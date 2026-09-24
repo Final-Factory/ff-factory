@@ -136,8 +136,13 @@ test('permission: Deny tells the agent why', async (t) => {
 test('interrupt: the turn stops, pending prompts are denied, the session stays live', async (t) => {
   const { store, sessions, worker } = setup(t);
   const s = worker();
+  let streaming = false;
+  const onEvent = (e: ServerEvent) => e.type === 'delta' && e.sessionId === s.info.id && (streaming = true);
+  bus.on('event', onEvent);
+  t.after(() => bus.off('event', onEvent));
   sessions.send(s.info.id, 'take your time #slow');
-  await until(() => store.readTranscript(s.info.id).length >= 1 && s.info.status === 'running', 'running');
+  // Mid-answer: the reply has started streaming.
+  await until(() => streaming, 'the reply to start');
   await s.interrupt();
   assert.equal(s.info.status, 'idle');
   assert.equal(s.live, true);

@@ -62,7 +62,6 @@ export function fakeQuery(fake: FakeOptions = {}) {
       if (typeof prompt === 'string') return;
       for await (const m of prompt) {
         if (abort.signal.aborted) return;
-        interrupted = false;
         const content = m.message.content;
         const said = typeof content === 'string' ? content : content.map((b) => (b.type === 'text' ? b.text : '')).join(' ');
         const images = typeof content === 'string' ? 0 : content.filter((b) => b.type === 'image').length;
@@ -107,10 +106,15 @@ export function fakeQuery(fake: FakeOptions = {}) {
             yield delta(reply.slice(i, i + size));
             await sleep(/#slow\b/i.test(words) ? 100 : step);
           }
-          if (interrupted) continue;
+          if (interrupted) {
+            // The interrupt ends this turn (an interrupt that came before it started ends it too).
+            interrupted = false;
+            continue;
+          }
           yield text(reply);
           yield result(uuid, true, reply);
         }
+        interrupted = false;
         yield state('idle');
       }
     }
