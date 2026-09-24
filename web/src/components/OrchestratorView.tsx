@@ -3,32 +3,28 @@ import type { SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, getState, openSession, reloadTranscript, useStore } from '../store';
 import { Composer } from './Composer';
-import { ModeSelect, SessionMeta } from './SessionView';
+import { ModeSelect } from './SessionView';
 import { Transcript } from './Transcript';
-import { Confirm, Dot, Icon } from './ui';
-import { sessionTone } from '../util';
+import { AttentionButton, DrawerButton } from './ShellButtons';
+import { Confirm, Icon, Menu, StateText } from './ui';
+import { fmtCost, fmtRelative, sessionLabel, sessionTone, useNow } from '../util';
 
-const SUGGESTIONS = [
-  'Start work on spec 098',
-  'Play a single player game through the tutorial and log the bugs',
-  'Read the Discord forums and identify bugs',
-  "How's the shader sandbox doing?",
-];
+const SUGGESTIONS = ["What's running, and what needs me?", 'Start work on spec 098', 'Play the tutorial single-player and log the bugs', 'Read the Discord forums and find bugs'];
+
+const HEARTBEATS = [10, 15, 30, 60];
 
 /** While workers are busy, wake the orchestrator every N minutes for a one-line status (server/wake.ts). */
 function HeartbeatSelect() {
   const minutes = useStore((s) => s.app?.settings?.heartbeatMinutes ?? null);
   return (
-    <label className={`mode-select heartbeat${minutes ? ' on' : ''}`} title="Heartbeat: while workers are busy, the orchestrator posts a one-line status every N minutes">
-      <select value={minutes ?? ''} onChange={(e) => void attempt(api.setSettings({ heartbeatMinutes: e.target.value ? Number(e.target.value) : null }))}>
-        <option value="">Heartbeat off</option>
-        {[10, 15, 30, 60].map((m) => (
-          <option key={m} value={m}>
-            Heartbeat {m} min
-          </option>
-        ))}
-      </select>
-    </label>
+    <select className="input input-sm" value={minutes ?? ''} aria-label="Heartbeat" onChange={(e) => void attempt(api.setSettings({ heartbeatMinutes: e.target.value ? Number(e.target.value) : null }))}>
+      <option value="">Off</option>
+      {HEARTBEATS.map((m) => (
+        <option key={m} value={m}>
+          Every {m} min
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -36,6 +32,8 @@ export function OrchestratorView({ session, compact }: { session: SessionInfo | 
   const [prefill, setPrefill] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const clearPrefill = useCallback(() => setPrefill(null), []);
+  const heartbeat = useStore((s) => s.app?.settings?.heartbeatMinutes ?? null);
+  const now = useNow(30_000);
 
   useEffect(() => (session ? openSession(session.id) : undefined), [session?.id]);
 
@@ -49,6 +47,7 @@ export function OrchestratorView({ session, compact }: { session: SessionInfo | 
     );
   }
 
+  const running = session.status === 'running' || session.status === 'starting';
   const empty = (
     <div className="orch-empty">
       <div className="orch-mark" aria-hidden>
@@ -57,10 +56,7 @@ export function OrchestratorView({ session, compact }: { session: SessionInfo | 
         <span />
       </div>
       <h1>What should the factory work on?</h1>
-      <p>
-        Ask for work in plain words. The orchestrator creates sandboxes, starts Unity and runs agents, then reports back
-        here.
-      </p>
+      <p>Say it in plain words. The orchestrator creates sandboxes, starts Unity and runs agents, then reports back here.</p>
       <div className="chips">
         {SUGGESTIONS.map((s) => (
           <button key={s} className="suggest" onClick={() => setPrefill(s)}>
@@ -74,29 +70,53 @@ export function OrchestratorView({ session, compact }: { session: SessionInfo | 
   return (
     <section className={`orch${compact ? ' orch-compact' : ''}`}>
       <header className="orch-head">
+        {!compact && <DrawerButton />}
         <div className="orch-title">
-          <Dot tone={sessionTone(session.status)} pulse={session.status === 'running'} />
-          <span>Orchestrator</span>
-          <SessionMeta session={session} />
+          <span className="orch-name">Orchestrator</span>
+          <StateText tone={sessionTone(session.status)} label={sessionLabel[session.status]} pulse={running} className="orch-state" />
         </div>
-        <div className="session-actions">
-          <HeartbeatSelect />
-          <ModeSelect session={session} />
-          <button className="btn btn-ghost btn-sm" onClick={() => setConfirmReset(true)} title="Start a fresh main conversation">
-            <Icon name="plus" size={14} /> <span className="hide-sm">New conversation</span>
-          </button>
-        </div>
+        {heartbeat && (
+          <span className="hb-on hide-phone" title={`Heartbeat: while workers are busy, a one-line status every ${heartbeat} minutes`}>
+            <Icon name="pulse" size={13} /> {heartbeat} min
+          </span>
+        )}
+        {!compact && <AttentionButton />}
+        <Menu label="Conversation options" className="orch-menu">
+          {(close) => (
+            <>
+              <label className="menu-field">
+                <span>
+                  Heartbeat
+                  <small>A one-line status while workers are busy</small>
+                </span>
+                <HeartbeatSelect />
+              </label>
+              <label className="menu-field">
+                <span>
+                  Permissions
+                  <small>When the orchestrator asks first</small>
+                </span>
+                <ModeSelect session={session} plain />
+              </label>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  close();
+                  setConfirmReset(true);
+                }}
+              >
+                <Icon name="plus" size={15} /> New conversation…
+              </button>
+              <div className="menu-foot">
+                {session.model ?? 'default model'} · {fmtCost(session.costUsd)} over {session.turns} turns · active {fmtRelative(session.lastActivityAt, now)}
+              </div>
+            </>
+          )}
+        </Menu>
       </header>
       <Transcript session={session} size={compact ? 'normal' : 'large'} empty={empty} />
       <div className="orch-composer-wrap">
-        <Composer
-          key={session.id}
-          session={session}
-          size={compact ? 'normal' : 'large'}
-          placeholder="Ask the orchestrator…  (Enter to send, Shift+Enter or Ctrl+Enter for a new line)"
-          prefill={prefill}
-          onPrefillUsed={clearPrefill}
-        />
+        <Composer key={session.id} session={session} size={compact ? 'normal' : 'large'} placeholder="Message the orchestrator" prefill={prefill} onPrefillUsed={clearPrefill} autoFocus={!compact} />
       </div>
       {confirmReset && (
         <Confirm
