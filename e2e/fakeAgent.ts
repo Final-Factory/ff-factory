@@ -74,9 +74,9 @@ export function fakeQuery(fake: FakeOptions = {}) {
           const input = { command: 'rm -rf build', description: 'Clean the build folder' };
           yield toolUse(toolId, 'Bash', input);
           yield state('requires_action');
-          const decision: PermissionResult = options?.canUseTool
+          const decision: PermissionResult = (options?.canUseTool
             ? await options.canUseTool('Bash', input, { signal: abort.signal, toolUseID: toolId } as never)
-            : { behavior: 'allow', updatedInput: input };
+            : { behavior: 'allow', updatedInput: input }) ?? { behavior: 'deny', message: 'no answer' };
           yield state('running');
           if (decision.behavior === 'allow') {
             yield toolResult(toolId, 'removed build/');

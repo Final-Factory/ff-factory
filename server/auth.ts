@@ -61,7 +61,7 @@ export class Auth {
   private readonly keyFailures = new Map<string, number[]>();
   private hashing = 0;
   /** A hash to verify against when the username does not exist, so timing does not reveal valid names. */
-  private dummyHash?: string;
+  private readonly dummyHash: Promise<string>;
   private readonly trustProxy: boolean;
 
   constructor(dataDir: string, opts: { trustProxy: boolean }) {
@@ -73,7 +73,7 @@ export class Auth {
       const now = Date.now();
       for (const [id, s] of Object.entries(raw)) if (s.expires > now) this.sessions.set(id, s);
     }
-    void hashPassword(randomBytes(16).toString('hex')).then((h) => (this.dummyHash = h));
+    this.dummyHash = hashPassword(randomBytes(16).toString('hex'));
   }
 
   users(): UserRecord[] {
@@ -177,7 +177,8 @@ export class Auth {
     this.hashing++;
     let valid = false;
     try {
-      valid = await verifyPassword(password, user?.hash ?? this.dummyHash ?? 'scrypt$1$1$1$AA==$AA==');
+      // Before the dummy hash is ready, wait for it: a made-up hash would answer faster (or throw).
+      valid = await verifyPassword(password, user?.hash ?? (await this.dummyHash));
     } finally {
       this.hashing--;
     }

@@ -112,7 +112,9 @@ fs.writeFileSync(
     settings: { heartbeatMinutes: null },
   }),
 );
-const events: Omit<TranscriptEvent, 'seq'>[] = [
+/** A transcript event before its seq is assigned (Omit over each member of the union). */
+type Unnumbered = TranscriptEvent extends infer E ? (E extends TranscriptEvent ? Omit<E, 'seq'> : never) : never;
+const events: Unnumbered[] = [
   { t: at(0), kind: 'user', from: 'human', text: 'Make the belt splitter balance its three outputs (zebrafish).' },
   { t: at(1), kind: 'assistant', text: 'I will look at **SplitterSystem** first, then write a test.\n\n- read the system\n- add a failing test\n- fix it' },
   { t: at(2), kind: 'tool_use', toolUseId: 'tu1', name: 'Bash', input: { command: 'git status --short', description: 'Show changed files' } },
