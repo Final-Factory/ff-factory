@@ -1,0 +1,137 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import { sandboxGuard } from './guard.ts';
+
+const decide = async (g: ReturnType<typeof sandboxGuard>, tool_name: string, tool_input: unknown, cwd = '') => {
+  const input = { hook_event_name: 'PreToolUse', tool_name, tool_input, tool_use_id: 'x', session_id: 's', transcript_path: '', cwd };
+  const r = (await g(input as never, 'x', { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } };
+  return r.hookSpecificOutput?.permissionDecision ?? 'allow';
+};
+
+const make = () => sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: ['C:/Users/dev/games/MyGame', path.join(os.homedir(), 'games', 'MyGame')] });
+
+test('shell access to the protected checkout is denied in every spelling', async () => {
+  const g = make();
+  assert.equal(await decide(g, 'Bash', { command: 'ls /c/Users/dev/games/MyGame/Assets' }), 'deny');
+  assert.equal(await decide(g, 'Bash', { command: 'cat C:\\Users\\dev\\games\\MyGame\\x' }), 'deny');
+  assert.equal(await decide(g, 'PowerShell', { command: 'dir c:/users/dev/games/mygame' }), 'deny');
+});
+
+test('pushes: own branch and develop allowed, master/main and force denied', async () => {
+  const g = make();
+  assert.equal(await decide(g, 'Bash', { command: 'git push -u origin sandbox/sb1' }), 'allow');
+  assert.equal(await decide(g, 'Bash', { command: 'git push --force-with-lease origin sandbox/sb1' }), 'allow');
+  assert.equal(await decide(g, 'Bash', { command: 'git push origin HEAD:master' }), 'deny');
+  assert.equal(await decide(g, 'Bash', { command: 'git push origin main' }), 'deny');
+  assert.equal(await decide(g, 'Bash', { command: 'git push -f origin sandbox/sb1' }), 'deny');
+  assert.equal(await decide(g, 'Bash', { command: 'git push --force origin sandbox/sb1' }), 'deny');
+});
+
+test('file writes are confined away from protected paths', async () => {
+  const g = make();
+  assert.equal(await decide(g, 'Edit', { file_path: 'C:\\Users\\dev\\games\\MyGame\\a.cs' }), 'deny');
+  assert.equal(await decide(g, 'Write', { file_path: 'C:\\ffsb\\sb1\\a.cs' }), 'allow');
+});
+
+test('Unity MCP: refused until pinned, and only to this sandbox editor', async () => {
+  const g = make();
+  assert.equal(await decide(g, 'mcp__UnityMCP__read_console', {}), 'deny');
+  assert.equal(await decide(g, 'mcp__UnityMCP__set_active_instance', { instance: 'FinalFactory@abc' }), 'deny');
+  assert.equal(await decide(g, 'mcp__UnityMCP__set_active_instance', { instance: '6401' }), 'deny');
+  assert.equal(await decide(g, 'mcp__UnityMCP__set_active_instance', { instance: 'sb1@abc' }), 'allow');
+  assert.equal(await decide(g, 'mcp__UnityMCP__read_console', {}), 'allow');
+  assert.equal(await decide(g, 'mcp__UnityMCP__read_console', { unity_instance: 'FinalFactory@abc' }), 'deny');
+});
+
+test('review bypasses are closed (push variants, gh, process kills)', async () => {
+  const g = make();
+  const deny = [
+    'git push origin HEAD:refs/heads/master',
+    'git push -uf origin sandbox/sb1',
+    'git push origin --delete develop',
+    'git push origin :develop',
+    'git push --mirror origin',
+    'cd x && git push -f origin sb1',
+    'gh api -X PATCH repos/o/r/git/refs/heads/master -F force=true',
+    'gh pr create --base master --title x --body y',
+    'gh pr create -B main --title x',
+    'Get-Process Unity | Stop-Process -Force',
+    'taskkill //IM Unity.exe //F',
+    'pkill -f node',
+    'shutdown /r /t 0',
+    'ls ~/games/MyGame',
+  ];
+  for (const command of deny) assert.equal(await decide(g, 'Bash', { command }), 'deny', command);
+  const allow = [
+    'git push',
+    'git push -u origin sandbox/sb1',
+    'git push origin HEAD',
+    'git push --force-with-lease origin sandbox/sb1',
+    'gh pr create --base develop --title x --body y',
+    'gh pr merge 12 --squash',
+    'git push origin HEAD:develop',
+    'gh api repos/o/r/pulls',
+    'git log --oneline -5',
+  ];
+  for (const command of allow) assert.equal(await decide(g, 'Bash', { command }), 'allow', command);
+});
+
+test('master/main: blocked for the game repo only, and whenever the target is unknown', async () => {
+  const remotes = (dir: string) => {
+    const d = dir.replace(/\\/g, '/').toLowerCase();
+    if (d === 'c:/ffsb/sb1') return new Map([['origin', 'git@github.com:example-org/example-game.git']]);
+    if (d === 'c:/tmp/tools') return new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git']]);
+    return undefined;
+  };
+  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git', 'C:/ffsb/_base'], remotes });
+  const sb = 'C:/ffsb/sb1';
+  const tools = 'C:/tmp/tools';
+  const cases: [string, string, 'allow' | 'deny'][] = [
+    [sb, 'git push origin HEAD:master', 'deny'],
+    [sb, 'gh pr create --base master --title x', 'deny'],
+    [sb, 'git push origin HEAD:develop', 'allow'],
+    [tools, 'git push origin HEAD:main', 'allow'],
+    [tools, 'git push origin main', 'allow'],
+    [tools, 'gh pr create --base main --title x', 'allow'],
+    [sb, 'cd C:/tmp/tools && git push origin HEAD:main', 'allow'],
+    [sb, 'cd /c/tmp/tools && git push origin HEAD:main', 'allow'],
+    [sb, 'git -C C:/tmp/tools push origin main', 'allow'],
+    [sb, 'git push https://github.com/Final-Factory/ff-factory HEAD:main', 'allow'],
+    [tools, 'git push https://github.com/example-org/example-game.git HEAD:master', 'deny'],
+    [tools, 'git push C:/ffsb/_base HEAD:master', 'deny'],
+    [tools, 'cd C:/ffsb/sb1 && git push origin HEAD:master', 'deny'],
+    [tools, 'cd $HOME/x && git push origin main', 'deny'],
+    [tools, 'git push upstream main', 'deny'],
+    [tools, 'git push main', 'deny'],
+    ['C:/elsewhere', 'git push origin main', 'deny'],
+    [tools, 'gh pr create -R example-org/example-game --base master', 'deny'],
+    [tools, 'GH_REPO=example-org/example-game gh pr create --base master', 'deny'],
+    [sb, 'gh pr create --repo Final-Factory/ff-factory --base main', 'allow'],
+    // Repository settings: other repos when the user asks; the game repo (or an unknown one) never; delete never.
+    [tools, 'gh repo rename ff-factory-private -R Final-Factory/ff-factory --yes', 'allow'],
+    [tools, 'gh repo rename ff-factory-private --yes', 'allow'], // the directory's repo is the app's
+    [sb, 'gh repo rename renamed --yes', 'deny'], // the directory's repo is the game's
+    [tools, 'gh repo rename x -R example-org/example-game', 'deny'],
+    ['C:/elsewhere', 'gh repo rename x --yes', 'deny'], // no remotes known
+    [sb, 'gh repo create Final-Factory/ff-factory --public --description "A portal"', 'allow'],
+    [tools, 'gh repo create example-org/example-game --private', 'deny'],
+    [tools, 'gh repo create --public', 'deny'],
+    [sb, 'gh repo edit Final-Factory/ff-factory --visibility public --accept-visibility-change-consequences', 'allow'],
+    [sb, 'gh repo edit --visibility public', 'deny'],
+    [tools, 'gh repo edit example-org/example-game --visibility public', 'deny'],
+    [tools, 'gh repo edit --description "x/y" example-org/example-game', 'deny'],
+    [sb, 'gh repo archive Final-Factory/ff-factory-private --yes', 'allow'],
+    [tools, 'GH_REPO=example-org/example-game gh repo archive --yes', 'deny'],
+    [tools, 'gh repo delete Final-Factory/ff-factory-private --yes', 'deny'],
+    [sb, 'gh api -X PUT repos/Final-Factory/ff-factory/private-vulnerability-reporting', 'allow'],
+    [tools, 'gh api -X DELETE repos/example-org/example-game/private-vulnerability-reporting', 'deny'],
+    [sb, 'gh api repos/example-org/example-game/private-vulnerability-reporting', 'allow'], // a read
+    // The every-repo rules still hold outside the game repo.
+    [tools, 'git push -' + 'f origin main', 'deny'],
+    [tools, 'git push origin --del' + 'ete old', 'deny'],
+    [tools, 'git push --mir' + 'ror origin', 'deny'],
+  ];
+  for (const [cwd, command, want] of cases) assert.equal(await decide(g, 'Bash', { command }, cwd), want, `${command} (in ${cwd})`);
+});

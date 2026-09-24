@@ -1,0 +1,375 @@
+import { useEffect, useState, useSyncExternalStore } from 'react';
+import type { ImageInput, Machine, PermissionMode, SessionInfo, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+
+export { displayName, isUnused } from '../../shared/labels';
+
+// ---------- formatting ----------
+
+export function fmtBytes(n: number | undefined): string {
+  if (n === undefined || !isFinite(n)) return '–';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
+}
+
+export function fmtCost(usd: number | undefined): string {
+  if (!usd) return '$0.00';
+  return usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`;
+}
+
+export function fmtDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+export function fmtRelative(iso: string | undefined, now: number): string {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (isNaN(t)) return '';
+  const s = Math.max(0, Math.round((now - t) / 1000));
+  if (s < 10) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+export function fmtClock(iso: string): string {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/** Re-render every `ms` so relative times stay fresh. */
+export function useNow(ms = 15000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+  return now;
+}
+
+// ---------- status vocab ----------
+
+export type Tone = 'green' | 'amber' | 'blue' | 'grey' | 'red';
+
+export function sessionTone(s: SessionStatus): Tone {
+  switch (s) {
+    case 'idle':
+      return 'green';
+    case 'running':
+    case 'starting':
+      return 'blue';
+    case 'waiting_permission':
+      return 'amber';
+    case 'error':
+      return 'red';
+    case 'stopped':
+      return 'grey';
+  }
+}
+
+export const sessionLabel: Record<SessionStatus, string> = {
+  starting: 'Starting',
+  running: 'Working',
+  idle: 'Idle',
+  waiting_permission: 'Needs you',
+  stopped: 'Stopped',
+  error: 'Error',
+};
+
+export function unityTone(s: UnityState): Tone {
+  return s === 'running' ? 'green' : s === 'crashed' ? 'red' : s === 'blocked' ? 'amber' : s === 'stopped' ? 'grey' : 'blue';
+}
+
+export const unityLabel: Record<UnityState, string> = {
+  stopped: 'Unity off',
+  starting: 'Unity starting',
+  running: 'Unity running',
+  stopping: 'Unity stopping',
+  crashed: 'Unity crashed',
+  blocked: 'Unity blocked',
+};
+
+export function machineTone(m: Machine): Tone {
+  if (m.status === 'deploying') return 'blue';
+  if (m.status === 'error') return 'red';
+  return m.online ? 'green' : 'grey';
+}
+
+export function machineLabel(m: Machine): string {
+  if (m.status === 'deploying') return 'Setting up';
+  if (m.status === 'error') return 'Error';
+  return m.online ? 'Online' : 'Offline';
+}
+
+export function sandboxTone(s: SandboxStatus): Tone {
+  return s === 'ready' ? 'green' : s === 'error' ? 'red' : 'blue';
+}
+
+// ---------- standing agents ----------
+
+export function standingTone(a: StandingAgent): Tone {
+  if (a.state === 'running') return 'blue';
+  if (a.state === 'waiting') return 'amber';
+  const last = lastRun(a);
+  if (last && (last.outcome === 'error' || last.outcome === 'budget' || last.outcome === 'timeout')) return 'red';
+  return a.state === 'paused' ? 'grey' : 'green';
+}
+
+export const standingLabel: Record<StandingAgent['state'], string> = {
+  asleep: 'Asleep',
+  waiting: 'Waiting for a slot',
+  running: 'Running',
+  paused: 'Paused',
+};
+
+export function outcomeTone(o: StandingRunOutcome): Tone {
+  switch (o) {
+    case 'ok':
+      return 'green';
+    case 'running':
+      return 'blue';
+    case 'skipped':
+    case 'stopped':
+    case 'interrupted':
+      return 'grey';
+    default:
+      return 'red';
+  }
+}
+
+export const outcomeLabel: Record<StandingRunOutcome, string> = {
+  running: 'Running',
+  ok: 'Done',
+  error: 'Error',
+  budget: 'Budget hit',
+  timeout: 'Timed out',
+  stopped: 'Stopped',
+  skipped: 'Skipped',
+  interrupted: 'Interrupted',
+};
+
+/** A summary's headline: its first line with words in it, without markdown decoration. */
+export function headline(summary: string | undefined): string {
+  for (const line of (summary ?? '').split('\n')) {
+    const t = line.replace(/^[\s#>*_`~|-]+|[\s*_`~|]+$/g, '').trim();
+    if (/[\p{L}\p{N}]/u.test(t)) return t;
+  }
+  return '';
+}
+
+/** The latest run that is not a skip, or the latest of all. */
+export function lastRun(a: StandingAgent) {
+  for (let i = a.runs.length - 1; i >= 0; i--) if (a.runs[i].outcome !== 'skipped') return a.runs[i];
+  return a.runs[a.runs.length - 1];
+}
+
+export function describeTrigger(t: StandingTrigger): string {
+  if (t.kind === 'interval') return t.minutes % 60 === 0 ? `every ${t.minutes / 60} h` : `every ${t.minutes} min`;
+  if (t.kind === 'cron') return `cron ${t.expr}`;
+  return 'manual only';
+}
+
+/** Local-day key, as the server counts the daily budget. */
+export function todayKey(d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+export function spentToday(a: StandingAgent): number {
+  return a.spend.day === todayKey() ? a.spend.usd : 0;
+}
+
+/** "in 12m", "in 3h", or "now" for a time in the future. */
+export function fmtUntil(iso: string | undefined, now: number): string {
+  if (!iso) return '';
+  const s = Math.round((Date.parse(iso) - now) / 1000);
+  if (s <= 30) return 'now';
+  const m = Math.round(s / 60);
+  if (m < 60) return `in ${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `in ${h}h${m % 60 ? ` ${m % 60}m` : ''}`;
+  return `in ${Math.round(h / 24)}d`;
+}
+
+export function isBusy(s: SessionInfo | undefined): boolean {
+  return !!s && (s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission');
+}
+
+export const PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [
+  { value: 'default', label: 'Ask', hint: 'Ask before risky tools' },
+  { value: 'acceptEdits', label: 'Accept edits', hint: 'Auto-approve file edits' },
+  { value: 'auto', label: 'Auto', hint: 'Classifier decides' },
+  { value: 'plan', label: 'Plan', hint: 'Read-only planning' },
+  { value: 'bypassPermissions', label: 'Bypass', hint: 'Never ask (dangerous)' },
+];
+
+// ---------- routing (hash based, so the phone back button works) ----------
+
+export type Route =
+  | { view: 'home' }
+  | { view: 'sandbox'; sandboxId: string; sessionId?: string }
+  | { view: 'session'; sessionId: string }
+  | { view: 'agent'; agentId: string; tab?: string }
+  | { view: 'machine'; machineId: string; sessionId?: string }
+  | { view: 'search'; q?: string };
+
+export function parseRoute(hash: string): Route {
+  const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === 'sandbox' && parts[1]) return { view: 'sandbox', sandboxId: parts[1], sessionId: parts[2] };
+  if (parts[0] === 'session' && parts[1]) return { view: 'session', sessionId: parts[1] };
+  if (parts[0] === 'search') return { view: 'search', q: parts[1] };
+  if (parts[0] === 'machine' && parts[1]) return { view: 'machine', machineId: parts[1], sessionId: parts[2] };
+  if (parts[0] === 'agent' && parts[1]) return { view: 'agent', agentId: parts[1], tab: parts[2] };
+  return { view: 'home' };
+}
+
+export function href(r: Route): string {
+  switch (r.view) {
+    case 'home':
+      return '#/';
+    case 'sandbox':
+      return `#/sandbox/${encodeURIComponent(r.sandboxId)}${r.sessionId ? '/' + encodeURIComponent(r.sessionId) : ''}`;
+    case 'session':
+      return `#/session/${encodeURIComponent(r.sessionId)}`;
+    case 'search':
+      return `#/search${r.q ? '/' + encodeURIComponent(r.q) : ''}`;
+    case 'machine':
+      return `#/machine/${encodeURIComponent(r.machineId)}${r.sessionId ? '/' + encodeURIComponent(r.sessionId) : ''}`;
+    case 'agent':
+      return `#/agent/${encodeURIComponent(r.agentId)}${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
+  }
+}
+
+export function navigate(r: Route, replace = false) {
+  const h = href(r);
+  if (replace) history.replaceState(null, '', h);
+  else location.hash = h;
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
+}
+
+function subscribeHash(cb: () => void) {
+  window.addEventListener('hashchange', cb);
+  return () => window.removeEventListener('hashchange', cb);
+}
+
+export function useRoute(): Route {
+  const hash = useSyncExternalStore(subscribeHash, () => location.hash);
+  return parseRoute(hash);
+}
+
+export function useMediaQuery(q: string): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      const m = window.matchMedia(q);
+      m.addEventListener('change', cb);
+      return () => m.removeEventListener('change', cb);
+    },
+    () => window.matchMedia(q).matches,
+  );
+}
+
+// ---------- tiny local storage wrapper (per-viewer conveniences only) ----------
+
+export function lsGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function lsSet(key: string, value: string | null) {
+  try {
+    if (value === null || value === '') localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    /* ignore */
+  }
+}
+
+// ---------- images ----------
+
+/** Claude's sweet spot: the long edge at most this many pixels (larger is scaled down server-side anyway). */
+const MAX_EDGE = 1568;
+const MAX_BYTES = 3_500_000;
+
+function toBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).replace(/^data:[^,]*,/, ''));
+    r.onerror = () => reject(r.error ?? new Error('could not read the image'));
+    r.readAsDataURL(blob);
+  });
+}
+
+function canvasBlob(c: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
+  return new Promise((resolve, reject) => c.toBlob((b) => (b ? resolve(b) : reject(new Error('could not encode the image'))), type, quality));
+}
+
+/**
+ * An image ready to send: PNG/JPEG/GIF/WebP, long edge ≤ 1568 px, a few MB at most. Phone photos are
+ * re-encoded as JPEG; screenshots stay PNG when that is small enough.
+ */
+export async function shrinkImage(file: Blob): Promise<ImageInput> {
+  const ok = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+  const bmp = await createImageBitmap(file).catch(() => null);
+  if (!bmp) throw new Error(`${(file as File).name ?? 'That file'} is not an image this browser can read`);
+  const long = Math.max(bmp.width, bmp.height);
+  if (ok.includes(file.type) && long <= MAX_EDGE && file.size <= MAX_BYTES) return { mediaType: file.type, data: await toBase64(file) };
+  const scale = Math.min(1, MAX_EDGE / long);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(bmp.width * scale));
+  c.height = Math.max(1, Math.round(bmp.height * scale));
+  c.getContext('2d')!.drawImage(bmp, 0, 0, c.width, c.height);
+  let out = file.type === 'image/png' ? await canvasBlob(c, 'image/png') : null;
+  if (!out || out.size > MAX_BYTES) out = await canvasBlob(c, 'image/jpeg', 0.86);
+  return { mediaType: out.type, data: await toBase64(out) };
+}
+
+/** Put an image (by URL) on the clipboard. Browsers take PNG only, so others are converted. */
+export async function copyImage(src: string): Promise<boolean> {
+  if (!navigator.clipboard || typeof ClipboardItem === 'undefined') throw new Error('This browser cannot copy images; use Download');
+  const png = (async () => {
+    const blob = await (await fetch(src, { credentials: 'same-origin' })).blob();
+    if (blob.type === 'image/png') return blob;
+    const bmp = await createImageBitmap(blob);
+    const c = document.createElement('canvas');
+    c.width = bmp.width;
+    c.height = bmp.height;
+    c.getContext('2d')!.drawImage(bmp, 0, 0);
+    return canvasBlob(c, 'image/png');
+  })();
+  // Safari wants the ClipboardItem created synchronously in the click, with a promise inside.
+  await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+  return true;
+}
+
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }
+}

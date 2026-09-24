@@ -1,0 +1,54 @@
+{
+  "port": 8790,
+  "host": "0.0.0.0",
+  "publicUrl": "",
+  "ownerName": "",
+  "dataDir": "./data",
+  "sandboxRoot": "C:/ffsb",
+  "repo": {
+    "url": "https://github.com/your-org/your-unity-game.git",
+    "basePath": "C:/ffsb/_base",
+    "referenceRepo": "C:/path/to/your/existing/clone"
+  },
+  "defaultBase": "origin/develop",
+  "librarySeed": "C:/path/to/your/existing/clone/Library",
+  "librarySeedGB": 70,
+  "unity": {
+    "editorPath": "C:/Program Files/Unity/Hub/Editor/{version}/Editor/Unity.exe",
+    "extraArgs": [],
+    "mcpServer": {
+      "command": "uvx",
+      "args": [
+        "--offline",
+        "--from",
+        "mcpforunityserver==10.0.0",
+        "mcp-for-unity"
+      ]
+    }
+  },
+  "protectedPaths": [
+    "C:/path/to/a/checkout/agents/must/not/touch"
+  ],
+  "limits": {
+    "maxUnity": 3,
+    "maxSessions": 6,
+    "maxSandboxes": 4,
+    "minFreeGB": 100
+  },
+  "models": [
+    "opus",
+    "sonnet",
+    "haiku",
+    "fable"
+  ],
+  "defaultModel": "opus",
+  "orchestrator": {
+    "model": "opus",
+    "effort": "medium",
+    "notifyOnWorkerEvents": true
+  },
+  "worker": {
+    "permissionMode": "bypassPermissions",
+    "effort": "high"
+  }
+}

@@ -1,0 +1,7 @@
+# Local text-to-speech for hands-free voice mode (server/voice/tts_worker.py): Kokoro-82M on
+# onnxruntime. Its own venv (<voice.toolsDir>/tts-venv), because onnxruntime-gpu cannot share one with
+# the CPU onnxruntime that faster-whisper needs; setup excludes the CPU package here.
+# The [cuda,cudnn] extras bring the CUDA 13 runtime and cuDNN as wheels: no toolkit install.
+kokoro-onnx==0.6.1
+onnxruntime-gpu[cuda,cudnn]==1.30.0; sys_platform == "win32" or sys_platform == "linux"
+onnxruntime==1.30.0; sys_platform == "darwin"

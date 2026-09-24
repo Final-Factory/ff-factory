@@ -1,0 +1,68 @@
+# Machines: agents on the user's Macs
+
+A machine is a whole computer the portal can run agents on, beside the sandboxes on the host. There
+is no partitioning: agents work in the Mac's main game clone, the one the user uses (no worktree
+unless a task truly needs one). Machines are Macs (the daemon is a LaunchAgent), with ids such as
+`m5` or `mini`.
+
+## Requirements
+
+| | on each Mac |
+|---|---|
+| Reachable | `ssh <host alias>` from the portal host with an existing key, no password prompt |
+| Game clone | a clone of the game repo (the one in config `repo.url`) under the home folder, found by its `origin` URL, or pass its path to `add_machine` |
+| Claude Code | installed and logged in for the user (the keychain login works: the daemon runs in the GUI session) |
+| node | 22.6 or newer (versions without native TypeScript support run with `--experimental-strip-types`); the newest node on the PATH the user's own zsh sets up, or in common install locations, is used |
+| Portal URL | a public URL for the portal, e.g. the Tailscale Funnel URL `https://<host>.<tailnet>.ts.net` (config `publicUrl`, or given to `add_machine`) |
+| Sleep | set to never, or agents stop when the Mac sleeps (the daemon holds `caffeinate -i` only while agents run) |
+
+The portal can listen on `127.0.0.1` only. The Macs reach it through its public URL, not a tailnet IP.
+
+## Design: a daemon that connects out
+
+Each Mac runs `machine/daemon.ts` as a **LaunchAgent** (`com.fffactory.daemon`, in the user's GUI
+session). It opens a WebSocket to `wss://<portal>/machine` with a per-machine token, and runs Agent
+SDK sessions locally with the same `AgentSession` code the portal uses, streaming every transcript
+event and session update back. The portal keeps the record (state.json, transcripts) exactly as for
+sandbox workers, so the UI, the orchestrator's tools and transcripts do not care where an agent runs.
+
+Why not drive sessions over ssh: an ssh session cannot read the login keychain, so Claude Code on
+a Mac often looks logged out there, and an ssh connection dies with every sleep or network change. A
+LaunchAgent runs in the logged-in session (keychain, the user's `claude` and plugins), starts at
+login, restarts if it dies, and reconnects by itself: exponential backoff, a ping every 20 s, and a
+dead connection is dropped after 45 s without a pong.
+
+- **Auth.** A 256-bit token per machine; the portal keeps only its SHA-256 (state.json) and compares
+  in constant time. `/machine` is on the public Funnel URL, so a bad token is logged and throttled.
+- **Sessions.** The portal creates the session record and tells the daemon what to launch (a
+  serialisable launch spec: cwd, model, brief, tools, guard settings, budget). Transcript sequence
+  numbers are assigned by the daemon, starting from the portal's last one, so a session resumes
+  across daemon restarts. An agent whose machine is offline shows `stopped`; messaging it fails with
+  "machine m5 is offline".
+- **Tools.** Workers get the machine's `set_label` (same as a sandbox's) via a `machine` MCP server
+  whose calls go back to the portal. Unity is not managed in v1: agents use whatever editor and MCP
+  the Mac already has (the Mac's own user settings load).
+- **Guard.** The workers' guard runs in the daemon, plus rules for the user's own clone: never
+  `git stash`, `reset --hard`, `clean -f`, `checkout -- <paths>`/`checkout .` or `restore` of the
+  worktree; and `git checkout`/`switch` of a branch only when `git status` is clean, otherwise
+  stop and ask. The daemon's own folder (`~/.ff-factory`, which holds the token) is protected.
+- **Limits.** Machine agents run on the Mac, so they do not count toward this host's
+  `limits.maxSessions`; each machine has its own limit (default 3).
+- **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
+- **Standing agents** can be assigned to a machine: their folder is `~/.ff-factory/agents/<id>` on
+  that Mac, runs wait (like a full slot) while the machine is offline, and budgets work unchanged.
+
+## Setup and updates, from this host
+
+`add_machine` (orchestrator tool, and a button in the UI) does everything over ssh with this host's
+existing keys: finds node (≥ 22.6) and the FF clone, copies the portal's own code
+(`git archive` of `server/ shared/ machine/ package*.json`) to `~/.ff-factory/app`, runs
+`npm ci --omit=dev`, captures the user's own zsh PATH (login + interactive, so the LaunchAgent sees what their
+terminal sees, e.g. `~/bin/gh`), writes `~/.ff-factory/daemon.json` (portal URL, name, token, repo path,
+`claude` path) and the LaunchAgent plist, and (re)loads it with `launchctl bootstrap gui/<uid>`.
+Running `add_machine` again for the same id (or Redeploy in the UI) updates the code and issues a fresh
+token; it refuses while agents are running there unless forced. The user does nothing on the Macs.
+
+## Not in v1
+
+Unity lifecycle on the Macs; machines other than Macs.

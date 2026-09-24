@@ -1,0 +1,10 @@
+node_modules/
+web/node_modules/
+web/dist/
+data/
+config.json
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+local-handoff.md

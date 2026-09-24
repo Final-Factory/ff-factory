@@ -1,0 +1,7 @@
+# Local speech-to-text for the composer's mic button (server/voice.ts, server/voiceSetup.ts).
+# Installed into <voice.toolsDir>/venv by `npm run voice-setup`; changing this file reinstalls.
+faster-whisper==1.2.1
+# CUDA 12 runtime libraries for CTranslate2 on the GPU (cuBLAS + cuDNN 9), as wheels: no CUDA toolkit install.
+# Only Windows and Linux have them; elsewhere the worker runs on the CPU.
+nvidia-cublas-cu12==12.9.1.4; sys_platform == "win32" or sys_platform == "linux"
+nvidia-cudnn-cu12==9.13.0.50; sys_platform == "win32" or sys_platform == "linux"
