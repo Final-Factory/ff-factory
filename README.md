@@ -1,5 +1,7 @@
 # FF Factory
 
+[![CI](https://github.com/Final-Factory/ff-factory/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Final-Factory/ff-factory/actions/workflows/ci.yml)
+
 A self-hosted web portal for running many [Claude Code](https://code.claude.com) agents in parallel
 on a Unity project. Each work stream gets its own git worktree, its own Unity editor on the real GPU
 and its own agents (built on the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk)), all
@@ -186,6 +188,10 @@ npm run typecheck && npm --prefix web run build
 
 A throwaway config pointing `repo.url` at a local bare repo and `unity.editorPath` at nothing is
 enough to exercise everything except Unity.
+
+Tests (unit and Playwright end to end), releases and the CI checks are described in
+[CONTRIBUTING.md](CONTRIBUTING.md). The running version shows in the sidebar footer and at
+`GET /api/health`; changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Security model
 

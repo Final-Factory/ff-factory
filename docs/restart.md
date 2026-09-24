@@ -43,8 +43,8 @@ scripts\restart.ps1 -DrainMinutes 3
    > and continue where you left off.
 
    plus any messages it had not answered yet. It then sends the orchestrator one `[app restarted]`
-   paragraph: who was resumed, who could not be (and why), the update result, and whether the code
-   changed.
+   paragraph: the version before and after ("Version 0.1.0 → 0.2.0."), who was resumed, who could
+   not be (and why), the update result, and whether the code changed.
 
 The script logs to `data\supervisor.log` and waits for the new server (3 min, or 20 with
 `-Update`). It is safe to run twice: a second run while one is in progress exits at once, and a run
