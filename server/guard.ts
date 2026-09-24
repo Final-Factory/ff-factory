@@ -30,6 +30,9 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *   - files: no writes to, or shell commands naming, a protected path (the live co-op checkout, this
  *     server's own directory).
  *   - Unity MCP: refused until the session pins its own editor ("<id>@<hash>"), and never another.
+ *   - branch switches: while the sandbox's editor runs, no `git switch` / `git checkout <branch>` in the
+ *     sandbox (Unity would stop on "The open scene(s) have been modified externally"); the worker's
+ *     switch_branch tool does it safely. `git checkout -- <paths>` and `git restore` stay allowed.
  */
 export function sandboxGuard(opts: {
   sandboxId: string;
@@ -46,6 +49,8 @@ export function sandboxGuard(opts: {
   ownCheckout?: { isClean?: (dir: string) => boolean };
   /** Tool name prefixes to refuse, e.g. "mcp__ffsb__" (the portal's own MCP, which would let an agent launch agents). */
   denyToolPrefixes?: string[];
+  /** Whether the sandbox's Unity editor is up right now: raw branch switches are refused then (checkEditorSwitch). */
+  editorRunning?: () => boolean;
 }): HookCallback {
   // Drive-letter paths are normalised textually so the guard behaves the same on any host OS.
   const norm = (p: string) => (/^[a-zA-Z]:[\\/]/.test(p) ? p : path.resolve(p)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -81,7 +86,8 @@ export function sandboxGuard(opts: {
       const cmd = String(args.command ?? '');
       const reason =
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes }) ??
-        (opts.ownCheckout ? checkOwnCheckout(cmd, input.cwd || opts.sandboxPath, opts.ownCheckout.isClean ?? gitIsClean) : undefined);
+        (opts.ownCheckout ? checkOwnCheckout(cmd, input.cwd || opts.sandboxPath, opts.ownCheckout.isClean ?? gitIsClean) : undefined) ??
+        (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined);
       if (reason) return deny(reason);
       const flat = cmd.replace(/\\/g, '/').toLowerCase();
       for (const s of spellings) {
@@ -176,6 +182,46 @@ export function checkOwnCheckout(cmd: string, cwd: string | undefined, isClean: 
         return `This clone has uncommitted changes (the user's work in progress), so do not switch branches. Stop and ask the user what to do.`;
       }
     }
+  }
+  return undefined;
+}
+
+/**
+ * Why a shell command is refused while the sandbox's editor runs, or undefined. Exported for tests. A branch
+ * switch under a running editor rewrites open scene files and Unity stops on its "modified externally"
+ * question; mcp__sandbox__switch_branch parks the scenes first. Only commands aimed at the sandbox (or at a
+ * directory that cannot be told) count.
+ */
+export function checkEditorSwitch(cmd: string, cwd: string | undefined, sandboxPath: string): string | undefined {
+  const inside = (d: string | undefined) => {
+    if (!d) return true;
+    const n = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    return n(d) === n(sandboxPath) || n(d).startsWith(n(sandboxPath) + '/');
+  };
+  let dir = cwd;
+  for (const seg of cmd.split(/&&|\|\||[;|\n]/)) {
+    const raw = seg
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => w.replace(/^["']|["']$/g, ''));
+    const lower = raw.map((w) => w.toLowerCase());
+    if (['cd', 'pushd', 'chdir', 'set-location', 'sl'].includes(lower[0] ?? '')) dir = resolveDir(dir, raw[1]);
+    const g = lower.findIndex((w) => w === 'git' || w.endsWith('/git') || w.endsWith('git.exe'));
+    if (g < 0) continue;
+    let gitDir = dir;
+    let i = g + 1;
+    while (i < raw.length && raw[i].startsWith('-')) {
+      if (raw[i] === '-C') gitDir = resolveDir(gitDir, raw[i + 1]);
+      i += raw[i] === '-C' || raw[i] === '-c' ? 2 : 1;
+    }
+    const sub = lower[i];
+    const rest = lower.slice(i + 1);
+    if (sub !== 'switch' && sub !== 'checkout') continue;
+    if (rest.some((w) => w === '-h' || w === '--help')) continue;
+    if (sub === 'checkout' && rest.some((w) => w === '--' || w === '-p' || w === '--patch')) continue; // paths, not a branch
+    if (!inside(gitDir)) continue;
+    return `git ${sub} to another branch is blocked while this sandbox's Unity editor is running: Unity would stop on "The open scene(s) have been modified externally". Use mcp__sandbox__switch_branch instead (it closes the open scenes across the switch, refreshes and reopens them). To restore files, use git restore <path> or git checkout -- <path>.`;
   }
   return undefined;
 }

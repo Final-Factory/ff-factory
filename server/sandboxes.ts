@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { CreateSandboxRequest, Sandbox, UnityBlocked, UnityDismissal } from '../shared/types.ts';
-import { decide, describeDialog, findDialogs, isStalled, listWindows, pressButton, type Dialog } from './watchdog.ts';
+import { decide, describeDialog, findDialogs, isStalled, listWindows, pressButton, sceneFilesUnchanged, type Dialog } from './watchdog.ts';
 import { commandLine, copyTree, isAlive, killTree, launchDetached, lowerPriority, must, processStartTime, removeTree, run } from './proc.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -701,7 +701,10 @@ export class SandboxManager {
 
   private async handleDialogs(s: Sandbox, dialogs: Dialog[], editorTitle?: string) {
     const autoDismiss = this.cfg.unity.watchdog.autoDismiss;
-    const scenesClean = (this.scenesClean.get(s.id) ?? 0) > Date.now();
+    // Clean scenes: the app's own bridge check before its switch, or else (a worker's raw git switch) no
+    // *.unity file with uncommitted changes. Only looked up when the reload question is actually up.
+    let scenesClean = (this.scenesClean.get(s.id) ?? 0) > Date.now();
+    if (!scenesClean && dialogs.some((d) => d.known?.id === 'scenes-modified')) scenesClean = await sceneFilesUnchanged(s.path);
     let report: { d: Dialog; repeated?: boolean } | undefined;
     for (const d of dialogs) {
       const verdict = decide(d, { autoDismiss, recent: s.unity.dismissed, scenesClean, editorTitle });

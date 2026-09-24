@@ -122,3 +122,28 @@ test('scenes modified externally: Reload only when the app knows the scenes are 
   assert.deepEqual(decide(d, { autoDismiss: true, scenesClean: true }), { report: true });
   assert.deepEqual(decide(d, { autoDismiss: false, scenesClean: true, editorTitle: TITLE }), { report: true });
 });
+
+test('scenes modified externally: no modified *.unity file counts as clean (git status)', async (t) => {
+  const { execFileSync } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { sceneFilesUnchanged } = await import('./watchdog.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scenes-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
+  git('init', '-q');
+  fs.mkdirSync(path.join(dir, 'Assets'));
+  fs.writeFileSync(path.join(dir, 'Assets', 'Main.unity'), 'a');
+  fs.writeFileSync(path.join(dir, 'Assets', 'A.cs'), 'a');
+  git('add', '-A');
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'x');
+  fs.writeFileSync(path.join(dir, 'Assets', 'A.cs'), 'b'); // a script change does not matter
+  assert.equal(await sceneFilesUnchanged(dir), true);
+  fs.writeFileSync(path.join(dir, 'Assets', 'Main.unity'), 'b');
+  assert.equal(await sceneFilesUnchanged(dir), false);
+  assert.equal(await sceneFilesUnchanged(path.join(dir, 'nope')), false);
+  // What decide() then does with it: Reload, unless the title has a "*".
+  const [d] = findDialogs([SCENES]);
+  assert.deepEqual(decide(d, { autoDismiss: true, scenesClean: true, editorTitle: TITLE }), { click: 'Reload' });
+});

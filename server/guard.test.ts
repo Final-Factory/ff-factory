@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { sandboxGuard } from './guard.ts';
+import { checkEditorSwitch, sandboxGuard } from './guard.ts';
 
 const decide = async (g: ReturnType<typeof sandboxGuard>, tool_name: string, tool_input: unknown, cwd = '') => {
   const input = { hook_event_name: 'PreToolUse', tool_name, tool_input, tool_use_id: 'x', session_id: 's', transcript_path: '', cwd };
@@ -134,4 +134,18 @@ test('master/main: blocked for the game repo only, and whenever the target is un
     [tools, 'git push --mir' + 'ror origin', 'deny'],
   ];
   for (const [cwd, command, want] of cases) assert.equal(await decide(g, 'Bash', { command }, cwd), want, `${command} (in ${cwd})`);
+});
+
+test('branch switches: refused in the sandbox while its editor runs, fine otherwise', async () => {
+  const sb = 'C:/ffsb/sb1';
+  const denied = ['git switch other', 'git switch -c new origin/develop', 'git checkout other', 'git checkout -b new', 'git -C C:/ffsb/sb1 switch x', 'cd /c/ffsb/sb1 && git checkout x'];
+  for (const c of denied) assert.match(checkEditorSwitch(c, sb, sb) ?? '', /switch_branch/, c);
+  const allowed = ['git checkout -- Assets/a.cs', 'git checkout HEAD -- a.unity', 'git restore Assets/a.cs', 'git switch --help', 'git status', 'git -C C:/tools/other switch main', 'cd C:/tools/other && git checkout main'];
+  for (const c of allowed) assert.equal(checkEditorSwitch(c, sb, sb), undefined, c);
+  // Wired into the guard only while the editor is up.
+  let running = true;
+  const g = sandboxGuard({ sandboxId: 'sb1', sandboxPath: sb, protectedPaths: [], gameRepos: ['https://github.com/example-org/example-game.git'], remotes: () => new Map(), editorRunning: () => running });
+  assert.equal(await decide(g, 'Bash', { command: 'git switch other' }, sb), 'deny');
+  running = false;
+  assert.equal(await decide(g, 'Bash', { command: 'git switch other' }, sb), 'allow');
 });

@@ -21,9 +21,12 @@ export interface EditorWindow {
 }
 
 /**
- * `onlyIf: 'scenesClean'`: press only while the app knows no open scene has unsaved edits (it checked
- * over the MCP bridge just before its own branch switch). Unity's title bar cannot tell: in 6000.3 its
- * "*" comes from an editor window's hasUnsavedChanges, never from a dirty scene (docs/unity-dialogs.md).
+ * `onlyIf: 'scenesClean'`: press only when the scenes count as clean: the app checked over the MCP bridge
+ * just before its own branch switch that none had unsaved edits, or no *.unity file in the sandbox has
+ * uncommitted changes (`git status`; it cannot see edits held only in the editor, but after a branch switch
+ * Reload is the right answer: Ignore and a later save would overwrite the new branch's scene). Unity's
+ * title bar cannot tell: in 6000.3 its "*" comes from an editor window's hasUnsavedChanges, never from a
+ * dirty scene (docs/unity-dialogs.md).
  */
 export type DialogAction = { kind: 'dismiss'; button: string; onlyIf?: 'scenesClean' } | { kind: 'notify' };
 
@@ -175,7 +178,7 @@ export function decide(
     autoDismiss: boolean;
     recent?: { at: string; title: string }[];
     nowMs?: number;
-    /** The app checked the open scenes over the bridge and none had unsaved edits (SandboxManager.markScenesClean). */
+    /** The scenes count as clean: the app's own bridge check (SandboxManager.markScenesClean) or no modified *.unity file. */
     scenesClean?: boolean;
     /** The editor's main window title; a "*" in it means some editor window has unsaved changes. */
     editorTitle?: string;
@@ -221,6 +224,12 @@ export async function listWindows(pids: number[]): Promise<EditorWindow[]> {
   if (!out) return [];
   const parsed = JSON.parse(out);
   return (Array.isArray(parsed) ? parsed : [parsed]) as EditorWindow[];
+}
+
+/** Whether no *.unity file in the working tree at `dir` has uncommitted changes (false when git cannot tell). */
+export async function sceneFilesUnchanged(dir: string): Promise<boolean> {
+  const r = await run('git', ['-C', dir, 'status', '--porcelain', '--', '*.unity'], { timeoutMs: 30_000 });
+  return r.code === 0 && r.stdout.trim() === '';
 }
 
 /** Press a button in a window that belongs to `pid` (or a process it started). Returns whether the window closed. */

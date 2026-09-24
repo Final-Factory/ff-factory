@@ -324,6 +324,7 @@ Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back: once yo
 Your editor's MCP instance is named \`${sb.id}@<hash>\`. Before ANY Unity MCP call, read \`mcpforunity://instances\` and \`set_active_instance\` with that full Name@hash. The harness refuses Unity MCP calls until you pin, and refuses any other instance (other editors belong to other sandboxes or to the live game).
 
 ## Git
+To change branches, ALWAYS call \`mcp__sandbox__switch_branch\`, never \`git switch\` / \`git checkout <branch>\` yourself: under a running editor that makes Unity stop on "The open scene(s) have been modified externally" (the harness refuses those while the editor runs). \`git checkout -- <path>\` and \`git restore\` for files are fine.
 \`develop\` is the integration branch and the user wants work landing there often, not piling up on side branches. Commit on \`${branch}\` as you reach good checkpoints. When a piece is done and verified (compiles, tests pass, per the repo's CLAUDE.md), integrate it:
 \`git fetch origin && git rebase origin/develop\`, re-verify if the rebase pulled in changes, then \`git push origin HEAD:develop\`. If the push is rejected because develop moved, fetch, rebase and push again. Also push your own branch (\`git push -u origin ${branch}\`) so work is never only on this machine.
 Never force-push anywhere. Never push to or open PRs into the Final Factory game repo's master/main (blocked here and on GitHub; releases are the user's call); other repos' master/main (e.g. the agents harness, this app) are fine when that is their normal workflow.
@@ -364,6 +365,15 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
             const s = this.sandboxes.setPurpose(id, purpose);
             return `Sandbox ${s.id} is now labelled "${s.purpose}".`;
           }),
+        ),
+        tool(
+          'switch_branch',
+          `Switch this sandbox (${id}) to another branch. ALWAYS use this instead of git switch / git checkout <branch> while the editor runs (the harness refuses those then). Refused if the tree has uncommitted changes or another agent in this sandbox is mid-turn; pushes commits of the current branch that no remote has first; fetches, then switches to the local branch, tracks origin/<branch>, or creates it from create_from (default origin/develop). With the editor running it closes the open scenes across the switch (if none has unsaved edits), refreshes and recompiles, and reopens them, so Unity does not stop on "The open scene(s) have been modified externally". Never master/main/develop.`,
+          {
+            branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),
+            create_from: z.string().optional().describe('Base for a branch that exists neither here nor on origin. Default origin/develop.'),
+          },
+          wrap(async ({ branch, create_from }) => this.switchBranch({ sandbox: id, branch, createFrom: create_from, callerSessionId: sessionId })),
         ),
         tool(
           'wait_for_unity',
@@ -445,6 +455,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
                 sandboxPath: sb.path,
                 protectedPaths: [...this.cfg.protectedPaths, ROOT, this.cfg.dataDir],
                 gameRepos: [this.cfg.repo.url, this.cfg.repo.basePath],
+                editorRunning: () => ['running', 'starting', 'blocked'].includes(this.sandboxes.list().find((x) => x.id === sb.id)?.unity.state ?? ''),
               }),
             ],
           },
@@ -485,10 +496,14 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
    * mid-turn or the tree has uncommitted changes; pushes stranded commits first; refreshes a running
    * sandbox editor afterwards. Returns a summary.
    */
-  async switchBranch(req: { sandbox?: string; machine?: string; branch: string; createFrom?: string }): Promise<string> {
+  async switchBranch(req: { sandbox?: string; machine?: string; branch: string; createFrom?: string; callerSessionId?: string }): Promise<string> {
     if (!!req.sandbox === !!req.machine) throw new Error('give either a sandbox or a machine');
+    // The worker calling its own switch_branch is mid-turn by definition; any OTHER busy agent refuses it.
     const busy = (ids: string[]) =>
-      ids.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && ['running', 'starting', 'waiting_permission'].includes(s.status));
+      ids
+        .filter((id) => id !== req.callerSessionId)
+        .map((id) => this.store.sessions.get(id))
+        .filter((s): s is SessionInfo => !!s && ['running', 'starting', 'waiting_permission'].includes(s.status));
     if (req.machine) {
       const m = this.machines.require(req.machine);
       const b = busy(m.sessionIds);
