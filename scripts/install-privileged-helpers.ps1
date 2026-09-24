@@ -12,8 +12,9 @@
 param(
   [string]$Vhdx = 'C:\ffsb-devdrive.vhdx',
   [string]$Letter = 'F',
-  # The account the app runs as (the one whose desktop session the ffsb-server task starts).
-  [string]$User = "$env:USERDOMAIN\$env:USERNAME",
+  # The account the app runs as. Default: the account of the app's ffsb-server logon task, else the account
+  # running this script. (Not USERDOMAIN\USERNAME: over OpenSSH USERDOMAIN is WORKGROUP, which is no account.)
+  [string]$User = '',
   [int]$PagefileGB = 0,
   [switch]$Uninstall
 )
@@ -21,12 +22,28 @@ $ErrorActionPreference = 'Stop'
 $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'run this as administrator' }
 
+# Who may start the helpers: resolved to a SID before anything is registered.
+function Resolve-Sid([string]$name) {
+  foreach ($n in @($name, ($name -replace '^WORKGROUP\\', "$env:COMPUTERNAME\"), ($name -split '\\')[-1]) | Select-Object -Unique) {
+    try { return @{ name = $n; sid = (New-Object Security.Principal.NTAccount($n)).Translate([Security.Principal.SecurityIdentifier]).Value } } catch { }
+  }
+  return $null
+}
+if (-not $User) {
+  $appTask = Get-ScheduledTask -TaskName 'ffsb-server' -ErrorAction SilentlyContinue
+  $User = if ($appTask -and $appTask.Principal.UserId) { $appTask.Principal.UserId } else { [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+}
+$who = Resolve-Sid $User
+if (-not $who) { throw "the account '$User' does not resolve to a SID; pass -User COMPUTERNAME\name (the account the app runs as)" }
+$User = $who.name
+"helpers will be startable by $User ($($who.sid))"
+
 $dir = Join-Path $env:ProgramData 'ffsb-helpers'
 $results = Join-Path $dir 'results'
-$actions = @('mount', 'trim', 'compact', 'reboot') + $(if ($PagefileGB -ge 4) { 'pagefile' } else { @() })
+$actions = @('mount', 'trim', 'compact', 'detach', 'reboot') + $(if ($PagefileGB -ge 4) { 'pagefile' } else { @() })
 
 if ($Uninstall) {
-  foreach ($a in 'mount', 'trim', 'compact', 'reboot', 'pagefile') { Unregister-ScheduledTask -TaskName "ffsb-helper-$a" -Confirm:$false -ErrorAction SilentlyContinue }
+  foreach ($a in 'mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile') { Unregister-ScheduledTask -TaskName "ffsb-helper-$a" -Confirm:$false -ErrorAction SilentlyContinue }
   "removed the ffsb-helper-* tasks (left $dir for its results)"
   return
 }
@@ -39,7 +56,7 @@ icacls $dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI
 if ($LASTEXITCODE -ne 0) { throw "icacls $dir failed" }
 
 # 2. One SYSTEM task per action, on demand only, arguments fixed.
-$sid = (New-Object Security.Principal.NTAccount($User)).Translate([Security.Principal.SecurityIdentifier]).Value
+$sid = $who.sid
 $svc = New-Object -ComObject Schedule.Service
 $svc.Connect()
 foreach ($a in $actions) {

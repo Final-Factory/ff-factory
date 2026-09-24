@@ -935,15 +935,16 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ...this.standingToolSpecs(tool),
         tool(
           'host_recovery',
-          "Recovery actions for this host (docs/self-recovery.md). The host guard does these by itself when needed; use this to retry or to act early. remount: reattach the sandbox drive now (also after the guard gave up). cleanup: remove known-safe junk now (old headless-browser profiles, test scratch folders, clean agent temp clones, rotated editor logs, the configured age rules). trim: hand free space inside the sandbox drive back to its VHDX. compact: trim, then detach, compact and reattach the VHDX (refused while an editor uses the drive; the drive is briefly offline). reboot: a controlled reboot in 2 minutes, only as a last resort when remounting keeps failing; it stops every agent and editor, and is refused unless automatic logon is set up. Each privileged action runs a fixed SYSTEM task installed by scripts/install-privileged-helpers.ps1.",
+          "Recovery actions for this host (docs/self-recovery.md). The host guard does these by itself when needed; use this to retry or to act early. remount: reattach the sandbox drive now (also after the guard gave up). cleanup: remove known-safe junk now (old headless-browser profiles, test scratch folders, clean agent temp clones, rotated editor logs, the configured age rules). trim: hand free space inside the sandbox drive back to its VHDX. compact: trim, then detach, compact and reattach the VHDX (refused while an editor uses the drive; the drive is briefly offline). selftest: the end-to-end recovery test: with no editor up and no agent busy in a sandbox, it detaches the sandbox drive (as Windows did when C: filled up), lets the guard notice it and reattach it, checks every sandbox folder is back, and reports the timings (about a minute; the drive is gone meanwhile). reboot: a controlled reboot in 2 minutes, only as a last resort when remounting keeps failing; it stops every agent and editor, and is refused unless automatic logon is set up. Each privileged action runs a fixed SYSTEM task installed by scripts/install-privileged-helpers.ps1.",
           {
-            action: z.enum(['remount', 'cleanup', 'trim', 'compact', 'reboot']),
+            action: z.enum(['remount', 'cleanup', 'trim', 'compact', 'selftest', 'reboot']),
             confirm_reboot: z.literal(true).optional().describe('Required for reboot: remounting failed and nothing else works.'),
           },
           wrap(async ({ action, confirm_reboot }) => {
             const h = this.hostHealth;
             if (!h) throw new Error('the host guard is not running (hostGuard.pollSeconds 0?)');
             if (action === 'remount') return h.remountNow();
+            if (action === 'selftest') return h.selftest();
             if (action === 'cleanup') return h.cleanupNow();
             if (action === 'compact') {
               const up = this.sandboxes.list().filter((s) => ['running', 'starting', 'blocked'].includes(s.unity.state)).map((s) => s.id);

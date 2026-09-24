@@ -145,3 +145,29 @@ test('disk critical: busy agents asked to checkpoint once, idle editors stopped,
   assert.equal(m.status.level, 'ok');
   assert.ok(log.includes('report Disk space is fine again'));
 });
+
+test('recovery self-test: detach through the helper, the guard notices and reattaches, sandboxes are back', async () => {
+  const { world, log, m } = harness();
+  world.sandboxes = world.sandboxes.map((s) => ({ ...s, status: 'ready', path: `F:\ffsb\${s.id}`, unity: { ...s.unity, state: 'stopped' } })) as Sandbox[];
+  world.sessions = [];
+  await m.tick();
+  // The fake helper: "detach" makes F: vanish; "mount" brings it back.
+  const deps = (m as unknown as { d: HostDeps }).d;
+  deps.runHelper = async (a) => {
+    log.push(`helper ${a}`);
+    world.now += 3000;
+    world.driveThere = a !== 'detach';
+    return { action: a, ok: true, at: '', detail: a };
+  };
+  const sleep = async (ms: number) => void (world.now += ms);
+  const out = await m.selftest({ pollMs: 1000, sleep });
+  assert.match(out, /^Self-test passed: detach helper: 3\.0 s \(detach\); F:\\ffsb gone after 3\.0 s; noticed by the guard after 0\.0 s; reattached by ffsb-helper-mount 3\.0 s later \(1 attempt\(s\)\); all 3 sandbox folder\(s\) back; total 6\.0 s\.$/);
+  assert.deepEqual(log.filter((l) => l.startsWith('helper')), ['helper detach', 'helper mount']);
+  assert.equal(m.status.sandboxRoot, 'ok');
+  // Refused while an editor is up or an agent is busy in a sandbox.
+  world.sandboxes = [{ ...world.sandboxes[0], unity: { state: 'running' } } as Sandbox];
+  await assert.rejects(m.selftest({ sleep }), /editors are up/);
+  world.sandboxes = [];
+  world.sessions = [sess('w9', 'blackhole', 'running')];
+  await assert.rejects(m.selftest({ sleep }), /mid-turn/);
+});

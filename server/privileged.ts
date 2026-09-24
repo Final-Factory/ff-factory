@@ -14,6 +14,8 @@ export const HELPERS = {
   trim: 'ffsb-helper-trim',
   /** Detach, compact and reattach the VHDX; refuses while any Unity editor uses the drive. */
   compact: 'ffsb-helper-compact',
+  /** Detach the VHDX (the recovery self-test); refuses while any Unity editor uses the drive. */
+  detach: 'ffsb-helper-detach',
   /** Controlled reboot in 2 minutes; refuses unless automatic logon is set up (else the app would not come back). */
   reboot: 'ffsb-helper-reboot',
 } as const;

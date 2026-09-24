@@ -21,7 +21,8 @@ arguments. There is no arbitrary command path.
 |---|---|
 | `ffsb-helper-mount` | attach the VHDX if it is not attached, bring its disk online, give its data partition the drive letter, wait for it |
 | `ffsb-helper-trim` | `Optimize-Volume -ReTrim` on the Dev Drive: free space inside the volume is handed back to the VHDX |
-| `ffsb-helper-compact` | refuses while any `Unity.exe` has a project on the drive; retrim, detach, `Optimize-VHD -Mode Full` (or `diskpart compact vdisk` without the Hyper-V module), reattach |
+| `ffsb-helper-compact` | refuses while any `Unity.exe` has a project on the drive; retrim, detach, `Optimize-VHD` (Full with the disk attached read-only, else Pretrimmed), reattach; reports ok only if it reclaimed at least 1 GB. Without the Hyper-V module and with a ReFS volume it refuses up front, without detaching (see the VHDX policy) |
+| `ffsb-helper-detach` | detach the VHDX, for the recovery self-test; refuses while any `Unity.exe` uses the drive |
 | `ffsb-helper-reboot` | a reboot in 2 minutes (`shutdown /a` cancels it). Refused unless automatic logon is set up, and at most once per 6 hours |
 | `ffsb-helper-pagefile` | only with `-PagefileGB N`: a fixed pagefile of N GB, from the next boot |
 
@@ -29,9 +30,14 @@ Each writes `%ProgramData%\ffsb-helpers\results\<action>.json` (`ok`, `at`, `det
 starts one with `schtasks /run /tn ffsb-helper-<action>` and waits for that file
 (`server/privileged.ts`).
 
+`-User` defaults to the account of the app's `ffsb-server` logon task (else the account running the
+installer). It must resolve to a SID before anything is registered; over OpenSSH `USERDOMAIN` is
+`WORKGROUP`, so the installer never builds the name from it. Re-run the installer after pulling a new
+version: it copies the current helper script and registers new actions (it is idempotent).
+
 ```powershell
 # once, as administrator (e.g. over SSH with an elevated account):
-.\scripts\install-privileged-helpers.ps1 -Vhdx C:\ffsb-devdrive.vhdx -Letter F -User <HOST>\<you>
+.\scripts\install-privileged-helpers.ps1 -Vhdx C:\ffsb-devdrive.vhdx -Letter F
 .\scripts\install-privileged-helpers.ps1 -PagefileGB 48      # also offer a fixed pagefile
 .\scripts\install-privileged-helpers.ps1 -Uninstall
 ```
@@ -95,6 +101,12 @@ action is logged, reported as a `[host]` message and push, and shown as `lastRea
 `system_status`. Profiles left without a process (`edge-*`, `playwright_*dev_profile-*`) are removed
 by the clean-up once untouched for an hour.
 
+**The recovery self-test** (`host_recovery` "selftest"). With no editor up and no agent busy in a
+sandbox, it detaches the sandbox drive through `ffsb-helper-detach`, lets the guard notice the missing
+drive and reattach it through `ffsb-helper-mount` exactly as in a real outage, checks that every ready
+sandbox's folder is back, and reports the timings (detach, noticed after, reattached after, total). Run
+it after installing or changing the helpers.
+
 The orchestrator can set `hostGuard.cleanup.ageRules`, `hostGuard.devDriveVhdx` and
 `hostGuard.compactWhenReclaimGB` with `set_app_config`, and act by hand with `host_recovery`
 (remount, cleanup, trim, compact, reboot with `confirm_reboot`). `system_status` and the sidebar's
@@ -108,6 +120,21 @@ A dynamically expanding VHDX grows as its volume is written and never shrinks by
 space on C: is what made Windows drop it.
 
 - **Watch the host volume**, not only the Dev Drive: `hostDiskPaths: ["C:/"]`.
+- **Compaction needs `Optimize-VHD`**, which comes with the Hyper-V PowerShell module. Without it the
+  only built-in tool is `diskpart compact vdisk`, and that finds unused space through the NTFS file
+  system inside the disk. The Dev Drive is ReFS, so it reclaims nothing: on 2026-09-24 a retrim plus
+  diskpart compaction left the file at 245.6 GB although the volume used 129 GB. The helper now refuses
+  instead of detaching the drive for nothing. To make compaction work, install the module once as
+  administrator (for example `Enable-WindowsOptionalFeature -Online -FeatureName
+  Microsoft-Hyper-V-Management-PowerShell -All`, which also enables the Hyper-V components it depends
+  on; reboot), check `Get-Command Optimize-VHD`, then compact at idle. After a retrim, Optimize-VHD's
+  Full and Pretrimmed modes reclaim the blocks ReFS released. Whether ReFS block cloning keeps shared
+  extents allocated does not matter here: the volume's own "used" figure already counts them once.
+- **Without the module**, the realistic choices are: keep the growth harmless (the host guard's C:
+  thresholds, which now stop new work long before the VHDX can hit a full C:), or rebuild the drive at
+  a planned moment. A rebuild means a new, smaller VHDX (a fixed-size one never grows at all) and moving
+  the sandboxes into it. That costs the block-clone sharing of the Library copies, so recreate
+  sandboxes from the seed there rather than copying them.
 - **Hand freed space back**: `ffsb-helper-trim` (online), then **compact** when idle.
   `hostGuard.compactWhenReclaimGB` (e.g. 60; 0 = never) lets the guard do it by itself, at most once
   a day, when no editor is up, no agent is busy, and the file holds at least that much more than the

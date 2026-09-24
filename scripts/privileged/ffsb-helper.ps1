@@ -3,7 +3,7 @@
 # action with every argument fixed; the app's user may only start those tasks. Each run writes
 # <ResultDir>\<Action>.json: { action, ok, at, detail }.
 param(
-  [Parameter(Mandatory)][ValidateSet('mount', 'trim', 'compact', 'reboot', 'pagefile')][string]$Action,
+  [Parameter(Mandatory)][ValidateSet('mount', 'trim', 'compact', 'detach', 'reboot', 'pagefile')][string]$Action,
   [Parameter(Mandatory)][string]$Vhdx,
   [Parameter(Mandatory)][ValidatePattern('^[D-Zd-z]$')][string]$Letter,
   [Parameter(Mandatory)][string]$ResultDir,
@@ -48,23 +48,53 @@ try {
       $users = Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" | Where-Object { $_.CommandLine -match "(?i)$($Letter):[\\/]" }
       if ($users) { Done $false "refused: $(@($users).Count) Unity editor(s) use $($Letter): (stop them first)" }
       $before = (Get-Item $Vhdx).Length
+      $fs = if (Drive) { (Get-Volume -DriveLetter $Letter).FileSystem } else { '?' }
+      # Reclaiming space from a dynamic VHDX needs Optimize-VHD (the Hyper-V PowerShell module). diskpart's
+      # "compact vdisk" finds unused space through the NTFS file system inside, so it reclaims nothing for ReFS
+      # (the first try on 2026-09-24 went 245.6 -> 245.6 GB): do not detach the drive for a no-op.
+      if (-not (Get-Command Optimize-VHD -ErrorAction SilentlyContinue)) {
+        if ($fs -ne 'NTFS') { Done $false ("cannot compact: Optimize-VHD (Hyper-V PowerShell module) is not installed, and diskpart only compacts NTFS volumes ({0}: is {1}). The VHDX stays {2:N1} GB. Install the module once (docs/self-recovery.md), then compact again." -f $Letter, $fs, ($before / 1GB)) }
+      }
       if (Drive) { Optimize-Volume -DriveLetter $Letter -ReTrim -ErrorAction SilentlyContinue }
+      $how = ''
       Dismount-DiskImage -ImagePath $Vhdx | Out-Null
       try {
         if (Get-Command Optimize-VHD -ErrorAction SilentlyContinue) {
-          Optimize-VHD -Path $Vhdx -Mode Full
+          # Full needs the disk attached read-only; Pretrimmed (blocks the retrim above released) needs it detached.
+          try {
+            Mount-DiskImage -ImagePath $Vhdx -Access ReadOnly -NoDriveLetter | Out-Null
+            Optimize-VHD -Path $Vhdx -Mode Full
+            $how = 'Optimize-VHD Full'
+          } catch {
+            $how = "Optimize-VHD Pretrimmed (Full: $($_.Exception.Message))"
+          } finally {
+            Dismount-DiskImage -ImagePath $Vhdx -ErrorAction SilentlyContinue | Out-Null
+          }
+          if ($how -like 'Optimize-VHD Pretrimmed*') { Optimize-VHD -Path $Vhdx -Mode Pretrimmed }
         } else {
-          # Without the Hyper-V module: diskpart compacts a read-only attached VHDX.
           $dp = Join-Path $env:TEMP 'ffsb-compact.txt'
           @("select vdisk file=`"$Vhdx`"", 'attach vdisk readonly', 'compact vdisk', 'detach vdisk') | Set-Content -Encoding ascii $dp
           $out = diskpart /s $dp 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "diskpart: $out" }
+          if ($out -match 'error|failed|not supported') { throw "diskpart: $($out -replace '\s+', ' ')" }
+          $how = 'diskpart compact vdisk'
         }
       } finally {
         Mount-DevDrive
       }
       $after = (Get-Item $Vhdx).Length
-      Done $true ("compacted {0:N1} GB -> {1:N1} GB and reattached {2}:" -f ($before / 1GB), ($after / 1GB), $Letter)
+      $freed = ($before - $after) / 1GB
+      $msg = "{0}: {1:N1} GB -> {2:N1} GB (reclaimed {3:N1} GB), {4}: reattached" -f $how, ($before / 1GB), ($after / 1GB), $freed, $Letter
+      if ($freed -lt 1) { Done $false "compaction reclaimed nothing: $msg" }
+      Done $true $msg
+    }
+    'detach' {
+      # For the recovery self-test (host_recovery "selftest"): the drive goes away as it did on 2026-09-24, and the
+      # app must notice and reattach it through ffsb-helper-mount. Refused while any editor uses the drive.
+      $users = Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" | Where-Object { $_.CommandLine -match "(?i)$($Letter):[\\/]" }
+      if ($users) { Done $false "refused: $(@($users).Count) Unity editor(s) use $($Letter): (stop them first)" }
+      if (-not (Get-DiskImage -ImagePath $Vhdx).Attached) { Done $true "already detached" }
+      Dismount-DiskImage -ImagePath $Vhdx | Out-Null
+      Done $true "detached $Vhdx ($($Letter): is gone until ffsb-helper-mount attaches it)"
     }
     'reboot' {
       # Without automatic logon the desktop session (and with it the app and the editors' GPU) would not come

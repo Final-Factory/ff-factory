@@ -92,6 +92,8 @@ export interface HostDeps {
 
 interface Recovery {
   since: number;
+  /** When the remount helper reported the drive back (for the self-test's timings). */
+  backAt?: number;
   editors: string[];
   sessions: string[];
   attempts: number;
@@ -213,7 +215,10 @@ export class HostHealthMonitor {
     this.health.detail = `attempt ${r.attempts} of ${MAX_REMOUNT_ATTEMPTS}`;
     this.helperBusy = true;
     const res = await this.d.runHelper('mount').finally(() => (this.helperBusy = false));
-    if (res.ok && this.d.exists(root)) return this.recovered();
+    if (res.ok && this.d.exists(root)) {
+      r.backAt = this.now();
+      return this.recovered();
+    }
     if (r.attempts >= MAX_REMOUNT_ATTEMPTS) {
       this.health.sandboxRoot = 'failed';
       this.health.detail = res.detail;
@@ -246,6 +251,7 @@ export class HostHealthMonitor {
   private async recovered() {
     const r = this.recovery!;
     this.recovery = undefined;
+    this.lastRecovery = { since: r.since, backAt: r.backAt ?? this.now(), attempts: r.attempts };
     this.health.sandboxRoot = 'ok';
     this.health.detail = undefined;
     const mins = Math.round((this.now() - r.since) / 60_000);
@@ -269,6 +275,52 @@ export class HostHealthMonitor {
       }
     }
     if (failed.length) this.d.report('Sandbox drive: some work did not come back', failed.join('; '));
+  }
+
+  private lastRecovery?: { since: number; backAt: number; attempts: number };
+
+  /**
+   * The end-to-end recovery self-test (host_recovery "selftest"): with no editor up and no agent busy in a
+   * sandbox, detach the sandbox drive through ffsb-helper-detach, as Windows did on 2026-09-24, and let the
+   * guard's own recovery notice it, reattach it and bring the sandboxes back. Reports each step's timing.
+   * `pollMs` / `timeoutMs` are for tests.
+   */
+  async selftest(opts: { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<string> {
+    const root = this.d.cfg.sandboxRoot;
+    const poll = opts.pollMs ?? 1000;
+    const timeout = opts.timeoutMs ?? 10 * 60_000;
+    const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const up = this.d.sandboxes().filter((s) => EDITOR_UP.has(s.unity.state)).map((s) => s.id);
+    if (up.length) throw new Error(`editors are up (${up.join(', ')}): stop them first; the self-test takes the drive away`);
+    const busy = this.d.sessions().filter((s) => s.sandboxId && BUSY.has(s.status)).map((s) => s.id);
+    if (busy.length) throw new Error(`agents are mid-turn in sandboxes (${busy.join(', ')}): wait for them first`);
+    if (!this.d.exists(root) || this.recovery || this.health.sandboxRoot !== 'ok') throw new Error(`the sandbox drive is not in a normal state (${this.health.sandboxRoot}); fix that first`);
+    const ready = this.d.sandboxes().filter((s) => s.status === 'ready');
+    const t0 = this.now();
+    const lines: string[] = [];
+    const secs = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+    this.lastRecovery = undefined;
+    const det = await this.d.runHelper('detach');
+    if (!det.ok) throw new Error(`ffsb-helper-detach failed: ${det.detail}`);
+    lines.push(`detach helper: ${secs(this.now() - t0)} (${det.detail})`);
+    let goneAt = 0;
+    while (this.now() - t0 < timeout) {
+      if (!goneAt && !this.d.exists(root)) goneAt = this.now();
+      await this.tick();
+      if (this.lastRecovery && this.d.exists(root)) break;
+      await sleep(poll);
+    }
+    const rec = this.lastRecovery as { since: number; backAt: number; attempts: number } | undefined; // set by tick() above
+    if (!rec) {
+      return `SELF-TEST FAILED: ${root} was not back within ${secs(timeout)} (state ${this.health.sandboxRoot}${this.health.detail ? `: ${this.health.detail}` : ''}). ${lines.join('; ')}. host_recovery "remount" retries.`;
+    }
+    if (goneAt) lines.push(`${root} gone after ${secs(goneAt - t0)}`);
+    lines.push(`noticed by the guard after ${secs(rec.since - (goneAt || t0))}`);
+    lines.push(`reattached by ffsb-helper-mount ${secs(rec.backAt - rec.since)} later (${rec.attempts} attempt(s))`);
+    const missing = ready.filter((s) => !this.d.exists(s.path)).map((s) => s.id);
+    lines.push(missing.length ? `sandboxes NOT back: ${missing.join(', ')}` : `all ${ready.length} sandbox folder(s) back`);
+    lines.push(`total ${secs(this.now() - t0)}`);
+    return `${missing.length ? 'SELF-TEST FAILED' : 'Self-test passed'}: ${lines.join('; ')}.`;
   }
 
   /** The orchestrator's host_recovery "remount": try now, even after giving up. */
