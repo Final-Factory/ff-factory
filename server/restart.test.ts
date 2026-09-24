@@ -12,6 +12,7 @@ import {
   parseRestartRequest,
   readUpdateResult,
   restartSummary,
+  versionLine,
   resumeMessage,
   takeResumeFile,
   writeResumeFile,
@@ -115,16 +116,25 @@ test('summary: resumed, failed, update result and code change', () => {
       { id: 'b', title: 'Docs', ok: false, error: 'already 6 agents running' },
     ],
     { ok: true, at: '2026-09-23T18:01:00Z', headBefore: 'aaaaaaaaaaaa', headAfter: 'bbbbbbbbbbbb' },
-    'bbbbbbbbbbbb',
+    { head: 'bbbbbbbbbbbb' },
   );
   assert.match(s, /^\[app restarted\]/);
   assert.match(s, /Update OK \(aaaaaaaaa → bbbbbbbbb\)/);
   assert.match(s, /Resumed automatically: "Shaders" \(a in sb1\)/);
   assert.match(s, /Could not resume: "Docs" \(b\): already 6 agents running/);
-  assert.match(restartSummary(file({ update: true }), [], { ok: false, at: 'x', error: 'npm ci failed' }, undefined), /Update FAILED: npm ci failed/);
-  assert.match(restartSummary(file({ update: true }), [], undefined, undefined), /Update result: unknown/);
-  assert.match(restartSummary(file({ head: 'aaaaaaaaaaaa' }), [], undefined, 'cccccccccccc'), /Code changed aaaaaaaaa → ccccccccc/);
-  assert.match(restartSummary(file({ orchestratorBusy: true }), [], undefined, undefined, ['NOTE']), /mid-turn yourself.*NOTE/);
+  assert.match(restartSummary(file({ update: true }), [], { ok: false, at: 'x', error: 'npm ci failed' }, {}), /Update FAILED: npm ci failed/);
+  assert.match(restartSummary(file({ update: true }), [], undefined, {}), /Update result: unknown/);
+  assert.match(restartSummary(file({ head: 'aaaaaaaaaaaa' }), [], undefined, { head: 'cccccccccccc' }), /Code changed aaaaaaaaa → ccccccccc/);
+  assert.match(restartSummary(file({ orchestratorBusy: true }), [], undefined, {}, ['NOTE']), /mid-turn yourself.*NOTE/);
+});
+
+test('summary: states the version before and after the restart', () => {
+  assert.match(restartSummary(file({ appVersion: '0.1.0' }), [], undefined, { version: '0.2.0' }), /^\[app restarted\][^.]*\)\. Version 0\.1\.0 → 0\.2\.0\./);
+  assert.match(restartSummary(file({ appVersion: '0.2.0' }), [], undefined, { version: '0.2.0' }), /Version 0\.2\.0 \(unchanged\)\./);
+  // A resume file from a server before versioning: only the new version is known.
+  assert.match(restartSummary(file(), [], undefined, { version: '0.1.0' }), /Now version 0\.1\.0\./);
+  assert.doesNotMatch(restartSummary(file({ appVersion: '0.1.0' }), [], undefined, {}), /[Vv]ersion/);
+  assert.equal(versionLine(undefined, undefined), '');
 });
 
 test('restart request: empty or garbage means stop now; JSON is validated', () => {

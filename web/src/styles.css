@@ -3754,3 +3754,12 @@ body {
 .composer-actions {
   touch-action: manipulation;
 }
+
+/* The app version under the sidebar, and in the settings sheet's About line. */
+.side-foot {
+  flex: none;
+  padding: 6px 4px 2px;
+  font-size: 11px;
+  text-align: center;
+  user-select: text;
+}

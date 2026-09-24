@@ -46,6 +46,12 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
   }
 }
 
+/** The Agent SDK's query(). The E2E server (e2e/server.ts) swaps in a scripted fake agent. */
+let runQuery: typeof query = query;
+export function setQueryForTesting(q: typeof query) {
+  runQuery = q;
+}
+
 /** Builds the SDK options for a session each time its process (re)starts. */
 export type OptionsFactory = (info: SessionInfo) => Options;
 
@@ -168,7 +174,7 @@ export class AgentSession implements SessionHandle {
     };
     this.costBase = this.info.costUsd;
     this.firstResult = true;
-    this.q = query({ prompt: this.input, options });
+    this.q = runQuery({ prompt: this.input, options });
     this.update({ status: 'starting' });
     void this.consume(this.q);
   }

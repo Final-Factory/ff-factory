@@ -1,6 +1,6 @@
 {
   "name": "ff-factory",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Manage Final Factory sandboxes (worktree + Unity + Claude Code agents) from a conversational web UI",
   "scripts": {
     "start": "node server/index.ts",
@@ -20,6 +20,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^26.6.2",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.18.1",

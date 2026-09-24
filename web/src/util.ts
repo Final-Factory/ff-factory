@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import type { ImageInput, Machine, PermissionMode, SessionInfo, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import type { AppVersion, ImageInput, Machine, PermissionMode, SessionInfo, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 
 export { displayName, isUnused } from '../../shared/labels';
 
@@ -372,4 +372,9 @@ export async function copyText(text: string): Promise<boolean> {
     ta.remove();
     return ok;
   }
+}
+
+/** "v0.1.0 · 1a2b3c4": the running server's version and commit. */
+export function versionLabel(v: AppVersion): string {
+  return `v${v.version}${v.sha ? ` · ${v.sha}` : ''}`;
 }

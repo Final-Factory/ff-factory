@@ -21,6 +21,7 @@ import { listImages, MEDIA_TYPE, readImage } from './images.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, parseRestartRequest, takeResumeFile, writeResumeFile, type RestartRequest } from './restart.ts';
 import { UsageTracker, usageLines } from './usage.ts';
+import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AppState, CreateSandboxRequest, HostStatus, PermissionDecisionRequest, ServerEvent, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
@@ -64,6 +65,7 @@ let lastSystem: SystemStats | undefined;
 
 function appState(): AppState {
   return {
+    app: appVersion(),
     sandboxes: sandboxes.list(),
     sessions: [...store.sessions.values()],
     standingAgents: agents.standing.list(),
@@ -539,6 +541,9 @@ const server = http.createServer(async (req, res) => {
         return send(res, 415, { error: 'JSON only' });
       }
     }
+    // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
+    // version of an open-source app is public anyway.
+    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appVersion() });
     if (url.pathname === '/api/login' && req.method === 'POST') {
       const { username, password } = await readJson<{ username?: string; password?: string }>(req);
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
@@ -659,7 +664,7 @@ process.on('uncaughtException', (e) => console.error('UNCAUGHT (kept running):',
 process.on('unhandledRejection', (e) => console.error('UNHANDLED REJECTION (kept running):', e));
 
 server.listen(cfg.port, cfg.host, () => {
-  console.log(`FF Factory on http://${cfg.host}:${cfg.port} — sandboxes in ${cfg.sandboxRoot}, base clone ${cfg.repo.basePath}`);
+  console.log(`FF Factory ${formatVersion(appVersion())} on http://${cfg.host}:${cfg.port} — sandboxes in ${cfg.sandboxRoot}, base clone ${cfg.repo.basePath}`);
 });
 
 /** This app's git HEAD, to tell the orchestrator what an update or restart changed. */
@@ -765,11 +770,14 @@ setInterval(() => {
   }
 }, 5000);
 
+/** The managers, for the E2E harness (e2e/server.ts) to set up states no browser can reach (a blocked editor). */
+export const internals = { cfg, store, sandboxes, sessions, agents };
+
 // Resume what the last server recorded (or report what a crash cut off), once the managers are up.
 setTimeout(() => {
   try {
     const notes = host.elevated ? [`WARNING: the server is running elevated, so it will not start Unity editors: ${host.elevatedWhy ?? ''}`] : [];
-    agents.resumeAfterRestart(takeResumeFile(cfg.dataDir), cutOff, appHead(), notes);
+    agents.resumeAfterRestart(takeResumeFile(cfg.dataDir), cutOff, { head: appHead(), version: appVersion().version }, notes);
   } catch (e) {
     console.error('resume after restart:', e);
   }

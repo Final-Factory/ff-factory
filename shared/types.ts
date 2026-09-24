@@ -412,7 +412,15 @@ export interface AppSettings {
   heartbeatMinutes: number | null;
 }
 
+/** This app's version (root package.json) and the short git SHA of the running checkout. */
+export interface AppVersion {
+  version: string;
+  sha?: string;
+}
+
 export interface AppState {
+  /** The running server's version; absent from a server older than 0.1.0. */
+  app?: AppVersion;
   sandboxes: Sandbox[];
   sessions: SessionInfo[];
   standingAgents: StandingAgent[];

@@ -1,0 +1,56 @@
+# Changelog
+
+All notable changes to FF Factory are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/). Until 1.0 a minor bump may break things.
+
+Add your change under **[Unreleased]** in the same pull request. `npm run release -- minor` (or
+`patch`, `major`, `X.Y.Z`) moves those notes under a new version, bumps `package.json` and
+`web/package.json`, commits and tags `vX.Y.Z`.
+
+## [Unreleased]
+
+## [0.1.0] - 2026-09-24
+
+The first versioned release. It records what FF Factory already does, plus the engineering setup
+that starts with it.
+
+### Added
+
+- **Versioning.** One semantic version in `package.json`, shown with the git commit in the sidebar
+  footer, the settings sheet, the orchestrator's `system_status` tool and `GET /api/health`
+  (`{ ok, version, sha }`). The `[app restarted]` summary says which version the app moved from and to.
+- **CI and tests.** GitHub Actions run typechecks, the unit tests with coverage, the web build, a
+  Playwright suite (desktop Chromium, Pixel-sized Chrome, iPhone-sized WebKit) against a server with
+  a scripted fake agent, gitleaks, and a check that every new commit uses a noreply email.
+- **Sandboxes.** A git worktree per work stream on its own branch, with a copy of a warm Unity
+  `Library/` (a near-free block clone on a ReFS Dev Drive), its own Unity editor on the GPU, and the
+  real git state (branch, dirty files, ahead/behind, open PR) in the sidebar.
+- **Orchestrator.** A chat-first main page whose agent has tools to create, relabel and delete
+  sandboxes, start and stop Unity, start, message, interrupt and stop workers, read transcripts,
+  switch branches, check machine load and plan usage, and update or restart the app. The same tools
+  are served over MCP at `/mcp` for other Claude Code sessions.
+- **Worker agents.** Claude Agent SDK sessions per sandbox with live transcripts, interrupts,
+  permission modes and Allow/Deny cards, and a guard hook that blocks pushes to the game repo's
+  main branches, force pushes, protected paths and other editors' Unity instances.
+- **Standing agents.** Long-lived agents with a charter, an interval, cron or manual schedule,
+  per-run and per-day budgets, read-only tool groups by default, and delegation requests that the
+  user approves.
+- **Machines.** Macs added over ssh run a daemon that connects back to the portal and runs agents in
+  the user's main clone, with the same session code and extra guard rules.
+- **Voice.** A mic in every message box with local Whisper transcription primed with project words,
+  and a hands-free voice mode that reads replies with local Kokoro TTS and supports barge-in.
+- **Notifications.** Web Push per device with a toggle for each kind (permission waiting, turn
+  finished, errors, standing-agent runs, delegations), including the iPhone Home Screen app.
+- **Images.** Paste or attach images in any message box, see screenshots agents take or mention
+  inline, and browse each sandbox's Screenshots gallery.
+- **Search.** Full-text search over every transcript, filtered by sandbox, machine, agent and date.
+- **Restart and auto-resume.** Restarts and updates drain busy agents, record what to resume, and
+  bring the interrupted workers back afterwards with a summary for the orchestrator.
+- **Unity watchdog.** Editors stuck on a dialog or a silent log are marked blocked and reported;
+  known harmless dialogs are dismissed automatically.
+- **Open source.** Published under the MIT license with a scripted republish that keeps private
+  history and identities out of the public repo.
+
+[Unreleased]: https://github.com/Final-Factory/ff-factory/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Final-Factory/ff-factory/releases/tag/v0.1.0

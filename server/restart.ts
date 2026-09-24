@@ -50,6 +50,8 @@ export interface ResumeFile {
   at: string;
   /** This app's git HEAD at shutdown, to report what an update changed. */
   head?: string;
+  /** This app's version (package.json) when it stopped; absent in files written before 0.1.0. */
+  appVersion?: string;
   sessions: ResumeEntry[];
   /** The orchestrator was itself mid-turn or had messages waiting. */
   orchestratorBusy: boolean;
@@ -126,9 +128,25 @@ export interface UpdateResult {
   headAfter?: string;
 }
 
+/** The running app after a restart: its git HEAD and package.json version. */
+export interface AppNow {
+  head?: string;
+  version?: string;
+}
+
+/** "Version 0.1.0 → 0.2.0." / "Version 0.2.0 (unchanged)." / "Now version 0.2.0." ("" when unknown). */
+export function versionLine(before: string | undefined, after: string | undefined): string {
+  if (!after) return '';
+  if (!before) return `Now version ${after}.`;
+  return before === after ? `Version ${after} (unchanged).` : `Version ${before} → ${after}.`;
+}
+
 /** The one paragraph the orchestrator gets after a restart. */
-export function restartSummary(f: ResumeFile, outcomes: ResumeOutcome[], update: UpdateResult | undefined, head: string | undefined, notes: string[] = []): string {
+export function restartSummary(f: ResumeFile, outcomes: ResumeOutcome[], update: UpdateResult | undefined, now: AppNow, notes: string[] = []): string {
+  const head = now.head;
   const parts: string[] = [`[app restarted] FF Factory restarted (${f.reason}; stopped at ${new Date(f.at).toLocaleTimeString()}).`];
+  const version = versionLine(f.appVersion, now.version);
+  if (version) parts.push(version);
   if (f.update) {
     if (!update) parts.push('Update result: unknown (no data/update.result.json; see data/supervisor.log).');
     else if (!update.ok) parts.push(`Update FAILED: ${clip(update.error ?? 'unknown error', 400)}; the server runs whatever code is on disk.`);

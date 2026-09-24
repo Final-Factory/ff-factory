@@ -24,7 +24,8 @@ import { describeTrigger } from './schedule.ts';
 import { describeGit, refreshSandboxGit } from './gitStatus.ts';
 import { displayName } from '../shared/labels.ts';
 import type { StandingAgentInput, StandingTrigger, UnityBlocked } from '../shared/types.ts';
-import { collectResume, orchestratorWasBusy, readUpdateResult, restartSummary, resumeMessage, type RestartRequest, type ResumeFile, type ResumeOutcome } from './restart.ts';
+import { collectResume, orchestratorWasBusy, readUpdateResult, restartSummary, resumeMessage, versionLine, type AppNow, type RestartRequest, type ResumeFile, type ResumeOutcome } from './restart.ts';
+import { appVersion, formatVersion } from './version.ts';
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
 export interface ToolSpec {
@@ -129,20 +130,36 @@ export class Agents {
   /** What to write to data/resume.json when the server stops. */
   resumeFile(req: { reason: string; update: boolean }, drained: ReadonlySet<string>, head: string | undefined): ResumeFile {
     const snaps = [...this.sessions.sessions.values()].map(snapshotOf);
-    return { version: 1, reason: req.reason, update: req.update, at: new Date().toISOString(), head, sessions: collectResume(snaps, drained), orchestratorBusy: orchestratorWasBusy(snaps) };
+    return {
+      version: 1,
+      reason: req.reason,
+      update: req.update,
+      at: new Date().toISOString(),
+      head,
+      appVersion: appVersion().version,
+      sessions: collectResume(snaps, drained),
+      orchestratorBusy: orchestratorWasBusy(snaps),
+    };
   }
 
   /**
    * After a restart: resume the sessions the last server recorded, then give the orchestrator one
    * paragraph on what happened. Without a resume file (a crash), only report what was cut off.
    */
-  resumeAfterRestart(f: ResumeFile | undefined, cutOff: SessionInfo[], head: string | undefined, notes: string[]) {
+  resumeAfterRestart(f: ResumeFile | undefined, cutOff: SessionInfo[], now: AppNow, notes: string[]) {
     if (!f) {
       const workers = cutOff.filter((i) => i.kind === 'worker');
       if (workers.length || notes.length) {
         const list = workers.map((i) => `"${i.title}" (${i.id}${i.sandboxId ? ` in ${i.sandboxId}` : ''})`).join(', ');
         this.notifyOrchestrator(
-          `[app restarted] FF Factory restarted without a clean stop (a crash or a forced kill).${workers.length ? ` These workers were cut off mid-turn and were NOT resumed automatically: ${list}. Resume the ones that matter with message_agent.` : ''} ${notes.join(' ')}`.trim(),
+          [
+            '[app restarted] FF Factory restarted without a clean stop (a crash or a forced kill).',
+            versionLine(undefined, now.version),
+            workers.length ? `These workers were cut off mid-turn and were NOT resumed automatically: ${list}. Resume the ones that matter with message_agent.` : '',
+            ...notes,
+          ]
+            .filter(Boolean)
+            .join(' '),
         );
       }
       return;
@@ -164,7 +181,7 @@ export class Agents {
       }
       outcomes.push(o);
     }
-    const summary = restartSummary(f, outcomes, readUpdateResult(this.cfg.dataDir, f.at), head, notes);
+    const summary = restartSummary(f, outcomes, readUpdateResult(this.cfg.dataDir, f.at), now, notes);
     console.log(summary);
     this.notifyOrchestrator(summary);
   }
@@ -900,6 +917,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
             const s = await systemStats(this.cfg);
             const gb = (b?: number) => (b === undefined ? '?' : `${(b / 2 ** 30).toFixed(0)} GB`);
             return [
+              `FF Factory ${formatVersion(appVersion())}`,
               `${s.hostname} (${s.platform}), ${s.cpuModel} x${s.cpuCount}, load ${s.loadPct}%`,
               `RAM free ${gb(s.memFreeBytes)} of ${gb(s.memTotalBytes)}; disk free ${gb(s.diskFreeBytes)} of ${gb(s.diskTotalBytes)}`,
               s.gpu ? `GPU ${s.gpu.name}: ${s.gpu.memUsedMiB}/${s.gpu.memTotalMiB} MiB, ${s.gpu.utilPct}% util` : 'GPU: n/a',

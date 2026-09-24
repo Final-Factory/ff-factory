@@ -22,6 +22,7 @@ import {
   useNow,
   displayName,
   isUnused,
+  versionLabel,
   type Route,
 } from '../util';
 import { Chip, Dot, Icon } from './ui';
@@ -198,7 +199,12 @@ export function Sidebar({
       <button className="btn btn-outline new-sb" onClick={onNewSandbox}>
         <Icon name="plus" size={14} /> New sandbox
       </button>
-      {settings && <SettingsModal onClose={() => setSettings(false)} />}
+      {app.app && (
+        <div className="side-foot mono dim" data-testid="app-version" title="FF Factory version and git commit">
+          {versionLabel(app.app)}
+        </div>
+      )}
+      {settings && <SettingsModal app={app.app} onClose={() => setSettings(false)} />}
     </aside>
   );
 }

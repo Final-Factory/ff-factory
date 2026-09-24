@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { NOTIFY_KINDS } from '../../../shared/types';
+import { NOTIFY_KINDS, type AppVersion } from '../../../shared/types';
 import { disablePush, enablePush, setPref, testNotification, usePush } from '../notify';
 import { api } from '../api';
 import { toast, toastError } from '../store';
@@ -7,9 +7,10 @@ import { SHORTCUT_LABEL, VOICE_PREF_DEFAULTS, refreshVoiceStatus, setVoicePrefs,
 import { browserSpeechSupported } from '../voice/browserSpeech';
 import type { VoiceEnginePref } from '../../../shared/voice';
 import { Modal } from './ui';
+import { versionLabel } from '../util';
 
 /** This device's settings: notifications and voice input. */
-export function SettingsModal({ onClose }: { onClose: () => void }) {
+export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () => void }) {
   const p = usePush();
   const [testing, setTesting] = useState(false);
   const on = !!p.endpoint;
@@ -77,6 +78,17 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         </div>
         <p className="dim small">These choices belong to this device; your phone and your desktop can differ. While the app is in front, nothing pops up.</p>
         <VoiceSettings />
+        {app && (
+          <div className="field about" data-testid="about-version">
+            <span>About</span>
+            <p className="small dim">
+              FF Factory <span className="mono">{versionLabel(app)}</span> ·{' '}
+              <a href="https://github.com/Final-Factory/ff-factory/blob/main/CHANGELOG.md" target="_blank" rel="noreferrer">
+                changelog
+              </a>
+            </p>
+          </div>
+        )}
       </div>
     </Modal>
   );
