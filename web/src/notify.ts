@@ -5,7 +5,7 @@ import type { NotifyKind, NotifyPrefs } from '../../shared/types';
 import { api } from './api';
 import { lsGet, lsSet, navigate, parseRoute } from './util';
 
-export const DEFAULT_PREFS: NotifyPrefs = { permission: true, turnEnd: true, error: true, standing: true, delegation: true, unity: true };
+export const DEFAULT_PREFS: NotifyPrefs = { permission: true, turnEnd: true, error: true, standing: true, delegation: true, unity: true, host: true };
 
 export interface PushState {
   /** This browser can do Web Push at all. */

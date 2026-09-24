@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import type { AppState, PlanUsage, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
+import type { AppState, HostHealth, PlanUsage, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
 import { useAttention, type AttentionItem } from '../attention';
 import {
   displayName,
@@ -299,7 +299,7 @@ function SystemFooter({ app }: { app: AppState }) {
     <div className={`sys-foot${open ? ' open' : ''}`}>
       {open && (
         <div className="sys-detail">
-          <Meters sys={sys} unityOn={unityOn} agentsOn={agentsOn} />
+          <Meters sys={sys} unityOn={unityOn} agentsOn={agentsOn} health={app.host?.health} />
           {u && <PlanMeters usage={u} />}
         </div>
       )}
@@ -345,10 +345,10 @@ function SystemFooter({ app }: { app: AppState }) {
   );
 }
 
-function Meter({ label, pct, value, warn = 75, crit = 90 }: { label: string; pct: number; value: string; warn?: number; crit?: number }) {
+function Meter({ label, pct, value, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; warn?: number; crit?: number; lvl?: 'ok' | 'warn' | 'crit' }) {
   const p = Math.max(0, Math.min(100, pct));
   return (
-    <div className={`meter meter-${level(p, warn, crit)}`}>
+    <div className={`meter meter-${lvl ?? level(p, warn, crit)}`}>
       <div className="meter-row">
         <span className="meter-label">{label}</span>
         <span className="meter-value">{value}</span>
@@ -360,7 +360,7 @@ function Meter({ label, pct, value, warn = 75, crit = 90 }: { label: string; pct
   );
 }
 
-function Meters({ sys, unityOn, agentsOn }: { sys: SystemStats; unityOn: number; agentsOn: number }) {
+function Meters({ sys, unityOn, agentsOn, health }: { sys: SystemStats; unityOn: number; agentsOn: number; health?: HostHealth }) {
   const memUsed = sys.memTotalBytes - sys.memFreeBytes;
   return (
     <div className="meters">
@@ -373,9 +373,23 @@ function Meters({ sys, unityOn, agentsOn }: { sys: SystemStats; unityOn: number;
           value={`${(sys.gpu.memUsedMiB / 1024).toFixed(1)} of ${(sys.gpu.memTotalMiB / 1024).toFixed(0)} GB · GPU ${Math.round(sys.gpu.utilPct)}%`}
         />
       )}
-      {sys.diskTotalBytes !== undefined && sys.diskFreeBytes !== undefined && (
-        <Meter label="Disk" pct={((sys.diskTotalBytes - sys.diskFreeBytes) / sys.diskTotalBytes) * 100} value={`${fmtBytes(sys.diskFreeBytes)} free`} warn={85} crit={95} />
-      )}
+      {health?.disks.length
+        ? // The host guard's volumes, coloured by its own levels (hostGuard.warnFreeGB / criticalFreeGB).
+          health.disks.map((d) =>
+            d.totalBytes !== undefined && d.freeBytes !== undefined ? (
+              <Meter
+                key={d.path}
+                label={`Disk ${d.path.replace(/[\\/]+$/, '')}`}
+                pct={((d.totalBytes - d.freeBytes) / d.totalBytes) * 100}
+                value={`${fmtBytes(d.freeBytes)} free`}
+                lvl={d.level === 'critical' ? 'crit' : d.level}
+              />
+            ) : (
+              <Meter key={d.path} label={`Disk ${d.path.replace(/[\\/]+$/, '')}`} pct={0} value="offline" lvl="crit" />
+            ),
+          )
+        : sys.diskTotalBytes !== undefined &&
+          sys.diskFreeBytes !== undefined && <Meter label="Disk" pct={((sys.diskTotalBytes - sys.diskFreeBytes) / sys.diskTotalBytes) * 100} value={`${fmtBytes(sys.diskFreeBytes)} free`} warn={85} crit={95} />}
       <div className="limits">
         <span className={unityOn >= sys.limits.maxUnity ? 'at-limit' : ''}>
           Unity editors <b>{unityOn}/{sys.limits.maxUnity}</b>

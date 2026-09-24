@@ -50,5 +50,18 @@
   "worker": {
     "permissionMode": "bypassPermissions",
     "effort": "high"
+  },
+  "hostDiskPaths": [
+    "C:/"
+  ],
+  "hostGuard": {
+    "warnFreeGB": 80,
+    "criticalFreeGB": 40,
+    "remountMinFreeGB": 30,
+    "devDriveVhdx": "",
+    "compactWhenReclaimGB": 0,
+    "cleanup": {
+      "ageRules": []
+    }
   }
 }

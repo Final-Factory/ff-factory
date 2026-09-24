@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -18,6 +19,9 @@ import { Auth } from './auth.ts';
 import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, readImage } from './images.ts';
+import { HostHealthMonitor } from './hostHealth.ts';
+import { runHelper } from './privileged.ts';
+import { planCleanup, runCleanup } from './cleanup.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, parseRestartRequest, takeResumeFile, writeResumeFile, type RestartRequest } from './restart.ts';
 import { UsageTracker, usageLines } from './usage.ts';
@@ -57,6 +61,60 @@ agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));
 agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
 sandboxes.events.on('blocked', (sb, b) => notifier.unityBlocked(sb, b));
+
+// The host guard: disk space, the sandbox drive's self-recovery, RAM and idle editors (docs/self-recovery.md).
+const hostHealth = new HostHealthMonitor({
+  cfg,
+  statfs: async (p) => {
+    try {
+      const s = await fs.promises.statfs(p);
+      return { free: s.bavail * s.bsize, total: s.blocks * s.bsize };
+    } catch {
+      return undefined;
+    }
+  },
+  exists: (p) => fs.existsSync(p),
+  mem: () => ({ free: os.freemem(), total: os.totalmem() }),
+  sandboxes: () => sandboxes.list(),
+  sessions: () => [...store.sessions.values()],
+  startEditor: async (id) => void (await sandboxes.startUnity(id)),
+  stopEditor: async (id) => void (await sandboxes.stopUnity(id)),
+  interrupt: (id) => sessions.get(id).interrupt(),
+  tell: (id, text) => void sessions.send(id, text, 'system', undefined, { bypassGate: true }),
+  report: (title, body) => {
+    console.log(`host guard: ${title}: ${body}`);
+    notifier.host(title, body);
+    const orch = store.orchestratorId;
+    if (orch) {
+      try {
+        sessions.send(orch, `[host] ${title}. ${body}`, 'system');
+      } catch {
+        // the orchestrator is not there; the notification still went out
+      }
+    }
+  },
+  runHelper: (a) => runHelper(a),
+  cleanup: async () => {
+    const keep = [...cfg.protectedPaths, cfg.sandboxRoot, cfg.standingRoot, cfg.repo.basePath, ROOT, cfg.dataDir];
+    const items = planCleanup({ policy: cfg.hostGuard.cleanup, keep });
+    const logs = sandboxes.list().filter((s) => s.unity.logPath).map((s) => ({ logsDir: path.dirname(s.unity.logPath!), current: s.unity.logPath! }));
+    const r = runCleanup(items, logs);
+    return { removed: r.removed.length };
+  },
+  changed: (h) => {
+    host.health = h;
+    broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
+  },
+  log: (line) => console.warn(line),
+});
+sandboxes.startGate = () => hostHealth.blockReason('editor');
+sessions.startGate = () => hostHealth.blockReason('agent');
+agents.standing.hostGate = () => hostHealth.blockReason('agent');
+agents.hostHealth = hostHealth;
+if (cfg.hostGuard.pollSeconds > 0) {
+  setInterval(() => void hostHealth.tick(), cfg.hostGuard.pollSeconds * 1000);
+  setTimeout(() => void hostHealth.tick(), 5000);
+}
 if (!auth.hasUsers()) console.warn('No users yet. Create one on this machine: node server/user.ts <username>');
 sandboxes.reconcile();
 const cutOff = agents.boot();

@@ -54,3 +54,26 @@ test('set_app_config: the public commit identity', (t) => {
   assert.throws(() => normalizeSetting('publicGitIdentity.email', 'not an email'));
   assert.throws(() => normalizeSetting('publicGitIdentity.name', 'a "quoted" name'));
 });
+
+test('set_app_config: host guard housekeeping, with age rules kept away from anything that matters', (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg, protectedPaths: ['C:/live/game'], sandboxRoot: 'F:/ffsb', standingRoot: 'F:/ffsb/_agents', dataDir: 'C:/app/data', repo: { basePath: 'C:/ffsb/_base' }, hostGuard: { devDriveVhdx: '', compactWhenReclaimGB: 0, cleanup: { ageRules: [] } } } as unknown as Config;
+  setAppConfig(file, full, 'hostGuard.devDriveVhdx', 'C:/ffsb-devdrive.vhdx');
+  setAppConfig(file, full, 'hostGuard.compactWhenReclaimGB', '60');
+  setAppConfig(file, full, 'hostGuard.cleanup.ageRules', '[{"path":"C:/Users/u/AppData/LocalLow/Studio/game/DeterminismAudit","olderThanDays":14}]');
+  assert.equal(full.hostGuard.devDriveVhdx, 'C:/ffsb-devdrive.vhdx');
+  assert.equal(full.hostGuard.compactWhenReclaimGB, 60);
+  assert.deepEqual(full.hostGuard.cleanup.ageRules, [{ path: 'C:/Users/u/AppData/LocalLow/Studio/game/DeterminismAudit', olderThanDays: 14 }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).hostGuard.cleanup.ageRules[0].olderThanDays, 14);
+  for (const bad of [
+    [{ path: 'C:/', olderThanDays: 30 }],
+    [{ path: os.homedir(), olderThanDays: 30 }],
+    [{ path: 'F:/ffsb/sb1', olderThanDays: 30 }],
+    [{ path: 'C:/live', olderThanDays: 30 }],
+    [{ path: 'relative/dir', olderThanDays: 30 }],
+    [{ path: 'C:/Users/u/old-builds', olderThanDays: 1 }],
+  ]) {
+    assert.throws(() => normalizeSetting('hostGuard.cleanup.ageRules', bad, full), Error, JSON.stringify(bad));
+  }
+  assert.throws(() => normalizeSetting('hostGuard.devDriveVhdx', 'C:/not-a-disk.txt'));
+});

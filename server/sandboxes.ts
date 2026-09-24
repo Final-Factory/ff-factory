@@ -463,6 +463,9 @@ export class SandboxManager {
     this.elevatedWhy = why;
   }
 
+  /** The host guard's gate (server/hostHealth.ts): why a new editor must wait (disk, sandbox drive, RAM). */
+  startGate?: () => string | undefined;
+
   private editorPath(s: Sandbox) {
     let version = '';
     const pv = path.join(s.path, 'ProjectSettings', 'ProjectVersion.txt');
@@ -504,6 +507,8 @@ export class SandboxManager {
       if (!isActive(s.unity.state)) this.update(s, { unity: { ...s.unity, state: 'stopped', detail: msg, blocked: undefined } });
       throw new Error(msg);
     }
+    const gate = isActive(s.unity.state) ? undefined : this.startGate?.();
+    if (gate) throw new Error(`not started: ${gate}`);
     if (this.startingUnity.has(s.id)) return s;
     this.startingUnity.add(s.id);
     try {

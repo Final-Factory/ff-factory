@@ -16,6 +16,9 @@ import type { PermissionMode, Sandbox, SessionInfo, TranscriptEvent } from '../s
 import { sandboxGuard } from './guard.ts';
 import { systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
+import { type HostHealthMonitor } from './hostHealth.ts';
+import { runHelper } from './privileged.ts';
+import type { HostHealth } from '../shared/types.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
 import type { LaunchSpec } from './launch.ts';
@@ -62,6 +65,8 @@ export class Agents {
   requestRestart?: (req: RestartRequest) => string;
   /** Plan usage lines for system_status (server/usage.ts); wired by index.ts. */
   usageLines?: () => string[];
+  /** The host guard (server/hostHealth.ts); wired by index.ts. */
+  hostHealth?: HostHealthMonitor;
 
   readonly machines: MachineManager;
   readonly waker: Waker;
@@ -923,10 +928,34 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
               s.gpu ? `GPU ${s.gpu.name}: ${s.gpu.memUsedMiB}/${s.gpu.memTotalMiB} MiB, ${s.gpu.utilPct}% util` : 'GPU: n/a',
               `Unity editors running ${this.sandboxes.runningUnityCount()}/${s.limits.maxUnity}; live agents ${this.sessions.liveAgents()}/${s.limits.maxSessions} (workers and running standing agents)`,
               ...(this.usageLines?.() ?? []),
+              ...hostHealthLines(this.hostHealth?.status),
             ].join('\n');
           }),
         ),
         ...this.standingToolSpecs(tool),
+        tool(
+          'host_recovery',
+          "Recovery actions for this host (docs/self-recovery.md). The host guard does these by itself when needed; use this to retry or to act early. remount: reattach the sandbox drive now (also after the guard gave up). cleanup: remove known-safe junk now (old headless-browser profiles, test scratch folders, clean agent temp clones, rotated editor logs, the configured age rules). trim: hand free space inside the sandbox drive back to its VHDX. compact: trim, then detach, compact and reattach the VHDX (refused while an editor uses the drive; the drive is briefly offline). reboot: a controlled reboot in 2 minutes, only as a last resort when remounting keeps failing; it stops every agent and editor, and is refused unless automatic logon is set up. Each privileged action runs a fixed SYSTEM task installed by scripts/install-privileged-helpers.ps1.",
+          {
+            action: z.enum(['remount', 'cleanup', 'trim', 'compact', 'reboot']),
+            confirm_reboot: z.literal(true).optional().describe('Required for reboot: remounting failed and nothing else works.'),
+          },
+          wrap(async ({ action, confirm_reboot }) => {
+            const h = this.hostHealth;
+            if (!h) throw new Error('the host guard is not running (hostGuard.pollSeconds 0?)');
+            if (action === 'remount') return h.remountNow();
+            if (action === 'cleanup') return h.cleanupNow();
+            if (action === 'compact') {
+              const up = this.sandboxes.list().filter((s) => ['running', 'starting', 'blocked'].includes(s.unity.state)).map((s) => s.id);
+              if (up.length) throw new Error(`editors are up (${up.join(', ')}): stop them first`);
+              const r = await h.compact('asked for');
+              return `${r.ok ? 'Done' : 'Failed'}: ${r.detail}`;
+            }
+            if (action === 'reboot' && !confirm_reboot) throw new Error('reboot needs confirm_reboot: true');
+            const r = await runHelper(action);
+            return `${r.ok ? 'Done' : 'Failed'}: ${r.detail}`;
+          }),
+        ),
         tool(
           'request_app_update',
           'Update this app (FF Factory) and restart it without the user at the desktop: busy workers are first asked to commit, push and end their turn (up to drain_minutes), then the supervisor pulls the latest code (fast-forward only), runs npm ci, rebuilds the web UI and starts the new server, as scripts/restart.ps1 -Update does. This STOPS EVERY AGENT PROCESS, the orchestrator (you) and every worker, for a few minutes. Workers that were mid-turn or asked to pause are resumed automatically afterwards, and you get a summary message. Unity editors keep running. Only call it when the user asked for the update.',
@@ -945,10 +974,10 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'set_app_config',
-          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …); publicGitIdentity.name / .email: the identity agents commit with in public repos such as this app's own (the guard refuses pushes there with other emails; GitHub noreply addresses are always fine). value null removes the key (back to the default). Only when the user asked for the change.`,
+          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …); publicGitIdentity.name / .email: the identity agents commit with in public repos such as this app's own (the guard refuses pushes there with other emails; GitHub noreply addresses are always fine); hostGuard.devDriveVhdx: the sandbox Dev Drive's .vhdx path; hostGuard.compactWhenReclaimGB: compact that VHDX at idle once it holds this many GB more than the volume uses (0 never); hostGuard.cleanup.ageRules: JSON list of { "path", "olderThanDays" (>= 3) } whose old entries clean-up removes when disk space is low (never a drive root, the home folder, the sandboxes, this app or a protected path). value null removes the key (back to the default). Only when the user asked for the change.`,
           {
             key: z.enum(SETTABLE_KEYS),
-            value: z.union([z.string(), z.array(z.string()), z.null()]),
+            value: z.union([z.string(), z.number(), z.array(z.string()), z.array(z.object({ path: z.string(), olderThanDays: z.number() })), z.null()]),
             user_asked: z.literal(true).describe('Must be true: the user asked for this change.'),
           },
           wrap(async ({ key, value }) => {
@@ -1297,4 +1326,15 @@ function unityStatus(sb: Sandbox, pretty: boolean): string {
       ? `blocked: ${b.title}${b.text ? `: ${b.text.replace(/\s+/g, ' ').slice(0, 600)}` : ''}${b.buttons?.length ? ` [buttons: ${b.buttons.join(' / ')}]` : ''}\n${b.advice ?? ''}`.trim()
       : `${u.state}${u.detail ? `: ${u.detail}` : ''}`;
   return `${head}\n${JSON.stringify(u, null, pretty ? 2 : undefined)}`;
+}
+
+/** The host guard's state for system_status. */
+function hostHealthLines(h: HostHealth | undefined): string[] {
+  if (!h) return ['Host guard: off'];
+  const gb = (b?: number) => (b === undefined ? '?' : `${(b / 2 ** 30).toFixed(0)} GB`);
+  return [
+    `Host guard (${h.level}): ${h.disks.map((d) => `${d.path} ${gb(d.freeBytes)} free${d.level !== 'ok' ? ` [${d.level}]` : ''}`).join(', ')}; sandbox drive ${h.sandboxRoot}${h.detail ? ` (${h.detail})` : ''}`,
+    ...(h.blocked ? [`New work waits: ${h.blocked}`] : []),
+    ...(h.lastCleanup ? [`Last clean-up ${h.lastCleanup.at}: ${h.lastCleanup.removed} item(s)${h.lastCleanup.freedBytes !== undefined ? `, ${gb(h.lastCleanup.freedBytes)}` : ''}`] : []),
+  ];
 }

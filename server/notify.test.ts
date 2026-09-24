@@ -109,6 +109,6 @@ test('notify: saved subscriptions without a newer kind start at its default', (t
   fs.writeFileSync(path.join(dir, 'push-subscriptions.json'), JSON.stringify([old]));
   const store = new Store(dir);
   const n = new Notifier(dir, store, new SessionManager({ limits: { maxSessions: 6 } } as Config, store));
-  assert.deepEqual(n.list('alice')[0].prefs, { ...old.prefs, unity: true });
+  assert.deepEqual(n.list('alice')[0].prefs, { ...old.prefs, unity: true, host: true });
   store.flush();
 });

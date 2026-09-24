@@ -466,12 +466,21 @@ export class SessionManager {
     return [...this.sessions.values()].filter((s) => s.info.kind !== 'orchestrator' && !s.info.machineId && s.live).length;
   }
 
-  /** Send, enforcing the concurrent-agent ceiling when this send would start a process. */
-  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[]): string {
+  /** The host guard's gate (server/hostHealth.ts): why a new agent process on this host must wait. */
+  startGate?: () => string | undefined;
+
+  /**
+   * Send, enforcing the concurrent-agent ceiling and the host guard when this send would start a process.
+   * `bypassGate`: the host guard's own messages (resume after recovery, checkpoint requests).
+   */
+  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean } = {}): string {
     const s = this.get(id);
-    if (!s.live && s.info.kind !== 'orchestrator' && !s.info.machineId && this.liveAgents() >= this.cfg.limits.maxSessions) {
+    const startsHere = !s.live && s.info.kind !== 'orchestrator' && !s.info.machineId;
+    if (startsHere && this.liveAgents() >= this.cfg.limits.maxSessions) {
       throw new Error(`already ${this.cfg.limits.maxSessions} agents running (limits.maxSessions); stop one first`);
     }
+    const gate = startsHere && !opts.bypassGate ? this.startGate?.() : undefined;
+    if (gate) throw new Error(`not started: ${gate}`);
     return s.send(text, from, undefined, images);
   }
 

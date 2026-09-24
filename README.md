@@ -126,6 +126,12 @@ settings agents may touch (`ownerName`, `voice.vocabulary`, `voice.ttsVoice`); e
 `config.json` is edited by hand. `republish_public` publishes this repo with a fresh history:
 [docs/republish.md](docs/republish.md).
 
+**Self-recovery.** A host guard watches free disk space, the sandbox Dev Drive and memory: it pauses new
+work and cleans known-safe junk when disk space runs low, and reattaches the Dev Drive by itself if
+Windows drops it (through SYSTEM helper tasks installed once with
+`scripts/install-privileged-helpers.ps1`), then restarts the editors and resumes the agents that were
+working there. See [docs/self-recovery.md](docs/self-recovery.md).
+
 The app must never run elevated: everything it starts inherits its token, and an elevated Unity
 editor stops at startup on a modal "running as administrator" dialog. An elevated server hands
 itself to the Limited task at startup, or (if it cannot) refuses to start editors and shows a

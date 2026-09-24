@@ -66,6 +66,8 @@ export interface Config {
    * sandboxRoot is a dynamically expanding Dev Drive VHDX stored on C:.
    */
   hostDiskPaths: string[];
+  /** The disk guard and the sandbox drive's self-recovery (server/hostHealth.ts, docs/self-recovery.md). */
+  hostGuard: HostGuardConfig;
   unity: {
     /** Editor path; `{version}` is replaced with the sandbox's ProjectSettings/ProjectVersion.txt. */
     editorPath: string;
@@ -81,6 +83,8 @@ export interface Config {
       /** How often to look at a running editor's windows. 0 turns it off. */
       runningPollSeconds: number;
     };
+    /** Stop an editor whose sandbox has had no agent activity for this long (and no agent mid-turn). 0: never. */
+    idleStopMinutes: number;
     /**
      * The MCP-for-Unity server every worker gets as "UnityMCP". Claude Code registers it per project
      * path, so a fresh worktree would otherwise have no Unity tools at all.
@@ -98,6 +102,8 @@ export interface Config {
     maxSandboxes: number;
     /** Provisioning refuses to leave less than this many GB free on the sandbox volume. */
     minFreeGB: number;
+    /** A Unity editor is started only with at least this much free RAM (each takes ~8-12 GB). 0: no check. */
+    minFreeRamGB: number;
   };
   models: string[];
   defaultModel: string;
@@ -169,14 +175,14 @@ export const VOICE_DEFAULTS: Omit<VoiceConfig, 'toolsDir'> = {
   ttsDevice: 'auto',
 };
 
-const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' | 'voice'> = {
+const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' | 'voice' | 'hostGuard'> = {
   port: 8790,
   trustProxy: true,
   host: '0.0.0.0',
   dataDir: './data',
   defaultBase: 'origin/develop',
   protectedPaths: [],
-  limits: { maxUnity: 3, maxSessions: 6, maxSandboxes: 4, minFreeGB: 100 },
+  limits: { maxUnity: 3, maxSessions: 6, maxSandboxes: 4, minFreeGB: 100, minFreeRamGB: 10 },
   librarySeedGB: 70,
   librarySeedCopy: 'robocopy',
   hostDiskPaths: [],
@@ -187,6 +193,55 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
 };
 
 const UNITY_WATCHDOG_DEFAULTS: Config['unity']['watchdog'] = { stallMinutes: 15, autoDismiss: true, startingPollSeconds: 10, runningPollSeconds: 60 };
+
+export interface CleanupPolicy {
+  /** Folder name patterns in the temp folder that are scratch, removed when older than tempOlderThanHours. */
+  tempPatterns: string[];
+  tempOlderThanHours: number;
+  /** Agent temp clones (fff-*, ffsb-*), removed when older than this and without uncommitted or unpushed work. 0: never. */
+  cloneOlderThanDays: number;
+  clonePatterns: string[];
+  /** Explicit rules: entries directly inside `path` older than `olderThanDays` go (e.g. old audit reports). */
+  ageRules: { path: string; olderThanDays: number }[];
+}
+
+export const DEFAULT_CLEANUP: CleanupPolicy = {
+  // Headless-browser profiles from screenshot scripts, and the fast suite's own scratch folders.
+  tempPatterns: ['edge-shot-*', 'edge-keys-*', 'ffsb-voice-*', 'ffsb-auth-*', 'ffsb-integ-*', 'ffsb-smoke-*', 'republish-??????', 'update-steps-??????', 'editor-log-??????', 'appcfg-??????', 'scenes-??????', 'pushed-??????'],
+  tempOlderThanHours: 1,
+  cloneOlderThanDays: 3,
+  clonePatterns: ['fff-*', 'ffsb-*'],
+  ageRules: [],
+};
+
+export interface HostGuardConfig {
+  /** How often the guard looks (seconds). 0 turns the whole guard off. */
+  pollSeconds: number;
+  /** Below this much free space on any watched volume: notify, and refuse new editors and agent processes. */
+  warnFreeGB: number;
+  /** Below this: also ask busy agents to checkpoint and end their turn, stop idle editors, and clean up. */
+  criticalFreeGB: number;
+  /** A level clears only this far above its threshold, so it does not flap. */
+  hysteresisGB: number;
+  /** The sandbox drive is reattached only with at least this much free on the volumes that hold it. */
+  remountMinFreeGB: number;
+  /** The Dev Drive's VHDX file, for growth checks and compaction (empty: no Dev Drive). */
+  devDriveVhdx: string;
+  /** Compact the VHDX at idle when it holds at least this much more than the volume inside uses. 0: never. */
+  compactWhenReclaimGB: number;
+  cleanup: CleanupPolicy;
+}
+
+const HOST_GUARD_DEFAULTS: HostGuardConfig = {
+  pollSeconds: 30,
+  warnFreeGB: 80,
+  criticalFreeGB: 40,
+  hysteresisGB: 10,
+  remountMinFreeGB: 30,
+  devDriveVhdx: '',
+  compactWhenReclaimGB: 0,
+  cleanup: DEFAULT_CLEANUP,
+};
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 
@@ -207,7 +262,8 @@ export function loadConfig(): Config {
     limits: { ...DEFAULTS.limits, ...raw.limits },
     orchestrator: { ...DEFAULTS.orchestrator, ...raw.orchestrator },
     worker: { ...DEFAULTS.worker, ...raw.worker },
-    unity: { extraArgs: [], ...raw.unity, watchdog: { ...UNITY_WATCHDOG_DEFAULTS, ...raw.unity?.watchdog } },
+    unity: { extraArgs: [], idleStopMinutes: 120, ...raw.unity, watchdog: { ...UNITY_WATCHDOG_DEFAULTS, ...raw.unity?.watchdog } },
+    hostGuard: { ...HOST_GUARD_DEFAULTS, ...raw.hostGuard, cleanup: { ...DEFAULT_CLEANUP, ...raw.hostGuard?.cleanup } },
     voice: { ...VOICE_DEFAULTS, toolsDir: '', ...raw.voice },
   };
   for (const key of ['sandboxRoot', 'repo', 'unity'] as const) {

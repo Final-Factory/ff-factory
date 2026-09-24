@@ -36,7 +36,10 @@ test('loadConfig: defaults fill what the file leaves out, nested objects merge',
   withConfig(t, { ...minimal(dir), dataDir: path.join(dir, 'data'), limits: { maxUnity: 1 }, unity: { editorPath: 'x', watchdog: { stallMinutes: 5 } }, voice: { model: 'small.en' } });
   const cfg = loadConfig();
   assert.equal(cfg.port, 8790);
-  assert.deepEqual(cfg.limits, { maxUnity: 1, maxSessions: 6, maxSandboxes: 4, minFreeGB: 100 });
+  assert.deepEqual(cfg.limits, { maxUnity: 1, maxSessions: 6, maxSandboxes: 4, minFreeGB: 100, minFreeRamGB: 10 });
+  assert.equal(cfg.unity.idleStopMinutes, 120);
+  assert.equal(cfg.hostGuard.warnFreeGB, 80);
+  assert.ok(cfg.hostGuard.cleanup.tempPatterns.includes('edge-shot-*'));
   assert.equal(cfg.unity.watchdog.stallMinutes, 5);
   assert.equal(cfg.unity.watchdog.autoDismiss, true);
   assert.deepEqual(cfg.unity.extraArgs, []);

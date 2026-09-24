@@ -101,6 +101,8 @@ interface ActiveRun {
  */
 export class StandingAgents {
   private readonly cfg: Config;
+  /** The host guard's gate (server/hostHealth.ts): while set, runs on this host wait. */
+  hostGate?: () => string | undefined;
   private readonly store: Store;
   private readonly sessions: SessionPort;
   private readonly deps: StandingDeps;
@@ -372,7 +374,7 @@ export class StandingAgents {
       liveAgents: m ? this.deps.machines!.liveCount(m.id) : this.sessions.liveAgents(),
       maxAgents: m ? m.maxSessions : this.cfg.limits.maxSessions,
       deadline: new Date(p.deadline),
-      unavailable: a.machineId && !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : undefined,
+      unavailable: a.machineId && !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : a.machineId ? undefined : this.hostGate?.(),
     });
     if (verdict.action === 'wait') {
       a.state = 'waiting';

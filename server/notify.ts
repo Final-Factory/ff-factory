@@ -17,7 +17,7 @@ export interface PushSub {
   device: string;
 }
 
-export const DEFAULT_PREFS: NotifyPrefs = { permission: true, turnEnd: true, error: true, standing: true, delegation: true, unity: true };
+export const DEFAULT_PREFS: NotifyPrefs = { permission: true, turnEnd: true, error: true, standing: true, delegation: true, unity: true, host: true };
 
 export interface Notice {
   kind: NotifyKind;
@@ -102,6 +102,11 @@ export class Notifier {
   unityBlocked(sb: Sandbox, b: UnityBlocked) {
     const what = b.reason === 'dialog' ? `"${b.title}"${b.text ? `: ${b.text.replace(/\s+/g, ' ')}` : ''}` : b.title ?? 'stuck';
     this.fire({ kind: 'unity', title: `Unity in ${nameWithSlot(sb)} is stuck`, body: clip(what, 180), url: `#/sandbox/${encodeURIComponent(sb.id)}`, tag: `unity-${sb.id}` });
+  }
+
+  /** A host-health step (disk guard, sandbox drive recovery): server/hostHealth.ts. */
+  host(title: string, body: string) {
+    this.fire({ kind: 'host', title, body: clip(body, 240), url: '#/', tag: `host-${title.slice(0, 40)}` });
   }
 
   delegation(d: DelegationRequest) {

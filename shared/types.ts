@@ -337,6 +337,26 @@ export interface HostStatus {
   elevatedWhy?: string;
   /** A restart is waiting for busy agents to finish (scripts/restart.ps1 or request_app_update). */
   drain?: DrainStatus;
+  /** Disks, the sandbox drive, memory, and what the guard is doing about them (server/hostHealth.ts). */
+  health?: HostHealth;
+}
+
+export type DiskLevel = 'ok' | 'warn' | 'critical';
+
+export interface HostHealth {
+  checkedAt: string;
+  /** Each watched volume (the sandbox root's and config hostDiskPaths'), with its guard level. */
+  disks: { path: string; freeBytes?: number; totalBytes?: number; level: DiskLevel }[];
+  /** The worst disk level. */
+  level: DiskLevel;
+  /** The sandbox drive: there, gone, being reattached, or given up on (see detail). */
+  sandboxRoot: 'ok' | 'missing' | 'remounting' | 'failed';
+  detail?: string;
+  memFreeBytes: number;
+  memTotalBytes: number;
+  /** Why new editors and new agent processes are refused right now, if they are. */
+  blocked?: string;
+  lastCleanup?: { at: string; removed: number; freedBytes?: number };
 }
 
 export interface DrainStatus {
@@ -350,7 +370,7 @@ export interface DrainStatus {
 
 // ---- notifications ----
 
-export type NotifyKind = 'permission' | 'turnEnd' | 'error' | 'standing' | 'delegation' | 'unity';
+export type NotifyKind = 'permission' | 'turnEnd' | 'error' | 'standing' | 'delegation' | 'unity' | 'host';
 export type NotifyPrefs = Record<NotifyKind, boolean>;
 
 export const NOTIFY_KINDS: { value: NotifyKind; label: string; hint: string }[] = [
@@ -360,6 +380,7 @@ export const NOTIFY_KINDS: { value: NotifyKind; label: string; hint: string }[] 
   { value: 'standing', label: 'Standing agent problems', hint: 'a run failed, hit its budget or ran out of time' },
   { value: 'delegation', label: 'Delegation requests', hint: 'a standing agent asks for a worker' },
   { value: 'unity', label: 'Unity editor stuck', hint: 'an editor is blocked on a dialog or has gone silent while starting' },
+  { value: 'host', label: 'Host health', hint: 'disk space low, the sandbox drive gone or back, automatic recovery steps' },
 ];
 
 /** One plan usage meter (server/usage.ts). */
