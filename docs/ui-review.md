@@ -164,3 +164,51 @@ Plan: names everywhere; ids in the details sheet and tooltips.
 Voice mode (one big word, the orb, tap anywhere to end) suits the car. Permission cards are clear
 and their buttons are thumb-sized on phones. Details live in a sheet, labels are names, drafts are
 kept per chat, Enter and Shift+Enter behave as expected, and the lightbox pages through images.
+
+## What changed
+
+All twelve findings were acted on; see the commits from "Harness notices, parsed for the page" to
+"E2E: new visual baselines". The after screenshots are in `…\Logs\ui-review\after\` with the same
+names as the before ones, and `…\Logs\ui-review\interact\` has the states a click leads to (the ⋯
+menu, an opened tool line and notice, a reply streaming, "New messages", a live permission request,
+the phone's bell opening the drawer, "Unity is stuck" opening the details, voice mode).
+
+| | Before | After |
+|---|---|---|
+| Orchestrator, desktop | `before\d1440\orch.png`, `orch-history.png` | `after\d1440\orch.png`, `orch-history.png` |
+| Orchestrator, phone | `before\p390\orch.png`, `land\orch.png` | `after\p390\orch.png`, `land\orch.png` |
+| Sidebar | `before\d1440\orch.png` (left), `p390\drawer.png` | `after\d1440\orch.png` (left), `p390\drawer.png` |
+| Sandbox page, desktop | `before\d1440\sandbox-working.png` | `after\d1440\sandbox-working.png` |
+| Sandbox page, phone | `before\p390\sandbox-working.png`, `sandbox-details.png` | `after\p390\sandbox-working.png`, `sandbox-details.png` |
+
+Not redesigned: the standing agent's page (only its facts line and names changed).
+
+`web/mock/server.ts` also serves the new build for these screenshots; the E2E suite
+(`npm run test:e2e`) follows the new layout, and its Linux baselines were re-rendered by CI.
+
+## iPad with a hardware keyboard (added during the work)
+
+Ben's report: focusing a composer in Safari on an iPad with a hardware keyboard floats the AutoFill
+bar (passwords, cards, contacts) at the bottom and shifts the whole page up, header off screen.
+
+- The message boxes now tell Safari and password managers they are free text: `autocomplete="off"`,
+  `autocorrect="on"`, `autocapitalize="sentences"`, no `name` or `id`, not inside a `<form>`, and
+  the 1Password, LastPass and Bitwarden ignore hints. Once signed in, the page has no password or
+  username field at all.
+- `web/src/viewport.ts` keeps the page fixed to the visual viewport, so a bar or keyboard only
+  lifts the composer. After every focus change or viewport event it now follows the viewport frame
+  by frame for a second, because Safari does not always fire an event for the last step of its pan;
+  and it no longer scrolls the document back with `window.scrollTo`, which fought Safari's scroll
+  into view.
+- `e2e/ipad.spec.ts` runs on WebKit as an iPad Pro 11 with a stand-in `visualViewport` that moves
+  the way Safari's does. Its case "a viewport change that comes without an event" fails on the old
+  `viewport.ts` with the header 60 px above the screen, which matches the report, and passes now.
+
+What only a real iPad can show: whether Safari still draws the AutoFill bar for a `<textarea>` with
+these attributes, and whether its pan comes as the stand-in assumes. If the bar still appears, the
+next step is a `contenteditable` composer (which Safari does not offer AutoFill for, as ChatGPT and
+Claude on the web use), keeping paste, Enter and Shift+Enter, voice and drafts.
+
+Also noticed: on an iPad with a hardware keyboard, Enter makes a new line, because the page treats
+any touch screen as having an on-screen keyboard. Detecting a hardware keyboard from the viewport
+would misfire on Android (whose keyboard resizes the layout itself), so this was left as it is.

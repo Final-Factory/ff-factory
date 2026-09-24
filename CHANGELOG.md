@@ -10,6 +10,35 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **The chat.** Tool calls and thinking between two messages fold into one line ("Used 3 tools:
+  …") that opens to the calls; harness notices ([worker update], [heartbeat], [unity blocked], …)
+  are one line each, with names instead of ids and amber when they need you. Replies show their
+  time, duration and cost on hover instead of a rule after every turn; a divider marks a gap of more
+  than 15 minutes; code blocks have Copy. "Jump to latest" shows whenever you are a screen from the
+  bottom, each chat keeps its scroll position, and while a turn runs the primary button is Stop.
+- **At a glance.** The sidebar starts with what needs you (permission requests, Unity stuck on a
+  dialog, delegation requests) and shows every sandbox, Mac and standing agent as a two-line row with
+  its state in words and colour; the host and plan meters fold into two lines. An idle agent is grey:
+  colour means something is happening or wrong.
+- **Pages.** One header row everywhere, phones included, with the state under the name and, on a
+  phone, the agent picker in that line; a strip under it says what waits. The orchestrator's
+  heartbeat, permission mode and new conversation are in its ⋯ menu. Names instead of slot ids.
+- **Styles.** One type scale and spacing grid; dim text passes WCAG AA; fewer borders. A phone on its
+  side gets a one-row composer.
+
+### Fixed
+
+- iPad with a hardware keyboard: focusing a composer no longer shifts the page up, and message
+  boxes no longer look like fields for AutoFill.
+- The details sheet and the settings dialog no longer scroll sideways on phones.
+
+### Added
+
+- `web/mock`: a mock backend with a busy day in every state, for working on the UI.
+- `docs/ui-review.md`: the review, and what changed.
+
 ## [0.1.0] - 2026-09-24
 
 The first versioned release. It records what FF Factory already does, plus the engineering setup
