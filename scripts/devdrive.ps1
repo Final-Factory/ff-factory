@@ -13,7 +13,18 @@ $ErrorActionPreference = 'Stop'
 
 function Attach {
   $img = Get-DiskImage -ImagePath $Path
-  if (-not $img.Attached) { Mount-DiskImage -ImagePath $Path | Out-Null; Start-Sleep 2 }
+  if (-not $img.Attached) {
+    try { Mount-DiskImage -ImagePath $Path -ErrorAction Stop | Out-Null }
+    catch {
+      # The storage CIM provider can refuse early in boot ("Access denied"); diskpart does not use it.
+      $dp = Join-Path $env:TEMP 'ffsb-devdrive-attach.txt'
+      @("select vdisk file=`"$Path`"", 'attach vdisk') | Set-Content -Encoding ascii $dp
+      $out = diskpart /s $dp 2>&1 | Out-String
+      Remove-Item $dp -ErrorAction SilentlyContinue
+      if ($out -notmatch 'successfully attached|already attached') { throw "Mount-DiskImage: $($_.Exception.Message); diskpart: $($out -replace '\s+', ' ')" }
+    }
+    Start-Sleep 2
+  }
   $part = Get-DiskImage -ImagePath $Path | Get-Disk | Get-Partition | Where-Object Type -ne 'Reserved' | Select-Object -First 1
   if ($part.DriveLetter -ne $Letter) { $part | Set-Partition -NewDriveLetter $Letter }
   "attached $Path as ${Letter}:"

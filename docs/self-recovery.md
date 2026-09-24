@@ -19,7 +19,7 @@ arguments. There is no arbitrary command path.
 
 | Task | Does |
 |---|---|
-| `ffsb-helper-mount` | attach the VHDX if it is not attached, bring its disk online, give its data partition the drive letter, wait for it |
+| `ffsb-helper-mount` | attach the VHDX if it is not attached, bring its disk online, give its data partition the drive letter, wait for it. Also runs **at every boot** (30 s after startup). Each step is retried three times; when the storage cmdlets are refused ("Access denied" from the storage CIM provider, seen at boot on 2026-09-24), it falls back to `diskpart` to attach the VHDX and assign the letter. Every attempt goes to `results\mount.log` |
 | `ffsb-helper-trim` | `Optimize-Volume -ReTrim` on the Dev Drive: free space inside the volume is handed back to the VHDX |
 | `ffsb-helper-compact` | refuses while any `Unity.exe` has a project on the drive; retrim, detach, `Optimize-VHD` (Full with the disk attached read-only, else Pretrimmed), reattach; reports ok only if it reclaimed at least 1 GB. Without the Hyper-V module and with a ReFS volume it refuses up front, without detaching (see the VHDX policy) |
 | `ffsb-helper-detach` | detach the VHDX, for the recovery self-test; refuses while any `Unity.exe` uses the drive |
@@ -41,6 +41,8 @@ version: it copies the current helper script and registers new actions (it is id
 .\scripts\install-privileged-helpers.ps1 -PagefileGB 48      # also offer a fixed pagefile
 .\scripts\install-privileged-helpers.ps1 -Uninstall
 ```
+
+**After a reboot or a power cut.** A VHDX attachment does not survive either. `ffsb-helper-mount` attaches it at boot; the supervisor (`scripts/supervise.ps1`) also starts that task when the drive is missing, and waits up to 5 minutes for it before starting the server; the server's host guard retries after that. The boot trigger is registered by `install-privileged-helpers.ps1`, so re-run it once (as administrator) after updating to get it.
 
 **Reboot and automatic logon.** Unity editors need the interactive desktop (GPU), and the app
 starts at logon (the `ffsb-server` task). After a reboot without automatic logon nothing comes back

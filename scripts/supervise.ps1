@@ -22,6 +22,12 @@ $PID | Out-File (Join-Path $DataDir 'supervisor.pid') -Encoding ascii
 try {
   $sbRoot = (Get-Content (Join-Path $AppRoot 'config.json') -Raw | ConvertFrom-Json).sandboxRoot
   $drive = Split-Path -Qualifier $sbRoot
+  if (!(Test-Path "$drive\")) {
+    # After a reboot or a power cut nothing may have attached it yet: ask the privileged mount helper
+    # (docs/self-recovery.md) rather than only waiting. It also runs at boot by itself.
+    schtasks.exe /run /tn ffsb-helper-mount 2>&1 | Out-Null
+    "$(Get-Date -Format s) $drive missing at start; started ffsb-helper-mount (exit $LASTEXITCODE)" | Out-File $log -Append
+  }
   for ($i = 0; $i -lt 150 -and !(Test-Path "$drive\"); $i++) { Start-Sleep 2 }
   if (!(Test-Path "$drive\")) { "$(Get-Date -Format s) WARNING: $drive not available after 5 min; starting anyway" | Out-File $log -Append }
 } catch { }

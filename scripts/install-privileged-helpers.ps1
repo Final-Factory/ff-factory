@@ -6,8 +6,8 @@
 #   .\install-privileged-helpers.ps1 -Uninstall
 #
 # What it does: copies scripts\privileged\ffsb-helper.ps1 to %ProgramData%\ffsb-helpers (writable only by
-# SYSTEM and Administrators), and registers one on-demand SYSTEM task per action (ffsb-helper-mount, -trim,
-# -compact, -reboot, and -pagefile with -PagefileGB) whose arguments are fixed here. The app's user gets
+# SYSTEM and Administrators), and registers one SYSTEM task per action (ffsb-helper-mount, which also runs
+# at every boot, -trim, -compact, -reboot, and -pagefile with -PagefileGB) whose arguments are fixed here. The app's user gets
 # read + run rights on those tasks only: it can start an action, not change what it runs.
 param(
   [string]$Vhdx = 'C:\ffsb-devdrive.vhdx',
@@ -55,7 +55,9 @@ Copy-Item -Force (Join-Path $PSScriptRoot 'privileged\ffsb-helper.ps1') (Join-Pa
 icacls $dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "icacls $dir failed" }
 
-# 2. One SYSTEM task per action, on demand only, arguments fixed.
+# 2. One SYSTEM task per action, arguments fixed. On demand, except mount, which also runs at every boot: a
+#    VHDX attachment does not survive a reboot (or a power cut), and nothing else attaches the drive before
+#    the app needs it.
 $sid = $who.sid
 $svc = New-Object -ComObject Schedule.Service
 $svc.Connect()
@@ -63,7 +65,9 @@ foreach ($a in $actions) {
   $name = "ffsb-helper-$a"
   $taskArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$dir\ffsb-helper.ps1`" -Action $a -Vhdx `"$Vhdx`" -Letter $Letter -ResultDir `"$results`""
   if ($a -eq 'pagefile') { $taskArgs += " -PagefileGB $PagefileGB" }
-  $task = New-ScheduledTask `
+  $extra = @{}
+  if ($a -eq 'mount') { $boot = New-ScheduledTaskTrigger -AtStartup; $boot.Delay = 'PT30S'; $extra.Trigger = $boot }
+  $task = New-ScheduledTask @extra `
     -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs) `
     -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest) `
     -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew)

@@ -18,18 +18,65 @@ function Done([bool]$ok, [string]$detail) {
 }
 function Drive { Test-Path "$($Letter):\" }
 
-# Attach the VHDX if it is not, bring its disk online and give its data partition the drive letter.
+# Every mount attempt, for post-mortems (the boot mount on 2026-09-24 failed with "Access denied" from the
+# storage CIM provider and left no trace).
+function Log([string]$m) {
+  try { "$(Get-Date -Format s) [$Action] $m" | Out-File -Append -Encoding utf8 (Join-Path $ResultDir 'mount.log') } catch { }
+}
+
+function Run-Diskpart([string[]]$lines) {
+  $dp = Join-Path $env:TEMP "ffsb-diskpart-$PID.txt"
+  $lines | Set-Content -Encoding ascii $dp
+  try { return (diskpart /s $dp 2>&1 | Out-String) -replace '\s+', ' ' } finally { Remove-Item $dp -ErrorAction SilentlyContinue }
+}
+
+# Attach the VHDX if it is not, bring its disk online and give its data partition the drive letter. The
+# storage cmdlets (a CIM provider) can refuse early in boot, so each step is retried, and diskpart, which does
+# not go through that provider, is the fallback for attaching and for the letter.
 function Mount-DevDrive {
-  $img = Get-DiskImage -ImagePath $Vhdx
-  if (-not $img.Attached) { Mount-DiskImage -ImagePath $Vhdx | Out-Null; Start-Sleep 2; $img = Get-DiskImage -ImagePath $Vhdx }
-  $disk = $img | Get-Disk
-  if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }
-  if ($disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false }
-  $part = Get-Partition -DiskNumber $disk.Number | Where-Object { $_.Type -ne 'Reserved' -and $_.Size -gt 1GB } | Sort-Object Size -Descending | Select-Object -First 1
-  if (-not $part) { throw "no data partition on disk $($disk.Number)" }
-  if ("$($part.DriveLetter)" -ne $Letter.ToUpper()) { $part | Set-Partition -NewDriveLetter $Letter }
+  $attached = $false
+  for ($i = 1; $i -le 3 -and -not $attached; $i++) {
+    try {
+      $img = Get-DiskImage -ImagePath $Vhdx -ErrorAction Stop
+      if (-not $img.Attached) { Mount-DiskImage -ImagePath $Vhdx -ErrorAction Stop | Out-Null; Start-Sleep 2; Log "attached with Mount-DiskImage (try $i)" }
+      $attached = $true
+    } catch {
+      Log "Mount-DiskImage try $i failed: $($_.Exception.Message)"
+      Start-Sleep -Seconds (5 * $i)
+    }
+  }
+  if (-not $attached) {
+    $out = Run-Diskpart @("select vdisk file=`"$Vhdx`"", 'attach vdisk')
+    Log "diskpart attach vdisk: $out"
+    if ($out -notmatch 'successfully attached|already attached|is already') { throw "could not attach $Vhdx (Mount-DiskImage failed 3 times; diskpart: $out)" }
+  }
+  $lettered = $false
+  for ($i = 1; $i -le 3 -and -not $lettered; $i++) {
+    try {
+      $disk = Get-DiskImage -ImagePath $Vhdx -ErrorAction Stop | Get-Disk -ErrorAction Stop
+      if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }
+      if ($disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false }
+      $part = Get-Partition -DiskNumber $disk.Number -ErrorAction Stop | Where-Object { $_.Type -ne 'Reserved' -and $_.Size -gt 1GB } | Sort-Object Size -Descending | Select-Object -First 1
+      if (-not $part) { throw "no data partition on disk $($disk.Number)" }
+      if ("$($part.DriveLetter)" -ne $Letter.ToUpper()) { $part | Set-Partition -NewDriveLetter $Letter -ErrorAction Stop; Log "gave disk $($disk.Number) partition $($part.PartitionNumber) the letter $($Letter):" }
+      $lettered = $true
+    } catch {
+      Log "partition/letter try $i failed: $($_.Exception.Message)"
+      Start-Sleep -Seconds (5 * $i)
+    }
+  }
+  if (-not $lettered -and -not (Drive)) {
+    # GPT disks made by devdrive.ps1: partition 1 is the reserved one, 2 the data (ReFS) one.
+    foreach ($n in 2, 1) {
+      $out = Run-Diskpart @("select vdisk file=`"$Vhdx`"", 'online disk noerr', 'attributes disk clear readonly noerr', "select partition $n", "assign letter=$Letter noerr")
+      Log "diskpart assign letter (partition $n): $out"
+      Start-Sleep 2
+      if (Drive) { break }
+    }
+  }
   for ($i = 0; $i -lt 15 -and -not (Drive); $i++) { Start-Sleep 2 }
-  if (-not (Drive)) { throw "the VHDX is attached but $($Letter): did not appear" }
+  if (-not (Drive)) { throw "the VHDX is attached but $($Letter): did not appear (see $(Join-Path $ResultDir 'mount.log'))" }
+  Log "$($Letter): is there"
 }
 
 try {
