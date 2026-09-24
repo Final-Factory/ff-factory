@@ -54,6 +54,31 @@ const sandboxes = new SandboxManager(cfg, store);
 const sessions = new SessionManager(cfg, store);
 const machines = new MachineManager(cfg, store, sessions);
 // A daemon that has not come back 2 minutes after a restart (or a drop) while ssh reaches its Mac is redeployed.
+// The machines' own Unity watch: tell the orchestrator and the user, and the machine's agents after a restart.
+machines.unityEvent = (machineId, text, restarted) => {
+  const line = `[unity] machine ${machineId}: ${text}`;
+  console.log(line);
+  notifier.host(`Unity on ${machineId}${restarted ? ' restarted' : ''}`, text);
+  const orch = store.orchestratorId;
+  if (orch) {
+    try {
+      sessions.send(orch, line, 'system');
+    } catch {
+      // no orchestrator right now
+    }
+  }
+  if (!restarted) return;
+  const recent = Date.now() - 30 * 60_000;
+  for (const s of store.sessions.values()) {
+    if (s.machineId !== machineId || s.kind === 'standing') continue;
+    if (!['running', 'starting', 'waiting_permission'].includes(s.status) && Date.parse(s.lastActivityAt) < recent) continue;
+    try {
+      sessions.send(s.id, `Unity on this machine was restarted automatically at ${new Date().toLocaleTimeString()} (${text.split(';')[0]}). Re-pin it (mcpforunity://instances, then set_active_instance) once its bridge is up, and continue where you left off.`, 'system');
+    } catch {
+      // offline or at its limit: it sees the editor state on its next Unity call
+    }
+  }
+};
 machines.report = (text) => {
   console.log(text);
   const orch = store.orchestratorId;
@@ -75,6 +100,44 @@ agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));
 agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
 sandboxes.events.on('blocked', (sb, b) => notifier.unityBlocked(sb, b));
+
+// Automatic editor restarts (docs/unity-lifecycle.md): a [unity] notice, and once the editor is back up, a
+// message to the sandbox's agents to re-pin and carry on.
+sandboxes.events.on('unityRestart', (sb, r) => {
+  const at = new Date().toLocaleTimeString();
+  const text = r.gaveUp
+    ? `automatic restart ${r.error ? `failed (${r.error})` : `stopped: ${cfg.unity.autoRestart.max} in ${cfg.unity.autoRestart.windowMinutes} min already`}; ${r.why}. Look at it, then restart it with the unity tool.`
+    : `restarted at ${at} after ${r.why}`;
+  const line = `[unity] ${sb.name} (${sb.id}): ${text}`;
+  console.log(line);
+  if (!r.gaveUp || r.error) notifier.host(`Unity in ${sb.name} ${r.gaveUp ? 'needs a person' : 'restarted'}`, text); // a give-up is also a 'blocked' notice
+  const orch = store.orchestratorId;
+  if (orch) {
+    try {
+      sessions.send(orch, line, 'system');
+    } catch {
+      // no orchestrator right now
+    }
+  }
+  if (r.gaveUp) return;
+  const deadline = Date.now() + 30 * 60_000;
+  const tell = () => {
+    const cur = store.sandboxes.get(sb.id);
+    if (!cur || cur.unity.state === 'stopped' || cur.unity.state === 'crashed' || Date.now() > deadline) return;
+    if (cur.unity.state !== 'running') return void setTimeout(tell, 15_000);
+    const recent = Date.now() - 30 * 60_000;
+    for (const s of store.sessions.values()) {
+      if (s.sandboxId !== sb.id || s.kind === 'standing') continue;
+      if (!['running', 'starting', 'waiting_permission'].includes(s.status) && Date.parse(s.lastActivityAt) < recent) continue;
+      try {
+        sessions.send(s.id, `Unity was restarted after a hang/crash at ${at} (${r.why}). It is up again: re-pin (mcpforunity://instances, then set_active_instance) and continue.`, 'system');
+      } catch {
+        // offline or at its limit: it sees the editor state on its next Unity call
+      }
+    }
+  };
+  setTimeout(tell, 15_000);
+});
 
 // The host guard: disk space, the sandbox drive's self-recovery, RAM and idle editors (docs/self-recovery.md).
 const hostHealth = new HostHealthMonitor({

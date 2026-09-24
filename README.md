@@ -136,7 +136,7 @@ The app must never run elevated: everything it starts inherits its token, and an
 editor stops at startup on a modal "running as administrator" dialog. An elevated server hands
 itself to the Limited task at startup, or (if it cannot) refuses to start editors and shows a
 banner. The Unity watchdog reports editors stuck on dialogs and dismisses the known harmless ones:
-[docs/unity-dialogs.md](docs/unity-dialogs.md). Logs: `data/server.{out,err}.log` (previous run:
+[docs/unity-dialogs.md](docs/unity-dialogs.md) (hangs, crashes and automatic restarts: [docs/unity-lifecycle.md](docs/unity-lifecycle.md)). Logs: `data/server.{out,err}.log` (previous run:
 `*.prev`) and `data/supervisor.log`.
 
 The sidebar's "Claude plan" meters (weekly, 5-hour session, per-model weekly) come from the same

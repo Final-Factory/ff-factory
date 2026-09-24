@@ -14,6 +14,7 @@ import { AgentSession, type OptionsFactory, type SessionHandle, type SessionSink
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
+import { MacUnity, MacUnityWatch } from './unity.ts';
 import { run } from '../server/proc.ts';
 import { listImages, readImage } from '../server/images.ts';
 import { readGitStatus } from '../server/gitStatus.ts';
@@ -45,6 +46,10 @@ const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
 
 export class Daemon {
   private readonly cfg: DaemonConfig;
+  /** The Unity editor of this machine's clone (machine/unity.ts). */
+  unity: MacUnity;
+  /** Its hang and crash watch (auto-restart), started with the daemon. */
+  unityWatch?: MacUnityWatch;
   private ws?: WebSocket;
   private readonly entries = new Map<string, Entry>();
   private readonly events = new EventEmitter();
@@ -60,6 +65,7 @@ export class Daemon {
 
   constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events)) {
     this.cfg = cfg;
+    this.unity = new MacUnity(cfg.repoPath);
     this.makeSession = makeSession;
     this.maxSessions = cfg.maxSessions ?? 3;
     for (const name of ['turnEnd', 'permission', 'result', 'ended'] as SignalName[]) {
@@ -79,6 +85,12 @@ export class Daemon {
 
   start() {
     this.connect();
+    // The editor of this clone: a hung or crashed one is restarted automatically (machine/unity.ts).
+    this.unityWatch = new MacUnityWatch(this.unity, (text, restarted) => {
+      log(`unity: ${text}`);
+      this.send({ type: 'unity_event', text, restarted });
+    });
+    this.timers.push(setInterval(() => void this.unityWatch?.tick(), 30_000));
     this.timers.push(setInterval(() => this.heartbeat(), 20_000));
     this.timers.push(setInterval(() => void this.reportStatus(), 60_000));
   }
@@ -323,6 +335,16 @@ export class Daemon {
       case 'status_now':
         void this.reportStatus();
         return;
+      case 'unity': {
+        const u = this.unity;
+        const act = msg.action === 'start' ? u.start() : msg.action === 'stop' ? u.stop({ force: msg.force }) : msg.action === 'restart' ? u.restart({ force: msg.force }) : u.status();
+        if (msg.action === 'stop' || msg.action === 'restart') this.unityWatch?.expectExit();
+        void act.then(
+          (text) => this.send({ type: 'unity_result', id: msg.id, ok: true, text }),
+          (err) => this.send({ type: 'unity_result', id: msg.id, ok: false, text: (err as Error).message }),
+        );
+        return;
+      }
       case 'interrupt':
         void this.entries.get(msg.sessionId)?.s.interrupt();
         return;

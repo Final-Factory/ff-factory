@@ -26,6 +26,8 @@ public static class FfsbWin {
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
+  // Windows' own "not responding": the window has not pumped messages for about 5 s.
+  [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
@@ -93,6 +95,7 @@ function Describe([IntPtr]$h) {
     class   = [FfsbWin]::ClassOf($h)
     title   = [FfsbWin]::TitleOf($h)
     enabled = [FfsbWin]::IsWindowEnabled($h)
+    hung    = [FfsbWin]::IsHungAppWindow($h)
     owned   = [FfsbWin]::GetWindow($h, 4) -ne [IntPtr]::Zero   # GW_OWNER
     text    = @($texts)
     buttons = @($buttons)

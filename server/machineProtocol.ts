@@ -23,7 +23,9 @@ export type ToDaemon =
   | { type: 'status_now' }
   | { type: 'mode'; sessionId: string; mode: PermissionMode }
   | { type: 'decide'; sessionId: string; requestId: string; allow: boolean; message?: string }
-  | { type: 'rpc_result'; id: string; ok: boolean; text: string };
+  | { type: 'rpc_result'; id: string; ok: boolean; text: string }
+  /** The Unity editor of the machine's clone (machine/unity.ts); answered by unity_result. */
+  | { type: 'unity'; id: string; action: 'status' | 'start' | 'stop' | 'restart'; force?: boolean };
 
 export type FromDaemon =
   | { type: 'hello'; protocol: number; info: NonNullable<Machine['info']>; home: string; live: string[] }
@@ -41,4 +43,7 @@ export type FromDaemon =
   /** An image a session produced (a tool result), stored by the portal under this id before the event naming it. */
   | { type: 'image'; sessionId: string; id: string; mediaType: string; data: string }
   | { type: 'switch_result'; id: string; ok: boolean; error?: string; from?: string; to?: string; notes?: string[] }
-  | { type: 'fs_result'; id: string; ok: boolean; error?: string; mediaType?: string; data?: string; files?: ImageFile[] };
+  | { type: 'fs_result'; id: string; ok: boolean; error?: string; mediaType?: string; data?: string; files?: ImageFile[] }
+  | { type: 'unity_result'; id: string; ok: boolean; text: string }
+  /** The daemon's own Unity watch: a hang or crash noticed, an automatic restart, the budget spent. */
+  | { type: 'unity_event'; text: string; restarted: boolean };

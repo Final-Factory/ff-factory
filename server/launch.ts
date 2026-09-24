@@ -54,6 +54,10 @@ export const CATALOG = {
     minutes: z.number().int().min(1).max(1440).describe('How long until you are messaged again.'),
     note: z.string().describe('What to check or do when you wake: this comes back to you word for word.'),
   },
+  unity: {
+    action: z.enum(['status', 'start', 'stop', 'restart']),
+    force: z.boolean().optional().describe('stop/restart: kill the editor at once instead of asking it to quit first (a frozen editor ignores that).'),
+  },
 } satisfies Record<string, z.ZodRawShape>;
 
 export type CatalogTool = keyof typeof CATALOG;

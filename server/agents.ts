@@ -107,6 +107,7 @@ export class Agents {
             return `Machine ${x.id} is now labelled "${x.purpose}".`;
           },
           wake_me: async (a) => this.waker.schedule(info.id, Number(a.minutes), String(a.note ?? '')),
+          unity: async (a) => machines.unity(m.id, a.action as 'status' | 'start' | 'stop' | 'restart', a.force === true),
         };
       },
     };
@@ -337,7 +338,7 @@ ${ownerLine(this.cfg)}
 - Protected paths on this machine: ${prot}. That is the live multiplayer game other agents are playing. Never read-modify-write it, never touch its Unity editor or its processes; the harness blocks writes and shell commands that mention it.
 
 ## Unity
-Your sandbox has its own Unity editor, managed by the dashboard. Use the \`mcp__sandbox__unity\` tool to check its state, start it, stop it or restart it, and to read its log. Unity crashes and freezes often: restart your editor whenever it is hung, crashed or misbehaving, without asking (action "restart", with force: true when it is frozen). Use the tool, never taskkill: other sandboxes' editors and the live game share this machine, so the harness refuses killing Unity by hand. The first boot of a fresh sandbox can take many minutes (asset import); poll the status every minute or so rather than giving up. Wait in the foreground with a single Bash call that loops on the real condition, for example \`for i in $(seq 1 30); do grep -q "StdioBridgeHost started" "$(ls -t Logs/sandbox-editor*.log | head -1)" && break; sleep 20; done\` (the log is Logs/sandbox-editor.log, or a sandbox-editor-<time>.log when the old one was locked: \`unity status\` shows its logPath) (up to 10 minutes per call), rather than one long sleep. Ending your turn means you stop working until someone messages you.
+Your sandbox has its own Unity editor, managed by the dashboard. Use the \`mcp__sandbox__unity\` tool to check its state, start it, stop it or restart it, and to read its log. Unity crashes and freezes often: restart your editor whenever it is hung, crashed or misbehaving, without asking (action "restart", with force: true when it is frozen). Use the tool, never taskkill: other sandboxes' editors and the live game share this machine, so the harness refuses killing Unity by hand. The harness also restarts a hung or crashed editor by itself and messages you once it is up again: then re-pin and carry on. The first boot of a fresh sandbox can take many minutes (asset import); poll the status every minute or so rather than giving up. Wait in the foreground with a single Bash call that loops on the real condition, for example \`for i in $(seq 1 30); do grep -q "StdioBridgeHost started" "$(ls -t Logs/sandbox-editor*.log | head -1)" && break; sleep 20; done\` (the log is Logs/sandbox-editor.log, or a sandbox-editor-<time>.log when the old one was locked: \`unity status\` shows its logPath) (up to 10 minutes per call), rather than one long sleep. Ending your turn means you stop working until someone messages you.
 
 ## Waiting
 Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back: once your turn ends, nothing resumes you unless a message arrives. So:
@@ -634,7 +635,7 @@ ${ownerLine(this.cfg)}
 - Do not create a git worktree unless the task truly needs one (a Unity project is large); if you must, say why.
 
 ## Unity
-Unity on this Mac: you may start, quit, kill and relaunch the Unity editor of this clone (and Unity Hub, crash reporters) whenever it is hung, crashed or misbehaving, as the user's own sessions here do; unsaved in-editor changes may be lost, which is accepted. Never kill node or claude processes: that takes down the FF Factory daemon or you. Before Unity MCP calls, pin the editor (read \`mcpforunity://instances\`, then \`set_active_instance\` with the instance whose name starts with "${path.basename(m.repoPath)}@").
+Unity on this Mac: the \`mcp__machine__unity\` tool starts, stops and restarts the editor of this clone (\`force: true\` for a frozen one), and a watch restarts a hung or crashed editor by itself and tells you. You may also start, quit, kill and relaunch the Unity editor of this clone (and Unity Hub, crash reporters) whenever it is hung, crashed or misbehaving, as the user's own sessions here do; unsaved in-editor changes may be lost, which is accepted. Never kill node or claude processes: that takes down the FF Factory daemon or you. Before Unity MCP calls, pin the editor (read \`mcpforunity://instances\`, then \`set_active_instance\` with the instance whose name starts with "${path.basename(m.repoPath)}@").
 
 ## Waiting
 Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back once your turn ends. To come back later (a long build, a test run), call \`mcp__machine__wake_me\` with minutes and a note, then end your turn: after that many minutes you get a message with your note.
@@ -669,6 +670,10 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
           {
             name: 'wake_me',
             description: 'Be messaged again after N minutes with your note, e.g. to check a long build or test run. Then end your turn: the message resumes you. One pending wake per session (a new one replaces it).',
+          },
+          {
+            name: 'unity',
+            description: `The Unity editor of this clone (${m.repoPath}) on this Mac. action: status | start | stop | restart. Restart it whenever it is hung, crashed or misbehaving: stop asks it to quit and kills it (and what it started) after 30 s; force: true kills at once, for a frozen editor. It removes a stale Temp/UnityLockfile and closes crash reporters. Never touches git.`,
           },
         ],
       },
@@ -784,14 +789,21 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'unity',
-          "Start, stop, restart or inspect the Unity editor of a sandbox. action: start | stop | restart | status | log. Restart whenever an editor is hung, crashed or misbehaving, without asking: stop asks it to quit and kills it (and what it started) after 15 s; force: true kills at once, for a frozen editor.",
+          "Start, stop, restart or inspect the Unity editor of a sandbox, or of a machine's clone (machine: the user's Mac; log is sandbox-only). action: start | stop | restart | status | log. Restart whenever an editor is hung, crashed or misbehaving, without asking: stop asks it to quit and kills it (and what it started) after a grace period; force: true kills at once, for a frozen editor.",
           {
-            sandbox: z.string(),
+            sandbox: z.string().optional().describe('A sandbox id. Give this or machine.'),
+            machine: z.string().optional().describe('A machine id (list_machines). Give this or sandbox.'),
             action: z.enum(['start', 'stop', 'restart', 'status', 'log']),
             force: z.boolean().optional().describe('stop/restart: kill at once instead of asking the editor to quit first.'),
             lines: z.number().int().min(1).max(2000).optional(),
           },
-          wrap(async ({ sandbox, action, force, lines }) => {
+          wrap(async ({ sandbox: sandboxArg, machine, action, force, lines }) => {
+            if (!!sandboxArg === !!machine) throw new Error('give either a sandbox or a machine');
+            if (machine) {
+              if (action === 'log') throw new Error('log is for sandboxes; on a machine, a worker there can read ~/Library/Logs/Unity/Editor.log');
+              return this.machines.unity(machine, action, force);
+            }
+            const sandbox = sandboxArg!;
             if (action === 'start') await this.sandboxes.startUnity(sandbox);
             if (action === 'stop') await this.sandboxes.stopUnity(sandbox, { force });
             if (action === 'restart') {
@@ -1350,6 +1362,7 @@ function hostHealthLines(h: HostHealth | undefined): string[] {
     `Host guard (${h.level}): ${h.disks.map((d) => `${d.path} ${gb(d.freeBytes)} free${d.level !== 'ok' ? ` [${d.level}]` : ''}`).join(', ')}; sandbox drive ${h.sandboxRoot}${h.detail ? ` (${h.detail})` : ''}`,
     ...(h.blocked ? [`New work waits: ${h.blocked}`] : []),
     ...(h.lastReap ? [`Last browser reap ${h.lastReap.at}: ${h.lastReap.lines.join('; ')}`] : []),
+    ...(h.unityRestarts?.length ? [`Unity restarted automatically in the last hour: ${h.unityRestarts.map((r) => `${r.sandbox} at ${r.at.slice(11, 16)} (${r.reason.slice(0, 80)})`).join('; ')}`] : []),
     ...(h.lastCleanup ? [`Last clean-up ${h.lastCleanup.at}: ${h.lastCleanup.removed} item(s)${h.lastCleanup.freedBytes !== undefined ? `, ${gb(h.lastCleanup.freedBytes)}` : ''}`] : []),
   ];
 }

@@ -22,8 +22,16 @@ export interface GitStatus {
 export type UnityState = 'stopped' | 'starting' | 'running' | 'stopping' | 'crashed' | 'blocked';
 
 /** Why an editor is blocked (docs/unity-dialogs.md). */
+export interface UnityRestart {
+  at: string;
+  /** Why: "hung: the Unity MCP bridge has not answered for 11 min …", "crashed: …", or "asked for". */
+  reason: string;
+  /** Started by the hang/crash watch (counts toward its limit), not by a tool. */
+  auto: boolean;
+}
+
 export interface UnityBlocked {
-  reason: 'dialog' | 'stalled' | 'elevated';
+  reason: 'dialog' | 'stalled' | 'elevated' | 'restart-limit';
   /** The dialog, when reason is 'dialog'. */
   title?: string;
   text?: string;
@@ -70,6 +78,8 @@ export interface Sandbox {
     blocked?: UnityBlocked;
     /** Dialogs the watchdog dismissed for this editor, newest last (capped). */
     dismissed?: UnityDismissal[];
+    /** Restarts of this sandbox's editor after a hang or crash (auto) or through the tools, newest last (capped). */
+    restarts?: UnityRestart[];
   };
   /** Session ids (worker agents) that belong to this sandbox, newest last. */
   sessionIds: string[];
@@ -357,6 +367,8 @@ export interface HostHealth {
   /** Why new editors and new agent processes are refused right now, if they are. */
   blocked?: string;
   lastCleanup?: { at: string; removed: number; freedBytes?: number };
+  /** Automatic Unity restarts in the last hour, per sandbox (docs/unity-lifecycle.md). */
+  unityRestarts?: { sandbox: string; at: string; reason: string }[];
   /** The orphan headless-browser reaper's last pass that found something (server/reaper.ts). */
   lastReap?: { at: string; killed: number; lines: string[] };
 }

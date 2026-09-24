@@ -170,7 +170,20 @@ export class HostHealthMonitor {
       disks.push({ path: p, freeBytes: st?.free, totalBytes: st?.total, level });
     }
     const m = this.d.mem();
-    this.health = { ...this.health, checkedAt: new Date(this.now()).toISOString(), disks, level: worstLevel(disks.map((x) => x.level)), memFreeBytes: m.free, memTotalBytes: m.total };
+    const hourAgo = this.now() - 3_600_000;
+    const unityRestarts = this.d
+      .sandboxes()
+      .flatMap((s) => (s.unity.restarts ?? []).filter((r) => r.auto && Date.parse(r.at) >= hourAgo).map((r) => ({ sandbox: s.id, at: r.at, reason: r.reason })))
+      .sort((x, y) => x.at.localeCompare(y.at));
+    this.health = {
+      ...this.health,
+      checkedAt: new Date(this.now()).toISOString(),
+      disks,
+      level: worstLevel(disks.map((x) => x.level)),
+      memFreeBytes: m.free,
+      memTotalBytes: m.total,
+      unityRestarts: unityRestarts.length ? unityRestarts : undefined,
+    };
   }
 
   /** Free space on the volumes that hold the sandbox drive's VHDX (config hostDiskPaths), in GB. */

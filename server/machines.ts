@@ -505,6 +505,19 @@ export class MachineManager {
           }
         }
         return;
+      case 'unity_result': {
+        const p = this.unityCalls.get(msg.id);
+        if (!p) return;
+        this.unityCalls.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.ok) p.resolve(msg.text);
+        else p.reject(new Error(msg.text));
+        return;
+      }
+      case 'unity_event': {
+        this.unityEvent?.(id, msg.text, msg.restarted);
+        return;
+      }
       case 'switch_result': {
         const p = this.switchCalls.get(msg.id);
         if (!p) return;
@@ -554,6 +567,31 @@ export class MachineManager {
       } catch (e) {
         clearTimeout(timer);
         this.fsCalls.delete(id);
+        reject(e as Error);
+      }
+    });
+  }
+
+  private readonly unityCalls = new Map<string, { resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  /** The daemon's Unity watch reported something (wired by index.ts: orchestrator, notification, the machine's agents). */
+  unityEvent?: (machineId: string, text: string, restarted: boolean) => void;
+
+  /** Status, start, stop or restart the Unity editor of a machine's clone, on the machine (machine/unity.ts). */
+  unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart', force?: boolean) {
+    const m = this.require(machineId);
+    if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline`);
+    return new Promise<string>((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.unityCalls.delete(id);
+        reject(new Error(`machine ${m.id} did not answer the unity ${action} in 3 minutes (an old daemon? redeploy it with add_machine)`));
+      }, 3 * 60_000);
+      this.unityCalls.set(id, { resolve, reject, timer });
+      try {
+        this.post(m.id, { type: 'unity', id, action, force });
+      } catch (e) {
+        clearTimeout(timer);
+        this.unityCalls.delete(id);
         reject(e as Error);
       }
     });

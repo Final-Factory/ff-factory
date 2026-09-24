@@ -175,6 +175,17 @@ export function SandboxPanel({
               <div className="dim small">since {fmtRelative(blocked.since, now)}</div>
             </div>
           )}
+          {(sandbox.unity.restarts?.length ?? 0) > 0 && (
+            <div className="dim small unity-dismissed">
+              Restarted after a hang or crash:{' '}
+              {sandbox.unity.restarts!.slice(-3).map((r, i) => (
+                <span key={r.at + i} title={`${new Date(r.at).toLocaleString()}: ${r.reason}`}>
+                  {i > 0 ? ' · ' : ''}
+                  {r.reason.split(':')[0]} {fmtRelative(r.at, now)}
+                </span>
+              ))}
+            </div>
+          )}
           {dismissed.length > 0 && (
             <div className="dim small unity-dismissed">
               Auto-dismissed:{' '}

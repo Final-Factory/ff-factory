@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PermissionMode } from '../shared/types.ts';
+import { DEFAULT_HANG, type HangThresholds } from './unityHang.ts';
 
 export interface Config {
   port: number;
@@ -85,6 +86,13 @@ export interface Config {
     };
     /** Stop an editor whose sandbox has had no agent activity for this long (and no agent mid-turn). 0: never. */
     idleStopMinutes: number;
+    /**
+     * Hang detection for running editors (docs/unity-lifecycle.md, server/unityHang.ts): the thresholds, and
+     * how often to look (each look pings the MCP bridge and checks the log; the window probe runs anyway).
+     */
+    hang: HangThresholds & { checkSeconds: number };
+    /** Restart a hung or crashed editor automatically, at most `max` times per `windowMinutes`; then report and stop. */
+    autoRestart: { enabled: boolean; max: number; windowMinutes: number };
     /**
      * The MCP-for-Unity server every worker gets as "UnityMCP". Claude Code registers it per project
      * path, so a fresh worktree would otherwise have no Unity tools at all.
@@ -268,7 +276,14 @@ export function loadConfig(): Config {
     limits: { ...DEFAULTS.limits, ...raw.limits },
     orchestrator: { ...DEFAULTS.orchestrator, ...raw.orchestrator },
     worker: { ...DEFAULTS.worker, ...raw.worker },
-    unity: { extraArgs: [], idleStopMinutes: 120, ...raw.unity, watchdog: { ...UNITY_WATCHDOG_DEFAULTS, ...raw.unity?.watchdog } },
+    unity: {
+      extraArgs: [],
+      idleStopMinutes: 120,
+      ...raw.unity,
+      watchdog: { ...UNITY_WATCHDOG_DEFAULTS, ...raw.unity?.watchdog },
+      hang: { ...DEFAULT_HANG, startupStallMinutes: raw.unity?.watchdog?.stallMinutes ?? DEFAULT_HANG.startupStallMinutes, checkSeconds: 30, ...raw.unity?.hang },
+      autoRestart: { enabled: true, max: 3, windowMinutes: 30, ...raw.unity?.autoRestart },
+    },
     hostGuard: { ...HOST_GUARD_DEFAULTS, ...raw.hostGuard, cleanup: { ...DEFAULT_CLEANUP, ...raw.hostGuard?.cleanup } },
     voice: { ...VOICE_DEFAULTS, toolsDir: '', ...raw.voice },
   };

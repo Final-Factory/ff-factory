@@ -6,6 +6,8 @@ import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { CreateSandboxRequest, Sandbox, UnityBlocked, UnityDismissal } from '../shared/types.ts';
 import { decide, describeDialog, findDialogs, isStalled, listWindows, pressButton, sceneFilesUnchanged, type Dialog } from './watchdog.ts';
+import { bridgeInfo, bridgePing, crashLeftoversFor, crashReportersFor, editorVerdict, restartAllowed } from './unityHang.ts';
+import { listProcs } from './reaper.ts';
 import { commandLine, copyTree, isAlive, killTree, launchDetached, lowerPriority, must, processStartTime, removeTree, run } from './proc.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -191,6 +193,9 @@ export class SandboxManager {
   /** Per sandbox: when its windows were last looked at, and an unknown dialog seen once (reported when seen twice). */
   private readonly lastProbe = new Map<string, number>();
   private readonly suspect = new Map<string, string>();
+  /** The hang watch's observations per running editor (docs/unity-lifecycle.md). */
+  private readonly hang = new Map<string, { pid: number; checkedAt: number; logSize: number; logGrewAt: number; bridgeUp: boolean; bridgeFailingSince?: number; reloading?: boolean; notRespondingSince?: number; dialogAt?: number; procsAt?: number; reporter?: boolean }>();
+  private readonly restarting = new Set<string>();
   /** Until when (ms) the open scenes of a sandbox's editor are known to have no unsaved edits. */
   private readonly scenesClean = new Map<string, number>();
   private probing = false;
@@ -200,7 +205,7 @@ export class SandboxManager {
    * 'blocked' (sandbox, blocked) when an editor gets stuck on a dialog or goes silent while starting;
    * 'dismissed' (sandbox, dismissal) when the watchdog pressed a safe button. Notifications hook in here.
    */
-  readonly events = new EventEmitter<{ blocked: [Sandbox, UnityBlocked]; dismissed: [Sandbox, UnityDismissal] }>();
+  readonly events = new EventEmitter<{ blocked: [Sandbox, UnityBlocked]; dismissed: [Sandbox, UnityDismissal]; unityRestart: [Sandbox, { why: string; gaveUp: boolean; error?: string }] }>();
 
   constructor(cfg: Config, store: Store) {
     this.cfg = cfg;
@@ -530,7 +535,7 @@ export class SandboxManager {
       this.lastVerified.set(s.id, Date.now());
       this.logGrowth.set(s.id, { size: 0, at: Date.now() });
       this.suspect.delete(s.id);
-      this.update(s, { unity: { state: 'starting', pid, startedAt: new Date().toISOString(), logPath, detail: 'launching', dismissed: s.unity.dismissed } });
+      this.update(s, { unity: { state: 'starting', pid, startedAt: new Date().toISOString(), logPath, detail: 'launching', dismissed: s.unity.dismissed, restarts: s.unity.restarts } });
       const startTime = await processStartTime(pid);
       if (this.editors.get(s.id)?.pid === pid) this.editors.set(s.id, { pid, startTime });
       return s;
@@ -545,13 +550,13 @@ export class SandboxManager {
     const pid = s.unity.pid;
     if (!pid || !isAlive(pid)) {
       this.expectedExit.delete(s.id);
-      this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath } });
+      this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath, restarts: s.unity.restarts } });
       return s;
     }
     // Never kill a pid we cannot prove is this sandbox's editor: pids are reused.
     if (!(await this.ownsEditor(s))) {
       this.expectedExit.delete(s.id);
-      this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath, detail: `pid ${pid} is no longer this editor` } });
+      this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath, detail: `pid ${pid} is no longer this editor`, restarts: s.unity.restarts } });
       return s;
     }
     this.expectedExit.add(s.id);
@@ -566,7 +571,9 @@ export class SandboxManager {
     // We saw the exit ourselves, so the poller never will; clear it so the next real crash reads as one.
     this.expectedExit.delete(s.id);
     this.editors.delete(s.id);
-    this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath } });
+    this.hang.delete(s.id);
+    await this.closeCrashReporters(s, pid);
+    this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath, restarts: s.unity.restarts } });
     return s;
   }
 
@@ -593,9 +600,142 @@ export class SandboxManager {
     this.editors.delete(s.id);
     this.logGrowth.delete(s.id);
     this.suspect.delete(s.id);
+    this.hang.delete(s.id);
     this.update(s, {
-      unity: { state: expected ? 'stopped' : 'crashed', logPath: s.unity.logPath, detail: expected ? undefined : 'editor exited; see the log', dismissed: s.unity.dismissed },
+      unity: { state: expected ? 'stopped' : 'crashed', logPath: s.unity.logPath, detail: expected ? undefined : 'editor exited; see the log', dismissed: s.unity.dismissed, restarts: s.unity.restarts },
     });
+    if (!expected && !this.restarting.has(s.id)) void this.autoRestart(s, 'crashed: the editor process exited unexpectedly');
+  }
+
+  // ---------------------------------------------------------------- hangs and crashes (docs/unity-lifecycle.md)
+
+  /** The window probe's word on the main window: Windows' "not responding" (IsHungAppWindow). */
+  private noteResponding(s: Sandbox, pid: number, hung: boolean | undefined, dialogs: number) {
+    const h = this.hang.get(s.id);
+    if (!h || h.pid !== pid) return;
+    if (hung) h.notRespondingSince ??= Date.now();
+    else h.notRespondingSince = undefined;
+    if (dialogs > 0) h.dialogAt = Date.now();
+  }
+
+  /**
+   * A running editor, every unity.hang.checkSeconds: log growth, a main-thread ping through the MCP bridge,
+   * crash reporters; editorVerdict decides, autoRestart acts. A silent bridge counts only once it answered for
+   * this editor (an idle editor logs almost nothing, so a bridge that was never reachable must not kill it).
+   */
+  private async checkHang(s: Sandbox) {
+    const u = s.unity;
+    if (u.state !== 'running' || !u.pid || this.restarting.has(s.id)) return;
+    const now = Date.now();
+    let h = this.hang.get(s.id);
+    if (!h || h.pid !== u.pid) {
+      h = { pid: u.pid, checkedAt: 0, logSize: -1, logGrewAt: now, bridgeUp: false };
+      this.hang.set(s.id, h);
+    }
+    if (now - h.checkedAt < this.cfg.unity.hang.checkSeconds * 1000) return;
+    h.checkedAt = now;
+    try {
+      const size = u.logPath ? fs.statSync(u.logPath).size : -1;
+      if (size !== h.logSize) {
+        h.logSize = size;
+        h.logGrewAt = now;
+      }
+    } catch {
+      // no log: its growth cannot tell anything
+    }
+    const b = bridgeInfo(s.path);
+    const ok = b.port ? await bridgePing(b.port) : false;
+    h.reloading = b.reloading;
+    if (ok) {
+      h.bridgeUp = true;
+      h.bridgeFailingSince = undefined;
+    } else if (h.bridgeUp) h.bridgeFailingSince ??= now;
+    // Listing processes costs seconds of PowerShell: every 5 min, or at once when something already looks wrong.
+    const suspicious = h.notRespondingSince !== undefined || h.bridgeFailingSince !== undefined;
+    if (suspicious || now - (h.procsAt ?? 0) >= 5 * 60_000) {
+      h.procsAt = now;
+      h.reporter = crashReportersFor(await listProcs().catch(() => []), s.path).length > 0;
+    }
+    if (s.unity.pid !== h.pid || s.unity.state !== 'running') return; // it changed while we looked
+    const v = editorVerdict(
+      {
+        alive: isAlive(h.pid),
+        crashReporter: h.reporter,
+        phase: 'running',
+        dialog: h.dialogAt !== undefined && now - h.dialogAt < 3 * 60_000,
+        notRespondingSince: h.notRespondingSince,
+        bridgeFailingSince: h.bridgeFailingSince,
+        reloading: h.reloading,
+        logGrewAt: h.logGrewAt,
+      },
+      now,
+      this.cfg.unity.hang,
+    );
+    if (v.kind !== 'ok') void this.autoRestart(s, `${v.kind}: ${v.why}`);
+  }
+
+  /** End every crash reporter left open for this sandbox's project (they can hold its log). */
+  private async closeCrashReporters(s: Sandbox, editorPid?: number): Promise<number> {
+    const reporters = crashLeftoversFor(await listProcs().catch(() => []), s.path, editorPid);
+    for (const r of reporters) await killTree(r.pid, 0);
+    return reporters.length;
+  }
+
+  /**
+   * Restart a hung or crashed editor (the hang watch, a crash, a stalled start): force-kill it and what it
+   * started, close its crash reporters, and start it again (a locked log gets a fresh name, a stale lock file
+   * goes). At most unity.autoRestart.max per windowMinutes; then the editor is marked blocked and reported.
+   */
+  async autoRestart(s: Sandbox, why: string) {
+    const a = this.cfg.unity.autoRestart;
+    if (!a.enabled || this.restarting.has(s.id) || s.status !== 'ready') return;
+    const now = Date.now();
+    const restarts = s.unity.restarts ?? [];
+    if (!restartAllowed(restarts, now, a.max, a.windowMinutes)) {
+      const title = `automatic restarts stopped (${a.max} in ${a.windowMinutes} min)`;
+      if (s.unity.pid && isAlive(s.unity.pid)) {
+        // Hung: blocked until someone restarts it (stopUnity clears the block); the hang watch stays off meanwhile.
+        if (s.unity.state === 'blocked' && s.unity.blocked?.reason === 'restart-limit') return;
+        this.block(s, {
+          reason: 'restart-limit',
+          title,
+          text: why,
+          advice: 'the editor keeps hanging or crashing. Look at its log (and the desktop), then restart it with the unity tool.',
+          since: new Date(now).toISOString(),
+          resumeState: 'running',
+        });
+      } else {
+        // Gone: it stays crashed (a blocked state on a dead pid would read as a new crash every poll).
+        if (s.unity.detail?.startsWith(title)) return;
+        this.update(s, { unity: { ...s.unity, state: 'crashed', detail: `${title}: ${why}` } });
+      }
+      this.events.emit('unityRestart', s, { why, gaveUp: true });
+      return;
+    }
+    this.restarting.add(s.id);
+    try {
+      const entry = { at: new Date(now).toISOString(), reason: why, auto: true };
+      this.update(s, { unity: { ...s.unity, restarts: [...restarts, entry].slice(-10), detail: `restarting after ${why}` } });
+      console.warn(`unity ${s.id}: automatic restart (${why})`);
+      const pid = s.unity.pid;
+      if (pid && isAlive(pid) && (await this.ownsEditor(s))) {
+        this.expectedExit.add(s.id);
+        await killTree(pid, 0);
+        this.expectedExit.delete(s.id);
+      }
+      await this.closeCrashReporters(s, pid);
+      this.editors.delete(s.id);
+      this.hang.delete(s.id);
+      this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath, dismissed: s.unity.dismissed, restarts: s.unity.restarts, detail: `restarting after ${why}` } });
+      await this.startUnity(s.id);
+      this.events.emit('unityRestart', s, { why, gaveUp: false });
+    } catch (e) {
+      const error = (e as Error).message;
+      this.update(s, { unity: { ...s.unity, detail: `automatic restart failed: ${error}` } });
+      this.events.emit('unityRestart', s, { why, gaveUp: true, error });
+    } finally {
+      this.restarting.delete(s.id);
+    }
   }
 
   /**
@@ -641,6 +781,7 @@ export class SandboxManager {
         continue;
       }
       if (isActive(u.state) && u.pid) this.verifySoon(s);
+      if (u.state === 'running' && u.pid) void this.checkHang(s).catch((e) => console.warn(`unity ${s.id}: hang check:`, (e as Error).message));
       const booting = u.state === 'starting' || (u.state === 'blocked' && u.blocked?.resumeState === 'starting');
       if (booting && u.logPath) this.checkStartupLog(s);
     }
@@ -680,6 +821,12 @@ export class SandboxManager {
     const stallMinutes = this.cfg.unity.watchdog.stallMinutes;
     if (isStalled(this.logGrowth.get(s.id)!.at, now, stallMinutes)) {
       const last = tail.trim().split('\n').filter(Boolean).pop()?.trim().slice(0, 300) ?? '(log is empty)';
+      const a = this.cfg.unity.autoRestart;
+      if (a.enabled && restartAllowed(u.restarts ?? [], now, a.max, a.windowMinutes)) {
+        this.logGrowth.delete(s.id);
+        void this.autoRestart(s, `hung: no startup progress for ${stallMinutes} min (last line: ${last.slice(0, 120)})`);
+        return;
+      }
       this.block(s, {
         reason: 'stalled',
         title: `no editor log output for ${stallMinutes} min`,
@@ -744,7 +891,9 @@ export class SandboxManager {
         // The editor may have been stopped or replaced while we looked.
         if (s.unity.pid !== pid || !isActive(s.unity.state) || this.store.sandboxes.get(s.id) !== s) continue;
         const main = windows.find((x) => x.pid === pid && x.class === 'UnityContainerWndClass');
-        await this.handleDialogs(s, findDialogs(windows), main?.title);
+        const dialogs = findDialogs(windows);
+        this.noteResponding(s, pid, main?.hung, dialogs.length);
+        await this.handleDialogs(s, dialogs, main?.title);
         // Unity prefixes its main window title with "Administrator:" when it runs elevated.
         if (main && /^Administrator:/i.test(main.title) && s.unity.state === 'running' && !/administrator/i.test(s.unity.detail ?? '')) {
           const detail = `${s.unity.detail ? `${s.unity.detail}; ` : ''}running with administrator rights (stop and start it to drop them)`;
@@ -819,7 +968,7 @@ export class SandboxManager {
       // A blocked state is re-derived by the watchdog; start from what the editor was doing.
       if (s.unity.state === 'blocked') this.update(s, { unity: { ...s.unity, state: s.unity.blocked?.resumeState ?? 'starting', blocked: undefined } });
       if (!s.unity.pid || !isAlive(s.unity.pid)) {
-        this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath } });
+        this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath, restarts: s.unity.restarts } });
         continue;
       }
       // Alive, but after a restart the pid may belong to another program now: check its command line.
@@ -827,7 +976,7 @@ export class SandboxManager {
       void this.ownsEditor(s)
         .then((ours) => {
           if (!ours && s.unity.pid === pid) {
-            this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath, detail: `pid ${pid} is no longer this editor` } });
+            this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath, detail: `pid ${pid} is no longer this editor`, restarts: s.unity.restarts } });
           }
         })
         .catch(() => undefined);

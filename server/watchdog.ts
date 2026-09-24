@@ -15,6 +15,8 @@ export interface EditorWindow {
   class: string;
   title: string;
   enabled: boolean;
+  /** Windows reports the window "not responding" (IsHungAppWindow). */
+  hung?: boolean;
   owned: boolean;
   text: string[];
   buttons: string[];
