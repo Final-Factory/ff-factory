@@ -149,3 +149,49 @@ test('branch switches: refused in the sandbox while its editor runs, fine otherw
   running = false;
   assert.equal(await decide(g, 'Bash', { command: 'git switch other' }, sb), 'allow');
 });
+
+test('public repos: a push whose commits carry a private email is refused', async () => {
+  const remotes = () => new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git'], ['game', 'git@github.com:example-org/example-game.git']]);
+  let emails = ['1+someone@users.noreply.github.com', 'bot@example.org'];
+  const seen: string[][] = [];
+  const g = sandboxGuard({
+    sandboxId: 'sb1',
+    sandboxPath: 'C:/ffsb/sb1',
+    protectedPaths: [],
+    gameRepos: ['https://github.com/example-org/example-game.git'],
+    remotes,
+    publicIdentity: { repos: ['https://github.com/Final-Factory/ff-factory'], name: 'Public Name', email: 'bot@example.org', pushedEmails: (_dir, remote, srcs) => (seen.push([remote, ...srcs]), emails) },
+  });
+  const cwd = 'C:/tmp/app';
+  assert.equal(await decide(g, 'Bash', { command: 'git push origin HEAD:main' }, cwd), 'allow');
+  assert.deepEqual(seen.at(-1), ['origin', 'HEAD']);
+  emails = ['1+someone@users.noreply.github.com', 'person@gmail.example'];
+  for (const command of ['git push origin HEAD:main', 'git push', 'git push origin feature:feature', 'git push https://github.com/Final-Factory/ff-factory.git x:y']) {
+    assert.equal(await decide(g, 'Bash', { command }, cwd), 'deny', command);
+  }
+  assert.deepEqual(seen.at(-1), ['https://github.com/Final-Factory/ff-factory.git', 'x']);
+  // Other repos are not its business (the game repo's own rules still apply).
+  assert.equal(await decide(g, 'Bash', { command: 'git push game HEAD:develop' }, cwd), 'allow');
+  // The refusal says how to fix it.
+  const input = { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'git push' }, tool_use_id: 'x', session_id: 's', transcript_path: '', cwd };
+  const r = (await g(input as never, 'x', { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecisionReason?: string } };
+  assert.match(r.hookSpecificOutput?.permissionDecisionReason ?? '', /person@gmail\.example.*git config user\.email "bot@example\.org".*--reset-author/);
+});
+
+test('public repos: the real lookup lists the unpushed commits\' emails', async (t) => {
+  const { execFileSync } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const { gitPushedEmails } = await import('./guard.ts');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pushed-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const git = (cwd: string, ...a: string[]) => execFileSync('git', ['-C', cwd, ...a], { stdio: 'ignore' });
+  execFileSync('git', ['init', '-q', '--bare', path.join(tmp, 'o.git')]);
+  const w = path.join(tmp, 'w');
+  execFileSync('git', ['init', '-q', w]);
+  git(w, 'remote', 'add', 'origin', path.join(tmp, 'o.git'));
+  git(w, '-c', 'user.name=a', '-c', 'user.email=1+a@users.noreply.github.com', 'commit', '-q', '--allow-empty', '-m', 'pushed');
+  git(w, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+  git(w, 'fetch', '-q', 'origin');
+  git(w, '-c', 'user.name=b', '-c', 'user.email=b@example.com', 'commit', '-q', '--allow-empty', '-m', 'not yet');
+  assert.deepEqual(gitPushedEmails(w, 'origin', ['HEAD']), ['b@example.com']);
+});

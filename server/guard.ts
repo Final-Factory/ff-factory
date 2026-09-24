@@ -30,6 +30,9 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
  *   - files: no writes to, or shell commands naming, a protected path (the live co-op checkout, this
  *     server's own directory).
  *   - Unity MCP: refused until the session pins its own editor ("<id>@<hash>"), and never another.
+ *   - public repos (config publicGitIdentity; default this app's own repo): a push is refused when a
+ *     commit it would publish has an author or committer email that is neither a GitHub noreply address
+ *     nor the configured public email, so nobody's private address ends up in public history.
  *   - branch switches: while the sandbox's editor runs, no `git switch` / `git checkout <branch>` in the
  *     sandbox (Unity would stop on "The open scene(s) have been modified externally"); the worker's
  *     switch_branch tool does it safely. `git checkout -- <paths>` and `git restore` stay allowed.
@@ -51,6 +54,8 @@ export function sandboxGuard(opts: {
   denyToolPrefixes?: string[];
   /** Whether the sandbox's Unity editor is up right now: raw branch switches are refused then (checkEditorSwitch). */
   editorRunning?: () => boolean;
+  /** Public repos whose pushes must carry only public commit identities (checkShell's identity rule). */
+  publicIdentity?: PublicIdentity;
 }): HookCallback {
   // Drive-letter paths are normalised textually so the guard behaves the same on any host OS.
   const norm = (p: string) => (/^[a-zA-Z]:[\\/]/.test(p) ? p : path.resolve(p)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -85,7 +90,7 @@ export function sandboxGuard(opts: {
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
       const reason =
-        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes }) ??
+        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity }) ??
         (opts.ownCheckout ? checkOwnCheckout(cmd, input.cwd || opts.sandboxPath, opts.ownCheckout.isClean ?? gitIsClean) : undefined) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined);
       if (reason) return deny(reason);
@@ -256,6 +261,45 @@ export interface ShellContext {
   cwd?: string;
   gameRepos: string[];
   remotes: RemoteResolver;
+  publicIdentity?: PublicIdentity;
+}
+
+/** Repos whose history is public, and the identity commits to them should carry (config publicGitIdentity). */
+export interface PublicIdentity {
+  repos: string[];
+  name?: string;
+  email?: string;
+  /** Author and committer emails of the commits a push from `dir` to `remote` would publish. Default: git log. */
+  pushedEmails?: (dir: string, remote: string, srcs: string[]) => string[] | undefined;
+}
+
+export const isNoreplyEmail = (email: string) => /@users\.noreply\.github\.com$/i.test(email.trim());
+
+/** The emails on commits reachable from `srcs` that `remote` does not have yet (by its tracking refs). */
+export const gitPushedEmails = (dir: string, remote: string, srcs: string[]): string[] | undefined => {
+  try {
+    const not = /[/:\\]/.test(remote) ? '--remotes' : `--remotes=${remote}`;
+    const out = execFileSync('git', ['-C', dir, 'log', '--format=%ae%n%ce', ...srcs, '--not', not, '--'], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    return [...new Set(out.split('\n').map((l) => l.trim()).filter(Boolean))];
+  } catch {
+    return undefined;
+  }
+};
+
+/** Why a push to a public repo is refused (a commit with a private email), or undefined. */
+function checkPublicIdentity(ctx: ShellContext | undefined, remote: string, srcs: string[], dir: string | undefined): string | undefined {
+  const pub = ctx?.publicIdentity;
+  if (!pub?.repos.length || !dir) return undefined;
+  const url = ctx!.remotes(dir)?.get(remote) ?? (/[/:\\]/.test(remote) ? remote : undefined);
+  if (!url) return undefined;
+  const target = repoKey(url);
+  if (!pub.repos.some((r) => repoKey(r) === target)) return undefined;
+  const emails = (pub.pushedEmails ?? gitPushedEmails)(dir, remote, srcs);
+  const bad = (emails ?? []).filter((e) => !isNoreplyEmail(e) && e.toLowerCase() !== pub.email?.trim().toLowerCase());
+  if (!bad.length) return undefined;
+  const name = pub.name ?? '<your name>';
+  const email = pub.email ?? '<id>+<login>@users.noreply.github.com';
+  return `This push publishes commits with the email(s) ${bad.join(', ')} to ${target}, whose history is public. Commit as the public identity instead: in this clone run git config user.name "${name}" and git config user.email "${email}", then rewrite your unpushed commits with git rebase -r @{u} --exec "git commit --amend --no-edit --reset-author" and push again.`;
 }
 
 /** Where a `cd` / `git -C` argument lands, or undefined when that cannot be known from the text. */
@@ -323,6 +367,9 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
       }
       const positionals = raw.slice(pushAt + 1).filter((w) => !w.startsWith('-'));
       const remote = positionals.length >= 2 ? positionals[0] : undefined;
+      const srcs = positionals.slice(1).map((r) => (r.includes(':') ? r.slice(0, r.indexOf(':')) : r).replace(/^\+/, '')).filter(Boolean);
+      const identity = checkPublicIdentity(ctx, positionals[0] ?? 'origin', srcs.length ? srcs : ['HEAD'], pushDir);
+      if (identity) return identity;
       for (const w of lower.slice(pushAt + 1)) {
         if (w === '--force' || w.startsWith('--force=') || (/^-[a-z]+$/.test(w) && w.includes('f'))) {
           return 'Force pushes are blocked in sandboxes. Use --force-with-lease on your own branch if you must rewrite it.';

@@ -44,3 +44,13 @@ test('set_app_config: only the allowlisted keys, only sane values', (t) => {
   assert.throws(() => normalizeSetting('voice.vocabulary', Array.from({ length: 61 }, (_, i) => `w${i}`)));
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8').slice(1)).port, 8790, 'refused changes leave the file alone');
 });
+
+test('set_app_config: the public commit identity', (t) => {
+  const { file, cfg } = setup(t);
+  setAppConfig(file, cfg, 'publicGitIdentity.email', ' 12345+someone@users.noreply.github.com ');
+  setAppConfig(file, cfg, 'publicGitIdentity.name', 'Some Team');
+  assert.deepEqual(cfg.publicGitIdentity, { email: '12345+someone@users.noreply.github.com', name: 'Some Team' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).publicGitIdentity, { email: '12345+someone@users.noreply.github.com', name: 'Some Team' });
+  assert.throws(() => normalizeSetting('publicGitIdentity.email', 'not an email'));
+  assert.throws(() => normalizeSetting('publicGitIdentity.name', 'a "quoted" name'));
+});

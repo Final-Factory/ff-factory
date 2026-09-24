@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { createSdkMcpServer, tool, tool as sdkTool, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { ROOT, configPath, ownerLine, type Config } from './config.ts';
+import { ROOT, configPath, ownerLine, publicIdentityLine, publicIdentityOf, type Config } from './config.ts';
 import { SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import type { Store } from './store.ts';
 import { branchProblem, withBaseRepoLock, type SandboxManager } from './sandboxes.ts';
@@ -324,7 +324,7 @@ Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back: once yo
 Your editor's MCP instance is named \`${sb.id}@<hash>\`. Before ANY Unity MCP call, read \`mcpforunity://instances\` and \`set_active_instance\` with that full Name@hash. The harness refuses Unity MCP calls until you pin, and refuses any other instance (other editors belong to other sandboxes or to the live game).
 
 ## Git
-To change branches, ALWAYS call \`mcp__sandbox__switch_branch\`, never \`git switch\` / \`git checkout <branch>\` yourself: under a running editor that makes Unity stop on "The open scene(s) have been modified externally" (the harness refuses those while the editor runs). \`git checkout -- <path>\` and \`git restore\` for files are fine.
+${publicIdentityLine(this.cfg)}To change branches, ALWAYS call \`mcp__sandbox__switch_branch\`, never \`git switch\` / \`git checkout <branch>\` yourself: under a running editor that makes Unity stop on "The open scene(s) have been modified externally" (the harness refuses those while the editor runs). \`git checkout -- <path>\` and \`git restore\` for files are fine.
 \`develop\` is the integration branch and the user wants work landing there often, not piling up on side branches. Commit on \`${branch}\` as you reach good checkpoints. When a piece is done and verified (compiles, tests pass, per the repo's CLAUDE.md), integrate it:
 \`git fetch origin && git rebase origin/develop\`, re-verify if the rebase pulled in changes, then \`git push origin HEAD:develop\`. If the push is rejected because develop moved, fetch, rebase and push again. Also push your own branch (\`git push -u origin ${branch}\`) so work is never only on this machine.
 Never force-push anywhere. Never push to or open PRs into the Final Factory game repo's master/main (blocked here and on GitHub; releases are the user's call); other repos' master/main (e.g. the agents harness, this app) are fine when that is their normal workflow.
@@ -455,6 +455,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
                 sandboxPath: sb.path,
                 protectedPaths: [...this.cfg.protectedPaths, ROOT, this.cfg.dataDir],
                 gameRepos: [this.cfg.repo.url, this.cfg.repo.basePath],
+                publicIdentity: publicIdentityOf(this.cfg),
                 editorRunning: () => ['running', 'starting', 'blocked'].includes(this.sandboxes.list().find((x) => x.id === sb.id)?.unity.state ?? ''),
               }),
             ],
@@ -650,6 +651,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ownPath: m.repoPath,
         protectedPaths: [`${m.home}/.ff-factory`],
         gameRepos: [this.cfg.repo.url],
+        publicIdentity: publicIdentityOf(this.cfg),
         ownCheckout: true,
         denyToolPrefixes: ['mcp__ffsb__'],
       },
@@ -925,7 +927,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'set_app_config',
-          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …). value null removes the key (back to the default). Only when the user asked for the change.`,
+          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …); publicGitIdentity.name / .email: the identity agents commit with in public repos such as this app's own (the guard refuses pushes there with other emails; GitHub noreply addresses are always fine). value null removes the key (back to the default). Only when the user asked for the change.`,
           {
             key: z.enum(SETTABLE_KEYS),
             value: z.union([z.string(), z.array(z.string()), z.null()]),

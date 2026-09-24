@@ -39,6 +39,22 @@ if ($LASTEXITCODE -eq 1) {
   Step "keep the old history as $backup" { git branch $backup HEAD }
   Step 'move to the republished history' { git reset --hard '@{u}' }
 }
+# If the upstream was rewritten (e.g. commit identities cleaned with a force-push), HEAD is no longer in it
+# and a fast-forward pull fails. Move to it only when nothing here would be lost: no modified tracked
+# files, every local commit has an equivalent in the upstream (git cherry: same patch), and the upstream
+# history holds this exact tree. The old HEAD stays on a pre-rewrite-<time> branch. Otherwise stop.
+git merge-base --is-ancestor HEAD '@{u}' *> $null
+if ($LASTEXITCODE -eq 1) {
+  $dirty = git status --porcelain --untracked-files=no
+  if ($dirty) { throw "the upstream no longer contains this checkout's HEAD (rewritten?) and tracked files are modified here; commit or discard them, then update again" }
+  $missing = @(git cherry '@{u}' HEAD | Where-Object { $_ -like '+*' })
+  if ($missing.Count) { throw "this checkout has $($missing.Count) commit(s) the upstream has no equivalent of ($($missing -join ', ')); push or drop them, then update again" }
+  $tree = "$(git rev-parse 'HEAD^{tree}')".Trim()
+  if (@(git log --format=%T '@{u}') -notcontains $tree) { throw "the upstream was rewritten and no commit in it has this checkout's tree $tree; update refused" }
+  $backup = 'pre-rewrite-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+  Step "keep the old history as $backup" { git branch $backup HEAD }
+  Step 'move to the rewritten upstream' { git reset --hard '@{u}' }
+}
 $global:LASTEXITCODE = 0
 Step 'git pull' { git pull --ff-only }
 Step 'npm ci' { npm.cmd ci --no-audit --no-fund }

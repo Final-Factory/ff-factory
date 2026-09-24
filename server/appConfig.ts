@@ -2,11 +2,12 @@ import fs from 'node:fs';
 import { VOICE_DEFAULTS, type Config } from './config.ts';
 
 /**
- * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones: nothing that
- * touches paths, limits, permissions, models, the guard or the network. Each applies to the running
- * server at once (the config object is shared) and is written to config.json for the next start.
+ * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
+ * commit identity (which names the identity to use; noreply addresses are always accepted): nothing that
+ * touches paths, limits, permissions, models or the network. Each applies to the running server at once
+ * (the config object is shared; guards read it when a session starts) and is written to config.json.
  */
-export const SETTABLE_KEYS = ['ownerName', 'voice.vocabulary', 'voice.ttsVoice'] as const;
+export const SETTABLE_KEYS = ['ownerName', 'voice.vocabulary', 'voice.ttsVoice', 'publicGitIdentity.name', 'publicGitIdentity.email'] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -27,6 +28,16 @@ export function normalizeSetting(key: SettableKey, value: unknown): string | str
       const words = [...new Set(list.map((w) => oneLine(w as string)).filter(Boolean))];
       if (words.length > 60 || words.some((w) => w.length > 40)) throw new Error('voice.vocabulary: at most 60 words of up to 40 characters');
       return words;
+    }
+    case 'publicGitIdentity.name': {
+      if (typeof value !== 'string') throw new Error('publicGitIdentity.name is a string');
+      const v = oneLine(value);
+      if (!v || v.length > 60 || /[<>`{}$\\"]/.test(v)) throw new Error('publicGitIdentity.name: 1-60 characters, one line, no <>`{}$\\"');
+      return v;
+    }
+    case 'publicGitIdentity.email': {
+      if (typeof value !== 'string' || !/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(value.trim())) throw new Error('publicGitIdentity.email is an email address, e.g. 12345+you@users.noreply.github.com');
+      return value.trim();
     }
     case 'voice.ttsVoice': {
       if (typeof value !== 'string' || !/^[a-z]{2}_[a-z]+$/.test(value.trim())) throw new Error('voice.ttsVoice is a Kokoro voice name such as "af_heart" or "bm_george"');
@@ -70,5 +81,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   if (key === 'ownerName') cfg.ownerName = v as string | undefined;
   else if (key === 'voice.vocabulary') cfg.voice.vocabulary = (v as string[] | undefined) ?? [];
   else if (key === 'voice.ttsVoice') cfg.voice.ttsVoice = (v as string | undefined) ?? VOICE_DEFAULTS.ttsVoice;
+  else if (key === 'publicGitIdentity.name' || key === 'publicGitIdentity.email') {
+    const field = key === 'publicGitIdentity.name' ? 'name' : 'email';
+    cfg.publicGitIdentity = { ...cfg.publicGitIdentity, [field]: v as string | undefined };
+  }
   return { before, after: v };
 }

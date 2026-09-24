@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PermissionMode } from '../shared/types.ts';
@@ -20,6 +21,13 @@ export interface Config {
    * each prompt adds one line saying who that is (ownerLine), so agents can address them by name.
    */
   ownerName?: string;
+  /**
+   * Repos whose history is public, and the identity agents commit to them with. The guard refuses a push
+   * to one of `repos` (default: this app's own origin) when a commit in it has an author or committer
+   * email that is neither a GitHub noreply address nor `email`. Example:
+   * { "name": "Your Name", "email": "12345+you@users.noreply.github.com" }.
+   */
+  publicGitIdentity?: { name?: string; email?: string; repos?: string[] };
   /** Where state.json and transcripts live. */
   dataDir: string;
   /** Every sandbox worktree is created as <sandboxRoot>/<id>. */
@@ -222,4 +230,33 @@ export function loadConfig(): Config {
 export function ownerLine(cfg: Pick<Config, 'ownerName'>): string {
   const n = cfg.ownerName?.replace(/\s+/g, ' ').trim();
   return n ? `\nThe user (the person who runs this portal) is ${n}.\n` : '';
+}
+
+let appOrigin: string | undefined | null = null;
+
+/** This app's own origin URL (git config), read once; undefined when it is not a git checkout. */
+export function appOriginUrl(): string | undefined {
+  if (appOrigin === null) {
+    try {
+      appOrigin = execFileSync('git', ['-C', ROOT, 'config', '--get', 'remote.origin.url'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim() || undefined;
+    } catch {
+      appOrigin = undefined;
+    }
+  }
+  return appOrigin;
+}
+
+/** The guard's public-repo identity rule for this config: its repos (default this app's origin), name and email. */
+export function publicIdentityOf(cfg: Pick<Config, 'publicGitIdentity'>): { repos: string[]; name?: string; email?: string } {
+  const own = appOriginUrl();
+  const repos = cfg.publicGitIdentity?.repos ?? (own ? [own] : []);
+  return { repos, name: cfg.publicGitIdentity?.name, email: cfg.publicGitIdentity?.email };
+}
+
+/** One brief line on committing to public repos ("" when there is none to name). */
+export function publicIdentityLine(cfg: Pick<Config, 'publicGitIdentity'>): string {
+  const pub = publicIdentityOf(cfg);
+  if (!pub.repos.length) return '';
+  const who = pub.name && pub.email ? `\`${pub.name} <${pub.email}>\`` : 'your GitHub noreply address (\`<id>+<login>@users.noreply.github.com\`)';
+  return `Commits you push to ${pub.repos.map((r) => `\`${r}\``).join(', ')} are public: commit there as ${who} (git config user.name / user.email in that clone). The harness refuses pushes there whose commits carry any other email.\n`;
 }

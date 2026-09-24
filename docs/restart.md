@@ -26,6 +26,12 @@ scripts\restart.ps1 -DrainMinutes 3
    running.
 3. **Update** (with `-Update`). The script leaves `data\update.request`. The next supervisor runs
    `update-steps.ps1` before starting node, and writes the outcome to `data\update.result.json`.
+   It fast-forwards. If the upstream has a new, unrelated history (republished) or was rewritten
+   (e.g. commit identities cleaned), it moves to it only when nothing would be lost: no modified
+   tracked files and, for a rewrite, no local commit without an equivalent upstream and this tree in
+   the upstream's history. The old HEAD stays on a `pre-republish-*` / `pre-rewrite-*` branch.
+   Otherwise the update stops with the reason. Note that it runs the `update-steps.ps1` already on
+   disk: a change to it takes effect from the update after the one that brings it.
 4. **Start**, always through the Limited `ffsb-server` task (`schtasks /run /tn ffsb-server`),
    never from the calling shell, so the app cannot inherit admin rights. If the task is missing or
    does not start a supervisor within 60 s, the script starts the supervisor directly. From an

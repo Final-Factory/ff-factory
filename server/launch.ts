@@ -33,6 +33,8 @@ export interface LaunchSpec {
     ownCheckout?: boolean;
     denyToolPrefixes?: string[];
     standing?: { folder: string; groups: StandingToolGroup[]; offLimits: string[] };
+    /** Public repos and their commit identity (config publicGitIdentity). */
+    publicIdentity?: { repos: string[]; name?: string; email?: string };
   };
   env?: Record<string, string>;
   claudeExecutable?: string;
@@ -68,6 +70,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       gameRepos: g.gameRepos,
       ownCheckout: g.ownCheckout ? {} : undefined,
       denyToolPrefixes: g.denyToolPrefixes,
+      publicIdentity: g.publicIdentity,
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];

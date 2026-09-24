@@ -4,7 +4,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { ROOT, ownerLine, type Config } from './config.ts';
+import { ROOT, ownerLine, publicIdentityOf, type Config } from './config.ts';
 import { buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from './launch.ts';
 import type { Store } from './store.ts';
 import type { OptionsFactory } from './sessions.ts';
@@ -859,6 +859,7 @@ ${a.charter}
         ownPath: a.folder,
         protectedPaths: place.protectedPaths,
         gameRepos: place.gameRepos,
+        publicIdentity: publicIdentityOf(this.cfg),
         standing: { folder: a.folder, groups: a.tools, offLimits: place.offLimits },
       },
       env: { ...place.env, FF_STANDING_AGENT: a.id },

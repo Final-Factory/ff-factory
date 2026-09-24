@@ -171,6 +171,9 @@ ones: `host`, `sandboxRoot` (keep it short: Windows path lengths),
 `librarySeed` (a warm `Library/` to copy; on a ReFS Dev Drive the copy is a near-free block clone),
 `protectedPaths` (checkouts agents must never touch), `limits` (editors are ~8-12 GB RAM each),
 `ownerName` (optional: the name agents' prompts use for you; otherwise they say "the user").
+`publicGitIdentity` (optional `name`/`email`/`repos`): repos whose history is public, by default this
+app's own origin. The guard refuses an agent's push there when a commit carries an email that is not a
+GitHub noreply address or the configured `email`.
 
 ## Development
 
