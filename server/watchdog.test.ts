@@ -147,3 +147,30 @@ test('scenes modified externally: no modified *.unity file counts as clean (git 
   const [d] = findDialogs([SCENES]);
   assert.deepEqual(decide(d, { autoDismiss: true, scenesClean: true, editorTitle: TITLE }), { click: 'Reload' });
 });
+
+test('always-rule dialogs (FMOD, Safe Mode): pressed every time they come back, reported only in a fast loop', () => {
+  const now = Date.parse('2026-09-24T12:00:00Z');
+  const at = (sAgo: number) => new Date(now - sAgo * 1000).toISOString();
+  for (const [title, text, buttons] of [
+    ['Repair FMOD Libraries', 'The following FMOD libraries contain incorrect line endings', ['Repair', 'Ignore']],
+    ['Enter Safe Mode?', 'The project you are opening contains compilation errors.', ['Enter Safe Mode', 'Ignore', 'Quit']],
+  ] as const) {
+    const [d] = findDialogs([win({ title, text: [text], buttons: [...buttons] })]);
+    const past = (ago: number[]) => ago.map((s) => ({ at: at(s), title }));
+    // Five presses in the last ten minutes: an ordinary dialog would have given up at three.
+    assert.deepEqual(decide(d, { autoDismiss: true, recent: past([60, 120, 240, 400, 590]), nowMs: now }), { click: 'Ignore' }, title);
+    // Back within 20 s of the last press: a loop.
+    const loop = decide(d, { autoDismiss: true, recent: past([5, 120]), nowMs: now });
+    assert.equal('report' in loop && loop.repeated, true, title);
+    assert.match(('why' in loop && loop.why) || '', /within 20 s/);
+    // 30 presses in the hour: a loop too; 29 is still fine, and older ones do not count.
+    const every = (n: number, gap: number) => Array.from({ length: n }, (_, i) => 30 + i * gap);
+    assert.equal('report' in decide(d, { autoDismiss: true, recent: past(every(30, 110)), nowMs: now }), true, title);
+    assert.deepEqual(decide(d, { autoDismiss: true, recent: past(every(29, 110)), nowMs: now }), { click: 'Ignore' }, title);
+    assert.deepEqual(decide(d, { autoDismiss: true, recent: past(every(30, 110).map((s) => s + 3600)), nowMs: now }), { click: 'Ignore' }, title);
+  }
+  // Dialogs without the rule keep the old limit.
+  const [conn] = findDialogs([win({ title: 'Connection Lost', text: ['The connection with the Unity Licensing Client has been lost.'], buttons: ['Retry'] })]);
+  const recent = [60, 120, 240].map((s) => ({ at: at(s), title: 'Connection Lost' }));
+  assert.deepEqual(decide(conn, { autoDismiss: true, recent, nowMs: now }), { report: true, repeated: true });
+});

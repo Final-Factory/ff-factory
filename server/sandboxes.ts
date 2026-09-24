@@ -756,7 +756,7 @@ export class SandboxManager {
     // *.unity file with uncommitted changes. Only looked up when the reload question is actually up.
     let scenesClean = (this.scenesClean.get(s.id) ?? 0) > Date.now();
     if (!scenesClean && dialogs.some((d) => d.known?.id === 'scenes-modified')) scenesClean = await sceneFilesUnchanged(s.path);
-    let report: { d: Dialog; repeated?: boolean } | undefined;
+    let report: { d: Dialog; repeated?: boolean; why?: string } | undefined;
     for (const d of dialogs) {
       const verdict = decide(d, { autoDismiss, recent: s.unity.dismissed, scenesClean, editorTitle });
       if ('click' in verdict) {
@@ -767,21 +767,21 @@ export class SandboxManager {
           console.warn(`unity watchdog: ${s.id}: ${(e as Error).message}`);
         }
         const dismissal: UnityDismissal = { at: new Date().toISOString(), title: d.title || describeDialog(d, 80), button: verdict.click };
-        const dismissed = [...(s.unity.dismissed ?? []), dismissal].slice(-20);
+        const dismissed = [...(s.unity.dismissed ?? []), dismissal].slice(-40);
         console.log(`unity ${s.id}: dismissed "${dismissal.title}" with "${verdict.click}"${closed ? '' : ' (the window is still open)'}`);
         this.update(s, { unity: { ...s.unity, dismissed, detail: `dismissed "${dismissal.title}" with "${verdict.click}"` } });
         this.events.emit('dismissed', s, dismissal);
         if (!closed) report ??= { d };
         continue;
       }
-      report ??= { d, repeated: verdict.repeated };
+      report ??= { d, repeated: verdict.repeated, why: verdict.why };
     }
     if (!report) {
       this.suspect.delete(s.id);
       if (s.unity.state === 'blocked' && s.unity.blocked?.reason === 'dialog') this.unblock(s, 'dialog closed');
       return;
     }
-    const { d, repeated } = report;
+    const { d, repeated, why } = report;
     // An unknown dialog must still be there on the next look: a short-lived one is not worth an alarm.
     const key = `${d.hwnd}:${d.title}`;
     if (!d.known && this.suspect.get(s.id) !== key) {
@@ -795,7 +795,7 @@ export class SandboxManager {
       text: d.text.slice(0, 1500),
       buttons: d.buttons,
       dialogId: d.known?.id,
-      advice: repeated ? `it came back after being dismissed several times, so it is no longer pressed automatically; ${advice}` : advice,
+      advice: repeated ? `${why ?? 'it came back after being dismissed several times'}, so it is no longer pressed automatically; ${advice}` : advice,
       since: new Date().toISOString(),
       resumeState: s.unity.state === 'running' ? 'running' : 'starting',
     });

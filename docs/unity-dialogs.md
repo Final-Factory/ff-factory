@@ -29,7 +29,9 @@ test message box (probe, match, press "Ignore", dialog closed, the app received 
 A window counts as a dialog when it is a `#32770` with at least one button that is not just
 "Cancel". Splash and progress windows have no buttons. An unknown dialog is reported only if it is
 still there on the next look. A known dialog that comes back three times within 10 minutes is
-reported instead of pressed again. Unity puts `Administrator:` at the start of its main window
+reported instead of pressed again, except the ones with a standing always-rule (FMOD line endings
+and Safe Mode: always Ignore). Those are pressed every time they come back, up to one press per 20 s
+and 30 an hour (`ALWAYS_LIMIT`); only a faster loop is reported. Every press is logged as before. Unity puts `Administrator:` at the start of its main window
 title when it runs elevated; the watchdog notes that on the card, and a non-elevated server uses
 the title to recognise an elevated editor it can no longer read the command line of.
 
@@ -108,4 +110,4 @@ dialog.
 pressed). Two things listen to `blocked`: the orchestrator message (`Agents.onUnityBlocked`) and a
 "Unity editor stuck" notification to the user (`Notifier.unityBlocked`, the `unity` kind in the
 notification settings, on by default). Every dismissal is kept on the sandbox
-(`unity.dismissed`, the last 20; the card shows the last 3) and logged to `data/server.out.log`.
+(`unity.dismissed`, the last 40; the card shows the last 3) and logged to `data/server.out.log`.

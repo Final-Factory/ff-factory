@@ -27,8 +27,12 @@ export interface EditorWindow {
  * Reload is the right answer: Ignore and a later save would overwrite the new branch's scene). Unity's
  * title bar cannot tell: in 6000.3 its "*" comes from an editor window's hasUnsavedChanges, never from a
  * dirty scene (docs/unity-dialogs.md).
+ *
+ * `always`: a standing rule says this button is always the answer (FMOD line endings, Safe Mode), so the
+ * watchdog never gives up after a few presses (DISMISS_LIMIT); it only stops at a true loop, when the
+ * dialog comes back faster than ALWAYS_LIMIT allows.
  */
-export type DialogAction = { kind: 'dismiss'; button: string; onlyIf?: 'scenesClean' } | { kind: 'notify' };
+export type DialogAction = { kind: 'dismiss'; button: string; onlyIf?: 'scenesClean'; always?: true } | { kind: 'notify' };
 
 export interface KnownDialog {
   id: string;
@@ -57,13 +61,13 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
     // Assets/Plugins/FMOD/src/Editor/EditorUtils.cs CheckMacLibraries(): a mac bundle's Info.plist checked out
     // with CRLF. Rule: anything about line endings gets "Ignore", never a convert/repair button.
     match: /Repair FMOD Libraries|line endings/i,
-    action: { kind: 'dismiss', button: 'Ignore' },
+    action: { kind: 'dismiss', button: 'Ignore', always: true },
     advice: 'FMOD found CRLF line endings in its mac bundles; "Ignore" leaves the files alone (the rule: always Ignore).',
   },
   {
     id: 'safe-mode',
     match: /Enter Safe Mode\?|project you are opening contains compilation errors/i,
-    action: { kind: 'dismiss', button: 'Ignore' },
+    action: { kind: 'dismiss', button: 'Ignore', always: true },
     advice:
       'the project has compile errors. "Ignore" opens the editor normally (with errors) so the MCP bridge comes up and an agent can fix them; Safe Mode would keep the bridge from loading.',
   },
@@ -168,6 +172,13 @@ const norm = (b: string) => b.replace(/&/g, '').trim().toLowerCase();
 export const DISMISS_LIMIT = { count: 3, windowMs: 10 * 60_000 };
 
 /**
+ * For `always` dialogs: at most one press per minGapMs and perHour presses an hour. Coming back faster than
+ * that is a stuck loop, reported like any other; slower repeats (every editor start, every reload) are
+ * simply pressed again.
+ */
+export const ALWAYS_LIMIT = { minGapMs: 20_000, perHour: 30 };
+
+/**
  * What to do about one dialog: press its safe button (only when auto-dismiss is on, the dialog is a
  * known dismissable one, the button is really there, and it has not already been dismissed
  * DISMISS_LIMIT times recently), or report it.
@@ -183,15 +194,24 @@ export function decide(
     /** The editor's main window title; a "*" in it means some editor window has unsaved changes. */
     editorTitle?: string;
   },
-): { click: string } | { report: true; repeated?: boolean } {
+): { click: string } | { report: true; repeated?: boolean; why?: string } {
   const a = d.known?.action;
   if (!opts.autoDismiss || a?.kind !== 'dismiss') return { report: true };
   if (a.onlyIf === 'scenesClean' && (!opts.scenesClean || !opts.editorTitle || opts.editorTitle.includes('*'))) return { report: true };
   const button = d.buttons.find((b) => norm(b) === norm(a.button));
   if (!button) return { report: true };
   const now = opts.nowMs ?? Date.now();
-  const again = (opts.recent ?? []).filter((r) => r.title === d.title && now - Date.parse(r.at) < DISMISS_LIMIT.windowMs).length;
-  if (again >= DISMISS_LIMIT.count) return { report: true, repeated: true };
+  const ago = (opts.recent ?? []).filter((r) => r.title === d.title).map((r) => now - Date.parse(r.at));
+  if (a.always) {
+    if (ago.some((ms) => ms < ALWAYS_LIMIT.minGapMs)) {
+      return { report: true, repeated: true, why: `it came back within ${ALWAYS_LIMIT.minGapMs / 1000} s of being dismissed (a loop)` };
+    }
+    if (ago.filter((ms) => ms < 3_600_000).length >= ALWAYS_LIMIT.perHour) {
+      return { report: true, repeated: true, why: `it was dismissed ${ALWAYS_LIMIT.perHour} times within an hour (a loop)` };
+    }
+    return { click: button };
+  }
+  if (ago.filter((ms) => ms < DISMISS_LIMIT.windowMs).length >= DISMISS_LIMIT.count) return { report: true, repeated: true };
   return { click: button };
 }
 
