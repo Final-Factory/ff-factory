@@ -80,6 +80,8 @@ export interface HostDeps {
   report(title: string, body: string): void;
   runHelper(action: HelperAction): Promise<HelperResult>;
   cleanup(): Promise<{ removed: number }>;
+  /** Kill stale automation browsers (server/reaper.ts); one line per reaped tree. */
+  reap?(maxAgeHours: number): Promise<string[]>;
   changed(h: HostHealth): void;
   now?(): number;
   log?(line: string): void;
@@ -106,6 +108,7 @@ export class HostHealthMonitor {
   private lastCleanupAt = 0;
   private criticalSince = 0;
   private lastCompactAt = 0;
+  private lastReapAt = 0;
   private ticking = false;
 
   constructor(deps: HostDeps) {
@@ -140,6 +143,7 @@ export class HostHealthMonitor {
       await this.sandboxDrive();
       await this.diskGuard();
       await this.idleEditors();
+      await this.reapBrowsers();
       await this.maybeCompact();
       this.health.blocked = this.blockReason('agent');
       this.d.changed(this.health);
@@ -322,6 +326,19 @@ export class HostHealthMonitor {
     const freed = before !== undefined && after !== undefined ? Math.max(0, after - before) * GB : undefined;
     this.health.lastCleanup = { at: new Date(this.now()).toISOString(), removed: r.removed, freedBytes: freed };
     if (r.removed) this.d.report('Cleaned up known-safe junk', `${why}: removed ${r.removed} item(s)${freed !== undefined ? `, about ${(freed / GB).toFixed(1)} GB` : ''}.`);
+  }
+
+  /** The orphan headless-browser reaper: at the first look after startup, then every reapEveryMinutes. */
+  private async reapBrowsers() {
+    const g = this.g();
+    if (!this.d.reap || g.reapBrowsersAfterHours <= 0) return;
+    if (this.lastReapAt && this.now() - this.lastReapAt < g.reapEveryMinutes * 60_000) return;
+    this.lastReapAt = this.now();
+    const lines = await this.d.reap(g.reapBrowsersAfterHours).catch((e) => [`reaper failed: ${(e as Error).message}`]);
+    if (!lines.length) return;
+    for (const l of lines) this.d.log?.(`reaper: ${l}`);
+    this.health.lastReap = { at: new Date(this.now()).toISOString(), killed: lines.filter((l) => l.startsWith('killed')).length, lines: lines.slice(0, 10) };
+    this.d.report('Reaped leftover headless browsers', lines.join('; '));
   }
 
   // ------------------------------------------------------------ editors and the VHDX

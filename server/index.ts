@@ -22,6 +22,7 @@ import { listImages, MEDIA_TYPE, readImage } from './images.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { runHelper } from './privileged.ts';
 import { planCleanup, runCleanup } from './cleanup.ts';
+import { reapBrowsers } from './reaper.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, parseRestartRequest, takeResumeFile, writeResumeFile, type RestartRequest } from './restart.ts';
 import { UsageTracker, usageLines } from './usage.ts';
@@ -101,6 +102,7 @@ const hostHealth = new HostHealthMonitor({
     const r = runCleanup(items, logs);
     return { removed: r.removed.length };
   },
+  reap: (hours) => reapBrowsers(hours),
   changed: (h) => {
     host.health = h;
     broadcast({ type: 'host', host: { ...host, drain: drainer.status } });

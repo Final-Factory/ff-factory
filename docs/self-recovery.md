@@ -79,6 +79,22 @@ has had no agent activity for `unity.idleStopMinutes` (120), and no agent mid-tu
   An age rule never covers a drive root, the home folder, the sandboxes, the base clone, this app,
   its data or a protected path.
 
+**The orphan headless-browser reaper** (`server/reaper.ts`). Scripts that drive a headless browser
+(screenshots, Playwright checks) sometimes die or hang and leave it running. Agents may not end
+browser or node processes by hand (the guard), so the server does it: once at startup, then every
+`hostGuard.reapEveryMinutes` (15). It only matches automation browsers:
+- anything under Playwright's own folder (`%LOCALAPPDATA%\ms-playwright\...`; its WebKit carries no
+  profile on the command line), or
+- Edge, Chrome or Firefox started `--headless` with a profile under the temp folder.
+
+The user's own browser, this server and Claude processes are never matched. A matched browser is
+reaped when it has run longer than `hostGuard.reapBrowsersAfterHours` (3; 0 turns the reaper off),
+or when whatever started it has been gone for 10 minutes. A node script driving it goes too, once
+it is older than the limit. The whole process tree ends and its temp profile is deleted. Each
+action is logged, reported as a `[host]` message and push, and shown as `lastReap` in
+`system_status`. Profiles left without a process (`edge-*`, `playwright_*dev_profile-*`) are removed
+by the clean-up once untouched for an hour.
+
 The orchestrator can set `hostGuard.cleanup.ageRules`, `hostGuard.devDriveVhdx` and
 `hostGuard.compactWhenReclaimGB` with `set_app_config`, and act by hand with `host_recovery`
 (remount, cleanup, trim, compact, reboot with `confirm_reboot`). `system_status` and the sidebar's

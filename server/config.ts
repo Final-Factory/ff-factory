@@ -207,7 +207,7 @@ export interface CleanupPolicy {
 
 export const DEFAULT_CLEANUP: CleanupPolicy = {
   // Headless-browser profiles from screenshot scripts, and the fast suite's own scratch folders.
-  tempPatterns: ['edge-shot-*', 'edge-keys-*', 'ffsb-voice-*', 'ffsb-auth-*', 'ffsb-integ-*', 'ffsb-smoke-*', 'republish-??????', 'update-steps-??????', 'editor-log-??????', 'appcfg-??????', 'scenes-??????', 'pushed-??????'],
+  tempPatterns: ['edge-shot-*', 'edge-keys-*', 'edge-icon-*', 'playwright_*dev_profile-*', 'ffsb-voice-*', 'ffsb-auth-*', 'ffsb-integ-*', 'ffsb-smoke-*', 'republish-??????', 'update-steps-??????', 'editor-log-??????', 'appcfg-??????', 'scenes-??????', 'pushed-??????'],
   tempOlderThanHours: 1,
   cloneOlderThanDays: 3,
   clonePatterns: ['fff-*', 'ffsb-*'],
@@ -229,6 +229,10 @@ export interface HostGuardConfig {
   devDriveVhdx: string;
   /** Compact the VHDX at idle when it holds at least this much more than the volume inside uses. 0: never. */
   compactWhenReclaimGB: number;
+  /** Kill automation browsers (headless, temp profile, or Playwright's) running longer than this, and orphans. 0: never. */
+  reapBrowsersAfterHours: number;
+  /** How often the reaper looks (it also runs once at startup). */
+  reapEveryMinutes: number;
   cleanup: CleanupPolicy;
 }
 
@@ -240,6 +244,8 @@ const HOST_GUARD_DEFAULTS: HostGuardConfig = {
   remountMinFreeGB: 30,
   devDriveVhdx: '',
   compactWhenReclaimGB: 0,
+  reapBrowsersAfterHours: 3,
+  reapEveryMinutes: 15,
   cleanup: DEFAULT_CLEANUP,
 };
 

@@ -1335,6 +1335,7 @@ function hostHealthLines(h: HostHealth | undefined): string[] {
   return [
     `Host guard (${h.level}): ${h.disks.map((d) => `${d.path} ${gb(d.freeBytes)} free${d.level !== 'ok' ? ` [${d.level}]` : ''}`).join(', ')}; sandbox drive ${h.sandboxRoot}${h.detail ? ` (${h.detail})` : ''}`,
     ...(h.blocked ? [`New work waits: ${h.blocked}`] : []),
+    ...(h.lastReap ? [`Last browser reap ${h.lastReap.at}: ${h.lastReap.lines.join('; ')}`] : []),
     ...(h.lastCleanup ? [`Last clean-up ${h.lastCleanup.at}: ${h.lastCleanup.removed} item(s)${h.lastCleanup.freedBytes !== undefined ? `, ${gb(h.lastCleanup.freedBytes)}` : ''}`] : []),
   ];
 }

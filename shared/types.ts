@@ -357,6 +357,8 @@ export interface HostHealth {
   /** Why new editors and new agent processes are refused right now, if they are. */
   blocked?: string;
   lastCleanup?: { at: string; removed: number; freedBytes?: number };
+  /** The orphan headless-browser reaper's last pass that found something (server/reaper.ts). */
+  lastReap?: { at: string; killed: number; lines: string[] };
 }
 
 export interface DrainStatus {
