@@ -62,7 +62,10 @@ export function remountDelayMs(attempt: number): number {
 export const MAX_REMOUNT_ATTEMPTS = 6;
 
 /** The volume a path lives on ("C:\" or "/"), to watch each volume once. */
-export const volumeOf = (p: string) => path.parse(path.resolve(p)).root.toUpperCase();
+export const volumeOf = (p: string) => {
+  const P = /^[a-zA-Z]:[\\/]|^\\\\/.test(p) ? path.win32 : path; // Windows paths on any OS (CI runs on Linux)
+  return P.parse(P.resolve(p)).root.toUpperCase();
+};
 
 export interface HostDeps {
   cfg: Config;

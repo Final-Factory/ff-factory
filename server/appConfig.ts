@@ -24,7 +24,9 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 
-const normPath = (p: string) => path.resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+// Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths on any OS (CI runs on Linux too).
+const P = (p: string) => (/^[a-zA-Z]:[\\/]|^\\\\/.test(p) ? path.win32 : path);
+const normPath = (p: string) => P(p).resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 const inside = (p: string, root: string) => normPath(p) === normPath(root) || normPath(p).startsWith(normPath(root) + '/');
 
 /**
@@ -39,8 +41,8 @@ export function checkAgeRules(value: unknown, cfg?: Pick<Config, 'protectedPaths
   return list.map((r) => {
     const p = typeof r?.path === 'string' ? r.path.trim() : '';
     const days = Number(r?.olderThanDays);
-    if (!path.isAbsolute(p)) throw new Error(`age rule path "${p}" must be absolute`);
-    if (normPath(p) === normPath(path.parse(path.resolve(p)).root) || normPath(p) === normPath(os.homedir())) throw new Error(`age rule path "${p}" is too broad`);
+    if (!P(p).isAbsolute(p)) throw new Error(`age rule path "${p}" must be absolute`);
+    if (normPath(p) === normPath(P(p).parse(P(p).resolve(p)).root) || normPath(p) === normPath(os.homedir())) throw new Error(`age rule path "${p}" is too broad`);
     const clash = off.find((o) => o && (inside(p, o) || inside(o, p)));
     if (clash) throw new Error(`age rule path "${p}" overlaps ${clash}, which clean-up never touches`);
     if (!Number.isFinite(days) || days < 3) throw new Error(`age rule for "${p}": olderThanDays must be at least 3`);
@@ -76,7 +78,7 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       return value.trim();
     }
     case 'hostGuard.devDriveVhdx': {
-      if (typeof value !== 'string' || !path.isAbsolute(value.trim()) || !/\.vhdx?$/i.test(value.trim())) throw new Error('hostGuard.devDriveVhdx is the absolute path of a .vhdx file');
+      if (typeof value !== 'string' || !P(value.trim()).isAbsolute(value.trim()) || !/\.vhdx?$/i.test(value.trim())) throw new Error('hostGuard.devDriveVhdx is the absolute path of a .vhdx file');
       return value.trim();
     }
     case 'hostGuard.compactWhenReclaimGB': {
