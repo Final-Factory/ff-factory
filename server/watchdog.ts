@@ -28,11 +28,14 @@ export interface EditorWindow {
  * title bar cannot tell: in 6000.3 its "*" comes from an editor window's hasUnsavedChanges, never from a
  * dirty scene (docs/unity-dialogs.md).
  *
+ * `onlyIf: 'sceneFilesClean'`: press only when no *.unity file in the sandbox has uncommitted changes
+ * (`git status`), with no title check (the dialog it guards comes up at startup, before the main window).
+ *
  * `always`: a standing rule says this button is always the answer (FMOD line endings, Safe Mode), so the
  * watchdog never gives up after a few presses (DISMISS_LIMIT); it only stops at a true loop, when the
  * dialog comes back faster than ALWAYS_LIMIT allows.
  */
-export type DialogAction = { kind: 'dismiss'; button: string; onlyIf?: 'scenesClean'; always?: true } | { kind: 'notify' };
+export type DialogAction = { kind: 'dismiss'; button: string; onlyIf?: 'scenesClean' | 'sceneFilesClean'; always?: true } | { kind: 'notify' };
 
 export interface KnownDialog {
   id: string;
@@ -106,9 +109,12 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
   },
   {
     id: 'scene-backups',
+    // Unity.dll 6000.3: title "Recovering Scene Backups", text "Scene backups from a previous Editor session have been
+    // detected. ... Do you want to copy and preserve these backups in Assets/_Recovery/?", buttons Yes / No.
     match: /Recovering Scene Backups|Scene backups from a previous Editor session/i,
-    action: { kind: 'notify' },
-    advice: 'an earlier editor did not close cleanly and left scene backups; choose whether to keep them in Assets/_Recovery/.',
+    action: { kind: 'dismiss', button: 'No', onlyIf: 'sceneFilesClean' },
+    advice:
+      'an earlier editor did not close cleanly and left scene backups. "No" drops them; "Yes" copies them into Assets/_Recovery/ as untracked files. It is pressed automatically only when no scene file has uncommitted changes; here one has, so check whether the backups hold work worth keeping.',
   },
   {
     id: 'package-manager',
@@ -191,6 +197,8 @@ export function decide(
     nowMs?: number;
     /** The scenes count as clean: the app's own bridge check (SandboxManager.markScenesClean) or no modified *.unity file. */
     scenesClean?: boolean;
+    /** No *.unity file in the sandbox has uncommitted changes (git status). */
+    sceneFilesClean?: boolean;
     /** The editor's main window title; a "*" in it means some editor window has unsaved changes. */
     editorTitle?: string;
   },
@@ -198,6 +206,7 @@ export function decide(
   const a = d.known?.action;
   if (!opts.autoDismiss || a?.kind !== 'dismiss') return { report: true };
   if (a.onlyIf === 'scenesClean' && (!opts.scenesClean || !opts.editorTitle || opts.editorTitle.includes('*'))) return { report: true };
+  if (a.onlyIf === 'sceneFilesClean' && !opts.sceneFilesClean) return { report: true };
   const button = d.buttons.find((b) => norm(b) === norm(a.button));
   if (!button) return { report: true };
   const now = opts.nowMs ?? Date.now();

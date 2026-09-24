@@ -754,11 +754,13 @@ export class SandboxManager {
     const autoDismiss = this.cfg.unity.watchdog.autoDismiss;
     // Clean scenes: the app's own bridge check before its switch, or else (a worker's raw git switch) no
     // *.unity file with uncommitted changes. Only looked up when the reload question is actually up.
-    let scenesClean = (this.scenesClean.get(s.id) ?? 0) > Date.now();
-    if (!scenesClean && dialogs.some((d) => d.known?.id === 'scenes-modified')) scenesClean = await sceneFilesUnchanged(s.path);
+    // The git check (no *.unity file with uncommitted changes) runs only when a dialog that needs it is up.
+    const needsGit = dialogs.some((d) => d.known?.action.kind === 'dismiss' && d.known.action.onlyIf);
+    const sceneFilesClean = needsGit ? await sceneFilesUnchanged(s.path) : false;
+    const scenesClean = (this.scenesClean.get(s.id) ?? 0) > Date.now() || sceneFilesClean;
     let report: { d: Dialog; repeated?: boolean; why?: string } | undefined;
     for (const d of dialogs) {
-      const verdict = decide(d, { autoDismiss, recent: s.unity.dismissed, scenesClean, editorTitle });
+      const verdict = decide(d, { autoDismiss, recent: s.unity.dismissed, scenesClean, sceneFilesClean, editorTitle });
       if ('click' in verdict) {
         let closed = false;
         try {

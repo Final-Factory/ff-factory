@@ -174,3 +174,22 @@ test('always-rule dialogs (FMOD, Safe Mode): pressed every time they come back, 
   const recent = [60, 120, 240].map((s) => ({ at: at(s), title: 'Connection Lost' }));
   assert.deepEqual(decide(conn, { autoDismiss: true, recent, nowMs: now }), { report: true, repeated: true });
 });
+
+test('scene backups after a crash: No when no scene file has uncommitted changes, else a person decides', () => {
+  // Unity.dll 6000.3 strings.
+  const [d] = findDialogs([
+    win({
+      title: 'Recovering Scene Backups',
+      text: ['Scene backups from a previous Editor session have been detected. Your scene might have been backed up when an Editor instance did not close correctly. \n\nDo you want to copy and preserve these backups in Assets/_Recovery/?'],
+      buttons: ['Yes', 'No'],
+    }),
+  ]);
+  assert.equal(d.known?.id, 'scene-backups');
+  // At startup there is no main window title yet; it is not needed here.
+  assert.deepEqual(decide(d, { autoDismiss: true, sceneFilesClean: true }), { click: 'No' });
+  assert.deepEqual(decide(d, { autoDismiss: true, sceneFilesClean: false }), { report: true });
+  assert.deepEqual(decide(d, { autoDismiss: true }), { report: true });
+  // The bridge check that allows Reload for "modified externally" does not count here: only git does.
+  assert.deepEqual(decide(d, { autoDismiss: true, scenesClean: true, editorTitle: TITLE }), { report: true });
+  assert.deepEqual(decide(d, { autoDismiss: false, sceneFilesClean: true }), { report: true });
+});
