@@ -39,8 +39,14 @@ export interface EditorWindow {
  * Addressables build report prompt), so the
  * watchdog never gives up after a few presses (DISMISS_LIMIT); it only stops at a true loop, when the
  * dialog comes back faster than ALWAYS_LIMIT allows.
+ *
+ * `singleButton`: an informational dialog of a known project tool; pressed only when its one button is
+ * `button` (a second button means it is asking something). `problem`: reported instead of pressed when its
+ * title or text matches `match` once the `benign` phrases (e.g. "No coverage errors") are taken out.
  */
-export type DialogAction = { kind: 'dismiss'; button: string; onlyIf?: 'scenesClean' | 'sceneFilesClean'; always?: true } | { kind: 'notify' };
+export type DialogAction =
+  | { kind: 'dismiss'; button: string; onlyIf?: 'scenesClean' | 'sceneFilesClean'; always?: true; singleButton?: true; problem?: { match: RegExp; benign?: RegExp } }
+  | { kind: 'notify' };
 
 export interface KnownDialog {
   id: string;
@@ -89,6 +95,17 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
     match: /Addressables Build Report|'Debug Build Layout' is turned on/i,
     action: { kind: 'dismiss', button: 'No', always: true },
     advice: 'Addressables offers to turn on "Debug Build Layout" (a build report that makes content builds slower); the rule: always No.',
+  },
+  {
+    id: 'font-coverage',
+    // The game's Assets/Editor/FontCoverage.cs, menu Tools > Localization > Validate Font Coverage / Rebuild Font
+    // Atlases: DisplayDialog("Font Coverage", "No coverage errors. See the Console for the full report." |
+    // "<n> coverage error(s). See the Console and Localization/FontCoverageReport.txt." | "Atlases rebuilt. No
+    // coverage errors." | "Atlases rebuilt, but <n> coverage error(s) remain. See the Console.", "OK").
+    match: /^Font Coverage(\n|$)/,
+    action: { kind: 'dismiss', button: 'OK', always: true, singleButton: true, problem: { match: /error|fail|missing/i, benign: /\bno (coverage )?errors?\b/gi } },
+    advice:
+      'the Font Coverage tool (Tools > Localization) finished; OK only closes its summary, and is pressed when it reports no errors. With coverage errors it waits for a person: see the Console and Localization/FontCoverageReport.txt. Agents can run the check with no dialog: Editor.FontCoverage.ValidateFontCoverageOrThrow() through execute_code (throws on errors).',
   },
   {
     id: 'licensing-connection-lost',
@@ -225,6 +242,8 @@ export function decide(
   if (a.onlyIf === 'sceneFilesClean' && !opts.sceneFilesClean) return { report: true };
   const button = d.buttons.find((b) => norm(b) === norm(a.button));
   if (!button) return { report: true };
+  if (a.singleButton && d.buttons.length !== 1) return { report: true, why: 'it has more than one button, so it is asking something' };
+  if (a.problem && a.problem.match.test(`${d.title}\n${d.text}`.replace(a.problem.benign ?? /$^/, ''))) return { report: true, why: 'it reports a problem' };
   const now = opts.nowMs ?? Date.now();
   const ago = (opts.recent ?? []).filter((r) => r.title === d.title).map((r) => now - Date.parse(r.at));
   if (a.always) {

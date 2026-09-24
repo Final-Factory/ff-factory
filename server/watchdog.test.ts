@@ -43,6 +43,7 @@ const SAMPLES: [string, string, string, string[]][] = [
     "There's a new Addressables Build Report you can check out after your content build.  However, this requires that 'Debug Build Layout' is turned on.  The setting can be found in Edit > Preferences > Addressables.  Would you like to turn it on?",
     ['Yes', 'No'],
   ],
+  ['font-coverage', 'Font Coverage', 'No coverage errors. See the Console for the full report.', ['OK']],
   ['project-version', 'Project Upgrade Required', 'Your project was saved with an older Unity version (6000.0.1f1) than the one you are currently using (6000.3.19f1).', ['Continue', 'Quit']],
   ['api-updater', 'Precompiled Assemblies Update Consent Request', 'Unity found assemblies using deprecated Unity APIs in this project.', ['Yes', 'No']],
   ['corrupted-library', 'Corrupted Library Detected', 'Corrupted files in the Library prevented Unity to load your project.', ['Rebuild Library', "Don't rebuild Library"]],
@@ -57,7 +58,7 @@ test('known dialogs: every sample matches its entry, and only the listed ones ar
     const [d] = findDialogs([win({ title, text: text ? [text] : [], buttons })]);
     assert.equal(d?.known?.id, id, title);
     const v = decide(d, { autoDismiss: true });
-    const expected: Record<string, string> = { 'fmod-line-endings': 'Ignore', 'safe-mode': 'Ignore', 'addressables-build-report': 'No' };
+    const expected: Record<string, string> = { 'fmod-line-endings': 'Ignore', 'safe-mode': 'Ignore', 'addressables-build-report': 'No', 'font-coverage': 'OK' };
     assert.deepEqual(v, expected[id] ? { click: expected[id] } : { report: true }, title);
   }
   assert.ok(new Set(KNOWN_DIALOGS.map((k) => k.id)).size === KNOWN_DIALOGS.length, 'ids are unique');
@@ -199,4 +200,24 @@ test('scene backups after a crash: No when no scene file has uncommitted changes
   // The bridge check that allows Reload for "modified externally" does not count here: only git does.
   assert.deepEqual(decide(d, { autoDismiss: true, scenesClean: true, editorTitle: TITLE }), { report: true });
   assert.deepEqual(decide(d, { autoDismiss: false, sceneFilesClean: true }), { report: true });
+});
+
+test('project tools: the Font Coverage summary is closed with OK only when it reports no problem', () => {
+  const d = (text: string, buttons = ['OK']) => findDialogs([win({ title: 'Font Coverage', text: [text], buttons })])[0];
+  for (const text of ['No coverage errors. See the Console for the full report.', 'Atlases rebuilt. No coverage errors.']) {
+    assert.deepEqual(decide(d(text), { autoDismiss: true }), { click: 'OK' }, text);
+    assert.deepEqual(decide(d(text, ['&OK']), { autoDismiss: true }), { click: '&OK' }, text);
+  }
+  for (const text of ['3 coverage error(s). See the Console and Localization/FontCoverageReport.txt.', 'Atlases rebuilt, but 2 coverage error(s) remain. See the Console.', 'No coverage errors, but 1 font failed to rebuild.']) {
+    const v = decide(d(text), { autoDismiss: true });
+    assert.equal('report' in v && v.why, 'it reports a problem', text);
+  }
+  // A second button: it is asking something, not informing.
+  assert.deepEqual(decide(d('No coverage errors.', ['OK', 'Cancel']), { autoDismiss: true }), { report: true, why: 'it has more than one button, so it is asking something' });
+  // Another tool's OK dialog is not this rule's.
+  assert.equal(findDialogs([win({ title: 'Name Conflict', text: ['The event x already exists under y'], buttons: ['OK'] })])[0].known, undefined);
+  // Coming back every time it is run is fine (an always-rule), a fast loop is not.
+  const now = Date.parse('2026-09-24T12:00:00Z');
+  const recent = [60, 120, 180, 240].map((s) => ({ at: new Date(now - s * 1000).toISOString(), title: 'Font Coverage' }));
+  assert.deepEqual(decide(d('No coverage errors.'), { autoDismiss: true, recent, nowMs: now }), { click: 'OK' });
 });
