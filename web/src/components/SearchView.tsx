@@ -2,15 +2,22 @@ import { useEffect, useRef, useState } from 'react';
 import type { AppState, SearchHit } from '../../../shared/types';
 import { api } from '../api';
 import { focusEvent, toastError } from '../store';
-import { displayName, navigate, type Route } from '../util';
+import { displayName, navigate, PLAIN_TEXT, sameTitle, useMediaQuery, type Route } from '../util';
+import { AttentionButton, DrawerButton } from './ShellButtons';
 import { Icon } from './ui';
 
-/** Where a hit's session lives in the app, and a label for it. */
-function placeOf(h: SearchHit): { route: Route; label: string } {
-  if (h.sessionKind === 'orchestrator') return { route: { view: 'home' }, label: 'Orchestrator' };
-  if (h.sandboxId) return { route: { view: 'sandbox', sandboxId: h.sandboxId, sessionId: h.sessionId }, label: `slot ${h.sandboxId}` };
-  if (h.standingId) return { route: { view: 'agent', agentId: h.standingId, tab: 'conversation' }, label: `standing · ${h.standingId}` };
-  if (h.machineId) return { route: { view: 'machine', machineId: h.machineId, sessionId: h.sessionId }, label: `machine ${h.machineId}` };
+/** Where a hit's session lives in the app, and a label for it (the place's name, not its id). */
+function placeOf(h: SearchHit, app: AppState): { route: Route; label: string } {
+  if (h.sessionKind === 'orchestrator') return { route: { view: 'home' }, label: '' };
+  if (h.sandboxId) {
+    const sb = app.sandboxes.find((x) => x.id === h.sandboxId);
+    return { route: { view: 'sandbox', sandboxId: h.sandboxId, sessionId: h.sessionId }, label: sb ? displayName(sb) : h.sandboxId };
+  }
+  if (h.standingId) return { route: { view: 'agent', agentId: h.standingId, tab: 'conversation' }, label: 'Standing agent' };
+  if (h.machineId) {
+    const m = app.machines.find((x) => x.id === h.machineId);
+    return { route: { view: 'machine', machineId: h.machineId, sessionId: h.sessionId }, label: m ? `${displayName(m)} (${m.id})` : h.machineId };
+  }
   return { route: { view: 'session', sessionId: h.sessionId }, label: '' };
 }
 
@@ -40,6 +47,9 @@ export function SearchView({ app, initial }: { app: AppState; initial?: string }
   const [result, setResult] = useState<{ hits: SearchHit[]; scanned: number; ms: number; q: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+  const phone = useMediaQuery('(max-width: 860px)');
+  const active = [place, agent, since, until].filter(Boolean).length;
+  const [filters, setFilters] = useState(active > 0);
 
   const run = async () => {
     if (!q.trim()) return;
@@ -63,11 +73,17 @@ export function SearchView({ app, initial }: { app: AppState; initial?: string }
 
   const open = (h: SearchHit) => {
     focusEvent(h.sessionId, h.seq);
-    navigate(placeOf(h).route);
+    navigate(placeOf(h, app).route);
   };
 
   return (
     <section className="search-view">
+      <header className="page-head">
+        <DrawerButton />
+        <span className="page-title">Search</span>
+        <span className="spacer" />
+        <AttentionButton />
+      </header>
       <form
         className="search-bar"
         onSubmit={(e) => {
@@ -77,12 +93,17 @@ export function SearchView({ app, initial }: { app: AppState; initial?: string }
       >
         <div className="search-input">
           <Icon name="search" size={16} />
-          <input ref={input} className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search every transcript… ("quoted phrase" works)' enterKeyHint="search" />
+          <input ref={input} {...PLAIN_TEXT} type="search" className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search every transcript… ("quoted phrase" works)' enterKeyHint="search" />
           <button className="btn btn-primary" disabled={!q.trim() || busy}>
             {busy ? <span className="spinner spinner-dark" /> : 'Search'}
           </button>
         </div>
-        <div className="search-filters">
+        {phone && (
+          <button type="button" className="link-btn search-filter-toggle" onClick={() => setFilters(!filters)} aria-expanded={filters}>
+            Filters{active ? ` (${active})` : ''}
+          </button>
+        )}
+        {(!phone || filters) && <div className="search-filters">
           <select className="input" value={place} onChange={(e) => setPlace(e.target.value)} aria-label="Where">
             <option value="">Everywhere</option>
             {app.sandboxes.map((s) => (
@@ -106,31 +127,31 @@ export function SearchView({ app, initial }: { app: AppState; initial?: string }
               ))}
           </datalist>
           <label className="search-date">
-            <span className="dim small">from</span>
+            <span>From</span>
             <input className="input" type="date" value={since} onChange={(e) => setSince(e.target.value)} />
           </label>
           <label className="search-date">
-            <span className="dim small">to</span>
+            <span>To</span>
             <input className="input" type="date" value={until} onChange={(e) => setUntil(e.target.value)} />
           </label>
-        </div>
+        </div>}
       </form>
       <div className="search-results">
         {result && (
           <p className="dim small">
-            {result.hits.length ? `${result.hits.length}${result.hits.length >= 100 ? '+' : ''} match(es)` : 'No matches'} in {result.scanned} transcript(s), {result.ms} ms.
+            {result.hits.length ? `${result.hits.length}${result.hits.length >= 100 ? '+' : ''} ${result.hits.length === 1 ? 'match' : 'matches'}` : 'No matches'} in {result.scanned} {result.scanned === 1 ? 'conversation' : 'conversations'}.
           </p>
         )}
         {result?.hits.map((h) => {
-          const p = placeOf(h);
+          const p = placeOf(h, app);
           return (
             <button key={`${h.sessionId}:${h.seq}`} className="search-hit" onClick={() => open(h)}>
               <div className="search-hit-head">
                 <span className="search-hit-title ellipsis">{h.title}</span>
-                {p.label && <span className="chip chip-grey search-where">{p.label}</span>}
-                <span className="dim small">{KIND_LABEL[h.kind] ?? h.kind}</span>
-                <span className="spacer" />
-                <time className="dim small mono">{new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
+                {p.label && !sameTitle(p.label, h.title) && <span className="search-where ellipsis">{p.label}</span>}
+              </div>
+              <div className="search-hit-meta">
+                {KIND_LABEL[h.kind] ?? h.kind} · <time>{new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
               </div>
               <div className="search-snippet">
                 <Highlighted text={h.snippet} q={result.q} />

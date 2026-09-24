@@ -1,7 +1,8 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import type { AppVersion, ImageInput, Machine, PermissionMode, SessionInfo, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import type { AppVersion, ImageInput, Machine, PermissionMode, Sandbox, SessionInfo, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import { displayName, isUnused } from '../../shared/labels';
 
-export { displayName, isUnused } from '../../shared/labels';
+export { displayName, isUnused };
 
 // ---------- formatting ----------
 
@@ -66,8 +67,6 @@ export type Tone = 'green' | 'amber' | 'blue' | 'grey' | 'red';
 
 export function sessionTone(s: SessionStatus): Tone {
   switch (s) {
-    case 'idle':
-      return 'green';
     case 'running':
     case 'starting':
       return 'blue';
@@ -75,6 +74,7 @@ export function sessionTone(s: SessionStatus): Tone {
       return 'amber';
     case 'error':
       return 'red';
+    case 'idle':
     case 'stopped':
       return 'grey';
   }
@@ -121,11 +121,10 @@ export function sandboxTone(s: SandboxStatus): Tone {
 // ---------- standing agents ----------
 
 export function standingTone(a: StandingAgent): Tone {
-  if (a.state === 'running') return 'blue';
-  if (a.state === 'waiting') return 'amber';
+  if (a.state === 'running' || a.state === 'waiting') return 'blue';
   const last = lastRun(a);
   if (last && (last.outcome === 'error' || last.outcome === 'budget' || last.outcome === 'timeout')) return 'red';
-  return a.state === 'paused' ? 'grey' : 'green';
+  return 'grey';
 }
 
 export const standingLabel: Record<StandingAgent['state'], string> = {
@@ -206,6 +205,103 @@ export function fmtUntil(iso: string | undefined, now: number): string {
 
 export function isBusy(s: SessionInfo | undefined): boolean {
   return !!s && (s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission');
+}
+
+// ---------- at a glance: what a sandbox, machine or standing agent is doing ----------
+
+/** A place's state for the lists and headers: a tone, the word for it, and what it is about. */
+export interface Glance {
+  tone: Tone;
+  /** "Working", "Needs you", "Unity blocked", "Idle", "Free", … */
+  label: string;
+  /** The agent it is about (when that says more than the place's own name), or a short reason. */
+  detail?: string;
+  /** How many things here wait on the user: permission requests, a blocked editor, delegation requests. */
+  attention: number;
+  /** The session the state is about, to open it. */
+  sessionId?: string;
+  /** Something is being set up or torn down. */
+  progress?: boolean;
+}
+
+const TITLE_NOISE = new Set(['the', 'a', 'an', 'and', 'of', 'for', 'in', 'on', 'to', 'with', 'agent', 'sandbox', 'slot']);
+const titleWords = (s: string) => new Set(s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w && !TITLE_NOISE.has(w)));
+
+/** Two titles that say the same thing, e.g. an agent "Lighting pass (AAA space look)" in a sandbox "Lighting pass: AAA space look". */
+export function sameTitle(a: string, b: string): boolean {
+  const A = titleWords(a);
+  const B = titleWords(b);
+  if (!A.size || !B.size) return false;
+  let shared = 0;
+  for (const w of A) if (B.has(w)) shared++;
+  return shared / Math.min(A.size, B.size) >= 0.75;
+}
+
+/** The agent that says most about a place: one waiting on the user, else one working, else the newest. */
+export function leadSession(sessions: SessionInfo[]): SessionInfo | undefined {
+  return sessions.find((s) => s.pendingPermissions.length > 0) ?? sessions.findLast(isBusy) ?? sessions.findLast((s) => s.status === 'error') ?? sessions.at(-1);
+}
+
+const firstLine = (s: string | undefined) => s?.split('\n').find((l) => l.trim())?.trim();
+
+function agentsGlance(name: string, sessions: SessionInfo[], attention: number, unity?: Sandbox['unity'], unused = false): Glance {
+  const about = (s: SessionInfo) => (sameTitle(s.title, name) ? undefined : s.title);
+  const waiting = sessions.find((s) => s.pendingPermissions.length > 0);
+  if (waiting) return { tone: 'amber', label: 'Needs you', detail: about(waiting), attention, sessionId: waiting.id };
+  if (unity?.state === 'blocked') return { tone: 'amber', label: 'Unity blocked', detail: unity.blocked?.title ? `“${unity.blocked.title}”` : undefined, attention };
+  if (unity?.state === 'crashed') return { tone: 'red', label: 'Unity crashed', attention };
+  const busy = sessions.findLast(isBusy);
+  if (busy) return { tone: 'blue', label: 'Working', detail: about(busy), attention, sessionId: busy.id };
+  const failed = sessions.findLast((s) => s.status === 'error');
+  if (failed) return { tone: 'red', label: 'Agent error', detail: about(failed), attention, sessionId: failed.id };
+  if (unity?.state === 'starting') return { tone: 'blue', label: 'Unity starting', attention };
+  if (unused) return { tone: 'grey', label: 'Free', attention };
+  const last = sessions.at(-1);
+  if (!last) return { tone: 'grey', label: 'No agents', attention };
+  return { tone: 'grey', label: 'Idle', detail: about(last), attention, sessionId: last.id };
+}
+
+export function sandboxGlance(sb: Sandbox, sessions: SessionInfo[]): Glance {
+  const attention = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0) + (sb.unity.state === 'blocked' ? 1 : 0);
+  if (sb.status === 'creating') return { tone: 'blue', label: 'Creating', detail: sb.statusDetail, attention, progress: true };
+  if (sb.status === 'deleting') return { tone: 'blue', label: 'Deleting', detail: sb.statusDetail, attention, progress: true };
+  if (sb.status === 'error') return { tone: 'red', label: 'Failed', detail: firstLine(sb.statusDetail), attention };
+  return agentsGlance(displayName(sb), sessions, attention, sb.unity, isUnused(sb.purpose));
+}
+
+export function machineGlance(m: Machine, sessions: SessionInfo[], now: number): Glance {
+  const attention = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0);
+  if (m.status === 'deploying') return { tone: 'blue', label: 'Setting up', detail: m.statusDetail, attention, progress: true };
+  if (m.status === 'error') return { tone: 'red', label: 'Error', detail: firstLine(m.statusDetail), attention };
+  if (!m.online) return { tone: 'grey', label: 'Offline', detail: m.lastSeen ? `seen ${fmtRelative(m.lastSeen, now)}` : 'never connected', attention };
+  const g = agentsGlance(displayName(m), sessions, attention, undefined, false);
+  return g.label === 'Idle' || g.label === 'No agents' ? { ...g, tone: 'green', label: 'Online' } : g;
+}
+
+export function standingGlance(a: StandingAgent, pendingDelegations: number, now: number): Glance {
+  const attention = pendingDelegations;
+  if (pendingDelegations) return { tone: 'amber', label: 'Needs you', detail: `${pendingDelegations} request${pendingDelegations === 1 ? '' : 's'}`, attention };
+  if (a.state === 'running') return { tone: 'blue', label: 'Running', attention };
+  if (a.state === 'waiting') return { tone: 'blue', label: 'Waiting for a slot', attention };
+  const last = lastRun(a);
+  if (last && (last.outcome === 'error' || last.outcome === 'budget' || last.outcome === 'timeout')) {
+    return { tone: 'red', label: outcomeLabel[last.outcome], detail: a.state === 'paused' ? 'paused' : undefined, attention };
+  }
+  if (a.state === 'paused') return { tone: 'grey', label: 'Paused', attention };
+  return { tone: 'grey', label: a.nextRunAt ? `Next run ${fmtUntil(a.nextRunAt, now)}` : a.enabled ? 'Runs by hand' : 'Paused', attention };
+}
+
+/** A time divider's text: "10:02", "Yesterday 18:40", "Mon 18:40", "20 Sep, 18:40". */
+export function fmtDivider(iso: string, now: number): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((day(new Date(now)) - day(d)) / 86_400_000);
+  if (days === 0) return `Today ${time}`;
+  if (days === 1) return `Yesterday ${time}`;
+  if (days < 7) return `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
+  return `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })}, ${time}`;
 }
 
 export const PERMISSION_MODES: { value: PermissionMode; label: string; hint: string }[] = [

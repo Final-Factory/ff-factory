@@ -1,35 +1,28 @@
-import type { AppState, Machine, PlanUsage, Sandbox, SessionInfo, StandingAgent, SystemStats, UsageMeter } from '../../../shared/types';
-import { logout, useStore } from '../store';
+import { useState, type ReactNode } from 'react';
+import type { AppState, PlanUsage, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
+import { useAttention, type AttentionItem } from '../attention';
 import {
+  displayName,
   fmtBytes,
   fmtClock,
   fmtCost,
-  fmtUntil,
-  headline,
-  lastRun,
-  machineLabel,
-  machineTone,
+  isUnused,
+  lsGet,
+  lsSet,
+  machineGlance,
   navigate,
-  sandboxTone,
+  sandboxGlance,
   sessionLabel,
   sessionTone,
-  spentToday,
-  standingLabel,
-  standingTone,
-  unityLabel,
-  unityTone,
-  useMediaQuery,
+  standingGlance,
   useNow,
-  displayName,
-  isUnused,
   versionLabel,
+  type Glance,
   type Route,
 } from '../util';
-import { Chip, Dot, Icon } from './ui';
-import { useState } from 'react';
+import { Dot, Icon, type IconName } from './ui';
 import { usePush } from '../notify';
 import { SettingsModal } from './Settings';
-import { gitSummary } from './Git';
 
 export function Sidebar({
   app,
@@ -46,14 +39,13 @@ export function Sidebar({
   onNewMachine: () => void;
   onNavigate: () => void;
 }) {
-  const ws = useStore((s) => s.ws);
   const push = usePush();
+  const now = useNow(15_000);
   const [settings, setSettings] = useState(false);
-  // On a phone the meters would push the sandbox list off the screen: fold them to one line.
-  const narrow = useMediaQuery('(max-width: 860px)');
-  const [metersOpen, setMetersOpen] = useState(false);
+  const attention = useAttention(app);
   const sessionsById = new Map(app.sessions.map((s) => [s.id, s]));
   const orch = sessionsById.get(app.orchestratorId);
+  const of = (ids: string[]) => ids.map((id) => sessionsById.get(id)).filter((s): s is SessionInfo => !!s);
   const selectedSandbox = route.view === 'sandbox' ? route.sandboxId : route.view === 'session' ? sessionsById.get(route.sessionId)?.sandboxId : undefined;
   const selectedMachine = route.view === 'machine' ? route.machineId : route.view === 'session' ? sessionsById.get(route.sessionId)?.machineId : undefined;
 
@@ -64,143 +56,118 @@ export function Sidebar({
 
   return (
     <aside className="sidebar">
-      <div className="brand">
+      <div className="side-head">
         <div className="brand-mark" aria-hidden>
-          <svg viewBox="0 0 32 32" width="26" height="26">
+          <svg viewBox="0 0 32 32" width="24" height="24">
             <rect width="32" height="32" rx="7" fill="var(--panel-2)" />
             <path d="M8 23V9h13M8 16h9" stroke="var(--accent)" strokeWidth="3.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
             <circle cx="24" cy="22" r="3" fill="var(--accent)" />
           </svg>
         </div>
         <div className="brand-text">
-          <div className="brand-name">FF Factory</div>
-          <div className="brand-host mono">{app.system?.hostname ?? ''}</div>
+          <span className="brand-name">FF Factory</span>
+          {app.system?.hostname && <span className="brand-host">{app.system.hostname}</span>}
         </div>
-        <span className={`ws-ind ws-${ws}`} title={ws === 'open' ? 'Live' : ws === 'connecting' ? 'Connecting…' : 'Disconnected, retrying'} />
-        <button className="btn btn-ghost btn-icon" title="Settings: notifications and voice input" aria-label="Settings" onClick={() => setSettings(true)}>
-          <Icon name={push.endpoint ? 'bell' : 'bellOff'} size={15} />
+        <button className="btn btn-ghost btn-icon side-icon" title="Search every conversation" aria-label="Search" onClick={() => go({ view: 'search' })}>
+          <Icon name="search" size={17} />
         </button>
-        <button className="btn btn-ghost btn-icon" title="Sign out" aria-label="Sign out" onClick={() => void logout()}>
-          <Icon name="logout" size={15} />
+        <button className="btn btn-ghost btn-icon side-icon" title={push.endpoint ? 'Settings: notifications are on' : 'Settings: notifications and voice'} aria-label="Settings" onClick={() => setSettings(true)}>
+          <Icon name={push.endpoint ? 'bell' : 'bellOff'} size={17} />
         </button>
       </div>
 
-      <button className={`nav-item${route.view === 'home' ? ' active' : ''}`} onClick={() => go({ view: 'home' })}>
-        <Icon name="chat" />
-        <span>Orchestrator</span>
-        {orch && <Dot tone={sessionTone(orch.status)} pulse={orch.status === 'running'} title={sessionLabel[orch.status]} />}
-      </button>
-
-      <button className={`nav-item${route.view === 'search' ? ' active' : ''}`} onClick={() => go({ view: 'search' })}>
-        <Icon name="search" />
-        <span>Search transcripts</span>
-      </button>
-
-      {narrow && app.system && (
-        <button className="meters-fold" onClick={() => setMetersOpen(!metersOpen)} aria-expanded={metersOpen}>
-          <span className="mono small">
-            CPU {Math.round(app.system.loadPct)}% · RAM {fmtBytes(app.system.memTotalBytes - app.system.memFreeBytes)} · Agents{' '}
-            {app.sessions.filter((s) => s.kind !== 'orchestrator' && !s.machineId && s.status !== 'stopped' && s.status !== 'error').length}/{app.system.limits.maxSessions}
-            {app.usage ? ' · plan' : ''}
-          </span>
-          <Icon name="chevron" size={12} />
-        </button>
-      )}
-      {(!narrow || metersOpen) && app.system && <Meters sys={app.system} app={app} />}
-      {(!narrow || metersOpen) && app.usage && <PlanMeters usage={app.usage} />}
-
       <div className="side-scroll">
-        <div className="section-head">
-          <span>Sandboxes</span>
-          <span className="count">{app.sandboxes.length}</span>
-          <button className="btn btn-ghost btn-xs" onClick={onNewSandbox}>
-            <Icon name="plus" size={13} /> New
-          </button>
-        </div>
+        {orch && (
+          <Row
+            active={route.view === 'home'}
+            icon="chat"
+            tone={sessionTone(orch.status)}
+            pulse={orch.status === 'running'}
+            title="Orchestrator"
+            sub={<span className={`tone-${sessionTone(orch.status)}`}>{sessionLabel[orch.status]}</span>}
+            onClick={() => go({ view: 'home' })}
+          />
+        )}
 
-        <div className="sandbox-list">
+        {attention.length > 0 && <AttentionList items={attention} onPick={onNavigate} />}
+
+        <Section title="Sandboxes" count={app.sandboxes.length} add="New sandbox" onAdd={onNewSandbox}>
           {app.sandboxes.length === 0 && (
-            <div className="sandbox-empty">
-              No sandboxes yet. Ask the orchestrator, or{' '}
+            <p className="side-empty">
+              None yet. Ask the orchestrator for work, or{' '}
               <button className="link-btn" onClick={onNewSandbox}>
                 create one
               </button>
               .
-            </div>
+            </p>
           )}
           {app.sandboxes.map((sb) => (
-            <SandboxCard
+            <PlaceRow
               key={sb.id}
-              sandbox={sb}
-              sessions={sb.sessionIds.map((id) => sessionsById.get(id)).filter((s): s is SessionInfo => !!s)}
+              title={displayName(sb)}
+              unused={isUnused(sb.purpose)}
+              glance={sandboxGlance(sb, of(sb.sessionIds))}
               active={selectedSandbox === sb.id}
+              hint={`Slot ${sb.id}${sb.git ? ` · ${sb.git.branch}` : ''}${sb.sessionIds.length ? `\nAgents: ${of(sb.sessionIds).map((s) => s.title).join(', ')}` : ''}`}
               onClick={() => go({ view: 'sandbox', sandboxId: sb.id })}
             />
           ))}
-        </div>
+        </Section>
 
-        <div className="section-head">
-          <span>Machines</span>
-          <span className="count">{app.machines.length}</span>
-          <button className="btn btn-ghost btn-xs" onClick={onNewMachine}>
-            <Icon name="plus" size={13} /> Add
-          </button>
-        </div>
-        <div className="sandbox-list">
+        <Section title="Machines" count={app.machines.length} add="Add a machine" onAdd={onNewMachine}>
           {app.machines.length === 0 && (
-            <div className="sandbox-empty">
-              The user's Macs, where agents work in their main clone.{' '}
+            <p className="side-empty">
+              Macs where agents work in the main clone.{' '}
               <button className="link-btn" onClick={onNewMachine}>
                 Add one
               </button>
               .
-            </div>
+            </p>
           )}
           {app.machines.map((m) => (
-            <MachineCard
+            <PlaceRow
               key={m.id}
-              machine={m}
-              sessions={m.sessionIds.map((id) => sessionsById.get(id)).filter((s): s is SessionInfo => !!s && s.kind !== 'standing')}
+              title={displayName(m)}
+              unused={isUnused(m.purpose)}
+              prefix={m.id}
+              glance={machineGlance(m, of(m.sessionIds).filter((s) => s.kind !== 'standing'), now)}
               active={selectedMachine === m.id}
+              hint={`Machine ${m.id}${m.git ? ` · ${m.git.branch}` : ''}`}
               onClick={() => go({ view: 'machine', machineId: m.id })}
             />
           ))}
-        </div>
+        </Section>
 
-        <div className="section-head">
-          <span>Standing agents</span>
-          <span className="count">{app.standingAgents.length}</span>
-          <button className="btn btn-ghost btn-xs" onClick={onNewStanding}>
-            <Icon name="plus" size={13} /> New
-          </button>
-        </div>
-        <div className="sandbox-list">
+        <Section title="Standing agents" count={app.standingAgents.length} add="New standing agent" onAdd={onNewStanding}>
           {app.standingAgents.length === 0 && (
-            <div className="sandbox-empty">
-              None yet. Long-lived agents with a job and a schedule, apart from the sandboxes.{' '}
+            <p className="side-empty">
+              Long-lived agents with a job and a schedule.{' '}
               <button className="link-btn" onClick={onNewStanding}>
                 Define one
               </button>
               .
-            </div>
+            </p>
           )}
           {app.standingAgents.map((a) => (
-            <StandingCard
+            <PlaceRow
               key={a.id}
-              agent={a}
-              pendingDelegations={app.delegations.filter((d) => d.agentId === a.id && d.status === 'pending').length}
+              title={a.name}
+              glance={standingGlance(
+                a,
+                app.delegations.filter((d) => d.agentId === a.id && d.status === 'pending').length,
+                now,
+              )}
               active={route.view === 'agent' && route.agentId === a.id}
+              hint={`${a.model} · today ${fmtCost(a.spend.usd)} of $${a.budget.perDayUsd.toFixed(0)}`}
               onClick={() => go({ view: 'agent', agentId: a.id })}
             />
           ))}
-        </div>
+        </Section>
       </div>
 
-      <button className="btn btn-outline new-sb" onClick={onNewSandbox}>
-        <Icon name="plus" size={14} /> New sandbox
-      </button>
+      <SystemFooter app={app} />
       {app.app && (
-        <div className="side-foot mono dim" data-testid="app-version" title="FF Factory version and git commit">
+        <div className="side-foot" data-testid="app-version" title="FF Factory version and git commit">
           {versionLabel(app.app)}
         </div>
       )}
@@ -209,14 +176,182 @@ export function Sidebar({
   );
 }
 
+// ---------------------------------------------------------------- rows
+
+function Row({ active, icon, tone, pulse, title, sub, onClick }: { active: boolean; icon: IconName; tone: Glance['tone']; pulse?: boolean; title: string; sub: ReactNode; onClick: () => void }) {
+  return (
+    <button className={`row${active ? ' active' : ''}`} onClick={onClick} aria-current={active ? 'page' : undefined}>
+      <span className="row-icon">
+        <Icon name={icon} size={16} />
+      </span>
+      <span className="row-main">
+        <span className="row-title">{title}</span>
+        <span className="row-sub">{sub}</span>
+      </span>
+      <Dot tone={tone} pulse={pulse} />
+    </button>
+  );
+}
+
+/** A sandbox, machine or standing agent: its name, then what it is doing in words (coloured) and for whom. */
+function PlaceRow({ title, unused, prefix, glance: g, active, hint, onClick }: { title: string; unused?: boolean; prefix?: string; glance: Glance; active: boolean; hint: string; onClick: () => void }) {
+  return (
+    <button className={`row place${active ? ' active' : ''}${g.attention ? ' has-attn' : ''}`} onClick={onClick} title={`${title}\n${hint}`} aria-current={active ? 'page' : undefined}>
+      <span className="row-icon">
+        <Dot tone={g.tone} pulse={g.tone === 'blue'} />
+      </span>
+      <span className="row-main">
+        <span className={`row-title${unused ? ' is-unused' : ''}`}>{title}</span>
+        <span className="row-sub">
+          {prefix && <span className="row-prefix">{prefix} · </span>}
+          <span className={`tone-${g.tone}`}>{g.label}</span>
+          {g.detail && <span className="row-detail"> · {g.detail}</span>}
+        </span>
+        {g.progress && <span className="indeterminate row-progress" />}
+      </span>
+      {g.attention > 0 && (
+        <span className="badge badge-amber" title="Waiting on you">
+          {g.attention}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function Section({ title, count, add, onAdd, children }: { title: string; count: number; add: string; onAdd: () => void; children: ReactNode }) {
+  return (
+    <section className="side-section">
+      <div className="section-head">
+        <span>{title}</span>
+        {count > 0 && <span className="count">{count}</span>}
+        <button className="btn btn-ghost btn-icon section-add" onClick={onAdd} title={add} aria-label={add}>
+          <Icon name="plus" size={15} />
+        </button>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+const ATTN_ICON: Record<AttentionItem['kind'], IconName> = { permission: 'bell', unity: 'alert', delegation: 'inbox' };
+
+/** Everything waiting on the user, oldest first; each opens where it is answered. */
+function AttentionList({ items, onPick }: { items: AttentionItem[]; onPick: () => void }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? items : items.slice(0, 4);
+  return (
+    <section className="attn" aria-label="Needs you">
+      <div className="attn-head">
+        <Icon name="bell" size={14} />
+        <span>Needs you</span>
+        <span className="count">{items.length}</span>
+      </div>
+      {shown.map((it) => (
+        <button
+          key={it.key}
+          className="attn-item"
+          onClick={() => {
+            it.open();
+            onPick();
+          }}
+        >
+          <Icon name={ATTN_ICON[it.kind]} size={15} />
+          <span className="attn-text">
+            <span className="attn-title">{it.title}</span>
+            <span className="attn-detail">{it.detail}</span>
+          </span>
+          <Icon name="chevron" size={12} />
+        </button>
+      ))}
+      {items.length > shown.length && (
+        <button className="link-btn attn-more" onClick={() => setAll(true)}>
+          {items.length - shown.length} more
+        </button>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------- the machine and the plan
+
+const level = (pct: number, warn = 75, crit = 90) => (pct >= crit ? 'crit' : pct >= warn ? 'warn' : 'ok');
+
+/** Two short lines of the host's load and the Claude plan; a tap opens the full meters. */
+function SystemFooter({ app }: { app: AppState }) {
+  const [open, setOpen] = useState(() => lsGet('ffsb.meters') === '1');
+  const sys = app.system;
+  if (!sys) return null;
+  const toggle = () => {
+    setOpen(!open);
+    lsSet('ffsb.meters', open ? null : '1');
+  };
+  const ram = ((sys.memTotalBytes - sys.memFreeBytes) / sys.memTotalBytes) * 100;
+  const vram = sys.gpu ? (sys.gpu.memUsedMiB / sys.gpu.memTotalMiB) * 100 : undefined;
+  const unityOn = app.sandboxes.filter((s) => s.unity.state !== 'stopped' && s.unity.state !== 'crashed').length;
+  // Workers and running standing agents on this host share limits.maxSessions; agents on a machine count toward its own limit.
+  const agentsOn = app.sessions.filter((s) => s.kind !== 'orchestrator' && !s.machineId && s.status !== 'stopped' && s.status !== 'error').length;
+  const u = app.usage;
+  const others = u?.available ? [u.session, ...u.models].filter((m): m is UsageMeter => !!m && m.percent >= 75) : [];
+  const hot = others.sort((a, b) => b.percent - a.percent)[0];
+  const short = (label: string) => label.replace(/^Weekly\s+/i, '').replace(/^5-hour session$/i, '5h');
+  const Val = ({ pct, children, warn, crit }: { pct: number; children: ReactNode; warn?: number; crit?: number }) => <b className={`lvl-${level(pct, warn, crit)}`}>{children}</b>;
+  return (
+    <div className={`sys-foot${open ? ' open' : ''}`}>
+      {open && (
+        <div className="sys-detail">
+          <Meters sys={sys} unityOn={unityOn} agentsOn={agentsOn} />
+          {u && <PlanMeters usage={u} />}
+        </div>
+      )}
+      <button className="sys-toggle" onClick={toggle} aria-expanded={open} title={`${sys.cpuModel} · ${sys.cpuCount} threads. Tap for the meters.`}>
+        <span className="sys-cells">
+          <span>
+            CPU <Val pct={sys.loadPct}>{Math.round(sys.loadPct)}%</Val>
+          </span>
+          <span>
+            RAM <Val pct={ram}>{Math.round(ram)}%</Val>
+          </span>
+          {vram !== undefined && (
+            <span>
+              VRAM <Val pct={vram}>{Math.round(vram)}%</Val>
+            </span>
+          )}
+          <span>
+            Unity <Val pct={(unityOn / sys.limits.maxUnity) * 100} warn={100} crit={101}>{`${unityOn}/${sys.limits.maxUnity}`}</Val>
+          </span>
+          <span>
+            Agents <Val pct={(agentsOn / sys.limits.maxSessions) * 100} warn={100} crit={101}>{`${agentsOn}/${sys.limits.maxSessions}`}</Val>
+          </span>
+          {u &&
+            (u.available && u.weekly ? (
+              <span>
+                Plan <Val pct={u.weekly.percent}>{Math.round(u.weekly.percent)}%</Val>
+                {hot && (
+                  <>
+                    {' · '}
+                    {short(hot.label)} <Val pct={hot.percent}>{Math.round(hot.percent)}%</Val>
+                  </>
+                )}
+              </span>
+            ) : (
+              <span>
+                Plan <b className="lvl-warn">?</b>
+              </span>
+            ))}
+        </span>
+        <Icon name="chevron" size={12} />
+      </button>
+    </div>
+  );
+}
+
 function Meter({ label, pct, value, warn = 75, crit = 90 }: { label: string; pct: number; value: string; warn?: number; crit?: number }) {
   const p = Math.max(0, Math.min(100, pct));
-  const level = p >= crit ? 'crit' : p >= warn ? 'warn' : 'ok';
   return (
-    <div className={`meter meter-${level}`}>
+    <div className={`meter meter-${level(p, warn, crit)}`}>
       <div className="meter-row">
         <span className="meter-label">{label}</span>
-        <span className="meter-value mono">{value}</span>
+        <span className="meter-value">{value}</span>
       </div>
       <div className="meter-bar">
         <i style={{ width: `${p}%` }} />
@@ -225,45 +360,35 @@ function Meter({ label, pct, value, warn = 75, crit = 90 }: { label: string; pct
   );
 }
 
-function Meters({ sys, app }: { sys: SystemStats; app: AppState }) {
+function Meters({ sys, unityOn, agentsOn }: { sys: SystemStats; unityOn: number; agentsOn: number }) {
   const memUsed = sys.memTotalBytes - sys.memFreeBytes;
-  const unityOn = app.sandboxes.filter((s) => s.unity.state !== 'stopped' && s.unity.state !== 'crashed').length;
-  // Workers and running standing agents on this host share limits.maxSessions; a sleeping standing agent is
-  // 'stopped', and agents on a machine count toward that machine's own limit.
-  const agentsOn = app.sessions.filter((s) => s.kind !== 'orchestrator' && !s.machineId && s.status !== 'stopped' && s.status !== 'error').length;
   return (
-    <div className="meters" title={`${sys.cpuModel} · ${sys.cpuCount} threads`}>
+    <div className="meters">
       <Meter label="CPU" pct={sys.loadPct} value={`${Math.round(sys.loadPct)}%`} />
-      <Meter label="RAM" pct={(memUsed / sys.memTotalBytes) * 100} value={`${fmtBytes(memUsed)} / ${fmtBytes(sys.memTotalBytes)}`} />
+      <Meter label="RAM" pct={(memUsed / sys.memTotalBytes) * 100} value={`${fmtBytes(memUsed)} of ${fmtBytes(sys.memTotalBytes)}`} />
       {sys.gpu && (
         <Meter
           label="VRAM"
           pct={(sys.gpu.memUsedMiB / sys.gpu.memTotalMiB) * 100}
-          value={`${(sys.gpu.memUsedMiB / 1024).toFixed(1)} / ${(sys.gpu.memTotalMiB / 1024).toFixed(0)} GB · ${Math.round(sys.gpu.utilPct)}%`}
+          value={`${(sys.gpu.memUsedMiB / 1024).toFixed(1)} of ${(sys.gpu.memTotalMiB / 1024).toFixed(0)} GB · GPU ${Math.round(sys.gpu.utilPct)}%`}
         />
       )}
       {sys.diskTotalBytes !== undefined && sys.diskFreeBytes !== undefined && (
-        <Meter
-          label="Disk"
-          pct={((sys.diskTotalBytes - sys.diskFreeBytes) / sys.diskTotalBytes) * 100}
-          value={`${fmtBytes(sys.diskFreeBytes)} free`}
-          warn={85}
-          crit={95}
-        />
+        <Meter label="Disk" pct={((sys.diskTotalBytes - sys.diskFreeBytes) / sys.diskTotalBytes) * 100} value={`${fmtBytes(sys.diskFreeBytes)} free`} warn={85} crit={95} />
       )}
       <div className="limits">
         <span className={unityOn >= sys.limits.maxUnity ? 'at-limit' : ''}>
-          Unity <b className="mono">{unityOn}/{sys.limits.maxUnity}</b>
+          Unity editors <b>{unityOn}/{sys.limits.maxUnity}</b>
         </span>
         <span className={agentsOn >= sys.limits.maxSessions ? 'at-limit' : ''}>
-          Agents <b className="mono">{agentsOn}/{sys.limits.maxSessions}</b>
+          Agents <b>{agentsOn}/{sys.limits.maxSessions}</b>
         </span>
       </div>
     </div>
   );
 }
 
-/** the user's Claude plan limits (server/usage.ts): weekly first, then the 5-hour session and per-model weekly windows. */
+/** The user's Claude plan limits (server/usage.ts): weekly first, then the 5-hour session and per-model weekly windows. */
 function PlanMeters({ usage: u }: { usage: PlanUsage }) {
   const now = useNow(60_000);
   const asOf = `as of ${fmtClock(u.asOf)}${u.error ? ' (refresh failed)' : ''}`;
@@ -274,14 +399,14 @@ function PlanMeters({ usage: u }: { usage: PlanUsage }) {
           <span className="meter-label">Claude plan</span>
           <span className="meter-value">unavailable</span>
         </div>
-        {u.why && <div className="plan-asof dim">{u.why}</div>}
+        {u.why && <div className="plan-asof">{u.why}</div>}
         {u.spendWeekUsd !== undefined && (
           <div className="meter-row" title="What FF Factory's own agents cost over the last 7 days, from their reported cost. This is spend, not the plan's usage limit.">
-            <span className="meter-label">Portal spend 7 d</span>
-            <span className="meter-value mono">{fmtCost(u.spendWeekUsd)}</span>
+            <span className="meter-label">Portal spend, 7 days</span>
+            <span className="meter-value">{fmtCost(u.spendWeekUsd)}</span>
           </div>
         )}
-        <div className="plan-asof dim">{asOf}</div>
+        <div className="plan-asof">{asOf}</div>
       </div>
     );
   }
@@ -291,7 +416,7 @@ function PlanMeters({ usage: u }: { usage: PlanUsage }) {
       {rows.map((m) => (
         <Meter key={m.label} label={m.label} pct={m.percent} value={`${Math.round(m.percent)}%${m.resetsAt ? ` · ${resetLabel(m.resetsAt, now)}` : ''}`} />
       ))}
-      <div className="plan-asof dim">
+      <div className="plan-asof">
         Claude {u.plan ?? 'plan'} · {asOf}
       </div>
     </div>
@@ -309,137 +434,3 @@ function resetLabel(iso: string, now: number): string {
   return `resets ${d.toLocaleDateString([], { weekday: 'short' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
 
-/** A sandbox's or machine's agents by name (the id is secondary), newest first, a few at most. */
-function AgentRows({ sessions }: { sessions: SessionInfo[] }) {
-  if (!sessions.length) return null;
-  const shown = [...sessions].reverse().slice(0, 4);
-  return (
-    <div className="agent-rows">
-      {shown.map((s) => (
-        <div key={s.id} className="agent-row" title={`${s.title} (${s.id}): ${sessionLabel[s.status]}`}>
-          <Dot tone={sessionTone(s.status)} pulse={s.status === 'running'} />
-          <span className="agent-row-title ellipsis">{s.title}</span>
-          {s.pendingPermissions.length > 0 && <span className="badge badge-amber">{s.pendingPermissions.length}</span>}
-          <span className="agent-row-id mono">{s.id}</span>
-        </div>
-      ))}
-      {sessions.length > shown.length && <div className="agent-row dim">+{sessions.length - shown.length} more</div>}
-    </div>
-  );
-}
-
-function MachineCard({ machine: m, sessions, active, onClick }: { machine: Machine; sessions: SessionInfo[]; active: boolean; onClick: () => void }) {
-  const needs = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0);
-  return (
-    <button className={`sb-card${active ? ' active' : ''}`} onClick={onClick}>
-      <div className="sb-top">
-        <Dot tone={machineTone(m)} pulse={m.status === 'deploying'} title={machineLabel(m)} />
-        <span className={`sb-name sb-title${isUnused(m.purpose) ? ' is-unused' : ''}`}>{displayName(m)}</span>
-        {needs > 0 && (
-          <span className="badge badge-amber" title="Waiting on you">
-            {needs}
-          </span>
-        )}
-      </div>
-      <div className="sb-slot mono">machine: {m.id}</div>
-      <div className="sb-branch mono ellipsis" title={m.repoPath}>
-        <Icon name="branch" size={12} /> {m.git ? m.git.branch : m.repoPath || '—'}
-        {m.git && (m.git.dirty || m.git.untracked || m.git.ahead || m.git.behind) ? <span className="sb-git"> · {gitSummary(m.git)}</span> : null}
-        {m.git?.pr && <span className="sb-git"> · PR #{m.git.pr.number}</span>}
-      </div>
-      {m.status === 'deploying' && (
-        <div className="sb-progress">
-          <div className="indeterminate" />
-          <span className="ellipsis">{m.statusDetail ?? 'Setting up…'}</span>
-        </div>
-      )}
-      {m.status === 'error' && <div className="sb-error">{m.statusDetail ?? 'Error'}</div>}
-      {m.status === 'ready' && (
-        <div className="sb-bottom">
-          <Chip tone={machineTone(m)}>{machineLabel(m)}</Chip>
-        </div>
-      )}
-      {m.status === 'ready' && <AgentRows sessions={sessions} />}
-    </button>
-  );
-}
-
-function StandingCard({ agent: a, pendingDelegations, active, onClick }: { agent: StandingAgent; pendingDelegations: number; active: boolean; onClick: () => void }) {
-  const now = useNow(15000);
-  const last = lastRun(a);
-  const when =
-    a.state === 'running'
-      ? 'running now'
-      : a.state === 'waiting'
-        ? 'waiting for a slot'
-        : a.nextRunAt
-          ? `next ${fmtUntil(a.nextRunAt, now)}`
-          : a.enabled
-            ? 'manual'
-            : 'paused';
-  return (
-    <button className={`sb-card sa-card${active ? ' active' : ''}`} onClick={onClick}>
-      <div className="sb-top">
-        <Dot tone={standingTone(a)} pulse={a.state === 'running' || a.state === 'waiting'} title={standingLabel[a.state]} />
-        <span className="sb-name ellipsis">{a.name}</span>
-        {pendingDelegations > 0 && (
-          <span className="badge badge-amber" title="Delegation requests waiting on you">
-            {pendingDelegations}
-          </span>
-        )}
-      </div>
-      {last?.summary && <div className="sb-purpose">{headline(last.summary)}</div>}
-      <div className="sb-bottom">
-        <span className="sb-branch">
-          <Icon name="clock" size={12} /> {when}
-        </span>
-        <span className="sb-branch mono" title="Spent today / daily budget">
-          {fmtCost(spentToday(a))} / ${a.budget.perDayUsd.toFixed(0)}
-        </span>
-      </div>
-    </button>
-  );
-}
-
-function SandboxCard({
-  sandbox: sb,
-  sessions,
-  active,
-  onClick,
-}: {
-  sandbox: Sandbox;
-  sessions: SessionInfo[];
-  active: boolean;
-  onClick: () => void;
-}) {
-  const needs = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0);
-  const busyStatus = sb.status === 'creating' || sb.status === 'deleting';
-  return (
-    <button className={`sb-card${active ? ' active' : ''} sb-${sb.status}`} onClick={onClick}>
-      <div className="sb-top">
-        <Dot tone={sandboxTone(sb.status)} pulse={busyStatus} title={sb.status} />
-        <span className={`sb-name sb-title${isUnused(sb.purpose) ? ' is-unused' : ''}`}>{displayName(sb)}</span>
-        {needs > 0 && <span className="badge badge-amber" title="Waiting on you">{needs}</span>}
-      </div>
-      <div className="sb-slot mono">slot: {sb.id}</div>
-      <div className="sb-branch mono ellipsis" title={sb.git ? `${sb.git.branch}: ${gitSummary(sb.git)}` : 'git status not read yet'}>
-        <Icon name="branch" size={12} /> {sb.git?.branch ?? '…'}
-        {sb.git && (sb.git.dirty || sb.git.untracked || sb.git.ahead) ? <span className="sb-git"> · {gitSummary(sb.git)}</span> : null}
-        {sb.git?.pr && <span className="sb-git"> · PR #{sb.git.pr.number}</span>}
-      </div>
-      {busyStatus && (
-        <div className="sb-progress">
-          <div className="indeterminate" />
-          <span className="ellipsis">{sb.statusDetail ?? (sb.status === 'creating' ? 'Creating…' : 'Deleting…')}</span>
-        </div>
-      )}
-      {sb.status === 'error' && <div className="sb-error">{sb.statusDetail ?? 'Error'}</div>}
-      {sb.status === 'ready' && (
-        <div className="sb-bottom">
-          <Chip tone={unityTone(sb.unity.state)}>{unityLabel[sb.unity.state]}</Chip>
-        </div>
-      )}
-      {sb.status === 'ready' && <AgentRows sessions={sessions} />}
-    </button>
-  );
-}

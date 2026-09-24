@@ -22,6 +22,10 @@ export interface StoreState {
   focusEvent: { sessionId: string; seq: number } | null;
   /** The full-size image viewer, when open. */
   lightbox: { items: LightboxItem[]; index: number } | null;
+  /** A sandbox or machine whose details should open (the attention list's "Unity is stuck"). */
+  focusDetails: string | null;
+  /** The phone's navigation drawer is open. */
+  drawer: boolean;
 }
 
 export interface LightboxItem {
@@ -46,6 +50,8 @@ let state: StoreState = {
   toasts: [],
   lightbox: null,
   focusEvent: null,
+  focusDetails: null,
+  drawer: false,
 };
 
 const listeners = new Set<() => void>();
@@ -293,6 +299,15 @@ export async function login(username: string, password: string) {
 
 export function focusPermission(requestId: string | null) {
   set({ focusRequestId: requestId });
+}
+
+/** Open the details of this sandbox or machine when its page shows (null: done). */
+export function focusDetails(id: string | null) {
+  set({ focusDetails: id });
+}
+
+export function setDrawer(open: boolean) {
+  set({ drawer: open });
 }
 
 /** Jump to an event in a session's transcript, loading older history if it is not there yet. */

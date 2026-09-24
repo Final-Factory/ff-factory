@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AppState, Sandbox, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
-import { attempt } from '../store';
-import { displayName, fmtRelative, isUnused, navigate, sandboxTone, unityLabel, unityTone, useNow } from '../util';
+import { attempt, focusDetails, useStore } from '../store';
+import { displayName, fmtRelative, isUnused, navigate, sandboxGlance, unityLabel, unityTone, useNow } from '../util';
 import { NewAgentModal } from './Modals';
 import { ScreenshotsDrawer } from './Images';
 import { GitFacts, SwitchBranchModal } from './Git';
 import { SessionDetails, SessionView } from './SessionView';
-import { AgentSwitcher, AgentTabs, CriticalBadges, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
-import { Chip, Confirm, CopyButton, Dot, Icon } from './ui';
+import { AgentPicker, AgentTabs, AttentionStrip, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
+import { Chip, Confirm, CopyButton, Icon, StateText } from './ui';
 
 export function SandboxPanel({
   app,
@@ -50,27 +50,66 @@ export function SandboxPanel({
 
   const [details, setDetails] = useDetailsOpen('sandbox');
   const pick = (id: string) => navigate({ view: 'sandbox', sandboxId: sandbox.id, sessionId: id }, true);
+  const glance = sandboxGlance(sandbox, sessions);
+  const waiting = sessions.find((s) => s.pendingPermissions.length > 0);
+
+  // "Unity is stuck" in the attention list opens the details; a permission request of another agent here selects it.
+  const detailsFor = useStore((s) => s.focusDetails);
+  useEffect(() => {
+    if (detailsFor !== sandbox.id) return;
+    setDetails(true);
+    focusDetails(null);
+  }, [detailsFor, sandbox.id]);
+  const focusRequest = useStore((s) => s.focusRequestId);
+  useEffect(() => {
+    const owner = focusRequest ? sessions.find((s) => s.pendingPermissions.some((p) => p.requestId === focusRequest)) : undefined;
+    if (owner && owner.id !== selected?.id) pick(owner.id);
+  }, [focusRequest]);
+
+  const facts = [u !== 'blocked' && ready ? unityLabel[u] : '', sandbox.git?.branch ?? ''].filter(Boolean);
 
   return (
     <section className="sb-panel">
       <PanelHeader
         onBack={onClose}
-        dot={<Dot tone={sandboxTone(sandbox.status)} pulse={sandbox.status === 'creating' || sandbox.status === 'deleting'} />}
         title={displayName(sandbox)}
         titleClass={isUnused(sandbox.purpose) ? 'is-unused' : ''}
-        subtitle={<span className="mono">slot {sandbox.id}</span>}
-        switcher={<AgentSwitcher sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!ready} />}
-        badges={<CriticalBadges session={selected} unityBlocked={u === 'blocked'} onUnity={() => setDetails(true)} />}
+        state={<StateText tone={glance.tone} label={glance.label} pulse={glance.tone === 'blue'} />}
+        extra={
+          <>
+            {glance.progress || sandbox.status === 'error' ? null : (
+              <span className="ph-facts hide-phone">
+                {facts.map((f, i) => (
+                  <span key={i} className={f === sandbox.git?.branch ? 'mono' : undefined}>
+                    <span className="ph-sep">·</span>
+                    {f}
+                  </span>
+                ))}
+              </span>
+            )}
+            {ready && <AgentPicker place={displayName(sandbox)} sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!ready} />}
+          </>
+        }
         detailsOpen={details}
         onToggleDetails={() => setDetails(!details)}
       />
+      <AttentionStrip session={waiting} unity={blocked} onUnity={() => setDetails(true)} />
       {(sandbox.status === 'creating' || sandbox.status === 'deleting') && (
         <div className="sb-progress">
           <div className="indeterminate" />
           <span>{sandbox.statusDetail ?? (sandbox.status === 'creating' ? 'Creating…' : 'Deleting…')}</span>
         </div>
       )}
-      {sandbox.status === 'error' && <div className="banner banner-error">{sandbox.statusDetail ?? 'Sandbox error'}</div>}
+      {sandbox.status === 'error' && (
+        <div className="banner banner-error banner-action">
+          <span>
+            <b>This sandbox could not be set up.</b> {sandbox.statusDetail}
+          </span>
+          <button className="btn btn-sm btn-outline" onClick={() => setConfirmDelete(true)}>
+            <Icon name="trash" size={14} /> Delete it
+          </button>
+        </div>
+      )}
       <DetailsSheet open={details} onClose={() => setDetails(false)} title={displayName(sandbox)}>
         <DetailsSection
           title="Sandbox"
@@ -85,14 +124,11 @@ export function SandboxPanel({
             </button>
           }
         >
-          <div className="details-row">
-            <span className={`details-name${isUnused(sandbox.purpose) ? ' is-unused' : ''}`}>{displayName(sandbox)}</span>
-            <span className="sb-slot mono" title="The sandbox's folder / Unity project: historical, not its current task">
-              slot: {sandbox.id}
+          <div className="details-row dim small">
+            <span title="The sandbox's folder and Unity project: historical, not its current task">
+              Slot <span className="mono">{sandbox.id}</span>
             </span>
-            <span className="dim small" title={new Date(sandbox.createdAt).toLocaleString()}>
-              created {fmtRelative(sandbox.createdAt, now)}
-            </span>
+            <span title={new Date(sandbox.createdAt).toLocaleString()}>created {fmtRelative(sandbox.createdAt, now)}</span>
           </div>
           <div className="sb-facts">
             <GitFacts git={sandbox.git} />
@@ -158,19 +194,29 @@ export function SandboxPanel({
 
       {selected ? (
         <SessionView key={selected.id} session={selected} embedded />
-      ) : (
+      ) : sandbox.status === 'error' ? null : (
         <div className="panel-empty">
           <Icon name="bot" size={28} />
-          <p>No agents in this sandbox yet.</p>
-          <button className="btn btn-primary" disabled={!ready} onClick={() => setNewAgent(true)}>
-            <Icon name="plus" size={14} /> New agent
-          </button>
+          <p>{ready ? 'No agents here yet.' : 'Agents can start once the sandbox is ready.'}</p>
+          {ready && (
+            <div className="panel-empty-actions">
+              <button className="btn btn-primary" onClick={() => setNewAgent(true)}>
+                <Icon name="plus" size={14} /> New agent
+              </button>
+              {u === 'stopped' && (
+                <button className="btn btn-outline" disabled={unityBusy} onClick={toggleUnity}>
+                  <Icon name="play" size={14} /> Start Unity
+                </button>
+              )}
+            </div>
+          )}
+          {ready && <p className="dim small">Or ask the orchestrator to put it to work.</p>}
         </div>
       )}
 
-      {newAgent && <NewAgentModal app={app} target={{ sandboxId: sandbox.id, name: nameOf }} onClose={() => setNewAgent(false)} />}
+      {newAgent && <NewAgentModal app={app} target={{ sandboxId: sandbox.id, name: displayName(sandbox) }} onClose={() => setNewAgent(false)} />}
       {logOpen && <UnityLogDrawer sandbox={sandbox} onClose={() => setLogOpen(false)} />}
-      {shotsOpen && <ScreenshotsDrawer place={{ sandbox: sandbox.id }} title={nameOf} onClose={() => setShotsOpen(false)} />}
+      {shotsOpen && <ScreenshotsDrawer place={{ sandbox: sandbox.id }} title={displayName(sandbox)} onClose={() => setShotsOpen(false)} />}
       {switchOpen && <SwitchBranchModal target={{ sandbox: sandbox.id }} name={nameOf} git={sandbox.git} onClose={() => setSwitchOpen(false)} />}
       {confirmDelete && (
         <Confirm
@@ -233,8 +279,8 @@ function UnityLogDrawer({ sandbox, onClose }: { sandbox: Sandbox; onClose: () =>
       <div className="drawer" role="dialog" aria-modal>
         <header className="drawer-head">
           <Icon name="log" />
-          <span>
-            Unity log · <span className="mono accent">{sandbox.id}</span>
+          <span className="ellipsis">
+            Unity log · <span className="accent">{displayName(sandbox)}</span>
           </span>
           {sandbox.unity.logPath && (
             <span className="mono dim small ellipsis hide-sm" title={sandbox.unity.logPath}>

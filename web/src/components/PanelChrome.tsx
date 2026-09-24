@@ -1,11 +1,13 @@
 // The chrome around a conversation in the sandbox, machine and session views, kept small so the
-// transcript gets the screen: one header row (back, label, agent switcher, critical badges, a ⋯
-// button) and everything else in a details sheet (a bottom sheet on phones, a collapsible panel on
-// desktop that remembers whether it was open).
+// transcript gets the screen: one header (back, the label, a line with the state and, on a phone, the
+// agent picker, and a ⋯ for the details), a strip when something waits on the user, and everything
+// else in a details sheet (a bottom sheet on phones, a collapsible panel on desktop that remembers
+// whether it was open).
 import { useEffect, useState, type ReactNode } from 'react';
-import type { SessionInfo } from '../../../shared/types';
+import type { SessionInfo, UnityBlocked } from '../../../shared/types';
 import { focusPermission } from '../store';
-import { lsGet, lsSet, sessionLabel, sessionTone, useMediaQuery } from '../util';
+import { lsGet, lsSet, sameTitle, sessionLabel, sessionTone, useMediaQuery } from '../util';
+import { summarizeToolInput, toolLabel } from './toolSummary';
 import { Dot, Icon } from './ui';
 
 export const PHONE = '(max-width: 860px)';
@@ -30,23 +32,21 @@ export function useDetailsOpen(kind: string): [boolean, (open: boolean) => void]
 export function PanelHeader({
   onBack,
   backLabel = 'Back',
-  dot,
   title,
   titleClass = '',
-  subtitle,
-  switcher,
-  badges,
+  state,
+  extra,
   detailsOpen,
   onToggleDetails,
 }: {
   onBack?: () => void;
   backLabel?: string;
-  dot?: ReactNode;
-  title: ReactNode;
+  title: string;
   titleClass?: string;
-  subtitle?: ReactNode;
-  switcher?: ReactNode;
-  badges?: ReactNode;
+  /** The state in words ("● Working"). */
+  state?: ReactNode;
+  /** After the state: the agent picker on a phone, a few facts on desktop. */
+  extra?: ReactNode;
   detailsOpen: boolean;
   onToggleDetails: () => void;
 }) {
@@ -57,17 +57,21 @@ export function PanelHeader({
           <Icon name="back" />
         </button>
       )}
-      <div className="ph-title">
-        {dot}
-        <span className={`ph-name ellipsis ${titleClass}`}>{title}</span>
-        {subtitle && <span className="ph-sub ellipsis hide-phone">{subtitle}</span>}
+      <div className="ph-text">
+        <div className={`ph-name ${titleClass}`} title={title}>
+          {title}
+        </div>
+        {(state || extra) && (
+          <div className="ph-sub">
+            {state}
+            {extra}
+          </div>
+        )}
       </div>
-      {switcher}
-      {badges}
       <button
         className={`btn btn-ghost btn-icon ph-btn${detailsOpen ? ' active' : ''}`}
         onClick={onToggleDetails}
-        title={detailsOpen ? 'Hide details' : 'Details: git, Unity, screenshots, permission mode, actions'}
+        title={detailsOpen ? 'Hide details' : 'Details: git, Unity, screenshots, permissions, actions'}
         aria-label="Details"
         aria-expanded={detailsOpen}
       >
@@ -77,14 +81,20 @@ export function PanelHeader({
   );
 }
 
-/** Pick the agent: a compact dropdown on phones, the tab row on desktop. */
-export function AgentSwitcher({
+/**
+ * Phones: the agent, in the header's second line. It reads as text ("Lighting pass ▾") and opens the
+ * native picker; its tap area reaches past the line so a thumb finds it.
+ */
+export function AgentPicker({
+  place,
   sessions,
   selected,
   onSelect,
   onNew,
   newDisabled,
 }: {
+  /** The sandbox's or machine's name: an agent named the same is shown as a count ("2 agents") rather than repeated. */
+  place: string;
   sessions: SessionInfo[];
   selected?: SessionInfo;
   onSelect: (id: string) => void;
@@ -92,9 +102,14 @@ export function AgentSwitcher({
   newDisabled?: boolean;
 }) {
   if (!sessions.length && !onNew) return null;
+  const text = !selected ? 'No agents yet' : sameTitle(selected.title, place) ? `${sessions.length} ${sessions.length === 1 ? 'agent' : 'agents'}` : selected.title;
   return (
-    <label className={`agent-select show-phone tone-${selected ? sessionTone(selected.status) : 'grey'}`} title="Agent">
-      {selected && <Dot tone={sessionTone(selected.status)} pulse={selected.status === 'running'} />}
+    <label className="agent-pick show-phone" title="Agent">
+      <span className="ph-sep" aria-hidden>
+        ·
+      </span>
+      <span className="agent-pick-text">{text}</span>
+      <Icon name="chevron" size={11} />
       <select
         value={selected?.id ?? ''}
         aria-label="Agent"
@@ -105,7 +120,7 @@ export function AgentSwitcher({
           } else onSelect(e.target.value);
         }}
       >
-        {!selected && <option value="">No agents</option>}
+        {!selected && <option value="">No agents yet</option>}
         {sessions.map((s) => (
           <option key={s.id} value={s.id}>
             {s.title} · {sessionLabel[s.status]}
@@ -162,25 +177,35 @@ export function AgentTabs({
   );
 }
 
-/** Only what cannot wait: a permission prompt (tap: scroll to it), Unity stuck on a dialog (tap: details). */
-export function CriticalBadges({ session, unityBlocked, onUnity }: { session?: SessionInfo; unityBlocked?: boolean; onUnity?: () => void }) {
-  const waiting = session?.pendingPermissions.length ?? 0;
-  if (!waiting && !unityBlocked) return null;
+/** Under the header, only while something waits on the user here: a permission request, Unity stuck on a dialog. */
+export function AttentionStrip({ session, unity, onUnity }: { session?: SessionInfo; unity?: UnityBlocked; onUnity?: () => void }) {
+  const waiting = session?.pendingPermissions ?? [];
+  if (!waiting.length && !unity) return null;
+  const p = waiting[0];
+  const what = p ? summarizeToolInput(p.toolName, p.input) : '';
   return (
-    <span className="ph-badges">
-      {waiting > 0 && (
-        <button className="ph-badge ph-badge-amber" onClick={() => focusPermission(session!.pendingPermissions[0].requestId)} title="Waiting for your permission: show it">
-          <Icon name="bell" size={13} /> <span>{waiting}</span>
-          <span className="hide-narrow">waiting</span>
+    <div className="attn-strip" role="status">
+      {p && (
+        <button className="attn-strip-row" onClick={() => focusPermission(p.requestId)}>
+          <Icon name="bell" size={15} />
+          <span className="attn-strip-text">
+            <b>{waiting.length > 1 ? `${waiting.length} requests wait for your OK` : 'Waiting for your OK'}</b> · {toolLabel(p.toolName)}
+            {what ? `: ${what}` : ''}
+          </span>
+          <span className="attn-strip-act">Review</span>
         </button>
       )}
-      {unityBlocked && (
-        <button className="ph-badge ph-badge-red" onClick={onUnity} title="Unity is stuck: see details">
-          <span>Unity</span>
-          <span className="hide-narrow">blocked</span>
+      {unity && (
+        <button className="attn-strip-row" onClick={onUnity}>
+          <Icon name="alert" size={15} />
+          <span className="attn-strip-text">
+            <b>Unity is stuck</b>
+            {unity.reason === 'dialog' && unity.title ? ` on “${unity.title}”` : unity.reason === 'stalled' ? ': no log output' : ''}. Someone at the desktop has to answer it.
+          </span>
+          <span className="attn-strip-act">Details</span>
         </button>
       )}
-    </span>
+    </div>
   );
 }
 

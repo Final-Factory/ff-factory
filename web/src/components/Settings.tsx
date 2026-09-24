@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { NOTIFY_KINDS, type AppVersion } from '../../../shared/types';
 import { disablePush, enablePush, setPref, testNotification, usePush } from '../notify';
 import { api } from '../api';
-import { toast, toastError } from '../store';
+import { logout, toast, toastError } from '../store';
 import { SHORTCUT_LABEL, VOICE_PREF_DEFAULTS, refreshVoiceStatus, setVoicePrefs, useVoicePrefs, useVoiceStatus, type TtsEnginePref } from '../voice/dictation';
 import { browserSpeechSupported } from '../voice/browserSpeech';
 import type { VoiceEnginePref } from '../../../shared/voice';
@@ -32,6 +32,10 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
       onClose={onClose}
       footer={
         <>
+          <button className="btn btn-ghost danger-hover settings-signout" onClick={() => void logout()} title="Sign this browser out">
+            Sign out
+          </button>
+          <span className="spacer" />
           {(on || canInPage) && (
             <button
               className="btn btn-ghost"

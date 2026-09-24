@@ -5,8 +5,8 @@ import { attempt, openSession } from '../store';
 import { fmtCost, fmtRelative, navigate, PERMISSION_MODES, sessionLabel, sessionTone, useNow } from '../util';
 import { Composer } from './Composer';
 import { Transcript } from './Transcript';
-import { Confirm, Dot, Icon } from './ui';
-import { CriticalBadges, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
+import { Confirm, Dot, Icon, StateText } from './ui';
+import { AttentionStrip, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 
 /**
  * A conversation: the transcript takes the height, the composer sits under it. Inside a sandbox or
@@ -33,13 +33,12 @@ export function SessionView({
         <>
           <PanelHeader
             onBack={onBack}
-            dot={<Dot tone={sessionTone(session.status)} pulse={session.status === 'running'} />}
             title={session.title}
-            subtitle={<SessionMeta session={session} />}
-            badges={<CriticalBadges session={session} />}
+            state={<StateText tone={sessionTone(session.status)} label={sessionLabel[session.status]} pulse={session.status === 'running'} />}
             detailsOpen={details}
             onToggleDetails={() => setDetails(!details)}
           />
+          <AttentionStrip session={session} />
           <DetailsSheet open={details} onClose={() => setDetails(false)} title={session.title}>
             <SessionDetails session={session} fullWidth={fullWidth} />
           </DetailsSheet>
@@ -51,7 +50,8 @@ export function SessionView({
         key={session.id}
         session={session}
         size={fullWidth ? 'large' : 'normal'}
-        placeholder={session.kind === 'standing' ? `Message ${session.title} (starts a run, or joins the current one)…` : `Message ${session.title}…`}
+        placeholder={session.kind === 'standing' ? `Message ${session.title} (starts a run, or joins one)` : `Message ${session.title}`}
+        autoFocus
       />
     </section>
   );
@@ -158,25 +158,32 @@ export function SessionMeta({ session }: { session: SessionInfo }) {
   );
 }
 
-export function ModeSelect({ session }: { session: SessionInfo }) {
+/** The permission mode: a pill in the details, or a plain select inside a menu or form (`plain`). */
+export function ModeSelect({ session, plain }: { session: SessionInfo; plain?: boolean }) {
   const [busy, setBusy] = useState(false);
+  const select = (
+    <select
+      className={plain ? 'input input-sm' : undefined}
+      value={session.permissionMode}
+      disabled={busy}
+      aria-label="Permission mode"
+      onChange={async (e) => {
+        setBusy(true);
+        await attempt(api.setMode(session.id, e.target.value as PermissionMode));
+        setBusy(false);
+      }}
+    >
+      {PERMISSION_MODES.map((m) => (
+        <option key={m.value} value={m.value} title={m.hint}>
+          {plain ? `${m.label}: ${m.hint.toLowerCase()}` : m.label}
+        </option>
+      ))}
+    </select>
+  );
+  if (plain) return select;
   return (
     <label className={`mode-select mode-${session.permissionMode}`} title="Permission mode">
-      <select
-        value={session.permissionMode}
-        disabled={busy}
-        onChange={async (e) => {
-          setBusy(true);
-          await attempt(api.setMode(session.id, e.target.value as PermissionMode));
-          setBusy(false);
-        }}
-      >
-        {PERMISSION_MODES.map((m) => (
-          <option key={m.value} value={m.value} title={m.hint}>
-            {m.label}
-          </option>
-        ))}
-      </select>
+      {select}
     </label>
   );
 }

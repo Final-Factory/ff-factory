@@ -15,12 +15,47 @@ export function Chip({ tone, children, title }: { tone: Tone; children: ReactNod
   );
 }
 
-type IconName =
+export type IconName =
   | 'menu' | 'plus' | 'send' | 'stop' | 'trash' | 'copy' | 'check' | 'x' | 'chevron' | 'back'
   | 'expand' | 'play' | 'power' | 'log' | 'refresh' | 'bell' | 'chat' | 'branch' | 'folder' | 'bot' | 'logout'
-  | 'clock' | 'pause' | 'edit' | 'wallet' | 'image' | 'download' | 'paperclip' | 'bellOff' | 'search' | 'mic' | 'wave' | 'more';
+  | 'clock' | 'pause' | 'edit' | 'wallet' | 'image' | 'download' | 'paperclip' | 'bellOff' | 'search' | 'mic' | 'wave' | 'more'
+  | 'pulse' | 'alert' | 'inbox' | 'info' | 'tools' | 'arrowDown' | 'bulb' | 'settings' | 'monitor';
 
 const PATHS: Record<IconName, ReactNode> = {
+  pulse: <path d="M3 12h4l2.5-6 4 12 2.5-6H21" />,
+  alert: (
+    <>
+      <path d="M12 4.5l8.5 15h-17z" />
+      <path d="M12 10v4.5M12 17.2h.01" />
+    </>
+  ),
+  inbox: (
+    <>
+      <path d="M4 13l2.5-7h11L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" />
+      <path d="M4 13h4.5l1 2h5l1-2H20" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 11v5M12 8h.01" />
+    </>
+  ),
+  tools: <path d="M14.7 6.3a4 4 0 0 0-5.4 5.1L4.5 16.2a1.8 1.8 0 0 0 2.5 2.5l4.8-4.8a4 4 0 0 0 5.1-5.4l-2.4 2.4-2.1-.4-.4-2.1z" />,
+  arrowDown: <path d="M12 5v14M6.5 13.5L12 19l5.5-5.5" />,
+  bulb: <path d="M9.5 18h5M10.5 21h3M12 3.5a5.5 5.5 0 0 0-3.3 9.9c.6.5.9 1.1.9 1.9V16h4.8v-.7c0-.8.3-1.4.9-1.9A5.5 5.5 0 0 0 12 3.5z" />,
+  settings: (
+    <>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M18 6l-1.6 1.6M7.6 16.4L6 18M18 18l-1.6-1.6M7.6 7.6L6 6" />
+    </>
+  ),
+  monitor: (
+    <>
+      <rect x="3.5" y="5" width="17" height="11" rx="1.5" />
+      <path d="M9 20h6M12 16v4" />
+    </>
+  ),
   menu: <path d="M4 7h16M4 12h16M4 17h16" />,
   clock: (
     <>
@@ -119,16 +154,18 @@ export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   );
 }
 
-export function CopyButton({ text, label }: { text: string; label?: string }) {
+/** Copy some text; `getText` reads it at click time (a code block's rendered text). */
+export function CopyButton({ text, getText, label, className = '' }: { text?: string; getText?: () => string; label?: string; className?: string }) {
   const [done, setDone] = useState(false);
   return (
     <button
       type="button"
-      className="btn btn-ghost btn-icon btn-xs"
-      title={label ?? 'Copy'}
+      className={`btn btn-ghost btn-icon btn-xs ${className}`}
+      title={done ? 'Copied' : (label ?? 'Copy')}
+      aria-label={label ?? 'Copy'}
       onClick={async (e) => {
         e.stopPropagation();
-        if (await copyText(text)) {
+        if (await copyText(getText ? getText() : (text ?? ''))) {
           setDone(true);
           setTimeout(() => setDone(false), 1400);
         }
@@ -136,6 +173,47 @@ export function CopyButton({ text, label }: { text: string; label?: string }) {
     >
       <Icon name={done ? 'check' : 'copy'} size={14} />
     </button>
+  );
+}
+
+/** A button that opens a small menu under it; it closes on a pick, a click outside or Escape. */
+export function Menu({ label, icon = 'more', className = '', children }: { label: string; icon?: IconName; className?: string; children: (close: () => void) => ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    document.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  return (
+    <div className={`menu ${className}`} ref={ref}>
+      <button type="button" className={`btn btn-ghost btn-icon menu-btn${open ? ' active' : ''}`} title={label} aria-label={label} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <Icon name={icon} />
+      </button>
+      {open && (
+        <div className="menu-pop" role="menu">
+          {children(() => setOpen(false))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A state in words with its dot: "● Working". */
+export function StateText({ tone, label, pulse, className = '' }: { tone: Tone; label: ReactNode; pulse?: boolean; className?: string }) {
+  return (
+    <span className={`state tone-${tone} ${className}`}>
+      <Dot tone={tone} pulse={pulse} />
+      {label}
+    </span>
   );
 }
 

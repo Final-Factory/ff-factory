@@ -24,6 +24,20 @@ export function toolDisplayName(name: string): { server?: string; tool: string }
   return { tool: name };
 }
 
+/** A tool's name for people: "list sandboxes" for mcp__sandboxes__list_sandboxes, "Read" for Read. */
+export function toolLabel(name: string): string {
+  const { server, tool } = toolDisplayName(name);
+  return server ? tool.replace(/_/g, ' ') : tool;
+}
+
+/** "Edit ×2, refresh unity, read console": the tools a run of calls used, in order, repeats counted. */
+export function toolsSummary(names: string[], max = 4): string {
+  const counts = new Map<string, number>();
+  for (const n of names) counts.set(toolLabel(n), (counts.get(toolLabel(n)) ?? 0) + 1);
+  const parts = [...counts].map(([label, n]) => (n > 1 ? `${label} ×${n}` : label));
+  return parts.length > max ? `${parts.slice(0, max).join(', ')}, …` : parts.join(', ');
+}
+
 export function summarizeToolInput(name: string, input: unknown): string {
   const o = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
   switch (name) {

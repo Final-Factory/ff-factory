@@ -134,8 +134,8 @@ export function ScreenshotsDrawer({ place, title, onClose }: { place: { sandbox:
       <div className="drawer" role="dialog" aria-modal>
         <header className="drawer-head">
           <Icon name="image" />
-          <span>
-            Screenshots · <span className="mono accent">{title}</span>
+          <span className="ellipsis">
+            Screenshots · <span className="accent">{title}</span>
           </span>
           <div className="spacer" />
           <button className="btn btn-ghost btn-icon" onClick={load} title="Refresh" aria-label="Refresh">

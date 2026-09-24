@@ -17,6 +17,7 @@ export function Composer({
   placeholder,
   prefill,
   onPrefillUsed,
+  autoFocus,
 }: {
   session: SessionInfo;
   size?: 'normal' | 'large';
@@ -24,6 +25,8 @@ export function Composer({
   /** Text pushed in from outside (e.g. a suggestion chip). */
   prefill?: string | null;
   onPrefillUsed?: () => void;
+  /** Put the caret here when the conversation opens (desktop only: on a phone it would pop the keyboard). */
+  autoFocus?: boolean;
 }) {
   const key = `ffsb.draft.${session.id}`;
   const [text, setText] = useState(() => lsGet(key) ?? '');
@@ -75,6 +78,10 @@ export function Composer({
   useEffect(() => {
     if (!busy) setStopping(false);
   }, [busy]);
+
+  useEffect(() => {
+    if (autoFocus && !touch && !document.querySelector('.overlay')) ta.current?.focus({ preventScroll: true });
+  }, [autoFocus, touch, session.id]);
 
   // Auto-grow.
   // Auto-grow up to a cap, then scroll. The cap also follows the visible viewport, so with the
@@ -153,7 +160,7 @@ export function Composer({
 
   return (
     <div className={`composer composer-${size}`}>
-      {voiceMode.view && <VoiceModeOverlay title={session.title} view={voiceMode.view} level={voiceMode.level} onEnd={voiceMode.end} bargeIn={bargeIn} />}
+      {voiceMode.view && <VoiceModeOverlay title={session.kind === 'orchestrator' ? 'Orchestrator' : session.title} view={voiceMode.view} level={voiceMode.level} onEnd={voiceMode.end} bargeIn={bargeIn} />}
       {hint && <div className="composer-hint">{hint}</div>}
       <div
         ref={boxRef}
@@ -196,7 +203,7 @@ export function Composer({
           aria-label={placeholder ?? 'Message'}
           rows={1}
           value={text}
-          placeholder={(touch ? placeholder?.replace(/\s*\(Enter to send[^)]*\)/, '') : placeholder) ?? (busy ? 'Queue a follow-up…' : 'Message…')}
+          placeholder={busy && !session.standingId ? 'Add a follow-up…' : (placeholder ?? 'Message…')}
           enterKeyHint={touch ? 'enter' : 'send'}
           onChange={(e) => setText(e.target.value)}
           onScroll={(e) => {
@@ -248,22 +255,27 @@ export function Composer({
             </>
           )}
           <span className="composer-spacer" />
-          {busy && (
-            <button className="btn btn-stop" onClick={stop} disabled={stopping} title="Interrupt the current turn" aria-label="Stop">
-              <Icon name="stop" size={14} /> <span className="stop-label">{stopping ? 'Stopping' : 'Stop'}</span>
+          {busy && hasContent && (
+            <button className="btn btn-ghost btn-icon btn-stop-mini" onClick={stop} disabled={stopping} title="Stop the current turn" aria-label="Stop">
+              <Icon name="stop" size={15} />
             </button>
           )}
+          {busy && !hasContent && !sending && <VoiceModeButton onStart={voiceMode.start} ghost />}
           <MicButton d={voice.d} />
-          {/* One primary slot, as in the ChatGPT and Claude apps: Send when there is something to send, else voice mode. */}
+          {/* One primary slot, as in the ChatGPT and Claude apps: Send when there is something to send, Stop while a turn runs, else voice mode. */}
           {hasContent || sending ? (
             <button
               className="btn btn-primary btn-icon btn-send"
               onClick={() => void send()}
               disabled={sending || reading > 0}
-              title={touch ? 'Send' : 'Send (Enter; Shift+Enter or Ctrl+Enter for a new line)'}
+              title={touch ? 'Send' : busy ? 'Send (it waits for the current turn)' : 'Send (Enter; Shift+Enter for a new line)'}
               aria-label="Send"
             >
               {sending ? <span className="spinner spinner-dark" /> : <Icon name="send" size={18} />}
+            </button>
+          ) : busy ? (
+            <button className="btn btn-icon btn-stop-main" onClick={stop} disabled={stopping} title={stopping ? 'Stopping…' : 'Stop the current turn'} aria-label="Stop">
+              {stopping ? <span className="spinner spinner-dark" /> : <Icon name="stop" size={16} />}
             </button>
           ) : (
             <VoiceModeButton onStart={voiceMode.start} />

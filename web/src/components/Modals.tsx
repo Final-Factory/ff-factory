@@ -145,7 +145,7 @@ export function NewAgentModal({ app, target, onClose }: { app: AppState; target:
     <Modal
       title={
         <>
-          New agent {'machineId' in target ? 'on' : 'in'} <span className="mono accent">{target.name}</span>
+          New agent {'machineId' in target ? 'on' : 'in'} <span className="accent">{target.name}</span>
         </>
       }
       onClose={onClose}

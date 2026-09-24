@@ -5,6 +5,7 @@ import { api } from '../api';
 import { attempt, toast } from '../store';
 import {
   describeTrigger,
+  displayName,
   fmtClock,
   fmtCost,
   fmtDuration,
@@ -75,17 +76,19 @@ export function StandingPanel({ app, agent, tab, onClose }: { app: AppState; age
           {agent.charter}
         </p>
         <div className="sb-facts">
-          <span className="fact">
-            <Icon name="clock" size={13} /> {describeTrigger(agent.trigger)}
-            <span className="dim">· {agent.model}</span>
-            {agent.machineId && <span className="dim">· on {agent.machineId}</span>}
-            {agent.autoApprove?.enabled && (
-              <span className="tone-blue" title={`Delegations start without you: ${agent.autoApprove.model}, ${agent.autoApprove.effort} effort, ${agent.autoApprove.maxPerRun}/run, ${agent.autoApprove.maxPerDay}/day`}>
-                · auto-approves {agent.autoApprove.maxPerDay}/day
-              </span>
-            )}
-            <span className="dim ellipsis">
-              · {agent.tools.length ? agent.tools.map((g) => STANDING_TOOL_GROUPS.find((x) => x.value === g)?.label ?? g).join(', ') : 'read-only'}
+          <span className="fact fact-wrap">
+            <Icon name="clock" size={13} />
+            <span>
+              {describeTrigger(agent.trigger)} · {agent.model}
+              {agent.machineId && ` · on ${agent.machineId}`}
+              {agent.autoApprove?.enabled && (
+                <span className="tone-blue" title={`Delegations start without you: ${agent.autoApprove.model}, ${agent.autoApprove.effort} effort, ${agent.autoApprove.maxPerRun}/run, ${agent.autoApprove.maxPerDay}/day`}>
+                  {' '}
+                  · auto-approves {agent.autoApprove.maxPerDay}/day
+                </span>
+              )}
+              {' · '}
+              {agent.tools.length ? agent.tools.map((g) => STANDING_TOOL_GROUPS.find((x) => x.value === g)?.label ?? g).join(', ') : 'read-only'}
             </span>
           </span>
           <span className="fact mono">
@@ -156,7 +159,7 @@ export function StandingPanel({ app, agent, tab, onClose }: { app: AppState; age
             <p>No conversation yet.</p>
           </div>
         ))}
-      {current === 'delegations' && <Delegations list={delegations} now={now} />}
+      {current === 'delegations' && <Delegations list={delegations} now={now} app={app} />}
 
       {edit && <StandingAgentModal app={app} agent={agent} onClose={() => setEdit(false)} />}
       {confirmDelete && (
@@ -236,7 +239,12 @@ function Runs({ agent, last, now }: { agent: StandingAgent; last: StandingRun | 
   );
 }
 
-function Delegations({ list, now }: { list: DelegationRequest[]; now: number }) {
+function Delegations({ list, now, app }: { list: DelegationRequest[]; now: number; app: AppState }) {
+  const where = (d: DelegationRequest) => {
+    const sb = d.sandboxId ? app.sandboxes.find((x) => x.id === d.sandboxId) : undefined;
+    const m = d.machineId ? app.machines.find((x) => x.id === d.machineId) : undefined;
+    return sb ? displayName(sb) : m ? displayName(m) : (d.sandboxId ?? d.machineId ?? '');
+  };
   const [busy, setBusy] = useState<string | null>(null);
   if (!list.length) {
     return (
@@ -250,7 +258,7 @@ function Delegations({ list, now }: { list: DelegationRequest[]; now: number }) 
     setBusy(d.id);
     const r = await attempt(api.decideDelegation(d.id, approve));
     setBusy(null);
-    if (r && approve && r.sandboxId) toast(`Worker started in ${r.sandboxId}`);
+    if (r && approve && (r.sandboxId || r.machineId)) toast(`Worker started in ${where(r)}`);
   };
   return (
     <div className="sa-scroll">
@@ -286,7 +294,7 @@ function Delegations({ list, now }: { list: DelegationRequest[]; now: number }) 
                 navigate(d.sandboxId ? { view: 'sandbox', sandboxId: d.sandboxId, sessionId: d.sessionId } : { view: 'machine', machineId: d.machineId!, sessionId: d.sessionId })
               }
             >
-              Open the worker (slot {d.sandboxId ?? d.machineId})
+              Open the worker in {where(d)}
               {d.model ? ` (${d.model}${d.effort ? `, ${d.effort}` : ''})` : ''}
             </button>
           )}

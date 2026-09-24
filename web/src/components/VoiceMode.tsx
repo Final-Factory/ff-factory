@@ -128,10 +128,10 @@ export function VoiceModeOverlay({
   );
 }
 
-/** Hands-free voice mode: the composer's primary button while the box is empty (Send takes its place when there is text). */
-export function VoiceModeButton({ onStart }: { onStart: () => void }) {
+/** Hands-free voice mode: the composer's primary button while the box is empty (Send takes its place when there is text, Stop while a turn runs). */
+export function VoiceModeButton({ onStart, ghost }: { onStart: () => void; ghost?: boolean }) {
   return (
-    <button type="button" className="btn btn-icon btn-voice-mode" onClick={onStart} title="Voice mode: talk hands-free, replies read aloud" aria-label="Voice mode">
+    <button type="button" className={`btn btn-icon ${ghost ? 'btn-ghost' : 'btn-voice-mode'}`} onClick={onStart} title="Voice mode: talk hands-free, replies read aloud" aria-label="Voice mode">
       <Icon name="wave" size={18} />
     </button>
   );

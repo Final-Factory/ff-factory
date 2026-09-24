@@ -1,14 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { AppState, Machine, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
-import { attempt, toast, upsertMachine } from '../store';
-import { displayName, fmtRelative, isUnused, machineLabel, machineTone, navigate, useNow } from '../util';
+import { attempt, toast, upsertMachine, useStore } from '../store';
+import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
 import { NewAgentModal } from './Modals';
 import { ScreenshotsDrawer } from './Images';
 import { GitFacts, SwitchBranchModal } from './Git';
 import { SessionDetails, SessionView } from './SessionView';
-import { AgentSwitcher, AgentTabs, CriticalBadges, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
-import { Chip, Confirm, CopyButton, Dot, Icon, Modal } from './ui';
+import { AgentPicker, AgentTabs, AttentionStrip, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
+import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
 
 /** One of the user's Macs (docs/machines.md): its daemon's state, its clone, and its agents. */
 export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: AppState; machine: Machine; sessionId?: string; onClose?: () => void }) {
@@ -33,20 +33,40 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
   const [details, setDetails] = useDetailsOpen('machine');
   const pick = (id: string) => navigate({ view: 'machine', machineId: m.id, sessionId: id }, true);
   const canAdd = m.status === 'ready' && m.online;
+  const glance = machineGlance(m, sessions, now);
+  const waiting = sessions.find((s) => s.pendingPermissions.length > 0);
+  const focusRequest = useStore((s) => s.focusRequestId);
+  useEffect(() => {
+    const owner = focusRequest ? sessions.find((s) => s.pendingPermissions.some((p) => p.requestId === focusRequest)) : undefined;
+    if (owner && owner.id !== selected?.id) pick(owner.id);
+  }, [focusRequest]);
 
   return (
     <section className="sb-panel">
       <PanelHeader
         onBack={onClose}
-        dot={<Dot tone={machineTone(m)} pulse={m.status === 'deploying'} />}
         title={displayName(m)}
         titleClass={isUnused(m.purpose) ? 'is-unused' : ''}
-        subtitle={<span className="mono">machine {m.id}</span>}
-        switcher={<AgentSwitcher sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!canAdd} />}
-        badges={<CriticalBadges session={selected} />}
+        state={<StateText tone={glance.tone} label={glance.label} pulse={glance.tone === 'blue'} />}
+        extra={
+          <>
+            <span className="ph-facts hide-phone">
+              <span className="ph-sep">·</span>
+              <span className="mono">{m.id}</span>
+              {m.git && (
+                <>
+                  <span className="ph-sep">·</span>
+                  <span className="mono">{m.git.branch}</span>
+                </>
+              )}
+            </span>
+            {m.status === 'ready' && <AgentPicker place={displayName(m)} sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!canAdd} />}
+          </>
+        }
         detailsOpen={details}
         onToggleDetails={() => setDetails(!details)}
       />
+      <AttentionStrip session={waiting} />
       {m.status === 'deploying' && (
         <div className="sb-progress">
           <div className="indeterminate" />
@@ -71,10 +91,11 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
             </span>
           }
         >
-          <div className="details-row">
-            <span className={`details-name${isUnused(m.purpose) ? ' is-unused' : ''}`}>{displayName(m)}</span>
-            <span className="sb-slot mono">machine: {m.id}</span>
-            <span className="dim small">{m.info?.hostname ?? `ssh ${m.host}`}</span>
+          <div className="details-row dim small">
+            <span>
+              Machine <span className="mono">{m.id}</span>
+            </span>
+            <span>{m.info?.hostname ?? `ssh ${m.host}`}</span>
           </div>
           <div className="sb-facts">
             <span className="fact mono">
@@ -128,9 +149,9 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
         </div>
       )}
 
-      {newAgent && <NewAgentModal app={app} target={{ machineId: m.id, name: m.id }} onClose={() => setNewAgent(false)} />}
+      {newAgent && <NewAgentModal app={app} target={{ machineId: m.id, name: displayName(m) }} onClose={() => setNewAgent(false)} />}
       {label && <LabelModal machine={m} onClose={() => setLabel(false)} />}
-      {shotsOpen && <ScreenshotsDrawer place={{ machine: m.id }} title={m.id} onClose={() => setShotsOpen(false)} />}
+      {shotsOpen && <ScreenshotsDrawer place={{ machine: m.id }} title={displayName(m)} onClose={() => setShotsOpen(false)} />}
       {switchOpen && <SwitchBranchModal target={{ machine: m.id }} name={m.id} git={m.git} onClose={() => setSwitchOpen(false)} />}
       {confirmRedeploy && (
         <Confirm

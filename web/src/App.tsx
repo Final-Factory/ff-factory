@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { AppState, HostStatus } from '../../shared/types';
+import { useAttention } from './attention';
 import { Login } from './components/Login';
 import { NewSandboxModal } from './components/Modals';
 import { OrchestratorView } from './components/OrchestratorView';
@@ -12,8 +13,7 @@ import { AddMachineModal, MachinePanel } from './components/MachinePanel';
 import { Toasts } from './components/Toasts';
 import { Lightbox } from './components/Images';
 import { SearchView } from './components/SearchView';
-import { Icon } from './components/ui';
-import { focusPermission, useStore } from './store';
+import { setDrawer, useStore } from './store';
 import { displayName, fmtClock, href, navigate, useMediaQuery, useRoute, type Route } from './util';
 
 export function App() {
@@ -32,25 +32,15 @@ export function App() {
   return <Shell app={app} />;
 }
 
-function usePending(app: AppState) {
-  return useMemo(() => {
-    const all = app.sessions.flatMap((s) => s.pendingPermissions.map((p) => ({ session: s, p })));
-    all.sort((a, b) => a.p.createdAt.localeCompare(b.p.createdAt));
-    return all;
-  }, [app.sessions]);
-}
-
 function Shell({ app }: { app: AppState }) {
   const route = useRoute();
   const wide = useMediaQuery('(min-width: 1280px)');
   const mobile = useMediaQuery('(max-width: 860px)');
-  const [drawer, setDrawer] = useState(false);
+  const drawer = useStore((s) => s.drawer);
   const [newSandbox, setNewSandbox] = useState(false);
   const [newStanding, setNewStanding] = useState(false);
   const [newMachine, setNewMachine] = useState(false);
-  const pending = usePending(app);
-  const delegations = app.delegations.filter((d) => d.status === 'pending');
-  const waiting = pending.length + delegations.length;
+  const waiting = useAttention(app).length;
 
   useEffect(() => {
     document.title = waiting ? `(${waiting}) FF Factory` : 'FF Factory';
@@ -64,70 +54,45 @@ function Shell({ app }: { app: AppState }) {
   const at = href(route);
   useEffect(() => setDrawer(false), [at]);
 
-  const jumpToPending = () => {
-    const first = pending[0];
-    if (!first) {
-      if (delegations[0]) navigate({ view: 'agent', agentId: delegations[0].agentId, tab: 'delegations' });
-      setDrawer(false);
-      return;
-    }
-    const s = first.session;
-    if (s.id === app.orchestratorId) navigate({ view: 'home' });
-    else if (s.sandboxId) navigate({ view: 'sandbox', sandboxId: s.sandboxId, sessionId: s.id });
-    else if (s.standingId) navigate({ view: 'agent', agentId: s.standingId, tab: 'conversation' });
-    else if (s.machineId) navigate({ view: 'machine', machineId: s.machineId, sessionId: s.id });
-    else navigate({ view: 'session', sessionId: s.id });
-    focusPermission(first.p.requestId);
-    setDrawer(false);
-  };
-
   const orch = app.sessions.find((s) => s.id === app.orchestratorId);
   const content = renderRoute(route, app, wide);
 
-  // A conversation page (sandbox, machine, a session of its own) has its own one-row header with a
-  // back button; on a phone the app's top bar would only repeat the title above it.
-  const focus = (route.view === 'sandbox' || route.view === 'machine' || route.view === 'session') && !!content.node;
-
   return (
-    <div className={`shell${drawer ? ' drawer-open' : ''}${focus ? ' shell-focus' : ''}`}>
-      <header className="topbar">
-        <button className="btn btn-ghost btn-icon" onClick={() => setDrawer(true)} aria-label="Menu">
-          <Icon name="menu" />
-        </button>
-        <span className="topbar-title ellipsis">{content.title}</span>
-        {waiting > 0 && (
-          <button className="needs-you" onClick={jumpToPending}>
-            <Icon name="bell" size={14} /> {waiting}
-          </button>
-        )}
-      </header>
-
+    <div className={`shell${drawer ? ' drawer-open' : ''}`}>
       <div className="sidebar-wrap">
         <Sidebar app={app} route={route} onNewSandbox={() => setNewSandbox(true)} onNewStanding={() => setNewStanding(true)} onNewMachine={() => setNewMachine(true)} onNavigate={() => setDrawer(false)} />
-        {waiting > 0 && !mobile && (
-          <button className="needs-you needs-you-side" onClick={jumpToPending}>
-            <Icon name="bell" size={14} />
-            <span>
-              {waiting} waiting on you
-              <small className="ellipsis">
-                {pending[0]
-                  ? `${pending[0].session.id === app.orchestratorId ? 'Orchestrator' : pending[0].session.title} · ${pending[0].p.toolName}`
-                  : `${delegations[0].agentName} · delegation request`}
-              </small>
-            </span>
-          </button>
-        )}
       </div>
       <div className="scrim" onClick={() => setDrawer(false)} />
 
       <main className={`main main-${content.layout}`}>{content.node ?? <OrchestratorView session={orch} />}</main>
       <HostBanner host={app.host} app={app} />
+      <ConnectionBanner />
 
       {newSandbox && <NewSandboxModal app={app} onClose={() => setNewSandbox(false)} />}
       {newStanding && <StandingAgentModal app={app} onClose={() => setNewStanding(false)} />}
       {newMachine && <AddMachineModal onClose={() => setNewMachine(false)} />}
       <Lightbox />
       <Toasts />
+    </div>
+  );
+}
+
+/** The live connection dropped: say so (after a moment, so a quick reconnect does not flash). */
+function ConnectionBanner() {
+  const ws = useStore((s) => s.ws);
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    if (ws === 'open') {
+      setShow(false);
+      return;
+    }
+    const t = setTimeout(() => setShow(true), 2500);
+    return () => clearTimeout(t);
+  }, [ws]);
+  if (!show) return null;
+  return (
+    <div className="conn-banner" role="status">
+      <span className="spinner" /> Connection lost. Reconnecting…
     </div>
   );
 }
