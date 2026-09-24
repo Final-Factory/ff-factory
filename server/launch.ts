@@ -99,7 +99,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     mcpServers[spec.mcp.server] = createSdkMcpServer({
       name: spec.mcp.server,
       version: '1.0.0',
-      tools: spec.mcp.tools.map((t) =>
+      // A tool this code does not know (a newer portal talking to an older daemon) is left out, not fatal.
+      tools: spec.mcp.tools.filter((t) => (t.name in CATALOG ? true : (console.warn(`launch: no tool "${t.name}" in this version; left out`), false))).map((t) =>
         tool(t.name, t.description, CATALOG[t.name], async (args: Record<string, unknown>) => {
           const h = handlers[t.name];
           try {

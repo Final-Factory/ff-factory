@@ -109,7 +109,8 @@ test('editor log: the previous run is kept; a log another process holds does not
     const fresh = pickEditorLog(dir, new Date('2026-09-24T10:00:00Z'));
     assert.equal(fresh, path.join(dir, 'sandbox-editor-20260924T100000Z.log'));
     assert.equal(fs.readFileSync(base, 'utf8'), 'run 2', 'the held log is left alone');
-    holder.kill();
+    // Let go of the file before the clean-up below and the temp folder's removal.
+    if (holder.exitCode === null) await new Promise<void>((resolve) => (holder.once('exit', () => resolve()), holder.kill()));
   }
   // Clean-up keeps the newest three kept logs and never the current one.
   for (let h = 11; h <= 15; h++) {

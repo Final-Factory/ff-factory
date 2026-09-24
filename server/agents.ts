@@ -171,10 +171,9 @@ export class Agents {
       }
       return;
     }
-    const outcomes: ResumeOutcome[] = [];
-    for (const e of f.sessions) {
+    const resume = (e: ResumeFile['sessions'][number]): ResumeOutcome => {
       const s = this.sessions.sessions.get(e.id);
-      const o: ResumeOutcome = { id: e.id, title: e.title, sandboxId: e.sandboxId, ok: false };
+      const o: ResumeOutcome = { id: e.id, title: e.title, sandboxId: e.sandboxId, machineId: s?.info.machineId, ok: false };
       if (!s) o.error = 'the session no longer exists';
       else {
         try {
@@ -186,11 +185,33 @@ export class Agents {
           o.error = (err as Error).message;
         }
       }
-      outcomes.push(o);
+      return o;
+    };
+    // Agents on machines wait for their daemon: after an update it still runs the old code until it is
+    // redeployed (MachineManager.whenCurrent), and an old daemon may not understand a new agent's launch.
+    const onMachine = new Map<string, ResumeFile['sessions']>();
+    const outcomes: ResumeOutcome[] = [];
+    for (const e of f.sessions) {
+      const mid = this.sessions.sessions.get(e.id)?.info.machineId;
+      if (mid) onMachine.set(mid, [...(onMachine.get(mid) ?? []), e]);
+      else outcomes.push(resume(e));
+    }
+    for (const [mid, es] of onMachine) {
+      for (const e of es) outcomes.push({ id: e.id, title: e.title, machineId: mid, ok: false, error: `waits for ${mid}'s daemon to be connected and current (redeployed if outdated); resumed after that, and you get a message` });
     }
     const summary = restartSummary(f, outcomes, readUpdateResult(this.cfg.dataDir, f.at), now, notes);
     console.log(summary);
     this.notifyOrchestrator(summary);
+    for (const [mid, es] of onMachine) {
+      void this.machines.whenCurrent(mid).then((why) => {
+        const done = why ? es.map((e) => ({ id: e.id, title: e.title, machineId: mid, ok: false, error: `${mid} is not ready: ${why}` })) : es.map(resume);
+        const ok = done.filter((o) => o.ok).map((o) => `"${o.title}" (${o.id})`);
+        const bad = done.filter((o) => !o.ok).map((o) => `"${o.title}" (${o.id}): ${o.error}`);
+        const line = `[machines] ${mid}${why ? '' : "'s daemon is current"}. ${ok.length ? `Resumed: ${ok.join(', ')}.` : ''} ${bad.length ? `Not resumed: ${bad.join('; ')}. Resume them with message_agent once it is ready.` : ''}`.trim();
+        console.log(line);
+        this.notifyOrchestrator(line);
+      });
+    }
   }
 
   private onUnityBlocked(sb: Sandbox, b: UnityBlocked) {

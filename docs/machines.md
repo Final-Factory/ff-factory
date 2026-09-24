@@ -68,6 +68,17 @@ terminal sees, e.g. `~/bin/gh`), writes `~/.ff-factory/daemon.json` (portal URL,
 Running `add_machine` again for the same id (or Redeploy in the UI) updates the code and issues a fresh
 token; it refuses while agents are running there unless forced. The user does nothing on the Macs.
 
+**Versions.** A deploy stamps the daemon with the portal's commit (`machine/VERSION`); its hello reports
+it, with the protocol number and the tools it can serve. A daemon from another commit or protocol is
+outdated (`MachineManager.outdated`): after an app update that is every Mac. The portal redeploys an
+outdated daemon by itself as soon as no agent runs there (checked on its hello and every 30 s, at most
+every 10 minutes per machine) and tells the orchestrator. Meanwhile a new agent there is refused with
+"<id>'s daemon is outdated (...); redeploying it now. Try again in a few minutes." Agents already
+running carry on. After an app update, agents on a Mac are resumed only once its daemon is connected and
+current (`whenCurrent`, up to 12 minutes); the orchestrator gets a `[machines]` line saying which ones
+resumed. The daemon also leaves out any MCP tool its own code does not know, so a newer portal cannot
+crash an older daemon's launch.
+
 ## Not in v1
 
 Unity lifecycle on the Macs; machines other than Macs.

@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { AgentSession, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
-import { buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
+import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { MacUnity, MacUnityWatch } from './unity.ts';
 import { run } from '../server/proc.ts';
@@ -194,6 +194,7 @@ export class Daemon {
       protocol: PROTOCOL_VERSION,
       home: HOME,
       live: [...this.entries.values()].filter((e) => e.s.live).map((e) => e.s.info.id),
+      catalog: Object.keys(CATALOG),
       info: {
         hostname: os.hostname(),
         os: osv.code === 0 ? `macOS ${osv.stdout.trim()}` : `${os.type()} ${os.release()}`,

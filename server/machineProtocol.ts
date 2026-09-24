@@ -4,7 +4,7 @@ import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { ImageFile, ImageInput, Machine, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 /** Bumped when either side must be redeployed to keep talking. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended';
 
@@ -28,7 +28,8 @@ export type ToDaemon =
   | { type: 'unity'; id: string; action: 'status' | 'start' | 'stop' | 'restart'; force?: boolean };
 
 export type FromDaemon =
-  | { type: 'hello'; protocol: number; info: NonNullable<Machine['info']>; home: string; live: string[] }
+  /** `catalog`: the MCP tools this daemon can serve (protocol 3+); info.daemon is the commit it was deployed from. */
+  | { type: 'hello'; protocol: number; info: NonNullable<Machine['info']>; home: string; live: string[]; catalog?: string[] }
   /** The session's current record (the daemon's AgentSession changed it). */
   | { type: 'session'; info: SessionInfo; live: boolean }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }

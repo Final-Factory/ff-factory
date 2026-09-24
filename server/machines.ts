@@ -1,10 +1,11 @@
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import type http from 'node:http';
 import type { Duplex } from 'node:stream';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { Config } from './config.ts';
+import { ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
@@ -146,6 +147,75 @@ export class MachineManager {
       }
     }
     return done;
+  }
+
+  // ---------------------------------------------------------------- daemon versions
+
+  /** What each connected daemon said in its hello. */
+  private readonly hellos = new Map<string, { protocol: number; daemon?: string; catalog?: string[] }>();
+  /** The commit this portal runs (a deploy stamps the daemon with the same), for the version check. */
+  portalHead: string | undefined = gitHead(ROOT);
+  private readonly reportedOutdated = new Map<string, string>();
+
+  /** Why a connected machine's daemon does not match this portal (a redeploy fixes it), or undefined. */
+  outdated(id: string): string | undefined {
+    const h = this.hellos.get(id);
+    return h && this.isOnline(id) ? daemonMismatch(h, this.portalHead) : undefined;
+  }
+
+  /**
+   * Redeploy connected daemons that are outdated (after an app update the Macs still run the old code) as
+   * soon as no agent runs there: at most every 10 minutes per machine. Called on every hello and every 30 s.
+   */
+  checkOutdated(now = Date.now()): string[] {
+    const done: string[] = [];
+    for (const m of this.list()) {
+      const why = this.outdated(m.id);
+      if (!why) {
+        this.reportedOutdated.delete(m.id);
+        continue;
+      }
+      if (this.deploying.has(m.id)) continue;
+      const live = this.liveCount(m.id);
+      if (live > 0) {
+        if (this.reportedOutdated.get(m.id) !== why) {
+          this.reportedOutdated.set(m.id, why);
+          this.report?.(`[machines] ${m.id}'s daemon is outdated (${why}); ${live} agent(s) still run there, so it is redeployed once they have stopped. New agents cannot start there until then.`);
+        }
+        continue;
+      }
+      if (now - (this.lastAutoDeploy.get(m.id) ?? 0) < 10 * 60_000) continue;
+      this.lastAutoDeploy.set(m.id, now);
+      try {
+        this.deployMachine({ id: m.id });
+        done.push(m.id);
+        this.report?.(`[machines] ${m.id}'s daemon is outdated (${why}); redeploying it (as add_machine does).`);
+      } catch (e) {
+        this.report?.(`[machines] ${m.id}'s daemon is outdated (${why}) and could not be redeployed: ${(e as Error).message}`);
+      }
+    }
+    return done;
+  }
+
+  /**
+   * Wait until a machine is connected with a current daemon, redeploying an outdated one on the way.
+   * Resolves undefined when it is, else why not (after `timeoutMs`).
+   */
+  async whenCurrent(id: string, timeoutMs = 12 * 60_000, pollMs = 3000): Promise<string | undefined> {
+    const until = Date.now() + timeoutMs;
+    for (;;) {
+      const m = this.store.machines.get(id);
+      if (!m) return `no machine "${id}"`;
+      const online = this.isOnline(id) && this.hellos.has(id);
+      const why = this.outdated(id);
+      if (online && !why && !this.deploying.has(id)) return undefined;
+      if (why) this.checkOutdated();
+      if (Date.now() >= until) {
+        if (this.deploying.has(id)) return `its daemon is still being redeployed (${m.statusDetail ?? 'deploying'})`;
+        return why ? `its daemon is outdated (${why})` : `it is offline${m.statusDetail ? ` (${m.statusDetail})` : ''}`;
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
   }
 
   /** Live agent processes on a machine (its own limit, apart from this host's). */
@@ -328,9 +398,20 @@ export class MachineManager {
     if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline (asleep, or its daemon is not running)`);
     if (!s.live && this.liveCount(m.id) >= m.maxSessions) throw new Error(`already ${m.maxSessions} agents running on ${m.id}; stop one first`);
     if (!this.hooks) throw new Error('machines are not wired up');
+    // A new agent process is built from the spec by the daemon's own code: an outdated daemon may not understand
+    // it (a tool it does not have). A live process only gets the text, so it carries on.
+    const why = s.live ? undefined : this.outdated(m.id);
+    if (why) {
+      this.checkOutdated();
+      const busy = this.liveCount(m.id);
+      throw new Error(`${m.id}'s daemon is outdated (${why}): ${this.deploying.has(m.id) ? 'it is being redeployed now' : busy ? `it is redeployed once its ${busy} running agent(s) stop` : 'redeploying it now'}. Try again in a few minutes.`);
+    }
+    const spec = this.hooks.specFor(s.info, m);
+    const catalog = this.hellos.get(m.id)?.catalog;
+    if (spec.mcp && catalog) spec.mcp = { ...spec.mcp, tools: spec.mcp.tools.filter((t) => catalog.includes(t.name)) };
     // Stored here first, so the daemon's transcript event can name them without sending them back.
     const withIds = images.map((i) => ({ ...i, id: i.id ?? this.store.saveImage(s.info.id, i.mediaType, i.data) }));
-    this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec: this.hooks.specFor(s.info, m), text, from, uuid, images: withIds });
+    this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text, from, uuid, images: withIds });
   }
 
   /** Ask a machine's daemon for its git status now. */
@@ -408,6 +489,7 @@ export class MachineManager {
 
   private detach(id: string) {
     this.links.delete(id);
+    this.hellos.delete(id);
     const m = this.store.machines.get(id);
     if (m) {
       Object.assign(m, { online: false, lastSeen: new Date().toISOString() });
@@ -448,9 +530,10 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        if (msg.protocol !== PROTOCOL_VERSION) {
-          Object.assign(m, { statusDetail: `daemon speaks protocol ${msg.protocol}, the portal ${PROTOCOL_VERSION}: run update_machine` });
-        } else if (m.statusDetail?.startsWith('daemon speaks')) m.statusDetail = undefined;
+        this.hellos.set(id, { protocol: msg.protocol, daemon: msg.info?.daemon, catalog: msg.catalog });
+        const why = daemonMismatch(this.hellos.get(id)!, this.portalHead);
+        if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
+        else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
         Object.assign(m, { info: msg.info, home: msg.home || m.home });
         this.store.putMachine(m);
         const live = new Set(msg.live);
@@ -458,6 +541,7 @@ export class MachineManager {
           const s = this.handle(sid);
           if (s) s.liveFlag = live.has(sid);
         }
+        if (why) this.checkOutdated();
         return;
       }
       case 'session': {
@@ -657,4 +741,26 @@ export async function sshReachable(host: string): Promise<boolean> {
   const { run } = await import('./proc.ts');
   const r = await run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, 'true'], { timeoutMs: 20_000 });
   return r.code === 0;
+}
+
+/** The commit a checkout is at, or undefined. */
+function gitHead(dir: string): string | undefined {
+  try {
+    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Why a daemon does not match this portal, or undefined: another protocol, or deployed from another commit
+ * (info.daemon is the short hash machineDeploy stamped into machine/VERSION). Unknown versions count as current.
+ */
+export function daemonMismatch(h: { protocol: number; daemon?: string }, portalHead: string | undefined): string | undefined {
+  if (h.protocol !== PROTOCOL_VERSION) return `it speaks protocol ${h.protocol}, this portal ${PROTOCOL_VERSION}`;
+  const d = h.daemon?.trim().toLowerCase();
+  const p = portalHead?.trim().toLowerCase();
+  if (!d || !p || !/^[0-9a-f]{7,40}$/.test(d)) return undefined;
+  if (!p.startsWith(d) && !d.startsWith(p)) return `it runs ${d.slice(0, 9)}, this portal ${p.slice(0, 9)}`;
+  return undefined;
 }

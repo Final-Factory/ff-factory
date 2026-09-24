@@ -90,7 +90,10 @@ machines.report = (text) => {
     }
   }
 };
-setInterval(() => void machines.watchOffline().catch((e) => console.warn('machine watchdog:', (e as Error).message)), 30_000);
+setInterval(() => {
+  void machines.watchOffline().catch((e) => console.warn('machine watchdog:', (e as Error).message));
+  machines.checkOutdated();
+}, 30_000);
 const agents = new Agents(cfg, store, sandboxes, sessions, machines);
 if (host.elevated) sandboxes.refuseUnityWhileElevated(host.elevatedWhy ?? 'Run scripts/restart.ps1 to relaunch it non-elevated.');
 const auth = new Auth(cfg.dataDir, { trustProxy: cfg.trustProxy });

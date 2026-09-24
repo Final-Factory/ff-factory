@@ -8,7 +8,9 @@ import type { EventEmitter } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, type SessionHandle, type SessionSink } from './sessions.ts';
-import { MachineManager, RemoteSession } from './machines.ts';
+import { MachineManager, RemoteSession, daemonMismatch } from './machines.ts';
+import { PROTOCOL_VERSION } from './machineProtocol.ts';
+import { buildOptions } from './launch.ts';
 import { Daemon } from '../machine/daemon.ts';
 import { checkOwnCheckout } from './guard.ts';
 import { agentPath, nodeSupport, plist } from './machineDeploy.ts';
@@ -305,4 +307,58 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   await new Promise((r) => setTimeout(r, 6000));
   // Attempts every ~2 s (jitter 1.5-2.5 s): at least 3 in 6 s. A hung attempt would allow 1.
   assert.ok(upgrades >= 3, `only ${upgrades} attempt(s) in 6 s`);
+});
+
+test('daemon versions: another protocol or another commit is outdated; unknown versions are not', () => {
+  const head = '5b181de0123456789abcdef0123456789abcdef0';
+  assert.equal(daemonMismatch({ protocol: PROTOCOL_VERSION, daemon: '5b181de' }, head), undefined);
+  assert.match(daemonMismatch({ protocol: PROTOCOL_VERSION, daemon: 'dd72bd0' }, head) ?? '', /runs dd72bd0, this portal 5b181de01/);
+  assert.match(daemonMismatch({ protocol: PROTOCOL_VERSION - 1, daemon: '5b181de' }, head) ?? '', /protocol/);
+  assert.equal(daemonMismatch({ protocol: PROTOCOL_VERSION, daemon: `protocol ${PROTOCOL_VERSION}` }, head), undefined);
+  assert.equal(daemonMismatch({ protocol: PROTOCOL_VERSION, daemon: '5b181de' }, undefined), undefined);
+});
+
+test('machine: an outdated daemon is redeployed, and new agents get a clear refusal meanwhile, not a crash', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const deployed: string[] = [];
+  mm.deployMachine = ((o: { id: string }) => (deployed.push(o.id), store.machines.get(o.id)!)) as typeof mm.deployMachine;
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  daemon();
+  await until('online', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
+  assert.equal(mm.outdated('mx'), undefined, 'this checkout has no machine/VERSION: current');
+  // The daemon a previous version deployed says hello (as after an app update).
+  mm.portalHead = '5b181de0123456789abcdef0123456789abcdef0';
+  const hello = (daemonVersion: string, protocol = PROTOCOL_VERSION) =>
+    (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', { type: 'hello', protocol, home: '', live: [], info: { ...store.machines.get('mx')!.info, daemon: daemonVersion } });
+  hello('dd72bd0');
+  assert.deepEqual(deployed, ['mx'], 'redeployed at once: no agent runs there');
+  assert.match(reports.at(-1) ?? '', /mx's daemon is outdated \(it runs dd72bd0, this portal 5b181de01\); redeploying/);
+  assert.match(store.machines.get('mx')!.statusDetail ?? '', /daemon outdated/);
+  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  assert.throws(() => sessions.send(s.info.id, 'hello'), /mx's daemon is outdated \(it runs dd72bd0.*Try again in a few minutes/);
+  // At most one automatic redeploy per 10 minutes.
+  mm.checkOutdated();
+  assert.equal(deployed.length, 1);
+  // The redeployed daemon: current again, and agents start.
+  hello('5b181de');
+  assert.equal(mm.outdated('mx'), undefined);
+  assert.equal(store.machines.get('mx')!.statusDetail, undefined);
+  assert.equal(await mm.whenCurrent('mx', 1000, 10), undefined);
+  const turnEnds: string[] = [];
+  sessions.events.on('turnEnd', (_s: SessionHandle, text: string) => turnEnds.push(text));
+  sessions.send(s.info.id, 'hello');
+  await until('turn end', () => turnEnds.length === 1);
+  // Offline: whenCurrent gives up with why.
+  assert.match((await mm.whenCurrent('nope', 50, 10)) ?? '', /no machine/);
+});
+
+test('launch: a tool this version does not know is left out, not fatal (a newer portal, an older daemon)', () => {
+  const tmp = os.tmpdir();
+  const o = buildOptions(
+    { cwd: tmp, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: tmp, protectedPaths: [], gameRepos: [] }, mcp: { server: 'machine', tools: [{ name: 'set_label', description: 'd' }, { name: 'from_the_future' as never, description: 'd' }] } },
+    {},
+  );
+  assert.ok(o.mcpServers?.machine);
 });
