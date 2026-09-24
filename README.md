@@ -180,8 +180,13 @@ ones: `host`, `sandboxRoot` (keep it short: Windows path lengths),
 `protectedPaths` (checkouts agents must never touch), `limits` (editors are ~8-12 GB RAM each),
 `ownerName` (optional: the name agents' prompts use for you; otherwise they say "the user").
 `publicGitIdentity` (optional `name`/`email`/`repos`): repos whose history is public, by default this
-app's own origin. The guard refuses an agent's push there when a commit carries an email that is not a
-GitHub noreply address or the configured `email`.
+app's own origin. Any other GitHub repo that GitHub reports as public counts too (`gh api`, cached;
+`server/publicGit.ts`). The guard refuses an agent's push to a public repo when a commit carries an email
+that is not a GitHub noreply address or the configured `email`, on the host and on the machines. Worker
+agents (sandboxes and machines) also commit as that identity automatically in clones of public repos: their
+git gets an `includeIf "hasconfig:remote.*.url:..."` through `GIT_CONFIG_COUNT` for the configured repos and
+every public repo of their owners, the game repo's owner and the gh account (git 2.36+; nobody's gitconfig
+changes). Without a configured `name`/`email` that identity is the gh account's login and noreply address.
 
 ## Development
 

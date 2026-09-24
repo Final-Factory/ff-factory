@@ -151,7 +151,7 @@ test('branch switches: refused in the sandbox while its editor runs, fine otherw
 });
 
 test('public repos: a push whose commits carry a private email is refused', async () => {
-  const remotes = () => new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git'], ['game', 'git@github.com:example-org/example-game.git']]);
+  const remotes = () => new Map([['origin', 'https://github.com/Final-Factory/ff-factory.git'], ['game', 'git@github.com:example-org/example-game.git'], ['kit', 'git@github.com:Final-Factory/agent-kit.git']]);
   let emails = ['1+someone@users.noreply.github.com', 'bot@example.org'];
   const seen: string[][] = [];
   const g = sandboxGuard({
@@ -160,7 +160,7 @@ test('public repos: a push whose commits carry a private email is refused', asyn
     protectedPaths: [],
     gameRepos: ['https://github.com/example-org/example-game.git'],
     remotes,
-    publicIdentity: { repos: ['https://github.com/Final-Factory/ff-factory'], name: 'Public Name', email: 'bot@example.org', pushedEmails: (_dir, remote, srcs) => (seen.push([remote, ...srcs]), emails) },
+    publicIdentity: { repos: ['https://github.com/Final-Factory/ff-factory'], name: 'Public Name', email: 'bot@example.org', pushedEmails: (_dir, remote, srcs) => (seen.push([remote, ...srcs]), emails), isPublic: (k) => k === 'github.com/final-factory/agent-kit' },
   });
   const cwd = 'C:/tmp/app';
   assert.equal(await decide(g, 'Bash', { command: 'git push origin HEAD:main' }, cwd), 'allow');
@@ -172,6 +172,8 @@ test('public repos: a push whose commits carry a private email is refused', asyn
   assert.deepEqual(seen.at(-1), ['https://github.com/Final-Factory/ff-factory.git', 'x']);
   // Other repos are not its business (the game repo's own rules still apply).
   assert.equal(await decide(g, 'Bash', { command: 'git push game HEAD:develop' }, cwd), 'allow');
+  // A repo GitHub reports as public counts too, configured or not.
+  assert.equal(await decide(g, 'Bash', { command: 'git push kit HEAD:develop' }, cwd), 'deny');
   // The refusal says how to fix it.
   const input = { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'git push' }, tool_use_id: 'x', session_id: 's', transcript_path: '', cwd };
   const r = (await g(input as never, 'x', { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecisionReason?: string } };

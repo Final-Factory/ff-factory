@@ -335,5 +335,5 @@ export function publicIdentityLine(cfg: Pick<Config, 'publicGitIdentity'>): stri
   const pub = publicIdentityOf(cfg);
   if (!pub.repos.length) return '';
   const who = pub.name && pub.email ? `\`${pub.name} <${pub.email}>\`` : 'your GitHub noreply address (\`<id>+<login>@users.noreply.github.com\`)';
-  return `Commits you push to ${pub.repos.map((r) => `\`${r}\``).join(', ')} are public: commit there as ${who} (git config user.name / user.email in that clone). The harness refuses pushes there whose commits carry any other email.\n`;
+  return `Commits you push to ${pub.repos.map((r) => `\`${r}\``).join(', ')}, or to any other public GitHub repo, are public: commit there as ${who} (git config user.name / user.email in that clone; in clones of public repos your git already defaults to it). The harness refuses pushes to public repos whose commits carry any other email.\n`;
 }

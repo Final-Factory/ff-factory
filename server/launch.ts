@@ -1,7 +1,10 @@
 import { createSdkMcpServer, tool, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import os from 'node:os';
+import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
 import { standingGuard } from './standingGuard.ts';
+import { publicIdentityEnv } from './publicGit.ts';
 import type { StandingToolGroup } from '../shared/types.ts';
 
 /**
@@ -37,6 +40,8 @@ export interface LaunchSpec {
     publicIdentity?: { repos: string[]; name?: string; email?: string };
   };
   env?: Record<string, string>;
+  /** Commit as this identity in clones of these public repos ("owner/name"), via publicIdentityEnv on the machine. */
+  publicGit?: { name: string; email: string; repos: string[] };
   claudeExecutable?: string;
   /** Created before the process starts: `cwd` itself, and these files (relative to cwd) when missing. */
   init?: { files?: Record<string, string> };
@@ -62,6 +67,17 @@ export const CATALOG = {
 
 export type CatalogTool = keyof typeof CATALOG;
 export type ToolHandler = (args: Record<string, unknown>) => Promise<string>;
+
+/** The spec's public-repo identity as git env (~/.ff-factory/public-identity.gitconfig on the machine). */
+function publicGitEnvFor(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv): Record<string, string> {
+  if (!spec.publicGit?.repos.length) return {};
+  try {
+    return publicIdentityEnv(spec.publicGit, spec.publicGit.repos, path.join(os.homedir(), '.ff-factory', 'public-identity.gitconfig'), baseEnv);
+  } catch (e) {
+    console.warn('public git identity:', (e as Error).message);
+    return {};
+  }
+}
 
 /** SDK options for a spec. `handlers` answers the spec's MCP tools; `baseEnv` is the process environment to start from. */
 export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, baseEnv: NodeJS.ProcessEnv = process.env): Options {
@@ -109,7 +125,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     ...(spec.maxBudgetUsd !== undefined ? { maxBudgetUsd: spec.maxBudgetUsd } : {}),
     hooks: { PreToolUse: [{ hooks }] },
     // Git fails fast instead of waiting on a credential prompt nobody will answer.
-    env: { MCP_TIMEOUT: '120000', ...baseEnv, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...spec.env },
+    env: { MCP_TIMEOUT: '120000', ...baseEnv, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env },
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
   };
 }

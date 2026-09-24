@@ -14,6 +14,7 @@ import { COMPILE_DONE, COMPILE_FAILED, readSince, Waker } from './wake.ts';
 import { snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { PermissionMode, Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { sandboxGuard } from './guard.ts';
+import { ghNoreply, githubSlug, publicIdentityEnv, publicReposOf } from './publicGit.ts';
 import { systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
@@ -456,6 +457,34 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
     }
   }
 
+  /**
+   * The identity workers commit with in public repos, and which repos those are: the configured ones plus
+   * every public repo of their owners, the game repo's owner and the gh account (server/publicGit.ts;
+   * cached, refreshed in the background). The name and email default to the gh account's noreply address.
+   */
+  private publicGit(): { name: string; email: string; repos: string[] } | undefined {
+    const pub = publicIdentityOf(this.cfg);
+    const me = ghNoreply();
+    const email = pub.email ?? me?.email;
+    const name = pub.name ?? me?.login;
+    if (!email || !name) return undefined;
+    const listed = pub.repos.map(githubSlug).filter((x): x is string => !!x);
+    const owners = [...listed, githubSlug(this.cfg.repo.url) ?? ''].map((s) => s.split('/')[0]).concat(me ? [me.login] : []).filter(Boolean);
+    return { name, email, repos: [...new Set([...listed, ...publicReposOf(owners)])] };
+  }
+
+  /** Env for a worker on this host: git commits in public repos as the public identity (publicIdentityEnv). */
+  private publicGitEnv(): Record<string, string> {
+    const g = this.publicGit();
+    if (!g) return {};
+    try {
+      return publicIdentityEnv(g, g.repos, path.join(this.cfg.dataDir, 'public-identity.gitconfig'), process.env);
+    } catch (e) {
+      console.warn('public git identity:', (e as Error).message);
+      return {};
+    }
+  }
+
   readonly workerOptions: OptionsFactory = (info: SessionInfo): Options => {
     const sb = this.sandboxes.require(info.sandboxId!);
     return {
@@ -490,7 +519,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ],
       },
       // The MCP-for-Unity server takes 20-40 s to answer on Windows; Claude Code's default connect timeout is 30 s.
-      env: { MCP_TIMEOUT: '120000', ...process.env, ...this.cfg.claudeEnv, FF_SANDBOX_ID: sb.id, FF_SANDBOX_PATH: sb.path },
+      env: { MCP_TIMEOUT: '120000', ...process.env, ...this.cfg.claudeEnv, ...this.publicGitEnv(), FF_SANDBOX_ID: sb.id, FF_SANDBOX_PATH: sb.path },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };
   };
@@ -686,6 +715,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ownCheckout: true,
         denyToolPrefixes: ['mcp__ffsb__'],
       },
+      publicGit: this.publicGit(),
       env: { FF_MACHINE_ID: m.id },
     };
   }
