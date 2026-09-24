@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { EFFORT_LEVELS, type AppState, type EffortLevel, type PermissionMode } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, upsertSandbox, upsertSession } from '../store';
-import { navigate, PERMISSION_MODES } from '../util';
+import { FREE_TEXT, navigate, PERMISSION_MODES } from '../util';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
 import { DictationBar, MicButton } from './Mic';
 import { Modal } from './ui';
@@ -167,6 +167,7 @@ export function NewAgentModal({ app, target, onClose }: { app: AppState; target:
           <span className="dictate-wrap">
             <textarea
               ref={promptRef}
+              {...FREE_TEXT}
               className="input"
               rows={6}
               value={prompt}

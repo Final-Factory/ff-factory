@@ -281,6 +281,28 @@ export function useMediaQuery(q: string): boolean {
   );
 }
 
+// ---------- text boxes that are not form fields ----------
+
+/**
+ * For boxes that take free text (a message, a prompt, a charter): nothing for Safari's AutoFill (on an
+ * iPad with a hardware keyboard it floats a passwords/cards/contacts bar over any field it may fill)
+ * or a password manager to offer. The composer is also in no <form>, and has no name or id.
+ */
+export const FREE_TEXT = {
+  autoComplete: 'off',
+  autoCorrect: 'on',
+  autoCapitalize: 'sentences',
+  spellCheck: true,
+  inputMode: 'text',
+  'data-1p-ignore': 'true',
+  'data-lpignore': 'true',
+  'data-bwignore': 'true',
+  'data-form-type': 'other',
+} as const;
+
+/** The same for a search term or a short name: no capitals or corrections either. */
+export const PLAIN_TEXT = { ...FREE_TEXT, autoCorrect: 'off', autoCapitalize: 'none', spellCheck: false } as const;
+
 // ---------- tiny local storage wrapper (per-viewer conveniences only) ----------
 
 export function lsGet(key: string): string | null {

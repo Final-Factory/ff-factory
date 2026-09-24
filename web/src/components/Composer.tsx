@@ -4,7 +4,7 @@ import { api } from '../api';
 import type { ImageInput } from '../../../shared/types';
 import { attempt, toast, toastError } from '../store';
 import { enterAction } from '../../../shared/keys';
-import { isBusy, lsGet, lsSet, shrinkImage, useMediaQuery } from '../util';
+import { FREE_TEXT, isBusy, lsGet, lsSet, shrinkImage, useMediaQuery } from '../util';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
 import { useVoicePrefs } from '../voice/dictation';
 import { DictationBar, MicButton } from './Mic';
@@ -191,7 +191,9 @@ export function Composer({
         <DictationBar d={voice.d} />
         <textarea
           ref={ta}
+          {...FREE_TEXT}
           {...voice.textareaProps}
+          aria-label={placeholder ?? 'Message'}
           rows={1}
           value={text}
           placeholder={(touch ? placeholder?.replace(/\s*\(Enter to send[^)]*\)/, '') : placeholder) ?? (busy ? 'Queue a follow-up…' : 'Message…')}

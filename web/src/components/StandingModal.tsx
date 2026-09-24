@@ -3,7 +3,7 @@ import type { AppState, AutoApprove, EffortLevel, StandingAgent, StandingToolGro
 import { EFFORT_LEVELS, STANDING_TOOL_GROUPS } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, upsertStanding } from '../store';
-import { displayName, navigate } from '../util';
+import { displayName, FREE_TEXT, navigate } from '../util';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
 import { DictationBar, MicButton } from './Mic';
 import { Modal } from './ui';
@@ -135,6 +135,7 @@ export function StandingAgentModal({ app, agent, onClose }: { app: AppState; age
           <span className="dictate-wrap">
             <textarea
               ref={charterRef}
+              {...FREE_TEXT}
               className="input"
               rows={9}
               value={charter}
