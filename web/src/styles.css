@@ -3705,3 +3705,52 @@ select.input {
     max-width: 42%;
   }
 }
+
+/* ---------- the app is a fixed screen, not a scrolling document (web/src/viewport.ts) ----------
+   The body is pinned to the visual viewport (its top and height follow window.visualViewport,
+   so the composer stays above the keyboard and the browser's bars), nothing outside the inner
+   scrollers can scroll, and nothing is wider than the screen. */
+
+html,
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+  width: 100%;
+}
+
+body {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--app-top, 0px);
+  height: var(--app-h, 100dvh);
+}
+
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+.shell {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.main {
+  overflow: hidden;
+}
+
+.composer,
+.composer-box {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.composer textarea {
+  overscroll-behavior: contain;
+}
+
+.composer-actions {
+  touch-action: manipulation;
+}

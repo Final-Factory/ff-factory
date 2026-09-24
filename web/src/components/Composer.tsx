@@ -91,9 +91,27 @@ export function Composer({
     if (!el) return;
     const cap = Math.max(72, Math.min(size === 'large' ? 320 : 220, Math.round(viewH * 0.35)));
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, cap) + 'px';
-    el.style.overflowY = el.scrollHeight > cap ? 'auto' : 'hidden';
+    const fits = el.scrollHeight <= cap;
+    // Exactly the content's height while it fits: nothing to scroll, nothing to bounce.
+    el.style.height = (fits ? el.scrollHeight : cap) + 'px';
+    el.style.overflowY = fits ? 'hidden' : 'auto';
+    if (fits) el.scrollTop = 0;
   }, [text, size, viewH]);
+
+  // The box itself never moves under a finger: a drag on it is cancelled unless it is inside the
+  // text box and that has more text than it shows.
+  const boxRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const onMove = (e: TouchEvent) => {
+      const t = (e.target as Element | null)?.closest('textarea');
+      if (t && t.scrollHeight > t.clientHeight + 1) return;
+      if (e.cancelable) e.preventDefault();
+    };
+    box.addEventListener('touchmove', onMove, { passive: false });
+    return () => box.removeEventListener('touchmove', onMove);
+  }, []);
 
   /** `override`: the text to send instead of the box's (auto-send after dictation, before the state lands). */
   const send = async (override?: string) => {
@@ -138,6 +156,7 @@ export function Composer({
       {voiceMode.view && <VoiceModeOverlay title={session.title} view={voiceMode.view} level={voiceMode.level} onEnd={voiceMode.end} bargeIn={bargeIn} />}
       {hint && <div className="composer-hint">{hint}</div>}
       <div
+        ref={boxRef}
         className={`composer-box${dragging ? ' dragging' : ''}`}
         onDragOver={(e) => {
           if (!canAttach || !e.dataTransfer.types.includes('Files')) return;
@@ -178,6 +197,11 @@ export function Composer({
           placeholder={(touch ? placeholder?.replace(/\s*\(Enter to send[^)]*\)/, '') : placeholder) ?? (busy ? 'Queue a follow-up…' : 'Message…')}
           enterKeyHint={touch ? 'enter' : 'send'}
           onChange={(e) => setText(e.target.value)}
+          onScroll={(e) => {
+            // A text box that fits its content has nothing to scroll (the browser may still try, revealing the caret).
+            const el = e.currentTarget;
+            if (el.style.overflowY === 'hidden' && el.scrollTop) el.scrollTop = 0;
+          }}
           onPaste={(e) => {
             if (!canAttach) return;
             const files = [...e.clipboardData.files].filter((f) => f.type.startsWith('image/'));
