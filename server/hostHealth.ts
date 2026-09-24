@@ -112,7 +112,6 @@ export class HostHealthMonitor {
   private maintenance = false;
   private lastCleanupAt = 0;
   private criticalSince = 0;
-  private lastCompactAt = 0;
   private lastReapAt = 0;
   private ticking = false;
 
@@ -149,7 +148,6 @@ export class HostHealthMonitor {
       await this.diskGuard();
       await this.idleEditors();
       await this.reapBrowsers();
-      await this.maybeCompact();
       this.health.blocked = this.blockReason('agent');
       this.d.changed(this.health);
     } catch (e) {
@@ -303,11 +301,8 @@ export class HostHealthMonitor {
     const poll = opts.pollMs ?? 1000;
     const timeout = opts.timeoutMs ?? 10 * 60_000;
     const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-    const up = this.d.sandboxes().filter((s) => EDITOR_UP.has(s.unity.state)).map((s) => s.id);
-    if (up.length) throw new Error(`editors are up (${up.join(', ')}): stop them first; the self-test takes the drive away`);
-    const busy = this.d.sessions().filter((s) => s.sandboxId && BUSY.has(s.status)).map((s) => s.id);
-    if (busy.length) throw new Error(`agents are mid-turn in sandboxes (${busy.join(', ')}): wait for them first`);
-    if (!this.d.exists(root) || this.recovery || this.health.sandboxRoot !== 'ok') throw new Error(`the sandbox drive is not in a normal state (${this.health.sandboxRoot}); fix that first`);
+    const no = this.detachRefusal() ?? (!this.d.exists(root) ? `${root} is not there; fix that first` : undefined);
+    if (no) throw new Error(no);
     const ready = this.d.sandboxes().filter((s) => s.status === 'ready');
     const t0 = this.now();
     const lines: string[] = [];
@@ -418,28 +413,24 @@ export class HostHealthMonitor {
     }
   }
 
-  /** At idle (no editor up, no agent busy), compact a VHDX that holds much more than its volume uses. */
-  private async maybeCompact() {
-    const g = this.g();
-    if (!g.compactWhenReclaimGB || !g.devDriveVhdx || this.health.sandboxRoot !== 'ok' || this.helperBusy) return;
-    if (this.now() - this.lastCompactAt < 24 * 3_600_000) return;
-    if (this.d.sandboxes().some((s) => EDITOR_UP.has(s.unity.state)) || this.d.sessions().some((s) => s.kind !== 'orchestrator' && BUSY.has(s.status))) return;
-    let fileBytes = 0;
-    try {
-      fileBytes = fs.statSync(g.devDriveVhdx).size;
-    } catch {
-      return;
-    }
-    const inside = this.health.disks.find((x) => volumeOf(x.path) === volumeOf(this.d.cfg.sandboxRoot));
-    if (!inside?.totalBytes || inside.freeBytes === undefined) return;
-    const reclaim = fileBytes - (inside.totalBytes - inside.freeBytes);
-    if (reclaim < g.compactWhenReclaimGB * GB) return;
-    this.lastCompactAt = this.now();
-    await this.compact(`the VHDX holds ${(reclaim / GB).toFixed(0)} GB more than the volume uses`);
+  /**
+   * Why the sandbox drive must not be taken away now (compact, the self-test), or undefined. Detaching it is
+   * manual only (host_recovery), never automatic, and refused while any editor is up or any agent on this
+   * host is busy: a drive pulled from under them kills their work (2026-09-24).
+   */
+  detachRefusal(): string | undefined {
+    const up = this.d.sandboxes().filter((s) => EDITOR_UP.has(s.unity.state)).map((s) => s.id);
+    if (up.length) return `editors are up (${up.join(', ')}): stop them first; this takes the sandbox drive away`;
+    const busy = this.d.sessions().filter((s) => s.kind !== 'orchestrator' && !s.machineId && BUSY.has(s.status)).map((s) => s.id);
+    if (busy.length) return `agents on this host are mid-turn (${busy.join(', ')}): wait until they are idle`;
+    if (this.recovery || this.health.sandboxRoot !== 'ok') return `the sandbox drive is not in a normal state (${this.health.sandboxRoot}); fix that first`;
+    return undefined;
   }
 
-  /** Retrim, detach, compact and reattach the Dev Drive (host_recovery "compact", or maybeCompact at idle). */
+  /** Retrim, detach, compact and reattach the Dev Drive: host_recovery "compact" only (detachRefusal first). */
   async compact(why: string): Promise<HelperResult> {
+    const no = this.detachRefusal();
+    if (no) return { action: 'compact', ok: false, at: new Date(this.now()).toISOString(), detail: `refused: ${no}` };
     this.maintenance = true;
     this.helperBusy = true;
     try {

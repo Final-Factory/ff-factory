@@ -170,4 +170,13 @@ test('recovery self-test: detach through the helper, the guard notices and reatt
   world.sandboxes = [];
   world.sessions = [sess('w9', 'blackhole', 'running')];
   await assert.rejects(m.selftest({ sleep }), /mid-turn/);
+  // Compacting takes the drive away too: refused the same way, and the helper is never started.
+  log.length = 0;
+  const r = await m.compact('asked for');
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /^refused: agents on this host are mid-turn \(w9\)/);
+  world.sessions = [];
+  world.sandboxes = [{ ...world.sandboxes[0], unity: { state: 'starting' } } as Sandbox];
+  assert.match((await m.compact('asked for')).detail, /^refused: editors are up/);
+  assert.deepEqual(log.filter((l) => l.startsWith('helper')), []);
 });

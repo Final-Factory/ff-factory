@@ -60,10 +60,10 @@ test('set_app_config: host guard housekeeping, with age rules kept away from any
   const { file, cfg } = setup(t);
   const full = { ...cfg, protectedPaths: ['C:/live/game'], sandboxRoot: 'F:/ffsb', standingRoot: 'F:/ffsb/_agents', dataDir: 'C:/app/data', repo: { basePath: 'C:/ffsb/_base' }, hostGuard: { devDriveVhdx: '', compactWhenReclaimGB: 0, cleanup: { ageRules: [] } } } as unknown as Config;
   setAppConfig(file, full, 'hostGuard.devDriveVhdx', 'C:/ffsb-devdrive.vhdx');
-  setAppConfig(file, full, 'hostGuard.compactWhenReclaimGB', '60');
+  assert.throws(() => setAppConfig(file, full, 'hostGuard.compactWhenReclaimGB' as never, '60'), /not|allowed|unknown/i, 'compaction is manual only');
   setAppConfig(file, full, 'hostGuard.cleanup.ageRules', '[{"path":"C:/Users/u/AppData/LocalLow/Studio/game/DeterminismAudit","olderThanDays":14}]');
   assert.equal(full.hostGuard.devDriveVhdx, 'C:/ffsb-devdrive.vhdx');
-  assert.equal(full.hostGuard.compactWhenReclaimGB, 60);
+  assert.equal(full.hostGuard.compactWhenReclaimGB, 0);
   assert.deepEqual(full.hostGuard.cleanup.ageRules, [{ path: 'C:/Users/u/AppData/LocalLow/Studio/game/DeterminismAudit', olderThanDays: 14 }]);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).hostGuard.cleanup.ageRules[0].olderThanDays, 14);
   for (const bad of [

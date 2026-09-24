@@ -17,7 +17,6 @@ export const SETTABLE_KEYS = [
   'publicGitIdentity.email',
   // The host guard's housekeeping (docs/self-recovery.md), so it can be tuned without anyone at the desk.
   'hostGuard.devDriveVhdx',
-  'hostGuard.compactWhenReclaimGB',
   'hostGuard.cleanup.ageRules',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
@@ -81,11 +80,6 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       if (typeof value !== 'string' || !P(value.trim()).isAbsolute(value.trim()) || !/\.vhdx?$/i.test(value.trim())) throw new Error('hostGuard.devDriveVhdx is the absolute path of a .vhdx file');
       return value.trim();
     }
-    case 'hostGuard.compactWhenReclaimGB': {
-      const n = Number(value);
-      if (!Number.isFinite(n) || n < 0 || n > 2000) throw new Error('hostGuard.compactWhenReclaimGB is a number of GB from 0 (never) to 2000');
-      return Math.round(n);
-    }
     case 'hostGuard.cleanup.ageRules':
       return checkAgeRules(value, cfg);
     case 'voice.ttsVoice': {
@@ -131,7 +125,6 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'voice.vocabulary') cfg.voice.vocabulary = (v as string[] | undefined) ?? [];
   else if (key === 'voice.ttsVoice') cfg.voice.ttsVoice = (v as string | undefined) ?? VOICE_DEFAULTS.ttsVoice;
   else if (key === 'hostGuard.devDriveVhdx') cfg.hostGuard.devDriveVhdx = (v as string | undefined) ?? '';
-  else if (key === 'hostGuard.compactWhenReclaimGB') cfg.hostGuard.compactWhenReclaimGB = (v as number | undefined) ?? 0;
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'publicGitIdentity.name' || key === 'publicGitIdentity.email') {
     const field = key === 'publicGitIdentity.name' ? 'name' : 'email';

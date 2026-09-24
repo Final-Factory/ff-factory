@@ -107,8 +107,8 @@ drive and reattach it through `ffsb-helper-mount` exactly as in a real outage, c
 sandbox's folder is back, and reports the timings (detach, noticed after, reattached after, total). Run
 it after installing or changing the helpers.
 
-The orchestrator can set `hostGuard.cleanup.ageRules`, `hostGuard.devDriveVhdx` and
-`hostGuard.compactWhenReclaimGB` with `set_app_config`, and act by hand with `host_recovery`
+The orchestrator can set `hostGuard.cleanup.ageRules` and `hostGuard.devDriveVhdx` with
+`set_app_config`, and act by hand with `host_recovery`
 (remount, cleanup, trim, compact, reboot with `confirm_reboot`). `system_status` and the sidebar's
 meters show the guard: one disk meter per watched volume in its guard colour, and a banner while
 the drive is offline or disk space is low.
@@ -135,10 +135,12 @@ space on C: is what made Windows drop it.
   a planned moment. A rebuild means a new, smaller VHDX (a fixed-size one never grows at all) and moving
   the sandboxes into it. That costs the block-clone sharing of the Library copies, so recreate
   sandboxes from the seed there rather than copying them.
-- **Hand freed space back**: `ffsb-helper-trim` (online), then **compact** when idle.
-  `hostGuard.compactWhenReclaimGB` (e.g. 60; 0 = never) lets the guard do it by itself, at most once
-  a day, when no editor is up, no agent is busy, and the file holds at least that much more than the
-  volume uses. The drive is offline for the few minutes the compaction takes; the guard knows and
+- **Hand freed space back**: `ffsb-helper-trim` (online), then **compact** by hand
+  (`host_recovery` "compact"). Nothing detaches the drive automatically (since 2026-09-24; the old
+  `hostGuard.compactWhenReclaimGB` idle policy is gone and the key is ignored). Compact and the
+  self-test are refused while any editor is up or any agent on this host is busy
+  (`HostHealthMonitor.detachRefusal`); the helper itself also refuses while a `Unity.exe` has a project
+  on the drive. The drive is offline for the few minutes the compaction takes; the guard knows and
   does not treat that as an outage.
 - **Cap the maximum size** to what C: can hold, keeping `warnFreeGB` in reserve. Today the VHDX may
   grow to 900 GB on a 1.8 TB disk shared with everything else. Lowering the maximum means shrinking

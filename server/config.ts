@@ -235,7 +235,7 @@ export interface HostGuardConfig {
   remountMinFreeGB: number;
   /** The Dev Drive's VHDX file, for growth checks and compaction (empty: no Dev Drive). */
   devDriveVhdx: string;
-  /** Compact the VHDX at idle when it holds at least this much more than the volume inside uses. 0: never. */
+  /** Ignored since 2026-09-24: compacting (it detaches the drive) is manual only, host_recovery "compact". Kept so old config files load. */
   compactWhenReclaimGB: number;
   /** Kill automation browsers (headless, temp profile, or Playwright's) running longer than this, and orphans. 0: never. */
   reapBrowsersAfterHours: number;
