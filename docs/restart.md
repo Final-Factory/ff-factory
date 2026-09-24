@@ -65,9 +65,28 @@ with nothing running just starts the app.
 The drain's own message is left out of the "unanswered" list. A resumed worker still reports its
 turns to the orchestrator if its interrupted turn came from the orchestrator.
 
-Without a clean stop (a crash, or a kill after the 60 s grace), there is no resume file. The new
-server then only tells the orchestrator which workers were cut off; it does not resume them, so a
-crash loop cannot keep restarting paid turns.
+Without a clean stop (a power cut, a crash, or a kill after the 60 s grace) there is no resume file,
+so the new server makes one from what the last server left (`Agents.uncleanResumeFile`):
+- **The cause.** The server writes a heartbeat (`alive.json`) every 30 s. If the machine booted after
+  the last beat, it went down ("BEAST went down unexpectedly (lost power, was hard-reset or crashed)
+  after <time>, and booted again at <time>"). Otherwise only the server stopped (a crash or a kill).
+- **Sessions to resume:** the workers that were mid-turn, on this host and on the Macs.
+- **Editors:** the editors that were up and died with it (`SandboxManager.lostEditors`).
+
+Then it brings things back in order. It waits (up to 15 minutes) for the sandbox drive, which a
+reboot leaves detached until `ffsb-helper-mount` runs (docs/self-recovery.md). Next it starts those
+editors again, then resumes the agents. Each agent's message says what happened and whether its
+editor is being started again. Agents on a Mac resume once its daemon is connected and current; one
+whose process kept running on the Mac is left alone. The orchestrator gets one paragraph, starting
+"FF Factory restarted WITHOUT a clean stop: …".
+
+An update asked for with `request_app_update` is kept in `restart.pending.json` until the server
+hands it to the supervisor. If the stop came during the drain, the update is retried: the new server
+writes the resume file and `update.request` and exits, the supervisor updates, and the updated
+server resumes everything.
+
+Crash-loop guard: a second unclean stop within 30 minutes (`unclean-recovery.last`) only reports what
+was cut off, as before. It does not resume, restart or retry anything.
 
 ## Never elevated
 
@@ -100,6 +119,9 @@ administrator rights. It cannot stop them itself; close them on the desktop.
 | `resume.json` / `resume.done.json` | server | sessions to resume / the last one used |
 | `update.request` | `restart.ps1 -Update`, server | the next supervisor updates first |
 | `update.result.json` | supervisor | `ok`, `error`, `headBefore`, `headAfter`, `at` |
+| `alive.json` | server, every 30 s | its last heartbeat: dates an unclean stop, and tells a power cut from a crash |
+| `restart.pending.json` | server | an update asked for but not yet handed to the supervisor (retried after an unclean stop) |
+| `unclean-recovery.last` | server | when an unclean stop was last recovered from (the crash-loop guard) |
 | `deelevate.last` | server | when it last handed itself to the task |
 | `restart.lock` | `restart.ps1` | one restart at a time |
 | `orchestrator-inbox/*.txt` | local scripts (`republish-public.ps1`) | sent to the orchestrator as a system message within 5 s, then renamed `*.sent` |

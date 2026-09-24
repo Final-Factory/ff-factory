@@ -126,3 +126,17 @@ test('mac dialog watch: without Accessibility it says what to grant, once, and n
   assert.match(reports.at(-1)!, /can see the editor's windows again/);
   assert.doesNotMatch(w.describe(), /dialog watch off/);
 });
+
+test('mac dialog watch: the licensing "Connection Lost" is retried, and the 4th time within 10 min gets a fresh editor', async () => {
+  const { world, w, reports } = macWithDialogs();
+  const lost = () => world.wins.push(alert(2, ['Connection Lost', 'The connection with the Unity Licensing Client has been lost.'], ['Retry']));
+  for (let i = 0; i < 3; i++) {
+    lost();
+    assert.equal(await w.tick(), 'ok');
+    world.now += 2 * 60_000;
+  }
+  assert.equal(world.pressed.filter((p) => p.endsWith('-> Retry')).length, 3);
+  lost();
+  assert.equal(await w.tick(), 'restarted');
+  assert.match(reports.at(-1)!, /keeps showing a dialog: "Connection Lost" came back 4 times within 10 minutes/);
+});

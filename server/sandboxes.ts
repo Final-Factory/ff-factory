@@ -916,6 +916,11 @@ export class SandboxManager {
     let report: { d: Dialog; repeated?: boolean; why?: string } | undefined;
     for (const d of dialogs) {
       const verdict = decide(d, { autoDismiss, recent: s.unity.dismissed, scenesClean, sceneFilesClean, editorTitle });
+      if ('restart' in verdict) {
+        // A fresh editor (and its fresh licensing client) instead of pressing on; within the restart budget.
+        void this.autoRestart(s, `hung: ${verdict.why}`);
+        return;
+      }
       if ('click' in verdict) {
         let closed = false;
         try {
@@ -959,6 +964,9 @@ export class SandboxManager {
   }
 
   /** On boot, reconcile editors that were running when the server went down. */
+  /** Sandboxes whose editors were up when the last server stopped and are gone now (a power cut, a crash): set by reconcile. */
+  lostEditors: string[] = [];
+
   reconcile() {
     for (const s of this.list()) {
       if (s.status === 'creating' || s.status === 'deleting') {
@@ -968,6 +976,7 @@ export class SandboxManager {
       // A blocked state is re-derived by the watchdog; start from what the editor was doing.
       if (s.unity.state === 'blocked') this.update(s, { unity: { ...s.unity, state: s.unity.blocked?.resumeState ?? 'starting', blocked: undefined } });
       if (!s.unity.pid || !isAlive(s.unity.pid)) {
+        if (s.status === 'ready' && isActive(s.unity.state)) this.lostEditors.push(s.id);
         this.update(s, { unity: { state: 'stopped', logPath: s.unity.logPath, restarts: s.unity.restarts } });
         continue;
       }

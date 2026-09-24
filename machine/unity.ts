@@ -251,6 +251,8 @@ export class MacUnityWatch {
   private reported = new Set<string>();
   /** The macOS permission the dialog watch lacks (the one-time step), if any. */
   private permission?: string;
+  /** A dialog rule asked for a fresh editor (decide's `restart`, e.g. the licensing "Connection Lost" coming back). */
+  private dialogRestart?: string;
 
   constructor(u: MacUnity, report: (text: string, restarted: boolean) => void, deps: Partial<WatchDeps> = {}, opts: Partial<{ max: number; windowMinutes: number; hang: HangThresholds }> = {}) {
     this.u = u;
@@ -338,6 +340,11 @@ export class MacUnityWatch {
       this.logGrewAt = Math.max(this.logGrewAt, now);
     }
     const dialogOpen = await this.dialogs(pid, now);
+    if (this.dialogRestart) {
+      const why = this.dialogRestart;
+      this.dialogRestart = undefined;
+      return this.restart(`the editor keeps showing a dialog: ${why}`, now);
+    }
     const b = this.d.bridge();
     const ok = b.port ? await this.d.ping(b.port) : false;
     if (ok) {
@@ -400,6 +407,11 @@ export class MacUnityWatch {
         sceneFilesClean,
         editorTitle: seen.mainTitle,
       });
+      if ('restart' in v) {
+        this.dialogRestart = v.why;
+        open.push({ d, state: 'blocked', since: prev?.since ?? now, why: v.why });
+        continue;
+      }
       if ('click' in v) {
         let pressed = false;
         try {

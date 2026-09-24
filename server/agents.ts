@@ -150,8 +150,44 @@ export class Agents {
   }
 
   /**
-   * After a restart: resume the sessions the last server recorded, then give the orchestrator one
-   * paragraph on what happened. Without a resume file (a crash), only report what was cut off.
+   * The resume file for a stop that was NOT clean (a power cut, a crash, a kill), made from what the last
+   * server left: the sessions it had mid-turn (cutOff, restored from the store) and the editors that were up
+   * (SandboxManager.lostEditors). `cause` says what happened; `at` is when the server was last alive.
+   */
+  uncleanResumeFile(cutOff: SessionInfo[], cause: string, editors: string[], at: number | undefined, head: string | undefined): ResumeFile {
+    const snaps = cutOff.map((i) => {
+      const h = this.sessions.sessions.get(i.id);
+      return { ...(h ? snapshotOf(h) : { id: i.id, kind: i.kind, title: i.title, sandboxId: i.sandboxId, machineId: i.machineId, unanswered: [], lastFrom: 'human' as const }), status: i.status };
+    });
+    return {
+      version: 1,
+      reason: cause,
+      cause,
+      update: false,
+      at: new Date(at ?? Date.now()).toISOString(),
+      head,
+      appVersion: appVersion().version,
+      sessions: collectResume(snaps),
+      orchestratorBusy: orchestratorWasBusy(snaps),
+      editors,
+    };
+  }
+
+  /** Wait (up to `timeoutMs`) for the sandbox drive: after a reboot it may still be being attached. Resolves why not, or undefined. */
+  private async sandboxRootBack(timeoutMs = 15 * 60_000): Promise<string | undefined> {
+    const until = Date.now() + timeoutMs;
+    while (!fs.existsSync(this.cfg.sandboxRoot)) {
+      if (Date.now() > until) return `the sandbox drive (${this.cfg.sandboxRoot}) is not back after ${Math.round(timeoutMs / 60_000)} min`;
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    return undefined;
+  }
+
+  /**
+   * After a restart: bring back what the last server had (after an unclean stop, f.cause: once the sandbox
+   * drive is there, the editors that were up), resume its sessions, then give the orchestrator one paragraph
+   * on what happened. Agents on machines resume once their daemon is connected and current. Without a resume
+   * file (never, since index.ts makes one for unclean stops) it only reports what was cut off.
    */
   resumeAfterRestart(f: ResumeFile | undefined, cutOff: SessionInfo[], now: AppNow, notes: string[]) {
     if (!f) {
@@ -175,7 +211,11 @@ export class Agents {
       const s = this.sessions.sessions.get(e.id);
       const o: ResumeOutcome = { id: e.id, title: e.title, sandboxId: e.sandboxId, machineId: s?.info.machineId, ok: false };
       if (!s) o.error = 'the session no longer exists';
-      else {
+      else if (s.live) {
+        // Still running (an agent on a Mac carries on while this host is down): nothing to resume.
+        o.ok = true;
+        o.error = undefined;
+      } else {
         try {
           this.sessions.send(e.id, resumeMessage(e, f), 'system');
           // Keep reporting its turns to the orchestrator if it was working for the orchestrator.
@@ -190,24 +230,48 @@ export class Agents {
     // Agents on machines wait for their daemon: after an update it still runs the old code until it is
     // redeployed (MachineManager.whenCurrent), and an old daemon may not understand a new agent's launch.
     const onMachine = new Map<string, ResumeFile['sessions']>();
-    const outcomes: ResumeOutcome[] = [];
+    const local: ResumeFile['sessions'] = [];
     for (const e of f.sessions) {
-      const mid = this.sessions.sessions.get(e.id)?.info.machineId;
+      const mid = e.machineId ?? this.sessions.sessions.get(e.id)?.info.machineId;
       if (mid) onMachine.set(mid, [...(onMachine.get(mid) ?? []), e]);
-      else outcomes.push(resume(e));
+      else local.push(e);
     }
-    for (const [mid, es] of onMachine) {
-      for (const e of es) outcomes.push({ id: e.id, title: e.title, machineId: mid, ok: false, error: `waits for ${mid}'s daemon to be connected and current (redeployed if outdated); resumed after that, and you get a message` });
-    }
-    const summary = restartSummary(f, outcomes, readUpdateResult(this.cfg.dataDir, f.at), now, notes);
-    console.log(summary);
-    this.notifyOrchestrator(summary);
+    void (async () => {
+      const outcomes: ResumeOutcome[] = [];
+      const extra = [...notes];
+      // Sandboxes live on the sandbox drive, which a reboot leaves detached until the mount helper runs.
+      const needDrive = local.some((e) => e.sandboxId) || !!f.editors?.length;
+      const noDrive = needDrive ? await this.sandboxRootBack() : undefined;
+      if (noDrive) extra.push(`WARNING: ${noDrive}; sandbox agents and editors were not brought back (host_recovery "remount", then resume them).`);
+      else if (f.editors?.length) {
+        const failed: string[] = [];
+        for (const id of f.editors) {
+          try {
+            await this.sandboxes.startUnity(id);
+          } catch (e) {
+            failed.push(`${id}: ${(e as Error).message}`);
+          }
+        }
+        if (failed.length) extra.push(`Could not start these editors again: ${failed.join('; ')}.`);
+      }
+      for (const e of local) {
+        if (noDrive && e.sandboxId) outcomes.push({ id: e.id, title: e.title, sandboxId: e.sandboxId, ok: false, error: noDrive });
+        else outcomes.push(resume(e));
+      }
+      for (const [mid, es] of onMachine) {
+        for (const e of es) outcomes.push({ id: e.id, title: e.title, machineId: mid, ok: false, error: `waits for ${mid}'s daemon to be connected and current (redeployed if outdated); resumed after that, and you get a message` });
+      }
+      const summary = restartSummary(f, outcomes, readUpdateResult(this.cfg.dataDir, f.at), now, extra);
+      console.log(summary);
+      this.notifyOrchestrator(summary);
+    })().catch((e) => console.error('resume after restart:', e));
     for (const [mid, es] of onMachine) {
       void this.machines.whenCurrent(mid).then((why) => {
         const done = why ? es.map((e) => ({ id: e.id, title: e.title, machineId: mid, ok: false, error: `${mid} is not ready: ${why}` })) : es.map(resume);
-        const ok = done.filter((o) => o.ok).map((o) => `"${o.title}" (${o.id})`);
+        const running = es.filter((e) => this.sessions.sessions.get(e.id)?.live).map((e) => `"${e.title}" (${e.id})`);
+        const ok = done.filter((o) => o.ok && !running.includes(`"${o.title}" (${o.id})`)).map((o) => `"${o.title}" (${o.id})`);
         const bad = done.filter((o) => !o.ok).map((o) => `"${o.title}" (${o.id}): ${o.error}`);
-        const line = `[machines] ${mid}${why ? '' : "'s daemon is current"}. ${ok.length ? `Resumed: ${ok.join(', ')}.` : ''} ${bad.length ? `Not resumed: ${bad.join('; ')}. Resume them with message_agent once it is ready.` : ''}`.trim();
+        const line = `[machines] ${mid}${why ? '' : "'s daemon is current"}. ${ok.length ? `Resumed: ${ok.join(', ')}.` : ''} ${running.length ? `Still running there (not interrupted): ${running.join(', ')}.` : ''} ${bad.length ? `Not resumed: ${bad.join('; ')}. Resume them with message_agent once it is ready.` : ''}`.replace(/\s+/g, ' ').trim();
         console.log(line);
         this.notifyOrchestrator(line);
       });

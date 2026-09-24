@@ -58,7 +58,7 @@ test('known dialogs: every sample matches its entry, and only the listed ones ar
     const [d] = findDialogs([win({ title, text: text ? [text] : [], buttons })]);
     assert.equal(d?.known?.id, id, title);
     const v = decide(d, { autoDismiss: true });
-    const expected: Record<string, string> = { 'fmod-line-endings': 'Ignore', 'safe-mode': 'Ignore', 'addressables-build-report': 'No', 'font-coverage': 'OK' };
+    const expected: Record<string, string> = { 'fmod-line-endings': 'Ignore', 'safe-mode': 'Ignore', 'licensing-connection-lost': 'Retry', 'addressables-build-report': 'No', 'font-coverage': 'OK' };
     assert.deepEqual(v, expected[id] ? { click: expected[id] } : { report: true }, title);
   }
   assert.ok(new Set(KNOWN_DIALOGS.map((k) => k.id)).size === KNOWN_DIALOGS.length, 'ids are unique');
@@ -82,15 +82,31 @@ test('decide: accelerator ampersands match, auto-dismiss off reports, unknown di
 });
 
 test('decide: a dialog that keeps coming back is reported instead of pressed forever', () => {
-  const [d] = findDialogs(LIVE);
+  const [d] = findDialogs([win({ title: 'Recovering Scene Backups', text: ['Scene backups from a previous Editor session have been detected.'], buttons: ['Yes', 'No'] })]);
   const now = Date.parse('2026-09-23T12:00:00Z');
-  const at = (minAgo: number) => ({ at: new Date(now - minAgo * 60_000).toISOString(), title: 'Connection Lost' });
+  const at = (minAgo: number) => ({ at: new Date(now - minAgo * 60_000).toISOString(), title: 'Recovering Scene Backups' });
   const recent = Array.from({ length: DISMISS_LIMIT.count }, (_, i) => at(i + 1));
-  assert.deepEqual(decide(d, { autoDismiss: true, recent, nowMs: now }), { report: true, repeated: true });
+  assert.deepEqual(decide(d, { autoDismiss: true, sceneFilesClean: true, recent, nowMs: now }), { report: true, repeated: true });
   // Old dismissals, or other dialogs, do not count.
   const old = recent.map((r) => ({ ...r, at: new Date(now - DISMISS_LIMIT.windowMs - 1000).toISOString() }));
-  assert.deepEqual(decide(d, { autoDismiss: true, recent: old, nowMs: now }), { click: 'Retry' });
-  assert.deepEqual(decide(d, { autoDismiss: true, recent: recent.map((r) => ({ ...r, title: 'Other' })), nowMs: now }), { click: 'Retry' });
+  assert.deepEqual(decide(d, { autoDismiss: true, sceneFilesClean: true, recent: old, nowMs: now }), { click: 'No' });
+  assert.deepEqual(decide(d, { autoDismiss: true, sceneFilesClean: true, recent: recent.map((r) => ({ ...r, title: 'Other' })), nowMs: now }), { click: 'No' });
+});
+
+test('licensing "Connection Lost": Retry every time, and a fresh editor once it is back 3 times in 10 minutes', () => {
+  const [d] = findDialogs(LIVE);
+  assert.equal(d.known?.id, 'licensing-connection-lost');
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const at = (minAgo: number) => ({ at: new Date(now - minAgo * 60_000).toISOString(), title: 'Connection Lost' });
+  assert.deepEqual(decide(d, { autoDismiss: true, nowMs: now }), { click: 'Retry' });
+  assert.deepEqual(decide(d, { autoDismiss: true, recent: [at(2), at(6)], nowMs: now }), { click: 'Retry' }, 'twice: still Retry');
+  const v = decide(d, { autoDismiss: true, recent: [at(2), at(5), at(9)], nowMs: now });
+  assert.ok('restart' in v, 'the 4th time within 10 min: restart the editor');
+  assert.match('restart' in v ? v.why : '', /came back 4 times within 10 minutes; pressing Retry is not fixing it/);
+  // Spread out (once every 20 min, an always-rule): just Retry.
+  assert.deepEqual(decide(d, { autoDismiss: true, recent: [at(20), at(40), at(60), at(80)], nowMs: now }), { click: 'Retry' });
+  // With auto-dismiss off nothing is pressed or restarted.
+  assert.deepEqual(decide(d, { autoDismiss: false, recent: [at(2), at(5), at(9)], nowMs: now }), { report: true });
 });
 
 test('describeDialog and isStalled', () => {
@@ -178,9 +194,9 @@ test('always-rule dialogs (FMOD, Safe Mode, Addressables build report): pressed 
     assert.deepEqual(decide(d, { autoDismiss: true, recent: past(every(30, 110).map((s) => s + 3600)), nowMs: now }), { click: answer }, title);
   }
   // Dialogs without the rule keep the old limit.
-  const [conn] = findDialogs([win({ title: 'Connection Lost', text: ['The connection with the Unity Licensing Client has been lost.'], buttons: ['Retry'] })]);
-  const recent = [60, 120, 240].map((s) => ({ at: at(s), title: 'Connection Lost' }));
-  assert.deepEqual(decide(conn, { autoDismiss: true, recent, nowMs: now }), { report: true, repeated: true });
+  const [conn] = findDialogs([win({ title: 'Recovering Scene Backups', text: ['Scene backups from a previous Editor session have been detected.'], buttons: ['Yes', 'No'] })]);
+  const recent = [60, 120, 240].map((s) => ({ at: at(s), title: 'Recovering Scene Backups' }));
+  assert.deepEqual(decide(conn, { autoDismiss: true, sceneFilesClean: true, recent, nowMs: now }), { report: true, repeated: true });
 });
 
 test('scene backups after a crash: No when no scene file has uncommitted changes, else a person decides', () => {

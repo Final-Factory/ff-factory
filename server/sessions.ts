@@ -400,6 +400,9 @@ export class SessionManager {
       if (info.machineId) {
         const h = remote?.(info);
         if (!h) continue;
+        // Busy on a Mac when this server stopped: its process may well still run there (the daemon reports it
+        // live when it reconnects); resumeAfterRestart checks before resuming it.
+        if (info.status === 'running' || info.status === 'starting' || info.status === 'waiting_permission') cutOff.push({ ...info });
         info.pendingPermissions = [];
         if (info.status !== 'stopped') info.status = 'stopped';
         this.sessions.set(info.id, h);

@@ -43,9 +43,21 @@ export interface EditorWindow {
  * `singleButton`: an informational dialog of a known project tool; pressed only when its one button is
  * `button` (a second button means it is asking something). `problem`: reported instead of pressed when its
  * title or text matches `match` once the `benign` phrases (e.g. "No coverage errors") are taken out.
+ *
+ * `restartAfter`: pressing stops helping once it has come back that often in 10 minutes (the licensing
+ * client's "Connection Lost"): the editor is force-restarted instead, within the automatic restart budget.
  */
 export type DialogAction =
-  | { kind: 'dismiss'; button: string; onlyIf?: 'scenesClean' | 'sceneFilesClean'; always?: true; singleButton?: true; problem?: { match: RegExp; benign?: RegExp } }
+  | {
+      kind: 'dismiss';
+      button: string;
+      onlyIf?: 'scenesClean' | 'sceneFilesClean';
+      always?: true;
+      singleButton?: true;
+      problem?: { match: RegExp; benign?: RegExp };
+      /** Back this many times within DISMISS_LIMIT.windowMs after being pressed: restart the editor instead (decide's `restart`). */
+      restartAfter?: number;
+    }
   | { kind: 'notify' };
 
 export interface KnownDialog {
@@ -110,8 +122,9 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
   {
     id: 'licensing-connection-lost',
     match: /connection with the Unity Licensing Client has been lost/i,
-    action: { kind: 'dismiss', button: 'Retry' },
-    advice: 'the editor lost its licensing client; "Retry" reconnects. If it keeps coming back, the licensing client or Hub needs attention.',
+    action: { kind: 'dismiss', button: 'Retry', always: true, restartAfter: 3 },
+    advice:
+      'the editor lost its licensing client; "Retry" reconnects (an always-rule). When it comes back 3 times within 10 minutes the editor is force-restarted, since a fresh editor starts a fresh licensing client; that counts toward the automatic restart limit.',
   },
   {
     id: 'scenes-modified',
@@ -235,7 +248,7 @@ export function decide(
     /** The editor's main window title; a "*" in it means some editor window has unsaved changes. */
     editorTitle?: string;
   },
-): { click: string } | { report: true; repeated?: boolean; why?: string } {
+): { click: string } | { report: true; repeated?: boolean; why?: string } | { restart: true; why: string } {
   const a = d.known?.action;
   if (!opts.autoDismiss || a?.kind !== 'dismiss') return { report: true };
   if (a.onlyIf === 'scenesClean' && (!opts.scenesClean || !opts.editorTitle || opts.editorTitle.includes('*'))) return { report: true };
@@ -247,6 +260,10 @@ export function decide(
   const now = opts.nowMs ?? Date.now();
   const ago = (opts.recent ?? []).filter((r) => r.title === d.title).map((r) => now - Date.parse(r.at));
   if (a.always) {
+    const lately = ago.filter((ms) => ms < DISMISS_LIMIT.windowMs).length;
+    if (a.restartAfter && lately >= a.restartAfter) {
+      return { restart: true, why: `"${d.title || 'the dialog'}" came back ${lately + 1} times within ${DISMISS_LIMIT.windowMs / 60_000} minutes; pressing ${a.button} is not fixing it` };
+    }
     if (ago.some((ms) => ms < ALWAYS_LIMIT.minGapMs)) {
       return { report: true, repeated: true, why: `it came back within ${ALWAYS_LIMIT.minGapMs / 1000} s of being dismissed (a loop)` };
     }

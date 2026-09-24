@@ -24,7 +24,7 @@ import { runHelper } from './privileged.ts';
 import { planCleanup, runCleanup } from './cleanup.ts';
 import { reapBrowsers } from './reaper.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
-import { Drainer, parseRestartRequest, takeResumeFile, writeResumeFile, type RestartRequest } from './restart.ts';
+import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
 import { UsageTracker, usageLines } from './usage.ts';
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
@@ -48,6 +48,12 @@ if (host.elevated) {
       `and every agent shell inherits admin rights. ${host.elevatedWhy ?? ''} Fix: run scripts/restart.ps1 (from any shell).\n`,
   );
 }
+
+// When the last server was last alive (its heartbeat), read before this one beats: after an unclean stop it
+// dates the outage and tells a power cut (the machine booted since) from a server crash.
+const lastAlive = readAlive(cfg.dataDir);
+writeAlive(cfg.dataDir);
+setInterval(() => writeAlive(cfg.dataDir), 30_000);
 
 const store = new Store(cfg.dataDir);
 const sandboxes = new SandboxManager(cfg, store);
@@ -867,6 +873,8 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
     console.error('could not write data/resume.json:', e);
   }
   if (req.update && !req.hold) fs.writeFileSync(path.join(cfg.dataDir, 'update.request'), new Date().toISOString());
+  // The supervisor has it now (or it was not an update): nothing left to retry after a crash.
+  clearPendingRestart(cfg.dataDir);
   sessions.stopAll();
   voice.unload('server stopping');
   store.flush();
@@ -890,6 +898,8 @@ const drainer = new Drainer({
   log: (line) => console.log(line),
 });
 agents.requestRestart = (req) => {
+  // An update survives a power cut or a crash during the drain: the next server retries it (below).
+  if (!drainer.status) writePendingRestart(cfg.dataDir, req);
   const note = drainer.request(req);
   broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
   return note;
@@ -947,10 +957,35 @@ setInterval(() => {
 export const internals = { cfg, store, sandboxes, sessions, agents };
 
 // Resume what the last server recorded (or report what a crash cut off), once the managers are up.
+// After a stop that was not clean (no resume file: a power cut, a crash, a kill), make one from what the last
+// server left (the sessions it had mid-turn, the editors that were up) and resume those too; an update that
+// was pending then is retried first (docs/restart.md).
 setTimeout(() => {
   try {
     const notes = host.elevated ? [`WARNING: the server is running elevated, so it will not start Unity editors: ${host.elevatedWhy ?? ''}`] : [];
-    agents.resumeAfterRestart(takeResumeFile(cfg.dataDir), cutOff, { head: appHead(), version: appVersion().version }, notes);
+    const clean = takeResumeFile(cfg.dataDir);
+    const pending = takePendingRestart(cfg.dataDir);
+    if (clean) {
+      agents.resumeAfterRestart(clean, cutOff, { head: appHead(), version: appVersion().version }, notes);
+      return;
+    }
+    const cause = describeUncleanStop({ lastAliveAt: lastAlive?.at, bootAt: Date.now() - os.uptime() * 1000, host: os.hostname() });
+    if (!mayRecoverUnclean(cfg.dataDir)) {
+      // A second unclean stop within 30 minutes: maybe a crash loop. Report only, as before.
+      notes.push(`Cause: ${cause}. This is the second unclean stop within 30 minutes, so nothing was resumed or restarted automatically (crash-loop guard)${pending ? `, and the pending update (${pending.reason}) was not retried` : ''}.`);
+      agents.resumeAfterRestart(undefined, cutOff, { head: appHead(), version: appVersion().version }, notes);
+      return;
+    }
+    const f = agents.uncleanResumeFile(cutOff, cause, sandboxes.lostEditors, lastAlive?.at, appHead());
+    console.warn(`unclean stop: ${cause}; ${f.sessions.length} session(s) and ${f.editors?.length ?? 0} editor(s) to bring back${pending ? `; retrying the pending update (${pending.reason})` : ''}`);
+    if (pending && !host.elevated) {
+      // Hand it to the supervisor as a clean update would, with everything to bring back in the resume file.
+      writeResumeFile(cfg.dataDir, { ...f, reason: pending.reason, update: true });
+      fs.writeFileSync(path.join(cfg.dataDir, 'update.request'), new Date().toISOString());
+      store.flush();
+      process.exit(0);
+    }
+    agents.resumeAfterRestart(f, cutOff, { head: appHead(), version: appVersion().version }, notes);
   } catch (e) {
     console.error('resume after restart:', e);
   }

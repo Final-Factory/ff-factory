@@ -55,6 +55,13 @@ export interface ResumeFile {
   sessions: ResumeEntry[];
   /** The orchestrator was itself mid-turn or had messages waiting. */
   orchestratorBusy: boolean;
+  /**
+   * Set when the stop was NOT clean (a power cut, a crash, a kill): what happened, in words. The file is then
+   * made by the next server from what the last one left (the cut-off sessions, the editors that were up).
+   */
+  cause?: string;
+  /** Sandboxes whose editors were up and died with the stop: started again before their agents resume. */
+  editors?: string[];
 }
 
 export const DRAIN_TAG = '[app restart pending]';
@@ -89,13 +96,16 @@ export function orchestratorWasBusy(sessions: SessionSnapshot[]): boolean {
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
 /** The message a resumed worker gets. */
-export function resumeMessage(e: ResumeEntry, f: Pick<ResumeFile, 'reason' | 'at'>): string {
+export function resumeMessage(e: ResumeEntry, f: Pick<ResumeFile, 'reason' | 'at' | 'cause' | 'editors'>): string {
   const when = new Date(f.at).toLocaleString();
+  const editorRestarted = !!e.sandboxId && !!f.editors?.includes(e.sandboxId);
   // Sessions on a machine (one of the user's Macs) have a clone of their own and no managed Unity editor.
   const lines = [
-    e.machineId
-      ? `The app restarted (${f.reason} at ${when}). Your process was stopped; your working tree and your history are intact.`
-      : `The app restarted (${f.reason} at ${when}). Your process was stopped; the worktree, the Unity editor and your history are intact.`,
+    f.cause
+      ? `${f.cause}. The app is back and resumes you now. Your process was stopped; ${e.machineId ? 'your working tree' : 'the worktree'} and your history are intact${editorRestarted ? ', and your Unity editor is being started again: wait for it (mcp__sandbox__wait_for_unity, until "ready") before any Unity call' : e.machineId ? '' : '; your Unity editor was not running'}.`
+      : e.machineId
+        ? `The app restarted (${f.reason} at ${when}). Your process was stopped; your working tree and your history are intact.`
+        : `The app restarted (${f.reason} at ${when}). Your process was stopped; the worktree, the Unity editor and your history are intact.`,
     e.why === 'drained'
       ? 'You were asked to pause for the restart; pick the task up again.'
       : 'Your last turn was cut off mid-way, so a tool call may not have finished.',
@@ -144,7 +154,9 @@ export function versionLine(before: string | undefined, after: string | undefine
 /** The one paragraph the orchestrator gets after a restart. */
 export function restartSummary(f: ResumeFile, outcomes: ResumeOutcome[], update: UpdateResult | undefined, now: AppNow, notes: string[] = []): string {
   const head = now.head;
-  const parts: string[] = [`[app restarted] FF Factory restarted (${f.reason}; stopped at ${new Date(f.at).toLocaleTimeString()}).`];
+  const parts: string[] = f.cause
+    ? [`[app restarted] FF Factory restarted WITHOUT a clean stop: ${f.cause}.${f.update ? ` The update that was pending then (${f.reason}) was retried.` : ''}`]
+    : [`[app restarted] FF Factory restarted (${f.reason}; stopped at ${new Date(f.at).toLocaleTimeString()}).`];
   const version = versionLine(f.appVersion, now.version);
   if (version) parts.push(version);
   if (f.update) {
@@ -160,6 +172,7 @@ export function restartSummary(f: ResumeFile, outcomes: ResumeOutcome[], update:
   if (ok.length) parts.push(`Resumed automatically: ${ok.map(name).join(', ')}.`);
   else parts.push('No worker sessions needed resuming.');
   if (bad.length) parts.push(`Could not resume: ${bad.map((o) => `${name(o)}: ${o.error}`).join('; ')}.`);
+  if (f.editors?.length) parts.push(`Unity editors that were up: ${f.editors.join(', ')} (started again before their agents resumed).`);
   if (f.orchestratorBusy) parts.push('You were mid-turn yourself when it stopped; check what you were doing.');
   parts.push(...notes);
   parts.push('Tell the user in a line if anything needs them; otherwise carry on.');
@@ -373,4 +386,93 @@ export class Drainer {
   get drainedIds(): ReadonlySet<string> {
     return this.drained;
   }
+}
+
+// ---------------------------------------------------------------- unclean stops (a power cut, a crash)
+
+export const ALIVE_FILE = 'alive.json';
+export const UNCLEAN_RECOVERY_FILE = 'unclean-recovery.last';
+
+/**
+ * Whether this unclean start may bring agents back: not when the last one did so within `withinMs` (a crash
+ * loop must not keep restarting paid turns). Records this attempt when it may.
+ */
+export function mayRecoverUnclean(dataDir: string, now = Date.now(), withinMs = 30 * 60_000): boolean {
+  const p = path.join(dataDir, UNCLEAN_RECOVERY_FILE);
+  try {
+    const last = Date.parse(fs.readFileSync(p, 'utf8').trim());
+    if (Number.isFinite(last) && now - last < withinMs) return false;
+  } catch {
+    // never recovered before
+  }
+  try {
+    fs.writeFileSync(p, new Date(now).toISOString());
+  } catch {
+    // best effort
+  }
+  return true;
+}
+export const PENDING_RESTART_FILE = 'restart.pending.json';
+
+/** The server's heartbeat (every 30 s): after an unclean stop it says when the server was last alive. */
+export function writeAlive(dataDir: string, now = Date.now()) {
+  try {
+    const p = path.join(dataDir, ALIVE_FILE);
+    fs.writeFileSync(p + '.tmp', JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid }));
+    fs.renameSync(p + '.tmp', p);
+  } catch {
+    // next beat
+  }
+}
+
+export function readAlive(dataDir: string): { at: number } | undefined {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(dataDir, ALIVE_FILE), 'utf8')) as { at?: string };
+    const at = Date.parse(j.at ?? '');
+    return Number.isFinite(at) ? { at } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * An update asked for but not yet handed to the supervisor (it drains first): kept on disk, so a power cut
+ * or a crash during the drain does not lose it. stopServer clears it once data/update.request is written.
+ */
+export function writePendingRestart(dataDir: string, req: RestartRequest) {
+  if (!req.update) return;
+  try {
+    fs.writeFileSync(path.join(dataDir, PENDING_RESTART_FILE), JSON.stringify({ ...req, at: new Date().toISOString() }));
+  } catch {
+    // best effort
+  }
+}
+
+export function clearPendingRestart(dataDir: string) {
+  fs.rmSync(path.join(dataDir, PENDING_RESTART_FILE), { force: true });
+}
+
+/** Read and remove the pending update, if any (older than a day: stale, dropped). */
+export function takePendingRestart(dataDir: string, now = Date.now()): (RestartRequest & { at: string }) | undefined {
+  const p = path.join(dataDir, PENDING_RESTART_FILE);
+  try {
+    const j = JSON.parse(fs.readFileSync(p, 'utf8')) as RestartRequest & { at: string };
+    fs.rmSync(p, { force: true });
+    return j.update && now - Date.parse(j.at) < 24 * 3_600_000 ? j : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What an unclean stop was, in words: the machine went down (it booted after the server's last heartbeat:
+ * a power cut, a hard reset or a system crash) or only the server did (a crash or a kill).
+ */
+export function describeUncleanStop(o: { lastAliveAt?: number; bootAt: number; host: string }): string {
+  const t = (ms: number) => new Date(ms).toLocaleString();
+  if (o.lastAliveAt !== undefined && o.bootAt > o.lastAliveAt) {
+    return `${o.host} went down unexpectedly (lost power, was hard-reset or crashed) after ${t(o.lastAliveAt)}, and booted again at ${t(o.bootAt)}`;
+  }
+  if (o.lastAliveAt !== undefined) return `the FF Factory server stopped without a clean stop (a crash or a forced kill) after ${t(o.lastAliveAt)}; ${o.host} itself kept running`;
+  return 'the FF Factory server stopped without a clean stop (a crash, a forced kill or a power cut)';
 }
