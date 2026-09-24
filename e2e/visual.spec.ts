@@ -26,11 +26,11 @@ test('visual: orchestrator home', async ({ page }) => {
   const orch = page.locator('section.orch');
   await expect(orch.locator('.composer-box')).toBeVisible();
   // The orchestrator is shared with the chat tests running alongside: its conversation and state are
-  // theirs, and while one of their turns runs the composer shows Stop and a follow-up placeholder. The
-  // frame (header, composer) is what is compared.
+  // theirs, and while one of their turns runs the composer shows Stop and a follow-up placeholder; the
+  // phone's needs-you bell counts their permission requests. The frame (header, composer) is compared.
   await page.addStyleTag({
     content: `
-      section.orch .transcript-inner, section.orch .orch-state, section.orch .hb-on { visibility: hidden !important; }
+      section.orch .transcript-inner, section.orch .orch-state, section.orch .hb-on, section.orch .needs-you, section.orch .drawer-dot { visibility: hidden !important; }
       section.orch .composer-hint, section.orch .jump-pill, section.orch .btn-stop-main, section.orch .btn-stop-mini,
       section.orch .composer-actions [aria-label="Voice mode"] { display: none !important; }
       section.orch .composer textarea::placeholder { color: transparent !important; }
