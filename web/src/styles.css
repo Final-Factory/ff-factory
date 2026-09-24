@@ -3325,7 +3325,8 @@ select.input {
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  /* Above the phone's details sheet (60/61): drawers and dialogs opened from it must take the taps. */
+  z-index: 65;
   background: rgba(4, 7, 10, 0.66);
   backdrop-filter: blur(3px);
   display: grid;
@@ -4212,4 +4213,58 @@ body {
 .composer-box {
   overflow: hidden;
   overscroll-behavior: contain;
+}
+
+/* Videos an agent mentioned (MP4/WebM), inline in the transcript. */
+.video-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+.video-item {
+  margin: 0;
+  width: min(100%, 480px);
+}
+.video-item video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 8px;
+}
+.video-item figcaption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.video-item figcaption .ellipsis {
+  flex: 1;
+  min-width: 0;
+}
+.lightbox-stage video {
+  max-width: 100%;
+  max-height: 100%;
+  background: #000;
+}
+/* Gallery tiles for videos: the first frame with a play mark. */
+.gallery-video {
+  position: relative;
+  display: block;
+}
+.gallery-video video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: #000;
+  pointer-events: none;
+}
+.gallery-video svg {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  color: #fff;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.7));
 }

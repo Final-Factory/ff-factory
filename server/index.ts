@@ -18,7 +18,7 @@ import { systemStats } from './system.ts';
 import { Auth } from './auth.ts';
 import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
-import { listImages, MEDIA_TYPE, readImage } from './images.ts';
+import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { runHelper } from './privileged.ts';
 import { planCleanup, runCleanup } from './cleanup.ts';
@@ -242,6 +242,18 @@ function checkImages(images: unknown): ImageInput[] {
 // ---- images: kept uploads, files agents mention, the Screenshots galleries
 
 /** A route may return a file instead of JSON. */
+/** A file streamed to the client, honouring an HTTP Range request (videos: seeking, and iPad Safari). */
+class StreamReply {
+  readonly type: string;
+  readonly path: string;
+  readonly size: number;
+  constructor(type: string, file: string, size: number) {
+    this.type = type;
+    this.path = file;
+    this.size = size;
+  }
+}
+
 class FileReply {
   readonly type: string;
   readonly data: Buffer;
@@ -277,6 +289,11 @@ route('GET', '/api/image', async (_r, _p, url) => {
   const file = need(url.searchParams.get('path'), 'path');
   const where = imageRoots(url);
   try {
+    if (VIDEO_FILE.test(file)) {
+      if (where.machine) throw new Error('videos on a machine cannot be shown yet');
+      const v = openVideo(file, where.roots);
+      return new StreamReply(v.mediaType, v.path, v.size);
+    }
     const img = where.machine ? await machines.readImage(where.machine, file) : readImage(file, where.roots);
     return new FileReply(img.mediaType, img.data);
   } catch (e) {
@@ -287,7 +304,7 @@ route('GET', '/api/image', async (_r, _p, url) => {
 route('GET', '/api/screenshots', async (_r, _p, url) => {
   const where = imageRoots(url);
   if (where.machine) return machines.listImages(where.machine, cfg.screenshotDirs);
-  return listImages(where.roots[0], cfg.screenshotDirs);
+  return listImages(where.roots[0], cfg.screenshotDirs, 120, { videos: true });
 });
 
 route('POST', '/api/sessions/([\\w-]+)/title', async (req, [id]) => {
@@ -619,6 +636,7 @@ const server = http.createServer(async (req, res) => {
         const m = req.method === method ? re.exec(url.pathname) : null;
         if (!m) continue;
         const out = await h(req, m.slice(1), url);
+        if (out instanceof StreamReply) return sendStream(req, res, out);
         if (out instanceof FileReply) {
           res.writeHead(200, { 'content-type': out.type, 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'" });
           return res.end(out.data);
@@ -665,6 +683,22 @@ server.on('upgrade', (req, socket, head) => {
     ws.send(JSON.stringify({ type: 'state', state: appState() } satisfies ServerEvent));
   });
 });
+
+function sendStream(req: http.IncomingMessage, res: http.ServerResponse, f: StreamReply) {
+  const headers = { 'content-type': f.type, 'accept-ranges': 'bytes', 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'" };
+  const range = parseRange(req.headers.range, f.size);
+  if (range === 'unsatisfiable') {
+    res.writeHead(416, { ...headers, 'content-range': `bytes */${f.size}` });
+    return res.end();
+  }
+  const { start, end } = range ?? { start: 0, end: f.size - 1 };
+  res.writeHead(range ? 206 : 200, { ...headers, 'content-length': String(end - start + 1), ...(range ? { 'content-range': `bytes ${start}-${end}/${f.size}` } : {}) });
+  if (f.size === 0) return res.end();
+  const stream = fs.createReadStream(f.path, { start, end });
+  stream.on('error', () => res.destroy());
+  res.on('close', () => stream.destroy());
+  stream.pipe(res);
+}
 
 function broadcast(e: ServerEvent) {
   const data = JSON.stringify(e);

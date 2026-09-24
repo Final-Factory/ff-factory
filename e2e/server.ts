@@ -47,6 +47,11 @@ function repo(dir: string, branch: string) {
 }
 repo(path.join(base, 'base'), 'develop');
 for (const id of ['alpha', 'gallery', 'stuck']) repo(path.join(sandboxRoot, id), `sandbox/${id}`);
+// A short clip in a sandbox's screenshot folder, with the .meta Unity writes beside it (e2e/video.spec.ts).
+const videos = path.join(sandboxRoot, 'alpha', 'Assets', 'Screenshots', 'Videos');
+fs.mkdirSync(videos, { recursive: true });
+fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(videos, 'clip.webm'));
+fs.writeFileSync(path.join(videos, 'clip.webm.meta'), 'fileFormatVersion: 2\nguid: 0\n');
 
 const configFile = path.join(base, 'config.json');
 fs.writeFileSync(

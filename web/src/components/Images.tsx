@@ -11,6 +11,9 @@ export type ImagePlace = { session: string } | { sandbox: string } | { machine: 
 export const uploadUrl = (sessionId: string, ref: ImageRef) => `/api/uploads/${encodeURIComponent(sessionId)}/${encodeURIComponent(ref.id)}`;
 export const fileUrl = (place: ImagePlace, path: string) => `/api/image?${new URLSearchParams({ ...place, path })}`;
 const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
+export const isVideoPath = (p: string) => /\.(mp4|m4v|webm)$/i.test(p);
+/** "#t=0.1" makes Safari (iPad) and Chrome paint the first frame as the poster before playing. */
+const posterSrc = (src: string) => `${src}#t=0.1`;
 
 /** Thumbnails; a click opens the lightbox on that image, with the others to page through. */
 export function ImageStrip({ items, size = 'normal' }: { items: LightboxItem[]; size?: 'normal' | 'small' }) {
@@ -28,8 +31,8 @@ export function ImageStrip({ items, size = 'normal' }: { items: LightboxItem[]; 
   );
 }
 
-// Absolute image paths in agent text: Windows (C:\x\y.png, C:/x/y.png) or POSIX (/Users/x/y.png).
-const PATH_RE = /(?:[A-Za-z]:[\\/]|\/)(?:[^\s`'"()<>|*?,;]+[\\/])*[^\s`'"()<>|*?,;:\\/]+\.(?:png|jpe?g|gif|webp)\b/gi;
+// Absolute image and video paths in agent text: Windows (C:\x\y.png, C:/x/y.mp4) or POSIX (/Users/x/y.png).
+const PATH_RE = /(?:[A-Za-z]:[\\/]|\/)(?:[^\s`'"()<>|*?,;]+[\\/])*[^\s`'"()<>|*?,;:\\/]+\.(?:png|jpe?g|gif|webp|mp4|m4v|webm)\b/gi;
 
 export function mentionedPaths(text: string): string[] {
   const out = new Set<string>();
@@ -44,10 +47,39 @@ export function mentionedPaths(text: string): string[] {
   return [...out];
 }
 
-/** Images an agent wrote about by path: shown if the file is in its folders (the server checks). */
+/** Images and videos an agent wrote about by path: shown if the file is in its folders (the server checks). */
 export function MentionedImages({ text, place }: { text: string; place: ImagePlace }) {
-  const items = useMemo(() => mentionedPaths(text).map((p) => ({ src: fileUrl(place, p), name: baseName(p) })), [text, place]);
-  return <ImageStrip items={items} />;
+  const items = useMemo(() => mentionedPaths(text).map((p) => ({ src: fileUrl(place, p), name: baseName(p), video: isVideoPath(p) })), [text, place]);
+  const images = items.filter((i) => !i.video);
+  const videos = items.filter((i) => i.video);
+  return (
+    <>
+      <ImageStrip items={images} />
+      <VideoStrip items={videos} />
+    </>
+  );
+}
+
+/** Videos inline: the player loads only their metadata (and first frame) until played; seeking uses HTTP ranges. */
+export function VideoStrip({ items }: { items: LightboxItem[] }) {
+  const [broken, setBroken] = useState<Set<string>>(new Set());
+  const shown = items.filter((i) => !broken.has(i.src));
+  if (!shown.length) return null;
+  return (
+    <div className="video-strip">
+      {shown.map((it, i) => (
+        <figure key={it.src} className="video-item">
+          <video src={posterSrc(it.src)} controls playsInline muted preload="metadata" onError={() => setBroken((b) => new Set(b).add(it.src))} />
+          <figcaption className="dim small">
+            <span className="ellipsis mono">{it.name}</span>
+            <button className="btn btn-ghost btn-sm" onClick={() => openLightbox(shown, i)} title="Open large">
+              <Icon name="expand" size={12} />
+            </button>
+          </figcaption>
+        </figure>
+      ))}
+    </div>
+  );
 }
 
 /** Full-size view: page through, copy the image, download it, open it on its own. */
@@ -81,9 +113,11 @@ export function Lightbox() {
           </span>
         )}
         <div className="spacer" />
-        <button className="btn btn-ghost btn-sm" onClick={copy} title="Copy image">
-          <Icon name="copy" size={14} /> <span className="hide-sm">Copy</span>
-        </button>
+        {!it.video && (
+          <button className="btn btn-ghost btn-sm" onClick={copy} title="Copy image">
+            <Icon name="copy" size={14} /> <span className="hide-sm">Copy</span>
+          </button>
+        )}
         <a className="btn btn-ghost btn-sm" href={it.src} download={it.name} title="Download">
           <Icon name="download" size={14} /> <span className="hide-sm">Download</span>
         </a>
@@ -100,7 +134,7 @@ export function Lightbox() {
             <Icon name="back" size={22} />
           </button>
         )}
-        <img src={it.src} alt={it.name} />
+        {it.video ? <video key={it.src} src={it.src} controls playsInline autoPlay /> : <img src={it.src} alt={it.name} />}
         {i < lb.items.length - 1 && (
           <button className="lightbox-nav next" onClick={() => setI(i + 1)} aria-label="Next">
             <Icon name="chevron" size={22} />
@@ -128,14 +162,14 @@ export function ScreenshotsDrawer({ place, title, onClose }: { place: { sandbox:
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
-  const items = (files ?? []).map((f) => ({ src: fileUrl(place, f.path), name: baseName(f.path) }));
+  const items = (files ?? []).map((f) => ({ src: fileUrl(place, f.path), name: baseName(f.path), video: isVideoPath(f.path) }));
   return (
     <div className="overlay overlay-drawer" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="drawer" role="dialog" aria-modal>
         <header className="drawer-head">
           <Icon name="image" />
           <span className="ellipsis">
-            Screenshots · <span className="accent">{title}</span>
+            Screenshots and videos · <span className="accent">{title}</span>
           </span>
           <div className="spacer" />
           <button className="btn btn-ghost btn-icon" onClick={load} title="Refresh" aria-label="Refresh">
@@ -147,10 +181,17 @@ export function ScreenshotsDrawer({ place, title, onClose }: { place: { sandbox:
         </header>
         <div className="gallery">
           {files === null && <p className="dim">Loading…</p>}
-          {files?.length === 0 && <p className="dim">No images yet in Assets/Screenshots, Screenshots, specs/*/proofs, Logs or Temp/Screenshots.</p>}
+          {files?.length === 0 && <p className="dim">No images or videos yet in Assets/Screenshots, Screenshots, specs/*/proofs, Logs or Temp/Screenshots.</p>}
           {files?.map((f, i) => (
             <button key={f.path} className="gallery-item" title={f.path} onClick={() => openLightbox(items, i)}>
-              <img src={items[i].src} alt={items[i].name} loading="lazy" />
+              {items[i].video ? (
+                <span className="gallery-video">
+                  <video src={posterSrc(items[i].src)} muted playsInline preload="metadata" />
+                  <Icon name="play" size={22} />
+                </span>
+              ) : (
+                <img src={items[i].src} alt={items[i].name} loading="lazy" />
+              )}
               <span className="gallery-cap ellipsis">{items[i].name}</span>
               <span className="gallery-meta dim">
                 {fmtRelative(f.mtime, now)} · {fmtBytes(f.size)}

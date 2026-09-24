@@ -159,7 +159,7 @@ export function SandboxPanel({
             <button className="btn btn-ghost btn-sm" onClick={() => setLogOpen(true)}>
               <Icon name="log" size={14} /> Log
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => setShotsOpen(true)} title="Screenshots and other images agents left here">
+            <button className="btn btn-ghost btn-sm" onClick={() => setShotsOpen(true)} title="Screenshots, videos and other images agents left here">
               <Icon name="image" size={14} /> Screenshots
             </button>
             <button className="btn btn-ghost btn-sm" disabled={!ready} onClick={() => setSwitchOpen(true)} title="Switch this sandbox to another branch">

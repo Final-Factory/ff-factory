@@ -67,3 +67,29 @@ test('store: images kept per session, removed with the transcript', (t) => {
   assert.equal(store.imagePath('s1', id), undefined);
   store.flush();
 });
+
+test('video: ranges for seeking, root-limited, and in the gallery without Unity .meta files', async (t) => {
+  const { openVideo, parseRange, listImages } = await import('./images.ts');
+  // Ranges.
+  assert.equal(parseRange(undefined, 1000), undefined);
+  assert.deepEqual(parseRange('bytes=0-', 1000), { start: 0, end: 999 });
+  assert.deepEqual(parseRange('bytes=100-199', 1000), { start: 100, end: 199 });
+  assert.deepEqual(parseRange('bytes=900-5000', 1000), { start: 900, end: 999 });
+  assert.deepEqual(parseRange('bytes=-100', 1000), { start: 900, end: 999 });
+  assert.equal(parseRange('bytes=1000-', 1000), 'unsatisfiable');
+  assert.equal(parseRange('bytes=0-1,5-9', 1000), undefined, 'several ranges: the whole file');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'video-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dir = path.join(root, 'sb', 'Assets', 'Screenshots', 'Videos');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const n of ['01_blackhole.mp4', '01_blackhole.mp4.meta', '01_blackhole_sheet.png', 'clip.webm', 'notes.txt']) fs.writeFileSync(path.join(dir, n), 'x'.repeat(10));
+  const v = openVideo(path.join(dir, '01_blackhole.mp4'), [path.join(root, 'sb')]);
+  assert.equal(v.mediaType, 'video/mp4');
+  assert.equal(v.size, 10);
+  assert.equal(openVideo(path.join(dir, 'clip.webm'), [path.join(root, 'sb')]).mediaType, 'video/webm');
+  assert.throws(() => openVideo(path.join(dir, '01_blackhole.mp4'), [path.join(root, 'other')]), /outside/);
+  assert.throws(() => openVideo(path.join(dir, '01_blackhole.mp4.meta'), [path.join(root, 'sb')]), /not a video/);
+  const names = (videos: boolean) => listImages(path.join(root, 'sb'), undefined, 120, { videos }).map((f) => path.basename(f.path)).sort();
+  assert.deepEqual(names(true), ['01_blackhole.mp4', '01_blackhole_sheet.png', 'clip.webm']);
+  assert.deepEqual(names(false), ['01_blackhole_sheet.png']);
+});

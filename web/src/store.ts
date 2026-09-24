@@ -31,6 +31,8 @@ export interface StoreState {
 export interface LightboxItem {
   src: string;
   name: string;
+  /** A video (MP4/WebM): shown with player controls instead of as an image. */
+  video?: boolean;
 }
 
 export interface Toast {
