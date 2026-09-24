@@ -55,7 +55,8 @@ test('set_app_config: the public commit identity', (t) => {
   assert.throws(() => normalizeSetting('publicGitIdentity.name', 'a "quoted" name'));
 });
 
-test('set_app_config: host guard housekeeping, with age rules kept away from anything that matters', (t) => {
+// The host guard's paths are Windows paths (drive letters, a Dev Drive .vhdx): on Linux "C:/..." is not absolute.
+test('set_app_config: host guard housekeeping, with age rules kept away from anything that matters', { skip: process.platform !== 'win32' && 'Windows only' }, (t) => {
   const { file, cfg } = setup(t);
   const full = { ...cfg, protectedPaths: ['C:/live/game'], sandboxRoot: 'F:/ffsb', standingRoot: 'F:/ffsb/_agents', dataDir: 'C:/app/data', repo: { basePath: 'C:/ffsb/_base' }, hostGuard: { devDriveVhdx: '', compactWhenReclaimGB: 0, cleanup: { ageRules: [] } } } as unknown as Config;
   setAppConfig(file, full, 'hostGuard.devDriveVhdx', 'C:/ffsb-devdrive.vhdx');
