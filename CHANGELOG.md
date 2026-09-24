@@ -30,8 +30,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
-- iPad with a hardware keyboard: focusing a composer no longer shifts the page up, and message
-  boxes no longer look like fields for AutoFill.
+- iPad with a hardware keyboard, in Safari and Chrome: the message box is no longer a form field, so
+  Chrome's AutoFill bar (passwords, cards, addresses) has nothing to attach to, and the app keeps its
+  full height under the keyboard's bar instead of leaving an empty band. Focusing the box no longer
+  shifts the page up; only the on-screen keyboard lifts the composer.
+- The caret stays where it belongs when the page moves under it (a keyboard coming up or going away).
 - iPad with a hardware keyboard: Enter sends and Shift+Enter makes a new line, as on a desktop.
   Phones and tablets typing on their own on-screen keyboard keep Enter for a new line.
 - The details sheet and the settings dialog no longer scroll sideways on phones.
@@ -40,6 +43,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 - `web/mock`: a mock backend with a busy day in every state, for working on the UI.
 - `docs/ui-review.md`: the review, and what changed.
+- E2E: iPad projects in Safari and in Chrome (its `CriOS` user agent on WebKit) for `e2e/ipad.spec.ts`.
 
 ## [0.1.0] - 2026-09-24
 

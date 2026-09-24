@@ -188,32 +188,43 @@ Not redesigned: the standing agent's page (only its facts line and names changed
 
 ## iPad with a hardware keyboard (added during the work)
 
-Ben's report: focusing a composer in Safari on an iPad with a hardware keyboard floats the AutoFill
-bar (passwords, cards, contacts) at the bottom and shifts the whole page up, header off screen.
+Ben's report, in Chrome on an iPad with a hardware keyboard (1366 x 1024 CSS px): focusing a composer
+floats an AutoFill bar (key, card, pin) at the bottom and shifts the page up. The first fix (form
+attributes, the app fitted to the visual viewport) made it worse: the bar stayed, since Chrome for iOS
+ignores `autocomplete="off"` for it (Chromium issue 442607855, cited in corveil/crow#1263), and iOS
+counts about 164 px at the bottom as covered while most of it still shows the page, so an app fitted
+to the visual viewport left a dead band under the composer.
 
-- The message boxes now tell Safari and password managers they are free text: `autocomplete="off"`,
-  `autocorrect="on"`, `autocapitalize="sentences"`, no `name` or `id`, not inside a `<form>`, and
-  the 1Password, LastPass and Bitwarden ignore hints. Once signed in, the page has no password or
-  username field at all.
-- `web/src/viewport.ts` keeps the page fixed to the visual viewport, so a bar or keyboard only
-  lifts the composer. After every focus change or viewport event it now follows the viewport frame
-  by frame for a second, because Safari does not always fire an event for the last step of its pan;
-  and it no longer scrolls the document back with `window.scrollTo`, which fought Safari's scroll
-  into view.
-- `e2e/ipad.spec.ts` runs on WebKit as an iPad Pro 11 with a stand-in `visualViewport` that moves
-  the way Safari's does. Its case "a viewport change that comes without an event" fails on the old
-  `viewport.ts` with the header 60 px above the screen, which matches the report, and passes now.
+- The composer's message box is a `contenteditable="plaintext-only"` div, not a textarea
+  (`web/src/editable.ts`, `web/src/components/Composer.tsx`): role `textbox`, `aria-multiline`, no
+  autocomplete or password-manager attributes, not in a form. Chrome for iOS reports "form activity"
+  (what brings up its AutoFill bar) for `FORM`, `INPUT`, `SELECT`, `OPTION` and `TEXTAREA` only
+  (`FORM_TAGS` and `formActivity()` in Chromium's
+  `components/autofill/ios/form_util/resources/form_handlers.ts`); contenteditable elements count only
+  behind `kAutofillSupportContentEditableIos`, which is `FEATURE_DISABLED_BY_DEFAULT`
+  (`components/autofill/ios/common/features.mm`, Chromium main on 2026-09-24). Enter and Shift+Enter,
+  image paste and drop, dictation at the caret, drafts, the placeholder, the capped height with its own
+  scroll and IME input all work as before. A browser without `plaintext-only` gets
+  `contenteditable="true"` with pastes and drops made plain and formatting blocked. The new-agent and
+  standing-agent dialogs keep their textareas.
+- `web/src/viewport.ts` keeps the app at the layout viewport's height unless more than 30% of the
+  screen (at least 120 px, at most 200 px) is covered, which only an on-screen keyboard does (an
+  iPad's takes 300 px or more). A hardware keyboard's bar floats over the full-height app. The app
+  follows Safari's pan either way, so the header stays on screen. The same rule decides Enter: a
+  hardware keyboard sends, an on-screen keyboard makes a new line.
+- The caret: after the page moves, the focused box's selection is set again where it is (iOS may go on
+  drawing the caret where the box was), and a layout box that holds the focused field is no longer
+  scrolled back while the field has the focus (it is once the focus leaves).
+- `e2e/ipad.spec.ts` runs in two projects, `ipad-safari` and `ipad-chrome` (Chrome's `CriOS` user agent;
+  Chrome for iOS is WebKit), with a stand-in `visualViewport`. It checks that the box is a
+  contenteditable without autocomplete attributes; that the app keeps the layout's height under a 60
+  or 164 px bar, panned or not; that it fits above a 396 px keyboard with the header in place; that the
+  caret stays in the box, at the same place and on screen, through each move; that keys typed while the
+  page moves stay in order (an earlier draft, which put back a Range saved before the move, typed "zxy"
+  for "xyz"); and Enter under a bar and with the keyboard.
 
-What only a real iPad can show: whether Safari still draws the AutoFill bar for a `<textarea>` with
-these attributes, and whether its pan comes as the stand-in assumes. If the bar still appears, the
-next step is a `contenteditable` composer (which Safari does not offer AutoFill for, as ChatGPT and
-Claude on the web use), keeping paste, Enter and Shift+Enter, voice and drafts.
-
-Enter with a hardware keyboard: it used to make a new line on any touch screen. It now follows the
-keyboard in use (`onScreenKeyboard()` in `web/src/viewport.ts`): an on-screen keyboard takes more
-than 150 px off the bottom of the screen, measured under the layout (iOS) and against the height
-before a field took the focus (Android, whose keyboard resizes the layout). With an iPad's hardware
-keyboard (only the shortcut bar, about 60 px, or nothing) Enter sends and Shift or Ctrl+Enter makes a
-new line; with a phone's or tablet's own keyboard Enter makes a new line and the Send button sends.
-Two iPad tests cover both; the hardware one fails on the old rule. The iPad's floating keyboard takes
-no height, so there Enter sends too.
+What only a real iPad can show: whether Chrome's AutoFill bar is gone for the contenteditable box (per
+Chromium's source it should be, unless that flag is on for some users); how much iPadOS still counts as
+covered with the hardware keyboard (the app takes anything up to 200 px for a bar); whether iPadOS's
+floating bar covers the Send button (Enter sends then); and whether Safari or Chrome pans the page for
+the box at the bottom under the bar (the app follows a pan, so the header should stay).
