@@ -337,7 +337,8 @@ export class Daemon {
         return;
       case 'unity': {
         const u = this.unity;
-        const act = msg.action === 'start' ? u.start() : msg.action === 'stop' ? u.stop({ force: msg.force }) : msg.action === 'restart' ? u.restart({ force: msg.force }) : u.status();
+        const status = async () => [await u.status(), this.unityWatch?.describe()].filter(Boolean).join('\n');
+        const act = msg.action === 'start' ? u.start() : msg.action === 'stop' ? u.stop({ force: msg.force }) : msg.action === 'restart' ? u.restart({ force: msg.force }) : status();
         if (msg.action === 'stop' || msg.action === 'restart') this.unityWatch?.expectExit();
         void act.then(
           (text) => this.send({ type: 'unity_result', id: msg.id, ok: true, text }),

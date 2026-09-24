@@ -20,6 +20,8 @@ export interface EditorWindow {
   owned: boolean;
   text: string[];
   buttons: string[];
+  /** A dialog by its own platform's measure (macOS: an alert window or a sheet, machine/macDialogs.ts). */
+  dialog?: boolean;
 }
 
 /**
@@ -158,7 +160,7 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
 
 /** Windows that hold no one up: Unity's own main window, splash and progress windows. */
 function isDialogLike(w: EditorWindow): boolean {
-  if (w.class !== '#32770') return false;
+  if (w.class !== '#32770' && !w.dialog) return false;
   if (!w.buttons.length) return false; // progress and splash windows have no buttons to press
   // A progress bar with only a Cancel button is work in progress, not a question.
   if (w.buttons.every((b) => /^&?cancel$/i.test(b.trim()))) return false;

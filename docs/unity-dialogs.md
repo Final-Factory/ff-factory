@@ -105,6 +105,37 @@ the project lock, "Opening Project in Non-Matching Editor Installation" (a Hub d
 input-system or render-pipeline restart prompts. Any of them would still be reported as an unknown
 dialog.
 
+## Macs
+
+The machine daemon runs the same rule table for the editor of its clone, from its Unity watch every
+30 s (`machine/macDialogs.ts`, `MacUnityWatch` in `machine/unity.ts`). It lists Unity's windows and
+their sheets through System Events (`osascript -l JavaScript`): an alert window (`AXDialog`,
+`AXSystemDialog`) or a sheet with named buttons counts as a dialog. An alert's first text is its title,
+the rest its text. The button is pressed with System Events after checking that the window still shows
+the same text. The decisions and rate limits are the ones above. For the two scene rules
+("scenes modified externally" Reload, "Recovering Scene Backups" No), clean means that no `*.unity` file
+in the clone has uncommitted changes (a read-only `git status`); the Reload also needs the main window
+title, without a `*`. A dialog that needs a person, or an unknown one still there on the next look, is
+sent once as a `[unity]` notice to the orchestrator. An editor waiting on a dialog is never restarted as
+hung. `unity status` on the machine lists the open dialogs, the answers of the last hour, and a missing
+permission.
+
+macOS privacy settings have to allow this once per Mac. Code cannot grant them, and the daemon does not
+try:
+
+- **Accessibility**, for the daemon's node binary (the process launchd starts, which macOS holds
+  responsible for its `osascript`). Missing: osascript fails with "not allowed assistive access" (-25211).
+  Fix: System Settings > Privacy & Security > Accessibility > +, Cmd-Shift-G, the node path (the notice
+  names it; the real path, e.g. `/opt/homebrew/Cellar/node/<v>/bin/node`), switch on. After a node
+  upgrade, add it again.
+- **Automation**, "node" may control "System Events". Missing: "Not authorized to send Apple events to
+  System Events" (-1743). macOS asks once on the Mac's screen ("node wants access to control System
+  Events", Allow) when someone is logged in. If it was declined, switch it on under Privacy & Security
+  > Automation > node.
+
+When either is missing, the watch sends one notice with the exact step and shows it in the status; the
+hang and crash watch keeps working without it. It notices by itself when the permission arrives.
+
 ## Hooks
 
 `SandboxManager.events` emits `blocked` (sandbox, details) and `dismissed` (sandbox, what was

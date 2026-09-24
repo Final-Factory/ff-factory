@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, type HangThresholds } from '../server/unityHang.ts';
+import { decide, describeDialog, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
+import { listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton } from './macDialogs.ts';
 
 /**
  * The Unity editor of a machine's clone (docs/unity-lifecycle.md), managed by the daemon on the Mac: status,
@@ -204,6 +206,13 @@ export interface WatchDeps {
   bridge(): { port?: number; reloading?: boolean };
   ping(port: number): Promise<boolean>;
   now(): number;
+  /** The editor's dialogs and main window title (machine/macDialogs.ts); throws osascript's error. */
+  listDialogs(pid: number): Promise<{ dialogs: Dialog[]; mainTitle?: string }>;
+  pressButton(pid: number, d: Dialog, button: string): Promise<boolean>;
+  /** No *.unity file in the clone has uncommitted changes (git status, read-only). */
+  sceneFilesClean(): Promise<boolean>;
+  /** The node binary the privacy settings must name. */
+  nodePath(): string;
 }
 
 /** What Unity writes to its log when it crashes (macOS: signals and the native crash reporter). */
@@ -234,6 +243,14 @@ export class MacUnityWatch {
   private busy = false;
   /** The watch launched the current editor itself (a restart): only then does a startup stall count. */
   private launchedByUs = false;
+  /** Dialogs open at the last look, and what the watch did about each. */
+  private open: { d: Dialog; state: 'pressed' | 'blocked' | 'new'; since: number; why?: string }[] = [];
+  /** Buttons pressed recently (the rate limits of decide), newest last. */
+  private dismissed: { at: string; title: string; button: string }[] = [];
+  /** Dialogs already reported, by title and text: once per appearance. */
+  private reported = new Set<string>();
+  /** The macOS permission the dialog watch lacks (the one-time step), if any. */
+  private permission?: string;
 
   constructor(u: MacUnity, report: (text: string, restarted: boolean) => void, deps: Partial<WatchDeps> = {}, opts: Partial<{ max: number; windowMinutes: number; hang: HangThresholds }> = {}) {
     this.u = u;
@@ -267,6 +284,10 @@ export class MacUnityWatch {
       bridge: () => bridgeInfo(u.repo),
       ping: (port) => bridgePing(port),
       now: () => Date.now(),
+      listDialogs: (pid) => listMacDialogs(pid),
+      pressButton: (pid, d, button) => pressMacButton(pid, d, button),
+      sceneFilesClean: () => sceneFilesUnchanged(u.repo),
+      nodePath: () => nodeBinary(),
       ...deps,
     };
   }
@@ -316,6 +337,7 @@ export class MacUnityWatch {
       this.bridgeFailingSince = undefined;
       this.logGrewAt = Math.max(this.logGrewAt, now);
     }
+    const dialogOpen = await this.dialogs(pid, now);
     const b = this.d.bridge();
     const ok = b.port ? await this.d.ping(b.port) : false;
     if (ok) {
@@ -330,6 +352,7 @@ export class MacUnityWatch {
         alive: true,
         crashReporter: reportersFor(procs, this.u.repo).length > 0,
         phase: this.launchedByUs && !this.bridgeUp ? 'starting' : 'running',
+        dialog: dialogOpen,
         bridgeFailingSince: this.bridgeFailingSince,
         reloading: b.reloading,
         logGrewAt: this.logGrewAt,
@@ -339,6 +362,84 @@ export class MacUnityWatch {
     );
     if (v.kind === 'ok') return 'ok';
     return this.restart(`the editor ${v.kind === 'crashed' ? 'crashed' : 'hung'}: ${v.why}`, now);
+  }
+
+  /**
+   * The dialog watchdog on this Mac (docs/unity-dialogs.md): the same rule table as on the host. A known
+   * dialog with a safe answer is pressed; one that needs a person, or an unknown one still there on the next
+   * look, is reported once. Returns whether a dialog is open (a dialog is never a hang).
+   */
+  private async dialogs(pid: number, now: number): Promise<boolean> {
+    let seen: { dialogs: Dialog[]; mainTitle?: string };
+    try {
+      seen = await this.d.listDialogs(pid);
+      if (this.permission) this.report('Unity dialog watch on this machine can see the editor\'s windows again.', false);
+      this.permission = undefined;
+    } catch (e) {
+      const msg = (e as Error).message;
+      const step = macPermissionProblem(msg, this.d.nodePath());
+      if (step && step !== this.permission) this.report(`Unity dialog watch on this machine cannot read Unity's dialogs: ${step}`, false);
+      this.permission = step ?? this.permission;
+      return this.open.length > 0;
+    }
+    const key = (d: Dialog) => `${d.title}\n${d.text}`;
+    const before = new Map(this.open.map((o) => [key(o.d), o]));
+    const open: typeof this.open = [];
+    let sceneFilesClean: boolean | undefined;
+    for (const d of seen.dialogs) {
+      const k = key(d);
+      const prev = before.get(k);
+      const a = d.known?.action;
+      if (a?.kind === 'dismiss' && a.onlyIf && sceneFilesClean === undefined) sceneFilesClean = await this.d.sceneFilesClean().catch(() => false);
+      const v = decide(d, {
+        autoDismiss: true,
+        recent: this.dismissed,
+        nowMs: now,
+        // No bridge check of open scenes here: the scene files on disk are the measure (as on the host without one).
+        scenesClean: sceneFilesClean,
+        sceneFilesClean,
+        editorTitle: seen.mainTitle,
+      });
+      if ('click' in v) {
+        let pressed = false;
+        try {
+          pressed = await this.d.pressButton(pid, d, v.click);
+        } catch (e) {
+          const step = macPermissionProblem((e as Error).message, this.d.nodePath());
+          if (step && step !== this.permission) this.report(`Unity dialog watch on this machine cannot press Unity's buttons: ${step}`, false);
+          this.permission = step ?? this.permission;
+        }
+        if (pressed) {
+          this.dismissed = [...this.dismissed, { at: new Date(now).toISOString(), title: d.title, button: v.click }].slice(-40);
+          this.reported.delete(k);
+          open.push({ d, state: 'pressed', since: prev?.since ?? now });
+          continue;
+        }
+      }
+      // Unknown dialogs are reported only if still there on the next look (many close by themselves).
+      const block = d.known || prev;
+      const why = d.known?.advice ?? ('why' in v ? v.why : undefined);
+      open.push({ d, state: block ? 'blocked' : 'new', since: prev?.since ?? now, why });
+      if (block && !this.reported.has(k)) {
+        this.reported.add(k);
+        this.report(`Unity on this machine is waiting on a dialog: ${describeDialog(d)} [${d.buttons.join(' / ')}]${why ? `. ${why}` : ''}`, false);
+      }
+    }
+    // A dialog that closed may come back later and deserves a new report then.
+    for (const k of [...this.reported]) if (!open.some((o) => key(o.d) === k)) this.reported.delete(k);
+    this.open = open.filter((o) => o.state !== 'pressed');
+    return this.open.length > 0;
+  }
+
+  /** Lines for the unity status: dialogs waiting, the permission step, recent automatic answers. */
+  describe(): string {
+    const now = this.d.now();
+    const lines: string[] = [];
+    for (const o of this.open) lines.push(`${o.state === 'blocked' ? 'blocked on a dialog' : 'dialog (checking)'}: ${describeDialog(o.d)} [${o.d.buttons.join(' / ')}], for ${Math.round((now - o.since) / 60_000)} min${o.why ? `; ${o.why}` : ''}`);
+    if (this.permission) lines.push(`dialog watch off: ${this.permission}`);
+    const recent = this.dismissed.filter((x) => now - Date.parse(x.at) < 3_600_000).slice(-5);
+    if (recent.length) lines.push(`auto-answered in the last hour: ${recent.map((x) => `"${x.title.slice(0, 60)}" -> ${x.button} (${Math.round((now - Date.parse(x.at)) / 60_000)} min ago)`).join('; ')}`);
+    return lines.join('\n');
   }
 
   private async restart(why: string, now: number): Promise<'restarted' | 'gave-up'> {
