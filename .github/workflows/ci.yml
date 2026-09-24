@@ -41,6 +41,11 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             web/package-lock.json
+      - name: A git identity for the tests that commit
+        # Global config, not GIT_AUTHOR_* variables: some tests set a commit's identity with -c on purpose.
+        run: |
+          git config --global user.name "FF Factory CI"
+          git config --global user.email "ci@users.noreply.github.com"
       - run: npm ci --no-audit --no-fund
       - run: npm ci --prefix web --no-audit --no-fund
       - name: Typecheck (server, shared, scripts, e2e)
