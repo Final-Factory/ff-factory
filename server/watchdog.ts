@@ -33,7 +33,8 @@ export interface EditorWindow {
  * `onlyIf: 'sceneFilesClean'`: press only when no *.unity file in the sandbox has uncommitted changes
  * (`git status`), with no title check (the dialog it guards comes up at startup, before the main window).
  *
- * `always`: a standing rule says this button is always the answer (FMOD line endings, Safe Mode), so the
+ * `always`: a standing rule says this button is always the answer (FMOD line endings, Safe Mode, the
+ * Addressables build report prompt), so the
  * watchdog never gives up after a few presses (DISMISS_LIMIT); it only stops at a true loop, when the
  * dialog comes back faster than ALWAYS_LIMIT allows.
  */
@@ -75,6 +76,17 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
     action: { kind: 'dismiss', button: 'Ignore', always: true },
     advice:
       'the project has compile errors. "Ignore" opens the editor normally (with errors) so the MCP bridge comes up and an agent can fix them; Safe Mode would keep the bridge from loading.',
+  },
+  {
+    id: 'addressables-build-report',
+    // com.unity.addressables 2.9.1 Editor/Build/DataBuilders/BuildScriptBase.cs NotifyUserAboutBuildReport(): title
+    // "Addressables Build Report", "There's a new Addressables Build Report ... requires that 'Debug Build Layout' is
+    // turned on ... Would you like to turn it on?", Yes / No. Shown on a content build (a player build too) until
+    // answered once; either answer sets userHasBeenInformedAboutBuildReportSettingPreBuild in the project's
+    // Library/AddressablesConfig.dat, so it does not come back. Yes would make every content build write a layout report.
+    match: /Addressables Build Report|'Debug Build Layout' is turned on/i,
+    action: { kind: 'dismiss', button: 'No', always: true },
+    advice: 'Addressables offers to turn on "Debug Build Layout" (a build report that makes content builds slower); the rule: always No.',
   },
   {
     id: 'licensing-connection-lost',

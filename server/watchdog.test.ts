@@ -37,6 +37,12 @@ const SAMPLES: [string, string, string, string[]][] = [
     ['Repair', 'Ignore'],
   ],
   ['safe-mode', 'Enter Safe Mode?', 'The project you are opening contains compilation errors.', ['Enter Safe Mode', 'Ignore', 'Quit']],
+  [
+    'addressables-build-report',
+    'Addressables Build Report',
+    "There's a new Addressables Build Report you can check out after your content build.  However, this requires that 'Debug Build Layout' is turned on.  The setting can be found in Edit > Preferences > Addressables.  Would you like to turn it on?",
+    ['Yes', 'No'],
+  ],
   ['project-version', 'Project Upgrade Required', 'Your project was saved with an older Unity version (6000.0.1f1) than the one you are currently using (6000.3.19f1).', ['Continue', 'Quit']],
   ['api-updater', 'Precompiled Assemblies Update Consent Request', 'Unity found assemblies using deprecated Unity APIs in this project.', ['Yes', 'No']],
   ['corrupted-library', 'Corrupted Library Detected', 'Corrupted files in the Library prevented Unity to load your project.', ['Rebuild Library', "Don't rebuild Library"]],
@@ -51,7 +57,7 @@ test('known dialogs: every sample matches its entry, and only the listed ones ar
     const [d] = findDialogs([win({ title, text: text ? [text] : [], buttons })]);
     assert.equal(d?.known?.id, id, title);
     const v = decide(d, { autoDismiss: true });
-    const expected: Record<string, string> = { 'fmod-line-endings': 'Ignore', 'safe-mode': 'Ignore' };
+    const expected: Record<string, string> = { 'fmod-line-endings': 'Ignore', 'safe-mode': 'Ignore', 'addressables-build-report': 'No' };
     assert.deepEqual(v, expected[id] ? { click: expected[id] } : { report: true }, title);
   }
   assert.ok(new Set(KNOWN_DIALOGS.map((k) => k.id)).size === KNOWN_DIALOGS.length, 'ids are unique');
@@ -148,17 +154,18 @@ test('scenes modified externally: no modified *.unity file counts as clean (git 
   assert.deepEqual(decide(d, { autoDismiss: true, scenesClean: true, editorTitle: TITLE }), { click: 'Reload' });
 });
 
-test('always-rule dialogs (FMOD, Safe Mode): pressed every time they come back, reported only in a fast loop', () => {
+test('always-rule dialogs (FMOD, Safe Mode, Addressables build report): pressed every time they come back, reported only in a fast loop', () => {
   const now = Date.parse('2026-09-24T12:00:00Z');
   const at = (sAgo: number) => new Date(now - sAgo * 1000).toISOString();
-  for (const [title, text, buttons] of [
-    ['Repair FMOD Libraries', 'The following FMOD libraries contain incorrect line endings', ['Repair', 'Ignore']],
-    ['Enter Safe Mode?', 'The project you are opening contains compilation errors.', ['Enter Safe Mode', 'Ignore', 'Quit']],
+  for (const [title, text, buttons, answer] of [
+    ['Repair FMOD Libraries', 'The following FMOD libraries contain incorrect line endings', ['Repair', 'Ignore'], 'Ignore'],
+    ['Enter Safe Mode?', 'The project you are opening contains compilation errors.', ['Enter Safe Mode', 'Ignore', 'Quit'], 'Ignore'],
+    ['Addressables Build Report', "There's a new Addressables Build Report you can check out after your content build.  However, this requires that 'Debug Build Layout' is turned on.", ['Yes', 'No'], 'No'],
   ] as const) {
     const [d] = findDialogs([win({ title, text: [text], buttons: [...buttons] })]);
     const past = (ago: number[]) => ago.map((s) => ({ at: at(s), title }));
     // Five presses in the last ten minutes: an ordinary dialog would have given up at three.
-    assert.deepEqual(decide(d, { autoDismiss: true, recent: past([60, 120, 240, 400, 590]), nowMs: now }), { click: 'Ignore' }, title);
+    assert.deepEqual(decide(d, { autoDismiss: true, recent: past([60, 120, 240, 400, 590]), nowMs: now }), { click: answer }, title);
     // Back within 20 s of the last press: a loop.
     const loop = decide(d, { autoDismiss: true, recent: past([5, 120]), nowMs: now });
     assert.equal('report' in loop && loop.repeated, true, title);
@@ -166,8 +173,8 @@ test('always-rule dialogs (FMOD, Safe Mode): pressed every time they come back, 
     // 30 presses in the hour: a loop too; 29 is still fine, and older ones do not count.
     const every = (n: number, gap: number) => Array.from({ length: n }, (_, i) => 30 + i * gap);
     assert.equal('report' in decide(d, { autoDismiss: true, recent: past(every(30, 110)), nowMs: now }), true, title);
-    assert.deepEqual(decide(d, { autoDismiss: true, recent: past(every(29, 110)), nowMs: now }), { click: 'Ignore' }, title);
-    assert.deepEqual(decide(d, { autoDismiss: true, recent: past(every(30, 110).map((s) => s + 3600)), nowMs: now }), { click: 'Ignore' }, title);
+    assert.deepEqual(decide(d, { autoDismiss: true, recent: past(every(29, 110)), nowMs: now }), { click: answer }, title);
+    assert.deepEqual(decide(d, { autoDismiss: true, recent: past(every(30, 110).map((s) => s + 3600)), nowMs: now }), { click: answer }, title);
   }
   // Dialogs without the rule keep the old limit.
   const [conn] = findDialogs([win({ title: 'Connection Lost', text: ['The connection with the Unity Licensing Client has been lost.'], buttons: ['Retry'] })]);
