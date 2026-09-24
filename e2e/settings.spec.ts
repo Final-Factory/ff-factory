@@ -1,3 +1,4 @@
+import { NOTIFY_KINDS } from '../shared/types.ts';
 import { expect, openSidebar, signIn, test } from './fixtures.ts';
 
 /**
@@ -83,8 +84,9 @@ test('settings: notifications on and off, per-kind choices, and the version', as
 
     // Each kind toggles and is saved on the server for this device.
     const boxes = sheet.locator('.field', { hasText: 'Tell me when' }).getByRole('checkbox');
-    await expect(boxes).toHaveCount(6);
-    const kinds = ['permission', 'turnEnd', 'error', 'standing', 'delegation', 'unity'];
+    // One per kind the server knows (shared/types.ts), in its order.
+    const kinds = NOTIFY_KINDS.map((k) => k.value);
+    await expect(boxes).toHaveCount(kinds.length);
     for (const i of [0, 3]) {
       const box = boxes.nth(i);
       await expect(box).toBeChecked();
