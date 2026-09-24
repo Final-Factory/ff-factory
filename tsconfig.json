@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["server", "shared", "machine"]
+  "include": ["server", "shared", "machine", "web/mock"]
 }
