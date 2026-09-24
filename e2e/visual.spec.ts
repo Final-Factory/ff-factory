@@ -33,7 +33,7 @@ test('visual: orchestrator home', async ({ page }) => {
       section.orch .transcript-inner, section.orch .orch-state, section.orch .hb-on, section.orch .needs-you, section.orch .drawer-dot { visibility: hidden !important; }
       section.orch .composer-hint, section.orch .jump-pill, section.orch .btn-stop-main, section.orch .btn-stop-mini,
       section.orch .composer-actions [aria-label="Voice mode"] { display: none !important; }
-      section.orch .composer textarea::placeholder { color: transparent !important; }
+      section.orch .composer-input::before { color: transparent !important; }
     `,
   });
   await expect(orch).toHaveScreenshot('orchestrator.png');

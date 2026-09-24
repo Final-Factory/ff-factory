@@ -2116,22 +2116,40 @@ select.input {
   border-color: var(--accent);
 }
 
-.composer textarea {
+/* The message box: contenteditable (web/src/editable.ts), grown by its text up to a max-height set
+   from the script, then scrolled. */
+.composer-input {
+  position: relative;
   width: 100%;
   min-width: 0;
   min-height: 30px;
   max-height: 320px;
   padding: 4px var(--s-2) 2px 0;
-  border: none;
   outline: none;
-  resize: none;
-  overflow-y: hidden;
-  background: transparent;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   line-height: 1.5;
+  cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
   overscroll-behavior: contain;
 }
 
-.composer-large textarea {
+.composer-input[data-empty]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: var(--s-2);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+  pointer-events: none;
+}
+
+.composer-large .composer-input {
   font-size: var(--fs-lg);
 }
 
@@ -3976,8 +3994,8 @@ select.input {
     padding-bottom: max(var(--s-2), env(safe-area-inset-bottom));
   }
 
-  .composer textarea,
-  .composer-large textarea,
+  .composer-input,
+  .composer-large .composer-input,
   .input {
     font-size: 16px; /* stops iOS zooming into the field */
   }
@@ -4123,7 +4141,7 @@ select.input {
     padding: 4px 4px 4px var(--s-4);
   }
 
-  .composer textarea {
+  .composer-input {
     flex: 1 1 0;
     width: auto;
     align-self: center;

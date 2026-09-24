@@ -1,4 +1,4 @@
-import { expect, expectFullyVisible, expectNoHorizontalOverflow, expectTapTargets, isMobile, openSandbox, openSidebar, settle, test } from './fixtures.ts';
+import { BOX, expect, expectFullyVisible, expectNoHorizontalOverflow, expectTapTargets, isMobile, openSandbox, openSidebar, settle, test } from './fixtures.ts';
 
 // The main screens fit the viewport on every project; on a phone, the primary controls are at least
 // 44 px (Apple's and Google's minimum touch target).
@@ -31,7 +31,7 @@ test('layout: a sandbox page', async ({ authed: page }) => {
   await expectTapTargets(page, '.sb-panel .composer-actions .btn, .sb-panel .ph .ph-btn, .sb-panel .agent-pick select');
 
   // With text in the box, Send takes the voice button's place: the same size.
-  await panel.locator('.composer textarea').fill('draft');
+  await panel.locator(BOX).fill('draft');
   await expect(panel.getByRole('button', { name: 'Send' })).toBeVisible();
   await expectTapTargets(page, '.sb-panel .composer-actions .btn');
 

@@ -1,6 +1,6 @@
 import { RED_PNG } from './fakeAgent.ts';
 import type { Locator, Page } from '@playwright/test';
-import { expect, openSandbox, pastePng, startWorker, test, uniq } from './fixtures.ts';
+import { BOX, expect, openSandbox, pastePng, startWorker, test, uniq } from './fixtures.ts';
 
 /** The images are on screen and actually decoded (a broken link has no natural size). */
 async function expectLoaded(images: Locator) {
@@ -19,9 +19,9 @@ async function workerPage(page: Page, prompt: string) {
 
 test('image paste: a thumbnail in the composer, then inline in the transcript, and the agent got it', async ({ authed: page }) => {
   const { panel, tag } = await workerPage(page, 'setup');
-  const box = panel.locator('.composer textarea');
+  const box = panel.locator(BOX);
 
-  await pastePng(page, '.sb-panel .composer textarea', RED_PNG);
+  await pastePng(page, `.sb-panel ${BOX}`, RED_PNG);
   const preview = panel.locator('.composer-image img');
   await expectLoaded(preview);
   // A pasted image alone is enough to send: the primary slot turns into Send.
@@ -31,7 +31,7 @@ test('image paste: a thumbnail in the composer, then inline in the transcript, a
   // Removing it and pasting again (the x on the thumbnail).
   await panel.getByRole('button', { name: 'Remove image' }).click();
   await expect(preview).toHaveCount(0);
-  await pastePng(page, '.sb-panel .composer textarea', RED_PNG);
+  await pastePng(page, `.sb-panel ${BOX}`, RED_PNG);
   await expect(preview).toHaveCount(1);
 
   await box.fill(`look at this ${tag}`);

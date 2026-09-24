@@ -1,4 +1,4 @@
-import { expect, test as base, type APIRequestContext, type Cookie, type Page } from '@playwright/test';
+import { expect, test as base, type APIRequestContext, type Cookie, type Locator, type Page } from '@playwright/test';
 import type { AppState, SessionInfo } from '../shared/types.ts';
 
 export const USER = 'tester';
@@ -121,6 +121,17 @@ export async function openSandbox(page: Page, sandboxId: string, sessionId?: str
   const panel = page.locator('.sb-panel');
   await expect(panel).toBeVisible();
   return panel;
+}
+
+/** A composer's message box: contenteditable, not a textarea (web/src/editable.ts). */
+export const BOX = '.composer [role="textbox"]';
+
+/**
+ * What a message box says, as the app reads it: its text, less the extra line break a browser adds
+ * after a final one (so that the empty last line shows). Playwright's toHaveValue is for form fields.
+ */
+export function boxText(box: Locator): Promise<string> {
+  return box.evaluate((el) => (el.textContent ?? '').replace(/\n\n$/, '\n'));
 }
 
 /** A clipboard paste of a PNG into `selector` (a text box), as the browser fires it for a pasted screenshot. */

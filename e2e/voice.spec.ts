@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { expect, signIn, startWorker, test, uniq } from './fixtures.ts';
+import { BOX, boxText, expect, signIn, startWorker, test, uniq } from './fixtures.ts';
 import { fakeVoice } from './voice.ts';
 
 // Voice is turned off on the E2E server (no local Whisper, no Kokoro), so voice mode and the mic use
@@ -81,7 +81,7 @@ test('voice mode: listening, hearing, thinking, speaking, listening again, stopp
 
 test('dictation with the browser engine: the words land in the box for review', async ({ page, browserName }) => {
   const { panel, tag } = await voicePage(page, browserName);
-  const box = panel.locator('.composer textarea');
+  const box = panel.locator(BOX);
   const mic = panel.getByRole('button', { name: 'Dictate' });
 
   await mic.click();
@@ -97,7 +97,7 @@ test('dictation with the browser engine: the words land in the box for review', 
   await bar.getByRole('button', { name: 'Done' }).click();
   await expect(bar).toBeHidden();
   // Not sent: it waits in the box (the "send automatically" setting is off by default).
-  await expect(box).toHaveValue(`note for ${tag}`);
+  await expect.poll(() => boxText(box)).toBe(`note for ${tag}`);
   await expect(panel.locator('.msg-user', { hasText: `note for ${tag}` })).toHaveCount(0);
   await expect(mic).toHaveAttribute('aria-pressed', 'false');
 });
