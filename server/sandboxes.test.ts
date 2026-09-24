@@ -83,3 +83,43 @@ test('base-repo lock runs one holder at a time, in order, and survives a throwin
   assert.equal(results[1].status, 'rejected');
   assert.deepEqual(results[2], { status: 'fulfilled', value: 'c' });
 });
+
+test('editor log: the previous run is kept; a log another process holds does not stop a start', { timeout: 60_000 }, async (t) => {
+  const { pickEditorLog, pruneEditorLogs } = await import('./sandboxes.ts');
+  const { spawn } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'editor-log-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
+  const base = path.join(dir, 'sandbox-editor.log');
+  // First start: no log yet.
+  assert.equal(pickEditorLog(dir, new Date('2026-09-24T08:00:00Z')), base);
+  fs.writeFileSync(base, 'run 1');
+  // Next start: run 1 is kept under its time, the editor gets the usual name.
+  assert.equal(pickEditorLog(dir, new Date('2026-09-24T09:00:00Z')), base);
+  assert.equal(fs.readFileSync(path.join(dir, 'sandbox-editor-20260924T090000Z.log'), 'utf8'), 'run 1');
+  if (process.platform === 'win32') {
+    // A leftover process holds the log the way Unity opens it: read/write sharing, no delete sharing.
+    fs.writeFileSync(base, 'run 2');
+    const holder = spawn('powershell.exe', ['-NoProfile', '-Command', `$s = [IO.File]::Open('${base}', 'Open', 'ReadWrite', 'ReadWrite'); 'held'; Start-Sleep 30; $s.Close()`], { stdio: ['ignore', 'pipe', 'ignore'] });
+    t.after(() => holder.kill());
+    await new Promise<void>((resolve) => holder.stdout.once('data', () => resolve()));
+    assert.throws(() => fs.rmSync(base), /EPERM|EBUSY/, 'the old start deleted the log and failed here');
+    const fresh = pickEditorLog(dir, new Date('2026-09-24T10:00:00Z'));
+    assert.equal(fresh, path.join(dir, 'sandbox-editor-20260924T100000Z.log'));
+    assert.equal(fs.readFileSync(base, 'utf8'), 'run 2', 'the held log is left alone');
+    holder.kill();
+  }
+  // Clean-up keeps the newest three kept logs and never the current one.
+  for (let h = 11; h <= 15; h++) {
+    const p = path.join(dir, `sandbox-editor-20260924T${h}0000Z.log`);
+    fs.writeFileSync(p, 'x');
+    fs.utimesSync(p, new Date(Date.UTC(2026, 8, 24, h)), new Date(Date.UTC(2026, 8, 24, h)));
+  }
+  const current = path.join(dir, 'sandbox-editor-20260924T110000Z.log'); // the oldest, but in use
+  pruneEditorLogs(dir, current);
+  const left = fs.readdirSync(dir).filter((n) => n.startsWith('sandbox-editor-')).sort();
+  // Newest by time: run 1's kept log (written just now), 15:00, 14:00; 13:00 and 12:00 go.
+  assert.deepEqual(left, ['sandbox-editor-20260924T090000Z.log', 'sandbox-editor-20260924T110000Z.log', 'sandbox-editor-20260924T140000Z.log', 'sandbox-editor-20260924T150000Z.log']);
+});

@@ -120,6 +120,58 @@ interface EditorIdentity {
  * own Library/ and at most one Unity editor. The folder name doubles as the Unity project name, so
  * the editor's MCP instance is "<id>@<hash>" — which is what the worker guard pins agents to.
  */
+/**
+ * The log file for an editor about to start, in `logsDir`. Normally Logs/sandbox-editor.log, with the
+ * previous run's log kept as sandbox-editor-<time>.log. A process that outlived a crashed editor can still
+ * hold the old log open without delete sharing (Unity's bug reporter, which the crashed editor starts, or
+ * a compiler server it spawned: they inherit its handle), and then the old log can be neither deleted nor
+ * renamed; this run then logs to a fresh sandbox-editor-<time>.log instead of failing. Callers take the
+ * returned path everywhere (unity.logPath: watchdog, wait_for_unity, the Log button).
+ */
+export function pickEditorLog(logsDir: string, now = new Date()): string {
+  fs.mkdirSync(logsDir, { recursive: true });
+  const base = path.join(logsDir, 'sandbox-editor.log');
+  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z'); // 20260924T084437Z
+  const stamped = path.join(logsDir, `sandbox-editor-${stamp}.log`);
+  if (!fs.existsSync(base)) return base;
+  try {
+    fs.renameSync(base, stamped);
+    return base;
+  } catch (e) {
+    console.warn(`unity log: ${base} is held by another process (${(e as NodeJS.ErrnoException).code}); this run logs to ${stamped}`);
+    return stamped;
+  }
+}
+
+/**
+ * Remove old kept editor logs (sandbox-editor-*.log, a few hundred MB each after a long run), newest
+ * `keep` first, never `current`. A log another process still holds is skipped and tried again next time.
+ */
+export function pruneEditorLogs(logsDir: string, current: string, keep = 3): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(logsDir).filter((n) => /^sandbox-editor-.+\.log$/.test(n));
+  } catch {
+    return [];
+  }
+  const old = names
+    .map((n) => path.join(logsDir, n))
+    .filter((p) => path.resolve(p) !== path.resolve(current))
+    .map((p) => ({ p, t: fs.statSync(p).mtimeMs }))
+    .sort((a, b) => b.t - a.t)
+    .slice(keep);
+  const removed: string[] = [];
+  for (const { p } of old) {
+    try {
+      fs.rmSync(p);
+      removed.push(p);
+    } catch {
+      // still held; next start tries again
+    }
+  }
+  return removed;
+}
+
 export class SandboxManager {
   private readonly cfg: Config;
   private readonly store: Store;
@@ -463,9 +515,8 @@ export class SandboxManager {
       }
       const lock = path.join(s.path, 'Temp', 'UnityLockfile');
       fs.rmSync(lock, { force: true });
-      const logPath = path.join(s.path, 'Logs', 'sandbox-editor.log');
-      fs.mkdirSync(path.dirname(logPath), { recursive: true });
-      fs.rmSync(logPath, { force: true });
+      const logPath = pickEditorLog(path.join(s.path, 'Logs'));
+      pruneEditorLogs(path.join(s.path, 'Logs'), logPath);
       const pid = launchDetached(this.editorPath(s), ['-projectPath', s.path, '-logFile', logPath, ...this.cfg.unity.extraArgs], s.path);
       // Below normal: this machine also runs the live game, which must win every contest for the CPU.
       lowerPriority(pid);
