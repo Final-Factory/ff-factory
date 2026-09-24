@@ -262,3 +262,47 @@ test('deploy: the game clone is recognised by the owner/name of config repo.url'
   assert.equal(repoSlug('https://github.com/Some-Org/SomeGame/'), 'Some-Org/SomeGame');
   assert.equal(repoSlug('not a url'), undefined);
 });
+
+test('machines: an offline daemon is redeployed only after 2 minutes, when idle, at most every 30 minutes', async () => {
+  const { redeployDue } = await import('./machines.ts');
+  const ok = { status: 'ready', deploying: false, liveAgents: 0 };
+  assert.equal(redeployDue(ok, 90_000, Infinity), undefined, 'it reconnects by itself within about a minute');
+  assert.match(redeployDue(ok, 3 * 60_000, Infinity) ?? '', /offline for 3 min/);
+  assert.equal(redeployDue(ok, 3 * 60_000, 10 * 60_000), undefined, 'tried 10 min ago');
+  assert.equal(redeployDue({ ...ok, deploying: true }, 3 * 60_000, Infinity), undefined);
+  assert.equal(redeployDue({ ...ok, liveAgents: 1 }, 3 * 60_000, Infinity), undefined);
+});
+
+test('daemon: reconnects every ~2 s for two minutes after a drop, then backs off', async () => {
+  const { reconnectDelayMs } = await import('../machine/daemon.ts');
+  assert.equal(reconnectDelayMs(5_000, 5, 0.5), 2000);
+  assert.equal(reconnectDelayMs(119_000, 6, 0.5), 2000);
+  assert.equal(reconnectDelayMs(130_000, 2, 0.5), 4000);
+  assert.equal(reconnectDelayMs(600_000, 6, 0.5), 30_000);
+});
+
+test('daemon: a portal answering 502 (restarting behind the proxy) is retried at once, not after a handshake timeout', async (t) => {
+  // The proxy in front of a restarting portal answers the upgrade with 502. Each refusal must end the attempt
+  // right away; before the fix it hung until the handshake timeout, so a restart took ~40 s to get over.
+  let upgrades = 0;
+  const server = http.createServer();
+  server.on('upgrade', (_req, socket) => {
+    upgrades++;
+    socket.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-502-'));
+  const d = new Daemon({ portalUrl: url, id: 'mx', token: 't', repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1 }, () => {
+    throw new Error('no sessions here');
+  });
+  t.after(() => {
+    d.shutdown();
+    server.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  d.start();
+  await new Promise((r) => setTimeout(r, 6000));
+  // Attempts every ~2 s (jitter 1.5-2.5 s): at least 3 in 6 s. A hung attempt would allow 1.
+  assert.ok(upgrades >= 3, `only ${upgrades} attempt(s) in 6 s`);
+});

@@ -29,8 +29,13 @@ sandbox workers, so the UI, the orchestrator's tools and transcripts do not care
 Why not drive sessions over ssh: an ssh session cannot read the login keychain, so Claude Code on
 a Mac often looks logged out there, and an ssh connection dies with every sleep or network change. A
 LaunchAgent runs in the logged-in session (keychain, the user's `claude` and plugins), starts at
-login, restarts if it dies, and reconnects by itself: exponential backoff, a ping every 20 s, and a
-dead connection is dropped after 45 s without a pong.
+login, restarts if it dies, and reconnects by itself: every ~2 s for the first two minutes after a drop
+(a portal restart takes 20-60 s; a refused attempt, such as the proxy's 502 while the portal is down,
+ends at once), then backing off to 30 s; a ping every 20 s, and a dead connection is dropped after 45 s
+without a pong. If a daemon still has not come back 2 minutes after the portal started or after it
+dropped, and its Mac answers ssh, the portal redeploys it by itself (as `add_machine` does), at most
+every 30 minutes and never while its agents are running. So after a restart, give daemons a minute
+before redeploying by hand.
 
 - **Auth.** A 256-bit token per machine; the portal keeps only its SHA-256 (state.json) and compares
   in constant time. `/machine` is on the public Funnel URL, so a bad token is logged and throttled.

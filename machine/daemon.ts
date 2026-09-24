@@ -93,13 +93,17 @@ export class Daemon {
 
   // ---------------------------------------------------------------- connection
 
+  /** When the connection was last lost (0 while connected), for the reconnect pace. */
+  private downSince = 0;
+
   private connect() {
     if (this.stopped) return;
     const url = this.cfg.portalUrl.replace(/^http/, 'ws').replace(/\/+$/, '') + '/machine';
-    const ws = new WebSocket(url, { headers: { authorization: `Bearer ${this.cfg.token}` }, handshakeTimeout: 15_000 });
+    const ws = new WebSocket(url, { headers: { authorization: `Bearer ${this.cfg.token}` }, handshakeTimeout: 8_000 });
     this.ws = ws;
     ws.on('open', () => {
       this.attempt = 0;
+      this.downSince = 0;
       this.lastPong = Date.now();
       log(`connected to ${url}`);
       void this.hello();
@@ -114,14 +118,23 @@ export class Daemon {
         log('bad message:', (e as Error).message);
       }
     });
-    ws.on('unexpected-response', (_req, res) => log(`portal refused the connection: HTTP ${res.statusCode}`));
+    ws.on('unexpected-response', (req, res) => {
+      // With this listener, ws leaves the aborting to us: without it each refused attempt (a 502 while the
+      // portal restarts) hung until the handshake timeout, and a restart took 40 s to get over.
+      log(`portal refused the connection: HTTP ${res.statusCode}`);
+      res.resume();
+      req.destroy();
+      ws.terminate();
+    });
     ws.on('error', (e) => log('socket error:', e.message));
     ws.on('close', (code) => {
       if (this.ws !== ws) return;
       this.ws = undefined;
       if (this.stopped) return;
-      // Sleep, wake, a network change or a portal restart: back off and try again, forever.
-      const delay = Math.min(30_000, 1000 * 2 ** this.attempt) * (0.75 + Math.random() * 0.5);
+      // Sleep, wake, a network change or a portal restart: try again, forever. For the first two minutes
+      // every ~2 s (a portal restart takes 20-60 s), then back off to 30 s.
+      if (!this.downSince) this.downSince = Date.now();
+      const delay = reconnectDelayMs(Date.now() - this.downSince, this.attempt);
       this.attempt = Math.min(this.attempt + 1, 6);
       log(`disconnected (${code}); retrying in ${Math.round(delay / 1000)} s`);
       setTimeout(() => this.connect(), delay);
@@ -391,4 +404,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   process.on('SIGINT', quit);
   process.on('uncaughtException', (e) => log('UNCAUGHT (kept running):', e));
   process.on('unhandledRejection', (e) => log('UNHANDLED REJECTION (kept running):', e));
+}
+
+/** How long to wait before the next connection attempt: ~2 s for the first two minutes down, then 1-30 s backoff. */
+export function reconnectDelayMs(downForMs: number, attempt: number, rand = Math.random()): number {
+  const jitter = 0.75 + rand * 0.5;
+  if (downForMs < 120_000) return 2000 * jitter;
+  return Math.min(30_000, 1000 * 2 ** attempt) * jitter;
 }

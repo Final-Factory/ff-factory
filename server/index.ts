@@ -53,6 +53,19 @@ const store = new Store(cfg.dataDir);
 const sandboxes = new SandboxManager(cfg, store);
 const sessions = new SessionManager(cfg, store);
 const machines = new MachineManager(cfg, store, sessions);
+// A daemon that has not come back 2 minutes after a restart (or a drop) while ssh reaches its Mac is redeployed.
+machines.report = (text) => {
+  console.log(text);
+  const orch = store.orchestratorId;
+  if (orch) {
+    try {
+      sessions.send(orch, text, 'system');
+    } catch {
+      // no orchestrator right now
+    }
+  }
+};
+setInterval(() => void machines.watchOffline().catch((e) => console.warn('machine watchdog:', (e as Error).message)), 30_000);
 const agents = new Agents(cfg, store, sandboxes, sessions, machines);
 if (host.elevated) sandboxes.refuseUnityWhileElevated(host.elevatedWhy ?? 'Run scripts/restart.ps1 to relaunch it non-elevated.');
 const auth = new Auth(cfg.dataDir, { trustProxy: cfg.trustProxy });

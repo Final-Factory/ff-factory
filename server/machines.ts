@@ -113,6 +113,41 @@ export class MachineManager {
     return this.links.has(id);
   }
 
+  // ---------------------------------------------------------------- the offline watchdog
+
+  /** When each machine was last seen going offline (or this server started without it). */
+  private offlineSince = new Map<string, number>();
+  private lastAutoDeploy = new Map<string, number>();
+  /** Tells the orchestrator (wired by index.ts). */
+  report?: (text: string) => void;
+
+  /**
+   * A machine whose daemon has not come back 2 minutes after this server started or after it dropped, while
+   * its host answers ssh, gets redeployed (what add_machine does by hand), at most every 30 minutes.
+   */
+  async watchOffline(now = Date.now(), reachable: (host: string) => Promise<boolean> = sshReachable): Promise<string[]> {
+    const done: string[] = [];
+    for (const m of this.list()) {
+      if (this.isOnline(m.id)) {
+        this.offlineSince.delete(m.id);
+        continue;
+      }
+      if (!this.offlineSince.has(m.id)) this.offlineSince.set(m.id, now);
+      const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
+      if (!why) continue;
+      if (!(await reachable(m.host))) continue;
+      this.lastAutoDeploy.set(m.id, now);
+      try {
+        this.deployMachine({ id: m.id });
+        done.push(m.id);
+        this.report?.(`[machines] ${m.id} was offline for ${Math.round((now - this.offlineSince.get(m.id)!) / 60_000)} min while ssh reached it; redeploying its daemon (as add_machine does).`);
+      } catch (e) {
+        this.report?.(`[machines] ${m.id} is offline and could not be redeployed: ${(e as Error).message}`);
+      }
+    }
+    return done;
+  }
+
   /** Live agent processes on a machine (its own limit, apart from this host's). */
   liveCount(id: string) {
     return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && s.live).length;
@@ -569,4 +604,19 @@ export class MachineManager {
     }
     this.post(id, reply, false);
   }
+}
+
+/** Whether an offline machine should be redeployed now, and why (undefined: not yet, or not at all). */
+export function redeployDue(m: { status: string; deploying: boolean; liveAgents: number }, offlineMs: number, sinceLastTryMs: number): string | undefined {
+  if (m.deploying || m.status === 'deploying' || m.liveAgents > 0) return undefined;
+  if (offlineMs < 2 * 60_000) return undefined; // a daemon reconnects by itself within about a minute
+  if (sinceLastTryMs < 30 * 60_000) return undefined;
+  return `offline for ${Math.round(offlineMs / 60_000)} min`;
+}
+
+/** Whether ssh reaches a host non-interactively (keys only, 10 s). */
+export async function sshReachable(host: string): Promise<boolean> {
+  const { run } = await import('./proc.ts');
+  const r = await run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, 'true'], { timeoutMs: 20_000 });
+  return r.code === 0;
 }
