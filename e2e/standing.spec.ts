@@ -29,9 +29,9 @@ test('standing agents: create, edit, run by hand, pause and resume, delete', asy
 
   // It is listed in the sidebar.
   sidebar = await openSidebar(page);
-  const card = sidebar.locator('.sa-card', { hasText: name });
+  const card = sidebar.locator('.row.place', { hasText: name });
   await expect(card).toBeVisible();
-  await expect(card).toContainText('manual');
+  await expect(card).toContainText('Runs by hand');
   await card.click();
   await expect(panel.locator('h2')).toHaveText(name);
 
@@ -74,7 +74,7 @@ test('standing agents: create, edit, run by hand, pause and resume, delete', asy
   await confirm.getByRole('button', { name: 'Delete agent' }).click();
   await expect(page).toHaveURL(/#\/$/);
   await expect(panel).toHaveCount(0);
-  await expect(page.locator('.sa-card', { hasText: name })).toHaveCount(0);
+  await expect(page.locator('.row.place', { hasText: name })).toHaveCount(0);
   expect((await page.request.get('/api/state').then((r) => r.json())).standingAgents.some((a: { name: string }) => a.name === renamed)).toBe(false);
 });
 
@@ -91,7 +91,8 @@ test('a modal keeps the focus where the user put it while the app state changes'
   // Something else happens meanwhile (an agent starts and answers): the app re-renders.
   const tag = uniq('focus');
   await startWorker(page.request, `hello ${tag}`, { title: `Focus ${tag}` });
-  await expect(page.locator('.sb-card .agent-row-title', { hasText: `Focus ${tag}` })).toBeAttached();
+  // The sandbox's row lists its agents in its tooltip once the new one has arrived.
+  await expect(page.locator(`.row.place[title*="Focus ${tag}"]`)).toBeAttached();
   await expect(charter).toBeFocused();
   await charter.pressSequentially('abc');
   await expect(charter).toHaveValue('abc');

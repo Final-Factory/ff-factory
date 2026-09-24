@@ -18,7 +18,7 @@ test('orchestrator: Enter sends, Shift+Enter makes a new line (desktop keyboards
   await box.press('Enter');
   const bubble = page.locator('.orch .msg-user', { hasText: tag });
   await expect(bubble).toBeVisible();
-  await expect(bubble.locator('.msg-user-text')).toHaveText(`first line ${tag}\nsecond line`);
+  await expect(bubble.locator('.bubble-text')).toHaveText(`first line ${tag}\nsecond line`);
   await expect(box).toHaveValue('');
   await expect(page.locator('.orch .msg-assistant', { hasText: `Echo: first line ${tag}` })).toBeVisible();
 
@@ -39,12 +39,12 @@ test('orchestrator: on a touch keyboard Enter is a new line and the Send button 
   await expect(box).toHaveValue(`first line ${tag}\nsecond line`);
   await expect(page.locator('.orch .msg-user', { hasText: tag })).toHaveCount(0);
   // The placeholder does not advertise Enter to send on a phone.
-  await expect(box).toHaveAttribute('placeholder', 'Ask the orchestrator…');
+  await expect(box).toHaveAttribute('placeholder', 'Message the orchestrator');
 
   await page.locator('.orch .composer').getByRole('button', { name: 'Send' }).click();
   const bubble = page.locator('.orch .msg-user', { hasText: tag });
   await expect(bubble).toBeVisible();
-  await expect(bubble.locator('.msg-user-text')).toHaveText(`first line ${tag}\nsecond line`);
+  await expect(bubble.locator('.bubble-text')).toHaveText(`first line ${tag}\nsecond line`);
   await expect(box).toHaveValue('');
   await expect(page.locator('.orch .msg-assistant', { hasText: `Echo: first line ${tag}` })).toBeVisible();
   // With the box empty again, the primary slot is voice mode, not Send.

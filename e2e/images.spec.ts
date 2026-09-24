@@ -12,8 +12,8 @@ async function workerPage(page: Page, prompt: string) {
   const tag = uniq('img');
   const s = await startWorker(page.request, `${prompt} ${tag}`, { title: `Images ${tag}` });
   const panel = await openSandbox(page, 'alpha', s.id);
-  // The first turn is done before the test goes on (its reply is on screen).
-  await expect(panel.locator('.turn-footer')).toHaveCount(1);
+  // The first turn is done before the test goes on (its reply is on screen, marked finished).
+  await expect(panel.locator('.msg-assistant[data-turn-end]')).toHaveCount(1);
   return { panel, tag };
 }
 
@@ -52,9 +52,9 @@ test('image paste: a thumbnail in the composer, then inline in the transcript, a
 
 test('a tool result with a screenshot shows the image inline', async ({ authed: page }) => {
   const { panel } = await workerPage(page, '#screenshot');
-  const tool = panel.locator('.tool', { hasText: 'Screenshots/proof.png' });
+  // The tool call is folded into one line ("Used 1 tool · Read: …"); its image shows without opening it.
+  const tool = panel.locator('.activity', { hasText: 'Screenshots/proof.png' });
   await expect(tool).toBeVisible();
-  // Shown without opening the tool row.
   await expect(tool).not.toHaveClass(/\bopen\b/);
   await expectLoaded(tool.locator('.img-strip img'));
   await expect(panel.locator('.msg-assistant', { hasText: 'Here is the screenshot.' })).toBeVisible();

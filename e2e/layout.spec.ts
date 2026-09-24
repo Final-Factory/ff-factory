@@ -9,14 +9,15 @@ test('layout: orchestrator home', async ({ authed: page }) => {
   await expectFullyVisible(page, '.orch .composer-box');
   if (!isMobile(page)) return;
   await expectTapTargets(page, '.orch .composer-actions .btn');
-  await expectTapTargets(page, '.topbar .btn');
+  // One header row on a phone: the drawer, the chat's state and its menu.
+  await expectTapTargets(page, '.orch-head .btn');
 
-  // The drawer: main navigation and the account buttons.
+  // The drawer: every row, its section buttons and the search and settings buttons.
   await openSidebar(page);
   await settle(page);
   await expectNoHorizontalOverflow(page);
-  await expectFullyVisible(page, '.sidebar .brand');
-  await expectTapTargets(page, '.sidebar .nav-item, .sidebar .brand .btn, .sidebar .sb-card');
+  await expectFullyVisible(page, '.sidebar .side-head');
+  await expectTapTargets(page, '.sidebar .row, .sidebar .side-head .btn, .sidebar .section-add, .sidebar .attn-item');
 });
 
 test('layout: a sandbox page', async ({ authed: page }) => {
@@ -26,7 +27,8 @@ test('layout: a sandbox page', async ({ authed: page }) => {
   await expectFullyVisible(page, '.sb-panel .composer-box');
   await expectFullyVisible(page, '.sb-panel .ph');
   if (!isMobile(page)) return;
-  await expectTapTargets(page, '.sb-panel .composer-actions .btn, .sb-panel .ph .ph-btn');
+  // The agent picker reads as text in the header's second line; its tap area is 44 px all the same.
+  await expectTapTargets(page, '.sb-panel .composer-actions .btn, .sb-panel .ph .ph-btn, .sb-panel .agent-pick select');
 
   // With text in the box, Send takes the voice button's place: the same size.
   await panel.locator('.composer textarea').fill('draft');

@@ -25,12 +25,15 @@ test('visual: orchestrator home', async ({ page }) => {
   await open(page);
   const orch = page.locator('section.orch');
   await expect(orch.locator('.composer-box')).toBeVisible();
-  // The orchestrator is shared with the chat tests running alongside: its conversation, status and
-  // cost are theirs. The frame (header, composer) is what is compared.
+  // The orchestrator is shared with the chat tests running alongside: its conversation and state are
+  // theirs, and while one of their turns runs the composer shows Stop and a follow-up placeholder. The
+  // frame (header, composer) is what is compared.
   await page.addStyleTag({
     content: `
-      section.orch .transcript-inner, section.orch .orch-title .dot, section.orch .session-meta { visibility: hidden !important; }
-      section.orch .composer-hint, section.orch .btn-stop, section.orch .jump-pill { display: none !important; }
+      section.orch .transcript-inner, section.orch .orch-state, section.orch .hb-on { visibility: hidden !important; }
+      section.orch .composer-hint, section.orch .jump-pill, section.orch .btn-stop-main, section.orch .btn-stop-mini,
+      section.orch .composer-actions [aria-label="Voice mode"] { display: none !important; }
+      section.orch .composer textarea::placeholder { color: transparent !important; }
     `,
   });
   await expect(orch).toHaveScreenshot('orchestrator.png');
@@ -39,7 +42,7 @@ test('visual: orchestrator home', async ({ page }) => {
 test('visual: the seeded sandbox page', async ({ page }) => {
   await open(page);
   const panel = await openSandbox(page, 'gallery');
-  await expect(panel.locator('.turn-footer')).toBeVisible();
+  await expect(panel.locator('.msg-assistant[data-turn-end="ok"]')).toBeVisible();
   await expect(panel).toHaveScreenshot('sandbox-gallery.png');
 });
 

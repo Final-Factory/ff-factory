@@ -21,7 +21,7 @@ async function voicePage(page: Page, browserName: string, prefs?: object) {
   await page.goto(`/#/sandbox/alpha/${s.id}`);
   expect((await (await status).json()).state).toBe('unavailable');
   const panel = page.locator('.sb-panel');
-  await expect(panel.locator('.turn-footer')).toHaveCount(1);
+  await expect(panel.locator('.msg-assistant[data-turn-end]')).toHaveCount(1);
   return { panel, tag };
 }
 
