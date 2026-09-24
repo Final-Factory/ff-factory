@@ -209,6 +209,11 @@ these attributes, and whether its pan comes as the stand-in assumes. If the bar 
 next step is a `contenteditable` composer (which Safari does not offer AutoFill for, as ChatGPT and
 Claude on the web use), keeping paste, Enter and Shift+Enter, voice and drafts.
 
-Also noticed: on an iPad with a hardware keyboard, Enter makes a new line, because the page treats
-any touch screen as having an on-screen keyboard. Detecting a hardware keyboard from the viewport
-would misfire on Android (whose keyboard resizes the layout itself), so this was left as it is.
+Enter with a hardware keyboard: it used to make a new line on any touch screen. It now follows the
+keyboard in use (`onScreenKeyboard()` in `web/src/viewport.ts`): an on-screen keyboard takes more
+than 150 px off the bottom of the screen, measured under the layout (iOS) and against the height
+before a field took the focus (Android, whose keyboard resizes the layout). With an iPad's hardware
+keyboard (only the shortcut bar, about 60 px, or nothing) Enter sends and Shift or Ctrl+Enter makes a
+new line; with a phone's or tablet's own keyboard Enter makes a new line and the Send button sends.
+Two iPad tests cover both; the hardware one fails on the old rule. The iPad's floating keyboard takes
+no height, so there Enter sends too.

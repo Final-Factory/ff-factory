@@ -149,3 +149,45 @@ export const test = base.extend<{ authed: Page }>({
 });
 
 export { expect };
+
+/**
+ * Safari's and Chrome's on-screen keyboards, and an iPad's shortcut bar, as the page sees them: a
+ * window.visualViewport the test moves (a browser here has neither). Add it with page.addInitScript
+ * before the page loads, then moveViewport(page, inset, pan): the bottom `inset` px are covered and the
+ * view is panned down by `pan`, as Safari does to reveal a field; `quiet` skips the events (Safari does
+ * not always fire one for the last step).
+ */
+export function standInViewport() {
+  const vv = new EventTarget();
+  let inset = 0;
+  let pan = 0;
+  const props: Record<string, () => number> = {
+    height: () => window.innerHeight - inset,
+    width: () => window.innerWidth,
+    offsetTop: () => pan,
+    offsetLeft: () => 0,
+    pageTop: () => window.scrollY + pan,
+    pageLeft: () => window.scrollX,
+    scale: () => 1,
+  };
+  for (const [k, get] of Object.entries(props)) Object.defineProperty(vv, k, { get });
+  Object.defineProperty(window, 'visualViewport', { configurable: true, get: () => vv });
+  (window as unknown as { __vv: unknown }).__vv = {
+    set(i: number, p: number, quiet = false) {
+      inset = i;
+      pan = p;
+      if (quiet) return;
+      vv.dispatchEvent(new Event('resize'));
+      vv.dispatchEvent(new Event('scroll'));
+    },
+  };
+}
+
+type StandIn = { __vv: { set(inset: number, pan: number, quiet?: boolean): void } };
+
+export function moveViewport(page: Page, inset: number, pan = 0, quiet = false) {
+  return page.evaluate(([i, p, q]) => (window as unknown as StandIn).__vv.set(i as number, p as number, q as boolean), [inset, pan, quiet] as const);
+}
+
+/** A phone's or tablet's own keyboard, over the bottom of the screen (height as on an iPhone). */
+export const ON_SCREEN_KEYBOARD = 336;

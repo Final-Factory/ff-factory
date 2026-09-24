@@ -8,6 +8,7 @@ import { FREE_TEXT, isBusy, lsGet, lsSet, shrinkImage, useMediaQuery } from '../
 import { useTextareaDictation } from '../voice/useTextareaDictation';
 import { useVoicePrefs } from '../voice/dictation';
 import { DictationBar, MicButton } from './Mic';
+import { onScreenKeyboard } from '../viewport';
 import { VoiceModeButton, VoiceModeOverlay, useVoiceMode } from './VoiceMode';
 import { Icon } from './ui';
 
@@ -38,7 +39,8 @@ export function Composer({
   const ta = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const busy = isBusy(session);
-  // Phones and tablets: Enter inserts a new line (there is no Shift), the button sends.
+  // Phones and tablets: with their on-screen keyboard (no Shift to hand) Enter inserts a new line and the
+  // button sends; with a hardware keyboard (an iPad's) Enter sends, as on a desktop (onScreenKeyboard).
   const touch = useMediaQuery('(pointer: coarse)');
   // Standing agents take text only (their runs are budgeted text turns); everyone else takes images.
   const canAttach = session.kind !== 'standing';
@@ -222,7 +224,7 @@ export function Composer({
             if (voice.keyDown(e)) return;
             const act = enterAction(
               { key: e.key, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode },
-              { touch, canSend: !!text.trim() || images.length > 0 },
+              { touch: touch && onScreenKeyboard(), canSend: !!text.trim() || images.length > 0 },
             );
             if (act === 'default') return;
             e.preventDefault();

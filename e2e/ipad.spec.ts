@@ -1,5 +1,5 @@
 import { devices, type Page } from '@playwright/test';
-import { expect, signIn, test } from './fixtures.ts';
+import { expect, moveViewport, ON_SCREEN_KEYBOARD, signIn, standInViewport, test, uniq } from './fixtures.ts';
 
 // Safari on an iPad (with or without a hardware keyboard). Focusing a composer must not move the page:
 // Safari floats its AutoFill bar (passwords, cards, contacts) over fields it may fill, shrinks the
@@ -12,39 +12,7 @@ const IPAD = devices['iPad Pro 11'];
 test.use({ viewport: IPAD.viewport, userAgent: IPAD.userAgent, deviceScaleFactor: IPAD.deviceScaleFactor, isMobile: IPAD.isMobile, hasTouch: IPAD.hasTouch });
 test.skip(({ browserName }) => browserName !== 'webkit', "Safari's engine only (the mobile-safari project)");
 
-/** A visual viewport the test controls: `__vv.set(inset, pan)` covers the bottom `inset` px and pans by `pan`. */
-function standInViewport() {
-  const vv = new EventTarget();
-  let inset = 0;
-  let pan = 0;
-  const props: Record<string, () => number> = {
-    height: () => window.innerHeight - inset,
-    width: () => window.innerWidth,
-    offsetTop: () => pan,
-    offsetLeft: () => 0,
-    pageTop: () => window.scrollY + pan,
-    pageLeft: () => window.scrollX,
-    scale: () => 1,
-  };
-  for (const [k, get] of Object.entries(props)) Object.defineProperty(vv, k, { get });
-  Object.defineProperty(window, 'visualViewport', { configurable: true, get: () => vv });
-  (window as unknown as { __vv: unknown }).__vv = {
-    set(i: number, p: number) {
-      inset = i;
-      pan = p;
-      vv.dispatchEvent(new Event('resize'));
-      vv.dispatchEvent(new Event('scroll'));
-    },
-    /** Safari does not always fire an event for the last step of a keyboard or bar animation. */
-    quiet(i: number, p: number) {
-      inset = i;
-      pan = p;
-    },
-  };
-}
-
-type StandIn = { __vv: { set(i: number, p: number): void; quiet(i: number, p: number): void } };
-const move = (page: Page, inset: number, pan: number) => page.evaluate(([i, p]) => (window as unknown as StandIn).__vv.set(i, p), [inset, pan]);
+const move = (page: Page, inset: number, pan: number) => moveViewport(page, inset, pan);
 
 /** Where things are on screen: the page's own layout, less how far the visual viewport is panned. */
 async function onScreen(page: Page) {
@@ -129,7 +97,44 @@ test('iPad: a viewport change that comes without an event is followed all the sa
   await page.locator('.orch .composer textarea').focus();
   await page.waitForTimeout(150);
   // The bar lands and Safari pans, with no resize or scroll event after the focus.
-  await page.evaluate(() => (window as unknown as StandIn).__vv.quiet(60, 60));
+  await moveViewport(page, 60, 60, true);
   await expect.poll(async () => (await onScreen(page)).header.top).toBe(before.header.top);
   expect((await onScreen(page)).composer.bottom).toBe(before.composer.bottom - 60);
+});
+
+// Enter follows the keyboard in use: with a hardware keyboard only Safari's shortcut bar (or nothing)
+// covers the screen, and Enter sends as on a desktop; with the iPad's own keyboard Enter is a new line.
+
+test('iPad with a hardware keyboard: Enter sends, Shift+Enter makes a new line', async ({ page }) => {
+  await home(page);
+  const tag = uniq('hwkb');
+  const box = page.locator('.orch .composer textarea');
+  await box.focus();
+  await move(page, 60, 0);
+  await box.pressSequentially(`first line ${tag}`);
+  await box.press('Shift+Enter');
+  await box.pressSequentially('second line');
+  await expect(box).toHaveValue(`first line ${tag}\nsecond line`);
+  await expect(page.locator('.orch .msg-user', { hasText: tag })).toHaveCount(0);
+
+  await box.press('Enter');
+  const bubble = page.locator('.orch .msg-user', { hasText: tag });
+  await expect(bubble.locator('.bubble-text')).toHaveText(`first line ${tag}\nsecond line`);
+  await expect(box).toHaveValue('');
+});
+
+test("iPad with its own on-screen keyboard: Enter makes a new line, the Send button sends", async ({ page }) => {
+  await home(page);
+  const tag = uniq('oskb');
+  const box = page.locator('.orch .composer textarea');
+  await box.focus();
+  await move(page, ON_SCREEN_KEYBOARD + 60, 0);
+  await box.pressSequentially(`first line ${tag}`);
+  await box.press('Enter');
+  await box.pressSequentially('second line');
+  await expect(box).toHaveValue(`first line ${tag}\nsecond line`);
+  await expect(page.locator('.orch .msg-user', { hasText: tag })).toHaveCount(0);
+
+  await page.locator('.orch .composer').getByRole('button', { name: 'Send' }).click();
+  await expect(page.locator('.orch .msg-user', { hasText: tag }).locator('.bubble-text')).toHaveText(`first line ${tag}\nsecond line`);
 });

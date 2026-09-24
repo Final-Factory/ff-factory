@@ -32,6 +32,8 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 - iPad with a hardware keyboard: focusing a composer no longer shifts the page up, and message
   boxes no longer look like fields for AutoFill.
+- iPad with a hardware keyboard: Enter sends and Shift+Enter makes a new line, as on a desktop.
+  Phones and tablets typing on their own on-screen keyboard keep Enter for a new line.
 - The details sheet and the settings dialog no longer scroll sideways on phones.
 
 ### Added
