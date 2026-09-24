@@ -539,7 +539,8 @@ export class SandboxManager {
     }
   }
 
-  async stopUnity(idOrName: string) {
+  /** Stop a sandbox's editor: politely, then by force after 15 s; `force` kills at once (a frozen editor). */
+  async stopUnity(idOrName: string, opts: { force?: boolean } = {}) {
     const s = this.require(idOrName);
     const pid = s.unity.pid;
     if (!pid || !isAlive(pid)) {
@@ -555,7 +556,7 @@ export class SandboxManager {
     }
     this.expectedExit.add(s.id);
     this.update(s, { unity: { ...s.unity, state: 'stopping', detail: undefined, blocked: undefined } });
-    await killTree(pid);
+    await killTree(pid, opts.force ? 0 : 15_000);
     if (isAlive(pid)) {
       // Leave expectedExit set: when it does go, that is the stop we asked for, not a crash.
       const detail = `could not stop pid ${pid}; if it runs with administrator rights (its window title starts with "Administrator:"), close it on the desktop`;

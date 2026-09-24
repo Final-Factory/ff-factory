@@ -90,7 +90,7 @@ export function sandboxGuard(opts: {
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
       const reason =
-        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity }) ??
+        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity, ownMachine: !!opts.ownCheckout }) ??
         (opts.ownCheckout ? checkOwnCheckout(cmd, input.cwd || opts.sandboxPath, opts.ownCheckout.isClean ?? gitIsClean) : undefined) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined);
       if (reason) return deny(reason);
@@ -259,6 +259,8 @@ export function repoKey(url: string): string {
 
 export interface ShellContext {
   cwd?: string;
+  /** The agent works on one of the user's own machines (a Mac), not in a sandbox on the shared host. */
+  ownMachine?: boolean;
   gameRepos: string[];
   remotes: RemoteResolver;
   publicIdentity?: PublicIdentity;
@@ -429,8 +431,18 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
   // target and the kill across a pipe.
   const all = cmd.toLowerCase().split(/[\s|;&]+/);
   const killer = all.some((w) => ['taskkill', 'taskkill.exe', 'stop-process', 'kill', 'pkill', 'killall', 'spps'].includes(w));
+  if (ctx?.ownMachine) {
+    // A machine (one of the user's Macs, docs/machines.md): its agents manage Unity like the user's own
+    // sessions there do, killing and relaunching editors, Hub and crash handlers freely. Only the FF Factory
+    // daemon (node, ~/.ff-factory) and Claude itself are off limits, as is unloading the daemon's LaunchAgent.
+    if (killer && all.some((w) => /^(node|claude)$|claude|ff-factory|daemon\.ts|com\.fffactory/.test(w))) {
+      return "Killing node or claude processes is blocked on a machine: that would take down the FF Factory daemon or this agent. Unity, Unity Hub and crash handlers are fine to kill.";
+    }
+    if (/launchctl\s+(bootout|unload|remove|kill|disable)\b[^;&|]*com\.fffactory/.test(cmd.toLowerCase())) return "Unloading the FF Factory daemon's LaunchAgent is blocked.";
+    return undefined;
+  }
   if (killer && all.some((w) => /unity|node|claude|powershell|pwsh|tailscale|supervise/.test(w))) {
-    return 'Killing Unity, node, claude or PowerShell processes by hand is blocked: other sandboxes and the live co-op game share this machine. Use mcp__sandbox__unity to stop or restart your own editor.';
+    return 'Killing Unity, node, claude or PowerShell processes by hand is blocked: other sandboxes and the live co-op game share this machine. Use mcp__sandbox__unity (action restart; force: true for a frozen editor) to stop or restart your own editor.';
   }
   return undefined;
 }

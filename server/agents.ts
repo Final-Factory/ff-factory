@@ -337,7 +337,7 @@ ${ownerLine(this.cfg)}
 - Protected paths on this machine: ${prot}. That is the live multiplayer game other agents are playing. Never read-modify-write it, never touch its Unity editor or its processes; the harness blocks writes and shell commands that mention it.
 
 ## Unity
-Your sandbox has its own Unity editor, managed by the dashboard. Use the \`mcp__sandbox__unity\` tool to check its state, start it, stop it or restart it, and to read its log. Do not launch or kill Unity processes yourself. The first boot of a fresh sandbox can take many minutes (asset import); poll the status every minute or so rather than giving up. Wait in the foreground with a single Bash call that loops on the real condition, for example \`for i in $(seq 1 30); do grep -q "StdioBridgeHost started" "$(ls -t Logs/sandbox-editor*.log | head -1)" && break; sleep 20; done\` (the log is Logs/sandbox-editor.log, or a sandbox-editor-<time>.log when the old one was locked: \`unity status\` shows its logPath) (up to 10 minutes per call), rather than one long sleep. Ending your turn means you stop working until someone messages you.
+Your sandbox has its own Unity editor, managed by the dashboard. Use the \`mcp__sandbox__unity\` tool to check its state, start it, stop it or restart it, and to read its log. Unity crashes and freezes often: restart your editor whenever it is hung, crashed or misbehaving, without asking (action "restart", with force: true when it is frozen). Use the tool, never taskkill: other sandboxes' editors and the live game share this machine, so the harness refuses killing Unity by hand. The first boot of a fresh sandbox can take many minutes (asset import); poll the status every minute or so rather than giving up. Wait in the foreground with a single Bash call that loops on the real condition, for example \`for i in $(seq 1 30); do grep -q "StdioBridgeHost started" "$(ls -t Logs/sandbox-editor*.log | head -1)" && break; sleep 20; done\` (the log is Logs/sandbox-editor.log, or a sandbox-editor-<time>.log when the old one was locked: \`unity status\` shows its logPath) (up to 10 minutes per call), rather than one long sleep. Ending your turn means you stop working until someone messages you.
 
 ## Waiting
 Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back: once your turn ends, nothing resumes you unless a message arrives. So:
@@ -366,13 +366,17 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
       tools: [
         tool(
           'unity',
-          `Control or inspect this sandbox's own Unity editor (sandbox ${id}). action: status | start | stop | restart | log. Starting returns at once; poll status until state is "running" (the MCP bridge is up).`,
-          { action: z.enum(['status', 'start', 'stop', 'restart', 'log']), lines: z.number().int().min(10).max(2000).optional() },
-          wrap(async ({ action, lines }) => {
+          `Control or inspect this sandbox's own Unity editor (sandbox ${id}). action: status | start | stop | restart | log. Restart whenever the editor is hung, crashed or misbehaving: stop asks it to quit and kills it (and what it started) after 15 s; force: true kills at once, for a frozen editor. Starting returns at once; poll status until state is "running" (the MCP bridge is up).`,
+          {
+            action: z.enum(['status', 'start', 'stop', 'restart', 'log']),
+            force: z.boolean().optional().describe('stop/restart: kill the editor at once instead of asking it to quit first (a frozen editor ignores that).'),
+            lines: z.number().int().min(10).max(2000).optional(),
+          },
+          wrap(async ({ action, force, lines }) => {
             if (action === 'start') await this.sandboxes.startUnity(id);
-            if (action === 'stop') await this.sandboxes.stopUnity(id);
+            if (action === 'stop') await this.sandboxes.stopUnity(id, { force });
             if (action === 'restart') {
-              await this.sandboxes.stopUnity(id);
+              await this.sandboxes.stopUnity(id, { force });
               await this.sandboxes.startUnity(id);
             }
             if (action === 'log') return this.sandboxes.unityLog(id, lines ?? 200).join('\n') || '(no log yet)';
@@ -630,7 +634,7 @@ ${ownerLine(this.cfg)}
 - Do not create a git worktree unless the task truly needs one (a Unity project is large); if you must, say why.
 
 ## Unity
-Unity on this Mac is the user's. Do not start or quit editors. If the task needs the editor and one is running with the Unity MCP bridge, pin it first (read \`mcpforunity://instances\`, then \`set_active_instance\` with the instance whose name starts with "${path.basename(m.repoPath)}@"). If none is running, say so rather than starting one.
+Unity on this Mac: you may start, quit, kill and relaunch the Unity editor of this clone (and Unity Hub, crash reporters) whenever it is hung, crashed or misbehaving, as the user's own sessions here do; unsaved in-editor changes may be lost, which is accepted. Never kill node or claude processes: that takes down the FF Factory daemon or you. Before Unity MCP calls, pin the editor (read \`mcpforunity://instances\`, then \`set_active_instance\` with the instance whose name starts with "${path.basename(m.repoPath)}@").
 
 ## Waiting
 Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back once your turn ends. To come back later (a long build, a test run), call \`mcp__machine__wake_me\` with minutes and a note, then end your turn: after that many minutes you get a message with your note.
@@ -780,11 +784,20 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'unity',
-          'Start, stop or inspect the Unity editor of a sandbox. action: start | stop | status | log.',
-          { sandbox: z.string(), action: z.enum(['start', 'stop', 'status', 'log']), lines: z.number().int().min(1).max(2000).optional() },
-          wrap(async ({ sandbox, action, lines }) => {
+          "Start, stop, restart or inspect the Unity editor of a sandbox. action: start | stop | restart | status | log. Restart whenever an editor is hung, crashed or misbehaving, without asking: stop asks it to quit and kills it (and what it started) after 15 s; force: true kills at once, for a frozen editor.",
+          {
+            sandbox: z.string(),
+            action: z.enum(['start', 'stop', 'restart', 'status', 'log']),
+            force: z.boolean().optional().describe('stop/restart: kill at once instead of asking the editor to quit first.'),
+            lines: z.number().int().min(1).max(2000).optional(),
+          },
+          wrap(async ({ sandbox, action, force, lines }) => {
             if (action === 'start') await this.sandboxes.startUnity(sandbox);
-            if (action === 'stop') await this.sandboxes.stopUnity(sandbox);
+            if (action === 'stop') await this.sandboxes.stopUnity(sandbox, { force });
+            if (action === 'restart') {
+              await this.sandboxes.stopUnity(sandbox, { force });
+              await this.sandboxes.startUnity(sandbox);
+            }
             if (action === 'log') return this.sandboxes.unityLog(sandbox, lines ?? 80).join('\n') || '(no log yet)';
             return unityStatus(this.sandboxes.require(sandbox), false);
           }),
