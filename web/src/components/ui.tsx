@@ -153,13 +153,17 @@ export function Modal({
   wide?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  // Callers pass a fresh onClose on every render (each server state push): read it through a ref, so
+  // the first field is focused once when the modal opens, not again under the user's caret.
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close.current();
     window.addEventListener('keydown', onKey);
     const first = ref.current?.querySelector<HTMLElement>('input, textarea, select, button.btn-primary');
     first?.focus();
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, []);
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`modal${wide ? ' modal-wide' : ''}`} ref={ref} role="dialog" aria-modal>

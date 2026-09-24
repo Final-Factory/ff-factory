@@ -14,7 +14,7 @@ import { Lightbox } from './components/Images';
 import { SearchView } from './components/SearchView';
 import { Icon } from './components/ui';
 import { focusPermission, useStore } from './store';
-import { displayName, fmtClock, navigate, useMediaQuery, useRoute, type Route } from './util';
+import { displayName, fmtClock, href, navigate, useMediaQuery, useRoute, type Route } from './util';
 
 export function App() {
   const auth = useStore((s) => s.auth);
@@ -59,6 +59,10 @@ function Shell({ app }: { app: AppState }) {
   useEffect(() => {
     if (!mobile) setDrawer(false);
   }, [mobile]);
+
+  // Any navigation closes the phone drawer, including one from a modal opened in it (a new standing agent opens its page).
+  const at = href(route);
+  useEffect(() => setDrawer(false), [at]);
 
   const jumpToPending = () => {
     const first = pending[0];

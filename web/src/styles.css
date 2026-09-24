@@ -2936,6 +2936,23 @@ select.input {
     right: 16px;
     bottom: calc(80px + env(safe-area-inset-bottom));
   }
+
+  /* 44 px touch targets: the top bar's menu, the drawer's navigation and account buttons, a sheet's close. */
+  .topbar .btn-icon,
+  .brand .btn-icon,
+  .modal-head .btn-icon {
+    width: 44px;
+    height: 44px;
+  }
+
+  .nav-item {
+    min-height: 44px;
+  }
+
+  /* WebKit counts a squeezed select's option text as overflow: the settings sheet scrolled sideways. */
+  select.input {
+    overflow: hidden;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3676,7 +3693,8 @@ select.input {
   .shell-focus .ph {
     padding-top: max(4px, env(safe-area-inset-top));
   }
-  .ph .ph-btn {
+  .ph .ph-btn,
+  .details-sheet-head .ph-btn {
     width: 44px;
     height: 44px;
     min-width: 44px;
