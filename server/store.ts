@@ -123,6 +123,34 @@ export class Store {
     fs.appendFileSync(this.transcriptPath(sessionId), JSON.stringify(e) + '\n');
     this.seqs.set(sessionId, e.seq);
     emit({ type: 'transcript', sessionId, event: e });
+    this.noteActivity(sessionId, e);
+  }
+
+  private readonly pendingTools = new Map<string, { id: string; name: string; since: string }[]>();
+  private readonly activitySaved = new Map<string, number>();
+
+  /**
+   * A session did something: an event (a tool call starting or ending, text, a result) or streamed output.
+   * Moves lastActivityAt (saved at most every 15 s, at once when a tool call starts or ends) and keeps
+   * activeTool: its oldest top-level tool call without a result yet, so a long foreground command reads
+   * as "in a long command", not as silence. Works the same for sessions on a machine (their events land here).
+   */
+  noteActivity(sessionId: string, e?: TranscriptEvent) {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    const now = Date.now();
+    let pending = this.pendingTools.get(sessionId) ?? [];
+    const before = pending[0]?.id;
+    if (e?.kind === 'tool_use' && !e.parentToolUseId) pending = [...pending, { id: e.toolUseId, name: e.name, since: e.t }];
+    else if (e?.kind === 'tool_result') pending = pending.filter((p) => p.id !== e.toolUseId);
+    else if (e?.kind === 'result' || e?.kind === 'error') pending = [];
+    this.pendingTools.set(sessionId, pending);
+    const toolChanged = pending[0]?.id !== before;
+    if (!toolChanged && now - (this.activitySaved.get(sessionId) ?? 0) < 15_000) return;
+    this.activitySaved.set(sessionId, now);
+    s.lastActivityAt = new Date(now).toISOString();
+    s.activeTool = pending[0];
+    this.putSession(s);
   }
 
   lastSeq(sessionId: string): number {
@@ -136,6 +164,7 @@ export class Store {
     const full = { ...e, seq, t: new Date().toISOString() } as TranscriptEvent;
     fs.appendFileSync(this.transcriptPath(sessionId), JSON.stringify(full) + '\n');
     emit({ type: 'transcript', sessionId, event: full });
+    this.noteActivity(sessionId, full);
     return full;
   }
 

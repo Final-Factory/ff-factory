@@ -56,7 +56,8 @@ export function setQueryForTesting(q: typeof query) {
 export type OptionsFactory = (info: SessionInfo) => Options;
 
 /** Where an AgentSession records itself: the Store here, or the link back to the portal on a machine daemon. */
-export type SessionSink = Pick<Store, 'putSession' | 'append' | 'amend' | 'saveImage'>;
+/** Where a session records itself; `noteActivity` (the portal's Store) marks streamed output as activity. */
+export type SessionSink = Pick<Store, 'putSession' | 'append' | 'amend' | 'saveImage'> & { noteActivity?: (sessionId: string) => void };
 
 /**
  * What the managers need from a session, wherever its process runs: an AgentSession in this process,
@@ -228,6 +229,7 @@ export class AgentSession implements SessionHandle {
         const ev = m.event;
         if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
           emit({ type: 'delta', sessionId: id, text: ev.delta.text });
+          this.store.noteActivity?.(id);
         }
         return;
       }

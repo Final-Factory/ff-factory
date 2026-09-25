@@ -91,9 +91,19 @@ export class Waker {
 /** One line per busy worker for the heartbeat: where, what, for how long, last word. */
 export function describeBusy(s: SessionInfo, where: { sandbox?: Sandbox; machine?: string }, now = Date.now()): string {
   const place = where.sandbox ? `in ${where.sandbox.id}` : where.machine ? `on ${where.machine}` : '';
-  const mins = Math.round((now - Date.parse(s.lastActivityAt)) / 60_000);
   const state = s.status === 'waiting_permission' ? 'WAITING FOR A PERMISSION' : `${s.status}${s.statusDetail ? ` (${s.statusDetail})` : ''}`;
-  return `${s.id} "${s.title}" ${place}: ${state}, last activity ${mins} min ago, ${s.turns} turns, $${s.costUsd.toFixed(2)}`;
+  return `${s.id} "${s.title}" ${place}: ${state}, ${activityLine(s, now)}, ${s.turns} turns, $${s.costUsd.toFixed(2)}`;
+}
+
+/**
+ * "last activity N min ago", or "in a long command: Bash (N min)" while one of its tool calls runs longer
+ * than a minute (a foreground build or wait loop is work, not silence).
+ */
+export function activityLine(s: Pick<SessionInfo, 'lastActivityAt' | 'activeTool' | 'status'>, now = Date.now()): string {
+  const mins = (t: string) => Math.max(0, Math.round((now - Date.parse(t)) / 60_000));
+  const busy = s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission';
+  if (busy && s.activeTool && now - Date.parse(s.activeTool.since) >= 60_000) return `in a long command: ${s.activeTool.name} (${mins(s.activeTool.since)} min)`;
+  return `last activity ${mins(s.lastActivityAt)} min ago`;
 }
 
 /**

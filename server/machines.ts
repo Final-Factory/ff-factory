@@ -562,7 +562,9 @@ export class MachineManager {
         const s = this.handle(msg.info.id);
         if (!s || s.info.machineId !== id) return;
         // The portal owns identity and naming; the daemon owns run state.
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, ...run } = msg.info;
+        // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
+        if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         Object.assign(s.info, run);
         s.liveFlag = msg.live;
         this.store.putSession(s.info);
@@ -575,7 +577,10 @@ export class MachineManager {
         if (this.handle(msg.sessionId)?.info.machineId === id) this.store.amend(msg.sessionId, msg.seq, msg.patch);
         return;
       case 'delta':
-        if (this.handle(msg.sessionId)?.info.machineId === id) emit({ type: 'delta', sessionId: msg.sessionId, text: msg.text });
+        if (this.handle(msg.sessionId)?.info.machineId === id) {
+          emit({ type: 'delta', sessionId: msg.sessionId, text: msg.text });
+          this.store.noteActivity(msg.sessionId);
+        }
         return;
       case 'signal': {
         const s = this.handle(msg.sessionId);

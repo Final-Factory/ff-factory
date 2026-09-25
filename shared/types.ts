@@ -134,6 +134,8 @@ export interface SessionInfo {
   sdkSessionId?: string;
   createdAt: string;
   lastActivityAt: string;
+  /** A tool call of its own (not a subagent's) still running: the oldest one, since when (Store.noteActivity). */
+  activeTool?: { id: string; name: string; since: string };
   turns: number;
   costUsd: number;
   pendingPermissions: PendingPermission[];

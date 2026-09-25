@@ -10,7 +10,7 @@ import { switchBranch } from './switchBranch.ts';
 import { searchTranscripts } from './search.ts';
 import { openUnity, type SceneState, type UnityBridge } from './unityMcp.ts';
 import { CATALOG } from './launch.ts';
-import { COMPILE_DONE, COMPILE_FAILED, readSince, Waker } from './wake.ts';
+import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './wake.ts';
 import { snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { PermissionMode, Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { sandboxGuard } from './guard.ts';
@@ -852,7 +852,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
     const agents = sb.sessionIds
       .map((id) => this.store.sessions.get(id))
       .filter((s): s is SessionInfo => !!s)
-      .map((s) => `    - ${s.id} "${s.title}" [${s.status}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`)
+      .map((s) => `    - ${s.id} "${s.title}" [${s.status}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`)
       .join('\n');
     // The label is what the sandbox is doing now; the id is only the slot (folder / Unity project) it lives in.
     return [
@@ -1204,7 +1204,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
     const agents = m.sessionIds
       .map((id) => this.store.sessions.get(id))
       .filter((s): s is SessionInfo => !!s)
-      .map((s) => `    - ${s.id} "${s.title}" [${s.status}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`)
+      .map((s) => `    - ${s.id} "${s.title}" [${s.status}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`)
       .join('\n');
     const g = m.git;
     return [
