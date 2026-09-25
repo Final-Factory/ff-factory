@@ -20,6 +20,7 @@ import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
+import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { planCleanup, runCleanup } from './cleanup.ts';
 import { reapBrowsers } from './reaper.ts';
@@ -96,6 +97,22 @@ machines.report = (text) => {
     }
   }
 };
+// The outside watchdog (docs/self-recovery.md): a Mac watches this host and alerts the user's phone through ntfy.
+const outside = loadOutsideWatchState(cfg.dataDir);
+const watcher = () => (cfg.outsideWatch?.enabled === false ? undefined : watcherOf(cfg.outsideWatch?.machine, machines.list().map((m) => m.id)));
+const watchConfig = () => outsideWatchConfig({ ...cfg.outsideWatch, publicUrl: cfg.publicUrl, name: os.hostname() }, outside);
+machines.outsideWatchFor = (id) => (id === watcher() ? (watchConfig() ?? null) : null);
+const learnNetwork = () =>
+  void collectNetwork()
+    .then((n) => {
+      if (!n || (n.mac === outside.mac && n.broadcast === outside.broadcast && n.ip === outside.ip)) return;
+      Object.assign(outside, n, { collectedAt: new Date().toISOString() });
+      saveOutsideWatchState(cfg.dataDir, outside);
+      machines.pushOutsideWatch();
+    })
+    .catch((e) => console.warn('outside watch: could not read the LAN adapter:', (e as Error).message));
+learnNetwork();
+setInterval(learnNetwork, 6 * 3_600_000);
 setInterval(() => {
   void machines.watchOffline().catch((e) => console.warn('machine watchdog:', (e as Error).message));
   machines.checkOutdated();
@@ -895,6 +912,14 @@ for (const s of sessions.sessions.values()) usage.recordCost(s.info.id, s.info.c
 sessions.events.on('rateLimit', () => usage.poke());
 sessions.events.on('result', (s: { info: { id: string; costUsd: number } }) => usage.recordCost(s.info.id, s.info.costUsd));
 agents.usageLines = () => usageLines(usage.usage, new Date());
+agents.extraStatusLines = () => {
+  const w = watcher();
+  const c = watchConfig();
+  if (!w || !c) return [`Outside watchdog: off (${cfg.outsideWatch?.enabled === false ? 'outsideWatch.enabled is false' : !c ? 'no publicUrl to watch' : 'no machine to watch from'})`];
+  return [
+    `Outside watchdog: ${w} checks ${c.healthUrl} and pings ${c.host} every 60 s${machines.isOnline(w) ? '' : ` (${w} is offline now)`}; alerts go to ntfy topic "${c.ntfyTopic}" (subscribe in the ntfy app); Wake-on-LAN ${c.mac ? `to ${c.mac}${c.broadcast ? ` via ${c.broadcast}` : ''}` : 'not possible yet (MAC unknown)'}`,
+  ];
+};
 usage.start();
 
 const drainer = new Drainer({

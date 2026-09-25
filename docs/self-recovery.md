@@ -152,3 +152,33 @@ space on C: is what made Windows drop it.
 - **Memory is disk too**: an automatically managed pagefile grows on C: under memory pressure,
   exactly when things are already tight. A fixed pagefile (`-PagefileGB`), fewer concurrent editors
   (`limits.maxUnity`, `limits.minFreeRamGB`) and stopping idle editors keep that growth away.
+
+## 4. Watched from outside (the outside watchdog)
+
+Everything above runs on BEAST, so none of it can report a power cut or a machine that booted with nobody
+logged in. A Mac watches it instead: the daemon of the watching machine (`m5` by default) checks BEAST every
+60 s, independent of it (`machine/outsideWatch.ts`).
+
+- **Checks:** `GET <publicUrl>/api/health` (no login; up when it answers `{ ok: true }`) and a ping of the
+  health URL's host (`tailscale ping`, else plain `ping`).
+- **Alerts** go to the user's phone through [ntfy](https://ntfy.sh) (no account): after 3 misses in a row
+  "BEAST down since HH:MM", or "BEAST up, portal down" when the machine answers ping but the portal does not
+  (booted with nobody logged in, since automatic logon is off, or the app did not start). A change between
+  those two sends a new alert; recovery sends "BEAST back (down since HH:MM, N min)". Subscribe to the topic
+  in the ntfy app (iOS/Android, "Subscribe to topic", server ntfy.sh). `system_status` names the topic.
+- **Wake-on-LAN:** once BEAST has not answered a ping for 5 minutes, the Mac sends a magic packet to its
+  MAC (UDP ports 9 and 7, to the LAN's broadcast address and 255.255.255.255), again every 15 minutes while
+  it stays down. It only works with Wake-on-LAN enabled in BEAST's BIOS (and the Mac on the same LAN);
+  otherwise it is harmless. Not sent while BEAST answers ping (it is on, just not logged in).
+
+The portal keeps the state in `<dataDir>/outside-watch.json`: the ntfy topic (random, made once; anyone who
+knows it can read the alerts, so keep it private) and BEAST's LAN adapter (the one with the default IPv4
+route: MAC, address, broadcast), read at start and every 6 hours while BEAST is up. It sends the config to
+the watching machine's daemon when it connects and whenever it changes (protocol message
+`outside_watch`); the daemon keeps it in `~/.ff-factory/outside-watch.json`, so the watch goes on while
+the portal is down. Other machines are told they do not watch (their copy is removed).
+
+Config (`config.json`, all optional): `"outsideWatch": { "machine": "m5", "healthUrl": "...", "host":
+"...", "ntfyServer": "https://ntfy.sh", "enabled": true }`. Without `publicUrl` (and no `healthUrl`)
+there is nothing to watch. The Macs get the watch with the daemon: they redeploy themselves when idle after
+an update.

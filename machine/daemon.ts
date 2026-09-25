@@ -15,6 +15,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { MacUnity, MacUnityWatch } from './unity.ts';
+import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
 import { listImages, readImage } from '../server/images.ts';
 import { readGitStatus } from '../server/gitStatus.ts';
@@ -50,6 +51,8 @@ export class Daemon {
   unity: MacUnity;
   /** Its hang and crash watch (auto-restart), started with the daemon. */
   unityWatch?: MacUnityWatch;
+  /** The outside watchdog of the portal's host, when this machine is the watcher (machine/outsideWatch.ts). */
+  outsideWatch?: OutsideWatch;
   private ws?: WebSocket;
   private readonly entries = new Map<string, Entry>();
   private readonly events = new EventEmitter();
@@ -93,6 +96,10 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.unityWatch?.tick(), 30_000));
     // App Nap off for Unity (takes effect at the editor's next launch; start() does it too).
     if (process.platform === 'darwin') void this.unity.noAppNap().catch(() => undefined);
+    // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
+    const watch = readOutsideWatch(outsideWatchFile(HOME));
+    if (watch) this.outsideWatch = new OutsideWatch(watch);
+    this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
     this.timers.push(setInterval(() => this.heartbeat(), 20_000));
     this.timers.push(setInterval(() => void this.reportStatus(), 60_000));
   }
@@ -298,6 +305,23 @@ export class Daemon {
 
   private onMessage(msg: ToDaemon) {
     switch (msg.type) {
+      case 'outside_watch': {
+        const file = outsideWatchFile(HOME);
+        try {
+          if (!msg.config) {
+            fs.rmSync(file, { force: true });
+            this.outsideWatch = undefined;
+          } else {
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            fs.writeFileSync(file, JSON.stringify(msg.config, null, 2), { mode: 0o600 });
+            if (this.outsideWatch) this.outsideWatch.cfg = msg.config;
+            else this.outsideWatch = new OutsideWatch(msg.config);
+          }
+        } catch (e) {
+          log(`outside watch: could not keep its config: ${(e as Error).message}`);
+        }
+        return;
+      }
       case 'welcome': {
         this.maxSessions = msg.maxSessions;
         const known = new Set(msg.sessions.map((s) => s.id));

@@ -10,6 +10,7 @@ import { emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import { PROTOCOL_VERSION, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { normalizePurpose } from './sandboxes.ts';
 import { openPr } from './gitStatus.ts';
 import type { EffortLevel, ImageInput, Machine, PermissionMode, SessionInfo } from '../shared/types.ts';
@@ -119,6 +120,17 @@ export class MachineManager {
   /** When each machine was last seen going offline (or this server started without it). */
   private offlineSince = new Map<string, number>();
   private lastAutoDeploy = new Map<string, number>();
+  /** The outside-watch config for a machine (null: it does not watch; wired by index.ts). */
+  outsideWatchFor?: (machineId: string) => OutsideWatchConfig | null;
+
+  /** Send every connected daemon its outside-watch config (after it changed). */
+  pushOutsideWatch() {
+    for (const id of this.links.keys()) {
+      const c = this.outsideWatchFor?.(id);
+      if (c !== undefined) this.post(id, { type: 'outside_watch', config: c }, false);
+    }
+  }
+
   /** Tells the orchestrator (wired by index.ts). */
   report?: (text: string) => void;
 
@@ -484,6 +496,8 @@ export class MachineManager {
     this.store.putMachine(m);
     const sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }));
     ws.send(JSON.stringify({ type: 'welcome', machineId: id, maxSessions: m.maxSessions, sessions } satisfies ToDaemon));
+    const watch = this.outsideWatchFor?.(id);
+    if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
     console.log(`machine ${id} connected`);
   }
 

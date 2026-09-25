@@ -67,6 +67,8 @@ export class Agents {
   requestRestart?: (req: RestartRequest) => string;
   /** Plan usage lines for system_status (server/usage.ts); wired by index.ts. */
   usageLines?: () => string[];
+  /** More lines for system_status (the outside watchdog; wired by index.ts). */
+  extraStatusLines?: () => string[];
   /** The host guard (server/hostHealth.ts); wired by index.ts. */
   hostHealth?: HostHealthMonitor;
 
@@ -1108,6 +1110,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
               `Unity editors running ${this.sandboxes.runningUnityCount()}/${s.limits.maxUnity}; live agents ${this.sessions.liveAgents()}/${s.limits.maxSessions} (workers and running standing agents)`,
               ...(this.usageLines?.() ?? []),
               ...hostHealthLines(this.hostHealth?.status),
+              ...(this.extraStatusLines?.() ?? []),
             ].join('\n');
           }),
         ),

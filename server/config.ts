@@ -29,6 +29,13 @@ export interface Config {
    * { "name": "Your Name", "email": "12345+you@users.noreply.github.com" }.
    */
   publicGitIdentity?: { name?: string; email?: string; repos?: string[] };
+  /**
+   * The outside watchdog (docs/self-recovery.md): a machine's daemon checks this host every minute and alerts
+   * the user's phone through ntfy. `machine` (default "m5", else the first machine), `healthUrl` (default
+   * <publicUrl>/api/health), `host` to ping (default the health URL's host), `ntfyServer` (default ntfy.sh).
+   * `enabled: false` turns it off. The ntfy topic is made once, in <dataDir>/outside-watch.json.
+   */
+  outsideWatch?: { enabled?: boolean; machine?: string; healthUrl?: string; host?: string; ntfyServer?: string };
   /** Where state.json and transcripts live. */
   dataDir: string;
   /** Every sandbox worktree is created as <sandboxRoot>/<id>. */

@@ -1,5 +1,6 @@
 // The WebSocket protocol between the portal (server/machines.ts) and a machine daemon
 // (machine/daemon.ts). JSON messages, one per frame. Types only, plus the version constant.
+import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { ImageFile, ImageInput, Machine, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
@@ -25,7 +26,9 @@ export type ToDaemon =
   | { type: 'decide'; sessionId: string; requestId: string; allow: boolean; message?: string }
   | { type: 'rpc_result'; id: string; ok: boolean; text: string }
   /** The Unity editor of the machine's clone (machine/unity.ts); answered by unity_result. */
-  | { type: 'unity'; id: string; action: 'status' | 'start' | 'stop' | 'restart'; force?: boolean };
+  | { type: 'unity'; id: string; action: 'status' | 'start' | 'stop' | 'restart'; force?: boolean }
+  /** Watch this portal's host from outside (machine/outsideWatch.ts); null: this machine does not watch. Kept on the Mac. */
+  | { type: 'outside_watch'; config: OutsideWatchConfig | null };
 
 export type FromDaemon =
   /** `catalog`: the MCP tools this daemon can serve (protocol 3+); info.daemon is the commit it was deployed from. */
