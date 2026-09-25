@@ -34,7 +34,7 @@ test('set_app_config: writes the key, keeps the rest and the old file, applies i
 
 test('set_app_config: only the allowlisted keys, only sane values', (t) => {
   const { file, cfg } = setup(t);
-  for (const key of ['protectedPaths', 'worker.permissionMode', 'limits.maxUnity', 'claudeEnv', 'host']) {
+  for (const key of ['protectedPaths', 'worker.permissionMode', 'limits.maxSessions', 'claudeEnv', 'host']) {
     assert.throws(() => setAppConfig(file, cfg, key as never, 'x'), /cannot be changed/);
   }
   assert.throws(() => normalizeSetting('ownerName', 'a'.repeat(61)));
@@ -77,4 +77,15 @@ test('set_app_config: host guard housekeeping, with age rules kept away from any
     assert.throws(() => normalizeSetting('hostGuard.cleanup.ageRules', bad, full), Error, JSON.stringify(bad));
   }
   assert.throws(() => normalizeSetting('hostGuard.devDriveVhdx', 'C:/not-a-disk.txt'));
+});
+
+test('app config: limits.maxUnity caps editors at once, live, 1 to 8', (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg, limits: { maxUnity: 3, maxSessions: 6 } } as unknown as Config;
+  setAppConfig(file, full, 'limits.maxUnity', '2');
+  assert.equal(full.limits.maxUnity, 2, 'applies at once');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).limits.maxUnity, 2);
+  for (const bad of ['0', '9', '2.5', 'two']) assert.throws(() => setAppConfig(file, full, 'limits.maxUnity', bad), /1 to 8/, bad);
+  setAppConfig(file, full, 'limits.maxUnity', null);
+  assert.equal(full.limits.maxUnity, 3, 'null: back to the default');
 });
