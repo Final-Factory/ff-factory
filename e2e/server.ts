@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
-import { fakeQuery } from './fakeAgent.ts';
+import { RED_PNG, fakeQuery } from './fakeAgent.ts';
 
 export const USER = 'tester';
 export const PASSWORD = 'e2e-password-123';
@@ -52,6 +52,8 @@ const videos = path.join(sandboxRoot, 'alpha', 'Assets', 'Screenshots', 'Videos'
 fs.mkdirSync(videos, { recursive: true });
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(videos, 'clip.webm'));
 fs.writeFileSync(path.join(videos, 'clip.webm.meta'), 'fileFormatVersion: 2\nguid: 0\n');
+// A screenshot in a sandbox that the orchestrator mentions by path (e2e/images.spec.ts).
+fs.writeFileSync(path.join(sandboxRoot, 'gallery', 'Screenshots', 'orch-proof.png'), Buffer.from(RED_PNG, 'base64'));
 
 const configFile = path.join(base, 'config.json');
 fs.writeFileSync(

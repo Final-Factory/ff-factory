@@ -1,6 +1,6 @@
 import { RED_PNG } from './fakeAgent.ts';
 import type { Locator, Page } from '@playwright/test';
-import { BOX, expect, openSandbox, pastePng, startWorker, test, uniq } from './fixtures.ts';
+import { BOX, appState, expect, openSandbox, pastePng, sendMessage, startWorker, test, uniq } from './fixtures.ts';
 
 /** The images are on screen and actually decoded (a broken link has no natural size). */
 async function expectLoaded(images: Locator) {
@@ -58,4 +58,24 @@ test('a tool result with a screenshot shows the image inline', async ({ authed: 
   await expect(tool).not.toHaveClass(/\bopen\b/);
   await expectLoaded(tool.locator('.img-strip img'));
   await expect(panel.locator('.msg-assistant', { hasText: 'Here is the screenshot.' })).toBeVisible();
+});
+
+test("the orchestrator's messages show images from any sandbox, markdown or bare path, with the lightbox", async ({ authed: page }) => {
+  const tag = uniq('orchimg');
+  const app = await appState(page.request);
+  const gallery = app.sandboxes.find((s) => s.id === 'gallery')!;
+  const shot = `${gallery.path}${gallery.path.includes('\\') ? '\\' : '/'}Screenshots${gallery.path.includes('\\') ? '\\' : '/'}orch-proof.png`;
+  // The fake orchestrator echoes the message, so its reply carries a markdown image of a sandbox file.
+  await sendMessage(page.request, app.orchestratorId!, `before and after ![after](${shot}) ${tag}`);
+  const reply = page.locator('.orch .msg-assistant', { hasText: tag });
+  await expect(reply).toBeVisible();
+  await expectLoaded(reply.locator('.img-strip img'));
+  // The markdown image itself is left to the strip: no broken <img> in the text.
+  await expect(reply.locator('.md img')).toHaveCount(0);
+  await reply.locator('.img-thumb').first().click();
+  await expectLoaded(page.locator('.lightbox img'));
+  await page.keyboard.press('Escape');
+  // Outside every root the orchestrator oversees: refused by the server.
+  const denied = await page.request.get(`/api/image?${new URLSearchParams({ session: app.orchestratorId!, path: shot.replace(/sandboxes.*$/, 'elsewhere.png') })}`);
+  expect(denied.status()).toBe(404);
 });

@@ -520,7 +520,7 @@ const ActivityGroup = memo(function ActivityGroup({ steps, sessionId, live }: { 
         {tools > 0 && names && <span className="activity-names">{names}</span>}
         {failed > 0 && <span className="activity-failed">{failed} failed</span>}
       </button>
-      {!open && images.length > 0 && <ImageStrip size="small" items={images} />}
+      {!open && images.length > 0 && <ImageStrip items={images} />}
       {open && (
         <div className="activity-body">
           {steps.map((s) =>

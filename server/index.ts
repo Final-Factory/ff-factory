@@ -354,8 +354,12 @@ route('GET', '/api/uploads/([\\w-]+)/([\\w-]+)', async (_r, [sessionId, imageId]
   return new FileReply(MEDIA_TYPE[f.split('.').pop()!] ?? 'application/octet-stream', fs.readFileSync(f));
 });
 
-/** Where a session, sandbox or machine may show images from. `machine` means: ask that machine's daemon. */
-function imageRoots(url: URL): { machine?: string; roots: string[] } {
+/**
+ * Where a session, sandbox or machine may show images from. `machine` means: ask that machine's daemon.
+ * The orchestrator oversees everything: the base clone, every sandbox and standing agent folder, and (for a
+ * path under a machine's clone or home) that machine's own folders, which its daemon checks.
+ */
+function imageRoots(url: URL, file?: string): { machine?: string; roots: string[] } {
   const sessionId = url.searchParams.get('session');
   const sandboxId = url.searchParams.get('sandbox');
   const machineId = url.searchParams.get('machine');
@@ -366,13 +370,17 @@ function imageRoots(url: URL): { machine?: string; roots: string[] } {
   if (s.machineId) return { machine: s.machineId, roots: [] };
   if (s.sandboxId) return { roots: [sandboxes.require(s.sandboxId).path] };
   if (s.standingId) return { roots: [agents.standing.require(s.standingId).folder] };
-  if (s.kind === 'orchestrator') return { roots: [cfg.repo.basePath] };
+  if (s.kind === 'orchestrator') {
+    const onMac = file && file.startsWith('/') ? machines.list().find((m) => [m.repoPath, m.home].some((r) => r && (file === r || file.startsWith(r.replace(/\/+$/, '') + '/')))) : undefined;
+    if (onMac) return { machine: onMac.id, roots: [] };
+    return { roots: [cfg.repo.basePath, cfg.sandboxRoot, cfg.standingRoot] };
+  }
   throw new HttpError(404, 'no folder for this session');
 }
 
 route('GET', '/api/image', async (_r, _p, url) => {
   const file = need(url.searchParams.get('path'), 'path');
-  const where = imageRoots(url);
+  const where = imageRoots(url, file);
   try {
     if (VIDEO_FILE.test(file)) {
       if (where.machine) throw new Error('videos on a machine cannot be shown yet');
