@@ -255,7 +255,9 @@ export class Daemon {
         }
         this.send({ type: 'rpc', id, sessionId, method, args });
       });
-    return { set_label: call('set_label'), request_delegation: call('request_delegation'), my_delegations: call('my_delegations') };
+    // Every tool the portal can answer: it decides per session which ones it serves (MachineManager.answer), and
+    // the spec decides which ones the agent sees. (A fixed list here once left wake_me and unity out on the Macs.)
+    return Object.fromEntries((Object.keys(CATALOG) as CatalogTool[]).map((k) => [k, call(k)]));
   }
 
   private entry(info: SessionInfo, lastSeq: number): Entry {

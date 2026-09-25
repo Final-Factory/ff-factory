@@ -791,7 +791,7 @@ ${ownerLine(this.cfg)}
 Unity on this Mac: the \`mcp__machine__unity\` tool starts, stops and restarts the editor of this clone (\`force: true\` for a frozen one), and a watch restarts a hung or crashed editor by itself and tells you. You may also start, quit, kill and relaunch the Unity editor of this clone (and Unity Hub, crash reporters) whenever it is hung, crashed or misbehaving, as the user's own sessions here do; unsaved in-editor changes may be lost, which is accepted. Never kill node or claude processes: that takes down the FF Factory daemon or you. Before Unity MCP calls, pin the editor (read \`mcpforunity://instances\`, then \`set_active_instance\` with the instance whose name starts with "${path.basename(m.repoPath)}@").
 
 ## Waiting
-Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back once your turn ends. To come back later (a long build, a test run), call \`mcp__machine__wake_me\` with minutes and a note, then end your turn: after that many minutes you get a message with your note.
+Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back once your turn ends. To come back later (a long build, a test run), call \`mcp__machine__wake_me\` with minutes and a note, then end your turn: after that many minutes you get a message with your note (one pending wake per session; a new one replaces it). Do not poll in the foreground for more than a few minutes: anything longer (a Unity import, a build, a play leg, CI) is a wake_me and an ended turn.
 
 ## Git
 \`develop\` is the integration branch; the game repo's master/main is off-limits (blocked), as are force pushes. Integrate verified work the usual way for this repo (its CLAUDE.md), rebasing on origin/develop first.

@@ -82,7 +82,7 @@ async function setup() {
   const mm = new MachineManager(cfg, store, sessions);
   mm.hooks = {
     specFor: (info) => ({ cwd: tmp, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: tmp, protectedPaths: [], gameRepos: [] }, model: info.model }),
-    handlersFor: (_info, m) => ({ set_label: async (a) => mm.setPurpose(m.id, String(a.purpose)).purpose }),
+    handlersFor: (_info, m) => ({ set_label: async (a) => mm.setPurpose(m.id, String(a.purpose)).purpose, wake_me: async (a) => `waking you in ${a.minutes} min: ${a.note}` }),
   };
   const server = http.createServer();
   server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
@@ -206,9 +206,13 @@ test('machine: a bad token is refused; tool calls go back to the portal', async 
   const d = daemon();
   await until('online', () => mm.isOnline('mx'));
   const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
-  const handlers = (d as unknown as { handlers(id: string): { set_label(a: Record<string, unknown>): Promise<string> } }).handlers(s.info.id);
+  type H = (a: Record<string, unknown>) => Promise<string>;
+  const handlers = (d as unknown as { handlers(id: string): Record<string, H> }).handlers(s.info.id);
   assert.equal(await handlers.set_label({ purpose: 'shader pass' }), 'shader pass');
   assert.equal(store.machines.get('mx')!.purpose, 'shader pass');
+  // Every portal tool is forwarded (wake_me and unity were left out once); the portal decides who may use which.
+  assert.equal(await handlers.wake_me({ minutes: 20, note: 'check the build' }), 'waking you in 20 min: check the build');
+  await assert.rejects(handlers.unity({ action: 'status' }), /unity is not available to this session/);
 });
 
 test("own checkout: nothing that loses the user's work; branch switches only on a clean tree", () => {
