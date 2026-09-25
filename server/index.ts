@@ -100,7 +100,9 @@ machines.report = (text) => {
 // The outside watchdog (docs/self-recovery.md): a Mac watches this host and alerts the user's phone through ntfy.
 const outside = loadOutsideWatchState(cfg.dataDir);
 const watcher = () => (cfg.outsideWatch?.enabled === false ? undefined : watcherOf(cfg.outsideWatch?.machine, machines.list().map((m) => m.id)));
-const watchConfig = () => outsideWatchConfig({ ...cfg.outsideWatch, publicUrl: cfg.publicUrl, name: os.hostname() }, outside);
+// Without publicUrl, the address the machines were deployed with (add_machine's portal_url) is the same portal.
+const portalUrl = () => cfg.publicUrl ?? machines.list().find((m) => /^https?:\/\//.test(m.portalUrl ?? ''))?.portalUrl;
+const watchConfig = () => outsideWatchConfig({ ...cfg.outsideWatch, publicUrl: portalUrl(), name: os.hostname() }, outside);
 machines.outsideWatchFor = (id) => (id === watcher() ? (watchConfig() ?? null) : null);
 const learnNetwork = () =>
   void collectNetwork()

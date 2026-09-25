@@ -20,6 +20,8 @@ export const SETTABLE_KEYS = [
   'hostGuard.cleanup.ageRules',
   // How many Unity editors may run at once on this host (each takes ~8-12 GB of RAM).
   'limits.maxUnity',
+  // The address machines and the outside watchdog reach this portal at (the Tailscale Funnel URL).
+  'publicUrl',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
@@ -78,6 +80,10 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       if (typeof value !== 'string' || !/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(value.trim())) throw new Error('publicGitIdentity.email is an email address, e.g. 12345+you@users.noreply.github.com');
       return value.trim();
     }
+    case 'publicUrl': {
+      if (typeof value !== 'string' || !/^https?:\/\/[^/\s]+\/?$/.test(value.trim())) throw new Error("publicUrl is the portal's base URL, e.g. https://<host>.<tailnet>.ts.net");
+      return value.trim().replace(/\/+$/, '');
+    }
     case 'limits.maxUnity': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 8) throw new Error('limits.maxUnity is a whole number of editors from 1 to 8');
@@ -133,6 +139,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'voice.ttsVoice') cfg.voice.ttsVoice = (v as string | undefined) ?? VOICE_DEFAULTS.ttsVoice;
   else if (key === 'hostGuard.devDriveVhdx') cfg.hostGuard.devDriveVhdx = (v as string | undefined) ?? '';
   else if (key === 'limits.maxUnity') cfg.limits.maxUnity = (v as number | undefined) ?? 3;
+  else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'publicGitIdentity.name' || key === 'publicGitIdentity.email') {
     const field = key === 'publicGitIdentity.name' ? 'name' : 'email';

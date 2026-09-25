@@ -89,3 +89,12 @@ test('app config: limits.maxUnity caps editors at once, live, 1 to 8', (t) => {
   setAppConfig(file, full, 'limits.maxUnity', null);
   assert.equal(full.limits.maxUnity, 3, 'null: back to the default');
 });
+
+test('app config: publicUrl (the portal address machines and the outside watchdog use)', (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg } as unknown as Config;
+  setAppConfig(file, full, 'publicUrl', 'https://beast.tailedfcad.ts.net/');
+  assert.equal(full.publicUrl, 'https://beast.tailedfcad.ts.net', 'applies at once, without the trailing slash');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).publicUrl, 'https://beast.tailedfcad.ts.net');
+  for (const bad of ['beast.tailedfcad.ts.net', 'https://beast.tailedfcad.ts.net/api', 'ftp://x']) assert.throws(() => setAppConfig(file, full, 'publicUrl', bad), /base URL/, bad);
+});
