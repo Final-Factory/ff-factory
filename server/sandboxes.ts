@@ -644,7 +644,9 @@ export class SandboxManager {
       // no log: its growth cannot tell anything
     }
     const b = bridgeInfo(s.path);
-    const ok = b.port ? await bridgePing(b.port) : false;
+    // A quick ping, then one long one (60 s) before a once-reachable bridge counts as silent: a throttled or
+    // idle editor gets to it eventually, a frozen one never does.
+    const ok = b.port ? (await bridgePing(b.port)) || (h.bridgeUp && (await bridgePing(b.port, 60_000))) : false;
     h.reloading = b.reloading;
     if (ok) {
       h.bridgeUp = true;

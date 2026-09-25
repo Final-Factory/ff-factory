@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MacUnity, MacUnityWatch, editorsFor, projectPathOf, treeOf, type Proc, type UnityDeps } from '../machine/unity.ts';
+import { MacUnity, MacUnityWatch, editorTree, editorsFor, projectPathOf, treeOf, type Proc, type UnityDeps } from '../machine/unity.ts';
 
 const REPO = '/Users/u/games/MyGame';
 const BIN = '/Applications/Unity/Hub/Editor/6000.3.19f1/Unity.app/Contents/MacOS/Unity';
@@ -29,7 +29,7 @@ function fakeMac(opts: { ignoresTerm?: boolean } = {}) {
     sleep: async (ms) => void (world.now += ms),
     now: () => world.now,
   };
-  return { world, editor, u: new MacUnity(REPO, deps, () => BIN) };
+  return { world, editor, deps, u: new MacUnity(REPO, deps, () => BIN) };
 }
 
 test('mac unity: finds only this clone\'s editor and what it started', () => {
@@ -115,4 +115,70 @@ test('mac unity watch: a hung editor is restarted; a quit one left closed; a cra
   world.procs.push({ pid: 998, ppid: 1, cmd: `Unity Bug Reporter --unity_project ${REPO}` });
   assert.equal(await w.tick(), 'gave-up');
   assert.match(reports.at(-1)!, /already restarted 3 times in 30 min; leaving it for a person/);
+});
+
+test('mac unity: a restart never takes a game player, another project, Unity Hub or node/claude with it', async () => {
+  const procs: Proc[] = [
+    { pid: 10, ppid: 1, cmd: `${BIN} -projectpath ${REPO} -useHub` },
+    { pid: 11, ppid: 10, cmd: '/Applications/Unity/Hub/Editor/6000.3.19f1/Unity.app/Contents/Tools/UnityShaderCompiler' },
+    { pid: 12, ppid: 10, cmd: `${BIN} -batchMode -projectpath ${REPO} -name AssetImportWorker0` },
+    { pid: 13, ppid: 10, cmd: '/Users/u/builds/FinalFactory.app/Contents/MacOS/FinalFactory -ffHost' },
+    { pid: 14, ppid: 13, cmd: '/Users/u/builds/FinalFactory.app/Contents/MacOS/crashpad_handler' },
+    { pid: 15, ppid: 10, cmd: `${BIN} -projectpath ${REPO}_clone_0` },
+    { pid: 16, ppid: 10, cmd: '/opt/homebrew/bin/node /Users/u/.ff-factory/app/machine/daemon.ts' },
+    { pid: 17, ppid: 10, cmd: '/Applications/Unity/Hub/Editor/6000.3.19f1/Unity.app/Contents/Unity Bug Reporter.app/Contents/MacOS/Unity Bug Reporter' },
+  ];
+  const t = editorTree(procs, 10, REPO);
+  assert.deepEqual(t.kill.sort(), [10, 11, 12, 17]);
+  assert.equal(t.spared.length, 3);
+  assert.match(t.spared.join('; '), /the FinalFactory app \(pid 13\).*another project's editor \(\/Users\/u\/games\/MyGame_clone_0\) \(pid 15\).*node\/claude \(pid 16\)/);
+  // And stop() reports what it left running.
+  const { world, u } = fakeMac();
+  world.procs.push(...procs.filter((p) => p.pid !== 10), { pid: 10, ppid: 1, cmd: `${BIN} -projectpath ${REPO}` });
+  const out = await u.stop({ force: true });
+  assert.ok(!world.killed.some((k) => /SIGKILL (13|14|15|16)$/.test(k)), world.killed.join(','));
+  assert.match(out, /left running what it started that is not part of it: the FinalFactory app \(pid 13\)/);
+});
+
+test('mac unity watch: an idle or throttled editor is not hung; App Nap is turned off at launch', async () => {
+  const { world, editor, u } = fakeMac();
+  const reports: string[] = [];
+  let quick = true;
+  let slow = true;
+  let asleep = false;
+  const w = new MacUnityWatch(u, (t) => reports.push(t), {
+    logStat: () => ({ size: 1, mtimeMs: 0 }), // an idle editor: its log has not moved for hours
+    logTail: () => '',
+    bridge: () => ({ port: 6400, reloading: false }),
+    ping: async (_p, timeoutMs) => ((timeoutMs ?? 0) >= 60_000 ? slow : quick),
+    now: () => world.now,
+    displayAsleep: async () => asleep,
+  });
+  editor(100);
+  assert.equal(await w.tick(), 'ok');
+  // Throttled (App Nap): the quick ping times out, the long one gets through. Hours of that: never hung.
+  quick = false;
+  for (let i = 0; i < 40; i++) {
+    world.now += 60_000;
+    assert.equal(await w.tick(), 'ok');
+  }
+  // The display asleep: even a bridge silent on both pings proves nothing.
+  slow = false;
+  asleep = true;
+  for (let i = 0; i < 40; i++) {
+    world.now += 60_000;
+    assert.equal(await w.tick(), 'ok');
+  }
+  assert.deepEqual(reports, []);
+  // Awake and silent on both for 10 minutes: hung.
+  asleep = false;
+  await w.tick();
+  world.now += 11 * 60_000;
+  assert.equal(await w.tick(), 'restarted');
+  // App Nap off before a launch.
+  const naps: string[] = [];
+  const fresh = fakeMac();
+  const u2 = new MacUnity(REPO, { ...fresh.deps, noAppNap: async (bin) => void naps.push(bin) }, () => BIN);
+  await u2.start();
+  assert.deepEqual(naps, [BIN]);
 });

@@ -47,7 +47,7 @@ An editor is **hung** only when it is silent on every channel for long:
 | bridge says reloading (domain reload, compile) AND log silent 10 min | 45 min (`unity.hang.reloadingMinutes`) |
 | starting, log silent | 15 min (`unity.hang.startupStallMinutes`, default `unity.watchdog.stallMinutes`) |
 
-A long import, compile or test run keeps the log growing, so it is never killed. A modal dialog is
+A long import, compile or test run keeps the log growing, so it is never killed. An idle editor's log can be silent for hours, so the log never proves a hang by itself: the bridge does, and only after a quick ping (8 s) and a long one (60 s) both fail, since a throttled editor answers late but a frozen one never. On a Mac a silent bridge counts for nothing while the display is asleep (`pmset displaysleepnow`, App Nap throttles everything), and App Nap is turned off for Unity (`defaults write <Unity's bundle id> NSAppSleepDisabled -bool YES`, when the daemon starts and before every launch; it applies from the editor's next launch). A modal dialog is
 never a hang: it is the dialog watchdog's business (seen in the last 3 minutes).
 The host checks each running editor every `unity.hang.checkSeconds` (30); a process listing, which
 costs a few seconds, runs every 5 minutes, or at once when something already looks wrong.
@@ -56,7 +56,7 @@ costs a few seconds, runs every 5 minutes, or at once when something already loo
 
 On a hang or crash, `SandboxManager.autoRestart` (host) or `MacUnityWatch` (Mac daemon, every 30 s):
 
-1. force-kills the editor and what it started, and its crash reporters;
+1. force-kills the editor and what it started, and its crash reporters. On a Mac, a game player (any `.app` other than Unity's, e.g. the host player launched from the editor), another project's editor, Unity Hub and node/claude are never part of that, nor what they started; the result names what was left running;
 2. clears the stale lock (and, on the host, starts on a fresh log if the old one is locked);
 3. starts the editor again; the dialog watchdog answers the recovery prompts as usual;
 4. records it: on the sandbox card (`unity.restarts`, "Restarted after a hang or crash"), a

@@ -29,6 +29,8 @@ export interface UnityDeps {
   remove(p: string): void;
   sleep(ms: number): Promise<void>;
   now(): number;
+  /** Turn App Nap off for the editor app at `bin` (optional: the real Mac writes NSAppSleepDisabled). */
+  noAppNap?(bin: string): Promise<void>;
 }
 
 const norm = (p: string) => p.replace(/\/+$/, '');
@@ -49,6 +51,37 @@ export function treeOf(procs: Proc[], root: number): number[] {
   const out = [root];
   for (let i = 0; i < out.length; i++) for (const p of procs) if (p.ppid === out[i] && !out.includes(p.pid)) out.push(p.pid);
   return out;
+}
+
+/**
+ * What an editor started that must survive its restart, with everything below it: a game player (any .app
+ * other than Unity.app, e.g. the 074 host player launched from the editor), another project's editor (a
+ * ParrelSync clone), Unity Hub, and node or claude (the daemon, an agent).
+ */
+export function spareOnRestart(p: Proc, repo: string): string | undefined {
+  const app = /\/([^/]+)\.app\/Contents\//.exec(p.cmd)?.[1];
+  if (app && app !== 'Unity') return app === 'Unity Hub' ? 'Unity Hub' : `the ${app} app`;
+  if (/\/Unity\.app\/Contents\/MacOS\/Unity(\s|$)/.test(p.cmd)) {
+    const proj = projectPathOf(p.cmd);
+    if (proj && proj !== norm(repo)) return `another project's editor (${proj})`;
+  }
+  if (!/\/Unity\.app\//.test(p.cmd) && /(^|\/)(node|claude)(\s|$)/.test(p.cmd)) return 'node/claude';
+  return undefined;
+}
+
+/** The editor and the processes it started that go with it (treeOf minus spareOnRestart and what those started), and what is spared. */
+export function editorTree(procs: Proc[], root: number, repo: string): { kill: number[]; spared: string[] } {
+  const kill = [root];
+  const spared: string[] = [];
+  for (let i = 0; i < kill.length; i++) {
+    for (const p of procs) {
+      if (p.ppid !== kill[i] || kill.includes(p.pid)) continue;
+      const why = spareOnRestart(p, repo);
+      if (why) spared.push(`${why} (pid ${p.pid})`);
+      else kill.push(p.pid);
+    }
+  }
+  return { kill, spared };
 }
 
 /** Crash reporters left for this project (their parent editor may be gone already). */
@@ -121,9 +154,12 @@ export class MacUnity {
     }
     const left = editorsFor(procs, this.repo);
     if (left.length) {
-      const pids = [...new Set(left.flatMap((e) => treeOf(procs, e.pid)))];
+      const trees = left.map((e) => editorTree(procs, e.pid, this.repo));
+      const pids = [...new Set(trees.flatMap((t) => t.kill))];
+      const spared = trees.flatMap((t) => t.spared);
       for (const pid of pids) this.d.kill(pid, 'SIGKILL');
       notes.push(`${opts.force ? 'force-killed' : 'did not quit in time; force-killed'} pid ${left.map((e) => e.pid).join(', ')} and ${pids.length - left.length} process(es) it started`);
+      if (spared.length) notes.push(`left running what it started that is not part of it: ${spared.join(', ')}`);
       for (let i = 0; i < 15; i++) {
         await this.d.sleep(1000);
         procs = await this.d.procs();
@@ -151,12 +187,26 @@ export class MacUnity {
     const lock = path.posix.join(this.repo, 'Temp', 'UnityLockfile');
     if (this.d.exists(lock)) this.d.remove(lock); // no editor has the project open, so the lock is stale
     const bin = this.bin();
+    await this.noAppNap(bin);
     const pid = this.d.launch(bin, ['-projectPath', this.repo], this.repo);
     for (let i = 0; i < 10; i++) {
       await this.d.sleep(1000);
       if (editorsFor(await this.d.procs(), this.repo).length) break;
     }
     return `Started ${bin} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
+  }
+
+  /**
+   * macOS App Nap throttles an editor in the background (or with the display asleep): its main thread, and so
+   * the bridge ping, may then answer only after long delays, which read as a hang. Turned off for Unity's
+   * app (by its own bundle id) before every launch, and by the daemon at start for the next one. Best effort.
+   */
+  async noAppNap(bin?: string): Promise<void> {
+    try {
+      await this.d.noAppNap?.(bin ?? this.bin());
+    } catch {
+      // not fatal: the watch also tolerates a throttled editor
+    }
   }
 
   async restart(opts: { force?: boolean } = {}): Promise<string> {
@@ -193,6 +243,12 @@ export function realDeps(): UnityDeps {
     remove: (p) => fs.rmSync(p, { force: true }),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: () => Date.now(),
+    noAppNap: async (bin) => {
+      // .../Unity.app/Contents/MacOS/Unity -> the app's bundle id (Unity has used com.unity3d.UnityEditor5.x for years).
+      const app = bin.replace(/\/Contents\/MacOS\/[^/]+$/, '');
+      const id = (await run('defaults', ['read', `${app}/Contents/Info`, 'CFBundleIdentifier'], { timeoutMs: 10_000 })).stdout.trim() || 'com.unity3d.UnityEditor5.x';
+      await run('defaults', ['write', id, 'NSAppSleepDisabled', '-bool', 'YES'], { timeoutMs: 10_000 });
+    },
   };
 }
 
@@ -204,8 +260,10 @@ export interface WatchDeps {
   /** The last few KB of the editor log (crash evidence after the editor is gone). */
   logTail(): string;
   bridge(): { port?: number; reloading?: boolean };
-  ping(port: number): Promise<boolean>;
+  ping(port: number, timeoutMs?: number): Promise<boolean>;
   now(): number;
+  /** The main display is asleep (pmset displaysleepnow, the lid, the screensaver's sleep): App Nap then throttles everything. */
+  displayAsleep(): Promise<boolean>;
   /** The editor's dialogs and main window title (machine/macDialogs.ts); throws osascript's error. */
   listDialogs(pid: number): Promise<{ dialogs: Dialog[]; mainTitle?: string }>;
   pressButton(pid: number, d: Dialog, button: string): Promise<boolean>;
@@ -284,8 +342,13 @@ export class MacUnityWatch {
         }
       },
       bridge: () => bridgeInfo(u.repo),
-      ping: (port) => bridgePing(port),
+      ping: (port, timeoutMs) => bridgePing(port, timeoutMs),
       now: () => Date.now(),
+      displayAsleep: async () => {
+        if (process.platform !== 'darwin') return false;
+        const r = await run('osascript', ['-l', 'JavaScript', '-e', 'ObjC.import("CoreGraphics"); $.CGDisplayIsAsleep($.CGMainDisplayID())'], { timeoutMs: 15_000 });
+        return r.code === 0 && /^(true|1)$/.test(r.stdout.trim());
+      },
       listDialogs: (pid) => listMacDialogs(pid),
       pressButton: (pid, d, button) => pressMacButton(pid, d, button),
       sceneFilesClean: () => sceneFilesUnchanged(u.repo),
@@ -346,12 +409,17 @@ export class MacUnityWatch {
       return this.restart(`the editor keeps showing a dialog: ${why}`, now);
     }
     const b = this.d.bridge();
-    const ok = b.port ? await this.d.ping(b.port) : false;
+    // A quick ping first; when it fails, one long one (60 s): a throttled or idle editor gets to it, a frozen
+    // one does not. With the display asleep a silent bridge proves nothing (App Nap), so its clock restarts.
+    let ok = b.port ? await this.d.ping(b.port) : false;
+    if (!ok && b.port && this.bridgeUp) ok = await this.d.ping(b.port, 60_000);
+    const asleep = !ok && this.bridgeUp ? await this.d.displayAsleep().catch(() => false) : false;
     if (ok) {
       this.bridgeUp = true;
       this.launchedByUs = false;
       this.bridgeFailingSince = undefined;
-    } else if (this.bridgeUp && this.bridgeFailingSince === undefined) this.bridgeFailingSince = now;
+    } else if (asleep) this.bridgeFailingSince = undefined;
+    else if (this.bridgeUp && this.bridgeFailingSince === undefined) this.bridgeFailingSince = now;
     // A silent bridge counts only once it has answered for this editor (an editor running without the bridge,
     // or before it is up, is never judged by it); a startup stall only for an editor the watch launched.
     const v = editorVerdict(

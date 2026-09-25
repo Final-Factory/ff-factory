@@ -91,6 +91,8 @@ export class Daemon {
       this.send({ type: 'unity_event', text, restarted });
     });
     this.timers.push(setInterval(() => void this.unityWatch?.tick(), 30_000));
+    // App Nap off for Unity (takes effect at the editor's next launch; start() does it too).
+    if (process.platform === 'darwin') void this.unity.noAppNap().catch(() => undefined);
     this.timers.push(setInterval(() => this.heartbeat(), 20_000));
     this.timers.push(setInterval(() => void this.reportStatus(), 60_000));
   }
