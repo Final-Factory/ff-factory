@@ -109,7 +109,7 @@ export function macPermissionProblem(stderr: string, nodePath: string): string |
     return `macOS has not allowed the daemon to control System Events (Automation). On the Mac, open System Settings > Privacy & Security > Automation, find "node" (${nodePath}) and turn on "System Events". If node is not listed, the permission prompt was never answered: log in at the Mac's desktop, and the next look (within a minute) shows the prompt "node wants access to control System Events": click Allow.`;
   }
   if (/-25211|-1719|assistive access|not allowed to send keystrokes|accessibility/i.test(stderr)) {
-    return `macOS has not given the daemon Accessibility access, which reading and pressing Unity's dialogs needs. On the Mac, open System Settings > Privacy & Security > Accessibility, click +, press Cmd-Shift-G, enter ${nodePath}, add it and make sure its switch is on. (It is the node binary the FF Factory daemon runs under; after a node upgrade the entry has to be added again.)`;
+    return `macOS has not given the daemon Accessibility access, which reading and pressing Unity's dialogs needs. On the Mac, open System Settings > Privacy & Security > Accessibility. If "node" is listed, turn its switch ON (an entry that is there but off is still denied). If it is not, click +, press Cmd-Shift-G, enter ${nodePath}, add it and turn it on. (It is the node binary the FF Factory daemon runs under; after a node upgrade the entry has to be added again.)`;
   }
   return undefined;
 }
@@ -175,12 +175,13 @@ export function nodeBinary(): string {
 }
 
 /** The dialogs of an editor on this Mac, and its main window's title. Throws with osascript's error text. */
-export async function listMacDialogs(pid: number): Promise<{ dialogs: Dialog[]; mainTitle?: string }> {
+export async function listMacDialogs(pid: number): Promise<{ dialogs: Dialog[]; mainTitle?: string; windows?: number }> {
   if (process.platform !== 'darwin') return { dialogs: [] };
   const r = await run('osascript', ['-l', 'JavaScript', '-e', LIST_SCRIPT, String(pid)], { timeoutMs: 30_000 });
   if (r.code !== 0) throw new Error(r.stderr.trim() || `osascript exited ${r.code}`);
   const { windows, mainTitle } = toEditorWindows(pid, JSON.parse(r.stdout.trim() || '[]') as MacWindow[]);
-  return { dialogs: findDialogs(windows), mainTitle };
+  // No windows at all: System Events has no such app (not a GUI process), which proves nothing either way.
+  return { dialogs: findDialogs(windows), mainTitle, windows: windows.length };
 }
 
 /** Press a button of a dialog listMacDialogs found. Returns whether it was pressed. */

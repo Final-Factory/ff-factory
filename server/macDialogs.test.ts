@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LIST_SCRIPT, macPermissionProblem, macWindowId, toEditorWindows, type MacWindow } from '../machine/macDialogs.ts';
-import { MacUnity, MacUnityWatch, type Proc, type UnityDeps } from '../machine/unity.ts';
+import { MacUnity, MacUnityWatch, editorsFor, type Proc, type UnityDeps } from '../machine/unity.ts';
 import { findDialogs, type Dialog } from './watchdog.ts';
 
 const REPO = '/Users/u/games/MyGame';
@@ -113,10 +113,14 @@ test('mac dialog watch: safe answers pressed, the rest reported once and shown i
   assert.equal(await w.tick(), 'ok');
 });
 
-test('mac dialog watch: without Accessibility it says what to grant, once, and notices when it is fixed', async () => {
+test('mac dialog watch: without Accessibility it says what to grant, only once it lasts (3 looks, 15 min), and notices when it is fixed', async () => {
   const { world, w, reports } = macWithDialogs();
   world.listError = 'osascript is not allowed assistive access. (-25211)';
-  await w.tick();
+  for (let i = 0; i < 3; i++) {
+    await w.tick();
+    world.now += 5 * 60_000;
+  }
+  assert.equal(reports.length, 0, '3 looks but only 10 minutes: not yet');
   await w.tick();
   assert.equal(reports.length, 1);
   assert.match(reports[0], /Accessibility.*\/usr\/local\/bin\/node/);
@@ -141,8 +145,8 @@ test('mac dialog watch: the licensing "Connection Lost" is retried, and the 4th 
   assert.match(reports.at(-1)!, /keeps showing a dialog: "Connection Lost" came back 4 times within 10 minutes/);
 });
 
-test('mac dialog watch: a locked screen pauses it (one notice an hour), a permission is reported only when AXIsProcessTrusted says so', async () => {
-  const world = { now: Date.parse('2026-09-25T16:00:00Z'), locked: false, trusted: true as boolean | undefined, fail: '' };
+test('mac dialog watch: a locked screen pauses it (one notice a day), a permission is reported only when AXIsProcessTrusted says so', async () => {
+  const world = { now: Date.parse('2026-09-25T16:00:00Z'), locked: false, trusted: true as boolean | undefined, fail: '', noWindows: false };
   const reports: string[] = [];
   const deps: UnityDeps = {
     procs: async () => [{ pid: 100, ppid: 1, cmd: `${BIN} -projectpath ${REPO}` }],
@@ -161,7 +165,7 @@ test('mac dialog watch: a locked screen pauses it (one notice an hour), a permis
     now: () => world.now,
     listDialogs: async () => {
       if (world.fail) throw new Error(world.fail);
-      return { dialogs: [], mainTitle: MAIN.title };
+      return world.noWindows ? { dialogs: [], windows: 0 } : { dialogs: [], mainTitle: MAIN.title, windows: 1 };
     },
     pressButton: async () => true,
     sceneFilesClean: async () => true,
@@ -198,16 +202,32 @@ test('mac dialog watch: a locked screen pauses it (one notice an hour), a permis
   world.fail = 'osascript is not allowed assistive access. (-25211)';
   await tick();
   assert.equal(reports.length, 1);
-  // Really missing: reported, once an hour however often it fails.
+  // Really missing: reported once it has lasted (3 looks over 15 min), then not again within the day.
   world.trusted = false;
-  await tick();
+  await tick(8);
+  await tick(8);
+  assert.equal(reports.length, 1, 'two looks: not yet');
+  await tick(8);
+  assert.equal(reports.length, 2);
+  assert.match(reports[1], /cannot read Unity's dialogs: macOS has not given the daemon Accessibility access.*If "node" is listed, turn its switch ON/);
+  // A look that sees no windows at all (System Events does not know the pid) proves nothing: no "again".
+  world.fail = '';
+  world.noWindows = true;
   await tick();
   assert.equal(reports.length, 2);
-  assert.match(reports[1], /cannot read Unity's dialogs: macOS has not given the daemon Accessibility access/);
-  world.fail = '';
+  world.noWindows = false;
   await tick();
   assert.equal(reports.at(-1), "Unity dialog watch on this machine can see the editor's windows again.");
   world.fail = 'osascript is not allowed assistive access. (-25211)';
-  await tick();
-  assert.equal(reports.length, 3, 'the permission notice not again within the hour');
+  for (let i = 0; i < 6; i++) await tick(10);
+  assert.equal(reports.length, 3, 'the permission notice not again within the day');
+});
+
+test('mac unity: the editor is the Unity with windows, never its -batchMode import workers or a command-line build', () => {
+  const procs: Proc[] = [
+    { pid: 72362, ppid: 24358, cmd: `${BIN} -adb2 -batchMode -noUpm -name AssetImportWorker0 -projectPath ${REPO} -logFile Logs/AssetImportWorker0.log` },
+    { pid: 24358, ppid: 1, cmd: `${BIN} -projectPath ${REPO}` },
+    { pid: 80000, ppid: 1, cmd: `${BIN} -batchmode -quit -nographics -projectPath ${REPO} -executeMethod Build.Run` },
+  ];
+  assert.deepEqual(editorsFor(procs, REPO).map((p) => p.pid), [24358]);
 });

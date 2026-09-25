@@ -41,9 +41,12 @@ export function projectPathOf(cmd: string): string | undefined {
   return m ? norm(m[2] ?? m[3]) : undefined;
 }
 
-/** Unity editors with `repo` open: the Unity binary itself, with that project path. */
+/**
+ * The Unity editor with `repo` open: the Unity binary with that project path, not a -batchMode one (its
+ * AssetImportWorkers, a command-line build), which has no windows and no bridge and is not the editor.
+ */
 export function editorsFor(procs: Proc[], repo: string): Proc[] {
-  return procs.filter((p) => /\/Unity\.app\/Contents\/MacOS\/Unity(\s|$)/.test(p.cmd) && projectPathOf(p.cmd) === norm(repo));
+  return procs.filter((p) => /\/Unity\.app\/Contents\/MacOS\/Unity(\s|$)/.test(p.cmd) && projectPathOf(p.cmd) === norm(repo) && !/\s-batchmode(\s|$)/i.test(p.cmd));
 }
 
 /** A process and everything it started (shader compilers, bee, Unity Helper, a crash reporter it spawned). */
@@ -265,7 +268,7 @@ export interface WatchDeps {
   /** The main display is asleep (pmset displaysleepnow, the lid, the screensaver's sleep): App Nap then throttles everything. */
   displayAsleep(): Promise<boolean>;
   /** The editor's dialogs and main window title (machine/macDialogs.ts); throws osascript's error. */
-  listDialogs(pid: number): Promise<{ dialogs: Dialog[]; mainTitle?: string }>;
+  listDialogs(pid: number): Promise<{ dialogs: Dialog[]; mainTitle?: string; windows?: number }>;
   pressButton(pid: number, d: Dialog, button: string): Promise<boolean>;
   /** No *.unity file in the clone has uncommitted changes (git status, read-only). */
   sceneFilesClean(): Promise<boolean>;
@@ -275,6 +278,8 @@ export interface WatchDeps {
   sessionState(): Promise<SessionState>;
   /** Accessibility really granted (AXIsProcessTrusted); undefined when it cannot be told. */
   axTrusted(): Promise<boolean | undefined>;
+  /** The daemon log (each failed look, with the session state and AXIsProcessTrusted, for diagnosis). */
+  log?(line: string): void;
 }
 
 /** What Unity writes to its log when it crashes (macOS: signals and the native crash reporter). */
@@ -315,8 +320,10 @@ export class MacUnityWatch {
   private permission?: string;
   /** Why the dialog watch is paused (the screen is locked, the display asleep), if it is. */
   private paused?: string;
-  /** When each kind of notice was last sent: none more than once an hour. */
+  /** When each kind of notice was last sent: none more than once a day. */
   private readonly noticed = new Map<string, number>();
+  /** Failed looks in a row with the screen awake and unlocked: a permission notice needs 3 across 15 minutes. */
+  private failStreak?: { first: number; count: number };
   /** A dialog rule asked for a fresh editor (decide's `restart`, e.g. the licensing "Connection Lost" coming back). */
   private dialogRestart?: string;
 
@@ -363,6 +370,7 @@ export class MacUnityWatch {
       nodePath: () => nodeBinary(),
       sessionState: () => sessionState(),
       axTrusted: () => axTrusted(),
+      log: (line) => console.log(new Date().toISOString(), line),
       ...deps,
     };
   }
@@ -455,11 +463,14 @@ export class MacUnityWatch {
    * look, is reported once. Returns whether a dialog is open (a dialog is never a hang).
    */
   private async dialogs(pid: number, now: number): Promise<boolean> {
-    let seen: { dialogs: Dialog[]; mainTitle?: string };
+    let seen: { dialogs: Dialog[]; mainTitle?: string; windows?: number };
     try {
       seen = await this.d.listDialogs(pid);
-      if (this.permission) this.notice('restored', now, "Unity dialog watch on this machine can see the editor's windows again.");
-      this.permission = this.paused = undefined;
+      // Only a look that saw the editor's windows proves anything (none: System Events did not know the process).
+      if (seen.windows !== 0) {
+        if (this.permission) this.notice('restored', now, "Unity dialog watch on this machine can see the editor's windows again.");
+        this.permission = this.paused = this.failStreak = undefined;
+      }
     } catch (e) {
       await this.cannotSee((e as Error).message, now, "read Unity's dialogs");
       return this.open.length > 0;
@@ -522,23 +533,28 @@ export class MacUnityWatch {
    * permission is reported only when AXIsProcessTrusted agrees. Each notice at most once an hour.
    */
   private async cannotSee(msg: string, now: number, what: string) {
-    const away = sessionAway(await this.d.sessionState().catch(() => ({})));
+    const session = await this.d.sessionState().catch(() => ({}));
+    const away = sessionAway(session);
+    const step = away ? undefined : macPermissionProblem(msg, this.d.nodePath());
+    const trusted = step ? await this.d.axTrusted().catch(() => undefined) : undefined;
+    this.d.log?.(`dialog watch: could not ${what} (${msg.replace(/\s+/g, ' ').slice(0, 160)}); session ${JSON.stringify(session)}; AXIsProcessTrusted ${trusted ?? 'not asked'}`);
     if (away) {
       this.paused = away;
       this.notice('paused', now, `Unity dialog watch on this machine is paused: ${away}. It resumes by itself when someone is back at the screen.`);
       return;
     }
-    const step = macPermissionProblem(msg, this.d.nodePath());
-    if (!step) return;
-    const trusted = await this.d.axTrusted().catch(() => undefined);
-    if (trusted === true) return; // granted: a passing failure, not the permission
+    if (!step || trusted === true) return; // not a permission error, or granted: a passing failure
+    // A real, lasting loss only: 3 failed looks in a row across at least 15 minutes, screen awake and unlocked.
+    const f = (this.failStreak ??= { first: now, count: 0 });
+    f.count++;
+    if (f.count < 3 || now - f.first < 15 * 60_000) return;
     this.permission = step;
     this.notice('permission', now, `Unity dialog watch on this machine cannot ${what}: ${step}`);
   }
 
-  /** Send a notice, unless the same kind went out within the hour. */
+  /** Send a notice, unless the same kind went out within the day. */
   private notice(kind: string, now: number, text: string) {
-    if (now - (this.noticed.get(kind) ?? -Infinity) < 3_600_000) return;
+    if (now - (this.noticed.get(kind) ?? -Infinity) < 24 * 3_600_000) return;
     this.noticed.set(kind, now);
     this.report(text, false);
   }

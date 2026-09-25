@@ -141,8 +141,14 @@ A locked screen, another user at the console (fast user switching) or a sleeping
 Events fail in ways that look like a missing permission. Before reporting one, the watch asks macOS
 (`CGSessionCopyCurrentDictionary`: `CGSSessionScreenIsLocked`, `kCGSSessionOnConsoleKey`;
 `CGDisplayIsAsleep`): then it pauses ("dialog watch paused: the screen is locked") and resumes by itself.
-A permission is reported only when `AXIsProcessTrusted()` also says it is missing. No notice (paused,
-permission, back) goes out more than once an hour.
+A permission is reported only when `AXIsProcessTrusted()` also says it is missing, and only once it
+lasts: 3 failed looks in a row across at least 15 minutes with the screen awake and unlocked. No notice
+(paused, permission, back) goes out more than once a day. A look that sees no windows at all (System
+Events does not know the process) proves nothing either way. The editor is the Unity process with the
+clone open that is not `-batchMode`: its AssetImportWorkers (same binary, same `-projectPath`) and
+command-line builds are not it (on m5, picking a worker was what made the watch "see again" now and
+then). Each failed look is logged in the daemon log with the session state and `AXIsProcessTrusted`.
+An Accessibility entry for node that is listed but switched off is still denied (TCC `auth_value` 0).
 
 ## Hooks
 
