@@ -137,6 +137,13 @@ try:
 When either is missing, the watch sends one notice with the exact step and shows it in the status; the
 hang and crash watch keeps working without it. It notices by itself when the permission arrives.
 
+A locked screen, another user at the console (fast user switching) or a sleeping display make System
+Events fail in ways that look like a missing permission. Before reporting one, the watch asks macOS
+(`CGSessionCopyCurrentDictionary`: `CGSSessionScreenIsLocked`, `kCGSSessionOnConsoleKey`;
+`CGDisplayIsAsleep`): then it pauses ("dialog watch paused: the screen is locked") and resumes by itself.
+A permission is reported only when `AXIsProcessTrusted()` also says it is missing. No notice (paused,
+permission, back) goes out more than once an hour.
+
 ## Hooks
 
 `SandboxManager.events` emits `blocked` (sandbox, details) and `dismissed` (sandbox, what was

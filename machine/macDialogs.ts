@@ -114,6 +114,57 @@ export function macPermissionProblem(stderr: string, nodePath: string): string |
   return undefined;
 }
 
+/** Whether the console session can be looked at: locked, someone else's (fast user switching), display asleep. */
+export interface SessionState {
+  locked?: boolean;
+  onConsole?: boolean;
+  displayAsleep?: boolean;
+}
+
+/**
+ * The console session's state (CGSessionCopyCurrentDictionary: CGSSessionScreenIsLocked,
+ * kCGSSessionOnConsoleKey; CGDisplayIsAsleep). While the screen is locked or the display asleep, System
+ * Events can fail in ways that look like a missing permission; the watch pauses instead.
+ */
+export const SESSION_SCRIPT = `
+ObjC.import('CoreGraphics');
+var out = {};
+try {
+  var d = ObjC.deepUnwrap(ObjC.castRefToObject($.CGSessionCopyCurrentDictionary()));
+  if (d) { out.locked = !!d.CGSSessionScreenIsLocked; out.onConsole = d.kCGSSessionOnConsoleKey !== false && d.kCGSSessionOnConsoleKey !== 0; }
+} catch (e) {}
+try { out.displayAsleep = !!$.CGDisplayIsAsleep($.CGMainDisplayID()); } catch (e) {}
+JSON.stringify(out);`;
+
+/** Whether this process (and so the daemon, responsible for its osascript) has Accessibility: AXIsProcessTrusted. */
+export const AX_TRUSTED_SCRIPT = `ObjC.import('ApplicationServices'); $.AXIsProcessTrusted() ? 'true' : 'false';`;
+
+export async function sessionState(): Promise<SessionState> {
+  if (process.platform !== 'darwin') return {};
+  const r = await run('osascript', ['-l', 'JavaScript', '-e', SESSION_SCRIPT], { timeoutMs: 15_000 });
+  if (r.code !== 0) return {};
+  try {
+    return JSON.parse(r.stdout.trim()) as SessionState;
+  } catch {
+    return {};
+  }
+}
+
+export async function axTrusted(): Promise<boolean | undefined> {
+  if (process.platform !== 'darwin') return undefined;
+  const r = await run('osascript', ['-l', 'JavaScript', '-e', AX_TRUSTED_SCRIPT], { timeoutMs: 15_000 });
+  const v = r.stdout.trim();
+  return r.code === 0 && (v === 'true' || v === 'false') ? v === 'true' : undefined;
+}
+
+/** Why the console cannot be looked at now, or undefined. */
+export function sessionAway(s: SessionState): string | undefined {
+  if (s.locked) return 'the screen is locked';
+  if (s.onConsole === false) return 'another user has the console';
+  if (s.displayAsleep) return 'the display is asleep';
+  return undefined;
+}
+
 /** The real path of the node binary running this daemon (what the privacy settings must name). */
 export function nodeBinary(): string {
   try {

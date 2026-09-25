@@ -5,7 +5,7 @@ import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, type HangThresholds } from '../server/unityHang.ts';
 import { decide, describeDialog, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
-import { listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton } from './macDialogs.ts';
+import { axTrusted, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, type SessionState } from './macDialogs.ts';
 
 /**
  * The Unity editor of a machine's clone (docs/unity-lifecycle.md), managed by the daemon on the Mac: status,
@@ -271,6 +271,10 @@ export interface WatchDeps {
   sceneFilesClean(): Promise<boolean>;
   /** The node binary the privacy settings must name. */
   nodePath(): string;
+  /** The console session: locked, someone else's, display asleep (macDialogs.sessionState). */
+  sessionState(): Promise<SessionState>;
+  /** Accessibility really granted (AXIsProcessTrusted); undefined when it cannot be told. */
+  axTrusted(): Promise<boolean | undefined>;
 }
 
 /** What Unity writes to its log when it crashes (macOS: signals and the native crash reporter). */
@@ -309,6 +313,10 @@ export class MacUnityWatch {
   private reported = new Set<string>();
   /** The macOS permission the dialog watch lacks (the one-time step), if any. */
   private permission?: string;
+  /** Why the dialog watch is paused (the screen is locked, the display asleep), if it is. */
+  private paused?: string;
+  /** When each kind of notice was last sent: none more than once an hour. */
+  private readonly noticed = new Map<string, number>();
   /** A dialog rule asked for a fresh editor (decide's `restart`, e.g. the licensing "Connection Lost" coming back). */
   private dialogRestart?: string;
 
@@ -353,6 +361,8 @@ export class MacUnityWatch {
       pressButton: (pid, d, button) => pressMacButton(pid, d, button),
       sceneFilesClean: () => sceneFilesUnchanged(u.repo),
       nodePath: () => nodeBinary(),
+      sessionState: () => sessionState(),
+      axTrusted: () => axTrusted(),
       ...deps,
     };
   }
@@ -448,13 +458,10 @@ export class MacUnityWatch {
     let seen: { dialogs: Dialog[]; mainTitle?: string };
     try {
       seen = await this.d.listDialogs(pid);
-      if (this.permission) this.report('Unity dialog watch on this machine can see the editor\'s windows again.', false);
-      this.permission = undefined;
+      if (this.permission) this.notice('restored', now, "Unity dialog watch on this machine can see the editor's windows again.");
+      this.permission = this.paused = undefined;
     } catch (e) {
-      const msg = (e as Error).message;
-      const step = macPermissionProblem(msg, this.d.nodePath());
-      if (step && step !== this.permission) this.report(`Unity dialog watch on this machine cannot read Unity's dialogs: ${step}`, false);
-      this.permission = step ?? this.permission;
+      await this.cannotSee((e as Error).message, now, "read Unity's dialogs");
       return this.open.length > 0;
     }
     const key = (d: Dialog) => `${d.title}\n${d.text}`;
@@ -485,9 +492,7 @@ export class MacUnityWatch {
         try {
           pressed = await this.d.pressButton(pid, d, v.click);
         } catch (e) {
-          const step = macPermissionProblem((e as Error).message, this.d.nodePath());
-          if (step && step !== this.permission) this.report(`Unity dialog watch on this machine cannot press Unity's buttons: ${step}`, false);
-          this.permission = step ?? this.permission;
+          await this.cannotSee((e as Error).message, now, "press Unity's buttons");
         }
         if (pressed) {
           this.dismissed = [...this.dismissed, { at: new Date(now).toISOString(), title: d.title, button: v.click }].slice(-40);
@@ -511,12 +516,40 @@ export class MacUnityWatch {
     return this.open.length > 0;
   }
 
+  /**
+   * System Events failed. A locked screen, another user at the console or a sleeping display make it fail in
+   * ways that look like a missing permission, so those pause the watch (one notice); a missing Accessibility
+   * permission is reported only when AXIsProcessTrusted agrees. Each notice at most once an hour.
+   */
+  private async cannotSee(msg: string, now: number, what: string) {
+    const away = sessionAway(await this.d.sessionState().catch(() => ({})));
+    if (away) {
+      this.paused = away;
+      this.notice('paused', now, `Unity dialog watch on this machine is paused: ${away}. It resumes by itself when someone is back at the screen.`);
+      return;
+    }
+    const step = macPermissionProblem(msg, this.d.nodePath());
+    if (!step) return;
+    const trusted = await this.d.axTrusted().catch(() => undefined);
+    if (trusted === true) return; // granted: a passing failure, not the permission
+    this.permission = step;
+    this.notice('permission', now, `Unity dialog watch on this machine cannot ${what}: ${step}`);
+  }
+
+  /** Send a notice, unless the same kind went out within the hour. */
+  private notice(kind: string, now: number, text: string) {
+    if (now - (this.noticed.get(kind) ?? -Infinity) < 3_600_000) return;
+    this.noticed.set(kind, now);
+    this.report(text, false);
+  }
+
   /** Lines for the unity status: dialogs waiting, the permission step, recent automatic answers. */
   describe(): string {
     const now = this.d.now();
     const lines: string[] = [];
     for (const o of this.open) lines.push(`${o.state === 'blocked' ? 'blocked on a dialog' : 'dialog (checking)'}: ${describeDialog(o.d)} [${o.d.buttons.join(' / ')}], for ${Math.round((now - o.since) / 60_000)} min${o.why ? `; ${o.why}` : ''}`);
-    if (this.permission) lines.push(`dialog watch off: ${this.permission}`);
+    if (this.paused) lines.push(`dialog watch paused: ${this.paused}`);
+    else if (this.permission) lines.push(`dialog watch off: ${this.permission}`);
     const recent = this.dismissed.filter((x) => now - Date.parse(x.at) < 3_600_000).slice(-5);
     if (recent.length) lines.push(`auto-answered in the last hour: ${recent.map((x) => `"${x.title.slice(0, 60)}" -> ${x.button} (${Math.round((now - Date.parse(x.at)) / 60_000)} min ago)`).join('; ')}`);
     return lines.join('\n');

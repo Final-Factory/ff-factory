@@ -140,3 +140,74 @@ test('mac dialog watch: the licensing "Connection Lost" is retried, and the 4th 
   assert.equal(await w.tick(), 'restarted');
   assert.match(reports.at(-1)!, /keeps showing a dialog: "Connection Lost" came back 4 times within 10 minutes/);
 });
+
+test('mac dialog watch: a locked screen pauses it (one notice an hour), a permission is reported only when AXIsProcessTrusted says so', async () => {
+  const world = { now: Date.parse('2026-09-25T16:00:00Z'), locked: false, trusted: true as boolean | undefined, fail: '' };
+  const reports: string[] = [];
+  const deps: UnityDeps = {
+    procs: async () => [{ pid: 100, ppid: 1, cmd: `${BIN} -projectpath ${REPO}` }],
+    kill: () => undefined,
+    launch: () => 1,
+    exists: () => false,
+    remove: () => undefined,
+    sleep: async () => undefined,
+    now: () => world.now,
+  };
+  const w = new MacUnityWatch(new MacUnity(REPO, deps, () => BIN), (t) => reports.push(t), {
+    logStat: () => ({ size: 1, mtimeMs: world.now }),
+    logTail: () => '',
+    bridge: () => ({}),
+    ping: async () => false,
+    now: () => world.now,
+    listDialogs: async () => {
+      if (world.fail) throw new Error(world.fail);
+      return { dialogs: [], mainTitle: MAIN.title };
+    },
+    pressButton: async () => true,
+    sceneFilesClean: async () => true,
+    nodePath: () => '/usr/local/bin/node',
+    sessionState: async () => ({ locked: world.locked }),
+    axTrusted: async () => world.trusted,
+  });
+  const tick = async (min = 1) => {
+    await w.tick();
+    world.now += min * 60_000;
+  };
+  // Screen locked: System Events fails with an "assistive access" error, but it is the lock.
+  world.locked = true;
+  world.fail = 'System Events got an error: osascript is not allowed assistive access. (-25211)';
+  await tick();
+  await tick();
+  assert.deepEqual(reports, ['Unity dialog watch on this machine is paused: the screen is locked. It resumes by itself when someone is back at the screen.']);
+  assert.match(w.describe(), /dialog watch paused: the screen is locked/);
+  // Unlocked: it works again, and there is no "can see again" (no permission was ever missing).
+  world.locked = false;
+  world.fail = '';
+  await tick();
+  assert.equal(reports.length, 1);
+  assert.doesNotMatch(w.describe(), /paused|off/);
+  // Locked again within the hour: no second notice (the flapping).
+  world.locked = true;
+  world.fail = 'error (-1719)';
+  await tick(10);
+  world.locked = false;
+  world.fail = '';
+  await tick();
+  assert.equal(reports.length, 1);
+  // A permission-looking error with the screen unlocked while Accessibility IS granted: a passing failure.
+  world.fail = 'osascript is not allowed assistive access. (-25211)';
+  await tick();
+  assert.equal(reports.length, 1);
+  // Really missing: reported, once an hour however often it fails.
+  world.trusted = false;
+  await tick();
+  await tick();
+  assert.equal(reports.length, 2);
+  assert.match(reports[1], /cannot read Unity's dialogs: macOS has not given the daemon Accessibility access/);
+  world.fail = '';
+  await tick();
+  assert.equal(reports.at(-1), "Unity dialog watch on this machine can see the editor's windows again.");
+  world.fail = 'osascript is not allowed assistive access. (-25211)';
+  await tick();
+  assert.equal(reports.length, 3, 'the permission notice not again within the hour');
+});
