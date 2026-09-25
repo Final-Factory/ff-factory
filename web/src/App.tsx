@@ -7,6 +7,7 @@ import { OrchestratorView } from './components/OrchestratorView';
 import { SandboxPanel } from './components/SandboxPanel';
 import { SessionView } from './components/SessionView';
 import { Sidebar } from './components/Sidebar';
+import { Icon } from './components/ui';
 import { StandingAgentModal } from './components/StandingModal';
 import { StandingPanel } from './components/StandingPanel';
 import { AddMachineModal, MachinePanel } from './components/MachinePanel';
@@ -64,15 +65,42 @@ function Shell({ app }: { app: AppState }) {
       </div>
       <div className="scrim" onClick={() => setDrawer(false)} />
 
-      <main className={`main main-${content.layout}`}>{content.node ?? <OrchestratorView session={orch} />}</main>
-      <HostBanner host={app.host} app={app} />
-      <ConnectionBanner />
+      <div className="main-col">
+        {/* Global notices sit above the page in the layout flow: they push it down, never cover its header. */}
+        <div className="gbars">
+          <ConnectionBanner />
+          <HostBanner host={app.host} app={app} />
+        </div>
+        <main className={`main main-${content.layout}`}>{content.node ?? <OrchestratorView session={orch} />}</main>
+      </div>
 
       {newSandbox && <NewSandboxModal app={app} onClose={() => setNewSandbox(false)} />}
       {newStanding && <StandingAgentModal app={app} onClose={() => setNewStanding(false)} />}
       {newMachine && <AddMachineModal onClose={() => setNewMachine(false)} />}
       <Lightbox />
       <Toasts />
+    </div>
+  );
+}
+
+/**
+ * One global notice: an opaque one-line bar in the layout flow above the page (it pushes the page down, never
+ * covers it). The text is cut to one line; hover shows it all (title), a click or tap unfolds it. `onDismiss`
+ * adds a close button.
+ */
+function Bar({ kind, text, children, onDismiss, busy }: { kind: 'warn' | 'error'; text: string; children: ReactNode; onDismiss?: () => void; busy?: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`gbar gbar-${kind}${open ? ' open' : ''}`} role="status">
+      {busy && <span className="spinner spinner-sm" />}
+      <button type="button" className="gbar-text" title={text} aria-expanded={open} onClick={() => setOpen(!open)}>
+        {children}
+      </button>
+      {onDismiss && (
+        <button type="button" className="btn btn-ghost btn-sm gbar-x" aria-label="Dismiss" title="Dismiss" onClick={onDismiss}>
+          <Icon name="x" size={12} />
+        </button>
+      )}
     </div>
   );
 }
@@ -91,47 +119,63 @@ function ConnectionBanner() {
   }, [ws]);
   if (!show) return null;
   return (
-    <div className="conn-banner" role="status">
-      <span className="spinner" /> Connection lost. Reconnecting…
-    </div>
+    <Bar kind="warn" busy text="Connection lost. Reconnecting…">
+      <b>Connection lost.</b> Reconnecting…
+    </Bar>
   );
 }
 
-/** The server's own trouble: running elevated (no Unity), a restart waiting for agents, the host guard's alarms. */
+/**
+ * The server's own trouble: running elevated (no Unity), a restart waiting for agents, the host guard's alarms.
+ * Each can be dismissed; it comes back when what it says changes.
+ */
 function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const h = host?.health;
   const drive = h && h.sandboxRoot !== 'ok';
   const disk = h && h.level !== 'ok';
   if (!host?.elevated && !host?.drain && !drive && !disk) return null;
   const low = h?.disks.filter((d) => d.level !== 'ok').map((d) => `${d.path} ${d.freeBytes === undefined ? '?' : fmtBytes(d.freeBytes)} free`).join(', ');
   const title = (id: string) => app.sessions.find((s) => s.id === id)?.title ?? id;
+  const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string }[] = [];
+  if (host.elevated) {
+    bars.push({
+      key: 'elevated',
+      kind: 'error',
+      lead: 'FF Factory is running with administrator rights.',
+      rest: `It will not start Unity editors (they would stop on Unity's administrator dialog), and every agent shell has admin rights. Run scripts\\restart.cmd to bring it back non-elevated.${host.elevatedWhy ? ` (${host.elevatedWhy})` : ''}`,
+    });
+  }
+  if (drive) {
+    bars.push({ key: 'drive', kind: 'error', lead: 'The sandbox drive is offline', rest: `(${h.sandboxRoot}${h.detail ? `: ${h.detail}` : ''}). FF Factory is reattaching it by itself; the editors and agents that were working there come back afterwards.` });
+  }
+  if (disk && !drive) {
+    bars.push({
+      key: 'disk',
+      kind: h.level === 'critical' ? 'error' : 'warn',
+      lead: `Disk space ${h.level === 'critical' ? 'critical' : 'low'}`,
+      rest: `(${low}). New editors and agents wait until space is freed${h.level === 'critical' ? '; busy agents were asked to checkpoint, idle editors stopped, and known-safe junk is cleaned up' : ''}.`,
+    });
+  }
+  if (host.drain) {
+    const d = host.drain;
+    bars.push({
+      key: 'drain',
+      kind: 'warn',
+      lead: 'Restart pending',
+      rest: `(${d.reason}): waiting for ${d.waitingFor.length ? d.waitingFor.map(title).join(', ') : 'nothing'} to finish, at the latest ${fmtClock(d.deadline)}. Interrupted agents are resumed afterwards.`,
+    });
+  }
+  const shown = bars.filter((b) => !dismissed.has(`${b.key}:${b.lead} ${b.rest}`));
+  if (!shown.length) return null;
   return (
-    <div className="host-banner" role="status">
-      {host.elevated && (
-        <div className="banner banner-error">
-          <b>FF Factory is running with administrator rights.</b> It will not start Unity editors (they would stop on Unity's administrator dialog), and every agent
-          shell has admin rights. Run <code>scripts\restart.cmd</code> to bring it back non-elevated.{host.elevatedWhy ? ` (${host.elevatedWhy})` : ''}
-        </div>
-      )}
-      {drive && (
-        <div className="banner banner-error">
-          <b>The sandbox drive is offline</b> ({h.sandboxRoot}{h.detail ? `: ${h.detail}` : ''}). FF Factory is reattaching it by itself; the editors and agents
-          that were working there come back afterwards.
-        </div>
-      )}
-      {disk && !drive && (
-        <div className={`banner ${h.level === 'critical' ? 'banner-error' : 'banner-warn'}`}>
-          <b>Disk space {h.level === 'critical' ? 'critical' : 'low'}</b> ({low}). New editors and agents wait until space is freed
-          {h.level === 'critical' ? '; busy agents were asked to checkpoint, idle editors stopped, and known-safe junk is cleaned up' : ''}.
-        </div>
-      )}
-      {host.drain && (
-        <div className="banner banner-warn">
-          <b>Restart pending</b> ({host.drain.reason}): waiting for {host.drain.waitingFor.length ? host.drain.waitingFor.map(title).join(', ') : 'nothing'} to finish,
-          at the latest {fmtClock(host.drain.deadline)}. Interrupted agents are resumed afterwards.
-        </div>
-      )}
-    </div>
+    <>
+      {shown.map((b) => (
+        <Bar key={b.key} kind={b.kind} text={`${b.lead} ${b.rest}`} onDismiss={() => setDismissed((s) => new Set(s).add(`${b.key}:${b.lead} ${b.rest}`))}>
+          <b>{b.lead}</b> {b.rest}
+        </Bar>
+      ))}
+    </>
   );
 }
 

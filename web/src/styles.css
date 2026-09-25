@@ -2776,42 +2776,79 @@ select.input {
   flex: none;
 }
 
-.host-banner {
-  position: fixed;
-  top: 0;
-  left: var(--sidebar-w);
-  right: 0;
-  z-index: 40;
+/* Global notices (App.tsx Bar): opaque one-line bars above the page, in the layout flow. */
+.main-col {
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 6px var(--s-3);
-  pointer-events: none;
 }
 
-.host-banner > * {
-  pointer-events: auto;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+.main-col > .main {
+  flex: 1;
 }
 
-.conn-banner {
-  position: fixed;
-  z-index: 70;
-  top: calc(env(safe-area-inset-top) + var(--s-3));
-  left: 50%;
-  transform: translateX(-50%);
-  display: inline-flex;
+.gbars {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.gbars:empty {
+  display: none;
+}
+
+.gbar {
+  display: flex;
   align-items: center;
   gap: var(--s-2);
-  padding: var(--s-2) 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 176, 32, 0.45);
+  min-height: 30px;
+  padding: 2px var(--s-2) 2px var(--s-3);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+.gbar-warn {
   background: #2a2110;
+  border-bottom-color: rgba(255, 176, 32, 0.45);
+}
+
+.gbar-warn b {
   color: var(--amber);
-  font-size: var(--fs-md);
-  font-weight: 600;
-  box-shadow: var(--shadow);
-  animation: rise 0.2s var(--ease);
+}
+
+.gbar-error {
+  background: #2c1416;
+  border-bottom-color: rgba(255, 95, 95, 0.45);
+}
+
+.gbar-error b {
+  color: var(--red);
+}
+
+.gbar-text {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.gbar.open .gbar-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.gbar-x {
+  flex: none;
 }
 
 .panel-empty {
@@ -3942,6 +3979,16 @@ select.input {
     padding: max(var(--s-1), env(safe-area-inset-top)) var(--s-1) var(--s-1);
   }
 
+  /* A global notice above the page takes the notch's space; the page header below it does not need it again. */
+  .gbars:not(:empty) {
+    padding-top: env(safe-area-inset-top);
+    background: var(--bg-2);
+  }
+
+  .main-col:has(.gbar) :is(.orch-head, .page-head, .ph, .sb-head) {
+    padding-top: var(--s-1);
+  }
+
   .orch-head .btn-icon,
   .page-head .btn-icon,
   .ph .ph-btn {
@@ -4090,10 +4137,6 @@ select.input {
     padding-right: var(--s-3);
   }
 
-  .host-banner {
-    left: 0;
-    top: 56px;
-  }
 
   .tool-nested {
     margin-left: var(--s-2);
