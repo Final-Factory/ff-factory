@@ -14,6 +14,7 @@ import { COMPILE_DONE, COMPILE_FAILED, readSince, Waker } from './wake.ts';
 import { snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { PermissionMode, Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { sandboxGuard } from './guard.ts';
+import { labelAfterEnd, labelDecision, type Place } from './labelPolicy.ts';
 import { ghNoreply, githubSlug, publicIdentityEnv, publicReposOf } from './publicGit.ts';
 import { systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
@@ -103,16 +104,14 @@ export class Agents {
       handlersFor: (info, m) => {
         if (info.kind === 'standing') return this.standing.handlers(info.standingId ?? '');
         return {
-          set_label: async (a) => {
-            const x = machines.setPurpose(m.id, String(a.purpose ?? ''));
-            return `Machine ${x.id} is now labelled "${x.purpose}".`;
-          },
+          set_label: async (a) => this.agentSetLabel({ machineId: m.id }, info.id, String(a.purpose ?? '')),
           wake_me: async (a) => this.waker.schedule(info.id, Number(a.minutes), String(a.note ?? '')),
           unity: async (a) => machines.unity(m.id, a.action as 'status' | 'start' | 'stop' | 'restart', a.force === true),
         };
       },
     };
     sessions.events.on('turnEnd', (s: SessionHandle, text: string) => this.onWorkerTurnEnd(s, text));
+    sessions.events.on('ended', (s: SessionHandle) => this.onAgentEnded(s));
     sessions.events.on('permission', (s: SessionHandle, p: { toolName: string; input: unknown }) => this.onWorkerPermission(s, p));
     // The watchdog's alarms. Push notifications to the user (when the app has them) belong on this same event.
     sandboxes.events.on('blocked', (sb, b) => this.onUnityBlocked(sb, b));
@@ -133,6 +132,49 @@ export class Agents {
   }
 
   // ---------------------------------------------------------------- restarts (server/restart.ts)
+
+  // ---------------------------------------------------------------- shared labels (server/labels.ts)
+
+  private place(where: { sandboxId?: string; machineId?: string }): Place {
+    const sessions = [...this.sessions.sessions.values()]
+      .filter((h) => h.info.kind !== 'orchestrator' && (where.sandboxId ? h.info.sandboxId === where.sandboxId : h.info.machineId === where.machineId))
+      .map((h) => ({ ...h.info, live: h.live }));
+    return { sessions };
+  }
+
+  private setPlaceLabel(where: { sandboxId?: string; machineId?: string }, label: string) {
+    return where.sandboxId ? this.sandboxes.setPurpose(where.sandboxId, label).purpose : this.machines.setPurpose(where.machineId!, label).purpose;
+  }
+
+  /** An agent's own set_label: "unused" while another agent there still works keeps (or restores) that agent's label. */
+  agentSetLabel(where: { sandboxId?: string; machineId?: string }, sessionId: string, purpose: string): string {
+    const current = where.sandboxId ? this.sandboxes.require(where.sandboxId).purpose : (this.store.machines.get(where.machineId!)?.purpose ?? '');
+    const d = labelDecision(this.place(where), sessionId, purpose, current);
+    const label = this.setPlaceLabel(where, d.set);
+    const me = this.sessions.sessions.get(sessionId);
+    if (me) {
+      Object.assign(me.info, d.remember ? { label, labelAt: new Date().toISOString() } : { label: undefined, labelAt: undefined });
+      this.store.putSession(me.info);
+    }
+    const what = where.sandboxId ? `Sandbox ${where.sandboxId}` : `Machine ${where.machineId}`;
+    return d.note ? `${d.note} (${what})` : `${what} is now labelled "${label}".`;
+  }
+
+  /** An agent's process ended: if another agent there still works, put its last label back. */
+  private onAgentEnded(h: SessionHandle) {
+    const i = h.info;
+    if (i.kind === 'orchestrator' || (!i.sandboxId && !i.machineId)) return;
+    const where = i.sandboxId ? { sandboxId: i.sandboxId } : { machineId: i.machineId };
+    const current = i.sandboxId ? this.store.sandboxes.get(i.sandboxId)?.purpose : this.store.machines.get(i.machineId!)?.purpose;
+    if (current === undefined) return;
+    const restore = labelAfterEnd(this.place(where), i.id, i.label, current);
+    if (!restore) return;
+    try {
+      this.setPlaceLabel(where, restore);
+    } catch {
+      // the sandbox is going away
+    }
+  }
 
   /** What to write to data/resume.json when the server stops. */
   resumeFile(req: { reason: string; update: boolean }, drained: ReadonlySet<string>, head: string | undefined): ResumeFile {
@@ -420,7 +462,7 @@ You are a Claude Code agent in an isolated sandbox of the Final Factory repo, on
 ${ownerLine(this.cfg)}
 - Sandbox: **${displayName(sb)}** (slot \`${sb.id}\`; the slot id is historical, the label is what it is doing now)
 - Worktree: \`${sb.path}\` on branch \`${branch}\`. Work only inside this directory.
-- Label: the sandbox's name in the dashboard; keep it saying what you are doing now. Change it with the \`mcp__sandbox__set_label\` tool (label only; the folder and branch stay).
+- Label: the sandbox's name in the dashboard; keep it saying what you are doing now. Change it with the \`mcp__sandbox__set_label\` tool (label only; the folder and branch stay). When you are done, set it to \`unused\`; if another agent still works in this sandbox that is ignored and its label stays (the tool says so), which is expected.
 - Protected paths on this machine: ${prot}. That is the live multiplayer game other agents are playing. Never read-modify-write it, never touch its Unity editor or its processes; the harness blocks writes and shell commands that mention it.
 
 ## Unity
@@ -474,10 +516,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
           'set_label',
           `Set the label of this sandbox (${id}): the one-line purpose the user sees in the dashboard and list_sandboxes. Changes the label only, never the folder, branch or Unity project name.`,
           { purpose: z.string().describe('One line on what this sandbox is being used for now.') },
-          wrap(async ({ purpose }) => {
-            const s = this.sandboxes.setPurpose(id, purpose);
-            return `Sandbox ${s.id} is now labelled "${s.purpose}".`;
-          }),
+          wrap(async ({ purpose }) => this.agentSetLabel({ sandboxId: id }, sessionId, purpose)),
         ),
         tool(
           'switch_branch',
@@ -740,7 +779,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
 You are a Claude Code agent started from FF Factory, the user's control room, on the machine **${m.id}**${m.purpose ? ` — ${m.purpose}` : ''}. The user or an orchestrator agent sends your messages. Nobody watches your terminal: a person reads your final message of each turn.
 ${ownerLine(this.cfg)}
 - Working directory: \`${m.repoPath}\`, the user's MAIN Final Factory clone on this Mac, not a disposable sandbox. It may hold their own uncommitted work.
-- Label: the purpose line of this machine, shown in the dashboard. Change it with \`mcp__machine__set_label\`, and set it back to \`unused\` when you are done.
+- Label: the purpose line of this machine, shown in the dashboard. Change it with \`mcp__machine__set_label\`, and set it back to \`unused\` when you are done. If another agent still works on this machine, "unused" is ignored and its label stays (the tool says so); that is expected.
 
 ## The user's work comes first
 - Never discard, stash, reset or clean anything in this clone. The harness blocks \`git stash\`, \`reset --hard\`, \`clean\`, \`checkout -- <paths>\`, \`restore\`, \`add -A\`/\`add .\` and \`commit -a\`.

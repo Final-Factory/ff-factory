@@ -548,7 +548,7 @@ export class MachineManager {
         const s = this.handle(msg.info.id);
         if (!s || s.info.machineId !== id) return;
         // The portal owns identity and naming; the daemon owns run state.
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, ...run } = msg.info;
         Object.assign(s.info, run);
         s.liveFlag = msg.live;
         this.store.putSession(s.info);

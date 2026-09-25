@@ -120,6 +120,9 @@ export interface SessionInfo {
   standingId?: string;
   /** Set when the session runs on a machine (docs/machines.md) rather than on this host. */
   machineId?: string;
+  /** The last label this agent gave its sandbox or machine (set_label), restored when a helper there finishes. */
+  label?: string;
+  labelAt?: string;
   title: string;
   status: SessionStatus;
   statusDetail?: string;
