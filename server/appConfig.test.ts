@@ -34,7 +34,7 @@ test('set_app_config: writes the key, keeps the rest and the old file, applies i
 
 test('set_app_config: only the allowlisted keys, only sane values', (t) => {
   const { file, cfg } = setup(t);
-  for (const key of ['protectedPaths', 'worker.permissionMode', 'limits.maxSessions', 'claudeEnv', 'host']) {
+  for (const key of ['protectedPaths', 'worker.permissionMode', 'limits.minFreeGB', 'claudeEnv', 'host']) {
     assert.throws(() => setAppConfig(file, cfg, key as never, 'x'), /cannot be changed/);
   }
   assert.throws(() => normalizeSetting('ownerName', 'a'.repeat(61)));
@@ -97,4 +97,21 @@ test('app config: publicUrl (the portal address machines and the outside watchdo
   assert.equal(full.publicUrl, 'https://beast.tailedfcad.ts.net', 'applies at once, without the trailing slash');
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).publicUrl, 'https://beast.tailedfcad.ts.net');
   for (const bad of ['beast.tailedfcad.ts.net', 'https://beast.tailedfcad.ts.net/api', 'ftp://x']) assert.throws(() => setAppConfig(file, full, 'publicUrl', bad), /base URL/, bad);
+});
+
+test('app config: limits.maxSandboxes (1-8) and limits.maxSessions (1-12), live', (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg, limits: { maxUnity: 3, maxSessions: 6, maxSandboxes: 4 } } as unknown as Config;
+  setAppConfig(file, full, 'limits.maxSandboxes', 5);
+  setAppConfig(file, full, 'limits.maxSessions', '8');
+  assert.equal(full.limits.maxSandboxes, 5, 'the create tool sees it at once');
+  assert.equal(full.limits.maxSessions, 8);
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8')).limits;
+  assert.equal(saved.maxSandboxes, 5);
+  assert.equal(saved.maxSessions, 8);
+  assert.equal(saved.maxUnity, 3, 'the other limits stay');
+  for (const bad of ['0', '9', '2.5']) assert.throws(() => setAppConfig(file, full, 'limits.maxSandboxes', bad), /1 to 8/, bad);
+  for (const bad of ['0', '13']) assert.throws(() => setAppConfig(file, full, 'limits.maxSessions', bad), /1 to 12/, bad);
+  setAppConfig(file, full, 'limits.maxSandboxes', null);
+  assert.equal(full.limits.maxSandboxes, 4, 'null: the default');
 });

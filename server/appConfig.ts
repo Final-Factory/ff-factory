@@ -7,7 +7,7 @@ import { OAUTH_TOKEN, SECRET_KEYS, maskSecret } from './secrets.ts';
 /**
  * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
  * commit identity (which names the identity to use; noreply addresses are always accepted): nothing that
- * touches paths, limits, permissions, models or the network. Each applies to the running server at once
+ * touches paths, permissions, models or the network (the capacity limits below are bounded). Each applies to the running server at once
  * (the config object is shared; guards read it when a session starts) and is written to config.json.
  */
 export const SETTABLE_KEYS = [
@@ -21,6 +21,9 @@ export const SETTABLE_KEYS = [
   'hostGuard.cleanup.ageRules',
   // How many Unity editors may run at once on this host (each takes ~8-12 GB of RAM).
   'limits.maxUnity',
+  // How many sandboxes may exist (each holds a worktree and a ~70 GB Library), and live agents on this host.
+  'limits.maxSandboxes',
+  'limits.maxSessions',
   // The address machines and the outside watchdog reach this portal at (the Tailscale Funnel URL).
   'publicUrl',
   // The Claude account the agents run on (claude setup-token): write-only, never shown (server/secrets.ts).
@@ -92,6 +95,13 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       if (typeof value !== 'string' || !/^https?:\/\/[^/\s]+\/?$/.test(value.trim())) throw new Error("publicUrl is the portal's base URL, e.g. https://<host>.<tailnet>.ts.net");
       return value.trim().replace(/\/+$/, '');
     }
+    case 'limits.maxSandboxes':
+    case 'limits.maxSessions': {
+      const max = key === 'limits.maxSandboxes' ? 8 : 12;
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1 || n > max) throw new Error(`${key} is a whole number from 1 to ${max}`);
+      return n;
+    }
     case 'limits.maxUnity': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 8) throw new Error('limits.maxUnity is a whole number of editors from 1 to 8');
@@ -147,6 +157,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'voice.ttsVoice') cfg.voice.ttsVoice = (v as string | undefined) ?? VOICE_DEFAULTS.ttsVoice;
   else if (key === 'hostGuard.devDriveVhdx') cfg.hostGuard.devDriveVhdx = (v as string | undefined) ?? '';
   else if (key === 'limits.maxUnity') cfg.limits.maxUnity = (v as number | undefined) ?? 3;
+  else if (key === 'limits.maxSandboxes') cfg.limits.maxSandboxes = (v as number | undefined) ?? 4;
+  else if (key === 'limits.maxSessions') cfg.limits.maxSessions = (v as number | undefined) ?? 6;
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
   else if (key === 'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN') {
     const env = { ...cfg.claudeEnv };
