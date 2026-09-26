@@ -20,6 +20,7 @@ import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
+import { scrubTranscripts } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { planCleanup, runCleanup } from './cleanup.ts';
@@ -57,6 +58,11 @@ writeAlive(cfg.dataDir);
 setInterval(() => writeAlive(cfg.dataDir), 30_000);
 
 const store = new Store(cfg.dataDir);
+// Transcripts written before redaction existed: no Claude OAuth token stays on disk (server/secrets.ts).
+setTimeout(() => {
+  const n = scrubTranscripts(path.join(cfg.dataDir, 'transcripts'));
+  if (n) console.log(`secrets: redacted a Claude OAuth token in ${n} transcript(s)`);
+}, 5000);
 const sandboxes = new SandboxManager(cfg, store);
 const sessions = new SessionManager(cfg, store);
 const machines = new MachineManager(cfg, store, sessions);

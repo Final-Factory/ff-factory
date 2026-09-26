@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ROOT, VOICE_DEFAULTS, type Config } from './config.ts';
+import { OAUTH_TOKEN, SECRET_KEYS, maskSecret } from './secrets.ts';
 
 /**
  * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
@@ -22,6 +23,8 @@ export const SETTABLE_KEYS = [
   'limits.maxUnity',
   // The address machines and the outside watchdog reach this portal at (the Tailscale Funnel URL).
   'publicUrl',
+  // The Claude account the agents run on (claude setup-token): write-only, never shown (server/secrets.ts).
+  'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
@@ -78,6 +81,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
     }
     case 'publicGitIdentity.email': {
       if (typeof value !== 'string' || !/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(value.trim())) throw new Error('publicGitIdentity.email is an email address, e.g. 12345+you@users.noreply.github.com');
+      return value.trim();
+    }
+    case 'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN': {
+      // Never echo the value, not even in the error.
+      if (typeof value !== 'string' || !OAUTH_TOKEN.test(value.trim())) throw new Error('claudeEnv.CLAUDE_CODE_OAUTH_TOKEN must be a Claude OAuth token (sk-ant-oat01-…, from `claude setup-token`); the value given is not one (not shown)');
       return value.trim();
     }
     case 'publicUrl': {
@@ -140,10 +148,18 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'hostGuard.devDriveVhdx') cfg.hostGuard.devDriveVhdx = (v as string | undefined) ?? '';
   else if (key === 'limits.maxUnity') cfg.limits.maxUnity = (v as number | undefined) ?? 3;
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
+  else if (key === 'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN') {
+    const env = { ...cfg.claudeEnv };
+    if (v === undefined) delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    else env.CLAUDE_CODE_OAUTH_TOKEN = v as string;
+    cfg.claudeEnv = env;
+  }
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'publicGitIdentity.name' || key === 'publicGitIdentity.email') {
     const field = key === 'publicGitIdentity.name' ? 'name' : 'email';
     cfg.publicGitIdentity = { ...cfg.publicGitIdentity, [field]: v as string | undefined };
   }
+  // A write-only secret reads back as "set (…abcd)" only.
+  if (SECRET_KEYS.has(key)) return { before: maskSecret(before), after: maskSecret(v) };
   return { before, after: v };
 }

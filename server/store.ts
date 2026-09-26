@@ -1,3 +1,4 @@
+import { redactValue } from './secrets.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -68,6 +69,8 @@ export class Store {
   }
 
   putSession(s: SessionInfo) {
+    // A permission prompt shows a tool call's arguments: never a Claude OAuth token in state.json or on screen.
+    if (s.pendingPermissions.length) s.pendingPermissions = redactValue(s.pendingPermissions);
     this.sessions.set(s.id, s);
     this.save();
     emit({ type: 'session', session: s });
@@ -120,6 +123,7 @@ export class Store {
   appendFull(sessionId: string, e: TranscriptEvent) {
     const last = this.seqs.get(sessionId) ?? this.lastSeq(sessionId);
     if (e.seq <= last) return;
+    e = redactValue(e); // never a Claude OAuth token on disk or on screen (server/secrets.ts)
     fs.appendFileSync(this.transcriptPath(sessionId), JSON.stringify(e) + '\n');
     this.seqs.set(sessionId, e.seq);
     emit({ type: 'transcript', sessionId, event: e });
@@ -161,7 +165,7 @@ export class Store {
 
   append(sessionId: string, e: DistributiveOmit<TranscriptEvent, 'seq' | 't'>): TranscriptEvent {
     const seq = this.nextSeq(sessionId);
-    const full = { ...e, seq, t: new Date().toISOString() } as TranscriptEvent;
+    const full = redactValue({ ...e, seq, t: new Date().toISOString() } as TranscriptEvent);
     fs.appendFileSync(this.transcriptPath(sessionId), JSON.stringify(full) + '\n');
     emit({ type: 'transcript', sessionId, event: full });
     this.noteActivity(sessionId, full);
@@ -173,7 +177,7 @@ export class Store {
     const all = this.readTranscript(sessionId);
     const i = all.findIndex((e) => e.seq === seq);
     if (i < 0) return;
-    all[i] = { ...all[i], ...patch } as TranscriptEvent;
+    all[i] = redactValue({ ...all[i], ...patch } as TranscriptEvent);
     fs.writeFileSync(this.transcriptPath(sessionId), all.map((e) => JSON.stringify(e)).join('\n') + '\n');
     emit({ type: 'transcript', sessionId, event: all[i] });
   }
