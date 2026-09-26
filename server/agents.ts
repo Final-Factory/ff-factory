@@ -13,7 +13,7 @@ import { CATALOG } from './launch.ts';
 import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './wake.ts';
 import { snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { PermissionMode, Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
-import { sandboxGuard } from './guard.ts';
+import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
 import { labelAfterEnd, labelDecision, type Place } from './labelPolicy.ts';
 import { ghNoreply, githubSlug, publicIdentityEnv, publicReposOf } from './publicGit.ts';
 import { systemStats } from './system.ts';
@@ -783,10 +783,9 @@ ${ownerLine(this.cfg)}
 - Working directory: \`${m.repoPath}\`, the user's MAIN Final Factory clone on this Mac, not a disposable sandbox. It may hold their own uncommitted work.
 - Label: the purpose line of this machine, shown in the dashboard. Change it with \`mcp__machine__set_label\`, and set it back to \`unused\` when you are done. If another agent still works on this machine, "unused" is ignored and its label stays (the tool says so); that is expected.
 
-## The user's work comes first
-- Never discard, stash, reset or clean anything in this clone. The harness blocks \`git stash\`, \`reset --hard\`, \`clean\`, \`checkout -- <paths>\`, \`restore\`, \`add -A\`/\`add .\` and \`commit -a\`.
-- Before switching branches, check \`git status\`. If it is not clean, do not switch: stop and ask the user (the harness refuses the switch anyway).
-- Stage and commit only your own files, by path.
+## The user's work comes first: back it up, then you may clear it
+- Standing permission from the user (do NOT ask them again): to update this clone (pull, switch branch, rebase), you MAY set aside or discard local changes (\`git stash\`, \`git restore\`/\`git checkout -- <paths>\`, \`git reset\` of files or \`--hard\`, \`git clean\`, a forced switch), but FIRST copy them to a fresh timestamped folder outside the repo: from the clone, run \`${backupRecipe(backupRootFor(m.repoPath))}\`. The harness refuses those commands until a backup folder from the last 2 hours exists in \`${backupRootFor(m.repoPath)}\`. Then say in your report exactly what you moved and where it is.
+- Still refused: force pushes, pushes to the game repo's master/main, and staging or committing everything (\`add -A\`/\`add .\`, \`commit -a\`): stage and commit only your own files, by path.
 - Do not create a git worktree unless the task truly needs one (a Unity project is large); if you must, say why.
 
 ## Unity
@@ -1472,7 +1471,7 @@ ${ownerLine(this.cfg)}
 - When the user asks for work, act: pick or create the sandbox, start Unity if the task needs it, start the agent with a complete brief (goal, done-criteria, constraints, the skill to use), then tell them in a line or two what you launched. Do not ask for confirmation for routine launches. Ask only when the request is genuinely ambiguous or would exceed the limits.
 - Prefer one sandbox per independent stream of work, named for the work ("spec-098", "tutorial-playtest", "discord-triage"). For spec work, use list_branches to find the spec's existing branch and check it out if there is one; otherwise create \`NNN-short-name\` from ${this.cfg.defaultBase}. Reuse an existing idle sandbox when the user refers to it or the work continues there.
 - Labels: a sandbox's purpose line is its label. A sandbox labelled \`unused\` with no running agent is idle; prefer those when reusing one, and never repurpose a sandbox whose label reserves it for something. When you give a sandbox new work, set_sandbox_label it to a short description of the task (workers relabel their own sandbox with \`set_label\`, and set it back to \`unused\` when done).
-- **Machines** are the user's Macs (list_machines). A worker there (start_agent with machine=) runs in the user's MAIN clone on that Mac, next to their own uncommitted work: use a machine when the user asks for it or the work belongs on that Mac, prefer a sandbox otherwise. The harness stops machine workers from discarding their work or switching branches on a dirty tree. Unity on a Mac is the user's; the app does not start or stop it. A machine that is asleep or offline cannot take work: say so.
+- **Machines** are the user's Macs (list_machines). A worker there (start_agent with machine=) runs in the user's MAIN clone on that Mac, next to their own uncommitted work: use a machine when the user asks for it or the work belongs on that Mac, prefer a sandbox otherwise. Machine workers may set aside or discard the user's local changes to update the clone (the user's standing permission) only after backing them up to ~/nevergames/ff-local-backups/<time>/ beside the clone, and they report what they moved; the harness enforces the backup. Unity on a Mac is the user's; the app does not start or stop it. A machine that is asleep or offline cannot take work: say so.
 - Work that never opens Unity (Discord reading, docs, planning) still needs a sandbox as its working directory; create it with seed_library=false, or reuse an idle one.
 - Never delete a sandbox unless the user asks for that deletion explicitly.
 - \`[worker update]\` messages come from the harness, not the user. Relay what matters in one or two lines, and do nothing when there is nothing worth saying. If a worker is waiting for a permission, tell the user it needs them.

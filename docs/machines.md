@@ -47,10 +47,16 @@ before redeploying by hand.
 - **Tools.** Workers get the machine's `set_label` (same as a sandbox's) via a `machine` MCP server
   whose calls go back to the portal. Unity is not managed in v1: agents use whatever editor and MCP
   the Mac already has (the Mac's own user settings load).
-- **Guard.** The workers' guard runs in the daemon, plus rules for the user's own clone: never
-  `git stash`, `reset --hard`, `clean -f`, `checkout -- <paths>`/`checkout .` or `restore` of the
-  worktree; and `git checkout`/`switch` of a branch only when `git status` is clean, otherwise
-  stop and ask. The daemon's own folder (`~/.ff-factory`, which holds the token) is protected.
+- **Guard.** The workers' guard runs in the daemon, plus rules for the user's own clone. The user's
+  standing permission (2026-09-25): to update the clone an agent may set aside or discard local
+  changes (`git stash`, `restore`/`checkout -- <paths>`, `reset` of files or `--hard`, `clean`, a
+  forced or dirty-tree branch switch), but only after copying them to a fresh timestamped folder in
+  `ff-local-backups/` beside the clone (e.g. `~/nevergames/ff-local-backups/<time>/`: the patches, the
+  changed and untracked files, the stash list), and it reports what it moved. The guard refuses those
+  commands until a backup folder from the last 2 hours exists, and its refusal gives the backup recipe
+  (`backupRecipe` in `server/guard.ts`). Staging or committing everything (`add -A`/`.`, `commit -a`),
+  force pushes and pushes to the game repo's master/main stay refused. The daemon's own folder
+  (`~/.ff-factory`, which holds the token) is protected.
 - **Limits.** Machine agents run on the Mac, so they do not count toward this host's
   `limits.maxSessions`; each machine has its own limit (default 3).
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.

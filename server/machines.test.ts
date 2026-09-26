@@ -12,7 +12,7 @@ import { MachineManager, RemoteSession, daemonMismatch } from './machines.ts';
 import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { Daemon } from '../machine/daemon.ts';
-import { checkOwnCheckout } from './guard.ts';
+import { backupRootFor, checkOwnCheckout, hasRecentBackup } from './guard.ts';
 import { agentPath, nodeSupport, plist } from './machineDeploy.ts';
 import type { Config } from './config.ts';
 import type { ImageInput, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
@@ -215,10 +215,12 @@ test('machine: a bad token is refused; tool calls go back to the portal', async 
   await assert.rejects(handlers.unity({ action: 'status' }), /unity is not available to this session/);
 });
 
-test("own checkout: nothing that loses the user's work; branch switches only on a clean tree", () => {
+test("own checkout: discards need a fresh backup first (the user's standing permission); never stage or commit everything", (t) => {
   const clean = () => true;
   const dirty = () => false;
-  for (const cmd of [
+  const none = { root: '/Users/b/nevergames/ff-local-backups', has: () => false };
+  const fresh = { ...none, has: () => true };
+  const discards = [
     'git stash',
     'git stash push -m x',
     'git stash pop',
@@ -227,21 +229,32 @@ test("own checkout: nothing that loses the user's work; branch switches only on 
     'git checkout -- Assets/x.cs',
     'git checkout .',
     'git restore Assets/x.cs',
-    'git add -A',
-    'git add .',
-    'git add --all',
-    'git commit -am "x"',
-    'git commit -a -m x',
     'cd sub && git switch -f other',
-  ]) {
-    assert.ok(checkOwnCheckout(cmd, '/r', clean), cmd);
+  ];
+  for (const cmd of discards) {
+    const why = checkOwnCheckout(cmd, '/r', clean, none);
+    assert.match(why ?? '', /standing permission.*FIRST copy them.*\/Users\/b\/nevergames\/ff-local-backups\/\$\(date.*report what you moved/, cmd);
+    assert.equal(checkOwnCheckout(cmd, '/r', clean, fresh), undefined, `${cmd} after a backup`);
+  }
+  // Never everything into a commit, backup or not.
+  for (const cmd of ['git add -A', 'git add .', 'git add --all', 'git commit -am "x"', 'git commit -a -m x']) {
+    assert.ok(checkOwnCheckout(cmd, '/r', clean, fresh), cmd);
   }
   for (const cmd of ['git stash list', 'git reset HEAD Assets/x.cs', 'git restore --staged Assets/x.cs', 'git add Assets/x.cs', 'git commit -m x', 'git clean -n', 'git status', 'git checkout -b feature/x', 'git switch develop']) {
-    assert.equal(checkOwnCheckout(cmd, '/r', clean), undefined, cmd);
+    assert.equal(checkOwnCheckout(cmd, '/r', clean, none), undefined, cmd);
   }
-  assert.match(checkOwnCheckout('git checkout develop', '/r', dirty)!, /uncommitted changes/);
-  assert.match(checkOwnCheckout('git -C /other switch -c x', '/r', dirty)!, /stop and ask/i);
-  assert.equal(checkOwnCheckout('git commit -m x', '/r', dirty), undefined, 'committing your own staged files is fine on a dirty tree');
+  // A branch switch on a dirty tree: after a backup.
+  assert.match(checkOwnCheckout('git checkout develop', '/r', dirty, none)!, /uncommitted changes.*FIRST copy them/);
+  assert.equal(checkOwnCheckout('git -C /other switch -c x', '/r', dirty, fresh), undefined);
+  assert.equal(checkOwnCheckout('git commit -m x', '/r', dirty, none), undefined, 'committing your own staged files is fine on a dirty tree');
+  // The folder beside the clone, and "fresh" = a backup folder from the last 2 hours.
+  assert.equal(backupRootFor('/Users/b/nevergames/FinalFactory/'), '/Users/b/nevergames/ff-local-backups');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-local-backups-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.equal(hasRecentBackup(root), false);
+  fs.mkdirSync(path.join(root, '20260925-101500'));
+  assert.equal(hasRecentBackup(root), true);
+  assert.equal(hasRecentBackup(root, 2 * 3_600_000, Date.now() + 3 * 3_600_000), false, 'three hours later it is stale');
 });
 
 test('deploy: node support and the LaunchAgent', () => {
