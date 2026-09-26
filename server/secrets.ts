@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import type { Config } from './config.ts';
 
 /**
  * Secrets agents may set but nobody may read back (set_app_config's write-only keys): the Claude OAuth token
@@ -54,4 +55,27 @@ export function scrubTranscripts(dir: string): number {
     }
   }
   return n;
+}
+
+/** Whether portal-run agents on `machineId` get this host's claudeEnv (config machines.useHostClaudeEnv; default yes). */
+export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'>, machineId: string): boolean {
+  const u = cfg.machines?.useHostClaudeEnv;
+  if (u === undefined) return true;
+  if (typeof u === 'boolean') return u;
+  return u[machineId] ?? true;
+}
+
+/**
+ * The Claude env a portal-run agent on `machineId` runs with: this host's claudeEnv (with
+ * CLAUDE_CODE_OAUTH_TOKEN, it overrides the Mac's keychain login for that agent only), or nothing (the Mac's
+ * own login). It travels in the launch spec over the authenticated daemon channel and is never logged.
+ */
+export function hostClaudeEnvFor(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machineId: string): Record<string, string> {
+  return usesHostClaudeEnv(cfg, machineId) ? { ...cfg.claudeEnv } : {};
+}
+
+/** Which Claude account a machine's portal-run agents use, safe to show: "host token …abcd" or "Mac login". */
+export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machineId: string): string {
+  const token = hostClaudeEnvFor(cfg, machineId).CLAUDE_CODE_OAUTH_TOKEN;
+  return token ? `host token …${token.slice(-4)}` : "Mac login (the Mac's own Claude Code login)";
 }

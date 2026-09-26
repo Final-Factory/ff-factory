@@ -36,6 +36,12 @@ export interface Config {
    * `enabled: false` turns it off. The ntfy topic is made once, in <dataDir>/outside-watch.json.
    */
   outsideWatch?: { enabled?: boolean; machine?: string; healthUrl?: string; host?: string; ntfyServer?: string };
+  /**
+   * Machines (docs/machines.md). `useHostClaudeEnv` (default true): portal-run agents on a Mac get this host's
+   * `claudeEnv` (so CLAUDE_CODE_OAUTH_TOKEN: the same Claude account as the agents here) instead of the Mac's
+   * own login. `false` turns it off everywhere; an object turns it off (or on) per machine: { "m3": false }.
+   */
+  machines?: { useHostClaudeEnv?: boolean | Record<string, boolean> };
   /** Where state.json and transcripts live. */
   dataDir: string;
   /** Every sandbox worktree is created as <sandboxRoot>/<id>. */

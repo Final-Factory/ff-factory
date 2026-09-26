@@ -57,6 +57,17 @@ before redeploying by hand.
   (`backupRecipe` in `server/guard.ts`). Staging or committing everything (`add -A`/`.`, `commit -a`),
   force pushes and pushes to the game repo's master/main stay refused. The daemon's own folder
   (`~/.ff-factory`, which holds the token) is protected.
+- **Claude account.** Portal-run agents on a Mac (workers and standing agents) use this host's
+  `claudeEnv`, so with `CLAUDE_CODE_OAUTH_TOKEN` set (`set_app_config`, write-only) they run on the same
+  Claude account as the agents here, not on the Mac's own login. The portal puts it in the launch spec,
+  sent over the authenticated daemon connection with each start; the daemon passes it to that agent's
+  Agent SDK process only (it overrides the Mac's keychain login for that process). It is never written
+  to disk on the Mac, the daemon log redacts tokens, and transcripts are redacted (server/secrets.ts).
+  The user's own interactive Claude Code sessions on the Mac are unaffected: they keep the Mac's login.
+  `list_machines` and the machine brief show the source: "host token …abcd" or "Mac login". Config
+  `machines.useHostClaudeEnv` (default `true`) turns it off everywhere (`false`) or per machine
+  (`{ "m3": false }`). An agent already running keeps its account until its process restarts; after an
+  update the daemons are redeployed anyway.
 - **Limits.** Machine agents run on the Mac, so they do not count toward this host's
   `limits.maxSessions`; each machine has its own limit (default 3).
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.

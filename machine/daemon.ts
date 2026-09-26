@@ -15,6 +15,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { MacUnity, MacUnityWatch } from './unity.ts';
+import { redactSecrets } from '../server/secrets.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
 import { listImages, readImage } from '../server/images.ts';
@@ -43,7 +44,8 @@ interface Entry {
 }
 
 const HOME = os.homedir();
-const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
+// Never a Claude OAuth token in the daemon log (the launch spec carries the host's, server/secrets.ts).
+const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a.map((x) => (typeof x === 'string' ? redactSecrets(x) : x)));
 
 export class Daemon {
   private readonly cfg: DaemonConfig;

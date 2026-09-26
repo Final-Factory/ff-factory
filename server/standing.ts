@@ -1,3 +1,4 @@
+import { hostClaudeEnvFor } from './secrets.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -776,7 +777,8 @@ export class StandingAgents {
         protectedPaths: [`${home}/.ff-factory/app`, `${home}/.ff-factory/daemon.json`],
         offLimits: [`${home}/.ff-factory/app`],
         gameRepos: [this.cfg.repo.url],
-        env: {},
+        // The host's Claude account (config machines.useHostClaudeEnv), for this agent only.
+        env: hostClaudeEnvFor(this.cfg, a.machineId),
         claudeExecutable: undefined,
       };
     }

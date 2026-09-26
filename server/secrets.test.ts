@@ -60,3 +60,27 @@ test('secrets: transcripts never keep the token: new events, amended ones, old f
   assert.equal(scrubTranscripts(path.join(dir, 'transcripts')), 0, 'nothing left');
   store.flush();
 });
+
+test('secrets: portal-run agents on a Mac get the host Claude env unless turned off, and it wins over the Mac env', async () => {
+  const { accountSource, hostClaudeEnvFor, usesHostClaudeEnv } = await import('./secrets.ts');
+  const { buildOptions } = await import('./launch.ts');
+  const claudeEnv = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, OTHER: 'x' };
+  const on = { claudeEnv } as Pick<Config, 'machines' | 'claudeEnv'>;
+  assert.deepEqual(hostClaudeEnvFor(on, 'm5'), claudeEnv, 'default: the host account');
+  assert.equal(accountSource(on, 'm5'), 'host token …XyZ9');
+  const offAll = { claudeEnv, machines: { useHostClaudeEnv: false } };
+  assert.deepEqual(hostClaudeEnvFor(offAll, 'm5'), {});
+  assert.match(accountSource(offAll, 'm5'), /^Mac login/);
+  const perMachine = { claudeEnv, machines: { useHostClaudeEnv: { m3: false } } };
+  assert.equal(usesHostClaudeEnv(perMachine, 'm3'), false);
+  assert.equal(usesHostClaudeEnv(perMachine, 'm5'), true);
+  assert.match(accountSource({ claudeEnv: {} }, 'm5'), /^Mac login/, 'no host token: the Mac login');
+  // On the Mac, the spec's env overrides the daemon's own environment for that agent's process.
+  const opts = buildOptions(
+    { cwd: '/tmp', settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: '/tmp', protectedPaths: [], gameRepos: [] }, env: { ...hostClaudeEnvFor(on, 'm5'), FF_MACHINE_ID: 'm5' } },
+    {},
+    { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-the-macs-own', HOME: '/Users/b' },
+  );
+  assert.equal(opts.env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN);
+  assert.equal(opts.env?.HOME, '/Users/b');
+});

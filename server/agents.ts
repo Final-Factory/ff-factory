@@ -14,6 +14,7 @@ import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './
 import { snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { PermissionMode, Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
+import { accountSource, hostClaudeEnvFor } from './secrets.ts';
 import { labelAfterEnd, labelDecision, type Place } from './labelPolicy.ts';
 import { ghNoreply, githubSlug, publicIdentityEnv, publicReposOf } from './publicGit.ts';
 import { systemStats } from './system.ts';
@@ -781,6 +782,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
 You are a Claude Code agent started from FF Factory, the user's control room, on the machine **${m.id}**${m.purpose ? ` — ${m.purpose}` : ''}. The user or an orchestrator agent sends your messages. Nobody watches your terminal: a person reads your final message of each turn.
 ${ownerLine(this.cfg)}
 - Working directory: \`${m.repoPath}\`, the user's MAIN Final Factory clone on this Mac, not a disposable sandbox. It may hold their own uncommitted work.
+- Claude account: you run on ${accountSource(this.cfg, m.id)}, set by the portal for its agents only; the user's own Claude sessions on this Mac keep their login.
 - Label: the purpose line of this machine, shown in the dashboard. Change it with \`mcp__machine__set_label\`, and set it back to \`unused\` when you are done. If another agent still works on this machine, "unused" is ignored and its label stays (the tool says so); that is expected.
 
 ## The user's work comes first: back it up, then you may clear it
@@ -841,7 +843,8 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         denyToolPrefixes: ['mcp__ffsb__'],
       },
       publicGit: this.publicGit(),
-      env: { FF_MACHINE_ID: m.id },
+      // The host's Claude account (config machines.useHostClaudeEnv), for this agent only: not the Mac's login.
+      env: { ...hostClaudeEnvFor(this.cfg, m.id), FF_MACHINE_ID: m.id },
     };
   }
 
@@ -1211,7 +1214,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
     const g = m.git;
     return [
       `- "${displayName(m)}" (machine ${m.id}, ssh ${m.host}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
-      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; up to ${m.maxSessions} agents`,
+      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; up to ${m.maxSessions} agents; Claude account of its agents: ${accountSource(this.cfg, m.id)}`,
       `  ${describeGit(g)}`,
       agents ? `  agents:\n${agents}` : '  agents: none',
     ].join('\n');
