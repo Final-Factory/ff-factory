@@ -58,10 +58,10 @@ writeAlive(cfg.dataDir);
 setInterval(() => writeAlive(cfg.dataDir), 30_000);
 
 const store = new Store(cfg.dataDir);
-// Transcripts written before redaction existed: no Claude OAuth token stays on disk (server/secrets.ts).
+// Transcripts written before redaction existed: no Claude OAuth or Discord token stays on disk (server/secrets.ts).
 setTimeout(() => {
   const n = scrubTranscripts(path.join(cfg.dataDir, 'transcripts'));
-  if (n) console.log(`secrets: redacted a Claude OAuth token in ${n} transcript(s)`);
+  if (n) console.log(`secrets: redacted secrets (Claude OAuth or Discord tokens) in ${n} transcript(s)`);
 }, 5000);
 const sandboxes = new SandboxManager(cfg, store);
 const sessions = new SessionManager(cfg, store);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { maskSecret, redactSecrets, scrubTranscripts } from './secrets.ts';
+import { maskSecret, redactSecrets, redactValue, scrubTranscripts } from './secrets.ts';
 import { setAppConfig } from './appConfig.ts';
 import { Store, bus } from './store.ts';
 import type { Config } from './config.ts';
@@ -83,4 +83,38 @@ test('secrets: portal-run agents on a Mac get the host Claude env unless turned 
   );
   assert.equal(opts.env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN);
   assert.equal(opts.env?.HOME, '/Users/b');
+});
+
+// Assembled at runtime so no literal token-shaped string sits in the repo (secret scanners on a public repo).
+const DISCORD = ['MTIzNDU2Nzg5', 'MDEyMzQ1Njc4'].join('') + '.' + ['GAb', 'cDe'].join('') + '.' + 'abcdefghij'.repeat(3) + 'Wxyz';
+
+test('secrets: Discord bot tokens and DISCORD_TOKEN / FFDISCORD_APP_TOKEN values are redacted too', (t) => {
+  assert.equal(redactSecrets(`here is the bot token ${DISCORD} ok`), 'here is the bot token [redacted Discord token …Wxyz] ok');
+  assert.equal(redactSecrets('DISCORD_TOKEN=abcDEF123456xyz9 npm start'), 'DISCORD_TOKEN=[redacted …xyz9] npm start');
+  assert.equal(redactSecrets('export FFDISCORD_APP_TOKEN="s3cr3t-value-7777"'), 'export FFDISCORD_APP_TOKEN="[redacted …7777]"');
+  assert.equal(redactSecrets('FFDISCORD_APP_TOKEN: longvalue_abcd'), 'FFDISCORD_APP_TOKEN: [redacted …abcd]');
+  // Inside a serialized event (JSON escapes), the result stays valid JSON and keeps the rest.
+  const ev = { kind: 'user', text: `set DISCORD_TOKEN="${DISCORD}" and restart`, from: 'human' };
+  const clean = redactValue(ev);
+  assert.ok(!JSON.stringify(clean).includes(DISCORD));
+  assert.match(clean.text, /^set DISCORD_TOKEN="\[redacted …Wxyz\]" and restart$/);
+  // Ordinary dotted text is left alone.
+  for (const s of ['server/secrets.test.ts', 'version 0.50.0.24', 'a.b.c', 'com.unity3d.UnityEditor5.x', 'DISCORD_TOKEN is set in the env']) assert.equal(redactSecrets(s), s, s);
+  // Written, sent and scrubbed like the Claude token.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secret-discord-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = new Store(dir);
+  const sent: string[] = [];
+  const on = (e: unknown) => sent.push(JSON.stringify(e));
+  bus.on('event', on);
+  t.after(() => bus.off('event', on));
+  store.append('o2', { kind: 'user', text: `the bot token: ${DISCORD}`, from: 'human' });
+  store.append('w2', { kind: 'user', text: `[from the orchestrator]\nuse ${DISCORD}`, from: 'orchestrator' });
+  const tdir = path.join(dir, 'transcripts');
+  assert.ok(!fs.readdirSync(tdir).map((f) => fs.readFileSync(path.join(tdir, f), 'utf8')).join('').includes(DISCORD));
+  assert.ok(!sent.join('').includes(DISCORD));
+  fs.writeFileSync(path.join(tdir, 'pasted.jsonl'), JSON.stringify({ seq: 1, kind: 'user', text: `token ${DISCORD}` }) + '\n');
+  assert.equal(scrubTranscripts(tdir), 1);
+  assert.ok(!fs.readFileSync(path.join(tdir, 'pasted.jsonl'), 'utf8').includes(DISCORD));
+  store.flush();
 });
