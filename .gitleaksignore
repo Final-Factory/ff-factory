@@ -1,0 +1,2 @@
+# Fake test values gitleaks flagged (generic-api-key) in history that cannot be rewritten; the test now assembles them at runtime.
+27d7938f3b6d089b0a40f10921938ac91d6c3dc4:server/secrets.test.ts:generic-api-key:93
