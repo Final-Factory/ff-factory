@@ -108,10 +108,21 @@ export function macPermissionProblem(stderr: string, nodePath: string): string |
   if (/-1743|Not authorized to send Apple events/i.test(stderr)) {
     return `macOS has not allowed the daemon to control System Events (Automation). On the Mac, open System Settings > Privacy & Security > Automation, find "node" (${nodePath}) and turn on "System Events". If node is not listed, the permission prompt was never answered: log in at the Mac's desktop, and the next look (within a minute) shows the prompt "node wants access to control System Events": click Allow.`;
   }
-  if (/-25211|-1719|assistive access|not allowed to send keystrokes|accessibility/i.test(stderr)) {
-    return `macOS has not given the daemon Accessibility access, which reading and pressing Unity's dialogs needs. On the Mac, open System Settings > Privacy & Security > Accessibility. If "node" is listed, turn its switch ON (an entry that is there but off is still denied). If it is not, click +, press Cmd-Shift-G, enter ${nodePath}, add it and turn it on. (It is the node binary the FF Factory daemon runs under; after a node upgrade the entry has to be added again.)`;
-  }
+  if (/-25211|-1719|assistive access|not allowed to send keystrokes|accessibility/i.test(stderr)) return accessibilityStep(nodePath);
   return undefined;
+}
+
+/**
+ * The one-time Accessibility step for the daemon's node binary, as exact as the TCC entry lets us be:
+ * `entry` 'off' = listed but switched off (the case on m5: adding it again does not switch it on).
+ */
+export function accessibilityStep(nodePath: string, entry?: 'on' | 'off' | 'missing'): string {
+  const where = 'On the Mac, open System Settings > Privacy & Security > Accessibility';
+  const why = "macOS has not given the daemon Accessibility access, which reading and pressing Unity's dialogs needs.";
+  const which = `(It is the node binary the FF Factory daemon runs under, ${nodePath}; macOS checks that exact path, so after a node upgrade it has to be added again.)`;
+  if (entry === 'off') return `${why} ${where}: "node" is listed but its switch is OFF; turn it ON (adding it again does not switch it on). ${which}`;
+  if (entry === 'missing') return `${why} ${where}, click +, press Cmd-Shift-G, enter ${nodePath}, add it and turn it on. ${which}`;
+  return `${why} ${where}. If "node" is listed, turn its switch ON (an entry that is there but off is still denied). If it is not, click +, press Cmd-Shift-G, enter ${nodePath}, add it and turn it on. ${which}`;
 }
 
 /** Whether the console session can be looked at: locked, someone else's (fast user switching), display asleep. */
@@ -135,6 +146,32 @@ try {
 } catch (e) {}
 try { out.displayAsleep = !!$.CGDisplayIsAsleep($.CGMainDisplayID()); } catch (e) {}
 JSON.stringify(out);`;
+
+/**
+ * Ask macOS to prompt for Accessibility (AXIsProcessTrustedWithOptions with kAXTrustedCheckOptionPrompt): it shows
+ * its own dialog on the Mac's screen, pointing at System Settings > Privacy & Security > Accessibility for the
+ * process macOS holds responsible (the daemon's node), so the user only has to switch it on.
+ */
+export const AX_PROMPT_SCRIPT = `ObjC.import('ApplicationServices'); $.AXIsProcessTrustedWithOptions($({ AXTrustedCheckOptionPrompt: true })) ? 'true' : 'false';`;
+
+export async function axPrompt(): Promise<void> {
+  if (process.platform !== 'darwin') return;
+  await run('osascript', ['-l', 'JavaScript', '-e', AX_PROMPT_SCRIPT], { timeoutMs: 15_000 });
+}
+
+/**
+ * The Accessibility entry for `binary` in the system TCC database, read-only: 'on', 'off' (listed but switched
+ * off: still denied), 'missing', or undefined when it cannot be read (the daemon usually lacks Full Disk Access).
+ */
+export async function tccAccessibility(binary: string): Promise<'on' | 'off' | 'missing' | undefined> {
+  if (process.platform !== 'darwin') return undefined;
+  const db = '/Library/Application Support/com.apple.TCC/TCC.db';
+  const q = `select auth_value from access where service='kTCCServiceAccessibility' and client='${binary.replace(/'/g, "''")}'`;
+  const r = await run('sqlite3', ['-readonly', db, q], { timeoutMs: 10_000 });
+  if (r.code !== 0) return undefined;
+  const v = r.stdout.trim();
+  return v === '' ? 'missing' : v === '2' ? 'on' : 'off';
+}
 
 /** Whether this process (and so the daemon, responsible for its osascript) has Accessibility: AXIsProcessTrusted. */
 export const AX_TRUSTED_SCRIPT = `ObjC.import('ApplicationServices'); $.AXIsProcessTrusted() ? 'true' : 'false';`;

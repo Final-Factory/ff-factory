@@ -231,3 +231,37 @@ test('mac unity: the editor is the Unity with windows, never its -batchMode impo
   ];
   assert.deepEqual(editorsFor(procs, REPO).map((p) => p.pid), [24358]);
 });
+
+test('mac dialog watch: an Accessibility entry that is listed but OFF says so, and macOS shows its own prompt once', async () => {
+  const { accessibilityStep } = await import('../machine/macDialogs.ts');
+  const node = '/opt/homebrew/Cellar/node/26.5.0/bin/node';
+  assert.match(accessibilityStep(node, 'off'), /"node" is listed but its switch is OFF; turn it ON \(adding it again does not switch it on\)\..*\/opt\/homebrew\/Cellar\/node\/26\.5\.0\/bin\/node; macOS checks that exact path/);
+  assert.match(accessibilityStep(node, 'missing'), /click \+, press Cmd-Shift-G, enter \/opt\/homebrew\/Cellar/);
+  const world = { now: Date.parse('2026-09-26T14:00:00Z'), prompts: 0 };
+  const reports: string[] = [];
+  const deps: UnityDeps = { procs: async () => [{ pid: 100, ppid: 1, cmd: `${BIN} -projectpath ${REPO}` }], kill: () => undefined, launch: () => 1, exists: () => false, remove: () => undefined, sleep: async () => undefined, now: () => world.now };
+  const w = new MacUnityWatch(new MacUnity(REPO, deps, () => BIN), (t) => reports.push(t), {
+    logStat: () => ({ size: 1, mtimeMs: world.now }),
+    logTail: () => '',
+    bridge: () => ({}),
+    ping: async () => false,
+    now: () => world.now,
+    listDialogs: async () => {
+      throw new Error('execution error: Error: Error: osascript is not allowed assistive access. (-25211)');
+    },
+    pressButton: async () => true,
+    sceneFilesClean: async () => true,
+    nodePath: () => node,
+    sessionState: async () => ({ locked: false, onConsole: true, displayAsleep: false }),
+    axTrusted: async () => false,
+    tccEntry: async () => 'off',
+    axPrompt: async () => void world.prompts++,
+  });
+  for (let i = 0; i < 6; i++) {
+    await w.tick();
+    world.now += 8 * 60_000;
+  }
+  assert.equal(reports.length, 1);
+  assert.match(reports[0], /"node" is listed but its switch is OFF.*macOS also shows its own Accessibility prompt/);
+  assert.equal(world.prompts, 1, 'the prompt once, with the notice');
+});

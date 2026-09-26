@@ -5,7 +5,7 @@ import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, type HangThresholds } from '../server/unityHang.ts';
 import { decide, describeDialog, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
-import { axTrusted, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, type SessionState } from './macDialogs.ts';
+import { accessibilityStep, axPrompt, axTrusted, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
 /**
  * The Unity editor of a machine's clone (docs/unity-lifecycle.md), managed by the daemon on the Mac: status,
@@ -280,6 +280,10 @@ export interface WatchDeps {
   axTrusted(): Promise<boolean | undefined>;
   /** The daemon log (each failed look, with the session state and AXIsProcessTrusted, for diagnosis). */
   log?(line: string): void;
+  /** The TCC Accessibility entry of the node binary ('on'/'off'/'missing'; undefined: unreadable). */
+  tccEntry?(): Promise<'on' | 'off' | 'missing' | undefined>;
+  /** Show macOS's own Accessibility prompt on the Mac's screen. */
+  axPrompt?(): Promise<void>;
 }
 
 /** What Unity writes to its log when it crashes (macOS: signals and the native crash reporter). */
@@ -371,6 +375,8 @@ export class MacUnityWatch {
       sessionState: () => sessionState(),
       axTrusted: () => axTrusted(),
       log: (line) => console.log(new Date().toISOString(), line),
+      tccEntry: () => tccAccessibility(nodeBinary()),
+      axPrompt: () => axPrompt(),
       ...deps,
     };
   }
@@ -548,15 +554,22 @@ export class MacUnityWatch {
     const f = (this.failStreak ??= { first: now, count: 0 });
     f.count++;
     if (f.count < 3 || now - f.first < 15 * 60_000) return;
-    this.permission = step;
-    this.notice('permission', now, `Unity dialog watch on this machine cannot ${what}: ${step}`);
+    // As exact as the TCC entry lets us be, and macOS's own prompt on the screen (both at most once a day).
+    const accessibility = /Accessibility access/.test(step);
+    const entry = accessibility ? await this.d.tccEntry?.().catch(() => undefined) : undefined;
+    const exact = accessibility ? accessibilityStep(this.d.nodePath(), entry) : step;
+    this.permission = exact;
+    if (this.notice('permission', now, `Unity dialog watch on this machine cannot ${what}: ${exact}${accessibility && this.d.axPrompt ? ' macOS also shows its own Accessibility prompt on the Mac\'s screen now.' : ''}`)) {
+      if (accessibility) await this.d.axPrompt?.().catch(() => undefined);
+    }
   }
 
-  /** Send a notice, unless the same kind went out within the day. */
-  private notice(kind: string, now: number, text: string) {
-    if (now - (this.noticed.get(kind) ?? -Infinity) < 24 * 3_600_000) return;
+  /** Send a notice, unless the same kind went out within the day. Returns whether it was sent. */
+  private notice(kind: string, now: number, text: string): boolean {
+    if (now - (this.noticed.get(kind) ?? -Infinity) < 24 * 3_600_000) return false;
     this.noticed.set(kind, now);
     this.report(text, false);
+    return true;
   }
 
   /** Lines for the unity status: dialogs waiting, the permission step, recent automatic answers. */
