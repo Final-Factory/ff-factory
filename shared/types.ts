@@ -221,6 +221,93 @@ export interface Machine {
   createdAt: string;
 }
 
+// ---- providers (docs/ffbox-integration.md): FFBox, reached through the connector it runs ----
+
+/** A kind of container a provider offers, as its connector last reported it (server/providerProtocol.ts). */
+export interface ProviderClass {
+  name: string;
+  network: 'fenced' | 'open';
+  gpu: boolean;
+  /** The model its runs use, e.g. "glm-5.3-flash". */
+  model: string;
+  /** full: any well-briefed task. simple: small, well-scoped work only. */
+  tier: 'full' | 'simple';
+  unity: string[];
+  free: number;
+  max: number;
+  note?: string;
+}
+
+export interface ProviderCapacity {
+  classes: ProviderClass[];
+  queue: number;
+  state: 'running' | 'draining' | 'updating' | 'stopped';
+  holds: string[];
+  /** When the portal received it. */
+  at: string;
+}
+
+/** One FFBox conversation, as reported. `title` is untrusted text (it can carry what a player wrote). */
+export interface ProviderConversation {
+  id: string;
+  source: 'discord' | 'intake' | 'codereview' | 'fff' | 'shell' | 'web' | 'other';
+  opener: 'operator' | 'player' | 'fff' | 'system';
+  title: string;
+  state: 'queued' | 'running' | 'idle' | 'blocked' | 'closed';
+  agentClass: string;
+  branch?: string;
+  pr?: { number: number; state: 'open' | 'merged' | 'closed' };
+  verdict?: string;
+  costUsd?: number;
+  key?: string;
+  url?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One report ffintake filed: only the facts ffintake computed or pattern-checked; never the report's own text. */
+export interface ProviderIntakeEvent {
+  reportId: string;
+  kind: 'crash' | 'desync';
+  receivedAt: string;
+  gameVersion: string;
+  platform: string;
+  bytes: number;
+  sender?: string;
+  desync?: {
+    group?: string | null;
+    correlationId?: string;
+    divergedClient?: number;
+    role?: 'host' | 'client';
+    localClient?: number;
+    sessionEpoch?: number;
+    verdictHeartbeat?: number;
+    divergedSurfaces?: string;
+    happenedAt?: string;
+    why?: string;
+  };
+}
+
+/** A provider as the sidebar and system_status see it. The lists are fetched separately (GET /api/providers/<id>/…). */
+export interface Provider {
+  id: string;
+  name: string;
+  /** config providers.<id>.enabled (default off). */
+  enabled: boolean;
+  /** Whether a connector token is configured (its hash; the token itself is never kept). */
+  tokenSet: boolean;
+  online: boolean;
+  connectedSince?: string;
+  lastSeen?: string;
+  statusDetail?: string;
+  connector?: { version: string; commit?: string; protocol: number };
+  /** The provider's own page, for links. */
+  web?: string;
+  capacity?: ProviderCapacity;
+  counts: { conversations: number; active: number; intake: number; intake24h: number };
+  lastIntakeAt?: string;
+}
+
 // ---- standing agents (docs/standing-agents.md) ----
 
 export type StandingTrigger = { kind: 'interval'; minutes: number } | { kind: 'cron'; expr: string } | { kind: 'manual' };
@@ -466,6 +553,8 @@ export interface AppState {
   standingAgents: StandingAgent[];
   delegations: DelegationRequest[];
   machines: Machine[];
+  /** Providers (FFBox); absent from a server older than this field. */
+  providers?: Provider[];
   system?: SystemStats;
   host: HostStatus;
   usage?: PlanUsage;
@@ -489,6 +578,7 @@ export type ServerEvent =
   /** Something worth a notification; pages without a push subscription may show it themselves. */
   | { type: 'notify'; notice: { kind: NotifyKind; title: string; body: string; url: string; tag: string } }
   | { type: 'machine_removed'; id: string }
+  | { type: 'provider'; provider: Provider }
   | { type: 'settings'; settings: AppSettings }
   | { type: 'transcript'; sessionId: string; event: TranscriptEvent }
   /** Live assistant text while a turn streams; the UI shows it until the 'assistant' event lands. */

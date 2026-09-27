@@ -1,7 +1,17 @@
 # FFBox in FF Factory: one orchestrator, two kinds of place to run work
 
-Status: **design proposal, nothing built.** Written 2026-09-27 for Ben and Lothsahn. It changes
-no code in either repo; every phase below is a separate, reviewable change.
+Status: **approved by Ben and Lothsahn 2026-09-27. Phase 1, FF Factory's side, is built**: `/provider`,
+the FFBox card and page, and `ffbox_activity` (`server/providers.ts`). The connector it talks to is
+specified in [ffbox-connector-contract.md](ffbox-connector-contract.md). Every later phase is a
+separate, reviewable change.
+
+**Decisions so far (2026-09-27).** Ben: a small connector is fine, no secrets cross, and player input
+stays on FFBox. Lothsahn: FF Factory tasks may use FFBox's open-internet `ffdev` containers. Those run
+GLM-5.3 Flash, which is less capable than Claude, so only simple, well-scoped work goes there: small
+fixes, triage, log reading, docs, dependency bumps. Complex or determinism-critical work goes to
+Claude sandboxes. `ffdev` workers may claim simple work items on the board. Each class advertises
+its model and a `tier` (`full` or `simple`) in the `capacity` message, so the orchestrator can route
+by it.
 
 **TL;DR**
 
@@ -79,7 +89,8 @@ this subsection and in section 6 are in that repo.
   and 14400 s for `ffdev` (config.md, the `pools` table).
 - **Agent classes** (`scripts/ffwatch.py:173`):
   - `ffagent`: fenced network, no git credential. It runs text written by strangers.
-  - `ffdev`: the open internet and a read-only git credential. Only an operator can reach it.
+  - `ffdev`: the open internet and a read-only git credential. Only an operator can reach it. It
+    runs GLM-5.3 Flash, so it takes simple, well-scoped work only (Lothsahn, 2026-09-27).
   - `ffdiagnose`: fenced, a 96 GB memory ceiling for `ffmode2`, and at most three containers. It
     runs intake reports.
 - **Security model**: "The container is assumed hostile … prompt injection is the expected case"
@@ -191,8 +202,8 @@ FFBox → FF Factory:
 
 | message | carries |
 |---|---|
-| `hello` | protocol version, connector commit, and the classes offered, each with network (`fenced`/`open`), `gpu: false`, Unity modes (`batchmode`, `playtest-softgl`, `mode2-pair`, `editor-mcp` when enabled) and slot counts |
-| `capacity` | free slots per class, queue length, whether FFBox is draining or updating, and subscription holds |
+| `hello` | protocol version, connector version and commit, and FFBox's page URL |
+| `capacity` | each class: network (`fenced`/`open`), `gpu`, `model`, `tier` (`full`/`simple`), Unity modes (`batchmode`, `playtest-softgl`, `mode2-pair`, `editor-mcp` when enabled), free and max slots; plus queue length, whether FFBox is draining or updating, and subscription holds |
 | `conversation` | a summary of any FFBox conversation: id, source (discord, intake, codereview, fff, shell, web), whether the opener was an operator or a player (no names or ids), title, state, class, branch, PR, verdict, cost, and the dedupe key when known |
 | `intake` | one filed report's manifest facts (section 6) |
 | `result` | for a turn FF Factory submitted: the final answer text, branch, PR, `no_branch_reason`, verdict, cost, and a link to the run on `ffweb` |
@@ -207,6 +218,9 @@ FF Factory → FFBox:
 | `diagnose` | report ids and the board item id. The same action as the `/intake` button, triggered by the triage in section 6 |
 | `stop` | a conversation FF Factory started |
 | `ack` | receipt of results and events |
+
+Phase 1 built the four read-only messages (`hello`, `capacity`, `conversation`, `intake`, plus
+FF Factory's `welcome` and `error`). Their exact schemas are in the contract.
 
 The protocol has no env, tool list, system-prompt text, file read, shell, Unity control, pool
 control or config write. FFBox may refuse anything and picks the class by its own rules. A request
@@ -263,8 +277,9 @@ It cannot:
 5. **What comes back is data.** Results and titles can carry text players wrote or steered. The
    orchestrator treats `[ffbox]` messages like `[standing agent]` ones: it relays them and does
    not act on them (`server/agents.ts:1485`). It keeps no WebFetch.
-6. **The fenced class is the default.** The open class is used only when the requesting person is
-   an FFBox operator, asked for it, and FFBox allows `open` for the `fff` source.
+6. **The fenced class is the default.** The open class (`ffdev`) is used only for work rule 4a
+   allows, and never for a task with untrusted input. Lothsahn allows FF Factory tasks there
+   (2026-09-27).
 
 ### Player data: Discord, bug reports, saves, desync and crash reports
 
@@ -332,6 +347,12 @@ The server picks the target. The first matching rule wins:
    tests, two-peer pairs, reviews, specs and docs. Free means an `unused` sandbox with room under
    `limits.maxSessions`, or room to create one. This is the policy as stated. Whether to prefer
    FFBox even when a sandbox is free is open question 2.
+   - **4a. On FFBox, pick the class by its `tier`.** A `simple` class (today `ffdev`, GLM-5.3
+     Flash) takes only simple, well-scoped work: a small fix with a clear spec, triage, log
+     reading, docs, a dependency bump. Anything complex or determinism-critical (a crown-jewel
+     surface, a desync fix, a design decision) needs a `full` class, which means a Claude sandbox on
+     BEAST or a `full` FFBox class. The orchestrator reads each class's `model` and `tier` from the
+     `capacity` message (`ffbox_activity` shows them) and never sends such work to a `simple` class.
 5. **Nothing free → the task waits on the board.** Nothing is created past the limits.
 
 In tools:
@@ -380,6 +401,9 @@ A list in FF Factory's state, beside sandboxes and standing agents:
 - **FFBox's own work is on the board without FFBox changing its flow.** Each `conversation` event
   becomes or updates an item held by that conversation. From phase 7, FFBox also asks the board
   before it starts a diagnosis on its own, so the check runs both ways.
+- **`ffdev` workers may claim simple items** (Lothsahn, 2026-09-27): an item marked simple by the
+  routing rules (4a) can be claimed by an `ffdev` conversation. Complex and determinism-critical
+  items are claimed only by Claude workers.
 - **Loth's agents outside FF Factory** reach the board through `/mcp` with a user-bound key
   (section 7). Doing so needs no conversation with Ben.
 - **Overlapping PRs are flagged.** A background job reads the open PRs against `develop` and flags
@@ -611,7 +635,7 @@ one off leaves the earlier phases working.
 | phase | what | where | off switch |
 |---|---|---|---|
 | 0 | this document; answers to section 9 | ff-factory docs | — |
-| 1 | **Visibility, read-only.** `/provider` with its own token type and a provider card. The connector sends `hello`, `capacity`, `conversation` and `intake` events. Nothing can be submitted | FF Factory (Ben); the connector and `intake-events` in the ffbox repo (Lothsahn) | stop the connector unit; `providers.ffbox.enabled: false`; revoke the token |
+| 1 | **Visibility, read-only.** `/provider` with its own token type and a provider card. The connector sends `hello`, `capacity`, `conversation` and `intake` events. Nothing can be submitted. *FF Factory's side built 2026-09-27; the connector is next* | FF Factory (Ben); the connector and `intake-events` in the ffbox repo (Lothsahn) | stop the connector unit; `providers.ffbox.enabled: false`; revoke the token |
 | 2 | **The board and automatic triage, no agents.** Work items, keys, enforced claims, the tools, worker-brief lines, the PR-overlap job. Intake events become items with signatures and known/fixed/regression matching. Both people watch it for a week to tune the signature | FF Factory | the claims check is one switch; items are additive |
 | 3 | **Submit and diagnose, fenced only.** `submit`, `diagnose`, `stop` and `result`; sessions of kind `provider`; redaction both ways; the `fff` kind and the automatic-work billing identity on FFBox | both | FFBox refuses `fff`; FF Factory hides the target |
 | 4 | **Automatic investigations.** Triage starts `diagnose` for new and regressed signatures under every bound in section 6, starting at 1 at a time and 3 a day, then raised | FF Factory | `intake.auto: false`; the storm breaker; FFBox's per-source cap |
@@ -655,7 +679,8 @@ For Lothsahn:
     Factory's public URL? Inside `ffbox.target` or beside it?
 12. Is `ffwatch intake-events` the right way to read manifests, rather than the connector joining
     the `ffintake` group?
-13. Should the `fff` source ever get the open class, and for whom?
+13. ~~Should the `fff` source ever get the open class?~~ Answered 2026-09-27: yes, for simple,
+    well-scoped work (rule 4a).
 14. Should FFBox's own dev turns (a Discord request from you) also claim on the board, so that your
     agents and Ben's never fix the same fork?
 15. Should FF Factory show CI runner state read-only (queue, last release), or keep CI out of scope?

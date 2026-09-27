@@ -10,6 +10,7 @@ import { SandboxManager } from './sandboxes.ts';
 import { SessionManager, snapshotOf } from './sessions.ts';
 import { Agents } from './agents.ts';
 import { MachineManager } from './machines.ts';
+import { ProviderManager } from './providers.ts';
 import { Notifier } from './notify.ts';
 import { refreshSandboxGit } from './gitStatus.ts';
 import { describeBusy } from './wake.ts';
@@ -66,6 +67,8 @@ setTimeout(() => {
 const sandboxes = new SandboxManager(cfg, store);
 const sessions = new SessionManager(cfg, store);
 const machines = new MachineManager(cfg, store, sessions);
+// FFBox, through the connector it runs (docs/ffbox-integration.md): read-only reports, off by default.
+const providers = new ProviderManager(cfg);
 // A daemon that has not come back 2 minutes after a restart (or a drop) while ssh reaches its Mac is redeployed.
 // The machines' own Unity watch: tell the orchestrator and the user, and the machine's agents after a restart.
 machines.unityEvent = (machineId, text, restarted) => {
@@ -223,6 +226,7 @@ sandboxes.startGate = () => hostHealth.blockReason('editor');
 sessions.startGate = () => hostHealth.blockReason('agent');
 agents.standing.hostGate = () => hostHealth.blockReason('agent');
 agents.hostHealth = hostHealth;
+agents.providers = providers;
 if (cfg.hostGuard.pollSeconds > 0) {
   setInterval(() => void hostHealth.tick(), cfg.hostGuard.pollSeconds * 1000);
   setTimeout(() => void hostHealth.tick(), 5000);
@@ -241,6 +245,7 @@ function appState(): AppState {
     standingAgents: agents.standing.list(),
     delegations: [...store.delegations.values()],
     machines: machines.list(),
+    providers: providers.enabled || providers.summary().tokenSet ? [providers.summary()] : [],
     system: lastSystem,
     host: { ...host, drain: drainer.status },
     usage: usage.usage,
@@ -295,6 +300,10 @@ const route = (method: string, pattern: string, h: Handler) => routes.push([meth
 
 route('GET', '/api/state', async () => appState());
 route('GET', '/api/me', async (req) => ({ username: auth.user(req) }));
+
+// ---- providers (docs/ffbox-integration.md): what FFBox's connector reported, newest first
+route('GET', '/api/providers/ffbox/conversations', async (_r, _m, url) => providers.conversations(Number(url.searchParams.get('limit')) || 100));
+route('GET', '/api/providers/ffbox/intake', async (_r, _m, url) => providers.intake(Number(url.searchParams.get('limit')) || 200));
 
 route('GET', '/api/sessions/([\\w-]+)/events', async (_r, [id], url) => {
   sessions.get(id);
@@ -776,6 +785,13 @@ const clients = new Set<WebSocket>();
 server.on('upgrade', (req, socket, head) => {
   // Cross-site WebSocket hijacking: the page's own origin only. Compared as strings; parsing an
   // attacker-supplied Origin ("null", garbage) must never be able to throw.
+  if (parseUrl(req.url)?.pathname === '/provider') {
+    // FFBox's connector (docs/ffbox-connector-contract.md): its own token, no browser session.
+    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
+    const peer = req.socket.remoteAddress ?? '';
+    providers.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    return;
+  }
   if (parseUrl(req.url)?.pathname === '/machine') {
     // A machine daemon (docs/machines.md): its own token, no browser session.
     const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
@@ -930,6 +946,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   clearPendingRestart(cfg.dataDir);
   sessions.stopAll();
   voice.unload('server stopping');
+  providers.close();
   store.flush();
   process.exit(0);
 }
@@ -941,6 +958,10 @@ sessions.events.on('rateLimit', () => usage.poke());
 sessions.events.on('result', (s: { info: { id: string; costUsd: number } }) => usage.recordCost(s.info.id, s.info.costUsd));
 agents.usageLines = () => usageLines(usage.usage, new Date());
 agents.extraStatusLines = () => {
+  const ffbox = providers.statusLine();
+  return [...(ffbox ? [ffbox] : []), ...outsideWatchLines()];
+};
+const outsideWatchLines = () => {
   const w = watcher();
   const c = watchConfig();
   if (!w || !c) return [`Outside watchdog: off (${cfg.outsideWatch?.enabled === false ? 'outsideWatch.enabled is false' : !c ? 'no publicUrl to watch' : 'no machine to watch from'})`];
@@ -1015,7 +1036,7 @@ setInterval(() => {
 }, 5000);
 
 /** The managers, for the E2E harness (e2e/server.ts) to set up states no browser can reach (a blocked editor). */
-export const internals = { cfg, store, sandboxes, sessions, agents };
+export const internals = { cfg, store, sandboxes, sessions, agents, providers };
 
 // Resume what the last server recorded (or report what a crash cut off), once the managers are up.
 // After a stop that was not clean (no resume file: a power cut, a crash, a kill), make one from what the last

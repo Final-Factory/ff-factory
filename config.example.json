@@ -54,6 +54,11 @@
   "hostDiskPaths": [
     "C:/"
   ],
+  "providers": {
+    "ffbox": {
+      "enabled": false
+    }
+  },
   "hostGuard": {
     "warnFreeGB": 80,
     "criticalFreeGB": 40,

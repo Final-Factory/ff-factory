@@ -42,6 +42,12 @@ export interface Config {
    * own login. `false` turns it off everywhere; an object turns it off (or on) per machine: { "m3": false }.
    */
   machines?: { useHostClaudeEnv?: boolean | Record<string, boolean> };
+  /**
+   * Providers (docs/ffbox-integration.md): FFBox, whose connector dials out to /provider. `enabled` (default
+   * false) lets it connect; `tokenSha256` is the SHA-256 of its connector token (ffpv1_…), set with
+   * `node server/providerToken.ts` or set_app_config providers.ffbox.token; the token itself is never kept.
+   */
+  providers?: { ffbox?: { enabled?: boolean; tokenSha256?: string } };
   /** Where state.json and transcripts live. */
   dataDir: string;
   /** Every sandbox worktree is created as <sandboxRoot>/<id>. */

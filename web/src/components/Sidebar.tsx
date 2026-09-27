@@ -11,6 +11,7 @@ import {
   lsSet,
   machineGlance,
   navigate,
+  providerGlance,
   sandboxGlance,
   sessionLabel,
   sessionTone,
@@ -138,6 +139,21 @@ export function Sidebar({
           ))}
         </Section>
 
+        {(app.providers ?? []).length > 0 && (
+          <Section title="Providers" count={app.providers!.length}>
+            {app.providers!.map((p) => (
+              <PlaceRow
+                key={p.id}
+                title={p.name}
+                glance={providerGlance(p, now)}
+                active={route.view === 'provider' && route.providerId === p.id}
+                hint={`${p.name}: CPU-only containers, reached through its connector${p.connector ? ` (${p.connector.version})` : ''}`}
+                onClick={() => go({ view: 'provider', providerId: p.id })}
+              />
+            ))}
+          </Section>
+        )}
+
         <Section title="Standing agents" count={app.standingAgents.length} add="New standing agent" onAdd={onNewStanding}>
           {app.standingAgents.length === 0 && (
             <p className="side-empty">
@@ -218,15 +234,17 @@ function PlaceRow({ title, unused, prefix, glance: g, active, hint, onClick }: {
   );
 }
 
-function Section({ title, count, add, onAdd, children }: { title: string; count: number; add: string; onAdd: () => void; children: ReactNode }) {
+function Section({ title, count, add, onAdd, children }: { title: string; count: number; add?: string; onAdd?: () => void; children: ReactNode }) {
   return (
     <section className="side-section">
       <div className="section-head">
         <span>{title}</span>
         {count > 0 && <span className="count">{count}</span>}
-        <button className="btn btn-ghost btn-icon section-add" onClick={onAdd} title={add} aria-label={add}>
-          <Icon name="plus" size={15} />
-        </button>
+        {add && onAdd && (
+          <button className="btn btn-ghost btn-icon section-add" onClick={onAdd} title={add} aria-label={add}>
+            <Icon name="plus" size={15} />
+          </button>
+        )}
       </div>
       {children}
     </section>

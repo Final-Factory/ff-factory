@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ROOT, VOICE_DEFAULTS, type Config } from './config.ts';
 import { OAUTH_TOKEN, SECRET_KEYS, maskSecret } from './secrets.ts';
+import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 
 /**
  * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
@@ -28,6 +29,10 @@ export const SETTABLE_KEYS = [
   'publicUrl',
   // The Claude account the agents run on (claude setup-token): write-only, never shown (server/secrets.ts).
   'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN',
+  // FFBox's connector (docs/ffbox-integration.md): whether it may connect (default off), and its token,
+  // write-only: only its SHA-256 is stored, as providers.ffbox.tokenSha256.
+  'providers.ffbox.enabled',
+  'providers.ffbox.token',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
@@ -113,12 +118,25 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
     }
     case 'hostGuard.cleanup.ageRules':
       return checkAgeRules(value, cfg);
+    case 'providers.ffbox.enabled': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error('providers.ffbox.enabled is true or false');
+    }
+    case 'providers.ffbox.token': {
+      // Never echo the value, not even in the error. Stored as its hash (STORED_AS).
+      if (typeof value !== 'string' || !PROVIDER_TOKEN.test(value.trim())) throw new Error('providers.ffbox.token must be a connector token (ffpv1_ and 43 characters, from `node server/providerToken.ts`); the value given is not one (not shown)');
+      return tokenSha256(value.trim());
+    }
     case 'voice.ttsVoice': {
       if (typeof value !== 'string' || !/^[a-z]{2}_[a-z]+$/.test(value.trim())) throw new Error('voice.ttsVoice is a Kokoro voice name such as "af_heart" or "bm_george"');
       return value.trim();
     }
   }
 }
+
+/** Keys stored under another name than the one set: the connector token is kept only as its hash. */
+const STORED_AS: Partial<Record<SettableKey, string>> = { 'providers.ffbox.token': 'providers.ffbox.tokenSha256' };
 
 /** Set (or with `undefined`, remove) a dotted key in a plain object. */
 function setPath(obj: Record<string, unknown>, key: string, value: unknown) {
@@ -146,8 +164,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   const v = normalizeSetting(key, value, cfg);
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
-  const before = getPath(raw, key);
-  setPath(raw, key, v);
+  const stored = STORED_AS[key] ?? key;
+  const before = getPath(raw, stored);
+  setPath(raw, stored, v);
   fs.writeFileSync(file + '.prev', text);
   fs.writeFileSync(file + '.tmp', JSON.stringify(raw, null, 2) + '\n');
   fs.renameSync(file + '.tmp', file);
@@ -165,6 +184,12 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (v === undefined) delete env.CLAUDE_CODE_OAUTH_TOKEN;
     else env.CLAUDE_CODE_OAUTH_TOKEN = v as string;
     cfg.claudeEnv = env;
+  }
+  else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.token') {
+    const ffbox = { ...cfg.providers?.ffbox };
+    if (key === 'providers.ffbox.enabled') ffbox.enabled = v as boolean | undefined;
+    else ffbox.tokenSha256 = v as string | undefined;
+    cfg.providers = { ...cfg.providers, ffbox };
   }
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'publicGitIdentity.name' || key === 'publicGitIdentity.email') {

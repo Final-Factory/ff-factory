@@ -10,6 +10,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Added
+
+- **FFBox, read-only (phase 1 of docs/ffbox-integration.md).** FFBox's connector dials out to
+  `/provider` with a token (`node server/providerToken.ts` mints one; config keeps its SHA-256) and
+  reports its container classes (network, model, tier, free slots), its conversations and the
+  crash/desync reports ffintake files. A Providers card in the sidebar and an FFBox page show them,
+  `system_status` has a line, and the orchestrator's `ffbox_activity` tool reads them as data. Off
+  unless `providers.ffbox.enabled` (settable with `set_app_config`, like the write-only
+  `providers.ffbox.token`). The connector's contract: docs/ffbox-connector-contract.md; a mock
+  connector for tests and trials: `e2e/mockConnector.ts`.
+
 ### Changed
 
 - **The chat.** Tool calls and thinking between two messages fold into one line ("Used 3 tools:

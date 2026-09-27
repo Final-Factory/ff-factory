@@ -149,6 +149,13 @@ function applyEvent(ev: ServerEvent) {
     case 'machine':
       set((s) => (s.app ? { app: { ...s.app, machines: upsertById(s.app.machines, ev.machine) } } : {}));
       return;
+    case 'provider': {
+      // Only a provider that is switched on or has a token is listed (as /api/state does).
+      const p = ev.provider;
+      const keep = p.enabled || p.tokenSet;
+      set((s) => (s.app ? { app: { ...s.app, providers: keep ? upsertById(s.app.providers ?? [], p) : (s.app.providers ?? []).filter((x) => x.id !== p.id) } } : {}));
+      return;
+    }
     case 'machine_removed':
       set((s) => (s.app ? { app: { ...s.app, machines: s.app.machines.filter((x) => x.id !== ev.id) } } : {}));
       return;

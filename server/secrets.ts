@@ -7,7 +7,8 @@ import type { Config } from './config.ts';
  * the agents run on. The value is only ever shown as "set (…last 4 chars)", and every transcript event is
  * written (and sent to the UI) with such a token redacted, so neither the orchestrator's own tool call that
  * set it nor a pasted message keeps it on disk. Discord bot tokens (and DISCORD_TOKEN / FFDISCORD_APP_TOKEN
- * values) are redacted the same way. Search reads the transcripts, so it never sees them either.
+ * values) are redacted the same way, and so are provider connector tokens (ffpv1_…, server/providerProtocol.ts).
+ * Search reads the transcripts, so it never sees them either.
  */
 
 /** A Claude Code OAuth token (`claude setup-token`). */
@@ -15,7 +16,10 @@ export const OAUTH_TOKEN = /^sk-ant-oat01-[A-Za-z0-9_-]{40,}$/;
 const OAUTH_TOKEN_ANYWHERE = /sk-ant-oat01-[A-Za-z0-9_-]{40,}/g;
 
 /** set_app_config keys whose value is never shown. */
-export const SECRET_KEYS: ReadonlySet<string> = new Set(['claudeEnv.CLAUDE_CODE_OAUTH_TOKEN']);
+export const SECRET_KEYS: ReadonlySet<string> = new Set(['claudeEnv.CLAUDE_CODE_OAUTH_TOKEN', 'providers.ffbox.token']);
+
+/** A provider connector token (server/providerProtocol.ts, PROVIDER_TOKEN). */
+const PROVIDER_TOKEN_ANYWHERE = /ffpv1_[A-Za-z0-9_-]{43}/g;
 
 /** How a secret setting reads anywhere: "set (…abcd)" or "not set". */
 export const maskSecret = (v: unknown) => (typeof v === 'string' && v ? `set (…${v.slice(-4)})` : 'not set');
@@ -32,7 +36,7 @@ const DISCORD_ASSIGNMENT = /\b((?:FF)?DISCORD(?:_APP)?_TOKEN)(\s*[=:]\s*\\?["']?
 const lastFour = (m: string) => m.slice(-4);
 
 /** Whether `text` may hold a secret this module redacts (a cheap check before the regexes). */
-const maybeSecret = (text: string) => text.includes('sk-ant-oat01-') || /DISCORD|\.[A-Za-z0-9_-]{6}\./.test(text);
+const maybeSecret = (text: string) => text.includes('sk-ant-oat01-') || text.includes('ffpv1_') || /DISCORD|\.[A-Za-z0-9_-]{6}\./.test(text);
 
 /**
  * `text` with its secrets replaced: a Claude OAuth token by "sk-ant-oat01-[redacted …abcd]", a Discord bot token
@@ -42,6 +46,7 @@ export function redactSecrets(text: string): string {
   if (!maybeSecret(text)) return text;
   return text
     .replace(OAUTH_TOKEN_ANYWHERE, (m) => `sk-ant-oat01-[redacted …${lastFour(m)}]`)
+    .replace(PROVIDER_TOKEN_ANYWHERE, (m) => `ffpv1_[redacted …${lastFour(m)}]`)
     .replace(DISCORD_ASSIGNMENT, (_m, name: string, sep: string, value: string) => (value.startsWith('[redacted') ? _m : `${name}${sep}[redacted …${lastFour(value)}]`))
     .replace(DISCORD_TOKEN_ANYWHERE, (m) => `[redacted Discord token …${lastFour(m)}]`);
 }

@@ -11,6 +11,7 @@ import { Icon } from './components/ui';
 import { StandingAgentModal } from './components/StandingModal';
 import { StandingPanel } from './components/StandingPanel';
 import { AddMachineModal, MachinePanel } from './components/MachinePanel';
+import { ProviderPanel } from './components/ProviderPanel';
 import { Toasts } from './components/Toasts';
 import { Lightbox } from './components/Images';
 import { SearchView } from './components/SearchView';
@@ -222,6 +223,24 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
       };
     }
     return { layout: 'single', title: displayName(m), node: panel };
+  }
+  if (route.view === 'provider') {
+    const p = app.providers?.find((x) => x.id === route.providerId);
+    if (!p) return { node: <Missing what="provider" />, layout: 'single', title: 'Not found' };
+    const panel = <ProviderPanel provider={p} tab={route.tab} onClose={() => navigate({ view: 'home' })} />;
+    if (wide) {
+      return {
+        layout: 'split',
+        title: p.name,
+        node: (
+          <>
+            <OrchestratorView session={orch} compact />
+            {panel}
+          </>
+        ),
+      };
+    }
+    return { layout: 'single', title: p.name, node: panel };
   }
   if (route.view === 'agent') {
     const a = app.standingAgents.find((x) => x.id === route.agentId);

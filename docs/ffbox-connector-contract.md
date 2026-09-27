@@ -1,0 +1,249 @@
+# FFBox connector contract (provider protocol 1)
+
+What FFBox's connector must do to talk to FF Factory. Written for Lothsahn, who builds the connector in
+the ffbox repo. The design and the reasons behind it are in [ffbox-integration.md](ffbox-integration.md).
+FF Factory's side is `server/providers.ts`. The schemas are in `server/providerProtocol.ts`, the
+source of truth when this page and the code disagree. A working reference client is
+`e2e/mockConnector.ts`.
+
+Protocol 1 is **read-only**. The connector reports capacity, conversations and intake reports, and
+FF Factory records and shows them. Nothing FF Factory sends asks FFBox to do anything.
+
+## The shape
+
+- The connector **dials out** to `wss://<FF Factory public URL>/provider`, which is the Tailscale Funnel
+  URL. FFBox opens no port and does not join the tailnet.
+- One connection at a time. A newer connection with the same token replaces the older one (close
+  `4000`).
+- JSON text frames, one message per frame, at most 64 KB each. Binary frames are ignored.
+- The connector is fixed code with no model. It runs as its own unix account and holds only its
+  token. It reads FFBox state through `ffwatch` (for example `ffwatch intake-events --since <cursor>
+  --json`), never by opening report zips.
+
+## Auth
+
+- The token looks like `ffpv1_` followed by 43 base64url characters (`^ffpv1_[A-Za-z0-9_-]{43}$`).
+  Ben mints it on the FF Factory host with `node server/providerToken.ts`, which prints it once. FF
+  Factory keeps only its SHA-256, in `config.json` as `providers.ffbox.tokenSha256`. The token
+  reaches FFBox out of band and goes into FFBox's secrets file. Keep it out of argv, logs and
+  containers, like every other FFBox secret.
+- It is sent on the upgrade request as `Authorization: Bearer <token>`.
+- FF Factory must also have `providers.ffbox.enabled: true`. The default is off.
+- FF Factory redacts anything shaped like a token from transcripts (`ffpv1_[redacted …abcd]`).
+
+The upgrade answers:
+
+| status | meaning | connector does |
+|---|---|---|
+| `101` | connected | send `hello` within 10 s |
+| `401` | no token, a malformed token, or not the configured one | check its secret; retry in 10 minutes |
+| `403` | the token is right, but FF Factory has the provider switched off | retry in 5 minutes |
+| `429` | 10 failed attempts from this address in 15 minutes | retry in 15 minutes |
+| anything else, or no answer (a `502` while FF Factory restarts, a network error) | FF Factory is down or restarting | the normal backoff below |
+
+## Handshake
+
+The connector's first message is `hello`:
+
+```json
+{ "type": "hello", "protocol": 1, "provider": "ffbox",
+  "connector": { "version": "1.0.0", "commit": "abc1234" },
+  "web": "https://ffbox.lan:8787" }
+```
+
+| field | rule |
+|---|---|
+| `protocol` | must be `1`. Any other number closes with `4426` |
+| `provider` | `"ffbox"` |
+| `connector.version` | 1-40 characters of `A-Z a-z 0-9 . _ + -` |
+| `connector.commit` | optional, 7-40 hex characters |
+| `web` | optional, an `https://` URL where people read FFBox's own page. FF Factory only links to it and never fetches it, so a LAN address is fine |
+
+FF Factory answers with `welcome`:
+
+```json
+{ "type": "welcome", "protocol": 1, "provider": "ffbox",
+  "cursors": { "conversation": "2026-09-27T09:20:00Z#812", "intake": "20260927T090000Z-desync-3a9f01c2d4" },
+  "limits": { "maxMessageBytes": 65536, "messagesPerSecond": 100, "burst": 1000, "helloTimeoutMs": 10000, "invalidPerMinute": 20 } }
+```
+
+`cursors` holds the `cursor` of the last `conversation` and `intake` message FF Factory stored. A
+stream FF Factory has never seen has no cursor. After the welcome, the connector sends the current
+`capacity`, then everything newer than each cursor, oldest first, and then live updates as they
+happen.
+
+## Messages from the connector
+
+Unknown fields are dropped, and a field that fails its rule makes the message invalid.
+
+### `capacity`
+
+What each container class offers now. Send it after the welcome, whenever a number changes, and at
+least every 5 minutes.
+
+```json
+{ "type": "capacity", "queue": 2, "state": "running", "holds": [],
+  "classes": [
+    { "name": "ffagent",    "network": "fenced", "gpu": false, "model": "claude-sonnet-5", "tier": "full",
+      "unity": ["batchmode", "playtest-softgl"], "free": 4, "max": 6, "note": "player text; no git credential" },
+    { "name": "ffdev",      "network": "open",   "gpu": false, "model": "glm-5.3-flash",   "tier": "simple",
+      "unity": ["batchmode"], "free": 1, "max": 3, "note": "small, well-scoped work only" },
+    { "name": "ffdiagnose", "network": "fenced", "gpu": false, "model": "claude-opus-5-5", "tier": "full",
+      "unity": ["batchmode", "mode2-pair"], "free": 2, "max": 3 } ] }
+```
+
+The model names in this example are illustrative, except `ffdev`'s (GLM-5.3 Flash, per Lothsahn).
+
+| field | rule |
+|---|---|
+| `classes[].name` | `^[a-z][a-z0-9_-]{0,31}$`; at most 10 classes |
+| `network` | `fenced` (the egress fence, no git credential) or `open` (the internet) |
+| `gpu` | a boolean. `false` for every FFBox class today |
+| `model` | the model the class's runs use, `^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,63}$` |
+| `tier` | `full` (any well-briefed task) or `simple` (small, well-scoped work only: small fixes, triage, log reading, docs, dependency bumps). The orchestrator routes by it |
+| `unity` | the Unity modes a run of this class can use: `batchmode`, `playtest-softgl`, `mode2-pair`, `editor-mcp`. Other words matching `^[a-z0-9][a-z0-9-]{0,31}$` are kept as given. At most 12 |
+| `free`, `max` | whole numbers from 0 to 1,000,000 |
+| `note` | optional, at most 200 characters, shown as given |
+| `queue` | turns waiting for a container |
+| `state` | `running`, `draining`, `updating` or `stopped` |
+| `holds` | why work waits, one line each (a subscription hold, quiet hours); at most 10 of 160 characters |
+
+### `conversation`
+
+One conversation, new or changed. Send it on every state change. FF Factory keeps the newest 500,
+keyed by `id`.
+
+```json
+{ "type": "conversation", "cursor": "2026-09-27T09:20:00Z#812",
+  "conversation": { "id": "812", "source": "intake", "opener": "operator",
+    "title": "Desync minerBots+census at heartbeat 7240", "state": "running", "agentClass": "ffdiagnose",
+    "branch": "ffbox/miner-census-812", "key": "desync:0.50.0:minerBots+census",
+    "createdAt": "2026-09-27T09:00:00Z", "updatedAt": "2026-09-27T09:20:00Z" } }
+```
+
+| field | rule |
+|---|---|
+| `cursor` | 1-120 characters, opaque to FF Factory. It must increase in the order the connector sends; `<updated_at>#<id>` works |
+| `id` | `^[A-Za-z0-9._:-]{1,80}$`, FFBox's conversation id |
+| `source` | `discord`, `intake`, `codereview`, `fff`, `shell`, `web` or `other` |
+| `opener` | `operator`, `player`, `fff` or `system`. **Never a name, handle or id** |
+| `title` | up to 2000 characters, of which FF Factory keeps 300. **Untrusted text**: it can quote a player. FF Factory strips control characters, redacts secrets, renders it as plain text and treats it as data. Still, prefer FFBox's own summary title over a player's raw words |
+| `state` | `queued`, `running`, `idle`, `blocked` or `closed` |
+| `agentClass` | the class of its latest turn |
+| `branch` | optional, `^[A-Za-z0-9._/+-]{1,200}$` |
+| `pr` | optional, `{ "number": 640, "state": "open" \| "merged" \| "closed" }` |
+| `verdict` | optional, `^[A-Z][A-Z-]{0,39}$`, for example `NEEDS-INFO` or `ESCALATE` |
+| `costUsd` | optional, 0 or more |
+| `key` | optional, the board's dedupe key when FFBox knows it (`^[A-Za-z0-9_:#.+/-]{1,160}$`), for example `desync:0.50.0:minerBots+census` |
+| `url` | optional, `https://`, where a person reads it on FFBox's page |
+| `createdAt`, `updatedAt` | ISO 8601 with a zone |
+
+### `intake`
+
+One report `ffintake` filed. Send it once per report, in the order they were filed. FF Factory keeps the
+newest 2000 and ignores a `reportId` it already has.
+
+```json
+{ "type": "intake", "cursor": "20260927T090000Z-desync-3a9f01c2d4",
+  "event": { "reportId": "20260927T090000Z-desync-3a9f01c2d4", "kind": "desync",
+    "receivedAt": "2026-09-27T09:00:00Z", "gameVersion": "0.50.0.35", "platform": "WindowsPlayer",
+    "bytes": 2400000, "sender": "3ace6eea57acd768",
+    "desync": { "group": "fc5620980cd46738", "correlationId": "7-7240-2", "divergedClient": 2,
+      "role": "host", "localClient": 0, "sessionEpoch": 7, "verdictHeartbeat": 7240,
+      "divergedSurfaces": "minerBots+census", "happenedAt": "2026-09-27T08:59:40Z" } } }
+```
+
+**Only facts `ffintake` computed or pattern-checked go in here: its manifest and the `desync` block.**
+Never send the description, log lines, file names from inside the zip, or the sender's address.
+
+| field | rule |
+|---|---|
+| `cursor` | as for conversations; the report id works, since ids sort by receive time |
+| `reportId` | `^\d{8}T\d{6}Z-(crash\|desync)-[0-9a-f]{6,32}$` |
+| `kind` | `crash` or `desync` |
+| `receivedAt` | ISO 8601 with a zone |
+| `gameVersion`, `platform` | `^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`, as `ffintake` checked them |
+| `bytes` | the report's size |
+| `sender` | optional, 8-64 hex characters. **Re-key `address_hash`** with a salt kept on FFBox (HMAC-SHA256 of the hash, first 16 hex characters is plenty), so FF Factory can count distinct senders but cannot match FFBox's hashes |
+| `desync` | optional. The fields of `ffintake`'s `desync` block, camel-cased: `group` (hex or null), `correlationId`, `divergedClient`, `role` (`host`/`client`), `localClient`, `sessionEpoch`, `verdictHeartbeat`, `divergedSurfaces` (`ffintake`'s `SURFACES_RE`), `happenedAt`, `why` (`^[a-z_]{1,40}$`). Leave `session_guid` and the combined fingerprints out: FF Factory does not need them |
+
+## Messages from FF Factory
+
+| message | when |
+|---|---|
+| `welcome` | the answer to a valid `hello` (above) |
+| `error` | `{ "type": "error", "code": "bad_json" \| "bad_message" \| "unknown_type" \| "hello_twice", "message": "…", "ref": "<type>" }`. A message was not taken, and the connection stays up. `message` names the field and the rule, never the value. Log it |
+
+Ignore any other message type: protocol 2 may add some.
+
+## Limits and close codes
+
+- Rate: a token bucket of 1000 messages refilled at 100 a second, which is enough for a catch-up of
+  a few thousand messages. Pace a larger backlog. Past the limit, FF Factory closes with `4429`.
+- More than 20 invalid messages in a minute closes with `4400`.
+- FF Factory pings every 20 s and drops a connection that has been silent for 45 s. The connector
+  should do the same: answer pings (any WebSocket library does), and treat 45 s without a frame or
+  pong as a dead link, then reconnect.
+
+| close | meaning | connector does |
+|---|---|---|
+| `1000`, `1001` | normal, or FF Factory shutting down | the normal backoff |
+| `4000` | replaced by a newer connection with the same token | nothing, if that was this connector's own reconnect; otherwise log it, because two connectors share one token |
+| `4400` | the first message was not a valid `hello`, or too many invalid messages | fix, then retry in 5 minutes |
+| `4403` | switched off in FF Factory while connected | retry in 5 minutes |
+| `4408` | no `hello` within 10 s | the normal backoff |
+| `4426` | FF Factory speaks another protocol | stop, say so in FFBox's journal and status, and retry every hour (an update on either side fixes it) |
+| `4429` | too many messages | wait 60 s, then send more slowly |
+
+## Reconnect and backoff
+
+The same pacing the Mac daemons use (`machine/daemon.ts`, `reconnectDelayMs`), which is tuned to how
+long an FF Factory restart takes (20-60 s):
+
+- For the first 2 minutes after a drop: retry every 2 s × a random factor between 0.75 and 1.25.
+- After that: `min(60 s, 1 s × 2^attempt)` with the same jitter.
+- A refused upgrade (`502` from the proxy while FF Factory is down, or a connection error) ends the
+  attempt at once. Do not wait out the handshake timeout.
+- `401`, `403`, `429`, `4400`, `4403`, `4426` and `4429` use their own waits from the tables above,
+  not the fast retry.
+- After any reconnect, send `hello` again, and resume from the cursors in the new `welcome`, not from
+  memory.
+
+## Kill switch
+
+Either side can end the link on its own:
+
+| side | how | effect |
+|---|---|---|
+| FFBox | a file, `~/.config/ffbox/fff.disabled` (or wherever Lothsahn prefers), checked every 5 s | the connector closes with `1000` and does not reconnect until the file is gone |
+| FFBox | stop the connector's unit | the same, until it is started |
+| FF Factory | `providers.ffbox.enabled: false` (`set_app_config` or `config.json`) | the live connection closes with `4403`; new ones get `403` |
+| FF Factory | `node server/providerToken.ts --revoke`, or a new token | every connection gets `401` |
+
+## Security checklist for the connector
+
+- No model and no shell built from message content. Protocol 1 needs nothing from FF Factory except
+  `welcome` and `error`.
+- It reads FFBox state through `ffwatch`'s CLI or a read-only view, and never opens a report zip.
+- Its account holds its token and nothing else: not `secrets.env`, not the Docker socket, and not
+  the `ffintake` group if `ffwatch intake-events` exists.
+- TLS verification on (Funnel has a real certificate), and `wss://` only.
+- The token stays out of argv and logs, and is rotated by minting a new one.
+- No player names, Discord or GitHub ids, addresses or report contents in any message.
+
+## Testing against FF Factory
+
+1. On a development FF Factory (see the README's Development section), set
+   `"providers": { "ffbox": { "enabled": true } }` in the test `config.json`, and run `node
+   server/providerToken.ts` with `FFSB_CONFIG` pointing at it.
+2. `node e2e/mockConnector.ts http://127.0.0.1:8790 <token>` connects, sends sample data and stays
+   connected. The FFBox card appears in the sidebar and its page lists the samples.
+3. `node --test server/providers.test.ts` holds FF Factory's side of this contract: tokens, statuses,
+   the handshake, validation, limits, close codes, cursors across a restart.
+
+## Versioning
+
+Additive changes keep protocol 1: a new optional field, a new message type from FF Factory (which the
+connector ignores), or a new `unity` mode. A change that needs both sides updated bumps
+`PROVIDER_PROTOCOL`. FF Factory then closes old connectors with `4426`, which tells them to wait for
+an update.

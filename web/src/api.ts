@@ -8,6 +8,8 @@ import type {
   ImageInput,
   Machine,
   NotifyPrefs,
+  ProviderConversation,
+  ProviderIntakeEvent,
   PermissionMode,
   Sandbox,
   SearchHit,
@@ -76,6 +78,9 @@ export const api = {
   login: (username: string, password: string) => request<{ username: string }>('POST', '/api/login', { username, password }),
   logout: () => request<unknown>('POST', '/api/logout'),
   state: () => request<AppState>('GET', '/api/state'),
+  // FFBox, as its connector reported it (docs/ffbox-integration.md): newest first.
+  providerConversations: (limit = 100) => request<ProviderConversation[]>('GET', `/api/providers/ffbox/conversations?limit=${limit}`),
+  providerIntake: (limit = 200) => request<ProviderIntakeEvent[]>('GET', `/api/providers/ffbox/intake?limit=${limit}`),
   events: (sessionId: string, limit = 500) =>
     request<TranscriptEvent[]>('GET', `/api/sessions/${enc(sessionId)}/events?limit=${limit}`),
   /** `note` is set for a standing agent: what the message did (started a run, joined one, waited). */

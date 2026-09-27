@@ -17,6 +17,9 @@ const CHROME_IPAD_UA =
   'Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/140.0.7339.122 Mobile/15E148 Safari/604.1';
 
 const IPAD = /ipad\.spec\.ts/;
+// FFBox's card and page (e2e/provider.spec.ts) run on servers of their own with the provider switched on
+// (E2E_PROVIDER=1), so the sidebar every other test and snapshot sees stays as it was.
+const PROVIDER = /provider\.spec\.ts/;
 
 const PROJECTS = [
   { name: 'desktop-chromium', port: 8791, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
@@ -25,9 +28,11 @@ const PROJECTS = [
   // iPhone 13: 390 px wide, WebKit (Safari's engine).
   { name: 'mobile-safari', port: 8793, use: { ...devices['iPhone 13'] } },
   // iPad Pro 11 (834 x 1194), in Safari and in Chrome: the iPad tests only (e2e/ipad.spec.ts).
-  { name: 'ipad-safari', port: 8794, use: { ...devices['iPad Pro 11'] }, ipad: true },
-  { name: 'ipad-chrome', port: 8795, use: { ...devices['iPad Pro 11'], userAgent: CHROME_IPAD_UA }, ipad: true },
-];
+  { name: 'ipad-safari', port: 8794, use: { ...devices['iPad Pro 11'] }, only: IPAD },
+  { name: 'ipad-chrome', port: 8795, use: { ...devices['iPad Pro 11'], userAgent: CHROME_IPAD_UA }, only: IPAD },
+  { name: 'provider-desktop', port: 8796, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } }, only: PROVIDER, env: { E2E_PROVIDER: '1' } },
+  { name: 'provider-mobile', port: 8797, use: { ...devices['Pixel 5'] }, only: PROVIDER, env: { E2E_PROVIDER: '1' } },
+] as { name: string; port: number; use: Record<string, unknown>; only?: RegExp; env?: Record<string, string> }[];
 
 export default defineConfig({
   testDir: './e2e',
@@ -55,12 +60,12 @@ export default defineConfig({
   projects: PROJECTS.map((p) => ({
     name: p.name,
     use: { ...p.use, baseURL: `http://127.0.0.1:${p.port}` },
-    ...(p.ipad ? { testMatch: IPAD } : { testIgnore: IPAD }),
+    ...(p.only ? { testMatch: p.only } : { testIgnore: [IPAD, PROVIDER] }),
   })),
   webServer: PROJECTS.map((p) => ({
     command: 'node e2e/server.ts',
     url: `http://127.0.0.1:${p.port}/api/health`,
-    env: { E2E_PORT: String(p.port) },
+    env: { E2E_PORT: String(p.port), ...p.env },
     reuseExistingServer: !CI,
     timeout: 60_000,
     stdout: 'ignore',

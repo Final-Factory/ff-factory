@@ -10,16 +10,21 @@
  *   sandbox "gallery"  one idle worker with a seeded transcript, for visual snapshots; never changed
  *   sandbox "stuck"    Unity blocked on a dialog (the watchdog's badge)
  *   login              tester / e2e-password-123
+ *   provider "ffbox"   only with E2E_PROVIDER=1 (the provider projects, e2e/provider.spec.ts): switched on, with
+ *                      E2E_PROVIDER_TOKEN as its connector token. Off everywhere else, so no other page changes.
  */
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { RED_PNG, fakeQuery } from './fakeAgent.ts';
+import { E2E_PROVIDER_TOKEN } from './mockConnector.ts';
 
 export const USER = 'tester';
 export const PASSWORD = 'e2e-password-123';
+const withProvider = process.env.E2E_PROVIDER === '1';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const port = Number(process.env.E2E_PORT ?? 8791);
@@ -75,6 +80,7 @@ fs.writeFileSync(
       orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false },
       worker: { permissionMode: 'bypassPermissions', effort: 'low' },
       voice: { enabled: false, autoInstall: false, tts: false },
+      ...(withProvider ? { providers: { ffbox: { enabled: true, tokenSha256: createHash('sha256').update(E2E_PROVIDER_TOKEN).digest('hex') } } } : {}),
     },
     null,
     2,
