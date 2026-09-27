@@ -17,7 +17,7 @@ import type { SessionHandle } from './sessions.ts';
 import { systemStats } from './system.ts';
 import { Auth } from './auth.ts';
 import { handleMcp } from './mcp.ts';
-import { IMAGE_TYPES, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
+import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { scrubTranscripts } from './secrets.ts';
@@ -792,6 +792,8 @@ server.on('upgrade', (req, socket, head) => {
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     clients.add(ws);
+    alive.add(ws);
+    ws.on('pong', () => alive.add(ws));
     ws.on('close', () => clients.delete(ws));
     // A malformed frame (e.g. unmasked) emits 'error'; unhandled, that would kill the process.
     ws.on('error', (e) => {
@@ -817,6 +819,24 @@ function sendStream(req: http.IncomingMessage, res: http.ServerResponse, f: Stre
   res.on('close', () => stream.destroy());
   stream.pipe(res);
 }
+
+// Sockets die silently (a laptop asleep, a phone suspending the tab, a NAT or proxy dropping an idle
+// connection): no close ever arrives, so neither side would notice. Every SOCKET_PING_MS the server
+// drops the sockets that did not answer the last protocol ping, and sends each page a 'ping' event it
+// can see (browsers hide protocol pings), so a page that hears nothing knows to reconnect and refetch.
+const alive = new WeakSet<WebSocket>();
+setInterval(() => {
+  for (const c of clients) {
+    if (!alive.has(c)) {
+      clients.delete(c);
+      c.terminate();
+      continue;
+    }
+    alive.delete(c);
+    c.ping();
+  }
+  broadcast({ type: 'ping' });
+}, SOCKET_PING_MS);
 
 function broadcast(e: ServerEvent) {
   const data = JSON.stringify(e);

@@ -1,3 +1,4 @@
+import { SOCKET_PING_MS } from '../../shared/types';
 import type {
   AppSettings,
   AppState,
@@ -157,6 +158,9 @@ export interface SocketHandlers {
   onFailure: () => Promise<boolean>;
 }
 
+/** Heard nothing (not even the server's ping) for this long: the socket is dead, even if it still reads open. */
+export const SOCKET_STALE_MS = SOCKET_PING_MS * 3;
+
 /** A self-healing WebSocket to /ws with exponential backoff. */
 export function connectSocket(h: SocketHandlers): () => void {
   let ws: WebSocket | null = null;
@@ -164,6 +168,8 @@ export function connectSocket(h: SocketHandlers): () => void {
   let attempt = 0;
   let everOpened = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  /** When the open socket last delivered anything. */
+  let heard = 0;
 
   const url = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
 
@@ -176,18 +182,20 @@ export function connectSocket(h: SocketHandlers): () => void {
     sock.onopen = () => {
       opened = true;
       attempt = 0;
+      heard = Date.now();
       h.onStatus('open');
       if (everOpened) h.onReconnect();
       everOpened = true;
     };
     sock.onmessage = (m) => {
+      heard = Date.now();
       let ev: ServerEvent;
       try {
         ev = JSON.parse(typeof m.data === 'string' ? m.data : '');
       } catch {
         return;
       }
-      h.onEvent(ev);
+      if (ev.type !== 'ping') h.onEvent(ev);
     };
     sock.onclose = async () => {
       if (ws !== sock) return;
@@ -204,9 +212,20 @@ export function connectSocket(h: SocketHandlers): () => void {
     };
   };
 
+  // A socket that died without a close (a laptop asleep, a phone that suspended the tab, a dropped
+  // connection) still reads open and just goes quiet: everything sent meanwhile, such as a message
+  // typed on another device, would never show here. Replace it; the reconnect refetches the gap.
+  const dropIfStale = () => {
+    if (!ws || stopped || ws.readyState !== WebSocket.OPEN || Date.now() - heard < SOCKET_STALE_MS) return false;
+    const dead = ws;
+    ws = null; // its onclose, if it ever comes, is then ignored
+    dead.close();
+    return true;
+  };
+
   // Reconnect promptly when a phone wakes up / the tab comes back.
   const wake = () => {
-    if (document.visibilityState === 'visible' && !ws && !stopped) {
+    if (document.visibilityState === 'visible' && !stopped && (!ws || dropIfStale())) {
       clearTimeout(timer);
       attempt = 0;
       open();
@@ -214,11 +233,19 @@ export function connectSocket(h: SocketHandlers): () => void {
   };
   document.addEventListener('visibilitychange', wake);
   window.addEventListener('online', wake);
+  const watchdog = setInterval(() => {
+    if (dropIfStale()) {
+      clearTimeout(timer);
+      attempt = 0;
+      open();
+    }
+  }, SOCKET_PING_MS);
 
   open();
   return () => {
     stopped = true;
     clearTimeout(timer);
+    clearInterval(watchdog);
     document.removeEventListener('visibilitychange', wake);
     window.removeEventListener('online', wake);
     ws?.close();

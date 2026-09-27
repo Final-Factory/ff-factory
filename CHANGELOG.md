@@ -30,6 +30,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Messages sent from another device now show up.** A page whose WebSocket had died silently (a
+  laptop asleep, a phone suspending the tab, a dropped connection) kept it as if open and showed
+  nothing new until a reload. The server now pings every 15 s and drops sockets that stop
+  answering; a page that hears nothing for 45 s (checked on a timer and when it comes back into
+  view) opens a new socket and refetches what it missed.
+
 - iPad with a hardware keyboard, in Safari and Chrome: the message box is no longer a form field, so
   Chrome's AutoFill bar (passwords, cards, addresses) has nothing to attach to, and the app keeps its
   full height under the keyboard's bar instead of leaving an empty band. Focusing the box no longer

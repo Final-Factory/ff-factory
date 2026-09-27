@@ -57,3 +57,73 @@ test('orchestrator: on a touch keyboard Enter is a new line and the Send button 
   // With the box empty again, the primary slot is voice mode, not Send.
   await expect(page.locator('.orch .composer').getByRole('button', { name: 'Voice mode' })).toBeVisible();
 });
+
+test('orchestrator: a message sent from another device shows up without a reload', async ({ authed: page, browser }) => {
+  test.skip(isMobile(page), 'one project is enough: two desktop windows on one server');
+  // The second device: a separate browser context (its own cookies, its own socket), same account.
+  const other = await browser.newContext({ baseURL: test.info().project.use.baseURL, viewport: { width: 1440, height: 900 } });
+  try {
+    const phone = await other.newPage();
+    await signIn(phone);
+    await phone.goto('/');
+    const tag = uniq('dev');
+    // Both windows have the chat open before the message goes out.
+    await expect(page.locator(`.orch ${BOX}`)).toBeVisible();
+    await expect(phone.locator(`.orch ${BOX}`)).toBeVisible();
+
+    const box = phone.locator(`.orch ${BOX}`);
+    await box.fill(`from the phone ${tag}`);
+    await box.press('Enter');
+    await expect(phone.locator('.orch .msg-user', { hasText: tag })).toBeVisible();
+
+    // The first window never sent it, and must still show it: the message, then the reply.
+    await expect(page.locator('.orch .msg-user', { hasText: tag })).toBeVisible();
+    await expect(page.locator('.orch .msg-assistant', { hasText: `Echo: from the phone ${tag}` })).toBeVisible();
+  } finally {
+    await other.close();
+  }
+});
+
+test('orchestrator: a window whose socket died silently catches up on messages sent meanwhile', async ({ page, browser }) => {
+  test.skip(isMobile(page), 'one project is enough: two desktop windows on one server');
+  // The desktop's first socket stays "open" but delivers nothing more, as after a laptop sleeps or a
+  // phone suspends the tab: no close event ever comes. Later sockets are healthy.
+  let socketsOpened = 0;
+  let firstDead = false;
+  await page.routeWebSocket('/ws', (ws) => {
+    const n = ++socketsOpened;
+    const server = ws.connectToServer();
+    server.onMessage((m) => {
+      if (!(n === 1 && firstDead)) ws.send(m);
+    });
+    ws.onMessage((m) => server.send(m));
+  });
+  await page.clock.install();
+  await signIn(page);
+  await page.goto('/');
+  await expect(page.locator(`.orch ${BOX}`)).toBeVisible();
+  await expect.poll(() => socketsOpened).toBe(1);
+
+  const other = await browser.newContext({ baseURL: test.info().project.use.baseURL, viewport: { width: 1440, height: 900 } });
+  try {
+    const phone = await other.newPage();
+    await signIn(phone);
+    await phone.goto('/');
+    firstDead = true;
+    const tag = uniq('zombie');
+    const box = phone.locator(`.orch ${BOX}`);
+    await box.fill(`while you slept ${tag}`);
+    await box.press('Enter');
+    await expect(phone.locator('.orch .msg-assistant', { hasText: `Echo: while you slept ${tag}` })).toBeVisible();
+
+    // The desktop heard none of it.
+    await expect(page.locator('.orch .msg-user', { hasText: tag })).toHaveCount(0);
+    // A minute of silence: the page gives up on that socket, opens a new one, and refetches.
+    await page.clock.fastForward(60_000);
+    await expect.poll(() => socketsOpened).toBe(2);
+    await expect(page.locator('.orch .msg-user', { hasText: tag })).toBeVisible();
+    await expect(page.locator('.orch .msg-assistant', { hasText: `Echo: while you slept ${tag}` })).toBeVisible();
+  } finally {
+    await other.close();
+  }
+});

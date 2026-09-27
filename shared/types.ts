@@ -495,7 +495,12 @@ export type ServerEvent =
   | { type: 'delta'; sessionId: string; text: string }
   | { type: 'system'; system: SystemStats }
   | { type: 'host'; host: HostStatus }
-  | { type: 'usage'; usage: PlanUsage };
+  | { type: 'usage'; usage: PlanUsage }
+  /** Keep-alive, every SOCKET_PING_MS: a page that hears nothing for longer treats its socket as dead. */
+  | { type: 'ping' };
+
+/** How often the server pings every browser socket (server/index.ts); the page's staleness limit is a few of these. */
+export const SOCKET_PING_MS = 15_000;
 
 // ---- REST request bodies ----
 
