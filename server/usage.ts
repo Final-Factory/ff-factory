@@ -21,11 +21,14 @@ import type { AccountUsage, PlanUsage, SessionInfo, UsageMeter } from '../shared
  * Agents keep using their own token.
  *
  * Every account in use (README, "Claude plan" meters): the agents' token is a separate account from that stored login
- * as far as anything here can tell, so it is polled too. Its usage request carries the token with
- * CLAUDE_CODE_OAUTH_SCOPES naming user:profile as well: the scope list above is only the CLI's
- * assumption about the token, and the usage endpoint answers a setup-token (checked 2026-09-27). Each
- * Mac's own login is polled by its daemon and reported to the portal (protocol 4). Accounts are told
- * apart by the login's email (accountInfo) or the token's last 4 characters, never by the credential.
+ * as far as anything here can tell, so it is polled too, but NOT through the CLI: given the token (and
+ * CLAUDE_CODE_OAUTH_SCOPES naming user:profile) the CLI still answers get_usage with the stored login's
+ * numbers. Measured 2026-09-27 on BEAST: a made-up token got the login's exact numbers back, and with the
+ * login hidden (an empty CLAUDE_CONFIG_DIR) it got none. So a token is sent to the usage endpoint itself
+ * (fetchTokenUsage), its only credential, and a failure there is "unknown", never another account's
+ * numbers. Each Mac's own login is polled by its daemon and reported to the portal (protocol 4).
+ * Accounts are told apart by the login's email (accountInfo) or the token's last 4 characters, never by
+ * the credential.
  */
 
 /** The parts of the SDK's usage reply we read. Everything is optional: the API is marked experimental. */
@@ -106,7 +109,7 @@ export function usageSummary(u: PlanUsage | undefined, now: Date): string {
     return `Claude plan usage: unavailable (${u.why ?? 'unknown'}), ${asOf}${spend}`;
   }
   const fmt = (m: UsageMeter) => `${m.label} ${Math.round(m.percent)}% used${m.resetsAt ? `, ${describeReset(m.resetsAt, now)}` : ''}`;
-  return `Claude plan (${u.plan ?? '?'}) usage, ${asOf}: ${[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt).join('; ')}`;
+  return `Claude plan${u.plan ? ` (${u.plan})` : ''} usage, ${asOf}: ${[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt).join('; ')}`;
 }
 
 /**
@@ -239,20 +242,12 @@ export interface AccountIdentity {
   plan?: string;
 }
 
-/** The scopes the token's usage request declares (see the top of this file). */
-export const TOKEN_SCOPES = 'user:inference user:profile';
-
 /** A token's account key: a hash prefix, so equal tokens are one account and the key reveals nothing. */
 export const tokenKey = (token: string) => `token:${createHash('sha256').update(token).digest('hex').slice(0, 12)}`;
 export const tokenLabel = (token: string) => `host token …${token.slice(-4)}`;
 /** This host's own login. Not "login:<id>": a machine may be called "host" (MACHINE_ID). */
 export const HOST_LOGIN = 'host:login';
 export const machineLogin = (machineId: string) => `login:${machineId}`;
-
-/** The usage request's environment for a token: the stored-login environment plus the token and both scopes. */
-export function tokenUsageEnv(env: Record<string, string | undefined>, token: string): Record<string, string | undefined> {
-  return { ...usageEnv(env), CLAUDE_CODE_OAUTH_TOKEN: token, CLAUDE_CODE_OAUTH_SCOPES: TOKEN_SCOPES };
-}
 
 /** The token the host's agents run on (claudeEnv over the server's own environment), if any. */
 export function hostToken(cfg: Pick<Config, 'claudeEnv'>, env: Record<string, string | undefined> = process.env): string | undefined {
@@ -288,6 +283,11 @@ export interface UsageEntry {
   label?: string;
   account?: AccountIdentity;
   usage?: PlanUsage;
+  /**
+   * Tokens: these numbers came from a request carrying this token itself (fetchTokenUsage). A token entry
+   * without it was saved before that fix, when the CLI answered with the stored login's numbers: dropped.
+   */
+  direct?: boolean;
 }
 
 export interface AccountContext {
@@ -391,8 +391,67 @@ export async function fetchPlanUsage(
   }
 }
 
+/** The endpoint behind get_usage (Claude Code's /usage). It answers a setup-token too. */
+export const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+
+/** A token's usage request that failed. `retryAfterMs`: how long the endpoint asked us to wait (HTTP 429). */
+export class UsageFetchError extends Error {
+  readonly retryAfterMs?: number;
+  constructor(message: string, retryAfterMs?: number) {
+    super(message);
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** Keeps any credential out of a message that came from elsewhere. */
+const scrub = (s: string) => s.replace(/sk-ant-[\w-]+/g, 'sk-ant-…');
+
+/**
+ * A token's plan usage, asked of the usage endpoint with that token as the only credential: no CLI, so
+ * nothing can fall back to a login stored on this machine (top of this file). The reply has the same
+ * shape as the SDK's rate_limits, so parseUsage reads it. Throws UsageFetchError, whose message never
+ * holds the token.
+ */
+export async function fetchTokenUsage(token: string, fetchImpl: typeof fetch = fetch, timeoutMs = 30_000): Promise<UsageReply> {
+  let res: Response;
+  try {
+    res = await fetchImpl(USAGE_URL, { headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    throw new UsageFetchError(`the usage endpoint could not be reached: ${scrub((e as Error).message).slice(0, 150)}`);
+  }
+  if (!res.ok) {
+    let detail = '';
+    try {
+      detail = ((await res.json()) as { error?: { message?: string } }).error?.message ?? '';
+    } catch {
+      // no JSON body
+    }
+    const seconds = Number(res.headers.get('retry-after'));
+    const retryAfterMs = res.status === 429 ? (Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : REFRESH_MS) : undefined;
+    const what =
+      res.status === 401 ? 'the token was rejected (expired or revoked?)'
+      : res.status === 403 ? 'the token may not read usage'
+      : retryAfterMs ? `the usage endpoint rate-limits this token, next try in ${Math.ceil(retryAfterMs / 60_000)} min`
+      : 'the usage endpoint failed';
+    throw new UsageFetchError(`${what} (HTTP ${res.status}${detail ? `: ${scrub(detail).slice(0, 150)}` : ''})`, retryAfterMs);
+  }
+  let body: UsageReply['rate_limits'];
+  try {
+    body = (await res.json()) as UsageReply['rate_limits'];
+  } catch {
+    throw new UsageFetchError('the usage endpoint answered with something other than JSON');
+  }
+  return { rate_limits_available: true, rate_limits: body };
+}
+
 /** The stored login cannot be used: fall back to spend without starting the CLI. */
 class LoginProblem extends Error {}
+
+/** "Weekly 41%, Session (5 h) 33%" for the poll log. */
+const brief = (u: PlanUsage) =>
+  u.available
+    ? [u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map((m) => `${m.label} ${Math.round(m.percent)}%`).join(', ')
+    : `no numbers: ${u.why ?? 'unknown'}`;
 
 // ---------------------------------------------------------------- the tracker
 
@@ -402,6 +461,16 @@ const EVENT_DEBOUNCE_MS = 60_000;
 /** What usage.json holds; a file from before per-account usage is one PlanUsage (this host's login). */
 interface UsageFile {
   entries: Record<string, UsageEntry>;
+}
+
+/** How the tracker reaches the network and its log; tests pass fakes. */
+export interface UsageDeps {
+  /** This host's stored login, through the CLI (fetchPlanUsage). */
+  fetchLogin?: (env: Record<string, string | undefined>) => Promise<{ reply: UsageReply; account: AccountIdentity }>;
+  /** A token, straight to the endpoint (fetchTokenUsage). */
+  fetchToken?: (token: string) => Promise<UsageReply>;
+  /** One line per poll: which credential, whether it answered. Never a credential. */
+  log?: (line: string) => void;
 }
 
 /**
@@ -419,16 +488,26 @@ export class UsageTracker {
   private lastFetch = 0;
   private soon?: NodeJS.Timeout;
   private readonly changed: () => void;
+  private readonly fetchLogin: NonNullable<UsageDeps['fetchLogin']>;
+  private readonly fetchToken: NonNullable<UsageDeps['fetchToken']>;
+  private readonly log: NonNullable<UsageDeps['log']>;
+  /** Per token key: no request before this time (epoch ms), the endpoint's Retry-After. */
+  private readonly retryAt = new Map<string, number>();
 
-  constructor(cfg: Config, changed: () => void) {
+  constructor(cfg: Config, changed: () => void, deps: UsageDeps = {}) {
     this.cfg = cfg;
     this.changed = changed;
+    this.fetchLogin = deps.fetchLogin ?? ((env) => fetchPlanUsage(env, { cwd: this.cfg.dataDir, claudeExecutable: this.cfg.claudeExecutable }));
+    this.fetchToken = deps.fetchToken ?? ((token) => fetchTokenUsage(token));
+    this.log = deps.log ?? ((line) => console.log(line));
     this.file = path.join(cfg.dataDir, 'usage.json');
     this.spendFile = path.join(cfg.dataDir, 'spend.json');
     try {
       const f = JSON.parse(fs.readFileSync(this.file, 'utf8')) as UsageFile | PlanUsage;
-      if ('entries' in f) for (const [k, e] of Object.entries(f.entries)) this.entries.set(k, e);
-      else this.entries.set(HOST_LOGIN, { kind: 'login', usage: f });
+      if ('entries' in f) {
+        // A token's numbers saved before it was asked directly were the stored login's: never show them.
+        for (const [k, e] of Object.entries(f.entries)) if (e.kind !== 'token' || e.direct) this.entries.set(k, e);
+      } else this.entries.set(HOST_LOGIN, { kind: 'login', usage: f });
     } catch {
       // first run
     }
@@ -509,10 +588,7 @@ export class UsageTracker {
       // A replaced token's numbers are no longer anyone's.
       for (const k of [...this.entries.keys()]) if (k.startsWith('token:') && (!token || k !== tokenKey(token))) this.entries.delete(k);
       this.tokenSeen = token ? tokenKey(token) : undefined;
-      await Promise.all([
-        this.refreshOne(HOST_LOGIN, 'login', usageEnv(base), true),
-        token ? this.refreshOne(tokenKey(token), 'token', tokenUsageEnv(base, token), false, tokenLabel(token)) : undefined,
-      ]);
+      await Promise.all([this.refreshLogin(usageEnv(base)), token ? this.refreshToken(token) : undefined]);
       this.save();
     } finally {
       this.inFlight = false;
@@ -520,35 +596,66 @@ export class UsageTracker {
     this.changed();
   }
 
-  private async refreshOne(key: string, kind: UsageEntry['kind'], env: Record<string, string | undefined>, storedLogin: boolean, label?: string) {
+  /** This host's stored claude.ai login, through the CLI with no token in its environment. */
+  private async refreshLogin(env: Record<string, string | undefined>) {
     const asOf = new Date().toISOString();
-    const prev = this.entries.get(key);
+    const prev = this.entries.get(HOST_LOGIN);
+    const file = credentialsFile(env);
+    const said = (u: PlanUsage, account?: AccountIdentity) =>
+      this.log(`usage: ${os.hostname()} login (the claude.ai login stored in ${file}${account?.email ? `, ${account.email}` : ''}): ${u.available ? 'ok' : 'failed'}, ${brief(u)}`);
     let u: PlanUsage;
     let account = prev?.account;
     try {
-      if (storedLogin) {
-        const file = credentialsFile(env);
-        const problem = loginProblem(readStoredLogin(file), Date.now(), file, process.platform === 'darwin');
-        if (problem) throw new LoginProblem(problem);
-      }
-      const r = await fetchPlanUsage(env, { cwd: this.cfg.dataDir, claudeExecutable: this.cfg.claudeExecutable });
+      const problem = loginProblem(readStoredLogin(file), Date.now(), file, process.platform === 'darwin');
+      if (problem) throw new LoginProblem(problem);
+      const r = await this.fetchLogin(env);
       u = parseUsage(r.reply, asOf);
-      if (kind === 'token' && !u.available) u.why = `the usage endpoint gave no plan limits for this token (${u.why ?? 'unknown'})`;
       if (r.account.email || r.account.plan) account = r.account;
     } catch (e) {
       if (e instanceof LoginProblem) {
         // A known, lasting cause: say it plainly instead of showing old numbers.
         u = { available: false, asOf, models: [], why: e.message };
       } else if (prev?.usage?.available) {
-        // Keep showing the last good numbers, marked stale by their own asOf, rather than nothing.
-        this.entries.set(key, { ...prev, usage: { ...prev.usage, error: (e as Error).message.slice(0, 200) } });
+        // Keep showing this login's last good numbers, marked stale by their own asOf, rather than nothing.
+        const kept = { ...prev.usage, error: scrub((e as Error).message).slice(0, 200) };
+        this.entries.set(HOST_LOGIN, { ...prev, usage: kept });
+        this.log(`usage: ${os.hostname()} login: failed (${kept.error}), keeping its numbers from ${prev.usage.asOf}`);
         return;
       } else {
-        u = { available: false, asOf, models: [], why: `could not fetch plan usage: ${(e as Error).message.slice(0, 200)}` };
+        u = { available: false, asOf, models: [], why: `could not fetch plan usage: ${scrub((e as Error).message).slice(0, 200)}` };
       }
     }
     if (!u.available) u.spendWeekUsd = weekSpend(this.ledger, localDay());
-    this.entries.set(key, { kind, label, account, usage: u });
+    this.entries.set(HOST_LOGIN, { kind: 'login', account, usage: u });
+    said(u, account);
+  }
+
+  /**
+   * The agents' token, asked with that token alone (fetchTokenUsage). A failure is "unknown" with its
+   * reason: no older numbers are kept, so nothing another credential answered can ever show here.
+   */
+  private async refreshToken(token: string) {
+    const key = tokenKey(token);
+    const label = tokenLabel(token);
+    const wait = this.retryAt.get(key);
+    if (wait && wait > Date.now()) {
+      this.log(`usage: ${label} (${key}): not asked, the usage endpoint said to wait until ${new Date(wait).toISOString()}`);
+      return;
+    }
+    this.retryAt.delete(key);
+    const asOf = new Date().toISOString();
+    let u: PlanUsage;
+    try {
+      u = parseUsage(await this.fetchToken(token), asOf);
+      if (!u.available) u.why = `the usage endpoint gave no plan limits for this token (${u.why ?? 'unknown'})`;
+    } catch (e) {
+      const after = e instanceof UsageFetchError ? e.retryAfterMs : undefined;
+      if (after) this.retryAt.set(key, Date.now() + after);
+      u = { available: false, asOf, models: [], why: `usage unknown: ${scrub((e as Error).message).slice(0, 200)}` };
+    }
+    if (!u.available) u.spendWeekUsd = weekSpend(this.ledger, localDay());
+    this.entries.set(key, { kind: 'token', label, usage: u, direct: true });
+    this.log(`usage: ${label} (${key}, asked with that token itself): ${u.available ? 'ok' : 'failed'}, ${brief(u)}`);
   }
 
   private save() {

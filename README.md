@@ -161,12 +161,15 @@ and compressed memory, from `vm_stat`; plain "total minus free" counts the file 
 turns amber or red with macOS memory pressure. Its GPU shares that RAM, so its bar is how busy the
 GPU is (`ioreg`), not VRAM.
 
-Credentials for the usage meter. Claude Code reads usage from `GET /api/oauth/usage` and only asks
-when it believes its OAuth login has the `user:profile` scope. For a `CLAUDE_CODE_OAUTH_TOKEN` it
-assumes `user:inference` alone unless `CLAUDE_CODE_OAUTH_SCOPES` says otherwise, and the usage
-endpoint does answer a `claude setup-token` token (checked 2026-09-27). So the agents' token is
-polled with `CLAUDE_CODE_OAUTH_SCOPES="user:inference user:profile"`, for that one request only; the
-agents' own environment is untouched. This host's own login is polled without the agents' token
+Credentials for the usage meter. Each account is asked with its own credential, and the numbers
+are kept per credential. The agents' token is sent straight to `GET /api/oauth/usage` as the only
+credential of that request. It does not go through the CLI: given a `CLAUDE_CODE_OAUTH_TOKEN`, the
+CLI still answers with the claude.ai login stored on the machine (measured 2026-09-27: a made-up
+token got that login's exact numbers). If the token's request fails (rejected, rate-limited, no
+network), its meter says "usage unknown" with the reason; it never shows older or other numbers. A
+429 waits for the endpoint's `Retry-After`. Each poll logs one line per credential (which one, by
+its last 4 characters and hash prefix, and whether it answered), never the credential itself.
+This host's own login is polled without the agents' token
 (and without any API key variable). The CLI then uses the interactive claude.ai login stored on this
 machine, `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR/.credentials.json`; the Keychain on
 macOS). A normal `/login` carries `user:inference user:profile user:sessions:claude_code

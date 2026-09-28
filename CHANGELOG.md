@@ -22,8 +22,8 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   connector for tests and trials: `e2e/mockConnector.ts`.
 
 - **Usage for every Claude account.** The usage meters now cover every account in use, each with
-  its weekly, 5-hour and per-model limits: the agents' token ("host token …abcd", polled with the
-  profile scope declared for that one request), this host's own login and each Mac's own login
+  its weekly, 5-hour and per-model limits: the agents' token ("host token …abcd", asked of the
+  usage endpoint with that token alone), this host's own login and each Mac's own login
   (reported by its daemon). Logins are merged by email; each account says where it is used and which
   agents run on it, `system_status` lists them all, and an agent's details name its account.
 - **Load of every machine.** The Mac daemons report CPU, RAM (Activity Monitor's Memory Used, with
@@ -52,6 +52,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The agents' token showed this host's login's usage.** Its request went through the CLI, which
+  answers with the claude.ai login stored on the machine whatever token it is given. The token is
+  now sent to the usage endpoint itself; a failure shows "usage unknown" with the reason, and
+  numbers saved by the old request are dropped. Each poll logs which credential it used and
+  whether it answered.
 - **Messages sent from another device now show up.** A page whose WebSocket had died silently (a
   laptop asleep, a phone suspending the tab, a dropped connection) kept it as if open and showed
   nothing new until a reload. The server now pings every 15 s and drops sockets that stop
