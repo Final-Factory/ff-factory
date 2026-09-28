@@ -110,7 +110,7 @@ export function restartAllowed(recent: { at: string; auto?: boolean }[], now: nu
 
 // ---------------------------------------------------------------- the MCP-for-Unity bridge
 
-const normProject = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').replace(/\/Assets$/i, '').toLowerCase();
+export const normProject = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').replace(/\/Assets$/i, '').toLowerCase();
 
 /** The bridge's port and reloading flag for a project, from ~/.unity-mcp (unity-mcp-status-*, unity-mcp-port-*). */
 export function bridgeInfo(project: string, dir = path.join(os.homedir(), '.unity-mcp')): { port?: number; reloading?: boolean } {

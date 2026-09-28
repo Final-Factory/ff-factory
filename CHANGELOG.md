@@ -72,6 +72,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Unity MCP calls could land in another sandbox's editor.** Every worker's MCP-for-Unity server
+  discovered all editors on the machine, and when its pinned editor was restarting or reloading it
+  reconnected to the next one it found (another sandbox's, or the live game's). Each sandbox's workers
+  now run it with `UNITY_MCP_STATUS_DIR` pointing at `data/unity-mcp/<sandbox>`, where the sandbox
+  poll keeps only that sandbox's live editor's status file and a port file for its own port (0 while
+  it is down), so they can neither see nor fall back to another editor.
 - **Restarts resumed the wrong workers.** After a crash, `SessionManager.restore` put the very
   session record it then marked "stopped" on the cut-off list, so the unclean-restart resume file
   saw every cut-off worker as stopped and reported "No worker sessions needed resuming". Agent

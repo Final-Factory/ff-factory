@@ -9,7 +9,7 @@ import type { Store } from './store.ts';
 import { branchProblem, withBaseRepoLock, type SandboxManager } from './sandboxes.ts';
 import { switchBranch } from './switchBranch.ts';
 import { searchTranscripts } from './search.ts';
-import { openUnity, type SceneState, type UnityBridge } from './unityMcp.ts';
+import { openUnity, unityMcpServerFor, type SceneState, type UnityBridge } from './unityMcp.ts';
 import { CATALOG } from './launch.ts';
 import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './wake.ts';
 import { snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
@@ -668,7 +668,8 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
       strictMcpConfig: true,
       mcpServers: {
         sandbox: this.workerTools(sb, info.id),
-        ...(this.cfg.unity.mcpServer ? { UnityMCP: { type: 'stdio' as const, ...this.cfg.unity.mcpServer } } : {}),
+        // Confined to this sandbox's editor (server/unityMcp.ts statusDirFor): it cannot find, or fall back to, another.
+        ...(this.cfg.unity.mcpServer ? { UnityMCP: { type: 'stdio' as const, ...unityMcpServerFor(this.cfg, sb.id)! } } : {}),
       },
       hooks: {
         // This server's own directory (code, config with the Claude token, user and session files) is
