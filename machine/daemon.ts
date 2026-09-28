@@ -270,11 +270,17 @@ export class Daemon {
     this.usageInFlight = true;
     this.lastUsage = Date.now();
     const asOf = new Date().toISOString();
+    let msg: FromDaemon;
     try {
       const r = await this.probes.usage(this.cfg.claude);
-      this.send({ type: 'usage', account: r.account, usage: parseUsage(r.reply, asOf) });
+      msg = { type: 'usage', account: r.account, usage: parseUsage(r.reply, asOf) };
     } catch (e) {
-      this.send({ type: 'usage', account: {}, usage: { available: false, asOf, models: [], why: `could not fetch plan usage on this Mac: ${(e as Error).message.slice(0, 200)}` } });
+      msg = { type: 'usage', account: {}, usage: { available: false, asOf, models: [], why: `could not fetch plan usage on this Mac: ${(e as Error).message.slice(0, 200)}` } };
+    }
+    try {
+      // The link dropped while the CLI answered: the reconnect fetches again rather than waiting 5 minutes.
+      if (this.ws?.readyState === WebSocket.OPEN) this.send(msg);
+      else this.lastUsage = 0;
     } finally {
       this.usageInFlight = false;
     }

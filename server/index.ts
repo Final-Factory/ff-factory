@@ -972,7 +972,7 @@ function accountsNow() {
     sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, toMachine), live: s.status !== 'stopped' && s.status !== 'error' })),
   });
 }
-// Which agents are on which account changes when sessions or machines come and go: send it again then.
+// Which agents are on which account, and how many run now (the order), change with sessions and machines.
 let accountShape = '';
 let accountTimer: NodeJS.Timeout | undefined;
 bus.on('event', (e: ServerEvent) => {
@@ -980,7 +980,8 @@ bus.on('event', (e: ServerEvent) => {
   if (e.type === 'machine_removed') usage.forget(e.id);
   accountTimer ??= setTimeout(() => {
     accountTimer = undefined;
-    const shape = `${[...store.sessions.keys()].join()}|${machines.list().map((m) => m.id).join()}|${hostToken(cfg)?.slice(-4) ?? ''}`;
+    const live = (s: { status: string }) => (s.status === 'stopped' || s.status === 'error' ? '' : '+');
+    const shape = `${[...store.sessions.values()].map((s) => s.id + live(s)).join()}|${machines.list().map((m) => m.id).join()}|${hostToken(cfg)?.slice(-4) ?? ''}`;
     if (shape === accountShape) return;
     accountShape = shape;
     broadcast({ type: 'accounts', accounts: accountsNow() });
