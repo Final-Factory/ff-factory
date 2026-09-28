@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { SessionManager, setQueryForTesting, snapshotOf, type SessionHandle } from './sessions.ts';
+import { SessionManager, restartMarks, setQueryForTesting, snapshotOf, type SessionHandle } from './sessions.ts';
+import { collectResume, resumeMessage } from './restart.ts';
 import { Store, bus } from './store.ts';
 import type { Config } from './config.ts';
 import type { ServerEvent, SessionInfo, TranscriptEvent } from '../shared/types.ts';
@@ -237,5 +238,100 @@ test('restore: sessions come back stopped; one cut off mid-turn says so and is r
   }
   assert.match(texts(again, 'busy').at(-1)!, /server restarted while this session was working/);
   assert.deepEqual(again.readTranscript('calm'), []);
+  again.flush();
+});
+
+test('restart marks: a process that ends with the server leaves its turn open, and the next server resumes it', async (t) => {
+  const { dir, store, sessions, worker } = setup(t);
+  const s = worker();
+  sessions.send(s.info.id, '#die');
+  await until(() => s.info.status === 'error', 'the process to end');
+  // Its process went first (a console close or a process-tree stop reaches it before the server): not busy by status...
+  assert.ok(s.info.turnOpenSince, '...but its turn is still open');
+  store.flush();
+
+  // The server goes too; the next one finds it cut off and resumes it.
+  const again = new Store(dir);
+  const restored = new SessionManager({ limits: { maxSessions: 6 } } as Config, again);
+  const cutOff = restored.restore(() => () => ({}));
+  assert.deepEqual(cutOff.map((i) => i.id), [s.info.id]);
+  const snaps = cutOff.map((i) => ({ ...snapshotOf(restored.get(i.id)), status: i.status }));
+  assert.deepEqual(collectResume(snaps).map((e) => [e.id, e.why]), [[s.info.id, 'mid-turn']]);
+  // Settled by the restart: a later restart does not resume it again.
+  restored.get(s.info.id).clearRestartMarks!();
+  assert.equal(again.sessions.get(s.info.id)!.turnOpenSince, undefined);
+  again.flush();
+});
+
+test('restart marks: a worker cut off mid-turn by a crash is resumed (restore used to report it as stopped)', (t) => {
+  const { dir, store } = setup(t);
+  const base = { title: 't', permissionMode: 'default' as const, createdAt: 'x', lastActivityAt: 'x', turns: 0, costUsd: 0, pendingPermissions: [] };
+  store.putSession({ ...base, id: 'busy', kind: 'worker', sandboxId: 'sb', status: 'running' });
+  store.flush();
+  const again = new Store(dir);
+  const restored = new SessionManager({ limits: { maxSessions: 6 } } as Config, again);
+  const cutOff = restored.restore(() => () => ({}));
+  // Agents.uncleanResumeFile: the cut-off list's own status, over the restored session's snapshot.
+  assert.equal(cutOff[0].status, 'running');
+  const snaps = cutOff.map((i) => ({ ...snapshotOf(restored.get(i.id)), status: i.status }));
+  assert.deepEqual(collectResume(snaps).map((e) => e.id), ['busy']);
+  again.flush();
+});
+
+test('restart marks: a process that ends on its own, with the server still up, is not resumed later', async (t) => {
+  const { sessions, worker } = setup(t);
+  const grace = restartMarks.graceMs;
+  restartMarks.graceMs = 30;
+  t.after(() => void (restartMarks.graceMs = grace));
+  const s = worker();
+  sessions.send(s.info.id, '#die');
+  await until(() => s.info.status === 'error', 'the process to end');
+  await until(() => !s.info.turnOpenSince, 'the marks to clear after the grace');
+  assert.deepEqual(collectResume([snapshotOf(s)]), []);
+});
+
+test('restart marks: stopped or interrupted on purpose is never resumed; stopped by the server stopping is', async (t) => {
+  const { sessions, worker } = setup(t);
+  const a = worker();
+  sessions.send(a.info.id, '#slow working');
+  await until(() => a.info.status === 'running', 'running');
+  a.stop();
+  // It had an unanswered message and a drain had asked it to pause: neither brings it back after the update.
+  assert.deepEqual(collectResume([snapshotOf(a)], new Set([a.info.id])), []);
+  assert.equal(a.info.turnOpenSince, undefined);
+
+  const b = worker();
+  sessions.send(b.info.id, '#slow working');
+  await until(() => b.info.status === 'running', 'running');
+  await b.interrupt();
+  assert.deepEqual(collectResume([snapshotOf(b)]), []);
+
+  const c = worker();
+  sessions.send(c.info.id, '#slow working');
+  await until(() => c.info.status === 'running', 'running');
+  sessions.stopAll();
+  assert.deepEqual(collectResume([snapshotOf(c)]).map((e) => [e.id, e.why]), [[c.info.id, 'mid-turn']]);
+  // A message after a deliberate stop makes it resumable again.
+  sessions.send(a.info.id, '#slow again');
+  await until(() => a.info.status === 'running', 'running');
+  assert.deepEqual(collectResume([snapshotOf(a)]).map((e) => e.why), ['mid-turn']);
+});
+
+test('restart marks: an idle worker waiting on a background task is resumed, told its task was ended', async (t) => {
+  const { dir, store, sessions, worker } = setup(t);
+  const s = worker();
+  sessions.send(s.info.id, '#bg');
+  await until(() => s.info.status === 'idle', 'idle');
+  assert.equal(s.info.backgroundTasks, 1);
+  assert.equal(s.info.turnOpenSince, undefined);
+  const [e] = collectResume([snapshotOf(s)]);
+  assert.equal(e.why, 'background');
+  assert.match(resumeMessage(e, { reason: 'update', at: new Date().toISOString() }), /background tasks running .* the restart ended them/);
+  // After a crash as well: the next server finds it in the store.
+  store.flush();
+  const again = new Store(dir);
+  const cutOff = new SessionManager({ limits: { maxSessions: 6 } } as Config, again).restore(() => () => ({}));
+  assert.deepEqual(cutOff.map((i) => i.id), [s.info.id]);
+  assert.match(texts(again, s.info.id).at(-1)!, /1 background task\(s\) running; they were stopped/);
   again.flush();
 });

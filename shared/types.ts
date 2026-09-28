@@ -164,6 +164,14 @@ export interface SessionInfo {
   requestedBy?: Requester;
   /** Who the latest message a person (or the orchestrator for a person) sent this session came from. */
   lastRequestedBy?: Requester;
+  /**
+   * Restart bookkeeping (server/restart.ts), saved at once: since when its current turn has been open. Set by a
+   * message, cleared when the turn ends or the session is stopped or interrupted on purpose, and kept when the
+   * process dies with the server, so a crash cannot make a mid-turn agent look finished.
+   */
+  turnOpenSince?: string;
+  /** Background tasks (a background command, a watcher) still open: they would have re-invoked it; a restart ends them. */
+  backgroundTasks?: number;
 }
 
 /** An image kept with a session's transcript, served at /api/uploads/<sessionId>/<id>. */

@@ -57,7 +57,14 @@ export type OptionsFactory = (info: SessionInfo) => Options;
 
 /** Where an AgentSession records itself: the Store here, or the link back to the portal on a machine daemon. */
 /** Where a session records itself; `noteActivity` (the portal's Store) marks streamed output as activity. */
-export type SessionSink = Pick<Store, 'putSession' | 'append' | 'amend' | 'saveImage'> & { noteActivity?: (sessionId: string) => void };
+export type SessionSink = Pick<Store, 'putSession' | 'append' | 'amend' | 'saveImage'> & { noteActivity?: (sessionId: string) => void; flush?: () => void };
+
+/**
+ * How long (ms) a session whose process ended by itself keeps its restart marks (turnOpenSince, backgroundTasks).
+ * Agent processes can end a moment before the server does (a console close or a process-tree stop reaches
+ * them first); if the server is still up after this, the process ended on its own and there is nothing to resume.
+ */
+export const restartMarks = { graceMs: 60_000 };
 
 /**
  * What the managers need from a session, wherever its process runs: an AgentSession in this process,
@@ -71,8 +78,11 @@ export interface SessionHandle {
   send(text: string, from?: 'human' | 'orchestrator' | 'system', uuid?: string, images?: ImageInput[], requestedBy?: Requester): string;
   interrupt(): Promise<void>;
   setMode(mode: PermissionMode): Promise<void>;
-  stop(): void;
+  /** `onPurpose` false: the server is stopping, not a person or the orchestrator; the restart marks stay. */
+  stop(onPurpose?: boolean): void;
   decide(requestId: string, allow: boolean, message?: string): boolean;
+  /** Drop the restart marks once a restart has resumed it, or decided not to. */
+  clearRestartMarks?(): void;
   /** Called when the session is removed for good. */
   dispose?(): void;
   /** What a restart needs to know (server/restart.ts); without it, snapshotOf() works from info alone. */
@@ -132,6 +142,9 @@ export class AgentSession implements SessionHandle {
   private firstResult = true;
   /** Messages sent but not yet answered by a finished turn, by uuid: what a restart would cut off. */
   private readonly outstanding = new Map<string, Unanswered>();
+  /** Stopped or interrupted by a person or the orchestrator since its last message: a restart leaves it alone. */
+  private stoppedOnPurpose = false;
+  private graceTimer?: NodeJS.Timeout;
   private readonly store: SessionSink;
   private readonly makeOptions: OptionsFactory;
   private readonly events: EventEmitter;
@@ -159,12 +172,16 @@ export class AgentSession implements SessionHandle {
     if (requestedBy && from !== 'system') this.info.lastRequestedBy = requestedBy;
     if (!this.q) this.start();
     this.lastFrom = from;
+    this.stoppedOnPurpose = false;
+    clearTimeout(this.graceTimer);
     this.outstanding.set(uuid, { text, from });
     // Images arrive stored already (with an id) or are kept here, so the transcript can show them.
     const refs = images.map((i) => ({ id: i.id ?? this.store.saveImage(this.info.id, i.mediaType, i.data), mediaType: i.mediaType }));
     this.store.append(this.info.id, { kind: 'user', text, from, uuid, ...(refs.length ? { images: refs } : {}), ...(requestedBy ? { requestedBy } : {}) });
     this.input!.push(promptText(this.info.kind, text, from, requestedBy), uuid, images);
-    this.update({ status: 'running', statusDetail: undefined });
+    const opens = !this.info.turnOpenSince;
+    this.update({ status: 'running', statusDetail: undefined, ...(opens ? { turnOpenSince: new Date().toISOString() } : {}) });
+    if (opens) this.store.flush?.();
     return uuid;
   }
 
@@ -189,6 +206,9 @@ export class AgentSession implements SessionHandle {
     };
     this.costBase = this.info.costUsd;
     this.firstResult = true;
+    // A new process: the last one's background tasks ended with it.
+    this.backgroundTasks = 0;
+    this.info.backgroundTasks = undefined;
     this.q = runQuery({ prompt: this.input, options });
     this.update({ status: 'starting' });
     void this.consume(this.q);
@@ -212,6 +232,7 @@ export class AgentSession implements SessionHandle {
         this.q = undefined;
         this.input = undefined;
         this.denyAllPending('session ended');
+        this.keepMarksBriefly();
         this.events.emit('ended', this);
       }
     }
@@ -230,12 +251,13 @@ export class AgentSession implements SessionHandle {
           else if (m.state === 'idle') {
             // Idle means the input queue is drained: everything sent has been answered.
             this.outstanding.clear();
-            this.update({ status: this.pending.size ? 'waiting_permission' : 'idle' });
+            this.update({ status: this.pending.size ? 'waiting_permission' : 'idle', turnOpenSince: undefined });
+            this.store.flush?.();
             this.events.emit('turnEnd', this, this.lastTurnText);
           }
         } else if (m.subtype === 'background_tasks_changed') {
           this.backgroundTasks = m.tasks.filter((t) => !t.ambient).length;
-          this.update({ statusDetail: this.backgroundTasks ? `${this.backgroundTasks} background task(s)` : undefined });
+          this.update({ statusDetail: this.backgroundTasks ? `${this.backgroundTasks} background task(s)` : undefined, backgroundTasks: this.backgroundTasks || undefined });
         }
         return;
       case 'stream_event': {
@@ -295,7 +317,7 @@ export class AgentSession implements SessionHandle {
           // Older CLI without state events: best effort from the result itself.
           const queued = (m as { queued_turn_count?: number }).queued_turn_count ?? 0;
           if (!queued) this.outstanding.clear();
-          this.update({ status: queued > 0 ? 'running' : this.pending.size ? 'waiting_permission' : 'idle' });
+          this.update({ status: queued > 0 ? 'running' : this.pending.size ? 'waiting_permission' : 'idle', ...(queued > 0 ? {} : { turnOpenSince: undefined }) });
           this.events.emit('turnEnd', this, text);
         }
         return;
@@ -362,8 +384,10 @@ export class AgentSession implements SessionHandle {
     this.denyAllPending('interrupted');
     await this.q.interrupt();
     this.outstanding.clear();
+    this.stoppedOnPurpose = true;
     this.store.append(this.info.id, { kind: 'system', text: 'Interrupted.' });
-    this.update({ status: 'idle' });
+    this.update({ status: 'idle', turnOpenSince: undefined });
+    this.store.flush?.();
   }
 
   async setMode(mode: PermissionMode) {
@@ -374,10 +398,31 @@ export class AgentSession implements SessionHandle {
 
   snapshot(): SessionSnapshot {
     const i = this.info;
-    return { id: i.id, kind: i.kind, title: i.title, sandboxId: i.sandboxId, machineId: i.machineId, status: i.status, unanswered: [...this.outstanding.values()], lastFrom: this.lastFrom };
+    return {
+      id: i.id,
+      kind: i.kind,
+      title: i.title,
+      sandboxId: i.sandboxId,
+      machineId: i.machineId,
+      status: i.status,
+      unanswered: [...this.outstanding.values()],
+      lastFrom: this.lastFrom,
+      turnOpen: !!i.turnOpenSince,
+      backgroundTasks: i.backgroundTasks ?? 0,
+      stoppedOnPurpose: this.stoppedOnPurpose,
+    };
   }
 
-  stop() {
+  /**
+   * Stop the process. On purpose (a person, the orchestrator): nothing is left to resume after a restart, not
+   * even messages it had not answered. Not on purpose (the server is stopping): the restart marks stay.
+   */
+  stop(onPurpose = true) {
+    if (onPurpose) {
+      this.stoppedOnPurpose = true;
+      this.outstanding.clear();
+      this.clearRestartMarks();
+    }
     if (!this.q) return;
     this.input?.close();
     this.abort?.abort();
@@ -386,6 +431,27 @@ export class AgentSession implements SessionHandle {
     this.denyAllPending('session stopped');
     this.update({ status: 'stopped', statusDetail: undefined });
     this.events.emit('ended', this);
+  }
+
+  clearRestartMarks() {
+    clearTimeout(this.graceTimer);
+    if (!this.info.turnOpenSince && !this.info.backgroundTasks) return;
+    this.info.turnOpenSince = undefined;
+    this.info.backgroundTasks = undefined;
+    this.store.putSession(this.info);
+    this.store.flush?.();
+  }
+
+  /** The process ended by itself: keep the restart marks for restartMarks.graceMs in case the server is going down too. */
+  private keepMarksBriefly() {
+    clearTimeout(this.graceTimer);
+    this.graceTimer = setTimeout(() => {
+      if (this.q) return;
+      // It ended on its own: what it had not answered is for a person to pick up, not for a later restart.
+      this.outstanding.clear();
+      this.clearRestartMarks();
+    }, restartMarks.graceMs);
+    this.graceTimer.unref?.();
   }
 }
 
@@ -428,10 +494,15 @@ export class SessionManager {
       const f = factoryFor(info);
       if (!f) continue;
       info.pendingPermissions = [];
-      if (info.status === 'running' || info.status === 'starting' || info.status === 'waiting_permission') {
+      // Busy by its status, or by the marks its process left (it may have ended a moment before the server did).
+      const busy = info.status === 'running' || info.status === 'starting' || info.status === 'waiting_permission' || !!info.turnOpenSince;
+      if (busy) {
         // Say so in the transcript: otherwise a turn cut off by a restart just looks finished.
         this.store.append(info.id, { kind: 'system', text: 'The server restarted while this session was working, so that turn was cut off. Send a message to resume it.' });
-        cutOff.push(info);
+        cutOff.push({ ...info });
+      } else if (info.backgroundTasks) {
+        this.store.append(info.id, { kind: 'system', text: `The server restarted while this session had ${info.backgroundTasks} background task(s) running; they were stopped.` });
+        cutOff.push({ ...info });
       }
       if (info.status !== 'stopped') info.status = 'stopped';
       this.sessions.set(info.id, new AgentSession(info, this.store, f, this.events));
@@ -524,7 +595,8 @@ export class SessionManager {
     this.store.deleteTranscript(id);
   }
 
+  /** The server is stopping: every process goes, but what each was doing is kept for the next server. */
   stopAll() {
-    for (const s of this.sessions.values()) s.stop();
+    for (const s of this.sessions.values()) s.stop(false);
   }
 }

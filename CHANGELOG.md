@@ -72,6 +72,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Restarts resumed the wrong workers.** After a crash, `SessionManager.restore` put the very
+  session record it then marked "stopped" on the cut-off list, so the unclean-restart resume file
+  saw every cut-off worker as stopped and reported "No worker sessions needed resuming". Agent
+  processes that ended a moment before the server (a console close, a process-tree stop) were missed
+  the same way. And a worker stopped on purpose was resumed after an update when it still had an
+  unanswered message or had been drained. Whether a turn is open is now saved at once
+  (`turnOpenSince`, `backgroundTasks`), kept for a minute when a process ends by itself, and cleared
+  by a deliberate stop or interrupt; workers stopped on purpose are never resumed. Idle workers
+  waiting on a background task (a background command or a watcher) are resumed too, told the
+  restart ended it.
 - **`wake_me` wakes were lost on a restart.** They lived only in timers, so an update or a crash
   forgot every pending wake and the idle workers (and the orchestrator) waiting on one never resumed.
   They are now kept in `data/wakes.json` and re-armed at startup; one that came due while the server

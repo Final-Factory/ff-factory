@@ -55,8 +55,21 @@ with nothing running just starts the app.
 `collectResume` in `server/restart.ts` (tests in `restart.test.ts`):
 
 - **Workers** that were mid-turn (running, starting, or waiting for a permission answer), had
-  messages no finished turn had answered, or were asked by the drain to pause.
+  messages no finished turn had answered, were asked by the drain to pause, or had background tasks
+  (a background command, a watcher meant to wake them) that the restart ends. The last are told so,
+  to run again or re-arm what still matters.
 - **Idle workers stay idle.**
+- **Workers stopped or interrupted on purpose** (by a person or the orchestrator, since their last
+  message) are never resumed, even with messages they had not answered or a drain request.
+
+"Mid-turn" is not only the live status. Each session also keeps `turnOpenSince` and
+`backgroundTasks` in `state.json`, saved at once: set when a message opens a turn (or a background
+task starts), cleared when the turn ends or the session is stopped or interrupted on purpose. A
+process that ends by itself keeps them for a minute (`restartMarks.graceMs`): agent processes can
+end a moment before the server does (a console close or a process-tree stop reaches them first), and
+their status then reads "stopped" or "error". If the server is still up after that minute, the
+process ended on its own and nothing is left to resume. The restart clears the marks once it has
+resumed a session or decided not to.
 - **Standing agents** are left to their scheduler; an interrupted run is recorded as interrupted
   and the schedule continues.
 - **The orchestrator** is not resumed as such; the summary message wakes it, and says so if it was
@@ -70,7 +83,8 @@ so the new server makes one from what the last server left (`Agents.uncleanResum
 - **The cause.** The server writes a heartbeat (`alive.json`) every 30 s. If the machine booted after
   the last beat, it went down ("BEAST went down unexpectedly (lost power, was hard-reset or crashed)
   after <time>, and booted again at <time>"). Otherwise only the server stopped (a crash or a kill).
-- **Sessions to resume:** the workers that were mid-turn, on this host and on the Macs.
+- **Sessions to resume:** the workers that were mid-turn (by status or by their marks) or waiting on
+  background tasks, on this host and on the Macs.
 - **Editors:** the editors that were up and died with it (`SandboxManager.lostEditors`).
 
 Then it brings things back in order. It waits (up to 15 minutes) for the sandbox drive, which a

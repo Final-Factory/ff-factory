@@ -9,6 +9,8 @@
  *   "#screenshot"  a tool result carrying a PNG (an inline image)
  *   "#slow"        streams for a few seconds (for the running state and interrupts)
  *   "#fail"        ends the turn with an error result
+ *   "#die"         the agent process ends mid-turn (as when the server's process tree is stopped)
+ *   "#bg"          starts a background task (a background command, a watcher) and ends the turn
  *   anything else  "Echo: <text>" (and how many images came with it)
  */
 import type { Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -96,6 +98,13 @@ export function fakeQuery(fake: FakeOptions = {}) {
           yield toolResult(toolId, [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: RED_PNG } }]);
           yield text('Here is the screenshot.');
           yield result(uuid, true, 'screenshot shown');
+        } else if (/#die\b/i.test(words)) {
+          yield text('Working on it...');
+          throw new Error('Claude Code process exited with code 1');
+        } else if (/#bg\b/i.test(words)) {
+          yield { type: 'system', subtype: 'background_tasks_changed', tasks: [{ id: `bg-${++msgId}`, ambient: false }], session_id: sessionId, uuid: `b${msgId}` } as never;
+          yield text('Started the build in the background; it will wake me.');
+          yield result(uuid, true, 'waiting on the background build');
         } else if (/#fail\b/i.test(words)) {
           yield text('Something went wrong.');
           yield result(uuid, false, 'failed');
