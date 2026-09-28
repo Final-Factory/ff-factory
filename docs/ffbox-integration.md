@@ -13,6 +13,15 @@ Claude sandboxes. `ffdev` workers may claim simple work items on the board. Each
 its model and a `tier` (`full` or `simple`) in the `capacity` message, so the orchestrator can route
 by it.
 
+**Ben's answers (2026-09-27).**
+
+- Automatic desync investigations are capped at **20 a day** to start (section 6).
+- Ben and Lothsahn share **one orchestrator chat** (section 7).
+- **Lothsahn may use every machine except Ben's M5**: BEAST sandboxes and the M3 (section 7).
+- FFBox bills its side to **Ben's second Claude account**, through a separate token that Ben gives
+  Lothsahn directly. That token never passes through FF Factory (rule 3).
+- `ffdev` (GLM-5.3 Flash) takes simple, well-scoped work only (rule 4a).
+
 **TL;DR**
 
 - **The goal is zero human coordination.** Ben and Lothsahn each just start work ("gogogo"). The
@@ -562,8 +571,8 @@ Each layer bounds the next:
 | per signature | at most one live investigation; re-investigation only on a regression or a better report |
 | trust | a signature is auto-investigated once it has reports from at least 2 distinct senders, or a host and client pair of one event. A single sender's signature waits for a person or for budget left at the end of the day |
 | concurrency | at most 2 automatic investigations at once (`ffdiagnose` holds 3, leaving 1 for people) |
-| rate | at most 3 new automatic investigations an hour and 10 a day |
-| money | a daily spend cap for automatic work, billed to its own credential (open question 1), plus FFBox's `max_budget_usd` per turn and its subscription holds |
+| rate | at most 3 new automatic investigations an hour and 20 a day (Ben, 2026-09-27) |
+| money | billed to Ben's second Claude account, whose token Ben gives Lothsahn directly (section 7), plus FFBox's `max_budget_usd` per turn and its subscription holds |
 | **storm breaker** | more than 5 new signatures in an hour, or one version's reports at more than 5 times its daily average: automatic starts stop, both people get one notice, and the queue waits ranked by distinct senders, then newest build. Starts resume when the rate falls back, or when a person says so |
 | ordering | the newest `develop` build first; builds older than a known fix last |
 
@@ -595,21 +604,23 @@ roles, and an API key is a full tool belt (`server/mcp.ts:18`).
 | sandboxes on BEAST: create, start agents, Unity | yes | yes |
 | FFBox tasks, fenced; board; delegation and escalation approvals | yes | yes |
 | FFBox tasks, open class | if FFBox lists him as an operator | if FFBox lists him as an operator |
-| Macs (Ben's main clones, next to his uncommitted work) | yes | no, unless Ben allows it per machine |
+| the M3 | yes | yes (Ben, 2026-09-27) |
+| the M5 (Ben's main clone, next to his uncommitted work) | yes | no |
 | `add_machine`, `set_app_config`, `request_app_update`, `republish_public`, host recovery, deleting someone else's sandbox, users and keys | yes | no |
 
 - **API keys belong to a user** and inherit that user's role.
-- **Which orchestrator conversation.** Either (a) one shared chat that both type into, with
-  attribution, or (b) one orchestrator conversation per person over the same state, board and
-  tools, where each sees the other's launches as `[board]` lines. We recommend (b). With it, a
-  turn acts for exactly one person, so the role check is simple. In (a), one turn can answer both
-  people, which makes a tool call's authority ambiguous. Option (b) is still one orchestrator
-  system: one board, one view of every sandbox, no coordination needed. This is open question 3.
+- **One shared orchestrator chat** (Ben, 2026-09-27). Both people type into the same
+  conversation, and every message carries its author. We had recommended one conversation per
+  person, because in a shared chat one turn can answer both people, which makes a tool call's
+  authority ambiguous. The role check therefore uses the author of the message the turn answers;
+  a turn that answers both uses the narrower role, the maintainer's.
 - **Mapping to FFBox.** FFBox's `operators` block gains an `fff` id per person, which is the FF
   Factory login, following its "one id per service" rule. The connector submits under a new local
   kind `fff`, with the opener recorded as `fff:<login>`, the way `/intake` records `web:<login>`.
-  Automatic intake work runs as its own billing identity (open question 1). An unknown login is
-  refused.
+  An unknown login is refused.
+- **Billing.** FFBox bills its side, people's tasks and automatic intake work alike, to Ben's
+  second Claude account. Ben gives Lothsahn that account's token directly; it never passes
+  through FF Factory, which holds no FFBox credential (rule 3).
 - **FFBox trusts FF Factory's login.** That is a real delegation of trust. Anyone who takes over FF
   Factory can submit as either person. The limits are section 3, plus per-source caps FFBox can set
   for `fff`: allowed classes per person, and turns and spend per day.
@@ -624,6 +635,8 @@ fix, planned but not built, is running workers and editors as a low-privilege lo
 approval click. Ben decides whether Lothsahn's login waits for that fix or comes first, with the
 risk accepted.
 
+Ben has decided where that login may reach (2026-09-27): BEAST sandboxes and the M3, not the M5.
+
 The mirror image holds on FFBox. Lothsahn decides whether the `fff` source ever gets the open
 class.
 
@@ -637,30 +650,31 @@ one off leaves the earlier phases working.
 | 0 | this document; answers to section 9 | ff-factory docs | — |
 | 1 | **Visibility, read-only.** `/provider` with its own token type and a provider card. The connector sends `hello`, `capacity`, `conversation` and `intake` events. Nothing can be submitted. *FF Factory's side built 2026-09-27; the connector is next* | FF Factory (Ben); the connector and `intake-events` in the ffbox repo (Lothsahn) | stop the connector unit; `providers.ffbox.enabled: false`; revoke the token |
 | 2 | **The board and automatic triage, no agents.** Work items, keys, enforced claims, the tools, worker-brief lines, the PR-overlap job. Intake events become items with signatures and known/fixed/regression matching. Both people watch it for a week to tune the signature | FF Factory | the claims check is one switch; items are additive |
-| 3 | **Submit and diagnose, fenced only.** `submit`, `diagnose`, `stop` and `result`; sessions of kind `provider`; redaction both ways; the `fff` kind and the automatic-work billing identity on FFBox | both | FFBox refuses `fff`; FF Factory hides the target |
-| 4 | **Automatic investigations.** Triage starts `diagnose` for new and regressed signatures under every bound in section 6, starting at 1 at a time and 3 a day, then raised | FF Factory | `intake.auto: false`; the storm breaker; FFBox's per-source cap |
+| 3 | **Submit and diagnose, fenced only.** `submit`, `diagnose`, `stop` and `result`; sessions of kind `provider`; redaction both ways; the `fff` kind; FFBox bills Ben's second Claude account | both | FFBox refuses `fff`; FF Factory hides the target |
+| 4 | **Automatic investigations.** Triage starts `diagnose` for new and regressed signatures under every bound in section 6: 2 at a time and 20 a day to start | FF Factory | `intake.auto: false`; the storm breaker; FFBox's per-source cap |
 | 5 | **Routing.** `needs`, `pick_target`, the rules, rule 1 on the server, FFBox as a delegation target. Discord-reading work moves off BEAST and the Macs | FF Factory | a config switch; manual targets still work |
-| 6 | **People and crashes.** Attribution, roles, user-owned keys, per-person conversations if chosen, Lothsahn's login, `fff` ids in FFBox's `operators`. Crash signatures by a capped fenced read | both | remove the login; `intake.crash.auto: false` |
+| 6 | **People and crashes.** Attribution, roles, user-owned keys, the shared chat, Lothsahn's login (BEAST and the M3), `fff` ids in FFBox's `operators`. Crash signatures by a capped fenced read | both | remove the login; `intake.crash.auto: false` |
 | 7 | **Both directions.** Max and `ESCALATE` delegations into FF Factory's queue; FFBox checks the board before its own diagnoses and operator dev turns | both | the connector stops sending `delegation`; FFBox skips the check |
 
 Phase 1 teaches both sides the connection, the token and the load, and cannot do harm. Phase 3 is
-the first to spend money on FFBox, so it waits for the billing answer. Phase 4 is where
-Lothsahn's FFBox starts working on desyncs nobody asked for, so it starts small.
+the first to spend money on FFBox, on Ben's second Claude account. Phase 4 is where
+Lothsahn's FFBox starts working on desyncs nobody asked for, so it starts capped at 20 a day.
 
 ## 9. Open questions
 
 For Ben and Lothsahn together:
 
-1. **Who pays** for FF Factory's FFBox runs? For a person's tasks: their own operator credential,
-   or one slot for `fff`? For automatic intake work: a dedicated slot or the metered key, and
-   what daily cap?
+1. ~~**Who pays** for FF Factory's FFBox runs, and what daily cap?~~ Answered 2026-09-27: Ben's
+   second Claude account, through a token Ben gives Lothsahn directly; 20 automatic
+   investigations a day to start.
 2. **CPU-only work:** FFBox only when no GPU sandbox is free (as stated), or always, to keep GPU
    slots for GPU work?
-3. **One shared orchestrator chat, or one per person** over one shared system (section 7)?
+3. ~~**One shared orchestrator chat, or one per person?**~~ Answered 2026-09-27: one shared chat
+   (section 7).
 4. **The desync signature:** is `version line + diverged_surfaces` the right coarse key? What
    structured root-cause field should `desync.md` ask for, so that diagnoses refine it?
-5. **Automatic-work numbers:** are 2 at once, 3 an hour, 10 a day, 2 distinct senders, and the storm
-   thresholds right to start with?
+5. **Automatic-work numbers:** the daily cap is 20 (Ben, 2026-09-27). Are 2 at once, 3 an hour,
+   2 distinct senders, and the storm thresholds right to start with?
 6. **Escalation onto Ben's machines:** one approval click until the low-privilege worker exists,
    or never automatic?
 7. **How much of an FFBox run crosses:** the result and a link (proposed), a condensed tool log, or
@@ -671,7 +685,7 @@ For Ben and Lothsahn together:
 For Ben:
 
 9. Does Lothsahn's login wait for the low-privilege worker user, or come first (section 7)?
-10. May Lothsahn's sessions start work on the Macs?
+10. ~~May Lothsahn's sessions start work on the Macs?~~ Answered 2026-09-27: the M3 yes, the M5 no.
 
 For Lothsahn:
 
