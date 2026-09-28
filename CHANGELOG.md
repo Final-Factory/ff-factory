@@ -21,6 +21,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   `providers.ffbox.token`). The connector's contract: docs/ffbox-connector-contract.md; a mock
   connector for tests and trials: `e2e/mockConnector.ts`.
 
+- **Usage for every Claude account.** The usage meters now cover every account in use, each with
+  its weekly, 5-hour and per-model limits: the agents' token ("host token …abcd", polled with the
+  profile scope declared for that one request), this host's own login and each Mac's own login
+  (reported by its daemon). Logins are merged by email; each account says where it is used and which
+  agents run on it, `system_status` lists them all, and an agent's details name its account.
+- **Load of every machine.** The Mac daemons report CPU, RAM (Activity Monitor's Memory Used, with
+  memory pressure), GPU (Apple Silicon: how busy it is; it shares the RAM) and disk every 15 s
+  (machine protocol 4). The sidebar footer shows each computer as a name and three mini bars in the
+  same space the host's numbers took, the open footer has a row per computer, and `system_status`
+  has a line per machine.
+
 ### Changed
 
 - **The chat.** Tool calls and thinking between two messages fold into one line ("Used 3 tools:

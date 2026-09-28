@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Config } from './config.ts';
-import type { PlanUsage, UsageMeter } from '../shared/types.ts';
+import type { AccountUsage, PlanUsage, SessionInfo, UsageMeter } from '../shared/types.ts';
 
 /**
  * The user's Claude plan usage: the weekly limit, the 5-hour session limit and any per-model weekly limit,
@@ -18,6 +19,13 @@ import type { PlanUsage, UsageMeter } from '../shared/types.ts';
  * agents' token: the CLI falls back to the interactive claude.ai login stored on this machine
  * (~/.claude/.credentials.json), which has user:profile, and refreshes it itself when it has expired.
  * Agents keep using their own token.
+ *
+ * Every account in use (README, "Claude plan" meters): the agents' token is a separate account from that stored login
+ * as far as anything here can tell, so it is polled too. Its usage request carries the token with
+ * CLAUDE_CODE_OAUTH_SCOPES naming user:profile as well: the scope list above is only the CLI's
+ * assumption about the token, and the usage endpoint answers a setup-token (checked 2026-09-27). Each
+ * Mac's own login is polled by its daemon and reported to the portal (protocol 4). Accounts are told
+ * apart by the login's email (accountInfo) or the token's last 4 characters, never by the credential.
  */
 
 /** The parts of the SDK's usage reply we read. Everything is optional: the API is marked experimental. */
@@ -89,16 +97,37 @@ export function describeReset(iso: string | undefined, now: Date): string {
   return `resets ${t.toLocaleDateString([], { weekday: 'short' })} ${t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
 
-/** The lines the orchestrator's system_status tool adds. */
-export function usageLines(u: PlanUsage | undefined, now: Date): string[] {
-  if (!u) return ['Claude plan usage: not fetched yet'];
+/** One account's usage in words: "Claude plan (max) usage, as of 10:02: Weekly 33% used, resets ...". */
+function usageSummary(u: PlanUsage | undefined, now: Date): string {
+  if (!u) return 'Claude plan usage: not fetched yet';
   const asOf = `as of ${new Date(u.asOf).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   if (!u.available) {
     const spend = u.spendWeekUsd !== undefined ? `; FF Factory's own agent spend in the last 7 days: $${u.spendWeekUsd.toFixed(2)} (spend, not the plan limit)` : '';
-    return [`Claude plan usage: unavailable (${u.why ?? 'unknown'}), ${asOf}${spend}`];
+    return `Claude plan usage: unavailable (${u.why ?? 'unknown'}), ${asOf}${spend}`;
   }
   const fmt = (m: UsageMeter) => `${m.label} ${Math.round(m.percent)}% used${m.resetsAt ? `, ${describeReset(m.resetsAt, now)}` : ''}`;
-  return [`Claude plan (${u.plan ?? '?'}) usage, ${asOf}: ${[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt).join('; ')}`];
+  return `Claude plan (${u.plan ?? '?'}) usage, ${asOf}: ${[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt).join('; ')}`;
+}
+
+/** The lines the orchestrator's system_status tool adds for one login (this host's). */
+export function usageLines(u: PlanUsage | undefined, now: Date): string[] {
+  return [usageSummary(u, now)];
+}
+
+/**
+ * The system_status lines for every account: which one, where it is used, who runs on it now, its usage.
+ * `sessions` names the agents (by id) so the orchestrator can tell which worker is on which account.
+ */
+export function accountLines(accounts: AccountUsage[], sessions: Map<string, Pick<SessionInfo, 'id' | 'kind' | 'status'>>, now: Date): string[] {
+  if (!accounts.length) return ['Claude accounts: none known yet'];
+  return [
+    `Claude accounts in use (${accounts.length}):`,
+    ...accounts.map((a) => {
+      const live = a.sessionIds.map((id) => sessions.get(id)).filter((s): s is Pick<SessionInfo, 'id' | 'kind' | 'status'> => !!s && s.status !== 'stopped' && s.status !== 'error');
+      const who = live.length ? live.map((s) => (s.kind === 'orchestrator' ? 'the orchestrator' : s.id)).join(', ') : 'no agent right now';
+      return `- ${a.label} [${a.where.join('; ')}; agents on it: ${who}]: ${usageSummary(a.usage, now)}`;
+    }),
+  ];
 }
 
 // ---------------------------------------------------------------- our own spend ledger (the fallback)
@@ -206,6 +235,151 @@ export function loginProblem(l: StoredLogin, now: number, file: string, keychain
   return undefined;
 }
 
+// ---------------------------------------------------------------- accounts
+
+/** What accountInfo() says about a login, safe to show: no credential in it. A token reports none of it. */
+export interface AccountIdentity {
+  email?: string;
+  organization?: string;
+  plan?: string;
+}
+
+/** The scopes the token's usage request declares (see the top of this file). */
+export const TOKEN_SCOPES = 'user:inference user:profile';
+
+/** A token's account key: a hash prefix, so equal tokens are one account and the key reveals nothing. */
+export const tokenKey = (token: string) => `token:${createHash('sha256').update(token).digest('hex').slice(0, 12)}`;
+export const tokenLabel = (token: string) => `host token …${token.slice(-4)}`;
+export const HOST_LOGIN = 'login:host';
+export const machineLogin = (machineId: string) => `login:${machineId}`;
+
+/** The usage request's environment for a token: the stored-login environment plus the token and both scopes. */
+export function tokenUsageEnv(env: Record<string, string | undefined>, token: string): Record<string, string | undefined> {
+  return { ...usageEnv(env), CLAUDE_CODE_OAUTH_TOKEN: token, CLAUDE_CODE_OAUTH_SCOPES: TOKEN_SCOPES };
+}
+
+/** The token the host's agents run on (claudeEnv over the server's own environment), if any. */
+export function hostToken(cfg: Pick<Config, 'claudeEnv'>, env: Record<string, string | undefined> = process.env): string | undefined {
+  return { ...env, ...cfg.claudeEnv }.CLAUDE_CODE_OAUTH_TOKEN || undefined;
+}
+
+/**
+ * Which credential a portal-run session uses, as an account source key: the host's token when it has one
+ * (and, on a machine, when that machine takes the host's claudeEnv), else the login of the computer it
+ * runs on. Follows the current config: an agent started before a token change keeps its old account until
+ * its process restarts.
+ */
+export function sessionSource(
+  info: Pick<SessionInfo, 'machineId'>,
+  token: string | undefined,
+  usesHostEnv: (machineId: string) => boolean,
+): string {
+  if (info.machineId) return token && usesHostEnv(info.machineId) ? tokenKey(token) : machineLogin(info.machineId);
+  return token ? tokenKey(token) : HOST_LOGIN;
+}
+
+/** One polled or reported credential. */
+export interface UsageEntry {
+  kind: 'token' | 'login';
+  /** Tokens: "host token …abcd". */
+  label?: string;
+  account?: AccountIdentity;
+  usage?: PlanUsage;
+}
+
+export interface AccountContext {
+  /** This host's name, for "BEAST login". */
+  hostName: string;
+  /** The current host token's key and label, when one is set. */
+  token?: { key: string; label: string };
+  /** Machines that exist; `usesToken`: their portal-run agents take the host token. */
+  machines: { id: string; usesToken: boolean }[];
+  /** Every session with its source key (sessionSource). */
+  sessions: { id: string; source: string }[];
+}
+
+const newer = (a?: PlanUsage, b?: PlanUsage) => {
+  if (!a) return b;
+  if (!b) return a;
+  if (a.available !== b.available) return a.available ? a : b;
+  return a.asOf >= b.asOf ? a : b;
+};
+
+/**
+ * The accounts in use, merged: one login signed in on several computers (same email) is one account;
+ * a token is one account per token. Sources nobody polls (a machine login no daemon reported yet) still
+ * appear when a session runs on them. Busiest first, then tokens (the agents' account), then by label. Pure.
+ */
+export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: AccountContext): AccountUsage[] {
+  const machineIds = new Set(ctx.machines.map((m) => m.id));
+  const sources = new Map<string, UsageEntry>();
+  sources.set(HOST_LOGIN, entries.get(HOST_LOGIN) ?? { kind: 'login' });
+  if (ctx.token) sources.set(ctx.token.key, { label: ctx.token.label, ...entries.get(ctx.token.key), kind: 'token' });
+  for (const [key, e] of entries) {
+    if (key.startsWith('login:') && key !== HOST_LOGIN && machineIds.has(key.slice(6))) sources.set(key, e);
+  }
+  for (const s of ctx.sessions) if (!sources.has(s.source) && s.source.startsWith('login:') && machineIds.has(s.source.slice(6))) sources.set(s.source, { kind: 'login' });
+
+  const tokenUsers = [ctx.hostName, ...ctx.machines.filter((m) => m.usesToken).map((m) => m.id)];
+  const out = new Map<string, AccountUsage>();
+  for (const [key, e] of sources) {
+    const email = e.kind === 'login' ? e.account?.email?.trim().toLowerCase() : undefined;
+    const id = e.kind === 'token' ? key : email ? `email:${email}` : key;
+    const where = e.kind === 'token' ? `the agents' token on ${tokenUsers.join(', ')}` : `${key === HOST_LOGIN ? ctx.hostName : key.slice(6)} login`;
+    const a = out.get(id) ?? { id, kind: e.kind, label: e.kind === 'token' ? (e.label ?? 'a token') : (e.account?.email ?? where), email: e.account?.email, sources: [], where: [], sessionIds: [], usage: undefined };
+    a.sources.push(key);
+    a.where.push(where);
+    a.usage = newer(a.usage, e.usage);
+    out.set(id, a);
+  }
+  const byId = [...out.values()];
+  for (const s of ctx.sessions) byId.find((a) => a.sources.includes(s.source))?.sessionIds.push(s.id);
+  return byId.sort((a, b) => b.sessionIds.length - a.sessionIds.length || (a.kind === b.kind ? 0 : a.kind === 'token' ? -1 : 1) || a.label.localeCompare(b.label));
+}
+
+// ---------------------------------------------------------------- fetching
+
+/**
+ * One promptless CLI process: it answers the account and get_usage control requests without starting a
+ * turn. With no token in `env` the CLI reads the stored login afresh each time (picking up refreshes by
+ * other Claude Code processes) and refreshes an expired access token itself. Used by the portal for its
+ * own login and token, and by each machine daemon for its Mac's login.
+ */
+export async function fetchPlanUsage(
+  env: Record<string, string | undefined>,
+  opts: { cwd: string; claudeExecutable?: string },
+): Promise<{ reply: UsageReply; account: AccountIdentity }> {
+  let release: (() => void) | undefined;
+  const idle: AsyncIterable<SDKUserMessage> = {
+    [Symbol.asyncIterator]: () => ({ next: () => new Promise((r) => (release = () => r({ value: undefined, done: true }))) }),
+  };
+  const abort = new AbortController();
+  const q = query({
+    prompt: idle,
+    options: {
+      cwd: opts.cwd,
+      settingSources: [],
+      persistSession: false,
+      abortController: abort,
+      env,
+      ...(opts.claudeExecutable ? { pathToClaudeCodeExecutable: opts.claudeExecutable } : {}),
+    },
+  });
+  const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out after 60 s')), 60_000).unref());
+  try {
+    const get = (q as unknown as { usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (o: { skipBehaviors: boolean }) => Promise<UsageReply> })
+      .usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (!get) throw new Error('this Agent SDK has no usage request');
+    // Who it is: only for a login (a token reports no email); a failure here costs the label, not the numbers.
+    const info = await Promise.race([q.accountInfo(), timeout]).catch(() => undefined);
+    const reply = await Promise.race([get.call(q, { skipBehaviors: true }), timeout]);
+    return { reply, account: { email: info?.email || undefined, organization: info?.organization || undefined, plan: info?.subscriptionType || undefined } };
+  } finally {
+    release?.();
+    abort.abort();
+  }
+}
+
 /** The stored login cannot be used: fall back to spend without starting the CLI. */
 class LoginProblem extends Error {}
 
@@ -214,25 +388,36 @@ class LoginProblem extends Error {}
 const REFRESH_MS = 5 * 60_000;
 const EVENT_DEBOUNCE_MS = 60_000;
 
+/** What usage.json holds; a file from before per-account usage is one PlanUsage (this host's login). */
+interface UsageFile {
+  entries: Record<string, UsageEntry>;
+}
+
+/**
+ * Polls this host's login and its token (when set) every few minutes and after rate-limit events, and
+ * keeps what the machine daemons report for their Macs' logins. `usage` is this host's login, as before.
+ */
 export class UsageTracker {
-  usage?: PlanUsage;
   private readonly cfg: Config;
   private readonly file: string;
   private readonly spendFile: string;
   private ledger: Record<string, number> = {};
   private readonly lastCost = new Map<string, number>();
+  readonly entries = new Map<string, UsageEntry>();
   private inFlight = false;
   private lastFetch = 0;
   private soon?: NodeJS.Timeout;
-  private readonly changed: (u: PlanUsage) => void;
+  private readonly changed: () => void;
 
-  constructor(cfg: Config, changed: (u: PlanUsage) => void) {
+  constructor(cfg: Config, changed: () => void) {
     this.cfg = cfg;
     this.changed = changed;
     this.file = path.join(cfg.dataDir, 'usage.json');
     this.spendFile = path.join(cfg.dataDir, 'spend.json');
     try {
-      this.usage = JSON.parse(fs.readFileSync(this.file, 'utf8')) as PlanUsage;
+      const f = JSON.parse(fs.readFileSync(this.file, 'utf8')) as UsageFile | PlanUsage;
+      if ('entries' in f) for (const [k, e] of Object.entries(f.entries)) this.entries.set(k, e);
+      else this.entries.set(HOST_LOGIN, { kind: 'login', usage: f });
     } catch {
       // first run
     }
@@ -241,6 +426,11 @@ export class UsageTracker {
     } catch {
       // first run
     }
+  }
+
+  /** This host's own claude.ai login's usage (the single meter before per-account usage). */
+  get usage(): PlanUsage | undefined {
+    return this.entries.get(HOST_LOGIN)?.usage;
   }
 
   start() {
@@ -271,75 +461,80 @@ export class UsageTracker {
     }
   }
 
+  /** A machine daemon reported its Mac's own login (protocol 4). */
+  report(machineId: string, account: AccountIdentity, usage: PlanUsage) {
+    const key = machineLogin(machineId);
+    const prev = this.entries.get(key);
+    // As for this host: a failed fetch keeps the last good numbers (stale by their asOf) and who it was.
+    const failed = !usage.available && /^could not fetch/.test(usage.why ?? '');
+    const kept = failed && prev?.usage?.available ? { ...prev.usage, error: usage.why?.slice(0, 200) } : usage;
+    this.entries.set(key, { kind: 'login', account: account.email ? account : prev?.account, usage: kept });
+    this.save();
+    this.changed();
+  }
+
+  /** A machine was removed: forget its login. */
+  forget(machineId: string) {
+    if (this.entries.delete(machineLogin(machineId))) {
+      this.save();
+      this.changed();
+    }
+  }
+
   async refresh() {
     if (this.inFlight) return;
     this.inFlight = true;
     this.lastFetch = Date.now();
-    const asOf = new Date().toISOString();
-    let u: PlanUsage;
-    const env = usageEnv({ ...process.env, ...this.cfg.claudeEnv });
-    const file = credentialsFile(env);
     try {
-      const problem = loginProblem(readStoredLogin(file), Date.now(), file, process.platform === 'darwin');
-      if (problem) throw new LoginProblem(problem);
-      u = parseUsage(await this.fetch(env), asOf);
+      const base = { ...process.env, ...this.cfg.claudeEnv };
+      const token = hostToken(this.cfg);
+      // A replaced token's numbers are no longer anyone's.
+      for (const k of [...this.entries.keys()]) if (k.startsWith('token:') && (!token || k !== tokenKey(token))) this.entries.delete(k);
+      await this.refreshOne(HOST_LOGIN, 'login', usageEnv(base), true);
+      if (token) await this.refreshOne(tokenKey(token), 'token', tokenUsageEnv(base, token), false, tokenLabel(token));
+      this.save();
+    } finally {
+      this.inFlight = false;
+    }
+    this.changed();
+  }
+
+  private async refreshOne(key: string, kind: UsageEntry['kind'], env: Record<string, string | undefined>, storedLogin: boolean, label?: string) {
+    const asOf = new Date().toISOString();
+    const prev = this.entries.get(key);
+    let u: PlanUsage;
+    let account = prev?.account;
+    try {
+      if (storedLogin) {
+        const file = credentialsFile(env);
+        const problem = loginProblem(readStoredLogin(file), Date.now(), file, process.platform === 'darwin');
+        if (problem) throw new LoginProblem(problem);
+      }
+      const r = await fetchPlanUsage(env, { cwd: this.cfg.dataDir, claudeExecutable: this.cfg.claudeExecutable });
+      u = parseUsage(r.reply, asOf);
+      if (kind === 'token' && !u.available) u.why = `the usage endpoint gave no plan limits for this token (${u.why ?? 'unknown'})`;
+      if (r.account.email || r.account.plan) account = r.account;
     } catch (e) {
       if (e instanceof LoginProblem) {
         // A known, lasting cause: say it plainly instead of showing old numbers.
         u = { available: false, asOf, models: [], why: e.message };
-      } else if (this.usage?.available) {
+      } else if (prev?.usage?.available) {
         // Keep showing the last good numbers, marked stale by their own asOf, rather than nothing.
-        this.usage = { ...this.usage, error: (e as Error).message.slice(0, 200) };
-        this.changed(this.usage);
-        this.inFlight = false;
+        this.entries.set(key, { ...prev, usage: { ...prev.usage, error: (e as Error).message.slice(0, 200) } });
         return;
       } else {
         u = { available: false, asOf, models: [], why: `could not fetch plan usage: ${(e as Error).message.slice(0, 200)}` };
       }
-    } finally {
-      this.inFlight = false;
     }
     if (!u.available) u.spendWeekUsd = weekSpend(this.ledger, localDay());
-    this.usage = u;
-    try {
-      fs.writeFileSync(this.file, JSON.stringify(u));
-    } catch {
-      // not fatal
-    }
-    this.changed(u);
+    this.entries.set(key, { kind, label, account, usage: u });
   }
 
-  /**
-   * One promptless CLI process: it answers the get_usage control request without starting a turn. `env`
-   * carries no agent token, so the CLI reads the stored login from disk afresh each time (picking up
-   * refreshes by other Claude Code processes) and refreshes an expired access token itself.
-   */
-  private async fetch(env: Record<string, string | undefined>): Promise<UsageReply> {
-    let release: (() => void) | undefined;
-    const idle: AsyncIterable<SDKUserMessage> = {
-      [Symbol.asyncIterator]: () => ({ next: () => new Promise((r) => (release = () => r({ value: undefined, done: true }))) }),
-    };
-    const abort = new AbortController();
-    const q = query({
-      prompt: idle,
-      options: {
-        cwd: this.cfg.dataDir,
-        settingSources: [],
-        persistSession: false,
-        abortController: abort,
-        env,
-        ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
-      },
-    });
-    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out after 60 s')), 60_000).unref());
+  private save() {
     try {
-      const get = (q as unknown as { usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (o: { skipBehaviors: boolean }) => Promise<UsageReply> })
-        .usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
-      if (!get) throw new Error('this Agent SDK has no usage request');
-      return await Promise.race([get.call(q, { skipBehaviors: true }), timeout]);
-    } finally {
-      release?.();
-      abort.abort();
+      fs.writeFileSync(this.file, JSON.stringify({ entries: Object.fromEntries(this.entries) } satisfies UsageFile));
+    } catch {
+      // not fatal
     }
   }
 }

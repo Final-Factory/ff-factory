@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import type { PermissionMode, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
-import { attempt, openSession } from '../store';
+import { attempt, openSession, useStore } from '../store';
 import { fmtCost, fmtRelative, navigate, PERMISSION_MODES, sessionLabel, sessionTone, useNow } from '../util';
 import { Composer } from './Composer';
 import { Transcript } from './Transcript';
 import { Confirm, Dot, Icon, StateText } from './ui';
 import { AttentionStrip, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
+import { accountOf, accountTag } from './SystemMeters';
 
 /**
  * A conversation: the transcript takes the height, the composer sits under it. Inside a sandbox or
@@ -148,10 +149,16 @@ export function SessionDetails({ session, fullWidth }: { session: SessionInfo; f
 
 export function SessionMeta({ session }: { session: SessionInfo }) {
   const now = useNow();
+  const account = useStore((s) => (s.app ? accountOf(s.app, session.id) : undefined));
   return (
     <div className="session-meta">
       <span className={`tone-${sessionTone(session.status)}`}>{sessionLabel[session.status]}</span>
       {session.model && <span className="mono">{session.model}</span>}
+      {account && (
+        <span className="mono" title={`Claude account: ${account.label}`} data-testid="session-account">
+          {accountTag(account)}
+        </span>
+      )}
       <span title={`${session.turns} turns`}>{fmtCost(session.costUsd)}</span>
       <span title={new Date(session.lastActivityAt).toLocaleString()}>{fmtRelative(session.lastActivityAt, now)}</span>
     </div>

@@ -11,11 +11,11 @@ import { SessionManager, type SessionHandle, type SessionSink } from './sessions
 import { MachineManager, RemoteSession, daemonMismatch } from './machines.ts';
 import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
-import { Daemon } from '../machine/daemon.ts';
+import { Daemon, type Probes } from '../machine/daemon.ts';
 import { backupRootFor, checkOwnCheckout, hasRecentBackup } from './guard.ts';
 import { agentPath, nodeSupport, plist } from './machineDeploy.ts';
 import type { Config } from './config.ts';
-import type { ImageInput, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { HostStats, ImageInput, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 /** Stands in for AgentSession on the daemon: answers every message with "echo <text>". */
 class FakeAgent implements SessionHandle {
@@ -66,6 +66,27 @@ class FakeAgent implements SessionHandle {
   }
 }
 
+/** A Mac's load and its own login's usage, without vm_stat or a Claude CLI. */
+const MAC_STATS: HostStats = {
+  hostname: 'mx.local',
+  platform: 'darwin 25.0.0',
+  cpuModel: 'Apple M4 Pro',
+  cpuCount: 14,
+  loadPct: 37,
+  memTotalBytes: 48 * 2 ** 30,
+  memFreeBytes: 30 * 2 ** 30,
+  memUsedBytes: 18 * 2 ** 30,
+  memPressure: 'normal',
+  gpu: { name: 'Apple M4 Pro', memTotalMiB: 48 * 1024, memUsedMiB: 2048, utilPct: 12, unified: true },
+};
+const FAKE_PROBES: Probes = {
+  stats: async () => MAC_STATS,
+  usage: async () => ({
+    account: { email: 'someone@example.com', plan: 'Claude Max' },
+    reply: { subscription_type: 'max', rate_limits_available: true, rate_limits: { limits: [{ kind: 'weekly_all', percent: 41, resets_at: null }] } },
+  }),
+};
+
 const until = async (what: string, cond: () => boolean, ms = 5000) => {
   const end = Date.now() + ms;
   while (!cond()) {
@@ -91,7 +112,7 @@ async function setup() {
   const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url, maxSessions: 1 });
   const daemons: Daemon[] = [];
   const daemon = (tok = token) => {
-    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1 }, (i, s, o, e) => new FakeAgent(i, s, o, e));
+    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1 }, (i, s, o, e) => new FakeAgent(i, s, o, e), FAKE_PROBES);
     daemons.push(d);
     d.start();
     return d;
@@ -107,6 +128,25 @@ async function setup() {
   };
   return { store, sessions, mm, daemon, token, cleanup };
 }
+
+test('machine: the daemon reports its Mac\'s load and its own login\'s usage; offline clears the load (protocol 4)', async (t) => {
+  const { mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const usage: unknown[] = [];
+  mm.onUsage = (id, account, u) => usage.push({ id, email: account.email, weekly: u.weekly?.percent });
+  const d = daemon();
+  await until('stats', () => !!mm.statsOf('mx'));
+  const st = mm.statsOf('mx')!;
+  assert.equal(st.loadPct, 37);
+  assert.equal(st.gpu?.unified, true);
+  assert.ok(!isNaN(Date.parse(st.at)), 'the portal stamps when it arrived');
+  assert.deepEqual(Object.keys(mm.allStats()), ['mx']);
+  await until('usage', () => usage.length > 0);
+  assert.deepEqual(usage[0], { id: 'mx', email: 'someone@example.com', weekly: 41 });
+  d.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  assert.equal(mm.statsOf('mx'), undefined, "an offline machine's numbers are gone, not shown stale");
+});
 
 test('machine: a daemon connects, runs a session, and everything it records lands in the portal', async (t) => {
   const { store, sessions, mm, daemon, cleanup } = await setup();
@@ -312,9 +352,13 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-502-'));
-  const d = new Daemon({ portalUrl: url, id: 'mx', token: 't', repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1 }, () => {
-    throw new Error('no sessions here');
-  });
+  const d = new Daemon(
+    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1 },
+    () => {
+      throw new Error('no sessions here');
+    },
+    FAKE_PROBES,
+  );
   t.after(() => {
     d.shutdown();
     server.close();

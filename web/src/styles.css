@@ -830,6 +830,66 @@ select.input {
   color: var(--text-2);
 }
 
+/* Every computer on one line: a name and three mini bars (CPU, RAM, GPU); hover for the numbers. */
+.mcell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mname {
+  max-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.mcell-off .mname {
+  color: var(--text-3);
+}
+
+.moff {
+  font-family: var(--mono);
+  color: var(--text-3);
+}
+
+.mbars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+}
+
+.mbar {
+  position: relative;
+  width: 4px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+
+.mbar i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--blue);
+  transition: height 0.6s var(--ease);
+}
+
+.mbar.lvl-bg-warn i { background: var(--amber); }
+.mbar.lvl-bg-crit i { background: var(--red); }
+
+.plan-tag,
+.plan-more {
+  font-family: var(--mono);
+  color: var(--text-3);
+}
+
 .sys-toggle > .icon {
   transform: rotate(-90deg);
   transition: transform 0.15s;
@@ -927,6 +987,84 @@ select.input {
   font-size: var(--fs-xs);
   color: var(--text-3);
   text-align: right;
+}
+
+/* Every computer's load, one row each. */
+.mt-row {
+  display: grid;
+  grid-template-columns: minmax(44px, 1fr) repeat(4, minmax(0, 1.1fr));
+  align-items: end;
+  gap: var(--s-2);
+  font-size: var(--fs-xs);
+}
+
+.mt-head {
+  color: var(--text-3);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.mt-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.mt-cell {
+  display: grid;
+  min-width: 0;
+}
+
+.mt-num {
+  font-family: var(--mono);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.mt-cell.meter-crit .mt-num { color: var(--red); }
+.mt-cell.meter-warn .meter-bar i { background: var(--amber); }
+.mt-cell.meter-crit .meter-bar i { background: var(--red); }
+
+.mt-note {
+  grid-column: 2 / -1;
+  color: var(--text-3);
+}
+
+.mt-row > .mt-note:not(:nth-child(2)) {
+  grid-column: auto;
+}
+
+/* One Claude account: who, how many agents, where it is used. */
+.acct-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+.acct-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.acct-agents {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.acct-where {
+  flex-basis: 100%;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
 }
 
 /* "Needs you" on a phone: the bell with a count, in the page's header. */

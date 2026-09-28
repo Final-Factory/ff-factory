@@ -1,14 +1,10 @@
 import { useState, type ReactNode } from 'react';
-import type { AppState, HostHealth, PlanUsage, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
+import type { AppState, SessionInfo } from '../../../shared/types';
 import { useAttention, type AttentionItem } from '../attention';
 import {
   displayName,
-  fmtBytes,
-  fmtClock,
   fmtCost,
   isUnused,
-  lsGet,
-  lsSet,
   machineGlance,
   navigate,
   providerGlance,
@@ -24,6 +20,7 @@ import {
 import { Dot, Icon, type IconName } from './ui';
 import { usePush } from '../notify';
 import { SettingsModal } from './Settings';
+import { SystemFooter } from './SystemMeters';
 
 export function Sidebar({
   app,
@@ -289,180 +286,3 @@ function AttentionList({ items, onPick }: { items: AttentionItem[]; onPick: () =
     </section>
   );
 }
-
-// ---------------------------------------------------------------- the machine and the plan
-
-const level = (pct: number, warn = 75, crit = 90) => (pct >= crit ? 'crit' : pct >= warn ? 'warn' : 'ok');
-
-/** Two short lines of the host's load and the Claude plan; a tap opens the full meters. */
-function SystemFooter({ app }: { app: AppState }) {
-  const [open, setOpen] = useState(() => lsGet('ffsb.meters') === '1');
-  const sys = app.system;
-  if (!sys) return null;
-  const toggle = () => {
-    setOpen(!open);
-    lsSet('ffsb.meters', open ? null : '1');
-  };
-  const ram = ((sys.memTotalBytes - sys.memFreeBytes) / sys.memTotalBytes) * 100;
-  const vram = sys.gpu ? (sys.gpu.memUsedMiB / sys.gpu.memTotalMiB) * 100 : undefined;
-  const unityOn = app.sandboxes.filter((s) => s.unity.state !== 'stopped' && s.unity.state !== 'crashed').length;
-  // Workers and running standing agents on this host share limits.maxSessions; agents on a machine count toward its own limit.
-  const agentsOn = app.sessions.filter((s) => s.kind !== 'orchestrator' && !s.machineId && s.status !== 'stopped' && s.status !== 'error').length;
-  const u = app.usage;
-  const others = u?.available ? [u.session, ...u.models].filter((m): m is UsageMeter => !!m && m.percent >= 75) : [];
-  const hot = others.sort((a, b) => b.percent - a.percent)[0];
-  const short = (label: string) => label.replace(/^Weekly\s+/i, '').replace(/^5-hour session$/i, '5h');
-  const Val = ({ pct, children, warn, crit }: { pct: number; children: ReactNode; warn?: number; crit?: number }) => <b className={`lvl-${level(pct, warn, crit)}`}>{children}</b>;
-  return (
-    <div className={`sys-foot${open ? ' open' : ''}`}>
-      {open && (
-        <div className="sys-detail">
-          <Meters sys={sys} unityOn={unityOn} agentsOn={agentsOn} health={app.host?.health} />
-          {u && <PlanMeters usage={u} />}
-        </div>
-      )}
-      <button className="sys-toggle" onClick={toggle} aria-expanded={open} title={`${sys.cpuModel} · ${sys.cpuCount} threads. Tap for the meters.`}>
-        <span className="sys-cells">
-          <span>
-            CPU <Val pct={sys.loadPct}>{Math.round(sys.loadPct)}%</Val>
-          </span>
-          <span>
-            RAM <Val pct={ram}>{Math.round(ram)}%</Val>
-          </span>
-          {vram !== undefined && (
-            <span>
-              VRAM <Val pct={vram}>{Math.round(vram)}%</Val>
-            </span>
-          )}
-          <span>
-            Unity <Val pct={(unityOn / sys.limits.maxUnity) * 100} warn={100} crit={101}>{`${unityOn}/${sys.limits.maxUnity}`}</Val>
-          </span>
-          <span>
-            Agents <Val pct={(agentsOn / sys.limits.maxSessions) * 100} warn={100} crit={101}>{`${agentsOn}/${sys.limits.maxSessions}`}</Val>
-          </span>
-          {u &&
-            (u.available && u.weekly ? (
-              <span>
-                Plan <Val pct={u.weekly.percent}>{Math.round(u.weekly.percent)}%</Val>
-                {hot && (
-                  <>
-                    {' · '}
-                    {short(hot.label)} <Val pct={hot.percent}>{Math.round(hot.percent)}%</Val>
-                  </>
-                )}
-              </span>
-            ) : (
-              <span>
-                Plan <b className="lvl-warn">?</b>
-              </span>
-            ))}
-        </span>
-        <Icon name="chevron" size={12} />
-      </button>
-    </div>
-  );
-}
-
-function Meter({ label, pct, value, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; warn?: number; crit?: number; lvl?: 'ok' | 'warn' | 'crit' }) {
-  const p = Math.max(0, Math.min(100, pct));
-  return (
-    <div className={`meter meter-${lvl ?? level(p, warn, crit)}`}>
-      <div className="meter-row">
-        <span className="meter-label">{label}</span>
-        <span className="meter-value">{value}</span>
-      </div>
-      <div className="meter-bar">
-        <i style={{ width: `${p}%` }} />
-      </div>
-    </div>
-  );
-}
-
-function Meters({ sys, unityOn, agentsOn, health }: { sys: SystemStats; unityOn: number; agentsOn: number; health?: HostHealth }) {
-  const memUsed = sys.memTotalBytes - sys.memFreeBytes;
-  return (
-    <div className="meters">
-      <Meter label="CPU" pct={sys.loadPct} value={`${Math.round(sys.loadPct)}%`} />
-      <Meter label="RAM" pct={(memUsed / sys.memTotalBytes) * 100} value={`${fmtBytes(memUsed)} of ${fmtBytes(sys.memTotalBytes)}`} />
-      {sys.gpu && (
-        <Meter
-          label="VRAM"
-          pct={(sys.gpu.memUsedMiB / sys.gpu.memTotalMiB) * 100}
-          value={`${(sys.gpu.memUsedMiB / 1024).toFixed(1)} of ${(sys.gpu.memTotalMiB / 1024).toFixed(0)} GB · GPU ${Math.round(sys.gpu.utilPct)}%`}
-        />
-      )}
-      {health?.disks.length
-        ? // The host guard's volumes, coloured by its own levels (hostGuard.warnFreeGB / criticalFreeGB).
-          health.disks.map((d) =>
-            d.totalBytes !== undefined && d.freeBytes !== undefined ? (
-              <Meter
-                key={d.path}
-                label={`Disk ${d.path.replace(/[\\/]+$/, '')}`}
-                pct={((d.totalBytes - d.freeBytes) / d.totalBytes) * 100}
-                value={`${fmtBytes(d.freeBytes)} free`}
-                lvl={d.level === 'critical' ? 'crit' : d.level}
-              />
-            ) : (
-              <Meter key={d.path} label={`Disk ${d.path.replace(/[\\/]+$/, '')}`} pct={0} value="offline" lvl="crit" />
-            ),
-          )
-        : sys.diskTotalBytes !== undefined &&
-          sys.diskFreeBytes !== undefined && <Meter label="Disk" pct={((sys.diskTotalBytes - sys.diskFreeBytes) / sys.diskTotalBytes) * 100} value={`${fmtBytes(sys.diskFreeBytes)} free`} warn={85} crit={95} />}
-      <div className="limits">
-        <span className={unityOn >= sys.limits.maxUnity ? 'at-limit' : ''}>
-          Unity editors <b>{unityOn}/{sys.limits.maxUnity}</b>
-        </span>
-        <span className={agentsOn >= sys.limits.maxSessions ? 'at-limit' : ''}>
-          Agents <b>{agentsOn}/{sys.limits.maxSessions}</b>
-        </span>
-      </div>
-    </div>
-  );
-}
-
-/** The user's Claude plan limits (server/usage.ts): weekly first, then the 5-hour session and per-model weekly windows. */
-function PlanMeters({ usage: u }: { usage: PlanUsage }) {
-  const now = useNow(60_000);
-  const asOf = `as of ${fmtClock(u.asOf)}${u.error ? ' (refresh failed)' : ''}`;
-  if (!u.available) {
-    return (
-      <div className="meters plan-meters" title={u.why}>
-        <div className="meter-row">
-          <span className="meter-label">Claude plan</span>
-          <span className="meter-value">unavailable</span>
-        </div>
-        {u.why && <div className="plan-asof">{u.why}</div>}
-        {u.spendWeekUsd !== undefined && (
-          <div className="meter-row" title="What FF Factory's own agents cost over the last 7 days, from their reported cost. This is spend, not the plan's usage limit.">
-            <span className="meter-label">Portal spend, 7 days</span>
-            <span className="meter-value">{fmtCost(u.spendWeekUsd)}</span>
-          </div>
-        )}
-        <div className="plan-asof">{asOf}</div>
-      </div>
-    );
-  }
-  const rows = [u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m);
-  return (
-    <div className="meters plan-meters" title={`Claude ${u.plan ?? ''} plan usage limits, from the claude.ai usage endpoint`}>
-      {rows.map((m) => (
-        <Meter key={m.label} label={m.label} pct={m.percent} value={`${Math.round(m.percent)}%${m.resetsAt ? ` · ${resetLabel(m.resetsAt, now)}` : ''}`} />
-      ))}
-      <div className="plan-asof">
-        Claude {u.plan ?? 'plan'} · {asOf}
-      </div>
-    </div>
-  );
-}
-
-function resetLabel(iso: string, now: number): string {
-  const t = Date.parse(iso);
-  if (isNaN(t)) return '';
-  const h = (t - now) / 3_600_000;
-  if (h <= 0) return 'resetting';
-  if (h < 1) return `resets in ${Math.max(1, Math.round(h * 60))}m`;
-  if (h < 24) return `resets in ${Math.round(h)}h`;
-  const d = new Date(t);
-  return `resets ${d.toLocaleDateString([], { weekday: 'short' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-}
-

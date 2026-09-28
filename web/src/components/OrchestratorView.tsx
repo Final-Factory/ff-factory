@@ -8,6 +8,7 @@ import { Transcript } from './Transcript';
 import { AttentionButton, DrawerButton } from './ShellButtons';
 import { Confirm, Icon, Menu, StateText } from './ui';
 import { fmtCost, fmtRelative, sessionLabel, sessionTone, useNow } from '../util';
+import { accountOf } from './SystemMeters';
 
 const SUGGESTIONS = ["What's running, and what needs me?", 'Start work on spec 098', 'Play the tutorial single-player and log the bugs', 'Read the Discord forums and find bugs'];
 
@@ -34,6 +35,7 @@ export function OrchestratorView({ session, compact }: { session: SessionInfo | 
   const clearPrefill = useCallback(() => setPrefill(null), []);
   const heartbeat = useStore((s) => s.app?.settings?.heartbeatMinutes ?? null);
   const now = useNow(30_000);
+  const account = useStore((s) => (s.app ? accountOf(s.app, s.app.orchestratorId) : undefined));
 
   useEffect(() => (session ? openSession(session.id) : undefined), [session?.id]);
 
@@ -108,7 +110,8 @@ export function OrchestratorView({ session, compact }: { session: SessionInfo | 
                 <Icon name="plus" size={15} /> New conversation…
               </button>
               <div className="menu-foot">
-                {session.model ?? 'default model'} · {fmtCost(session.costUsd)} over {session.turns} turns · active {fmtRelative(session.lastActivityAt, now)}
+                {session.model ?? 'default model'}
+                {account ? ` on ${account.label}` : ''} · {fmtCost(session.costUsd)} over {session.turns} turns · active {fmtRelative(session.lastActivityAt, now)}
               </div>
             </>
           )}

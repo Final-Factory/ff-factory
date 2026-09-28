@@ -21,7 +21,9 @@ import { run } from '../server/proc.ts';
 import { listImages, readImage } from '../server/images.ts';
 import { readGitStatus } from '../server/gitStatus.ts';
 import { switchBranch } from '../server/switchBranch.ts';
-import type { SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import { hostStats } from '../server/system.ts';
+import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
+import type { HostStats, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /** Portal base URL, e.g. https://<host>.<tailnet>.ts.net */
@@ -34,6 +36,17 @@ export interface DaemonConfig {
   maxSessions?: number;
 }
 
+/** How the daemon measures its Mac and reads its login's plan usage; tests pass fakes (no CLI, no tools). */
+export interface Probes {
+  stats: (diskPath: string) => Promise<HostStats>;
+  usage: (claude: string | undefined) => Promise<{ reply: UsageReply; account: AccountIdentity }>;
+}
+
+const REAL_PROBES: Probes = {
+  stats: hostStats,
+  usage: (claude) => fetchPlanUsage(usageEnv(process.env), { cwd: HOME, claudeExecutable: claude }),
+};
+
 /** Builds a session; the real one is an AgentSession, tests pass a fake. */
 export type SessionFactory = (info: SessionInfo, sink: SessionSink, options: OptionsFactory, events: EventEmitter) => SessionHandle;
 
@@ -44,6 +57,8 @@ interface Entry {
 }
 
 const HOME = os.homedir();
+const STATS_MS = 15_000;
+const USAGE_MS = 5 * 60_000;
 // Never a Claude OAuth token in the daemon log (the launch spec carries the host's, server/secrets.ts).
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a.map((x) => (typeof x === 'string' ? redactSecrets(x) : x)));
 
@@ -67,9 +82,11 @@ export class Daemon {
   private maxSessions: number;
   private readonly timers: NodeJS.Timeout[] = [];
   private readonly makeSession: SessionFactory;
+  private readonly probes: Probes;
 
-  constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events)) {
+  constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES) {
     this.cfg = cfg;
+    this.probes = probes;
     this.unity = new MacUnity(cfg.repoPath);
     this.makeSession = makeSession;
     this.maxSessions = cfg.maxSessions ?? 3;
@@ -104,6 +121,12 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
     this.timers.push(setInterval(() => this.heartbeat(), 20_000));
     this.timers.push(setInterval(() => void this.reportStatus(), 60_000));
+    this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
+    this.timers.push(setInterval(() => void this.reportUsage(), USAGE_MS));
+    // An agent here hit a rate limit (it runs on this Mac's login when the portal sends no token): fetch sooner.
+    this.events.on('rateLimit', () => {
+      if (Date.now() - this.lastUsage > 60_000) void this.reportUsage();
+    });
   }
 
   shutdown() {
@@ -218,6 +241,41 @@ export class Daemon {
     // The portal showed these stopped while the link was down; give it their real state.
     for (const e of this.entries.values()) this.send({ type: 'session', info: e.s.info, live: e.s.live });
     void this.reportStatus();
+    void this.reportStats();
+    void this.reportUsage();
+  }
+
+  /** This Mac's CPU, RAM, GPU and disk (the disk holding the clone), for the portal's meters (protocol 4). */
+  private async reportStats() {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    try {
+      this.send({ type: 'stats', stats: await this.probes.stats(fs.existsSync(this.cfg.repoPath) ? this.cfg.repoPath : HOME) });
+    } catch (e) {
+      log('stats:', (e as Error).message);
+    }
+  }
+
+  private lastUsage = 0;
+  private usageInFlight = false;
+
+  /**
+   * The plan usage of this Mac's own Claude login, the same request the portal makes for its host
+   * (server/usage.ts), with no token in the environment: the keychain login answers. Agents the portal
+   * starts here with the host token are that token's account, which the portal polls itself.
+   */
+  private async reportUsage() {
+    if (this.ws?.readyState !== WebSocket.OPEN || this.usageInFlight) return;
+    this.usageInFlight = true;
+    this.lastUsage = Date.now();
+    const asOf = new Date().toISOString();
+    try {
+      const r = await this.probes.usage(this.cfg.claude);
+      this.send({ type: 'usage', account: r.account, usage: parseUsage(r.reply, asOf) });
+    } catch (e) {
+      this.send({ type: 'usage', account: {}, usage: { available: false, asOf, models: [], why: `could not fetch plan usage on this Mac: ${(e as Error).message.slice(0, 200)}` } });
+    } finally {
+      this.usageInFlight = false;
+    }
   }
 
   private async reportStatus() {

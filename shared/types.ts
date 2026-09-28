@@ -178,7 +178,8 @@ export type TranscriptEvent =
   | { seq: number; t: string; kind: 'error'; text: string }
   | { seq: number; t: string; kind: 'permission'; requestId: string; toolName: string; input: unknown; decision?: 'allow' | 'deny' };
 
-export interface SystemStats {
+/** One computer's load: the portal's host (SystemStats) or a machine (its daemon reports it, server/system.ts). */
+export interface HostStats {
   hostname: string;
   platform: string;
   cpuModel: string;
@@ -186,10 +187,30 @@ export interface SystemStats {
   loadPct: number; // 0-100, whole machine
   memTotalBytes: number;
   memFreeBytes: number;
+  /**
+   * Memory in use as the OS's own monitor counts it. On macOS free memory is mostly file cache, so this is
+   * app + wired + compressed memory (Activity Monitor's "Memory Used"); absent: total minus free.
+   */
+  memUsedBytes?: number;
+  /** macOS memory pressure (kern.memorystatus_vm_pressure_level). */
+  memPressure?: 'normal' | 'warn' | 'critical';
   diskTotalBytes?: number;
   diskFreeBytes?: number;
-  gpu?: { name: string; memTotalMiB: number; memUsedMiB: number; utilPct: number };
+  /**
+   * `unified`: Apple Silicon, where the GPU shares RAM: memUsedMiB is what the GPU holds in use and
+   * memTotalMiB is all of RAM, so utilPct is the number that says how busy it is.
+   */
+  gpu?: { name: string; memTotalMiB: number; memUsedMiB: number; utilPct: number; unified?: boolean };
+}
+
+export interface SystemStats extends HostStats {
   limits: { maxUnity: number; maxSessions: number };
+}
+
+/** A machine's load, as its daemon last reported it (protocol 4+); not kept in state.json. */
+export interface MachineStats extends HostStats {
+  /** When the portal received it. */
+  at: string;
 }
 
 // ---- machines (docs/machines.md) ----
@@ -519,6 +540,29 @@ export interface PlanUsage {
   spendWeekUsd?: number;
 }
 
+/**
+ * One Claude account the portal's agents or the user's machines run on, with its plan usage. Identified
+ * safely: the last 4 characters of a token, or a login's email; never the credential itself.
+ */
+export interface AccountUsage {
+  /** Stable key: "token:<sha256 prefix>", "email:<address>", or "login:<where>" while a login's email is unknown. */
+  id: string;
+  kind: 'token' | 'login';
+  /** "host token …9AAA", or the login's email. */
+  label: string;
+  email?: string;
+  /**
+   * The credentials that are this account: "token:<sha256 prefix>", "login:host" (this host's own claude.ai
+   * login) or "login:<machine id>" (a Mac's own login). Several when one login is signed in on several computers.
+   */
+  sources: string[];
+  /** Where it is used, for people: "BEAST login", "m3 login", "the agents' token on BEAST, m5". */
+  where: string[];
+  /** The portal's agents that run on it now, by session id. */
+  sessionIds: string[];
+  usage?: PlanUsage;
+}
+
 /** One transcript search result: where, when, and the text around the match. */
 export interface SearchHit {
   sessionId: string;
@@ -558,6 +602,10 @@ export interface AppState {
   system?: SystemStats;
   host: HostStatus;
   usage?: PlanUsage;
+  /** Every Claude account in use, with its plan usage; absent from a server older than this field. */
+  accounts?: AccountUsage[];
+  /** Each online machine's load, by machine id; absent from a server older than this field. */
+  machineStats?: Record<string, MachineStats>;
   /** The id of the main-page orchestrator session. */
   orchestratorId: string;
   config: { defaultModel: string; models: string[]; defaultBase: string };
@@ -586,6 +634,9 @@ export type ServerEvent =
   | { type: 'system'; system: SystemStats }
   | { type: 'host'; host: HostStatus }
   | { type: 'usage'; usage: PlanUsage }
+  | { type: 'accounts'; accounts: AccountUsage[] }
+  /** null: the machine went offline and its numbers are gone. */
+  | { type: 'machine_stats'; id: string; stats: MachineStats | null }
   /** Keep-alive, every SOCKET_PING_MS: a page that hears nothing for longer treats its socket as dead. */
   | { type: 'ping' };
 

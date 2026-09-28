@@ -2,10 +2,15 @@
 // (machine/daemon.ts). JSON messages, one per frame. Types only, plus the version constant.
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
-import type { ImageFile, ImageInput, Machine, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { AccountIdentity } from './usage.ts';
+import type { HostStats, ImageFile, ImageInput, Machine, PermissionMode, PlanUsage, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
-/** Bumped when either side must be redeployed to keep talking. */
-export const PROTOCOL_VERSION = 3;
+/**
+ * Bumped when either side must be redeployed to keep talking. 4: the daemon reports its Mac's load
+ * (`stats`) and its own Claude login's plan usage (`usage`); a portal ignores messages it does not know,
+ * and a protocol-3 daemon simply sends neither, so the machine shows no numbers until it is redeployed.
+ */
+export const PROTOCOL_VERSION = 4;
 
 export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended';
 
@@ -50,4 +55,8 @@ export type FromDaemon =
   | { type: 'fs_result'; id: string; ok: boolean; error?: string; mediaType?: string; data?: string; files?: ImageFile[] }
   | { type: 'unity_result'; id: string; ok: boolean; text: string }
   /** The daemon's own Unity watch: a hang or crash noticed, an automatic restart, the budget spent. */
-  | { type: 'unity_event'; text: string; restarted: boolean };
+  | { type: 'unity_event'; text: string; restarted: boolean }
+  /** The Mac's CPU, RAM, GPU and disk (server/system.ts), every 15 s (protocol 4+). */
+  | { type: 'stats'; stats: HostStats }
+  /** The plan usage of the Mac's own Claude login (not the host token), every 5 minutes (protocol 4+). */
+  | { type: 'usage'; account: AccountIdentity; usage: PlanUsage };

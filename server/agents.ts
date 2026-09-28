@@ -18,7 +18,7 @@ import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
 import { accountSource, hostClaudeEnvFor } from './secrets.ts';
 import { labelAfterEnd, labelDecision, type Place } from './labelPolicy.ts';
 import { ghNoreply, githubSlug, publicIdentityEnv, publicReposOf } from './publicGit.ts';
-import { systemStats } from './system.ts';
+import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { runHelper } from './privileged.ts';
@@ -71,6 +71,8 @@ export class Agents {
   usageLines?: () => string[];
   /** More lines for system_status (the outside watchdog; wired by index.ts). */
   extraStatusLines?: () => string[];
+  /** One load line per machine (wired by index.ts). */
+  machineStatusLines?: () => string[];
   /** The host guard (server/hostHealth.ts); wired by index.ts. */
   hostHealth?: HostHealthMonitor;
   /** FFBox, through its connector (server/providers.ts); wired by index.ts. */
@@ -1102,16 +1104,14 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'system_status',
-          "Machine load: CPU, RAM, disk free under the sandbox root, GPU memory, the configured limits on concurrent editors and agents, and the user's Claude plan usage (weekly limit, 5-hour session limit, per-model weekly limits).",
+          "Load of every computer: this host (CPU, RAM, disk free under the sandbox root, GPU memory) and each machine (the same, as its daemon reports it; a Mac's GPU shares its RAM, so its line gives how busy the GPU is and the memory pressure), the configured limits on concurrent editors and agents here, and the plan usage of every Claude account in use (weekly limit, 5-hour session limit, per-model weekly limits): the host token the agents run on, this host's own login, each Mac's own login, with which agents run on each.",
           {},
           wrap(async () => {
             const s = await systemStats(this.cfg);
-            const gb = (b?: number) => (b === undefined ? '?' : `${(b / 2 ** 30).toFixed(0)} GB`);
             return [
               `FF Factory ${formatVersion(appVersion())}`,
-              `${s.hostname} (${s.platform}), ${s.cpuModel} x${s.cpuCount}, load ${s.loadPct}%`,
-              `RAM free ${gb(s.memFreeBytes)} of ${gb(s.memTotalBytes)}; disk free ${gb(s.diskFreeBytes)} of ${gb(s.diskTotalBytes)}`,
-              s.gpu ? `GPU ${s.gpu.name}: ${s.gpu.memUsedMiB}/${s.gpu.memTotalMiB} MiB, ${s.gpu.utilPct}% util` : 'GPU: n/a',
+              `${statsLine(s.hostname, s)} (this host)`,
+              ...(this.machineStatusLines?.() ?? []),
               `Unity editors running ${this.sandboxes.runningUnityCount()}/${s.limits.maxUnity}; live agents ${this.sessions.liveAgents()}/${s.limits.maxSessions} (workers and running standing agents)`,
               ...(this.usageLines?.() ?? []),
               ...hostHealthLines(this.hostHealth?.status),

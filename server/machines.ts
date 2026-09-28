@@ -13,7 +13,8 @@ import { PROTOCOL_VERSION, type FromDaemon, type ToDaemon } from './machineProto
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { normalizePurpose } from './sandboxes.ts';
 import { openPr } from './gitStatus.ts';
-import type { EffortLevel, ImageInput, Machine, PermissionMode, SessionInfo } from '../shared/types.ts';
+import type { AccountIdentity } from './usage.ts';
+import type { EffortLevel, ImageInput, Machine, MachineStats, PermissionMode, PlanUsage, SessionInfo } from '../shared/types.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -114,6 +115,20 @@ export class MachineManager {
   isOnline(id: string) {
     return this.links.has(id);
   }
+
+  /** Each online machine's load, as its daemon last reported it (protocol 4); kept in memory only. */
+  private readonly stats = new Map<string, MachineStats>();
+
+  statsOf(id: string): MachineStats | undefined {
+    return this.stats.get(id);
+  }
+
+  allStats(): Record<string, MachineStats> {
+    return Object.fromEntries(this.stats);
+  }
+
+  /** A daemon reported its Mac's own Claude login's usage (wired by index.ts to the UsageTracker). */
+  onUsage?: (machineId: string, account: AccountIdentity, usage: PlanUsage) => void;
 
   // ---------------------------------------------------------------- the offline watchdog
 
@@ -504,6 +519,7 @@ export class MachineManager {
   private detach(id: string) {
     this.links.delete(id);
     this.hellos.delete(id);
+    if (this.stats.delete(id)) emit({ type: 'machine_stats', id, stats: null });
     const m = this.store.machines.get(id);
     if (m) {
       Object.assign(m, { online: false, lastSeen: new Date().toISOString() });
@@ -639,6 +655,15 @@ export class MachineManager {
         else p.reject(new Error(msg.error ?? 'failed'));
         return;
       }
+      case 'stats': {
+        const stats: MachineStats = { ...msg.stats, at: new Date().toISOString() };
+        this.stats.set(id, stats);
+        emit({ type: 'machine_stats', id, stats });
+        return;
+      }
+      case 'usage':
+        this.onUsage?.(id, msg.account, msg.usage);
+        return;
       case 'status':
         Object.assign(m, { git: msg.git ? { ...msg.git, pr: m.git?.branch === msg.git.branch ? m.git.pr : undefined } : undefined, lastSeen: new Date().toISOString() });
         this.store.putMachine(m);

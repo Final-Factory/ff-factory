@@ -85,6 +85,16 @@ terminal sees, e.g. `~/bin/gh`), writes `~/.ff-factory/daemon.json` (portal URL,
 Running `add_machine` again for the same id (or Redeploy in the UI) updates the code and issues a fresh
 token; it refuses while agents are running there unless forced. The user does nothing on the Macs.
 
+**Load and usage (protocol 4).** Every 15 s the daemon reports its Mac's CPU, RAM, GPU and disk
+(`stats`, measured by `server/system.ts` as the portal measures its own host: RAM from `vm_stat` and
+memory pressure, the GPU from `ioreg`), and every 5 minutes (sooner after a rate-limit event) the plan
+usage of the Mac's own Claude login (`usage`, the same promptless usage request the portal makes, with
+no token in its environment). The portal keeps the load in memory only (not in state.json) and drops
+it when the machine goes offline; the sidebar footer and `system_status` show every machine. The usage
+becomes one of the accounts in the usage meters, merged by email with the same login elsewhere. A
+daemon from before protocol 4 sends neither; the machine shows "no numbers yet" until the usual
+redeploy of outdated daemons updates it.
+
 **Versions.** A deploy stamps the daemon with the portal's commit (`machine/VERSION`); its hello reports
 it, with the protocol number and the tools it can serve. A daemon from another commit or protocol is
 outdated (`MachineManager.outdated`): after an app update that is every Mac. The portal redeploys an

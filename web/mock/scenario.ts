@@ -3,11 +3,13 @@
 // two machines, three standing agents with runs and delegations, and long transcripts with tool
 // calls, thinking, code, tables, images and the harness notices the orchestrator gets.
 import type {
+  AccountUsage,
   AppState,
   DelegationRequest,
   GitStatus,
   ImageRef,
   Machine,
+  MachineStats,
   PendingPermission,
   Sandbox,
   SessionInfo,
@@ -233,8 +235,8 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
       host: 'm3',
       purpose: 'unused',
       status: 'ready',
-      online: false,
-      lastSeen: iso(190),
+      online: true,
+      lastSeen: iso(0),
       repoPath: '/Users/ben/FinalFactory',
       home: '/Users/ben',
       portalUrl: 'https://beast.tail4c2a.ts.net',
@@ -243,6 +245,70 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
       info: { hostname: 'Bens-MacBook-Air', os: 'macOS 26.1', node: 'v24.3.0', claude: '2.3.11', daemon: '1.4.0' },
       git: git('develop'),
       createdAt: iso(60 * 24 * 9),
+    },
+  ];
+
+  // Two Macs reporting their load (protocol 4); an Apple GPU shares the RAM.
+  const macStats = (): Record<string, MachineStats> => ({
+    m5: {
+      hostname: 'Bens-MacBook-Pro',
+      platform: 'darwin 25.1.0',
+      cpuModel: 'Apple M5 Max',
+      cpuCount: 18,
+      loadPct: 64,
+      memTotalBytes: 64 * 2 ** 30,
+      memFreeBytes: 30 * 2 ** 30,
+      memUsedBytes: 34 * 2 ** 30,
+      memPressure: 'normal',
+      diskTotalBytes: 2 * 2 ** 40,
+      diskFreeBytes: 0.9 * 2 ** 40,
+      gpu: { name: 'Apple M5 Max', memTotalMiB: 64 * 1024, memUsedMiB: 9 * 1024, utilPct: 71, unified: true },
+      at: iso(0),
+    },
+    m3: {
+      hostname: 'Bens-MacBook-Air',
+      platform: 'darwin 25.1.0',
+      cpuModel: 'Apple M3 Pro',
+      cpuCount: 11,
+      loadPct: 12,
+      memTotalBytes: 18 * 2 ** 30,
+      memFreeBytes: 3 * 2 ** 30,
+      memUsedBytes: 15.5 * 2 ** 30,
+      memPressure: 'warn',
+      diskTotalBytes: 0.46 * 2 ** 40,
+      diskFreeBytes: 14 * 2 ** 30,
+      gpu: { name: 'Apple M3 Pro', memTotalMiB: 18 * 1024, memUsedMiB: 300, utilPct: 3, unified: true },
+      at: iso(0),
+    },
+  });
+
+  // The agents' token, and the owner's own login signed in on BEAST and both Macs.
+  const accounts = (agentIds: string[]): AccountUsage[] => [
+    {
+      id: 'token:3f9c0a7d21be',
+      kind: 'token',
+      label: 'host token …9AAA',
+      sources: ['token:3f9c0a7d21be'],
+      where: ["the agents' token on BEAST, m5, m3"],
+      sessionIds: agentIds,
+      usage: base.usage,
+    },
+    {
+      id: 'email:ben@example.com',
+      kind: 'login',
+      label: 'ben@example.com',
+      email: 'ben@example.com',
+      sources: ['login:host', 'login:m5', 'login:m3'],
+      where: ['BEAST login', 'm5 login', 'm3 login'],
+      sessionIds: [],
+      usage: {
+        available: true,
+        asOf: iso(2),
+        plan: 'max',
+        weekly: { label: 'Weekly', percent: 23, resetsAt: new Date(now + 4.1 * 24 * 60 * MIN).toISOString() },
+        session: { label: 'Session (5 h)', percent: 6, resetsAt: new Date(now + 250 * MIN).toISOString() },
+        models: [],
+      },
     },
   ];
 
@@ -652,7 +718,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
   }
 
   return {
-    state: { ...base, sandboxes, sessions, standingAgents, delegations, machines },
+    state: { ...base, sandboxes, sessions, standingAgents, delegations, machines, machineStats: macStats(), accounts: accounts(sessions.map((s) => s.id)) },
     transcripts,
     uploads,
     files,

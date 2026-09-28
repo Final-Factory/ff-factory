@@ -4,7 +4,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  accountLines,
   addSpend,
+  buildAccounts,
+  HOST_LOGIN,
+  hostToken,
+  sessionSource,
+  tokenKey,
+  tokenLabel,
+  tokenUsageEnv,
+  UsageTracker,
+  type UsageEntry,
   credentialsFile,
   describeReset,
   LOGIN_ACTION,
@@ -157,4 +167,141 @@ test('usage credential: a reply without plan limits names the fix', () => {
   const u = parseUsage({ subscription_type: null, rate_limits_available: false, rate_limits: null }, AS_OF);
   assert.equal(u.available, false);
   assert.ok(u.why?.includes(LOGIN_ACTION));
+});
+
+// ---------------------------------------------------------------- every account in use
+
+// Made up, the shape of a setup-token; never a real one.
+const TOKEN = `sk-ant-oat01-${'x'.repeat(60)}9AAA`;
+const TOKEN2 = `sk-ant-oat01-${'y'.repeat(60)}7BBB`;
+
+test('accounts: a token is known by a hash prefix and its last 4 characters, never by its value', () => {
+  assert.match(tokenKey(TOKEN), /^token:[0-9a-f]{12}$/);
+  assert.notEqual(tokenKey(TOKEN), tokenKey(TOKEN2));
+  assert.equal(tokenLabel(TOKEN), 'host token …9AAA');
+  assert.doesNotMatch(tokenKey(TOKEN) + tokenLabel(TOKEN), /xxxx/);
+});
+
+test('accounts: the token is polled with the profile scope, the agents keep theirs', () => {
+  const agents = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_OAUTH_SCOPES: 'user:inference', PATH: 'p' };
+  assert.deepEqual(tokenUsageEnv(agents, TOKEN), { PATH: 'p', CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CODE_OAUTH_SCOPES: 'user:inference user:profile' });
+  assert.equal(agents.CLAUDE_CODE_OAUTH_SCOPES, 'user:inference');
+  // claudeEnv wins over the server's own environment, as for the agents.
+  assert.equal(hostToken({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN } }, { CLAUDE_CODE_OAUTH_TOKEN: TOKEN2 }), TOKEN);
+  assert.equal(hostToken({}, { CLAUDE_CODE_OAUTH_TOKEN: TOKEN2 }), TOKEN2);
+  assert.equal(hostToken({}, {}), undefined);
+});
+
+test('accounts: each session is attributed to the credential it runs on', () => {
+  const onlyM3OwnLogin = (id: string) => id !== 'm3';
+  assert.equal(sessionSource({}, TOKEN, onlyM3OwnLogin), tokenKey(TOKEN));
+  assert.equal(sessionSource({}, undefined, onlyM3OwnLogin), HOST_LOGIN);
+  assert.equal(sessionSource({ machineId: 'm5' }, TOKEN, onlyM3OwnLogin), tokenKey(TOKEN));
+  assert.equal(sessionSource({ machineId: 'm3' }, TOKEN, onlyM3OwnLogin), 'login:m3', 'machines.useHostClaudeEnv false: the Mac login');
+  assert.equal(sessionSource({ machineId: 'm5' }, undefined, onlyM3OwnLogin), 'login:m5', 'no host token: the Mac login');
+});
+
+const usageOf = (weekly: number, asOf = AS_OF) => ({ ...parseUsage(REAL, asOf), weekly: { label: 'Weekly', percent: weekly } });
+
+test('accounts: one login on several computers is one account; the token is its own; stale machines drop out', () => {
+  const entries = new Map<string, UsageEntry>([
+    [HOST_LOGIN, { kind: 'login', account: { email: 'Owner@Example.com' }, usage: usageOf(33, '2026-09-24T02:30:00Z') }],
+    [tokenKey(TOKEN), { kind: 'token', label: tokenLabel(TOKEN), usage: usageOf(98) }],
+    ['login:m5', { kind: 'login', account: { email: 'owner@example.com' }, usage: usageOf(34, '2026-09-24T02:35:00Z') }],
+    ['login:m3', { kind: 'login', account: { email: 'other@example.com' }, usage: usageOf(12) }],
+    ['login:gone', { kind: 'login', account: { email: 'gone@example.com' }, usage: usageOf(1) }],
+  ]);
+  const accounts = buildAccounts(entries, {
+    hostName: 'BEAST',
+    token: { key: tokenKey(TOKEN), label: tokenLabel(TOKEN) },
+    machines: [
+      { id: 'm3', usesToken: false },
+      { id: 'm5', usesToken: true },
+    ],
+    sessions: [
+      { id: 'orch', source: tokenKey(TOKEN) },
+      { id: 'w1', source: tokenKey(TOKEN) },
+      { id: 'm3-w', source: 'login:m3' },
+    ],
+  });
+  assert.deepEqual(
+    accounts.map((a) => [a.id, a.label, a.sources, a.where, a.sessionIds, a.usage?.weekly?.percent]),
+    [
+      [tokenKey(TOKEN), 'host token …9AAA', [tokenKey(TOKEN)], ["the agents' token on BEAST, m5"], ['orch', 'w1'], 98],
+      ['email:other@example.com', 'other@example.com', ['login:m3'], ['m3 login'], ['m3-w'], 12],
+      // Merged by email (case-insensitive); the newer reading wins.
+      ['email:owner@example.com', 'Owner@Example.com', [HOST_LOGIN, 'login:m5'], ['BEAST login', 'm5 login'], [], 34],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(accounts), /xxxx|sk-ant/);
+});
+
+test('accounts: before anything is fetched, the host login and token still show, and a Mac login its agents use', () => {
+  const accounts = buildAccounts(new Map(), {
+    hostName: 'BEAST',
+    token: { key: tokenKey(TOKEN), label: tokenLabel(TOKEN) },
+    machines: [{ id: 'm3', usesToken: false }],
+    sessions: [{ id: 'm3-w', source: 'login:m3' }],
+  });
+  assert.deepEqual(
+    accounts.map((a) => [a.id, a.label, a.usage]),
+    [
+      ['login:m3', 'm3 login', undefined],
+      [tokenKey(TOKEN), 'host token …9AAA', undefined],
+      [HOST_LOGIN, 'BEAST login', undefined],
+    ],
+  );
+});
+
+test('accounts: the system_status lines name each account, where it is used and who runs on it', () => {
+  const now = new Date('2026-09-24T02:40:00Z');
+  const accounts = buildAccounts(new Map<string, UsageEntry>([[tokenKey(TOKEN), { kind: 'token', label: tokenLabel(TOKEN), usage: usageOf(98) }]]), {
+    hostName: 'BEAST',
+    token: { key: tokenKey(TOKEN), label: tokenLabel(TOKEN) },
+    machines: [],
+    sessions: [
+      { id: 'orch', source: tokenKey(TOKEN) },
+      { id: 'w1', source: tokenKey(TOKEN) },
+      { id: 'w2', source: tokenKey(TOKEN) },
+    ],
+  });
+  const sessions = new Map([
+    ['orch', { id: 'orch', kind: 'orchestrator' as const, status: 'idle' as const }],
+    ['w1', { id: 'w1', kind: 'worker' as const, status: 'running' as const }],
+    ['w2', { id: 'w2', kind: 'worker' as const, status: 'stopped' as const }],
+  ]);
+  const lines = accountLines(accounts, sessions, now);
+  assert.equal(lines[0], 'Claude accounts in use (2):');
+  assert.match(lines[1], /^- host token …9AAA \[the agents' token on BEAST; agents on it: the orchestrator, w1\]: Claude plan \(max\) usage, as of .+: Weekly 98% used/);
+  assert.match(lines[2], /^- BEAST login \[BEAST login; agents on it: no agent right now\]: Claude plan usage: not fetched yet/);
+  assert.deepEqual(accountLines([], sessions, now), ['Claude accounts: none known yet']);
+});
+
+test('accounts: the tracker reads a usage.json from before accounts, keeps Mac reports, and survives a failed fetch', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-accounts-'));
+  const cfg = { dataDir: dir } as never;
+  fs.writeFileSync(path.join(dir, 'usage.json'), JSON.stringify(parseUsage(REAL, AS_OF)));
+  let changes = 0;
+  const t = new UsageTracker(cfg, () => changes++);
+  assert.equal(t.usage?.weekly?.percent, 33, "the old file is this host's login");
+
+  t.report('m5', { email: 'owner@example.com' }, usageOf(40));
+  assert.equal(changes, 1);
+  // A failed fetch on the Mac keeps the last good numbers and who it was, flagged.
+  t.report('m5', {}, { available: false, asOf: AS_OF, models: [], why: 'could not fetch plan usage on this Mac: timed out after 60 s' });
+  const e = t.entries.get('login:m5')!;
+  assert.equal(e.account?.email, 'owner@example.com');
+  assert.equal(e.usage?.weekly?.percent, 40);
+  assert.match(e.usage?.error ?? '', /timed out/);
+  // A lasting answer (no plan on that login) replaces them.
+  t.report('m5', { email: 'owner@example.com' }, { available: false, asOf: AS_OF, models: [], why: 'the Claude login used for usage reports no plan limits' });
+  assert.equal(t.entries.get('login:m5')!.usage?.available, false);
+
+  // Saved in the new shape, and read back.
+  const again = new UsageTracker(cfg, () => undefined);
+  assert.equal(again.entries.get('login:m5')?.account?.email, 'owner@example.com');
+  assert.equal(again.usage?.weekly?.percent, 33);
+  again.forget('m5');
+  assert.equal(again.entries.has('login:m5'), false);
+  fs.rmSync(dir, { recursive: true });
 });

@@ -15,20 +15,20 @@ import { Notifier } from './notify.ts';
 import { refreshSandboxGit } from './gitStatus.ts';
 import { describeBusy } from './wake.ts';
 import type { SessionHandle } from './sessions.ts';
-import { systemStats } from './system.ts';
+import { machineLoadLine, systemStats } from './system.ts';
 import { Auth } from './auth.ts';
 import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
-import { scrubTranscripts } from './secrets.ts';
+import { scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { planCleanup, runCleanup } from './cleanup.ts';
 import { reapBrowsers } from './reaper.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
-import { UsageTracker, usageLines } from './usage.ts';
+import { UsageTracker, accountLines, buildAccounts, hostToken, sessionSource, tokenKey, tokenLabel } from './usage.ts';
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
@@ -249,6 +249,8 @@ function appState(): AppState {
     system: lastSystem,
     host: { ...host, drain: drainer.status },
     usage: usage.usage,
+    accounts: accountsNow(),
+    machineStats: machines.allStats(),
     orchestratorId: agents.orchestratorId,
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase },
     settings: store.settings,
@@ -952,11 +954,41 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
 }
 
 // The user's Claude plan usage (server/usage.ts): refreshed every few minutes and after rate-limit events.
-const usage = new UsageTracker(cfg, (u) => broadcast({ type: 'usage', usage: u }));
+// Every account in use: this host's login and token here, each Mac's own login reported by its daemon.
+const usage = new UsageTracker(cfg, () => {
+  if (usage.usage) broadcast({ type: 'usage', usage: usage.usage });
+  broadcast({ type: 'accounts', accounts: accountsNow() });
+});
+function accountsNow() {
+  const token = hostToken(cfg);
+  const usesHost = (id: string) => usesHostClaudeEnv(cfg, id);
+  return buildAccounts(usage.entries, {
+    hostName: os.hostname(),
+    token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
+    machines: machines.list().map((m) => ({ id: m.id, usesToken: !!token && usesHost(m.id) })),
+    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, usesHost) })),
+  });
+}
+// Which agents are on which account changes when sessions or machines come and go: send it again then.
+let accountShape = '';
+let accountTimer: NodeJS.Timeout | undefined;
+bus.on('event', (e: ServerEvent) => {
+  if (!['session', 'session_removed', 'machine', 'machine_removed'].includes(e.type)) return;
+  if (e.type === 'machine_removed') usage.forget(e.id);
+  accountTimer ??= setTimeout(() => {
+    accountTimer = undefined;
+    const shape = `${[...store.sessions.keys()].join()}|${machines.list().map((m) => m.id).join()}|${hostToken(cfg)?.slice(-4) ?? ''}`;
+    if (shape === accountShape) return;
+    accountShape = shape;
+    broadcast({ type: 'accounts', accounts: accountsNow() });
+  }, 1000);
+});
+machines.onUsage = (id, account, u) => usage.report(id, account, u);
 for (const s of sessions.sessions.values()) usage.recordCost(s.info.id, s.info.costUsd); // baselines
 sessions.events.on('rateLimit', () => usage.poke());
 sessions.events.on('result', (s: { info: { id: string; costUsd: number } }) => usage.recordCost(s.info.id, s.info.costUsd));
-agents.usageLines = () => usageLines(usage.usage, new Date());
+agents.usageLines = () => accountLines(accountsNow(), store.sessions, new Date());
+agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
   return [...(ffbox ? [ffbox] : []), ...outsideWatchLines()];

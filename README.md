@@ -145,11 +145,29 @@ claude.ai usage data as Claude Code's `/usage`: `server/usage.ts` asks a short-l
 process for it (the Agent SDK's experimental usage request; no model call) every 5 minutes and
 after rate-limit events. The orchestrator's `system_status` tool reports the same numbers.
 
+They cover every Claude account in use, each with its own meters: the agents' token
+(`claudeEnv.CLAUDE_CODE_OAUTH_TOKEN`, shown as "host token …abcd"), this host's own claude.ai login,
+and each machine's own login (its daemon polls it the same way and reports it). A login is shown by
+its email and one login signed in on several computers is one account; a token by its last 4
+characters, never its value. Each account lists where it is used and which agents run on it, and an
+agent's details name its account when there is more than one. The collapsed footer shows the
+account nearest its weekly limit and how many more there are.
+
+The footer also shows every computer's load: this host, and each machine as its daemon reports it
+every 15 s (CPU, RAM, GPU, disk). Alone, the host keeps its numbers (CPU, RAM, VRAM); with machines,
+each computer is a name and three mini bars (CPU, RAM, GPU; hover for the numbers), and the open
+footer has one row per computer. A Mac's RAM is what Activity Monitor calls Memory Used (app, wired
+and compressed memory, from `vm_stat`; plain "total minus free" counts the file cache as used) and
+turns amber or red with macOS memory pressure. Its GPU shares that RAM, so its bar is how busy the
+GPU is (`ioreg`), not VRAM.
+
 Credentials for the usage meter. Claude Code reads usage from `GET /api/oauth/usage` and only asks
-when its OAuth login has the `user:profile` scope. The agents' `claudeEnv.CLAUDE_CODE_OAUTH_TOKEN`
-(from `claude setup-token`) never has it: setup-token requests `user:inference` only, and there is
-no flag to widen it. So the usage request, and nothing else, runs without the agents' token (and
-without any API key variable). The CLI then uses the interactive claude.ai login stored on this
+when it believes its OAuth login has the `user:profile` scope. For a `CLAUDE_CODE_OAUTH_TOKEN` it
+assumes `user:inference` alone unless `CLAUDE_CODE_OAUTH_SCOPES` says otherwise, and the usage
+endpoint does answer a `claude setup-token` token (checked 2026-09-27). So the agents' token is
+polled with `CLAUDE_CODE_OAUTH_SCOPES="user:inference user:profile"`, for that one request only; the
+agents' own environment is untouched. This host's own login is polled without the agents' token
+(and without any API key variable). The CLI then uses the interactive claude.ai login stored on this
 machine, `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR/.credentials.json`; the Keychain on
 macOS). A normal `/login` carries `user:inference user:profile user:sessions:claude_code
 user:mcp_servers user:file_upload`. Each fetch starts a new CLI process, so it reads the file afresh

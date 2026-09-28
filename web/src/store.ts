@@ -143,6 +143,18 @@ function applyEvent(ev: ServerEvent) {
     case 'usage':
       set((s) => (s.app ? { app: { ...s.app, usage: ev.usage } } : {}));
       return;
+    case 'accounts':
+      set((s) => (s.app ? { app: { ...s.app, accounts: ev.accounts } } : {}));
+      return;
+    case 'machine_stats':
+      set((s) => {
+        if (!s.app) return {};
+        const machineStats = { ...s.app.machineStats };
+        if (ev.stats) machineStats[ev.id] = ev.stats;
+        else delete machineStats[ev.id];
+        return { app: { ...s.app, machineStats } };
+      });
+      return;
     case 'sandbox':
       set((s) => (s.app ? { app: { ...s.app, sandboxes: upsertById(s.app.sandboxes, ev.sandbox) } } : {}));
       return;

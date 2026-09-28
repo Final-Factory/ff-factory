@@ -139,8 +139,10 @@ fs.mkdirSync(path.join(dataDir, 'transcripts'), { recursive: true });
 fs.writeFileSync(path.join(dataDir, 'transcripts', 'gallery1.jsonl'), events.map((e, i) => JSON.stringify({ seq: i + 1, ...e })).join('\n') + '\n');
 
 process.env.FFSB_CONFIG = configFile;
-// No stored claude.ai login here, so the plan meter reports "unavailable" instead of starting a CLI.
+// No stored claude.ai login here, so the plan meter reports "unavailable" instead of starting a CLI;
+// and no agents' token from the environment this runs in, which the meter would poll for real.
 process.env.CLAUDE_CONFIG_DIR = path.join(base, 'claude');
+delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
 
 const { Auth } = await import('../server/auth.ts');
