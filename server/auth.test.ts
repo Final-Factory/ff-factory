@@ -145,9 +145,11 @@ test('API keys: shown once, stored hashed, revocable; bad keys are throttled per
   assert.deepEqual(a.bearer(req()), { ok: false, status: 401 });
 
   for (let i = 0; i < 9; i++) assert.equal(bearer(`ffsb_${'x'.repeat(43)}`, '198.51.100.3').ok, false);
-  // The tenth failure from that address... and then even a good key waits.
+  // The tenth failure from that address... and then bad keys get 429, but a good key still gets in and clears it.
   assert.deepEqual(bearer(`ffsb_${'y'.repeat(43)}`, '198.51.100.3'), { ok: false, status: 401 });
-  assert.deepEqual(bearer(key2, '198.51.100.3'), { ok: false, status: 429 });
+  assert.deepEqual(bearer(`ffsb_${'y'.repeat(43)}`, '198.51.100.3'), { ok: false, status: 429 });
+  assert.deepEqual(bearer(key2, '198.51.100.3'), { ok: true, name: 'laptop' });
+  assert.deepEqual(bearer(`ffsb_${'y'.repeat(43)}`, '198.51.100.3'), { ok: false, status: 401 });
   assert.deepEqual(bearer(key2, '198.51.100.4'), { ok: true, name: 'laptop' });
 
   assert.equal(a.revokeApiKey('laptop'), true);

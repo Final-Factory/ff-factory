@@ -423,3 +423,43 @@ test('launch: a tool this version does not know is left out, not fatal (a newer 
   );
   assert.ok(o.mcpServers?.machine);
 });
+
+test('machine: a lockout does not feed itself, and a good token gets through it', async (t) => {
+  const { mm, token, cleanup } = await setup();
+  t.after(cleanup);
+  const bad = token.slice(0, -4) + 'AAAA';
+  let clock = Date.now();
+  t.mock.method(Date, 'now', () => clock);
+  const answers: string[] = [];
+  const attempt = (tok: string) => {
+    const out: string[] = [];
+    const socket = { write: (s: string) => out.push(s), destroy: () => undefined } as unknown as import('node:stream').Duplex;
+    const req = { headers: { authorization: `Bearer ${tok}` } } as unknown as http.IncomingMessage;
+    const ok = mm.upgrade(req, socket, Buffer.alloc(0), '198.51.100.7');
+    answers.push(ok ? 'ok' : (out[0]?.split(' ')[1] ?? '?'));
+    return ok;
+  };
+  for (let i = 0; i < 10; i++) attempt(bad);
+  assert.deepEqual(answers.splice(0), [...Array(10).fill('401')]);
+  // A daemon retrying about every 36 s for an hour: refused, but its refusals do not extend the lockout.
+  for (let i = 0; i < 100; i++) {
+    clock += 36_000;
+    attempt(bad);
+  }
+  assert.equal(answers.at(10), '429', 'still locked out ten retries in');
+  assert.equal(answers.at(-1), '401', 'the lockout ends 15 minutes after the last counted failure');
+  answers.length = 0;
+
+  // Locked out again; a good token still gets in (the reinstall fixed the daemon), and it clears the address.
+  for (let i = 0; i < 11; i++) attempt(bad);
+  assert.equal(answers.at(-1), '429');
+  const failures = (mm as unknown as { failures: Map<string, number[]> }).failures;
+  const wss = (mm as unknown as { wss: { handleUpgrade: (...a: unknown[]) => void } }).wss;
+  let upgraded = 0;
+  t.mock.method(wss, 'handleUpgrade', () => upgraded++);
+  assert.equal(attempt(token), true);
+  assert.equal(upgraded, 1);
+  assert.equal(failures.has('198.51.100.7'), false);
+  assert.equal(attempt(bad), false);
+  assert.equal(answers.at(-1), '401');
+});
