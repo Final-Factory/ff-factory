@@ -103,7 +103,7 @@ export class Agents {
     this.sessions = sessions;
     this.machines = machines;
     this.identity = identity;
-    this.waker = new Waker(sessions, store);
+    this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
     this.standing = new StandingAgents({
       cfg,
       store,
@@ -153,6 +153,9 @@ export class Agents {
     this.standing.boot();
     const id = this.store.orchestratorId;
     if (!id || !this.sessions.sessions.has(id)) this.newOrchestrator();
+    // The wake_me wakes the last server had pending (workers' and the orchestrator's): a restart must not lose them.
+    const wakes = this.waker.restore();
+    if (wakes) console.log(`wake_me: re-armed ${wakes} pending wake(s)`);
     return cutOff;
   }
 

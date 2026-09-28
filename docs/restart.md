@@ -85,6 +85,11 @@ hands it to the supervisor. If the stop came during the drain, the update is ret
 writes the resume file and `update.request` and exits, the supervisor updates, and the updated
 server resumes everything.
 
+**Pending `wake_me` wakes** (workers' and the orchestrator's) are kept in `data/wakes.json` and re-armed
+at startup, after a clean restart or a crash alike (`Waker.restore`). One whose time passed while the
+server was down fires at once and says how late it is. A wake that cannot start its agent (the agent
+limit, the host guard) is retried once a minute, ten times, before the transcript says it failed.
+
 Crash-loop guard: a second unclean stop within 30 minutes (`unclean-recovery.last`) only reports what
 was cut off, as before. It does not resume, restart or retry anything.
 

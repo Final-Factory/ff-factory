@@ -72,6 +72,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **`wake_me` wakes were lost on a restart.** They lived only in timers, so an update or a crash
+  forgot every pending wake and the idle workers (and the orchestrator) waiting on one never resumed.
+  They are now kept in `data/wakes.json` and re-armed at startup; one that came due while the server
+  was down fires at once, and one that cannot start its agent is retried for ten minutes.
 - **A machine locked out by its own retries.** After 10 failed `/machine` upgrades from an address
   in 15 minutes, every refused retry was counted again, so a daemon retrying every ~36 s kept the
   lockout going forever and even its fixed token got 429 (the M5 after a half-failed reinstall).
