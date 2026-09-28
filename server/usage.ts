@@ -517,6 +517,12 @@ const brief = (u: PlanUsage) =>
 
 const REFRESH_MS = 5 * 60_000;
 const EVENT_DEBOUNCE_MS = 60_000;
+/**
+ * The longest the tracker waits for any one request (the login's CLI, the token's endpoint, its headers),
+ * whatever the request's own timeout says. A token asks at most two, so a poll settles well within
+ * REFRESH_MS and every credential has numbers or a reason by the next one.
+ */
+const ANSWER_MS = 75_000;
 
 /** What usage.json holds; a file from before per-account usage is one PlanUsage (this host's login). */
 interface UsageFile {
@@ -533,6 +539,8 @@ export interface UsageDeps {
   fetchTokenLimits?: (token: string) => Promise<UsageReply>;
   /** One line per poll: which credential, whether it answered. Never a credential. */
   log?: (line: string) => void;
+  /** Tests: the per-request deadline (ANSWER_MS). */
+  answerMs?: number;
 }
 
 /**
@@ -546,7 +554,9 @@ export class UsageTracker {
   private ledger: Record<string, number> = {};
   private readonly lastCost = new Map<string, number>();
   readonly entries = new Map<string, UsageEntry>();
-  private inFlight = false;
+  /** When the running poll started (0: none), and which poll it is, so a stale one cannot clear a newer one's mark. */
+  private inFlightSince = 0;
+  private pollId = 0;
   private lastFetch = 0;
   private soon?: NodeJS.Timeout;
   private readonly changed: () => void;
@@ -554,6 +564,7 @@ export class UsageTracker {
   private readonly fetchToken: NonNullable<UsageDeps['fetchToken']>;
   private readonly fetchTokenLimits: NonNullable<UsageDeps['fetchTokenLimits']>;
   private readonly log: NonNullable<UsageDeps['log']>;
+  private readonly answerMs: number;
   /** Per token key: no request before this time (epoch ms), the endpoint's Retry-After. */
   private readonly retryAt = new Map<string, number>();
 
@@ -564,6 +575,7 @@ export class UsageTracker {
     this.fetchToken = deps.fetchToken ?? ((token) => fetchTokenUsage(token));
     this.fetchTokenLimits = deps.fetchTokenLimits ?? ((token) => fetchTokenLimits(token));
     this.log = deps.log ?? ((line) => console.log(line));
+    this.answerMs = deps.answerMs ?? ANSWER_MS;
     this.file = path.join(cfg.dataDir, 'usage.json');
     this.spendFile = path.join(cfg.dataDir, 'spend.json');
     try {
@@ -655,10 +667,29 @@ export class UsageTracker {
     }
   }
 
+  /**
+   * `p`, or a UsageFetchError once the tracker's own deadline passes. A request that never settles (seen
+   * 2026-09-28: the token's first poll never answered and, holding the in-flight mark, stopped every poll
+   * after it) then becomes a reason like any other failure.
+   */
+  private within<T>(p: Promise<T>, what: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new UsageFetchError(`${what} gave no answer within ${Math.round(this.answerMs / 1000)} s`)), this.answerMs);
+    });
+    return Promise.race([p, late]).finally(() => clearTimeout(timer));
+  }
+
   async refresh() {
-    if (this.inFlight) return;
-    this.inFlight = true;
-    this.lastFetch = Date.now();
+    const now = Date.now();
+    if (this.inFlightSince) {
+      if (now - this.inFlightSince < REFRESH_MS) return;
+      // Cannot happen while every request has a deadline; if it does, one stuck poll must not stop the rest.
+      this.log(`usage: the poll started at ${new Date(this.inFlightSince).toISOString()} has not finished; polling again`);
+    }
+    const mine = ++this.pollId;
+    this.inFlightSince = now;
+    this.lastFetch = now;
     try {
       const base = { ...process.env, ...this.cfg.claudeEnv };
       const tokens = this.tokens();
@@ -669,7 +700,7 @@ export class UsageTracker {
       await Promise.all([this.refreshLogin(usageEnv(base)), ...tokens.map((x) => this.refreshToken(x.token, x.label))]);
       this.save();
     } finally {
-      this.inFlight = false;
+      if (this.pollId === mine) this.inFlightSince = 0;
     }
     this.changed();
   }
@@ -686,7 +717,7 @@ export class UsageTracker {
     try {
       const problem = loginProblem(readStoredLogin(file), Date.now(), file, process.platform === 'darwin');
       if (problem) throw new LoginProblem(problem);
-      const r = await this.fetchLogin(env);
+      const r = await this.within(this.fetchLogin(env), 'the claude.ai login (through the CLI)');
       u = parseUsage(r.reply, asOf);
       if (r.account.email || r.account.plan) account = r.account;
     } catch (e) {
@@ -715,14 +746,14 @@ export class UsageTracker {
   private async refreshToken(token: string, label = tokenLabel(token)) {
     const key = tokenKey(token);
     const asOf = new Date().toISOString();
-    const reason = (e: unknown) => scrub((e as Error).message).slice(0, 200);
+    const reason = (e: unknown) => scrub(e instanceof Error ? e.message : String(e)).slice(0, 200);
     // The usage endpoint's answer, or why it rate-limits this token (now, or still within its Retry-After).
     const endpoint = async (): Promise<PlanUsage | { limited: string }> => {
       const wait = this.retryAt.get(key);
       if (wait && wait > Date.now()) return { limited: `the usage endpoint rate-limits this token until ${new Date(wait).toISOString()}` };
       this.retryAt.delete(key);
       try {
-        const u = parseUsage(await this.fetchToken(token), asOf);
+        const u = parseUsage(await this.within(this.fetchToken(token), 'the usage endpoint'), asOf);
         if (!u.available) u.why = `the usage endpoint gave no plan limits for this token (${u.why ?? 'unknown'})`;
         return u;
       } catch (e) {
@@ -732,18 +763,23 @@ export class UsageTracker {
         return { limited: reason(e) };
       }
     };
-    const first = await endpoint();
     let u: PlanUsage;
     let via = 'the usage endpoint';
-    if ('limited' in first) {
-      // The same token's rate-limit headers stand in: weekly and session, no per-model limits.
-      via = `the API's ${LIMITS_SOURCE} (${first.limited})`;
-      try {
-        u = { ...parseUsage(await this.fetchTokenLimits(token), asOf), source: LIMITS_SOURCE };
-      } catch (e) {
-        u = { available: false, asOf, models: [], why: `usage unknown: ${first.limited}; ${reason(e)}` };
-      }
-    } else u = first;
+    try {
+      const first = await endpoint();
+      if ('limited' in first) {
+        // The same token's rate-limit headers stand in: weekly and session, no per-model limits.
+        via = `the API's ${LIMITS_SOURCE} (${first.limited})`;
+        try {
+          u = { ...parseUsage(await this.within(this.fetchTokenLimits(token), "the API's rate-limit headers"), asOf), source: LIMITS_SOURCE };
+        } catch (e) {
+          u = { available: false, asOf, models: [], why: `usage unknown: ${first.limited}; ${reason(e)}` };
+        }
+      } else u = first;
+    } catch (e) {
+      // Anything unexpected (a reply parseUsage cannot read): still a reason, never "not fetched yet".
+      u = { available: false, asOf, models: [], why: `usage unknown: ${reason(e)}` };
+    }
     if (!u.available) u.spendWeekUsd = weekSpend(this.ledger, localDay());
     this.entries.set(key, { kind: 'token', label, usage: u, direct: true });
     this.log(`usage: ${label} (${key}, asked with that token itself, via ${via}): ${u.available ? 'ok' : 'failed'}, ${brief(u)}`);

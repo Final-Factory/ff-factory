@@ -551,3 +551,71 @@ test("tracker: a token's numbers saved before it was asked directly (the login's
   assert.equal(t.usage?.weekly?.percent, 98);
   fs.rmSync(dir, { recursive: true });
 });
+
+test('tracker: every token shows numbers or "usage unknown: <reason>" after one poll, even when a request never answers', async () => {
+  const never = () => new Promise<never>(() => undefined);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-hang-'));
+  fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'login-secret', refreshToken: 'r', scopes: ['user:profile'] } }));
+  const cfg = { dataDir: dir, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never;
+  const summary = (t: UsageTracker) => accountLines(tokenOnly(t), new Map(), new Date(AS_OF)).find((l) => l.includes('host token'))!;
+  // The request that wedged BEAST's portal (2026-09-28): it never settles, nor does the login's CLI.
+  let hang = { token: never as () => Promise<UsageReply>, limits: never as () => Promise<UsageReply> };
+  const logs: string[] = [];
+  const t = new UsageTracker(cfg, () => undefined, {
+    fetchLogin: never,
+    fetchToken: () => hang.token(),
+    fetchTokenLimits: () => hang.limits(),
+    log: (line) => logs.push(line),
+    answerMs: 30,
+  });
+  assert.match(summary(t), /not fetched yet/, 'before the first poll');
+  await t.refresh();
+  assert.doesNotMatch(summary(t), /not fetched yet/);
+  assert.match(t.entries.get(tokenKey(TOKEN))!.usage!.why!, /^usage unknown: the usage endpoint gave no answer within 0 s$/);
+  assert.match(t.usage!.why!, /could not fetch plan usage: the claude\.ai login \(through the CLI\) gave no answer/);
+
+  // The next poll runs (the first no longer holds it), and a rate-limited endpoint whose headers hang is unknown too.
+  hang = {
+    token: async () => {
+      throw new UsageFetchError('the usage endpoint rate-limits this token, next try in 58 min (HTTP 429)', 3_463_000);
+    },
+    limits: never,
+  };
+  await t.refresh();
+  assert.match(t.entries.get(tokenKey(TOKEN))!.usage!.why!, /^usage unknown: the usage endpoint rate-limits .*HTTP 429\); the API's rate-limit headers gave no answer/);
+
+  // An answer nothing can read is a reason as well, never an exception that leaves the entry unset.
+  const odd = new UsageTracker({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'usage-odd-')), claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never, () => undefined, {
+    fetchLogin: never,
+    fetchToken: async () => ({ rate_limits_available: true, rate_limits: { limits: 7 as never } }),
+    log: () => undefined,
+    answerMs: 30,
+  });
+  await odd.refresh();
+  assert.match(odd.entries.get(tokenKey(TOKEN))!.usage!.why!, /^usage unknown: /);
+  assert.ok(logs.some((l) => /host token …9AAA .*: failed, no numbers: usage unknown: /.test(l)), logs.join('\n'));
+  fs.rmSync(dir, { recursive: true });
+});
+
+test('tracker: a poll that has run longer than the interval no longer blocks the next one', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-stuck-'));
+  const logs: string[] = [];
+  let calls = 0;
+  const t = new UsageTracker({ dataDir: dir, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never, () => undefined, {
+    fetchLogin: () => new Promise(() => undefined),
+    fetchToken: async () => {
+      calls++;
+      return { rate_limits_available: true, rate_limits: endpointBody(41, 33, 0) };
+    },
+    log: (line) => logs.push(line),
+    answerMs: 60_000,
+  });
+  void t.refresh();
+  await t.refresh(); // still in flight, and recent: skipped
+  assert.equal(calls, 1);
+  (t as unknown as { inFlightSince: number }).inFlightSince -= 6 * 60_000;
+  await Promise.race([t.refresh(), new Promise((r) => setTimeout(r, 20))]);
+  assert.equal(calls, 2);
+  assert.ok(logs.some((l) => /has not finished; polling again/.test(l)), logs.join('\n'));
+  fs.rmSync(dir, { recursive: true });
+});
