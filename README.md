@@ -166,8 +166,11 @@ are kept per credential. The agents' token is sent straight to `GET /api/oauth/u
 credential of that request. It does not go through the CLI: given a `CLAUDE_CODE_OAUTH_TOKEN`, the
 CLI still answers with the claude.ai login stored on the machine (measured 2026-09-27: a made-up
 token got that login's exact numbers). If the token's request fails (rejected, rate-limited, no
-network), its meter says "usage unknown" with the reason; it never shows older or other numbers. A
-429 waits for the endpoint's `Retry-After`. Each poll logs one line per credential (which one, by
+network), its meter says "usage unknown" with the reason; it never shows older or other numbers.
+The endpoint rate-limits a token for long stretches when many agents run on it (HTTP 429 with a
+`Retry-After` of about an hour). Until that passes, the token's weekly and 5-hour numbers come from
+the rate-limit headers of one Haiku request with one output token, made with the same token; the meter
+says "from rate-limit headers", and per-model limits are missing then. Each poll logs one line per credential (which one, by
 its last 4 characters and hash prefix, and whether it answered), never the credential itself.
 This host's own login is polled without the agents' token
 (and without any API key variable). The CLI then uses the interactive claude.ai login stored on this

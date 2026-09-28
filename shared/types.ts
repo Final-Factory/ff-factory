@@ -536,6 +536,8 @@ export interface PlanUsage {
   why?: string;
   /** The last refresh failed; the numbers are from asOf. */
   error?: string;
+  /** Where the numbers came from when not the usage endpoint, e.g. "rate-limit headers" (weekly and session only). */
+  source?: string;
   /** Only when unavailable: FF Factory's own agent spend over the last 7 days (spend, not the plan limit). */
   spendWeekUsd?: number;
 }

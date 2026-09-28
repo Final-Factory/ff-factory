@@ -55,7 +55,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 - **The agents' token showed this host's login's usage.** Its request went through the CLI, which
   answers with the claude.ai login stored on the machine whatever token it is given. The token is
   now sent to the usage endpoint itself; a failure shows "usage unknown" with the reason, and
-  numbers saved by the old request are dropped. Each poll logs which credential it used and
+  numbers saved by the old request are dropped. While the endpoint rate-limits the token (429), its
+  weekly and 5-hour numbers come from the rate-limit headers of a one-token Haiku request made with
+  the same token. Each poll logs which credential it used and
   whether it answered.
 - **Messages sent from another device now show up.** A page whose WebSocket had died silently (a
   laptop asleep, a phone suspending the tab, a dropped connection) kept it as if open and showed

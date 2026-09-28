@@ -381,13 +381,14 @@ function PlanMeters({ usage: u, head }: { usage?: PlanUsage; head?: ReactNode })
   }
   const rows = [u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m);
   return (
-    <div className="meters plan-meters" title={`Claude ${u.plan ?? ''} plan usage limits, from the claude.ai usage endpoint`}>
+    <div className="meters plan-meters" title={`Claude ${u.plan ?? ''} plan usage limits, from ${u.source ? `the API's ${u.source}` : 'the claude.ai usage endpoint'}`}>
       {head}
       {rows.map((m) => (
         <Meter key={m.label} label={m.label} pct={m.percent} value={`${Math.round(m.percent)}%${m.resetsAt ? ` · ${resetLabel(m.resetsAt, now)}` : ''}`} />
       ))}
       <div className="plan-asof">
         Claude {u.plan ?? 'plan'} · {asOf}
+        {u.source ? ` · from ${u.source}` : ''}
       </div>
     </div>
   );

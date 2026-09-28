@@ -109,7 +109,7 @@ export function usageSummary(u: PlanUsage | undefined, now: Date): string {
     return `Claude plan usage: unavailable (${u.why ?? 'unknown'}), ${asOf}${spend}`;
   }
   const fmt = (m: UsageMeter) => `${m.label} ${Math.round(m.percent)}% used${m.resetsAt ? `, ${describeReset(m.resetsAt, now)}` : ''}`;
-  return `Claude plan${u.plan ? ` (${u.plan})` : ''} usage, ${asOf}: ${[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt).join('; ')}`;
+  return `Claude plan${u.plan ? ` (${u.plan})` : ''} usage, ${asOf}${u.source ? `, from ${u.source}` : ''}: ${[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt).join('; ')}`;
 }
 
 /**
@@ -444,6 +444,49 @@ export async function fetchTokenUsage(token: string, fetchImpl: typeof fetch = f
   return { rate_limits_available: true, rate_limits: body };
 }
 
+export const MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
+export const LIMITS_SOURCE = 'rate-limit headers';
+
+/**
+ * A token's weekly and 5-hour utilization from the rate-limit headers the API sends with every reply
+ * (anthropic-ratelimit-unified-7d-* / -5h-*), for when the usage endpoint rate-limits the token: it
+ * does for long stretches when many agents run on it (measured 2026-09-27: HTTP 429 with a fresh
+ * Retry-After of ~58 min each hour, while these headers answered). Costs one Haiku request with one
+ * output token, made with that token alone. No per-model limits: the headers do not carry them.
+ */
+export async function fetchTokenLimits(token: string, fetchImpl: typeof fetch = fetch, timeoutMs = 30_000): Promise<UsageReply> {
+  let res: Response;
+  try {
+    res = await fetchImpl(MESSAGES_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20', 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1,
+        system: "You are Claude Code, Anthropic's official CLI for Claude.",
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    await res.text(); // the body is not needed; read it so the connection is released
+  } catch (e) {
+    throw new UsageFetchError(`the API could not be reached: ${scrub((e as Error).message).slice(0, 150)}`);
+  }
+  const num = (k: string) => {
+    const v = res.headers.get(`anthropic-ratelimit-unified-${k}`);
+    return v !== null && v !== '' && Number.isFinite(Number(v)) ? Number(v) : undefined;
+  };
+  const window = (k: '5h' | '7d') => {
+    const used = num(`${k}-utilization`);
+    const reset = num(`${k}-reset`);
+    return used === undefined ? null : { utilization: used * 100, resets_at: reset === undefined ? null : new Date(reset * 1000).toISOString() };
+  };
+  const five_hour = window('5h');
+  const seven_day = window('7d');
+  if (!five_hour && !seven_day) throw new UsageFetchError(`the API's reply had no rate-limit headers for this token (HTTP ${res.status})`);
+  return { rate_limits_available: true, rate_limits: { five_hour, seven_day } };
+}
+
 /** The stored login cannot be used: fall back to spend without starting the CLI. */
 class LoginProblem extends Error {}
 
@@ -469,6 +512,8 @@ export interface UsageDeps {
   fetchLogin?: (env: Record<string, string | undefined>) => Promise<{ reply: UsageReply; account: AccountIdentity }>;
   /** A token, straight to the endpoint (fetchTokenUsage). */
   fetchToken?: (token: string) => Promise<UsageReply>;
+  /** A token's weekly and session numbers from the API's rate-limit headers (fetchTokenLimits), while the endpoint rate-limits it. */
+  fetchTokenLimits?: (token: string) => Promise<UsageReply>;
   /** One line per poll: which credential, whether it answered. Never a credential. */
   log?: (line: string) => void;
 }
@@ -490,6 +535,7 @@ export class UsageTracker {
   private readonly changed: () => void;
   private readonly fetchLogin: NonNullable<UsageDeps['fetchLogin']>;
   private readonly fetchToken: NonNullable<UsageDeps['fetchToken']>;
+  private readonly fetchTokenLimits: NonNullable<UsageDeps['fetchTokenLimits']>;
   private readonly log: NonNullable<UsageDeps['log']>;
   /** Per token key: no request before this time (epoch ms), the endpoint's Retry-After. */
   private readonly retryAt = new Map<string, number>();
@@ -499,6 +545,7 @@ export class UsageTracker {
     this.changed = changed;
     this.fetchLogin = deps.fetchLogin ?? ((env) => fetchPlanUsage(env, { cwd: this.cfg.dataDir, claudeExecutable: this.cfg.claudeExecutable }));
     this.fetchToken = deps.fetchToken ?? ((token) => fetchTokenUsage(token));
+    this.fetchTokenLimits = deps.fetchTokenLimits ?? ((token) => fetchTokenLimits(token));
     this.log = deps.log ?? ((line) => console.log(line));
     this.file = path.join(cfg.dataDir, 'usage.json');
     this.spendFile = path.join(cfg.dataDir, 'spend.json');
@@ -637,25 +684,39 @@ export class UsageTracker {
   private async refreshToken(token: string) {
     const key = tokenKey(token);
     const label = tokenLabel(token);
-    const wait = this.retryAt.get(key);
-    if (wait && wait > Date.now()) {
-      this.log(`usage: ${label} (${key}): not asked, the usage endpoint said to wait until ${new Date(wait).toISOString()}`);
-      return;
-    }
-    this.retryAt.delete(key);
     const asOf = new Date().toISOString();
+    const reason = (e: unknown) => scrub((e as Error).message).slice(0, 200);
+    // The usage endpoint's answer, or why it rate-limits this token (now, or still within its Retry-After).
+    const endpoint = async (): Promise<PlanUsage | { limited: string }> => {
+      const wait = this.retryAt.get(key);
+      if (wait && wait > Date.now()) return { limited: `the usage endpoint rate-limits this token until ${new Date(wait).toISOString()}` };
+      this.retryAt.delete(key);
+      try {
+        const u = parseUsage(await this.fetchToken(token), asOf);
+        if (!u.available) u.why = `the usage endpoint gave no plan limits for this token (${u.why ?? 'unknown'})`;
+        return u;
+      } catch (e) {
+        const after = e instanceof UsageFetchError ? e.retryAfterMs : undefined;
+        if (!after) return { available: false, asOf, models: [], why: `usage unknown: ${reason(e)}` };
+        this.retryAt.set(key, Date.now() + after);
+        return { limited: reason(e) };
+      }
+    };
+    const first = await endpoint();
     let u: PlanUsage;
-    try {
-      u = parseUsage(await this.fetchToken(token), asOf);
-      if (!u.available) u.why = `the usage endpoint gave no plan limits for this token (${u.why ?? 'unknown'})`;
-    } catch (e) {
-      const after = e instanceof UsageFetchError ? e.retryAfterMs : undefined;
-      if (after) this.retryAt.set(key, Date.now() + after);
-      u = { available: false, asOf, models: [], why: `usage unknown: ${scrub((e as Error).message).slice(0, 200)}` };
-    }
+    let via = 'the usage endpoint';
+    if ('limited' in first) {
+      // The same token's rate-limit headers stand in: weekly and session, no per-model limits.
+      via = `the API's ${LIMITS_SOURCE} (${first.limited})`;
+      try {
+        u = { ...parseUsage(await this.fetchTokenLimits(token), asOf), source: LIMITS_SOURCE };
+      } catch (e) {
+        u = { available: false, asOf, models: [], why: `usage unknown: ${first.limited}; ${reason(e)}` };
+      }
+    } else u = first;
     if (!u.available) u.spendWeekUsd = weekSpend(this.ledger, localDay());
     this.entries.set(key, { kind: 'token', label, usage: u, direct: true });
-    this.log(`usage: ${label} (${key}, asked with that token itself): ${u.available ? 'ok' : 'failed'}, ${brief(u)}`);
+    this.log(`usage: ${label} (${key}, asked with that token itself, via ${via}): ${u.available ? 'ok' : 'failed'}, ${brief(u)}`);
   }
 
   private save() {
