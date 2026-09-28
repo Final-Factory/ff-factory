@@ -72,6 +72,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Plan usage stopped polling after one request never answered.** On BEAST the token's first
+  request never settled, so the poll kept its in-flight mark and every later poll (the token's and
+  this host's login) was skipped: the token said "not fetched yet" for hours and the host login
+  kept its numbers from before the weekly reset. Every request now has the tracker's own 75 s
+  deadline, a failure of any kind becomes "usage unknown: <reason>", and a poll older than the
+  interval no longer blocks the next one.
+
 - **The agents' token showed this host's login's usage.** Its request went through the CLI, which
   answers with the claude.ai login stored on the machine whatever token it is given. The token is
   now sent to the usage endpoint itself; a failure shows "usage unknown" with the reason, and
