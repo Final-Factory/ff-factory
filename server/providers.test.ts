@@ -131,7 +131,28 @@ test('hello → welcome; capacity, conversations and intake are recorded, newest
   assert.equal(pm.summary().counts.active, 2);
   const line = pm.statusLine()!;
   assert.match(line, /FFBox: online, connector mock-1/);
-  assert.match(line, /ffdev \(open, glm-5\.3-flash, simple, no GPU\) 1\/3 free/);
+  assert.match(line, /ffdev \(open, claude-opus-5-5, full, no GPU\) 1\/3 free/);
+  assert.match(line, /ffagent \(fenced, operator: claude-opus-5-5 full, discord: glm-5\.3-flash simple, no GPU\) 4\/6 free/);
+});
+
+test('capacity: models per requester are optional, kept as reported, and one entry per requester', async (t) => {
+  const { connect, pm } = await setup(t);
+  const c = connect();
+  await c.hello();
+  // A connector from before per-requester models: model and tier only.
+  const { models: _dropped, ...older } = SAMPLE_CLASSES[0];
+  c.capacity([older]);
+  await until('the older capacity', () => pm.summary().capacity?.classes[0]?.name === 'ffagent');
+  assert.equal(pm.summary().capacity?.classes[0].models, undefined);
+  assert.match(pm.statusLine()!, /ffagent \(fenced, claude-opus-5-5, full, no GPU\)/);
+  c.capacity([SAMPLE_CLASSES[0]]);
+  await until('the per-requester models', () => pm.summary().capacity?.classes[0]?.models !== undefined);
+  assert.deepEqual(pm.summary().capacity?.classes[0].models, SAMPLE_CLASSES[0].models);
+  const twice = { ...SAMPLE_CLASSES[0], models: [SAMPLE_CLASSES[0].models![0], SAMPLE_CLASSES[0].models![0]] };
+  c.capacity([twice]);
+  const bad = await c.next('error');
+  assert.equal(bad.code, 'bad_message');
+  assert.match(String(bad.message), /models/);
 });
 
 test('titles are untrusted text: control characters out, one line, tokens redacted, capped', async (t) => {

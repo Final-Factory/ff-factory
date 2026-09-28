@@ -15,8 +15,15 @@ import type { ProviderClass, ProviderConversation, ProviderIntakeEvent } from '.
 export const E2E_PROVIDER_TOKEN = ['ffpv1', 'E2eOnlyTokenForTheMockConnectorNotASecret00'].join('_');
 
 export const SAMPLE_CLASSES: ProviderClass[] = [
-  { name: 'ffagent', network: 'fenced', gpu: false, model: 'claude-sonnet-5', tier: 'full', unity: ['batchmode', 'playtest-softgl'], free: 4, max: 6, note: 'player text; no git credential' },
-  { name: 'ffdev', network: 'open', gpu: false, model: 'glm-5.3-flash', tier: 'simple', unity: ['batchmode'], free: 1, max: 3, note: 'small, well-scoped work only' },
+  {
+    name: 'ffagent', network: 'fenced', gpu: false, model: 'claude-opus-5-5', tier: 'full',
+    models: [
+      { requester: 'operator', model: 'claude-opus-5-5', tier: 'full' },
+      { requester: 'discord', model: 'glm-5.3-flash', tier: 'simple' },
+    ],
+    unity: ['batchmode', 'playtest-softgl'], free: 4, max: 6, note: 'player text; no git credential',
+  },
+  { name: 'ffdev', network: 'open', gpu: false, model: 'claude-opus-5-5', tier: 'full', unity: ['batchmode'], free: 1, max: 3, note: 'operators only; read-only git credential' },
   { name: 'ffdiagnose', network: 'fenced', gpu: false, model: 'claude-opus-5-5', tier: 'full', unity: ['batchmode', 'mode2-pair'], free: 2, max: 3, note: 'intake reports' },
 ];
 

@@ -24,7 +24,7 @@ import {
   type FromConnector,
   type ToConnector,
 } from './providerProtocol.ts';
-import type { Provider, ProviderCapacity, ProviderConversation, ProviderIntakeEvent } from '../shared/types.ts';
+import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent } from '../shared/types.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -197,7 +197,8 @@ export class ProviderManager {
     if (!p.tokenSet) return 'FFBox: enabled, but no connector token is set (node server/providerToken.ts)';
     if (!p.online) return `FFBox: connector offline${p.lastSeen ? ` (last seen ${p.lastSeen})` : ' (never connected)'}`;
     const c = p.capacity;
-    const classes = c?.classes.map((k) => `${k.name} (${k.network}, ${k.model}, ${k.tier}${k.gpu ? ', GPU' : ', no GPU'}) ${k.free}/${k.max} free`).join('; ');
+    const models = (k: ProviderClass) => (k.models?.length ? k.models.map((m) => `${m.requester}: ${m.model} ${m.tier}`).join(', ') : `${k.model}, ${k.tier}`);
+    const classes = c?.classes.map((k) => `${k.name} (${k.network}, ${models(k)}${k.gpu ? ', GPU' : ', no GPU'}) ${k.free}/${k.max} free`).join('; ');
     return [
       `FFBox: online, connector ${p.connector?.version ?? '?'}`,
       c ? `${c.state}; ${classes || 'no classes'}; queue ${c.queue}${c.holds.length ? `; holds: ${c.holds.join(' | ')}` : ''}` : 'no capacity report yet',

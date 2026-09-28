@@ -268,15 +268,24 @@ export interface Machine {
 
 // ---- providers (docs/ffbox-integration.md): FFBox, reached through the connector it runs ----
 
+/** What one kind of requester gets in a provider class: operators run on their own Claude plan, Discord strangers on FFBox's model. */
+export interface ProviderClassModel {
+  requester: 'operator' | 'discord';
+  model: string;
+  tier: 'full' | 'simple';
+}
+
 /** A kind of container a provider offers, as its connector last reported it (server/providerProtocol.ts). */
 export interface ProviderClass {
   name: string;
   network: 'fenced' | 'open';
   gpu: boolean;
-  /** The model its runs use, e.g. "glm-5.3-flash". */
+  /** The model FF Factory's own work (operator-requested or automatic) runs on, e.g. "claude-opus-5-5". */
   model: string;
   /** full: any well-briefed task. simple: small, well-scoped work only. */
   tier: 'full' | 'simple';
+  /** The model and tier per kind of requester, when the connector reports them; they win over model and tier. */
+  models?: ProviderClassModel[];
   unity: string[];
   free: number;
   max: number;
