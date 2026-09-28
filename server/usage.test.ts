@@ -12,7 +12,11 @@ import {
   sessionSource,
   tokenKey,
   tokenLabel,
-  tokenUsageEnv,
+  fetchTokenLimits,
+  fetchTokenUsage,
+  MESSAGES_URL,
+  USAGE_URL,
+  UsageFetchError,
   UsageTracker,
   type UsageEntry,
   credentialsFile,
@@ -183,10 +187,7 @@ test('accounts: a token is known by a hash prefix and its last 4 characters, nev
   assert.doesNotMatch(tokenKey(TOKEN) + tokenLabel(TOKEN), /xxxx/);
 });
 
-test('accounts: the token is polled with the profile scope, the agents keep theirs', () => {
-  const agents = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_OAUTH_SCOPES: 'user:inference', PATH: 'p' };
-  assert.deepEqual(tokenUsageEnv(agents, TOKEN), { PATH: 'p', CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CODE_OAUTH_SCOPES: 'user:inference user:profile' });
-  assert.equal(agents.CLAUDE_CODE_OAUTH_SCOPES, 'user:inference');
+test('accounts: the host token is config claudeEnv over the server environment', () => {
   // claudeEnv wins over the server's own environment, as for the agents.
   assert.equal(hostToken({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN } }, { CLAUDE_CODE_OAUTH_TOKEN: TOKEN2 }), TOKEN);
   assert.equal(hostToken({}, { CLAUDE_CODE_OAUTH_TOKEN: TOKEN2 }), TOKEN2);
@@ -319,5 +320,234 @@ test('accounts: the tracker reads a usage.json from before accounts, keeps Mac r
   assert.equal(again.usage?.weekly?.percent, 33);
   again.forget('m5');
   assert.equal(again.entries.has('login:m5'), false);
+  fs.rmSync(dir, { recursive: true });
+});
+
+// ---------------------------------------------------------------- each account asked with its own credential
+
+/** The raw endpoint's reply (the shape of GET /api/oauth/usage, trimmed): weekly, session and Fable. */
+const endpointBody = (weekly: number, session: number, fable: number) => ({
+  five_hour: { utilization: session, resets_at: '2026-09-28T04:40:00+00:00' },
+  seven_day: { utilization: weekly, resets_at: '2026-10-02T03:00:00+00:00' },
+  limits: [
+    { kind: 'session', group: 'session', percent: session, severity: 'normal', resets_at: '2026-09-28T04:40:00+00:00', scope: null },
+    { kind: 'weekly_all', group: 'weekly', percent: weekly, severity: 'normal', resets_at: '2026-10-02T03:00:00+00:00', scope: null },
+    { kind: 'weekly_scoped', group: 'weekly', percent: fable, severity: 'normal', resets_at: '2026-10-02T03:00:00+00:00', scope: { model: { display_name: 'Fable' }, surface: null } },
+  ],
+});
+
+test('token usage: asked of the endpoint with that token alone; failures never carry the token', async () => {
+  const seen: { url: string; auth: string | null }[] = [];
+  const ok = (async (url: string, init: RequestInit) => {
+    seen.push({ url, auth: new Headers(init.headers).get('authorization') });
+    return new Response(JSON.stringify(endpointBody(41, 33, 0)), { status: 200 });
+  }) as unknown as typeof fetch;
+  const u = parseUsage(await fetchTokenUsage(TOKEN, ok), AS_OF);
+  assert.deepEqual(seen, [{ url: USAGE_URL, auth: `Bearer ${TOKEN}` }]);
+  assert.deepEqual([u.available, u.weekly?.percent, u.session?.percent, u.models.map((m) => [m.label, m.percent])], [true, 41, 33, [['Weekly Fable', 0]]]);
+
+  const answer = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    (async () => new Response(JSON.stringify(body), { status, headers })) as unknown as typeof fetch;
+  const failure = async (f: typeof fetch) => {
+    try {
+      await fetchTokenUsage(TOKEN, f);
+    } catch (e) {
+      assert.ok(e instanceof UsageFetchError);
+      assert.doesNotMatch(e.message, /sk-ant-oat01-x|9AAA/);
+      return e;
+    }
+    assert.fail('no error');
+  };
+  const limited = await failure(answer(429, { error: { type: 'rate_limit_error', message: 'Rate limited. Please try again later.' } }, { 'retry-after': '3463' }));
+  assert.equal(limited.retryAfterMs, 3_463_000);
+  assert.match(limited.message, /rate-limits this token, next try in 58 min \(HTTP 429: Rate limited/);
+  assert.match((await failure(answer(401, { error: { message: 'Invalid bearer token' } }))).message, /the token was rejected .*HTTP 401/);
+  assert.equal((await failure(answer(401, {}))).retryAfterMs, undefined);
+  // A network error that quotes the credential is scrubbed.
+  const leaky = (async () => {
+    throw new Error(`connect failed for ${TOKEN}`);
+  }) as unknown as typeof fetch;
+  assert.match((await failure(leaky)).message, /could not be reached: connect failed for sk-ant-…$/);
+});
+
+/** A tracker on a temp dir with a usable stored login, the token in claudeEnv, and fake fetchers. */
+function trackerWith(
+  fetchToken: (t: string) => Promise<UsageReply>,
+  fetchTokenLimits: (t: string) => Promise<UsageReply> = async () => {
+    throw new UsageFetchError('no headers here');
+  },
+) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-creds-'));
+  fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'login-secret', refreshToken: 'r', scopes: ['user:inference', 'user:profile'] } }));
+  const calls = { login: [] as Record<string, string | undefined>[], token: [] as string[], limits: [] as string[] };
+  const logs: string[] = [];
+  const cfg = { dataDir: dir, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never;
+  const t = new UsageTracker(cfg, () => undefined, {
+    // The host login (BEAST's claude.ai account): 98% of its week gone.
+    fetchLogin: async (env) => {
+      calls.login.push(env);
+      return { reply: { subscription_type: 'max', rate_limits_available: true, rate_limits: endpointBody(98, 0, 22) }, account: { email: 'owner@example.com' } };
+    },
+    fetchToken: async (tok) => {
+      calls.token.push(tok);
+      return fetchToken(tok);
+    },
+    fetchTokenLimits: async (tok) => {
+      calls.limits.push(tok);
+      return fetchTokenLimits(tok);
+    },
+    log: (line) => logs.push(line),
+  });
+  return { t, dir, calls, logs };
+}
+
+const tokenOnly = (t: UsageTracker) =>
+  buildAccounts(t.entries, { hostName: 'BEAST', token: { key: tokenKey(TOKEN), label: tokenLabel(TOKEN) }, machines: [], sessions: [] });
+
+test('tracker: two accounts, each asked with its own credential, each keeps its own numbers', async () => {
+  // The token's account: 41% of the week, 33% of the session.
+  const { t, dir, calls, logs } = trackerWith(async () => ({ rate_limits_available: true, rate_limits: endpointBody(41, 33, 0) }));
+  await t.refresh();
+  const login = t.entries.get(HOST_LOGIN)!;
+  const tok = t.entries.get(tokenKey(TOKEN))!;
+  assert.deepEqual([login.usage?.weekly?.percent, login.usage?.session?.percent, login.account?.email], [98, 0, 'owner@example.com']);
+  assert.deepEqual(
+    [tok.kind, tok.label, tok.direct, tok.usage?.weekly?.percent, tok.usage?.session?.percent, tok.usage?.models[0]?.percent],
+    ['token', 'host token …9AAA', true, 41, 33, 0],
+  );
+  // The login's request never sees the token; the token's request is that token.
+  assert.equal(calls.login.length, 1);
+  assert.equal(calls.login[0].CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(calls.login[0].CLAUDE_CODE_OAUTH_SCOPES, undefined);
+  assert.deepEqual(calls.token, [TOKEN]);
+  // One log line per credential, saying which and whether it answered, with no secret in it.
+  assert.equal(logs.length, 2);
+  assert.ok(logs.some((l) => /login \(the claude\.ai login stored in .*, owner@example\.com\): ok, Weekly 98%, Session \(5 h\) 0%, Weekly Fable 22%$/.test(l)), logs.join('\n'));
+  assert.ok(logs.includes(`usage: host token …9AAA (${tokenKey(TOKEN)}, asked with that token itself, via the usage endpoint): ok, Weekly 41%, Session (5 h) 33%, Weekly Fable 0%`), logs.join('\n'));
+  assert.doesNotMatch(logs.join('\n'), /sk-ant|login-secret|xxxx/);
+  // The accounts built from them keep the two apart.
+  assert.deepEqual(
+    tokenOnly(t).map((a) => [a.label, a.usage?.weekly?.percent, a.usage?.session?.percent]),
+    [
+      ['host token …9AAA', 41, 33],
+      ['owner@example.com', 98, 0],
+    ],
+  );
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("tracker: a token whose request fails is unknown with the reason, never another account's or older numbers", async () => {
+  let fail: Error | undefined;
+  const { t, dir, calls, logs } = trackerWith(async () => {
+    if (fail) throw fail;
+    return { rate_limits_available: true, rate_limits: endpointBody(41, 33, 0) };
+  });
+  const tokenLog = () => logs.filter((l) => l.includes('host token')).at(-1)!;
+  await t.refresh();
+  assert.equal(t.entries.get(tokenKey(TOKEN))?.usage?.weekly?.percent, 41);
+
+  // Rejected: unknown, with the reason, and the older 41% is not kept.
+  fail = new UsageFetchError('the token was rejected (expired or revoked?) (HTTP 401)');
+  await t.refresh();
+  let u = t.entries.get(tokenKey(TOKEN))!.usage!;
+  assert.deepEqual([u.available, u.weekly, u.session], [false, undefined, undefined]);
+  assert.match(u.why!, /^usage unknown: the token was rejected/);
+  assert.match(tokenLog(), /host token …9AAA .*via the usage endpoint\): failed, no numbers: usage unknown: .*HTTP 401/);
+  assert.equal(calls.limits.length, 0, 'only a rate limit turns to the headers');
+  // The login still has its own numbers.
+  assert.equal(t.usage?.weekly?.percent, 98);
+  assert.match(accountLines(tokenOnly(t), new Map(), new Date(AS_OF))[1], /^- host token …9AAA .*: Claude plan usage: unavailable \(usage unknown: the token was rejected/);
+
+  // Rate-limited, and the headers fail too: unknown with both reasons.
+  fail = new UsageFetchError('the usage endpoint rate-limits this token, next try in 58 min (HTTP 429)', 3_463_000);
+  await t.refresh();
+  u = t.entries.get(tokenKey(TOKEN))!.usage!;
+  assert.deepEqual([u.available, u.weekly], [false, undefined]);
+  assert.match(u.why!, /^usage unknown: the usage endpoint rate-limits this token.*HTTP 429\); no headers here$/);
+  assert.deepEqual(calls.limits, [TOKEN]);
+
+  // Within the Retry-After the endpoint is not asked again.
+  await t.refresh();
+  assert.equal(calls.token.length, 3);
+  assert.equal(calls.limits.length, 2);
+  assert.match(tokenLog(), /via the API's rate-limit headers \(the usage endpoint rate-limits this token until /);
+
+  // Any other failure: unknown too, and the next poll asks again.
+  const again = trackerWith(async () => {
+    throw new Error('socket hang up');
+  });
+  await again.t.refresh();
+  await again.t.refresh();
+  assert.equal(again.calls.token.length, 2);
+  assert.match(again.t.entries.get(tokenKey(TOKEN))!.usage!.why!, /^usage unknown: socket hang up/);
+  fs.rmSync(dir, { recursive: true });
+  fs.rmSync(again.dir, { recursive: true });
+});
+
+test("tracker: while the endpoint rate-limits the token, the same token's rate-limit headers give weekly and session", async () => {
+  const headers = { rate_limits_available: true, rate_limits: { five_hour: { utilization: 43, resets_at: '2026-09-28T04:40:00.000Z' }, seven_day: { utilization: 42, resets_at: '2026-10-02T03:00:00.000Z' } } };
+  const { t, dir, calls, logs } = trackerWith(
+    async () => {
+      throw new UsageFetchError('the usage endpoint rate-limits this token, next try in 58 min (HTTP 429)', 3_463_000);
+    },
+    async () => headers,
+  );
+  await t.refresh();
+  const u = t.entries.get(tokenKey(TOKEN))!.usage!;
+  assert.deepEqual([u.available, u.weekly?.percent, u.session?.percent, u.models, u.source], [true, 42, 43, [], 'rate-limit headers']);
+  assert.deepEqual([calls.token, calls.limits], [[TOKEN], [TOKEN]]);
+  assert.equal(t.usage?.weekly?.percent, 98, 'the login is untouched');
+  assert.ok(
+    logs.includes(
+      `usage: host token …9AAA (${tokenKey(TOKEN)}, asked with that token itself, via the API's rate-limit headers (the usage endpoint rate-limits this token, next try in 58 min (HTTP 429))): ok, Weekly 42%, Session (5 h) 43%`,
+    ),
+    logs.join('\n'),
+  );
+  assert.match(accountLines(tokenOnly(t), new Map(), new Date(AS_OF))[1], /^- host token …9AAA .*: Claude plan usage, as of .*, from rate-limit headers: Weekly 42% used/);
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("token limits: read from the API reply's rate-limit headers, asked with that token alone", async () => {
+  const seen: { url: string; auth: string | null; body: string }[] = [];
+  const reply = (headers: Record<string, string>, status = 200) =>
+    (async (url: string, init: RequestInit) => {
+      seen.push({ url, auth: new Headers(init.headers).get('authorization'), body: String(init.body) });
+      return new Response('{}', { status, headers });
+    }) as unknown as typeof fetch;
+  const u = parseUsage(
+    await fetchTokenLimits(
+      TOKEN,
+      reply({
+        'anthropic-ratelimit-unified-5h-utilization': '0.43',
+        'anthropic-ratelimit-unified-5h-reset': '1790570400',
+        'anthropic-ratelimit-unified-7d-utilization': '0.42',
+        'anthropic-ratelimit-unified-7d-reset': '1790910000',
+      }),
+    ),
+    AS_OF,
+  );
+  assert.deepEqual([u.weekly?.percent, u.weekly?.resetsAt, u.session?.percent, u.session?.resetsAt], [42, '2026-10-02T03:00:00.000Z', 43, '2026-09-28T04:40:00.000Z']);
+  assert.equal(seen[0].url, MESSAGES_URL);
+  assert.equal(seen[0].auth, `Bearer ${TOKEN}`);
+  assert.equal(JSON.parse(seen[0].body).max_tokens, 1);
+  // No headers (an API key, an error reply): an error, never a number.
+  await assert.rejects(
+    fetchTokenLimits(TOKEN, reply({}, 401)),
+    (e: Error) => e instanceof UsageFetchError && /no rate-limit headers .*HTTP 401/.test(e.message) && !e.message.includes(TOKEN),
+  );
+});
+
+test("tracker: a token's numbers saved before it was asked directly (the login's) are dropped on load", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-old-'));
+  const entries: Record<string, UsageEntry> = {
+    [HOST_LOGIN]: { kind: 'login', usage: usageOf(98) },
+    [tokenKey(TOKEN)]: { kind: 'token', label: tokenLabel(TOKEN), usage: usageOf(98) },
+    [tokenKey(TOKEN2)]: { kind: 'token', label: tokenLabel(TOKEN2), usage: usageOf(41), direct: true },
+  };
+  fs.writeFileSync(path.join(dir, 'usage.json'), JSON.stringify({ entries }));
+  const t = new UsageTracker({ dataDir: dir } as never, () => undefined, { log: () => undefined });
+  assert.equal(t.entries.has(tokenKey(TOKEN)), false);
+  assert.equal(t.entries.get(tokenKey(TOKEN2))?.usage?.weekly?.percent, 41);
+  assert.equal(t.usage?.weekly?.percent, 98);
   fs.rmSync(dir, { recursive: true });
 });
