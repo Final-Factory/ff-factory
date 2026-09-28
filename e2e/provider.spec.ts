@@ -36,11 +36,18 @@ test('FFBox: the card follows the connector, and its page lists capacity, conver
 
     const classes = panel.getByTestId('provider-classes');
     const ffdev = classes.locator('.pv-class', { hasText: 'ffdev' });
-    await expect(ffdev).toContainText('glm-5.3-flash');
-    await expect(ffdev).toContainText('simple work');
+    await expect(ffdev).toContainText('claude-opus-5-5');
+    await expect(ffdev).toContainText('full');
+    await expect(ffdev).not.toContainText('simple work');
     await expect(ffdev).toContainText('open internet');
     await expect(ffdev).toContainText('1/3 free');
     await expect(classes.locator('.pv-class', { hasText: 'ffdiagnose' })).toContainText('fenced');
+    // A class that reports a model per requester shows each one as reported: operators on Claude, Discord on FFBox's model.
+    const perRequester = classes.locator('.pv-class', { hasText: 'ffagent' }).getByTestId('provider-class-model');
+    await expect(perRequester).toHaveCount(2);
+    await expect(perRequester.filter({ hasText: 'operators' })).toContainText('claude-opus-5-5');
+    await expect(perRequester.filter({ hasText: 'Discord' })).toContainText('glm-5.3-flash');
+    await expect(perRequester.filter({ hasText: 'Discord' })).toContainText('simple work');
 
     const conversations = panel.getByTestId('provider-conversations');
     await expect(conversations.locator('.run-row')).toHaveCount(4);

@@ -48,6 +48,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **FFBox: the model depends on who asked** (Lothsahn, 2026-09-28; docs/ffbox-integration.md, rule
+  4a). Operator work on FFBox, `ffdev` included, runs on the requesting operator's own Claude plan at
+  full capability and is billed to them; GLM-5.3 Flash is for Discord work only. A `capacity` class
+  may now list `models`, one `{ requester: operator|discord, model, tier }` per kind of requester
+  (optional; `model` and `tier` stay). The FFBox page, `system_status` and `ffbox_activity` show what
+  the connector reports.
 - **The chat.** Tool calls and thinking between two messages fold into one line ("Used 3 tools:
   …") that opens to the calls; harness notices ([worker update], [heartbeat], [unity blocked], …)
   are one line each, with names instead of ids and amber when they need you. Replies show their

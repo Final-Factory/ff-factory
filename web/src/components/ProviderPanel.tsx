@@ -3,7 +3,7 @@
 // the crash/desync reports ffintake filed, newest first. Titles are FFBox's data and can quote players: they
 // are shown as plain text, never acted on.
 import { useEffect, useState } from 'react';
-import type { Provider, ProviderConversation, ProviderIntakeEvent } from '../../../shared/types';
+import type { Provider, ProviderClass, ProviderConversation, ProviderIntakeEvent } from '../../../shared/types';
 import { api } from '../api';
 import { fmtCost, fmtRelative, navigate, providerGlance, useNow, type Glance } from '../util';
 import { Chip, Dot, Icon } from './ui';
@@ -101,12 +101,15 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
                 </div>
                 <div className="pv-class-tags">
                   <Chip tone={k.network === 'open' ? 'amber' : 'green'}>{k.network === 'open' ? 'open internet' : 'fenced'}</Chip>
-                  <Chip tone={k.tier === 'simple' ? 'amber' : 'blue'} title={k.tier === 'simple' ? 'Small, well-scoped work only' : 'Any well-briefed task'}>
-                    {k.tier === 'simple' ? 'simple work' : 'full'}
-                  </Chip>
-                  <span className="dim small mono">{k.model}</span>
+                  {!k.models?.length && <ModelTags tier={k.tier} model={k.model} />}
                   {!k.gpu && <span className="dim small">no GPU</span>}
                 </div>
+                {k.models?.map((m) => (
+                  <div key={m.requester} className="pv-class-tags" data-testid="provider-class-model">
+                    <span className="dim small">{m.requester === 'operator' ? 'operators' : 'Discord'}</span>
+                    <ModelTags tier={m.tier} model={m.model} />
+                  </div>
+                ))}
               </div>
             ))}
           </div>
@@ -203,5 +206,17 @@ function Intake({ list }: { list?: ProviderIntakeEvent[] }) {
         </div>
       ))}
     </div>
+  );
+}
+
+/** A class's model and tier, exactly as the connector reported them. */
+function ModelTags({ tier, model }: { tier: ProviderClass['tier']; model: string }) {
+  return (
+    <>
+      <Chip tone={tier === 'simple' ? 'amber' : 'blue'} title={tier === 'simple' ? 'Small, well-scoped work only' : 'Any well-briefed task'}>
+        {tier === 'simple' ? 'simple work' : 'full'}
+      </Chip>
+      <span className="dim small mono">{model}</span>
+    </>
   );
 }

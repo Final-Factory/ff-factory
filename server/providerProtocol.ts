@@ -57,15 +57,31 @@ const cursor = z.string().min(1).max(120);
 /** A container class name, e.g. "ffagent". */
 const className = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
 
+const modelName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,63}$/);
+/** full: any well-briefed task. simple: small, well-scoped work only (docs/ffbox-integration.md, routing). */
+const tier = z.enum(['full', 'simple']);
+
+/** What one kind of requester gets in a class: operators run on their own Claude plan, Discord strangers on FFBox's model. */
+export const ProviderClassModelSchema = z.object({
+  requester: z.enum(['operator', 'discord']),
+  model: modelName,
+  tier,
+});
+
 export const ProviderClassSchema = z.object({
   name: className,
   /** fenced: FFBox's egress fence, no git credential. open: the internet. */
   network: z.enum(['fenced', 'open']),
   gpu: z.boolean(),
-  /** The model this class's runs use, e.g. "claude-opus-5-5" or "glm-5.3-flash". */
-  model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,63}$/),
-  /** full: any well-briefed task. simple: small, well-scoped work only (docs/ffbox-integration.md, routing). */
-  tier: z.enum(['full', 'simple']),
+  /** The model FF Factory's own work (operator-requested or automatic) runs on in this class, e.g. "claude-opus-5-5". */
+  model: modelName,
+  tier,
+  /** Optional: the model and tier per kind of requester. When given, it is what the class runs; model and tier stay for older portals. */
+  models: z
+    .array(ProviderClassModelSchema)
+    .max(4)
+    .refine((ms) => new Set(ms.map((m) => m.requester)).size === ms.length, 'one entry per requester')
+    .optional(),
   /** Unity modes: batchmode, playtest-softgl, mode2-pair, editor-mcp; unknown ones are kept as given. */
   unity: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)).max(12).default([]),
   free: count,

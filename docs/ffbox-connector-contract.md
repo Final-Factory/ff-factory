@@ -90,23 +90,28 @@ least every 5 minutes.
 ```json
 { "type": "capacity", "queue": 2, "state": "running", "holds": [],
   "classes": [
-    { "name": "ffagent",    "network": "fenced", "gpu": false, "model": "claude-sonnet-5", "tier": "full",
+    { "name": "ffagent",    "network": "fenced", "gpu": false, "model": "claude-opus-5-5", "tier": "full",
+      "models": [ { "requester": "operator", "model": "claude-opus-5-5", "tier": "full" },
+                  { "requester": "discord",  "model": "glm-5.3-flash",   "tier": "simple" } ],
       "unity": ["batchmode", "playtest-softgl"], "free": 4, "max": 6, "note": "player text; no git credential" },
-    { "name": "ffdev",      "network": "open",   "gpu": false, "model": "glm-5.3-flash",   "tier": "simple",
-      "unity": ["batchmode"], "free": 1, "max": 3, "note": "small, well-scoped work only" },
+    { "name": "ffdev",      "network": "open",   "gpu": false, "model": "claude-opus-5-5", "tier": "full",
+      "unity": ["batchmode"], "free": 1, "max": 3, "note": "operators only; read-only git credential" },
     { "name": "ffdiagnose", "network": "fenced", "gpu": false, "model": "claude-opus-5-5", "tier": "full",
       "unity": ["batchmode", "mode2-pair"], "free": 2, "max": 3 } ] }
 ```
 
-The model names in this example are illustrative, except `ffdev`'s (GLM-5.3 Flash, per Lothsahn).
+The Claude model names in this example are illustrative. What is not: operator work runs on the
+requesting operator's own Claude plan at full capability, and Discord work runs GLM-5.3 Flash in the
+fenced class (Lothsahn, 2026-09-28).
 
 | field | rule |
 |---|---|
 | `classes[].name` | `^[a-z][a-z0-9_-]{0,31}$`; at most 10 classes |
 | `network` | `fenced` (the egress fence, no git credential) or `open` (the internet) |
 | `gpu` | a boolean. `false` for every FFBox class today |
-| `model` | the model the class's runs use, `^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,63}$` |
-| `tier` | `full` (any well-briefed task) or `simple` (small, well-scoped work only: small fixes, triage, log reading, docs, dependency bumps). The orchestrator routes by it |
+| `model` | the model FF Factory's own work (operator-requested or automatic) runs on in this class, `^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,63}$` |
+| `tier` | the tier of that work: `full` (any well-briefed task) or `simple` (small, well-scoped work only: small fixes, triage, log reading, docs, dependency bumps). Operator work is `full` |
+| `models` | optional, at most 4: the model and tier per kind of requester, `{ "requester": "operator" \| "discord", "model", "tier" }`, one entry per requester. When given, the portal shows these and not `model`/`tier`; keep `model` and `tier` equal to the `operator` entry so older portals stay right. Leave a requester out when it cannot reach the class (`ffdev` has no `discord` entry) |
 | `unity` | the Unity modes a run of this class can use: `batchmode`, `playtest-softgl`, `mode2-pair`, `editor-mcp`. Other words matching `^[a-z0-9][a-z0-9-]{0,31}$` are kept as given. At most 12 |
 | `free`, `max` | whole numbers from 0 to 1,000,000 |
 | `note` | optional, at most 200 characters, shown as given |
