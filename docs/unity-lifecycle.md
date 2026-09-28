@@ -91,3 +91,24 @@ update. An older daemon ignores the `unity` message, and the tool times out with
 
 Tests: `server/unityHang.test.ts` (verdicts, budget, a fake bridge), `server/macUnity.test.ts`
 (the Mac stop/start/restart and the watch).
+
+## Each sandbox's Unity MCP reaches only its editor
+
+MCP-for-Unity (stdio) finds editors through the status files every editor writes to `~/.unity-mcp`.
+Pinned (`set_active_instance`) to an editor it can no longer find, because it is restarting, reloading
+or has crashed, it reconnects to whatever discovery finds next: the newest status file, the newest
+port file, or port 6400. That is another sandbox's editor, or the live game's. The pin itself is per
+server process (its `session_key: global` is only the in-process key), so the leak was the fallback.
+
+So each sandbox's workers run their `UnityMCP` server with `UNITY_MCP_STATUS_DIR` set to a folder of
+their own, `data/unity-mcp/<sandbox>` (`server/unityMcp.ts`, `unityMcpServerFor`; `switch_branch`'s
+own bridge too). The sandbox poll (every 3 s, `syncStatusDir`) keeps in it only that sandbox's editor's
+status file, while its process is alive and only if the file was written since that editor was
+launched: a crashed editor's leftover file may name a port another editor has taken since. It also
+writes the legacy `unity-mcp-port.json` there with the editor's own port, or 0 while it is down, so the
+fallback's last step never reaches port 6400. `mcpforunity://instances` lists only the sandbox's own
+editor, and a call made while it is down fails instead of landing elsewhere. Editors keep writing to
+`~/.unity-mcp`, so this needs no editor restart, and the hang detection is unchanged. The guard still
+refuses Unity MCP calls until the worker pins its own `<sandbox>@<hash>`.
+
+Not covered: agents on the Macs (one clone per Mac) and Claude Code sessions outside FF Factory.

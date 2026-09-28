@@ -9,7 +9,7 @@ import type { Store } from './store.ts';
 import { branchProblem, withBaseRepoLock, type SandboxManager } from './sandboxes.ts';
 import { switchBranch } from './switchBranch.ts';
 import { searchTranscripts } from './search.ts';
-import { openUnity, type SceneState, type UnityBridge } from './unityMcp.ts';
+import { openUnity, unityMcpServerFor, type SceneState, type UnityBridge } from './unityMcp.ts';
 import { CATALOG } from './launch.ts';
 import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './wake.ts';
 import { snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
@@ -103,7 +103,7 @@ export class Agents {
     this.sessions = sessions;
     this.machines = machines;
     this.identity = identity;
-    this.waker = new Waker(sessions, store);
+    this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
     this.standing = new StandingAgents({
       cfg,
       store,
@@ -153,6 +153,9 @@ export class Agents {
     this.standing.boot();
     const id = this.store.orchestratorId;
     if (!id || !this.sessions.sessions.has(id)) this.newOrchestrator();
+    // The wake_me wakes the last server had pending (workers' and the orchestrator's): a restart must not lose them.
+    const wakes = this.waker.restore();
+    if (wakes) console.log(`wake_me: re-armed ${wakes} pending wake(s)`);
     return cutOff;
   }
 
@@ -203,6 +206,7 @@ export class Agents {
 
   /** What to write to data/resume.json when the server stops. */
   resumeFile(req: { reason: string; update: boolean }, drained: ReadonlySet<string>, head: string | undefined): ResumeFile {
+    // Snapshots carry the durable marks too: an agent whose process ended a moment before this stop still counts.
     const snaps = [...this.sessions.sessions.values()].map(snapshotOf);
     return {
       version: 1,
@@ -257,6 +261,10 @@ export class Agents {
    * file (never, since index.ts makes one for unclean stops) it only reports what was cut off.
    */
   resumeAfterRestart(f: ResumeFile | undefined, cutOff: SessionInfo[], now: AppNow, notes: string[]) {
+    // The restart marks have done their job once this decides: those resumed get fresh ones from the resume
+    // message, and nothing else may be resumed by a later restart.
+    const toResume = new Set(f?.sessions.map((e) => e.id));
+    for (const h of this.sessions.sessions.values()) if (!toResume.has(h.info.id) && !h.live) h.clearRestartMarks?.();
     if (!f) {
       const workers = cutOff.filter((i) => i.kind === 'worker');
       if (workers.length || notes.length) {
@@ -277,6 +285,8 @@ export class Agents {
     const resume = (e: ResumeFile['sessions'][number]): ResumeOutcome => {
       const s = this.sessions.sessions.get(e.id);
       const o: ResumeOutcome = { id: e.id, title: e.title, sandboxId: e.sandboxId, machineId: s?.info.machineId, ok: false };
+      // Resumed now (the message sets fresh marks) or reported as not resumable: either way this restart settled it.
+      if (s && !s.live) s.clearRestartMarks?.();
       if (!s) o.error = 'the session no longer exists';
       else if (s.live) {
         // Still running (an agent on a Mac carries on while this host is down): nothing to resume.
@@ -322,8 +332,10 @@ export class Agents {
         if (failed.length) extra.push(`Could not start these editors again: ${failed.join('; ')}.`);
       }
       for (const e of local) {
-        if (noDrive && e.sandboxId) outcomes.push({ id: e.id, title: e.title, sandboxId: e.sandboxId, ok: false, error: noDrive });
-        else outcomes.push(resume(e));
+        if (noDrive && e.sandboxId) {
+          this.sessions.sessions.get(e.id)?.clearRestartMarks?.();
+          outcomes.push({ id: e.id, title: e.title, sandboxId: e.sandboxId, ok: false, error: noDrive });
+        } else outcomes.push(resume(e));
       }
       for (const [mid, es] of onMachine) {
         for (const e of es) outcomes.push({ id: e.id, title: e.title, machineId: mid, ok: false, error: `waits for ${mid}'s daemon to be connected and current (redeployed if outdated); resumed after that, and you get a message` });
@@ -656,7 +668,8 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
       strictMcpConfig: true,
       mcpServers: {
         sandbox: this.workerTools(sb, info.id),
-        ...(this.cfg.unity.mcpServer ? { UnityMCP: { type: 'stdio' as const, ...this.cfg.unity.mcpServer } } : {}),
+        // Confined to this sandbox's editor (server/unityMcp.ts statusDirFor): it cannot find, or fall back to, another.
+        ...(this.cfg.unity.mcpServer ? { UnityMCP: { type: 'stdio' as const, ...unityMcpServerFor(this.cfg, sb.id)! } } : {}),
       },
       hooks: {
         // This server's own directory (code, config with the Claude token, user and session files) is

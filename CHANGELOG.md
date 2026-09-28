@@ -72,6 +72,31 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Unity MCP calls could land in another sandbox's editor.** Every worker's MCP-for-Unity server
+  discovered all editors on the machine, and when its pinned editor was restarting or reloading it
+  reconnected to the next one it found (another sandbox's, or the live game's). Each sandbox's workers
+  now run it with `UNITY_MCP_STATUS_DIR` pointing at `data/unity-mcp/<sandbox>`, where the sandbox
+  poll keeps only that sandbox's live editor's status file and a port file for its own port (0 while
+  it is down), so they can neither see nor fall back to another editor.
+- **Restarts resumed the wrong workers.** After a crash, `SessionManager.restore` put the very
+  session record it then marked "stopped" on the cut-off list, so the unclean-restart resume file
+  saw every cut-off worker as stopped and reported "No worker sessions needed resuming". Agent
+  processes that ended a moment before the server (a console close, a process-tree stop) were missed
+  the same way. And a worker stopped on purpose was resumed after an update when it still had an
+  unanswered message or had been drained. Whether a turn is open is now saved at once
+  (`turnOpenSince`, `backgroundTasks`), kept for a minute when a process ends by itself, and cleared
+  by a deliberate stop or interrupt; workers stopped on purpose are never resumed. Idle workers
+  waiting on a background task (a background command or a watcher) are resumed too, told the
+  restart ended it.
+- **`wake_me` wakes were lost on a restart.** They lived only in timers, so an update or a crash
+  forgot every pending wake and the idle workers (and the orchestrator) waiting on one never resumed.
+  They are now kept in `data/wakes.json` and re-armed at startup; one that came due while the server
+  was down fires at once, and one that cannot start its agent is retried for ten minutes.
+- **A machine locked out by its own retries.** After 10 failed `/machine` upgrades from an address
+  in 15 minutes, every refused retry was counted again, so a daemon retrying every ~36 s kept the
+  lockout going forever and even its fixed token got 429 (the M5 after a half-failed reinstall).
+  Refusals during a lockout are no longer counted, and a good machine token or API key always gets
+  in and clears the address's record.
 - **Plan usage stopped polling after one request never answered.** On BEAST the token's first
   request never settled, so the poll kept its in-flight mark and every later poll (the token's and
   this host's login) was skipped: the token said "not fetched yet" for hours and the host login

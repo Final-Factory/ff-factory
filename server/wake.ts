@@ -5,35 +5,44 @@ import type { Sandbox, SessionInfo } from '../shared/types.ts';
 
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 
+/** A pending wake as kept in data/wakes.json. */
+interface WakeRecord {
+  at: number;
+  note: string;
+}
+
+/** Tries to deliver a wake whose session could not be started (the agent limit, the host guard): once a minute. */
+const RETRIES = 10;
+
 /**
  * Timed wake-ups (docs: the wake_me tools). An agent that wants to check back later ends its turn;
  * after N minutes it gets a message with its own note. Plus the orchestrator's optional heartbeat:
  * while any worker is mid-turn, a short "who is busy" message every N minutes.
- * In memory: a server restart forgets pending wake-ups (the restart resumes busy sessions anyway).
+ * Pending wakes are kept in `file` (data/wakes.json): restore() re-arms them after a restart or a crash,
+ * and one that came due while the server was down fires at once.
  */
 export class Waker {
   private readonly sessions: SessionManager;
   private readonly store: Store;
-  private readonly timers = new Map<string, { timer: NodeJS.Timeout; at: number; note: string }>();
+  private readonly file?: string;
+  private readonly timers = new Map<string, { timer: NodeJS.Timeout } & WakeRecord>();
   private lastBeat = 0;
   private busySince = 0;
   now: () => number = Date.now;
 
-  constructor(sessions: SessionManager, store: Store) {
+  constructor(sessions: SessionManager, store: Store, file?: string) {
     this.sessions = sessions;
     this.store = store;
+    this.file = file;
   }
 
   /** Message `sessionId` with `note` after `minutes` (one pending wake per session: a new one replaces it). */
   schedule(sessionId: string, minutes: number, note: string): string {
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > 24 * 60) throw new Error('minutes must be between 1 and 1440');
     this.sessions.get(sessionId);
-    this.cancel(sessionId);
     const at = this.now() + minutes * 60_000;
-    const text = note.trim().slice(0, 2000);
-    const timer = setTimeout(() => this.fire(sessionId), minutes * 60_000);
-    timer.unref?.();
-    this.timers.set(sessionId, { timer, at, note: text });
+    this.arm(sessionId, { at, note: note.trim().slice(0, 2000) });
+    this.save();
     return `I will message you at ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${minutes} min) with your note. End your turn now; that message resumes you.`;
   }
 
@@ -42,6 +51,7 @@ export class Waker {
     if (!t) return false;
     clearTimeout(t.timer);
     this.timers.delete(sessionId);
+    this.save();
     return true;
   }
 
@@ -50,16 +60,63 @@ export class Waker {
     return t ? { at: new Date(t.at).toISOString(), note: t.note } : undefined;
   }
 
-  private fire(sessionId: string) {
+  /**
+   * After a restart: arm the wakes the last server left in the file. One whose time passed while the server
+   * was down fires at once, saying how late it is; one for a session that no longer exists is dropped.
+   * Returns how many were re-armed.
+   */
+  restore(): number {
+    if (!this.file) return 0;
+    let saved: Record<string, WakeRecord> = {};
+    try {
+      saved = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, WakeRecord>;
+    } catch {
+      return 0; // none, or unreadable
+    }
+    let n = 0;
+    for (const [id, w] of Object.entries(saved)) {
+      if (!this.sessions.sessions.has(id) || !Number.isFinite(w?.at) || this.timers.has(id)) continue;
+      this.arm(id, { at: w.at, note: String(w.note ?? '') });
+      n++;
+    }
+    this.save();
+    return n;
+  }
+
+  private arm(sessionId: string, w: WakeRecord, tries = 0, delay = Math.max(0, w.at - this.now())) {
+    const old = this.timers.get(sessionId);
+    if (old) clearTimeout(old.timer);
+    const timer = setTimeout(() => this.fire(sessionId, tries), delay);
+    timer.unref?.();
+    this.timers.set(sessionId, { timer, ...w });
+  }
+
+  private save() {
+    if (!this.file) return;
+    const out: Record<string, WakeRecord> = {};
+    for (const [id, t] of this.timers) out[id] = { at: t.at, note: t.note };
+    try {
+      fs.writeFileSync(this.file + '.tmp', JSON.stringify(out, null, 2));
+      fs.renameSync(this.file + '.tmp', this.file);
+    } catch (e) {
+      console.warn('wake_me: could not save the pending wakes:', (e as Error).message);
+    }
+  }
+
+  private fire(sessionId: string, tries: number) {
     const t = this.timers.get(sessionId);
     this.timers.delete(sessionId);
-    if (!t || !this.sessions.sessions.has(sessionId)) return;
+    if (!t || !this.sessions.sessions.has(sessionId)) return void this.save();
+    const late = Math.round((this.now() - t.at) / 60_000);
+    const when = late >= 2 ? ` (${late} min late: FF Factory was restarting)` : '';
     try {
-      this.sessions.send(sessionId, `[wake_me] Time is up. Your note: ${t.note || '(none)'}`, 'system');
+      this.sessions.send(sessionId, `[wake_me] Time is up${when}. Your note: ${t.note || '(none)'}`, 'system');
     } catch (e) {
-      // At the agent limit, or its machine is offline: say so where the user will see it.
+      // At the agent limit, the host guard says wait, or its machine is offline: try again in a minute, a few times.
+      if (tries < RETRIES) return this.arm(sessionId, { at: t.at, note: t.note }, tries + 1, 60_000);
       this.store.append(sessionId, { kind: 'system', text: `wake_me could not wake this session: ${(e as Error).message}` });
     }
+    this.save();
   }
 
   // ---------------------------------------------------------------- the orchestrator's heartbeat

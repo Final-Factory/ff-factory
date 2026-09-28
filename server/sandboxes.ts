@@ -7,6 +7,7 @@ import type { Store } from './store.ts';
 import type { CreateSandboxRequest, Sandbox, UnityBlocked, UnityDismissal } from '../shared/types.ts';
 import { decide, describeDialog, findDialogs, isStalled, listWindows, pressButton, sceneFilesUnchanged, type Dialog } from './watchdog.ts';
 import { bridgeInfo, bridgePing, crashLeftoversFor, crashReportersFor, editorVerdict, restartAllowed } from './unityHang.ts';
+import { readStatusFiles, statusDirFor, syncStatusDir } from './unityMcp.ts';
 import { listProcs } from './reaper.ts';
 import { commandLine, copyTree, isAlive, killTree, launchDetached, lowerPriority, must, processStartTime, removeTree, run } from './proc.ts';
 
@@ -454,6 +455,7 @@ export class SandboxManager {
     }
     this.editors.delete(s.id);
     this.expectedExit.delete(s.id);
+    fs.rmSync(statusDirFor(this.cfg.dataDir, s.id), { recursive: true, force: true });
     this.store.removeSandbox(s.id);
     if (problems.length) console.warn(`sandbox ${s.id} removed with warnings: ${problems.join('; ')}`);
     if (branchError) throw new Error(branchError);
@@ -776,8 +778,18 @@ export class SandboxManager {
   }
 
   poll() {
+    const statusFiles = this.cfg.unity.mcpServer ? readStatusFiles() : [];
     for (const s of this.list()) {
       const u = s.unity;
+      if (this.cfg.unity.mcpServer) {
+        // Its workers' Unity MCP server sees only this editor, and only while it is alive (server/unityMcp.ts).
+        const alive = isActive(u.state) && !!u.pid && isAlive(u.pid);
+        try {
+          syncStatusDir(statusDirFor(this.cfg.dataDir, s.id), s.path, alive ? { since: u.startedAt ? Date.parse(u.startedAt) : undefined } : undefined, statusFiles);
+        } catch (e) {
+          console.warn(`unity ${s.id}: status folder:`, (e as Error).message);
+        }
+      }
       if (isActive(u.state) && u.pid && !isAlive(u.pid)) {
         this.editorGone(s);
         continue;

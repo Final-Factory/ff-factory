@@ -472,19 +472,31 @@ export class MachineManager {
 
   // ---------------------------------------------------------------- the /machine socket
 
-  /** Take over an HTTP upgrade to /machine. Returns false if the token is bad (the socket is already answered). */
+  /**
+   * Take over an HTTP upgrade to /machine. Returns false if the token is bad (the socket is already answered).
+   * After 10 failures from an address in 15 minutes it is answered 429, and refusals then are not counted: a
+   * daemon retrying every half minute would otherwise keep its own lockout going forever. A good token always
+   * gets in and clears the address's record (a daemon fixed by a reinstall must not wait out the lockout).
+   * Tokens are 240+ random bits checked with one SHA-256, so the lockout is not what stops guessing.
+   */
   upgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, ip: string) {
     const now = Date.now();
     const recent = (this.failures.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
-    const id = recent.length < 10 ? this.authenticate(req.headers.authorization) : undefined;
-    if (!id || !this.store.machines.has(id)) {
-      recent.push(now);
-      this.failures.set(ip, recent);
-      console.warn(`machine: refused a connection from ${ip}`);
-      socket.write(`HTTP/1.1 ${recent.length > 10 ? '429 Too Many Requests' : '401 Unauthorized'}\r\n\r\n`);
+    const auth = this.authenticate(req.headers.authorization);
+    const id = auth && this.store.machines.has(auth) ? auth : undefined;
+    if (!id) {
+      const locked = recent.length >= 10;
+      if (!locked) recent.push(now);
+      if (recent.length) this.failures.set(ip, recent);
+      else this.failures.delete(ip);
+      console.warn(`machine: refused a connection from ${ip}${locked ? ' (too many failures)' : ''}`);
+      socket.write(`HTTP/1.1 ${locked ? '429 Too Many Requests' : '401 Unauthorized'}
+
+`);
       socket.destroy();
       return false;
     }
+    this.failures.delete(ip);
     this.wss.handleUpgrade(req, socket, head, (ws) => this.attach(id, ws));
     return true;
   }

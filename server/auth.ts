@@ -14,7 +14,8 @@ import type { UserInfo, UserRole } from '../shared/types.ts';
  *   - cookies are HttpOnly + SameSite=Strict (+ Secure behind HTTPS);
  *   - failed logins are rate limited per client IP and globally; an attempt is counted BEFORE the
  *     slow hash (so a burst of parallel guesses cannot all slip in), and at most two password hashes
- *     run at once. Bad API keys are throttled per IP separately, so they cannot lock out a login.
+ *     run at once. Bad API keys are throttled per IP separately, so they cannot lock out a login; a good key
+ *     is never throttled.
  */
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -183,22 +184,29 @@ export class Auth {
     return keys.some((k) => k.name === name);
   }
 
-  /** The key's name (and the login it acts for) for a valid "Authorization: Bearer ffsb_…" header; throttled like logins. */
+  /**
+   * The key's name (and the login it acts for) for a valid "Authorization: Bearer ffsb_…" header. After 10 bad
+   * keys from an address in 15 minutes it is answered 429, and refusals then are not counted. A good key always
+   * gets in and clears the address (one bad client must not lock out every key behind the same address): keys
+   * are 256 random bits checked with one SHA-256, so the throttle is not what stops guessing.
+   */
   bearer(req: http.IncomingMessage): { ok: true; name: string; user?: string } | { ok: false; status: number } {
     const ip = this.clientIp(req);
     const now = Date.now();
     const recent = (this.keyFailures.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
-    this.keyFailures.set(ip, recent);
-    if (recent.length >= 10) return { ok: false, status: 429 };
     const m = /^Bearer\s+(ffsb_[A-Za-z0-9_-]{20,})$/.exec(String(req.headers.authorization ?? ''));
     const digest = m ? createHash('sha256').update(m[1]).digest() : undefined;
     const hit = digest && this.keys().find((k) => timingSafeEqual(Buffer.from(k.sha256, 'hex'), digest));
-    if (!hit) {
-      recent.push(now);
-      console.warn(`bad API key from ${ip}`);
-      return { ok: false, status: 401 };
+    if (hit) {
+      this.keyFailures.delete(ip);
+      return { ok: true, name: hit.name, ...(hit.user ? { user: hit.user } : {}) };
     }
-    return { ok: true, name: hit.name, ...(hit.user ? { user: hit.user } : {}) };
+    const locked = recent.length >= 10;
+    if (!locked) recent.push(now);
+    this.keyFailures.set(ip, recent);
+    if (locked) return { ok: false, status: 429 };
+    console.warn(`bad API key from ${ip}`);
+    return { ok: false, status: 401 };
   }
 
   /** The client address, taking X-Forwarded-For only from a local reverse proxy (Tailscale serve/funnel). */

@@ -27,9 +27,15 @@ export interface SessionSnapshot {
   unanswered: Unanswered[];
   /** Who sent the message that started its current turn; decides whether the orchestrator hears when it ends. */
   lastFrom: 'human' | 'orchestrator' | 'system';
+  /** Its turn was still open (SessionInfo.turnOpenSince), even if its process ended a moment before the server. */
+  turnOpen?: boolean;
+  /** Background tasks still open when it stopped (a background command, a watcher that would have woken it). */
+  backgroundTasks?: number;
+  /** A person or the orchestrator stopped or interrupted it since its last message: never resumed. */
+  stoppedOnPurpose?: boolean;
 }
 
-export type ResumeWhy = 'mid-turn' | 'queued' | 'drained';
+export type ResumeWhy = 'mid-turn' | 'queued' | 'drained' | 'background';
 
 export interface ResumeEntry {
   id: string;
@@ -71,18 +77,20 @@ const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting',
 export const isBusy = (status: SessionInfo['status']) => BUSY.has(status);
 
 /**
- * The sessions to resume after the restart: workers that were mid-turn, had unanswered messages, or
- * were asked by a drain to pause. Idle sessions stay idle. Standing agents are left to their own
- * scheduler (a cut-off run is recorded as interrupted and the schedule continues). The orchestrator is
- * not resumed here: the restart summary wakes it anyway.
+ * The sessions to resume after the restart: workers that were mid-turn, had unanswered messages, were
+ * asked by a drain to pause, or had background tasks the restart ends. Idle sessions stay idle, and so
+ * does a worker a person or the orchestrator stopped or interrupted. Standing agents are left to their
+ * own scheduler (a cut-off run is recorded as interrupted and the schedule continues). The orchestrator
+ * is not resumed here: the restart summary wakes it anyway.
  */
 export function collectResume(sessions: SessionSnapshot[], drained: ReadonlySet<string> = new Set()): ResumeEntry[] {
   const out: ResumeEntry[] = [];
   for (const s of sessions) {
-    if (s.kind !== 'worker') continue;
+    if (s.kind !== 'worker' || s.stoppedOnPurpose) continue;
     // The drain's own request is not work to resume.
     const unanswered = s.unanswered.filter((u) => !u.text.startsWith(DRAIN_TAG));
-    const why: ResumeWhy | undefined = isBusy(s.status) ? 'mid-turn' : unanswered.length ? 'queued' : drained.has(s.id) ? 'drained' : undefined;
+    const why: ResumeWhy | undefined =
+      isBusy(s.status) || s.turnOpen ? 'mid-turn' : unanswered.length ? 'queued' : drained.has(s.id) ? 'drained' : s.backgroundTasks ? 'background' : undefined;
     if (!why) continue;
     out.push({ id: s.id, kind: s.kind, title: s.title, sandboxId: s.sandboxId, machineId: s.machineId, why, unanswered: unanswered.slice(-5), lastFrom: s.lastFrom });
   }
@@ -90,7 +98,7 @@ export function collectResume(sessions: SessionSnapshot[], drained: ReadonlySet<
 }
 
 export function orchestratorWasBusy(sessions: SessionSnapshot[]): boolean {
-  return sessions.some((s) => s.kind === 'orchestrator' && (isBusy(s.status) || s.unanswered.length > 0));
+  return sessions.some((s) => s.kind === 'orchestrator' && (isBusy(s.status) || !!s.turnOpen || s.unanswered.length > 0));
 }
 
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
@@ -108,7 +116,9 @@ export function resumeMessage(e: ResumeEntry, f: Pick<ResumeFile, 'reason' | 'at
         : `The app restarted (${f.reason} at ${when}). Your process was stopped; the worktree, the Unity editor and your history are intact.`,
     e.why === 'drained'
       ? 'You were asked to pause for the restart; pick the task up again.'
-      : 'Your last turn was cut off mid-way, so a tool call may not have finished.',
+      : e.why === 'background'
+        ? 'You had background tasks running (a background command, or a watcher meant to wake you); the restart ended them. Check what they were for, and run again or re-arm what still matters (wake_me to check back later).'
+        : 'Your last turn was cut off mid-way, so a tool call may not have finished.',
     e.machineId
       ? 'Check git status for half-written edits and continue where you left off.'
       : 'Check git status for half-written edits, re-pin your Unity instance (read mcpforunity://instances, then set_active_instance), and continue where you left off.',

@@ -109,3 +109,53 @@ test('wait_for_unity: compile markers and reading only what the log gained', (t)
   assert.equal(readSince(path.join(dir, 'missing.log'), 0).size, 0);
   assert.equal(readSince(log, 10_000_000).text.length > 0, true, 'a shorter log (editor restarted) is read from the start');
 });
+
+test('wake_me: pending wakes survive a restart; one that came due while the server was down fires at once', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-wakes-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'wakes.json');
+  const store = new Store(dir);
+  const sent: { id: string; text: string }[] = [];
+  let refuse = 0;
+  const sessions = {
+    sessions: new Map([['w1', {}], ['w2', {}], ['orch', {}]]),
+    get: () => ({}),
+    send: (id: string, text: string) => {
+      if (refuse > 0 && refuse--) throw new Error('already 6 agents running');
+      sent.push({ id, text });
+      return 'u';
+    },
+  } as unknown as SessionManager;
+  let now = 1_000_000;
+  const before = new Waker(sessions, store, file);
+  before.now = () => now;
+  before.schedule('w1', 10, 'check the build');
+  before.schedule('w2', 60, 'check CI');
+  before.schedule('orch', 30, 'see how the belt fix is going');
+  before.schedule('gone', 5, 'a session deleted before the restart');
+  before.cancel('orch');
+  before.schedule('orch', 30, 'see how the belt fix is going');
+  // The server stops (an update or a crash): its timers are gone with it. It comes back 20 minutes later.
+  t.mock.timers.reset();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  now += 20 * 60_000;
+  const after = new Waker(sessions, store, file);
+  after.now = () => now;
+  assert.equal(after.restore(), 3);
+  t.mock.timers.tick(0);
+  assert.deepEqual(sent, [{ id: 'w1', text: '[wake_me] Time is up (10 min late: FF Factory was restarting). Your note: check the build' }]);
+  assert.equal(after.pending('w2')?.note, 'check CI');
+  t.mock.timers.tick(10 * 60_000);
+  assert.equal(sent.at(-1)?.id, 'orch');
+  assert.equal(sent.at(-1)?.text, '[wake_me] Time is up. Your note: see how the belt fix is going');
+  // At the agent limit it tries again a minute later instead of dropping the wake.
+  refuse = 1;
+  t.mock.timers.tick(30 * 60_000);
+  assert.equal(sent.at(-1)?.id, 'orch');
+  t.mock.timers.tick(60_000);
+  assert.equal(sent.at(-1)?.text, '[wake_me] Time is up. Your note: check CI');
+  // Everything fired: nothing is left to re-arm.
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), {});
+  store.flush();
+});
