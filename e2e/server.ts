@@ -9,7 +9,9 @@
  *   sandbox "alpha"    ready, Unity stopped: tests start their own worker agents here
  *   sandbox "gallery"  one idle worker with a seeded transcript, for visual snapshots; never changed
  *   sandbox "stuck"    Unity blocked on a dialog (the watchdog's badge)
- *   login              tester / e2e-password-123
+ *   login              tester / e2e-password-123 (the owner)
+ *   second login       teammate / e2e-teammate-456, "Team Mate", a member (e2e/identity.spec.ts), with an /mcp API
+ *                      key bound to it in <data folder>/../teammate-key.txt
  *   provider "ffbox"   only with E2E_PROVIDER=1 (the provider projects, e2e/provider.spec.ts): switched on, with
  *                      E2E_PROVIDER_TOKEN as its connector token. Off everywhere else, so no other page changes.
  */
@@ -24,6 +26,8 @@ import { E2E_PROVIDER_TOKEN } from './mockConnector.ts';
 
 export const USER = 'tester';
 export const PASSWORD = 'e2e-password-123';
+export const MATE = 'teammate';
+export const MATE_PASSWORD = 'e2e-teammate-456';
 const withProvider = process.env.E2E_PROVIDER === '1';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -146,7 +150,10 @@ delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
 
 const { Auth } = await import('../server/auth.ts');
-await new Auth(dataDir, { trustProxy: false }).setUser(USER, PASSWORD);
+const auth = new Auth(dataDir, { trustProxy: false });
+await auth.setUser(USER, PASSWORD);
+await auth.setUser(MATE, MATE_PASSWORD, { displayName: 'Team Mate', role: 'member' });
+fs.writeFileSync(path.join(base, 'teammate-key.txt'), auth.createApiKey('teammate-laptop', MATE));
 
 const { setQueryForTesting } = await import('../server/sessions.ts');
 setQueryForTesting(fakeQuery() as never);

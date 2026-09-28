@@ -407,7 +407,7 @@ export class Daemon {
           if (!e.s.live && this.liveCount() >= this.maxSessions) throw new Error(`already ${this.maxSessions} agents running on this machine`);
           e.spec = msg.spec;
           if (!e.s.live) prepare(msg.spec);
-          e.s.send(msg.text, msg.from, msg.uuid, msg.images);
+          e.s.send(msg.text, msg.from, msg.uuid, msg.images, msg.requestedBy);
         } catch (err) {
           this.out({ type: 'failed', sessionId: msg.info.id, error: (err as Error).message });
         }

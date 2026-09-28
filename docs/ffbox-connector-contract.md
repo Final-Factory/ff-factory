@@ -9,6 +9,11 @@ source of truth when this page and the code disagree. A working reference client
 Protocol 1 is **read-only**. The connector reports capacity, conversations and intake reports, and
 FF Factory records and shows them. Nothing FF Factory sends asks FFBox to do anything.
 
+The phase 3 work messages are specified below, in [Work messages](#work-messages-phase-3-who-asked-and-who-pays):
+`submit`, `diagnose` and `stop`, each naming the person it is for, and the connector's `accepted` and
+`refused`. FF Factory does not send them yet, and it never sends one to a connector whose `hello` does not
+list it in `accepts`. A connector built to this page as it was before can ignore that section.
+
 ## The shape
 
 - The connector **dials out** to `wss://<FF Factory public URL>/provider`, which is the Tailscale Funnel
@@ -58,6 +63,7 @@ The connector's first message is `hello`:
 | `connector.version` | 1-40 characters of `A-Z a-z 0-9 . _ + -` |
 | `connector.commit` | optional, 7-40 hex characters |
 | `web` | optional, an `https://` URL where people read FFBox's own page. FF Factory only links to it and never fetches it, so a LAN address is fine |
+| `accepts` | optional, the work messages this connector takes: `submit`, `diagnose`, `stop` ([Work messages](#work-messages-phase-3-who-asked-and-who-pays)). Leave it out until the connector implements them. Up to 20 words matching `^[a-z_]{1,32}$`; unknown ones are kept |
 
 FF Factory answers with `welcome`:
 
@@ -176,6 +182,97 @@ Never send the description, log lines, file names from inside the zip, or the se
 
 Ignore any other message type: protocol 2 may add some.
 
+## Work messages (phase 3): who asked and who pays
+
+FF Factory sends these only once phase 3 ships, and only to a connector that listed them in `hello.accepts`.
+The schemas are `SubmitSchema`, `DiagnoseSchema`, `StopSchema`, `AcceptedSchema` and `RefusedSchema` in
+`server/providerProtocol.ts`, tested in `server/providerWork.test.ts`.
+
+### `requestedBy`: the person the work is for
+
+Every work message names one person, an FF Factory login:
+
+```json
+"requestedBy": { "userId": "lothsahn", "displayName": "Lothsahn" }
+```
+
+| field | rule |
+|---|---|
+| `userId` | the FF Factory login name, `^[a-zA-Z0-9._-]{2,32}$`. Stable: it never changes for a person. **This is the only field that picks an account** |
+| `displayName` | 1-40 characters on one line: no control characters, and none of `<` `>` `{` `}` `$` `\` `[` `]` or a backtick. For FFBox's pages and logs only |
+
+`requestedBy` holds exactly these two fields. It carries **no credential, email or token**, and FF Factory
+builds every work message strictly (`buildSubmit` and the others refuse any field they do not know), so none
+can ride along. FF Factory redacts anything shaped like a secret from `title` and `prompt` before sending.
+
+Who it is:
+
+- **A person asked** (`"trigger": "person"`): the login that wrote the message, pressed the button, or whose
+  message the orchestrator acted on (docs/identity.md, "The shared orchestrator chat").
+- **FF Factory started it by itself** (`"trigger": "automatic"`, intake triage from phase 4): the configured
+  system payer, config `systemPayer`. That is Ben, per his decision.
+
+**FFBox MUST:**
+
+1. **Pick the Claude account by `requestedBy.userId`, and only by it.** Map it through the `operators` block:
+   the entry whose `fff` id is that user id, and the credential that entry names. Ben's entry names the token
+   Ben gave Lothsahn privately. Lothsahn's names his own account. The same applies to `trigger: "automatic"`,
+   which arrives as the system payer.
+2. **Refuse work for a person it has no account for**, and never fall back to another person's account or a
+   default one. Answer `refused` with `unknown_requester` (no operator with that `fff` id) or `no_account`
+   (an operator with no Claude account to bill).
+3. **Say whose account it charged** in `accepted.billedTo`: the user id, never the credential. It must equal
+   `requestedBy.userId`. FF Factory flags any other value.
+4. Record the person on the conversation, as `fff:<userId>`, the way `/intake` records `web:<login>`.
+
+Tokens never cross the connector in either direction. FF Factory holds no FFBox credential, and FFBox
+receives none from FF Factory.
+
+### FF Factory → connector
+
+```json
+{ "type": "submit", "id": "fff-7c1e", "requestedBy": { "userId": "lothsahn", "displayName": "Lothsahn" },
+  "trigger": "person", "title": "Fix the belt splitter", "prompt": "…", "class": "fenced",
+  "untrustedInput": false, "base": "develop", "key": "issue#640" }
+{ "type": "diagnose", "id": "fff-7c1f", "requestedBy": { "userId": "ben", "displayName": "Ben" },
+  "trigger": "automatic", "reportIds": ["20260927T090000Z-desync-3a9f01c2d4"], "key": "desync:0.50.0:minerBots+census" }
+{ "type": "stop", "id": "fff-7c20", "requestedBy": { "userId": "ben", "displayName": "Ben" }, "conversation": "813" }
+```
+
+| field | rule |
+|---|---|
+| `id` | FF Factory's request id, `^[A-Za-z0-9._:-]{1,80}$`. The replies refer to it as `ref` |
+| `requestedBy` | above. Required on all three |
+| `trigger` | `person` or `automatic` (submit and diagnose) |
+| `title` | 1-300 characters, redacted. Untrusted: it can quote what a person pasted |
+| `prompt` | 1-48,000 characters, redacted |
+| `class` | `fenced` (the default) or `open`. `untrustedInput: true` never goes with `open` |
+| `untrustedInput` | the task reads text from outside the team; forces the fenced class |
+| `base`, `branch` | optional git refs, `^[A-Za-z0-9._/+-]{1,200}$` |
+| `conversation` | optional on submit: a conversation FF Factory started, whose next turn this is. Required on stop |
+| `reportIds` | diagnose: 1-20 report ids as in `intake` |
+| `key` | optional, the board's dedupe key |
+
+FFBox may refuse anything, and it picks the class by its own rules. A request can only make the class
+stricter.
+
+### Connector → FF Factory
+
+```json
+{ "type": "accepted", "ref": "fff-7c1e", "conversation": "813", "billedTo": "lothsahn" }
+{ "type": "refused", "ref": "fff-7c1e", "reason": "no_account", "message": "fff:lothsahn has no Claude account configured" }
+```
+
+| field | rule |
+|---|---|
+| `ref` | the request's `id` |
+| `conversation` | accepted: the FFBox conversation id, as in `conversation` messages |
+| `billedTo` | accepted: the user id whose account FFBox charges. Must be `requestedBy.userId` |
+| `reason` | refused: `unknown_requester`, `no_account`, `class_not_allowed`, `budget_hold`, `draining`, `already_diagnosed`, `bad_request` or `other` |
+| `message` | optional, up to 300 characters, one line for people. Shown as data |
+
+Until phase 3, FF Factory answers these two with `unknown_type`, like any message it does not take yet.
+
 ## Limits and close codes
 
 - Rate: a token bucket of 1000 messages refilled at 100 a second, which is enough for a catch-up of
@@ -229,6 +326,9 @@ Either side can end the link on its own:
   the `ffintake` group if `ffwatch intake-events` exists.
 - TLS verification on (Funnel has a real certificate), and `wss://` only.
 - The token stays out of argv and logs, and is rotated by minting a new one.
+- From phase 3: the Claude account for a work message comes from `requestedBy.userId` through the
+  `operators` block, and from nothing else in the message. There is no fallback account. No credential
+  is ever sent to FF Factory, and none is expected from it.
 - No player names, Discord or GitHub ids, addresses or report contents in any message.
 
 ## Testing against FF Factory

@@ -89,6 +89,22 @@ export interface Sandbox {
 
 export type SessionKind = 'orchestrator' | 'worker' | 'standing';
 
+/**
+ * A person FF Factory knows: a login (data/users.json). `userId` is the login name, which never changes; it is
+ * what FFBox maps to the account it bills (docs/ffbox-connector-contract.md, `requestedBy`).
+ */
+export interface Requester {
+  userId: string;
+  displayName: string;
+}
+
+/** owner: runs this portal (Ben). member: a teammate with a login (Lothsahn). Roles are recorded; enforcing them is a later phase. */
+export type UserRole = 'owner' | 'member';
+
+export interface UserInfo extends Requester {
+  role: UserRole;
+}
+
 export type SessionStatus =
   | 'starting'
   | 'running' // a turn is in flight
@@ -141,6 +157,13 @@ export interface SessionInfo {
   pendingPermissions: PendingPermission[];
   /** Last assistant text of the most recent finished turn, trimmed; for cards and summaries. */
   lastResult?: string;
+  /**
+   * The person this agent works for: who started it, or had the orchestrator start it (docs/identity.md). A
+   * standing agent's is its current run's. Absent on the shared orchestrator and on sessions older than this field.
+   */
+  requestedBy?: Requester;
+  /** Who the latest message a person (or the orchestrator for a person) sent this session came from. */
+  lastRequestedBy?: Requester;
 }
 
 /** An image kept with a session's transcript, served at /api/uploads/<sessionId>/<id>. */
@@ -168,7 +191,8 @@ export interface ImageFile {
 
 /** One persisted transcript entry. Streaming deltas are NOT persisted (see ServerEvent). */
 export type TranscriptEvent =
-  | { seq: number; t: string; kind: 'user'; text: string; from: 'human' | 'orchestrator' | 'system'; uuid?: string; images?: ImageRef[] }
+  /** requestedBy: the person who wrote it (from 'human'), or for whom the orchestrator or the harness sent it. */
+  | { seq: number; t: string; kind: 'user'; text: string; from: 'human' | 'orchestrator' | 'system'; uuid?: string; images?: ImageRef[]; requestedBy?: Requester }
   | { seq: number; t: string; kind: 'assistant'; text: string }
   | { seq: number; t: string; kind: 'thinking'; text: string }
   | { seq: number; t: string; kind: 'tool_use'; toolUseId: string; name: string; input: unknown; parentToolUseId?: string | null }
@@ -324,6 +348,8 @@ export interface Provider {
   connector?: { version: string; commit?: string; protocol: number };
   /** The provider's own page, for links. */
   web?: string;
+  /** Work messages the connector said it takes (hello.accepts, e.g. "submit"); none yet in phase 1. */
+  accepts?: string[];
   capacity?: ProviderCapacity;
   counts: { conversations: number; active: number; intake: number; intake24h: number };
   lastIntakeAt?: string;
@@ -357,6 +383,8 @@ export interface StandingRun {
   costUsd: number;
   /** The agent's final message, clipped; or why it was skipped/stopped. */
   summary?: string;
+  /** Who asked for it: the person for a manual or message run, the system payer (config systemPayer) for a scheduled one. */
+  requestedBy?: Requester;
 }
 
 /** What the agent is doing now. */
@@ -383,7 +411,7 @@ export interface StandingAgent {
   /** Next scheduled run; undefined for manual-only or paused agents. */
   nextRunAt?: string;
   /** A run that is due but has not started (waiting for a free agent slot). At most one. */
-  pending?: { trigger: StandingRunTrigger; dueAt: string; deadline: string; text?: string };
+  pending?: { trigger: StandingRunTrigger; dueAt: string; deadline: string; text?: string; requestedBy?: Requester };
   /** Runs on this machine instead of this host (its folder is then on that machine). */
   machineId?: string;
   /** Start this agent's delegation requests without the user's approval, within these limits. */
@@ -450,6 +478,10 @@ export interface DelegationRequest {
   finishedAt?: string;
   /** What happened to it, oldest first: "10:02 queued: no free target", "10:05 started in sb2". */
   log?: string[];
+  /** Who the run that filed it was for (the system payer for a scheduled run). */
+  requestedBy?: Requester;
+  /** The person who approved it; absent when auto-approved. Its worker is requested by them. */
+  approvedBy?: Requester;
 }
 
 /** Facts about the host process itself, for the dashboard banner. */

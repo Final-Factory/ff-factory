@@ -72,10 +72,16 @@ and not over SSH): Unity editors it launches must land on the interactive deskto
 
 The page drives agents that run shell commands on the host, so its login is treated like a shell
 login: usernames with scrypt-hashed passwords (`data/users.json`, managed with
-`node server/user.ts <name>`, which also changes a password and signs that user out everywhere),
+`node server/user.ts <name> [--name "Display Name"] [--role owner|member]`, which also changes a
+password and signs that user out everywhere),
 server-side 30-day sessions (`data/auth-sessions.json`; delete it to sign everyone out),
 HttpOnly + SameSite=Strict cookies (Secure over HTTPS), 5 failed logins per IP per 15 minutes,
 JSON-only writes (CSRF) and a same-origin check on the WebSocket.
+
+Several people can share one portal and one orchestrator chat. Every message records who wrote it, and
+the workers, standing runs and approvals it causes are recorded as requested by that person. A person
+can have their own Claude token (`userClaudeEnv`), which the agents they ask for run on. The first login
+is the owner. Roles are recorded but not enforced yet. See [docs/identity.md](docs/identity.md).
 
 For access from anywhere, bind to loopback (`"host": "127.0.0.1"`) and publish it with
 **Tailscale Funnel**, which terminates TLS with a real certificate and needs no router ports:

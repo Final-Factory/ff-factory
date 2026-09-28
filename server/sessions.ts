@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { query, type Options, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Config } from './config.ts';
 import type { Store } from './store.ts';
-import type { EffortLevel, ImageInput, ImageRef, PendingPermission, PermissionMode, SessionInfo, SessionKind } from '../shared/types.ts';
+import type { EffortLevel, ImageInput, ImageRef, PendingPermission, PermissionMode, Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { emit } from './store.ts';
 import type { SessionSnapshot, Unanswered } from './restart.ts';
 
@@ -67,7 +67,8 @@ export interface SessionHandle {
   readonly info: SessionInfo;
   readonly live: boolean;
   lastFrom: 'human' | 'orchestrator' | 'system';
-  send(text: string, from?: 'human' | 'orchestrator' | 'system', uuid?: string, images?: ImageInput[]): string;
+  /** `requestedBy`: the person who wrote it, or for whom the orchestrator or the harness sends it (docs/identity.md). */
+  send(text: string, from?: 'human' | 'orchestrator' | 'system', uuid?: string, images?: ImageInput[], requestedBy?: Requester): string;
   interrupt(): Promise<void>;
   setMode(mode: PermissionMode): Promise<void>;
   stop(): void;
@@ -95,6 +96,16 @@ function textOf(content: unknown): string {
       .join('\n');
   }
   return content == null ? '' : JSON.stringify(content);
+}
+
+/**
+ * What the model reads for a message: the orchestrator's briefs are marked as such, and in the orchestrator's
+ * chat, which several people share, each person's message starts with who wrote it.
+ */
+export function promptText(kind: SessionKind, text: string, from: 'human' | 'orchestrator' | 'system', requestedBy?: Requester): string {
+  if (from === 'orchestrator') return `[from the orchestrator${requestedBy ? `, for ${requestedBy.displayName}` : ''}]\n${text}`;
+  if (from === 'human' && kind === 'orchestrator' && requestedBy) return `[from ${requestedBy.displayName}]\n${text}`;
+  return text;
 }
 
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + `\n… (${s.length - n} more chars)` : s);
@@ -142,14 +153,17 @@ export class AgentSession implements SessionHandle {
   }
 
   /** Queue a user message; returns its uuid, which the answering turn's result lists in `answers`. */
-  send(text: string, from: 'human' | 'orchestrator' | 'system' = 'human', uuid: string = randomUUID(), images: ImageInput[] = []): string {
+  send(text: string, from: 'human' | 'orchestrator' | 'system' = 'human', uuid: string = randomUUID(), images: ImageInput[] = [], requestedBy?: Requester): string {
+    // A person's message (or the orchestrator's on a person's behalf) says who this session now works for; the
+    // harness's own messages carry the person they are about, but do not change that.
+    if (requestedBy && from !== 'system') this.info.lastRequestedBy = requestedBy;
     if (!this.q) this.start();
     this.lastFrom = from;
     this.outstanding.set(uuid, { text, from });
     // Images arrive stored already (with an id) or are kept here, so the transcript can show them.
     const refs = images.map((i) => ({ id: i.id ?? this.store.saveImage(this.info.id, i.mediaType, i.data), mediaType: i.mediaType }));
-    this.store.append(this.info.id, { kind: 'user', text, from, uuid, ...(refs.length ? { images: refs } : {}) });
-    this.input!.push(from === 'orchestrator' ? `[from the orchestrator]\n${text}` : text, uuid, images);
+    this.store.append(this.info.id, { kind: 'user', text, from, uuid, ...(refs.length ? { images: refs } : {}), ...(requestedBy ? { requestedBy } : {}) });
+    this.input!.push(promptText(this.info.kind, text, from, requestedBy), uuid, images);
     this.update({ status: 'running', statusDetail: undefined });
     return uuid;
   }
@@ -426,7 +440,7 @@ export class SessionManager {
     return cutOff;
   }
 
-  create(opts: { kind: SessionKind; title: string; sandboxId?: string; standingId?: string; model?: string; effort?: EffortLevel; permissionMode: PermissionMode; options: OptionsFactory; id?: string }) {
+  create(opts: { kind: SessionKind; title: string; sandboxId?: string; standingId?: string; model?: string; effort?: EffortLevel; permissionMode: PermissionMode; options: OptionsFactory; id?: string; requestedBy?: Requester }) {
     const now = new Date().toISOString();
     const info: SessionInfo = {
       id: opts.id ?? randomUUID().slice(0, 8),
@@ -443,6 +457,7 @@ export class SessionManager {
       turns: 0,
       costUsd: 0,
       pendingPermissions: [],
+      ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
     };
     const s = new AgentSession(info, this.store, opts.options, this.events);
     this.sessions.set(info.id, s);
@@ -478,7 +493,7 @@ export class SessionManager {
    * Send, enforcing the concurrent-agent ceiling and the host guard when this send would start a process.
    * `bypassGate`: the host guard's own messages (resume after recovery, checkpoint requests).
    */
-  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean } = {}): string {
+  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean; requestedBy?: Requester } = {}): string {
     const s = this.get(id);
     const startsHere = !s.live && s.info.kind !== 'orchestrator' && !s.info.machineId;
     if (startsHere && this.liveAgents() >= this.cfg.limits.maxSessions) {
@@ -486,7 +501,7 @@ export class SessionManager {
     }
     const gate = startsHere && !opts.bypassGate ? this.startGate?.() : undefined;
     if (gate) throw new Error(`not started: ${gate}`);
-    return s.send(text, from, undefined, images);
+    return s.send(text, from, undefined, images, opts.requestedBy);
   }
 
   /** Rename a session: one line, at most 80 characters. Returns the stored title. */

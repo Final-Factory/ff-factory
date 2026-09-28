@@ -67,7 +67,8 @@ export function fakeQuery(fake: FakeOptions = {}) {
         const images = typeof content === 'string' ? 0 : content.filter((b) => b.type === 'image').length;
         const uuid = m.uuid ?? '';
         yield state('running');
-        const words = said.replace(/^\[from the orchestrator\]\n/, '');
+        // The harness's "[from the orchestrator]" / "[from <person>]" line (server/sessions.ts, promptText) is not the message.
+        const words = said.replace(/^\[from [^\]\n]*\]\n/, '');
         if (/#perm\b/i.test(words)) {
           const toolId = `tool-${++msgId}`;
           const input = { command: 'rm -rf build', description: 'Clean the build folder' };

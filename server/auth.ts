@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type http from 'node:http';
 import { createHash, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
+import type { UserInfo, UserRole } from '../shared/types.ts';
 
 /**
  * Username/password login. This page can drive agents that run shell commands on the host, so it
@@ -27,7 +28,18 @@ interface UserRecord {
   username: string;
   /** scrypt$N$r$p$saltB64$hashB64 */
   hash: string;
+  /** Shown in transcripts and on agents ("Lothsahn"); default the username. */
+  displayName?: string;
+  /** Absent in files written before roles: those logins were all the owner's, so they read as owner. */
+  role?: UserRole;
 }
+
+export interface UserProfile {
+  displayName?: string;
+  role?: UserRole;
+}
+
+const cleanName = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 interface SessionRecord {
   username: string;
@@ -50,6 +62,22 @@ async function verifyPassword(password: string, stored: string) {
   const expected = Buffer.from(hash, 'base64');
   const key = await scryptAsync(password, Buffer.from(salt, 'base64'), { N: Number(n), r: Number(r), p: Number(p), maxmem: SCRYPT.maxmem });
   return key.length === expected.length && timingSafeEqual(key, expected);
+}
+
+/** The profile fields to store, checked. */
+function checkProfile(p: UserProfile): Partial<UserRecord> {
+  const out: Partial<UserRecord> = {};
+  if (p.displayName !== undefined) {
+    const n = cleanName(p.displayName);
+    // It is shown in prompts ("[from Lothsahn]") and transcripts: one plain line.
+    if (!n || n.length > 40 || /[<>`{}$\\[\]]/.test(n)) throw new Error('display name: 1-40 characters, one line, none of <>`{}$\\[]');
+    out.displayName = n;
+  }
+  if (p.role !== undefined) {
+    if (p.role !== 'owner' && p.role !== 'member') throw new Error('role is owner or member');
+    out.role = p.role;
+  }
+  return out;
 }
 
 export class Auth {
@@ -85,15 +113,43 @@ export class Auth {
     return this.users().length > 0;
   }
 
-  async setUser(username: string, password: string) {
+  /** Every login as the rest of the app sees it (no hashes): user id = username, display name, role. */
+  userInfos(): UserInfo[] {
+    return this.users().map((u) => ({ userId: u.username, displayName: u.displayName || u.username, role: u.role ?? 'owner' }));
+  }
+
+  userInfo(username: string | undefined): UserInfo | undefined {
+    return username ? this.userInfos().find((u) => u.userId === username) : undefined;
+  }
+
+  /**
+   * Create a login or change its password. `profile` sets its display name and role; without it an existing
+   * login keeps its own, and a new one is the owner when it is the first login, a member otherwise.
+   */
+  async setUser(username: string, password: string, profile: UserProfile = {}) {
     if (!/^[a-zA-Z0-9._-]{2,32}$/.test(username)) throw new Error('username: 2-32 letters, digits, . _ -');
     if (password.length < 12) throw new Error('password must be at least 12 characters');
-    const users = this.users().filter((u) => u.username !== username);
-    users.push({ username, hash: await hashPassword(password) });
-    fs.writeFileSync(this.usersFile, JSON.stringify(users, null, 2));
+    const all = this.users();
+    const old = all.find((u) => u.username === username);
+    const rec: UserRecord = { ...old, username, hash: await hashPassword(password), ...checkProfile(profile) };
+    rec.role ??= old ? 'owner' : all.length ? 'member' : 'owner';
+    this.writeUsers([...all.filter((u) => u.username !== username), rec]);
     // A password change logs that user out everywhere.
     for (const [id, s] of this.sessions) if (s.username === username) this.sessions.delete(id);
     this.persistSessions();
+  }
+
+  /** Change a login's display name or role, keeping its password and sessions. */
+  setProfile(username: string, profile: UserProfile) {
+    const all = this.users();
+    const old = all.find((u) => u.username === username);
+    if (!old) throw new Error(`no login "${username}"`);
+    const p = checkProfile(profile);
+    this.writeUsers(all.map((u) => (u === old ? { ...u, ...p } : u)));
+  }
+
+  private writeUsers(users: UserRecord[]) {
+    fs.writeFileSync(this.usersFile, JSON.stringify(users, null, 2));
   }
 
   // ---- API keys, for machine clients such as a remote Claude Code's MCP connection ----
@@ -102,17 +158,21 @@ export class Auth {
     return path.join(path.dirname(this.usersFile), 'api-keys.json');
   }
 
-  private keys(): { name: string; sha256: string; createdAt: string }[] {
+  private keys(): { name: string; sha256: string; createdAt: string; user?: string }[] {
     return fs.existsSync(this.keysFile) ? JSON.parse(fs.readFileSync(this.keysFile, 'utf8')) : [];
   }
 
-  /** Mint a key (shown once; only its SHA-256 is stored). Re-minting a name replaces its old key. */
-  createApiKey(name: string) {
+  /**
+   * Mint a key (shown once; only its SHA-256 is stored). Re-minting a name replaces its old key. `user`: the login
+   * it acts for (work it starts is requested by them); a key without one acts for the owner.
+   */
+  createApiKey(name: string, user?: string) {
     if (!/^[a-zA-Z0-9._-]{2,40}$/.test(name)) throw new Error('key name: 2-40 letters, digits, . _ -');
+    if (user !== undefined && !this.users().some((u) => u.username === user)) throw new Error(`no login "${user}" to bind the key to`);
     const key = `ffsb_${randomBytes(32).toString('base64url')}`;
     const sha256 = createHash('sha256').update(key).digest('hex');
     const keys = this.keys().filter((k) => k.name !== name);
-    keys.push({ name, sha256, createdAt: new Date().toISOString() });
+    keys.push({ name, sha256, createdAt: new Date().toISOString(), ...(user ? { user } : {}) });
     fs.writeFileSync(this.keysFile, JSON.stringify(keys, null, 2));
     return key;
   }
@@ -123,8 +183,8 @@ export class Auth {
     return keys.some((k) => k.name === name);
   }
 
-  /** The key's name for a valid "Authorization: Bearer ffsb_…" header; throttled like logins. */
-  bearer(req: http.IncomingMessage): { ok: true; name: string } | { ok: false; status: number } {
+  /** The key's name (and the login it acts for) for a valid "Authorization: Bearer ffsb_…" header; throttled like logins. */
+  bearer(req: http.IncomingMessage): { ok: true; name: string; user?: string } | { ok: false; status: number } {
     const ip = this.clientIp(req);
     const now = Date.now();
     const recent = (this.keyFailures.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
@@ -138,7 +198,7 @@ export class Auth {
       console.warn(`bad API key from ${ip}`);
       return { ok: false, status: 401 };
     }
-    return { ok: true, name: hit.name };
+    return { ok: true, name: hit.name, ...(hit.user ? { user: hit.user } : {}) };
   }
 
   /** The client address, taking X-Forwarded-For only from a local reverse proxy (Tailscale serve/funnel). */

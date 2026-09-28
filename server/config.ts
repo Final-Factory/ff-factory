@@ -149,6 +149,18 @@ export interface Config {
    * so an always-on host does not depend on an interactive login that can expire.
    */
   claudeEnv?: Record<string, string>;
+  /**
+   * Per-person Claude env, by user id (docs/identity.md, "Local billing"): an agent working for that person
+   * (SessionInfo.requestedBy) runs with it laid over claudeEnv, e.g.
+   * { "lothsahn": { "CLAUDE_CODE_OAUTH_TOKEN": "<Lothsahn's claude setup-token>" } }. A person without an entry
+   * runs on claudeEnv, the owner's account. Write-only through set_app_config; redacted from transcripts.
+   */
+  userClaudeEnv?: Record<string, Record<string, string>>;
+  /**
+   * The user id automatic work is attributed and billed to: scheduled standing-agent runs and, once FFBox takes
+   * work, intake-triggered diagnoses (docs/identity.md). Default: the owner (the first login with role owner).
+   */
+  systemPayer?: string;
   /** Explicit path to a `claude` executable; default is the SDK's bundled one. */
   claudeExecutable?: string;
   /** Voice input: local speech-to-text behind the composers' mic button (server/voice.ts, docs/voice.md). */

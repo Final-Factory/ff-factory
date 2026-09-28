@@ -68,7 +68,7 @@ test('voice mode: listening, hearing, thinking, speaking, listening again, stopp
   await expect(page.locator('.toast', { hasText: 'Stopped by voice.' })).toBeVisible();
   // What was said went into the conversation like a typed message.
   await expect(panel.locator('.msg-user', { hasText: `tell me a story #slow ${tag}` })).toBeVisible();
-  await expect(panel.locator('.msg-user', { hasText: /^stop$/ })).toHaveCount(0);
+  await expect(panel.locator('.msg-user .bubble-text', { hasText: /^stop$/ })).toHaveCount(0);
 
   // A tap anywhere ends it too.
   await panel.getByRole('button', { name: 'Voice mode' }).click();

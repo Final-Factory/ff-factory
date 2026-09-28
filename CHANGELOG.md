@@ -12,6 +12,20 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **People: who asked, and whose account pays** (docs/identity.md). Logins have a display name and a
+  role (`node server/user.ts <name> --name … --role owner|member`; the first login is the owner).
+  - Every message records its author. In the shared orchestrator chat, each person's name shows above
+    their message, and the model reads it as `[from <name>]`.
+  - Workers (started by hand, by `start_agent`, or through an `/mcp` key bound with
+    `node server/apikey.ts <key> --user <login>`), `message_agent` follow-ups, standing runs started by
+    hand, and delegation approvals all carry the person as `requestedBy`. Agent tabs and details show it.
+    The orchestrator acts for the latest person's message, or for another with `for_user`.
+  - Scheduled and automatic work is attributed to config `systemPayer` (default: the owner).
+  - A person's own Claude token (`userClaudeEnv`, write-only through `set_app_config`) is what the
+    agents they ask for run on, here and on the Macs, and it is a usage account of its own.
+  - The FFBox contract gains the phase 3 work messages (`submit`, `diagnose`, `stop`) with
+    `requestedBy`: FFBox bills that person's account or refuses. They are specified, not sent yet.
+
 - **FFBox, read-only (phase 1 of docs/ffbox-integration.md).** FFBox's connector dials out to
   `/provider` with a token (`node server/providerToken.ts` mints one; config keeps its SHA-256) and
   reports its container classes (network, model, tier, free slots), its conversations and the

@@ -230,7 +230,7 @@ export function Transcript({
           )}
           {isEmpty && (empty ?? <div className="transcript-empty">No messages yet.</div>)}
           {items.map((it) => (
-            <ItemView key={it.key} it={it} sessionId={session.id} pending={pendingById} live={it.key === liveGroup} />
+            <ItemView key={it.key} it={it} sessionId={session.id} pending={pendingById} live={it.key === liveGroup} owner={session.requestedBy?.userId} />
           ))}
           {orphanPending.map((p) => (
             <PermissionCard key={p.requestId} sessionId={session.id} requestId={p.requestId} toolName={p.toolName} input={p.input} reason={p.reason} pending />
@@ -253,7 +253,7 @@ export function Transcript({
   );
 }
 
-const ItemView = memo(function ItemView({ it, sessionId, pending, live }: { it: Item; sessionId: string; pending: Map<string, PendingPermission>; live: boolean }) {
+const ItemView = memo(function ItemView({ it, sessionId, pending, live, owner }: { it: Item; sessionId: string; pending: Map<string, PendingPermission>; live: boolean; owner?: string }) {
   switch (it.type) {
     case 'divider':
       return (
@@ -262,7 +262,7 @@ const ItemView = memo(function ItemView({ it, sessionId, pending, live }: { it: 
         </div>
       );
     case 'user':
-      return it.ev.from === 'orchestrator' ? <Brief ev={it.ev} /> : <UserMessage ev={it.ev} sessionId={sessionId} />;
+      return it.ev.from === 'orchestrator' ? <Brief ev={it.ev} /> : <UserMessage ev={it.ev} sessionId={sessionId} owner={owner} />;
     case 'notice':
       return <NoticeRow ev={it.ev} />;
     case 'assistant':
@@ -292,13 +292,23 @@ function WorkingIndicator({ detail, since }: { detail?: string; since?: string }
 
 // ---------------------------------------------------------------- messages
 
-function UserMessage({ ev, sessionId }: { ev: UserEv; sessionId: string }) {
+/**
+ * A person's message. Its author shows above it when that is news: always in the shared orchestrator chat (no
+ * owner), and in an agent's chat when someone other than the person it works for (`owner`) wrote it.
+ */
+function UserMessage({ ev, sessionId, owner }: { ev: UserEv; sessionId: string; owner?: string }) {
+  const author = ev.requestedBy && ev.requestedBy.userId !== owner ? ev.requestedBy : undefined;
   return (
     <div className="msg msg-user" data-seq={ev.seq}>
       <time className="msg-side-time" dateTime={ev.t} title={new Date(ev.t).toLocaleString()}>
         {fmtClock(ev.t)}
       </time>
       <div className="msg-user-body">
+        {author && (
+          <span className="msg-author" title={author.userId} data-testid="msg-author">
+            {author.displayName}
+          </span>
+        )}
         {ev.images?.length ? <ImageStrip items={ev.images.map((r, i) => ({ src: uploadUrl(sessionId, r), name: `image-${ev.seq}-${i + 1}.${r.mediaType.split('/')[1]}` }))} /> : null}
         {ev.text && (
           <div className="bubble">
@@ -323,7 +333,7 @@ function Brief({ ev }: { ev: UserEv }) {
     <div className={`brief${long ? ' is-long' : ''}${open ? ' open' : ''}`} data-seq={ev.seq}>
       <div className="brief-head">
         <Icon name="chat" size={13} />
-        <span>From the orchestrator</span>
+        <span>From the orchestrator{ev.requestedBy ? `, for ${ev.requestedBy.displayName}` : ''}</span>
         <time dateTime={ev.t} title={new Date(ev.t).toLocaleString()}>
           {fmtClock(ev.t)}
         </time>

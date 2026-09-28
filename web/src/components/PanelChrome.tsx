@@ -124,6 +124,7 @@ export function AgentPicker({
         {sessions.map((s) => (
           <option key={s.id} value={s.id}>
             {s.title} · {sessionLabel[s.status]}
+            {s.requestedBy ? ` · for ${s.requestedBy.displayName}` : ''}
             {s.pendingPermissions.length ? ` · ${s.pendingPermissions.length} waiting` : ''}
           </option>
         ))}
@@ -161,10 +162,15 @@ export function AgentTabs({
           aria-selected={s.id === selected?.id}
           className={`tab${s.id === selected?.id ? ' active' : ''}`}
           onClick={() => onSelect(s.id)}
-          title={`${s.title}: ${sessionLabel[s.status]}`}
+          title={`${s.title}: ${sessionLabel[s.status]}${s.requestedBy ? ` · requested by ${s.requestedBy.displayName}` : ''}`}
         >
           <Dot tone={sessionTone(s.status)} pulse={s.status === 'running'} />
           <span className="ellipsis">{s.title}</span>
+          {s.requestedBy && (
+            <span className="tab-by" data-testid="tab-requested-by">
+              {s.requestedBy.displayName}
+            </span>
+          )}
           {s.pendingPermissions.length > 0 && <span className="badge badge-amber">{s.pendingPermissions.length}</span>}
         </button>
       ))}

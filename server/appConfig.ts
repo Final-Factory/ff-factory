@@ -4,6 +4,7 @@ import path from 'node:path';
 import { ROOT, VOICE_DEFAULTS, type Config } from './config.ts';
 import { OAUTH_TOKEN, SECRET_KEYS, maskSecret } from './secrets.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
+import { USER_ID } from './identity.ts';
 
 /**
  * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
@@ -29,6 +30,10 @@ export const SETTABLE_KEYS = [
   'publicUrl',
   // The Claude account the agents run on (claude setup-token): write-only, never shown (server/secrets.ts).
   'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN',
+  // A person's own Claude account, for agents working for them (docs/identity.md): write-only, needs `user`.
+  'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN',
+  // Who automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to.
+  'systemPayer',
   // FFBox's connector (docs/ffbox-integration.md): whether it may connect (default off), and its token,
   // write-only: only its SHA-256 is stored, as providers.ffbox.tokenSha256.
   'providers.ffbox.enabled',
@@ -91,9 +96,14 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       if (typeof value !== 'string' || !/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(value.trim())) throw new Error('publicGitIdentity.email is an email address, e.g. 12345+you@users.noreply.github.com');
       return value.trim();
     }
-    case 'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN': {
+    case 'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN':
+    case 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN': {
       // Never echo the value, not even in the error.
-      if (typeof value !== 'string' || !OAUTH_TOKEN.test(value.trim())) throw new Error('claudeEnv.CLAUDE_CODE_OAUTH_TOKEN must be a Claude OAuth token (sk-ant-oat01-…, from `claude setup-token`); the value given is not one (not shown)');
+      if (typeof value !== 'string' || !OAUTH_TOKEN.test(value.trim())) throw new Error(`${key} must be a Claude OAuth token (sk-ant-oat01-…, from \`claude setup-token\`); the value given is not one (not shown)`);
+      return value.trim();
+    }
+    case 'systemPayer': {
+      if (typeof value !== 'string' || !USER_ID.test(value.trim())) throw new Error('systemPayer is a user id (a login name, e.g. "ben")');
       return value.trim();
     }
     case 'publicUrl': {
@@ -157,14 +167,18 @@ function getPath(obj: unknown, key: string): unknown {
 
 /**
  * Change one allowlisted key in the config file (kept as config.json.prev first; written through a temp
- * file) and in the running config. Returns the value before and after.
+ * file) and in the running config. Returns the value before and after. `opts.user`: whose entry, for the
+ * per-person keys (userClaudeEnv.*, stored as userClaudeEnv.<user>.*).
  */
-export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown): { before: unknown; after: unknown } {
+export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { user?: string } = {}): { before: unknown; after: unknown } {
   if (!SETTABLE_KEYS.includes(key)) throw new Error(`${key} cannot be changed by an agent; allowed: ${SETTABLE_KEYS.join(', ')}`);
+  const perUser = key.startsWith('userClaudeEnv.');
+  // The user id becomes a key path segment: no dots (edit config.json by hand for such a login).
+  if (perUser && !(opts.user && USER_ID.test(opts.user) && !opts.user.includes('.'))) throw new Error(`${key} needs user: the user id (login name, without dots) whose account it is`);
   const v = normalizeSetting(key, value, cfg);
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
-  const stored = STORED_AS[key] ?? key;
+  const stored = perUser ? `userClaudeEnv.${opts.user}.${key.slice('userClaudeEnv.'.length)}` : (STORED_AS[key] ?? key);
   const before = getPath(raw, stored);
   setPath(raw, stored, v);
   fs.writeFileSync(file + '.prev', text);
@@ -184,7 +198,15 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (v === undefined) delete env.CLAUDE_CODE_OAUTH_TOKEN;
     else env.CLAUDE_CODE_OAUTH_TOKEN = v as string;
     cfg.claudeEnv = env;
-  }
+  } else if (key === 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN') {
+    const all = { ...cfg.userClaudeEnv };
+    const env = { ...all[opts.user!] };
+    if (v === undefined) delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    else env.CLAUDE_CODE_OAUTH_TOKEN = v as string;
+    if (Object.keys(env).length) all[opts.user!] = env;
+    else delete all[opts.user!];
+    cfg.userClaudeEnv = all;
+  } else if (key === 'systemPayer') cfg.systemPayer = v as string | undefined;
   else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.token') {
     const ffbox = { ...cfg.providers?.ffbox };
     if (key === 'providers.ffbox.enabled') ffbox.enabled = v as boolean | undefined;

@@ -3,7 +3,7 @@
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
-import type { HostStats, ImageFile, ImageInput, Machine, PermissionMode, PlanUsage, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { HostStats, ImageFile, ImageInput, Machine, PermissionMode, PlanUsage, Requester, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 /**
  * Bumped when either side must be redeployed to keep talking. 4: the daemon reports its Mac's load
@@ -21,7 +21,7 @@ export type ToDaemon =
   /** First message after connecting: the portal's sessions on this machine and where their transcripts end. */
   | { type: 'welcome'; machineId: string; maxSessions: number; sessions: { id: string; lastSeq: number }[] }
   /** Start the session's process if needed (from `spec`) and send it a message. */
-  | { type: 'send'; info: SessionInfo; lastSeq: number; spec: LaunchSpec; text: string; from: 'human' | 'orchestrator' | 'system'; uuid: string; images?: ImageInput[] }
+  | { type: 'send'; info: SessionInfo; lastSeq: number; spec: LaunchSpec; text: string; from: 'human' | 'orchestrator' | 'system'; uuid: string; images?: ImageInput[]; requestedBy?: Requester }
   /** Read an image file (under the daemon's roots) or list the recent ones: the Screenshots gallery and inline images. */
   | { type: 'fs'; id: string; op: 'read'; path: string }
   | { type: 'fs'; id: string; op: 'list'; dirs?: string[] }

@@ -1,9 +1,12 @@
 // The WebSocket protocol between the portal (server/providers.ts) and a provider's connector: FFBox's, for
 // now (docs/ffbox-connector-contract.md, docs/ffbox-integration.md). The connector dials out to /provider;
 // every message is JSON data, one per frame, and neither side can make the other run anything.
-// Phase 1 is read-only: the connector reports, the portal records and shows.
+// Phase 1 is read-only: the connector reports, the portal records and shows. The phase 3 work messages (submit,
+// diagnose, stop, and the connector's accepted/refused) are defined below, with the person each is for
+// (`requestedBy`), but the portal does not send them yet.
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { redactSecrets } from './secrets.ts';
 
 /** Bumped when a change needs both sides updated. The portal refuses a hello with another number (close 4426). */
 export const PROVIDER_PROTOCOL = 1;
@@ -127,6 +130,11 @@ export const HelloSchema = z.object({
   connector: z.object({ version: z.string().regex(/^[A-Za-z0-9._+-]{1,40}$/), commit: z.string().regex(/^[0-9a-f]{7,40}$/).optional() }),
   /** FFBox's own page, for links (LAN-only is fine: people open it, the portal never does). */
   web: z.string().max(300).regex(/^https:\/\/[^\s"'<>]+$/).optional(),
+  /**
+   * The work messages this connector takes (WORK_MESSAGES: "submit", "diagnose", "stop"). The portal sends a
+   * work message only to a connector that lists it, so a phase 1 connector never gets one. Unknown words are kept.
+   */
+  accepts: z.array(z.string().regex(/^[a-z_]{1,32}$/)).max(20).optional(),
 });
 
 export const CapacitySchema = z.object({
@@ -155,6 +163,138 @@ export type ToConnector =
   | { type: 'welcome'; protocol: number; provider: 'ffbox'; cursors: { conversation?: string; intake?: string }; limits: typeof LIMITS }
   /** A message the portal did not take; the connection stays up. */
   | { type: 'error'; code: 'bad_json' | 'bad_message' | 'unknown_type' | 'hello_twice'; message: string; ref?: string };
+
+// ---------------------------------------------------------------- work messages (phase 3, docs/ffbox-connector-contract.md)
+//
+// Defined and tested now so both sides can build to them; the portal sends none until phase 3. Each carries the
+// person it is for, `requestedBy`, and never a credential: FFBox maps `requestedBy.userId` to the Claude account
+// it holds for that person, and refuses the work (`refused`, reason `unknown_requester` or `no_account`) when it
+// has none. The portal builds them strictly (buildSubmit, buildDiagnose, buildStop): no field it does not know,
+// so nothing can ride along.
+
+/** The work messages a connector can take, as it lists them in hello.accepts. */
+export const WORK_MESSAGES = ['submit', 'diagnose', 'stop'] as const;
+export type WorkMessage = (typeof WORK_MESSAGES)[number];
+
+/** The person a piece of work is for: an FF Factory login. An id and a name, nothing else (no email, no token). */
+export const RequesterSchema = z
+  .object({
+    /** The FF Factory login name: stable, and what FFBox's operators block maps (`fff:<userId>`). */
+    userId: z.string().regex(/^[a-zA-Z0-9._-]{2,32}$/),
+    /** For people reading FFBox's pages and logs. Never used to pick an account. */
+    displayName: z
+      .string()
+      .min(1)
+      .max(40)
+      .regex(/^[^\u0000-\u001f<>`{}$\\[\]]+$/, 'one plain line'),
+  })
+  .strict();
+
+/**
+ * person: someone asked for it (a message, a button, the orchestrator acting on their message). automatic: the
+ * portal started it by itself (intake triage, phase 4), and `requestedBy` is the configured system payer.
+ */
+export const TriggerSchema = z.enum(['person', 'automatic']);
+
+/** FF Factory's id for one work request; accepted, refused and (later) result refer to it. */
+const requestId = z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/);
+const conversationId = z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/);
+const gitRef = z.string().regex(/^[A-Za-z0-9._/+-]{1,200}$/);
+const boardKey = z.string().regex(/^[A-Za-z0-9_:#.+/-]{1,160}$/);
+const reportId = z.string().regex(/^\d{8}T\d{6}Z-(crash|desync)-[0-9a-f]{6,32}$/);
+
+/** portal → connector: start a turn on FFBox (a new conversation, or the next turn of one it started). */
+export const SubmitSchema = z
+  .object({
+    type: z.literal('submit'),
+    id: requestId,
+    requestedBy: RequesterSchema,
+    trigger: TriggerSchema,
+    title: z.string().min(1).max(300),
+    /** The brief. Secrets are redacted before it is built (redactSecrets). */
+    prompt: z.string().min(1).max(48_000),
+    /** fenced by default. FFBox may still pick a stricter class; nothing here can force the open one. */
+    class: z.enum(['fenced', 'open']).default('fenced'),
+    /** Branch to base new work on (default develop), or to continue. */
+    base: gitRef.optional(),
+    branch: gitRef.optional(),
+    /** A conversation this portal started earlier: this is its next turn. */
+    conversation: conversationId.optional(),
+    /** The task reads text from outside the team (players, the web). Forces the fenced class. */
+    untrustedInput: z.boolean(),
+    /** The board's dedupe key, when there is one. */
+    key: boardKey.optional(),
+  })
+  .strict()
+  .refine((m) => !(m.untrustedInput && m.class === 'open'), { message: 'untrustedInput work runs fenced', path: ['class'] });
+
+/** portal → connector: diagnose filed intake reports, as the /intake button does. */
+export const DiagnoseSchema = z
+  .object({
+    type: z.literal('diagnose'),
+    id: requestId,
+    requestedBy: RequesterSchema,
+    trigger: TriggerSchema,
+    reportIds: z.array(reportId).min(1).max(20),
+    key: boardKey.optional(),
+  })
+  .strict();
+
+/** portal → connector: stop a conversation this portal started. */
+export const StopSchema = z
+  .object({ type: z.literal('stop'), id: requestId, requestedBy: RequesterSchema, conversation: conversationId })
+  .strict();
+
+export const ToConnectorWorkSchema = z.discriminatedUnion('type', [SubmitSchema, DiagnoseSchema, StopSchema]);
+export type SubmitMessage = z.infer<typeof SubmitSchema>;
+export type DiagnoseMessage = z.infer<typeof DiagnoseSchema>;
+export type StopMessage = z.infer<typeof StopSchema>;
+export type ToConnectorWork = z.infer<typeof ToConnectorWorkSchema>;
+
+/**
+ * connector → portal: FFBox took a work request. `billedTo`: the user id whose account FFBox charges, which must
+ * be `requestedBy.userId`; the portal flags any other.
+ */
+export const AcceptedSchema = z.object({
+  type: z.literal('accepted'),
+  ref: requestId,
+  conversation: conversationId,
+  billedTo: z.string().regex(/^[a-zA-Z0-9._-]{2,32}$/),
+});
+
+/**
+ * connector → portal: FFBox would not take a work request. unknown_requester: no operator entry for
+ * `requestedBy.userId`; no_account: an operator with no Claude account to bill. Neither falls back to another
+ * person's account.
+ */
+export const RefusedSchema = z.object({
+  type: z.literal('refused'),
+  ref: requestId,
+  reason: z.enum(['unknown_requester', 'no_account', 'class_not_allowed', 'budget_hold', 'draining', 'already_diagnosed', 'bad_request', 'other']),
+  /** One line for people; FFBox's own words, shown as data. */
+  message: z.string().max(300).optional(),
+});
+
+export const WorkReplySchema = z.discriminatedUnion('type', [AcceptedSchema, RefusedSchema]);
+export type WorkReply = z.infer<typeof WorkReplySchema>;
+
+type Input<T> = Omit<z.input<T & z.ZodTypeAny>, 'type'>;
+
+/** A submit message, with its title and prompt redacted and every field checked; throws on anything wrong. */
+export function buildSubmit(m: Input<typeof SubmitSchema>): SubmitMessage {
+  return SubmitSchema.parse({ ...m, type: 'submit', title: redactSecrets(String(m.title ?? '')), prompt: redactSecrets(String(m.prompt ?? '')) });
+}
+
+export function buildDiagnose(m: Input<typeof DiagnoseSchema>): DiagnoseMessage {
+  return DiagnoseSchema.parse({ ...m, type: 'diagnose' });
+}
+
+export function buildStop(m: Input<typeof StopSchema>): StopMessage {
+  return StopSchema.parse({ ...m, type: 'stop' });
+}
+
+/** Whether a connector's hello said it takes this work message (a phase 1 connector takes none). */
+export const acceptsWork = (accepts: readonly string[] | undefined, type: WorkMessage) => !!accepts?.includes(type);
 
 /** What was wrong with a message, in one line (never echoing its content). */
 export function describeIssues(e: z.ZodError): string {

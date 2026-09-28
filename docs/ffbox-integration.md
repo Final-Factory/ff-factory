@@ -18,8 +18,14 @@ by it.
 - Automatic desync investigations are capped at **20 a day** to start (section 6).
 - Ben and Lothsahn share **one orchestrator chat** (section 7).
 - **Lothsahn may use every machine except Ben's M5**: BEAST sandboxes and the M3 (section 7).
-- FFBox bills its side to **Ben's second Claude account**, through a separate token that Ben gives
-  Lothsahn directly. That token never passes through FF Factory (rule 3).
+- FFBox bills Ben's work, and automatic work, to **Ben's second Claude account**, through a separate
+  token that Ben gives Lothsahn directly. That token never passes through FF Factory (rule 3).
+- **Billing follows the person who asked (Lothsahn's request, 2026-09-27).** Every work message
+  carries `requestedBy`, the FF Factory login it came from. FFBox charges that person's account:
+  Ben's work goes to the token Ben gave Lothsahn, and Lothsahn's goes to his own account. Automatic
+  intake work is charged to a configured system payer, which is Ben. On Ben's machines, the agents
+  Lothsahn asks for run on Lothsahn's own Claude token when FF Factory has one (section 7,
+  [identity.md](identity.md)).
 - `ffdev` (GLM-5.3 Flash) takes simple, well-scoped work only (rule 4a).
 
 **TL;DR**
@@ -78,9 +84,11 @@ A Node server on a Windows host with a GPU (BEAST), reached through a web page a
 - **Watchdogs**: the Unity hang and crash watch (docs/unity-lifecycle.md), the dialog watchdog
   (docs/unity-dialogs.md), the host guard for disk, the Dev Drive and memory
   (docs/self-recovery.md), and a Mac that watches BEAST from outside.
-- **Identity**: named web logins and named `/mcp` API keys (`server/auth.ts`, `server/apikey.ts`).
-  There are no roles. A human message is recorded as `'human'` without the login
-  (`server/index.ts:335`), and an API key gets the whole tool belt (`server/mcp.ts:18`).
+- **Identity**: named web logins, each with a display name and a role (owner or member), and `/mcp`
+  API keys that can be bound to a login (`server/auth.ts`, `server/apikey.ts`, [identity.md](identity.md)).
+  Every person's message records its author, and the workers, standing runs and approvals it causes
+  carry that person as `requestedBy`. Roles are recorded but not enforced yet, and an API key still gets
+  the whole tool belt (`server/mcp.ts`).
 
 ### FFBox
 
@@ -215,21 +223,25 @@ FFBox → FF Factory:
 | `capacity` | each class: network (`fenced`/`open`), `gpu`, `model`, `tier` (`full`/`simple`), Unity modes (`batchmode`, `playtest-softgl`, `mode2-pair`, `editor-mcp` when enabled), free and max slots; plus queue length, whether FFBox is draining or updating, and subscription holds |
 | `conversation` | a summary of any FFBox conversation: id, source (discord, intake, codereview, fff, shell, web), whether the opener was an operator or a player (no names or ids), title, state, class, branch, PR, verdict, cost, and the dedupe key when known |
 | `intake` | one filed report's manifest facts (section 6) |
+| `accepted` | a work request FFBox took: its conversation id, and `billedTo`, the user id whose account it charges (must be the request's `requestedBy`) |
 | `result` | for a turn FF Factory submitted: the final answer text, branch, PR, `no_branch_reason`, verdict, cost, and a link to the run on `ffweb` |
 | `delegation` | (phase 7) a request for GPU-side work from an operator's conversation or an `ESCALATE` diagnosis |
-| `refused` | a request FFBox would not take, and why: unknown user, class not allowed, budget hold, draining, already diagnosed |
+| `refused` | a request FFBox would not take, and why: `unknown_requester` or `no_account` (no account for the person it is for), class not allowed, budget hold, draining, already diagnosed |
 
 FF Factory → FFBox:
 
 | message | carries |
 |---|---|
-| `submit` | request id, the FF Factory login it came from, title, prompt, requested class (`fenced` by default), optional base or branch, optional conversation id for a follow-up, and `untrusted_input` |
-| `diagnose` | report ids and the board item id. The same action as the `/intake` button, triggered by the triage in section 6 |
-| `stop` | a conversation FF Factory started |
+| `submit` | request id, `requestedBy` (the FF Factory login it is for: user id and display name, no credential) and `trigger` (`person` or `automatic`), title, prompt, requested class (`fenced` by default), optional base or branch, optional conversation id for a follow-up, and `untrustedInput` |
+| `diagnose` | report ids, the board key, `requestedBy` and `trigger`. The same action as the `/intake` button, triggered by the triage in section 6 (`automatic`, for the system payer) or by a person |
+| `stop` | a conversation FF Factory started, and `requestedBy` |
 | `ack` | receipt of results and events |
 
 Phase 1 built the four read-only messages (`hello`, `capacity`, `conversation`, `intake`, plus
-FF Factory's `welcome` and `error`). Their exact schemas are in the contract.
+FF Factory's `welcome` and `error`). Their exact schemas are in the contract. The work messages
+(`submit`, `diagnose`, `stop`, and the connector's `accepted` and `refused`) are specified there too,
+with their attribution rules, but are not sent until phase 3. A connector lists the ones it takes in
+`hello.accepts`, and FF Factory sends a work message only to a connector that listed it.
 
 The protocol has no env, tool list, system-prompt text, file read, shell, Unity control, pool
 control or config write. FFBox may refuse anything and picks the class by its own rules. A request
@@ -572,7 +584,7 @@ Each layer bounds the next:
 | trust | a signature is auto-investigated once it has reports from at least 2 distinct senders, or a host and client pair of one event. A single sender's signature waits for a person or for budget left at the end of the day |
 | concurrency | at most 2 automatic investigations at once (`ffdiagnose` holds 3, leaving 1 for people) |
 | rate | at most 3 new automatic investigations an hour and 20 a day (Ben, 2026-09-27) |
-| money | billed to Ben's second Claude account, whose token Ben gives Lothsahn directly (section 7), plus FFBox's `max_budget_usd` per turn and its subscription holds |
+| money | automatic investigations carry the system payer (config `systemPayer`, Ben) as `requestedBy`, so FFBox bills Ben's second Claude account, whose token Ben gives Lothsahn directly (section 7); plus FFBox's `max_budget_usd` per turn and its subscription holds |
 | **storm breaker** | more than 5 new signatures in an hour, or one version's reports at more than 5 times its daily average: automatic starts stop, both people get one notice, and the queue waits ranked by distinct senders, then newest build. Starts resume when the rate falls back, or when a person says so |
 | ordering | the newest `develop` build first; builds older than a known fix last |
 
@@ -590,13 +602,28 @@ after the breaker has stopped automatic starts.
 
 ### What exists
 
-Logins are separate, but nothing records who said what (`server/index.ts:335`). There are no
-roles, and an API key is a full tool belt (`server/mcp.ts:18`).
+Built 2026-09-27 ([identity.md](identity.md)):
+
+- **Logins with a display name and a role**: owner (Ben) or member (Lothsahn). API keys can be bound
+  to a login.
+- **Attribution.** Every person's message records its author, and the orchestrator reads it as
+  `[from Lothsahn]`. Each of the following carries the person as `requestedBy`:
+  - workers started by hand, by the orchestrator (`start_agent`) or through a bound `/mcp` key;
+  - the orchestrator's follow-ups (`message_agent`);
+  - standing runs started by hand;
+  - delegation approvals (`approvedBy`).
+
+  The orchestrator acts for the author of the latest person's message, or names another person with
+  `for_user`. Agent cards and details show who an agent works for.
+- **Local billing.** A worker runs on its person's own Claude token when config `userClaudeEnv` has
+  one, and on the owner's otherwise. This is how the agents Lothsahn asks for on Ben's machines (BEAST
+  sandboxes and the M3) run on Lothsahn's account.
+- Roles are not enforced yet, and an API key is still a full tool belt (`server/mcp.ts`).
 
 ### Proposal
 
-- **Attribution.** Every human message carries its login, and the orchestrator sees
-  `[from lothsahn]`. Sessions, claims, approvals and notifications all name the person.
+- **Attribution** (built; see above). Board claims and notifications will name the person too, once
+  they exist.
 - **Roles, checked in the tool handlers:**
 
 | | owner (Ben) | maintainer (Lothsahn) |
@@ -615,12 +642,25 @@ roles, and an API key is a full tool belt (`server/mcp.ts:18`).
   authority ambiguous. The role check therefore uses the author of the message the turn answers;
   a turn that answers both uses the narrower role, the maintainer's.
 - **Mapping to FFBox.** FFBox's `operators` block gains an `fff` id per person, which is the FF
-  Factory login, following its "one id per service" rule. The connector submits under a new local
-  kind `fff`, with the opener recorded as `fff:<login>`, the way `/intake` records `web:<login>`.
-  An unknown login is refused.
-- **Billing.** FFBox bills its side, people's tasks and automatic intake work alike, to Ben's
-  second Claude account. Ben gives Lothsahn that account's token directly; it never passes
-  through FF Factory, which holds no FFBox credential (rule 3).
+  Factory login (`requestedBy.userId` in every work message), following its "one id per service"
+  rule. The connector submits under a new local kind `fff`, with the opener recorded as
+  `fff:<userId>`, the way `/intake` records `web:<login>`. An unknown user id is refused
+  (`unknown_requester`).
+- **Billing: per person** (Lothsahn's request, 2026-09-27; this replaces "everything on Ben's second
+  account"). FFBox charges the account the `requestedBy` person's operator entry names:
+  - Ben's requests go to Ben's second Claude account, whose token Ben gives Lothsahn directly.
+  - Lothsahn's requests go to Lothsahn's own account.
+  - Automatic intake work carries the system payer (config `systemPayer`, Ben) and goes to Ben's.
+
+  An operator with no account is refused (`no_account`), never billed to someone else, and
+  `accepted.billedTo` says whose account was charged. Tokens never cross the connector (rule 3).
+  The schema and the MUST rules are in the contract, "Work messages".
+- **Billing on Ben's machines** (the same idea, locally; [identity.md](identity.md), "Local billing"):
+  - Work Lothsahn asks for on BEAST sandboxes or the M3 runs on Lothsahn's own Claude token when FF
+    Factory has one. It is config `userClaudeEnv.lothsahn`, write-only and redacted like `claudeEnv`,
+    and chosen per worker by `requestedBy`.
+  - Without one, work runs on the owner's account.
+  - The shared orchestrator always runs on the owner's.
 - **FFBox trusts FF Factory's login.** That is a real delegation of trust. Anyone who takes over FF
   Factory can submit as either person. The limits are section 3, plus per-source caps FFBox can set
   for `fff`: allowed classes per person, and turns and spend per day.
@@ -653,7 +693,7 @@ one off leaves the earlier phases working.
 | 3 | **Submit and diagnose, fenced only.** `submit`, `diagnose`, `stop` and `result`; sessions of kind `provider`; redaction both ways; the `fff` kind; FFBox bills Ben's second Claude account | both | FFBox refuses `fff`; FF Factory hides the target |
 | 4 | **Automatic investigations.** Triage starts `diagnose` for new and regressed signatures under every bound in section 6: 2 at a time and 20 a day to start | FF Factory | `intake.auto: false`; the storm breaker; FFBox's per-source cap |
 | 5 | **Routing.** `needs`, `pick_target`, the rules, rule 1 on the server, FFBox as a delegation target. Discord-reading work moves off BEAST and the Macs | FF Factory | a config switch; manual targets still work |
-| 6 | **People and crashes.** Attribution, roles, user-owned keys, the shared chat, Lothsahn's login (BEAST and the M3), `fff` ids in FFBox's `operators`. Crash signatures by a capped fenced read | both | remove the login; `intake.crash.auto: false` |
+| 6 | **People and crashes.** Attribution, user-owned keys, the shared chat and per-person local billing are built early (2026-09-27, [identity.md](identity.md)). Left for this phase: roles enforced, Lothsahn's login (BEAST and the M3), `fff` ids in FFBox's `operators`, and crash signatures by a capped fenced read | both | remove the login; `intake.crash.auto: false` |
 | 7 | **Both directions.** Max and `ESCALATE` delegations into FF Factory's queue; FFBox checks the board before its own diagnoses and operator dev turns | both | the connector stops sending `delegation`; FFBox skips the check |
 
 Phase 1 teaches both sides the connection, the token and the load, and cannot do harm. Phase 3 is
