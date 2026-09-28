@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import type { AccountUsage, AppState, HostHealth, HostStats, PlanUsage, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
+import { memUsed as memUsedOf } from '../../../shared/stats';
 import { fmtBytes, fmtClock, fmtCost, lsGet, lsSet, useNow } from '../util';
 import { Icon } from './ui';
 
@@ -26,7 +27,6 @@ export function computersOf(app: AppState): Computer[] {
 
 const shortHost = (h: string) => h.replace(/\.(local|lan|home)$/i, '');
 
-const memUsedOf = (s: HostStats) => s.memUsedBytes ?? s.memTotalBytes - s.memFreeBytes;
 const ramPct = (s: HostStats) => (memUsedOf(s) / s.memTotalBytes) * 100;
 /** RAM's level: its share, raised by the Mac's own memory pressure (the better signal where RAM is also the GPU's). */
 const ramLvl = (s: HostStats) => worse(level(ramPct(s), 85, 95), s.memPressure === 'critical' ? 'crit' : s.memPressure === 'warn' ? 'warn' : 'ok');

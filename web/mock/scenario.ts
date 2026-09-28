@@ -285,10 +285,10 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
   // The agents' token, and the owner's own login signed in on BEAST and both Macs.
   const accounts = (agentIds: string[]): AccountUsage[] => [
     {
-      id: 'token:3f9c0a7d21be',
+      id: 'token:mock-9aaa',
       kind: 'token',
       label: 'host token …9AAA',
-      sources: ['token:3f9c0a7d21be'],
+      sources: ['token:mock-9aaa'],
       where: ["the agents' token on BEAST, m5, m3"],
       sessionIds: agentIds,
       usage: base.usage,
@@ -298,7 +298,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
       kind: 'login',
       label: 'ben@example.com',
       email: 'ben@example.com',
-      sources: ['login:host', 'login:m5', 'login:m3'],
+      sources: ['host:login', 'login:m5', 'login:m3'],
       where: ['BEAST login', 'm5 login', 'm3 login'],
       sessionIds: [],
       usage: {

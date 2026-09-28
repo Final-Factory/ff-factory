@@ -22,7 +22,8 @@ import {
   parseUsage,
   readStoredLogin,
   usageEnv,
-  usageLines,
+  usageSummary,
+  machineToken,
   weekSpend,
   type StoredLogin,
   type UsageReply,
@@ -77,10 +78,10 @@ test('usage: API keys and scope-less tokens report unavailable, never a made-up 
 
 test('usage: the system_status lines', () => {
   const now = new Date('2026-09-24T02:40:00Z');
-  const [line] = usageLines(parseUsage(REAL, AS_OF), now);
+  const line = usageSummary(parseUsage(REAL, AS_OF), now);
   assert.match(line, /^Claude plan \(max\) usage, as of .+: Weekly 33% used, resets .+; Session \(5 h\) 33% used, resets in 2 h; Weekly Fable 22% used/);
-  assert.match(usageLines(undefined, now)[0], /not fetched yet/);
-  const [fb] = usageLines({ available: false, asOf: AS_OF, models: [], why: 'no scope', spendWeekUsd: 12.5 }, now);
+  assert.match(usageSummary(undefined, now), /not fetched yet/);
+  const fb = usageSummary({ available: false, asOf: AS_OF, models: [], why: 'no scope', spendWeekUsd: 12.5 }, now);
   assert.match(fb, /unavailable \(no scope\).*\$12\.50 \(spend, not the plan limit\)/);
 });
 
@@ -193,12 +194,19 @@ test('accounts: the token is polled with the profile scope, the agents keep thei
 });
 
 test('accounts: each session is attributed to the credential it runs on', () => {
-  const onlyM3OwnLogin = (id: string) => id !== 'm3';
-  assert.equal(sessionSource({}, TOKEN, onlyM3OwnLogin), tokenKey(TOKEN));
-  assert.equal(sessionSource({}, undefined, onlyM3OwnLogin), HOST_LOGIN);
-  assert.equal(sessionSource({ machineId: 'm5' }, TOKEN, onlyM3OwnLogin), tokenKey(TOKEN));
-  assert.equal(sessionSource({ machineId: 'm3' }, TOKEN, onlyM3OwnLogin), 'login:m3', 'machines.useHostClaudeEnv false: the Mac login');
-  assert.equal(sessionSource({ machineId: 'm5' }, undefined, onlyM3OwnLogin), 'login:m5', 'no host token: the Mac login');
+  // m3 is set to its own login (machines.useHostClaudeEnv { m3: false }); the others take config claudeEnv.
+  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN } };
+  const toMachine = (id: string) => machineToken(cfg, id !== 'm3');
+  assert.equal(sessionSource({}, TOKEN, toMachine), tokenKey(TOKEN));
+  assert.equal(sessionSource({}, undefined, toMachine), HOST_LOGIN);
+  assert.equal(sessionSource({ machineId: 'm5' }, TOKEN, toMachine), tokenKey(TOKEN));
+  assert.equal(sessionSource({ machineId: 'm3' }, TOKEN, toMachine), 'login:m3', 'machines.useHostClaudeEnv false: the Mac login');
+  // A token only in the server's own environment is not sent to machines: their agents are on the Mac login.
+  const envOnly = (id: string) => machineToken({}, id !== 'm3');
+  assert.equal(sessionSource({}, TOKEN2, envOnly), tokenKey(TOKEN2));
+  assert.equal(sessionSource({ machineId: 'm5' }, TOKEN2, envOnly), 'login:m5');
+  // A machine may be called "host": its login is not this host's.
+  assert.notEqual(sessionSource({ machineId: 'host' }, undefined, envOnly), HOST_LOGIN);
 });
 
 const usageOf = (weekly: number, asOf = AS_OF) => ({ ...parseUsage(REAL, asOf), weekly: { label: 'Weekly', percent: weekly } });
@@ -219,16 +227,19 @@ test('accounts: one login on several computers is one account; the token is its 
       { id: 'm5', usesToken: true },
     ],
     sessions: [
-      { id: 'orch', source: tokenKey(TOKEN) },
-      { id: 'w1', source: tokenKey(TOKEN) },
-      { id: 'm3-w', source: 'login:m3' },
+      { id: 'orch', source: tokenKey(TOKEN), live: true },
+      { id: 'w1', source: tokenKey(TOKEN), live: true },
+      { id: 'm3-w', source: 'login:m3', live: true },
+      { id: 'old', source: 'login:m3' },
+      { id: 'older', source: 'login:m3' },
     ],
   });
   assert.deepEqual(
     accounts.map((a) => [a.id, a.label, a.sources, a.where, a.sessionIds, a.usage?.weekly?.percent]),
     [
       [tokenKey(TOKEN), 'host token …9AAA', [tokenKey(TOKEN)], ["the agents' token on BEAST, m5"], ['orch', 'w1'], 98],
-      ['email:other@example.com', 'other@example.com', ['login:m3'], ['m3 login'], ['m3-w'], 12],
+      // Ranked by agents running now (2 vs 1), not by every session it ever had (3).
+      ['email:other@example.com', 'other@example.com', ['login:m3'], ['m3 login'], ['m3-w', 'old', 'older'], 12],
       // Merged by email (case-insensitive); the newer reading wins.
       ['email:owner@example.com', 'Owner@Example.com', [HOST_LOGIN, 'login:m5'], ['BEAST login', 'm5 login'], [], 34],
     ],
@@ -241,7 +252,7 @@ test('accounts: before anything is fetched, the host login and token still show,
     hostName: 'BEAST',
     token: { key: tokenKey(TOKEN), label: tokenLabel(TOKEN) },
     machines: [{ id: 'm3', usesToken: false }],
-    sessions: [{ id: 'm3-w', source: 'login:m3' }],
+    sessions: [{ id: 'm3-w', source: 'login:m3', live: true }],
   });
   assert.deepEqual(
     accounts.map((a) => [a.id, a.label, a.usage]),
@@ -287,6 +298,11 @@ test('accounts: the tracker reads a usage.json from before accounts, keeps Mac r
 
   t.report('m5', { email: 'owner@example.com' }, usageOf(40));
   assert.equal(changes, 1);
+  // A machine called "host" is not this host's login.
+  t.report('host', { email: 'mac@example.com' }, usageOf(7));
+  assert.equal(t.usage?.weekly?.percent, 33);
+  t.forget('host');
+  assert.equal(t.usage?.weekly?.percent, 33);
   // A failed fetch on the Mac keeps the last good numbers and who it was, flagged.
   t.report('m5', {}, { available: false, asOf: AS_OF, models: [], why: 'could not fetch plan usage on this Mac: timed out after 60 s' });
   const e = t.entries.get('login:m5')!;

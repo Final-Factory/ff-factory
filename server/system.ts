@@ -3,6 +3,9 @@ import fs from 'node:fs';
 import type { Config } from './config.ts';
 import type { HostStats, SystemStats } from '../shared/types.ts';
 import { run } from './proc.ts';
+import { memUsed } from '../shared/stats.ts';
+
+export { memUsed };
 
 /**
  * A computer's load: CPU, RAM, disk and GPU. The portal measures its own host with it, and each machine
@@ -135,8 +138,6 @@ export async function systemStats(cfg: Config): Promise<SystemStats> {
   return { ...(await hostStats(target)), limits: cfg.limits };
 }
 
-/** Memory in use: the OS monitor's figure where known (macOS), else total minus free. */
-export const memUsed = (s: Pick<HostStats, 'memTotalBytes' | 'memFreeBytes' | 'memUsedBytes'>) => s.memUsedBytes ?? s.memTotalBytes - s.memFreeBytes;
 
 const gb = (b?: number) => (b === undefined ? '?' : `${(b / 2 ** 30).toFixed(0)} GB`);
 
@@ -158,6 +159,6 @@ export function statsLine(name: string, s: HostStats): string {
 /** A machine's system_status line: its load, or why there is none. */
 export function machineLoadLine(m: { id: string; lastSeen?: string }, stats: HostStats | undefined, online: boolean): string {
   if (stats) return statsLine(m.id, stats);
-  if (online) return `${m.id}: online, no load numbers yet (a daemon from before protocol 4 sends none until it is redeployed)`;
+  if (online) return `${m.id}: online, no load numbers yet (a daemon from before protocol 4 sends none; the portal redeploys it once no agent runs there)`;
   return `${m.id}: offline${m.lastSeen ? ` since ${m.lastSeen.slice(0, 16).replace('T', ' ')} UTC` : ''}`;
 }

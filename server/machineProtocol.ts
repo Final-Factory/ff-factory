@@ -7,12 +7,15 @@ import type { HostStats, ImageFile, ImageInput, Machine, PermissionMode, PlanUsa
 
 /**
  * Bumped when either side must be redeployed to keep talking. 4: the daemon reports its Mac's load
- * (`stats`) and its own Claude login's plan usage (`usage`); a portal ignores messages it does not know,
- * and a protocol-3 daemon simply sends neither, so the machine shows no numbers until it is redeployed.
+ * (`stats`), its own Claude login's plan usage (`usage`) and its agents' rate limits (a `rateLimit`
+ * signal). Nothing breaks either way (a portal ignores messages it does not know), but a protocol-3
+ * daemon is outdated, like any daemon after an app update (it runs another commit): new agents wait
+ * there until the portal redeploys it once idle, and until then its machine shows no numbers.
  */
 export const PROTOCOL_VERSION = 4;
 
-export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended';
+/** rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner. */
+export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit';
 
 export type ToDaemon =
   /** First message after connecting: the portal's sessions on this machine and where their transcripts end. */

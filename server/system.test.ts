@@ -102,7 +102,7 @@ test('system: status lines for a discrete GPU and for Apple Silicon', () => {
 
 test('system: a machine line says why there are no numbers', () => {
   assert.match(machineLoadLine({ id: 'm5' }, MAC, true), /^m5 \(darwin/);
-  assert.match(machineLoadLine({ id: 'm3' }, undefined, true), /^m3: online, no load numbers yet \(a daemon from before protocol 4/);
+  assert.match(machineLoadLine({ id: 'm3' }, undefined, true), /^m3: online, no load numbers yet \(a daemon from before protocol 4 sends none/);
   assert.equal(machineLoadLine({ id: 'mini', lastSeen: '2026-09-27T08:15:00.000Z' }, undefined, false), 'mini: offline since 2026-09-27 08:15 UTC');
   assert.equal(machineLoadLine({ id: 'mini' }, undefined, false), 'mini: offline');
 });

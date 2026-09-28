@@ -552,7 +552,7 @@ export interface AccountUsage {
   label: string;
   email?: string;
   /**
-   * The credentials that are this account: "token:<sha256 prefix>", "login:host" (this host's own claude.ai
+   * The credentials that are this account: "token:<sha256 prefix>", "host:login" (this host's own claude.ai
    * login) or "login:<machine id>" (a Mac's own login). Several when one login is signed in on several computers.
    */
   sources: string[];

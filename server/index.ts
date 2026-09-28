@@ -28,7 +28,7 @@ import { planCleanup, runCleanup } from './cleanup.ts';
 import { reapBrowsers } from './reaper.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
-import { UsageTracker, accountLines, buildAccounts, hostToken, sessionSource, tokenKey, tokenLabel } from './usage.ts';
+import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, sessionSource, tokenKey, tokenLabel } from './usage.ts';
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
@@ -961,12 +961,15 @@ const usage = new UsageTracker(cfg, () => {
 });
 function accountsNow() {
   const token = hostToken(cfg);
-  const usesHost = (id: string) => usesHostClaudeEnv(cfg, id);
+  const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, id));
   return buildAccounts(usage.entries, {
     hostName: os.hostname(),
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
-    machines: machines.list().map((m) => ({ id: m.id, usesToken: !!token && usesHost(m.id) })),
-    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, usesHost) })),
+    machines: machines.list().map((m) => {
+      const t = toMachine(m.id);
+      return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token) };
+    }),
+    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, toMachine), live: s.status !== 'stopped' && s.status !== 'error' })),
   });
 }
 // Which agents are on which account changes when sessions or machines come and go: send it again then.

@@ -98,7 +98,7 @@ export function describeReset(iso: string | undefined, now: Date): string {
 }
 
 /** One account's usage in words: "Claude plan (max) usage, as of 10:02: Weekly 33% used, resets ...". */
-function usageSummary(u: PlanUsage | undefined, now: Date): string {
+export function usageSummary(u: PlanUsage | undefined, now: Date): string {
   if (!u) return 'Claude plan usage: not fetched yet';
   const asOf = `as of ${new Date(u.asOf).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   if (!u.available) {
@@ -107,11 +107,6 @@ function usageSummary(u: PlanUsage | undefined, now: Date): string {
   }
   const fmt = (m: UsageMeter) => `${m.label} ${Math.round(m.percent)}% used${m.resetsAt ? `, ${describeReset(m.resetsAt, now)}` : ''}`;
   return `Claude plan (${u.plan ?? '?'}) usage, ${asOf}: ${[u.weekly, u.session, ...u.models].filter((m): m is UsageMeter => !!m).map(fmt).join('; ')}`;
-}
-
-/** The lines the orchestrator's system_status tool adds for one login (this host's). */
-export function usageLines(u: PlanUsage | undefined, now: Date): string[] {
-  return [usageSummary(u, now)];
 }
 
 /**
@@ -250,7 +245,8 @@ export const TOKEN_SCOPES = 'user:inference user:profile';
 /** A token's account key: a hash prefix, so equal tokens are one account and the key reveals nothing. */
 export const tokenKey = (token: string) => `token:${createHash('sha256').update(token).digest('hex').slice(0, 12)}`;
 export const tokenLabel = (token: string) => `host token …${token.slice(-4)}`;
-export const HOST_LOGIN = 'login:host';
+/** This host's own login. Not "login:<id>": a machine may be called "host" (MACHINE_ID). */
+export const HOST_LOGIN = 'host:login';
 export const machineLogin = (machineId: string) => `login:${machineId}`;
 
 /** The usage request's environment for a token: the stored-login environment plus the token and both scopes. */
@@ -264,18 +260,25 @@ export function hostToken(cfg: Pick<Config, 'claudeEnv'>, env: Record<string, st
 }
 
 /**
- * Which credential a portal-run session uses, as an account source key: the host's token when it has one
- * (and, on a machine, when that machine takes the host's claudeEnv), else the login of the computer it
+ * The token a machine's portal-run agents get: config claudeEnv only, and only when that machine takes it
+ * (hostClaudeEnvFor, server/secrets.ts). A token in the server's own environment stays on this host.
+ */
+export function machineToken(cfg: Pick<Config, 'claudeEnv'>, takesHostEnv: boolean): string | undefined {
+  return (takesHostEnv && cfg.claudeEnv?.CLAUDE_CODE_OAUTH_TOKEN) || undefined;
+}
+
+/**
+ * Which credential a portal-run session uses, as an account source key: on this host its token (hostToken)
+ * when there is one, on a machine the token it is sent (machineToken); else the login of the computer it
  * runs on. Follows the current config: an agent started before a token change keeps its old account until
  * its process restarts.
  */
-export function sessionSource(
-  info: Pick<SessionInfo, 'machineId'>,
-  token: string | undefined,
-  usesHostEnv: (machineId: string) => boolean,
-): string {
-  if (info.machineId) return token && usesHostEnv(info.machineId) ? tokenKey(token) : machineLogin(info.machineId);
-  return token ? tokenKey(token) : HOST_LOGIN;
+export function sessionSource(info: Pick<SessionInfo, 'machineId'>, hostTok: string | undefined, machineTok: (machineId: string) => string | undefined): string {
+  if (info.machineId) {
+    const t = machineTok(info.machineId);
+    return t ? tokenKey(t) : machineLogin(info.machineId);
+  }
+  return hostTok ? tokenKey(hostTok) : HOST_LOGIN;
 }
 
 /** One polled or reported credential. */
@@ -294,8 +297,8 @@ export interface AccountContext {
   token?: { key: string; label: string };
   /** Machines that exist; `usesToken`: their portal-run agents take the host token. */
   machines: { id: string; usesToken: boolean }[];
-  /** Every session with its source key (sessionSource). */
-  sessions: { id: string; source: string }[];
+  /** Every session with its source key (sessionSource); `live`: running now (for the order). */
+  sessions: { id: string; source: string; live?: boolean }[];
 }
 
 const newer = (a?: PlanUsage, b?: PlanUsage) => {
@@ -308,7 +311,7 @@ const newer = (a?: PlanUsage, b?: PlanUsage) => {
 /**
  * The accounts in use, merged: one login signed in on several computers (same email) is one account;
  * a token is one account per token. Sources nobody polls (a machine login no daemon reported yet) still
- * appear when a session runs on them. Busiest first, then tokens (the agents' account), then by label. Pure.
+ * appear when a session runs on them. Most agents running now first, then tokens (the agents' account), then by label. Pure.
  */
 export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: AccountContext): AccountUsage[] {
   const machineIds = new Set(ctx.machines.map((m) => m.id));
@@ -333,8 +336,15 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
     out.set(id, a);
   }
   const byId = [...out.values()];
-  for (const s of ctx.sessions) byId.find((a) => a.sources.includes(s.source))?.sessionIds.push(s.id);
-  return byId.sort((a, b) => b.sessionIds.length - a.sessionIds.length || (a.kind === b.kind ? 0 : a.kind === 'token' ? -1 : 1) || a.label.localeCompare(b.label));
+  const live = new Map<string, number>();
+  for (const s of ctx.sessions) {
+    const a = byId.find((x) => x.sources.includes(s.source));
+    if (!a) continue;
+    a.sessionIds.push(s.id);
+    if (s.live) live.set(a.id, (live.get(a.id) ?? 0) + 1);
+  }
+  const busy = (a: AccountUsage) => live.get(a.id) ?? 0;
+  return byId.sort((a, b) => busy(b) - busy(a) || (a.kind === b.kind ? 0 : a.kind === 'token' ? -1 : 1) || a.label.localeCompare(b.label));
 }
 
 // ---------------------------------------------------------------- fetching
@@ -370,9 +380,10 @@ export async function fetchPlanUsage(
     const get = (q as unknown as { usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (o: { skipBehaviors: boolean }) => Promise<UsageReply> })
       .usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (!get) throw new Error('this Agent SDK has no usage request');
-    // Who it is: only for a login (a token reports no email); a failure here costs the label, not the numbers.
-    const info = await Promise.race([q.accountInfo(), timeout]).catch(() => undefined);
-    const reply = await Promise.race([get.call(q, { skipBehaviors: true }), timeout]);
+    // Who it is (a login only: a token reports no email), asked alongside with its own time limit: a
+    // failure there costs the label, not the numbers.
+    const who = Promise.race([q.accountInfo(), new Promise<undefined>((r) => setTimeout(() => r(undefined), 20_000).unref())]).catch(() => undefined);
+    const [reply, info] = await Promise.all([Promise.race([get.call(q, { skipBehaviors: true }), timeout]), who]);
     return { reply, account: { email: info?.email || undefined, organization: info?.organization || undefined, plan: info?.subscriptionType || undefined } };
   } finally {
     release?.();
@@ -433,9 +444,16 @@ export class UsageTracker {
     return this.entries.get(HOST_LOGIN)?.usage;
   }
 
+  /** The token the last refresh polled, to notice a new one (set_app_config) before the next poll. */
+  private tokenSeen?: string;
+
   start() {
     void this.refresh();
     setInterval(() => void this.refresh(), REFRESH_MS);
+    setInterval(() => {
+      const t = hostToken(this.cfg);
+      if ((t ? tokenKey(t) : undefined) !== this.tokenSeen) this.poke();
+    }, 10_000).unref();
   }
 
   /** A session saw a rate-limit event: the numbers moved, fetch them again soon (at most once a minute). */
@@ -490,8 +508,11 @@ export class UsageTracker {
       const token = hostToken(this.cfg);
       // A replaced token's numbers are no longer anyone's.
       for (const k of [...this.entries.keys()]) if (k.startsWith('token:') && (!token || k !== tokenKey(token))) this.entries.delete(k);
-      await this.refreshOne(HOST_LOGIN, 'login', usageEnv(base), true);
-      if (token) await this.refreshOne(tokenKey(token), 'token', tokenUsageEnv(base, token), false, tokenLabel(token));
+      this.tokenSeen = token ? tokenKey(token) : undefined;
+      await Promise.all([
+        this.refreshOne(HOST_LOGIN, 'login', usageEnv(base), true),
+        token ? this.refreshOne(tokenKey(token), 'token', tokenUsageEnv(base, token), false, tokenLabel(token)) : undefined,
+      ]);
       this.save();
     } finally {
       this.inFlight = false;

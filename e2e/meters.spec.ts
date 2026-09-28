@@ -56,10 +56,10 @@ const M5: MachineStats = {
 
 const ACCOUNTS = (agentIds: string[]): AccountUsage[] => [
   {
-    id: 'token:0123456789ab',
+    id: 'token:e2e-9aaa',
     kind: 'token',
     label: 'host token …9AAA',
-    sources: ['token:0123456789ab'],
+    sources: ['token:e2e-9aaa'],
     where: ["the agents' token on BEAST, m5"],
     sessionIds: agentIds,
     usage: {
@@ -76,7 +76,7 @@ const ACCOUNTS = (agentIds: string[]): AccountUsage[] => [
     kind: 'login',
     label: 'owner@example.com',
     email: 'owner@example.com',
-    sources: ['login:host', 'login:m5'],
+    sources: ['host:login', 'login:m5'],
     where: ['BEAST login', 'm5 login'],
     sessionIds: [],
     usage: { available: true, asOf: NOW.toISOString(), plan: 'max', weekly: { label: 'Weekly', percent: 23, resetsAt: at(90) }, models: [] },
@@ -202,7 +202,7 @@ test('meters: the server lists its accounts, with each agent on the one it runs 
   const s = await appState(page.request);
   expect(s.machineStats).toEqual({});
   // The test server has no token and no stored login: its own login, not fetched or unavailable, is the one account.
-  expect(s.accounts?.map((a) => [a.kind, a.sources])).toEqual([['login', ['login:host']]]);
+  expect(s.accounts?.map((a) => [a.kind, a.sources])).toEqual([['login', ['host:login']]]);
   expect(s.accounts![0].sessionIds).toEqual(expect.arrayContaining([s.orchestratorId, 'gallery1']));
   expect(JSON.stringify(s.accounts)).not.toMatch(/sk-ant/);
 });

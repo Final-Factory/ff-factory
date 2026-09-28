@@ -90,7 +90,7 @@ export class Daemon {
     this.unity = new MacUnity(cfg.repoPath);
     this.makeSession = makeSession;
     this.maxSessions = cfg.maxSessions ?? 3;
-    for (const name of ['turnEnd', 'permission', 'result', 'ended'] as SignalName[]) {
+    for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'] as SignalName[]) {
       this.events.on(name, (s: SessionHandle, arg?: unknown) => {
         this.out({ type: 'signal', name, sessionId: s.info.id, arg: name === 'permission' ? undefined : arg });
         this.awake();
@@ -123,9 +123,10 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.reportStatus(), 60_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
     this.timers.push(setInterval(() => void this.reportUsage(), USAGE_MS));
-    // An agent here hit a rate limit (it runs on this Mac's login when the portal sends no token): fetch sooner.
-    this.events.on('rateLimit', () => {
-      if (Date.now() - this.lastUsage > 60_000) void this.reportUsage();
+    // An agent here on this Mac's own login (the portal sent it no token) hit a rate limit: fetch sooner. The
+    // portal hears the signal too and refreshes the token's usage for agents on the token.
+    this.events.on('rateLimit', (s: SessionHandle) => {
+      if (!this.entries.get(s.info.id)?.spec?.env?.CLAUDE_CODE_OAUTH_TOKEN && Date.now() - this.lastUsage > 60_000) void this.reportUsage();
     });
   }
 
@@ -242,7 +243,8 @@ export class Daemon {
     for (const e of this.entries.values()) this.send({ type: 'session', info: e.s.info, live: e.s.live });
     void this.reportStatus();
     void this.reportStats();
-    void this.reportUsage();
+    // The portal keeps the last report across a reconnect: a flapping link must not start a CLI each time.
+    if (Date.now() - this.lastUsage > USAGE_MS / 2) void this.reportUsage();
   }
 
   /** This Mac's CPU, RAM, GPU and disk (the disk holding the clone), for the portal's meters (protocol 4). */
