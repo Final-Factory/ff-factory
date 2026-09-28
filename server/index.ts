@@ -17,6 +17,7 @@ import { describeBusy } from './wake.ts';
 import type { SessionHandle } from './sessions.ts';
 import { machineLoadLine, systemStats } from './system.ts';
 import { Auth } from './auth.ts';
+import { Identity, asRequester, userToken } from './identity.ts';
 import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
@@ -128,9 +129,17 @@ setInterval(() => {
   void machines.watchOffline().catch((e) => console.warn('machine watchdog:', (e as Error).message));
   machines.checkOutdated();
 }, 30_000);
-const agents = new Agents(cfg, store, sandboxes, sessions, machines);
-if (host.elevated) sandboxes.refuseUnityWhileElevated(host.elevatedWhy ?? 'Run scripts/restart.ps1 to relaunch it non-elevated.');
 const auth = new Auth(cfg.dataDir, { trustProxy: cfg.trustProxy });
+// Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
+const identity = new Identity(cfg, () => auth.userInfos());
+const agents = new Agents(cfg, store, sandboxes, sessions, machines, identity);
+if (host.elevated) sandboxes.refuseUnityWhileElevated(host.elevatedWhy ?? 'Run scripts/restart.ps1 to relaunch it non-elevated.');
+
+/** The signed-in person making this request, as work records them (a route only runs for a signed-in user). */
+function requesterOf(req: http.IncomingMessage) {
+  const u = auth.userInfo(auth.user(req));
+  return u ? asRequester(u) : identity.owner();
+}
 const notifier = new Notifier(cfg.dataDir, store, sessions);
 notifier.orchestratorId = () => store.orchestratorId;
 agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));
@@ -301,7 +310,10 @@ const routes: [string, RegExp, Handler][] = [];
 const route = (method: string, pattern: string, h: Handler) => routes.push([method, new RegExp(`^${pattern}$`), h]);
 
 route('GET', '/api/state', async () => appState());
-route('GET', '/api/me', async (req) => ({ username: auth.user(req) }));
+route('GET', '/api/me', async (req) => {
+  const u = auth.userInfo(auth.user(req));
+  return { username: auth.user(req), ...(u ?? {}) };
+});
 
 // ---- providers (docs/ffbox-integration.md): what FFBox's connector reported, newest first
 route('GET', '/api/providers/ffbox/conversations', async (_r, _m, url) => providers.conversations(Number(url.searchParams.get('limit')) || 100));
@@ -338,12 +350,12 @@ route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
   // A standing agent only works inside a run (budget, no overlap, agent limit): a message starts one.
   if (s.info.kind === 'standing' && s.info.standingId) {
     if (imgs.length) throw new HttpError(400, 'standing agents take text only; describe the image or put it in their folder');
-    return { note: agents.standing.runNow(s.info.standingId, 'message', need(text, 'text')) };
+    return { note: agents.standing.runNow(s.info.standingId, 'message', need(text, 'text'), requesterOf(req)) };
   }
   if (!imgs.length) need(text, 'text');
   // The user wrote to the orchestrator: its own wake_me check-in is moot.
   if (id === store.orchestratorId) agents.waker.cancel(id);
-  sessions.send(id, String(text ?? '').trim(), 'human', imgs);
+  sessions.send(id, String(text ?? '').trim(), 'human', imgs, { requestedBy: requesterOf(req) });
   return {};
 });
 
@@ -472,6 +484,7 @@ route('POST', '/api/sessions', async (req) => {
     permissionMode: b.permissionMode,
     effort: b.effort,
     from: 'human',
+    requestedBy: requesterOf(req),
   });
   return s.info;
 });
@@ -530,15 +543,15 @@ route('DELETE', '/api/standing/([\\w-]+)', async (_r, [id]) => {
   return {};
 });
 
-route('POST', '/api/standing/([\\w-]+)/(run|stop|pause|resume)', async (_r, [id, action]) => {
+route('POST', '/api/standing/([\\w-]+)/(run|stop|pause|resume)', async (req, [id, action]) => {
   const st = agents.standing;
-  if (action === 'run') return { note: st.runNow(id, 'manual') };
+  if (action === 'run') return { note: st.runNow(id, 'manual', undefined, requesterOf(req)) };
   if (action === 'stop') return { note: st.stop(id) };
   return action === 'pause' ? st.pause(id) : st.resume(id);
 });
 
 route('POST', '/api/delegations/([\\w-]+)/(approve|reject)', async (req, [id, action]) => {
-  if (action === 'approve') return agents.standing.approveDelegation(id);
+  if (action === 'approve') return agents.standing.approveDelegation(id, { approvedBy: requesterOf(req) });
   const { note } = await readJson<{ note?: string }>(req);
   return agents.standing.rejectDelegation(id, note);
 });
@@ -739,7 +752,9 @@ const server = http.createServer(async (req, res) => {
       // Machine clients authenticate with an API key, not a browser session; no cookies, so no CSRF.
       const who = auth.bearer(req);
       if (!who.ok) return send(res, who.status, { error: who.status === 429 ? 'too many failures' : 'API key required' });
-      return await handleMcp(agents, who.name, req, res, req.method === 'POST' ? await readJson(req) : undefined);
+      // A key bound to a login acts for that person; an unbound one (made before keys had users) for the owner.
+      const keyUser = auth.userInfo(who.user);
+      return await handleMcp(agents, who.name, keyUser ? asRequester(keyUser) : identity.owner(), req, res, req.method === 'POST' ? await readJson(req) : undefined);
     }
     if (url.pathname.startsWith('/api/') && req.method !== 'GET') {
       // CSRF: a cross-site form cannot send application/json, and SameSite=Strict keeps the cookie home.
@@ -959,17 +974,27 @@ const usage = new UsageTracker(cfg, () => {
   if (usage.usage) broadcast({ type: 'usage', usage: usage.usage });
   broadcast({ type: 'accounts', accounts: accountsNow() });
 });
+/** People's own Claude tokens (config userClaudeEnv, docs/identity.md), labelled with their names. */
+function personTokens() {
+  return identity
+    .list()
+    .map((u) => ({ u, token: userToken(cfg, u.userId) }))
+    .filter((x): x is { u: (typeof x)['u']; token: string } => !!x.token)
+    .map(({ u, token }) => ({ token, displayName: u.displayName, label: `${u.displayName}'s token …${token.slice(-4)}` }));
+}
+usage.personTokens = personTokens;
 function accountsNow() {
   const token = hostToken(cfg);
   const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, id));
   return buildAccounts(usage.entries, {
     hostName: os.hostname(),
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
+    people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
     machines: machines.list().map((m) => {
       const t = toMachine(m.id);
       return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token) };
     }),
-    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, toMachine), live: s.status !== 'stopped' && s.status !== 'error' })),
+    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, toMachine, (id) => userToken(cfg, id)), live: s.status !== 'stopped' && s.status !== 'error' })),
   });
 }
 // Which agents are on which account, and how many run now (the order), change with sessions and machines.

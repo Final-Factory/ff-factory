@@ -1386,6 +1386,13 @@ select.input {
   overflow-wrap: anywhere;
 }
 
+/* Who wrote it, above the bubble, in the chat people share. */
+.msg-author {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  padding: 0 6px;
+}
+
 .msg-side-time {
   flex: none;
   padding-bottom: 6px;
@@ -2682,7 +2689,14 @@ select.input {
   min-width: 0;
 }
 
-.details-section .session-meta {
+.details-section /* The person a tab's agent works for. */
+.tab-by {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.session-meta {
   flex-wrap: wrap;
   white-space: normal;
 }

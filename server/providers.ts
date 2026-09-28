@@ -38,6 +38,8 @@ interface Persisted {
   cursors: { conversation?: string; intake?: string };
   connector?: Provider['connector'];
   web?: string;
+  /** hello.accepts: the work messages the connector takes. */
+  accepts?: string[];
   capacity?: ProviderCapacity;
   lastSeen?: string;
   conversations: ProviderConversation[];
@@ -113,7 +115,7 @@ export class ProviderManager {
   private load(): Persisted {
     try {
       const d = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<Persisted>;
-      return { cursors: d.cursors ?? {}, conversations: d.conversations ?? [], intake: d.intake ?? [], connector: d.connector, web: d.web, capacity: d.capacity, lastSeen: d.lastSeen };
+      return { cursors: d.cursors ?? {}, conversations: d.conversations ?? [], intake: d.intake ?? [], connector: d.connector, web: d.web, accepts: d.accepts, capacity: d.capacity, lastSeen: d.lastSeen };
     } catch {
       return { cursors: {}, conversations: [], intake: [] };
     }
@@ -153,6 +155,7 @@ export class ProviderManager {
       statusDetail: this.statusDetail,
       connector: this.data.connector,
       web: this.data.web,
+      ...(this.data.accepts?.length ? { accepts: this.data.accepts } : {}),
       capacity: this.data.capacity,
       counts: {
         conversations: this.data.conversations.length,
@@ -344,6 +347,7 @@ export class ProviderManager {
       link.hello = true;
       this.data.connector = { version: parsed.data.connector.version, commit: parsed.data.connector.commit, protocol: parsed.data.protocol };
       this.data.web = parsed.data.web;
+      this.data.accepts = parsed.data.accepts;
       this.data.lastSeen = new Date(now).toISOString();
       this.statusDetail = undefined;
       this.send(link, { type: 'welcome', protocol: PROVIDER_PROTOCOL, provider: 'ffbox', cursors: { ...this.data.cursors }, limits: LIMITS });

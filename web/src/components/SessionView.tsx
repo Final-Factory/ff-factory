@@ -154,6 +154,11 @@ export function SessionMeta({ session }: { session: SessionInfo }) {
     <div className="session-meta">
       <span className={`tone-${sessionTone(session.status)}`}>{sessionLabel[session.status]}</span>
       {session.model && <span className="mono">{session.model}</span>}
+      {session.requestedBy && (
+        <span title={`Requested by ${session.requestedBy.displayName} (${session.requestedBy.userId}): the person this agent works for`} data-testid="session-requested-by">
+          for {session.requestedBy.displayName}
+        </span>
+      )}
       {account && (
         <span className="mono" title={`Claude account: ${account.label}`} data-testid="session-account">
           {accountTag(account)}

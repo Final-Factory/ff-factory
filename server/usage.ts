@@ -268,7 +268,15 @@ export function machineToken(cfg: Pick<Config, 'claudeEnv'>, takesHostEnv: boole
  * runs on. Follows the current config: an agent started before a token change keeps its old account until
  * its process restarts.
  */
-export function sessionSource(info: Pick<SessionInfo, 'machineId'>, hostTok: string | undefined, machineTok: (machineId: string) => string | undefined): string {
+export function sessionSource(
+  info: Pick<SessionInfo, 'machineId' | 'requestedBy'>,
+  hostTok: string | undefined,
+  machineTok: (machineId: string) => string | undefined,
+  personTok: (userId: string) => string | undefined = () => undefined,
+): string {
+  // An agent working for a person with their own token runs on it, here or on a Mac (docs/identity.md).
+  const own = info.requestedBy ? personTok(info.requestedBy.userId) : undefined;
+  if (own) return tokenKey(own);
   if (info.machineId) {
     const t = machineTok(info.machineId);
     return t ? tokenKey(t) : machineLogin(info.machineId);
@@ -297,6 +305,8 @@ export interface AccountContext {
   token?: { key: string; label: string };
   /** Machines that exist; `usesToken`: their portal-run agents take the host token. */
   machines: { id: string; usesToken: boolean }[];
+  /** People's own tokens (config userClaudeEnv): key, label ("Lothsahn's token …abcd") and whose. */
+  people?: { key: string; label: string; displayName: string }[];
   /** Every session with its source key (sessionSource); `live`: running now (for the order). */
   sessions: { id: string; source: string; live?: boolean }[];
 }
@@ -318,6 +328,12 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
   const sources = new Map<string, UsageEntry>();
   sources.set(HOST_LOGIN, entries.get(HOST_LOGIN) ?? { kind: 'login' });
   if (ctx.token) sources.set(ctx.token.key, { label: ctx.token.label, ...entries.get(ctx.token.key), kind: 'token' });
+  const whose = new Map<string, string>();
+  for (const p of ctx.people ?? []) {
+    if (sources.has(p.key)) continue; // the same token as the host's: one account
+    sources.set(p.key, { label: p.label, ...entries.get(p.key), kind: 'token' });
+    whose.set(p.key, p.displayName);
+  }
   for (const [key, e] of entries) {
     if (key.startsWith('login:') && key !== HOST_LOGIN && machineIds.has(key.slice(6))) sources.set(key, e);
   }
@@ -328,7 +344,8 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
   for (const [key, e] of sources) {
     const email = e.kind === 'login' ? e.account?.email?.trim().toLowerCase() : undefined;
     const id = e.kind === 'token' ? key : email ? `email:${email}` : key;
-    const where = e.kind === 'token' ? `the agents' token on ${tokenUsers.join(', ')}` : `${key === HOST_LOGIN ? ctx.hostName : key.slice(6)} login`;
+    const person = whose.get(key);
+    const where = person ? `agents working for ${person}` : e.kind === 'token' ? `the agents' token on ${tokenUsers.join(', ')}` : `${key === HOST_LOGIN ? ctx.hostName : key.slice(6)} login`;
     const a = out.get(id) ?? { id, kind: e.kind, label: e.kind === 'token' ? (e.label ?? 'a token') : (e.account?.email ?? where), email: e.account?.email, sources: [], where: [], sessionIds: [], usage: undefined };
     a.sources.push(key);
     a.where.push(where);
@@ -570,15 +587,28 @@ export class UsageTracker {
     return this.entries.get(HOST_LOGIN)?.usage;
   }
 
-  /** The token the last refresh polled, to notice a new one (set_app_config) before the next poll. */
+  /** The tokens the last refresh polled, to notice a new one (set_app_config) before the next poll. */
   private tokenSeen?: string;
+
+  /** People's own tokens (config userClaudeEnv) with their labels; wired by index.ts. Polled like the host token. */
+  personTokens?: () => { token: string; label: string }[];
+
+  /** Every token to poll: the host's, then people's own, each once. */
+  private tokens(): { token: string; label: string }[] {
+    const t = hostToken(this.cfg);
+    const all = [...(t ? [{ token: t, label: tokenLabel(t) }] : []), ...(this.personTokens?.() ?? [])];
+    return all.filter((x, i) => all.findIndex((y) => y.token === x.token) === i);
+  }
+
+  private tokensKey() {
+    return this.tokens().map((x) => tokenKey(x.token)).join() || undefined;
+  }
 
   start() {
     void this.refresh();
     setInterval(() => void this.refresh(), REFRESH_MS);
     setInterval(() => {
-      const t = hostToken(this.cfg);
-      if ((t ? tokenKey(t) : undefined) !== this.tokenSeen) this.poke();
+      if (this.tokensKey() !== this.tokenSeen) this.poke();
     }, 10_000).unref();
   }
 
@@ -631,11 +661,12 @@ export class UsageTracker {
     this.lastFetch = Date.now();
     try {
       const base = { ...process.env, ...this.cfg.claudeEnv };
-      const token = hostToken(this.cfg);
+      const tokens = this.tokens();
+      const keep = new Set(tokens.map((x) => tokenKey(x.token)));
       // A replaced token's numbers are no longer anyone's.
-      for (const k of [...this.entries.keys()]) if (k.startsWith('token:') && (!token || k !== tokenKey(token))) this.entries.delete(k);
-      this.tokenSeen = token ? tokenKey(token) : undefined;
-      await Promise.all([this.refreshLogin(usageEnv(base)), token ? this.refreshToken(token) : undefined]);
+      for (const k of [...this.entries.keys()]) if (k.startsWith('token:') && !keep.has(k)) this.entries.delete(k);
+      this.tokenSeen = this.tokensKey();
+      await Promise.all([this.refreshLogin(usageEnv(base)), ...tokens.map((x) => this.refreshToken(x.token, x.label))]);
       this.save();
     } finally {
       this.inFlight = false;
@@ -681,9 +712,8 @@ export class UsageTracker {
    * The agents' token, asked with that token alone (fetchTokenUsage). A failure is "unknown" with its
    * reason: no older numbers are kept, so nothing another credential answered can ever show here.
    */
-  private async refreshToken(token: string) {
+  private async refreshToken(token: string, label = tokenLabel(token)) {
     const key = tokenKey(token);
-    const label = tokenLabel(token);
     const asOf = new Date().toISOString();
     const reason = (e: unknown) => scrub((e as Error).message).slice(0, 200);
     // The usage endpoint's answer, or why it rate-limits this token (now, or still within its Retry-After).

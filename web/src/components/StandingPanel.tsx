@@ -204,7 +204,8 @@ function Runs({ agent, last, now }: { agent: StandingAgent; last: StandingRun | 
           <div className="sa-last-head">
             <Chip tone={outcomeTone(last.outcome)}>{outcomeLabel[last.outcome]}</Chip>
             <span className="dim small">
-              last run {fmtRelative(last.endedAt ?? last.startedAt ?? last.dueAt, now)} · {last.trigger} · {fmtCost(last.costUsd)}
+              last run {fmtRelative(last.endedAt ?? last.startedAt ?? last.dueAt, now)} · {last.trigger}
+              {last.requestedBy && last.trigger !== 'schedule' ? ` by ${last.requestedBy.displayName}` : ''} · {fmtCost(last.costUsd)}
               {last.startedAt && last.endedAt ? ` · ${fmtDuration(Date.parse(last.endedAt) - Date.parse(last.startedAt))}` : ''}
             </span>
           </div>
@@ -224,7 +225,10 @@ function Runs({ agent, last, now }: { agent: StandingAgent; last: StandingRun | 
                 {new Date(r.startedAt ?? r.dueAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
               </span>
               <span className={`run-outcome tone-${outcomeTone(r.outcome)}`}>{outcomeLabel[r.outcome]}</span>
-              <span className="run-headline ellipsis">{headline(r.summary)}</span>
+              <span className="run-headline ellipsis">
+                {r.requestedBy && r.trigger !== 'schedule' ? <span className="dim">{r.requestedBy.displayName}: </span> : null}
+                {headline(r.summary)}
+              </span>
               <span className="run-cost mono dim">{r.outcome === 'skipped' ? '' : fmtCost(r.costUsd)}</span>
             </button>
             {open === r.id && r.summary && (
@@ -267,6 +271,11 @@ function Delegations({ list, now, app }: { list: DelegationRequest[]; now: numbe
           <div className="deleg-head">
             <Chip tone={d.status === 'pending' ? 'amber' : d.status === 'approved' ? 'green' : d.status === 'expired' ? 'red' : 'grey'}>{d.status}</Chip>
             {d.autoApproved && <span className="chip chip-blue">auto-approved</span>}
+            {d.approvedBy && (
+              <span className="chip" data-testid="deleg-approved-by">
+                approved by {d.approvedBy.displayName}
+              </span>
+            )}
             {d.status === 'pending' && d.auto === 'queued' && (
               <span className="chip chip-blue" title="Starts by itself when a sandbox or machine frees up">
                 auto · queued until {d.expiresAt ? new Date(d.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '?'}

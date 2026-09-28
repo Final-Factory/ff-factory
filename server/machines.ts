@@ -14,7 +14,7 @@ import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { normalizePurpose } from './sandboxes.ts';
 import { openPr } from './gitStatus.ts';
 import type { AccountIdentity } from './usage.ts';
-import type { EffortLevel, ImageInput, Machine, MachineStats, PermissionMode, PlanUsage, SessionInfo } from '../shared/types.ts';
+import type { EffortLevel, ImageInput, Machine, MachineStats, PermissionMode, PlanUsage, Requester, SessionInfo } from '../shared/types.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -39,8 +39,9 @@ export class RemoteSession implements SessionHandle {
     return this.liveFlag;
   }
 
-  send(text: string, from: 'human' | 'orchestrator' | 'system' = 'human', uuid: string = randomUUID(), images: ImageInput[] = []): string {
-    this.link.dispatchSend(this, text, from, uuid, images);
+  send(text: string, from: 'human' | 'orchestrator' | 'system' = 'human', uuid: string = randomUUID(), images: ImageInput[] = [], requestedBy?: Requester): string {
+    if (requestedBy && from !== 'system') this.info.lastRequestedBy = requestedBy;
+    this.link.dispatchSend(this, text, from, uuid, images, requestedBy);
     this.lastFrom = from;
     return uuid;
   }
@@ -394,7 +395,7 @@ export class MachineManager {
 
   // ---------------------------------------------------------------- sessions
 
-  createSession(machineId: string, opts: { kind: 'worker' | 'standing'; title: string; model?: string; effort?: EffortLevel; permissionMode: PermissionMode; standingId?: string }) {
+  createSession(machineId: string, opts: { kind: 'worker' | 'standing'; title: string; model?: string; effort?: EffortLevel; permissionMode: PermissionMode; standingId?: string; requestedBy?: Requester }) {
     const m = this.require(machineId);
     const now = new Date().toISOString();
     const info: SessionInfo = {
@@ -412,6 +413,7 @@ export class MachineManager {
       turns: 0,
       costUsd: 0,
       pendingPermissions: [],
+      ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
     };
     const h = this.sessions.adopt(new RemoteSession(info, this));
     m.sessionIds = [...m.sessionIds, info.id];
@@ -420,7 +422,7 @@ export class MachineManager {
   }
 
   /** RemoteSession.send: checked here so the caller gets the error at once. */
-  dispatchSend(s: RemoteSession, text: string, from: 'human' | 'orchestrator' | 'system', uuid: string, images: ImageInput[] = []) {
+  dispatchSend(s: RemoteSession, text: string, from: 'human' | 'orchestrator' | 'system', uuid: string, images: ImageInput[] = [], requestedBy?: Requester) {
     const m = this.require(s.info.machineId!);
     if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline (asleep, or its daemon is not running)`);
     if (!s.live && this.liveCount(m.id) >= m.maxSessions) throw new Error(`already ${m.maxSessions} agents running on ${m.id}; stop one first`);
@@ -438,7 +440,7 @@ export class MachineManager {
     if (spec.mcp && catalog) spec.mcp = { ...spec.mcp, tools: spec.mcp.tools.filter((t) => catalog.includes(t.name)) };
     // Stored here first, so the daemon's transcript event can name them without sending them back.
     const withIds = images.map((i) => ({ ...i, id: i.id ?? this.store.saveImage(s.info.id, i.mediaType, i.data) }));
-    this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text, from, uuid, images: withIds });
+    this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}) });
   }
 
   /** Ask a machine's daemon for its git status now. */
