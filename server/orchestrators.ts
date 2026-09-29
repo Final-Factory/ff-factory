@@ -16,6 +16,7 @@ import {
   isOpen,
   ledgerOrder,
   limitProblem,
+  limitsFor,
   logLine,
   names,
   overlapLine,
@@ -483,7 +484,8 @@ export class Orchestrators {
     }
     this.spend(chat.info.id, owner);
     const now = this.now();
-    const limit = limitProblem(this.store.work.values(), owner, now.getTime());
+    // A person filing through their own orchestrator is not capped; automated sources are (work.ts limitsFor).
+    const limit = limitProblem(this.store.work.values(), owner, now.getTime(), limitsFor('person', this.d.cfg.workLimits));
     if (limit) throw new Error(limit);
     const branches = this.knownBranches();
     const { sandboxes, machines } = this.d.places();

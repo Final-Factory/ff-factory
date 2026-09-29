@@ -10,6 +10,20 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **A window title or command line with control characters no longer stops the Unity watch** on Windows machines
+  ("Bad control character in string literal in JSON", LothDesktop). `scripts/unity-windows.ps1` and the daemon's
+  process listing drop them before `ConvertTo-Json`, and `parsePsJson` escapes any that still come through and skips
+  (and logs) an entry that cannot be read ([docs/unity-dialogs.md](docs/unity-dialogs.md)).
+
+### Changed
+
+- **No hourly or daily filing cap for people** ([docs/orchestrators.md](docs/orchestrators.md)): a person's own
+  orchestrator files as many work requests as they ask for (the 3 filings between two messages of theirs still hold).
+  The 10-an-hour and 40-a-day caps stay for automated sources (standing agents, the intake), per source in config
+  `workLimits`.
+
 ### Added
 
 - **The intake: Discord and FFBox into the work ledger** ([docs/intake.md](docs/intake.md)), every switch off by default

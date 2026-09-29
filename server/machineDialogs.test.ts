@@ -110,6 +110,7 @@ test('unity-windows.ps1 on Windows: lists a real window, closes it only while it
 Add-Type -AssemblyName System.Windows.Forms
 $a = New-Object System.Windows.Forms.Form; $a.Text = 'FMOD Setup Wizard'; $a.ShowInTaskbar = $false; $a.Show()
 $b = New-Object System.Windows.Forms.Form; $b.Text = 'sb1 - Main - Unity 6000.3'; $b.ShowInTaskbar = $false; $b.Show()
+$c = New-Object System.Windows.Forms.Form; $c.Text = 'Odd' + [char]1 + [char]7 + [char]31 + ' title'; $c.ShowInTaskbar = $false; $c.Show()
 [Console]::Out.WriteLine('up'); [Console]::Out.Flush()
 while ($b.Visible) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }`;
   const p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -121,9 +122,11 @@ while ($b.Visible) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep
   const wins = await listWindows([p.pid!]);
   const [wizard] = findClosable(wins);
   assert.ok(wizard, `the wizard window is found among ${JSON.stringify(wins.map((w) => w.title))}`);
+  // A title with control characters comes back without them (scripts/unity-windows.ps1 Clean), in valid JSON.
+  assert.ok(wins.some((w) => w.title === 'Odd title'), `the odd title is cleaned: ${JSON.stringify(wins.map((w) => w.title))}`);
   const other = wins.find((w) => w.title.startsWith('sb1 - Main'))!;
   await assert.rejects(closeWindow(p.pid!, other.hwnd, 'FMOD Setup Wizard'), /is not titled 'FMOD Setup Wizard'/);
   assert.equal(await closeWindow(p.pid!, wizard.hwnd, 'FMOD Setup Wizard'), true);
   const after = await listWindows([p.pid!]);
-  assert.deepEqual(after.map((w) => w.title), ['sb1 - Main - Unity 6000.3'], 'only the wizard closed');
+  assert.deepEqual(after.map((w) => w.title).sort(), ['Odd title', 'sb1 - Main - Unity 6000.3'], 'only the wizard closed');
 });
