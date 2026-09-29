@@ -6,6 +6,12 @@ coarse signature with the step 4 counts (`shared/intake.ts`), before phase 4 act
 specified in [ffbox-connector-contract.md](ffbox-connector-contract.md). Every later phase is a
 separate, reviewable change.
 
+**2026-09-29: the intake ([intake.md](intake.md)).** FF Factory's side of phase 7's "both directions" and of phase 3's
+sending is built and off: FFBox's fix branches and `request` messages become ledger requests that wait for a reviewer,
+`board_check` lets FFBox ask the ledger before it works a report, and the dispatcher's `send_to_ffbox` submits work
+once `providers.ffbox.sendWork` is on. FFBox is optional there: the Discord intake runs without it. Lothsahn's side is
+listed in intake.md, "Rollout checklist: Lothsahn".
+
 **Decisions so far (2026-09-27).** Ben: a small connector is fine, no secrets cross, and player input
 stays on FFBox. Lothsahn: FF Factory tasks may use FFBox's open-internet `ffdev` containers.
 

@@ -2,6 +2,10 @@
  * A stand-in for Discord's REST API, for the E2E servers' Max page (docs/max.md): the few read-only endpoints
  * server/max.ts calls, with fixed data. It checks the bot token like Discord would (401 otherwise), so the test
  * proves the token went only here. Also seeds the Max events file the ffdiscord CLI would have written.
+ *
+ * For the intake (docs/intake.md, e2e/intake.spec.ts) a test adds what players and people post, without a token:
+ *   POST /_e2e/thread  {name, description, version}         a new #bug-reports thread from the in-game reporter
+ *   POST /_e2e/message {authorId, name, content, toBot}     a new #dev-chat message (toBot: it mentions Max)
  */
 import fs from 'node:fs';
 import http from 'node:http';
@@ -16,6 +20,9 @@ export const CH = {
   patchNotes: '1400000000000000001',
   askClaude: '1531433612464099521',
 };
+
+/** The bot's own user id (GET /users/@me), which the intake recognises messages to Max by. */
+export const BOT_ID = '1450000000000000001';
 
 /** The E2E clock (e2e/visual.spec.ts NOW): seeded times are just before it. */
 export const E2E_NOW = Date.parse('2026-09-24T12:00:00Z');
@@ -48,18 +55,45 @@ const THREADS = [
 /** Seen up to here, so each channel starts with one unread item (server/max.ts keeps these cursors in max.json). */
 export const SEEDED_CURSORS = { dev_chat: DEV_CHAT[1].id, bug_reports: THREADS[1].last_message_id };
 
+/** What tests posted (POST /_e2e/...): new threads with their first message, new #dev-chat messages. */
+const added = { threads: [] as typeof THREADS, starters: {} as Record<string, unknown>, chat: [] as Record<string, unknown>[] };
+let seq = 100;
+
 export function startMockDiscord(port: number): Promise<http.Server> {
   const server = http.createServer((req, res) => {
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
+    if (req.method === 'POST' && req.url?.startsWith('/_e2e/')) {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        const b = JSON.parse(raw || '{}') as Record<string, string | boolean | undefined>;
+        const id = snowflake(new Date().toISOString(), ++seq);
+        if (req.url === '/_e2e/thread') {
+          added.threads.push({ id, parent_id: CH.bugs, name: String(b.name), last_message_id: id, message_count: 1 });
+          added.starters[id] = {
+            id,
+            webhook_id: '77',
+            author: { id: '77', username: 'Bug Bot', bot: true },
+            embeds: [{ title: `🐛 ${b.name}`, description: String(b.description ?? ''), fields: [{ name: 'Game Version', value: String(b.version ?? '0.50.0.46') }, { name: 'Platform', value: 'WindowsPlayer' }] }],
+            attachments: [{ filename: 'Player.log', url: `https://cdn.discordapp.com/attachments/${CH.bugs}/${id}/Player.log`, size: 4096 }],
+          };
+        } else {
+          added.chat.unshift({ id, content: `${b.toBot ? `<@${BOT_ID}> ` : ''}${b.content}`, author: { id: String(b.authorId), username: String(b.name), global_name: String(b.name) }, mentions: b.toBot ? [{ id: BOT_ID }] : [] });
+        }
+        send(200, { id });
+      });
+      return;
+    }
     if (req.headers.authorization !== `Bot ${E2E_DISCORD_TOKEN}`) return send(401, { message: '401: Unauthorized', code: 0 });
     const p = (req.url ?? '').replace(/^\/api\/v10/, '').replace(/\?.*$/, '');
     let m: RegExpExecArray | null;
-    if (p === '/users/@me') return send(200, { id: '1', username: 'max', global_name: 'Max' });
-    if (p === `/guilds/${GUILD}/threads/active`) return send(200, { threads: THREADS });
-    if ((m = /^\/channels\/(\d+)\/messages$/.exec(p))) return m[1] === CH.devChat ? send(200, DEV_CHAT) : send(403, { message: 'Missing Access', code: 50001 });
+    if (p === '/users/@me') return send(200, { id: BOT_ID, username: 'max', global_name: 'Max' });
+    if (p === `/guilds/${GUILD}/threads/active`) return send(200, { threads: [...added.threads, ...THREADS] });
+    if ((m = /^\/channels\/(\d+)\/messages\/(\d+)$/.exec(p))) return added.starters[m[2]] ? send(200, added.starters[m[2]]) : send(404, { message: 'Unknown Message', code: 10008 });
+    if ((m = /^\/channels\/(\d+)\/messages$/.exec(p))) return m[1] === CH.devChat ? send(200, [...added.chat, ...DEV_CHAT]) : send(403, { message: 'Missing Access', code: 50001 });
     if ((m = /^\/channels\/(\d+)$/.exec(p))) return CHANNELS[m[1]] ? send(200, CHANNELS[m[1]]) : send(404, { message: 'Unknown Channel', code: 10003 });
     send(404, { message: '404: Not Found', code: 0 });
   });

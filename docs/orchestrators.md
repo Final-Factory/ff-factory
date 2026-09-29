@@ -47,6 +47,11 @@ the server (`server/work.ts`) does three things:
    once, in the tool's answer.
 3. **Limits.** Below.
 
+Requests also come from the intake ([intake.md](intake.md)): Discord bug reports, trusted people's requests to Max
+and FFBox's work, each with its source, its triage (an obvious bug, or it needs a human) and, until a reviewer approves
+it, `approval: pending`, which keeps it from the dispatcher and makes `start_agent` refuse it. Work started from the
+dashboard, over `/mcp` or for a delegation is recorded as an active request too, so the ledger shows all work.
+
 The dispatcher then does one of these for each request:
 
 | decision | how | status |
@@ -104,6 +109,8 @@ neither relays nor sees these messages.
 | `[app restarted]`, `[machines]`, `[unity]`, `[host]`, the orchestrator inbox | the dispatcher. A person's orchestrator cut off mid-turn by a restart is told to pick its turn up again |
 | `[heartbeat]` | each person's own orchestrator, with that person's busy workers, when they turned it on |
 | `[person message]` | the recipient's own orchestrator (message_person), and a notification to the recipient alone |
+| `[work request]` marked intake | the dispatcher, once approved (by a reviewer, or an auto-approve rule for an obvious bug), gathered a minute at a time ([intake.md](intake.md)) |
+| `[intake question]` | the reviewers' own orchestrators, when a worker on an intake request stops at a design decision |
 | push notifications and in-page notices | a person's own orchestrator's only to that person; a worker's finished turn to the people it works for; the dispatcher's turns to nobody, its questions and errors to the owner |
 
 `/mcp` `ask_orchestrator` and `orchestrator_transcript` talk to the key's person's own orchestrator.
@@ -156,7 +163,8 @@ than Ben's own.
 
 ## Not in this version
 
-- Delegation requests are not ledger items, so a dashboard or automatic approval skips the overlap check.
+- Delegation requests are not ledger items until their worker starts (then it is recorded), so a dashboard or
+  automatic approval skips the overlap check.
 - `/mcp` has `list_work` but not `request_work`.
 - Roles are still not enforced: a member's work can go to the owner's machines if the dispatcher sends it there (its brief
   tells it not to).

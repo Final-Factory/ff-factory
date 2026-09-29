@@ -124,9 +124,10 @@ export class Waker {
 
   /**
    * Called every minute for each orchestrator whose person turned the heartbeat on (docs/orchestrators.md): wakes it
-   * with the busy list when a beat is due. `mine` picks that person's workers (default: every worker).
+   * with the busy list when a beat is due. `mine` picks that person's workers (default: every worker); `extra` adds a
+   * line (the intake's: Discord and FFBox requests waiting for approval or for this person, docs/intake.md).
    */
-  heartbeat(orchestratorId: string | undefined, minutes: number | null | undefined, describe: (s: SessionInfo) => string, mine: (s: SessionInfo) => boolean = () => true) {
+  heartbeat(orchestratorId: string | undefined, minutes: number | null | undefined, describe: (s: SessionInfo) => string, mine: (s: SessionInfo) => boolean = () => true, extra: () => string = () => '') {
     if (!orchestratorId) return;
     const busy = [...this.store.sessions.values()].filter((s) => s.kind === 'worker' && BUSY.includes(s.status) && mine(s));
     const now = this.now();
@@ -142,6 +143,8 @@ export class Waker {
     if (!orch || BUSY.includes(orch.status)) return; // it is working already; next minute
     this.lastBeat.set(orchestratorId, now);
     const lines = busy.map((s) => `- ${describe(s)}`);
+    const more = extra();
+    if (more) lines.push(more);
     try {
       this.sessions.send(orchestratorId, `[heartbeat] ${busy.length} worker(s) busy:\n${lines.join('\n')}\nPost the user a one-line status (what each is doing, anything stuck or waiting on them). No tool calls needed unless something looks wrong.`, 'system');
     } catch {

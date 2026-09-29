@@ -45,7 +45,7 @@ const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work
 const NOT_DISPATCHER: ReadonlySet<string> = new Set([...PERSONAL_ONLY, 'set_heartbeat']);
 
 /** Tools only the dispatcher has. */
-const DISPATCHER_ONLY: ReadonlySet<string> = new Set(['decide_work']);
+const DISPATCHER_ONLY: ReadonlySet<string> = new Set(['decide_work', 'send_to_ffbox']);
 
 /**
  * The dispatcher's destructive and administrative tools, which run only when a person asked. They run in a turn a

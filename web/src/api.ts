@@ -127,6 +127,10 @@ export const api = {
   deleteSession: (sessionId: string) => request<unknown>('DELETE', `/api/sessions/${enc(sessionId)}`),
   /** A fresh conversation: your own orchestrator's, or the dispatcher's (the owner only). */
   resetOrchestrator: (which: 'mine' | 'dispatcher' = 'mine') => request<{ id: string }>('POST', '/api/orchestrator/reset', { which }),
+  /** The intake (docs/intake.md): a person approves or declines a Discord or FFBox request. */
+  approveWork: (id: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/approve`, {}),
+  intakePoll: () => request<{ ok: boolean; note?: string }>('POST', '/api/intake/poll', {}),
+  declineWork: (id: string, note?: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/decline`, { note }),
   /** A host sandbox, or (once the host's own daemon holds them, docs/beast-machine.md) where the daemon is making it. */
   createSandbox: (req: CreateSandboxRequest) => request<Sandbox | { machine: string; id: string; note: string }>('POST', '/api/sandboxes', req),
   deleteSandbox: (id: string) => request<unknown>('DELETE', `/api/sandboxes/${enc(id)}`),

@@ -331,3 +331,27 @@ test('max: refresh is rate limited to one every 30 s', async () => {
   t += 30_000;
   assert.equal((await m.refresh()).ok, true);
 });
+
+test('max, for the intake: the bot id from the token check, forum threads and messages oldest first, and every new event through the hook', async () => {
+  const { m } = manager();
+  const t1 = '1460000000000000001';
+  const t2 = '1460000000000000009';
+  m.fetch = fakeDiscord({
+    '/users/@me': { id: '1450000000000000001', username: 'max' },
+    [`/guilds/${GUILD}/threads/active`]: { threads: [{ id: t2, parent_id: BUGS, name: 'b' }, { id: '1460000000000000005', parent_id: '1', name: 'elsewhere' }, { id: t1, parent_id: BUGS, name: 'a' }] },
+    [`/channels/${t1}/messages/${t1}`]: { id: t1, content: 'starter' },
+    [`/channels/${DEV_CHAT}/messages?after=5&limit=50`]: [{ id: '9' }, { id: '7' }],
+  }).f;
+  assert.equal(m.botId, undefined);
+  assert.equal(await m.ensureBotId(), '1450000000000000001');
+  assert.deepEqual([m.hasToken, m.guildId, m.channelIdOf('bug_reports'), m.channelIdOf('1012843817981976686'), m.channelIdOf('nope')], [true, GUILD, BUGS, DEV_CHAT, undefined]);
+  assert.deepEqual((await m.forumThreads(BUGS)).map((t) => t.id), [t1, t2], 'this forum only, oldest first');
+  assert.deepEqual(await m.message(t1, t1), { id: t1, content: 'starter' });
+  assert.deepEqual((await m.messagesAfter(DEV_CHAT, '5')).map((x) => x.id), ['7', '9']);
+  const seen: string[] = [];
+  m.onEvent = (ev) => seen.push(`${ev.action} ${ev.channelId}`);
+  m.ingestLine(line({ action: 'reply', channel_id: t1, message_id: '1460000000000000010' }), 'host');
+  m.ingestLine(line({ action: 'reply', channel_id: t1, message_id: '1460000000000000010' }), 'host');
+  assert.deepEqual(seen, [`reply ${t1}`], 'once: a duplicate line is not new');
+  m.close();
+});

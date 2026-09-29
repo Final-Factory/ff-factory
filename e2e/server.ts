@@ -16,6 +16,9 @@
  *                      five seeded events from the gallery worker (e2e/max.spec.ts)
  *   provider "ffbox"   only with E2E_PROVIDER=1 (the provider projects, e2e/provider.spec.ts): switched on, with
  *                      E2E_PROVIDER_TOKEN as its connector token. Off everywhere else, so no other page changes.
+ *   intake             only with E2E_INTAKE=1 (the intake projects, e2e/intake.spec.ts): the Discord intake on, reading the
+ *                      mock Discord, with Discord id INTAKE_TRUSTED trusted as tester; its cursors start at the server's
+ *                      start, so only what a test posts is new. Off everywhere else.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -25,13 +28,16 @@ import path from 'node:path';
 import type { Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { RED_PNG, fakeQuery } from './fakeAgent.ts';
 import { E2E_PROVIDER_TOKEN } from './mockConnector.ts';
-import { SEEDED_CURSORS, startMockDiscord, writeFfboxConfig, writeMaxEvents } from './mockDiscord.ts';
+import { CH, SEEDED_CURSORS, snowflake, startMockDiscord, writeFfboxConfig, writeMaxEvents } from './mockDiscord.ts';
 
 export const USER = 'tester';
 export const PASSWORD = 'e2e-password-123';
 export const MATE = 'teammate';
 export const MATE_PASSWORD = 'e2e-teammate-456';
 const withProvider = process.env.E2E_PROVIDER === '1';
+const withIntake = process.env.E2E_INTAKE === '1';
+/** The Discord user id the intake projects trust, mapped to tester (e2e/intake.spec.ts). */
+export const INTAKE_TRUSTED = '444444444444444444';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const port = Number(process.env.E2E_PORT ?? 8791);
@@ -73,6 +79,11 @@ await startMockDiscord(discordPort);
 writeFfboxConfig(path.join(base, 'ffbox'));
 writeMaxEvents(path.join(base, 'max-events.jsonl'), 'gallery1');
 fs.writeFileSync(path.join(dataDir, 'max.json'), JSON.stringify({ events: [], cursors: SEEDED_CURSORS, channels: {} }));
+// The intake's first look is done: only threads and messages posted from now on are new.
+if (withIntake) {
+  const start = snowflake(new Date(Date.now() - 1000).toISOString());
+  fs.writeFileSync(path.join(dataDir, 'intake.json'), JSON.stringify({ cursors: { [`bug:${CH.bugs}`]: start, [`req:${CH.devChat}`]: start }, recent: [], versions: {} }));
+}
 
 const configFile = path.join(base, 'config.json');
 fs.writeFileSync(
@@ -96,6 +107,7 @@ fs.writeFileSync(
       worker: { permissionMode: 'bypassPermissions', effort: 'low' },
       voice: { enabled: false, autoInstall: false, tts: false },
       max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },
+      ...(withIntake ? { intake: { discord: { enabled: true, trusted: { [INTAKE_TRUSTED]: 'tester' }, pollMinutes: 120 }, reviewers: ['tester'] } } : {}),
       ...(withProvider ? { providers: { ffbox: { enabled: true, tokenSha256: createHash('sha256').update(E2E_PROVIDER_TOKEN).digest('hex') } } } : {}),
     },
     null,

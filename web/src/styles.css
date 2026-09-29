@@ -3241,6 +3241,76 @@ select.input {
   padding: var(--s-2) 2px;
 }
 
+/* The Dispatcher's Intake tab (docs/intake.md): what is switched on, what waits for approval, what came in. */
+.intake-settings {
+  display: grid;
+  gap: var(--s-2);
+  padding: var(--s-3) 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  justify-items: start;
+}
+
+.intake-settings > p {
+  margin: 0;
+}
+
+.intake-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-1) var(--s-2);
+}
+
+.intake-h {
+  margin: var(--s-3) 2px 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.intake-pending {
+  display: grid;
+  gap: 0;
+}
+
+/* A long intake page scrolls: nothing in it shrinks to fit (a run-list hides its overflow, so it would vanish). */
+.intake-tab > * {
+  flex-shrink: 0;
+}
+
+.intake-pending + .intake-pending {
+  border-top: 1px solid var(--border);
+}
+
+.intake-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-1) 14px var(--s-2);
+}
+
+.intake-brief {
+  justify-self: stretch;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 22em;
+  overflow: auto;
+}
+
+.intake-log {
+  list-style: none;
+  margin: var(--s-2) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.intake-recent {
+  margin-top: var(--s-3);
+}
+
 .deleg {
   display: grid;
   gap: var(--s-2);
