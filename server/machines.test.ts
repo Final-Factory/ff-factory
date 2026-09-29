@@ -8,7 +8,7 @@ import type { EventEmitter } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, type SessionHandle, type SessionSink } from './sessions.ts';
-import { MachineManager, RemoteSession, daemonMismatch } from './machines.ts';
+import { MachineManager, RESUME_DELAY_MS, RemoteSession, daemonMismatch } from './machines.ts';
 import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
@@ -41,10 +41,12 @@ class FakeAgent implements SessionHandle {
       this.sink.append(this.info.id, { kind: 'tool_result', toolUseId: 't', isError: false, text: '[image]', images: [{ id, mediaType: 'image/png' }] });
     }
     this.info.status = 'running';
+    this.info.turnOpenSince ??= new Date().toISOString();
     this.sink.putSession(this.info);
+    if (text.startsWith('long')) return uuid; // stays mid-turn
     setTimeout(() => {
       this.sink.append(this.info.id, { kind: 'assistant', text: `echo ${text}` });
-      Object.assign(this.info, { status: 'idle', costUsd: this.info.costUsd + 0.01, turns: this.info.turns + 1 });
+      Object.assign(this.info, { status: 'idle', turnOpenSince: undefined, costUsd: this.info.costUsd + 0.01, turns: this.info.turns + 1 });
       this.sink.putSession(this.info);
       this.events.emit('result', this, 'success');
       this.events.emit('turnEnd', this, `echo ${text}`);
@@ -55,10 +57,12 @@ class FakeAgent implements SessionHandle {
   async setMode(m: PermissionMode) {
     this.info.permissionMode = m;
   }
-  stop() {
+  stop(onPurpose = true) {
     if (!this.live) return;
     this.live = false;
     this.info.status = 'stopped';
+    // Like AgentSession: a stop on purpose ends the turn; a daemon going down keeps the restart mark.
+    if (onPurpose) this.info.turnOpenSince = undefined;
     this.sink.putSession(this.info);
     this.events.emit('ended', this);
   }
@@ -545,4 +549,50 @@ test('machine: stopping or restarting a daemon is refused while agents run unles
   assert.deepEqual(redeployed, []);
   mm.update('mx', { daemonStopped: undefined });
   assert.deepEqual(await mm.watchOffline(Date.now() + 20 * 60_000, async () => true), ['mx'], 'otherwise it is redeployed as before');
+});
+
+test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart are resumed when the daemon is back; a stop is not', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  RESUME_DELAY_MS.value = 50;
+  t.after(() => (RESUME_DELAY_MS.value = 3000));
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  const d1 = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  sessions.send(s.info.id, 'long build');
+  await until('mid-turn', () => s.info.status === 'running');
+  const users = () => store.readTranscript(s.info.id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text);
+
+  // add_machine with force: the old daemon (and its agent processes) goes, a new one connects.
+  mm.expectDrop('mx', 'was redeployed (add_machine with force)');
+  d1.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  assert.equal(s.info.status, 'stopped');
+  const d2 = daemon();
+  await until('resumed', () => users().length === 2, 8000).catch((e) => {
+    throw new Error(`${e.message}; cutOff=${JSON.stringify([...(mm as unknown as { cutOff: Map<string, unknown> }).cutOff])} outdated=${mm.outdated('mx')} users=${JSON.stringify(users())} status=${s.info.status} reports=${reports.join(' | ')}`);
+  });
+  assert.match(users()[1], /^\[machine mx\] The FF Factory daemon on this machine was redeployed \(add_machine with force\) at .* while you were mid-turn/);
+  await until('the resumed turn ran', () => s.info.status === 'idle');
+  assert.ok(reports.some((r) => /mx is back after its daemon was redeployed \(add_machine with force\); resumed 1 agent\(s\)/.test(r)), reports.join('\n'));
+
+  // A network blip: the daemon (and the agent) live on; the reconnect finds it live, so no resume message.
+  sessions.send(s.info.id, 'long again');
+  await until('the daemon has it mid-turn', () => s.info.status === 'running' && users().length === 3);
+  (mm as unknown as { links: Map<string, { ws: { terminate(): void } }> }).links.get('mx')!.ws.terminate();
+  await until('dropped', () => !mm.isOnline('mx'));
+  await until('back', () => mm.isOnline('mx') && s.live, 8000);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(users().length, 3, 'a live agent is not sent a resume');
+
+  // machine_daemon stop: on purpose, so nothing is resumed when a daemon comes back later.
+  mm.expectDrop('mx', false);
+  d2.shutdown();
+  await until('offline again', () => !mm.isOnline('mx'));
+  daemon();
+  await until('online again', () => mm.isOnline('mx'));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(users().length, 3, `a stop is not undone: ${JSON.stringify(users())} ${reports.join(' | ')}`);
 });

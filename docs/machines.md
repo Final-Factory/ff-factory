@@ -50,7 +50,13 @@ before redeploying by hand.
   serialisable launch spec: cwd, model, brief, tools, guard settings, budget). Transcript sequence
   numbers are assigned by the daemon, starting from the portal's last one, so a session resumes
   across daemon restarts. An agent whose machine is offline shows `stopped`; messaging it fails with
-  "machine m5 is offline".
+  "machine m5 is offline". **Cut off mid-turn:** when a machine's link drops, the portal notes the workers that
+  were mid-turn; when the daemon is back without them (it was redeployed with `add_machine` `force`, restarted
+  with `machine_daemon restart`, or crashed), each gets a resume message (check git status, re-pin Unity,
+  continue), as after a portal restart, and the orchestrator hears which. After a network blip they are still
+  running, so nothing is sent; `machine_daemon stop` is on purpose and resumes nobody; after more than 6 hours
+  the orchestrator is told instead. A daemon going down stops its agents keeping their mid-turn mark
+  (`stop(false)`), which is how the portal knows.
 - **Tools.** Workers get the machine's `set_label` (same as a sandbox's) via a `machine` MCP server
   whose calls go back to the portal. Unity is not managed in v1: agents use whatever editor and MCP
   the Mac already has (the Mac's own user settings load).
@@ -361,6 +367,14 @@ folder are protected, killing Unity by hand is refused (other sandboxes' editors
 **Warm Library.** A new sandbox's `Library` is copied from the main clone's, or, when that is empty (a clone that never
 opened Unity), from a ready sandbox's, preferring one whose editor is stopped: robocopy on Windows, an APFS clone
 (`cp -c`) on a Mac. It needs `disk_warn_gb` + 30 GB free first. `seed_library: false` skips it.
+
+**The first start after a Library copy reimports the scripts.** A Library copied from another project path keeps
+stale script-to-class mappings: on LothDesktop's first sandboxes URP renderer features loaded as missing, the player
+build crashed in the shader step and the FMOD settings were dropped. So after the copy the pool drops a one-time
+editor script into the sandbox (`Assets/__FFFactoryReimport/Editor`, `machine/scriptReimport.ts`): at the first
+editor start it force-reimports every `.cs`, `.asmdef` and `.asmref` under `Assets`, then deletes its folder. The
+folder is in the repo's `info/exclude`, so it never shows in `git status` or a commit. If the project does not
+compile the script cannot run; it stays and runs at the next start that compiles.
 
 **Editors.** Each sandbox editor logs to its own `Logs/sandbox-editor.log` in the worktree (`-logFile`; the previous
 run's kept as `sandbox-editor-<time>.log`, the newest three), so its hang and crash watch (the same `MacUnityWatch` as

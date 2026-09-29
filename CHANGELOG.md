@@ -196,6 +196,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 - **Worker updates named "A worker" in the chat.** Since updates carry "(requested by …)", the page could not
   read which worker one was about; it names the worker and links to it again.
+- **Machine agents cut off by a forced redeploy were not resumed** (docs/machines.md, "Sessions"). A daemon going
+  down (`add_machine` with `force`, `machine_daemon restart`, a crash) stopped its agents as if on purpose, which
+  cleared their mid-turn mark, and nothing resumed them when the new daemon connected; only a portal restart
+  resumed agents. Now the daemon keeps the mark, and the portal resumes the workers that were mid-turn once the
+  daemon is back without them (not after a network blip, not after `machine_daemon stop`).
+- **Machine sandboxes seeded with a copied Library had stale script mappings** (docs/machines.md, "Warm Library"):
+  missing URP renderer features, a player build crashing in the shader step, dropped FMOD settings. The first
+  editor start after a Library copy now force-reimports the scripts under `Assets` once, through a
+  self-deleting editor script git ignores.
 
 - **Clean-up freed nothing while the disk filled.** It ran only below the critical level (40 GB), after the
   warn level (80 GB) had already stopped new work, and its rules did not cover what fills the disk
