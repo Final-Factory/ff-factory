@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **No hourly or daily filing cap for people** ([docs/orchestrators.md](docs/orchestrators.md)): a person's own
+  orchestrator files as many work requests as they ask for (the 3 filings between two messages of theirs still hold).
+  The 10-an-hour and 40-a-day caps stay for automated sources (standing agents, the intake), per source in config
+  `workLimits`.
+
 ### Added
 
 - **Claude plan usage is polled every 15 minutes** (config `usagePollMinutes`, 5 to 240, settable with

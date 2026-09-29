@@ -114,7 +114,10 @@ neither relays nor sees these messages.
 - A person's orchestrator files or updates at most 3 times, and follows up with one worker at most 3 times, between two
   messages of its person. Harness messages alone cannot keep it going.
 - A person's orchestrator messages another person at most 3 times until that person writes to their own orchestrator.
-- Each person files at most 10 requests an hour and 40 a day; repeats are free.
+- People are not capped per hour or per day (Ben, 2026-09-29): only the per-message budget above holds. Automated
+  sources (standing agents, the Discord/FFBox intake, once they file here) get at most 10 requests an hour and 40 a
+  day per requester, set per source in config `workLimits.standing` / `workLimits.intake` (`server/work.ts`
+  `limitsFor`); repeats are free.
 - Attribution on the dispatcher comes from the request (`work_id`). Without one, `for_user` must name someone its
   conversation shows asking, or the system payer; with neither, the tool refuses. "Whoever wrote last" is never used,
   because most of what the dispatcher hears is the harness.

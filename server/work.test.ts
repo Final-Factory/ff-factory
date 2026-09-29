@@ -9,6 +9,7 @@ import {
   findOverlaps,
   ledgerOrder,
   limitProblem,
+  limitsFor,
   normalizeTitle,
   overlapOf,
   pruneIds,
@@ -107,13 +108,25 @@ test('overlaps: the five strongest, strongest first', () => {
   assert.deepEqual(found.map((o) => o.score), [1, 0.8, 0.67, 0.57, 0.5]);
 });
 
-test('limits: per person per hour and per day; a repeat of an open request is found by its title', () => {
+test('limits: people are never capped; standing agents and the intake are, each configurable', () => {
+  const now = T0;
+  const many = (n: number) => Array.from({ length: n }, (_, i) => item(`x${i}`, { requestedBy: BEN, createdAt: new Date(now - 60_000).toISOString() }));
+  assert.equal(limitsFor('person'), undefined);
+  assert.equal(limitsFor('person', { standing: { perHour: 1 } }), undefined, 'config caps only the automated sources');
+  assert.equal(limitProblem(many(500), BEN, now, limitsFor('person')), undefined, 'a person filing 500 in a minute is not stopped');
+  assert.deepEqual(limitsFor('standing'), { perHour: 10, perDay: 40 });
+  assert.deepEqual(limitsFor('intake', { intake: { perHour: 3 } }), { perHour: 3, perDay: 40 });
+  assert.deepEqual(limitsFor('standing', { intake: { perHour: 3 } }), { perHour: 10, perDay: 40 }, "one source's setting is its own");
+  assert.match(limitProblem(many(3), BEN, now, limitsFor('intake', { intake: { perHour: 3 } }))!, /3 requests in the last hour/);
+});
+
+test('limits: an automated source per requester per hour and per day; a repeat of an open request is found by its title', () => {
   const now = T0;
   const recent = (n: number, who: Requester, agoMin: number) => Array.from({ length: n }, (_, i) => item(`x${i}`, { requestedBy: who, createdAt: new Date(now - agoMin * 60_000).toISOString() }));
-  assert.equal(limitProblem(recent(LIMITS.perHour - 1, BEN, 5), BEN, now), undefined);
-  assert.match(limitProblem(recent(LIMITS.perHour, BEN, 5), BEN, now)!, /10 requests in the last hour/);
-  assert.equal(limitProblem(recent(LIMITS.perHour, LOTH, 5), BEN, now), undefined, "someone else's filings do not count");
-  assert.match(limitProblem(recent(LIMITS.perDay, BEN, 120), BEN, now)!, /40 requests today/);
+  assert.equal(limitProblem(recent(LIMITS.perHour - 1, BEN, 5), BEN, now, LIMITS), undefined);
+  assert.match(limitProblem(recent(LIMITS.perHour, BEN, 5), BEN, now, LIMITS)!, /10 requests in the last hour/);
+  assert.equal(limitProblem(recent(LIMITS.perHour, LOTH, 5), BEN, now, LIMITS), undefined, "someone else's filings do not count");
+  assert.match(limitProblem(recent(LIMITS.perDay, BEN, 120), BEN, now, LIMITS)!, /40 requests today/);
   const open = item('w1', { title: 'Fix the Belt desync!' });
   assert.equal(repeatOf([open], BEN, 'fix the belt   desync')?.id, 'w1');
   assert.equal(repeatOf([open], LOTH, 'fix the belt desync'), undefined);
