@@ -233,8 +233,8 @@ log on again. A deploy while nobody is logged on installs everything and says so
   `unity_path`, `unity_editor_root`, the editors the Hub lists, its chosen install location, Program Files); its
   log is
   `%LOCALAPPDATA%\Unity\Editor\Editor.log`. The editor is launched through `Start-Process` so that it is
-  nobody's child and outlives a daemon restart. There is no dialog watch on Windows machines yet (the Mac's
-  reads windows through macOS's System Events), and no App Nap.
+  nobody's child and outlives a daemon restart. The dialog watch reads and presses Unity's windows with
+  `scripts/unity-windows.ps1`, as the host's does ([unity-dialogs.md](unity-dialogs.md#macs)). No App Nap.
 - **Guard**: the same rules. Killing `node.exe` or `claude.exe`, and ending, changing or deleting the
   `FFFactoryDaemon` task (`schtasks /End|/Change|/Delete`, `Stop-/Disable-/Unregister-/Set-ScheduledTask`) are
   refused; Unity, Unity Hub and crash handlers are fine to kill. The daemon's folder (`.ff-factory`, or the
@@ -355,7 +355,7 @@ sandbox agents in all), `max_unity: 2`.
   (stops its agents and editor, removes the Library, the worktree and the folder; the branch stays),
   `unity {sandbox: "lothdesktop/sb1", action}` (status, start, stop, restart, log), `start_agent {sandbox:
   "lothdesktop/sb1", prompt, ...}`, `switch_branch {sandbox: "lothdesktop/sb1", branch}` (refused while its editor
-  runs: stop it first, since Windows machines have no dialog watch for Unity's "modified externally" question).
+  runs: stop it first, or Unity stops on "The open scene(s) have been modified externally").
 - `list_sandboxes` shows this host's sandboxes and then each machine's, grouped, with each group's limits and free
   count, one line per sandbox (a **FREE** flag when it is ready, labelled unused and has no live agent) and only
   its live agents. An offline machine's sandboxes show as last reported.
@@ -401,6 +401,18 @@ git state and a branch switch (`POST /api/machines/<machine>/sandboxes/<id>/unit
 ![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
 ![The Overview board](images/fleet-overview-desktop-chromium.png)
 
+**Unity MCP.** Every agent on a machine, in its main clone or in a sandbox, gets the Unity MCP bridge of its own
+editor as `UnityMCP`: the portal marks the launch spec `unityMcp`, and the daemon adds the MCP-for-Unity server
+(`machine/unityMcp.ts`). Claude Code registers that server per project folder, so a fresh worktree would otherwise have
+none (LothDesktop's sandbox agents fell back to Unity on the command line). The command is `daemon.json`
+`unityMcpServer` when set, else the `UnityMCP` entry the machine's own Claude Code has in `~/.claude.json`: the main
+clone's, then a user-wide one, then the one most of its projects use. Each agent's server gets its place's own
+`UNITY_MCP_STATUS_DIR` (`<app_dir>/unity-mcp/<sandbox>`, or `_main-clone`), which the daemon keeps every 5 s holding
+only that editor's status file from `~/.unity-mcp` (and a fallback port file pointing at its port, 0 while it is
+down), as the host does for its sandboxes (`server/unityMcp.ts`). So a pinned agent never lands on another sandbox's
+editor while its own restarts. A status file counts only if written since that editor started (for an editor already
+running at the daemon's first look, any age). The daemon logs the command it found, or that there is none, at start.
+
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
@@ -408,4 +420,4 @@ portal never sends it one: it says the daemon is being redeployed.
 
 ## Not in v1
 
-The Unity dialog watch on Windows machines; machines other than Macs and Windows PCs.
+Machines other than Macs and Windows PCs.

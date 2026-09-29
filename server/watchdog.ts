@@ -188,6 +188,39 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
   },
 ];
 
+/**
+ * Editor windows (not dialogs: no native buttons) that a fresh editor opens by itself and that are closed without
+ * pressing anything in them, like its title bar's close button. Matched on the whole window title, so Unity's main
+ * window never is. Only one whose closing changes nothing on disk is listed. The machines' watch closes them
+ * (machine/unity.ts); decisions: docs/unity-dialogs.md.
+ */
+export interface ClosableWindow {
+  id: string;
+  title: RegExp;
+  advice: string;
+}
+
+export const CLOSABLE_WINDOWS: ClosableWindow[] = [
+  {
+    id: 'fmod-setup-wizard',
+    // Assets/Plugins/FMOD/src/Editor/SetupWizard.cs: SetupWizardWindow.Startup() opens it at every editor start while
+    // the FMOD settings' HideSetupWizard is off (GetWindow(..., "FMOD Setup Wizard").ShowUtility()). Its window has no
+    // OnDisable/OnDestroy, so closing it writes nothing; only its own buttons change settings.
+    title: /^FMOD Setup Wizard$/,
+    advice: 'FMOD opens its Setup Wizard at every editor start while its settings say so; closing the window changes nothing (it comes back at the next start).',
+  },
+];
+
+/** The windows among an editor's that CLOSABLE_WINDOWS lists (as a Dialog: `closable` set, no buttons). */
+export function findClosable(windows: EditorWindow[]): (Dialog & { closable: ClosableWindow })[] {
+  const out: (Dialog & { closable: ClosableWindow })[] = [];
+  for (const w of windows) {
+    const c = CLOSABLE_WINDOWS.find((k) => k.title.test(w.title.trim()));
+    if (c) out.push({ hwnd: w.hwnd, pid: w.pid, title: w.title.trim(), text: '', buttons: [], closable: c });
+  }
+  return out;
+}
+
 /** Windows that hold no one up: Unity's own main window, splash and progress windows. */
 function isDialogLike(w: EditorWindow): boolean {
   if (w.class !== '#32770' && !w.dialog) return false;
@@ -264,16 +297,24 @@ export function decide(
     if (a.restartAfter && lately >= a.restartAfter) {
       return { restart: true, why: `"${d.title || 'the dialog'}" came back ${lately + 1} times within ${DISMISS_LIMIT.windowMs / 60_000} minutes; pressing ${a.button} is not fixing it` };
     }
-    if (ago.some((ms) => ms < ALWAYS_LIMIT.minGapMs)) {
-      return { report: true, repeated: true, why: `it came back within ${ALWAYS_LIMIT.minGapMs / 1000} s of being dismissed (a loop)` };
-    }
-    if (ago.filter((ms) => ms < 3_600_000).length >= ALWAYS_LIMIT.perHour) {
-      return { report: true, repeated: true, why: `it was dismissed ${ALWAYS_LIMIT.perHour} times within an hour (a loop)` };
-    }
-    return { click: button };
+    const loop = alwaysLoop(ago);
+    return loop ? { report: true, repeated: true, why: loop } : { click: button };
   }
   if (ago.filter((ms) => ms < DISMISS_LIMIT.windowMs).length >= DISMISS_LIMIT.count) return { report: true, repeated: true };
   return { click: button };
+}
+
+/** Why an always-answered window coming back after these many ms since each earlier answer is a loop, or undefined (ALWAYS_LIMIT). */
+function alwaysLoop(ago: number[]): string | undefined {
+  if (ago.some((ms) => ms < ALWAYS_LIMIT.minGapMs)) return `it came back within ${ALWAYS_LIMIT.minGapMs / 1000} s of being dismissed (a loop)`;
+  if (ago.filter((ms) => ms < 3_600_000).length >= ALWAYS_LIMIT.perHour) return `it was dismissed ${ALWAYS_LIMIT.perHour} times within an hour (a loop)`;
+  return undefined;
+}
+
+/** Whether to close a CLOSABLE_WINDOWS window now: always, unless it keeps coming back (the always-rule limits). */
+export function decideClose(d: Pick<Dialog, 'title'>, recent: { at: string; title: string }[] = [], nowMs = Date.now()): { close: true } | { report: true; why: string } {
+  const loop = alwaysLoop(recent.filter((r) => r.title === d.title).map((r) => nowMs - Date.parse(r.at)));
+  return loop ? { report: true, why: loop } : { close: true };
 }
 
 /** One line for the card and the status tool: "<title>: <text>", clipped. */
@@ -311,6 +352,20 @@ export async function listWindows(pids: number[]): Promise<EditorWindow[]> {
 export async function sceneFilesUnchanged(dir: string): Promise<boolean> {
   const r = await run('git', ['-C', dir, 'status', '--porcelain', '--', '*.unity'], { timeoutMs: 30_000 });
   return r.code === 0 && r.stdout.trim() === '';
+}
+
+/**
+ * Close a window that belongs to `pid` (or a process it started) and still has the title `title`, as its title bar's
+ * close button does (WM_CLOSE). Returns whether it closed.
+ */
+export async function closeWindow(pid: number, hwnd: number, title: string): Promise<boolean> {
+  const r = await ps(['-Pids', String(pid), '-Hwnd', String(hwnd), '-Close', '-Title', title]);
+  if (r.code !== 0) throw new Error(`could not close "${title}": ${r.stderr.trim().split('\n').slice(-2).join(' ')}`);
+  try {
+    return !(JSON.parse(r.stdout.trim()) as { stillOpen: boolean }).stillOpen;
+  } catch {
+    return false;
+  }
 }
 
 /** Press a button in a window that belongs to `pid` (or a process it started). Returns whether the window closed. */

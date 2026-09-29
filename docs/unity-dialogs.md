@@ -121,6 +121,19 @@ sent once as a `[unity]` notice to the orchestrator. An editor waiting on a dial
 hung. `unity status` on the machine lists the open dialogs, the answers of the last hour, and a missing
 permission.
 
+Windows machines run the same watch: the daemon reads the editor's windows with `scripts/unity-windows.ps1`
+(deployed with the daemon's code) and presses buttons with it, as the host does, with the main window title from
+Unity's own `UnityContainerWndClass` window. Each automatic answer is logged in the daemon log
+(`unity <project>: dismissed "<title>" with "<button>"`), like the host's `unity <sandbox>: dismissed ...` lines.
+
+Machines also close a few editor windows that are not dialogs (`CLOSABLE_WINDOWS` in `server/watchdog.ts`),
+matched on their whole title, as their title bar's close button does (`WM_CLOSE` on Windows, the window's
+`AXCloseButton` on a Mac), after checking the title again:
+
+| Window | Where it comes from | Decision |
+|---|---|---|
+| "FMOD Setup Wizard" | `Assets/Plugins/FMOD/src/Editor/SetupWizard.cs` `SetupWizardWindow.Startup()`, at every editor start while the FMOD settings' `HideSetupWizard` is off (a utility window) | **Auto: close.** The window has no `OnDisable`/`OnDestroy`, so closing it writes nothing; only its own buttons change settings. It comes back at the next start and is closed again. Logged as `closed "FMOD Setup Wizard"`; the always-rule limits apply (back within 20 s, or 30 times an hour, is reported instead). |
+
 macOS privacy settings have to allow this once per Mac. Code cannot grant them, and the daemon does not
 try:
 

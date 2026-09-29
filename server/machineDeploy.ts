@@ -200,7 +200,7 @@ export const macDirArg = (appDir?: string) => (appDir ? sq(appDir) : '~/.ff-fact
 /** Stream `git archive` of this checkout's HEAD into app.new in the daemon's folder on the host. */
 function upload(root: string, host: string, appDir?: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const git = spawn('git', ['-C', root, 'archive', '--format=tar', 'HEAD', 'server', 'shared', 'machine', 'package.json', 'package-lock.json'], { windowsHide: true });
+    const git = spawn('git', ['-C', root, 'archive', '--format=tar', 'HEAD', 'server', 'shared', 'machine', 'scripts/unity-windows.ps1', 'package.json', 'package-lock.json'], { windowsHide: true });
     const d = macDirArg(appDir);
     const ssh = spawn('ssh', [...SSH, host, `rm -rf ${d}/app.new && mkdir -p ${d}/app.new ${d}/logs && tar -xf - -C ${d}/app.new`], { windowsHide: true });
     let err = '';
@@ -407,7 +407,7 @@ export function daemonConfig(o: { portalUrl: string; id: string; token: string; 
 /** A git archive of this checkout's committed code as a base64 .tar.gz (the Windows upload's payload). */
 export function bundle(root: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const git = spawn('git', ['-C', root, 'archive', '--format=tar.gz', 'HEAD', 'server', 'shared', 'machine', 'package.json', 'package-lock.json'], { windowsHide: true });
+    const git = spawn('git', ['-C', root, 'archive', '--format=tar.gz', 'HEAD', 'server', 'shared', 'machine', 'scripts/unity-windows.ps1', 'package.json', 'package-lock.json'], { windowsHide: true });
     const chunks: Buffer[] = [];
     let err = '';
     git.stdout.on('data', (d: Buffer) => chunks.push(d));

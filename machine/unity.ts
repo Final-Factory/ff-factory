@@ -4,16 +4,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, type HangThresholds } from '../server/unityHang.ts';
-import { decide, describeDialog, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
-import { accessibilityStep, axPrompt, axTrusted, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
+import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
+import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
 /**
  * The Unity editor of a machine's clone (docs/unity-lifecycle.md), managed by the daemon on the machine: status,
  * start, stop (graceful, then forced) and restart, for the orchestrator and machine workers (the "unity" tool),
  * and an automatic restart of a hung or crashed editor (MacUnityWatch). It only ever touches the editor that
  * has this clone open (and the processes that editor started), never git and never another project's editor.
- * Written for the Macs first (hence the names); a Windows PC (`platform` win32) gets the same, minus the
- * macOS dialog watch and App Nap.
+ * Written for the Macs first (hence the names); a Windows PC (`platform` win32) gets the same, minus App Nap (its
+ * dialog watch reads windows through scripts/unity-windows.ps1, as the host's does).
  */
 
 export type UnityPlatform = 'darwin' | 'win32';
@@ -454,9 +454,14 @@ export interface WatchDeps {
   now(): number;
   /** The main display is asleep (pmset displaysleepnow, the lid, the screensaver's sleep): App Nap then throttles everything. */
   displayAsleep(): Promise<boolean>;
-  /** The editor's dialogs and main window title (machine/macDialogs.ts); throws osascript's error. */
-  listDialogs(pid: number): Promise<{ dialogs: Dialog[]; mainTitle?: string; windows?: number }>;
+  /**
+   * The editor's dialogs, the windows to close (server/watchdog.ts CLOSABLE_WINDOWS) and its main window title
+   * (machine/macDialogs.ts on a Mac, scripts/unity-windows.ps1 on Windows); throws the probe's error.
+   */
+  listDialogs(pid: number): Promise<{ dialogs: Dialog[]; closable?: Dialog[]; mainTitle?: string; windows?: number }>;
   pressButton(pid: number, d: Dialog, button: string): Promise<boolean>;
+  /** Close a window listDialogs found closable, as its close button does. Returns whether it closed. */
+  closeWindow?(pid: number, d: Dialog): Promise<boolean>;
   /** No *.unity file in the clone has uncommitted changes (git status, read-only). */
   sceneFilesClean(): Promise<boolean>;
   /** The node binary the privacy settings must name. */
@@ -477,6 +482,17 @@ export interface WatchDeps {
 export const CRASH_MARKERS = /Crash!!!|Received signal SIG(SEGV|BUS|ABRT|ILL|FPE)|Native Crash Reporting|Obtained \d+ stack frames|=+ OUTPUTTING STACK TRACE =+/;
 
 export const MAC_EDITOR_LOG = path.join(os.homedir(), 'Library', 'Logs', 'Unity', 'Editor.log');
+
+/**
+ * An editor's dialogs and windows to close on Windows (scripts/unity-windows.ps1, as the host's watchdog reads them),
+ * and its main window title: Unity's own window (UnityContainerWndClass) whose title names Unity.
+ */
+export async function listWinDialogs(pid: number): Promise<{ dialogs: Dialog[]; closable: Dialog[]; mainTitle?: string; windows: number }> {
+  const wins = await listWindows([pid]);
+  const own = wins.filter((w) => w.pid === pid && w.class === 'UnityContainerWndClass');
+  const main = own.find((w) => /\bUnity\b/.test(w.title)) ?? own[0];
+  return { dialogs: findDialogs(wins), closable: findClosable(wins), mainTitle: main?.title, windows: wins.length };
+}
 
 /** The editor log Unity writes by default: ~/Library/Logs/Unity on a Mac, %LOCALAPPDATA%\Unity\Editor on Windows. */
 export function editorLogPath(platform: UnityPlatform, env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
@@ -563,9 +579,10 @@ export class MacUnityWatch {
         const r = await run('osascript', ['-l', 'JavaScript', '-e', 'ObjC.import("CoreGraphics"); $.CGDisplayIsAsleep($.CGMainDisplayID())'], { timeoutMs: 15_000 });
         return r.code === 0 && /^(true|1)$/.test(r.stdout.trim());
       },
-      // The dialog watch reads windows through macOS's System Events; Windows machines do without it for now.
-      listDialogs: (pid) => (mac ? listMacDialogs(pid) : Promise.resolve({ dialogs: [] })),
-      pressButton: (pid, d, button) => (mac ? pressMacButton(pid, d, button) : Promise.resolve(false)),
+      // The dialog watch reads windows through macOS's System Events on a Mac, scripts/unity-windows.ps1 on Windows.
+      listDialogs: (pid) => (mac ? listMacDialogs(pid) : listWinDialogs(pid)),
+      pressButton: (pid, d, button) => (mac ? pressMacButton(pid, d, button) : pressButton(pid, d.hwnd, button)),
+      closeWindow: (pid, d) => (mac ? closeMacWindow(pid, d) : closeWindow(pid, d.hwnd, d.title)),
       sceneFilesClean: () => sceneFilesUnchanged(u.repo),
       nodePath: () => nodeBinary(),
       sessionState: () => sessionState(),
@@ -575,6 +592,11 @@ export class MacUnityWatch {
       axPrompt: mac ? () => axPrompt() : undefined,
       ...deps,
     };
+  }
+
+  /** The editor's pid at the last look (undefined: none running). */
+  get editorPid(): number | undefined {
+    return this.pid || undefined;
   }
 
   /** A stop or restart asked for through the tool: the editor going away is not a crash. */
@@ -665,7 +687,7 @@ export class MacUnityWatch {
    * look, is reported once. Returns whether a dialog is open (a dialog is never a hang).
    */
   private async dialogs(pid: number, now: number): Promise<boolean> {
-    let seen: { dialogs: Dialog[]; mainTitle?: string; windows?: number };
+    let seen: { dialogs: Dialog[]; closable?: Dialog[]; mainTitle?: string; windows?: number };
     try {
       seen = await this.d.listDialogs(pid);
       // Only a look that saw the editor's windows proves anything (none: System Events did not know the process).
@@ -680,8 +702,36 @@ export class MacUnityWatch {
     const key = (d: Dialog) => `${d.title}\n${d.text}`;
     const before = new Map(this.open.map((o) => [key(o.d), o]));
     const open: typeof this.open = [];
+    // Windows to close (the FMOD Setup Wizard): closed like their title bar's X, unless they keep coming back.
+    const closable = seen.closable ?? [];
+    for (const d of closable) {
+      const k = key(d);
+      const prev = before.get(k);
+      const v = decideClose(d, this.dismissed, now);
+      if ('close' in v && this.d.closeWindow) {
+        let closed = false;
+        try {
+          closed = await this.d.closeWindow(pid, d);
+        } catch (e) {
+          await this.cannotSee((e as Error).message, now, "close Unity's windows");
+        }
+        if (closed) {
+          this.answered(d, 'Close', now);
+          this.reported.delete(k);
+          continue;
+        }
+      }
+      const why = 'why' in v ? v.why : 'closing it did not work';
+      open.push({ d, state: 'blocked', since: prev?.since ?? now, why });
+      if (!this.reported.has(k)) {
+        this.reported.add(k);
+        const advice = (d as Dialog & { closable?: { advice: string } }).closable?.advice;
+        this.report(`Unity on this machine shows "${d.title}" and it was left open: ${why}.${advice ? ` ${advice}` : ''}`, false);
+      }
+    }
     let sceneFilesClean: boolean | undefined;
     for (const d of seen.dialogs) {
+      if (closable.some((c) => c.hwnd === d.hwnd)) continue;
       const k = key(d);
       const prev = before.get(k);
       const a = d.known?.action;
@@ -708,7 +758,7 @@ export class MacUnityWatch {
           await this.cannotSee((e as Error).message, now, "press Unity's buttons");
         }
         if (pressed) {
-          this.dismissed = [...this.dismissed, { at: new Date(now).toISOString(), title: d.title, button: v.click }].slice(-40);
+          this.answered(d, v.click, now);
           this.reported.delete(k);
           open.push({ d, state: 'pressed', since: prev?.since ?? now });
           continue;
@@ -727,6 +777,13 @@ export class MacUnityWatch {
     for (const k of [...this.reported]) if (!open.some((o) => key(o.d) === k)) this.reported.delete(k);
     this.open = open.filter((o) => o.state !== 'pressed');
     return this.open.length > 0;
+  }
+
+  /** A dialog answered, or a window closed, automatically: kept for the rate limits and the status, and logged. */
+  private answered(d: Dialog, button: string, now: number) {
+    this.dismissed = [...this.dismissed, { at: new Date(now).toISOString(), title: d.title, button }].slice(-40);
+    const what = d.buttons.length ? `dismissed "${d.title}" with "${button}"` : `closed "${d.title}"`;
+    this.d.log?.(`unity ${path.basename(this.u.repo)}: ${what}`);
   }
 
   /**

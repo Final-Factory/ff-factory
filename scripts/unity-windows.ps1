@@ -3,7 +3,9 @@
 # a modal dialog. With -Click it presses one button in one of those windows instead (auto-dismiss).
 #   unity-windows.ps1 -Pids 1234,5678
 #   unity-windows.ps1 -Pids 1234 -Hwnd 2885298 -Click 'Ignore'
-# Read-only unless -Click is given, and -Click only touches a window owned by one of -Pids.
+#   unity-windows.ps1 -Pids 1234 -Hwnd 2885298 -Close -Title 'FMOD Setup Wizard'
+# Read-only unless -Click or -Close is given, and those only touch a window owned by one of -Pids. -Close sends
+# WM_CLOSE (what the title bar's close button does) to a window that still has exactly the title -Title.
 # Unity's dialogs are plain Win32 dialogs (class #32770): the message is a read-only Edit control, which
 # GetWindowText cannot read across processes, so text is fetched with WM_GETTEXT. UI Automation reports
 # those buttons as panes, so it is only a fallback for windows with no Win32 children (task dialogs).
@@ -11,7 +13,9 @@ param(
   # Comma-separated (powershell -File passes a list as one string).
   [Parameter(Mandatory = $true)][string]$Pids,
   [long]$Hwnd = 0,
-  [string]$Click = ''
+  [string]$Click = '',
+  [switch]$Close,
+  [string]$Title = ''
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
@@ -55,6 +59,8 @@ public static class FfsbWin {
   }
   /// BM_CLICK, posted so a dialog that blocks in its handler cannot block us.
   public static void Press(IntPtr button) { PostMessage(button, 0x00F5, IntPtr.Zero, IntPtr.Zero); }
+  /// WM_CLOSE, posted: the window's own close, as its title bar's X.
+  public static void CloseWindow(IntPtr h) { PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero); }
 }
 '@
 
@@ -100,6 +106,16 @@ function Describe([IntPtr]$h) {
     text    = @($texts)
     buttons = @($buttons)
   }
+}
+
+if ($Close) {
+  $h = [IntPtr]$Hwnd
+  if (![FfsbWin]::IsWindow($h) -or !$set.Contains([FfsbWin]::PidOf($h))) { throw "window $Hwnd is gone or does not belong to pids $Pids" }
+  if (!$Title -or [FfsbWin]::TitleOf($h).Trim() -ne $Title) { throw "window $Hwnd is not titled '$Title'" }
+  [FfsbWin]::CloseWindow($h)
+  for ($i = 0; $i -lt 10 -and [FfsbWin]::IsWindow($h) -and [FfsbWin]::IsWindowVisible($h); $i++) { Start-Sleep -Milliseconds 200 }
+  [pscustomobject]@{ closed = $Title; hwnd = $Hwnd; stillOpen = [FfsbWin]::IsWindow($h) -and [FfsbWin]::IsWindowVisible($h) } | ConvertTo-Json -Compress
+  return
 }
 
 if ($Click) {

@@ -1028,8 +1028,10 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
       effort: info.effort ?? this.cfg.worker.effort,
       settingSources: ['user', 'project', 'local'],
       append: this.machineBrief(m),
-      // The Mac's own MCP servers load (its Unity bridge), except the portal's: an agent must not launch agents.
+      // The Mac's own MCP servers load, except the portal's: an agent must not launch agents. Its Unity bridge is the
+      // daemon's, confined to this clone's editor (machine/unityMcp.ts).
       strictMcp: false,
+      unityMcp: true,
       disallowedTools: ['mcp__ffsb'],
       mcp: {
         server: 'machine',
@@ -1107,6 +1109,8 @@ To show the user an image, save it in your worktree (e.g. \`Assets/Screenshots/\
       settingSources: ['user', 'project', 'local'],
       append: this.machineSandboxBrief(m, sb),
       strictMcp: false,
+      // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
+      unityMcp: true,
       disallowedTools: ['mcp__ffsb'],
       mcp: {
         server: 'machine',

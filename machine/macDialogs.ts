@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { run } from '../server/proc.ts';
-import { findDialogs, type Dialog, type EditorWindow } from '../server/watchdog.ts';
+import { findClosable, findDialogs, type Dialog, type EditorWindow } from '../server/watchdog.ts';
 
 /**
  * The dialog watchdog's eyes and hands on a Mac (docs/unity-dialogs.md, "Macs"): Unity's windows and sheets
@@ -81,6 +81,26 @@ function run(argv) {
   if (!bs.length) return JSON.stringify({ clicked: false, why: 'no such button' });
   bs[0].click();
   return JSON.stringify({ clicked: true });
+}`;
+
+/**
+ * Closes one window with its title bar's close button (AXCloseButton), after checking it still has exactly the
+ * expected title. argv: pid, window index, title. Prints {closed, why?}.
+ */
+export const CLOSE_SCRIPT = `
+function run(argv) {
+  var pid = parseInt(argv[0], 10), idx = parseInt(argv[1], 10), title = argv[2] || '';
+  var ps = Application('System Events').processes.whose({ unixId: pid })();
+  if (!ps.length) return JSON.stringify({ closed: false, why: 'the process is gone' });
+  var w = ps[0].windows[idx - 1];
+  var name = '';
+  try { name = String(w.name() || ''); } catch (e) { return JSON.stringify({ closed: false, why: 'the window is gone' }); }
+  if (!title || name.trim() !== title) return JSON.stringify({ closed: false, why: 'the window changed' });
+  var bs = [];
+  try { bs = w.buttons.whose({ subrole: 'AXCloseButton' })(); } catch (e) {}
+  if (!bs.length) return JSON.stringify({ closed: false, why: 'it has no close button' });
+  bs[0].click();
+  return JSON.stringify({ closed: true });
 }`;
 
 const DIALOG_SUBROLES = new Set(['AXDialog', 'AXSystemDialog', 'AXSheet']);
@@ -211,14 +231,25 @@ export function nodeBinary(): string {
   }
 }
 
-/** The dialogs of an editor on this Mac, and its main window's title. Throws with osascript's error text. */
-export async function listMacDialogs(pid: number): Promise<{ dialogs: Dialog[]; mainTitle?: string; windows?: number }> {
+/** The dialogs of an editor on this Mac, the windows to close (findClosable), and its main window's title. Throws with osascript's error text. */
+export async function listMacDialogs(pid: number): Promise<{ dialogs: Dialog[]; closable?: Dialog[]; mainTitle?: string; windows?: number }> {
   if (process.platform !== 'darwin') return { dialogs: [] };
   const r = await run('osascript', ['-l', 'JavaScript', '-e', LIST_SCRIPT, String(pid)], { timeoutMs: 30_000 });
   if (r.code !== 0) throw new Error(r.stderr.trim() || `osascript exited ${r.code}`);
   const { windows, mainTitle } = toEditorWindows(pid, JSON.parse(r.stdout.trim() || '[]') as MacWindow[]);
   // No windows at all: System Events has no such app (not a GUI process), which proves nothing either way.
-  return { dialogs: findDialogs(windows), mainTitle, windows: windows.length };
+  return { dialogs: findDialogs(windows), closable: findClosable(windows), mainTitle, windows: windows.length };
+}
+
+/** Close a window listMacDialogs found closable. Returns whether it was closed. */
+export async function closeMacWindow(pid: number, d: Dialog): Promise<boolean> {
+  const r = await run('osascript', ['-l', 'JavaScript', '-e', CLOSE_SCRIPT, String(pid), String(Math.floor(d.hwnd / 100)), d.title], { timeoutMs: 30_000 });
+  if (r.code !== 0) throw new Error(r.stderr.trim() || `osascript exited ${r.code}`);
+  try {
+    return (JSON.parse(r.stdout.trim()) as { closed: boolean }).closed;
+  } catch {
+    return false;
+  }
 }
 
 /** Press a button of a dialog listMacDialogs found. Returns whether it was pressed. */
