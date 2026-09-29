@@ -13,8 +13,8 @@ import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
 /** One of the user's Macs or Windows PCs (docs/machines.md): its daemon's state, its clone, and its agents. */
 export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: AppState; machine: Machine; sessionId?: string; onClose?: () => void }) {
   const now = useNow();
-  // Standing agents assigned here have their own page; the tabs are the machine's workers.
-  const sessions = m.sessionIds.map((id) => app.sessions.find((s) => s.id === id)).filter((s): s is SessionInfo => !!s && s.kind !== 'standing');
+  // Standing agents assigned here have their own page, and so do its sandboxes; the tabs are the main clone's workers.
+  const sessions = m.sessionIds.map((id) => app.sessions.find((s) => s.id === id)).filter((s): s is SessionInfo => !!s && s.kind !== 'standing' && !s.machineSandbox);
   const selected = sessions.find((s) => s.id === sessionId) ?? sessions[sessions.length - 1];
   const [newAgent, setNewAgent] = useState(false);
   const [label, setLabel] = useState(false);
@@ -23,7 +23,8 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [shotsOpen, setShotsOpen] = useState(false);
   const [switchOpen, setSwitchOpen] = useState(false);
-  const live = sessions.filter((s) => s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission').length;
+  // A redeploy or daemon restart stops every agent there, its sandboxes' too.
+  const live = m.sessionIds.map((id) => app.sessions.find((s) => s.id === id)).filter((s) => s && s.kind !== 'standing' && (s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission')).length;
   const g = m.git;
 
   const redeploy = async () => {
@@ -160,6 +161,17 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
             </button>
           </div>
         </DetailsSection>
+        {(m.sandboxes?.length ?? 0) > 0 && (
+          <DetailsSection title="Sandboxes">
+            <div className="fl-sb-links">
+              {m.sandboxes!.map((sb) => (
+                <button key={sb.id} className="btn btn-ghost btn-sm" onClick={() => navigate({ view: 'msandbox', machineId: m.id, sandboxId: sb.id })} title={`${m.id}/${sb.id} · ${sb.git?.branch ?? sb.branch}`}>
+                  <Icon name="folder" size={13} /> <span className="mono">{sb.id}</span> <span className={isUnused(sb.purpose) ? 'dim' : ''}>{displayName(sb)}</span>
+                </button>
+              ))}
+            </div>
+          </DetailsSection>
+        )}
         {selected && <SessionDetails session={selected} />}
       </DetailsSheet>
 
@@ -170,7 +182,7 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
       ) : (
         <div className="panel-empty">
           <Icon name="bot" size={28} />
-          <p>No agents on this machine yet.</p>
+          <p>No agents in this machine's main clone yet.</p>
           <p className="dim small">They work in the user's main clone here, next to their own uncommitted work.</p>
           <button className="btn btn-primary" disabled={!canAdd} onClick={() => setNewAgent(true)}>
             <Icon name="plus" size={14} /> New agent

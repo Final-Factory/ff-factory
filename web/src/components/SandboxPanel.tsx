@@ -226,7 +226,7 @@ export function SandboxPanel({
       )}
 
       {newAgent && <NewAgentModal app={app} target={{ sandboxId: sandbox.id, name: displayName(sandbox) }} onClose={() => setNewAgent(false)} />}
-      {logOpen && <UnityLogDrawer sandbox={sandbox} onClose={() => setLogOpen(false)} />}
+      {logOpen && <UnityLogDrawer name={displayName(sandbox)} logPath={sandbox.unity.logPath} load={(lines) => api.unityLog(sandbox.id, lines)} onClose={() => setLogOpen(false)} />}
       {shotsOpen && <ScreenshotsDrawer place={{ sandbox: sandbox.id }} title={displayName(sandbox)} onClose={() => setShotsOpen(false)} />}
       {switchOpen && <SwitchBranchModal target={{ sandbox: sandbox.id }} name={nameOf} git={sandbox.git} onClose={() => setSwitchOpen(false)} />}
       {confirmDelete && (
@@ -255,7 +255,8 @@ export function SandboxPanel({
   );
 }
 
-function UnityLogDrawer({ sandbox, onClose }: { sandbox: Sandbox; onClose: () => void }) {
+/** A sandbox editor's log, followed every few seconds: a host sandbox's, or a machine sandbox's through its daemon. */
+export function UnityLogDrawer({ name, logPath, load: fetchLines, onClose }: { name: string; logPath?: string; load: (lines: number) => Promise<{ lines: string[] }>; onClose: () => void }) {
   const [lines, setLines] = useState<string[] | null>(null);
   const [follow, setFollow] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -263,7 +264,7 @@ function UnityLogDrawer({ sandbox, onClose }: { sandbox: Sandbox; onClose: () =>
 
   const load = async () => {
     setLoading(true);
-    const r = await attempt(api.unityLog(sandbox.id, 400));
+    const r = await attempt(fetchLines(400));
     setLoading(false);
     if (r) setLines(r.lines);
   };
@@ -273,13 +274,13 @@ function UnityLogDrawer({ sandbox, onClose }: { sandbox: Sandbox; onClose: () =>
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [sandbox.id]);
+  }, [name]);
 
   useEffect(() => {
     if (!follow) return;
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
-  }, [follow, sandbox.id]);
+  }, [follow, name]);
 
   useEffect(() => {
     if (follow && pre.current) pre.current.scrollTop = pre.current.scrollHeight;
@@ -291,11 +292,11 @@ function UnityLogDrawer({ sandbox, onClose }: { sandbox: Sandbox; onClose: () =>
         <header className="drawer-head">
           <Icon name="log" />
           <span className="ellipsis">
-            Unity log · <span className="accent">{displayName(sandbox)}</span>
+            Unity log · <span className="accent">{name}</span>
           </span>
-          {sandbox.unity.logPath && (
-            <span className="mono dim small ellipsis hide-sm" title={sandbox.unity.logPath}>
-              {sandbox.unity.logPath}
+          {logPath && (
+            <span className="mono dim small ellipsis hide-sm" title={logPath}>
+              {logPath}
             </span>
           )}
           <div className="spacer" />

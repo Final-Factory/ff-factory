@@ -78,6 +78,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 const enc = encodeURIComponent;
 
+/** A host sandbox, a machine's main clone, or a machine sandbox (machine and sandbox). */
+export type BranchTarget = { sandbox: string; machine?: string } | { machine: string; sandbox?: string };
+
 export const api = {
   login: (username: string, password: string) => request<{ username: string }>('POST', '/api/login', { username, password }),
   logout: () => request<unknown>('POST', '/api/logout'),
@@ -101,8 +104,12 @@ export const api = {
   pushPrefs: (endpoint: string, prefs: Partial<NotifyPrefs>) => request<{ prefs: NotifyPrefs }>('POST', '/api/push/prefs', { endpoint, prefs }),
   pushUnsubscribe: (endpoint: string) => request<unknown>('POST', '/api/push/unsubscribe', { endpoint }),
   pushTest: (endpoint?: string) => request<{ delivered: number }>('POST', '/api/push/test', { endpoint }),
-  switchBranch: (target: { sandbox: string } | { machine: string }, branch: string, createFrom?: string) =>
-    request<{ note: string }>('POST', `/api/${'sandbox' in target ? 'sandboxes' : 'machines'}/${enc('sandbox' in target ? target.sandbox : target.machine)}/switch-branch`, { branch, createFrom }),
+  switchBranch: (target: BranchTarget, branch: string, createFrom?: string) =>
+    request<{ note: string }>(
+      'POST',
+      `${target.machine && target.sandbox ? `/api/machines/${enc(target.machine)}/sandboxes/${enc(target.sandbox)}` : target.machine ? `/api/machines/${enc(target.machine)}` : `/api/sandboxes/${enc(target.sandbox!)}`}/switch-branch`,
+      { branch, createFrom },
+    ),
   setSettings: (patch: Partial<AppSettings>) => request<AppSettings>('POST', '/api/settings', patch),
   search: (q: { q: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string }) =>
     request<{ hits: SearchHit[]; scanned: number; ms: number }>('GET', `/api/search?${new URLSearchParams(Object.entries(q).filter(([, v]) => v) as [string, string][])}`),
@@ -129,6 +136,10 @@ export const api = {
   machineDaemon: (id: string, action: 'start' | 'stop' | 'restart', force = false) => request<{ note: string }>('POST', `/api/machines/${enc(id)}/daemon`, { action, force }),
   labelMachine: (id: string, purpose: string) => request<Machine>('POST', `/api/machines/${enc(id)}/label`, { purpose }),
   removeMachine: (id: string) => request<{ note: string }>('DELETE', `/api/machines/${enc(id)}`),
+  machineSandboxUnity: (machine: string, sandbox: string, action: 'start' | 'stop') =>
+    request<{ note: string }>('POST', `/api/machines/${enc(machine)}/sandboxes/${enc(sandbox)}/unity`, { action }),
+  machineSandboxLog: (machine: string, sandbox: string, lines = 200) =>
+    request<{ lines: string[] }>('GET', `/api/machines/${enc(machine)}/sandboxes/${enc(sandbox)}/unity-log?lines=${lines}`),
   createStanding: (req: StandingAgentInput) => request<StandingAgent>('POST', '/api/standing', req),
   updateStanding: (id: string, patch: Partial<StandingAgentInput>) => request<StandingAgent>('POST', `/api/standing/${enc(id)}`, patch),
   deleteStanding: (id: string) => request<unknown>('DELETE', `/api/standing/${enc(id)}`),

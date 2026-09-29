@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { GitStatus } from '../../../shared/types';
-import { api } from '../api';
+import { api, type BranchTarget } from '../api';
 import { toast, toastError } from '../store';
 import { fmtRelative, useNow } from '../util';
 import { CopyButton, Icon, Modal } from './ui';
@@ -54,7 +54,7 @@ export function GitFacts({ git }: { git?: GitStatus }) {
 }
 
 /** Switch a sandbox's or machine's branch (the switch_branch tool): the server refuses, with a reason, when it is not safe. */
-export function SwitchBranchModal({ target, name, git, onClose }: { target: { sandbox: string } | { machine: string }; name: string; git?: GitStatus; onClose: () => void }) {
+export function SwitchBranchModal({ target, name, git, onClose }: { target: BranchTarget; name: string; git?: GitStatus; onClose: () => void }) {
   const [branch, setBranch] = useState('');
   const [from, setFrom] = useState('');
   const [busy, setBusy] = useState(false);

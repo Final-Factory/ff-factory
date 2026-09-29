@@ -13,6 +13,8 @@ import { StandingPanel } from './components/StandingPanel';
 import { AddMachineModal, MachinePanel } from './components/MachinePanel';
 import { ProviderPanel } from './components/ProviderPanel';
 import { MaxPanel } from './components/MaxPanel';
+import { MachineSandboxPanel } from './components/MachineSandboxPanel';
+import { OverviewBoard } from './components/Fleet';
 import { Toasts } from './components/Toasts';
 import { Lightbox } from './components/Images';
 import { SearchView } from './components/SearchView';
@@ -225,6 +227,28 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
     }
     return { layout: 'single', title: displayName(m), node: panel };
   }
+  if (route.view === 'msandbox') {
+    const m = app.machines.find((x) => x.id === route.machineId);
+    const sb = m?.sandboxes?.find((x) => x.id === route.sandboxId);
+    if (!m || !sb) return { node: <Missing what="sandbox" />, layout: 'single', title: 'Not found' };
+    const panel = <MachineSandboxPanel app={app} machine={m} sandbox={sb} sessionId={route.sessionId} onClose={() => navigate({ view: 'home' })} />;
+    if (wide) {
+      return {
+        layout: 'split',
+        title: displayName(sb),
+        node: (
+          <>
+            <OrchestratorView session={orch} compact />
+            {panel}
+          </>
+        ),
+      };
+    }
+    return { layout: 'single', title: displayName(sb), node: panel };
+  }
+  if (route.view === 'overview') {
+    return { layout: 'single', title: 'Overview', node: <OverviewBoard app={app} /> };
+  }
   if (route.view === 'max') {
     if (!app.max) return { node: <Missing what="page" />, layout: 'single', title: 'Not found' };
     const panel = <MaxPanel app={app} max={app.max} tab={route.tab} onClose={() => navigate({ view: 'home' })} />;
@@ -294,7 +318,9 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
             navigate(
               s.sandboxId
                 ? { view: 'sandbox', sandboxId: s.sandboxId, sessionId: s.id }
-                : s.machineId && !s.standingId
+                : s.machineId && s.machineSandbox
+                  ? { view: 'msandbox', machineId: s.machineId, sandboxId: s.machineSandbox, sessionId: s.id }
+                  : s.machineId && !s.standingId
                   ? { view: 'machine', machineId: s.machineId, sessionId: s.id }
                   : s.standingId
                   ? { view: 'agent', agentId: s.standingId, tab: 'conversation' }

@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Every computer at a glance.** The sidebar groups sandboxes and agents by computer: BEAST, then each machine,
+  each a collapsible group (remembered per browser) whose header has its CPU, RAM, GPU and disk and its sandbox and
+  editor counts ("2/3 sandboxes · 1/2 editors"). Under it, one row per sandbox with its label, branch, Unity state and
+  a **FREE** badge, its live agents (title, busy or idle, time since last activity; stopped ones as a count), and a
+  machine's main-clone agents. A new **Overview** page (`#/overview`) shows the same as one card per computer. Machine
+  sandboxes get their own page (`#/machine/lothdesktop/sandbox/sb1`): agents as tabs, the editor with start/stop and
+  its log, git state and a branch switch, through new `/api/machines/<id>/sandboxes/<sb>/…` routes. The machine page
+  now tabs only its main-clone agents and links its sandboxes.
 - **Machine sandboxes** (docs/machines.md, "Machine sandboxes"). A Mac or Windows PC can now hold a pool of
   sandboxes like the host's: git worktrees of its main clone in its `sandbox_root`, each on its own branch,
   with a warm Library copied from the main clone (or another sandbox) and its own Unity editor, which the
