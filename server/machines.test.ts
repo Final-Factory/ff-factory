@@ -880,3 +880,38 @@ esac
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('machine: agents finished days ago and stopped again and again are not resumed when the daemon comes back after being offline (m3, 4 agents, 2026-09-29)', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  RESUME_DELAY_MS.value = 50;
+  t.after(() => (RESUME_DELAY_MS.value = 3000));
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  const d1 = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const users = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').length;
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+  // As on m3: finished days ago, the daemon (restarted since) does not hold them, the portal's mark never cleared,
+  // refused resumes (05:43, 10:44) moved their activity time, and stop_agent was called on each, several times.
+  const old = [0, 1, 2, 3].map((n) => {
+    const h = mm.createSession('mx', { kind: 'worker', title: `old ${n}`, permissionMode: 'default' });
+    Object.assign(h.info, { status: 'error', statusDetail: "already 3 agents running in this machine's main clone", turnOpenSince: hoursAgo(60), lastActivityAt: hoursAgo(4) });
+    store.putSession(h.info);
+    for (let i = 0; i < 3; i++) sessions.get(h.info.id).stop();
+    return h;
+  });
+  for (const h of old) {
+    assert.equal(h.info.stoppedOnPurpose, true);
+    assert.equal(h.info.turnOpenSince, undefined, 'stop_agent clears the mark the portal holds, not only the daemon');
+  }
+  // The daemon goes (a failed redeploy), the machine is offline a while, the offline watch redeploys it, it is back.
+  d1.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  assert.equal((mm as unknown as { cutOff: Map<string, unknown> }).cutOff.has('mx'), false, 'nothing noted as cut off');
+  daemon();
+  await until('back', () => mm.isOnline('mx'));
+  await new Promise((r) => setTimeout(r, 300));
+  for (const h of old) assert.equal(users(h.info.id), 0, `${h.info.title} is not resumed`);
+  assert.ok(!reports.some((r) => /resume/.test(r)), reports.join('\n'));
+});
