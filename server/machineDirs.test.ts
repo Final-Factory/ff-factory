@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import * as win from './machineDeployWin.ts';
 import { checkDirs, daemonConfig, macDirArg, plist } from './machineDeploy.ts';
 import { daemonLogPath, dirOptions, machineDir, machineForPath } from './machines.ts';
@@ -42,7 +43,7 @@ test('machine dirs: daemon.json carries the folders, and leaves unset ones out',
   assert.ok(!('unityPath' in c));
   assert.deepEqual(Object.keys(JSON.parse(daemonConfig(base))).sort(), ['id', 'maxSessions', 'portalUrl', 'repoPath', 'token']);
   assert.equal(appDirOfConfig({ appDir: APP }), APP);
-  assert.equal(appDirOfConfig({}, '/Users/b'), '/Users/b/.ff-factory');
+  assert.equal(appDirOfConfig({}, '/Users/b'), path.join('/Users/b', '.ff-factory'));
   assert.deepEqual(tempEnv('D:\\tmp'), { TMP: 'D:\\tmp', TEMP: 'D:\\tmp', TMPDIR: 'D:\\tmp' });
   assert.deepEqual(tempEnv(undefined), {});
 });
