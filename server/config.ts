@@ -38,6 +38,11 @@ export interface Config {
    */
   usagePollMinutes: number;
   /**
+   * Filing caps of the work ledger's automated sources (docs/orchestrators.md): requests an hour and a day per
+   * requester, default 10 and 40 each. People filing through their own orchestrator are never capped.
+   */
+  workLimits?: Partial<Record<'standing' | 'intake', Partial<{ perHour: number; perDay: number }>>>;
+  /**
    * Repos whose history is public, and the identity agents commit to them with. The guard refuses a push
    * to one of `repos` (default: this app's own origin) when a commit in it has an author or committer
    * email that is neither a GitHub noreply address nor `email`. Example:

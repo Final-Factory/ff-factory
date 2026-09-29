@@ -1,5 +1,5 @@
 // The work ledger's rules (docs/orchestrators.md): the dedupe keys of a request, which work in flight or recently done
-// it may repeat, the status changes allowed, each person's filing limits, and the lines orchestrators read. Pure: the
+// it may repeat, the status changes allowed, the automated sources' filing limits, and the lines orchestrators read. Pure: the
 // items live in the Store (data/work.json); server/orchestrators.ts does the wiring.
 import { WORK_OPEN, type Requester, type WorkItem, type WorkOverlap, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 
@@ -7,8 +7,24 @@ import { WORK_OPEN, type Requester, type WorkItem, type WorkOverlap, type WorkPr
 export const STRONG = 0.8;
 /** Overlaps below this are not listed. */
 const LISTED = 0.35;
-/** Filings per person. Repeats of an open request are free. */
-export const LIMITS = { perHour: 10, perDay: 40 };
+/** Filing caps (requests an hour and a day per requester). Repeats of an open request are free. */
+export interface FilingLimits {
+  perHour: number;
+  perDay: number;
+}
+/**
+ * Who files a request: a person, through their own orchestrator, or an automated source (a standing agent, the
+ * Discord/FFBox intake). People are never capped (Ben, 2026-09-29); the automated sources are, per source.
+ */
+export type WorkSource = 'person' | 'standing' | 'intake';
+/** The automated sources' caps, unless config workLimits.<source> says otherwise. */
+export const LIMITS: FilingLimits = { perHour: 10, perDay: 40 };
+
+/** The caps for a source (config workLimits overrides the automated ones field by field), or undefined: none. */
+export function limitsFor(source: WorkSource, overrides?: Partial<Record<Exclude<WorkSource, 'person'>, Partial<FilingLimits>>>): FilingLimits | undefined {
+  if (source === 'person') return undefined;
+  return { ...LIMITS, ...overrides?.[source] };
+}
 /** Questions the dispatcher may ask about one request. */
 export const MAX_ASKS = 3;
 /** Closed requests kept in data/work.json (open ones are always kept). */
@@ -147,8 +163,9 @@ export const overlapLine = (o: WorkOverlap) => `${o.kind === 'work' ? o.ref : o.
 
 // ---------------------------------------------------------------- limits
 
-/** Why `who` may not file another request now (their filings in the last hour and day), or undefined. */
-export function limitProblem(items: Iterable<WorkItem>, who: Requester, now: number): string | undefined {
+/** Why `who` may not file another request now (their filings in the last hour and day, against `limits`), or undefined. */
+export function limitProblem(items: Iterable<WorkItem>, who: Requester, now: number, limits: FilingLimits | undefined): string | undefined {
+  if (!limits) return undefined;
   let hour = 0;
   let day = 0;
   for (const w of items) {
@@ -157,8 +174,8 @@ export function limitProblem(items: Iterable<WorkItem>, who: Requester, now: num
     if (age < 3_600_000) hour++;
     if (age < 86_400_000) day++;
   }
-  if (hour >= LIMITS.perHour) return `${who.displayName} already filed ${LIMITS.perHour} requests in the last hour; wait, or add to an open one with update_work`;
-  if (day >= LIMITS.perDay) return `${who.displayName} already filed ${LIMITS.perDay} requests today; wait, or add to an open one with update_work`;
+  if (hour >= limits.perHour) return `${who.displayName} already filed ${limits.perHour} requests in the last hour; wait, or add to an open one with update_work`;
+  if (day >= limits.perDay) return `${who.displayName} already filed ${limits.perDay} requests today; wait, or add to an open one with update_work`;
   return undefined;
 }
 

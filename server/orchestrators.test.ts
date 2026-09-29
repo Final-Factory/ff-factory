@@ -177,6 +177,17 @@ test('budgets and limits: a few filings per message of the person; a person’s 
   assert.equal((await call(ben, 'request_work', { title: 'One more thing', brief: 'x' })).isError, false);
 });
 
+test('no hourly or daily cap on a person: past the old 10 an hour, each message of theirs files 3 more', async (t) => {
+  const { o, store, chat, call } = setup(t);
+  const ben = chat(BEN).info;
+  for (let i = 0; i < 15; i++) {
+    if (i % FILINGS_PER_MESSAGE === 0) o.personWrote(ben.id);
+    const r = await call(ben, 'request_work', { title: `Separate task number ${i}`, brief: `do thing ${i}` });
+    assert.equal(r.isError, false, `filing ${i + 1}: ${r.text}`);
+  }
+  assert.equal([...store.work.values()].filter((w) => w.requestedBy.userId === 'ben').length, 15);
+});
+
 test("routing: a worker's update goes to its requesters' own chats, never the dispatcher's or anyone else's", async (t) => {
   const { store, sessions, dispatcher, chat, call, heard } = setup(t);
   const ben = chat(BEN).info;
