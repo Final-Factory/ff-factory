@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { run } from './proc.ts';
 import * as win from './machineDeployWin.ts';
 import { platformNoun, type MachinePlatform } from '../shared/types.ts';
@@ -41,21 +44,25 @@ export interface DeployResult {
 }
 
 /** Run a bash script on `host` (fed on stdin, so no quoting through ssh). */
-export function sshScript(host: string, script: string, opts: { timeoutMs?: number; stdin?: NodeJS.ReadableStream } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+export function sshScript(host: string, script: string, opts: { timeoutMs?: number; stdin?: NodeJS.ReadableStream } = {}): Promise<win.RemoteResult> {
   return new Promise((resolve) => {
     const child = spawn('ssh', [...SSH, host, 'bash', '-s'], { windowsHide: true });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
-    const timer = setTimeout(() => child.kill(), opts.timeoutMs ?? 120_000);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, opts.timeoutMs ?? 120_000);
     child.on('error', (e) => {
       clearTimeout(timer);
       resolve({ code: -1, stdout, stderr: stderr || e.message });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout, stderr });
+      resolve({ code: code ?? -1, stdout, stderr, timedOut });
     });
     child.stdin.end(script);
   });
@@ -63,7 +70,7 @@ export function sshScript(host: string, script: string, opts: { timeoutMs?: numb
 
 async function must(host: string, what: string, script: string, timeoutMs?: number) {
   const r = await sshScript(host, script, { timeoutMs });
-  if (r.code !== 0) throw new Error(`${what} on ${host} failed (${r.code}): ${(r.stderr || r.stdout).trim().split('\n').slice(-6).join(' | ')}`);
+  if (r.code !== 0) throw new Error(`${what} on ${host} failed: ${win.failureDetail(r)}`);
   return r.stdout;
 }
 
@@ -222,6 +229,8 @@ export interface DeployOptions {
   /** The daemon's folder of the previous deploy, when it moves (Windows stops the daemon running from there). */
   previousAppDir?: string;
   step?: (what: string) => void;
+  /** Called as soon as the OS is known, so a deploy that fails later does not go on showing a Mac. */
+  onPlatform?: (platform: MachinePlatform) => void;
 }
 
 /** A machine's folder options, as add_machine takes them and daemon.json keeps them. */
@@ -241,12 +250,13 @@ export function checkDirs(dirs: MachineDirs | undefined, platform: MachinePlatfo
 }
 
 /**
- * What `uname -s` said over ssh, as a platform. A Windows PC answers only when Git's or MSYS's Unix tools are
- * on its PATH (MINGW64_NT-10.0-26100, MSYS_NT-...); otherwise its shell fails the command (undefined).
+ * What `uname -s` said over ssh, as a platform. A Windows PC answers only when Git's, MSYS's or Cygwin's Unix
+ * tools are on its PATH (MINGW64_NT-10.0-26100, MSYS_NT-..., CYGWIN_NT-...: any *_NT-*); otherwise its shell
+ * fails the command (undefined). Only an exact "Darwin" is a Mac.
  */
 export function platformOfUname(out: string, code: number): MachinePlatform | 'other' | undefined {
   const s = out.trim().split('\n').pop()?.trim() ?? '';
-  if (/^(MINGW|MSYS|CYGWIN)/i.test(s)) return 'win32';
+  if (/^(MINGW|MSYS|CYGWIN)|_NT-\d/i.test(s)) return 'win32';
   if (code !== 0) return undefined;
   if (/^Darwin$/i.test(s)) return 'darwin';
   return s ? 'other' : undefined;
@@ -259,18 +269,20 @@ export function platformOfUname(out: string, code: number): MachinePlatform | 'o
  */
 export async function detectPlatform(host: string): Promise<MachinePlatform> {
   const r = await run('ssh', [...SSH, host, 'uname', '-s'], { timeoutMs: 30_000 });
-  if (r.code === 255) throw new Error(`ssh ${host} failed: ${(r.stderr || r.stdout).trim().split('\n').slice(-2).join(' | ')}`);
+  if (r.code === 255) throw new Error(`ssh ${host} failed: ${win.failureDetail(r)}`);
   const u = platformOfUname(r.stdout, r.code);
   if (u === 'darwin' || u === 'win32') return u;
   if (u === 'other') throw new Error(`${host} runs ${r.stdout.trim()}; machines are Macs or Windows PCs`);
   const w = await win.psScript(host, "'platform=' + [Environment]::OSVersion.Platform", { timeoutMs: 60_000 });
   if (w.code === 0 && /platform=Win32NT/.test(w.stdout)) return 'win32';
-  throw new Error(`could not tell what ${host} runs: uname -s failed (${(r.stderr || r.stdout).trim().slice(0, 200)}) and PowerShell did not answer (${(w.stderr || w.stdout).trim().slice(0, 200)})`);
+  throw new Error(`could not tell what ${host} runs: uname -s failed (${win.failureDetail(r)}) and PowerShell did not answer (${win.failureDetail(w)})`);
 }
 
 export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   (opts.step ?? (() => undefined))('checking the OS');
-  return (await detectPlatform(opts.host)) === 'win32' ? deployWindows(opts) : deployMac(opts);
+  const platform = await detectPlatform(opts.host);
+  opts.onPlatform?.(platform);
+  return platform === 'win32' ? deployWindows(opts) : deployMac(opts);
 }
 
 async function deployMac(opts: DeployOptions): Promise<DeployResult> {
@@ -375,7 +387,7 @@ export function parseWinProbe(out: string): WinProbe {
 
 async function mustPs(host: string, what: string, script: string, opts: { timeoutMs?: number; data?: string } = {}) {
   const r = await win.psScript(host, script, opts);
-  if (r.code !== 0) throw new Error(`${what} on ${host} failed (${r.code}): ${(r.stderr || r.stdout).trim().split('\n').slice(-6).join(' | ')}`);
+  if (r.code !== 0) throw new Error(`${what} on ${host} failed: ${win.failureDetail(r)}`);
   return r.stdout;
 }
 
@@ -401,6 +413,24 @@ export function bundle(root: string): Promise<string> {
   });
 }
 
+/**
+ * Copy the code bundle to a Windows `host` by scp, into the user's home (scp's starting folder); returns its
+ * name there. Not on the script's stdin: on some PCs stdin through sshd and cmd.exe stalls after ~200 KB.
+ */
+async function scpBundle(root: string, host: string): Promise<string> {
+  const name = `.ff-factory-upload-${Date.now()}.tgz`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-upload-'));
+  try {
+    fs.writeFileSync(path.join(dir, name), Buffer.from(await bundle(root), 'base64'));
+    // A bare local name (cwd: dir), so a Windows drive letter is never read as a host.
+    const r = await run('scp', [...SSH, '-q', name, `${host}:${name}`], { cwd: dir, timeoutMs: 10 * 60_000 });
+    if (r.code !== 0) throw new Error(`copying the code to ${host} (scp) failed: ${win.failureDetail(r)}`);
+    return name;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /** The game clone: the given path, else the shortest one found (the clone, not a copy nested in it). */
 export function pickRepo(given: string | undefined, found: string[]): string | undefined {
   return given || [...found].sort((a, b) => a.length - b.length)[0];
@@ -421,7 +451,8 @@ async function deployWindows(opts: DeployOptions): Promise<DeployResult> {
   const appDir = opts.dirs?.appDir;
 
   step('copying code');
-  await mustPs(opts.host, 'copying the code', win.uploadScript(appDir), { data: await bundle(opts.root), timeoutMs: 10 * 60_000 });
+  const name = await scpBundle(opts.root, opts.host);
+  await mustPs(opts.host, 'copying the code', win.uploadScript(appDir, name), { timeoutMs: 10 * 60_000 });
   const version = (await run('git', ['-C', opts.root, 'rev-parse', '--short', 'HEAD'])).stdout.trim() || 'unknown';
 
   step('npm ci');

@@ -10,16 +10,24 @@ import { spawn } from 'node:child_process';
  * How a script gets there: Windows OpenSSH Server hands the command line to its default shell, cmd.exe or
  * PowerShell, which quote differently. So the command line is only `powershell.exe ... -EncodedCommand <b64>`
  * (letters, digits, + / =: the same under either shell), a small bootstrap that reads the real script from
- * stdin as UTF-8 and runs it. A payload (the code bundle) follows the script on stdin after a `#FFDATA` line
- * and reaches the script as $FFData, so nothing binary crosses a PowerShell pipe.
+ * stdin as UTF-8 and runs it. A small payload may follow the script on stdin after a `#FFDATA` line and
+ * reaches the script as $FFData, so nothing binary crosses a PowerShell pipe; the code bundle goes by scp.
  *
  * Under cmd.exe the nested powershell.exe reads ssh's stdin as is. Under PowerShell as the default shell, the
  * outer PowerShell passes stdin on to it as lines of text, with CRLF endings and possibly re-encoded. So the
  * bootstrap turns CRLF back into LF, the scripts are pure ASCII (psq), the payload is base64, and an empty
- * script is an error rather than a silent success.
+ * script is an error rather than a silent success. The script ends with END_MARK and the bootstrap reads up to it,
+ * never waiting for EOF.
  */
 
 export const TASK_NAME = 'FFFactoryDaemon';
+/** A script run over ssh: its exit code (-1 when it could not start or was killed), output, and whether the timeout killed it. */
+export interface RemoteResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+  timedOut?: boolean;
+}
 const SSH = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15'];
 /** What separates the script from its payload on stdin. */
 export const DATA_MARK = '\n#FFDATA\n';
@@ -46,13 +54,26 @@ export function psq(s: string): string {
   return `([string]${parts.join(' + ')})`;
 }
 
-/** The bootstrap run by -EncodedCommand: read stdin (UTF-8), split off the payload, run the script; any error exits 1. */
+/**
+ * What ends the script (and its payload) on stdin. The bootstrap stops reading there instead of waiting for EOF:
+ * on some PCs (Windows 11 with cmd.exe as sshd's default shell) reading stdin to EOF never returns once more
+ * than a few KB came in, so the probe hung until its timeout with no output at all.
+ */
+export const END_MARK = '\n#FFEND\n';
+
+/**
+ * The bootstrap run by -EncodedCommand: read stdin (UTF-8) up to END_MARK, split off the payload, run the
+ * script; any error exits 1, a script that arrived without its end mark (cut off) exits 3.
+ */
 export const BOOTSTRAP = [
   "$ProgressPreference = 'SilentlyContinue'",
   '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
   '$ms = New-Object IO.MemoryStream',
-  '[Console]::OpenStandardInput().CopyTo($ms)',
-  '$all = [Text.Encoding]::UTF8.GetString($ms.ToArray()).Replace([string][char]13 + [char]10, [string][char]10)',
+  '$in = [Console]::OpenStandardInput(); $buf = New-Object byte[] 65536',
+  "while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $ms.Write($buf, 0, $n); $k = [int][Math]::Min($ms.Length, 32); if ([Text.Encoding]::ASCII.GetString($ms.GetBuffer(), [int]$ms.Length - $k, $k).TrimEnd().EndsWith('#FFEND')) { break } }",
+  '$all = [Text.Encoding]::UTF8.GetString($ms.ToArray()).Replace([string][char]13 + [char]10, [string][char]10).TrimEnd()',
+  "if ($all.Trim() -and -not $all.EndsWith('#FFEND')) { [Console]::Error.WriteLine('the script arrived without its end mark after ' + $ms.Length + ' bytes: cut off on the way'); exit 3 }",
+  "if ($all.EndsWith('#FFEND')) { $all = $all.Substring(0, $all.Length - 6).TrimEnd() }",
   "if (-not $all.Trim()) { [Console]::Error.WriteLine('no script arrived on stdin'); exit 3 }",
   "$FFData = ''",
   '$i = $all.IndexOf([string][char]10 + "#FFDATA" + [char]10)',
@@ -67,25 +88,44 @@ export function psCommand(): string[] {
   return ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded];
 }
 
+/** What goes to the bootstrap on stdin: the script, its payload after DATA_MARK, then END_MARK. */
+export function stdinOf(script: string, data?: string): string {
+  return (data === undefined ? script : script + DATA_MARK + data) + END_MARK;
+}
+
+/** Why a remote run failed, in one line: its exit code (or the timeout that killed it), then stderr and stdout. */
+export function failureDetail(r: { code: number; stdout: string; stderr: string; timedOut?: boolean }): string {
+  const tail = (t: string) => t.trim().split('\n').slice(-6).join(' | ');
+  return [
+    r.timedOut ? `timed out and killed (code ${r.code})` : `exit code ${r.code}`,
+    r.stderr.trim() ? `stderr: ${tail(r.stderr)}` : 'no stderr',
+    r.stdout.trim() ? `stdout: ${tail(r.stdout)}` : 'no stdout',
+  ].join('; ');
+}
+
 /** Run a PowerShell script on a Windows `host` over ssh, with an optional payload ($FFData in the script). */
-export function psScript(host: string, script: string, opts: { timeoutMs?: number; data?: string } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+export function psScript(host: string, script: string, opts: { timeoutMs?: number; data?: string } = {}): Promise<RemoteResult> {
   return new Promise((resolve) => {
     const child = spawn('ssh', [...SSH, host, ...psCommand()], { windowsHide: true });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
-    const timer = setTimeout(() => child.kill(), opts.timeoutMs ?? 120_000);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, opts.timeoutMs ?? 120_000);
     child.on('error', (e) => {
       clearTimeout(timer);
       resolve({ code: -1, stdout, stderr: stderr || e.message });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout: stdout.replace(/\r\n/g, '\n'), stderr: stderr.replace(/\r\n/g, '\n') });
+      resolve({ code: code ?? -1, stdout: stdout.replace(/\r\n/g, '\n'), stderr: stderr.replace(/\r\n/g, '\n'), timedOut });
     });
     child.stdin.on('error', () => undefined); // ssh gone early: its exit code says why
-    child.stdin.end(opts.data === undefined ? script : script + DATA_MARK + opts.data);
+    child.stdin.end(stdinOf(script, opts.data));
   });
 }
 
@@ -237,14 +277,23 @@ if ($git -and $slug) {
 `;
 }
 
-/** Unpack the code bundle ($FFData: a base64 .tar.gz) into app.new in the daemon's folder with Windows' own tar. */
-export function uploadScript(appDir?: string): string {
+/**
+ * Unpack the code bundle (a .tar.gz) into app.new in the daemon's folder with Windows' own tar. The bundle is
+ * `file`, copied there by scp (a path, or a name in the user's home, where scp puts it; deleted after), else
+ * $FFData (base64). The deploy uses scp: on some PCs stdin through sshd stalls after ~200 KB (END_MARK above).
+ */
+export function uploadScript(appDir?: string, file?: string): string {
+  const from = file
+    ? `$tgz = ${psq(file)}
+if (-not [IO.Path]::IsPathRooted($tgz)) { $tgz = Join-Path $env:USERPROFILE $tgz }
+if (-not (Test-Path -LiteralPath $tgz)) { throw "the code bundle $tgz did not arrive" }`
+    : `$tgz = Join-Path $F 'app.tgz'
+[IO.File]::WriteAllBytes($tgz, [Convert]::FromBase64String($FFData.Trim()))`;
   return `${head({ appDir })}
 $new = Join-Path $F 'app.new'
 if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Recurse -Force }
 New-Item -ItemType Directory -Force $new, (Join-Path $F 'logs') | Out-Null
-$tgz = Join-Path $F 'app.tgz'
-[IO.File]::WriteAllBytes($tgz, [Convert]::FromBase64String($FFData.Trim()))
+${from}
 # System32's bsdtar, not a Git or MSYS tar on the PATH (those read C: as a remote host).
 $r = Invoke-Native (Join-Path $env:SystemRoot 'System32\\tar.exe') @('-xzf', $tgz, '-C', $new)
 Remove-Item -LiteralPath $tgz -Force

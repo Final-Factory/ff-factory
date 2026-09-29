@@ -152,8 +152,11 @@ hello). `list_machines`, the sidebar and the machine page show it.
 **How the portal talks to it.** Windows OpenSSH Server hands a command to its default shell, cmd.exe or
 PowerShell, and the two quote differently. So the command line is only
 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand <base64>` (the same under
-either shell), a small bootstrap that reads the real script from stdin as UTF-8 and runs it; the code bundle
-follows the script on stdin (`server/machineDeployWin.ts`). Nothing depends on which default shell is set.
+either shell), a small bootstrap that reads the real script from stdin as UTF-8 up to a `#FFEND` line and runs
+it (`server/machineDeployWin.ts`). It never waits for EOF on stdin: on some PCs (Windows 11, cmd.exe as the default
+shell) that read never returns once a few KB came in, and stdin through sshd stalls altogether after ~200 KB. So
+the code bundle goes by `scp` into the user's home, and the upload script unpacks and deletes it. Nothing
+depends on which default shell is set.
 
 **What a deploy does** (all in `%USERPROFILE%\.ff-factory`, the same folder as on a Mac, or in the machine's
 `app_dir`, e.g. `D:\work\.ff-factory` on a PC with several drives; see "A machine's own folders" above):

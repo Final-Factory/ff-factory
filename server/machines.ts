@@ -364,7 +364,7 @@ export class MachineManager {
     const { ROOT } = await import('./config.ts');
     try {
       const dirs = { appDir: m.appDir, unityEditorRoot: m.unityEditorRoot, unityPath: m.unityPath, tempDir: m.tempDir };
-      const r = await deploy({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, previousAppDir, step: (s) => this.update(m.id, { statusDetail: s }) });
+      const r = await deploy({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, previousAppDir, step: (s) => this.update(m.id, { statusDetail: s }), onPlatform: (platform) => this.update(m.id, { platform }) });
       this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
       if (r.started === false) {
         // Windows: the task runs only in the user's logged-on session (docs/machines.md).
