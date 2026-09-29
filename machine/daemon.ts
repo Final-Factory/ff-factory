@@ -265,7 +265,9 @@ export class Daemon {
   shutdown() {
     this.stopped = true;
     for (const t of this.timers) clearInterval(t);
-    for (const e of this.entries.values()) e.s.stop();
+    // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
+    // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
+    for (const e of this.entries.values()) e.s.stop(false);
     this.caffeinate?.kill();
     this.ws?.close();
   }

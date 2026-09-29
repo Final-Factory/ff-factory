@@ -119,6 +119,12 @@ test('machine sandboxes: a worktree of the main clone on its own branch, a warm 
   const dir = path.join(r.sbRoot, 'sb1');
   assert.equal(fs.readFileSync(path.join(dir, 'README.md'), 'utf8').replace(/\r\n/g, '\n'), 'game\n', 'checked out');
   assert.equal(fs.readFileSync(path.join(dir, 'Library', 'Artifacts', 'warm.bin'), 'utf8'), 'imported', "the main clone's Library, copied");
+  // The copied Library's stale script mappings: the first editor start reimports the scripts, via a script git ignores.
+  const script = path.join(dir, 'Assets', '__FFFactoryReimport', 'Editor', 'ScriptReimportAfterLibraryCopy.cs');
+  assert.match(fs.readFileSync(script, 'utf8'), /ImportAsset\(p, ImportAssetOptions\.ForceUpdate\)[\s\S]*DeleteAsset\(Folder\)/);
+  fs.writeFileSync(path.join(dir, 'Assets', '__FFFactoryReimport.meta'), 'guid: x');
+  assert.equal(r.git(dir, 'status', '--porcelain'), '', 'excluded from git, with the .meta Unity makes');
+  assert.equal(r.git(r.main, 'status', '--porcelain'), '', 'the main clone is clean too');
   assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
   assert.match(r.git(r.main, 'worktree', 'list'), /ffsb[\\/]sb1/);
   assert.equal(r.git(r.main, 'branch', '--show-current'), 'develop', "the main clone's own checkout is untouched");
@@ -146,6 +152,9 @@ test('machine sandboxes: a second one seeds its Library from a sandbox when the 
   await p.create({ id: 'sb2', branch: 'feature/x', base: 'origin/develop', seedLibrary: true, startUnity: false });
   await ready(p, 'sb2');
   assert.equal(fs.readFileSync(path.join(r.sbRoot, 'sb2', 'Library', 'Artifacts', 'warm.bin'), 'utf8'), 'imported', "sb1's Library");
+  assert.ok(fs.existsSync(path.join(r.sbRoot, 'sb2', 'Assets', '__FFFactoryReimport')), 'armed after any Library copy');
+  const exclude = fs.readFileSync(path.join(r.main, '.git', 'info', 'exclude'), 'utf8');
+  assert.equal(exclude.split('\n').filter((l) => l === '/Assets/__FFFactoryReimport*').length, 1, 'the exclude line once');
 
   await assert.rejects(p.create({ id: 'sb3', branch: 'sandbox/sb3', base: 'origin/develop', seedLibrary: false, startUnity: false }), /already 2 sandboxes on this machine \(max_sandboxes 2\)/);
   await p.remove('sb2', true);
