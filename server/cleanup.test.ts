@@ -135,7 +135,9 @@ function world(t: { after: (fn: () => void) => void }) {
     age(p, hours);
     return p;
   };
-  const git = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { stdio: 'ignore' });
+  // No background maintenance or gc: a detached `git maintenance` after fetch would touch .git after the ages are set.
+  const git = (dir: string, ...a: string[]) =>
+    execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...a], { stdio: 'ignore' });
   const clone = (rel: string, hours: number, state: 'clean' | 'dirty' | 'unpushed') => {
     const bare = path.join(root, `${path.basename(rel)}.git`);
     execFileSync('git', ['init', '-q', '--bare', bare]);

@@ -89,8 +89,9 @@ export interface CleanupRun {
   bytes: number;
 }
 
-// Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths on any OS (CI runs on Linux too).
-const P = (p: string) => (/^[a-zA-Z]:[\\/]|^\\\\/.test(p) ? path.win32 : path);
+// Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths and "/x" as POSIX paths on any OS (CI runs
+// on Linux and Windows).
+const P = (p: string) => (/^[a-zA-Z]:[\\/]|^\\\\/.test(p) ? path.win32 : p.startsWith('/') ? path.posix : path);
 const norm = (p: string) => P(p).resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 const within = (p: string, root: string) => norm(p) === norm(root) || norm(p).startsWith(norm(root) + '/');
 const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i');
@@ -131,7 +132,7 @@ export function neverDelete(p: string, g: CleanupGuard): string | undefined {
   const Pp = P(p);
   const n = norm(p);
   const parts = n.split('/').filter(Boolean);
-  const win = Pp === path.win32;
+  const win = Pp === path.win32 || (Pp === path && process.platform === 'win32');
   if (parts.length <= (win ? 1 : 0)) return 'a drive root';
   const home = norm(g.home);
   if (n === home || home.startsWith(n + '/')) return 'the home folder or a folder holding it';
