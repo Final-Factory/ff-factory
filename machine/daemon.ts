@@ -17,6 +17,7 @@ import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHand
 import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { MacUnity, MacUnityWatch, realDeps } from './unity.ts';
 import { SandboxPool, realPoolDeps, type PoolDeps } from './sandboxes.ts';
+import { MAIN_CLONE, McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { withBaseRepoLock } from '../server/sandboxes.ts';
 import { redactSecrets } from '../server/secrets.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
@@ -54,6 +55,11 @@ export interface DaemonConfig {
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
   sandboxIdleStopMinutes?: number;
+  /**
+   * The MCP-for-Unity server agents here get as "UnityMCP", each confined to its own editor (machine/unityMcp.ts).
+   * Default: the UnityMCP entry the machine's own Claude Code has in ~/.claude.json.
+   */
+  unityMcpServer?: StdioServer;
 }
 
 const BUSY = new Set(['running', 'starting', 'waiting_permission']);
@@ -121,6 +127,8 @@ export class Daemon {
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
   private cleanupSettings = { ...MACHINE_CLEANUP_DEFAULTS };
+  /** Each place's Unity MCP status folder, kept holding only its own editor (machine/unityMcp.ts). */
+  private readonly mcpScopes = new McpScopes();
 
   constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES, poolDeps?: PoolDeps) {
     this.cfg = cfg;
@@ -203,6 +211,39 @@ export class Daemon {
     return this.cfg.maxEventsFile === null ? undefined : (this.cfg.maxEventsFile ?? defaultEventsFile());
   }
 
+  /**
+   * The stdio MCP servers of an agent here: for spec.unityMcp, the machine's Unity MCP server confined to its place's
+   * editor (its sandbox's, else the main clone's). Never the portal's own commands. Exported through the class for tests.
+   */
+  stdioMcpFor(spec: Pick<LaunchSpec, 'unityMcp' | 'sandbox'>): LaunchSpec['stdioMcp'] {
+    if (!spec.unityMcp) return undefined;
+    const { server } = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
+    if (!server) return undefined;
+    const appDir = appDirOfConfig(this.cfg);
+    const place = spec.sandbox ?? MAIN_CLONE;
+    fs.mkdirSync(mcpStatusDir(appDir, place), { recursive: true });
+    this.syncMcpScopes();
+    return { UnityMCP: scopedUnityMcp(server, appDir, place) };
+  }
+
+  /** Bring every place's Unity MCP status folder up to date, from the editor pids the watches know. */
+  syncMcpScopes() {
+    const alive = (pid?: number) => {
+      if (!pid) return undefined;
+      try {
+        process.kill(pid, 0);
+        return pid;
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === 'EPERM' ? pid : undefined;
+      }
+    };
+    const places = [
+      { place: MAIN_CLONE, project: this.cfg.repoPath, pid: alive(this.unityWatch?.editorPid) },
+      ...this.pool.list().map((sb) => ({ place: sb.id, project: sb.path, pid: alive(sb.unity.pid) })),
+    ];
+    this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line));
+  }
+
   get connected() {
     return this.ws?.readyState === WebSocket.OPEN;
   }
@@ -217,6 +258,10 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.unityWatch?.tick(), 30_000));
     // The sandboxes' editors (state, hang/crash watch), their git status, the disk guard and the idle-editor stop.
     this.timers.push(setInterval(() => void this.pool.tick(), 30_000));
+    // Each agent's Unity MCP server finds only its own place's editor (machine/unityMcp.ts).
+    const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
+    log(mcp.server ? `unity mcp: ${mcp.server.command} ${mcp.server.args.join(' ')} (from ${mcp.source})` : `unity mcp: none (${mcp.source}); agents here get no Unity MCP bridge`);
+    this.timers.push(setInterval(() => this.syncMcpScopes(), 5_000));
     // App Nap off for Unity (takes effect at the editor's next launch; start() does it too).
     if (process.platform === 'darwin') void this.unity.noAppNap().catch(() => undefined);
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
@@ -498,7 +543,7 @@ export class Daemon {
         const sandbox = spec.sandbox;
         // TMP, TEMP and TMPDIR: the session's own folder under temp_dir, removed once the session is gone.
         return buildOptions(
-          { ...spec, claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}) } },
+          { ...spec, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}) } },
           this.handlers(info.id),
           process.env,
           sandbox ? () => this.pool.editorUp(sandbox) : undefined,

@@ -194,6 +194,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Machine agents get the Unity MCP bridge of their own editor** ([docs/machines.md](docs/machines.md#machine-sandboxes),
+  "Unity MCP"). Agents in a machine sandbox had none (Claude Code registers the server per project folder), and
+  LothDesktop's main clone had none either, so they ran Unity from the command line. The daemon now gives each agent
+  the machine's MCP-for-Unity server (`daemon.json` `unityMcpServer`, else the machine's own `~/.claude.json`
+  entry), confined to its sandbox's or main clone's editor through its own `UNITY_MCP_STATUS_DIR`, as the host does.
+- **The Unity dialog watch runs on Windows machines too**, with the same rules and safe answers as on the host ("Repair
+  FMOD Libraries" Ignore, "Connection Lost" Retry, "Font Coverage" OK, ...), and machines close the **FMOD Setup
+  Wizard** window without touching it. Each automatic answer is logged in the daemon log.
 - **Worker updates named "A worker" in the chat.** Since updates carry "(requested by …)", the page could not
   read which worker one was about; it names the worker and links to it again.
 - **A dropped machine link resumed every old agent on it** (21 on M3 and M5, 2026-09-29). The daemon's session

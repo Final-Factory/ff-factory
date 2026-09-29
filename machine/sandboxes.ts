@@ -480,7 +480,7 @@ export class SandboxPool {
     if (r.status !== 'ready') throw new Error(`sandbox ${id} is ${r.status}`);
     const problem = await sandboxBranchProblem(branch, this.d.git);
     if (problem) throw new Error(problem);
-    if (this.editorUp(id)) throw new Error(`the editor of sandbox ${id} is running: stop it first (unity stop), switch, then start it again. A switch under a running editor stops Unity on "The open scene(s) have been modified externally", and machines have no dialog watch for it on Windows.`);
+    if (this.editorUp(id)) throw new Error(`the editor of sandbox ${id} is running: stop it first (unity stop), switch, then start it again. A switch under a running editor stops Unity on "The open scene(s) have been modified externally".`);
     const res = await switchBranch({
       dir: r.path,
       branch,

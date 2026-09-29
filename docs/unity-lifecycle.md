@@ -86,7 +86,7 @@ touches git.
 }
 ```
 
-The machines (Macs and Windows PCs, [machines.md](machines.md#windows-machines); no dialog watch on Windows yet) get the watch and the `unity` tool with the daemon: redeploy it (`add_machine`) after an
+The machines (Macs and Windows PCs, [machines.md](machines.md#windows-machines)) get the watch and the `unity` tool with the daemon: redeploy it (`add_machine`) after an
 update. An older daemon ignores the `unity` message, and the tool times out with that advice.
 
 Tests: `server/unityHang.test.ts` (verdicts, budget, a fake bridge), `server/macUnity.test.ts`

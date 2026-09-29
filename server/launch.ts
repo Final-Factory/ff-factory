@@ -8,6 +8,13 @@ import { publicIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
 import type { StandingToolGroup } from '../shared/types.ts';
 
+/** A stdio MCP server the agent process starts (on a machine: the daemon's Unity MCP server, machine/unityMcp.ts). */
+export interface StdioServer {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
 /**
  * Everything needed to start an agent process, as plain data: the portal builds it and a machine daemon
  * turns it into SDK options (docs/machines.md). Hooks and MCP servers are functions, so they cannot
@@ -27,6 +34,13 @@ export interface LaunchSpec {
   disallowedTools?: string[];
   /** Only the MCP servers named here (plus `mcp`); false loads the user's own too. */
   strictMcp: boolean;
+  /**
+   * Give the agent the machine's Unity MCP server as "UnityMCP", confined to its place's editor (the sandbox's, else
+   * the main clone's): the daemon fills in `stdioMcp` from it (machine/unityMcp.ts). An older daemon ignores it.
+   */
+  unityMcp?: boolean;
+  /** Stdio MCP servers the process starts, by name (the daemon's, never the portal's: commands are the machine's). */
+  stdioMcp?: Record<string, StdioServer>;
   /** An in-process MCP server whose tool calls are answered by `handlers` (on a machine: the portal). */
   mcp?: { server: string; tools: { name: CatalogTool; description: string }[] };
   maxBudgetUsd?: number;
@@ -113,6 +127,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];
   const mcpServers: NonNullable<Options['mcpServers']> = {};
+  for (const [name, srv] of Object.entries(spec.stdioMcp ?? {})) mcpServers[name] = { type: 'stdio', command: srv.command, args: srv.args, ...(srv.env ? { env: srv.env } : {}) };
   if (spec.mcp) {
     mcpServers[spec.mcp.server] = createSdkMcpServer({
       name: spec.mcp.server,
