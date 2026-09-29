@@ -204,6 +204,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Wizard** window without touching it. Each automatic answer is logged in the daemon log.
 - **Worker updates named "A worker" in the chat.** Since updates carry "(requested by …)", the page could not
   read which worker one was about; it names the worker and links to it again.
+- **Redeploying M5's outdated daemon resumed 8 agents finished for hours** (2026-09-29, after #21). They were not in
+  the daemon's memory any more, so no report ever cleared their portal-side turn mark, and each refused resume
+  appended an error that moved their `lastActivityAt`, so the 6-hour rule and the boot clean-up saw them as recent.
+  A dropped link now counts a worker as cut off only if its daemon reported it live on that link (every daemon
+  version sends that), a refused start no longer counts as activity, and an agent stopped or interrupted on purpose
+  is marked `stoppedOnPurpose` and never resumed (not by a dropped link, a link that already dropped, or a portal
+  restart) until it is messaged again.
 - **A dropped machine link resumed every old agent on it** (21 on M3 and M5, 2026-09-29). The daemon's session
   reports are JSON, which drops a cleared `turnOpenSince`, so the portal kept every finished turn marked open; the
   cut-off resume (#20) and a clean portal restart's resume file then treated them all as mid-turn. The portal now

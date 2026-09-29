@@ -26,12 +26,15 @@ const MID_TURN = new Set(['running', 'starting', 'waiting_permission']);
 const CLEARABLE = ['turnOpenSince', 'backgroundTasks', 'statusDetail'] as const;
 
 /**
- * Whether a machine worker counts as cut off mid-turn when its link drops: in a turn now (status, or the turn
- * mark a daemon going down keeps) and active within RESUME_WITHIN_MS. A worker that finished days ago is not,
- * whatever a stale mark says (2026-09-29: one drop resumed 21 old agents on M3 and M5). Exported for tests.
+ * Whether a machine worker counts as cut off mid-turn when its link drops: its daemon reported its process live on
+ * that link (`seenLive`), it is in a turn (status, or the turn mark a daemon going down keeps), it was not stopped
+ * on purpose, and it was active within RESUME_WITHIN_MS. The portal's own marks and activity times are not enough:
+ * a mark the daemon never cleared (the agent is not in its memory any more) and an error line from a refused
+ * resume (which moves lastActivityAt) made 8 agents finished for hours look cut off when M5's outdated daemon was
+ * redeployed (2026-09-29). Every daemon version reports `live`. Exported for tests.
  */
-export function cutOffMidTurn(i: Pick<SessionInfo, 'kind' | 'status' | 'turnOpenSince' | 'lastActivityAt'>, now: number): boolean {
-  if (i.kind !== 'worker' || !(MID_TURN.has(i.status) || i.turnOpenSince)) return false;
+export function cutOffMidTurn(i: Pick<SessionInfo, 'kind' | 'status' | 'turnOpenSince' | 'lastActivityAt' | 'stoppedOnPurpose'>, seenLive: boolean, now: number): boolean {
+  if (i.kind !== 'worker' || !seenLive || i.stoppedOnPurpose || !(MID_TURN.has(i.status) || i.turnOpenSince)) return false;
   return now - (Date.parse(i.lastActivityAt) || 0) <= RESUME_WITHIN_MS;
 }
 
@@ -101,6 +104,8 @@ export class RemoteSession implements SessionHandle {
   readonly info: SessionInfo;
   lastFrom: 'human' | 'orchestrator' | 'system' = 'human';
   liveFlag = false;
+  /** Its daemon reported its process live on the current link (hello or a session report); reset when the link drops. */
+  seenLive = false;
   private readonly link: MachineManager;
 
   constructor(info: SessionInfo, link: MachineManager) {
@@ -116,10 +121,16 @@ export class RemoteSession implements SessionHandle {
     if (requestedBy && from !== 'system') this.info.lastRequestedBy = requestedBy;
     this.link.dispatchSend(this, text, from, uuid, images, requestedBy);
     this.lastFrom = from;
+    // A new turn: the stop is over (as AgentSession.send).
+    if (this.info.stoppedOnPurpose) {
+      delete this.info.stoppedOnPurpose;
+      this.link.touch(this);
+    }
     return uuid;
   }
 
   async interrupt() {
+    this.link.stoppedOnPurpose(this);
     this.link.post(this.info.machineId!, { type: 'interrupt', sessionId: this.info.id }, false);
   }
 
@@ -129,7 +140,8 @@ export class RemoteSession implements SessionHandle {
     this.link.post(this.info.machineId!, { type: 'mode', sessionId: this.info.id, mode }, false);
   }
 
-  stop() {
+  stop(onPurpose = true) {
+    if (onPurpose) this.link.stoppedOnPurpose(this);
     this.link.post(this.info.machineId!, { type: 'stop', sessionId: this.info.id }, false);
   }
 
@@ -241,6 +253,21 @@ export class MachineManager {
   }
 
   /**
+   * An agent stopped or interrupted on purpose (stop_agent, interrupt_agent, the UI): its turn is over, whatever the
+   * daemon still has or reports, so no dropped link resumes it, one that already dropped included, until it is sent
+   * a message again (RemoteSession.send). Kept in the store: a portal restart does not forget it.
+   */
+  stoppedOnPurpose(s: RemoteSession) {
+    s.info.stoppedOnPurpose = true;
+    delete s.info.turnOpenSince;
+    delete s.info.backgroundTasks;
+    // No process to report back (the daemon lost it, or the link is down): it is not running.
+    if (!s.live && MID_TURN.has(s.info.status)) Object.assign(s.info, { status: 'stopped', pendingPermissions: [] });
+    for (const c of this.cutOff.values()) c.sessions = c.sessions.filter((sid) => sid !== s.info.id);
+    this.store.putSession(s.info);
+  }
+
+  /**
    * The daemon is back (hello): agents that were mid-turn when its link dropped and that it no longer runs (it
    * was redeployed, restarted or crashed; not a network blip, after which they are still live) get a resume
    * message, as after a portal restart. An outdated daemon cannot start them: that waits for its redeploy.
@@ -249,7 +276,7 @@ export class MachineManager {
     const c = this.cutOff.get(machineId);
     if (!c || this.outdated(machineId)) return;
     this.cutOff.delete(machineId);
-    const gone = c.sessions.filter((sid) => !live.has(sid) && this.handle(sid));
+    const gone = c.sessions.filter((sid) => !live.has(sid) && this.handle(sid) && !this.handle(sid)!.info.stoppedOnPurpose);
     if (!gone.length) return;
     const when = new Date(c.at).toLocaleTimeString();
     if (now - c.at > RESUME_WITHIN_MS) {
@@ -745,7 +772,7 @@ export class MachineManager {
     const why = this.dropWhy.get(id) ?? 'lost its connection to the portal';
     this.dropWhy.delete(id);
     const midTurn = [...this.sessions.sessions.values()]
-      .filter((s) => s.info.machineId === id && s instanceof RemoteSession && cutOffMidTurn(s.info, Date.now()))
+      .filter((s) => s.info.machineId === id && s instanceof RemoteSession && cutOffMidTurn(s.info, s.seenLive, Date.now()))
       .map((s) => s.info.id);
     if (why === false) this.cutOff.delete(id);
     else if (midTurn.length) {
@@ -757,6 +784,7 @@ export class MachineManager {
       if (s.info.machineId !== id || !(s instanceof RemoteSession)) continue;
       const was = s.liveFlag;
       s.liveFlag = false;
+      s.seenLive = false;
       if (s.info.status !== 'stopped' && s.info.status !== 'error') {
         Object.assign(s.info, { status: 'stopped', statusDetail: `machine ${id} went offline`, pendingPermissions: [] });
         this.store.putSession(s.info);
@@ -801,7 +829,9 @@ export class MachineManager {
         const live = new Set(msg.live);
         for (const sid of m.sessionIds) {
           const s = this.handle(sid);
-          if (s) s.liveFlag = live.has(sid);
+          if (!s) continue;
+          s.liveFlag = live.has(sid);
+          if (s.liveFlag) s.seenLive = true;
         }
         if (why) this.checkOutdated();
         // After the daemon's own session reports (sent right after its hello), so a resume starts from its state.
@@ -814,7 +844,7 @@ export class MachineManager {
         const s = this.handle(msg.info.id);
         if (!s || s.info.machineId !== id) return;
         // The portal owns identity and naming; the daemon owns run state.
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's.
@@ -823,6 +853,7 @@ export class MachineManager {
         // JSON drops a field the daemon cleared: take the absence as cleared, or a finished turn stays marked mid-turn.
         for (const k of CLEARABLE) if (!(k in run)) delete s.info[k];
         s.liveFlag = msg.live;
+        if (msg.live) s.seenLive = true;
         this.store.putSession(s.info);
         return;
       }
@@ -846,8 +877,11 @@ export class MachineManager {
       case 'failed': {
         const s = this.handle(msg.sessionId);
         if (!s || s.info.machineId !== id) return;
+        // A refused start is not the agent doing something: its activity time stays (a refused resume made agents
+        // finished for hours look active, 2026-09-29).
+        const at = s.info.lastActivityAt;
         this.store.append(s.info.id, { kind: 'error', text: `On ${id}: ${msg.error}` });
-        Object.assign(s.info, { status: 'error', statusDetail: msg.error });
+        Object.assign(s.info, { status: 'error', statusDetail: msg.error, lastActivityAt: at });
         this.store.putSession(s.info);
         this.sessions.events.emit('ended', s);
         return;
