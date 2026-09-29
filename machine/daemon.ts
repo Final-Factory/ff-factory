@@ -16,6 +16,8 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { MacUnity, MacUnityWatch, realDeps } from './unity.ts';
+import { SandboxPool, realPoolDeps, type PoolDeps } from './sandboxes.ts';
+import { withBaseRepoLock } from '../server/sandboxes.ts';
 import { redactSecrets } from '../server/secrets.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
@@ -25,7 +27,7 @@ import { readGitStatus } from '../server/gitStatus.ts';
 import { switchBranch } from '../server/switchBranch.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
-import type { HostStats, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { HostStats, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /** Portal base URL, e.g. https://<host>.<tailnet>.ts.net */
@@ -46,7 +48,13 @@ export interface DaemonConfig {
   tempDir?: string;
   /** The Max events file agents here append to (docs/max.md); default ~/.config/ff-factory/max-events.jsonl, null: none. */
   maxEventsFile?: string | null;
+  /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
+  sandboxes?: SandboxPoolSettings;
+  /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
+  sandboxIdleStopMinutes?: number;
 }
+
+const BUSY = new Set(['running', 'starting', 'waiting_permission']);
 
 /** The daemon's folder. Exported for tests. */
 export const appDirOfConfig = (cfg: Pick<DaemonConfig, 'appDir'>, home = HOME) => cfg.appDir || path.join(home, '.ff-factory');
@@ -105,12 +113,31 @@ export class Daemon {
   private readonly makeSession: SessionFactory;
   private readonly probes: Probes;
   private maxTail?: FileTail;
+  /** The machine's sandboxes (machine/sandboxes.ts): worktrees of the clone with their own editors. */
+  readonly pool: SandboxPool;
 
-  constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES) {
+  constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES, poolDeps?: PoolDeps) {
     this.cfg = cfg;
     this.probes = probes;
     const platform = process.platform === 'win32' ? 'win32' : 'darwin';
-    this.unity = new MacUnity(cfg.repoPath, realDeps(platform), undefined, platform, { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath });
+    const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
+    this.unity = new MacUnity(cfg.repoPath, realDeps(platform), undefined, platform, where);
+    this.pool = new SandboxPool(
+      {
+        repoPath: cfg.repoPath,
+        stateFile: path.join(appDirOfConfig(cfg), 'sandboxes.json'),
+        settings: cfg.sandboxes,
+        idleStopMinutes: cfg.sandboxIdleStopMinutes,
+        activity: (id) => this.sandboxActivity(id),
+        onChange: () => this.reportSandboxes(),
+        onEvent: (e) => {
+          log(`sandboxes: ${e.text}`);
+          if (e.unity) this.send({ type: 'unity_event', text: e.text, restarted: !!e.restarted, sandbox: e.sandbox });
+          else this.send({ type: 'sandbox_event', text: e.text, sandbox: e.sandbox, checkpoint: e.checkpoint });
+        },
+      },
+      poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line)),
+    );
     this.makeSession = makeSession;
     this.maxSessions = cfg.maxSessions ?? 3;
     for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'] as SignalName[]) {
@@ -140,6 +167,8 @@ export class Daemon {
       this.send({ type: 'unity_event', text, restarted });
     });
     this.timers.push(setInterval(() => void this.unityWatch?.tick(), 30_000));
+    // The sandboxes' editors (state, hang/crash watch), their git status, the disk guard and the idle-editor stop.
+    this.timers.push(setInterval(() => void this.pool.tick(), 30_000));
     // App Nap off for Unity (takes effect at the editor's next launch; start() does it too).
     if (process.platform === 'darwin') void this.unity.noAppNap().catch(() => undefined);
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
@@ -295,6 +324,7 @@ export class Daemon {
     this.flush();
     // The portal showed these stopped while the link was down; give it their real state.
     for (const e of this.entries.values()) this.send({ type: 'session', info: e.s.info, live: e.s.live });
+    this.reportSandboxes();
     void this.reportStatus();
     void this.reportStats();
     // The portal keeps the last report across a reconnect: a flapping link must not start a CLI each time.
@@ -343,6 +373,21 @@ export class Daemon {
   private async reportStatus() {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     this.send({ type: 'status', git: await readGitStatus(this.cfg.repoPath) });
+  }
+
+  /** Every sandbox, whenever one changes (protocol 5). Only when the machine has sandboxes, or had some. */
+  private reportSandboxes() {
+    if (!this.pool.configured && !this.pool.list().length) return;
+    this.send({ type: 'sandboxes', list: this.pool.list(), disk: this.pool.diskState() });
+  }
+
+  /** The agents of a sandbox, as the idle-editor stop sees them: one mid-turn, and the last activity there. */
+  private sandboxActivity(id: string): { busy: boolean; lastActivityMs: number } {
+    const mine = [...this.entries.values()].filter((e) => e.spec?.sandbox === id);
+    return {
+      busy: mine.some((e) => e.s.live && BUSY.has(e.s.info.status)),
+      lastActivityMs: Math.max(0, ...mine.map((e) => Date.parse(e.s.info.lastActivityAt) || 0)),
+    };
   }
 
   // ---------------------------------------------------------------- sessions
@@ -398,7 +443,13 @@ export class Daemon {
         const spec = holder.e!.spec!;
         // FF_MAX_EVENTS: where the ffdiscord CLI reports what the agent did as Max (this machine's file, tailed above).
         const maxFile = this.maxEventsFile;
-        return buildOptions({ ...spec, claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...tempEnv(this.cfg.tempDir), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}) } }, this.handlers(info.id));
+        const sandbox = spec.sandbox;
+        return buildOptions(
+          { ...spec, claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...tempEnv(this.cfg.tempDir), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}) } },
+          this.handlers(info.id),
+          process.env,
+          sandbox ? () => this.pool.editorUp(sandbox) : undefined,
+        );
       }, events);
       e = { s, seq: lastSeq };
       holder.e = e;
@@ -414,6 +465,28 @@ export class Daemon {
   private liveCount() {
     return [...this.entries.values()].filter((e) => e.s.live).length;
   }
+
+  /** Live agents in one place: a sandbox, or the main clone (sandbox undefined). */
+  private liveIn(sandbox: string | undefined) {
+    return [...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox === sandbox).length;
+  }
+
+  /**
+   * Why a new agent process for `spec` may not start here, or undefined: the main clone takes maxSessions agents, each
+   * sandbox maxAgentsPerSandbox, and a sandbox agent needs its sandbox ready at the folder the spec names.
+   */
+  private startRefusal(spec: LaunchSpec): string | undefined {
+    if (!spec.sandbox) return this.liveIn(undefined) >= this.maxSessions ? `already ${this.maxSessions} agents running in this machine's main clone` : undefined;
+    const sb = this.pool.list().find((s) => s.id === spec.sandbox);
+    if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;
+    if (sb.status !== 'ready') return `sandbox ${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`;
+    if (path.resolve(sb.path).toLowerCase() !== path.resolve(spec.cwd).toLowerCase()) return `sandbox ${sb.id} is at ${sb.path}, not ${spec.cwd}`;
+    const max = this.poolSettings?.maxAgentsPerSandbox ?? this.cfg.sandboxes?.maxAgentsPerSandbox ?? 2;
+    return this.liveIn(sb.id) >= max ? `already ${max} agents running in sandbox ${sb.id} (max_agents_per_sandbox)` : undefined;
+  }
+
+  /** The pool settings the portal last sent (welcome). */
+  private poolSettings?: SandboxPoolSettings | null;
 
   /**
    * Keep the machine from idle-sleeping while any agent process is live: `caffeinate -i` on a Mac; on Windows a
@@ -454,6 +527,12 @@ export class Daemon {
       }
       case 'welcome': {
         this.maxSessions = msg.maxSessions;
+        // A portal from before protocol 5 sends no pool settings: keep daemon.json's.
+        if (msg.sandboxes !== undefined) {
+          this.poolSettings = msg.sandboxes;
+          this.pool.configure(msg.sandboxes);
+          this.reportSandboxes();
+        }
         const known = new Set(msg.sessions.map((s) => s.id));
         for (const [id, e] of this.entries) {
           if (!known.has(id)) {
@@ -465,8 +544,9 @@ export class Daemon {
       }
       case 'send': {
         try {
+          const refusal = this.entries.get(msg.info.id)?.s.live ? undefined : this.startRefusal(msg.spec);
+          if (refusal) throw new Error(refusal);
           const e = this.entry(msg.info, msg.lastSeq);
-          if (!e.s.live && this.liveCount() >= this.maxSessions) throw new Error(`already ${this.maxSessions} agents running on this machine`);
           e.spec = msg.spec;
           if (!e.s.live) prepare(msg.spec, this.cfg.tempDir);
           e.s.send(msg.text, msg.from, msg.uuid, msg.images, msg.requestedBy);
@@ -477,12 +557,15 @@ export class Daemon {
         return;
       }
       case 'switch': {
-        const busy = [...this.entries.values()].filter((e) => e.s.live && e.s.info.status !== 'idle');
+        // Agents of the same place only: a sandbox's agents do not hold up the main clone, nor the other way round.
+        const busy = [...this.entries.values()].filter((e) => e.s.live && e.s.info.status !== 'idle' && e.spec?.sandbox === msg.sandbox);
         if (busy.length) {
-          this.send({ type: 'switch_result', id: msg.id, ok: false, error: `${busy.length} agent(s) are mid-turn on this machine` });
+          this.send({ type: 'switch_result', id: msg.id, ok: false, error: `${busy.length} agent(s) are mid-turn ${msg.sandbox ? `in sandbox ${msg.sandbox}` : "in this machine's main clone"}` });
           return;
         }
-        void switchBranch({ dir: this.cfg.repoPath, branch: msg.branch, createFrom: msg.createFrom }).then(
+        // The main clone's git is shared with its sandboxes' worktrees: the same lock as theirs.
+        const job = msg.sandbox ? this.pool.switch(msg.sandbox, msg.branch, msg.createFrom) : switchBranch({ dir: this.cfg.repoPath, branch: msg.branch, createFrom: msg.createFrom, lock: withBaseRepoLock });
+        void job.then(
           (r) => {
             this.send({ type: 'switch_result', id: msg.id, ok: true, ...r });
             void this.reportStatus();
@@ -494,7 +577,29 @@ export class Daemon {
       case 'status_now':
         void this.reportStatus();
         return;
+      case 'sandbox': {
+        const reply = (p: Promise<string>) =>
+          void p.then(
+            (text) => this.send({ type: 'sandbox_result', id: msg.id, ok: true, text }),
+            (err) => this.send({ type: 'sandbox_result', id: msg.id, ok: false, text: (err as Error).message }),
+          );
+        if (msg.op === 'create') {
+          reply(this.pool.create({ id: msg.sandbox, branch: msg.branch, base: msg.base, seedLibrary: msg.seedLibrary, startUnity: msg.startUnity }).then((s) => `Creating sandbox ${s.id} on branch ${s.branch} from ${s.base} at ${s.path}.`));
+        } else if (msg.op === 'delete') {
+          const live = this.liveIn(msg.sandbox);
+          reply(live ? Promise.reject(new Error(`${live} agent(s) still run in sandbox ${msg.sandbox}; stop them first`)) : this.pool.remove(msg.sandbox, msg.deleteBranch));
+        } else if (msg.op === 'log') reply(Promise.resolve().then(() => this.pool.log(msg.sandbox, msg.lines)));
+        return;
+      }
       case 'unity': {
+        if (msg.sandbox) {
+          const sb = msg.sandbox;
+          void this.pool.unity(sb, msg.action, msg.force).then(
+            (text) => this.send({ type: 'unity_result', id: msg.id, ok: true, text }),
+            (err) => this.send({ type: 'unity_result', id: msg.id, ok: false, text: (err as Error).message }),
+          );
+          return;
+        }
         const u = this.unity;
         const status = async () => [await u.status(), this.unityWatch?.describe()].filter(Boolean).join('\n');
         const act = msg.action === 'start' ? u.start() : msg.action === 'stop' ? u.stop({ force: msg.force }) : msg.action === 'restart' ? u.restart({ force: msg.force }) : status();
@@ -527,7 +632,7 @@ export class Daemon {
         return;
       case 'fs': {
         // Only the clone and the standing agents' folders: the gallery and inline images, nothing else.
-        const roots = [this.cfg.repoPath, path.join(appDirOfConfig(this.cfg), 'agents')];
+        const roots = [this.cfg.repoPath, path.join(appDirOfConfig(this.cfg), 'agents'), ...this.pool.paths()];
         try {
           if (msg.op === 'read') {
             const img = readImage(msg.path, roots);

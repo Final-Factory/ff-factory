@@ -9,7 +9,8 @@ import { groupIntake } from '../shared/intake.ts';
 import { ROOT, configPath, ownerLine, publicIdentityLine, publicIdentityOf, type Config } from './config.ts';
 import { SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import type { Store } from './store.ts';
-import { branchProblem, withBaseRepoLock, type SandboxManager } from './sandboxes.ts';
+import { branchProblem, slugify, withBaseRepoLock, type SandboxManager } from './sandboxes.ts';
+import { parseSandboxRef, poolSettingsOf } from './machines.ts';
 import { switchBranch } from './switchBranch.ts';
 import { searchTranscripts } from './search.ts';
 import { openUnity, unityMcpServerFor, type SceneState, type UnityBridge } from './unityMcp.ts';
@@ -20,7 +21,7 @@ import type { PermissionMode, Requester, Sandbox, SessionInfo, TranscriptEvent }
 import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
 import { accountSource, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
 import { Identity, actingFor, claudeEnvFor, forLine } from './identity.ts';
-import { labelAfterEnd, labelDecision, type Place } from './labelPolicy.ts';
+import { isUnused, labelAfterEnd, labelDecision, type Place } from './labelPolicy.ts';
 import { ghNoreply, githubSlug, publicIdentityEnv, publicReposOf } from './publicGit.ts';
 import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
@@ -30,7 +31,7 @@ import type { HostHealth } from '../shared/types.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
 import type { LaunchSpec } from './launch.ts';
-import { EFFORT_LEVELS, appDirOf, platformNoun, type AutoApprove, type EffortLevel, type Machine } from '../shared/types.ts';
+import { EFFORT_LEVELS, appDirOf, platformNoun, type AutoApprove, type EffortLevel, type Machine, type MachineSandbox } from '../shared/types.ts';
 import { describeTrigger } from './schedule.ts';
 import { describeGit, refreshSandboxGit } from './gitStatus.ts';
 import { displayName } from '../shared/labels.ts';
@@ -67,6 +68,11 @@ const wrap =
   };
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'] as const;
+
+/** Where an agent works, for labels: a host sandbox, a machine's main clone, or a machine sandbox. */
+type Where = { sandboxId?: string; machineId?: string; machineSandbox?: string };
+
+const BUSY_STATUS = new Set(['running', 'starting', 'waiting_permission']);
 
 /** Who a tool call is for, when not the author of the latest message (docs/identity.md). */
 const FOR_USER = z
@@ -129,10 +135,20 @@ export class Agents {
     machines.hooks = {
       specFor: (info, m) => {
         if (info.kind === 'standing') return this.standing.spec(this.standing.require(info.standingId ?? ''));
+        if (info.machineSandbox) return this.machineSandboxSpec(info, m, machines.requireSandbox(m.id, info.machineSandbox));
         return this.machineWorkerSpec(info, m);
       },
       handlersFor: (info, m) => {
         if (info.kind === 'standing') return this.standing.handlers(info.standingId ?? '');
+        const sb = info.machineSandbox;
+        if (sb) {
+          return {
+            set_label: async (a) => this.agentSetLabel({ machineId: m.id, machineSandbox: sb }, info.id, String(a.purpose ?? '')),
+            wake_me: async (a) => this.waker.schedule(info.id, Number(a.minutes), String(a.note ?? '')),
+            unity: async (a) => machines.unity(m.id, a.action as 'status' | 'start' | 'stop' | 'restart', a.force === true, sb),
+            switch_branch: async (a) => this.switchBranch({ sandbox: `${m.id}/${sb}`, branch: String(a.branch ?? ''), createFrom: typeof a.create_from === 'string' ? a.create_from : undefined, callerSessionId: info.id }),
+          };
+        }
         return {
           set_label: async (a) => this.agentSetLabel({ machineId: m.id }, info.id, String(a.purpose ?? '')),
           wake_me: async (a) => this.waker.schedule(info.id, Number(a.minutes), String(a.note ?? '')),
@@ -168,20 +184,29 @@ export class Agents {
 
   // ---------------------------------------------------------------- shared labels (server/labels.ts)
 
-  private place(where: { sandboxId?: string; machineId?: string }): Place {
+  /** A machine's main clone and each of its sandboxes are separate places: their agents' labels do not mix. */
+  private place(where: Where): Place {
     const sessions = [...this.sessions.sessions.values()]
-      .filter((h) => h.info.kind !== 'orchestrator' && (where.sandboxId ? h.info.sandboxId === where.sandboxId : h.info.machineId === where.machineId))
+      .filter((h) => h.info.kind !== 'orchestrator' && (where.sandboxId ? h.info.sandboxId === where.sandboxId : h.info.machineId === where.machineId && h.info.machineSandbox === where.machineSandbox))
       .map((h) => ({ ...h.info, live: h.live }));
     return { sessions };
   }
 
-  private setPlaceLabel(where: { sandboxId?: string; machineId?: string }, label: string) {
-    return where.sandboxId ? this.sandboxes.setPurpose(where.sandboxId, label).purpose : this.machines.setPurpose(where.machineId!, label).purpose;
+  private setPlaceLabel(where: Where, label: string) {
+    if (where.sandboxId) return this.sandboxes.setPurpose(where.sandboxId, label).purpose;
+    if (where.machineSandbox) return this.machines.setSandboxPurpose(where.machineId!, where.machineSandbox, label).purpose;
+    return this.machines.setPurpose(where.machineId!, label).purpose;
+  }
+
+  private placeLabel(where: Where): string | undefined {
+    if (where.sandboxId) return this.store.sandboxes.get(where.sandboxId)?.purpose;
+    const m = this.store.machines.get(where.machineId ?? '');
+    return where.machineSandbox ? m?.sandboxes?.find((s) => s.id === where.machineSandbox)?.purpose : m?.purpose;
   }
 
   /** An agent's own set_label: "unused" while another agent there still works keeps (or restores) that agent's label. */
-  agentSetLabel(where: { sandboxId?: string; machineId?: string }, sessionId: string, purpose: string): string {
-    const current = where.sandboxId ? this.sandboxes.require(where.sandboxId).purpose : (this.store.machines.get(where.machineId!)?.purpose ?? '');
+  agentSetLabel(where: Where, sessionId: string, purpose: string): string {
+    const current = where.sandboxId ? this.sandboxes.require(where.sandboxId).purpose : (this.placeLabel(where) ?? '');
     const d = labelDecision(this.place(where), sessionId, purpose, current);
     const label = this.setPlaceLabel(where, d.set);
     const me = this.sessions.sessions.get(sessionId);
@@ -189,7 +214,7 @@ export class Agents {
       Object.assign(me.info, d.remember ? { label, labelAt: new Date().toISOString() } : { label: undefined, labelAt: undefined });
       this.store.putSession(me.info);
     }
-    const what = where.sandboxId ? `Sandbox ${where.sandboxId}` : `Machine ${where.machineId}`;
+    const what = where.sandboxId ? `Sandbox ${where.sandboxId}` : where.machineSandbox ? `Sandbox ${where.machineId}/${where.machineSandbox}` : `Machine ${where.machineId}`;
     return d.note ? `${d.note} (${what})` : `${what} is now labelled "${label}".`;
   }
 
@@ -197,8 +222,8 @@ export class Agents {
   private onAgentEnded(h: SessionHandle) {
     const i = h.info;
     if (i.kind === 'orchestrator' || (!i.sandboxId && !i.machineId)) return;
-    const where = i.sandboxId ? { sandboxId: i.sandboxId } : { machineId: i.machineId };
-    const current = i.sandboxId ? this.store.sandboxes.get(i.sandboxId)?.purpose : this.store.machines.get(i.machineId!)?.purpose;
+    const where: Where = i.sandboxId ? { sandboxId: i.sandboxId } : { machineId: i.machineId, machineSandbox: i.machineSandbox };
+    const current = this.placeLabel(where);
     if (current === undefined) return;
     const restore = labelAfterEnd(this.place(where), i.id, i.label, current);
     if (!restore) return;
@@ -370,6 +395,25 @@ export class Agents {
     );
   }
 
+  /**
+   * A tool's sandbox / machine arguments as one place: a host sandbox ("spec-098"), a machine's main clone (machine
+   * only), or a machine sandbox ("lothdesktop/sb1", or machine plus sandbox). "a/b" names a machine sandbox only when
+   * machine a exists (a host sandbox's name may hold a slash).
+   */
+  target(sandbox?: string, machine?: string): { sandbox?: string; machine?: string; machineSandbox?: string } {
+    const s = sandbox?.trim();
+    const m = machine?.trim().toLowerCase();
+    if (!s && !m) throw new Error('give a sandbox or a machine');
+    if (!s) return { machine: m };
+    const ref = parseSandboxRef(s);
+    if (ref && this.store.machines.has(ref.machine)) {
+      if (m && m !== ref.machine) throw new Error(`sandbox ${s} is on ${ref.machine}, not ${m}`);
+      return { machine: ref.machine, machineSandbox: ref.sandbox };
+    }
+    if (m) return { machine: m, machineSandbox: slugify(s) };
+    return { sandbox: s };
+  }
+
   get orchestratorId() {
     return this.store.orchestratorId!;
   }
@@ -394,12 +438,16 @@ export class Agents {
    * person it works for (docs/identity.md); it runs on their Claude account when config userClaudeEnv has one.
    */
   startWorker(req: { sandbox?: string; machine?: string; prompt: string; title?: string; model?: string; effort?: EffortLevel; permissionMode?: PermissionMode; from: 'human' | 'orchestrator'; requestedBy?: Requester }) {
-    if (!!req.sandbox === !!req.machine) throw new Error('give either a sandbox or a machine');
+    const t = this.target(req.sandbox, req.machine);
     if (req.effort && !EFFORT_LEVELS.includes(req.effort)) throw new Error(`effort must be one of ${EFFORT_LEVELS.join(', ')}`);
     const title = req.title?.trim() || req.prompt.replace(/\s+/g, ' ').slice(0, 60);
-    if (req.machine) {
-      const m = this.machines.require(req.machine);
+    if (t.machine) {
+      const m = this.machines.require(t.machine);
       if (m.status === 'deploying') throw new Error(`machine ${m.id} is still being set up`);
+      if (t.machineSandbox) {
+        const sb = this.machines.requireSandbox(m.id, t.machineSandbox);
+        if (sb.status === 'error' || sb.status === 'deleting') throw new Error(`sandbox ${m.id}/${sb.id} is ${sb.status}${sb.statusDetail ? `: ${sb.statusDetail}` : ''}`);
+      }
       const s = this.machines.createSession(m.id, {
         kind: 'worker',
         title,
@@ -407,7 +455,14 @@ export class Agents {
         effort: req.effort,
         permissionMode: req.permissionMode || this.cfg.worker.permissionMode,
         requestedBy: req.requestedBy,
+        sandbox: t.machineSandbox,
       });
+      const sb = t.machineSandbox ? this.machines.requireSandbox(m.id, t.machineSandbox) : undefined;
+      if (sb && sb.status === 'creating') {
+        // Like a host sandbox: the prompt goes once it is ready.
+        void this.sendWhenMachineSandboxReady(m.id, sb.id, s.info.id, req.prompt, req.from, req.requestedBy);
+        return s;
+      }
       try {
         this.sessions.send(s.info.id, req.prompt, req.from, undefined, { requestedBy: req.requestedBy });
       } catch (e) {
@@ -418,7 +473,7 @@ export class Agents {
       }
       return s;
     }
-    const sb = this.sandboxes.require(req.sandbox!);
+    const sb = this.sandboxes.require(t.sandbox!);
     if (sb.status === 'error' || sb.status === 'deleting') throw new Error(`sandbox ${sb.id} is ${sb.status}${sb.statusDetail ? `: ${sb.statusDetail}` : ''}`);
     const s = this.sessions.create({
       kind: 'worker',
@@ -461,6 +516,30 @@ export class Agents {
     }
   }
 
+  private async sendWhenMachineSandboxReady(machineId: string, sandbox: string, sessionId: string, prompt: string, from: 'human' | 'orchestrator', requestedBy?: Requester) {
+    const s = this.sessions.get(sessionId);
+    const fail = (why: string) => {
+      this.store.append(sessionId, { kind: 'user', text: prompt, from, ...(requestedBy ? { requestedBy } : {}) });
+      Object.assign(s.info, { status: 'error', statusDetail: why });
+      this.store.putSession(s.info);
+    };
+    s.info.statusDetail = 'waiting for the sandbox to finish provisioning';
+    this.store.putSession(s.info);
+    // A Library copy takes minutes; give up after two hours.
+    for (const until = Date.now() + 2 * 3_600_000; ; ) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const sb = this.store.machines.get(machineId)?.sandboxes?.find((x) => x.id === sandbox);
+      if (!sb || sb.status === 'error' || sb.status === 'deleting') return fail(`sandbox ${machineId}/${sandbox} failed before the agent could start${sb?.statusDetail ? `: ${sb.statusDetail}` : ''}`);
+      if (sb.status === 'ready') break;
+      if (Date.now() > until) return fail(`sandbox ${machineId}/${sandbox} is still ${sb.status} after two hours`);
+    }
+    try {
+      this.sessions.send(sessionId, prompt, from, undefined, { requestedBy });
+    } catch (e) {
+      fail((e as Error).message);
+    }
+  }
+
   // ---------------------------------------------------------------- notifications to the orchestrator
 
   /** `requestedBy`: the person the news is about, recorded on the message (for_user can then name them). */
@@ -477,6 +556,7 @@ export class Agents {
 
   private label(s: SessionHandle) {
     const by = forLine(s.info.requestedBy);
+    if (s.info.machineId && s.info.machineSandbox) return `agent "${s.info.title}" (session ${s.info.id})${by} in sandbox ${s.info.machineId}/${s.info.machineSandbox}`;
     if (s.info.machineId) return `agent "${s.info.title}" (session ${s.info.id})${by} on machine ${s.info.machineId}`;
     const sb = s.info.sandboxId ? this.store.sandboxes.get(s.info.sandboxId) : undefined;
     return `agent "${s.info.title}" (session ${s.info.id})${by} in sandbox ${sb?.id ?? '?'}`;
@@ -732,21 +812,28 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
    * sandbox editor afterwards. Returns a summary.
    */
   async switchBranch(req: { sandbox?: string; machine?: string; branch: string; createFrom?: string; callerSessionId?: string }): Promise<string> {
-    if (!!req.sandbox === !!req.machine) throw new Error('give either a sandbox or a machine');
+    const t = this.target(req.sandbox, req.machine);
     // The worker calling its own switch_branch is mid-turn by definition; any OTHER busy agent refuses it.
     const busy = (ids: string[]) =>
       ids
         .filter((id) => id !== req.callerSessionId)
         .map((id) => this.store.sessions.get(id))
         .filter((s): s is SessionInfo => !!s && ['running', 'starting', 'waiting_permission'].includes(s.status));
-    if (req.machine) {
-      const m = this.machines.require(req.machine);
-      const b = busy(m.sessionIds);
-      if (b.length) throw new Error(`agent(s) ${b.map((s) => `"${s.title}"`).join(', ')} are mid-turn on ${m.id}; wait for them (or stop them) first`);
-      const r = await this.machines.switchBranch(m.id, req.branch, req.createFrom);
-      return `${m.id}: ${r.from} → ${r.to}. ${r.notes.join('; ')}.`;
+    if (t.machine) {
+      const m = this.machines.require(t.machine);
+      // Only the agents of the same place: the main clone, or that one sandbox.
+      const sb = t.machineSandbox ? this.machines.requireSandbox(m.id, t.machineSandbox) : undefined;
+      if (sb) {
+        const problem = branchProblem(req.branch);
+        if (problem) throw new Error(problem);
+      }
+      const where = sb ? `${m.id}/${sb.id}` : m.id;
+      const b = busy(sb ? sb.sessionIds : m.sessionIds.filter((id) => !this.store.sessions.get(id)?.machineSandbox));
+      if (b.length) throw new Error(`agent(s) ${b.map((s) => `"${s.title}"`).join(', ')} are mid-turn in ${where}; wait for them (or stop them) first`);
+      const r = await this.machines.switchBranch(m.id, req.branch, req.createFrom, sb?.id);
+      return `${where}: ${r.from} → ${r.to}. ${r.notes.join('; ')}.`;
     }
-    const sb = this.sandboxes.require(req.sandbox!);
+    const sb = this.sandboxes.require(t.sandbox!);
     if (sb.status !== 'ready') throw new Error(`sandbox ${sb.id} is ${sb.status}`);
     const problem = branchProblem(req.branch);
     if (problem) throw new Error(problem);
@@ -904,21 +991,133 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
     };
   }
 
+  private machineSandboxBrief(m: Machine, sb: MachineSandbox) {
+    const mac = platformNoun(m.platform);
+    const branch = sb.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb.branch;
+    const max = poolSettingsOf(m)?.maxAgentsPerSandbox ?? 2;
+    return `
+# You are running inside an FF Sandbox on one of the user's ${mac}s
+
+You are a Claude Code agent in an isolated sandbox of the Final Factory repo on the machine **${m.id}**, started from FF Factory, the user's control room. Up to ${max} agents may work in this sandbox and other sandboxes run beside it on this ${mac}. The user or an orchestrator agent sends your messages. Nobody watches your terminal: a person reads your final message of each turn.
+${ownerLine(this.cfg)}
+- Sandbox: **${displayName(sb)}** (\`${m.id}/${sb.id}\`; the id is only the slot, the label is what it is doing now)
+- Worktree: \`${sb.path}\` on branch \`${branch}\`, a git worktree of the machine's main clone. Work only inside this directory.
+- Label: the sandbox's name in the dashboard; keep it saying what you are doing now with \`mcp__machine__set_label\` (label only). When you are done, set it to \`unused\`; if another agent still works in this sandbox that is ignored and its label stays (the tool says so), which is expected.
+- Claude account: you run on ${accountSource(this.cfg, m.id)}, set by the portal for its agents only.
+- Protected: the machine's main clone \`${m.repoPath}\` (the user's own work) and the FF Factory daemon's folder. Never write there or run commands naming them; the harness blocks it.
+
+## Unity
+Your sandbox has its own Unity editor, managed by the FF Factory daemon on this ${mac}. Use \`mcp__machine__unity\` to check its state, start, stop or restart it (force: true for a frozen one). Restart it whenever it is hung, crashed or misbehaving, without asking. Use the tool, never taskkill or kill: other sandboxes' editors share this ${mac}, so the harness refuses killing Unity by hand. A watch restarts a hung or crashed editor by itself and messages you. The first boot of a fresh sandbox can take many minutes (asset import); its log is \`Logs/sandbox-editor.log\` in the worktree (or the newest \`Logs/sandbox-editor-<time>.log\`). Your editor's MCP instance is named \`${sb.id}@<hash>\`: before ANY Unity MCP call, read \`mcpforunity://instances\` and \`set_active_instance\` with that full Name@hash. The harness refuses Unity MCP calls until you pin, and refuses any other instance.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like D:\\... (forward slashes work in Bash and in git).' : ''}
+
+## Waiting
+Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back once your turn ends. To come back later (an import, a build, a test run, CI), call \`mcp__machine__wake_me\` with minutes and a note, then end your turn. Do not poll in the foreground for more than a few minutes.
+
+## Git
+${publicIdentityLine(this.cfg)}To change branches, ALWAYS call \`mcp__machine__switch_branch\`, never \`git switch\` / \`git checkout <branch>\` yourself; it is refused while the editor runs (stop it first). \`git checkout -- <path>\` and \`git restore\` for files are fine.
+\`develop\` is the integration branch and the user wants work landing there often. Commit on \`${branch}\` as you reach good checkpoints. When a piece is done and verified (compiles, tests pass, per the repo's CLAUDE.md): \`git fetch origin && git rebase origin/develop\`, re-verify if the rebase pulled in changes, then \`git push origin HEAD:develop\`; also push your own branch (\`git push -u origin ${branch}\`). Never force-push anywhere. Never push to or open PRs into the game repo's master/main.
+
+## Reporting
+End every turn with a short plain-language summary: what you did, what is left, and anything you need from the user. If you are blocked, say so plainly instead of guessing.
+To show the user an image, save it in your worktree (e.g. \`Assets/Screenshots/\`) and write its absolute path in your message: the dashboard shows it inline.
+`.trim();
+  }
+
+  /** What a worker in a machine sandbox launches: its worktree, the sandbox guard (not the main clone's backup rules). */
+  private machineSandboxSpec(info: SessionInfo, m: Machine, sb: MachineSandbox): LaunchSpec {
+    return {
+      cwd: sb.path,
+      sandbox: sb.id,
+      model: info.model,
+      effort: info.effort ?? this.cfg.worker.effort,
+      settingSources: ['user', 'project', 'local'],
+      append: this.machineSandboxBrief(m, sb),
+      strictMcp: false,
+      disallowedTools: ['mcp__ffsb'],
+      mcp: {
+        server: 'machine',
+        tools: [
+          { name: 'set_label', description: `Set the label of this sandbox (${m.id}/${sb.id}): the one-line purpose the user sees in the dashboard. Changes the label only.` },
+          { name: 'wake_me', description: 'Be messaged again after N minutes with your note, e.g. to check a long build or test run. Then end your turn: the message resumes you. One pending wake per session (a new one replaces it).' },
+          {
+            name: 'unity',
+            description: `This sandbox's own Unity editor (${sb.path}) on this ${platformNoun(m.platform)}. action: status | start | stop | restart. Restart it whenever it is hung, crashed or misbehaving: stop asks it to quit and kills it (and what it started) after 30 s; force: true kills at once. Starting returns once the process is up; the MCP bridge follows once the project has loaded (poll status until "running").`,
+          },
+          {
+            name: 'switch_branch',
+            description: `Switch this sandbox (${m.id}/${sb.id}) to another branch. ALWAYS use this instead of git switch / git checkout <branch>. Refused while its editor runs (stop it first), with uncommitted changes, or while another agent here is mid-turn; pushes commits of the current branch that no remote has first; fetches, then switches to the local branch, tracks origin/<branch>, or creates it from create_from (default origin/develop). Never master/main/develop.`,
+          },
+        ],
+      },
+      guard: {
+        id: sb.id,
+        ownPath: sb.path,
+        protectedPaths: [appDirOf(m), m.repoPath].filter(Boolean),
+        gameRepos: [this.cfg.repo.url, m.repoPath].filter(Boolean),
+        publicIdentity: publicIdentityOf(this.cfg),
+        denyToolPrefixes: ['mcp__ffsb__'],
+      },
+      publicGit: this.publicGit(),
+      env: { ...claudeEnvFor(this.cfg, info.requestedBy, hostClaudeEnvFor(this.cfg, m.id)), FF_MACHINE_ID: m.id, FF_SANDBOX_ID: sb.id, FF_SANDBOX_PATH: sb.path, FF_SESSION_ID: info.id },
+      login: machineUsesLogin(this.cfg, m.id),
+    };
+  }
+
   // ---------------------------------------------------------------- the orchestrator
 
+  /** An agent line for the listings: live agents only (the full history is in the dashboard and search_transcripts). */
+  private agentLine(s: SessionInfo) {
+    return `    - ${s.id} "${s.title}" [${s.status}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`;
+  }
+
+  /** Live agents of a place (a process up or mid-turn), and how many earlier ones there were. */
+  private liveAgents(ids: string[]): { live: SessionInfo[]; earlier: number } {
+    const all = ids.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+    const live = all.filter((s) => this.sessions.sessions.get(s.id)?.live || BUSY_STATUS.has(s.status) || s.pendingPermissions.length > 0);
+    return { live, earlier: all.length - live.length };
+  }
+
+  private agentsPart(ids: string[]) {
+    const { live, earlier } = this.liveAgents(ids);
+    const more = earlier ? ` (+${earlier} stopped earlier)` : '';
+    return live.length ? `  agents${more}:\n${live.map((s) => this.agentLine(s)).join('\n')}` : `  agents: none live${more}`;
+  }
+
+  /** Free: ready, labelled unused, no live agent. */
+  private free(x: { status: string; purpose: string; sessionIds: string[] }) {
+    return x.status === 'ready' && isUnused(x.purpose) && this.liveAgents(x.sessionIds).live.length === 0;
+  }
+
+  private describeMachineSandbox(m: Machine, sb: MachineSandbox) {
+    const u = sb.unity;
+    return [
+      `- ${m.id}/${sb.id}${this.free(sb) ? ' FREE' : ''}: "${displayName(sb)}", ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}; ${describeGit(sb.git) || `branch ${sb.branch}`}; unity ${u.state}${u.detail ? ` (${u.detail})` : ''}`,
+      this.agentsPart(sb.sessionIds),
+    ].join('\n');
+  }
+
   private describeSandbox(sb: Sandbox) {
-    const agents = sb.sessionIds
-      .map((id) => this.store.sessions.get(id))
-      .filter((s): s is SessionInfo => !!s)
-      .map((s) => `    - ${s.id} "${s.title}" [${s.status}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`)
-      .join('\n');
     // The label is what the sandbox is doing now; the id is only the slot (folder / Unity project) it lives in.
     return [
-      `- "${displayName(sb)}" (slot ${sb.id}): ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`,
-      `  ${describeGit(sb.git)}`,
-      `  unity: ${sb.unity.state}${sb.unity.detail ? ` (${sb.unity.detail})` : ''}`,
-      agents ? `  agents:\n${agents}` : '  agents: none',
+      `- ${sb.id}${this.free(sb) ? ' FREE' : ''}: "${displayName(sb)}", ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}; ${describeGit(sb.git)}; unity ${sb.unity.state}${sb.unity.detail ? ` (${sb.unity.detail.slice(0, 160)})` : ''}`,
+      this.agentsPart(sb.sessionIds),
     ].join('\n');
+  }
+
+  /** list_sandboxes: this host's sandboxes, then each machine's, compactly (live agents only). */
+  describeAllSandboxes(): string {
+    const host = this.sandboxes.list();
+    const parts = [`## this host (${host.length}/${this.cfg.limits.maxSandboxes} sandboxes, ${host.filter((s) => this.free(s)).length} free)`, ...host.map((s) => this.describeSandbox(s))];
+    for (const m of this.machines.list()) {
+      const pool = poolSettingsOf(m);
+      if (!pool && !m.sandboxes?.length) continue;
+      const sbs = m.sandboxes ?? [];
+      const disk = this.machines.diskOf(m.id);
+      const state = this.machines.isOnline(m.id) ? 'online' : 'OFFLINE (last known state)';
+      const limits = pool ? `${sbs.length}/${pool.maxSandboxes} sandboxes, ${sbs.filter((s) => this.free(s)).length} free, up to ${pool.maxAgentsPerSandbox} agents each, ${pool.maxUnity} editors at once, root ${pool.root}` : 'no sandbox_root any more';
+      const diskPart = disk && disk.level !== 'ok' ? `; DISK ${disk.level.toUpperCase()} (${((disk.freeBytes ?? 0) / 2 ** 30).toFixed(0)} GB free)` : '';
+      parts.push('', `## ${m.id} (${platformNoun(m.platform)}, ${state}; ${limits}${diskPart})`, ...(sbs.length ? sbs.map((s) => this.describeMachineSandbox(m, s)) : ['(none yet)']));
+    }
+    return parts.join('\n');
   }
 
   private condensed(events: TranscriptEvent[]) {
@@ -961,22 +1160,24 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
     return [
         tool(
           'list_sandboxes',
-          'List every sandbox: its label (what it is doing now, "Unused" when free) first, then its slot id (the folder; historical, not the task), the real git state (branch checked out now, uncommitted files, ahead/behind, last commit, open PR), Unity and agents. Call this before deciding whether to reuse a sandbox or make a new one; address sandboxes by slot id in other tools.',
+          'List every sandbox, grouped by computer: this host\'s, then each machine\'s (the user\'s Macs and Windows PCs with a sandbox_root), with each group\'s limits and free count. One line per sandbox: its id (address it by this in other tools: "spec-098" on this host, "lothdesktop/sb1" on a machine), FREE when it is ready, labelled unused and has no live agent, its label (what it is doing now), status, git state (branch checked out now, uncommitted files, ahead/behind, open PR) and Unity; then its live agents only (the count of stopped earlier ones; their history is in agent_transcript and search_transcripts). Call this before deciding whether to reuse a sandbox or make a new one.',
           {},
-          wrap(async () => this.sandboxes.list().map((s) => this.describeSandbox(s)).join('\n\n') || 'No sandboxes yet.'),
+          wrap(async () => this.describeAllSandboxes()),
         ),
         tool(
           'create_sandbox',
-          'Create a sandbox: a new git worktree of Final Factory on its own branch, optionally with a warm Library copy and a Unity editor. Returns immediately; provisioning (fetch, checkout, Library copy) continues in the background and list_sandboxes shows progress. You can call start_agent right away: the prompt is delivered once the sandbox is ready.',
+          'Create a sandbox: a new git worktree of Final Factory on its own branch, optionally with a warm Library copy and a Unity editor, on this host or (machine) on one of the user\'s machines with a sandbox_root (a worktree of its main clone, its Library seeded from the main clone\'s or another sandbox\'s). Returns immediately; provisioning (fetch, checkout, Library copy) continues in the background and list_sandboxes shows progress. You can call start_agent right away: the prompt is delivered once the sandbox is ready.',
           {
             name: z.string().describe('Short slug-able name, e.g. "spec-098" or "shader-dissolve". Becomes the folder and Unity project name.'),
             purpose: z.string().describe('One line on what this sandbox is for.'),
+            machine: z.string().optional().describe('A machine id from list_machines (e.g. "lothdesktop") to create it there; default this host. It is then addressed as "<machine>/<name>".'),
             branch: z.string().optional().describe('Branch to check out or create. Default "sandbox/<name>". Use an existing branch name (e.g. "098-foo") to continue work on it.'),
             base: z.string().optional().describe(`Base ref for a new branch. Default ${this.cfg.defaultBase}.`),
             start_unity: z.boolean().optional().describe('Start the Unity editor once ready. Needed for anything that plays the game or touches assets/shaders/scenes.'),
             seed_library: z.boolean().optional().describe('Copy the warm Unity Library (default true). Set false for work that will never open Unity, to save disk and time.'),
           },
           wrap(async (a) => {
+            if (a.machine) return this.machines.createSandbox(a.machine, { name: a.name, purpose: a.purpose, branch: a.branch, base: a.base, startUnity: a.start_unity, seedLibrary: a.seed_library });
             const s = this.sandboxes.create({ name: a.name, purpose: a.purpose, branch: a.branch, base: a.base, startUnity: a.start_unity, seedLibrary: a.seed_library });
             return `Creating sandbox ${s.id} on branch ${s.branch} from ${s.base} at ${s.path}.`;
           }),
@@ -984,17 +1185,34 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         tool(
           'set_sandbox_label',
           "Change a sandbox's label: the one-line purpose shown in list_sandboxes and the dashboard. Changes the label only, never the folder, branch or Unity project name.",
-          { sandbox: z.string(), purpose: z.string().describe('One line on what this sandbox is for now.') },
+          { sandbox: z.string().describe('A sandbox id: "spec-098" on this host, "lothdesktop/sb1" on a machine.'), purpose: z.string().describe('One line on what this sandbox is for now.') },
           wrap(async ({ sandbox, purpose }) => {
+            const t = this.target(sandbox);
+            if (t.machine) {
+              const sb = this.machines.setSandboxPurpose(t.machine, t.machineSandbox!, purpose);
+              return `Sandbox ${t.machine}/${sb.id} is now labelled "${sb.purpose}".`;
+            }
             const s = this.sandboxes.setPurpose(sandbox, purpose);
             return `Sandbox ${s.id} is now labelled "${s.purpose}".`;
           }),
         ),
         tool(
           'delete_sandbox',
-          'Delete a sandbox: stops its editor and agents, removes the worktree and its Library. The local branch is kept, so recreating a sandbox on it resumes the work. ONLY call this when the user explicitly asked for this sandbox to be deleted.',
+          'Delete a sandbox (on this host, or "<machine>/<name>" on a machine): stops its editor and agents, removes the worktree and its Library. The local branch is kept, so recreating a sandbox on it resumes the work. ONLY call this when the user explicitly asked for this sandbox to be deleted.',
           { sandbox: z.string(), user_asked: z.literal(true).describe('Must be true: the user explicitly asked for this deletion.') },
           wrap(async ({ sandbox }) => {
+            const t = this.target(sandbox);
+            if (t.machine) {
+              const msb = this.machines.requireSandbox(t.machine, t.machineSandbox!);
+              this.machines.requireSandboxDaemon(t.machine);
+              const ids = [...msb.sessionIds];
+              for (const id of ids) this.sessions.sessions.get(id)?.stop();
+              // The daemon refuses while an agent process there is live; give the stops a moment to land.
+              for (let i = 0; i < 20 && ids.some((id) => this.sessions.sessions.get(id)?.live); i++) await new Promise((r) => setTimeout(r, 500));
+              const text = await this.machines.deleteSandbox(t.machine, msb.id);
+              for (const id of ids) if (this.sessions.sessions.has(id)) this.sessions.remove(id);
+              return text;
+            }
             const sb = this.sandboxes.require(sandbox);
             for (const id of sb.sessionIds) if (this.sessions.sessions.has(id)) this.sessions.remove(id);
             void this.sandboxes.remove(sb.id).catch(() => undefined);
@@ -1003,21 +1221,25 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'unity',
-          "Start, stop, restart or inspect the Unity editor of a sandbox, or of a machine's clone (machine: the user's Mac or Windows PC; log is sandbox-only). action: start | stop | restart | status | log. Restart whenever an editor is hung, crashed or misbehaving, without asking: stop asks it to quit and kills it (and what it started) after a grace period; force: true kills at once, for a frozen editor.",
+          "Start, stop, restart or inspect the Unity editor of a sandbox (this host's, or a machine's as \"<machine>/<name>\"), or of a machine's main clone (machine alone: the user's Mac or Windows PC; log is for sandboxes). action: start | stop | restart | status | log. Restart whenever an editor is hung, crashed or misbehaving, without asking: stop asks it to quit and kills it (and what it started) after a grace period; force: true kills at once, for a frozen editor.",
           {
-            sandbox: z.string().optional().describe('A sandbox id. Give this or machine.'),
-            machine: z.string().optional().describe('A machine id (list_machines). Give this or sandbox.'),
+            sandbox: z.string().optional().describe('A sandbox id: "spec-098" on this host, "lothdesktop/sb1" on a machine. Give this or machine.'),
+            machine: z.string().optional().describe("A machine id (list_machines): its main clone's editor. Give this or sandbox."),
             action: z.enum(['start', 'stop', 'restart', 'status', 'log']),
             force: z.boolean().optional().describe('stop/restart: kill at once instead of asking the editor to quit first.'),
             lines: z.number().int().min(1).max(2000).optional(),
           },
           wrap(async ({ sandbox: sandboxArg, machine, action, force, lines }) => {
-            if (!!sandboxArg === !!machine) throw new Error('give either a sandbox or a machine');
-            if (machine) {
+            const t = this.target(sandboxArg, machine);
+            if (t.machine) {
+              if (t.machineSandbox) {
+                if (action === 'log') return this.machines.sandboxLog(t.machine, t.machineSandbox, lines ?? 80);
+                return this.machines.unity(t.machine, action, force, t.machineSandbox);
+              }
               if (action === 'log') throw new Error('log is for sandboxes; on a machine, a worker there can read ~/Library/Logs/Unity/Editor.log');
-              return this.machines.unity(machine, action, force);
+              return this.machines.unity(t.machine, action, force);
             }
-            const sandbox = sandboxArg!;
+            const sandbox = t.sandbox!;
             if (action === 'start') await this.sandboxes.startUnity(sandbox);
             if (action === 'stop') await this.sandboxes.stopUnity(sandbox, { force });
             if (action === 'restart') {
@@ -1030,10 +1252,10 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'start_agent',
-          'Start a new Claude Code worker agent with a task prompt, in a sandbox on this host or on a machine (one of the user\'s Macs or Windows PCs, working in their main clone there). The worker has the full Final Factory harness (CLAUDE.md, ff-agents / ff-speckit / ff-discord skills, the Unity MCP bridge for its own editor). Write the prompt as a complete brief: goal, done-criteria, constraints, and which skill to use if one fits. You will get a [worker update] message when it finishes a turn.',
+          'Start a new Claude Code worker agent with a task prompt: in a sandbox on this host, in a sandbox on a machine ("lothdesktop/sb1": its own worktree and editor there), or on a machine itself (machine alone: one of the user\'s Macs or Windows PCs, working in their main clone there). The worker has the full Final Factory harness (CLAUDE.md, ff-agents / ff-speckit / ff-discord skills, the Unity MCP bridge for its own editor). Write the prompt as a complete brief: goal, done-criteria, constraints, and which skill to use if one fits. You will get a [worker update] message when it finishes a turn.',
           {
-            sandbox: z.string().optional().describe('A sandbox id. Give this or machine.'),
-            machine: z.string().optional().describe('A machine id from list_machines (e.g. "m5"). Give this or sandbox.'),
+            sandbox: z.string().optional().describe('A sandbox id: "spec-098" on this host, "lothdesktop/sb1" on a machine. Give this or machine.'),
+            machine: z.string().optional().describe('A machine id from list_machines (e.g. "m5"): its main clone. Give this or sandbox.'),
             prompt: z.string(),
             title: z.string().optional().describe('A short, specific name the user will recognise on the dashboard, e.g. "Belt splitter fix (spec 098)". Always give one.'),
             model: z.string().optional().describe(`One of ${this.cfg.models.join(', ')}. Default ${this.cfg.defaultModel}.`),
@@ -1044,7 +1266,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
           wrap(async (a) => {
             const requestedBy = actor(a.for_user);
             const s = this.startWorker({ sandbox: a.sandbox, machine: a.machine, prompt: a.prompt, title: a.title, model: a.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy });
-            const where = a.machine ? `on machine ${a.machine}` : `in ${a.sandbox}`;
+            const where = s.info.machineSandbox ? `in sandbox ${s.info.machineId}/${s.info.machineSandbox}` : s.info.machineId ? `on machine ${s.info.machineId}` : `in ${a.sandbox}`;
             return s.info.status === 'error' ? `Created agent ${s.info.id} ${where}, but it did not start: ${s.info.statusDetail}` : `Started agent ${s.info.id} "${s.info.title}" ${where}, requested by ${requestedBy.displayName}.`;
           }),
         ),
@@ -1114,7 +1336,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'switch_branch',
-          "Switch a sandbox's or a machine's working tree to another branch: refused while an agent there is mid-turn or there are uncommitted changes (it says which). Pushes the current branch first if it has commits no remote has, fetches, then switches to the local branch, tracks origin/<branch>, or creates it from create_from (default origin/develop). A running sandbox editor is refreshed and recompiled afterwards; if none of its open scenes has unsaved edits they are closed across the switch and reopened, so Unity does not stop to ask whether to reload them. Sandboxes can never be on master/main/develop.",
+          "Switch a sandbox's (\"spec-098\", or \"lothdesktop/sb1\" on a machine, refused there while its editor runs) or a machine's main clone's working tree to another branch: refused while an agent there is mid-turn or there are uncommitted changes (it says which). Pushes the current branch first if it has commits no remote has, fetches, then switches to the local branch, tracks origin/<branch>, or creates it from create_from (default origin/develop). A running sandbox editor is refreshed and recompiled afterwards; if none of its open scenes has unsaved edits they are closed across the switch and reopened, so Unity does not stop to ask whether to reload them. Sandboxes can never be on master/main/develop.",
           {
             sandbox: z.string().optional(),
             machine: z.string().optional(),
@@ -1276,18 +1498,21 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
   }
 
   private describeMachine(m: Machine) {
-    const agents = m.sessionIds
-      .map((id) => this.store.sessions.get(id))
-      .filter((s): s is SessionInfo => !!s)
-      .map((s) => `    - ${s.id} "${s.title}" [${s.status}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`)
-      .join('\n');
     const g = m.git;
+    const pool = poolSettingsOf(m);
+    const sbs = m.sandboxes ?? [];
+    const sandboxes = pool
+      ? `  sandboxes: ${sbs.length}/${pool.maxSandboxes} in ${pool.root} (${sbs.filter((s) => this.free(s)).length} free; up to ${pool.maxAgentsPerSandbox} agents each, ${pool.maxUnity} editors at once; disk guard ${pool.diskWarnGB}/${pool.diskCriticalGB} GB): ${sbs.map((s) => s.id).join(', ') || 'none yet'} (list_sandboxes for details)`
+      : '  sandboxes: none (no sandbox_root)';
+    // Its main clone's agents here; a sandbox's are under list_sandboxes.
+    const main = m.sessionIds.filter((id) => !this.store.sessions.get(id)?.machineSandbox);
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${platformNoun(m.platform)}, ssh ${m.host}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
-      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; up to ${m.maxSessions} agents; Claude account of its agents: ${accountSource(this.cfg, m.id)}`,
+      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; up to ${m.maxSessions} agents in the main clone; Claude account of its agents: ${accountSource(this.cfg, m.id)}`,
       `  folders: ${describeDirs(m)}`,
+      sandboxes,
       `  ${describeGit(g)}`,
-      agents ? `  agents:\n${agents}` : '  agents: none',
+      this.agentsPart(main),
     ].join('\n');
   }
 
@@ -1346,15 +1571,38 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
           ssh_host: z.string().optional().describe('ssh host alias this host uses (default: the id).'),
           portal_url: z.string().optional().describe("The URL the machine reaches this portal at, e.g. the Funnel URL https://<host>.<tailnet>.ts.net. Default: config publicUrl, or the machine's previous one."),
           repo_path: z.string().optional().describe('Its main Final Factory clone (default: found automatically).'),
-          max_agents: z.number().int().min(1).max(8).optional().describe('Agents that may run there at once (default 3).'),
+          max_agents: z.number().int().min(1).max(8).optional().describe("Agents that may run at once in its main clone (default 3; its sandboxes' agents count separately)."),
           app_dir: z.string().optional().describe('Absolute folder on the machine for the daemon (its code, logs, agents, daemon.json), e.g. "D:\\work\\.ff-factory". Default ~/.ff-factory (%USERPROFILE%\\.ff-factory). Omitted on a redeploy: kept; "": back to the default.'),
           unity_editor_root: z.string().optional().describe("Absolute folder holding Unity editor versions (<root>/<version>/Editor/Unity.exe on Windows, <root>/<version>/Unity.app on a Mac), searched before Unity Hub's folders. Omitted: kept; \"\": cleared."),
           unity_path: z.string().optional().describe('The Unity editor executable itself (e.g. "E:\\Unity\\6000.3.2f1\\Editor\\Unity.exe"): used whatever the project\'s version. Omitted: kept; "": cleared.'),
           temp_dir: z.string().optional().describe('Absolute scratch folder for its agents (their TMP, TEMP and TMPDIR). Default: the system\'s. Omitted: kept; "": cleared.'),
+          sandbox_root: z.string().optional().describe('Absolute folder for its sandboxes (git worktrees of its main clone, each with its own Library and editor), e.g. "D:\\work\\ffsb". Unset: no sandboxes there. Omitted: kept; "": none (refused while sandboxes exist).'),
+          max_sandboxes: z.number().int().min(1).max(8).optional().describe('Sandboxes that may exist there (default 3). Omitted: kept.'),
+          max_agents_per_sandbox: z.number().int().min(1).max(8).optional().describe('Agents that may run at once in one sandbox (default 2). Omitted: kept.'),
+          max_unity: z.number().int().min(0).max(8).optional().describe("Sandbox Unity editors that may run at once there (default 2; the main clone's editor is not counted). Omitted: kept."),
+          disk_warn_gb: z.number().int().min(1).optional().describe("Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 50). Omitted: kept."),
+          disk_critical_gb: z.number().int().min(1).optional().describe('Below this, idle sandbox editors stop and busy sandbox agents are asked to commit, push and end their turn (default 20). Omitted: kept.'),
           force: z.boolean().optional().describe('Redeploy even though agents are running there (they stop).'),
         },
         wrap(async (a) => {
-          const m = mm.deployMachine({ id: a.id, host: a.ssh_host, portalUrl: a.portal_url, repoPath: a.repo_path, maxSessions: a.max_agents, appDir: a.app_dir, unityEditorRoot: a.unity_editor_root, unityPath: a.unity_path, tempDir: a.temp_dir, force: a.force });
+          const m = mm.deployMachine({
+            id: a.id,
+            host: a.ssh_host,
+            portalUrl: a.portal_url,
+            repoPath: a.repo_path,
+            maxSessions: a.max_agents,
+            appDir: a.app_dir,
+            unityEditorRoot: a.unity_editor_root,
+            unityPath: a.unity_path,
+            tempDir: a.temp_dir,
+            sandboxRoot: a.sandbox_root,
+            maxSandboxes: a.max_sandboxes,
+            maxAgentsPerSandbox: a.max_agents_per_sandbox,
+            maxUnity: a.max_unity,
+            diskWarnGB: a.disk_warn_gb,
+            diskCriticalGB: a.disk_critical_gb,
+            force: a.force,
+          });
           return `Deploying to ${m.id} (ssh ${m.host}, portal ${m.portalUrl}); list_machines shows progress.`;
         }),
       ),

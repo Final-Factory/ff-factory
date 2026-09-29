@@ -15,6 +15,8 @@ import type { StandingToolGroup } from '../shared/types.ts';
  */
 export interface LaunchSpec {
   cwd: string;
+  /** A machine sandbox (docs/machines.md): the daemon checks cwd is its folder and gives the guard its editor state. */
+  sandbox?: string;
   model?: string;
   effort?: Options['effort'];
   settingSources: NonNullable<Options['settingSources']>;
@@ -69,6 +71,10 @@ export const CATALOG = {
     action: z.enum(['status', 'start', 'stop', 'restart']),
     force: z.boolean().optional().describe('stop/restart: kill the editor at once instead of asking it to quit first (a frozen editor ignores that).'),
   },
+  switch_branch: {
+    branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),
+    create_from: z.string().optional().describe('Base for a branch that exists neither here nor on origin. Default origin/develop.'),
+  },
 } satisfies Record<string, z.ZodRawShape>;
 
 export type CatalogTool = keyof typeof CATALOG;
@@ -85,8 +91,12 @@ function publicGitEnvFor(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv): Record<s
   }
 }
 
-/** SDK options for a spec. `handlers` answers the spec's MCP tools; `processEnv` is the environment to start from (without its credentials for spec.login). */
-export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env): Options {
+/**
+ * SDK options for a spec. `handlers` answers the spec's MCP tools; `processEnv` is the environment to start from (without its
+ * credentials for spec.login); `editorRunning`, for a machine sandbox, says whether its editor is up (raw branch switches are
+ * refused then).
+ */
+export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env, editorRunning?: () => boolean): Options {
   const baseEnv = spec.login ? usageEnv(processEnv) : processEnv;
   const g = spec.guard;
   const hooks = [
@@ -98,6 +108,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       ownCheckout: g.ownCheckout ? {} : undefined,
       denyToolPrefixes: g.denyToolPrefixes,
       publicIdentity: g.publicIdentity,
+      editorRunning,
     }),
     ...(g.standing ? [standingGuard(g.standing)] : []),
   ];

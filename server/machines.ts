@@ -9,14 +9,14 @@ import { ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
-import { PROTOCOL_VERSION, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { PROTOCOL_VERSION, SANDBOX_PROTOCOL, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
-import { normalizePurpose } from './sandboxes.ts';
+import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
 import type { MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
-import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineStats, PermissionMode, PlanUsage, Requester, SessionInfo } from '../shared/types.ts';
+import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -24,6 +24,58 @@ const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
 /** Machine ids: short, lower-case, safe in a path and a LaunchAgent label. */
 export const MACHINE_ID = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+const SANDBOX_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+/** A machine's sandbox limits as add_machine takes them (docs/machines.md, "Machine sandboxes"). */
+export interface SandboxLimits {
+  maxSandboxes?: number;
+  maxAgentsPerSandbox?: number;
+  maxUnity?: number;
+  diskWarnGB?: number;
+  diskCriticalGB?: number;
+}
+
+/** The pool settings of a machine (its sandbox_root and limits, with defaults), or null when it has no sandbox_root. Exported for tests. */
+export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits): SandboxPoolSettings | null {
+  if (!m.sandboxRoot) return null;
+  const warn = m.diskWarnGB ?? 50;
+  return {
+    root: m.sandboxRoot,
+    maxSandboxes: m.maxSandboxes ?? 3,
+    maxAgentsPerSandbox: m.maxAgentsPerSandbox ?? 2,
+    maxUnity: m.maxUnity ?? 2,
+    diskWarnGB: warn,
+    diskCriticalGB: Math.min(m.diskCriticalGB ?? 20, warn),
+  };
+}
+
+/** The limits a deploy stores: each given one checked, an unset one kept from the previous deploy. Exported for tests. */
+export function limitOptions(opts: SandboxLimits, prev: SandboxLimits | undefined): SandboxLimits {
+  const pick = (k: keyof SandboxLimits, min: number, max: number) => {
+    const v = opts[k] ?? prev?.[k];
+    if (v !== undefined && (!Number.isInteger(v) || v < min || v > max)) throw new Error(`${k} must be a whole number from ${min} to ${max}`);
+    return v;
+  };
+  const out = { maxSandboxes: pick('maxSandboxes', 1, 8), maxAgentsPerSandbox: pick('maxAgentsPerSandbox', 1, 8), maxUnity: pick('maxUnity', 0, 8), diskWarnGB: pick('diskWarnGB', 1, 10_000), diskCriticalGB: pick('diskCriticalGB', 1, 10_000) };
+  if (out.diskWarnGB !== undefined && out.diskCriticalGB !== undefined && out.diskCriticalGB > out.diskWarnGB) throw new Error('disk_critical_gb must not be above disk_warn_gb');
+  return out;
+}
+
+/**
+ * A machine's sandboxes after a daemon snapshot: the daemon's facts (folder, branch, status, editor, git) with the
+ * portal's purpose and agents kept by id; `pending` gives the purpose of sandboxes just asked for. Exported for tests.
+ */
+export function mergeSandboxes(prev: MachineSandbox[] | undefined, list: DaemonSandbox[], pending: ReadonlyMap<string, string> = new Map()): MachineSandbox[] {
+  const old = new Map((prev ?? []).map((s) => [s.id, s]));
+  return list.map((d) => ({ ...d, purpose: old.get(d.id)?.purpose ?? pending.get(d.id) ?? 'unused', sessionIds: old.get(d.id)?.sessionIds ?? [] }));
+}
+
+/** "lothdesktop/sb1" as a machine sandbox reference, or undefined for a plain (host) sandbox id. */
+export function parseSandboxRef(ref: string): { machine: string; sandbox: string } | undefined {
+  const m = /^\s*([A-Za-z0-9][A-Za-z0-9-]*)\s*[/:]\s*([A-Za-z0-9][A-Za-z0-9 _.-]*?)\s*$/.exec(ref);
+  return m ? { machine: m[1].toLowerCase(), sandbox: slugify(m[2]) } : undefined;
+}
 
 /** A session whose process runs on a machine; the daemon there runs the real AgentSession. */
 export class RemoteSession implements SessionHandle {
@@ -254,6 +306,11 @@ export class MachineManager {
     return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && s.live).length;
   }
 
+  /** Live agents in one place of a machine: a sandbox, or (sandbox undefined) its main clone and standing agents. */
+  liveIn(id: string, sandbox: string | undefined) {
+    return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && s.info.machineSandbox === sandbox && s.live).length;
+  }
+
   /** Re-attach a persisted session on boot. */
   restore(info: SessionInfo): SessionHandle | undefined {
     if (!info.machineId || !this.store.machines.has(info.machineId)) return undefined;
@@ -327,7 +384,7 @@ export class MachineManager {
    * Add a machine, or redeploy one (same id): mint a token, install the daemon over ssh and wait for
    * it to connect. Returns at once; progress shows on the record (status/statusDetail).
    */
-  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; purpose?: string; force?: boolean } & MachineDirs) {
+  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; purpose?: string; force?: boolean } & MachineDirs & SandboxLimits) {
     const typed = opts.id.trim();
     const id = typed.toLowerCase();
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
@@ -337,6 +394,10 @@ export class MachineManager {
     if (!/^https?:\/\/[^/\s]+$/.test(portalUrl)) throw new Error('portal_url is required: the address the machine reaches this portal at, e.g. https://<host>.<tailnet>.ts.net (or set publicUrl in config.json)');
     if (prev && !opts.force && this.liveCount(id) > 0) throw new Error(`${id} has agents running; a redeploy restarts its daemon and stops them. Stop them first or pass force.`);
     const dirs = dirOptions(opts, prev);
+    const limits = limitOptions(opts, prev);
+    if (prev?.sandboxRoot && dirs.sandboxRoot !== prev.sandboxRoot && prev.sandboxes?.length) {
+      throw new Error(`${id} has ${prev.sandboxes.length} sandbox(es) in ${prev.sandboxRoot}; delete them before moving sandbox_root`);
+    }
     const { machine, token } = this.register({
       id,
       host: opts.host?.trim() || prev?.host || id,
@@ -352,7 +413,9 @@ export class MachineManager {
       lastSeen: prev?.lastSeen,
       platform: prev?.platform,
       name: typed !== id ? typed : prev?.name,
+      sandboxes: prev?.sandboxes,
       ...dirs,
+      ...limits,
     });
     void this.runDeploy(machine, token, opts.repoPath, prev?.appDir);
     return machine;
@@ -363,8 +426,8 @@ export class MachineManager {
     const { deploy, repoSlug } = await import('./machineDeploy.ts');
     const { ROOT } = await import('./config.ts');
     try {
-      const dirs = { appDir: m.appDir, unityEditorRoot: m.unityEditorRoot, unityPath: m.unityPath, tempDir: m.tempDir };
-      const r = await deploy({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, previousAppDir, step: (s) => this.update(m.id, { statusDetail: s }), onPlatform: (platform) => this.update(m.id, { platform }) });
+      const dirs = { appDir: m.appDir, unityEditorRoot: m.unityEditorRoot, unityPath: m.unityPath, tempDir: m.tempDir, sandboxRoot: m.sandboxRoot };
+      const r = await deploy({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step: (s) => this.update(m.id, { statusDetail: s }), onPlatform: (platform) => this.update(m.id, { platform }) });
       this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
       if (r.started === false) {
         // Windows: the task runs only in the user's logged-on session (docs/machines.md).
@@ -425,13 +488,15 @@ export class MachineManager {
 
   // ---------------------------------------------------------------- sessions
 
-  createSession(machineId: string, opts: { kind: 'worker' | 'standing'; title: string; model?: string; effort?: EffortLevel; permissionMode: PermissionMode; standingId?: string; requestedBy?: Requester }) {
+  createSession(machineId: string, opts: { kind: 'worker' | 'standing'; title: string; model?: string; effort?: EffortLevel; permissionMode: PermissionMode; standingId?: string; requestedBy?: Requester; sandbox?: string }) {
     const m = this.require(machineId);
+    const sb = opts.sandbox ? this.requireSandbox(m.id, opts.sandbox) : undefined;
     const now = new Date().toISOString();
     const info: SessionInfo = {
       id: randomUUID().slice(0, 8),
       kind: opts.kind,
       machineId: m.id,
+      ...(sb ? { machineSandbox: sb.id } : {}),
       standingId: opts.standingId,
       title: opts.title,
       status: 'stopped',
@@ -447,6 +512,7 @@ export class MachineManager {
     };
     const h = this.sessions.adopt(new RemoteSession(info, this));
     m.sessionIds = [...m.sessionIds, info.id];
+    if (sb) sb.sessionIds = [...sb.sessionIds, info.id];
     this.store.putMachine(m);
     return h;
   }
@@ -455,7 +521,14 @@ export class MachineManager {
   dispatchSend(s: RemoteSession, text: string, from: 'human' | 'orchestrator' | 'system', uuid: string, images: ImageInput[] = [], requestedBy?: Requester) {
     const m = this.require(s.info.machineId!);
     if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline (asleep, or its daemon is not running)`);
-    if (!s.live && this.liveCount(m.id) >= m.maxSessions) throw new Error(`already ${m.maxSessions} agents running on ${m.id}; stop one first`);
+    const sbId = s.info.machineSandbox;
+    if (sbId && !s.live) {
+      const sb = this.requireSandbox(m.id, sbId);
+      this.requireSandboxDaemon(m.id);
+      if (sb.status !== 'ready') throw new Error(`sandbox ${m.id}/${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`);
+      const max = poolSettingsOf(m)?.maxAgentsPerSandbox ?? 2;
+      if (this.liveIn(m.id, sb.id) >= max) throw new Error(`already ${max} agents running in sandbox ${m.id}/${sb.id} (max_agents_per_sandbox); stop one first`);
+    } else if (!s.live && this.liveIn(m.id, undefined) >= m.maxSessions) throw new Error(`already ${m.maxSessions} agents running in ${m.id}'s main clone; stop one first`);
     if (!this.hooks) throw new Error('machines are not wired up');
     // A new agent process is built from the spec by the daemon's own code: an outdated daemon may not understand
     // it (a tool it does not have). A live process only gets the text, so it carries on.
@@ -486,6 +559,7 @@ export class MachineManager {
     const m = this.store.machines.get(s.info.machineId ?? '');
     if (m) {
       m.sessionIds = m.sessionIds.filter((x) => x !== s.info.id);
+      for (const sb of m.sandboxes ?? []) sb.sessionIds = sb.sessionIds.filter((x) => x !== s.info.id);
       this.store.putMachine(m);
     }
   }
@@ -554,7 +628,7 @@ export class MachineManager {
     Object.assign(m, { online: true, lastSeen: new Date().toISOString() });
     this.store.putMachine(m);
     const sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }));
-    ws.send(JSON.stringify({ type: 'welcome', machineId: id, maxSessions: m.maxSessions, sessions } satisfies ToDaemon));
+    ws.send(JSON.stringify({ type: 'welcome', machineId: id, maxSessions: m.maxSessions, sessions, sandboxes: poolSettingsOf(m) } satisfies ToDaemon));
     const watch = this.outsideWatchFor?.(id);
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
     console.log(`machine ${id} connected`);
@@ -680,9 +754,29 @@ export class MachineManager {
         return;
       }
       case 'unity_event': {
-        this.unityEvent?.(id, msg.text, msg.restarted);
+        this.unityEvent?.(id, msg.text, msg.restarted, typeof msg.sandbox === 'string' ? msg.sandbox : undefined);
         return;
       }
+      case 'sandboxes': {
+        if (!Array.isArray(msg.list)) return;
+        m.sandboxes = mergeSandboxes(m.sandboxes, msg.list, this.pendingPurpose);
+        for (const sb of m.sandboxes) this.pendingPurpose.delete(sb.id);
+        if (msg.disk) this.disks.set(id, msg.disk);
+        this.store.putMachine(m);
+        return;
+      }
+      case 'sandbox_result': {
+        const p = this.sandboxCalls.get(msg.id);
+        if (!p) return;
+        this.sandboxCalls.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.ok) p.resolve(msg.text);
+        else p.reject(new Error(msg.text));
+        return;
+      }
+      case 'sandbox_event':
+        this.sandboxEvent?.(id, msg.text, { sandbox: msg.sandbox, checkpoint: !!msg.checkpoint });
+        return;
       case 'switch_result': {
         const p = this.switchCalls.get(msg.id);
         if (!p) return;
@@ -750,15 +844,117 @@ export class MachineManager {
   }
 
   private readonly unityCalls = new Map<string, { resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
-  /** The daemon's Unity watch reported something (wired by index.ts: orchestrator, notification, the machine's agents). */
-  unityEvent?: (machineId: string, text: string, restarted: boolean) => void;
+  /** The daemon's Unity watch reported something (wired by index.ts: orchestrator, notification, the agents there). `sandbox`: a sandbox's editor. */
+  unityEvent?: (machineId: string, text: string, restarted: boolean, sandbox?: string) => void;
+  /** The sandbox pool reported something: the disk guard (checkpoint: ask its busy agents to commit and stop), an idle editor stopped (wired by index.ts). */
+  sandboxEvent?: (machineId: string, text: string, e: { sandbox?: string; checkpoint: boolean }) => void;
+
+  // ---------------------------------------------------------------- machine sandboxes (docs/machines.md, machine/sandboxes.ts)
+
+  private readonly sandboxCalls = new Map<string, { resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  /** Purposes of sandboxes asked for and not yet in a snapshot. */
+  private readonly pendingPurpose = new Map<string, string>();
+  /** Each machine's sandbox volume, as its daemon last reported it (memory only). */
+  private readonly disks = new Map<string, { level: 'ok' | 'warn' | 'critical'; freeBytes?: number }>();
+
+  diskOf(id: string) {
+    return this.disks.get(id);
+  }
+
+  /** A machine's sandbox by id or name. */
+  requireSandbox(machineId: string, sandbox: string): MachineSandbox {
+    const m = this.require(machineId);
+    const want = slugify(sandbox);
+    const sb = (m.sandboxes ?? []).find((s) => s.id === sandbox || s.id === want);
+    if (!sb) throw new Error(`no sandbox "${sandbox}" on ${m.id} (have: ${(m.sandboxes ?? []).map((s) => s.id).join(', ') || 'none'})`);
+    return sb;
+  }
+
+  /** Throws unless the machine is online with a daemon that knows sandboxes (protocol 5+). */
+  requireSandboxDaemon(machineId: string) {
+    const m = this.require(machineId);
+    if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline (asleep, or its daemon is not running)`);
+    const h = this.hellos.get(m.id);
+    if (!h || h.protocol < SANDBOX_PROTOCOL) {
+      this.checkOutdated();
+      throw new Error(`${m.id}'s daemon ${h ? `speaks protocol ${h.protocol}` : 'has not said hello yet'} and does not know sandboxes; it is redeployed once no agent runs there. Try again in a few minutes.`);
+    }
+    return m;
+  }
+
+  private sandboxCall(machineId: string, msg: Record<string, unknown>, timeoutMs: number): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.sandboxCalls.delete(id);
+        reject(new Error(`machine ${machineId} did not answer in ${Math.round(timeoutMs / 60_000)} minutes`));
+      }, timeoutMs);
+      this.sandboxCalls.set(id, { resolve, reject, timer });
+      try {
+        this.post(machineId, { type: 'sandbox', id, ...msg } as ToDaemon);
+      } catch (e) {
+        clearTimeout(timer);
+        this.sandboxCalls.delete(id);
+        reject(e as Error);
+      }
+    });
+  }
+
+  /** Create a sandbox on a machine: a worktree of its main clone in its sandbox_root (returns once the daemon recorded it). */
+  async createSandbox(machineId: string, req: { name: string; purpose?: string; branch?: string; base?: string; seedLibrary?: boolean; startUnity?: boolean }): Promise<string> {
+    const m = this.requireSandboxDaemon(machineId);
+    const pool = poolSettingsOf(m);
+    if (!pool) throw new Error(`${m.id} has no sandboxes: redeploy it with add_machine sandbox_root (e.g. "D:\\work\\ffsb")`);
+    const id = slugify(req.name);
+    if (!SANDBOX_ID.test(id)) throw new Error(`"${req.name}" does not make a usable sandbox name`);
+    if ((m.sandboxes ?? []).some((s) => s.id === id)) throw new Error(`sandbox "${id}" already exists on ${m.id}`);
+    if ((m.sandboxes ?? []).length >= pool.maxSandboxes) throw new Error(`already ${m.sandboxes!.length} sandboxes on ${m.id} (max_sandboxes ${pool.maxSandboxes}); delete one first`);
+    const branch = req.branch?.trim() || `sandbox/${id}`;
+    const problem = branchProblem(branch);
+    if (problem) throw new Error(problem);
+    const base = req.base?.trim() || this.cfg.defaultBase;
+    const purpose = req.purpose?.trim() ? normalizePurpose(req.purpose) : 'unused';
+    this.pendingPurpose.set(id, purpose);
+    try {
+      return await this.sandboxCall(m.id, { op: 'create', sandbox: id, branch, base, seedLibrary: req.seedLibrary ?? true, startUnity: req.startUnity ?? false }, 2 * 60_000);
+    } catch (e) {
+      this.pendingPurpose.delete(id);
+      throw e;
+    }
+  }
+
+  /** Delete a machine sandbox (its editor, Library, worktree; the branch stays unless deleteBranch). Returns when it is gone. */
+  async deleteSandbox(machineId: string, sandbox: string, deleteBranch = false): Promise<string> {
+    const m = this.requireSandboxDaemon(machineId);
+    const sb = this.requireSandbox(m.id, sandbox);
+    const text = await this.sandboxCall(m.id, { op: 'delete', sandbox: sb.id, deleteBranch }, 60 * 60_000);
+    m.sandboxes = (m.sandboxes ?? []).filter((s) => s.id !== sb.id);
+    this.store.putMachine(m);
+    return text;
+  }
+
+  setSandboxPurpose(machineId: string, sandbox: string, purpose: string): MachineSandbox {
+    const m = this.require(machineId);
+    const sb = this.requireSandbox(m.id, sandbox);
+    if (sb.status === 'deleting') throw new Error(`sandbox ${m.id}/${sb.id} is being deleted`);
+    sb.purpose = normalizePurpose(purpose);
+    this.store.putMachine(m);
+    return sb;
+  }
+
+  sandboxLog(machineId: string, sandbox: string, lines: number): Promise<string> {
+    this.requireSandboxDaemon(machineId);
+    return this.sandboxCall(machineId, { op: 'log', sandbox: this.requireSandbox(machineId, sandbox).id, lines }, 60_000);
+  }
   /** A line from the Mac's Max events file (server/max.ts validates it). */
   maxEvent?: (machineId: string, line: string) => void;
 
   /** Status, start, stop or restart the Unity editor of a machine's clone, on the machine (machine/unity.ts). */
-  unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart', force?: boolean) {
+  unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart', force?: boolean, sandbox?: string) {
     const m = this.require(machineId);
     if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline`);
+    // Never a sandbox field to a daemon that would ignore it and act on the main clone.
+    const sb = sandbox ? (this.requireSandboxDaemon(m.id), this.requireSandbox(m.id, sandbox).id) : undefined;
     return new Promise<string>((resolve, reject) => {
       const id = randomUUID();
       const timer = setTimeout(() => {
@@ -767,7 +963,7 @@ export class MachineManager {
       }, 3 * 60_000);
       this.unityCalls.set(id, { resolve, reject, timer });
       try {
-        this.post(m.id, { type: 'unity', id, action, force });
+        this.post(m.id, { type: 'unity', id, action, force, ...(sb ? { sandbox: sb } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.unityCalls.delete(id);
@@ -779,7 +975,8 @@ export class MachineManager {
   private readonly switchCalls = new Map<string, { resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
   /** Switch the branch of a machine's clone, on the machine (server/switchBranch.ts). */
-  switchBranch(machineId: string, branch: string, createFrom?: string) {
+  switchBranch(machineId: string, branch: string, createFrom?: string, sandbox?: string) {
+    const sb = sandbox ? (this.requireSandboxDaemon(machineId), this.requireSandbox(machineId, sandbox).id) : undefined;
     return new Promise<{ from: string; to: string; notes: string[] }>((resolve, reject) => {
       const id = randomUUID();
       const timer = setTimeout(() => {
@@ -788,7 +985,7 @@ export class MachineManager {
       }, 10 * 60_000);
       this.switchCalls.set(id, { resolve, reject, timer });
       try {
-        this.post(machineId, { type: 'switch', id, branch, createFrom });
+        this.post(machineId, { type: 'switch', id, branch, createFrom, ...(sb ? { sandbox: sb } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.switchCalls.delete(id);
@@ -867,17 +1064,17 @@ export function machineDir(p: string | undefined, what: string): string | undefi
  */
 export function dirOptions(opts: MachineDirs, prev: MachineDirs | undefined): MachineDirs {
   const pick = (k: keyof MachineDirs, what: string) => (opts[k] === undefined ? prev?.[k] : machineDir(opts[k], what));
-  return { appDir: pick('appDir', 'app_dir'), unityEditorRoot: pick('unityEditorRoot', 'unity_editor_root'), unityPath: pick('unityPath', 'unity_path'), tempDir: pick('tempDir', 'temp_dir') };
+  return { appDir: pick('appDir', 'app_dir'), unityEditorRoot: pick('unityEditorRoot', 'unity_editor_root'), unityPath: pick('unityPath', 'unity_path'), tempDir: pick('tempDir', 'temp_dir'), sandboxRoot: pick('sandboxRoot', 'sandbox_root') };
 }
 
 /**
  * The machine whose clone, home or daemon folder (app_dir) holds `file` (the orchestrator's inline images), or undefined. A Windows
  * machine's paths compare case-insensitively with either slash; a Mac's exactly.
  */
-export function machineForPath<M extends Pick<Machine, 'repoPath' | 'home' | 'platform' | 'appDir'>>(file: string, machines: M[]): M | undefined {
+export function machineForPath<M extends Pick<Machine, 'repoPath' | 'home' | 'platform' | 'appDir'> & { sandboxRoot?: string }>(file: string, machines: M[]): M | undefined {
   const win = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   return machines.find((m) =>
-    [m.repoPath, m.home, m.appDir].some((r) => {
+    [m.repoPath, m.home, m.appDir, m.sandboxRoot].some((r) => {
       if (!r) return false;
       if (m.platform === 'win32') {
         if (!/^[a-z]:[\\/]/i.test(file)) return false;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { machineLoadLine, memUsed, parseIoregGpu, parseNvidiaSmi, parsePressure, parseVmStat, statsLine } from './system.ts';
+import { machineLoadLine, memUsed, parseIoregGpu, parseNvidiaSmi, parsePressure, parseVmStat, parseWinGpu, statsLine } from './system.ts';
 import type { HostStats } from '../shared/types.ts';
 
 const GB = 2 ** 30;
@@ -51,6 +51,29 @@ test('system: the Apple GPU from ioreg shares the RAM; utilisation is its busy f
     }`;
   assert.deepEqual(parseIoregGpu(out, 18 * GB), { name: 'Apple M3 Pro', memTotalMiB: 18 * 1024, memUsedMiB: 3072, utilPct: 42, unified: true });
   assert.equal(parseIoregGpu('no accelerator here', 18 * GB), undefined);
+});
+
+test("system: any Windows GPU from Windows' performance counters, when there is no nvidia-smi", () => {
+  // Trimmed from LothDesktop (Intel Arc B580, 2026-09-29), with made-up load: two engines of the Arc busy, one of them
+  // shared by two processes; the Remote Display adapter has no memory of its own.
+  const out = [
+    'engine|pid_11124_luid_0x00000000_0x00012132_phys_0_eng_0_engtype_3d|30',
+    'engine|pid_13520_luid_0x00000000_0x00012132_phys_0_eng_0_engtype_3d|25.5',
+    'engine|pid_13520_luid_0x00000000_0x00012132_phys_0_eng_3_engtype_videodecode|40',
+    'engine|pid_12336_luid_0x00000000_0x000125d0_phys_0_eng_0_engtype_3D|0',
+    'mem|luid_0x00000000_0x00012132_phys_0|2191482880',
+    'mem|luid_0x00000000_0x000125d0_phys_0|0',
+    'adapter|Microsoft Remote Display Adapter|0',
+    'adapter|Intel(R) Arc(TM) B580 Graphics|12884901888',
+    '',
+  ].join('\r\n');
+  assert.deepEqual(parseWinGpu(out), { name: 'Intel(R) Arc(TM) B580 Graphics', memTotalMiB: 12288, memUsedMiB: 2090, utilPct: 56 }, 'the busiest engine: 30 + 25.5 on 3D engine 0');
+  // Idle, and counters only (no registry entry readable): still numbers, a plain name.
+  assert.deepEqual(parseWinGpu('mem|luid_0x0_0x1_phys_0|1048576\nengine|pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D|0'), { name: 'GPU', memTotalMiB: 1, memUsedMiB: 1, utilPct: 0 });
+  // A busy engine is never over 100%; nothing at all is no GPU.
+  assert.equal(parseWinGpu('engine|pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D|80\nengine|pid_2_luid_0x0_0x1_phys_0_eng_0_engtype_3D|70')!.utilPct, 100);
+  assert.equal(parseWinGpu(''), undefined);
+  assert.equal(parseWinGpu('adapter|Microsoft Basic Display Adapter|0'), undefined);
 });
 
 test('system: nvidia-smi', () => {

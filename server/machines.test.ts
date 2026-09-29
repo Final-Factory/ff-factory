@@ -113,7 +113,7 @@ async function setup() {
   const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url, maxSessions: 1 });
   const daemons: Daemon[] = [];
   const daemon = (tok = token, agent: typeof FakeAgent = FakeAgent) => {
-    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: path.join(tmp, 'max-events.jsonl') }, (i, s, o, e) => new agent(i, s, o, e), FAKE_PROBES);
+    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, appDir: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: path.join(tmp, 'max-events.jsonl') }, (i, s, o, e) => new agent(i, s, o, e), FAKE_PROBES);
     daemons.push(d);
     d.start();
     return d;
@@ -200,7 +200,7 @@ test('machine: a daemon connects, runs a session, and everything it records land
 
   // The machine's own limit (1): a second session cannot start while the first is live.
   const s2 = mm.createSession('mx', { kind: 'worker', title: 'w2', permissionMode: 'default' });
-  assert.throws(() => sessions.send(s2.info.id, 'x'), /already 1 agents running on mx/);
+  assert.throws(() => sessions.send(s2.info.id, 'x'), /already 1 agents running in mx's main clone/);
   s.stop();
   await until('stopped', () => !s.live);
   sessions.send(s2.info.id, 'second');

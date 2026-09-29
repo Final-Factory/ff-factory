@@ -35,7 +35,7 @@ import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, ses
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AppState, CreateSandboxRequest, HostStatus, PermissionDecisionRequest, ServerEvent, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
+import type { AppState, CreateSandboxRequest, HostStatus, Machine, PermissionDecisionRequest, ServerEvent, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 
 const cfg = loadConfig();
 fs.mkdirSync(cfg.dataDir, { recursive: true });
@@ -80,10 +80,10 @@ const max = new MaxManager(cfg, {
 machines.maxEvent = (machineId, line) => max.ingestLine(line, machineId);
 // A daemon that has not come back 2 minutes after a restart (or a drop) while ssh reaches its Mac is redeployed.
 // The machines' own Unity watch: tell the orchestrator and the user, and the machine's agents after a restart.
-machines.unityEvent = (machineId, text, restarted) => {
+machines.unityEvent = (machineId, text, restarted, sandbox) => {
   const line = `[unity] machine ${machineId}: ${text}`;
   console.log(line);
-  notifier.host(`Unity on ${machineId}${restarted ? ' restarted' : ''}`, text);
+  notifier.host(`Unity on ${machineId}${sandbox ? `/${sandbox}` : ''}${restarted ? ' restarted' : ''}`, text);
   const orch = store.orchestratorId;
   if (orch) {
     try {
@@ -95,12 +95,36 @@ machines.unityEvent = (machineId, text, restarted) => {
   if (!restarted) return;
   const recent = Date.now() - 30 * 60_000;
   for (const s of store.sessions.values()) {
-    if (s.machineId !== machineId || s.kind === 'standing') continue;
+    // Only the agents of that editor's place: the sandbox's, or the main clone's.
+    if (s.machineId !== machineId || s.kind === 'standing' || s.machineSandbox !== sandbox) continue;
     if (!['running', 'starting', 'waiting_permission'].includes(s.status) && Date.parse(s.lastActivityAt) < recent) continue;
     try {
-      sessions.send(s.id, `Unity on this machine was restarted automatically at ${new Date().toLocaleTimeString()} (${text.split(';')[0]}). Re-pin it (mcpforunity://instances, then set_active_instance) once its bridge is up, and continue where you left off.`, 'system');
+      sessions.send(s.id, `Unity ${sandbox ? `of your sandbox (${sandbox})` : 'on this machine'} was restarted automatically at ${new Date().toLocaleTimeString()} (${text.split(';')[0]}). Re-pin it (mcpforunity://instances, then set_active_instance) once its bridge is up, and continue where you left off.`, 'system');
     } catch {
       // offline or at its limit: it sees the editor state on its next Unity call
+    }
+  }
+};
+machines.sandboxEvent = (machineId, text, e) => {
+  const line = `[sandboxes] ${machineId}: ${text}`;
+  console.log(line);
+  if (e.checkpoint) notifier.host(`Disk critical on ${machineId}`, text);
+  const orch = store.orchestratorId;
+  if (orch) {
+    try {
+      sessions.send(orch, line, 'system');
+    } catch {
+      // no orchestrator right now
+    }
+  }
+  if (!e.checkpoint) return;
+  // The machine's disk guard: its sandbox agents mid-turn commit, push and stop (as the host's guard asks its own).
+  for (const s of store.sessions.values()) {
+    if (s.machineId !== machineId || !s.machineSandbox || !['running', 'starting', 'waiting_permission'].includes(s.status)) continue;
+    try {
+      sessions.send(s.id, '[disk critical] Free disk space on this machine is critically low. Commit and push your work now (a WIP commit is fine) and end your turn; new work waits until space is freed. You will be told when to continue.', 'system');
+    } catch {
+      // it sees the refusal on its next start
     }
   }
 };
@@ -640,7 +664,7 @@ route('POST', '/api/(sandboxes|machines)/([\\w-]+)/switch-branch', async (req, [
 // ---- machines (docs/machines.md)
 
 route('POST', '/api/machines', async (req) => {
-  const b = await readJson<{ id?: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string }>(req);
+  const b = await readJson<{ id?: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string } & Pick<Machine, 'sandboxRoot' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity' | 'diskWarnGB' | 'diskCriticalGB'>>(req);
   return machines.deployMachine({
     id: need(b.id, 'id'),
     host: b.host,
@@ -651,6 +675,12 @@ route('POST', '/api/machines', async (req) => {
     unityEditorRoot: b.unityEditorRoot,
     unityPath: b.unityPath,
     tempDir: b.tempDir,
+    sandboxRoot: b.sandboxRoot,
+    maxSandboxes: b.maxSandboxes,
+    maxAgentsPerSandbox: b.maxAgentsPerSandbox,
+    maxUnity: b.maxUnity,
+    diskWarnGB: b.diskWarnGB,
+    diskCriticalGB: b.diskCriticalGB,
   });
 });
 
