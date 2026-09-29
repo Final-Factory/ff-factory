@@ -8,8 +8,8 @@ import { Icon } from './ui';
 // quiet lines; a tap opens the meters. With machines connected each computer is a name and three mini
 // bars (CPU, RAM, GPU), so the footer stays the size it was with the host alone.
 
-type Lvl = 'ok' | 'warn' | 'crit';
-const level = (pct: number, warn = 75, crit = 90): Lvl => (pct >= crit ? 'crit' : pct >= warn ? 'warn' : 'ok');
+export type Lvl = 'ok' | 'warn' | 'crit';
+export const level = (pct: number, warn = 75, crit = 90): Lvl => (pct >= crit ? 'crit' : pct >= warn ? 'warn' : 'ok');
 const worse = (a: Lvl, b: Lvl): Lvl => (a === 'crit' || b === 'crit' ? 'crit' : a === 'warn' || b === 'warn' ? 'warn' : 'ok');
 
 /** One computer in the footer: the host (always first) or a machine, with its numbers when it has any. */
@@ -29,13 +29,13 @@ export function computersOf(app: AppState): Computer[] {
 
 const shortHost = (h: string) => h.replace(/\.(local|lan|home)$/i, '');
 
-const ramPct = (s: HostStats) => (memUsedOf(s) / s.memTotalBytes) * 100;
+export const ramPct = (s: HostStats) => (memUsedOf(s) / s.memTotalBytes) * 100;
 /** RAM's level: its share, raised by the Mac's own memory pressure (the better signal where RAM is also the GPU's). */
-const ramLvl = (s: HostStats) => worse(level(ramPct(s), 85, 95), s.memPressure === 'critical' ? 'crit' : s.memPressure === 'warn' ? 'warn' : 'ok');
+export const ramLvl = (s: HostStats) => worse(level(ramPct(s), 85, 95), s.memPressure === 'critical' ? 'crit' : s.memPressure === 'warn' ? 'warn' : 'ok');
 /** A discrete GPU: its VRAM in use. Apple Silicon shares RAM, so how busy it is says more. */
-const gpuPct = (s: HostStats) => (!s.gpu ? undefined : s.gpu.unified ? s.gpu.utilPct : (s.gpu.memUsedMiB / s.gpu.memTotalMiB) * 100);
+export const gpuPct = (s: HostStats) => (!s.gpu ? undefined : s.gpu.unified ? s.gpu.utilPct : (s.gpu.memUsedMiB / s.gpu.memTotalMiB) * 100);
 
-function describe(c: Computer): string {
+export function describe(c: Computer): string {
   const s = c.stats;
   if (!s) return c.online ? `${c.name}: online, no numbers yet` : `${c.name}: offline`;
   const gpu = !s.gpu

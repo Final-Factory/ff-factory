@@ -28,6 +28,7 @@ export function sessionRoute(s: SessionInfo, app: Pick<AppState, 'orchestratorId
   if (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher') return { view: 'dispatcher', tab: 'conversation' };
   if (s.sandboxId) return { view: 'sandbox', sandboxId: s.sandboxId, sessionId: s.id };
   if (s.standingId) return { view: 'agent', agentId: s.standingId, tab: 'conversation' };
+  if (s.machineId && s.machineSandbox) return { view: 'msandbox', machineId: s.machineId, sandboxId: s.machineSandbox, sessionId: s.id };
   if (s.machineId) return { view: 'machine', machineId: s.machineId, sessionId: s.id };
   return { view: 'session', sessionId: s.id };
 }

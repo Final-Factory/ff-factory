@@ -741,6 +741,23 @@ route('POST', '/api/(sandboxes|machines)/([\\w-]+)/switch-branch', async (req, [
   return { note: await agents.switchBranch({ ...target, branch: need(b.branch, 'branch').trim(), createFrom: b.createFrom?.trim() || undefined }) };
 });
 
+// ---- a machine sandbox's page (docs/machines.md, "Machine sandboxes"): its editor, its log, its branch
+
+route('POST', '/api/machines/([\\w-]+)/sandboxes/([\\w-]+)/unity', async (req, [id, sb]) => {
+  const { action } = await readJson<{ action?: string }>(req);
+  if (action !== 'start' && action !== 'stop') throw new HttpError(400, 'action must be start or stop');
+  return { note: await machines.unity(id, action, false, sb) };
+});
+
+route('GET', '/api/machines/([\\w-]+)/sandboxes/([\\w-]+)/unity-log', async (_r, [id, sb], url) => ({
+  lines: (await machines.sandboxLog(id, sb, Math.min(5000, Number(url.searchParams.get('lines')) || 200))).split('\n'),
+}));
+
+route('POST', '/api/machines/([\\w-]+)/sandboxes/([\\w-]+)/switch-branch', async (req, [id, sb]) => {
+  const b = await readJson<{ branch?: string; createFrom?: string }>(req);
+  return { note: await agents.switchBranch({ machine: id, sandbox: sb, branch: need(b.branch, 'branch').trim(), createFrom: b.createFrom?.trim() || undefined }) };
+});
+
 // ---- machines (docs/machines.md)
 
 route('POST', '/api/machines', async (req) => {

@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import type { AppVersion, ImageInput, Machine, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import type { AppVersion, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 
 export { displayName, isUnused };
@@ -313,6 +313,14 @@ export function sandboxGlance(sb: Sandbox, sessions: SessionInfo[]): Glance {
   return agentsGlance(displayName(sb), sessions, attention, sb.unity, isUnused(sb.purpose));
 }
 
+export function machineSandboxGlance(sb: MachineSandbox, sessions: SessionInfo[]): Glance {
+  const attention = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0);
+  if (sb.status === 'creating') return { tone: 'blue', label: 'Creating', detail: sb.statusDetail, attention, progress: true };
+  if (sb.status === 'deleting') return { tone: 'blue', label: 'Deleting', detail: sb.statusDetail, attention, progress: true };
+  if (sb.status === 'error') return { tone: 'red', label: 'Failed', detail: firstLine(sb.statusDetail), attention };
+  return agentsGlance(displayName(sb), sessions, attention, sb.unity, isUnused(sb.purpose));
+}
+
 export function machineGlance(m: Machine, sessions: SessionInfo[], now: number): Glance {
   const attention = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0);
   if (m.status === 'deploying') return { tone: 'blue', label: 'Setting up', detail: m.statusDetail, attention, progress: true };
@@ -391,6 +399,10 @@ export type Route =
   | { view: 'session'; sessionId: string }
   | { view: 'agent'; agentId: string; tab?: string }
   | { view: 'machine'; machineId: string; sessionId?: string }
+  /** A sandbox on a machine (docs/machines.md, "Machine sandboxes"): #/machine/lothdesktop/sandbox/sb1. */
+  | { view: 'msandbox'; machineId: string; sandboxId: string; sessionId?: string }
+  /** Every computer and what it is working on, as a board. */
+  | { view: 'overview' }
   | { view: 'provider'; providerId: string; tab?: string }
   | { view: 'max'; tab?: string }
   | { view: 'search'; q?: string };
@@ -402,7 +414,9 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === 'sandbox' && parts[1]) return { view: 'sandbox', sandboxId: parts[1], sessionId: parts[2] };
   if (parts[0] === 'session' && parts[1]) return { view: 'session', sessionId: parts[1] };
   if (parts[0] === 'search') return { view: 'search', q: parts[1] };
+  if (parts[0] === 'machine' && parts[1] && parts[2] === 'sandbox' && parts[3]) return { view: 'msandbox', machineId: parts[1], sandboxId: parts[3], sessionId: parts[4] };
   if (parts[0] === 'machine' && parts[1]) return { view: 'machine', machineId: parts[1], sessionId: parts[2] };
+  if (parts[0] === 'overview') return { view: 'overview' };
   if (parts[0] === 'agent' && parts[1]) return { view: 'agent', agentId: parts[1], tab: parts[2] };
   if (parts[0] === 'provider' && parts[1]) return { view: 'provider', providerId: parts[1], tab: parts[2] };
   if (parts[0] === 'max') return { view: 'max', tab: parts[1] };
@@ -425,6 +439,10 @@ export function href(r: Route): string {
       return `#/search${r.q ? '/' + encodeURIComponent(r.q) : ''}`;
     case 'machine':
       return `#/machine/${encodeURIComponent(r.machineId)}${r.sessionId ? '/' + encodeURIComponent(r.sessionId) : ''}`;
+    case 'msandbox':
+      return `#/machine/${encodeURIComponent(r.machineId)}/sandbox/${encodeURIComponent(r.sandboxId)}${r.sessionId ? '/' + encodeURIComponent(r.sessionId) : ''}`;
+    case 'overview':
+      return '#/overview';
     case 'agent':
       return `#/agent/${encodeURIComponent(r.agentId)}${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
     case 'provider':

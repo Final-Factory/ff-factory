@@ -253,7 +253,8 @@ export interface HostStats {
 }
 
 export interface SystemStats extends HostStats {
-  limits: { maxUnity: number; maxSessions: number };
+  /** The host's config limits; maxSandboxes is absent from a server older than the fleet view. */
+  limits: { maxUnity: number; maxSessions: number; maxSandboxes?: number };
 }
 
 /** A machine's load, as its daemon last reported it (protocol 4+); not kept in state.json. */

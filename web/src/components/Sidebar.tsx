@@ -1,18 +1,15 @@
 import { useState, type ReactNode } from 'react';
-import { platformNoun, type AppState, type SessionInfo } from '../../../shared/types';
+import type { AppState, SessionInfo } from '../../../shared/types';
+import { fleetOf, type FleetComputer } from '../../../shared/fleet';
 import { useAttention, type AttentionItem } from '../attention';
 import {
   chatOwner,
   dispatcherGlance,
-  displayName,
   fmtCost,
   isBusy,
   isOpenWork,
-  isUnused,
-  machineGlance,
   navigate,
   providerGlance,
-  sandboxGlance,
   sessionLabel,
   sessionTone,
   standingGlance,
@@ -26,6 +23,7 @@ import { usePush } from '../notify';
 import { SettingsModal } from './Settings';
 import { SystemFooter } from './SystemMeters';
 import { ExternalStrip } from './External';
+import { FleetGroups, type FleetSelection } from './Fleet';
 
 export function Sidebar({
   app,
@@ -52,9 +50,8 @@ export function Sidebar({
   const others = app.sessions.filter((s) => s.id !== app.orchestratorId && chatOwner(s)).sort((a, b) => a.title.localeCompare(b.title));
   const dispatcher = app.dispatcherId ? sessionsById.get(app.dispatcherId) : undefined;
   const ledger = dispatcherGlance(dispatcher, (app.work ?? []).filter(isOpenWork), app.me?.userId);
-  const of = (ids: string[]) => ids.map((id) => sessionsById.get(id)).filter((s): s is SessionInfo => !!s);
-  const selectedSandbox = route.view === 'sandbox' ? route.sandboxId : route.view === 'session' ? sessionsById.get(route.sessionId)?.sandboxId : undefined;
-  const selectedMachine = route.view === 'machine' ? route.machineId : route.view === 'session' ? sessionsById.get(route.sessionId)?.machineId : undefined;
+  const selection = selectionOf(route, sessionsById);
+  const fleet = fleetOf(app);
 
   const go = (r: Route) => {
     navigate(r);
@@ -129,53 +126,22 @@ export function Sidebar({
           />
         )}
 
+        <Row
+          active={route.view === 'overview'}
+          icon="monitor"
+          tone={fleet.some((c) => c.busy > 0) ? 'blue' : 'grey'}
+          title="Overview"
+          sub={<span>{overviewLine(fleet)}</span>}
+          onClick={() => go({ view: 'overview' })}
+        />
+
         {attention.length > 0 && <AttentionList items={attention} onPick={onNavigate} />}
 
-        <Section title="Sandboxes" count={app.sandboxes.length} add="New sandbox" onAdd={onNewSandbox}>
-          {app.sandboxes.length === 0 && (
-            <p className="side-empty">
-              None yet. Ask the orchestrator for work, or{' '}
-              <button className="link-btn" onClick={onNewSandbox}>
-                create one
-              </button>
-              .
-            </p>
-          )}
-          {app.sandboxes.map((sb) => (
-            <PlaceRow
-              key={sb.id}
-              title={displayName(sb)}
-              unused={isUnused(sb.purpose)}
-              glance={sandboxGlance(sb, of(sb.sessionIds))}
-              active={selectedSandbox === sb.id}
-              hint={`Slot ${sb.id}${sb.git ? ` · ${sb.git.branch}` : ''}${sb.sessionIds.length ? `\nAgents: ${of(sb.sessionIds).map((s) => s.title).join(', ')}` : ''}`}
-              onClick={() => go({ view: 'sandbox', sandboxId: sb.id })}
-            />
-          ))}
-        </Section>
-
-        <Section title="Machines" count={app.machines.length} add="Add a machine" onAdd={onNewMachine}>
-          {app.machines.length === 0 && (
-            <p className="side-empty">
-              Macs and Windows PCs where agents work in the main clone.{' '}
-              <button className="link-btn" onClick={onNewMachine}>
-                Add one
-              </button>
-              .
-            </p>
-          )}
-          {app.machines.map((m) => (
-            <PlaceRow
-              key={m.id}
-              title={displayName(m)}
-              unused={isUnused(m.purpose)}
-              prefix={`${m.name ?? m.id} · ${m.platform === 'win32' ? 'Windows' : 'Mac'}`}
-              glance={machineGlance(m, of(m.sessionIds).filter((s) => s.kind !== 'standing'), now)}
-              active={selectedMachine === m.id}
-              hint={`Machine ${m.name ?? m.id} (${platformNoun(m.platform)}, ssh ${m.host})${m.git ? ` · ${m.git.branch}` : ''}`}
-              onClick={() => go({ view: 'machine', machineId: m.id })}
-            />
-          ))}
+        <Section title="Computers" count={app.machines.length + 1} add="New sandbox" onAdd={onNewSandbox}>
+          <FleetGroups app={app} sel={selection} go={go} onNewSandbox={onNewSandbox} />
+          <button className="link-btn fl-add-machine" onClick={onNewMachine}>
+            {app.machines.length ? 'Add a machine' : 'Add a Mac or Windows PC where agents can work'}
+          </button>
         </Section>
 
         {(app.providers ?? []).length > 0 && (
@@ -230,6 +196,26 @@ export function Sidebar({
       {settings && <SettingsModal app={app.app} onClose={() => setSettings(false)} />}
     </aside>
   );
+}
+
+/** What the sidebar marks as open: a sandbox (host "alpha" or machine "m5/sb1"), a machine's main clone, an agent. */
+function selectionOf(route: Route, sessions: Map<string, SessionInfo>): FleetSelection {
+  if (route.view === 'sandbox') return { sandbox: route.sandboxId, sessionId: route.sessionId };
+  if (route.view === 'msandbox') return { sandbox: `${route.machineId}/${route.sandboxId}`, sessionId: route.sessionId };
+  if (route.view === 'machine') return { machineMain: route.machineId, sessionId: route.sessionId };
+  if (route.view !== 'session') return {};
+  const s = sessions.get(route.sessionId);
+  if (s?.sandboxId) return { sandbox: s.sandboxId, sessionId: s.id };
+  if (s?.machineId && s.machineSandbox) return { sandbox: `${s.machineId}/${s.machineSandbox}`, sessionId: s.id };
+  if (s?.machineId) return { machineMain: s.machineId, sessionId: s.id };
+  return {};
+}
+
+/** The Overview row's line: how many agents are live and busy across every computer. */
+function overviewLine(fleet: FleetComputer[]): string {
+  const live = fleet.reduce((n, c) => n + c.live, 0);
+  const busy = fleet.reduce((n, c) => n + c.busy, 0);
+  return `${fleet.length} ${fleet.length === 1 ? 'computer' : 'computers'} · ${busy} of ${live} ${live === 1 ? 'agent' : 'agents'} busy`;
 }
 
 // ---------------------------------------------------------------- rows

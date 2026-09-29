@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { EFFORT_LEVELS, type AppState, type EffortLevel, type PermissionMode } from '../../../shared/types';
 import { api } from '../api';
+import { sessionRoute } from '../attention';
 import { attempt, upsertSandbox, upsertSession } from '../store';
 import { FREE_TEXT, navigate, PERMISSION_MODES } from '../util';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
@@ -134,7 +135,7 @@ export function NewAgentModal({ app, target, onClose }: { app: AppState; target:
     setBusy(false);
     if (s) {
       upsertSession(s);
-      navigate('machineId' in target ? { view: 'machine', machineId: target.machineId, sessionId: s.id } : { view: 'sandbox', sandboxId: target.sandboxId, sessionId: s.id });
+      navigate(sessionRoute(s, app));
       onClose();
     }
   };
