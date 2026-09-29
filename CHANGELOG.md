@@ -12,6 +12,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **A machine's own folders** (docs/machines.md, "A machine's own folders"). `add_machine` (and the Add
+  machine form) takes `app_dir` (the daemon's folder instead of `~/.ff-factory`, e.g.
+  `D:\work\.ff-factory`), `unity_editor_root` (a folder of Unity versions), `unity_path` (the editor
+  executable) and `temp_dir` (TMP/TEMP/TMPDIR of the agents), kept on the machine record and in
+  `daemon.json`, and shown by `list_machines` and the machine page. The Mac and Windows deploys, the
+  LaunchAgent and scheduled task, stop/restart/remove, the guard's protected folder, standing agents'
+  folders and image routing follow `app_dir`. Unity is now also found where Unity Hub says, on both OSes: the
+  editors it lists (`editors-v2.json`, `editors.json`) and its chosen install location
+  (`secondaryInstallPath.json`, newly on a Mac too).
+
 - **Claude account per role and machine** ([docs/accounts.md](docs/accounts.md)). Config
   `claudeAccounts.orchestrator` / `.workers` / `.standing` (`"token"`, the default, or `"login"`) picks
   whether this host's agents run on the host token or on this host's stored claude.ai login; a "login"

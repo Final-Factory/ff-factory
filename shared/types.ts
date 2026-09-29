@@ -261,6 +261,9 @@ export type MachinePlatform = 'darwin' | 'win32';
 /** "Mac" or "Windows PC", for sentences about a machine (a record from before platforms is a Mac). */
 export const platformNoun = (p: MachinePlatform | undefined) => (p === 'win32' ? 'Windows PC' : 'Mac');
 
+/** A machine's daemon folder: its app_dir, else <home>/.ff-factory. */
+export const appDirOf = (m: Pick<Machine, 'appDir' | 'home'>) => m.appDir || `${m.home}/.ff-factory`;
+
 export interface Machine {
   /** Short name, e.g. "m5"; also the MCP/label id. Lower-case (MACHINE_ID). */
   id: string;
@@ -282,6 +285,14 @@ export interface Machine {
   /** The machine's main Final Factory clone: where its agents work. */
   repoPath: string;
   home: string;
+  /** The daemon's folder (code, logs, agents, daemon.json) when not the default <home>/.ff-factory (add_machine app_dir). */
+  appDir?: string;
+  /** A folder holding Unity editor versions (<root>/<version>/...), searched before Unity Hub's defaults. */
+  unityEditorRoot?: string;
+  /** The Unity editor executable itself (Unity.exe, or .../Unity.app/Contents/MacOS/Unity): wins over any lookup. */
+  unityPath?: string;
+  /** Scratch folder for its agents (TMP, TEMP and TMPDIR of their processes); unset: the system's. */
+  tempDir?: string;
   /** Portal URL the daemon connects to. */
   portalUrl: string;
   maxSessions: number;

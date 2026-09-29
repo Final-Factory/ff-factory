@@ -614,8 +614,18 @@ route('POST', '/api/(sandboxes|machines)/([\\w-]+)/switch-branch', async (req, [
 // ---- machines (docs/machines.md)
 
 route('POST', '/api/machines', async (req) => {
-  const b = await readJson<{ id?: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number }>(req);
-  return machines.deployMachine({ id: need(b.id, 'id'), host: b.host, portalUrl: b.portalUrl, repoPath: b.repoPath || undefined, maxSessions: b.maxSessions });
+  const b = await readJson<{ id?: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string }>(req);
+  return machines.deployMachine({
+    id: need(b.id, 'id'),
+    host: b.host,
+    portalUrl: b.portalUrl,
+    repoPath: b.repoPath || undefined,
+    maxSessions: b.maxSessions,
+    appDir: b.appDir,
+    unityEditorRoot: b.unityEditorRoot,
+    unityPath: b.unityPath,
+    tempDir: b.tempDir,
+  });
 });
 
 route('POST', '/api/machines/([\\w-]+)/redeploy', async (req, [id]) => {

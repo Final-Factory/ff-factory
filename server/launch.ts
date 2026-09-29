@@ -74,11 +74,11 @@ export const CATALOG = {
 export type CatalogTool = keyof typeof CATALOG;
 export type ToolHandler = (args: Record<string, unknown>) => Promise<string>;
 
-/** The spec's public-repo identity as git env (~/.ff-factory/public-identity.gitconfig on the machine). */
+/** The spec's public-repo identity as git env (public-identity.gitconfig in the machine daemon's folder, FF_APP_DIR). */
 function publicGitEnvFor(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv): Record<string, string> {
   if (!spec.publicGit?.repos.length) return {};
   try {
-    return publicIdentityEnv(spec.publicGit, spec.publicGit.repos, path.join(os.homedir(), '.ff-factory', 'public-identity.gitconfig'), baseEnv);
+    return publicIdentityEnv(spec.publicGit, spec.publicGit.repos, path.join(baseEnv.FF_APP_DIR || path.join(os.homedir(), '.ff-factory'), 'public-identity.gitconfig'), baseEnv);
   } catch (e) {
     console.warn('public git identity:', (e as Error).message);
     return {};

@@ -12,6 +12,8 @@ import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import { PROTOCOL_VERSION, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { normalizePurpose } from './sandboxes.ts';
+import { winDir } from './machineDeployWin.ts';
+import type { MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineStats, PermissionMode, PlanUsage, Requester, SessionInfo } from '../shared/types.ts';
@@ -325,7 +327,7 @@ export class MachineManager {
    * Add a machine, or redeploy one (same id): mint a token, install the daemon over ssh and wait for
    * it to connect. Returns at once; progress shows on the record (status/statusDetail).
    */
-  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; purpose?: string; force?: boolean }) {
+  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; purpose?: string; force?: boolean } & MachineDirs) {
     const typed = opts.id.trim();
     const id = typed.toLowerCase();
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
@@ -334,6 +336,7 @@ export class MachineManager {
     const portalUrl = (opts.portalUrl ?? prev?.portalUrl ?? this.cfg.publicUrl ?? '').replace(/\/+$/, '');
     if (!/^https?:\/\/[^/\s]+$/.test(portalUrl)) throw new Error('portal_url is required: the address the machine reaches this portal at, e.g. https://<host>.<tailnet>.ts.net (or set publicUrl in config.json)');
     if (prev && !opts.force && this.liveCount(id) > 0) throw new Error(`${id} has agents running; a redeploy restarts its daemon and stops them. Stop them first or pass force.`);
+    const dirs = dirOptions(opts, prev);
     const { machine, token } = this.register({
       id,
       host: opts.host?.trim() || prev?.host || id,
@@ -349,17 +352,19 @@ export class MachineManager {
       lastSeen: prev?.lastSeen,
       platform: prev?.platform,
       name: typed !== id ? typed : prev?.name,
+      ...dirs,
     });
-    void this.runDeploy(machine, token, opts.repoPath);
+    void this.runDeploy(machine, token, opts.repoPath, prev?.appDir);
     return machine;
   }
 
-  private async runDeploy(m: Machine, token: string, repoPath: string | undefined) {
+  private async runDeploy(m: Machine, token: string, repoPath: string | undefined, previousAppDir: string | undefined) {
     this.deploying.add(m.id);
     const { deploy, repoSlug } = await import('./machineDeploy.ts');
     const { ROOT } = await import('./config.ts');
     try {
-      const r = await deploy({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), step: (s) => this.update(m.id, { statusDetail: s }) });
+      const dirs = { appDir: m.appDir, unityEditorRoot: m.unityEditorRoot, unityPath: m.unityPath, tempDir: m.tempDir };
+      const r = await deploy({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, previousAppDir, step: (s) => this.update(m.id, { statusDetail: s }) });
       this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
       if (r.started === false) {
         // Windows: the task runs only in the user's logged-on session (docs/machines.md).
@@ -379,7 +384,7 @@ export class MachineManager {
         m.id,
         link && link.since >= since
           ? { status: 'ready', statusDetail: undefined }
-          : { status: 'error', statusDetail: `installed, but the daemon has not connected to ${m.portalUrl}; see ${daemonLogPath(r.platform)} on ${m.host}` },
+          : { status: 'error', statusDetail: `installed, but the daemon has not connected to ${m.portalUrl}; see ${daemonLogPath(r.platform, m.appDir)} on ${m.host}` },
       );
     } catch (e) {
       this.update(m.id, { status: 'error', statusDetail: (e as Error).message });
@@ -394,12 +399,12 @@ export class MachineManager {
     const { undeploy } = await import('./machineDeploy.ts');
     let note = '';
     try {
-      await undeploy(m.host, m.platform);
+      await undeploy(m.host, m.platform, m.appDir);
     } catch (e) {
       note = ` (could not unload the daemon: ${(e as Error).message})`;
     }
     this.remove(m.id);
-    return `Removed ${m.id}${note}. Its files stay in the .ff-factory folder in its home on the machine.`;
+    return `Removed ${m.id}${note}. Its files stay in ${m.appDir ?? 'the .ff-factory folder in its home'} on the machine.`;
   }
 
   /**
@@ -413,7 +418,7 @@ export class MachineManager {
     const live = this.liveCount(m.id);
     if (action !== 'start' && live > 0 && !force) throw new Error(`${m.id} has ${live} agent(s) running; a daemon ${action} stops them. Stop them first or pass force.`);
     const { controlDaemon } = await import('./machineDeploy.ts');
-    const done = await controlDaemon(m.host, m.platform, action);
+    const done = await controlDaemon(m.host, m.platform, action, m.appDir);
     this.update(m.id, { daemonStopped: action === 'stop' ? true : undefined });
     return `${m.id}: ${done}.`;
   }
@@ -834,18 +839,40 @@ export async function sshReachable(host: string): Promise<boolean> {
 export const SSH_REACHABLE_ARGS = (host: string) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, 'exit', '0'];
 
 /** Where a machine's daemon log is, for messages. */
-export function daemonLogPath(platform: MachinePlatform | undefined): string {
-  return platform === 'win32' ? '%USERPROFILE%\\.ff-factory\\logs\\daemon.log (and daemon.err.log, supervisor.log)' : '~/.ff-factory/logs/daemon.log';
+export function daemonLogPath(platform: MachinePlatform | undefined, appDir?: string): string {
+  if (platform === 'win32') return `${appDir ?? '%USERPROFILE%\\.ff-factory'}\\logs\\daemon.log (and daemon.err.log, supervisor.log)`;
+  return `${appDir ?? '~/.ff-factory'}/logs/daemon.log`;
 }
 
 /**
- * The machine whose clone or home holds `file` (the orchestrator's inline images), or undefined. A Windows
+ * A folder option as stored: trimmed, without a trailing slash, a Windows one (C:\... or C:/...) with backslashes.
+ * Throws unless absolute. Exported for tests.
+ */
+export function machineDir(p: string | undefined, what: string): string | undefined {
+  const t = p?.trim();
+  if (!t) return undefined;
+  if (/^[a-zA-Z]:[\\/]/.test(t)) return winDir(t);
+  if (t.startsWith('/')) return t.replace(/(?<=.)\/+$/, '');
+  throw new Error(`${what} "${t}" must be an absolute path (/Users/... on a Mac, D:\\... on Windows)`);
+}
+
+/**
+ * The folder options a deploy stores (add_machine): each given one checked and normalised (machineDir), "" back to the
+ * default, an unset one kept from the previous deploy. Exported for tests.
+ */
+export function dirOptions(opts: MachineDirs, prev: MachineDirs | undefined): MachineDirs {
+  const pick = (k: keyof MachineDirs, what: string) => (opts[k] === undefined ? prev?.[k] : machineDir(opts[k], what));
+  return { appDir: pick('appDir', 'app_dir'), unityEditorRoot: pick('unityEditorRoot', 'unity_editor_root'), unityPath: pick('unityPath', 'unity_path'), tempDir: pick('tempDir', 'temp_dir') };
+}
+
+/**
+ * The machine whose clone, home or daemon folder (app_dir) holds `file` (the orchestrator's inline images), or undefined. A Windows
  * machine's paths compare case-insensitively with either slash; a Mac's exactly.
  */
-export function machineForPath<M extends Pick<Machine, 'repoPath' | 'home' | 'platform'>>(file: string, machines: M[]): M | undefined {
+export function machineForPath<M extends Pick<Machine, 'repoPath' | 'home' | 'platform' | 'appDir'>>(file: string, machines: M[]): M | undefined {
   const win = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   return machines.find((m) =>
-    [m.repoPath, m.home].some((r) => {
+    [m.repoPath, m.home, m.appDir].some((r) => {
       if (!r) return false;
       if (m.platform === 'win32') {
         if (!/^[a-z]:[\\/]/i.test(file)) return false;

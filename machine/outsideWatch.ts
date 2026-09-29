@@ -195,7 +195,7 @@ export function realDeps(): OutsideWatchDeps {
 }
 
 /** Where a Mac keeps the watch's config between runs (written when the portal sends it). */
-export const outsideWatchFile = (home: string) => path.join(home, '.ff-factory', 'outside-watch.json');
+export const outsideWatchFile = (appDir: string) => path.join(appDir, 'outside-watch.json');
 
 export function readOutsideWatch(file: string): OutsideWatchConfig | undefined {
   try {
