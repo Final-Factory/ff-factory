@@ -97,7 +97,8 @@ interface Entry {
 
 const HOME = os.homedir();
 const STATS_MS = 15_000;
-const USAGE_MS = 5 * 60_000;
+/** How often this Mac's own login's usage is polled until the portal says (usage_config: config usagePollMinutes). */
+const USAGE_DEFAULT_MINUTES = 15;
 // Never a Claude OAuth token in the daemon log (the launch spec carries the host's, server/secrets.ts).
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a.map((x) => (typeof x === 'string' ? redactSecrets(x) : x)));
 
@@ -279,7 +280,6 @@ export class Daemon {
     this.timers.push(setInterval(() => this.heartbeat(), 20_000));
     this.timers.push(setInterval(() => void this.reportStatus(), 60_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
-    this.timers.push(setInterval(() => void this.reportUsage(), USAGE_MS));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
     this.timers.push(setInterval(() => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
     // What agents here did as Max (the ffdiscord CLI's lines): forwarded, and queued while the link is down.
@@ -308,15 +308,11 @@ export class Daemon {
         }, 3000),
       );
     }
-    // An agent here on this Mac's own login (the portal sent it no token) hit a rate limit: fetch sooner. The
-    // portal hears the signal too and refreshes the token's usage for agents on the token.
-    this.events.on('rateLimit', (s: SessionHandle) => {
-      if (!this.entries.get(s.info.id)?.spec?.env?.CLAUDE_CODE_OAUTH_TOKEN && Date.now() - this.lastUsage > 60_000) void this.reportUsage();
-    });
   }
 
   shutdown() {
     this.stopped = true;
+    clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
     // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
@@ -433,7 +429,8 @@ export class Daemon {
     void this.reportStatus();
     void this.reportStats();
     // The portal keeps the last report across a reconnect: a flapping link must not start a CLI each time.
-    if (Date.now() - this.lastUsage > USAGE_MS / 2) void this.reportUsage();
+    if (Date.now() - this.lastUsage > this.usageMs / 2) void this.reportUsage();
+    else this.scheduleUsage();
   }
 
   /** This Mac's CPU, RAM, GPU and disk (the disk holding the clone), for the portal's meters (protocol 4). */
@@ -448,6 +445,17 @@ export class Daemon {
 
   private lastUsage = 0;
   private usageInFlight = false;
+  private usageTimer?: NodeJS.Timeout;
+  /** The usage poll interval, config usagePollMinutes as the portal last sent it. */
+  private usageMs = USAGE_DEFAULT_MINUTES * 60_000;
+
+  /** The next usage poll: one interval after the last, whatever started it (connect, the timer, the portal's Refresh). */
+  private scheduleUsage() {
+    clearTimeout(this.usageTimer);
+    if (this.stopped) return;
+    this.usageTimer = setTimeout(() => void this.reportUsage(), Math.max(1_000, this.lastUsage + this.usageMs - Date.now()));
+    this.usageTimer.unref?.();
+  }
 
   /**
    * The plan usage of this Mac's own Claude login, the same request the portal makes for its host
@@ -458,6 +466,7 @@ export class Daemon {
     if (this.ws?.readyState !== WebSocket.OPEN || this.usageInFlight) return;
     this.usageInFlight = true;
     this.lastUsage = Date.now();
+    this.scheduleUsage();
     const asOf = new Date().toISOString();
     let msg: FromDaemon;
     try {
@@ -467,7 +476,7 @@ export class Daemon {
       msg = { type: 'usage', account: {}, usage: { available: false, asOf, models: [], why: `could not fetch plan usage on this Mac: ${(e as Error).message.slice(0, 200)}` } };
     }
     try {
-      // The link dropped while the CLI answered: the reconnect fetches again rather than waiting 5 minutes.
+      // The link dropped while the CLI answered: the reconnect fetches again rather than waiting an interval.
       if (this.ws?.readyState === WebSocket.OPEN) this.send(msg);
       else this.lastUsage = 0;
     } finally {
@@ -643,6 +652,13 @@ export class Daemon {
         }
         return;
       }
+      case 'usage_config':
+        this.usageMs = (msg.config.everyMinutes > 0 ? msg.config.everyMinutes : USAGE_DEFAULT_MINUTES) * 60_000;
+        this.scheduleUsage();
+        return;
+      case 'usage_now':
+        void this.reportUsage();
+        return;
       case 'cleanup_now':
         void this.cleaner.run('asked').catch((e) => log(`clean-up failed: ${(e as Error).message}`));
         return;

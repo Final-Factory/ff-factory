@@ -156,7 +156,7 @@ so a Hub whose install location is, say, `C:\Program Files\Unity\Editor` needs n
 
 **Load and usage (protocol 4).** Every 15 s the daemon reports its Mac's CPU, RAM, GPU and disk
 (`stats`, measured by `server/system.ts` as the portal measures its own host: RAM from `vm_stat` and
-memory pressure, the GPU from `ioreg`), and every 5 minutes (sooner after a rate-limit event) the plan
+memory pressure, the GPU from `ioreg`), and every config `usagePollMinutes` (default 15; [accounts.md](accounts.md#how-often)) the plan
 usage of the Mac's own Claude login (`usage`, the same promptless usage request the portal makes, with
 no token in its environment). The portal keeps the load in memory only (not in state.json) and drops
 it when the machine goes offline; the sidebar footer and `system_status` show every machine. The usage

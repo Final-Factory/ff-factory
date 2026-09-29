@@ -180,6 +180,22 @@ test('meters: open, every computer is a row and every account its limits and age
   await expect(foot.locator('.sys-detail')).toHaveScreenshot('meters-open.png');
 });
 
+test('meters: Refresh usage polls every account now; each account says as of when', async ({ page }) => {
+  const foot = await fixedWorld(page, 'machines');
+  await foot.locator('.sys-toggle').click();
+  await expect(foot.locator('.plan-asof').first()).toContainText(/as of \d\d:\d\d/);
+  const button = foot.getByTestId('usage-refresh');
+  await expect(button).toHaveText('Refresh usage');
+  const asked = page.waitForResponse((r) => r.url().endsWith('/api/usage/refresh') && r.request().method() === 'POST');
+  await button.click();
+  const r = await asked;
+  expect(r.ok()).toBeTruthy();
+  // The live test server: no machine connected, and its one poll may already be running.
+  expect(await r.json()).toMatchObject({ started: expect.any(Boolean), machines: 0 });
+  await expect(button).toBeDisabled();
+  await expect(button).toHaveText('Refreshing…');
+});
+
 test('meters: with more than one account, a session says which one it runs on', async ({ page }) => {
   await fixedWorld(page, 'machines');
   await page.goto('/#/session/w-busy');

@@ -86,3 +86,21 @@ to the login cannot use it.
 
 The usage tracker polls the host token and this host's login whatever the switches say, and each Mac's
 daemon polls its own login.
+
+## How often
+
+Every account is polled once when the portal starts (a daemon: when it connects, unless it reported in the last half
+interval), then every config `usagePollMinutes` (default 15, 5 to 240; `set_app_config usagePollMinutes`). The usage
+endpoint rate-limits, so the numbers are allowed to be that old: each account's meters say "as of" when.
+
+- The portal (`UsageTracker`, `server/usage.ts`) counts the interval from its last poll, whatever started it. A
+  changed interval applies at once, here and on the daemons (`usage_config`, sent at connect and when it changes).
+- Rate-limit events no longer poll (they did, up to once a minute). A new token set with `set_app_config` is polled
+  within seconds.
+- `system_status` uses the numbers as they are when they are under one interval old, and starts a poll when they are
+  older (the last poll failed, or its timer was held up).
+- **Refresh usage** under the meters (`POST /api/usage/refresh`) polls every account now, and asks each connected
+  daemon for its login (`usage_now`), unless a poll is running or started seconds ago. The next scheduled poll then
+  counts from it.
+- A request that never answers cannot hold the polls up: each gives up after 75 s, and a poll still marked running
+  after 5 minutes no longer blocks the next one.

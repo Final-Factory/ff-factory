@@ -12,6 +12,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Claude plan usage is polled every 15 minutes** (config `usagePollMinutes`, 5 to 240, settable with
+  `set_app_config`; [docs/accounts.md](docs/accounts.md#how-often)), on the portal and by each machine daemon, instead
+  of every 5 minutes plus up to once a minute after rate-limit events. One poll at startup or connect; **Refresh
+  usage** under the meters polls every account at once (here and on each connected machine); `system_status` polls
+  only when the numbers are older than the interval. Each account still says "as of" when.
 - **People message each other through their orchestrators** (`message_person`,
   [docs/orchestrators.md](docs/orchestrators.md)). A person's own orchestrator can send another person a message: it
   lands in that person's own chat as a `[person message]` from the sender, which their orchestrator shows them and
