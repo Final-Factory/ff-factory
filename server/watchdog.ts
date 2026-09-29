@@ -342,10 +342,99 @@ export async function listWindows(pids: number[]): Promise<EditorWindow[]> {
   if (!isWindows || !pids.length) return [];
   const r = await ps(['-Pids', pids.join(',')]);
   if (r.code !== 0) throw new Error(`unity-windows.ps1 failed (${r.code}): ${r.stderr.trim().split('\n').slice(-2).join(' ')}`);
-  const out = r.stdout.trim();
-  if (!out) return [];
-  const parsed = JSON.parse(out);
-  return (Array.isArray(parsed) ? parsed : [parsed]) as EditorWindow[];
+  return parsePsJson<EditorWindow>(r.stdout, 'unity-windows.ps1');
+}
+
+/**
+ * Raw control characters (U+0000-U+001F) inside JSON strings, escaped as \u00XX. Windows PowerShell 5.1's
+ * ConvertTo-Json lets some through from window titles and command lines, and JSON.parse refuses them ("Bad
+ * control character in string literal", LothDesktop's Unity watch, 2026-09-29).
+ */
+export function escapeControlInStrings(text: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    const code = ch.charCodeAt(0);
+    const hex = () => `u${code.toString(16).padStart(4, '0')}`;
+    if (!inString) {
+      if (ch === '"') inString = true;
+      out += ch;
+    } else if (escaped) {
+      escaped = false;
+      // A backslash followed by a raw control character: the escape becomes \u00XX, the character itself.
+      out += code < 0x20 ? hex() : ch;
+    } else if (ch === '\\') {
+      escaped = true;
+      out += ch;
+    } else if (ch === '"') {
+      inString = false;
+      out += ch;
+    } else out += code < 0x20 ? `\\${hex()}` : ch;
+  }
+  return out;
+}
+
+/** The top-level elements of a JSON array, as text (strings respected), or undefined when `text` is not one. */
+function arrayElements(text: string): string[] | undefined {
+  const t = text.trim();
+  if (!t.startsWith('[')) return undefined;
+  const out: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let start = 1;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '[' || ch === '{') depth++;
+    else if (ch === ']' || ch === '}') {
+      depth--;
+      if (depth === 0) {
+        if (t.slice(start, i).trim()) out.push(t.slice(start, i));
+        return out;
+      }
+    } else if (ch === ',' && depth === 1) {
+      out.push(t.slice(start, i));
+      start = i + 1;
+    }
+  }
+  // Cut off before its end (a truncated output): what was complete is still worth reading.
+  if (t.slice(start).trim()) out.push(t.slice(start));
+  return out;
+}
+
+/**
+ * A PowerShell ConvertTo-Json listing (an array, or one object), tolerant of what Windows PowerShell 5.1 emits: raw
+ * control characters in strings are escaped, and when the whole still does not parse, each entry is read on its own
+ * and the unreadable ones are skipped and logged, so one odd window title or command line does not fail the watch.
+ */
+export function parsePsJson<T>(text: string, what: string, log: (line: string) => void = (l) => console.warn(l)): T[] {
+  const t = text.trim();
+  if (!t) return [];
+  const list = (v: unknown) => (Array.isArray(v) ? v : [v]) as T[];
+  try {
+    return list(JSON.parse(escapeControlInStrings(t)));
+  } catch (e) {
+    const parts = arrayElements(t);
+    if (!parts) throw new Error(`${what}: unreadable output (${(e as Error).message})`);
+    const good: T[] = [];
+    for (const p of parts) {
+      try {
+        good.push(JSON.parse(escapeControlInStrings(p)) as T);
+      } catch {
+        // skipped below
+      }
+    }
+    log(`${what}: skipped ${parts.length - good.length} unreadable of ${parts.length} entries (${(e as Error).message})`);
+    return good;
+  }
 }
 
 /** Whether no *.unity file in the working tree at `dir` has uncommitted changes (false when git cannot tell). */

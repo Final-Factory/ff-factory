@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, type HangThresholds } from '../server/unityHang.ts';
-import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
+import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
 import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
 /**
@@ -360,13 +360,16 @@ export class MacUnity {
  * A Windows process listing (Win32_Process as JSON: pid, parent, full command line). The CIM query costs a
  * second or two, which the watch's 30 s look can afford. Exported for tests (the parser).
  */
-export function parseWinProcs(json: string): Proc[] {
-  if (!json.trim()) return [];
-  const rows = JSON.parse(json) as { pid: number; ppid: number; cmd?: string | null; name?: string | null } | { pid: number; ppid: number; cmd?: string | null; name?: string | null }[];
-  return (Array.isArray(rows) ? rows : [rows]).map((r) => ({ pid: Number(r.pid), ppid: Number(r.ppid), cmd: r.cmd || r.name || '' }));
+export function parseWinProcs(json: string, log?: (line: string) => void): Proc[] {
+  // Tolerant of raw control characters and of an unreadable entry (server/watchdog.ts parsePsJson).
+  const rows = parsePsJson<{ pid: number; ppid: number; cmd?: string | null; name?: string | null }>(json, 'the Windows process list', log);
+  return rows.map((r) => ({ pid: Number(r.pid), ppid: Number(r.ppid), cmd: r.cmd || r.name || '' }));
 }
 
-const WIN_PROCS = "Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name; cmd = [string]$_.CommandLine } } | ConvertTo-Json -Compress";
+// Control characters other than tab and line breaks are dropped from names and command lines before ConvertTo-Json,
+// which in Windows PowerShell 5.1 lets them through raw (parsePsJson copes if one still does).
+const WIN_PROCS =
+  "$bad = '[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]'; Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = ([string]$_.Name) -replace $bad, ''; cmd = ([string]$_.CommandLine) -replace $bad, '' } } | ConvertTo-Json -Compress";
 
 /** The PowerShell that starts the editor so that it is nobody's child (it outlives a daemon restart) and prints its pid. */
 export function winLaunchScript(bin: string, args: string[], cwd: string): string {

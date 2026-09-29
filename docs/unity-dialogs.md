@@ -26,6 +26,11 @@ posted `BM_CLICK`. UI Automation reports those buttons as panes, so it is only a
 was checked on this host against a live editor's "Connection Lost" dialog, and end to end against a
 test message box (probe, match, press "Ignore", dialog closed, the app received "Ignore").
 
+Window titles, texts and (on a machine) command lines can hold control characters, which Windows PowerShell 5.1's
+`ConvertTo-Json` passes through raw and `JSON.parse` refuses. The script drops them (tab and line breaks aside), and
+the Node side reads the output with `parsePsJson` (`server/watchdog.ts`): raw control characters in strings are
+escaped, and an entry that still does not parse is skipped and logged instead of failing the whole watch.
+
 A window counts as a dialog when it is a `#32770` with at least one button that is not just
 "Cancel". Splash and progress windows have no buttons. An unknown dialog is reported only if it is
 still there on the next look. A known dialog that comes back three times within 10 minutes is
