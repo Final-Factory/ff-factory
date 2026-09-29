@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Config } from './config.ts';
+import { HOST_ROLES, roleNames, type ClaudeAccount, type Config, type HostRole } from './config.ts';
+import type { SessionKind } from '../shared/types.ts';
+import { credentialsFile, loginUnusable, readStoredLogin, usageEnv } from './usage.ts';
 
 /**
  * Secrets agents may set but nobody may read back (set_app_config's write-only keys): the Claude OAuth token
@@ -85,12 +87,54 @@ export function scrubTranscripts(dir: string): number {
   return n;
 }
 
-/** Whether portal-run agents on `machineId` get this host's claudeEnv (config machines.useHostClaudeEnv; default yes). */
+/**
+ * Whether portal-run agents on `machineId` get this host's claudeEnv (config machines.useHostClaudeEnv; default
+ * yes): the value itself, or per machine, with "*" for machines not named.
+ */
 export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'>, machineId: string): boolean {
   const u = cfg.machines?.useHostClaudeEnv;
   if (u === undefined) return true;
   if (typeof u === 'boolean') return u;
-  return u[machineId] ?? true;
+  return u[machineId] ?? u['*'] ?? true;
+}
+
+// ---------------------------------------------------------------- this host's agents (docs/accounts.md)
+
+/** The role config claudeAccounts knows a session of `kind` on this host by. */
+export const hostRole = (kind: SessionKind): HostRole => (kind === 'orchestrator' ? 'orchestrator' : kind === 'standing' ? 'standing' : 'workers');
+
+/** The account this host's agents of `role` run on (config claudeAccounts; default the token). */
+export function hostAccount(cfg: Pick<Config, 'claudeAccounts'>, role: HostRole): ClaudeAccount {
+  return cfg.claudeAccounts?.[role] === 'login' ? 'login' : 'token';
+}
+
+/**
+ * Config claudeEnv as a host agent of `role` gets it: whole ("token"), or without its credentials ("login"), so
+ * the agent falls back to the claude.ai login stored on this host. Its other variables (CLAUDE_CONFIG_DIR…) stay.
+ */
+export function hostClaudeEnv(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'>, role: HostRole): Record<string, string> {
+  const env = { ...cfg.claudeEnv };
+  return hostAccount(cfg, role) === 'login' ? usageEnv(env) : env;
+}
+
+/**
+ * The whole environment a Claude process of `role` starts with on this host: the server's own with config
+ * claudeEnv over it, and for "login" without any credential, as the usage meters read the host login
+ * (server/usage.ts refresh), so what they show as "<host> login" is what the agent runs on.
+ */
+export function hostProcessEnv(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'>, role: HostRole, env: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const all = { ...env, ...cfg.claudeEnv };
+  return hostAccount(cfg, role) === 'login' ? usageEnv(all) : all;
+}
+
+/**
+ * Why this host's stored claude.ai login cannot run agents (none stored, or expired past refreshing), or
+ * undefined. Read from where a "login" agent's Claude Code reads it (hostProcessEnv). macOS keeps it in the
+ * Keychain, where a missing file proves nothing.
+ */
+export function hostLoginProblem(cfg: Pick<Config, 'claudeEnv'>, env: Record<string, string | undefined> = process.env, now = Date.now()): string | undefined {
+  const file = credentialsFile(usageEnv({ ...env, ...cfg.claudeEnv }));
+  return loginUnusable(readStoredLogin(file), now, file, process.platform === 'darwin');
 }
 
 /**
@@ -102,8 +146,26 @@ export function hostClaudeEnvFor(cfg: Pick<Config, 'machines' | 'claudeEnv'>, ma
   return usesHostClaudeEnv(cfg, machineId) ? { ...cfg.claudeEnv } : {};
 }
 
+/** Whether a machine's portal-run agents run on the Mac's own login: they are sent no token (hostClaudeEnvFor). */
+export const machineUsesLogin = (cfg: Pick<Config, 'machines' | 'claudeEnv'>, machineId: string) => !hostClaudeEnvFor(cfg, machineId).CLAUDE_CODE_OAUTH_TOKEN;
+
 /** Which Claude account a machine's portal-run agents use, safe to show: "host token …abcd" or "Mac login". */
 export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machineId: string): string {
   const token = hostClaudeEnvFor(cfg, machineId).CLAUDE_CODE_OAUTH_TOKEN;
   return token ? `host token …${token.slice(-4)}` : "Mac login (the Mac's own Claude Code login)";
+}
+
+/**
+ * system_status's lines on which account each kind of agent runs on (docs/accounts.md), safe to show: this
+ * host's roles, then every machine. `hostName`: this host, `hostToken`: the token its agents would get (usage.ts
+ * hostToken), `people`: display names of those with their own token, which wins for work they asked for.
+ */
+export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv' | 'machines'>, hostName: string, hostToken: string | undefined, machineIds: string[], people: string[] = []): string[] {
+  const here = (role: HostRole) => (hostAccount(cfg, role) === 'login' || !hostToken ? `${hostName} login` : `host token …${hostToken.slice(-4)}`);
+  const logins = HOST_ROLES.filter((r) => hostAccount(cfg, r) === 'login');
+  const problem = logins.length ? hostLoginProblem(cfg) : undefined;
+  return [
+    `Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): ${HOST_ROLES.map((r) => `${roleNames([r])} here: ${here(r)}`).join('; ')}${machineIds.length ? `; ${machineIds.map((id) => `agents on ${id}: ${accountSource(cfg, id).replace(/ \(.*\)$/, '')}`).join('; ')}` : ''}${people.length ? `; work asked for by ${people.join(', ')}: their own token` : ''}`,
+    ...(problem ? [`WARNING: set to the ${hostName} login (${roleNames(logins)}), which cannot run agents: ${problem}`] : []),
+  ];
 }

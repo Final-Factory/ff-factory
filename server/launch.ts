@@ -5,6 +5,7 @@ import path from 'node:path';
 import { sandboxGuard } from './guard.ts';
 import { standingGuard } from './standingGuard.ts';
 import { publicIdentityEnv } from './publicGit.ts';
+import { usageEnv } from './usage.ts';
 import type { StandingToolGroup } from '../shared/types.ts';
 
 /**
@@ -40,6 +41,11 @@ export interface LaunchSpec {
     publicIdentity?: { repos: string[]; name?: string; email?: string };
   };
   env?: Record<string, string>;
+  /**
+   * Run on the computer's stored claude.ai login (docs/accounts.md): credentials in the process environment it
+   * starts from are dropped (usage.ts AUTH_ENV), so only a token in `env` (a person's own) can override the login.
+   */
+  login?: boolean;
   /** Commit as this identity in clones of these public repos ("owner/name"), via publicIdentityEnv on the machine. */
   publicGit?: { name: string; email: string; repos: string[] };
   claudeExecutable?: string;
@@ -79,8 +85,9 @@ function publicGitEnvFor(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv): Record<s
   }
 }
 
-/** SDK options for a spec. `handlers` answers the spec's MCP tools; `baseEnv` is the process environment to start from. */
-export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, baseEnv: NodeJS.ProcessEnv = process.env): Options {
+/** SDK options for a spec. `handlers` answers the spec's MCP tools; `processEnv` is the environment to start from (without its credentials for spec.login). */
+export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env): Options {
+  const baseEnv = spec.login ? usageEnv(processEnv) : processEnv;
   const g = spec.guard;
   const hooks = [
     sandboxGuard({

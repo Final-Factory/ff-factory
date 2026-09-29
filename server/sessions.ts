@@ -5,6 +5,7 @@ import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { EffortLevel, ImageInput, ImageRef, PendingPermission, PermissionMode, Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { emit } from './store.ts';
+import { accountKeyOf } from './usage.ts';
 import type { SessionSnapshot, Unanswered } from './restart.ts';
 
 /** The prompt stream for one query(): messages pushed here become user turns, in order. */
@@ -210,7 +211,8 @@ export class AgentSession implements SessionHandle {
     this.backgroundTasks = 0;
     this.info.backgroundTasks = undefined;
     this.q = runQuery({ prompt: this.input, options });
-    this.update({ status: 'starting' });
+    // What this process runs on, whatever the config says later (the account meters, docs/accounts.md).
+    this.update({ status: 'starting', account: accountKeyOf(options.env ?? process.env) });
     void this.consume(this.q);
   }
 

@@ -3,8 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { Config } from './config.ts';
-import type { AccountUsage, PlanUsage, SessionInfo, UsageMeter } from '../shared/types.ts';
+import { HOST_ROLES, roleNames, type Config, type HostRole } from './config.ts';
+import type { AccountUsage, PlanUsage, SessionInfo, SessionKind, UsageMeter } from '../shared/types.ts';
 
 /**
  * The user's Claude plan usage: the weekly limit, the 5-hour session limit and any per-model weekly limit,
@@ -173,8 +173,11 @@ export const AUTH_ENV = [
   'CLAUDE_CODE_SIMPLE',
 ];
 
-/** The usage request's environment: the agents' environment without the credentials that would shadow the stored login. */
-export function usageEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+/**
+ * The usage request's environment: the agents' environment without the credentials that would shadow the stored
+ * login. Also what an agent set to run on the stored login starts with (server/secrets.ts, docs/accounts.md).
+ */
+export function usageEnv<E extends Record<string, string | undefined>>(env: E): E {
   const out = { ...env };
   for (const k of AUTH_ENV) delete out[k];
   return out;
@@ -222,8 +225,16 @@ export function readStoredLogin(file: string): StoredLogin {
  * `keychain`: the platform keeps the login outside the file (macOS), so a missing file proves nothing.
  */
 export function loginProblem(l: StoredLogin, now: number, file: string, keychain = false): string | undefined {
+  if (l.present && l.hasAccessToken && !l.scopes.includes(PROFILE_SCOPE)) return `the stored claude.ai login lacks the ${PROFILE_SCOPE} scope (it has: ${l.scopes.join(' ') || 'none'}). ${LOGIN_ACTION}`;
+  return loginUnusable(l, now, file, keychain);
+}
+
+/**
+ * Why the stored login cannot run an agent at all (none stored, or expired past refreshing), or undefined. An
+ * agent needs no user:profile scope, so a login without it is still usable here (config claudeAccounts).
+ */
+export function loginUnusable(l: StoredLogin, now: number, file: string, keychain = false): string | undefined {
   if (!l.present || !l.hasAccessToken) return keychain ? undefined : `no claude.ai login is stored on this machine (${file}). ${LOGIN_ACTION}`;
-  if (!l.scopes.includes(PROFILE_SCOPE)) return `the stored claude.ai login lacks the ${PROFILE_SCOPE} scope (it has: ${l.scopes.join(' ') || 'none'}). ${LOGIN_ACTION}`;
   const accessLive = l.expiresAt === undefined || l.expiresAt > now;
   const refreshLive = l.hasRefreshToken && (l.refreshTokenExpiresAt === undefined || l.refreshTokenExpiresAt > now);
   if (!accessLive && !refreshLive) {
@@ -263,17 +274,30 @@ export function machineToken(cfg: Pick<Config, 'claudeEnv'>, takesHostEnv: boole
 }
 
 /**
- * Which credential a portal-run session uses, as an account source key: on this host its token (hostToken)
- * when there is one, on a machine the token it is sent (machineToken); else the login of the computer it
- * runs on. Follows the current config: an agent started before a token change keeps its old account until
- * its process restarts.
+ * The account source key of a process started with `env`: its token, or else the login stored on the computer
+ * it runs on (HOST_LOGIN; the portal reads a Mac's as that Mac's login, machineLogin). Recorded as
+ * SessionInfo.account when the process starts (server/sessions.ts).
+ */
+export function accountKeyOf(env: Record<string, string | undefined>): string {
+  const t = env.CLAUDE_CODE_OAUTH_TOKEN;
+  return t ? tokenKey(t) : HOST_LOGIN;
+}
+
+/**
+ * Which credential a portal-run session uses, as an account source key. A running process: the account it
+ * started on (SessionInfo.account), so a config change shows only once it restarts. Otherwise the one its next
+ * process gets from the current config: a person's own token for their work, on a machine the token it is sent
+ * (machineToken), on this host the token (hostToken) unless config claudeAccounts sets the session's role to
+ * "login" (`hostLogin`); else the login of the computer it runs on (docs/accounts.md).
  */
 export function sessionSource(
-  info: Pick<SessionInfo, 'machineId' | 'requestedBy'>,
+  info: Pick<SessionInfo, 'machineId' | 'requestedBy'> & Partial<Pick<SessionInfo, 'kind' | 'account' | 'status'>>,
   hostTok: string | undefined,
   machineTok: (machineId: string) => string | undefined,
   personTok: (userId: string) => string | undefined = () => undefined,
+  hostLogin: (kind: SessionKind) => boolean = () => false,
 ): string {
+  if (info.account && info.status && info.status !== 'stopped' && info.status !== 'error') return info.account;
   // An agent working for a person with their own token runs on it, here or on a Mac (docs/identity.md).
   const own = info.requestedBy ? personTok(info.requestedBy.userId) : undefined;
   if (own) return tokenKey(own);
@@ -281,6 +305,7 @@ export function sessionSource(
     const t = machineTok(info.machineId);
     return t ? tokenKey(t) : machineLogin(info.machineId);
   }
+  if (hostLogin(info.kind ?? 'worker')) return HOST_LOGIN;
   return hostTok ? tokenKey(hostTok) : HOST_LOGIN;
 }
 
@@ -305,6 +330,8 @@ export interface AccountContext {
   token?: { key: string; label: string };
   /** Machines that exist; `usesToken`: their portal-run agents take the host token. */
   machines: { id: string; usesToken: boolean }[];
+  /** This host's roles config claudeAccounts sets to its stored login (docs/accounts.md); the others take the token. */
+  hostLoginRoles?: HostRole[];
   /** People's own tokens (config userClaudeEnv): key, label ("Lothsahn's token …abcd") and whose. */
   people?: { key: string; label: string; displayName: string }[];
   /** Every session with its source key (sessionSource); `live`: running now (for the order). */
@@ -339,13 +366,23 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
   }
   for (const s of ctx.sessions) if (!sources.has(s.source) && s.source.startsWith('login:') && machineIds.has(s.source.slice(6))) sources.set(s.source, { kind: 'login' });
 
-  const tokenUsers = [ctx.hostName, ...ctx.machines.filter((m) => m.usesToken).map((m) => m.id)];
+  // Which of this host's agents are on the token and which on its login, named only when they are split.
+  const onLogin = HOST_ROLES.filter((r) => ctx.hostLoginRoles?.includes(r));
+  const onToken = HOST_ROLES.filter((r) => !onLogin.includes(r));
+  const split = onLogin.length > 0 && onToken.length > 0;
+  const hostOnToken = onToken.length ? [split ? `${ctx.hostName} (${roleNames(onToken)})` : ctx.hostName] : [];
+  const hostLoginWhere = `${ctx.hostName} login${ctx.token && onLogin.length ? ` (${roleNames(onLogin)})` : ''}`;
+  const tokenUsers = [...hostOnToken, ...ctx.machines.filter((m) => m.usesToken).map((m) => m.id)];
   const out = new Map<string, AccountUsage>();
   for (const [key, e] of sources) {
     const email = e.kind === 'login' ? e.account?.email?.trim().toLowerCase() : undefined;
     const id = e.kind === 'token' ? key : email ? `email:${email}` : key;
     const person = whose.get(key);
-    const where = person ? `agents working for ${person}` : e.kind === 'token' ? `the agents' token on ${tokenUsers.join(', ')}` : `${key === HOST_LOGIN ? ctx.hostName : key.slice(6)} login`;
+    const where = person
+      ? `agents working for ${person}`
+      : e.kind === 'token'
+        ? tokenUsers.length ? `the agents' token on ${tokenUsers.join(', ')}` : "the agents' token (no agent set to it)"
+        : key === HOST_LOGIN ? hostLoginWhere : `${key.slice(6)} login`;
     const a = out.get(id) ?? { id, kind: e.kind, label: e.kind === 'token' ? (e.label ?? 'a token') : (e.account?.email ?? where), email: e.account?.email, sources: [], where: [], sessionIds: [], usage: undefined };
     a.sources.push(key);
     a.where.push(where);

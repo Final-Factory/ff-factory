@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROOT, VOICE_DEFAULTS, type Config } from './config.ts';
-import { OAUTH_TOKEN, SECRET_KEYS, maskSecret } from './secrets.ts';
+import { ROOT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole } from './config.ts';
+import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret } from './secrets.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 
@@ -32,6 +32,12 @@ export const SETTABLE_KEYS = [
   'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN',
   // A person's own Claude account, for agents working for them (docs/identity.md): write-only, needs `user`.
   'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN',
+  // Which account this host's agents run on, per role: "token" (claudeEnv's) or "login" (this host's stored
+  // claude.ai login), and whether a Mac's agents take the host token (optional `machine`). docs/accounts.md.
+  'claudeAccounts.orchestrator',
+  'claudeAccounts.workers',
+  'claudeAccounts.standing',
+  'machines.useHostClaudeEnv',
   // Who automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to.
   'systemPayer',
   // FFBox's connector (docs/ffbox-integration.md): whether it may connect (default off), and its token,
@@ -102,6 +108,21 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       if (typeof value !== 'string' || !OAUTH_TOKEN.test(value.trim())) throw new Error(`${key} must be a Claude OAuth token (sk-ant-oat01-…, from \`claude setup-token\`); the value given is not one (not shown)`);
       return value.trim();
     }
+    case 'claudeAccounts.orchestrator':
+    case 'claudeAccounts.workers':
+    case 'claudeAccounts.standing': {
+      const v = typeof value === 'string' ? value.trim() : value;
+      if (v !== 'login' && v !== 'token') throw new Error(`${key} is "login" (this host's stored claude.ai login) or "token" (config claudeEnv's)`);
+      // Refuse a switch that would leave the role unable to start: the stored login must be there and alive.
+      const problem = v === 'login' && cfg ? hostLoginProblem(cfg) : undefined;
+      if (problem) throw new Error(`${key} cannot be "login": ${problem}`);
+      return v;
+    }
+    case 'machines.useHostClaudeEnv': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error('machines.useHostClaudeEnv is true (the host token) or false (the Mac\'s own login)');
+    }
     case 'systemPayer': {
       if (typeof value !== 'string' || !USER_ID.test(value.trim())) throw new Error('systemPayer is a user id (a login name, e.g. "ben")');
       return value.trim();
@@ -165,22 +186,44 @@ function getPath(obj: unknown, key: string): unknown {
   return key.split('.').reduce<unknown>((o, p) => (o && typeof o === 'object' ? (o as Record<string, unknown>)[p] : undefined), obj);
 }
 
+/** A machine id as config machines.useHostClaudeEnv names it (server/machines.ts MACHINE_ID). */
+const MACHINE_KEY = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+/**
+ * machines.useHostClaudeEnv after setting it to `v` (undefined: removing it) for `machine`, or for every machine
+ * not named when `machine` is absent. Per-machine entries survive a change of the rest, which is "*" once
+ * there are any: { "*": false, "m5": true }. Collapses back to a plain boolean (or nothing) when it can.
+ */
+export function nextUseHostClaudeEnv(cur: unknown, machine: string | undefined, v: boolean | undefined): boolean | Record<string, boolean> | undefined {
+  const obj: Record<string, boolean> = typeof cur === 'object' && cur !== null ? { ...(cur as Record<string, boolean>) } : typeof cur === 'boolean' ? { '*': cur } : {};
+  const at = machine ?? '*';
+  if (v === undefined) delete obj[at];
+  else obj[at] = v;
+  const keys = Object.keys(obj);
+  if (!keys.length) return undefined;
+  if (keys.length === 1 && keys[0] === '*') return obj['*'];
+  return obj;
+}
+
 /**
  * Change one allowlisted key in the config file (kept as config.json.prev first; written through a temp
  * file) and in the running config. Returns the value before and after. `opts.user`: whose entry, for the
- * per-person keys (userClaudeEnv.*, stored as userClaudeEnv.<user>.*).
+ * per-person keys (userClaudeEnv.*, stored as userClaudeEnv.<user>.*). `opts.machine`: for
+ * machines.useHostClaudeEnv, the one machine to set (absent: every machine not named).
  */
-export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { user?: string } = {}): { before: unknown; after: unknown } {
+export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { user?: string; machine?: string } = {}): { before: unknown; after: unknown } {
   if (!SETTABLE_KEYS.includes(key)) throw new Error(`${key} cannot be changed by an agent; allowed: ${SETTABLE_KEYS.join(', ')}`);
   const perUser = key.startsWith('userClaudeEnv.');
   // The user id becomes a key path segment: no dots (edit config.json by hand for such a login).
   if (perUser && !(opts.user && USER_ID.test(opts.user) && !opts.user.includes('.'))) throw new Error(`${key} needs user: the user id (login name, without dots) whose account it is`);
+  if (opts.machine !== undefined && (key !== 'machines.useHostClaudeEnv' || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.useHostClaudeEnv, and is a machine id such as "m5"`);
   const v = normalizeSetting(key, value, cfg);
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
   const stored = perUser ? `userClaudeEnv.${opts.user}.${key.slice('userClaudeEnv.'.length)}` : (STORED_AS[key] ?? key);
   const before = getPath(raw, stored);
-  setPath(raw, stored, v);
+  const next = key === 'machines.useHostClaudeEnv' ? nextUseHostClaudeEnv(before, opts.machine, v as boolean | undefined) : v;
+  setPath(raw, stored, next);
   fs.writeFileSync(file + '.prev', text);
   fs.writeFileSync(file + '.tmp', JSON.stringify(raw, null, 2) + '\n');
   fs.renameSync(file + '.tmp', file);
@@ -206,7 +249,14 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (Object.keys(env).length) all[opts.user!] = env;
     else delete all[opts.user!];
     cfg.userClaudeEnv = all;
-  } else if (key === 'systemPayer') cfg.systemPayer = v as string | undefined;
+  } else if (key === 'claudeAccounts.orchestrator' || key === 'claudeAccounts.workers' || key === 'claudeAccounts.standing') {
+    const accounts = { ...cfg.claudeAccounts };
+    const role = key.slice('claudeAccounts.'.length) as HostRole;
+    if (v === undefined) delete accounts[role];
+    else accounts[role] = v as ClaudeAccount;
+    cfg.claudeAccounts = accounts;
+  } else if (key === 'machines.useHostClaudeEnv') cfg.machines = { ...cfg.machines, useHostClaudeEnv: next as boolean | Record<string, boolean> | undefined };
+  else if (key === 'systemPayer') cfg.systemPayer = v as string | undefined;
   else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.token') {
     const ffbox = { ...cfg.providers?.ffbox };
     if (key === 'providers.ffbox.enabled') ffbox.enabled = v as boolean | undefined;
@@ -220,5 +270,5 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   }
   // A write-only secret reads back as "set (…abcd)" only.
   if (SECRET_KEYS.has(key)) return { before: maskSecret(before), after: maskSecret(v) };
-  return { before, after: v };
+  return { before, after: next };
 }

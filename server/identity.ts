@@ -83,11 +83,12 @@ export function actingFor(recent: readonly TranscriptEvent[], latest: Requester 
 export const forLine = (r: Requester | undefined) => (r ? ` (requested by ${r.displayName})` : '');
 
 /**
- * The Claude env an agent working for `who` runs with: `base` (the owner's, config claudeEnv, or for a Mac what
- * it takes of it) with that person's own entry in config userClaudeEnv laid over it. A person with no entry
- * runs on `base`: the owner's account. docs/identity.md, "Local billing".
+ * The Claude env an agent working for `who` runs with: `base` (the owner's: what config claudeAccounts picks on
+ * this host, or for a Mac what it takes of config claudeEnv) with that person's own entry in config
+ * userClaudeEnv laid over it. A person with no entry runs on `base`: the owner's account. docs/identity.md,
+ * "Local billing", and docs/accounts.md.
  */
-export function claudeEnvFor(cfg: Pick<Config, 'userClaudeEnv'>, who: Requester | undefined, base: Record<string, string>): Record<string, string> {
+export function claudeEnvFor<E extends Record<string, string | undefined>>(cfg: Pick<Config, 'userClaudeEnv'>, who: Requester | undefined, base: E): E {
   const own = who ? Object.entries(cfg.userClaudeEnv ?? {}).find(([id]) => same(id, who.userId))?.[1] : undefined;
   return own && Object.keys(own).length ? { ...base, ...own } : base;
 }

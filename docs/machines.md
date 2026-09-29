@@ -66,9 +66,13 @@ before redeploying by hand.
   The user's own interactive Claude Code sessions on the Mac are unaffected: they keep the Mac's login.
   `list_machines` and the machine brief show the source: "host token …abcd" or "Mac login". Config
   `machines.useHostClaudeEnv` (default `true`) turns it off everywhere (`false`) or per machine
-  (`{ "m3": false }`). An agent already running keeps its account until its process restarts; after an
-  update the daemons are redeployed anyway. An agent working for someone with their own token (config
-  `userClaudeEnv`, [identity.md](identity.md)) runs on that token instead, on any Mac.
+  (`{ "m3": false }`, with `"*"` for the machines not named); `set_app_config machines.useHostClaudeEnv`
+  sets it, with `machine: "<id>"` for one machine. A Mac on its own login gets no token, and the daemon
+  drops any credential in its own environment for that agent (`LaunchSpec.login`). An agent already
+  running keeps its account until its process restarts; after an update the daemons are redeployed
+  anyway. An agent working for someone with their own token (config `userClaudeEnv`,
+  [identity.md](identity.md)) runs on that token instead, on any Mac. Every account switch, including the
+  orchestrator's and this host's workers': [accounts.md](accounts.md).
 - **Limits.** Machine agents run on the Mac, so they do not count toward this host's
   `limits.maxSessions`; each machine has its own limit (default 3).
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.

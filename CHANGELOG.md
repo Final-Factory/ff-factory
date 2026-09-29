@@ -12,6 +12,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Claude account per role and machine** ([docs/accounts.md](docs/accounts.md)). Config
+  `claudeAccounts.orchestrator` / `.workers` / `.standing` (`"token"`, the default, or `"login"`) picks
+  whether this host's agents run on the host token or on this host's stored claude.ai login; a "login"
+  process starts with no credential in its environment. `set_app_config` sets these and
+  `machines.useHostClaudeEnv` (globally, or per machine with `machine:`; `"*"` names the rest), refusing
+  "login" when no usable login is stored, and the server refuses malformed values at load. Sessions
+  record the account their process started on, so the meters, `system_status` (a new per-role account
+  line) and agent details show the account each agent actually runs on, including a Mac's login as that
+  Mac's.
+
 - **People: who asked, and whose account pays** (docs/identity.md). Logins have a display name and a
   role (`node server/user.ts <name> --name … --role owner|member`; the first login is the owner).
   - Every message records its author. In the shared orchestrator chat, each person's name shows above

@@ -79,13 +79,15 @@ access to the M5.
   `set_app_config userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN` with `user: "lothsahn"`. The value is write-only:
   it reads back only as `set (…abcd)`, and it is redacted from transcripts like `claudeEnv`
   (`server/secrets.ts`).
-- An agent's Claude env is `claudeEnvFor(requestedBy)`: the person's entry laid over the owner's, which is
-  `claudeEnv` on this host and, on a Mac, what `machines.useHostClaudeEnv` gives it. A person without an
-  entry runs on the owner's account (`server/identity.ts`). This applies to sandbox workers
+- An agent's Claude env is `claudeEnvFor(requestedBy)`: the person's entry laid over the owner's, which is,
+  on this host, the token or this host's login as config `claudeAccounts` picks per role, and, on a Mac,
+  the token or the Mac's login as `machines.useHostClaudeEnv` picks ([accounts.md](accounts.md)). A person
+  without an entry runs on the owner's account (`server/identity.ts`). This applies to sandbox workers
   (`workerOptions`), Mac workers (`machineWorkerSpec`) and standing runs on either (`standing.ts`, `place`).
 - The env is fixed when an agent's process starts. A worker keeps the account of the person who started it.
   A message from someone else is recorded, but it does not move the worker to another account.
-- The orchestrator is one shared process. It runs on the owner's account whoever is talking to it.
+- The orchestrator is one shared process. It runs on the owner's account whoever is talking to it: the
+  host token, or this host's login with `claudeAccounts.orchestrator: "login"`.
 - The usage meters list each person's token as its own account ("Lothsahn's token …abcd", "agents working
   for Lothsahn"). It is polled like the host token, with that token alone (`server/usage.ts`).
 
