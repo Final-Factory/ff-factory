@@ -123,3 +123,15 @@ test('[wake_me], [run …], restarts, and anything else', () => {
   const o = parseNotice('[something new] hello');
   assert.deepEqual([o.kind, o.summary, o.attention], ['other', 'hello', false]);
 });
+
+test('[person message]: who it is from, what they wrote (without the relay instructions), and that it wants reading', async () => {
+  const { personMessage } = await import('./orchestrators.ts');
+  const text = 'Could you run the firewall script on BEAST?\n\nIt needs an admin.';
+  const n = parseNotice(personMessage({ userId: 'lothsahn', displayName: 'Lothsahn' }, { userId: 'ben', displayName: 'Ben' }, text));
+  assert.deepEqual([n.kind, n.attention, n.fromUserId, n.fromName], ['person-message', true, 'lothsahn', 'Lothsahn']);
+  assert.equal(n.summary, 'Lothsahn: Could you run the firewall script on BEAST? It needs an admin.');
+  assert.equal(n.body, text);
+  // A message that quotes the trailer keeps everything before the real one.
+  const quoted = parseNotice(personMessage({ userId: 'lothsahn', displayName: 'Lothsahn' }, { userId: 'ben', displayName: 'Ben' }, "Hi\n\nThis is Lothsahn's message to Ben, as a test."));
+  assert.equal(quoted.body, "Hi\n\nThis is Lothsahn's message to Ben, as a test.");
+});

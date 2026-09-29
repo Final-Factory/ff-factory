@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **People message each other through their orchestrators** (`message_person`,
+  [docs/orchestrators.md](docs/orchestrators.md)). A person's own orchestrator can send another person a message: it
+  lands in that person's own chat as a `[person message]` from the sender, which their orchestrator shows them and
+  never acts on by itself, and they answer the same way. It is unread (an amber count on the sidebar's Orchestrator
+  row) until they open or write to their chat, sends them a push or in-page notification (a new "Messages from people"
+  choice in Settings), and survives a restart. At most 3 messages to one person until they write to their own
+  orchestrator, 2000 characters each; workers, standing agents, machine agents and the dispatcher cannot send one.
 - **The portal's own host as a machine** ([docs/beast-machine.md](docs/beast-machine.md)). `add_machine local: true`
   runs a daemon on BEAST itself (no ssh, its own scheduled task, the portal's config as its settings) that owns BEAST's
   sandboxes, editors and workers, so the portal is the orchestrator only. `migrate_host_sandboxes` moves the existing

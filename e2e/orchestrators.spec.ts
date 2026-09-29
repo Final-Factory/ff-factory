@@ -1,5 +1,5 @@
 import type { APIRequestContext, Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
-import { BOX, appState, expect, isMobile, openSidebar, sendMessage, test, uniq } from './fixtures.ts';
+import { BOX, appState, expect, go, isMobile, openSidebar, sendMessage, test, uniq } from './fixtures.ts';
 import type { ServerEvent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /**
@@ -211,6 +211,50 @@ test("worker updates go to the chats of the people the work is for, never to the
     expect(await heard(page.request, me.orchestratorId, '[worker update]', `Inventory ${tag}`)).toEqual([]);
     // And the owner's orchestrator may not follow up on the teammate's worker.
     expect(await useTool(page.request, me.orchestratorId, 'message_agent', { session_id: v.id, text: 'mine now' })).toBe(`ERROR: ${v.id} "Inventory ${tag}" is Team Mate's work: follow up only on tester's own workers; for anything else, request_work`);
+  } finally {
+    await mateCtx.close();
+  }
+});
+
+test('one person messages another: it waits unread in their own chat, opens there, and the answer goes back the same way', async ({ authed: page, browser }) => {
+  const tag = uniq('person');
+  const mateCtx = await mateContext(browser);
+  try {
+    const me = await appState(page.request);
+    const mateChat = (await appState(mateCtx.request)).orchestratorId;
+    const matePage = await mateCtx.newPage();
+    const theirs = notices(matePage);
+    await matePage.goto('/#/overview');
+    const text = `Could you run the firewall script on BEAST once? ${tag}`;
+    const sidebar = await openSidebar(matePage);
+    const row = sidebar.getByRole('button', { name: /^Orchestrator/ });
+    // Other tests share this server, and a message the teammate writes to their own chat reads it (and lets the owner
+    // write again): send until the unread count is seen.
+    await expect(async () => {
+      await sendMessage(mateCtx.request, mateChat, `ready ${tag}`);
+      expect(await useTool(page.request, me.orchestratorId, 'message_person', { to: 'teammate', text })).toMatch(/^Sent to Team Mate's orchestrator/);
+      await expect(row.getByTestId('unread-people')).toHaveAttribute('title', 'Unread: 1 message from tester', { timeout: 3000 });
+    }).toPass({ timeout: 60_000 });
+    await expect(row.getByTestId('unread-people')).toHaveText('1');
+    const [m] = await heard(mateCtx.request, mateChat, '[person message]', tag);
+    expect(m).toMatch(/^\[person message\] From tester's orchestrator \(user id tester\), written for tester:/);
+    // The notification is the teammate's alone.
+    await expect.poll(() => theirs.filter((n) => n.tag === 'person-tester').map((n) => n.users)).toContainEqual(['teammate']);
+
+    // Opening the chat shows it, and reads it.
+    await row.click();
+    const notice = matePage.locator('.orch .notice.notice-attn', { hasText: tag }).last();
+    await expect(notice.locator('.notice-text')).toHaveText(`tester: ${text}`);
+    await expect(notice.locator('.notice-body')).toHaveText(text);
+    await expect.poll(async () => (await appState(mateCtx.request)).sessions.find((s) => s.id === mateChat)?.personMessages).toBeUndefined();
+    // Nobody marks someone else's chat read.
+    expect((await page.request.post(`/api/sessions/${mateChat}/seen`, { data: {} })).status()).toBe(403);
+
+    // The answer: the same tool, from the teammate's orchestrator to the owner's; the dispatcher sees neither.
+    expect(await useTool(mateCtx.request, mateChat, 'message_person', { to: 'tester', text: `Done, it is allowed now. ${tag}` })).toMatch(/^Sent to tester's orchestrator/);
+    await expect.poll(async () => (await heard(page.request, me.orchestratorId, '[person message]', tag)).length).toBe(1);
+    expect((await heard(page.request, me.orchestratorId, '[person message]', tag))[0]).toMatch(/^\[person message\] From Team Mate's orchestrator \(user id teammate\)/);
+    expect(await heard(page.request, me.dispatcherId!, '[person message]', tag)).toEqual([]);
   } finally {
     await mateCtx.close();
   }

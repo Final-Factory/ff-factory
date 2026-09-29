@@ -116,6 +116,7 @@ export const api = {
   eventsFrom: (sessionId: string, seq: number) => request<TranscriptEvent[]>('GET', `/api/sessions/${enc(sessionId)}/events?from=${seq}`),
   screenshots: (place: { sandbox: string } | { machine: string }) => request<ImageFile[]>('GET', `/api/screenshots?${new URLSearchParams(place)}`),
   renameSession: (sessionId: string, title: string) => request<{ title: string }>('POST', `/api/sessions/${enc(sessionId)}/title`, { title }),
+  seen: (sessionId: string) => request<unknown>('POST', `/api/sessions/${enc(sessionId)}/seen`),
   interrupt: (sessionId: string) => request<unknown>('POST', `/api/sessions/${enc(sessionId)}/interrupt`),
   permission: (sessionId: string, requestId: string, allow: boolean, message?: string) =>
     request<unknown>('POST', `/api/sessions/${enc(sessionId)}/permission`, { requestId, allow, message }),

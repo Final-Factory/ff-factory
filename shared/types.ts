@@ -182,6 +182,11 @@ export interface SessionInfo {
   /** Who the latest message a person (or the orchestrator for a person) sent this session came from. */
   lastRequestedBy?: Requester;
   /**
+   * A person's own orchestrator only: messages other people sent its person (message_person, docs/orchestrators.md)
+   * that they have not seen yet. Cleared when they open or write to their chat.
+   */
+  personMessages?: { from: Requester; at: string }[];
+  /**
    * Restart bookkeeping (server/restart.ts), saved at once: since when its current turn has been open. Set by a
    * message, cleared when the turn ends or the session is stopped or interrupted on purpose, and kept when the
    * process dies with the server, so a crash cannot make a mid-turn agent look finished.
@@ -808,11 +813,12 @@ export interface DrainStatus {
 
 // ---- notifications ----
 
-export type NotifyKind = 'permission' | 'turnEnd' | 'error' | 'standing' | 'delegation' | 'unity' | 'host';
+export type NotifyKind = 'permission' | 'person' | 'turnEnd' | 'error' | 'standing' | 'delegation' | 'unity' | 'host';
 export type NotifyPrefs = Record<NotifyKind, boolean>;
 
 export const NOTIFY_KINDS: { value: NotifyKind; label: string; hint: string }[] = [
   { value: 'permission', label: 'Needs permission', hint: 'an agent is waiting for you to allow a tool' },
+  { value: 'person', label: 'Messages from people', hint: 'someone sent you a message through their orchestrator' },
   { value: 'turnEnd', label: 'Turn finished', hint: 'the orchestrator or a worker finished a turn' },
   { value: 'error', label: 'Errors', hint: 'a session stopped with an error' },
   { value: 'standing', label: 'Standing agent problems', hint: 'a run failed, hit its budget or ran out of time' },

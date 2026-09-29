@@ -89,6 +89,7 @@ export function Sidebar({
             pulse={orch.status === 'running'}
             title="Orchestrator"
             sub={<span className={`tone-${sessionTone(orch.status)}`}>{sessionLabel[orch.status]}</span>}
+            badge={orch.personMessages?.length ? { count: orch.personMessages.length, hint: `Unread: ${peopleMessagesHint(orch.personMessages)}` } : undefined}
             onClick={() => go({ view: 'home' })}
           />
         )}
@@ -220,7 +221,28 @@ function overviewLine(fleet: FleetComputer[]): string {
 
 // ---------------------------------------------------------------- rows
 
-function Row({ active, icon, tone, pulse, title, sub, hint, onClick }: { active: boolean; icon: IconName; tone: Glance['tone']; pulse?: boolean; title: string; sub: ReactNode; hint?: string; onClick: () => void }) {
+function Row({
+  active,
+  icon,
+  tone,
+  pulse,
+  title,
+  sub,
+  hint,
+  badge,
+  onClick,
+}: {
+  active: boolean;
+  icon: IconName;
+  tone: Glance['tone'];
+  pulse?: boolean;
+  title: string;
+  sub: ReactNode;
+  hint?: string;
+  /** Unread messages from other people in your own chat. */
+  badge?: { count: number; hint: string };
+  onClick: () => void;
+}) {
   return (
     <button className={`row${active ? ' active' : ''}`} onClick={onClick} aria-current={active ? 'page' : undefined} title={hint}>
       <span className="row-icon">
@@ -230,6 +252,11 @@ function Row({ active, icon, tone, pulse, title, sub, hint, onClick }: { active:
         <span className="row-title">{title}</span>
         <span className="row-sub">{sub}</span>
       </span>
+      {badge && (
+        <span className="badge badge-amber" title={badge.hint} data-testid="unread-people">
+          {badge.count}
+        </span>
+      )}
       <Dot tone={tone} pulse={pulse} />
     </button>
   );
@@ -314,4 +341,11 @@ function AttentionList({ items, onPick }: { items: AttentionItem[]; onPick: () =
       )}
     </section>
   );
+}
+
+/** "2 from Lothsahn, 1 from Ben": whose messages wait in your chat. */
+function peopleMessagesHint(list: NonNullable<SessionInfo['personMessages']>): string {
+  const by = new Map<string, number>();
+  for (const m of list) by.set(m.from.displayName, (by.get(m.from.displayName) ?? 0) + 1);
+  return [...by].map(([name, n]) => `${n} ${n === 1 ? 'message' : 'messages'} from ${name}`).join(', ');
 }

@@ -209,6 +209,7 @@ notifier.audience = (s, kind) => {
   if (s.kind === 'worker' && kind === 'turnEnd') return [...new Set([...agents.orchestrators.audienceOf(s), ...(s.lastRequestedBy ? [s.lastRequestedBy] : [])].map((r) => r.userId.toLowerCase()))];
   return undefined;
 };
+agents.orchestrators.onPersonMessage = (from, to, text) => notifier.personMessage(from, to, text);
 agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));
 agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
@@ -493,6 +494,14 @@ route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
     agents.orchestrators.personWrote(id);
   }
   sessions.send(id, String(text ?? '').trim(), 'human', imgs, { requestedBy: requesterOf(req) });
+  return {};
+});
+
+// A person opened their own chat: the messages other people sent them there are read (docs/orchestrators.md).
+route('POST', '/api/sessions/([\\w-]+)/seen', async (req, [id]) => {
+  const s = sessions.get(id);
+  mayDrive(req, s.info);
+  agents.orchestrators.seen(id);
   return {};
 });
 
