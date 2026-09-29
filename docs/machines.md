@@ -430,6 +430,14 @@ on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
 portal never sends it one: it says the daemon is being redeployed.
 
+## The portal's own host as a machine
+
+`add_machine {id: "BEAST", local: true}` runs a daemon on the portal's own computer, deployed and controlled without
+ssh, which takes over the host's sandboxes (`migrate_host_sandboxes` moves the existing ones in place; `back` undoes
+it). Its settings default to the portal's config. Protocol 6 adds the `adopt`/`release` sandbox ops and the pool's
+total agent cap, Library seed, below-normal editors and protected paths. Everything about it, with the migration,
+rollback and deploy steps: [beast-machine.md](beast-machine.md).
+
 ## Not in v1
 
 Machines other than Macs and Windows PCs.

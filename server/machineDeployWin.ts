@@ -103,10 +103,26 @@ export function failureDetail(r: { code: number; stdout: string; stderr: string;
   ].join('; ');
 }
 
-/** Run a PowerShell script on a Windows `host` over ssh, with an optional payload ($FFData in the script). */
-export function psScript(host: string, script: string, opts: { timeoutMs?: number; data?: string } = {}): Promise<RemoteResult> {
+/**
+ * Where a script runs: a Windows PC over ssh (its host alias), or this computer itself (LOCAL: the portal's own host
+ * as a machine, docs/beast-machine.md), where the same bootstrap is started directly, as this server's user.
+ */
+export const LOCAL = { local: true } as const;
+export type Target = string | typeof LOCAL;
+export const isLocal = (t: Target): t is typeof LOCAL => typeof t !== 'string';
+export const targetName = (t: Target) => (isLocal(t) ? 'this host' : t);
+
+/** The program and arguments that run a script fed on stdin: ssh to the host, or PowerShell here. Exported for tests. */
+export function scriptCommand(target: Target): [string, string[]] {
+  const [ps, ...args] = psCommand();
+  return isLocal(target) ? [ps, args] : ['ssh', [...SSH, target, ps, ...args]];
+}
+
+/** Run a PowerShell script on a Windows `host` over ssh (or here, for LOCAL), with an optional payload ($FFData in the script). */
+export function psScript(host: Target, script: string, opts: { timeoutMs?: number; data?: string } = {}): Promise<RemoteResult> {
   return new Promise((resolve) => {
-    const child = spawn('ssh', [...SSH, host, ...psCommand()], { windowsHide: true });
+    const [cmd, args] = scriptCommand(host);
+    const child = spawn(cmd, args, { windowsHide: true });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -450,7 +466,17 @@ function Write-B64($name, $data) { [IO.File]::WriteAllBytes((Join-Path $F $name)
 Write-B64 'daemon.json' '${b64(o.config, 'utf8')}'
 Write-B64 'run-daemon.ps1' '${b64(supervisorScript(o.node, o.flag), 'utf8bom')}'
 $xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(taskXml(o.sid, o.home, o.appDir), 'utf8')}'))
-try { $null = Register-ScheduledTask -TaskName '${TASK_NAME}' -Xml $xml -Force } catch { throw "registering the ${TASK_NAME} task failed: $($_.Exception.Message)" }
+try { $null = Register-ScheduledTask -TaskName '${TASK_NAME}' -Xml $xml -Force } catch {
+  # Not elevated (the portal's own host deploys as the server's non-elevated user): a task an administrator registered
+  # once keeps working, since its action runs this folder's run-daemon.ps1. Without one, say exactly what to run once.
+  $why = $_.Exception.Message
+  $x = Join-Path $F 'daemon-task.xml'
+  [IO.File]::WriteAllText($x, $xml, [Text.Encoding]::Unicode)
+  if (-not (Get-ScheduledTask -TaskName '${TASK_NAME}' -ErrorAction SilentlyContinue)) {
+    throw "registering the ${TASK_NAME} task failed ($why). Register it once from an administrator PowerShell: Register-ScheduledTask -TaskName ${TASK_NAME} -Xml (Get-Content -Raw '$x'); then redeploy"
+  }
+  'registered=kept'
+}
 if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }
 `;
 }

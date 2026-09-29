@@ -14,11 +14,17 @@ import type { CleanupSummary, HostStats, ImageFile, ImageInput, Machine, Machine
  * 5: machine sandboxes (docs/machines.md, "Machine sandboxes"): `sandbox` ops, `sandbox` on `switch` and `unity`, the
  * pool settings in `welcome`, and the daemon's `sandboxes` snapshots. A protocol-4 daemon would ignore the sandbox
  * field of a switch or unity message and act on the main clone, so the portal never sends one to it.
+ * 6: the portal's own host as a machine (docs/beast-machine.md): the `adopt` and `release` sandbox ops (a worktree
+ * that already exists is taken into the pool, or dropped from it, without touching the folder), and the pool
+ * settings' `maxAgents`, `librarySeed`, `librarySeedCopy`, `librarySeedGB`, `belowNormal` and `protectedPaths`.
  */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 /** The oldest protocol that understands machine sandboxes. */
 export const SANDBOX_PROTOCOL = 5;
+
+/** The oldest protocol that can adopt and release existing worktrees (the host migration, server/hostMigration.ts). */
+export const ADOPT_PROTOCOL = 6;
 
 /** What the daemon reports of a sandbox; the portal adds purpose and sessionIds (MachineSandbox). */
 export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
@@ -44,6 +50,13 @@ export type ToDaemon =
   | { type: 'sandbox'; id: string; op: 'create'; sandbox: string; branch: string; base: string; seedLibrary: boolean; startUnity: boolean }
   | { type: 'sandbox'; id: string; op: 'delete'; sandbox: string; deleteBranch?: boolean }
   | { type: 'sandbox'; id: string; op: 'log'; sandbox: string; lines: number }
+  /**
+   * Protocol 6: take a worktree that already exists into the pool as it is (the host migration): nothing on disk is
+   * created, copied or deleted, and an editor already running on it is found by the next look.
+   */
+  | { type: 'sandbox'; id: string; op: 'adopt'; sandbox: string; path: string; branch: string; base: string; createdAt: string; logPath?: string }
+  /** Protocol 6: forget a sandbox without touching its folder, branch or editor (the migration back). */
+  | { type: 'sandbox'; id: string; op: 'release'; sandbox: string }
   /** Report git status now (after an agent turn), not at the next minute. */
   | { type: 'status_now' }
   | { type: 'mode'; sessionId: string; mode: PermissionMode }

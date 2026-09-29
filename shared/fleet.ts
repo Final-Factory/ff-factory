@@ -40,6 +40,11 @@ export interface FleetComputer {
   name: string;
   host: boolean;
   machine?: Machine;
+  /**
+   * The host's own machine daemon (docs/beast-machine.md): shown in the host's group, which lists its sandboxes as the
+   * host's own (they are on this computer); it has no group of its own.
+   */
+  daemon?: Machine;
   platform?: MachinePlatform | string;
   online: boolean;
   stats?: HostStats;
@@ -106,21 +111,27 @@ export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines
       sandbox: sb,
     };
   });
-  const host = summarize({
-    key: 'host',
-    name: app.system?.hostname ? shortHost(app.system.hostname) : 'This host',
-    host: true,
-    platform: app.system?.platform,
-    online: true,
-    stats: app.system,
-    sandboxes: inUseFirst(hostSandboxes),
-    sandboxLimit: app.system?.limits.maxSandboxes,
-    editors: app.sandboxes.filter((s) => s.unity.state === 'running' || s.unity.state === 'starting' || s.unity.state === 'blocked' || s.unity.state === 'stopping').length,
-    editorLimit: app.system?.limits.maxUnity,
-  });
+  const hostEditors = app.sandboxes.filter((s) => s.unity.state === 'running' || s.unity.state === 'starting' || s.unity.state === 'blocked' || s.unity.state === 'stopping').length;
+  const host = (local?: Machine) => {
+    // With its own daemon, this host's sandboxes are that daemon's (plus any the host's old pool still has).
+    const daemonSandboxes = local ? machineSandboxes(local) : [];
+    return summarize({
+      key: 'host',
+      name: app.system?.hostname ? shortHost(app.system.hostname) : 'This host',
+      host: true,
+      ...(local ? { daemon: local } : {}),
+      platform: app.system?.platform,
+      online: true,
+      stats: app.system,
+      sandboxes: inUseFirst([...hostSandboxes, ...daemonSandboxes]),
+      sandboxLimit: local?.sandboxRoot ? (local.maxSandboxes ?? 3) : app.system?.limits.maxSandboxes,
+      editors: hostEditors + daemonSandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
+      editorLimit: local?.sandboxRoot ? (local.maxUnity ?? 2) : app.system?.limits.maxUnity,
+    });
+  };
 
-  const machines = app.machines.map((m) => {
-    const sandboxes = (m.sandboxes ?? []).map((sb): FleetSandbox => {
+  const machineSandboxes = (m: Machine) =>
+    (m.sandboxes ?? []).map((sb): FleetSandbox => {
       const agents = agentsIn(sb.sessionIds, byId);
       return {
         key: `${m.id}/${sb.id}`,
@@ -137,6 +148,9 @@ export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines
         machineSandbox: sb,
       };
     });
+  const local = app.machines.find((m) => m.local);
+  const machines = app.machines.filter((m) => m !== local).map((m) => {
+    const sandboxes = machineSandboxes(m);
     return summarize({
       key: m.id,
       name: m.name ?? m.id,
@@ -154,7 +168,7 @@ export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines
     });
   });
 
-  return [host, ...machines];
+  return [host(local), ...machines];
 }
 
 /** "2/3 sandboxes · 1/2 editors", or what a computer without a pool has. */

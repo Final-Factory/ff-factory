@@ -12,6 +12,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The portal's own host as a machine** ([docs/beast-machine.md](docs/beast-machine.md)). `add_machine local: true`
+  runs a daemon on BEAST itself (no ssh, its own scheduled task, the portal's config as its settings) that owns BEAST's
+  sandboxes, editors and workers, so the portal is the orchestrator only. `migrate_host_sandboxes` moves the existing
+  sandboxes to it in place (folders, branches, Libraries, editors, agent history and session ids untouched) and back.
+  BEAST's sandboxes are `beast/<name>`, bare names keep working, and the sidebar and Overview still show them under
+  BEAST. Protocol 6: the `adopt`/`release` sandbox ops, and the pool's total agent cap, Library seed (block clone),
+  below-normal editors and protected paths. The workers keep `claudeAccounts.workers`. Backlog step 2 (restarts that
+  leave daemon agents running) is built behind `machines.keepAgentsOnRestart`, off.
+
 - **An orchestrator for each person, and a dispatcher** ([docs/orchestrators.md](docs/orchestrators.md)). Each
   login gets their own orchestrator chat on the home page: only they write to it, it runs on their own Claude token
   when they have one, sees everything, follows up with their own workers, and files work requests. The shared chat

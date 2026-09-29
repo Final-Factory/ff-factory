@@ -18,6 +18,7 @@ Every agent the portal starts runs on one of three kinds of Claude credential:
 | Sandbox workers on this host | `claudeAccounts.workers` | same | `"token"` |
 | Standing agents on this host | `claudeAccounts.standing` | same | `"token"` |
 | Workers and standing agents on a Mac | `machines.useHostClaudeEnv` | `true` (host token) or `false` (the Mac's login); global, or per machine | `true` |
+| Workers on this host's own daemon ([beast-machine.md](beast-machine.md)) | `claudeAccounts.workers`, unless `machines.useHostClaudeEnv` names the machine | as for sandbox workers here; "login" is this host's login, with the rest of `claudeEnv` (e.g. `CLAUDE_CONFIG_DIR`) kept | `"token"` |
 
 `machines.useHostClaudeEnv` takes `true`/`false` or an object with one entry per machine id, plus `"*"` for
 the machines it does not name: `{ "m3": false, "m5": false }`, or `{ "*": false, "m5": true }`.

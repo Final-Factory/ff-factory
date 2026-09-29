@@ -233,6 +233,18 @@ export interface DeployOptions {
   step?: (what: string) => void;
   /** Called as soon as the OS is known, so a deploy that fails later does not go on showing a Mac. */
   onPlatform?: (platform: MachinePlatform) => void;
+  /** The portal's own host (docs/beast-machine.md): the scripts run here, as this server's user, not over ssh. */
+  local?: boolean;
+  /** daemon.json extras: the MCP-for-Unity server agents get, the Max events file, the idle-editor stop. */
+  extra?: DaemonExtras;
+}
+
+/** daemon.json settings a deploy may add (machine/daemon.ts DaemonConfig). */
+export interface DaemonExtras {
+  unityMcpServer?: { command: string; args: string[]; env?: Record<string, string> };
+  maxEventsFile?: string | null;
+  sandboxIdleStopMinutes?: number;
+  cleanup?: { everyMinutes: number; softFreeGB: number };
 }
 
 /** A machine's folder options, as add_machine takes them and daemon.json keeps them. */
@@ -284,6 +296,12 @@ export async function detectPlatform(host: string): Promise<MachinePlatform> {
 
 export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   (opts.step ?? (() => undefined))('checking the OS');
+  if (opts.local) {
+    // The portal's own host (docs/beast-machine.md): no ssh; only a Windows host is supported so far.
+    if (process.platform !== 'win32') throw new Error('a local machine (the portal\'s own host) is only supported on a Windows host so far');
+    opts.onPlatform?.('win32');
+    return deployWindows(opts);
+  }
   const platform = await detectPlatform(opts.host);
   opts.onPlatform?.(platform);
   return platform === 'win32' ? deployWindows(opts) : deployMac(opts);
@@ -386,16 +404,29 @@ export function parseWinProbe(out: string): WinProbe {
   };
 }
 
-async function mustPs(host: string, what: string, script: string, opts: { timeoutMs?: number; data?: string } = {}) {
+async function mustPs(host: win.Target, what: string, script: string, opts: { timeoutMs?: number; data?: string } = {}) {
   const r = await win.psScript(host, script, opts);
-  if (r.code !== 0) throw new Error(`${what} on ${host} failed: ${win.failureDetail(r)}`);
+  if (r.code !== 0) throw new Error(`${what} on ${win.targetName(host)} failed: ${win.failureDetail(r)}`);
   return r.stdout;
 }
 
 /** The daemon's config file (both platforms); a folder option left unset is left out. Exported for tests. */
-export function daemonConfig(o: { portalUrl: string; id: string; token: string; repoPath: string; claude?: string; maxSessions: number; sandboxes?: SandboxPoolSettings | null } & MachineDirs): string {
+export function daemonConfig(o: { portalUrl: string; id: string; token: string; repoPath: string; claude?: string; maxSessions: number; sandboxes?: SandboxPoolSettings | null; extra?: DaemonExtras } & MachineDirs): string {
   return JSON.stringify(
-    { portalUrl: o.portalUrl, id: o.id, token: o.token, repoPath: o.repoPath, claude: o.claude, maxSessions: o.maxSessions, appDir: o.appDir, unityEditorRoot: o.unityEditorRoot, unityPath: o.unityPath, tempDir: o.tempDir, sandboxes: o.sandboxes ?? undefined },
+    {
+      portalUrl: o.portalUrl,
+      id: o.id,
+      token: o.token,
+      repoPath: o.repoPath,
+      claude: o.claude,
+      maxSessions: o.maxSessions,
+      appDir: o.appDir,
+      unityEditorRoot: o.unityEditorRoot,
+      unityPath: o.unityPath,
+      tempDir: o.tempDir,
+      sandboxes: o.sandboxes ?? undefined,
+      ...o.extra,
+    },
     null,
     2,
   );
@@ -437,10 +468,18 @@ export function pickRepo(given: string | undefined, found: string[]): string | u
   return given || [...found].sort((a, b) => a.length - b.length)[0];
 }
 
+/** Write the code bundle into this user's home for a local deploy (the upload script unpacks and deletes it); returns its path. */
+async function localBundle(root: string): Promise<string> {
+  const file = path.join(os.homedir(), `.ff-factory-upload-${Date.now()}.tgz`);
+  fs.writeFileSync(file, Buffer.from(await bundle(root), 'base64'));
+  return file;
+}
+
 async function deployWindows(opts: DeployOptions): Promise<DeployResult> {
   const step = opts.step ?? (() => undefined);
+  const host: win.Target = opts.local ? win.LOCAL : opts.host;
   step('probing');
-  const p = parseWinProbe(await mustPs(opts.host, 'probe', win.probeScript(opts.repoSlug ?? ''), { timeoutMs: 3 * 60_000 }));
+  const p = parseWinProbe(await mustPs(host, 'probe', win.probeScript(opts.repoSlug ?? ''), { timeoutMs: 3 * 60_000 }));
   if (!p.home || !p.sid) throw new Error(`could not read the user and home folder on ${opts.host}`);
   const support = nodeSupport(p.nodeVersion);
   if (!p.node || !support.ok) throw new Error(`${opts.host} needs Node ${MIN_NODE.join('.')}+ (found ${p.nodeVersion ?? 'none'} at ${p.node ?? '-'})`);
@@ -452,16 +491,16 @@ async function deployWindows(opts: DeployOptions): Promise<DeployResult> {
   const appDir = opts.dirs?.appDir;
 
   step('copying code');
-  const name = await scpBundle(opts.root, opts.host);
-  await mustPs(opts.host, 'copying the code', win.uploadScript(appDir, name), { timeoutMs: 10 * 60_000 });
+  const name = opts.local ? await localBundle(opts.root) : await scpBundle(opts.root, opts.host);
+  await mustPs(host, 'copying the code', win.uploadScript(appDir, name), { timeoutMs: 10 * 60_000 });
   const version = (await run('git', ['-C', opts.root, 'rev-parse', '--short', 'HEAD'])).stdout.trim() || 'unknown';
 
   step('npm ci');
-  await mustPs(opts.host, 'npm ci', win.npmScript(p.node, version, appDir), { timeoutMs: 10 * 60_000 });
+  await mustPs(host, 'npm ci', win.npmScript(p.node, version, appDir), { timeoutMs: 10 * 60_000 });
 
   step('installing');
-  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, sandboxes: opts.sandboxes, ...opts.dirs });
-  const out = await mustPs(opts.host, 'install', win.installScript({ sid: p.sid, home: p.home, config, node: p.node, flag: support.flag, appDir, previousAppDir: opts.previousAppDir }), { timeoutMs: 3 * 60_000 });
+  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, sandboxes: opts.sandboxes, extra: opts.extra, ...opts.dirs });
+  const out = await mustPs(host, 'install', win.installScript({ sid: p.sid, home: p.home, config, node: p.node, flag: support.flag, appDir, previousAppDir: opts.previousAppDir }), { timeoutMs: 3 * 60_000 });
   return { platform: 'win32', home: p.home, repoPath, node: p.node, nodeVersion: p.nodeVersion ?? '', claude: p.claude, version, started: /started=True/.test(out) };
 }
 
@@ -511,10 +550,10 @@ export function macControlScript(action: DaemonAction | 'uninstall'): string {
  * Start, stop or restart the daemon on a machine. A stopped Mac daemon loads again at the next login, a
  * Windows one starts again at the next logon. Returns what happened, in a few words.
  */
-export async function controlDaemon(host: string, platform: MachinePlatform | undefined, action: DaemonAction, appDir?: string): Promise<string> {
-  const pf = platform ?? (await detectPlatform(host));
+export async function controlDaemon(host: string, platform: MachinePlatform | undefined, action: DaemonAction, appDir?: string, local = false): Promise<string> {
+  const pf = local ? 'win32' : (platform ?? (await detectPlatform(host)));
   if (pf === 'win32') {
-    const out = await mustPs(host, `daemon ${action}`, win.controlScript(action, appDir), { timeoutMs: 2 * 60_000 });
+    const out = await mustPs(local ? win.LOCAL : host, `daemon ${action}`, win.controlScript(action, appDir), { timeoutMs: 2 * 60_000 });
     const stopped = /stopped=(\d+)/.exec(out)?.[1];
     const started = /started=(True|False)/.exec(out)?.[1];
     return [
@@ -529,8 +568,8 @@ export async function controlDaemon(host: string, platform: MachinePlatform | un
 }
 
 /** Stop and unload the daemon (its files stay in its folder). */
-export async function undeploy(host: string, platform?: MachinePlatform, appDir?: string) {
-  const pf = platform ?? (await detectPlatform(host));
-  if (pf === 'win32') await mustPs(host, 'uninstall', win.uninstallScript(appDir), { timeoutMs: 2 * 60_000 });
+export async function undeploy(host: string, platform?: MachinePlatform, appDir?: string, local = false) {
+  const pf = local ? 'win32' : (platform ?? (await detectPlatform(host)));
+  if (pf === 'win32') await mustPs(local ? win.LOCAL : host, 'uninstall', win.uninstallScript(appDir), { timeoutMs: 2 * 60_000 });
   else await must(host, 'uninstall', macControlScript('uninstall'), 60_000);
 }

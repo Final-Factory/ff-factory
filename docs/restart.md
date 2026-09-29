@@ -50,6 +50,11 @@ The script logs to `data\supervisor.log` and waits for the new server (3 min, or
 `-Update`). It is safe to run twice: a second run while one is in progress exits at once, and a run
 with nothing running just starts the app.
 
+**Agents on machines** (a Mac, a Windows PC, this host's own daemon) are drained and stopped like this host's today.
+Config `machines.keepAgentsOnRestart: true` (backlog step 2, off until the host's own daemon has proven itself) leaves
+them running instead: no drain message, no stop, and after the restart the ones still running are reported as such
+([beast-machine.md](beast-machine.md#backlog-step-2-prepared-off)).
+
 ## Who is resumed
 
 `collectResume` in `server/restart.ts` (tests in `restart.test.ts`):
