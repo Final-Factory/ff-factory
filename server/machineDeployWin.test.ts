@@ -37,6 +37,7 @@ test('windows: every script is plain PowerShell (no template leftovers) and sing
   const scripts = {
     probe: win.probeScript('Some-Org/Some.Game'),
     upload: win.uploadScript(),
+    uploadFile: win.uploadScript(undefined, '.ff-factory-upload-1.tgz'),
     npm: win.npmScript(node, 'abc1234'),
     supervisor: win.supervisorScript(node, false),
     install: win.installScript({ sid: SID, home: 'C:\\Users\\Ben', config: '{}', node, flag: false }),
@@ -162,6 +163,12 @@ test('platform: uname tells a Mac; a Windows PC fails it, or answers MINGW/MSYS 
   assert.equal(platformOfUname('Darwin\n', 0), 'darwin');
   assert.equal(platformOfUname('MINGW64_NT-10.0-26100\n', 0), 'win32');
   assert.equal(platformOfUname('MSYS_NT-10.0-22631', 0), 'win32');
+  assert.equal(platformOfUname('MINGW32_NT-10.0-26200', 0), 'win32');
+  assert.equal(platformOfUname('CYGWIN_NT-10.0-26200', 0), 'win32');
+  assert.equal(platformOfUname('UCRT64_NT-10.0-26200\n', 0), 'win32', 'any *_NT-<version> is Windows');
+  assert.equal(platformOfUname('CLANG64_NT-10.0-26200', 0), 'win32');
+  assert.equal(platformOfUname('MINGW64_NT-10.0-26200', 127), 'win32', 'even when the exit code is odd');
+  assert.equal(platformOfUname('Darwin extra', 0), 'other', 'only an exact Darwin is a Mac');
   assert.equal(platformOfUname("'uname' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n", 1), undefined, 'cmd.exe: ask PowerShell next');
   assert.equal(platformOfUname('', 1), undefined);
   assert.equal(platformOfUname('Linux\n', 0), 'other');
@@ -296,7 +303,7 @@ const onWindowsCi = process.platform === 'win32' && process.env.CI === 'true';
  * Run a script the way psScript does over ssh, but locally: the same encoded bootstrap, fed on stdin. `shell`
  * stands in for sshd's default shell: sshd runs the command line through `cmd.exe /c` or `powershell.exe -c`.
  */
-function runPs(script: string, opts: { data?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; shell?: 'cmd' | 'powershell' } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+function runPs(script: string, opts: { data?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; shell?: 'cmd' | 'powershell'; raw?: boolean } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const line = win.psCommand().join(' ');
     const [exe, ...args] = opts.shell === 'cmd' ? ['cmd.exe', '/c', line] : opts.shell === 'powershell' ? ['powershell.exe', '-c', line] : win.psCommand();
@@ -310,7 +317,7 @@ function runPs(script: string, opts: { data?: string; env?: NodeJS.ProcessEnv; t
       clearTimeout(timer);
       resolve({ code: code ?? -1, stdout: stdout.replace(/\r\n/g, '\n'), stderr });
     });
-    child.stdin.end(opts.data === undefined ? script : script + win.DATA_MARK + opts.data);
+    child.stdin.end(opts.raw ? script : win.stdinOf(script, opts.data));
   });
 }
 
@@ -320,6 +327,7 @@ test('windows (real PowerShell): every script parses', { skip: !onWindowsCi && '
     win.BOOTSTRAP,
     win.probeScript('Some-Org/SomeGame'),
     win.uploadScript(),
+    win.uploadScript('D:\\ff', '.ff-factory-upload-1.tgz'),
     win.npmScript(node, 'abc1234'),
     win.supervisorScript(node, true),
     win.installScript({ sid: SID, home: 'C:\\Users\\Ben', config: '{}', node, flag: false }),
@@ -351,6 +359,28 @@ test('windows (real PowerShell): the bootstrap runs a script from stdin with its
   }
   const empty = await runPs('');
   assert.equal(empty.code, 3, 'nothing on stdin is an error, not a silent success');
+  const nothing = await runPs('', { raw: true });
+  assert.equal(nothing.code, 3, 'not even the end mark: an error too');
+  const cut = await runPs("[Console]::Out.WriteLine('ran')", { raw: true });
+  assert.equal(cut.code, 3, 'a script without its end mark was cut off on the way: not run');
+  assert.doesNotMatch(cut.stdout, /ran/);
+  assert.match(cut.stderr, /without its end mark/);
+  // Larger than one 64 KB read, and with a payload: the bootstrap stops at the end mark, over several reads.
+  const big = await runPs(`${'# padding\n'.repeat(9000)}[Console]::Out.WriteLine('big ok ' + $FFData.Trim().Length)`, { data: 'A'.repeat(200_000), shell: 'cmd' });
+  assert.equal(big.code, 0, big.stderr);
+  assert.match(big.stdout, /big ok 200000/);
+});
+
+test('windows: stdin is the script, the payload after DATA_MARK, then END_MARK (the bootstrap reads up to it, never to EOF)', () => {
+  assert.equal(win.stdinOf('s'), 's\n#FFEND\n');
+  assert.equal(win.stdinOf('s', 'QUJD'), 's\n#FFDATA\nQUJD\n#FFEND\n');
+  assert.doesNotMatch(win.BOOTSTRAP, /CopyTo/, 'CopyTo waits for EOF, which never comes on some PCs past a few KB of stdin');
+  assert.match(win.BOOTSTRAP, /EndsWith\('#FFEND'\)\) \{ break \}/);
+});
+
+test('remote failures say the exit code, whether the timeout killed it, and both output streams', () => {
+  assert.equal(win.failureDetail({ code: -1, stdout: '', stderr: '', timedOut: true }), 'timed out and killed (code -1); no stderr; no stdout');
+  assert.equal(win.failureDetail({ code: 1, stdout: 'a\nb\n', stderr: 'boom\n' }), 'exit code 1; stderr: boom; stdout: a | b');
 });
 
 test('windows (real PowerShell): probe, unpack, npm ci, install into an app_dir, the daemon says hello as win32, stop, uninstall', { skip: !onWindowsCi && 'Windows CI only', timeout: 12 * 60_000 }, async (t) => {
@@ -381,9 +411,13 @@ test('windows (real PowerShell): probe, unpack, npm ci, install into an app_dir,
   assert.equal(p.tar, true);
   assert.deepEqual(p.repos.map(real), [real(clone)]);
 
-  const up = await runPs(win.uploadScript(appDir), { env, data: await bundle(ROOT), timeoutMs: 5 * 60_000, shell: 'powershell' });
+  // The bundle as scp leaves it (a file), unpacked and then deleted.
+  const tgz = path.join(home, '.ff-factory-upload-1.tgz');
+  fs.writeFileSync(tgz, Buffer.from(await bundle(ROOT), 'base64'));
+  const up = await runPs(win.uploadScript(appDir, tgz), { env, timeoutMs: 5 * 60_000, shell: 'powershell' });
   assert.equal(up.code, 0, up.stderr);
   assert.ok(fs.existsSync(path.join(appDir, 'app.new', 'machine', 'daemon.ts')));
+  assert.ok(!fs.existsSync(tgz), 'the uploaded bundle is deleted after unpacking');
 
   const npm = await runPs(win.npmScript(p.node!, 'abc1234', appDir), { env, timeoutMs: 8 * 60_000 });
   assert.equal(npm.code, 0, npm.stderr || npm.stdout);
