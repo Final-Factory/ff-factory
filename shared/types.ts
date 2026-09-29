@@ -189,6 +189,11 @@ export interface SessionInfo {
   turnOpenSince?: string;
   /** Background tasks (a background command, a watcher) still open: they would have re-invoked it; a restart ends them. */
   backgroundTasks?: number;
+  /**
+   * Machine sessions: stopped or interrupted on purpose (stop_agent, interrupt_agent, the UI) since its last message.
+   * Kept by the portal, never by the daemon: no dropped link or restart resumes it until it is sent a message again.
+   */
+  stoppedOnPurpose?: boolean;
 }
 
 /** An image kept with a session's transcript, served at /api/uploads/<sessionId>/<id>. */

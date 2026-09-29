@@ -7,7 +7,8 @@ import http from 'node:http';
 import type { EventEmitter } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
-import { SessionManager, type SessionHandle, type SessionSink } from './sessions.ts';
+import { SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
+import { collectResume } from './restart.ts';
 import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonMismatch } from './machines.ts';
 import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
@@ -604,11 +605,14 @@ test('machine: a dropped link resumes only agents mid-turn now, never finished o
   t.after(() => (RESUME_DELAY_MS.value = 3000));
   const now = Date.parse('2026-09-29T12:00:00Z');
   const worker = (over: Partial<SessionInfo>) => ({ kind: 'worker' as const, status: 'idle' as const, lastActivityAt: '2026-09-29T11:59:00Z', ...over });
-  assert.equal(cutOffMidTurn(worker({ status: 'running' }), now), true);
-  assert.equal(cutOffMidTurn(worker({ status: 'stopped', turnOpenSince: '2026-09-29T11:50:00Z' }), now), true, 'a daemon going down keeps the mark');
-  assert.equal(cutOffMidTurn(worker({ status: 'stopped', turnOpenSince: '2026-09-26T10:00:00Z', lastActivityAt: '2026-09-26T10:05:00Z' }), now), false, 'finished days ago');
-  assert.equal(cutOffMidTurn(worker({ status: 'idle' }), now), false);
-  assert.equal(cutOffMidTurn({ ...worker({ status: 'running' }), kind: 'standing' }, now), false);
+  assert.equal(cutOffMidTurn(worker({ status: 'running' }), true, now), true);
+  assert.equal(cutOffMidTurn(worker({ status: 'stopped', turnOpenSince: '2026-09-29T11:50:00Z' }), true, now), true, 'a daemon going down keeps the mark');
+  assert.equal(cutOffMidTurn(worker({ status: 'stopped', turnOpenSince: '2026-09-26T10:00:00Z', lastActivityAt: '2026-09-26T10:05:00Z' }), true, now), false, 'finished days ago');
+  assert.equal(cutOffMidTurn(worker({ status: 'idle' }), true, now), false);
+  assert.equal(cutOffMidTurn({ ...worker({ status: 'running' }), kind: 'standing' }, true, now), false);
+  // 2026-09-29, M5: the portal's mark and a fresh activity time are not enough; the daemon must have had it live.
+  assert.equal(cutOffMidTurn(worker({ status: 'error', turnOpenSince: '2026-09-29T01:15:00Z' }), false, now), false, 'not live on the link that dropped');
+  assert.equal(cutOffMidTurn(worker({ status: 'running', stoppedOnPurpose: true }), true, now), false, 'stopped on purpose');
   // At boot, a stale mark on an agent idle for days goes (else the next restart's resume file resumes it); a fresh one stays.
   const stale = { id: 's1', machineId: 'mx', turnOpenSince: '2026-09-20T10:00:00Z', lastActivityAt: '2026-09-20T10:05:00Z' } as SessionInfo;
   const fresh = { id: 's2', machineId: 'mx', turnOpenSince: '2026-09-29T11:50:00Z', lastActivityAt: '2026-09-29T11:58:00Z' } as SessionInfo;
@@ -641,4 +645,127 @@ test('machine: a dropped link resumes only agents mid-turn now, never finished o
   assert.equal(users(done.info.id), 1, 'a finished agent is not resumed');
   assert.equal(users(old.info.id), 0, 'an old agent is not resumed');
   assert.ok(!reports.some((r) => /resumed/.test(r)), reports.join('\n'));
+});
+
+/** A process that ignores a stop on purpose (a stuck CLI, a stop that never reached it); a daemon going down still ends it. */
+class StubbornAgent extends FakeAgent {
+  override stop(onPurpose = true) {
+    if (!onPurpose) super.stop(false);
+  }
+}
+
+test('machine: redeploying an outdated daemon resumes only the agent live mid-turn on it, not finished ones the portal still marks (8 on M5, 2026-09-29)', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  RESUME_DELAY_MS.value = 50;
+  t.after(() => (RESUME_DELAY_MS.value = 3000));
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  const deployed: string[] = [];
+  mm.deployMachine = ((o: { id: string }) => (deployed.push(o.id), store.machines.get(o.id)!)) as typeof mm.deployMachine;
+  const d1 = daemon();
+  await until('online', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
+  const users = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').length;
+
+  // The one agent really mid-turn on the daemon.
+  const busy = mm.createSession('mx', { kind: 'worker', title: 'busy', permissionMode: 'default' });
+  sessions.send(busy.info.id, 'long build');
+  await until('mid-turn', () => busy.info.status === 'running' && busy.live);
+
+  // Agents that finished hours ago, as the portal had them: the daemon (restarted since) no longer holds them, so
+  // nothing ever cleared their turn mark, and refused resumes kept moving their activity time.
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+  const refused = "already 3 agents running in this machine's main clone";
+  const old = [0, 1, 2].map((n) => {
+    const h = mm.createSession('mx', { kind: 'worker', title: `old ${n}`, permissionMode: 'default' });
+    Object.assign(h.info, { status: 'error', statusDetail: refused, turnOpenSince: hoursAgo(13), lastActivityAt: hoursAgo(3), ...(n ? { backgroundTasks: 1 } : {}) });
+    store.putSession(h.info);
+    return h;
+  });
+  // A refused start (the daemon's 'failed') is not activity: it no longer makes an old agent look recent.
+  const onMessage = (msg: unknown) => (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', msg);
+  const before = old[0].info.lastActivityAt;
+  onMessage({ type: 'failed', sessionId: old[0].info.id, error: refused });
+  assert.equal(old[0].info.lastActivityAt, before, 'a refusal does not move the activity time');
+  assert.equal(store.readTranscript(old[0].info.id).at(-1)?.kind, 'error', 'the refusal is still in its transcript');
+  // An outdated daemon may report an agent it holds with a stale mark and a fresh time, but not live.
+  onMessage({ type: 'session', info: { ...old[1].info, status: 'stopped', turnOpenSince: hoursAgo(13), lastActivityAt: new Date().toISOString() }, live: false });
+  assert.equal(old[1].live, false);
+
+  // The daemon turns out to be outdated (the portal was updated): with an agent running, it waits.
+  mm.portalHead = '5b181de0123456789abcdef0123456789abcdef0';
+  onMessage({ type: 'hello', protocol: PROTOCOL_VERSION, home: '', live: [busy.info.id], info: { ...store.machines.get('mx')!.info, daemon: 'dd72bd0' } });
+  assert.ok(mm.outdated('mx'));
+  assert.deepEqual(deployed, [], 'not redeployed while an agent runs');
+
+  // Then it is redeployed (no expectDrop: the portal only sees the link drop) and a current daemon connects.
+  d1.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  const cut = (mm as unknown as { cutOff: Map<string, { sessions: string[] }> }).cutOff.get('mx');
+  assert.deepEqual(cut?.sessions, [busy.info.id], 'only the agent live mid-turn on the dropped link is noted');
+  mm.portalHead = undefined;
+  daemon();
+  await until('resumed', () => users(busy.info.id) === 2, 8000);
+  await new Promise((r) => setTimeout(r, 300));
+  for (const h of old) assert.equal(users(h.info.id), 0, `${h.info.title} is not resumed`);
+  const resumed = reports.filter((r) => /resume/.test(r));
+  assert.equal(resumed.length, 1, resumed.join('\n'));
+  assert.match(resumed[0], new RegExp(`mx is back after its daemon lost its connection to the portal; resumed 1 agent\\(s\\) that were mid-turn: ${busy.info.id}\\.$`));
+});
+
+test('machine: an agent stopped with stop_agent is never resumed by a dropped link, whenever the stop came (2026-09-29)', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  RESUME_DELAY_MS.value = 50;
+  t.after(() => (RESUME_DELAY_MS.value = 3000));
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  const users = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').length;
+
+  // 1. Stopped while online, but its process did not end (the daemon still reports it live and mid-turn).
+  const d1 = daemon(undefined, StubbornAgent);
+  await until('online', () => mm.isOnline('mx'));
+  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  sessions.send(s.info.id, 'long build');
+  await until('mid-turn', () => s.info.status === 'running' && s.live);
+  sessions.get(s.info.id).stop(); // what stop_agent does
+  assert.equal(s.info.stoppedOnPurpose, true);
+  assert.equal(store.sessions.get(s.info.id)?.stoppedOnPurpose, true, 'saved: a portal restart keeps it');
+  assert.equal(s.info.turnOpenSince, undefined);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok(s.live, 'the stubborn process is still live');
+  // A portal restart's resume file skips it too.
+  assert.deepEqual(collectResume([{ ...snapshotOf(s), status: 'running' }]), []);
+  mm.expectDrop('mx', 'was redeployed (add_machine with force)');
+  d1.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  const d2 = daemon();
+  await until('online again', () => mm.isOnline('mx'));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(users(s.info.id), 1, 'not resumed after its daemon was redeployed');
+
+  // 2. Cut off mid-turn by a restart, then stopped while the daemon was down: not resumed when it is back.
+  sessions.send(s.info.id, 'long again');
+  assert.equal(s.info.stoppedOnPurpose, undefined, 'a new message ends the stop');
+  await until('mid-turn again', () => s.info.status === 'running' && s.live);
+  mm.expectDrop('mx', 'was restarted (machine_daemon restart)');
+  d2.shutdown();
+  await until('offline again', () => !mm.isOnline('mx'));
+  const cutOff = (mm as unknown as { cutOff: Map<string, { sessions: string[] }> }).cutOff;
+  assert.deepEqual(cutOff.get('mx')?.sessions, [s.info.id], 'noted as cut off');
+  sessions.get(s.info.id).stop();
+  const d3 = daemon();
+  await until('back', () => mm.isOnline('mx'));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(users(s.info.id), 2, 'a stop after the drop still holds');
+  assert.ok(!reports.some((r) => /resumed/.test(r)), reports.join('\n'));
+
+  // 3. Messaged again, it is an ordinary agent: a later cut-off resumes it.
+  sessions.send(s.info.id, 'long third');
+  await until('mid-turn a third time', () => s.info.status === 'running' && s.live);
+  mm.expectDrop('mx', 'was restarted (machine_daemon restart)');
+  d3.shutdown();
+  await until('offline a third time', () => !mm.isOnline('mx'));
+  daemon();
+  await until('resumed', () => users(s.info.id) === 4, 8000);
 });

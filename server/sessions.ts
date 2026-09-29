@@ -100,7 +100,7 @@ export interface SessionHandle {
 export function snapshotOf(h: SessionHandle): SessionSnapshot {
   if (h.snapshot) return h.snapshot();
   const i = h.info;
-  return { id: i.id, kind: i.kind, title: i.title, sandboxId: i.sandboxId, machineId: i.machineId, status: i.status, unanswered: [], lastFrom: h.lastFrom };
+  return { id: i.id, kind: i.kind, title: i.title, sandboxId: i.sandboxId, machineId: i.machineId, status: i.status, unanswered: [], lastFrom: h.lastFrom, ...(i.stoppedOnPurpose ? { stoppedOnPurpose: true } : {}) };
 }
 
 const MAX_TOOL_RESULT = 6000;

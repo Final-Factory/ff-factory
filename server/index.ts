@@ -97,7 +97,7 @@ machines.unityEvent = (machineId, text, restarted, sandbox) => {
   const recent = Date.now() - 30 * 60_000;
   for (const s of store.sessions.values()) {
     // Only the agents of that editor's place: the sandbox's, or the main clone's.
-    if (s.machineId !== machineId || s.kind === 'standing' || s.machineSandbox !== sandbox) continue;
+    if (s.machineId !== machineId || s.kind === 'standing' || s.machineSandbox !== sandbox || s.stoppedOnPurpose) continue;
     if (!['running', 'starting', 'waiting_permission'].includes(s.status) && Date.parse(s.lastActivityAt) < recent) continue;
     try {
       sessions.send(s.id, `Unity ${sandbox ? `of your sandbox (${sandbox})` : 'on this machine'} was restarted automatically at ${new Date().toLocaleTimeString()} (${text.split(';')[0]}). Re-pin it (mcpforunity://instances, then set_active_instance) once its bridge is up, and continue where you left off.`, 'system');

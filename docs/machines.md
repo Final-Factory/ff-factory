@@ -56,9 +56,13 @@ before redeploying by hand.
   continue), as after a portal restart, and the orchestrator hears which. After a network blip they are still
   running, so nothing is sent; `machine_daemon stop` is on purpose and resumes nobody; after more than 6 hours
   the orchestrator is told instead. A daemon going down stops its agents keeping their mid-turn mark
-  (`stop(false)`), which is how the portal knows. Only workers mid-turn and active within those 6 hours count
-  (`cutOffMidTurn`); a report without `turnOpenSince` clears the portal's copy (JSON drops cleared fields), and a
-  drop clears every mark it has noted, so no finished agent is ever resumed.
+  (`stop(false)`), which is how the portal knows. Only workers the daemon reported live on the link that dropped
+  (its hello or a session report, `seenLive`), mid-turn and active within those 6 hours count (`cutOffMidTurn`):
+  the portal's own marks and activity times never suffice on their own, whatever the daemon's version. A report
+  without `turnOpenSince` clears the portal's copy (JSON drops cleared fields), a drop clears every mark it has
+  noted, and a refused start (`failed`) does not move `lastActivityAt`. An agent stopped or interrupted on purpose
+  (`stop_agent`, the UI) is marked `stoppedOnPurpose` (saved, and taken off any cut-off list already noted) and is
+  never resumed, by a dropped link or a portal restart, until it is sent a message again.
 - **Tools.** Workers get the machine's `set_label` (same as a sandbox's) via a `machine` MCP server
   whose calls go back to the portal. Unity is not managed in v1: agents use whatever editor and MCP
   the Mac already has (the Mac's own user settings load).
