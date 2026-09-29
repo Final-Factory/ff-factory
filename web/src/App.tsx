@@ -12,6 +12,7 @@ import { StandingAgentModal } from './components/StandingModal';
 import { StandingPanel } from './components/StandingPanel';
 import { AddMachineModal, MachinePanel } from './components/MachinePanel';
 import { ProviderPanel } from './components/ProviderPanel';
+import { MaxPanel } from './components/MaxPanel';
 import { Toasts } from './components/Toasts';
 import { Lightbox } from './components/Images';
 import { SearchView } from './components/SearchView';
@@ -224,8 +225,26 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
     }
     return { layout: 'single', title: displayName(m), node: panel };
   }
+  if (route.view === 'max') {
+    if (!app.max) return { node: <Missing what="page" />, layout: 'single', title: 'Not found' };
+    const panel = <MaxPanel app={app} max={app.max} tab={route.tab} onClose={() => navigate({ view: 'home' })} />;
+    if (wide) {
+      return {
+        layout: 'split',
+        title: 'Max',
+        node: (
+          <>
+            <OrchestratorView session={orch} compact />
+            {panel}
+          </>
+        ),
+      };
+    }
+    return { layout: 'single', title: 'Max', node: panel };
+  }
   if (route.view === 'provider') {
-    const p = app.providers?.find((x) => x.id === route.providerId);
+    // FFBox is listed only while switched on or set up; its page (with what it needs) opens either way.
+    const p = app.providers?.find((x) => x.id === route.providerId) ?? (app.ffbox?.id === route.providerId ? app.ffbox : undefined);
     if (!p) return { node: <Missing what="provider" />, layout: 'single', title: 'Not found' };
     const panel = <ProviderPanel provider={p} tab={route.tab} onClose={() => navigate({ view: 'home' })} />;
     if (wide) {

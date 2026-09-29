@@ -5,6 +5,8 @@ import { E2E_PROVIDER_TOKEN, MockConnector, SAMPLE_CONVERSATIONS } from './mockC
 
 test('FFBox: the card follows the connector, and its page lists capacity, conversations and intake reports', async ({ authed: page, request }) => {
   const base = test.info().project.use.baseURL!;
+  // Relative times in the page ("last 3h ago") read the browser's clock: frozen just after the samples.
+  await page.clock.setFixedTime(new Date('2026-09-27T12:00:00Z'));
 
   // Switched on, nothing connected yet (or, on a reused local server, gone again).
   let sidebar = await openSidebar(page);
@@ -65,6 +67,24 @@ test('FFBox: the card follows the connector, and its page lists capacity, conver
     await expect(intake).toContainText('crash');
     await expectNoHorizontalOverflow(page);
 
+    // Grouped the way automatic investigations will group them, with the day's numbers against the cap of 20.
+    await panel.getByRole('tab', { name: /Signatures/ }).click();
+    await expect(page).toHaveURL(/#\/provider\/ffbox\/signatures$/);
+    const budget = panel.getByTestId('provider-budget');
+    await expect(budget).toContainText('not live yet');
+    await expect(budget).toContainText(/would start today 0 of 20/);
+    const sigs = panel.getByTestId('provider-signatures').locator('.run-row');
+    await expect(sigs).toHaveCount(2);
+    await expect(sigs.first()).toContainText('minerBots+census');
+    await expect(sigs.first()).toContainText('trusted');
+    await expect(sigs.first()).toContainText('2 reports · 1 event · 2 senders · host+client pair');
+    await expect(sigs.nth(1)).toContainText('no signature yet');
+    await expect(panel).toHaveScreenshot('ffbox-signatures.png');
+    const groups = await (await page.request.get('/api/providers/ffbox/signatures')).json();
+    expect(groups.signatures.map((g: { signature: string }) => g.signature)).toEqual(['desync:0.50.0:minerBots+census', 'crash:0.50.0']);
+    expect(groups.budget.perDay).toBe(20);
+    await panel.getByRole('tab', { name: /Intake reports/ }).click();
+
     const listed = await page.request.get('/api/providers/ffbox/intake');
     expect(listed.ok()).toBeTruthy();
     expect((await listed.json()).map((e: { reportId: string }) => e.reportId)).toEqual([
@@ -78,6 +98,7 @@ test('FFBox: the card follows the connector, and its page lists capacity, conver
 
   // The connector goes away: the card and the page say so, and keep what was reported.
   await expect(page.locator('[data-testid="provider-state"]')).toContainText('Connector offline');
+  await expect(page.getByTestId('provider-offline-note')).toContainText('not connected');
   await expect(page.getByTestId('provider-intake').locator('.run-row')).toHaveCount(3);
   sidebar = await openSidebar(page);
   await expect(sidebar.locator('.row.place', { hasText: 'FFBox' })).toContainText('Connector offline');

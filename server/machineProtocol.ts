@@ -62,4 +62,6 @@ export type FromDaemon =
   /** The Mac's CPU, RAM, GPU and disk (server/system.ts), every 15 s (protocol 4+). */
   | { type: 'stats'; stats: HostStats }
   /** The plan usage of the Mac's own Claude login (not the host token), every 5 minutes (protocol 4+). */
-  | { type: 'usage'; account: AccountIdentity; usage: PlanUsage };
+  | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
+  /** A line the ffdiscord CLI appended to the Mac's Max events file (docs/max.md), forwarded as is; the portal validates it. */
+  | { type: 'max_event'; line: string };

@@ -372,6 +372,118 @@ export interface Provider {
   lastIntakeAt?: string;
 }
 
+/** FFBox's intake reports grouped by their coarse signature (shared/intake.ts, docs/ffbox-integration.md section 6). */
+export interface IntakeSignature {
+  /** `desync:<major.minor.patch>:<diverged surfaces>`, or `crash:<major.minor.patch>` (crashes get a real signature in phase 6). */
+  signature: string;
+  kind: 'crash' | 'desync';
+  versionLine: string;
+  surfaces?: string;
+  reports: number;
+  /** Distinct desync events (the report's group): every peer of one desync is one event. */
+  events: number;
+  senders: number;
+  /** A host and a client report of one event. */
+  pair: boolean;
+  /** Clears the trust bar for an automatic investigation: 2+ distinct senders, or a host and client pair. Never for crashes yet. */
+  trusted: boolean;
+  firstAt: string;
+  lastAt: string;
+  versions: string[];
+  platforms: string[];
+  /** Report ids, newest first (at most 20). */
+  reportIds: string[];
+}
+
+/** The numbers automatic investigations will be bounded by (docs/ffbox-integration.md, step 4). */
+export interface IntakeBudget {
+  /** Phase 4 (automatic investigations) is not built yet: these are what it would use. */
+  live: false;
+  perDay: number;
+  perHour: number;
+  /** Signatures first seen in the last 24 h / hour. */
+  newToday: number;
+  newLastHour: number;
+  /** New today and past the trust bar: what would be started, before the caps. */
+  trustedToday: number;
+  /** min(trustedToday, perDay). */
+  wouldStartToday: number;
+  /** More than 5 new signatures in an hour stops automatic starts. */
+  stormBreaker: { threshold: number; tripped: boolean };
+}
+
+export interface IntakeGroups {
+  signatures: IntakeSignature[];
+  budget: IntakeBudget;
+  /** How many reports were grouped (the portal keeps the newest 2000). */
+  reports: number;
+}
+
+// ---- Max, the Discord bot our agents post as (docs/max.md) ----
+
+export type MaxAction = 'post' | 'reply' | 'ask' | 'edit' | 'thread_create' | 'close' | 'rename';
+
+/** One thing an FF Factory agent did as Max, reported by the ffdiscord CLI through the events file. Text is ours but still shown as plain text. */
+export interface MaxEvent {
+  id: string;
+  at: string;
+  action: MaxAction;
+  ok: boolean;
+  channelId?: string;
+  /** "#dev-chat", or the alias the agent passed, as best known. */
+  channel?: string;
+  /** Set when the channel is a thread: the thread's name and its parent channel. */
+  thread?: { id: string; name?: string; parent?: string };
+  messageId?: string;
+  url?: string;
+  /** The first line of what was posted (or the thread name), cleaned; never the whole message. */
+  text?: string;
+  /** Why it failed, e.g. "403 Missing Permissions". */
+  error?: string;
+  sessionId?: string;
+  /** The session's title when the event arrived. */
+  session?: string;
+  /** "worker", "standing: <name>", "orchestrator", or "outside FF Factory". */
+  agent?: string;
+  /** "host" or a machine id. */
+  where: string;
+}
+
+export interface MaxInboundItem {
+  id: string;
+  kind: 'message' | 'thread';
+  author?: string;
+  /** Untrusted Discord text: cleaned, cut short, shown as plain text only. */
+  text: string;
+  at: string;
+  url?: string;
+  unread: boolean;
+  /** A forum thread's message count. */
+  replies?: number;
+}
+
+export interface MaxInboundChannel {
+  alias: string;
+  channelId?: string;
+  name?: string;
+  kind?: 'text' | 'forum';
+  unread: number;
+  lastAt?: string;
+  error?: string;
+}
+
+export interface MaxSummary {
+  /** Where the bot token was looked for (a path or a variable name; never the token). */
+  token: { found: boolean; source: string; problem?: string };
+  health: { state: 'ok' | 'error' | 'unknown' | 'no_token'; bot?: string; checkedAt?: string; error?: string };
+  lastError?: { at: string; message: string; channel?: string; action?: string; session?: string };
+  lastPost?: { at: string; channel?: string; session?: string };
+  counts: { events: number; posts24h: number; errors24h: number };
+  inbound: { enabled: boolean; channels: MaxInboundChannel[]; polledAt?: string; nextPollAt?: string };
+  /** The file the CLI appends events to on the host (FF_MAX_EVENTS). */
+  eventsFile: string;
+}
+
 // ---- standing agents (docs/standing-agents.md) ----
 
 export type StandingTrigger = { kind: 'interval'; minutes: number } | { kind: 'cron'; expr: string } | { kind: 'manual' };
@@ -650,6 +762,10 @@ export interface AppState {
   machines: Machine[];
   /** Providers (FFBox); absent from a server older than this field. */
   providers?: Provider[];
+  /** FFBox's summary even while it is off (the External strip and its setup page); absent from older servers. */
+  ffbox?: Provider;
+  /** Max, the Discord bot our agents post as (docs/max.md); absent from a server older than this field. */
+  max?: MaxSummary;
   system?: SystemStats;
   host: HostStatus;
   usage?: PlanUsage;
@@ -678,6 +794,7 @@ export type ServerEvent =
   | { type: 'notify'; notice: { kind: NotifyKind; title: string; body: string; url: string; tag: string } }
   | { type: 'machine_removed'; id: string }
   | { type: 'provider'; provider: Provider }
+  | { type: 'max'; max: MaxSummary }
   | { type: 'settings'; settings: AppSettings }
   | { type: 'transcript'; sessionId: string; event: TranscriptEvent }
   /** Live assistant text while a turn streams; the UI shows it until the 'assistant' event lands. */

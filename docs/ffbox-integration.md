@@ -1,7 +1,8 @@
 # FFBox in FF Factory: one orchestrator, two kinds of place to run work
 
 Status: **approved by Ben and Lothsahn 2026-09-27. Phase 1, FF Factory's side, is built**: `/provider`,
-the FFBox card and page, and `ffbox_activity` (`server/providers.ts`). The connector it talks to is
+the FFBox card and page, and `ffbox_activity` (`server/providers.ts`). The page groups intake reports by
+coarse signature with the step 4 counts (`shared/intake.ts`), before phase 4 acts on them. The connector it talks to is
 specified in [ffbox-connector-contract.md](ffbox-connector-contract.md). Every later phase is a
 separate, reviewable change.
 

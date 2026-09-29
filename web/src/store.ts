@@ -165,9 +165,12 @@ function applyEvent(ev: ServerEvent) {
       // Only a provider that is switched on or has a token is listed (as /api/state does).
       const p = ev.provider;
       const keep = p.enabled || p.tokenSet;
-      set((s) => (s.app ? { app: { ...s.app, providers: keep ? upsertById(s.app.providers ?? [], p) : (s.app.providers ?? []).filter((x) => x.id !== p.id) } } : {}));
+      set((s) => (s.app ? { app: { ...s.app, ffbox: p.id === 'ffbox' ? p : s.app.ffbox, providers: keep ? upsertById(s.app.providers ?? [], p) : (s.app.providers ?? []).filter((x) => x.id !== p.id) } } : {}));
       return;
     }
+    case 'max':
+      set((s) => (s.app ? { app: { ...s.app, max: ev.max } } : {}));
+      return;
     case 'machine_removed':
       set((s) => (s.app ? { app: { ...s.app, machines: s.app.machines.filter((x) => x.id !== ev.id) } } : {}));
       return;

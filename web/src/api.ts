@@ -8,6 +8,10 @@ import type {
   ImageInput,
   Machine,
   NotifyPrefs,
+  IntakeGroups,
+  MaxEvent,
+  MaxInboundChannel,
+  MaxInboundItem,
   ProviderConversation,
   ProviderIntakeEvent,
   PermissionMode,
@@ -81,6 +85,12 @@ export const api = {
   // FFBox, as its connector reported it (docs/ffbox-integration.md): newest first.
   providerConversations: (limit = 100) => request<ProviderConversation[]>('GET', `/api/providers/ffbox/conversations?limit=${limit}`),
   providerIntake: (limit = 200) => request<ProviderIntakeEvent[]>('GET', `/api/providers/ffbox/intake?limit=${limit}`),
+  providerSignatures: () => request<IntakeGroups>('GET', '/api/providers/ffbox/signatures'),
+  // Max, the Discord bot (docs/max.md): what agents did as Max, and a read-only look at a few channels.
+  maxActivity: (limit = 200) => request<MaxEvent[]>('GET', `/api/max/activity?limit=${limit}`),
+  maxInbound: () => request<(MaxInboundChannel & { items: MaxInboundItem[] })[]>('GET', '/api/max/inbound'),
+  maxSeen: (alias: string) => request<{ ok: boolean }>('POST', `/api/max/inbound/${encodeURIComponent(alias)}/seen`),
+  maxRefresh: () => request<{ ok: boolean; note?: string }>('POST', '/api/max/refresh'),
   events: (sessionId: string, limit = 500) =>
     request<TranscriptEvent[]>('GET', `/api/sessions/${enc(sessionId)}/events?limit=${limit}`),
   /** `note` is set for a standing agent: what the message did (started a run, joined one, waited). */

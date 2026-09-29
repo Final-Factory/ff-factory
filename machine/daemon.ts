@@ -16,6 +16,7 @@ import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHand
 import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { MacUnity, MacUnityWatch } from './unity.ts';
 import { redactSecrets } from '../server/secrets.ts';
+import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
 import { listImages, readImage } from '../server/images.ts';
@@ -34,6 +35,8 @@ export interface DaemonConfig {
   /** The machine's own `claude` (its login, settings and plugins). */
   claude?: string;
   maxSessions?: number;
+  /** The Max events file agents here append to (docs/max.md); default ~/.config/ff-factory/max-events.jsonl, null: none. */
+  maxEventsFile?: string | null;
 }
 
 /** How the daemon measures its Mac and reads its login's plan usage; tests pass fakes (no CLI, no tools). */
@@ -83,6 +86,7 @@ export class Daemon {
   private readonly timers: NodeJS.Timeout[] = [];
   private readonly makeSession: SessionFactory;
   private readonly probes: Probes;
+  private maxTail?: FileTail;
 
   constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES) {
     this.cfg = cfg;
@@ -99,6 +103,10 @@ export class Daemon {
     bus.on('event', (e) => {
       if (e.type === 'delta' && this.entries.has(e.sessionId)) this.out({ type: 'delta', sessionId: e.sessionId, text: e.text });
     });
+  }
+
+  private get maxEventsFile(): string | undefined {
+    return this.cfg.maxEventsFile === null ? undefined : (this.cfg.maxEventsFile ?? defaultEventsFile());
   }
 
   get connected() {
@@ -123,6 +131,32 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.reportStatus(), 60_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
     this.timers.push(setInterval(() => void this.reportUsage(), USAGE_MS));
+    // What agents here did as Max (the ffdiscord CLI's lines): forwarded, and queued while the link is down.
+    const maxFile = this.maxEventsFile;
+    if (maxFile) {
+      const offsetFile = `${maxFile}.daemon-offset`;
+      let offset: number | undefined;
+      try {
+        offset = Number(fs.readFileSync(offsetFile, 'utf8')) || 0;
+      } catch {
+        /* first run: from the start */
+      }
+      this.maxTail = new FileTail(maxFile, (line) => this.out({ type: 'max_event', line }), offset === undefined ? { fromStart: true } : { offset });
+      let saved = offset;
+      this.timers.push(
+        setInterval(() => {
+          this.maxTail!.poll();
+          if (this.maxTail!.position !== saved) {
+            saved = this.maxTail!.position;
+            try {
+              fs.writeFileSync(offsetFile, String(saved));
+            } catch {
+              /* read again after a restart: the portal drops duplicates */
+            }
+          }
+        }, 3000),
+      );
+    }
     // An agent here on this Mac's own login (the portal sent it no token) hit a rate limit: fetch sooner. The
     // portal hears the signal too and refreshes the token's usage for agents on the token.
     this.events.on('rateLimit', (s: SessionHandle) => {
@@ -342,7 +376,9 @@ export class Daemon {
       const holder: { e?: Entry } = {};
       const s = this.makeSession({ ...info, pendingPermissions: [] }, this.sink(), () => {
         const spec = holder.e!.spec!;
-        return buildOptions({ ...spec, claudeExecutable: spec.claudeExecutable ?? this.cfg.claude }, this.handlers(info.id));
+        // FF_MAX_EVENTS: where the ffdiscord CLI reports what the agent did as Max (this Mac's file, tailed above).
+        const maxFile = this.maxEventsFile;
+        return buildOptions({ ...spec, claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}) } }, this.handlers(info.id));
       }, events);
       e = { s, seq: lastSeq };
       holder.e = e;

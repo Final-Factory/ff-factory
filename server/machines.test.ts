@@ -112,7 +112,7 @@ async function setup() {
   const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url, maxSessions: 1 });
   const daemons: Daemon[] = [];
   const daemon = (tok = token) => {
-    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1 }, (i, s, o, e) => new FakeAgent(i, s, o, e), FAKE_PROBES);
+    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: path.join(tmp, 'max-events.jsonl') }, (i, s, o, e) => new FakeAgent(i, s, o, e), FAKE_PROBES);
     daemons.push(d);
     d.start();
     return d;
@@ -126,7 +126,7 @@ async function setup() {
     store.flush();
     fs.rmSync(tmp, { recursive: true, force: true });
   };
-  return { store, sessions, mm, daemon, token, cleanup };
+  return { store, sessions, mm, daemon, token, cleanup, tmp };
 }
 
 test('machine: the daemon reports its Mac\'s load and its own login\'s usage; offline clears the load (protocol 4)', async (t) => {
@@ -146,6 +146,27 @@ test('machine: the daemon reports its Mac\'s load and its own login\'s usage; of
   d.shutdown();
   await until('offline', () => !mm.isOnline('mx'));
   assert.equal(mm.statsOf('mx'), undefined, "an offline machine's numbers are gone, not shown stale");
+});
+
+test("machine: the daemon forwards the Mac's Max events file, older lines first, then new ones (docs/max.md)", async (t) => {
+  const { mm, daemon, cleanup, tmp } = await setup();
+  t.after(cleanup);
+  const lines: [string, string][] = [];
+  mm.maxEvent = (id, line) => lines.push([id, line]);
+  const file = path.join(tmp, 'max-events.jsonl');
+  fs.writeFileSync(file, '{"v":1,"n":1}\n');
+  daemon();
+  await until('the line written before the daemon started', () => lines.length === 1);
+  fs.appendFileSync(file, '{"v":1,"n":2}\n{"v":1,"n":3');
+  await until('the next complete line', () => lines.length === 2);
+  assert.deepEqual(lines, [
+    ['mx', '{"v":1,"n":1}'],
+    ['mx', '{"v":1,"n":2}'],
+  ]);
+  // The half-written third line waits for its newline; the offset is kept for a restart.
+  fs.appendFileSync(file, '}\n');
+  await until('the finished line', () => lines.length === 3);
+  await until('the offset saved', () => fs.existsSync(`${file}.daemon-offset`) && Number(fs.readFileSync(`${file}.daemon-offset`, 'utf8')) === fs.statSync(file).size);
 });
 
 test('machine: a daemon connects, runs a session, and everything it records lands in the portal', async (t) => {
@@ -353,7 +374,7 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-502-'));
   const d = new Daemon(
-    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1 },
+    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: null },
     () => {
       throw new Error('no sessions here');
     },

@@ -2,13 +2,16 @@
 // connection and each container class (network, model, tier, free slots); the tabs list its conversations and
 // the crash/desync reports ffintake filed, newest first. Titles are FFBox's data and can quote players: they
 // are shown as plain text, never acted on.
-import { useEffect, useState } from 'react';
-import type { Provider, ProviderClass, ProviderConversation, ProviderIntakeEvent } from '../../../shared/types';
+import { useEffect, useState, type ReactNode } from 'react';
+import type { IntakeGroups, Provider, ProviderClass, ProviderConversation, ProviderIntakeEvent } from '../../../shared/types';
 import { api } from '../api';
 import { fmtCost, fmtRelative, navigate, providerGlance, useNow, type Glance } from '../util';
 import { Chip, Dot, Icon } from './ui';
 
-type Tab = 'conversations' | 'intake';
+type Tab = 'conversations' | 'signatures' | 'intake';
+
+/** The connector's contract, for whoever sets it up (docs/ffbox-connector-contract.md). */
+export const CONTRACT_URL = 'https://github.com/Final-Factory/ff-factory/blob/main/docs/ffbox-connector-contract.md';
 
 const convTone = (c: ProviderConversation): Glance['tone'] =>
   c.state === 'running' || c.state === 'queued' ? 'blue' : c.state === 'blocked' ? 'amber' : c.pr?.state === 'open' ? 'green' : 'grey';
@@ -17,10 +20,11 @@ const when = (iso: string) => new Date(iso).toLocaleString([], { month: 'short',
 
 export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provider; tab?: string; onClose?: () => void }) {
   const now = useNow(15_000);
-  const current: Tab = tab === 'intake' ? 'intake' : 'conversations';
+  const current: Tab = tab === 'intake' ? 'intake' : tab === 'signatures' ? 'signatures' : 'conversations';
   const setTab = (t: Tab) => navigate({ view: 'provider', providerId: p.id, tab: t === 'conversations' ? undefined : t }, true);
   const [conversations, setConversations] = useState<ProviderConversation[]>();
   const [intake, setIntake] = useState<ProviderIntakeEvent[]>();
+  const [groups, setGroups] = useState<IntakeGroups>();
   const [error, setError] = useState<string>();
   const g = providerGlance(p, now);
 
@@ -29,11 +33,12 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
   useEffect(() => {
     let live = true;
     const t = setTimeout(() => {
-      Promise.all([api.providerConversations(200), api.providerIntake(300)]).then(
-        ([c, i]) => {
+      Promise.all([api.providerConversations(200), api.providerIntake(300), api.providerSignatures()]).then(
+        ([c, i, sg]) => {
           if (!live) return;
           setConversations(c);
           setIntake(i);
+          setGroups(sg);
           setError(undefined);
         },
         (e: Error) => live && setError(e.message),
@@ -46,6 +51,8 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
   }, [version]);
 
   const c = p.capacity;
+  // Never connected and nothing reported: what it takes to switch it on, instead of empty lists.
+  const setup = !p.online && !p.lastSeen && !c && !p.counts.conversations && !p.counts.intake;
   return (
     <section className="sb-panel sa-panel pv-panel" data-testid="provider-panel">
       <header className="sb-head">
@@ -117,9 +124,19 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
         {c && c.holds.length > 0 && <p className="small tone-amber">Waiting: {c.holds.join(' · ')}</p>}
       </header>
 
+      {setup ? (
+        <div className="sa-scroll">
+          <Setup p={p} />
+        </div>
+      ) : (
+      <>
+      {!p.online && <p className="small pv-offline" data-testid="provider-offline-note">{p.enabled ? 'The connector is not connected: the lists below are what it reported last.' : 'Switched off (providers.ffbox.enabled): the lists below are what it reported last.'}</p>}
       <nav className="tabs" role="tablist">
         <button role="tab" aria-selected={current === 'conversations'} className={`tab${current === 'conversations' ? ' active' : ''}`} onClick={() => setTab('conversations')}>
           Conversations <span className="dim">{p.counts.conversations}</span>
+        </button>
+        <button role="tab" aria-selected={current === 'signatures'} className={`tab${current === 'signatures' ? ' active' : ''}`} onClick={() => setTab('signatures')}>
+          Signatures <span className="dim">{groups?.signatures.length ?? ''}</span>
         </button>
         <button role="tab" aria-selected={current === 'intake'} className={`tab${current === 'intake' ? ' active' : ''}`} onClick={() => setTab('intake')}>
           Intake reports <span className="dim">{p.counts.intake}</span>
@@ -129,9 +146,131 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
       <div className="sa-scroll">
         {error && <p className="small tone-red">Could not load the lists: {error}</p>}
         {current === 'conversations' && <Conversations list={conversations} />}
+        {current === 'signatures' && <Signatures groups={groups} now={now} />}
         {current === 'intake' && <Intake list={intake} />}
       </div>
+      </>
+      )}
     </section>
+  );
+}
+
+/** Off and never connected: the three things it needs, each with whether it is done. */
+function Setup({ p }: { p: Provider }) {
+  const steps: { done: boolean; title: string; body: ReactNode }[] = [
+    {
+      done: p.tokenSet,
+      title: 'A connector token',
+      body: (
+        <>
+          Make one on this host with <span className="mono">node server/providerToken.ts</span> (or ask the orchestrator to set <span className="mono">providers.ffbox.token</span>) and give it to Lothsahn for the connector. Only its SHA-256 is kept here.
+        </>
+      ),
+    },
+    {
+      done: p.enabled,
+      title: 'The switch',
+      body: (
+        <>
+          <span className="mono">providers.ffbox.enabled: true</span> lets the connector in (the orchestrator can set it). Off, a valid token is refused with 403.
+        </>
+      ),
+    },
+    {
+      done: p.online,
+      title: "FFBox's connector",
+      body: (
+        <>
+          Lothsahn's side: a small service on FFBox that dials out to <span className="mono">/provider</span> with the token and reports capacity, conversations and intake reports. What it must send is in the{' '}
+          <a href={CONTRACT_URL} target="_blank" rel="noreferrer noopener">
+            connector contract
+          </a>
+          .
+        </>
+      ),
+    },
+  ];
+  return (
+    <div className="pv-setup" data-testid="provider-setup">
+      <p className="pv-setup-lead">
+        FFBox is not connected yet. Once it is, this page shows its container classes and free slots, the model each kind of requester gets, its conversations, and the crash and desync reports players upload, grouped the way automatic investigations will use them (at most 20 a day).
+      </p>
+      <ol className="pv-steps">
+        {steps.map((st) => (
+          <li key={st.title} className={st.done ? 'done' : ''}>
+            <span className={`pv-step-mark tone-${st.done ? 'green' : 'grey'}`} aria-label={st.done ? 'done' : 'to do'}>
+              <Icon name={st.done ? 'check' : 'clock'} size={14} />
+            </span>
+            <div>
+              <div className="pv-step-title">{st.title}</div>
+              <div className="small dim">{st.body}</div>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <p className="small dim">
+        The design, and what later phases add: <span className="mono">docs/ffbox-integration.md</span>.
+      </p>
+    </div>
+  );
+}
+
+/** Intake reports grouped by coarse signature, and the numbers automatic investigations will be capped by. */
+function Signatures({ groups, now }: { groups?: IntakeGroups; now: number }) {
+  if (!groups) return <p className="dim small">Loading…</p>;
+  const b = groups.budget;
+  return (
+    <>
+      <div className="pv-budget" data-testid="provider-budget">
+        <div className="pv-budget-top">
+          <span className="pv-budget-title">Automatic investigations</span>
+          <Chip tone="grey">not live yet</Chip>
+        </div>
+        <div className="pv-meter" aria-label={`${b.wouldStartToday} of ${b.perDay} a day`}>
+          <i style={{ width: `${Math.min(100, (b.wouldStartToday / b.perDay) * 100)}%` }} />
+        </div>
+        <div className="pv-budget-cells small">
+          <span>
+            would start today <b className="mono">{b.wouldStartToday}</b> of {b.perDay}
+          </span>
+          <span>
+            new signatures 24 h <b className="mono">{b.newToday}</b>
+          </span>
+          <span>
+            past the trust bar <b className="mono">{b.trustedToday}</b>
+          </span>
+          <span className={b.stormBreaker.tripped ? 'tone-red' : ''}>
+            last hour <b className="mono">{b.newLastHour}</b> new{b.stormBreaker.tripped ? ' · storm breaker tripped' : ` (breaker above ${b.stormBreaker.threshold})`}
+          </span>
+        </div>
+        <p className="small dim">
+          One investigation per signature once it has 2+ senders or a host and client pair; at most {b.perHour} an hour and {b.perDay} a day. Phase 4 builds them; these are the numbers it will use.
+        </p>
+      </div>
+      {!groups.signatures.length ? (
+        <Empty text="No crash or desync reports yet." />
+      ) : (
+        <div className="run-list" data-testid="provider-signatures">
+          {groups.signatures.map((g) => (
+            <div key={g.signature} className="run-row pv-item" title={g.reportIds.join('\n')}>
+              <div className="pv-line">
+                <Dot tone={g.kind === 'desync' ? 'amber' : 'red'} title={g.kind} />
+                <span className="small">{g.kind}</span>
+                <span className="mono small">{g.versionLine}</span>
+                {g.trusted ? <Chip tone="green">trusted</Chip> : <Chip tone="grey">{g.kind === 'crash' ? 'no signature yet' : 'waiting for a 2nd sender'}</Chip>}
+                <span className="dim small">last {fmtRelative(g.lastAt, now)}</span>
+              </div>
+              <div className="pv-title mono">{g.surfaces ?? 'crash (signatures come in phase 6)'}</div>
+              <div className="pv-sig-counts small dim">
+                {g.reports} report{g.reports === 1 ? '' : 's'} · {g.events} event{g.events === 1 ? '' : 's'} · {g.senders} sender{g.senders === 1 ? '' : 's'}
+                {g.pair ? ' · host+client pair' : ''} · {g.platforms.join(', ')}
+                {g.versions.length > 1 ? ` · ${g.versions.length} builds` : ` · ${g.versions[0]}`}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
