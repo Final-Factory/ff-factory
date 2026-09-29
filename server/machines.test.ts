@@ -8,7 +8,7 @@ import type { EventEmitter } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, type SessionHandle, type SessionSink } from './sessions.ts';
-import { MachineManager, RESUME_DELAY_MS, RemoteSession, daemonMismatch } from './machines.ts';
+import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonMismatch } from './machines.ts';
 import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
@@ -595,4 +595,50 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   await until('online again', () => mm.isOnline('mx'));
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(users().length, 3, `a stop is not undone: ${JSON.stringify(users())} ${reports.join(' | ')}`);
+});
+
+test('machine: a dropped link resumes only agents mid-turn now, never finished ones with a stale turn mark (21 old agents resumed, 2026-09-29)', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  RESUME_DELAY_MS.value = 50;
+  t.after(() => (RESUME_DELAY_MS.value = 3000));
+  const now = Date.parse('2026-09-29T12:00:00Z');
+  const worker = (over: Partial<SessionInfo>) => ({ kind: 'worker' as const, status: 'idle' as const, lastActivityAt: '2026-09-29T11:59:00Z', ...over });
+  assert.equal(cutOffMidTurn(worker({ status: 'running' }), now), true);
+  assert.equal(cutOffMidTurn(worker({ status: 'stopped', turnOpenSince: '2026-09-29T11:50:00Z' }), now), true, 'a daemon going down keeps the mark');
+  assert.equal(cutOffMidTurn(worker({ status: 'stopped', turnOpenSince: '2026-09-26T10:00:00Z', lastActivityAt: '2026-09-26T10:05:00Z' }), now), false, 'finished days ago');
+  assert.equal(cutOffMidTurn(worker({ status: 'idle' }), now), false);
+  assert.equal(cutOffMidTurn({ ...worker({ status: 'running' }), kind: 'standing' }, now), false);
+  // At boot, a stale mark on an agent idle for days goes (else the next restart's resume file resumes it); a fresh one stays.
+  const stale = { id: 's1', machineId: 'mx', turnOpenSince: '2026-09-20T10:00:00Z', lastActivityAt: '2026-09-20T10:05:00Z' } as SessionInfo;
+  const fresh = { id: 's2', machineId: 'mx', turnOpenSince: '2026-09-29T11:50:00Z', lastActivityAt: '2026-09-29T11:58:00Z' } as SessionInfo;
+  assert.ok(mm.restore(stale, now) && mm.restore(fresh, now));
+  assert.equal(stale.turnOpenSince, undefined);
+  assert.equal(fresh.turnOpenSince, '2026-09-29T11:50:00Z');
+
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  const d1 = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  // A turn that finished: the daemon clears its mark, and the portal's copy must follow (JSON drops undefined fields).
+  const done = mm.createSession('mx', { kind: 'worker', title: 'done', permissionMode: 'default' });
+  sessions.send(done.info.id, 'quick');
+  await until('finished', () => done.info.status === 'idle');
+  assert.equal(done.info.turnOpenSince, undefined, 'the finished turn is not left marked');
+  // An old agent as the portal's state has them after the bug: stopped days ago, the mark still set.
+  const old = mm.createSession('mx', { kind: 'worker', title: 'old', permissionMode: 'default' });
+  Object.assign(old.info, { status: 'stopped', turnOpenSince: '2026-09-20T10:00:00Z', lastActivityAt: '2026-09-20T10:05:00Z' });
+  store.putSession(old.info);
+  const users = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').length;
+
+  mm.expectDrop('mx', 'was redeployed (add_machine with force)');
+  d1.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  assert.equal(old.info.turnOpenSince, undefined, 'a drop clears marks, so the next drop cannot find them again');
+  daemon();
+  await until('online again', () => mm.isOnline('mx'));
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(users(done.info.id), 1, 'a finished agent is not resumed');
+  assert.equal(users(old.info.id), 0, 'an old agent is not resumed');
+  assert.ok(!reports.some((r) => /resumed/.test(r)), reports.join('\n'));
 });

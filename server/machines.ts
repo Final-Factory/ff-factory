@@ -22,6 +22,19 @@ const PING_MS = 20_000;
 const DEAD_MS = 45_000;
 /** Statuses of an agent in the middle of a turn. */
 const MID_TURN = new Set(['running', 'starting', 'waiting_permission']);
+/** Run-state fields the daemon clears (absent from its JSON report once cleared). */
+const CLEARABLE = ['turnOpenSince', 'backgroundTasks', 'statusDetail'] as const;
+
+/**
+ * Whether a machine worker counts as cut off mid-turn when its link drops: in a turn now (status, or the turn
+ * mark a daemon going down keeps) and active within RESUME_WITHIN_MS. A worker that finished days ago is not,
+ * whatever a stale mark says (2026-09-29: one drop resumed 21 old agents on M3 and M5). Exported for tests.
+ */
+export function cutOffMidTurn(i: Pick<SessionInfo, 'kind' | 'status' | 'turnOpenSince' | 'lastActivityAt'>, now: number): boolean {
+  if (i.kind !== 'worker' || !(MID_TURN.has(i.status) || i.turnOpenSince)) return false;
+  return now - (Date.parse(i.lastActivityAt) || 0) <= RESUME_WITHIN_MS;
+}
+
 /** Agents cut off longer ago than this are reported, not resumed. */
 const RESUME_WITHIN_MS = 6 * 3_600_000;
 /** How long after a daemon's hello the resume messages go out. */
@@ -388,8 +401,11 @@ export class MachineManager {
   }
 
   /** Re-attach a persisted session on boot. */
-  restore(info: SessionInfo): SessionHandle | undefined {
+  restore(info: SessionInfo, now = Date.now()): SessionHandle | undefined {
     if (!info.machineId || !this.store.machines.has(info.machineId)) return undefined;
+    // A turn mark left by the JSON-drop bug on an agent idle for hours is stale: kept, the next restart's resume
+    // file (collectResume) would resume it as mid-turn.
+    if (info.turnOpenSince && now - (Date.parse(info.lastActivityAt) || 0) > RESUME_WITHIN_MS) delete info.turnOpenSince;
     return new RemoteSession(info, this);
   }
 
@@ -729,7 +745,7 @@ export class MachineManager {
     const why = this.dropWhy.get(id) ?? 'lost its connection to the portal';
     this.dropWhy.delete(id);
     const midTurn = [...this.sessions.sessions.values()]
-      .filter((s) => s.info.machineId === id && s instanceof RemoteSession && s.info.kind === 'worker' && (MID_TURN.has(s.info.status) || !!s.info.turnOpenSince))
+      .filter((s) => s.info.machineId === id && s instanceof RemoteSession && cutOffMidTurn(s.info, Date.now()))
       .map((s) => s.info.id);
     if (why === false) this.cutOff.delete(id);
     else if (midTurn.length) {
@@ -743,6 +759,11 @@ export class MachineManager {
       s.liveFlag = false;
       if (s.info.status !== 'stopped' && s.info.status !== 'error') {
         Object.assign(s.info, { status: 'stopped', statusDetail: `machine ${id} went offline`, pendingPermissions: [] });
+        this.store.putSession(s.info);
+      }
+      // Noted above if it was mid-turn; the mark must not outlive this drop, or every later drop resumes it again.
+      if (s.info.turnOpenSince) {
+        delete s.info.turnOpenSince;
         this.store.putSession(s.info);
       }
       if (was) this.sessions.events.emit('ended', s);
@@ -799,6 +820,8 @@ export class MachineManager {
         // "The login of the computer it runs on", there: this Mac's login, not this host's.
         if (run.account === HOST_LOGIN) run.account = machineLogin(id);
         Object.assign(s.info, run);
+        // JSON drops a field the daemon cleared: take the absence as cleared, or a finished turn stays marked mid-turn.
+        for (const k of CLEARABLE) if (!(k in run)) delete s.info[k];
         s.liveFlag = msg.live;
         this.store.putSession(s.info);
         return;
