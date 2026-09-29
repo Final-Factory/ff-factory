@@ -15,7 +15,7 @@ import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './
 import { snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { PermissionMode, Requester, Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
-import { accountSource, hostClaudeEnvFor } from './secrets.ts';
+import { accountSource, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
 import { Identity, actingFor, claudeEnvFor, forLine } from './identity.ts';
 import { labelAfterEnd, labelDecision, type Place } from './labelPolicy.ts';
 import { ghNoreply, githubSlug, publicIdentityEnv, publicReposOf } from './publicGit.ts';
@@ -690,8 +690,9 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ],
       },
       // The MCP-for-Unity server takes 20-40 s to answer on Windows; Claude Code's default connect timeout is 30 s.
-      // The Claude account: the person's own (config userClaudeEnv) when they have one, else the owner's (docs/identity.md).
-      env: { MCP_TIMEOUT: '120000', ...process.env, ...claudeEnvFor(this.cfg, info.requestedBy, { ...this.cfg.claudeEnv }), ...this.publicGitEnv(), FF_SANDBOX_ID: sb.id, FF_SANDBOX_PATH: sb.path },
+      // The Claude account: the person's own (config userClaudeEnv) when they have one, else what config
+      // claudeAccounts.workers picks (docs/accounts.md).
+      env: { MCP_TIMEOUT: '120000', ...claudeEnvFor(this.cfg, info.requestedBy, hostProcessEnv(this.cfg, 'workers')), ...this.publicGitEnv(), FF_SANDBOX_ID: sb.id, FF_SANDBOX_PATH: sb.path },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };
   };
@@ -891,6 +892,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
       // The host's Claude account (config machines.useHostClaudeEnv), for this agent only: not the Mac's login. A
       // person with their own (config userClaudeEnv) runs on theirs (docs/identity.md).
       env: { ...claudeEnvFor(this.cfg, info.requestedBy, hostClaudeEnvFor(this.cfg, m.id)), FF_MACHINE_ID: m.id },
+      login: machineUsesLogin(this.cfg, m.id),
     };
   }
 
@@ -1148,7 +1150,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'system_status',
-          "Load of every computer: this host (CPU, RAM, disk free under the sandbox root, GPU memory) and each machine (the same, as its daemon reports it; a Mac's GPU shares its RAM, so its line gives how busy the GPU is and the memory pressure), the configured limits on concurrent editors and agents here, and the plan usage of every Claude account in use (weekly limit, 5-hour session limit, per-model weekly limits): the host token the agents run on, this host's own login, each Mac's own login, with which agents run on each.",
+          "Load of every computer: this host (CPU, RAM, disk free under the sandbox root, GPU memory) and each machine (the same, as its daemon reports it; a Mac's GPU shares its RAM, so its line gives how busy the GPU is and the memory pressure), the configured limits on concurrent editors and agents here, and the plan usage of every Claude account in use (weekly limit, 5-hour session limit, per-model weekly limits): the host token the agents run on, this host's own login, each Mac's own login, with which agents run on each; and which account each kind of agent runs on (the orchestrator, workers and standing agents here, each Mac's agents: config claudeAccounts, machines.useHostClaudeEnv), with a warning when a role set to this host's login cannot use it.",
           {},
           wrap(async () => {
             const s = await systemStats(this.cfg);
@@ -1206,21 +1208,27 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ),
         tool(
           'set_app_config',
-          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …); publicGitIdentity.name / .email: the identity agents commit with in public repos such as this app's own (the guard refuses pushes there with other emails; GitHub noreply addresses are always fine); hostGuard.devDriveVhdx: the sandbox Dev Drive's .vhdx path; publicUrl: the portal's base URL that machines and the outside watchdog reach it at (the Tailscale Funnel URL); claudeEnv.CLAUDE_CODE_OAUTH_TOKEN: the Claude account's OAuth token the agents run on (sk-ant-oat01-…, from "claude setup-token"), write-only: it is never shown back, only "set (…last 4)", and redacted from transcripts; userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN (with user: a user id): that person's own Claude token, which agents working for them run on instead (same rules; only when that person asked for it); systemPayer: the user id automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to (default the owner); providers.ffbox.enabled: true lets FFBox's connector connect (read-only reports: capacity, conversations, intake), false drops it at once (default false); providers.ffbox.token: FFBox's connector token (ffpv1_…), write-only, stored only as its SHA-256; limits.maxUnity: how many Unity editors may run at once on this host (1-8, default 3; applies to the next start, running editors are not stopped); limits.maxSandboxes: how many sandboxes may exist (1-8, default 4); limits.maxSessions: how many agents may run at once on this host (1-12, default 6); both apply at once; hostGuard.cleanup.ageRules: JSON list of { "path", "olderThanDays" (>= 3) } whose old entries clean-up removes when disk space is low (never a drive root, the home folder, the sandboxes, this app or a protected path). value null removes the key (back to the default). Only when the user asked for the change.`,
+          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …); publicGitIdentity.name / .email: the identity agents commit with in public repos such as this app's own (the guard refuses pushes there with other emails; GitHub noreply addresses are always fine); hostGuard.devDriveVhdx: the sandbox Dev Drive's .vhdx path; publicUrl: the portal's base URL that machines and the outside watchdog reach it at (the Tailscale Funnel URL); claudeEnv.CLAUDE_CODE_OAUTH_TOKEN: the Claude account's OAuth token the agents run on (sk-ant-oat01-…, from "claude setup-token"), write-only: it is never shown back, only "set (…last 4)", and redacted from transcripts; userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN (with user: a user id): that person's own Claude token, which agents working for them run on instead (same rules; only when that person asked for it); claudeAccounts.orchestrator / .workers / .standing: which Claude account this host's orchestrator (you), sandbox workers and standing agents run on: "token" (claudeEnv's token, the default) or "login" (the claude.ai login stored on this host; refused when none is stored or it has expired); a person's own token still wins for their work; machines.useHostClaudeEnv (optionally with machine: a machine id): true (default) runs that Mac's agents (workers and standing agents there) on this host's token, false on the Mac's own login; without machine it sets every machine not named; systemPayer: the user id automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to (default the owner); providers.ffbox.enabled: true lets FFBox's connector connect (read-only reports: capacity, conversations, intake), false drops it at once (default false); providers.ffbox.token: FFBox's connector token (ffpv1_…), write-only, stored only as its SHA-256; limits.maxUnity: how many Unity editors may run at once on this host (1-8, default 3; applies to the next start, running editors are not stopped); limits.maxSandboxes: how many sandboxes may exist (1-8, default 4); limits.maxSessions: how many agents may run at once on this host (1-12, default 6); both apply at once; hostGuard.cleanup.ageRules: JSON list of { "path", "olderThanDays" (>= 3) } whose old entries clean-up removes when disk space is low (never a drive root, the home folder, the sandboxes, this app or a protected path). value null removes the key (back to the default). Only when the user asked for the change.`,
           {
             key: z.enum(SETTABLE_KEYS),
             value: z.union([z.string(), z.number(), z.boolean(), z.array(z.string()), z.array(z.object({ path: z.string(), olderThanDays: z.number() })), z.null()]),
             user: z.string().optional().describe('For userClaudeEnv.* only: the user id whose account it is.'),
+            machine: z.string().optional().describe('For machines.useHostClaudeEnv only: the machine id to set (e.g. "m5"); absent: every machine not named.'),
             user_asked: z.literal(true).describe('Must be true: the user asked for this change.'),
           },
-          wrap(async ({ key, value, user }) => {
+          wrap(async ({ key, value, user, machine }) => {
             if (user && !this.identity.get(user)) throw new Error(`no login "${user}"; the logins are ${this.identity.list().map((u) => u.userId).join(', ') || '(none)'}`);
-            const { before, after } = setAppConfig(configPath(), this.cfg, key, value, { user: user && this.identity.get(user)?.userId });
+            if (machine && !this.machines.list().some((m) => m.id === machine)) throw new Error(`no machine "${machine}"; the machines are ${this.machines.list().map((m) => m.id).join(', ') || '(none)'}`);
+            const { before, after } = setAppConfig(configPath(), this.cfg, key, value, { user: user && this.identity.get(user)?.userId, machine });
             if (key === 'publicUrl') this.machines.pushOutsideWatch(); // the outside watchdog watches this URL
             if (key.startsWith('providers.')) this.providers?.configChanged();
             if (key === 'providers.ffbox.token') return `${key}: set. Written to config.json as its SHA-256 only (providers.ffbox.tokenSha256); the connector's next connection must use it. The value is never shown.`;
             if (key === 'userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN') {
               return `${key} for ${user}: ${before} → ${after}. Written to config.json. Agents started for ${user} from now on run on it; running ones keep their account until their process restarts. The value is never shown.`;
+            }
+            if (key.startsWith('claudeAccounts.') || key === 'machines.useHostClaudeEnv') {
+              const who = key === 'claudeAccounts.orchestrator' ? 'You (the orchestrator) switch when your process restarts: restart the app for that' : 'Agents started from now on use it; running ones keep their account until their process restarts';
+              return `${key}${machine ? ` for ${machine}` : ''}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json. ${who}. system_status shows which account each kind of agent runs on.`;
             }
             if (key === 'claudeEnv.CLAUDE_CODE_OAUTH_TOKEN') {
               return `${key}: ${before} → ${after}. Written to config.json. Agents started from now on use it; agents already running (and you, the orchestrator, and standing agents) keep their account until their process restarts. For everything to use it at once, restart the app (request_app_update with a restart). The value is never shown.`;
@@ -1602,7 +1610,8 @@ ${ownerLine(this.cfg)}
     tools: ['Read', 'Glob', 'Grep'],
     allowedTools: ['Read', 'Glob', 'Grep', 'mcp__sandboxes'],
     mcpServers: { sandboxes: this.orchestratorTools() },
-    env: { ...process.env, ...this.cfg.claudeEnv },
+    // Config claudeAccounts.orchestrator: the host token, or this host's stored claude.ai login (docs/accounts.md).
+    env: hostProcessEnv(this.cfg, 'orchestrator'),
     systemPrompt: { type: 'preset', preset: 'claude_code', append: this.orchestratorBrief() },
     ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
   });

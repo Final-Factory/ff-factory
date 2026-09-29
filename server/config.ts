@@ -4,6 +4,16 @@ import path from 'node:path';
 import type { PermissionMode } from '../shared/types.ts';
 import { DEFAULT_HANG, type HangThresholds } from './unityHang.ts';
 
+/** What a portal-run agent runs on (docs/accounts.md): the computer's stored claude.ai login, or config claudeEnv's token. */
+export type ClaudeAccount = 'login' | 'token';
+export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token'];
+/** The roles config claudeAccounts picks an account for, on this host. */
+export type HostRole = 'orchestrator' | 'workers' | 'standing';
+export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'workers', 'standing'];
+const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator', workers: 'workers', standing: 'standing agents' };
+/** Roles as people read them: "the orchestrator, standing agents". */
+export const roleNames = (roles: readonly HostRole[]) => roles.map((r) => ROLE_NAMES[r]).join(', ');
+
 export interface Config {
   port: number;
   host: string;
@@ -37,11 +47,20 @@ export interface Config {
    */
   outsideWatch?: { enabled?: boolean; machine?: string; healthUrl?: string; host?: string; ntfyServer?: string };
   /**
-   * Machines (docs/machines.md). `useHostClaudeEnv` (default true): portal-run agents on a Mac get this host's
-   * `claudeEnv` (so CLAUDE_CODE_OAUTH_TOKEN: the same Claude account as the agents here) instead of the Mac's
-   * own login. `false` turns it off everywhere; an object turns it off (or on) per machine: { "m3": false }.
+   * Machines (docs/machines.md, docs/accounts.md). `useHostClaudeEnv` (default true): portal-run agents on a Mac
+   * get this host's `claudeEnv` (so CLAUDE_CODE_OAUTH_TOKEN: the same Claude account as the agents here) instead
+   * of the Mac's own login. `false` turns it off everywhere; an object sets it per machine, "*" for the rest:
+   * { "m3": false, "m5": false } or { "*": false, "m5": true }.
    */
   machines?: { useHostClaudeEnv?: boolean | Record<string, boolean> };
+  /**
+   * Which Claude account THIS host's agents run on, per role (docs/accounts.md): "token" (the default) is
+   * claudeEnv's CLAUDE_CODE_OAUTH_TOKEN; "login" starts the process with no credential in its environment, so
+   * Claude Code uses the claude.ai login stored on this host (the one the usage meters show as "<host> login").
+   * `workers`: sandbox workers; `standing`: standing agents on this host. Agents on a Mac follow
+   * machines.useHostClaudeEnv instead, and a person's own token (userClaudeEnv) wins for work they asked for.
+   */
+  claudeAccounts?: Partial<Record<HostRole, ClaudeAccount>>;
   /**
    * Providers (docs/ffbox-integration.md): FFBox, whose connector dials out to /provider. `enabled` (default
    * false) lets it connect; `tokenSha256` is the SHA-256 of its connector token (ffpv1_…), set with
@@ -321,6 +340,7 @@ export function loadConfig(): Config {
   for (const key of ['sandboxRoot', 'repo', 'unity'] as const) {
     if (!cfg[key]) throw new Error(`config.json is missing "${key}"`);
   }
+  checkAccountConfig(cfg);
   cfg.dataDir = path.resolve(ROOT, cfg.dataDir);
   cfg.sandboxRoot = path.resolve(cfg.sandboxRoot);
   cfg.standingRoot = path.resolve(raw.standingRoot ?? path.join(cfg.sandboxRoot, '_agents'));
@@ -332,6 +352,27 @@ export function loadConfig(): Config {
   cfg.voice.toolsDir = cfg.voice.toolsDir ? path.resolve(ROOT, cfg.voice.toolsDir) : path.join(cfg.dataDir, 'tools', 'whisper');
   cfg.protectedPaths = cfg.protectedPaths.map((p) => path.resolve(p));
   return cfg;
+}
+
+/**
+ * Throws when config claudeAccounts or machines.useHostClaudeEnv is malformed: a typo there would otherwise
+ * quietly run agents on another account than the one meant.
+ */
+export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machines'>) {
+  const a: unknown = cfg.claudeAccounts;
+  if (a !== undefined) {
+    if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error('config claudeAccounts is an object, e.g. { "orchestrator": "login" }');
+    for (const [role, v] of Object.entries(a)) {
+      if (!HOST_ROLES.includes(role as HostRole)) throw new Error(`config claudeAccounts.${role}: no such role (${HOST_ROLES.join(', ')})`);
+      if (!CLAUDE_ACCOUNTS.includes(v as ClaudeAccount)) throw new Error(`config claudeAccounts.${role} is "login" or "token"`);
+    }
+  }
+  const u: unknown = cfg.machines?.useHostClaudeEnv;
+  if (u === undefined || typeof u === 'boolean') return;
+  if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error('config machines.useHostClaudeEnv is true, false or { "<machine id>" | "*": true | false }');
+  for (const [id, v] of Object.entries(u)) {
+    if (typeof v !== 'boolean') throw new Error(`config machines.useHostClaudeEnv.${id} is true or false`);
+  }
 }
 
 /** The line agents' prompts add when config ownerName is set ("" when it is not). */
