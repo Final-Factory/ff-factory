@@ -11,6 +11,7 @@ import { buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } fro
 import type { Store } from './store.ts';
 import type { OptionsFactory } from './sessions.ts';
 import { slugify } from './sandboxes.ts';
+import { maxEnv } from './maxEvents.ts';
 import {
   addSpend,
   admit,
@@ -917,7 +918,8 @@ ${a.charter}
         publicIdentity: publicIdentityOf(this.cfg),
         standing: { folder: a.folder, groups: a.tools, offLimits: place.offLimits },
       },
-      env: { ...place.env, FF_STANDING_AGENT: a.id },
+      // What the agent does as Max is tagged with its session (docs/max.md); a machine's daemon sets its own FF_MAX_EVENTS.
+      env: { ...place.env, FF_STANDING_AGENT: a.id, ...(a.machineId ? { FF_SESSION_ID: a.sessionId } : maxEnv(this.cfg, a.sessionId)) },
       login: place.login,
       claudeExecutable: place.claudeExecutable,
       init: { files: { [NOTES]: this.notesSeed(a) } },

@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import type { AppVersion, ImageInput, Machine, PermissionMode, Provider, Sandbox, SessionInfo, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import type { AppVersion, ImageInput, Machine, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 
 export { displayName, isUnused };
@@ -290,6 +290,17 @@ export function providerGlance(p: Provider, now: number): Glance {
   return { tone: 'green', label: 'Online', detail: free !== undefined ? `${free} free` : undefined, attention: 0 };
 }
 
+/** Max at a glance: the token's health first, then a recent failure, then when it last posted. */
+export function maxGlance(m: MaxSummary, now: number): Glance {
+  const h = m.health;
+  const last = m.lastPost ? `posted ${fmtRelative(m.lastPost.at, now)}` : undefined;
+  if (h.state === 'no_token') return { tone: 'grey', label: 'No token', detail: last, attention: 0 };
+  if (h.state === 'error') return { tone: 'red', label: 'Token error', detail: last, attention: 0 };
+  const recentError = m.lastError && now - Date.parse(m.lastError.at) < 24 * 3600_000 && (!m.lastPost || Date.parse(m.lastError.at) > Date.parse(m.lastPost.at));
+  if (recentError) return { tone: 'amber', label: 'Error', detail: last ?? fmtRelative(m.lastError!.at, now), attention: 0 };
+  return { tone: h.state === 'ok' ? 'green' : 'grey', label: h.state === 'ok' ? 'OK' : 'Not checked', detail: last, attention: 0 };
+}
+
 export function standingGlance(a: StandingAgent, pendingDelegations: number, now: number): Glance {
   const attention = pendingDelegations;
   if (pendingDelegations) return { tone: 'amber', label: 'Needs you', detail: `${pendingDelegations} request${pendingDelegations === 1 ? '' : 's'}`, attention };
@@ -333,6 +344,7 @@ export type Route =
   | { view: 'agent'; agentId: string; tab?: string }
   | { view: 'machine'; machineId: string; sessionId?: string }
   | { view: 'provider'; providerId: string; tab?: string }
+  | { view: 'max'; tab?: string }
   | { view: 'search'; q?: string };
 
 export function parseRoute(hash: string): Route {
@@ -343,6 +355,7 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === 'machine' && parts[1]) return { view: 'machine', machineId: parts[1], sessionId: parts[2] };
   if (parts[0] === 'agent' && parts[1]) return { view: 'agent', agentId: parts[1], tab: parts[2] };
   if (parts[0] === 'provider' && parts[1]) return { view: 'provider', providerId: parts[1], tab: parts[2] };
+  if (parts[0] === 'max') return { view: 'max', tab: parts[1] };
   return { view: 'home' };
 }
 
@@ -362,6 +375,8 @@ export function href(r: Route): string {
       return `#/agent/${encodeURIComponent(r.agentId)}${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
     case 'provider':
       return `#/provider/${encodeURIComponent(r.providerId)}${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
+    case 'max':
+      return `#/max${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
   }
 }
 

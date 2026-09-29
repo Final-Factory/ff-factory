@@ -710,6 +710,9 @@ export class MachineManager {
       case 'usage':
         this.onUsage?.(id, msg.account, msg.usage);
         return;
+      case 'max_event':
+        if (typeof msg.line === 'string' && msg.line.length <= 8192) this.maxEvent?.(id, msg.line);
+        return;
       case 'status':
         Object.assign(m, { git: msg.git ? { ...msg.git, pr: m.git?.branch === msg.git.branch ? m.git.pr : undefined } : undefined, lastSeen: new Date().toISOString() });
         this.store.putMachine(m);
@@ -749,6 +752,8 @@ export class MachineManager {
   private readonly unityCalls = new Map<string, { resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   /** The daemon's Unity watch reported something (wired by index.ts: orchestrator, notification, the machine's agents). */
   unityEvent?: (machineId: string, text: string, restarted: boolean) => void;
+  /** A line from the Mac's Max events file (server/max.ts validates it). */
+  maxEvent?: (machineId: string, line: string) => void;
 
   /** Status, start, stop or restart the Unity editor of a machine's clone, on the machine (machine/unity.ts). */
   unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart', force?: boolean) {

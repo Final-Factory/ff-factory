@@ -12,6 +12,8 @@
  *   login              tester / e2e-password-123 (the owner)
  *   second login       teammate / e2e-teammate-456, "Team Mate", a member (e2e/identity.spec.ts), with an /mcp API
  *                      key bound to it in <data folder>/../teammate-key.txt
+ *   Max                a mock Discord on <port + 100> (e2e/mockDiscord.ts) with a bot token in a scratch ffbox config, and
+ *                      five seeded events from the gallery worker (e2e/max.spec.ts)
  *   provider "ffbox"   only with E2E_PROVIDER=1 (the provider projects, e2e/provider.spec.ts): switched on, with
  *                      E2E_PROVIDER_TOKEN as its connector token. Off everywhere else, so no other page changes.
  */
@@ -23,6 +25,7 @@ import path from 'node:path';
 import type { Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { RED_PNG, fakeQuery } from './fakeAgent.ts';
 import { E2E_PROVIDER_TOKEN } from './mockConnector.ts';
+import { SEEDED_CURSORS, startMockDiscord, writeFfboxConfig, writeMaxEvents } from './mockDiscord.ts';
 
 export const USER = 'tester';
 export const PASSWORD = 'e2e-password-123';
@@ -64,6 +67,13 @@ fs.writeFileSync(path.join(videos, 'clip.webm.meta'), 'fileFormatVersion: 2\ngui
 // A screenshot in a sandbox that the orchestrator mentions by path (e2e/images.spec.ts).
 fs.writeFileSync(path.join(sandboxRoot, 'gallery', 'Screenshots', 'orch-proof.png'), Buffer.from(RED_PNG, 'base64'));
 
+// Max (docs/max.md): the token in a scratch ffbox config, a mock Discord, and what agents' ffdiscord calls wrote.
+const discordPort = port + 100;
+await startMockDiscord(discordPort);
+writeFfboxConfig(path.join(base, 'ffbox'));
+writeMaxEvents(path.join(base, 'max-events.jsonl'), 'gallery1');
+fs.writeFileSync(path.join(dataDir, 'max.json'), JSON.stringify({ events: [], cursors: SEEDED_CURSORS, channels: {} }));
+
 const configFile = path.join(base, 'config.json');
 fs.writeFileSync(
   configFile,
@@ -84,6 +94,7 @@ fs.writeFileSync(
       orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false },
       worker: { permissionMode: 'bypassPermissions', effort: 'low' },
       voice: { enabled: false, autoInstall: false, tts: false },
+      max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },
       ...(withProvider ? { providers: { ffbox: { enabled: true, tokenSha256: createHash('sha256').update(E2E_PROVIDER_TOKEN).digest('hex') } } } : {}),
     },
     null,
@@ -147,6 +158,8 @@ process.env.FFSB_CONFIG = configFile;
 // and no agents' token from the environment this runs in, which the meter would poll for real.
 process.env.CLAUDE_CONFIG_DIR = path.join(base, 'claude');
 delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+// Nor a real Discord token: Max reads only the scratch ffbox config above.
+for (const k of ['DISCORD_TOKEN', 'FFDISCORD_APP_TOKEN', 'FFDISCORD_SERVER_ID', 'FFBOX_SECRETS', 'FFBOX_CONFIG_DIR']) delete process.env[k];
 fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
 
 const { Auth } = await import('../server/auth.ts');
