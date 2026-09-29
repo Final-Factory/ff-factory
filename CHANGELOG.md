@@ -196,6 +196,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 - **Worker updates named "A worker" in the chat.** Since updates carry "(requested by …)", the page could not
   read which worker one was about; it names the worker and links to it again.
+- **A dropped machine link resumed every old agent on it** (21 on M3 and M5, 2026-09-29). The daemon's session
+  reports are JSON, which drops a cleared `turnOpenSince`, so the portal kept every finished turn marked open; the
+  cut-off resume (#20) and a clean portal restart's resume file then treated them all as mid-turn. The portal now
+  takes a missing `turnOpenSince` / `backgroundTasks` / `statusDetail` in a report as cleared, clears the marks of
+  a machine's agents when its link drops, counts only workers active within 6 hours as cut off, and drops stale
+  marks (idle over 6 hours) when it restores machine sessions at boot.
+
 - **Machine agents cut off by a forced redeploy were not resumed** (docs/machines.md, "Sessions"). A daemon going
   down (`add_machine` with `force`, `machine_daemon restart`, a crash) stopped its agents as if on purpose, which
   cleared their mid-turn mark, and nothing resumed them when the new daemon connected; only a portal restart
