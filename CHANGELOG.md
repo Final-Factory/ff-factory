@@ -204,6 +204,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Wizard** window without touching it. Each automatic answer is logged in the daemon log.
 - **Worker updates named "A worker" in the chat.** Since updates carry "(requested by …)", the page could not
   read which worker one was about; it names the worker and links to it again.
+- **A connected machine shown in error** (m5, 2026-09-29: "installed, but the daemon has not connected" while it
+  was). The deploy looked for a link opened after the ssh install returned, but launchd starts the new daemon, and
+  it connects, before that; it now counts from the start of the install step, or a hello naming the version
+  installed. A daemon's hello clears an install or connection error, a failed redeploy while a daemon is still
+  connected no longer marks the machine as in error, and a deploy cut short by a portal restart no longer stays
+  "deploying" (which kept the offline watch from ever redeploying it).
+- **A Mac redeploy could leave no daemon at all** (m3, 2026-09-29: "Bootstrap failed: 5: Input/output error").
+  The install booted out the old LaunchAgent and bootstrapped the new one a second later, while the old one was
+  still going; it now waits (up to 30 s) until the old one is gone and retries the bootstrap.
 - **Redeploying M5's outdated daemon resumed 8 agents finished for hours** (2026-09-29, after #21). They were not in
   the daemon's memory any more, so no report ever cleared their portal-side turn mark, and each refused resume
   appended an error that moved their `lastActivityAt`, so the 6-hour rule and the boot clean-up saw them as recent.

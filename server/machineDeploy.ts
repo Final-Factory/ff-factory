@@ -337,10 +337,7 @@ FFCONFIG
 umask 022
 cat > "$HOME/Library/LaunchAgents/${LABEL}.plist" <<'FFPLIST'
 ${plist(p.home, p.node, support.flag, p.path, appDir)}FFPLIST
-launchctl bootout gui/${p.uid}/${LABEL} 2>/dev/null || true
-sleep 1
-launchctl bootstrap gui/${p.uid} "$HOME/Library/LaunchAgents/${LABEL}.plist"
-`,
+${macReloadLines(`gui/${p.uid}`)}`,
     60_000,
   );
   return { platform: 'darwin', home: p.home, repoPath, node: p.node, nodeVersion: p.nodeVersion ?? '', claude: p.claude, version };
@@ -471,6 +468,28 @@ async function deployWindows(opts: DeployOptions): Promise<DeployResult> {
 // ---------------------------------------------------------------- start, stop, restart, remove
 
 export type DaemonAction = 'start' | 'stop' | 'restart';
+
+/**
+ * Replace the loaded LaunchAgent with the plist on disk. `bootout` returns before the old daemon has exited (it
+ * stops its agents first), and a `bootstrap` into a service still loaded fails with "Bootstrap failed: 5:
+ * Input/output error" and leaves no daemon at all (m3, 2026-09-29, after `sleep 1`). So: wait up to 30 s for the
+ * old one to be gone, then bootstrap, retrying a few times. `domain` is `gui/<uid>`. Exported for tests.
+ */
+export function macReloadLines(domain: string): string {
+  const target = `${domain}/${LABEL}`;
+  const plistPath = `"$HOME/Library/LaunchAgents/${LABEL}.plist"`;
+  return `launchctl bootout ${target} 2>/dev/null || true
+i=0
+while launchctl print ${target} >/dev/null 2>&1 && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
+n=0
+until launchctl bootstrap ${domain} ${plistPath}; do
+  n=$((n+1))
+  if [ $n -ge 5 ]; then echo "launchctl bootstrap failed $n times" >&2; exit 1; fi
+  sleep 3
+  launchctl bootout ${target} 2>/dev/null || true
+done
+`;
+}
 
 /** The Mac's launchctl lines for each action on the LaunchAgent. Exported for tests. */
 export function macControlScript(action: DaemonAction | 'uninstall'): string {

@@ -15,7 +15,7 @@ import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { backupRootFor, checkOwnCheckout, hasRecentBackup } from './guard.ts';
-import { agentPath, nodeSupport, plist } from './machineDeploy.ts';
+import { agentPath, macReloadLines, nodeSupport, plist } from './machineDeploy.ts';
 import type { Config } from './config.ts';
 import type { HostStats, ImageInput, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
@@ -768,4 +768,150 @@ test('machine: an agent stopped with stop_agent is never resumed by a dropped li
   await until('offline a third time', () => !mm.isOnline('mx'));
   daemon();
   await until('resumed', () => users(s.info.id) === 4, 8000);
+});
+
+test('machine: a daemon that connects during its own install counts as connected, and a connected daemon is never shown in error (m5, 2026-09-29)', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  mm.deployWaitMs = { settle: 50, poll: 20 };
+  const result = { platform: 'darwin' as const, home: '/Users/x', repoPath: '/Users/x/game', node: '/usr/local/bin/node', nodeVersion: 'v22', version: 'abc1234' };
+
+  // launchd starts the new daemon inside the install step: it connects before the ssh session returns.
+  mm.deployer = async (o) => {
+    o.step?.('copying code');
+    o.step?.('installing');
+    daemon(o.token); // a deploy mints the daemon a new token
+    await until('the new daemon connected', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
+    await new Promise((r) => setTimeout(r, 100));
+    return result;
+  };
+  mm.deployMachine({ id: 'mx' });
+  await until('settled', () => store.machines.get('mx')!.status !== 'deploying');
+  assert.equal(store.machines.get('mx')!.status, 'ready', String(store.machines.get('mx')!.statusDetail));
+  assert.equal(store.machines.get('mx')!.statusDetail, undefined);
+
+  // An install or connection error from before (the state m5 was left in): its daemon's next hello clears it.
+  mm.update('mx', { status: 'error', statusDetail: 'installed, but the daemon has not connected to https://beast.example.ts.net; see ~/.ff-factory/logs/daemon.log on mx' });
+  (mm as unknown as { links: Map<string, { ws: { terminate(): void } }> }).links.get('mx')!.ws.terminate();
+  await until('back', () => mm.isOnline('mx') && store.machines.get('mx')!.status === 'ready', 8000);
+  assert.equal(store.machines.get('mx')!.statusDetail, undefined);
+
+  // A redeploy that fails while the old daemon still runs: the machine works, the failure stays in view.
+  mm.deployer = async () => {
+    throw new Error('install on mx failed: exit code 5; stderr: Bootstrap failed: 5: Input/output error');
+  };
+  mm.deployMachine({ id: 'mx' });
+  await until('failed', () => store.machines.get('mx')!.status !== 'deploying');
+  assert.equal(store.machines.get('mx')!.status, 'ready');
+  assert.match(store.machines.get('mx')!.statusDetail ?? '', /^the last redeploy failed, so the previous daemon is still the one running: install on mx failed/);
+});
+
+test('machine: a deploy cut short by a portal restart is not left "deploying" (the offline watch would skip it forever)', async (t) => {
+  const { store, sessions, mm, daemon, cleanup, tmp } = await setup();
+  t.after(cleanup);
+  mm.update('mx', { status: 'deploying', statusDetail: 'npm ci' });
+  store.flush();
+  // The next portal process: a new Store and MachineManager over the same data folder.
+  const cfg = { dataDir: tmp, limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
+  const store2 = new Store(tmp);
+  const mm2 = new MachineManager(cfg, store2, new SessionManager(cfg, store2));
+  assert.equal(store2.machines.get('mx')!.status, 'error');
+  assert.match(store2.machines.get('mx')!.statusDetail ?? '', /a portal restart interrupted its deploy \(at: npm ci\)/);
+  void sessions;
+  void mm2;
+  // And a daemon saying hello clears a stale 'deploying' too (no deploy runs in this process).
+  mm.update('mx', { status: 'deploying', statusDetail: 'installing' });
+  daemon();
+  await until('ready', () => mm.isOnline('mx') && store.machines.get('mx')!.status === 'ready');
+});
+
+const posixSh = process.platform !== 'win32' && fs.existsSync('/bin/sh');
+
+test('machine deploy (mac): the LaunchAgent reload waits for bootout and retries bootstrap (m3 "Bootstrap failed: 5", 2026-09-29)', { skip: !posixSh && 'needs a POSIX sh' }, async () => {
+  const { execFileSync, spawnSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-launchctl-'));
+  try {
+    // A launchctl whose old service lingers for `linger` prints after bootout, and whose bootstrap fails with 5
+    // while it is loaded, and `failFirst` more times after; sleep returns at once.
+    const fake = (linger: number, failFirst: number) => {
+      fs.writeFileSync(path.join(dir, 'linger'), String(linger));
+      fs.writeFileSync(path.join(dir, 'fail'), String(failFirst));
+      fs.writeFileSync(path.join(dir, 'log'), '');
+    };
+    fs.writeFileSync(
+      path.join(dir, 'launchctl'),
+      `#!/bin/sh
+D=${JSON.stringify(dir)}
+echo "$1" >> "$D/log"
+L=$(cat "$D/linger"); F=$(cat "$D/fail")
+case "$1" in
+  print) if [ "$L" -gt 0 ]; then echo $((L-1)) > "$D/linger"; exit 0; fi; exit 113 ;;
+  bootout) exit 0 ;;
+  bootstrap)
+    if [ "$L" -gt 0 ] || [ "$F" -gt 0 ]; then echo $((F-1)) > "$D/fail"; echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
+    echo ok >> "$D/log"; exit 0 ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(path.join(dir, 'sleep'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const script = `set -e\n${macReloadLines('gui/501')}echo done\n`;
+    const run = () => spawnSync('/bin/sh', ['-c', script], { env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, HOME: dir }, encoding: 'utf8' });
+    const log = () => fs.readFileSync(path.join(dir, 'log'), 'utf8').trim().split('\n');
+
+    // The old daemon takes a few seconds to go: no bootstrap until it has.
+    fake(3, 0);
+    let r = run();
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(log(), ['bootout', 'print', 'print', 'print', 'print', 'bootstrap', 'ok']);
+    // A bootstrap refused anyway is retried.
+    fake(0, 2);
+    r = run();
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(log().filter((l) => l === 'bootstrap').length, 3);
+    // Still refused after five tries: the install fails loudly (set -e), as before.
+    fake(0, 99);
+    r = run();
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /launchctl bootstrap failed 5 times/);
+    assert.equal(log().filter((l) => l === 'bootstrap').length, 5);
+    void execFileSync;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('machine: agents finished days ago and stopped again and again are not resumed when the daemon comes back after being offline (m3, 4 agents, 2026-09-29)', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  RESUME_DELAY_MS.value = 50;
+  t.after(() => (RESUME_DELAY_MS.value = 3000));
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  const d1 = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const users = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').length;
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+  // As on m3: finished days ago, the daemon (restarted since) does not hold them, the portal's mark never cleared,
+  // refused resumes (05:43, 10:44) moved their activity time, and stop_agent was called on each, several times.
+  const old = [0, 1, 2, 3].map((n) => {
+    const h = mm.createSession('mx', { kind: 'worker', title: `old ${n}`, permissionMode: 'default' });
+    Object.assign(h.info, { status: 'error', statusDetail: "already 3 agents running in this machine's main clone", turnOpenSince: hoursAgo(60), lastActivityAt: hoursAgo(4) });
+    store.putSession(h.info);
+    for (let i = 0; i < 3; i++) sessions.get(h.info.id).stop();
+    return h;
+  });
+  for (const h of old) {
+    assert.equal(h.info.stoppedOnPurpose, true);
+    assert.equal(h.info.turnOpenSince, undefined, 'stop_agent clears the mark the portal holds, not only the daemon');
+  }
+  // The daemon goes (a failed redeploy), the machine is offline a while, the offline watch redeploys it, it is back.
+  d1.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  assert.equal((mm as unknown as { cutOff: Map<string, unknown> }).cutOff.has('mx'), false, 'nothing noted as cut off');
+  daemon();
+  await until('back', () => mm.isOnline('mx'));
+  await new Promise((r) => setTimeout(r, 300));
+  for (const h of old) assert.equal(users(h.info.id), 0, `${h.info.title} is not resumed`);
+  assert.ok(!reports.some((r) => /resume/.test(r)), reports.join('\n'));
 });
