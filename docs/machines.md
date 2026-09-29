@@ -117,9 +117,17 @@ existing keys: finds node (≥ 22.6) and the FF clone, copies the portal's own c
 (`git archive` of `server/ shared/ machine/ package*.json`) to `~/.ff-factory/app`, runs
 `npm ci --omit=dev`, captures the user's own zsh PATH (login + interactive, so the LaunchAgent sees what their
 terminal sees, e.g. `~/bin/gh`), writes `~/.ff-factory/daemon.json` (portal URL, name, token, repo path,
-`claude` path) and the LaunchAgent plist, and (re)loads it with `launchctl bootstrap gui/<uid>`.
+`claude` path) and the LaunchAgent plist, and (re)loads it: `launchctl bootout`, a wait of up to 30 s until the
+old daemon has gone (`launchctl print` fails), then `launchctl bootstrap gui/<uid>`, retried up to 5 times
+(`macReloadLines`; a bootstrap into a service still loaded fails with "5: Input/output error" and left m3 with no
+daemon, 2026-09-29).
 Running `add_machine` again for the same id (or Redeploy in the UI) updates the code and issues a fresh
 token; it refuses while agents are running there unless forced. The user does nothing on the Macs.
+The deploy counts the new daemon as connected from the start of its install step (launchd starts it before the
+ssh session returns) or by its hello naming the version installed. A daemon's hello clears any install or
+connection error on its machine (a connected machine never shows "error"); a redeploy that fails while a
+daemon is still connected leaves the machine ready, with "the last redeploy failed, …" as its detail; a deploy
+cut short by a portal restart shows as an error at boot rather than staying "deploying".
 
 **A machine's own folders.** `add_machine` (and the Add machine form) takes four optional absolute paths (and
 `sandbox_root`, [below](#machine-sandboxes)),

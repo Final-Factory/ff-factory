@@ -13,7 +13,7 @@ import { PROTOCOL_VERSION, SANDBOX_PROTOCOL, type DaemonSandbox, type FromDaemon
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
-import type { MachineDirs } from './machineDeploy.ts';
+import type { DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
@@ -185,6 +185,13 @@ export class MachineManager {
     this.store = store;
     this.sessions = sessions;
     this.tokensFile = path.join(cfg.dataDir, 'machine-tokens.json');
+    // A deploy runs in this process: one still marked at boot was cut short by a restart. Left 'deploying', the
+    // offline watch (redeployDue) would never redeploy it; its daemon's hello clears the error if it did start.
+    for (const m of store.machines.values()) {
+      if (m.status !== 'deploying') continue;
+      Object.assign(m, { status: 'error', statusDetail: `a portal restart interrupted its deploy${m.statusDetail ? ` (at: ${m.statusDetail})` : ''}` });
+      store.putMachine(m);
+    }
     setInterval(() => this.heartbeat(), PING_MS).unref();
   }
 
@@ -498,6 +505,8 @@ export class MachineManager {
   // ---------------------------------------------------------------- deploying (server/machineDeploy.ts)
 
   private readonly deploying = new Set<string>();
+  /** How long a deploy lets the old daemon's link close, then how often it looks for the new one (tests shorten them). */
+  deployWaitMs = { settle: 3000, poll: 1000 };
 
   /**
    * Add a machine, or redeploy one (same id): mint a token, install the daemon over ssh and wait for
@@ -541,36 +550,56 @@ export class MachineManager {
     return machine;
   }
 
+  /** The install over ssh (server/machineDeploy.ts); replaced by tests. */
+  deployer: (opts: DeployOptions) => Promise<DeployResult> = async (opts) => (await import('./machineDeploy.ts')).deploy(opts);
+
+  /**
+   * Whether the daemon a deploy installed has connected: a link opened since its install step began, or one whose
+   * hello names the version installed. Not "since the install returned": the new daemon often connects before the
+   * ssh session that started it has closed, and was then never counted (m5, 2026-09-29: "installed, but the daemon
+   * has not connected" while it was connected).
+   */
+  private deployedDaemonConnected(id: string, installAt: number, version: string) {
+    const link = this.links.get(id);
+    const hello = this.hellos.get(id);
+    if (!link) return false;
+    return link.since >= installAt || (!!hello && version !== 'unknown' && hello.daemon === version);
+  }
+
   private async runDeploy(m: Machine, token: string, repoPath: string | undefined, previousAppDir: string | undefined) {
     this.deploying.add(m.id);
-    const { deploy, repoSlug } = await import('./machineDeploy.ts');
+    const { repoSlug } = await import('./machineDeploy.ts');
     const { ROOT } = await import('./config.ts');
     try {
       const dirs = { appDir: m.appDir, unityEditorRoot: m.unityEditorRoot, unityPath: m.unityPath, tempDir: m.tempDir, sandboxRoot: m.sandboxRoot };
-      const r = await deploy({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step: (s) => this.update(m.id, { statusDetail: s }), onPlatform: (platform) => this.update(m.id, { platform }) });
+      // The old daemon goes, and the new one starts, during the install step.
+      let installAt = Date.now();
+      const step = (s: string) => {
+        if (s === 'installing') installAt = Date.now();
+        this.update(m.id, { statusDetail: s });
+      };
+      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }) });
+      const connected = () => this.deployedDaemonConnected(m.id, installAt, r.version);
       this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
-      if (r.started === false) {
-        // Windows: the task runs only in the user's logged-on session (docs/machines.md).
+      if (r.started === false && !connected()) {
+        // Windows: the task runs only in the user's logged-on session (docs/machines.md). The hello clears this.
         this.update(m.id, { status: 'error', statusDetail: `installed, but nobody is logged on to ${m.host}: the daemon starts when its user logs on to the desktop` });
         return;
       }
       // The old daemon's connection (if any) closes when launchd stops it; wait for the new one.
-      const since = Date.now();
-      await new Promise((res) => setTimeout(res, 3000));
-      for (let i = 0; i < 90; i++) {
-        const link = this.links.get(m.id);
-        if (link && link.since >= since) break;
-        await new Promise((res) => setTimeout(res, 1000));
-      }
-      const link = this.links.get(m.id);
+      await new Promise((res) => setTimeout(res, this.deployWaitMs.settle));
+      for (let i = 0; i < 90 && !connected(); i++) await new Promise((res) => setTimeout(res, this.deployWaitMs.poll));
       this.update(
         m.id,
-        link && link.since >= since
+        connected()
           ? { status: 'ready', statusDetail: undefined }
           : { status: 'error', statusDetail: `installed, but the daemon has not connected to ${m.portalUrl}; see ${daemonLogPath(r.platform, m.appDir)} on ${m.host}` },
       );
     } catch (e) {
-      this.update(m.id, { status: 'error', statusDetail: (e as Error).message });
+      // A daemon still connected (the old one kept running, or it came back) works: not an error alongside a live
+      // link, but the failed redeploy stays in view.
+      const live = this.isOnline(m.id) && this.hellos.has(m.id);
+      this.update(m.id, live ? { status: 'ready', statusDetail: `the last redeploy failed, so the previous daemon is still the one running: ${(e as Error).message}` } : { status: 'error', statusDetail: (e as Error).message });
     } finally {
       this.deploying.delete(m.id);
       this.dropWhy.delete(m.id); // the old daemon's link has dropped by now, or the deploy never got that far
@@ -821,6 +850,9 @@ export class MachineManager {
     switch (msg.type) {
       case 'hello': {
         this.hellos.set(id, { protocol: msg.protocol, daemon: msg.info?.daemon, catalog: msg.catalog });
+        // Its daemon runs and reached us: an install or connection error from before is over (a deploy in progress
+        // settles the status itself). A 'deploying' left by a portal restart mid-deploy is over too.
+        if (m.status === 'error' || (m.status === 'deploying' && !this.deploying.has(id))) Object.assign(m, { status: 'ready', statusDetail: undefined });
         const why = daemonMismatch(this.hellos.get(id)!, this.portalHead);
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
         else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
