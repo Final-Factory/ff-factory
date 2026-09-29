@@ -112,3 +112,30 @@ test('notify: saved subscriptions without a newer kind start at its default', (t
   assert.deepEqual(n.list('alice')[0].prefs, { ...old.prefs, unity: true, host: true });
   store.flush();
 });
+
+test("notify: a person's own orchestrator, and a worker's finished turn, reach only the people they are for", async (t) => {
+  const { n, sessions, sent } = setup(t);
+  const seen: string[][] = [];
+  const onBus = (e: ServerEvent) => e.type === 'notify' && seen.push(e.users ?? ['everyone']);
+  bus.on('event', onBus);
+  t.after(() => bus.off('event', onBus));
+  n.subscribe('ben', sub('ben-phone'), {}, 'Safari on iPhone');
+  n.subscribe('lothsahn', sub('loth-desk'), {}, 'Chrome on Windows');
+  n.audience = (s, kind) => (s.orchestratorRole === 'personal' ? [s.requestedBy!.userId] : s.orchestratorRole === 'dispatcher' ? (kind === 'turnEnd' ? [] : ['ben']) : s.kind === 'worker' && kind === 'turnEnd' ? ['LothSahn'] : undefined);
+  const emit = (over: Partial<SessionInfo>, event: 'turnEnd' | 'permission') => sessions.events.emit(event, { info: info(over) }, event === 'turnEnd' ? 'done' : { toolName: 'Bash', input: {} });
+
+  emit({ id: 'p1', kind: 'orchestrator', orchestratorRole: 'personal', requestedBy: { userId: 'ben', displayName: 'Ben' } }, 'turnEnd');
+  emit({ id: 'd1', kind: 'orchestrator', orchestratorRole: 'dispatcher' }, 'turnEnd');
+  emit({ id: 'd1', kind: 'orchestrator', orchestratorRole: 'dispatcher' }, 'permission');
+  emit({ id: 'w1', kind: 'worker', sandboxId: 'alpha' }, 'turnEnd');
+  emit({ id: 'w1', kind: 'worker', sandboxId: 'alpha' }, 'permission');
+  await flush();
+  assert.deepEqual(
+    sent.map((x) => `${x.endpoint.split('/').pop()} ${x.payload.title}`),
+    ['ben-phone Your orchestrator finished', 'ben-phone The dispatcher needs you', 'loth-desk Belt fix finished', 'ben-phone Belt fix needs you', 'loth-desk Belt fix needs you'],
+  );
+  // Open pages hear only what is theirs; the dispatcher's own turns are nobody's news.
+  assert.deepEqual(seen, [['ben'], ['ben'], ['LothSahn'], ['everyone']]);
+  assert.equal(sessionRoute(info({ kind: 'orchestrator', orchestratorRole: 'dispatcher' })), '#/dispatcher/conversation');
+  assert.equal(sessionRoute(info({ id: 'p1', kind: 'orchestrator', orchestratorRole: 'personal' })), '#/');
+});

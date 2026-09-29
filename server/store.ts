@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent } from '../shared/types.ts';
+import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /** Everything the UI hears about goes through here and out the WebSocket. */
 export const bus = new EventEmitter<{ event: [ServerEvent] }>();
@@ -13,6 +13,7 @@ export const emit = (e: ServerEvent) => bus.emit('event', e);
 interface Persisted {
   sandboxes: Sandbox[];
   sessions: SessionInfo[];
+  /** The dispatcher (docs/orchestrators.md); before per-person orchestrators, the one shared orchestrator. */
   orchestratorId?: string;
   standingAgents?: StandingAgent[];
   delegations?: DelegationRequest[];
@@ -31,9 +32,16 @@ export class Store {
   readonly standing = new Map<string, StandingAgent>();
   readonly delegations = new Map<string, DelegationRequest>();
   readonly machines = new Map<string, Machine>();
+  /** The work ledger (docs/orchestrators.md), kept in its own file, data/work.json. */
+  readonly work = new Map<string, WorkItem>();
+  /** The number of the last work item ("w12" is 12). */
+  workSeq = 0;
+  /** The dispatcher's session id (the key keeps its old name: it was the one shared orchestrator). */
   orchestratorId?: string;
   settings: AppSettings = { heartbeatMinutes: null };
   private readonly file: string;
+  private readonly workFile: string;
+  private workTimer?: NodeJS.Timeout;
   private readonly transcriptDir: string;
   private readonly uploadDir: string;
   private readonly seqs = new Map<string, number>();
@@ -41,6 +49,7 @@ export class Store {
 
   constructor(dataDir: string) {
     this.file = path.join(dataDir, 'state.json');
+    this.workFile = path.join(dataDir, 'work.json');
     this.transcriptDir = path.join(dataDir, 'transcripts');
     this.uploadDir = path.join(dataDir, 'uploads');
     fs.mkdirSync(this.transcriptDir, { recursive: true });
@@ -53,6 +62,11 @@ export class Store {
       for (const d of p.delegations ?? []) this.delegations.set(d.id, d);
       for (const m of p.machines ?? []) this.machines.set(m.id, { ...m, online: false });
       this.settings = { ...this.settings, ...p.settings };
+    }
+    if (fs.existsSync(this.workFile)) {
+      const w: { seq?: number; items?: WorkItem[] } = JSON.parse(fs.readFileSync(this.workFile, 'utf8'));
+      for (const item of w.items ?? []) this.work.set(item.id, item);
+      this.workSeq = w.seq ?? 0;
     }
   }
 
@@ -98,6 +112,37 @@ export class Store {
     this.delegations.set(d.id, d);
     this.save();
     emit({ type: 'delegation', request: d });
+  }
+
+  /** Save a work item (data/work.json, its own file: state.json is rewritten on every session update). */
+  putWork(w: WorkItem) {
+    this.work.set(w.id, w);
+    this.saveWork();
+    emit({ type: 'work', item: w });
+  }
+
+  /** Forget work items (pruning closed ones); no event: pages drop them at their next state. */
+  dropWork(ids: string[]) {
+    for (const id of ids) this.work.delete(id);
+    if (ids.length) this.saveWork();
+  }
+
+  private saveWork() {
+    clearTimeout(this.workTimer);
+    this.workTimer = setTimeout(() => this.flushWork(), 300);
+  }
+
+  private flushWork() {
+    clearTimeout(this.workTimer);
+    this.workTimer = undefined;
+    const tmp = this.workFile + '.tmp';
+    try {
+      fs.writeFileSync(tmp, JSON.stringify({ seq: this.workSeq, items: [...this.work.values()] }, null, 2));
+      fs.renameSync(tmp, this.workFile);
+    } catch (e) {
+      console.warn('work ledger save failed, retrying:', (e as Error).message);
+      this.saveWork();
+    }
   }
 
   putSettings(patch: Partial<AppSettings>) {
@@ -252,6 +297,7 @@ export class Store {
   }
 
   flush() {
+    if (this.workTimer) this.flushWork();
     clearTimeout(this.saveTimer);
     const p: Persisted = {
       sandboxes: [...this.sandboxes.values()],

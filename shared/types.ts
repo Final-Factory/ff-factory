@@ -90,6 +90,12 @@ export interface Sandbox {
 export type SessionKind = 'orchestrator' | 'worker' | 'standing';
 
 /**
+ * What an orchestrator is (docs/orchestrators.md): the portal's one dispatcher, which owns every tool that changes
+ * something, or a person's own orchestrator, which talks with that person and files work requests with the dispatcher.
+ */
+export type OrchestratorRole = 'dispatcher' | 'personal';
+
+/**
  * A person FF Factory knows: a login (data/users.json). `userId` is the login name, which never changes; it is
  * what FFBox maps to the account it bills (docs/ffbox-connector-contract.md, `requestedBy`).
  */
@@ -167,9 +173,12 @@ export interface SessionInfo {
   lastResult?: string;
   /**
    * The person this agent works for: who started it, or had the orchestrator start it (docs/identity.md). A
-   * standing agent's is its current run's. Absent on the shared orchestrator and on sessions older than this field.
+   * standing agent's is its current run's; a personal orchestrator's is its person. Absent on the dispatcher and on
+   * sessions older than this field.
    */
   requestedBy?: Requester;
+  /** Kind 'orchestrator' only: the dispatcher or a person's own. Absent on an orchestrator older than this field. */
+  orchestratorRole?: OrchestratorRole;
   /** Who the latest message a person (or the orchestrator for a person) sent this session came from. */
   lastRequestedBy?: Requester;
   /**
@@ -824,8 +833,65 @@ export interface SearchHit {
 
 /** Server-wide settings the user changes from the UI (or the orchestrator's tools). */
 export interface AppSettings {
-  /** Wake the orchestrator every N minutes while any worker is mid-turn; null = off. */
+  /** The one heartbeat from before each person had their own orchestrator: moved into `heartbeat` (the owner's) at startup. */
   heartbeatMinutes: number | null;
+  /** Each person's heartbeat, by user id: while their workers are mid-turn, their orchestrator is woken every N minutes. */
+  heartbeat?: Record<string, number>;
+}
+
+// ---- the work ledger (docs/orchestrators.md) ----
+
+/** Where a work request stands. The first four are open. */
+export type WorkStatus = 'new' | 'question' | 'queued' | 'active' | 'merged' | 'done' | 'rejected' | 'cancelled';
+export const WORK_OPEN: readonly WorkStatus[] = ['new', 'question', 'queued', 'active'];
+
+export type WorkPriority = 'low' | 'normal' | 'high' | 'urgent';
+export const WORK_PRIORITIES: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent'];
+
+/** Work in flight or recently done that a new request may repeat, as the server found it when the request was filed. */
+export interface WorkOverlap {
+  /** A work item ("w12"), a session id, a delegation id or a commit. */
+  ref: string;
+  kind: 'work' | 'session' | 'delegation' | 'commit';
+  title: string;
+  /** 0 to 1; 0.8 and over is strong: the dispatcher then gives a reason to start work anyway. */
+  score: number;
+  /** "same spec 098", "same PR #412", "similar title". */
+  why: string;
+}
+
+/** A request for work that a person's orchestrator filed with the dispatcher, and what became of it. */
+export interface WorkItem {
+  id: string;
+  title: string;
+  brief: string;
+  constraints?: string;
+  priority: WorkPriority;
+  /** Ids the requester named: a spec, a PR, a session, a sandbox, a delegation, another work item. */
+  relatedIds?: string[];
+  /** What overlaps are matched on: "spec:098", "pr:412", "branch:098-belts", "session:ab12cd34". */
+  keys: string[];
+  /** Who filed it: its workers run on their account. */
+  requestedBy: Requester;
+  /** Everyone it is for, the filer first, then the people whose requests were merged into it. They hear its news. */
+  requesters: Requester[];
+  /** Filed in a turn the person started (their own message), which the destructive tools require. */
+  humanAsked: boolean;
+  status: WorkStatus;
+  createdAt: string;
+  updatedAt: string;
+  /** When merged: the item it continues as. */
+  mergedInto?: string;
+  /** The workers started, messaged or linked for it. */
+  sessionIds: string[];
+  /** What it may repeat, found when it was filed; strongest first. */
+  overlaps: WorkOverlap[];
+  /** The latest outcome: a worker's last word, or the note it was closed with. */
+  outcome?: string;
+  /** Questions the dispatcher asked about it (at most 3). */
+  asks: number;
+  /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
+  log: string[];
 }
 
 /** This app's version (root package.json) and the short git SHA of the running checkout. */
@@ -855,8 +921,14 @@ export interface AppState {
   accounts?: AccountUsage[];
   /** Each online machine's load, by machine id; absent from a server older than this field. */
   machineStats?: Record<string, MachineStats>;
-  /** The id of the main-page orchestrator session. */
+  /** The signed-in person's own orchestrator: the chat the home page shows (docs/orchestrators.md). */
   orchestratorId: string;
+  /** The dispatcher; absent from a server older than this field. */
+  dispatcherId?: string;
+  /** Who this page is signed in as; absent from a server older than this field. */
+  me?: UserInfo;
+  /** The work ledger: every open item, and the ones closed in the last 3 days (at most 100). */
+  work?: WorkItem[];
   config: { defaultModel: string; models: string[]; defaultBase: string };
   settings: AppSettings;
 }
@@ -872,8 +944,12 @@ export type ServerEvent =
   | { type: 'standing_removed'; id: string }
   | { type: 'delegation'; request: DelegationRequest }
   | { type: 'machine'; machine: Machine }
-  /** Something worth a notification; pages without a push subscription may show it themselves. */
-  | { type: 'notify'; notice: { kind: NotifyKind; title: string; body: string; url: string; tag: string } }
+  /**
+   * Something worth a notification; pages without a push subscription may show it themselves. `users`: the people
+   * it is for (user ids); only their pages get it. Absent: everyone.
+   */
+  | { type: 'notify'; notice: { kind: NotifyKind; title: string; body: string; url: string; tag: string }; users?: string[] }
+  | { type: 'work'; item: WorkItem }
   | { type: 'machine_removed'; id: string }
   | { type: 'provider'; provider: Provider }
   | { type: 'max'; max: MaxSummary }

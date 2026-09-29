@@ -2,6 +2,7 @@ import type http from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { Agents } from './agents.ts';
+import { beltFor } from './belts.ts';
 import type { Requester } from '../shared/types.ts';
 
 /**
@@ -17,7 +18,9 @@ export async function handleMcp(agents: Agents, keyName: string, who: Requester,
     return res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed (stateless server: POST only)' }, id: null }));
   }
   const server = new McpServer({ name: 'ff-sandboxes', version: '1.0.0' });
-  for (const t of [...agents.toolSpecs('human', agents.fixedActor(who)), ...agents.remoteToolSpecs(`Claude Code (${keyName})`, who)]) {
+  // A remote client is a person driving directly: the tools act for them, and ask_orchestrator talks to their own orchestrator.
+  const belt = beltFor('remote', agents.toolSpecs('human', agents.fixedActor(who), { role: 'remote', owner: who }));
+  for (const t of [...belt, ...agents.remoteToolSpecs(`Claude Code (${keyName})`, who)]) {
     server.registerTool(t.name, { description: t.description, inputSchema: t.schema }, t.handler as never);
   }
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

@@ -11,9 +11,15 @@
  *   "#fail"        ends the turn with an error result
  *   "#die"         the agent process ends mid-turn (as when the server's process tree is stopped)
  *   "#bg"          starts a background task (a background command, a watcher) and ends the turn
+ *   "#tool <name> <json>"  (one per line) calls that tool of the session's in-process MCP server (an orchestrator's
+ *                  belt) with those arguments, and says what it answered: "Called <name>: <answer>". Only in a
+ *                  person's own message to an orchestrator (the "[from <name>]" line), so a notice quoting the tag
+ *                  never sets it off.
  *   anything else  "Echo: <text>" (and how many images came with it)
  */
-import type { Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { McpServerConfig, Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 /** A 16x16 red PNG. */
 export const RED_PNG =
@@ -59,6 +65,34 @@ export function fakeQuery(fake: FakeOptions = {}) {
         uuid: `x${++msgId}`,
       }) as never;
 
+    // The session's in-process MCP servers (createSdkMcpServer), reached through an in-memory MCP client, once.
+    const clients = new Map<string, Promise<Client>>();
+    const client = (name: string, server: McpServerConfig & { instance: { connect(t: unknown): Promise<void> } }) => {
+      let c = clients.get(name);
+      if (!c) {
+        c = (async () => {
+          const [mine, theirs] = InMemoryTransport.createLinkedPair();
+          await server.instance.connect(theirs);
+          const cl = new Client({ name: 'fake-agent', version: '1.0.0' });
+          await cl.connect(mine);
+          return cl;
+        })();
+        clients.set(name, c);
+      }
+      return c;
+    };
+    async function callTool(name: string, args: Record<string, unknown>): Promise<{ server: string; text: string; isError: boolean }> {
+      for (const [serverName, cfg] of Object.entries(options?.mcpServers ?? {})) {
+        if (cfg.type !== 'sdk' || !('instance' in cfg)) continue;
+        const c = await client(serverName, cfg as never);
+        const { tools } = await c.listTools();
+        if (!tools.some((t) => t.name === name)) continue;
+        const r = (await c.callTool({ name, arguments: args })) as { content?: { type: string; text?: string }[]; isError?: boolean };
+        return { server: serverName, text: (r.content ?? []).map((b) => b.text ?? '').join('\n'), isError: !!r.isError };
+      }
+      return { server: 'none', text: `no tool "${name}" in this session`, isError: true };
+    }
+
     async function* stream(): AsyncGenerator<SDKMessage, void> {
       yield { type: 'system', subtype: 'init', session_id: sessionId, model: options?.model ?? 'fake-model', uuid: 'init' } as never;
       if (typeof prompt === 'string') return;
@@ -71,7 +105,27 @@ export function fakeQuery(fake: FakeOptions = {}) {
         yield state('running');
         // The harness's "[from the orchestrator]" / "[from <person>]" line (server/sessions.ts, promptText) is not the message.
         const words = said.replace(/^\[from [^\]\n]*\]\n/, '');
-        if (/#perm\b/i.test(words)) {
+        const byPerson = /^\[from (?!the orchestrator)[^\]\n]*\]\n/.test(said);
+        const calls = byPerson ? [...words.matchAll(/^#tool\s+([\w-]+)\s+(\{.*\})\s*$/gm)] : [];
+        if (calls.length) {
+          const answers: string[] = [];
+          for (const [, name, json] of calls) {
+            const toolId = `tool-${++msgId}`;
+            let args: Record<string, unknown> = {};
+            try {
+              args = JSON.parse(json);
+            } catch {
+              answers.push(`${name}: bad JSON`);
+              continue;
+            }
+            const r = await callTool(name, args);
+            yield toolUse(toolId, `mcp__${r.server}__${name}`, args);
+            yield toolResult(toolId, r.text, r.isError);
+            answers.push(`Called ${name}: ${r.text}`);
+          }
+          yield text(answers.join('\n\n'));
+          yield result(uuid, true, answers.join('\n\n'));
+        } else if (/#perm\b/i.test(words)) {
           const toolId = `tool-${++msgId}`;
           const input = { command: 'rm -rf build', description: 'Clean the build folder' };
           yield toolUse(toolId, 'Bash', input);

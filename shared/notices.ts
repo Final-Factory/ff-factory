@@ -18,6 +18,10 @@ export type NoticeKind =
   | 'restart-pending'
   | 'restart-cancelled'
   | 'resumed'
+  | 'dispatch'
+  | 'work-request'
+  | 'work-update'
+  | 'ledger'
   | 'other';
 
 export interface Notice {
@@ -39,6 +43,8 @@ export interface Notice {
   /** The tool a worker waits to use, and what it wants to do with it. */
   tool?: string;
   detail?: string;
+  /** A work request in the ledger ("w13"), docs/orchestrators.md. */
+  workId?: string;
 }
 
 /** A harness message starts with its tag: [worker update], [heartbeat], [run r-12], … */
@@ -126,6 +132,32 @@ export function parseNotice(text: string): Notice {
     const why = /—\s*(.+?)\.(?:\n|$)/.exec(rest)?.[1];
     const says = /\n[^\n]* says:\n([\s\S]*)$/.exec(rest)?.[1].trim();
     return { kind: 'run', summary: `Run started${why ? `: ${why}` : ''}`, attention: false, body: says };
+  }
+
+  // The work ledger (docs/orchestrators.md): the dispatcher's decisions in a person's chat, and requests in its own.
+  if (tag === 'dispatch') {
+    const [head, ...note] = rest.split('\n');
+    const d = /^(w\d+) "(.+?)": ([\s\S]*)\.$/.exec(head.trim());
+    if (!d) return { kind: 'dispatch', summary: clip(oneLine(rest), 160), attention: false, body: rest };
+    const [, workId, title, what] = d;
+    const question = what.startsWith('a question');
+    const body = note.join('\n').trim() || undefined;
+    return { kind: 'dispatch', summary: question ? `The dispatcher asks about “${clip(title, 70)}”` : `“${clip(title, 70)}”: ${clip(what, 110)}`, attention: question, body, workId };
+  }
+  if (tag === 'work request') {
+    const r = /^(w\d+) from (.+?)(?: \((?:low|high|urgent)\))?: "(.+?)"/.exec(rest);
+    const more = (text.match(/^\[work (?:request|update)\]/gm)?.length ?? 1) - 1;
+    const summary = r ? `${r[2]} asks: “${clip(r[3], 90)}”${more ? ` (and ${more} more)` : ''}` : 'A work request';
+    return { kind: 'work-request', summary, attention: false, body: rest.trim(), workId: r?.[1] };
+  }
+  if (tag === 'work update') {
+    const u = /^(w\d+) "(.+?)" \(\w+\) from (.+?): /.exec(rest);
+    return { kind: 'work-update', summary: u ? `${u[3]} updated “${clip(u[2], 90)}”` : 'A request was updated', attention: false, body: rest.trim(), workId: u?.[1] };
+  }
+  if (tag === 'ledger') {
+    const queued = /Queued: ([\s\S]*?)\. Start what fits/.exec(rest)?.[1];
+    const n = queued ? queued.split('; ').length : 0;
+    return { kind: 'ledger', summary: `Capacity may have freed${n ? `; ${n} queued` : ''}`, attention: false, body: rest.trim() };
   }
 
   if (tag === 'app restarted') return { kind: 'restarted', summary: 'FF Factory restarted', attention: false, body: rest.trim() };
