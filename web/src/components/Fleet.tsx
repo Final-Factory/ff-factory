@@ -82,7 +82,8 @@ function Meters({ c, health, now }: { c: FleetComputer; health?: HostHealth; now
     { label: 'RAM', pct: ramPct(s), text: `${Math.round(ramPct(s))}%`, lvl: ramLvl(s) },
     // "GPU" either way (VRAM in use on a discrete card, how busy it is on Apple Silicon); the hover says which.
     ...(g !== undefined ? [{ label: 'GPU', pct: g, text: `${Math.round(g)}%`, lvl: level(g) }] : []),
-    ...(disk ? [{ label: 'Disk', pct: disk.used, text: fmtBytes(disk.free).replace(' ', ''), lvl: disk.lvl }] : []),
+    // "1.1T" free: the unit's letter only, so the four fit the sidebar on any font.
+    ...(disk ? [{ label: 'Disk', pct: disk.used, text: fmtBytes(disk.free).replace(/ ([KMGT])B$/, '$1'), lvl: disk.lvl }] : []),
   ];
   return (
     <span className="fl-meters" title={describe({ name: c.name, stats: s, online: c.online, host: c.host })}>
@@ -108,6 +109,12 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
         <Dot tone={tone} pulse={tone === 'blue'} title={state} />
         <span className="fl-name">{c.name}</span>
         <span className="fl-os">{[osName(c.platform), c.host ? 'host' : state === 'online' ? '' : state].filter(Boolean).join(' · ')}</span>
+        {c.live > 0 && (
+          <span className="fl-agents-sum" data-testid="fl-agents-sum">
+            {c.live} {c.live === 1 ? 'agent' : 'agents'}
+            {c.busy ? `, ${c.busy} busy` : ''}
+          </span>
+        )}
         {c.attention > 0 && (
           <span className="badge badge-amber" title="Waiting on you">
             {c.attention}
@@ -118,7 +125,6 @@ function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth;
       <Meters c={c} health={health} now={now} />
       <span className="fl-cap" data-testid="fl-capacity">
         {capacityLine(c)}
-        {c.live > 0 && ` · ${c.live} ${c.live === 1 ? 'agent' : 'agents'}${c.busy ? `, ${c.busy} busy` : ''}`}
       </span>
     </>
   );

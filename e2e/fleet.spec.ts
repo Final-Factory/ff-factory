@@ -190,13 +190,17 @@ test('fleet: the sidebar groups every computer, with its sandboxes, their agents
 
   const beast = sidebar.getByTestId('fl-group-host');
   await expect(beast.locator('.fl-name')).toHaveText('BEAST');
-  await expect(beast.getByTestId('fl-capacity')).toHaveText('2/10 sandboxes · 1/4 editors · 1 agent, 1 busy');
+  await expect(beast.getByTestId('fl-capacity')).toHaveText('2/10 sandboxes · 1/4 editors');
+  await expect(beast.getByTestId('fl-agents-sum')).toHaveText('1 agent, 1 busy');
   await expect(beast.getByTestId('meter-CPU')).toHaveText('CPU 38%');
   await expect(beast.getByTestId('meter-GPU')).toHaveText('GPU 45%');
-  await expect(beast.getByTestId('meter-Disk')).toHaveText('Disk 1.1TB');
-  // The four meters sit on one line in the sidebar's width.
-  const tops = await beast.locator('.fl-meter').evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().top)));
-  expect(new Set(tops).size, `meters on ${new Set(tops).size} lines`).toBe(1);
+  await expect(beast.getByTestId('meter-Disk')).toHaveText('Disk 1.1T');
+  // The four meters sit on one line in the sidebar's width, none of them cut.
+  const cells = await beast.locator('.fl-meter').evaluateAll((els) => els.map((e) => ({ top: Math.round(e.getBoundingClientRect().top), cut: e.scrollWidth > e.clientWidth + 1, text: e.textContent })));
+  expect(new Set(cells.map((c) => c.top)).size, 'meters on one line').toBe(1);
+  expect(cells.filter((c) => c.cut).map((c) => c.text), 'meters cut short').toEqual([]);
+  // Nor is the counts line.
+  expect(await beast.getByTestId('fl-capacity').evaluate((e) => e.scrollWidth <= e.clientWidth + 1), 'counts line cut short').toBe(true);
   // A live agent: its title, busy or idle, and how long since it last did something; a stopped one is a count.
   const play = beast.getByTestId('fl-sandbox-agent-a');
   await expect(play.getByTestId('fl-agent')).toHaveCount(1);
@@ -207,7 +211,8 @@ test('fleet: the sidebar groups every computer, with its sandboxes, their agents
   const loth = sidebar.getByTestId('fl-group-lothdesktop');
   await expect(loth.locator('.fl-title')).toContainText('LothDesktop');
   await expect(loth.locator('.fl-title')).toContainText('Windows');
-  await expect(loth.getByTestId('fl-capacity')).toHaveText('2/3 sandboxes · 1/2 editors · 3 agents, 1 busy');
+  await expect(loth.getByTestId('fl-capacity')).toHaveText('2/3 sandboxes · 1/2 editors');
+  await expect(loth.getByTestId('fl-agents-sum')).toHaveText('3 agents, 1 busy');
   const sb1 = loth.getByTestId('fl-sandbox-lothdesktop/sb1');
   await expect(sb1.locator('.row-title')).toHaveText('Nightly e2e run');
   await expect(sb1.locator('.row-sub')).toContainText('Working · feature/fleet-view');
@@ -221,7 +226,8 @@ test('fleet: the sidebar groups every computer, with its sandboxes, their agents
   await expect(main.getByTestId('fl-agent')).toHaveText([/Spec 075 nightly e2e\s*idle\s*12m/]);
 
   // The M5 has no sandbox pool; the M3 is offline.
-  await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-capacity')).toHaveText('main clone only · 1 agent, 1 busy');
+  await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-capacity')).toHaveText('main clone only');
+  await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-agents-sum')).toHaveText('1 agent, 1 busy');
   await expect(sidebar.getByTestId('fl-group-m3').locator('.fl-meters')).toHaveText('offline · seen 3h ago');
   if (!isMobile(page)) await proof(page, 'sidebar');
 });
@@ -256,7 +262,8 @@ test('fleet: the Overview board shows every computer as a card with its live age
   await expect(board.locator('.overview-sum')).toHaveText('5 agents live · 3 busy');
   await expect(board.locator('.board-card')).toHaveCount(4);
   const loth = board.getByTestId('board-lothdesktop');
-  await expect(loth.getByTestId('fl-capacity')).toHaveText('2/3 sandboxes · 1/2 editors · 3 agents, 1 busy');
+  await expect(loth.getByTestId('fl-capacity')).toHaveText('2/3 sandboxes · 1/2 editors');
+  await expect(loth.getByTestId('fl-agents-sum')).toHaveText('3 agents, 1 busy');
   // Free sandboxes are one line of chips on the board; the requester shows on each agent.
   await expect(loth.getByTestId('fl-free-line')).toHaveText(/FREE\s*sb2/);
   await expect(loth.getByTestId('fl-agent').filter({ hasText: 'Review the nightly report' })).toContainText('Lothsahn');

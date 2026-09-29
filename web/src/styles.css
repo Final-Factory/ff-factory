@@ -4762,11 +4762,19 @@ body {
 }
 
 .fl-meters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 7px;
-  font-size: var(--fs-xs);
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, max-content);
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10.5px;
   color: var(--text-3);
+}
+
+.board-card .fl-meters {
+  justify-content: start;
+  gap: 12px;
+  font-size: var(--fs-xs);
 }
 
 .fl-meters-off {
@@ -4777,7 +4785,15 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  min-width: 0;
+  overflow: hidden;
   white-space: nowrap;
+}
+
+.fl-agents-sum {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
 }
 
 .fl-meter .mbar {
