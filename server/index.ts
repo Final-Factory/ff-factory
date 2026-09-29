@@ -35,7 +35,7 @@ import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, ses
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AppState, CreateSandboxRequest, HostStatus, PermissionDecisionRequest, ServerEvent, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
+import type { AppState, CreateSandboxRequest, HostStatus, PermissionDecisionRequest, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 
 const cfg = loadConfig();
 fs.mkdirSync(cfg.dataDir, { recursive: true });
@@ -148,8 +148,32 @@ function requesterOf(req: http.IncomingMessage) {
   const u = auth.userInfo(auth.user(req));
   return u ? asRequester(u) : identity.owner();
 }
+
+/**
+ * Who may drive an orchestrator (docs/orchestrators.md): a person's own only by that person, the dispatcher only by an
+ * owner. So one person's chat never gets the other's messages, and nobody spends someone else's Claude account.
+ */
+function mayDrive(req: http.IncomingMessage, s: SessionInfo) {
+  if (s.kind !== 'orchestrator') return;
+  const me = requesterOf(req);
+  const owner = agents.orchestrators.ownerOf(s);
+  if (owner) {
+    if (owner.userId.toLowerCase() !== me.userId.toLowerCase()) throw new HttpError(403, `this is ${owner.displayName}'s own orchestrator; write to yours`);
+    return;
+  }
+  if (identity.get(me.userId)?.role !== 'owner') throw new HttpError(403, 'only the owner writes to the dispatcher; ask your own orchestrator, which files work with it');
+}
 const notifier = new Notifier(cfg.dataDir, store, sessions);
 notifier.orchestratorId = () => store.orchestratorId;
+// Who hears about a session (docs/orchestrators.md): a person's own orchestrator only them, the dispatcher's turns
+// nobody (its questions and errors the owners), a worker's finished turns the people it works for.
+notifier.audience = (s, kind) => {
+  const owner = agents.orchestrators.ownerOf(s);
+  if (owner) return [owner.userId];
+  if (agents.orchestrators.isDispatcher(s)) return kind === 'turnEnd' ? [] : identity.list().filter((u) => u.role === 'owner').map((u) => u.userId);
+  if (s.kind === 'worker' && kind === 'turnEnd') return agents.orchestrators.audienceOf(s).map((r) => r.userId);
+  return undefined;
+};
 agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));
 agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
@@ -173,7 +197,8 @@ sandboxes.events.on('unityRestart', (sb, r) => {
       // no orchestrator right now
     }
   }
-  if (r.gaveUp) return;
+  // A give-up needs a person: the people whose workers are there hear it in their own chats too.
+  if (r.gaveUp) return void agents.orchestrators.toPeople(agents.orchestrators.peopleAt({ sandboxId: sb.id }), line);
   const deadline = Date.now() + 30 * 60_000;
   const tell = () => {
     const cur = store.sandboxes.get(sb.id);
@@ -255,7 +280,11 @@ const cutOff = agents.boot();
 
 let lastSystem: SystemStats | undefined;
 
-function appState(): AppState {
+/** The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). */
+function appState(user: string | undefined): AppState {
+  const u = auth.userInfo(user);
+  const me = u ?? { ...identity.owner(), role: 'owner' as const };
+  const mine = agents.orchestrators.personalFor(me);
   return {
     app: appVersion(),
     sandboxes: sandboxes.list(),
@@ -271,7 +300,10 @@ function appState(): AppState {
     usage: usage.usage,
     accounts: accountsNow(),
     machineStats: machines.allStats(),
-    orchestratorId: agents.orchestratorId,
+    orchestratorId: mine.info.id,
+    dispatcherId: agents.dispatcherId,
+    me,
+    work: agents.orchestrators.forPage(),
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase },
     settings: store.settings,
   };
@@ -320,7 +352,7 @@ type Handler = (req: http.IncomingMessage, params: string[], url: URL) => Promis
 const routes: [string, RegExp, Handler][] = [];
 const route = (method: string, pattern: string, h: Handler) => routes.push([method, new RegExp(`^${pattern}$`), h]);
 
-route('GET', '/api/state', async () => appState());
+route('GET', '/api/state', async (req) => appState(auth.user(req)));
 route('GET', '/api/me', async (req) => {
   const u = auth.userInfo(auth.user(req));
   return { username: auth.user(req), ...(u ?? {}) };
@@ -379,8 +411,12 @@ route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
     return { note: agents.standing.runNow(s.info.standingId, 'message', need(text, 'text'), requesterOf(req)) };
   }
   if (!imgs.length) need(text, 'text');
-  // The user wrote to the orchestrator: its own wake_me check-in is moot.
-  if (id === store.orchestratorId) agents.waker.cancel(id);
+  mayDrive(req, s.info);
+  if (s.info.kind === 'orchestrator') {
+    // A person wrote to their orchestrator: its own wake_me check-in is moot, and its budgets start again.
+    agents.waker.cancel(id);
+    agents.orchestrators.personWrote(id);
+  }
   sessions.send(id, String(text ?? '').trim(), 'human', imgs, { requestedBy: requesterOf(req) });
   return {};
 });
@@ -478,24 +514,31 @@ route('POST', '/api/sessions/([\\w-]+)/title', async (req, [id]) => {
   const { title } = await readJson<{ title?: string }>(req);
   const s = sessions.get(id);
   if (s.info.kind === 'standing') throw new HttpError(400, "a standing agent's conversation carries the agent's name; rename the agent instead");
+  if (s.info.kind === 'orchestrator') throw new HttpError(400, "an orchestrator's name is its person's (or Dispatcher)");
   return { title: sessions.setTitle(id, need(title, 'title')) };
 });
 
-route('POST', '/api/sessions/([\\w-]+)/interrupt', async (_r, [id]) => {
-  await sessions.get(id).interrupt();
+route('POST', '/api/sessions/([\\w-]+)/interrupt', async (req, [id]) => {
+  const s = sessions.get(id);
+  mayDrive(req, s.info);
+  await s.interrupt();
   return {};
 });
 
 route('POST', '/api/sessions/([\\w-]+)/permission', async (req, [id]) => {
   const b = await readJson<PermissionDecisionRequest>(req);
-  if (!sessions.get(id).decide(need(b.requestId, 'requestId'), !!b.allow, b.message)) throw new HttpError(404, 'no such pending request');
+  const s = sessions.get(id);
+  mayDrive(req, s.info);
+  if (!s.decide(need(b.requestId, 'requestId'), !!b.allow, b.message)) throw new HttpError(404, 'no such pending request');
   return {};
 });
 
 route('POST', '/api/sessions/([\\w-]+)/mode', async (req, [id]) => {
   const { mode } = await readJson<{ mode: string }>(req);
   if (!['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'].includes(mode)) throw new HttpError(400, 'bad mode');
-  await sessions.get(id).setMode(mode as never);
+  const s = sessions.get(id);
+  mayDrive(req, s.info);
+  await s.setMode(mode as never);
   return {};
 });
 
@@ -528,10 +571,18 @@ route('DELETE', '/api/sessions/([\\w-]+)', async (_r, [id]) => {
   return {};
 });
 
-route('POST', '/api/orchestrator/reset', async () => {
-  agents.newOrchestrator();
-  broadcast({ type: 'state', state: appState() });
-  return {};
+/** A fresh conversation: your own orchestrator's (the default), or the dispatcher's (an owner only). */
+route('POST', '/api/orchestrator/reset', async (req) => {
+  const { which } = await readJson<{ which?: 'mine' | 'dispatcher' }>(req);
+  const me = requesterOf(req);
+  let id: string;
+  if (which === 'dispatcher') {
+    if (identity.get(me.userId)?.role !== 'owner') throw new HttpError(403, 'only the owner resets the dispatcher');
+    id = agents.newDispatcher().info.id;
+  } else id = agents.orchestrators.resetPersonal(me).info.id;
+  // Each page has its own home chat, so each gets its own state.
+  for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
+  return { id };
 });
 
 route('POST', '/api/sandboxes', async (req) => {
@@ -616,17 +667,23 @@ function deviceName(ua: string) {
 
 // ---- settings (heartbeat) and wake-ups (server/wake.ts)
 
+/** heartbeatMinutes: the signed-in person's own heartbeat (docs/orchestrators.md). */
 route('POST', '/api/settings', async (req) => {
   const b = await readJson<{ heartbeatMinutes?: number | null }>(req);
   const m = b.heartbeatMinutes;
   if (m !== undefined && m !== null && (!Number.isInteger(m) || m < 5 || m > 240)) throw new HttpError(400, 'heartbeatMinutes: 5 to 240, or null for off');
-  return store.putSettings({ ...(m !== undefined ? { heartbeatMinutes: m } : {}) });
+  if (m !== undefined) agents.setHeartbeat(requesterOf(req).userId, m);
+  return store.settings;
 });
 
+// Each person's heartbeat wakes their own orchestrator, with their own busy workers.
 setInterval(() => {
-  agents.waker.heartbeat(store.orchestratorId, store.settings.heartbeatMinutes, (s) =>
-    describeBusy(s, { sandbox: s.sandboxId ? store.sandboxes.get(s.sandboxId) : undefined, machine: s.machineId }),
-  );
+  const describe = (s: SessionInfo) => describeBusy(s, { sandbox: s.sandboxId ? store.sandboxes.get(s.sandboxId) : undefined, machine: s.machineId });
+  for (const [userId, minutes] of Object.entries(store.settings.heartbeat ?? {})) {
+    const chat = agents.orchestrators.personalOf(userId);
+    if (!chat) continue;
+    agents.waker.heartbeat(chat.info.id, minutes, describe, (s) => agents.orchestrators.audienceOf(s).some((r) => r.userId.toLowerCase() === userId.toLowerCase()));
+  }
 }, 60_000);
 
 // ---- switch_branch (server/switchBranch.ts)
@@ -839,7 +896,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 const wss = new WebSocketServer({ noServer: true });
-const clients = new Set<WebSocket>();
+/** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
+const clients = new Map<WebSocket, string>();
 
 server.on('upgrade', (req, socket, head) => {
   // Cross-site WebSocket hijacking: the page's own origin only. Compared as strings; parsing an
@@ -865,8 +923,9 @@ server.on('upgrade', (req, socket, head) => {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     return socket.destroy();
   }
+  const user = auth.user(req)!;
   wss.handleUpgrade(req, socket, head, (ws) => {
-    clients.add(ws);
+    clients.set(ws, user);
     alive.add(ws);
     ws.on('pong', () => alive.add(ws));
     ws.on('close', () => clients.delete(ws));
@@ -875,7 +934,7 @@ server.on('upgrade', (req, socket, head) => {
       console.warn('websocket error:', e.message);
       clients.delete(ws);
     });
-    ws.send(JSON.stringify({ type: 'state', state: appState() } satisfies ServerEvent));
+    ws.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
   });
 });
 
@@ -901,7 +960,7 @@ function sendStream(req: http.IncomingMessage, res: http.ServerResponse, f: Stre
 // can see (browsers hide protocol pings), so a page that hears nothing knows to reconnect and refetch.
 const alive = new WeakSet<WebSocket>();
 setInterval(() => {
-  for (const c of clients) {
+  for (const c of clients.keys()) {
     if (!alive.has(c)) {
       clients.delete(c);
       c.terminate();
@@ -915,7 +974,9 @@ setInterval(() => {
 
 function broadcast(e: ServerEvent) {
   const data = JSON.stringify(e);
-  for (const c of clients) if (c.readyState === c.OPEN) c.send(data);
+  // A notice for some people only reaches their pages (docs/orchestrators.md: no interruptions).
+  const only = e.type === 'notify' && e.users ? new Set(e.users.map((u) => u.toLowerCase())) : undefined;
+  for (const [c, user] of clients) if (c.readyState === c.OPEN && (!only || only.has(user.toLowerCase()))) c.send(data);
 }
 bus.on('event', broadcast);
 
@@ -1061,8 +1122,21 @@ machines.onUsage = (id, account, u) => usage.report(id, account, u);
 for (const s of sessions.sessions.values()) usage.recordCost(s.info.id, s.info.costUsd); // baselines
 sessions.events.on('rateLimit', () => usage.poke());
 sessions.events.on('result', (s: { info: { id: string; costUsd: number } }) => usage.recordCost(s.info.id, s.info.costUsd));
+/** Whose account each orchestrator runs on (docs/orchestrators.md), for system_status: a person without a token of their own is on the owner's. */
+function orchestratorAccountsLine() {
+  const people = identity.list();
+  const own = people.filter((u) => userToken(cfg, u.userId)).map((u) => u.displayName);
+  const none = people.filter((u) => !userToken(cfg, u.userId)).map((u) => u.displayName);
+  const payer = identity.systemPayer();
+  return (
+    `Orchestrators: each person's own runs on their own token${own.length ? ` (${own.join(', ')})` : ''}` +
+    `${none.length ? `; ${none.join(', ')} ${none.length === 1 ? 'has' : 'have'} none here, so theirs runs on the orchestrator's account above` : ''}` +
+    `; the dispatcher runs for the system payer, ${payer.displayName}, on ${userToken(cfg, payer.userId) ? 'their own token' : "the orchestrator's account above"}.`
+  );
+}
 agents.usageLines = () => [
   ...accountSetupLines(cfg, os.hostname(), hostToken(cfg), machines.list().map((m) => m.id), personTokens().map((p) => p.displayName)),
+  orchestratorAccountsLine(),
   ...accountLines(accountsNow(), store.sessions, new Date()),
 ];
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id)));

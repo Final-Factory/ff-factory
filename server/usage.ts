@@ -116,13 +116,18 @@ export function usageSummary(u: PlanUsage | undefined, now: Date): string {
  * The system_status lines for every account: which one, where it is used, who runs on it now, its usage.
  * `sessions` names the agents (by id) so the orchestrator can tell which worker is on which account.
  */
-export function accountLines(accounts: AccountUsage[], sessions: Map<string, Pick<SessionInfo, 'id' | 'kind' | 'status'>>, now: Date): string[] {
+type AccountSession = Pick<SessionInfo, 'id' | 'kind' | 'status'> & Partial<Pick<SessionInfo, 'title' | 'orchestratorRole'>>;
+
+/** An agent as the account lines name it: the dispatcher, "Lothsahn's orchestrator", or a session id. */
+const agentName = (s: AccountSession) => (s.kind !== 'orchestrator' ? s.id : s.orchestratorRole === 'personal' && s.title ? `${s.title}'s orchestrator` : s.orchestratorRole === 'dispatcher' ? 'the dispatcher' : 'the orchestrator');
+
+export function accountLines(accounts: AccountUsage[], sessions: Map<string, AccountSession>, now: Date): string[] {
   if (!accounts.length) return ['Claude accounts: none known yet'];
   return [
     `Claude accounts in use (${accounts.length}):`,
     ...accounts.map((a) => {
-      const live = a.sessionIds.map((id) => sessions.get(id)).filter((s): s is Pick<SessionInfo, 'id' | 'kind' | 'status'> => !!s && s.status !== 'stopped' && s.status !== 'error');
-      const who = live.length ? live.map((s) => (s.kind === 'orchestrator' ? 'the orchestrator' : s.id)).join(', ') : 'no agent right now';
+      const live = a.sessionIds.map((id) => sessions.get(id)).filter((s): s is AccountSession => !!s && s.status !== 'stopped' && s.status !== 'error');
+      const who = live.length ? live.map(agentName).join(', ') : 'no agent right now';
       return `- ${a.label} [${a.where.join('; ')}; agents on it: ${who}]: ${usageSummary(a.usage, now)}`;
     }),
   ];
