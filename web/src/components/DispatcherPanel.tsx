@@ -187,7 +187,7 @@ function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; 
           {workers.map((s) => (
             <button key={s.id} className="link-btn small" onClick={() => navigate(sessionRoute(s, app))}>
               Open {s.title}
-              {s.sandboxId ? ` in ${s.sandboxId}` : s.machineId ? ` on ${s.machineId}` : ''}
+              {s.sandboxId ? ` in ${s.sandboxId}` : s.machineId && s.machineSandbox ? ` in ${s.machineId}/${s.machineSandbox}` : s.machineId ? ` on ${s.machineId}` : ''}
             </button>
           ))}
           {w.overlaps.length > 0 && (

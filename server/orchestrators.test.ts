@@ -254,6 +254,30 @@ test('requests: a question goes to its filer, whose answer brings it back; closi
   assert.match((await call(chat(BEN).info, 'update_work', { id: 'w1', note: 'mine now' })).text, /is Lothsahn's request, not Ben's/);
 });
 
+test('overlaps reach every computer: a worker in a machine sandbox is found by the branch it is on', async (t) => {
+  const { store, sessions, chat, call } = setup(t);
+  store.putMachine({
+    id: 'm3',
+    host: 'm3',
+    purpose: 'unused',
+    status: 'ready',
+    online: true,
+    repoPath: '/Users/u/game',
+    home: '/Users/u',
+    portalUrl: 'http://x',
+    maxSessions: 3,
+    sessionIds: [],
+    createdAt: T0,
+    sandboxes: [{ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', path: '/Users/u/sandboxes/sb1', purpose: 'Belt splitter fix', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: ['mw1'], git: { branch: '098-belt-splitter', dirty: 0, untracked: 0, at: T0 } }],
+  });
+  const w = sessions.create({ kind: 'worker', title: 'Splitter', model: 'opus', permissionMode: 'bypassPermissions', options: () => ({ model: 'opus' }), id: 'mw1', requestedBy: LOTH });
+  Object.assign(w.info, { machineId: 'm3', machineSandbox: 'sb1', status: 'running' });
+  store.putSession(w.info);
+  const r = await call(chat(BEN).info, 'request_work', { title: 'Continue on 098-belt-splitter', brief: 'Pick up the splitter work.' });
+  assert.match(r.text, /Possible overlap: worker mw1 "Splitter" \(same branch 098-belt-splitter, strong\)/);
+  assert.equal(store.work.get('w1')!.overlaps[0].ref, 'mw1');
+});
+
 test('list_work: open requests by default, one in full with its log', async (t) => {
   const { dispatcher, chat, call } = setup(t);
   await call(chat(BEN).info, 'request_work', { title: 'Tidy the docs', brief: 'Fix the dead links in docs/.', priority: 'low' });

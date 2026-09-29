@@ -29,6 +29,8 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
     notifications, in-page notices and the heartbeat are per person.
   - The sidebar lists the other people's chats (read only) and the Dispatcher; its page shows the requests and its
     conversation. Decisions arrive in your chat as notices that open the request.
+- **docs/backlog.md**: the planned BEAST split (a portal plus a machine daemon owning BEAST's sandboxes, not before
+  2026-09-30), then portal restarts that leave daemon agents running.
 
 - **Machine sandboxes** (docs/machines.md, "Machine sandboxes"). A Mac or Windows PC can now hold a pool of
   sandboxes like the host's: git worktrees of its main clone in its `sandbox_root`, each on its own branch,

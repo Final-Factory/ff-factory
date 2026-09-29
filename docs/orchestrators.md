@@ -39,8 +39,9 @@ the server (`server/work.ts`) does three things:
    instead of a new one, and the new text goes into its log.
 2. **Overlaps.** It pulls keys out of the request (specs like `098`, PR numbers, branches of sandboxes and machines,
    and the ids in `related_ids`) and compares it with open requests and those closed in the last 48 hours, live and
-   recent workers (their title, branch and open PR), pending delegation requests, and commits on the base branch in
-   the last 48 hours. A shared request, worker, PR or branch scores 1; a shared spec with a similar title scores 0.8;
+   recent workers wherever they run (their title, and the branch and open PR of their sandbox, this host's or a
+   machine's, or of the machine's main clone), pending delegation requests, and commits on the base branch in the last
+   48 hours. A shared request, worker, PR or branch scores 1; a shared spec with a similar title scores 0.8;
    otherwise title similarity. 0.8 and over is strong. The person's orchestrator gets the overlaps at once, in the
    tool's answer.
 3. **Limits.** Below.
@@ -122,3 +123,6 @@ than Ben's own.
 - Roles are still not enforced: a member's work can go to the owner's machines if the dispatcher sends it there (its brief
   tells it not to).
 - An idle personal orchestrator keeps its process until the server restarts.
+- This host's sandboxes still run in the portal's own process. Moving them behind a daemon, as on the machines, is
+  [backlog.md](backlog.md) item 1; the dispatcher already addresses a daemon's sandbox as `"<machine>/<name>"`, and
+  nothing in the ledger or the routing depends on where a worker runs.

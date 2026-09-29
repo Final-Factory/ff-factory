@@ -244,11 +244,15 @@ export class Orchestrators {
     return [...out.values()];
   }
 
-  /** The people whose workers are in this sandbox or on this machine (the owner when there are none). */
-  peopleAt(where: { sandboxId?: string; machineId?: string }): Requester[] {
+  /**
+   * The people whose workers are in this place (the owner when there are none): a sandbox of this host, a machine's
+   * main clone, or a machine sandbox. Places are the same wherever they live, so a host run by a daemon fits too.
+   */
+  peopleAt(where: { sandboxId?: string; machineId?: string; machineSandbox?: string }): Requester[] {
     const out = new Map<string, Requester>();
+    const here = (s: SessionInfo) => (where.sandboxId ? s.sandboxId === where.sandboxId : s.machineId === where.machineId && (s.machineSandbox ?? '') === (where.machineSandbox ?? ''));
     for (const s of this.store.sessions.values()) {
-      if (s.kind !== 'worker' || (where.sandboxId ? s.sandboxId !== where.sandboxId : s.machineId !== where.machineId)) continue;
+      if (s.kind !== 'worker' || !here(s)) continue;
       for (const r of this.audienceOf(s)) out.set(r.userId.toLowerCase(), r);
     }
     return out.size ? [...out.values()] : [this.d.identity.owner()];
@@ -308,16 +312,37 @@ export class Orchestrators {
     w.updatedAt = now.toISOString();
   }
 
+  /** The branches checked out anywhere: this host's sandboxes, the machines' main clones and their sandboxes. */
   private knownBranches(): string[] {
     const { sandboxes, machines } = this.d.places();
-    return [...sandboxes.flatMap((s) => [s.branch, s.git?.branch ?? '']), ...machines.map((m) => m.git?.branch ?? '')].filter(Boolean);
+    const machineBranches = machines.flatMap((m) => [m.git?.branch ?? '', ...(m.sandboxes ?? []).flatMap((sb) => [sb.branch, sb.git?.branch ?? ''])]);
+    return [...sandboxes.flatMap((s) => [s.branch, s.git?.branch ?? '']), ...machineBranches].filter(Boolean);
+  }
+
+  /**
+   * Where a worker works, whatever computer holds it: a sandbox of this host, a machine sandbox ("m3/sb1") or a
+   * machine's main clone, with its label and the branch and open PR there.
+   */
+  private placeOf(s: SessionInfo): { name: string; label: string; branch?: string; pr?: number } | undefined {
+    const { sandboxes, machines } = this.d.places();
+    const branchOf = (g: Sandbox['git'], fallback?: string) => (g?.branch && g.branch !== 'detached HEAD' ? g.branch : fallback);
+    if (s.sandboxId) {
+      const sb = sandboxes.find((x) => x.id === s.sandboxId);
+      return sb && { name: sb.id, label: displayName(sb), branch: branchOf(sb.git, sb.branch), pr: sb.git?.pr?.number };
+    }
+    const m = s.machineId ? machines.find((x) => x.id === s.machineId) : undefined;
+    if (!m) return undefined;
+    if (s.machineSandbox) {
+      const sb = m.sandboxes?.find((x) => x.id === s.machineSandbox);
+      return sb && { name: `${m.id}/${sb.id}`, label: displayName(sb), branch: branchOf(sb.git, sb.branch), pr: sb.git?.pr?.number };
+    }
+    return { name: m.id, label: displayName(m), branch: branchOf(m.git), pr: m.git?.pr?.number };
   }
 
   /** Everything a new request may repeat: requests open or closed in the last 48 hours, live and recent workers, pending delegations, recent commits. */
   private pool(exceptId?: string): PoolEntry[] {
     const now = this.now().getTime();
     const branches = this.knownBranches();
-    const { sandboxes, machines } = this.d.places();
     const out: PoolEntry[] = [];
     for (const w of this.store.work.values()) {
       if (w.id === exceptId || w.status === 'merged' || w.status === 'cancelled') continue;
@@ -327,17 +352,14 @@ export class Orchestrators {
     for (const s of this.store.sessions.values()) {
       if (s.kind !== 'worker') continue;
       if (!BUSY.includes(s.status) && now - Date.parse(s.lastActivityAt) > 6 * 3_600_000) continue;
-      const sb = s.sandboxId ? sandboxes.find((x) => x.id === s.sandboxId) : undefined;
-      const m = s.machineId ? machines.find((x) => x.id === s.machineId) : undefined;
-      const git = sb?.git ?? m?.git;
-      const keys = new Set([...textKeys(`${s.title}\n${s.lastResult ?? ''}\n${sb?.purpose ?? m?.purpose ?? ''}`, branches), `session:${s.id}`]);
-      const branch = git?.branch && git.branch !== 'detached HEAD' ? git.branch : sb?.branch;
-      if (branch && !['develop', 'main', 'master'].includes(branch)) {
-        keys.add(`branch:${branch.toLowerCase()}`);
-        for (const k of textKeys(branch)) keys.add(k);
+      const place = this.placeOf(s);
+      const keys = new Set([...textKeys(`${s.title}\n${s.lastResult ?? ''}\n${place?.label ?? ''}`, branches), `session:${s.id}`]);
+      if (place?.branch && !['develop', 'main', 'master'].includes(place.branch)) {
+        keys.add(`branch:${place.branch.toLowerCase()}`);
+        for (const k of textKeys(place.branch)) keys.add(k);
       }
-      if (git?.pr) keys.add(`pr:${git.pr.number}`);
-      out.push({ ref: s.id, kind: 'session', title: s.title, keys: [...keys], text: sb ? displayName(sb) : m ? displayName(m) : undefined });
+      if (place?.pr) keys.add(`pr:${place.pr}`);
+      out.push({ ref: s.id, kind: 'session', title: s.title, keys: [...keys], text: place?.label });
     }
     for (const d of this.store.delegations.values()) {
       if (d.status !== 'pending') continue;
@@ -566,7 +588,7 @@ export class Orchestrators {
   workerLine(id: string): string {
     const s = this.store.sessions.get(id);
     if (!s) return `worker ${id}`;
-    return `worker ${id} "${clip(s.title, 60)}"${s.sandboxId ? ` in ${s.sandboxId}` : s.machineId ? ` on ${s.machineId}` : ''}`;
+    return `worker ${id} "${clip(s.title, 60)}"${s.sandboxId ? ` in ${s.sandboxId}` : s.machineId && s.machineSandbox ? ` in ${s.machineId}/${s.machineSandbox}` : s.machineId ? ` on ${s.machineId}` : ''}`;
   }
 
   /** One line per worker with its live state, for list_work. */

@@ -54,7 +54,7 @@ const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1).trimEnd
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 /** `agent "T" (session S) (requested by P) in sandbox X` / `on machine M`: the worker a [worker update] is about. */
-const WORKER = /^agent "(.+?)" \(session ([\w-]+)\)(?: \(requested by [^)]*\))? (?:in sandbox ([\w.-]+|\?)|on machine ([\w.-]+))/;
+const WORKER = /^agent "(.+?)" \(session ([\w-]+)\)(?: \(requested by [^)]*\))? (?:in sandbox ([\w.-]+(?:\/[\w.-]+)?|\?)|on machine ([\w.-]+))/;
 
 /** What a tool call wants, in a few words: the command, the file, or the first string it was given. */
 function describeInput(tool: string, json: string): string | undefined {
