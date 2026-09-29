@@ -152,6 +152,27 @@ export class MachineManager {
   /** Tells the orchestrator (wired by index.ts). */
   report?: (text: string) => void;
 
+  /** A machine's clean-up settings (config machines.cleanup; wired by index.ts). */
+  cleanupFor?: (machineId: string) => { everyMinutes: number; softFreeGB: number };
+  /** A machine's clean-up could not get above its soft threshold (wired by index.ts: the orchestrator and a push). */
+  cleanupNotice?: (machineId: string, text: string) => void;
+
+  /** Send every connected daemon its clean-up settings (after they changed). */
+  pushCleanupConfig() {
+    for (const id of this.links.keys()) {
+      const c = this.cleanupFor?.(id);
+      if (c) this.post(id, { type: 'cleanup_config', config: c }, false);
+    }
+  }
+
+  /** A clean-up pass on the machine now; its result arrives as the machine's lastCleanup. */
+  cleanupNow(machineId: string): string {
+    const m = this.require(machineId);
+    if (!this.links.has(m.id)) throw new Error(`machine ${m.id} is offline`);
+    this.post(m.id, { type: 'cleanup_now' });
+    return `Asked ${m.id} for a clean-up pass; list_machines shows its result (last clean-up) in a minute or two.`;
+  }
+
   /**
    * A machine whose daemon has not come back 2 minutes after this server started or after it dropped, while
    * its host answers ssh, gets redeployed (what add_machine does by hand), at most every 30 minutes.
@@ -557,6 +578,8 @@ export class MachineManager {
     ws.send(JSON.stringify({ type: 'welcome', machineId: id, maxSessions: m.maxSessions, sessions } satisfies ToDaemon));
     const watch = this.outsideWatchFor?.(id);
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
+    const cleanup = this.cleanupFor?.(id);
+    if (cleanup) ws.send(JSON.stringify({ type: 'cleanup_config', config: cleanup } satisfies ToDaemon));
     console.log(`machine ${id} connected`);
   }
 
@@ -709,6 +732,11 @@ export class MachineManager {
       }
       case 'usage':
         this.onUsage?.(id, msg.account, msg.usage);
+        return;
+      case 'cleanup':
+        m.lastCleanup = msg.summary;
+        this.store.putMachine(m);
+        if (msg.notice) this.cleanupNotice?.(id, msg.notice);
         return;
       case 'max_event':
         if (typeof msg.line === 'string' && msg.line.length <= 8192) this.maxEvent?.(id, msg.line);

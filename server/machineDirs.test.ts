@@ -5,7 +5,9 @@ import * as win from './machineDeployWin.ts';
 import { checkDirs, daemonConfig, macDirArg, plist } from './machineDeploy.ts';
 import { daemonLogPath, dirOptions, machineDir, machineForPath } from './machines.ts';
 import { sandboxGuard } from './guard.ts';
-import { appDirOfConfig, tempEnv } from '../machine/daemon.ts';
+import os from 'node:os';
+import { agentTempRoot, appDirOfConfig } from '../machine/daemon.ts';
+import { sessionTempDir } from './cleanup.ts';
 import { editorBinary } from '../machine/unity.ts';
 import { appDirOf } from '../shared/types.ts';
 
@@ -44,8 +46,10 @@ test('machine dirs: daemon.json carries the folders, and leaves unset ones out',
   assert.deepEqual(Object.keys(JSON.parse(daemonConfig(base))).sort(), ['id', 'maxSessions', 'portalUrl', 'repoPath', 'token']);
   assert.equal(appDirOfConfig({ appDir: APP }), APP);
   assert.equal(appDirOfConfig({}, '/Users/b'), path.join('/Users/b', '.ff-factory'));
-  assert.deepEqual(tempEnv('D:\\tmp'), { TMP: 'D:\\tmp', TEMP: 'D:\\tmp', TMPDIR: 'D:\\tmp' });
-  assert.deepEqual(tempEnv(undefined), {});
+  // Each agent gets its own folder under temp_dir (else the system's), removed once its session is gone.
+  assert.equal(agentTempRoot('D:\\tmp'), 'D:\\tmp');
+  assert.equal(agentTempRoot(undefined), os.tmpdir());
+  assert.equal(sessionTempDir('/t', 'ab12-cd/../x'), path.join('/t', 'ffa-ab12-cdx'));
 });
 
 test('machine dirs (Windows scripts): every script works in the app_dir, and the stop also finds a daemon in the old folder', () => {

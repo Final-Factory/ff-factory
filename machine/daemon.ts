@@ -25,6 +25,8 @@ import { readGitStatus } from '../server/gitStatus.ts';
 import { switchBranch } from '../server/switchBranch.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, type CleanupGuard } from '../server/cleanup.ts';
+import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import type { HostStats, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
@@ -51,10 +53,11 @@ export interface DaemonConfig {
 /** The daemon's folder. Exported for tests. */
 export const appDirOfConfig = (cfg: Pick<DaemonConfig, 'appDir'>, home = HOME) => cfg.appDir || path.join(home, '.ff-factory');
 
-/** The environment an agent's process gets for the machine's temp_dir (none without one). Exported for tests. */
-export function tempEnv(tempDir: string | undefined): Record<string, string> {
-  return tempDir ? { TMP: tempDir, TEMP: tempDir, TMPDIR: tempDir } : {};
-}
+/** Where agents' own temp folders go: the machine's temp_dir, else the system's. Exported for tests. */
+export const agentTempRoot = (tempDir: string | undefined) => tempDir || os.tmpdir();
+
+/** The clean-up settings the portal last sent, kept in the daemon's folder so they hold while it is down. */
+export const cleanupConfigFile = (appDir: string) => path.join(appDir, 'cleanup.json');
 
 /** How the daemon measures its Mac and reads its login's plan usage; tests pass fakes (no CLI, no tools). */
 export interface Probes {
@@ -105,6 +108,9 @@ export class Daemon {
   private readonly makeSession: SessionFactory;
   private readonly probes: Probes;
   private maxTail?: FileTail;
+  /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
+  readonly cleaner: CleanupRunner;
+  private cleanupSettings = { ...MACHINE_CLEANUP_DEFAULTS };
 
   constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES) {
     this.cfg = cfg;
@@ -122,6 +128,41 @@ export class Daemon {
     bus.on('event', (e) => {
       if (e.type === 'delta' && this.entries.has(e.sessionId)) this.out({ type: 'delta', sessionId: e.sessionId, text: e.text });
     });
+    try {
+      this.cleanupSettings = { ...this.cleanupSettings, ...JSON.parse(fs.readFileSync(cleanupConfigFile(appDirOfConfig(cfg)), 'utf8')) };
+    } catch {
+      // never sent yet: the defaults
+    }
+    const env = hostCleanupEnv(cfg.tempDir);
+    this.cleaner = new CleanupRunner({
+      settings: () => this.cleanupSettings,
+      diskPaths: () => [HOME, env.tmp, cfg.repoPath],
+      statfs: async (p) => {
+        const st = await fs.promises.statfs(p).catch(() => undefined);
+        return st && { free: st.bavail * st.bsize, total: st.blocks * st.bsize };
+      },
+      pass: async (low) => {
+        const guard = this.cleanupGuard();
+        return runCleanup(await planCleanup({ rules: cleanupRules(env, DEFAULT_CLEANUP), guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }), guard);
+      },
+      consumers: () => biggestConsumers(env),
+      stale: async () => (await staleUnityLibraries([HOME], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
+      log: (e) => appendCleanupLog(appDirOfConfig(cfg), e),
+      done: (summary, notice) => {
+        log(`clean-up (${summary.trigger}): ${summary.removed} item(s), ${((summary.freedBytes ?? 0) / 2 ** 30).toFixed(1)} GB${notice ? `; ${notice}` : ''}`);
+        this.out({ type: 'cleanup', summary, notice });
+      },
+    });
+  }
+
+  /** What clean-up never touches on this machine: the clone, the daemon's folder, Unity, and the temp folders of agents running now. */
+  private cleanupGuard(): CleanupGuard {
+    const c = this.cfg;
+    return {
+      keep: [c.repoPath, appDirOfConfig(c), c.unityEditorRoot, c.unityPath, this.maxEventsFile && path.dirname(this.maxEventsFile)].filter((x): x is string => !!x),
+      inUse: [...this.entries.values()].filter((e) => e.s.live).map((e) => sessionTempDir(agentTempRoot(c.tempDir), e.s.info.id)),
+      home: HOME,
+    };
   }
 
   private get maxEventsFile(): string | undefined {
@@ -150,6 +191,8 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.reportStatus(), 60_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
     this.timers.push(setInterval(() => void this.reportUsage(), USAGE_MS));
+    // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
+    this.timers.push(setInterval(() => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
     // What agents here did as Max (the ffdiscord CLI's lines): forwarded, and queued while the link is down.
     const maxFile = this.maxEventsFile;
     if (maxFile) {
@@ -398,7 +441,8 @@ export class Daemon {
         const spec = holder.e!.spec!;
         // FF_MAX_EVENTS: where the ffdiscord CLI reports what the agent did as Max (this machine's file, tailed above).
         const maxFile = this.maxEventsFile;
-        return buildOptions({ ...spec, claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...tempEnv(this.cfg.tempDir), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}) } }, this.handlers(info.id));
+        // TMP, TEMP and TMPDIR: the session's own folder under temp_dir, removed once the session is gone.
+        return buildOptions({ ...spec, claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}) } }, this.handlers(info.id));
       }, events);
       e = { s, seq: lastSeq };
       holder.e = e;
@@ -452,6 +496,19 @@ export class Daemon {
         }
         return;
       }
+      case 'cleanup_config': {
+        this.cleanupSettings = { ...msg.config };
+        try {
+          fs.mkdirSync(appDirOfConfig(this.cfg), { recursive: true });
+          fs.writeFileSync(cleanupConfigFile(appDirOfConfig(this.cfg)), JSON.stringify(msg.config, null, 2));
+        } catch (e) {
+          log(`clean-up: could not keep its settings: ${(e as Error).message}`);
+        }
+        return;
+      }
+      case 'cleanup_now':
+        void this.cleaner.run('asked').catch((e) => log(`clean-up failed: ${(e as Error).message}`));
+        return;
       case 'welcome': {
         this.maxSessions = msg.maxSessions;
         const known = new Set(msg.sessions.map((s) => s.id));
@@ -517,6 +574,8 @@ export class Daemon {
         e?.s.stop();
         this.entries.delete(msg.sessionId);
         this.awake();
+        // Its own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene").
+        void fs.promises.rm(sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId), { recursive: true, force: true, maxRetries: 2 }).catch(() => undefined);
         return;
       }
       case 'mode':
