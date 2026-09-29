@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { AppState, Machine, SessionInfo } from '../../../shared/types';
+import { platformNoun, type AppState, type Machine, type SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, toast, upsertMachine, useStore } from '../store';
 import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
@@ -10,7 +10,7 @@ import { SessionDetails, SessionView } from './SessionView';
 import { AgentPicker, AgentTabs, AttentionStrip, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
 
-/** One of the user's Macs (docs/machines.md): its daemon's state, its clone, and its agents. */
+/** One of the user's Macs or Windows PCs (docs/machines.md): its daemon's state, its clone, and its agents. */
 export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: AppState; machine: Machine; sessionId?: string; onClose?: () => void }) {
   const now = useNow();
   // Standing agents assigned here have their own page; the tabs are the machine's workers.
@@ -20,6 +20,7 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
   const [label, setLabel] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [confirmRedeploy, setConfirmRedeploy] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(false);
   const [shotsOpen, setShotsOpen] = useState(false);
   const [switchOpen, setSwitchOpen] = useState(false);
   const live = sessions.filter((s) => s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission').length;
@@ -28,6 +29,12 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
   const redeploy = async () => {
     const r = await attempt(api.redeployMachine(m.id, live > 0));
     if (r) upsertMachine(r);
+  };
+  // A daemon stopped on purpose is started; otherwise restarted (its agents stop, so asked first when any run).
+  const daemonAction = m.daemonStopped ? 'start' : 'restart';
+  const controlDaemon = async () => {
+    const r = await attempt(api.machineDaemon(m.id, daemonAction, live > 0));
+    if (r) toast(r.note);
   };
 
   const [details, setDetails] = useDetailsOpen('machine');
@@ -52,7 +59,7 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
           <>
             <span className="ph-facts hide-phone">
               <span className="ph-sep">·</span>
-              <span className="mono">{m.id}</span>
+              <span className="mono">{m.name ?? m.id}</span>
               {m.git && (
                 <>
                   <span className="ph-sep">·</span>
@@ -85,6 +92,14 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
               <button className="btn btn-ghost btn-sm" title="Redeploy the daemon" disabled={m.status === 'deploying'} onClick={() => (live ? setConfirmRedeploy(true) : void redeploy())}>
                 <Icon name="refresh" size={14} /> Redeploy
               </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                title={m.daemonStopped ? 'Start the daemon again' : `Restart the daemon (${m.platform === 'win32' ? 'its scheduled task' : 'its LaunchAgent'}) without redeploying`}
+                disabled={m.status === 'deploying'}
+                onClick={() => (live ? setConfirmRestart(true) : void controlDaemon())}
+              >
+                <Icon name="power" size={14} /> {m.daemonStopped ? 'Start' : 'Restart'}
+              </button>
               <button className="btn btn-ghost btn-sm danger-hover" title="Remove machine" onClick={() => setConfirmRemove(true)}>
                 <Icon name="trash" size={14} /> Remove
               </button>
@@ -93,7 +108,7 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
         >
           <div className="details-row dim small">
             <span>
-              Machine <span className="mono">{m.id}</span>
+              Machine <span className="mono">{m.name ?? m.id}</span> · {platformNoun(m.platform)}
             </span>
             <span>{m.info?.hostname ?? `ssh ${m.host}`}</span>
           </div>
@@ -161,6 +176,16 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
           body={<p>{live} agent(s) are running there. Redeploying restarts the daemon, which stops them; they resume when messaged.</p>}
           onConfirm={redeploy}
           onClose={() => setConfirmRedeploy(false)}
+        />
+      )}
+      {confirmRestart && (
+        <Confirm
+          title={`Restart ${m.id}'s daemon?`}
+          danger
+          confirmLabel="Restart"
+          body={<p>{live} agent(s) are running there. Restarting the daemon stops them; they resume when messaged.</p>}
+          onConfirm={controlDaemon}
+          onClose={() => setConfirmRestart(false)}
         />
       )}
       {confirmRemove && (
@@ -236,7 +261,7 @@ function LabelModal({ machine, onClose }: { machine: Machine; onClose: () => voi
   );
 }
 
-/** Set up a Mac over ssh from the portal host. */
+/** Set up a Mac or a Windows PC over ssh from the portal host. */
 export function AddMachineModal({ onClose }: { onClose: () => void }) {
   const [id, setId] = useState('');
   const [host, setHost] = useState('');
@@ -250,7 +275,7 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
     if (!valid || busy) return;
     setBusy(true);
     const m = await attempt(
-      api.addMachine({ id: slug, host: host.trim() || undefined, portalUrl: portalUrl.trim().replace(/\/+$/, ''), repoPath: repoPath.trim() || undefined, maxSessions: Number(max) || 3 }),
+      api.addMachine({ id: id.trim(), host: host.trim() || undefined, portalUrl: portalUrl.trim().replace(/\/+$/, ''), repoPath: repoPath.trim() || undefined, maxSessions: Number(max) || 3 }),
     );
     setBusy(false);
     if (m) {
@@ -282,8 +307,8 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
         }}
       >
         <p className="dim small">
-          Installs the FF Factory daemon on the Mac over ssh from this host (a LaunchAgent that runs agents there and connects back). Needs ssh key access and Node 22.6+ on
-          the Mac.
+          Installs the FF Factory daemon on a Mac or Windows PC over ssh from this host (a LaunchAgent on a Mac, a scheduled task at logon on Windows) that runs agents
+          there and connects back. The OS is found over ssh. Needs ssh key access, Node 22.6+ and git there; see docs/machines.md for a Windows PC's setup.
         </p>
         <div className="field-row">
           <label className="field">
@@ -296,7 +321,7 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
           </label>
         </div>
         <label className="field">
-          <span>Portal URL the Mac connects to</span>
+          <span>Portal URL the machine connects to</span>
           <input className="input mono" value={portalUrl} onChange={(e) => setPortalUrl(e.target.value)} />
         </label>
         <div className="field-row">

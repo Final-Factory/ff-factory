@@ -115,6 +115,7 @@ export const api = {
     request<{ lines: string[] }>('GET', `/api/sandboxes/${enc(id)}/unity-log?lines=${lines}`),
   addMachine: (req: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number }) => request<Machine>('POST', '/api/machines', req),
   redeployMachine: (id: string, force = false) => request<Machine>('POST', `/api/machines/${enc(id)}/redeploy`, { force }),
+  machineDaemon: (id: string, action: 'start' | 'stop' | 'restart', force = false) => request<{ note: string }>('POST', `/api/machines/${enc(id)}/daemon`, { action, force }),
   labelMachine: (id: string, purpose: string) => request<Machine>('POST', `/api/machines/${enc(id)}/label`, { purpose }),
   removeMachine: (id: string) => request<{ note: string }>('DELETE', `/api/machines/${enc(id)}`),
   createStanding: (req: StandingAgentInput) => request<StandingAgent>('POST', '/api/standing', req),

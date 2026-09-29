@@ -1,8 +1,9 @@
-// The FF Factory machine daemon (docs/machines.md). Runs on a Mac as a LaunchAgent, keeps a WebSocket
-// open to the portal, and runs the portal's agents for this machine locally with the same AgentSession
-// code the portal uses, streaming everything they record back.
+// The FF Factory machine daemon (docs/machines.md). Runs on a Mac as a LaunchAgent, or on a Windows PC from a
+// Task Scheduler task in the user's logged-on session, keeps a WebSocket open to the portal, and runs the
+// portal's agents for this machine locally with the same AgentSession code the portal uses, streaming
+// everything they record back.
 //
-//   node machine/daemon.ts [config.json]      (default ~/.ff-factory/daemon.json)
+//   node machine/daemon.ts [config.json]      (default <home>/.ff-factory/daemon.json)
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +15,7 @@ import { AgentSession, type OptionsFactory, type SessionHandle, type SessionSink
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
-import { MacUnity, MacUnityWatch } from './unity.ts';
+import { MacUnity, MacUnityWatch, realDeps } from './unity.ts';
 import { redactSecrets } from '../server/secrets.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
@@ -78,6 +79,7 @@ export class Daemon {
   private attempt = 0;
   private lastPong = 0;
   private stopped = false;
+  /** What keeps the machine awake while agents run: caffeinate on a Mac, a PowerShell holding SetThreadExecutionState on Windows. */
   private caffeinate?: ChildProcess;
   private maxSessions: number;
   private readonly timers: NodeJS.Timeout[] = [];
@@ -87,7 +89,7 @@ export class Daemon {
   constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES) {
     this.cfg = cfg;
     this.probes = probes;
-    this.unity = new MacUnity(cfg.repoPath);
+    this.unity = new MacUnity(cfg.repoPath, realDeps(process.platform === 'win32' ? 'win32' : 'darwin'), undefined, process.platform === 'win32' ? 'win32' : 'darwin');
     this.makeSession = makeSession;
     this.maxSessions = cfg.maxSessions ?? 3;
     for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'] as SignalName[]) {
@@ -221,7 +223,7 @@ export class Daemon {
 
   private async hello() {
     const [osv, claude] = await Promise.all([
-      run('sw_vers', ['-productVersion'], { timeoutMs: 5000 }),
+      process.platform === 'darwin' ? run('sw_vers', ['-productVersion'], { timeoutMs: 5000 }) : Promise.resolve({ code: -1, stdout: '', stderr: '' }),
       run(this.cfg.claude ?? 'claude', ['--version'], { timeoutMs: 15000 }),
     ]);
     this.send({
@@ -232,10 +234,11 @@ export class Daemon {
       catalog: Object.keys(CATALOG),
       info: {
         hostname: os.hostname(),
-        os: osv.code === 0 ? `macOS ${osv.stdout.trim()}` : `${os.type()} ${os.release()}`,
+        os: osv.code === 0 ? `macOS ${osv.stdout.trim()}` : osName(),
         node: process.version,
         claude: claude.code === 0 ? claude.stdout.trim().split(/\s+/)[0] : undefined,
         daemon: readVersion(),
+        platform: process.platform === 'win32' ? 'win32' : 'darwin',
       },
     });
     this.flush();
@@ -359,11 +362,17 @@ export class Daemon {
     return [...this.entries.values()].filter((e) => e.s.live).length;
   }
 
-  /** caffeinate -i while any agent process is live, so the Mac does not idle-sleep under a run. */
+  /**
+   * Keep the machine from idle-sleeping while any agent process is live: `caffeinate -i` on a Mac; on Windows a
+   * hidden PowerShell that holds SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) until it is killed
+   * or the daemon exits (keepAwakeCommand). Both end with the daemon, so a crash cannot leave the machine awake.
+   */
   private awake() {
     const live = this.liveCount() > 0;
-    if (live && !this.caffeinate && process.platform === 'darwin') {
-      this.caffeinate = spawn('caffeinate', ['-i', '-w', String(process.pid)], { stdio: 'ignore' });
+    const cmd = live && !this.caffeinate ? keepAwakeCommand(process.platform, process.pid) : undefined;
+    if (cmd) {
+      this.caffeinate = spawn(cmd[0], cmd.slice(1), { stdio: 'ignore', windowsHide: true });
+      this.caffeinate.on('error', (e) => log(`keep-awake: ${e.message}`));
       this.caffeinate.on('exit', () => (this.caffeinate = undefined));
     } else if (!live && this.caffeinate) {
       this.caffeinate.kill();
@@ -498,6 +507,32 @@ function prepare(spec: LaunchSpec) {
     const f = path.join(spec.cwd, name);
     if (!fs.existsSync(f)) fs.writeFileSync(f, content);
   }
+}
+
+/** "Windows 11 Pro (10.0.26100)", or the kernel's type and release elsewhere. */
+function osName() {
+  if (process.platform !== 'win32') return `${os.type()} ${os.release()}`;
+  const [, , build] = os.release().split('.').map(Number);
+  // os.version() says "Windows 10 ..." on Windows 11 too; builds from 22000 are Windows 11.
+  const name = os.version().replace(/^Windows 10\b/, build >= 22000 ? 'Windows 11' : 'Windows 10');
+  return `${name} (${os.release()})`;
+}
+
+/**
+ * The command that keeps this machine awake until it is killed or process `pid` (the daemon) exits, or
+ * undefined where there is none. Windows: SetThreadExecutionState on PowerShell's own thread, then waiting
+ * on the daemon; the request ends with that thread. Exported for tests.
+ */
+export function keepAwakeCommand(platform: NodeJS.Platform, pid: number): string[] | undefined {
+  if (platform === 'darwin') return ['caffeinate', '-i', '-w', String(pid)];
+  if (platform !== 'win32') return undefined;
+  const ps = [
+    `$t = Add-Type -Name FFAwake -Namespace FFFactory -PassThru -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'`,
+    // ES_CONTINUOUS | ES_SYSTEM_REQUIRED: no idle sleep; the display may still turn off.
+    '[void]$t::SetThreadExecutionState([uint32]2147483649)',
+    `Wait-Process -Id ${Math.trunc(pid)} -ErrorAction SilentlyContinue`,
+  ].join('; ');
+  return ['powershell.exe', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')];
 }
 
 function readVersion() {

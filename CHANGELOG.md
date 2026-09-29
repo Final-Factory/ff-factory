@@ -12,6 +12,25 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Windows machines** (docs/machines.md, "Windows machines"). A machine can be a Windows PC reached over
+  ssh (Windows OpenSSH Server, cmd.exe or PowerShell as its shell), not only a Mac.
+  - `add_machine` finds the OS over ssh. On Windows it probes node, git, Claude Code and the clone,
+    unpacks the same code bundle into `%USERPROFILE%\.ff-factory\app`, runs `npm ci`, and registers the
+    `FFFactoryDaemon` scheduled task: at the user's logon, in their session, not elevated, at normal
+    priority, supervised and restarted. The scripts go through an encoded PowerShell bootstrap, so the
+    same command works under either default shell.
+  - The daemon on Windows keeps the PC awake with `SetThreadExecutionState` while agents run, and
+    reports CPU, RAM, disk and an NVIDIA GPU. It manages the Unity editor (`Unity.exe`, the hang and
+    crash watch; no dialog watch yet). The guard protects `node.exe`, `claude.exe` and the task, and
+    the backup recipe uses tar, because Git Bash has no rsync.
+  - The hello reports `platform`. `list_machines`, the sidebar and the machine page show Mac or
+    Windows.
+  - Machine ids given with capitals (`LothDesktop`) are stored lower-case and shown as typed.
+  - `machine_daemon` (tool, and Restart/Start on the machine page) starts, stops or restarts a daemon
+    on either OS. Like a redeploy, a stop or restart is refused while agents run unless forced, and a
+    stopped daemon is not redeployed while it is offline.
+  - The offline check runs `ssh <host> exit 0`: `true` is not a command in cmd.exe or PowerShell.
+
 - **People: who asked, and whose account pays** (docs/identity.md). Logins have a display name and a
   role (`node server/user.ts <name> --name … --role owner|member`; the first login is the owner).
   - Every message records its author. In the shared orchestrator chat, each person's name shows above

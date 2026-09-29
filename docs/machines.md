@@ -1,9 +1,13 @@
-# Machines: agents on the user's Macs
+# Machines: agents on the user's Macs and Windows PCs
 
 A machine is a whole computer the portal can run agents on, beside the sandboxes on the host. There
-is no partitioning: agents work in the Mac's main game clone, the one the user uses (no worktree
-unless a task truly needs one). Machines are Macs (the daemon is a LaunchAgent), with ids such as
-`m5` or `mini`.
+is no partitioning: agents work in the machine's main game clone, the one the user uses (no worktree
+unless a task truly needs one). Machines are Macs (the daemon is a LaunchAgent) or Windows PCs (the
+daemon is a scheduled task at the user's logon, [below](#windows-machines)), with ids such as `m5` or
+`lothdesktop`. Ids are lower-case letters, digits and dashes; one given with capitals (`LothDesktop`) is
+stored lower-case and shown as typed, and either spelling works in every tool.
+
+The rest of this page describes the Macs; [Windows machines](#windows-machines) says what differs.
 
 ## Requirements
 
@@ -15,6 +19,9 @@ unless a task truly needs one). Machines are Macs (the daemon is a LaunchAgent),
 | node | 22.6 or newer (versions without native TypeScript support run with `--experimental-strip-types`); the newest node on the PATH the user's own zsh sets up, or in common install locations, is used |
 | Portal URL | a public URL for the portal, e.g. the Tailscale Funnel URL `https://<host>.<tailnet>.ts.net` (config `publicUrl`, or given to `add_machine`) |
 | Sleep | set to never, or agents stop when the Mac sleeps (the daemon holds `caffeinate -i` only while agents run) |
+
+A Windows PC needs the same (reachable over ssh with a key, a clone, Claude Code, node 22.6+) plus git and
+OpenSSH Server: its owner's checklist is in [Setting up a Windows PC](#setting-up-a-windows-pc-for-its-owner).
 
 The portal can listen on `127.0.0.1` only. The Macs reach it through its public URL, not a tailnet IP.
 
@@ -107,6 +114,149 @@ current (`whenCurrent`, up to 12 minutes); the orchestrator gets a `[machines]` 
 resumed. The daemon also leaves out any MCP tool its own code does not know, so a newer portal cannot
 crash an older daemon's launch.
 
+## Windows machines
+
+A Windows PC is a machine like a Mac: same daemon, same protocol, same guard, same tools. `add_machine`
+finds out over ssh which OS it is talking to (`detectPlatform` in `server/machineDeploy.ts`: `uname -s`
+answers on a Mac; on Windows, PowerShell does) and records it (`platform`, also reported in the daemon's
+hello). `list_machines`, the sidebar and the machine page show it.
+
+**How the portal talks to it.** Windows OpenSSH Server hands a command to its default shell, cmd.exe or
+PowerShell, and the two quote differently. So the command line is only
+`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand <base64>` (the same under
+either shell), a small bootstrap that reads the real script from stdin as UTF-8 and runs it; the code bundle
+follows the script on stdin (`server/machineDeployWin.ts`). Nothing depends on which default shell is set.
+
+**What a deploy does** (all in `%USERPROFILE%\.ff-factory`, the same folder as on a Mac):
+
+1. Probe: the user's SID and home, the newest node (the PATH, then nodejs.org, nvm-windows, Volta, fnm and
+   Scoop installs), Claude Code's native `claude.exe` (an npm `claude.cmd` shim cannot be started by the Agent
+   SDK, which then uses its own bundled Claude Code), git, System32's `tar.exe`, whether the user is logged on,
+   and the game clone: a clone of config `repo.url` under the home folder (3 levels deep, not AppData) or
+   near the top of any fixed drive (2 levels, e.g. `D:\FinalFactory` or `D:\dev\FinalFactory`).
+2. Copy the portal's code (the same `git archive` of `server/ shared/ machine/ package*.json`, as a .tar.gz)
+   into `app.new`, unpacked with System32's tar; `npm ci --omit=dev` with that node's own npm.
+3. Stop the old daemon, `app` → `app.old`, `app.new` → `app`, write `daemon.json` (portal URL, id, token,
+   repo path, claude path) and `run-daemon.ps1`, register the **`FFFactoryDaemon`** scheduled task and start it.
+
+**What runs it.** The task starts at logon of that user (trigger and principal by SID), in their interactive
+session (the Claude login, the GPU and the desktop Unity needs), not elevated (`LeastPrivilege`), at normal
+priority (a task's default 7 would give every agent and Unity below-normal CPU, I/O and memory priority), with
+no time limit and no battery or idle conditions. Its action is `powershell.exe -WindowStyle Hidden -File
+run-daemon.ps1`, a supervisor like the portal's own `scripts/supervise.ps1`: it starts
+`node machine/daemon.ts <daemon.json>` hidden, and again whenever it exits (10 s, doubling up to 5 minutes
+while it keeps dying within 5 minutes). Its output is in `.ff-factory\logs\daemon.log` and `daemon.err.log`
+(the previous run's in `*.prev`), the supervisor's own lines in `supervisor.log`. Task Scheduler restarts the
+supervisor itself if it fails.
+
+**Start, stop, restart.** `machine_daemon` (orchestrator tool, and Restart/Start on the machine page) runs
+over ssh: stop disables the task, ends it, kills the supervisor and the daemon with everything they started
+(agents and their shells, but never a Unity editor or Unity Hub, which outlive a daemon restart as on a Mac),
+and enables the task again, so it starts at the next logon; start runs the task. Stop and restart are refused
+while agents run there unless forced, as is a redeploy; a daemon stopped this way is left alone by the
+offline redeploy until it is started or redeployed. On a Mac the same tool unloads, loads or kickstarts the
+LaunchAgent. `remove_machine` stops the daemon and deletes the task; the files stay.
+
+**Only while someone is logged on.** The daemon lives in the user's session: it starts when they log on
+(a locked screen is fine) and stops when they log off. After a reboot (Windows Update) it is back once they
+log on again. A deploy while nobody is logged on installs everything and says so: the machine shows
+"installed, but nobody is logged on".
+
+**On the machine.** The daemon is the same code as on a Mac, with these differences:
+
+- **Awake**: while any agent runs it holds `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`
+  from a hidden PowerShell that waits on the daemon's pid (so a crashed daemon cannot keep the PC awake).
+  The display may still turn off; set sleep to never anyway (below).
+- **Load**: `server/system.ts` as on the BEAST host: CPU, RAM, disk, and an NVIDIA GPU through `nvidia-smi`.
+- **Unity**: the `unity` tool and the hang/crash watch work as on a Mac (`machine/unity.ts` with platform
+  win32): the editor is `Unity.exe` with `-projectPath` of the clone, found in Unity Hub's editor folders
+  (Program Files, or the install location set in the Hub); its log is
+  `%LOCALAPPDATA%\Unity\Editor\Editor.log`. The editor is launched through `Start-Process` so that it is
+  nobody's child and outlives a daemon restart. There is no dialog watch on Windows machines yet (the Mac's
+  reads windows through macOS's System Events), and no App Nap.
+- **Guard**: the same rules. Killing `node.exe` or `claude.exe`, and ending, changing or deleting the
+  `FFFactoryDaemon` task (`schtasks /End|/Change|/Delete`, `Stop-/Disable-/Unregister-/Set-ScheduledTask`) are
+  refused; Unity, Unity Hub and crash handlers are fine to kill. The `.ff-factory` folder is protected in
+  every spelling (`C:\Users\x\.ff-factory`, `~/.ff-factory`, `%USERPROFILE%`, `$env:USERPROFILE`, Git Bash's
+  `/c/Users/...`). The backup-before-discard rule is the same, into `ff-local-backups` beside the clone (e.g.
+  `D:\ff-local-backups\<time>\`); the recipe is a Git Bash line that copies the changed and untracked files
+  with tar, since Git Bash has no rsync.
+
+### Setting up a Windows PC (for its owner)
+
+Once, on the PC, as the user whose desktop the agents should run in. Commands are for an **administrator**
+PowerShell unless it says otherwise.
+
+1. **Tailscale.** Install it from tailscale.com and sign in. The portal host (BEAST) must reach the PC over
+   the tailnet: either join Ben's tailnet (Ben sends an invite), or keep your own tailnet and share the
+   machine with Ben (admin console → the machine → Share). Nothing is needed the other way: the daemon reaches
+   the portal at its public URL.
+2. **OpenSSH Server**, started now and at every boot:
+
+   ```powershell
+   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+   Set-Service -Name sshd -StartupType Automatic
+   Start-Service sshd
+   # Recommended: PowerShell as the ssh shell (cmd.exe, the default, works too).
+   New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -PropertyType String -Force
+   ```
+
+   The installer adds a firewall rule for port 22 (`Get-NetFirewallRule -Name OpenSSH-Server-In-TCP`).
+3. **BEAST's public key.** Ben sends the one-line public key of the portal host (its `id_ed25519.pub`).
+   Where it goes depends on your account, which is the quirk to watch for: **for a member of the
+   Administrators group, OpenSSH ignores `~\.ssh\authorized_keys`** and reads only
+   `C:\ProgramData\ssh\administrators_authorized_keys`, which must be writable by Administrators and SYSTEM
+   only:
+
+   ```powershell
+   # An administrator account:
+   Add-Content -Path C:\ProgramData\ssh\administrators_authorized_keys -Value '<the key Ben sent>'
+   icacls.exe C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F'
+   # A standard account instead (in that user's own, non-admin PowerShell):
+   New-Item -ItemType Directory -Force $env:USERPROFILE\.ssh | Out-Null
+   Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value '<the key Ben sent>'
+   ```
+
+   Your ssh user name is what `whoami` prints after the backslash (with a Microsoft account, the local
+   account name, usually your folder under `C:\Users`).
+4. **Tools**, then log in to Claude Code and clone the game, in a normal (not administrator) terminal:
+
+   ```powershell
+   winget install OpenJS.NodeJS.LTS      # node 22.6 or newer
+   winget install Git.Git                # git and Git Bash (Claude Code needs it); includes git-lfs
+   irm https://claude.ai/install.ps1 | iex   # Claude Code, the native claude.exe
+   # A new terminal, then:
+   claude                                 # log in once, then /exit
+   git lfs install
+   git clone https://github.com/Final-Factory/FinalFactory.git D:\FinalFactory   # or under your home folder
+   ```
+
+   Clone from a normal terminal: a clone made from an administrator one is owned by Administrators, and git
+   in the (non-elevated) daemon then refuses it as "dubious ownership". For Unity work, install Unity Hub and
+   the project's Unity version (ProjectSettings\ProjectVersion.txt) in the Hub's default or chosen folder.
+5. **Never sleep** while plugged in, and stay logged on (locking the screen is fine):
+
+   ```powershell
+   powercfg /change standby-timeout-ac 0
+   powercfg /change hibernate-timeout-ac 0
+   ```
+
+6. **Tell Ben** the PC's Tailscale name as it appears in his tailnet (the MagicDNS name, or its 100.x
+   address), your ssh user name, and a short machine id (letters, digits and dashes; it is stored lower-case
+   and shown as you wrote it, e.g. `LothDesktop`).
+
+Then Ben, on the portal host, adds an ssh alias and checks it answers without a password:
+
+```text
+# ~/.ssh/config on BEAST
+Host lothdesktop
+  HostName <the Tailscale name or 100.x address>
+  User <the ssh user name>
+```
+
+`ssh lothdesktop exit 0` must return at once. Then `add_machine` with `id: LothDesktop` and
+`ssh_host: lothdesktop` (or the Add button in the sidebar) does the rest; `list_machines` shows the progress.
+
 ## Not in v1
 
-Unity lifecycle on the Macs; machines other than Macs.
+The Unity dialog watch on Windows machines; machines other than Macs and Windows PCs.

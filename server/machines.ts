@@ -14,7 +14,7 @@ import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { normalizePurpose } from './sandboxes.ts';
 import { openPr } from './gitStatus.ts';
 import type { AccountIdentity } from './usage.ts';
-import type { EffortLevel, ImageInput, Machine, MachineStats, PermissionMode, PlanUsage, Requester, SessionInfo } from '../shared/types.ts';
+import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineStats, PermissionMode, PlanUsage, Requester, SessionInfo } from '../shared/types.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -162,6 +162,7 @@ export class MachineManager {
         continue;
       }
       if (!this.offlineSince.has(m.id)) this.offlineSince.set(m.id, now);
+      if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
       const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
       if (!why) continue;
       if (!(await reachable(m.host))) continue;
@@ -325,7 +326,8 @@ export class MachineManager {
    * it to connect. Returns at once; progress shows on the record (status/statusDetail).
    */
   deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; purpose?: string; force?: boolean }) {
-    const id = opts.id.trim().toLowerCase();
+    const typed = opts.id.trim();
+    const id = typed.toLowerCase();
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
     if (this.deploying.has(id)) throw new Error(`${id} is already being deployed`);
     const prev = this.store.machines.get(id);
@@ -345,6 +347,8 @@ export class MachineManager {
       info: prev?.info,
       git: prev?.git,
       lastSeen: prev?.lastSeen,
+      platform: prev?.platform,
+      name: typed !== id ? typed : prev?.name,
     });
     void this.runDeploy(machine, token, opts.repoPath);
     return machine;
@@ -356,7 +360,12 @@ export class MachineManager {
     const { ROOT } = await import('./config.ts');
     try {
       const r = await deploy({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), step: (s) => this.update(m.id, { statusDetail: s }) });
-      this.update(m.id, { repoPath: r.repoPath, home: r.home, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
+      this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
+      if (r.started === false) {
+        // Windows: the task runs only in the user's logged-on session (docs/machines.md).
+        this.update(m.id, { status: 'error', statusDetail: `installed, but nobody is logged on to ${m.host}: the daemon starts when its user logs on to the desktop` });
+        return;
+      }
       // The old daemon's connection (if any) closes when launchd stops it; wait for the new one.
       const since = Date.now();
       await new Promise((res) => setTimeout(res, 3000));
@@ -370,7 +379,7 @@ export class MachineManager {
         m.id,
         link && link.since >= since
           ? { status: 'ready', statusDetail: undefined }
-          : { status: 'error', statusDetail: `installed, but the daemon has not connected to ${m.portalUrl}; see ~/.ff-factory/logs/daemon.log on ${m.host}` },
+          : { status: 'error', statusDetail: `installed, but the daemon has not connected to ${m.portalUrl}; see ${daemonLogPath(r.platform)} on ${m.host}` },
       );
     } catch (e) {
       this.update(m.id, { status: 'error', statusDetail: (e as Error).message });
@@ -385,12 +394,28 @@ export class MachineManager {
     const { undeploy } = await import('./machineDeploy.ts');
     let note = '';
     try {
-      await undeploy(m.host);
+      await undeploy(m.host, m.platform);
     } catch (e) {
       note = ` (could not unload the daemon: ${(e as Error).message})`;
     }
     this.remove(m.id);
-    return `Removed ${m.id}${note}. Its files stay in ~/.ff-factory on the machine.`;
+    return `Removed ${m.id}${note}. Its files stay in the .ff-factory folder in its home on the machine.`;
+  }
+
+  /**
+   * Start, stop or restart a machine's daemon over ssh. Stopping or restarting ends its agents, so it is refused
+   * while any run unless forced (as a redeploy is). A stopped daemon is left alone by the offline redeploy until
+   * it is started (or redeployed) again.
+   */
+  async controlDaemon(id: string, action: 'start' | 'stop' | 'restart', force = false): Promise<string> {
+    const m = this.require(id);
+    if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
+    const live = this.liveCount(m.id);
+    if (action !== 'start' && live > 0 && !force) throw new Error(`${m.id} has ${live} agent(s) running; a daemon ${action} stops them. Stop them first or pass force.`);
+    const { controlDaemon } = await import('./machineDeploy.ts');
+    const done = await controlDaemon(m.host, m.platform, action);
+    this.update(m.id, { daemonStopped: action === 'stop' ? true : undefined });
+    return `${m.id}: ${done}.`;
   }
 
   // ---------------------------------------------------------------- sessions
@@ -578,7 +603,7 @@ export class MachineManager {
         const why = daemonMismatch(this.hellos.get(id)!, this.portalHead);
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
         else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
-        Object.assign(m, { info: msg.info, home: msg.home || m.home });
+        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined });
         this.store.putMachine(m);
         const live = new Set(msg.live);
         for (const sid of m.sessionIds) {
@@ -794,11 +819,41 @@ export function redeployDue(m: { status: string; deploying: boolean; liveAgents:
   return `offline for ${Math.round(offlineMs / 60_000)} min`;
 }
 
-/** Whether ssh reaches a host non-interactively (keys only, 10 s). */
+/**
+ * Whether ssh reaches a host non-interactively (keys only, 10 s). The command is `exit 0`, which every default
+ * shell runs (zsh, bash, cmd.exe, PowerShell); `true` is not a command in cmd.exe or PowerShell.
+ */
 export async function sshReachable(host: string): Promise<boolean> {
   const { run } = await import('./proc.ts');
-  const r = await run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, 'true'], { timeoutMs: 20_000 });
+  const r = await run('ssh', SSH_REACHABLE_ARGS(host), { timeoutMs: 20_000 });
   return r.code === 0;
+}
+
+export const SSH_REACHABLE_ARGS = (host: string) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, 'exit', '0'];
+
+/** Where a machine's daemon log is, for messages. */
+export function daemonLogPath(platform: MachinePlatform | undefined): string {
+  return platform === 'win32' ? '%USERPROFILE%\\.ff-factory\\logs\\daemon.log (and daemon.err.log, supervisor.log)' : '~/.ff-factory/logs/daemon.log';
+}
+
+/**
+ * The machine whose clone or home holds `file` (the orchestrator's inline images), or undefined. A Windows
+ * machine's paths compare case-insensitively with either slash; a Mac's exactly.
+ */
+export function machineForPath<M extends Pick<Machine, 'repoPath' | 'home' | 'platform'>>(file: string, machines: M[]): M | undefined {
+  const win = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  return machines.find((m) =>
+    [m.repoPath, m.home].some((r) => {
+      if (!r) return false;
+      if (m.platform === 'win32') {
+        if (!/^[a-z]:[\\/]/i.test(file)) return false;
+        const f = win(file);
+        const root = win(r);
+        return f === root || f.startsWith(root + '/');
+      }
+      return file.startsWith('/') && (file === r || file.startsWith(r.replace(/\/+$/, '') + '/'));
+    }),
+  );
 }
 
 /** The commit a checkout is at, or undefined. */

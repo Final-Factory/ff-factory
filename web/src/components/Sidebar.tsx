@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import type { AppState, SessionInfo } from '../../../shared/types';
+import { platformNoun, type AppState, type SessionInfo } from '../../../shared/types';
 import { useAttention, type AttentionItem } from '../attention';
 import {
   displayName,
@@ -115,7 +115,7 @@ export function Sidebar({
         <Section title="Machines" count={app.machines.length} add="Add a machine" onAdd={onNewMachine}>
           {app.machines.length === 0 && (
             <p className="side-empty">
-              Macs where agents work in the main clone.{' '}
+              Macs and Windows PCs where agents work in the main clone.{' '}
               <button className="link-btn" onClick={onNewMachine}>
                 Add one
               </button>
@@ -127,10 +127,10 @@ export function Sidebar({
               key={m.id}
               title={displayName(m)}
               unused={isUnused(m.purpose)}
-              prefix={m.id}
+              prefix={`${m.name ?? m.id} · ${m.platform === 'win32' ? 'Windows' : 'Mac'}`}
               glance={machineGlance(m, of(m.sessionIds).filter((s) => s.kind !== 'standing'), now)}
               active={selectedMachine === m.id}
-              hint={`Machine ${m.id}${m.git ? ` · ${m.git.branch}` : ''}`}
+              hint={`Machine ${m.name ?? m.id} (${platformNoun(m.platform)}, ssh ${m.host})${m.git ? ` · ${m.git.branch}` : ''}`}
               onClick={() => go({ view: 'machine', machineId: m.id })}
             />
           ))}

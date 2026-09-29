@@ -249,9 +249,17 @@ export interface MachineStats extends HostStats {
 
 export type MachineStatus = 'deploying' | 'ready' | 'error';
 
+/** What a machine runs: a Mac (LaunchAgent) or a Windows PC (Task Scheduler), docs/machines.md. */
+export type MachinePlatform = 'darwin' | 'win32';
+
+/** "Mac" or "Windows PC", for sentences about a machine (a record from before platforms is a Mac). */
+export const platformNoun = (p: MachinePlatform | undefined) => (p === 'win32' ? 'Windows PC' : 'Mac');
+
 export interface Machine {
-  /** Short name, e.g. "m5"; also the MCP/label id. */
+  /** Short name, e.g. "m5"; also the MCP/label id. Lower-case (MACHINE_ID). */
   id: string;
+  /** The id as it was typed when it has capitals, e.g. "LothDesktop" for lothdesktop: shown in its place. */
+  name?: string;
   /** ssh host alias this host deploys to. */
   host: string;
   /** The label, like a sandbox's purpose line. */
@@ -261,7 +269,11 @@ export interface Machine {
   statusDetail?: string;
   online: boolean;
   lastSeen?: string;
-  /** The Mac's main Final Factory clone: where its agents work. */
+  /** Mac or Windows PC; found over ssh at deploy and reported in the daemon's hello. Unset: a Mac (records from before). */
+  platform?: MachinePlatform;
+  /** The daemon was stopped on purpose (machine_daemon stop): not redeployed while offline until started again. */
+  daemonStopped?: boolean;
+  /** The machine's main Final Factory clone: where its agents work. */
   repoPath: string;
   home: string;
   /** Portal URL the daemon connects to. */
@@ -269,7 +281,7 @@ export interface Machine {
   maxSessions: number;
   sessionIds: string[];
   /** Reported by the daemon. */
-  info?: { hostname: string; os: string; node: string; claude?: string; daemon: string };
+  info?: { hostname: string; os: string; node: string; claude?: string; daemon: string; platform?: MachinePlatform };
   git?: GitStatus;
   createdAt: string;
 }
