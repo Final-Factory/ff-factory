@@ -16,7 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { MacUnity, MacUnityWatch, realDeps } from './unity.ts';
-import { SandboxPool, realPoolDeps, type PoolDeps } from './sandboxes.ts';
+import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { MAIN_CLONE, McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { withBaseRepoLock } from '../server/sandboxes.ts';
 import { redactSecrets } from '../server/secrets.ts';
@@ -194,14 +194,19 @@ export class Daemon {
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
   private sandboxRoot(): string | undefined {
-    return (this.poolSettings === undefined ? this.cfg.sandboxes : this.poolSettings)?.root;
+    return this.currentPool()?.root;
+  }
+
+  /** The pool settings in force: the portal's last welcome, else daemon.json's. */
+  private currentPool(): SandboxPoolSettings | null | undefined {
+    return this.poolSettings === undefined ? this.cfg.sandboxes : this.poolSettings;
   }
 
   /** What clean-up never touches on this machine: the clone, its sandboxes, the daemon's folder, Unity, and the temp folders of agents running now. */
   private cleanupGuard(): CleanupGuard {
     const c = this.cfg;
     return {
-      keep: [c.repoPath, this.sandboxRoot(), appDirOfConfig(c), c.unityEditorRoot, c.unityPath, this.maxEventsFile && path.dirname(this.maxEventsFile)].filter((x): x is string => !!x),
+      keep: [c.repoPath, this.sandboxRoot(), appDirOfConfig(c), c.unityEditorRoot, c.unityPath, this.maxEventsFile && path.dirname(this.maxEventsFile), ...(this.currentPool()?.protectedPaths ?? [])].filter((x): x is string => !!x),
       inUse: [...this.entries.values()].filter((e) => e.s.live).map((e) => sessionTempDir(agentTempRoot(c.tempDir), e.s.info.id)),
       home: HOME,
     };
@@ -580,7 +585,9 @@ export class Daemon {
     if (sb.status !== 'ready') return `sandbox ${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`;
     if (path.resolve(sb.path).toLowerCase() !== path.resolve(spec.cwd).toLowerCase()) return `sandbox ${sb.id} is at ${sb.path}, not ${spec.cwd}`;
     const max = this.poolSettings?.maxAgentsPerSandbox ?? this.cfg.sandboxes?.maxAgentsPerSandbox ?? 2;
-    return this.liveIn(sb.id) >= max ? `already ${max} agents running in sandbox ${sb.id} (max_agents_per_sandbox)` : undefined;
+    if (this.liveIn(sb.id) >= max) return `already ${max} agents running in sandbox ${sb.id} (max_agents_per_sandbox)`;
+    const inSandboxes = [...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox).length;
+    return totalAgentsRefusal(inSandboxes, this.currentPool());
   }
 
   /** The pool settings the portal last sent (welcome). */
@@ -700,6 +707,11 @@ export class Daemon {
           const live = this.liveIn(msg.sandbox);
           reply(live ? Promise.reject(new Error(`${live} agent(s) still run in sandbox ${msg.sandbox}; stop them first`)) : this.pool.remove(msg.sandbox, msg.deleteBranch));
         } else if (msg.op === 'log') reply(Promise.resolve().then(() => this.pool.log(msg.sandbox, msg.lines)));
+        else if (msg.op === 'adopt') reply(this.pool.adopt({ id: msg.sandbox, path: msg.path, branch: msg.branch, base: msg.base, createdAt: msg.createdAt, logPath: msg.logPath }));
+        else if (msg.op === 'release') {
+          const live = this.liveIn(msg.sandbox);
+          reply(live ? Promise.reject(new Error(`${live} agent(s) still run in sandbox ${msg.sandbox}; stop them first`)) : Promise.resolve().then(() => this.pool.release(msg.sandbox)));
+        }
         return;
       }
       case 'unity': {

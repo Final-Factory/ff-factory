@@ -9,11 +9,11 @@ import { ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
-import { PROTOCOL_VERSION, SANDBOX_PROTOCOL, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ADOPT_PROTOCOL, PROTOCOL_VERSION, SANDBOX_PROTOCOL, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
-import type { DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
+import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
@@ -56,10 +56,15 @@ export interface SandboxLimits {
   maxUnity?: number;
   diskWarnGB?: number;
   diskCriticalGB?: number;
+  /** Live agents across all its sandboxes (unset: no total). */
+  maxSandboxAgents?: number;
 }
 
+/** A machine's pool extras (docs/beast-machine.md): the Library seed, editor priority and the folders never to touch. */
+export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'protectedPaths'>;
+
 /** The pool settings of a machine (its sandbox_root and limits, with defaults), or null when it has no sandbox_root. Exported for tests. */
-export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits): SandboxPoolSettings | null {
+export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits & PoolExtras): SandboxPoolSettings | null {
   if (!m.sandboxRoot) return null;
   const warn = m.diskWarnGB ?? 50;
   return {
@@ -69,6 +74,40 @@ export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits):
     maxUnity: m.maxUnity ?? 2,
     diskWarnGB: warn,
     diskCriticalGB: Math.min(m.diskCriticalGB ?? 20, warn),
+    ...(m.maxSandboxAgents !== undefined ? { maxAgents: m.maxSandboxAgents } : {}),
+    ...(m.librarySeed ? { librarySeed: m.librarySeed } : {}),
+    ...(m.librarySeedCopy ? { librarySeedCopy: m.librarySeedCopy } : {}),
+    ...(m.librarySeedGB !== undefined ? { librarySeedGB: m.librarySeedGB } : {}),
+    ...(m.unityBelowNormal ? { belowNormal: true } : {}),
+    ...(m.protectedPaths?.length ? { protectedPaths: m.protectedPaths } : {}),
+  };
+}
+
+/**
+ * What the portal's own host takes from this server's config when it becomes a machine (add_machine local, docs/
+ * beast-machine.md): the base clone as its main clone, the host's sandbox root, limits, Library seed, protected paths
+ * (plus this app and its data) and disk thresholds, editors below normal (the live game wins), and this server's own
+ * loopback address. Anything add_machine is given explicitly wins. Exported for tests.
+ */
+export function localMachineDefaults(cfg: Pick<Config, 'port' | 'repo' | 'sandboxRoot' | 'limits' | 'protectedPaths' | 'dataDir' | 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'hostGuard'>, root = ROOT) {
+  const cap = (n: number) => Math.max(1, Math.min(8, n));
+  return {
+    host: 'localhost',
+    portalUrl: `http://127.0.0.1:${cfg.port}`,
+    repoPath: cfg.repo.basePath,
+    sandboxRoot: cfg.sandboxRoot,
+    maxSandboxes: cap(cfg.limits.maxSandboxes),
+    maxUnity: Math.max(0, Math.min(8, cfg.limits.maxUnity)),
+    // This host had one ceiling for all its workers (limits.maxSessions) and none per sandbox.
+    maxSandboxAgents: cap(cfg.limits.maxSessions),
+    maxAgentsPerSandbox: cap(cfg.limits.maxSessions),
+    diskWarnGB: cfg.hostGuard.warnFreeGB,
+    diskCriticalGB: Math.min(cfg.hostGuard.criticalFreeGB, cfg.hostGuard.warnFreeGB),
+    protectedPaths: [...new Set([...cfg.protectedPaths, root, cfg.dataDir].filter(Boolean))],
+    librarySeed: cfg.librarySeed,
+    librarySeedCopy: cfg.librarySeedCopy,
+    librarySeedGB: cfg.librarySeedCopy === 'clone' ? 10 : cfg.librarySeedGB,
+    unityBelowNormal: true,
   };
 }
 
@@ -79,7 +118,7 @@ export function limitOptions(opts: SandboxLimits, prev: SandboxLimits | undefine
     if (v !== undefined && (!Number.isInteger(v) || v < min || v > max)) throw new Error(`${k} must be a whole number from ${min} to ${max}`);
     return v;
   };
-  const out = { maxSandboxes: pick('maxSandboxes', 1, 8), maxAgentsPerSandbox: pick('maxAgentsPerSandbox', 1, 8), maxUnity: pick('maxUnity', 0, 8), diskWarnGB: pick('diskWarnGB', 1, 10_000), diskCriticalGB: pick('diskCriticalGB', 1, 10_000) };
+  const out = { maxSandboxes: pick('maxSandboxes', 1, 8), maxAgentsPerSandbox: pick('maxAgentsPerSandbox', 1, 8), maxUnity: pick('maxUnity', 0, 8), diskWarnGB: pick('diskWarnGB', 1, 10_000), diskCriticalGB: pick('diskCriticalGB', 1, 10_000), maxSandboxAgents: pick('maxSandboxAgents', 1, 16) };
   if (out.diskWarnGB !== undefined && out.diskCriticalGB !== undefined && out.diskCriticalGB > out.diskWarnGB) throw new Error('disk_critical_gb must not be above disk_warn_gb');
   return out;
 }
@@ -322,6 +361,7 @@ export class MachineManager {
   /** A clean-up pass on the machine now; its result arrives as the machine's lastCleanup. */
   cleanupNow(machineId: string): string {
     const m = this.require(machineId);
+    if (m.local) throw new Error(`${m.id} is this host: its disk is cleaned by this host's guard (host_recovery "cleanup"), not by its daemon`);
     if (!this.links.has(m.id)) throw new Error(`machine ${m.id} is offline`);
     this.post(m.id, { type: 'cleanup_now' });
     return `Asked ${m.id} for a clean-up pass; list_machines shows its result (last clean-up) in a minute or two.`;
@@ -342,12 +382,13 @@ export class MachineManager {
       if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
       const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
       if (!why) continue;
-      if (!(await reachable(m.host))) continue;
+      // The portal's own host needs no ssh: it is always there when this code runs.
+      if (!m.local && !(await reachable(m.host))) continue;
       this.lastAutoDeploy.set(m.id, now);
       try {
         this.deployMachine({ id: m.id });
         done.push(m.id);
-        this.report?.(`[machines] ${m.id} was offline for ${Math.round((now - this.offlineSince.get(m.id)!) / 60_000)} min while ssh reached it; redeploying its daemon (as add_machine does).`);
+        this.report?.(`[machines] ${m.id} was offline for ${Math.round((now - this.offlineSince.get(m.id)!) / 60_000)} min${m.local ? '' : ' while ssh reached it'}; redeploying its daemon (as add_machine does).`);
       } catch (e) {
         this.report?.(`[machines] ${m.id} is offline and could not be redeployed: ${(e as Error).message}`);
       }
@@ -363,10 +404,26 @@ export class MachineManager {
   portalHead: string | undefined = gitHead(ROOT);
   private readonly reportedOutdated = new Map<string, string>();
 
+  /** The protocol a connected daemon said hello with, or undefined. */
+  protocolOf(id: string): number | undefined {
+    return this.isOnline(id) ? this.hellos.get(id)?.protocol : undefined;
+  }
+
   /** Why a connected machine's daemon does not match this portal (a redeploy fixes it), or undefined. */
   outdated(id: string): string | undefined {
     const h = this.hellos.get(id);
     return h && this.isOnline(id) ? daemonMismatch(h, this.portalHead) : undefined;
+  }
+
+  /**
+   * Why a daemon may not take a new agent, or undefined: it is outdated, except that with config
+   * machines.keepAgentsOnRestart (backlog step 2) one from another commit that speaks this protocol still may (its
+   * agents outlived the portal's update; it is redeployed once idle).
+   */
+  incompatible(id: string): string | undefined {
+    const why = this.outdated(id);
+    if (!why || this.cfg.machines?.keepAgentsOnRestart !== true) return why;
+    return this.hellos.get(id)?.protocol === PROTOCOL_VERSION ? undefined : why;
   }
 
   /**
@@ -413,9 +470,9 @@ export class MachineManager {
       const m = this.store.machines.get(id);
       if (!m) return `no machine "${id}"`;
       const online = this.isOnline(id) && this.hellos.has(id);
-      const why = this.outdated(id);
+      const why = this.incompatible(id);
       if (online && !why && !this.deploying.has(id)) return undefined;
-      if (why) this.checkOutdated();
+      if (this.outdated(id)) this.checkOutdated();
       if (Date.now() >= until) {
         if (this.deploying.has(id)) return `its daemon is still being redeployed (${m.statusDetail ?? 'deploying'})`;
         return why ? `its daemon is outdated (${why})` : `it is offline${m.statusDetail ? ` (${m.statusDetail})` : ''}`;
@@ -512,12 +569,22 @@ export class MachineManager {
    * Add a machine, or redeploy one (same id): mint a token, install the daemon over ssh and wait for
    * it to connect. Returns at once; progress shows on the record (status/statusDetail).
    */
-  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; purpose?: string; force?: boolean } & MachineDirs & SandboxLimits) {
+  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; purpose?: string; force?: boolean; local?: boolean } & MachineDirs & SandboxLimits & PoolExtras) {
     const typed = opts.id.trim();
     const id = typed.toLowerCase();
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
     if (this.deploying.has(id)) throw new Error(`${id} is already being deployed`);
     const prev = this.store.machines.get(id);
+    const local = opts.local ?? prev?.local ?? false;
+    if (prev && !!prev.local !== local) throw new Error(`${id} is ${prev.local ? "the portal's own host" : 'a machine reached over ssh'}; remove it first to change that`);
+    if (local) {
+      const other = this.list().find((m) => m.local && m.id !== id);
+      if (other) throw new Error(`${other.id} is already the portal's own host as a machine; there can be only one`);
+      if (process.platform !== 'win32' && !this.allowLocalAnywhere) throw new Error("a local machine (the portal's own host) is only supported on a Windows host so far");
+    }
+    // The portal's own host takes its settings from this server's config where add_machine does not say otherwise.
+    const defaults = local && !prev ? localMachineDefaults(this.cfg) : undefined;
+    if (defaults) opts = { ...defaults, ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)), id: opts.id } as typeof opts;
     const portalUrl = (opts.portalUrl ?? prev?.portalUrl ?? this.cfg.publicUrl ?? '').replace(/\/+$/, '');
     if (!/^https?:\/\/[^/\s]+$/.test(portalUrl)) throw new Error('portal_url is required: the address the machine reaches this portal at, e.g. https://<host>.<tailnet>.ts.net (or set publicUrl in config.json)');
     if (prev && !opts.force && this.liveCount(id) > 0) throw new Error(`${id} has agents running; a redeploy restarts its daemon and stops them. Stop them first or pass force.`);
@@ -527,8 +594,17 @@ export class MachineManager {
     if (prev?.sandboxRoot && dirs.sandboxRoot !== prev.sandboxRoot && prev.sandboxes?.length) {
       throw new Error(`${id} has ${prev.sandboxes.length} sandbox(es) in ${prev.sandboxRoot}; delete them before moving sandbox_root`);
     }
+    const extras: PoolExtras = {
+      protectedPaths: opts.protectedPaths ?? prev?.protectedPaths,
+      librarySeed: opts.librarySeed === '' ? undefined : (opts.librarySeed ?? prev?.librarySeed),
+      librarySeedCopy: opts.librarySeedCopy ?? prev?.librarySeedCopy,
+      librarySeedGB: opts.librarySeedGB ?? prev?.librarySeedGB,
+      unityBelowNormal: opts.unityBelowNormal ?? prev?.unityBelowNormal,
+    };
     const { machine, token } = this.register({
       id,
+      ...(local ? { local: true } : {}),
+      ...extras,
       host: opts.host?.trim() || prev?.host || id,
       purpose: opts.purpose ?? prev?.purpose ?? 'unused',
       status: 'deploying',
@@ -546,8 +622,18 @@ export class MachineManager {
       ...dirs,
       ...limits,
     });
-    void this.runDeploy(machine, token, opts.repoPath, prev?.appDir);
+    // The portal's own host keeps its main clone (the base clone): a redeploy's probe would pick the shortest clone it
+    // finds, which on BEAST could be the live game's checkout.
+    void this.runDeploy(machine, token, opts.repoPath ?? (local ? machine.repoPath : undefined), prev?.appDir);
     return machine;
+  }
+
+  /** Tests only: allow a local machine on a host that is not Windows (the deploy itself is a fake there). */
+  allowLocalAnywhere = false;
+
+  /** The portal's own host as a machine (docs/beast-machine.md), if one is set up. */
+  local(): Machine | undefined {
+    return this.list().find((m) => m.local);
   }
 
   /** The install over ssh (server/machineDeploy.ts); replaced by tests. */
@@ -578,7 +664,7 @@ export class MachineManager {
         if (s === 'installing') installAt = Date.now();
         this.update(m.id, { statusDetail: s });
       };
-      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }) });
+      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : {}) });
       const connected = () => this.deployedDaemonConnected(m.id, installAt, r.version);
       this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
       if (r.started === false && !connected()) {
@@ -606,13 +692,28 @@ export class MachineManager {
     }
   }
 
+  /**
+   * daemon.json extras for the portal's own host: the MCP-for-Unity server its workers had (config unity.mcpServer), no
+   * Max events file of its own (its agents write this server's, which it reads already: the spec names it), and the
+   * host's idle-editor stop (config unity.idleStopMinutes).
+   */
+  private localExtras(): DaemonExtras {
+    const u = this.cfg.unity;
+    return {
+      ...(u.mcpServer ? { unityMcpServer: { command: u.mcpServer.command, args: u.mcpServer.args, ...(u.mcpServer.env ? { env: u.mcpServer.env } : {}) } } : {}),
+      maxEventsFile: null,
+      sandboxIdleStopMinutes: u.idleStopMinutes,
+    };
+  }
+
   /** Stop and unload the daemon on the machine (best effort), then forget the machine here. */
   async removeMachine(id: string) {
     const m = this.require(id);
+    if (m.local && m.sandboxes?.length) throw new Error(`${m.id} still holds ${m.sandboxes.length} sandbox(es): move them back to this host first (migrate_host_sandboxes direction "back"), or delete them`);
     const { undeploy } = await import('./machineDeploy.ts');
     let note = '';
     try {
-      await undeploy(m.host, m.platform, m.appDir);
+      await undeploy(m.host, m.platform, m.appDir, !!m.local);
     } catch (e) {
       note = ` (could not unload the daemon: ${(e as Error).message})`;
     }
@@ -633,7 +734,7 @@ export class MachineManager {
     // A stop is on purpose: its agents stay stopped. A restart resumes the ones it cut off mid-turn.
     if (action !== 'start') this.expectDrop(m.id, action === 'stop' ? false : 'was restarted (machine_daemon restart)');
     const { controlDaemon } = await import('./machineDeploy.ts');
-    const done = await controlDaemon(m.host, m.platform, action, m.appDir);
+    const done = await controlDaemon(m.host, m.platform, action, m.appDir, !!m.local);
     this.update(m.id, { daemonStopped: action === 'stop' ? true : undefined });
     return `${m.id}: ${done}.`;
   }
@@ -678,13 +779,21 @@ export class MachineManager {
       const sb = this.requireSandbox(m.id, sbId);
       this.requireSandboxDaemon(m.id);
       if (sb.status !== 'ready') throw new Error(`sandbox ${m.id}/${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`);
-      const max = poolSettingsOf(m)?.maxAgentsPerSandbox ?? 2;
+      const pool = poolSettingsOf(m);
+      const max = pool?.maxAgentsPerSandbox ?? 2;
       if (this.liveIn(m.id, sb.id) >= max) throw new Error(`already ${max} agents running in sandbox ${m.id}/${sb.id} (max_agents_per_sandbox); stop one first`);
+      const inSandboxes = [...this.sessions.sessions.values()].filter((x) => x.info.machineId === m.id && x.info.machineSandbox && x.live).length;
+      if (pool?.maxAgents !== undefined && inSandboxes >= pool.maxAgents) throw new Error(`already ${inSandboxes} agents running in ${m.id}'s sandboxes (max_sandbox_agents ${pool.maxAgents}); stop one first`);
+    } else if (!s.live && m.local && s.info.kind === 'worker') {
+      throw new Error(`${m.id}'s main clone (${m.repoPath}) is the base its sandboxes are worktrees of: start agents in one of its sandboxes`);
     } else if (!s.live && this.liveIn(m.id, undefined) >= m.maxSessions) throw new Error(`already ${m.maxSessions} agents running in ${m.id}'s main clone; stop one first`);
+    // The portal's own host: its guard's gate (disk space, the sandbox drive, RAM) holds new agent processes there too.
+    const gate = !s.live && m.local && from !== 'system' ? this.localGate?.('agent') : undefined;
+    if (gate) throw new Error(`not started: ${gate}`);
     if (!this.hooks) throw new Error('machines are not wired up');
     // A new agent process is built from the spec by the daemon's own code: an outdated daemon may not understand
     // it (a tool it does not have). A live process only gets the text, so it carries on.
-    const why = s.live ? undefined : this.outdated(m.id);
+    const why = s.live ? undefined : this.incompatible(m.id);
     if (why) {
       this.checkOutdated();
       const busy = this.liveCount(m.id);
@@ -879,8 +988,9 @@ export class MachineManager {
         const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
-        // "The login of the computer it runs on", there: this Mac's login, not this host's.
-        if (run.account === HOST_LOGIN) run.account = machineLogin(id);
+        // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host
+        // it is this host's login, which the usage tracker already polls.
+        if (run.account === HOST_LOGIN && !m.local) run.account = machineLogin(id);
         Object.assign(s.info, run);
         // JSON drops a field the daemon cleared: take the absence as cleared, or a finished turn stays marked mid-turn.
         for (const k of CLEARABLE) if (!(k in run)) delete s.info[k];
@@ -988,7 +1098,8 @@ export class MachineManager {
         return;
       }
       case 'usage':
-        this.onUsage?.(id, msg.account, msg.usage);
+        // The portal's own host: its login is this host's, polled here already (UsageTracker).
+        if (!m.local) this.onUsage?.(id, msg.account, msg.usage);
         return;
       case 'cleanup':
         m.lastCleanup = msg.summary;
@@ -1140,10 +1251,44 @@ export class MachineManager {
   /** A line from the Mac's Max events file (server/max.ts validates it). */
   maxEvent?: (machineId: string, line: string) => void;
 
+  /** The host guard's gate for the portal's own host (wired by index.ts): why a new agent or editor there must wait. */
+  localGate?: (kind: 'editor' | 'agent') => string | undefined;
+
+  /**
+   * Take a worktree that already exists into a machine's pool (the host migration, server/hostMigration.ts). Resolves
+   * once the daemon has it; its snapshot arrives before the answer, so the record here has it too.
+   */
+  async adoptSandbox(machineId: string, req: { id: string; path: string; branch: string; base: string; createdAt: string; logPath?: string; purpose: string }): Promise<string> {
+    const m = this.requireSandboxDaemon(machineId);
+    const h = this.hellos.get(m.id);
+    if (!h || h.protocol < ADOPT_PROTOCOL) throw new Error(`${m.id}'s daemon speaks protocol ${h?.protocol ?? '?'} and cannot adopt sandboxes; redeploy it first`);
+    this.pendingPurpose.set(req.id, req.purpose);
+    try {
+      return await this.sandboxCall(m.id, { op: 'adopt', sandbox: req.id, path: req.path, branch: req.branch, base: req.base, createdAt: req.createdAt, logPath: req.logPath }, 2 * 60_000);
+    } catch (e) {
+      this.pendingPurpose.delete(req.id);
+      throw e;
+    }
+  }
+
+  /** Drop a sandbox from a machine's pool, leaving its folder, branch and editor (the migration back). */
+  async releaseSandbox(machineId: string, sandbox: string): Promise<string> {
+    const m = this.requireSandboxDaemon(machineId);
+    const h = this.hellos.get(m.id);
+    if (!h || h.protocol < ADOPT_PROTOCOL) throw new Error(`${m.id}'s daemon speaks protocol ${h?.protocol ?? '?'} and cannot release sandboxes`);
+    const sb = this.requireSandbox(m.id, sandbox);
+    const text = await this.sandboxCall(m.id, { op: 'release', sandbox: sb.id }, 60_000);
+    m.sandboxes = (m.sandboxes ?? []).filter((s) => s.id !== sb.id);
+    this.store.putMachine(m);
+    return text;
+  }
+
   /** Status, start, stop or restart the Unity editor of a machine's clone, on the machine (machine/unity.ts). */
   unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart', force?: boolean, sandbox?: string) {
     const m = this.require(machineId);
     if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline`);
+    const gate = m.local && (action === 'start' || action === 'restart') ? this.localGate?.('editor') : undefined;
+    if (gate) throw new Error(`not started: ${gate}`);
     // Never a sandbox field to a daemon that would ignore it and act on the main clone.
     const sb = sandbox ? (this.requireSandboxDaemon(m.id), this.requireSandbox(m.id, sandbox).id) : undefined;
     return new Promise<string>((resolve, reject) => {
