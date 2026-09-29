@@ -218,41 +218,42 @@ test("worker updates go to the chats of the people the work is for, never to the
 
 test('one person messages another: it waits unread in their own chat, opens there, and the answer goes back the same way', async ({ authed: page, browser }) => {
   const tag = uniq('person');
-  const mine = notices(page);
-  await page.reload();
   const mateCtx = await mateContext(browser);
   try {
     const me = await appState(page.request);
     const mateChat = (await appState(mateCtx.request)).orchestratorId;
-    // The owner writing to their own chat lets others message them again (a server shared with other tests).
-    await sendMessage(page.request, me.orchestratorId, `hello ${tag}`);
-    await expect.poll(async () => (await appState(page.request)).sessions.find((s) => s.id === me.orchestratorId)?.status).toBe('idle');
-    await go(page, '#/overview');
-
+    const matePage = await mateCtx.newPage();
+    const theirs = notices(matePage);
+    await matePage.goto('/#/overview');
     const text = `Could you run the firewall script on BEAST once? ${tag}`;
-    expect(await useTool(mateCtx.request, mateChat, 'message_person', { to: 'tester', text })).toMatch(/^Sent to tester's orchestrator/);
-    const [m] = await heard(page.request, me.orchestratorId, '[person message]', tag);
-    expect(m).toMatch(/^\[person message\] From Team Mate's orchestrator \(user id teammate\), written for Team Mate:/);
-    await expect.poll(() => mine.filter((n) => n.tag === 'person-teammate').map((n) => n.users)).toEqual([['tester']]);
-
-    // Unread in the sidebar until the owner opens their chat.
-    const sidebar = await openSidebar(page);
+    const sidebar = await openSidebar(matePage);
     const row = sidebar.getByRole('button', { name: /^Orchestrator/ });
+    // Other tests share this server, and a message the teammate writes to their own chat reads it (and lets the owner
+    // write again): send until the unread count is seen.
+    await expect(async () => {
+      await sendMessage(mateCtx.request, mateChat, `ready ${tag}`);
+      expect(await useTool(page.request, me.orchestratorId, 'message_person', { to: 'teammate', text })).toMatch(/^Sent to Team Mate's orchestrator/);
+      await expect(row.getByTestId('unread-people')).toHaveAttribute('title', 'Unread: 1 message from tester', { timeout: 3000 });
+    }).toPass({ timeout: 60_000 });
     await expect(row.getByTestId('unread-people')).toHaveText('1');
-    await expect(row.getByTestId('unread-people')).toHaveAttribute('title', 'Unread: 1 message from Team Mate');
+    const [m] = await heard(mateCtx.request, mateChat, '[person message]', tag);
+    expect(m).toMatch(/^\[person message\] From tester's orchestrator \(user id tester\), written for tester:/);
+    // The notification is the teammate's alone.
+    await expect.poll(() => theirs.filter((n) => n.tag === 'person-tester').map((n) => n.users)).toContainEqual(['teammate']);
+
+    // Opening the chat shows it, and reads it.
     await row.click();
-    const notice = page.locator('.orch .notice.notice-attn', { hasText: tag });
-    await expect(notice.locator('.notice-text')).toHaveText(`Team Mate: ${text}`);
+    const notice = matePage.locator('.orch .notice.notice-attn', { hasText: tag }).last();
+    await expect(notice.locator('.notice-text')).toHaveText(`tester: ${text}`);
     await expect(notice.locator('.notice-body')).toHaveText(text);
-    await expect.poll(async () => (await appState(page.request)).sessions.find((s) => s.id === me.orchestratorId)?.personMessages).toBeUndefined();
-
+    await expect.poll(async () => (await appState(mateCtx.request)).sessions.find((s) => s.id === mateChat)?.personMessages).toBeUndefined();
     // Nobody marks someone else's chat read.
-    expect((await mateCtx.request.post(`/api/sessions/${me.orchestratorId}/seen`, { data: {} })).status()).toBe(403);
+    expect((await page.request.post(`/api/sessions/${mateChat}/seen`, { data: {} })).status()).toBe(403);
 
-    // The answer: the same tool, from the owner's orchestrator to the teammate's.
-    expect(await useTool(page.request, me.orchestratorId, 'message_person', { to: 'teammate', text: `Done, it is allowed now. ${tag}` })).toMatch(/^Sent to Team Mate's orchestrator/);
-    await expect.poll(async () => (await heard(mateCtx.request, mateChat, '[person message]', tag)).length).toBe(1);
-    expect((await heard(mateCtx.request, mateChat, '[person message]', tag))[0]).toMatch(/^\[person message\] From tester's orchestrator \(user id tester\)/);
+    // The answer: the same tool, from the teammate's orchestrator to the owner's; the dispatcher sees neither.
+    expect(await useTool(mateCtx.request, mateChat, 'message_person', { to: 'tester', text: `Done, it is allowed now. ${tag}` })).toMatch(/^Sent to tester's orchestrator/);
+    await expect.poll(async () => (await heard(page.request, me.orchestratorId, '[person message]', tag)).length).toBe(1);
+    expect((await heard(page.request, me.orchestratorId, '[person message]', tag))[0]).toMatch(/^\[person message\] From Team Mate's orchestrator \(user id teammate\)/);
     expect(await heard(page.request, me.dispatcherId!, '[person message]', tag)).toEqual([]);
   } finally {
     await mateCtx.close();
