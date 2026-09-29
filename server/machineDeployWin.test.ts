@@ -390,6 +390,7 @@ test('windows (real PowerShell): probe, unpack, npm ci, install, the daemon says
   // A stand-in portal: the daemon must connect and say hello as a Windows machine.
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0, path: '/machine' });
   t.after(() => wss.close());
+  await new Promise<void>((r) => wss.once('listening', () => r()));
   const hello = new Promise<Record<string, unknown>>((resolve) => wss.on('connection', (ws) => ws.on('message', (d) => {
     const m = JSON.parse(String(d));
     if (m.type === 'hello') resolve(m);
