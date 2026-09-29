@@ -11,6 +11,7 @@ import { SessionManager, type SessionHandle, type SessionSink } from './sessions
 import { MachineManager, RemoteSession, daemonMismatch } from './machines.ts';
 import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
+import { HOST_LOGIN } from './usage.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { backupRootFor, checkOwnCheckout, hasRecentBackup } from './guard.ts';
 import { agentPath, nodeSupport, plist } from './machineDeploy.ts';
@@ -111,8 +112,8 @@ async function setup() {
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url, maxSessions: 1 });
   const daemons: Daemon[] = [];
-  const daemon = (tok = token) => {
-    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1 }, (i, s, o, e) => new FakeAgent(i, s, o, e), FAKE_PROBES);
+  const daemon = (tok = token, agent: typeof FakeAgent = FakeAgent) => {
+    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1 }, (i, s, o, e) => new agent(i, s, o, e), FAKE_PROBES);
     daemons.push(d);
     d.start();
     return d;
@@ -183,6 +184,24 @@ test('machine: a daemon connects, runs a session, and everything it records land
   await until('stopped', () => !s.live);
   sessions.send(s2.info.id, 'second');
   await until('second turn', () => turnEnds.length === 2);
+});
+
+test("machine: a Mac agent on its own login shows on that Mac's login, not this host's (docs/accounts.md)", async (t) => {
+  const { mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  // What AgentSession records on the Mac when its process starts with no token (usage.ts accountKeyOf).
+  class OnLogin extends FakeAgent {
+    override send(text: string, from?: 'human' | 'orchestrator' | 'system', uuid?: string, images?: ImageInput[]) {
+      this.info.account = HOST_LOGIN;
+      return super.send(text, from, uuid, images);
+    }
+  }
+  daemon(undefined, OnLogin);
+  await until('online', () => mm.isOnline('mx'));
+  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  s.send('hello');
+  await until('reported', () => s.info.account !== undefined);
+  assert.equal(s.info.account, 'login:mx');
 });
 
 test('machine: offline sessions show stopped and refuse messages; a reconnect resumes the transcript numbering', async (t) => {

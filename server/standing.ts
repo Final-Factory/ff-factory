@@ -1,4 +1,4 @@
-import { hostClaudeEnvFor } from './secrets.ts';
+import { hostAccount, hostClaudeEnv, hostClaudeEnvFor, machineUsesLogin } from './secrets.ts';
 import { claudeEnvFor } from './identity.ts';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -825,6 +825,7 @@ export class StandingAgents {
         // The host's Claude account (config machines.useHostClaudeEnv), for this agent only; the run's person's own
         // when they have one (config userClaudeEnv, docs/identity.md).
         env: claudeEnvFor(this.cfg, this.currentRequester(a), hostClaudeEnvFor(this.cfg, a.machineId)),
+        login: machineUsesLogin(this.cfg, a.machineId),
         claudeExecutable: undefined,
       };
     }
@@ -834,7 +835,10 @@ export class StandingAgents {
       protectedPaths: [...this.cfg.protectedPaths, ROOT, this.cfg.dataDir],
       offLimits: [this.cfg.sandboxRoot, this.cfg.repo.basePath],
       gameRepos: [this.cfg.repo.url, this.cfg.repo.basePath],
-      env: claudeEnvFor(this.cfg, this.currentRequester(a), { ...this.cfg.claudeEnv }),
+      // Config claudeAccounts.standing: the host token or this host's stored login (docs/accounts.md); the run's
+      // person's own token when they have one.
+      env: claudeEnvFor(this.cfg, this.currentRequester(a), hostClaudeEnv(this.cfg, 'standing')),
+      login: hostAccount(this.cfg, 'standing') === 'login',
       claudeExecutable: this.cfg.claudeExecutable,
     };
   }
@@ -913,6 +917,7 @@ ${a.charter}
         standing: { folder: a.folder, groups: a.tools, offLimits: place.offLimits },
       },
       env: { ...place.env, FF_STANDING_AGENT: a.id },
+      login: place.login,
       claudeExecutable: place.claudeExecutable,
       init: { files: { [NOTES]: this.notesSeed(a) } },
     };

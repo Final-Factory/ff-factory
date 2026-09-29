@@ -153,7 +153,10 @@ after rate-limit events. The orchestrator's `system_status` tool reports the sam
 
 They cover every Claude account in use, each with its own meters: the agents' token
 (`claudeEnv.CLAUDE_CODE_OAUTH_TOKEN`, shown as "host token …abcd"), this host's own claude.ai login,
-and each machine's own login (its daemon polls it the same way and reports it). A login is shown by
+and each machine's own login (its daemon polls it the same way and reports it). Which agents run on
+which is set per role and per machine ([docs/accounts.md](docs/accounts.md)): config `claudeAccounts`
+puts the orchestrator, workers or standing agents here on this host's login instead of the token, and
+`machines.useHostClaudeEnv` puts a Mac's agents on that Mac's login. A login is shown by
 its email and one login signed in on several computers is one account; a token by its last 4
 characters, never its value. Each account lists where it is used and which agents run on it, and an
 agent's details name its account when there is more than one. The collapsed footer shows the

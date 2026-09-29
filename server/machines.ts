@@ -13,7 +13,7 @@ import { PROTOCOL_VERSION, type FromDaemon, type ToDaemon } from './machineProto
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { normalizePurpose } from './sandboxes.ts';
 import { openPr } from './gitStatus.ts';
-import type { AccountIdentity } from './usage.ts';
+import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineStats, PermissionMode, PlanUsage, Requester, SessionInfo } from '../shared/types.ts';
 
 const PING_MS = 20_000;
@@ -620,6 +620,8 @@ export class MachineManager {
         const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
+        // "The login of the computer it runs on", there: this Mac's login, not this host's.
+        if (run.account === HOST_LOGIN) run.account = machineLogin(id);
         Object.assign(s.info, run);
         s.liveFlag = msg.live;
         this.store.putSession(s.info);

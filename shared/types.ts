@@ -148,6 +148,12 @@ export interface SessionInfo {
   effort?: EffortLevel;
   /** The Claude Code session id, used to resume after a restart. */
   sdkSessionId?: string;
+  /**
+   * The Claude account its current process started on, as an account source key (server/usage.ts
+   * accountKeyOf: "token:<sha256 prefix>" or "host:login"). Set by this host's own sessions only; a Mac's
+   * follow the config (sessionSource).
+   */
+  account?: string;
   createdAt: string;
   lastActivityAt: string;
   /** A tool call of its own (not a subagent's) still running: the oldest one, since when (Store.noteActivity). */

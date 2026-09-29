@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { loadConfig, ROOT } from './config.ts';
+import { HOST_ROLES, loadConfig, ROOT } from './config.ts';
 import { Store, bus } from './store.ts';
 import { SandboxManager } from './sandboxes.ts';
 import { SessionManager, snapshotOf } from './sessions.ts';
@@ -22,7 +22,7 @@ import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
-import { scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { planCleanup, runCleanup } from './cleanup.ts';
@@ -33,7 +33,7 @@ import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, ses
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AppState, CreateSandboxRequest, HostStatus, PermissionDecisionRequest, ServerEvent, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
+import type { AppState, CreateSandboxRequest, HostStatus, PermissionDecisionRequest, ServerEvent, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 
 const cfg = loadConfig();
 fs.mkdirSync(cfg.dataDir, { recursive: true });
@@ -992,15 +992,17 @@ usage.personTokens = personTokens;
 function accountsNow() {
   const token = hostToken(cfg);
   const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, id));
+  const hostLogin = (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login';
   return buildAccounts(usage.entries, {
     hostName: os.hostname(),
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
+    hostLoginRoles: HOST_ROLES.filter((r) => hostAccount(cfg, r) === 'login'),
     people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
     machines: machines.list().map((m) => {
       const t = toMachine(m.id);
       return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token) };
     }),
-    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, toMachine, (id) => userToken(cfg, id)), live: s.status !== 'stopped' && s.status !== 'error' })),
+    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, toMachine, (id) => userToken(cfg, id), hostLogin), live: s.status !== 'stopped' && s.status !== 'error' })),
   });
 }
 // Which agents are on which account, and how many run now (the order), change with sessions and machines.
@@ -1012,7 +1014,7 @@ bus.on('event', (e: ServerEvent) => {
   accountTimer ??= setTimeout(() => {
     accountTimer = undefined;
     const live = (s: { status: string }) => (s.status === 'stopped' || s.status === 'error' ? '' : '+');
-    const shape = `${[...store.sessions.values()].map((s) => s.id + live(s)).join()}|${machines.list().map((m) => m.id).join()}|${hostToken(cfg)?.slice(-4) ?? ''}`;
+    const shape = `${[...store.sessions.values()].map((s) => s.id + live(s) + (s.account ?? '')).join()}|${machines.list().map((m) => m.id).join()}|${hostToken(cfg)?.slice(-4) ?? ''}|${JSON.stringify([cfg.claudeAccounts, cfg.machines?.useHostClaudeEnv])}`;
     if (shape === accountShape) return;
     accountShape = shape;
     broadcast({ type: 'accounts', accounts: accountsNow() });
@@ -1022,7 +1024,10 @@ machines.onUsage = (id, account, u) => usage.report(id, account, u);
 for (const s of sessions.sessions.values()) usage.recordCost(s.info.id, s.info.costUsd); // baselines
 sessions.events.on('rateLimit', () => usage.poke());
 sessions.events.on('result', (s: { info: { id: string; costUsd: number } }) => usage.recordCost(s.info.id, s.info.costUsd));
-agents.usageLines = () => accountLines(accountsNow(), store.sessions, new Date());
+agents.usageLines = () => [
+  ...accountSetupLines(cfg, os.hostname(), hostToken(cfg), machines.list().map((m) => m.id), personTokens().map((p) => p.displayName)),
+  ...accountLines(accountsNow(), store.sessions, new Date()),
+];
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
