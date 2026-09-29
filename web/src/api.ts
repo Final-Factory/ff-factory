@@ -126,7 +126,8 @@ export const api = {
   deleteSession: (sessionId: string) => request<unknown>('DELETE', `/api/sessions/${enc(sessionId)}`),
   /** A fresh conversation: your own orchestrator's, or the dispatcher's (the owner only). */
   resetOrchestrator: (which: 'mine' | 'dispatcher' = 'mine') => request<{ id: string }>('POST', '/api/orchestrator/reset', { which }),
-  createSandbox: (req: CreateSandboxRequest) => request<Sandbox>('POST', '/api/sandboxes', req),
+  /** A host sandbox, or (once the host's own daemon holds them, docs/beast-machine.md) where the daemon is making it. */
+  createSandbox: (req: CreateSandboxRequest) => request<Sandbox | { machine: string; id: string; note: string }>('POST', '/api/sandboxes', req),
   deleteSandbox: (id: string) => request<unknown>('DELETE', `/api/sandboxes/${enc(id)}`),
   unity: (id: string, action: 'start' | 'stop') =>
     request<unknown>('POST', `/api/sandboxes/${enc(id)}/unity`, { action }),

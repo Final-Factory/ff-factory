@@ -55,9 +55,9 @@ export function isAutomationBrowser(p: Proc, tmp: string, playwrightDir: string)
   return /--headless\b|-headless\b/i.test(p.cmd) && tempProfiles(p.cmd, tmp).length > 0;
 }
 
-/** Never touched: this server, anything running the app's server script, Claude itself. */
+/** Never touched: this server, anything running the app's server script or a machine daemon (this host's own), Claude itself. */
 export function isProtected(p: Proc, selfPid: number): boolean {
-  return p.pid === selfPid || /server[\\/]index\.ts/i.test(p.cmd) || /^claude(\.exe)?$/i.test(p.name) || /[\\/]claude(\.exe)?["\s]/i.test(p.cmd);
+  return p.pid === selfPid || /server[\\/]index\.ts/i.test(p.cmd) || /machine[\\/]daemon\.ts/i.test(p.cmd) || /^claude(\.exe)?$/i.test(p.name) || /[\\/]claude(\.exe)?["\s]/i.test(p.cmd);
 }
 
 /**

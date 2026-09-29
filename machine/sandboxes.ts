@@ -9,7 +9,7 @@ import { switchBranch } from '../server/switchBranch.ts';
 import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeInfo } from '../server/unityHang.ts';
-import { copyTree, removeTree, run, type RunResult } from '../server/proc.ts';
+import { copyTree, lowerPriority, removeTree, run, type RunResult } from '../server/proc.ts';
 import { armScriptReimport } from './scriptReimport.ts';
 import { MacUnity, MacUnityWatch, realDeps, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
@@ -39,7 +39,7 @@ export interface SandboxEditor {
 
 export interface PoolDeps {
   git(args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<RunResult>;
-  copyTree(src: string, dst: string, signal?: AbortSignal): Promise<void>;
+  copyTree(src: string, dst: string, signal?: AbortSignal, mode?: 'robocopy' | 'clone'): Promise<void>;
   removeTree(dir: string): Promise<RunResult>;
   /** Free bytes on the volume holding `p`, or undefined when unknown. */
   freeBytes(p: string): Promise<number | undefined>;
@@ -49,6 +49,8 @@ export interface PoolDeps {
   bridgeUp(project: string): boolean;
   gitStatus(dir: string): Promise<GitStatus | undefined>;
   now(): number;
+  /** Below-normal priority for an editor (pool setting belowNormal: a game the user plays on this computer wins). */
+  lowerPriority?(pid: number): void;
 }
 
 export interface PoolOptions {
@@ -89,8 +91,18 @@ export function deletable(dir: string, id: string, root: string, repoPath: strin
   return k(P.dirname(P.resolve(dir))) === k(root) && P.basename(P.resolve(dir)) === id;
 }
 
-/** The Library to seed a new sandbox from: the main clone's, else a sandbox's whose editor is stopped, else any sandbox's. Exported for tests. */
-export function librarySource(repoPath: string, sandboxes: { path: string; status: SandboxStatus; editorUp: boolean }[], hasLibrary: (dir: string) => boolean): string | undefined {
+/**
+ * The Library to seed a new sandbox from: the pool's librarySeed (a Library folder itself) when it has something in it,
+ * else the main clone's, else a sandbox's whose editor is stopped, else any sandbox's. Exported for tests.
+ */
+export function librarySource(
+  repoPath: string,
+  sandboxes: { path: string; status: SandboxStatus; editorUp: boolean }[],
+  hasLibrary: (dir: string) => boolean,
+  seed?: string,
+  seedHasFiles: (dir: string) => boolean = nonEmpty,
+): string | undefined {
+  if (seed && seedHasFiles(seed)) return seed;
   if (hasLibrary(repoPath)) return path.join(repoPath, 'Library');
   const ready = sandboxes.filter((s) => s.status === 'ready' && hasLibrary(s.path));
   const pick = ready.find((s) => !s.editorUp) ?? ready[0];
@@ -99,11 +111,28 @@ export function librarySource(repoPath: string, sandboxes: { path: string; statu
 
 /** A Library folder with something in it (a clone that never opened Unity has none, or an empty one). */
 export function hasLibrary(dir: string): boolean {
+  return nonEmpty(path.join(dir, 'Library'));
+}
+
+function nonEmpty(dir: string): boolean {
   try {
-    return fs.readdirSync(path.join(dir, 'Library')).length > 0;
+    return fs.readdirSync(dir).length > 0;
   } catch {
     return false;
   }
+}
+
+/** Whether two paths name the same folder: case-insensitive with either slash on Windows. Exported for tests. */
+export function samePath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  const P = platform === 'win32' ? path.win32 : path.posix;
+  const k = (p: string) => (platform === 'win32' ? P.resolve(p).toLowerCase() : P.resolve(p)).replace(/[\\/]+$/, '');
+  return k(a) === k(b);
+}
+
+/** Live agents across a machine's sandboxes against the pool's total (maxAgents), as a refusal, or undefined. Exported for tests. */
+export function totalAgentsRefusal(liveInSandboxes: number, settings: Pick<SandboxPoolSettings, 'maxAgents'> | undefined | null): string | undefined {
+  const max = settings?.maxAgents;
+  return max !== undefined && liveInSandboxes >= max ? `already ${liveInSandboxes} agents running in this machine's sandboxes (max_sandbox_agents ${max}); stop one first` : undefined;
 }
 
 /** Running editors to stop for being idle: up, no agent mid-turn there, nothing done there for `idleMinutes`. Exported for tests. */
@@ -130,7 +159,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32', repoPath: string, whe
   const shared: UnityDeps = { ...base, procs };
   return {
     git: (args, opts = {}) => run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: ENV }),
-    copyTree: (src, dst, signal) => copyTree(src, dst, { signal }),
+    copyTree: (src, dst, signal, mode) => copyTree(src, dst, { signal, mode }),
     removeTree,
     freeBytes: async (p) => {
       try {
@@ -148,6 +177,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32', repoPath: string, whe
     bridgeUp: (project) => !!bridgeInfo(project).port,
     gitStatus: readGitStatus,
     now: () => Date.now(),
+    lowerPriority,
   };
 }
 
@@ -265,6 +295,7 @@ export class SandboxPool {
     if (this.recs.has(id)) throw new Error(`sandbox "${id}" already exists on this machine`);
     if (this.recs.size >= s.maxSandboxes) throw new Error(`already ${this.recs.size} sandboxes on this machine (max_sandboxes ${s.maxSandboxes}); delete one first`);
     if (id === path.basename(this.o.repoPath).toLowerCase()) throw new Error(`"${id}" is the main clone's folder name: its Unity instance would collide with the main clone's`);
+    if ((s.protectedPaths ?? []).some((p) => slugify(path.win32.basename(p)) === id || path.win32.basename(p).toLowerCase() === id)) throw new Error(`"${id}" is the folder name of a protected checkout: its Unity instance would collide with that editor's`);
     const dir = path.join(s.root, id);
     if (fs.existsSync(dir)) throw new Error(`${dir} already exists on disk; delete it or pick another name`);
     if (!deletable(dir, id, s.root, this.o.repoPath)) throw new Error(`${dir} overlaps the main clone ${this.o.repoPath}; pick another sandbox_root`);
@@ -320,13 +351,14 @@ export class SandboxPool {
       if (co.code !== 0) throw new Error(`checkout failed (${co.code}): ${tail(co.stderr || co.stdout)}`);
       if (seedLibrary && !fs.existsSync(path.join(r.path, 'Library'))) {
         const others = [...this.recs.values()].filter((x) => x.id !== r.id).map((x) => ({ path: x.path, status: x.status, editorUp: this.editorUp(x.id) }));
-        const src = librarySource(this.o.repoPath, others, hasLibrary);
+        const settings = this.need();
+        const src = librarySource(this.o.repoPath, others, hasLibrary, settings.librarySeed);
         if (src) {
-          const gb = this.o.librarySeedGB ?? 30;
+          const gb = settings.librarySeedGB ?? this.o.librarySeedGB ?? 30;
           step('checking disk space for the Library copy');
           await this.requireFreeSpace(gb, `the Library copy (~${gb} GB)`);
           step(`copying the warm Library from ${src} (a few minutes)`);
-          await this.d.copyTree(src, path.join(r.path, 'Library'), signal);
+          await this.d.copyTree(src, path.join(r.path, 'Library'), signal, settings.librarySeedCopy);
           // The copy keeps the other project's script-to-class mappings: the first editor start reimports the scripts.
           const common = await this.d.git(['-C', r.path, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { signal });
           if (common.code !== 0) throw new Error(`could not find the repo's git folder (${common.code}): ${tail(common.stderr)}`);
@@ -401,6 +433,53 @@ export class SandboxPool {
     this.git.delete(id);
     this.changed();
     return `Deleted sandbox ${id} (${r.path})${note}.${problems.length ? ` Warnings: ${problems.join('; ')}` : ''}`;
+  }
+
+  /**
+   * Take a worktree that already exists into the pool, as it is (the host migration, docs/beast-machine.md): it must be
+   * a direct child of the sandbox root named `id` and a worktree of the main clone. Nothing on disk changes; an editor
+   * already running on it is found by the next look (and keeps running).
+   */
+  async adopt(req: { id: string; path: string; branch: string; base: string; createdAt: string; logPath?: string }): Promise<string> {
+    const s = this.need();
+    const id = req.id;
+    if (!SLUG.test(id)) throw new Error(`"${id}" is not a usable sandbox name`);
+    if (this.recs.has(id)) throw new Error(`sandbox "${id}" already exists on this machine`);
+    if (this.recs.size >= s.maxSandboxes) throw new Error(`already ${this.recs.size} sandboxes on this machine (max_sandboxes ${s.maxSandboxes})`);
+    if (!deletable(req.path, id, s.root, this.o.repoPath)) throw new Error(`${req.path} is not a folder named ${id} directly in the sandbox root ${s.root}`);
+    if (!fs.existsSync(req.path)) throw new Error(`${req.path} does not exist`);
+    const common = await this.d.git(['-C', req.path, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+    if (common.code !== 0) throw new Error(`${req.path} is not a git worktree: ${tail(common.stderr || common.stdout)}`);
+    // Real paths: git names the folder as the file system resolves it (a symlinked temp folder on a Mac, a junction on Windows).
+    const real = (p: string) => {
+      try {
+        return fs.realpathSync.native(p);
+      } catch {
+        return p;
+      }
+    };
+    if (!samePath(real(common.stdout.trim()), real(path.join(this.o.repoPath, '.git')))) throw new Error(`${req.path} is a worktree of ${common.stdout.trim()}, not of this machine's main clone ${this.o.repoPath}`);
+    const head = await this.d.git(['-C', req.path, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
+    const branch = head.code === 0 && head.stdout.trim() ? head.stdout.trim() : req.branch;
+    if (this.recs.has(id)) throw new Error(`sandbox "${id}" already exists on this machine`); // raced another adopt
+    const r: Rec = { id, branch, base: req.base, path: req.path, createdAt: req.createdAt, status: 'ready', logPath: req.logPath };
+    this.recs.set(id, r);
+    this.git.set(id, await this.d.gitStatus(r.path).catch(() => undefined));
+    this.changed();
+    void this.tick();
+    return `Adopted sandbox ${id} (${r.path}, branch ${branch}).`;
+  }
+
+  /** Drop a sandbox from the pool without touching its folder, branch or editor (the migration back). */
+  release(id: string): string {
+    const r = this.require(id);
+    if (this.busy.has(id) || r.status === 'creating' || r.status === 'deleting') throw new Error(`sandbox ${id} is ${r.status}; wait until it is done`);
+    this.recs.delete(id);
+    this.editors.delete(id);
+    this.unityState.delete(id);
+    this.git.delete(id);
+    this.changed();
+    return `Released sandbox ${id}; ${r.path} and its editor are left as they are.`;
   }
 
   /** The editor object of a sandbox for this log file, made anew when the log moves (a locked old log gets a fresh name). */
@@ -526,6 +605,8 @@ export class SandboxPool {
         this.unityState.set(r.id, next);
         dirty = true;
       }
+      // A new editor process (started here, restarted by its watch, or already running when adopted).
+      if (pid && pid !== prev.pid && s?.belowNormal) this.d.lowerPriority?.(pid);
       // The watch restarts a hung or crashed editor (within its budget) and reports through onEvent.
       const verdict = await ed.watch?.tick();
       if (verdict === 'gave-up') {

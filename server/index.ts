@@ -9,7 +9,8 @@ import { Store, bus } from './store.ts';
 import { SandboxManager } from './sandboxes.ts';
 import { SessionManager, snapshotOf } from './sessions.ts';
 import { Agents } from './agents.ts';
-import { MachineManager, machineForPath } from './machines.ts';
+import { MachineManager, machineForPath, parseSandboxRef } from './machines.ts';
+import { hostSandboxFrom } from './hostMigration.ts';
 import { ProviderManager } from './providers.ts';
 import { MaxManager } from './max.ts';
 import { groupIntake } from '../shared/intake.ts';
@@ -28,7 +29,7 @@ import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostCla
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
-import { pruneEditorLogs } from './sandboxes.ts';
+import { pruneEditorLogs, slugify } from './sandboxes.ts';
 import { reapBrowsers } from './reaper.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
@@ -141,7 +142,9 @@ machines.report = (text) => {
   }
 };
 // Each machine's own clean-up (docs/self-recovery.md): its settings, and a notice when it cannot free enough.
-machines.cleanupFor = (id) => machineCleanupSettings(cfg, id);
+// The portal's own host as a machine (docs/beast-machine.md) cleans nothing itself: this host's guard already cleans
+// this computer, with its own rules, and counts that daemon's running agents' temp folders as in use.
+machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 machines.cleanupNotice = (machineId, text) => {
   notifier.host(`Disk space on ${machineId}`, text);
   machines.report?.(`[machine ${machineId}] Clean-up cannot free enough disk space. ${text}`);
@@ -251,12 +254,34 @@ sandboxes.events.on('unityRestart', (sb, r) => {
   setTimeout(tell, 15_000);
 });
 
+/** "beast/sb1" as this host's own daemon's sandbox, or undefined. */
+const localRef = (id: string) => {
+  const local = machines.local();
+  const ref = local ? parseSandboxRef(id) : undefined;
+  return ref && ref.machine === local!.id ? ref : undefined;
+};
+/** This host's own daemon's sandboxes as host records named "<machine>/<id>" (the host guard's view). */
+const localSandboxView = () => {
+  const local = machines.local();
+  return local ? (local.sandboxes ?? []).map((x) => hostSandboxFrom(x, `${local.id}/${x.id}`)) : [];
+};
+/** The sessions as the host guard sees them: those of this host's own daemon's sandboxes as if they were this host's. */
+const localSessionView = (): SessionInfo[] => {
+  const local = machines.local();
+  return [...store.sessions.values()].map((s) => {
+    if (!local || s.machineId !== local.id || !s.machineSandbox) return s;
+    const { machineId: _m, machineSandbox, ...rest } = s;
+    return { ...rest, sandboxId: `${local.id}/${machineSandbox}` };
+  });
+};
+
 // The host guard: disk space, the sandbox drive's self-recovery, RAM and idle editors (docs/self-recovery.md).
 const cleanupEnv = { ...hostCleanupEnv(), sandboxRoots: [cfg.sandboxRoot] };
 /** What clean-up never touches here: the sandbox root, the standing agents, the base clone, this app and its data, and the temp folders of agents running now. */
 const hostCleanupGuard = () => ({
   keep: [...cfg.protectedPaths, cfg.sandboxRoot, cfg.standingRoot, cfg.repo.basePath, ROOT, cfg.dataDir, cfg.hostGuard.devDriveVhdx].filter(Boolean),
-  inUse: [...sessions.sessions.values()].filter((s) => s.live && !s.info.machineId).map((s) => sessionTempDir(os.tmpdir(), s.info.id)),
+  // This host's agents, and those this host's own daemon runs (they get their temp folder under the same %TEMP%).
+  inUse: [...sessions.sessions.values()].filter((s) => s.live && (!s.info.machineId || store.machines.get(s.info.machineId)?.local)).map((s) => sessionTempDir(os.tmpdir(), s.info.id)),
   home: cleanupEnv.home,
 });
 const hostHealth = new HostHealthMonitor({
@@ -271,10 +296,12 @@ const hostHealth = new HostHealthMonitor({
   },
   exists: (p) => fs.existsSync(p),
   mem: () => ({ free: os.freemem(), total: os.totalmem() }),
-  sandboxes: () => sandboxes.list(),
-  sessions: () => [...store.sessions.values()],
-  startEditor: async (id) => void (await sandboxes.startUnity(id)),
-  stopEditor: async (id) => void (await sandboxes.stopUnity(id)),
+  // Plus this host's own daemon's sandboxes as "<machine>/<id>" (docs/beast-machine.md): they are on this host's
+  // sandbox drive and disks, so the guard brings their editors and agents back after the drive, and gates them.
+  sandboxes: () => [...sandboxes.list(), ...localSandboxView()],
+  sessions: () => localSessionView(),
+  startEditor: async (id) => void (localRef(id) ? await machines.unity(localRef(id)!.machine, 'start', false, localRef(id)!.sandbox) : await sandboxes.startUnity(id)),
+  stopEditor: async (id) => void (localRef(id) ? await machines.unity(localRef(id)!.machine, 'stop', false, localRef(id)!.sandbox) : await sandboxes.stopUnity(id)),
   interrupt: (id) => sessions.get(id).interrupt(),
   tell: (id, text) => void sessions.send(id, text, 'system', undefined, { bypassGate: true }),
   report: (title, body) => {
@@ -313,6 +340,7 @@ const hostHealth = new HostHealthMonitor({
   log: (line) => console.warn(line),
 });
 sandboxes.startGate = () => hostHealth.blockReason('editor');
+machines.localGate = (kind) => hostHealth.blockReason(kind);
 sessions.startGate = () => hostHealth.blockReason('agent');
 agents.standing.hostGate = () => hostHealth.blockReason('agent');
 agents.hostHealth = hostHealth;
@@ -644,6 +672,12 @@ route('POST', '/api/orchestrator/reset', async (req) => {
 route('POST', '/api/sandboxes', async (req) => {
   const b = await readJson<CreateSandboxRequest>(req);
   need(b.name, 'name');
+  // Once this host's own daemon holds its sandboxes, a new one is made there (docs/beast-machine.md).
+  const on = agents.defaultSandboxMachine();
+  if (on) {
+    const note = await machines.createSandbox(on, b);
+    return { machine: on, id: slugify(b.name), note };
+  }
   return sandboxes.create(b);
 });
 
@@ -1147,7 +1181,8 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   if (req.update && !req.hold) fs.writeFileSync(path.join(cfg.dataDir, 'update.request'), new Date().toISOString());
   // The supervisor has it now (or it was not an update): nothing left to retry after a crash.
   clearPendingRestart(cfg.dataDir);
-  sessions.stopAll();
+  // Backlog step 2 (config machines.keepAgentsOnRestart, docs/beast-machine.md): the daemons' agents carry on.
+  sessions.stopAll((s) => !(keepDaemonAgents() && s.info.machineId));
   voice.unload('server stopping');
   providers.close();
   max.close();
@@ -1172,7 +1207,7 @@ function personTokens() {
 usage.personTokens = personTokens;
 function accountsNow() {
   const token = hostToken(cfg);
-  const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, id));
+  const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));
   const hostLogin = (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login';
   return buildAccounts(usage.entries, {
     hostName: os.hostname(),
@@ -1218,7 +1253,7 @@ function orchestratorAccountsLine() {
   );
 }
 agents.usageLines = () => [
-  ...accountSetupLines(cfg, os.hostname(), hostToken(cfg), machines.list().map((m) => m.id), personTokens().map((p) => p.displayName)),
+  ...accountSetupLines(cfg, os.hostname(), hostToken(cfg), machines.list(), personTokens().map((p) => p.displayName)),
   orchestratorAccountsLine(),
   ...accountLines(accountsNow(), store.sessions, new Date()),
 ];
@@ -1237,9 +1272,12 @@ const outsideWatchLines = () => {
 };
 usage.start();
 
+/** Backlog step 2: a restart leaves the agents machine daemons run alone (config machines.keepAgentsOnRestart). */
+const keepDaemonAgents = () => cfg.machines?.keepAgentsOnRestart === true;
 const drainer = new Drainer({
   dataDir: cfg.dataDir,
-  snapshot: () => [...sessions.sessions.values()].map(snapshotOf),
+  // With keepAgentsOnRestart the daemons' agents are not asked to wrap up: the restart does not stop them.
+  snapshot: () => [...sessions.sessions.values()].filter((s) => !(keepDaemonAgents() && s.info.machineId)).map(snapshotOf),
   tell: (id, text) => void sessions.send(id, text, 'system'),
   stop: (req, drained) => stopServer(req, drained),
   changed: () => broadcast({ type: 'host', host: { ...host, drain: drainer.status } }),

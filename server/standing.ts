@@ -826,8 +826,8 @@ export class StandingAgents {
         gameRepos: [this.cfg.repo.url],
         // The host's Claude account (config machines.useHostClaudeEnv), for this agent only; the run's person's own
         // when they have one (config userClaudeEnv, docs/identity.md).
-        env: claudeEnvFor(this.cfg, this.currentRequester(a), hostClaudeEnvFor(this.cfg, a.machineId)),
-        login: machineUsesLogin(this.cfg, a.machineId),
+        env: claudeEnvFor(this.cfg, this.currentRequester(a), hostClaudeEnvFor(this.cfg, m ?? a.machineId)),
+        login: machineUsesLogin(this.cfg, m ?? a.machineId),
         claudeExecutable: undefined,
       };
     }

@@ -59,6 +59,12 @@ export interface Config {
      * sooner below `softFreeGB` (default 80). A number for every machine, or per machine with "*" for the rest.
      */
     cleanup?: { everyMinutes?: number | Record<string, number>; softFreeGB?: number | Record<string, number> };
+    /**
+     * Backlog step 2 (docs/beast-machine.md), off by default: a portal restart or update leaves the agents daemons run
+     * running (no drain, no stop), and a daemon from another commit that speaks this portal's protocol still takes new
+     * agents (it is redeployed once idle, as before). Turn it on once the host's own daemon has proven itself.
+     */
+    keepAgentsOnRestart?: boolean;
   };
   /**
    * Which Claude account THIS host's agents run on, per role (docs/accounts.md): "token" (the default) is

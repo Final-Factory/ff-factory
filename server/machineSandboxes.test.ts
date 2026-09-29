@@ -280,7 +280,7 @@ test('machine sandboxes: settings, limits, references and snapshots on the porta
   assert.deepEqual(poolSettingsOf({ sandboxRoot: 'D:\\work\\ffsb' }), { root: 'D:\\work\\ffsb', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 50, diskCriticalGB: 20 });
   assert.equal(poolSettingsOf({ sandboxRoot: '/x', diskWarnGB: 10 })!.diskCriticalGB, 10, 'critical never above warn');
 
-  assert.deepEqual(limitOptions({ maxSandboxes: 3 }, { maxUnity: 2, maxSandboxes: 1 }), { maxSandboxes: 3, maxAgentsPerSandbox: undefined, maxUnity: 2, diskWarnGB: undefined, diskCriticalGB: undefined }, 'unset ones are kept');
+  assert.deepEqual(limitOptions({ maxSandboxes: 3 }, { maxUnity: 2, maxSandboxes: 1 }), { maxSandboxes: 3, maxAgentsPerSandbox: undefined, maxUnity: 2, diskWarnGB: undefined, diskCriticalGB: undefined, maxSandboxAgents: undefined }, 'unset ones are kept');
   assert.throws(() => limitOptions({ maxSandboxes: 0 }, undefined), /maxSandboxes must be a whole number from 1 to 8/);
   assert.throws(() => limitOptions({ diskWarnGB: 10, diskCriticalGB: 20 }, undefined), /disk_critical_gb must not be above disk_warn_gb/);
 

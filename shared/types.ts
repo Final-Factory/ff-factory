@@ -329,6 +329,24 @@ export interface Machine {
   diskCriticalGB?: number;
   /** Its sandboxes, as its daemon last reported them (portal-owned: purpose and sessionIds). */
   sandboxes?: MachineSandbox[];
+  /**
+   * The portal's own host (docs/beast-machine.md): its daemon runs on this computer, is deployed and controlled
+   * without ssh, and takes over the host's sandboxes. Its unset settings follow the portal's config (sandboxRoot,
+   * limits, protectedPaths, librarySeed, the workers' Claude account). At most one machine is local.
+   */
+  local?: boolean;
+  /** Live agents that may run at once across all its sandboxes (unset: only max_agents_per_sandbox limits them). */
+  maxSandboxAgents?: number;
+  /** Folders its agents must never touch and its clean-up never deletes, besides its main clone and daemon folder (e.g. a live game). */
+  protectedPaths?: string[];
+  /** A warm Library folder new sandboxes are seeded from first (else the main clone's, else a sandbox's). */
+  librarySeed?: string;
+  /** How the seed is copied on Windows: "clone" (Copy-Item, which block-clones on a ReFS Dev Drive) or "robocopy" (the default). */
+  librarySeedCopy?: 'robocopy' | 'clone';
+  /** Room a Library copy needs, in GB, on top of disk_warn_gb (default 30). */
+  librarySeedGB?: number;
+  /** Its sandbox editors run at below-normal priority, so a game the user plays there wins every contest for the CPU. */
+  unityBelowNormal?: boolean;
   /** Portal URL the daemon connects to. */
   portalUrl: string;
   maxSessions: number;
@@ -376,6 +394,16 @@ export interface SandboxPoolSettings {
   maxUnity: number;
   diskWarnGB: number;
   diskCriticalGB: number;
+  /** Protocol 6 (docs/beast-machine.md): live agents across all sandboxes; unset: no total. */
+  maxAgents?: number;
+  /** Protocol 6: the Library new sandboxes are seeded from first. */
+  librarySeed?: string;
+  librarySeedCopy?: 'robocopy' | 'clone';
+  librarySeedGB?: number;
+  /** Protocol 6: start sandbox editors at below-normal priority. */
+  belowNormal?: boolean;
+  /** Protocol 6: folders clean-up never deletes (a live game), besides the clone, the sandboxes and the daemon's folder. */
+  protectedPaths?: string[];
 }
 
 // ---- providers (docs/ffbox-integration.md): FFBox, reached through the connector it runs ----

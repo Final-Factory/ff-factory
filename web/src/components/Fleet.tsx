@@ -101,14 +101,29 @@ function Meters({ c, health, now }: { c: FleetComputer; health?: HostHealth; now
 
 /** A computer's name, state, load and counts. */
 function Head({ c, health, now, fold }: { c: FleetComputer; health?: HostHealth; now: number; fold?: boolean }) {
-  const tone: Tone = c.machine ? (c.machine.status === 'deploying' ? 'blue' : c.machine.status === 'error' ? 'red' : c.online ? 'green' : 'grey') : 'green';
+  // The host with its own daemon (docs/beast-machine.md): its dot says whether that daemon, which runs its sandboxes, is up.
+  const d = c.daemon;
+  const tone: Tone = c.machine
+    ? c.machine.status === 'deploying'
+      ? 'blue'
+      : c.machine.status === 'error'
+        ? 'red'
+        : c.online
+          ? 'green'
+          : 'grey'
+    : d && (!d.online || d.status === 'error')
+      ? 'red'
+      : d?.status === 'deploying'
+        ? 'blue'
+        : 'green';
   const state = c.machine?.status === 'deploying' ? 'setting up' : c.machine?.status === 'error' ? 'error' : c.online ? 'online' : 'offline';
+  const daemonState = d ? (d.status === 'deploying' ? 'daemon setting up' : !d.online ? 'daemon offline' : d.status === 'error' ? 'daemon error' : '') : '';
   return (
     <>
       <span className="fl-title">
-        <Dot tone={tone} pulse={tone === 'blue'} title={state} />
+        <Dot tone={tone} pulse={tone === 'blue'} title={c.host ? daemonState || (d ? 'host and its daemon online' : 'host') : state} />
         <span className="fl-name">{c.name}</span>
-        <span className="fl-os">{[osName(c.platform), c.host ? 'host' : state === 'online' ? '' : state].filter(Boolean).join(' · ')}</span>
+        <span className="fl-os" data-testid="fl-os">{[osName(c.platform), c.host ? 'host' : state === 'online' ? '' : state, daemonState].filter(Boolean).join(' · ')}</span>
         {c.live > 0 && (
           <span className="fl-agents-sum" data-testid="fl-agents-sum">
             {c.live} {c.live === 1 ? 'agent' : 'agents'}
@@ -344,6 +359,10 @@ export function OverviewBoard({ app }: { app: AppState }) {
               {c.machine ? (
                 <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.machine!.id })} title={`Open ${c.name}`}>
                   <Head c={c} now={now} />
+                </button>
+              ) : c.daemon ? (
+                <button className="board-head-link" onClick={() => go({ view: 'machine', machineId: c.daemon!.id })} title={`Open ${c.name}'s daemon (${c.daemon.id})`}>
+                  <Head c={c} health={app.host?.health} now={now} />
                 </button>
               ) : (
                 <div className="board-head-link">

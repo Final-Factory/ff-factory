@@ -24,7 +24,8 @@ export interface Computer {
 
 export function computersOf(app: AppState): Computer[] {
   const host: Computer[] = app.system ? [{ name: shortHost(app.system.hostname), stats: app.system, online: true, host: true, cleanup: app.host?.health?.lastCleanup }] : [];
-  return [...host, ...app.machines.map((m) => ({ name: m.id, stats: app.machineStats?.[m.id], online: m.online, cleanup: m.lastCleanup }))];
+  // The host's own daemon (docs/beast-machine.md) is this same computer: the host's line stands for it.
+  return [...host, ...app.machines.filter((m) => !m.local).map((m) => ({ name: m.id, stats: app.machineStats?.[m.id], online: m.online, cleanup: m.lastCleanup }))];
 }
 
 const shortHost = (h: string) => h.replace(/\.(local|lan|home)$/i, '');

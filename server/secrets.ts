@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { HOST_ROLES, roleNames, type ClaudeAccount, type Config, type HostRole } from './config.ts';
 import type { SessionKind } from '../shared/types.ts';
@@ -87,15 +88,25 @@ export function scrubTranscripts(dir: string): number {
   return n;
 }
 
+/** A machine as the account rules need it: its id, and whether it is the portal's own host (docs/beast-machine.md). */
+export type MachineRef = string | { id: string; local?: boolean };
+const refId = (m: MachineRef) => (typeof m === 'string' ? m : m.id);
+const refLocal = (m: MachineRef) => typeof m !== 'string' && !!m.local;
+
 /**
- * Whether portal-run agents on `machineId` get this host's claudeEnv (config machines.useHostClaudeEnv; default
- * yes): the value itself, or per machine, with "*" for machines not named.
+ * Whether portal-run agents on a machine get this host's claudeEnv (config machines.useHostClaudeEnv; default
+ * yes): an entry naming the machine, else, for the portal's own host (a local machine, docs/beast-machine.md), what
+ * claudeAccounts.workers says (its sandboxes were this host's, so its workers keep the account they had), else the
+ * value itself, or "*" for machines not named.
  */
-export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'>, machineId: string): boolean {
+export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'> & Partial<Pick<Config, 'claudeAccounts'>>, machine: MachineRef): boolean {
   const u = cfg.machines?.useHostClaudeEnv;
+  const id = refId(machine);
+  if (u && typeof u === 'object' && u[id] !== undefined) return u[id];
+  if (refLocal(machine)) return hostAccount(cfg, 'workers') !== 'login';
   if (u === undefined) return true;
   if (typeof u === 'boolean') return u;
-  return u[machineId] ?? u['*'] ?? true;
+  return u['*'] ?? true;
 }
 
 // ---------------------------------------------------------------- this host's agents (docs/accounts.md)
@@ -142,17 +153,21 @@ export function hostLoginProblem(cfg: Pick<Config, 'claudeEnv'>, env: Record<str
  * CLAUDE_CODE_OAUTH_TOKEN, it overrides the Mac's keychain login for that agent only), or nothing (the Mac's
  * own login). It travels in the launch spec over the authenticated daemon channel and is never logged.
  */
-export function hostClaudeEnvFor(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machineId: string): Record<string, string> {
-  return usesHostClaudeEnv(cfg, machineId) ? { ...cfg.claudeEnv } : {};
+export function hostClaudeEnvFor(cfg: Pick<Config, 'machines' | 'claudeEnv'> & Partial<Pick<Config, 'claudeAccounts'>>, machine: MachineRef): Record<string, string> {
+  if (usesHostClaudeEnv(cfg, machine)) return { ...cfg.claudeEnv };
+  // The portal's own host on its login: config claudeEnv without its credentials, as this host's "login" workers had
+  // it (CLAUDE_CONFIG_DIR and the like stay, so a resumed session finds its history).
+  return refLocal(machine) ? usageEnv({ ...cfg.claudeEnv }) : {};
 }
 
 /** Whether a machine's portal-run agents run on the Mac's own login: they are sent no token (hostClaudeEnvFor). */
-export const machineUsesLogin = (cfg: Pick<Config, 'machines' | 'claudeEnv'>, machineId: string) => !hostClaudeEnvFor(cfg, machineId).CLAUDE_CODE_OAUTH_TOKEN;
+export const machineUsesLogin = (cfg: Pick<Config, 'machines' | 'claudeEnv'> & Partial<Pick<Config, 'claudeAccounts'>>, machine: MachineRef) => !hostClaudeEnvFor(cfg, machine).CLAUDE_CODE_OAUTH_TOKEN;
 
 /** Which Claude account a machine's portal-run agents use, safe to show: "host token …abcd" or "Mac login". */
-export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machineId: string): string {
-  const token = hostClaudeEnvFor(cfg, machineId).CLAUDE_CODE_OAUTH_TOKEN;
-  return token ? `host token …${token.slice(-4)}` : "Mac login (the Mac's own Claude Code login)";
+export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'> & Partial<Pick<Config, 'claudeAccounts'>>, machine: MachineRef): string {
+  const token = hostClaudeEnvFor(cfg, machine).CLAUDE_CODE_OAUTH_TOKEN;
+  if (token) return `host token …${token.slice(-4)}`;
+  return refLocal(machine) ? `${os.hostname()} login (this host's stored Claude login, claudeAccounts.workers)` : "Mac login (the Mac's own Claude Code login)";
 }
 
 /**
@@ -160,12 +175,12 @@ export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machi
  * host's roles, then every machine. `hostName`: this host, `hostToken`: the token its agents would get (usage.ts
  * hostToken), `people`: display names of those with their own token, which wins for work they asked for.
  */
-export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv' | 'machines'>, hostName: string, hostToken: string | undefined, machineIds: string[], people: string[] = []): string[] {
+export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv' | 'machines'>, hostName: string, hostToken: string | undefined, machineIds: MachineRef[], people: string[] = []): string[] {
   const here = (role: HostRole) => (hostAccount(cfg, role) === 'login' || !hostToken ? `${hostName} login` : `host token …${hostToken.slice(-4)}`);
   const logins = HOST_ROLES.filter((r) => hostAccount(cfg, r) === 'login');
   const problem = logins.length ? hostLoginProblem(cfg) : undefined;
   return [
-    `Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): ${HOST_ROLES.map((r) => `${roleNames([r])} here: ${here(r)}`).join('; ')}${machineIds.length ? `; ${machineIds.map((id) => `agents on ${id}: ${accountSource(cfg, id).replace(/ \(.*\)$/, '')}`).join('; ')}` : ''}${people.length ? `; work asked for by ${people.join(', ')}: their own token` : ''}`,
+    `Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): ${HOST_ROLES.map((r) => `${roleNames([r])} here: ${here(r)}`).join('; ')}${machineIds.length ? `; ${machineIds.map((m) => `agents on ${refId(m)}: ${accountSource(cfg, m).replace(/ \(.*\)$/, '')}`).join('; ')}` : ''}${people.length ? `; work asked for by ${people.join(', ')}: their own token` : ''}`,
     ...(problem ? [`WARNING: set to the ${hostName} login (${roleNames(logins)}), which cannot run agents: ${problem}`] : []),
   ];
 }

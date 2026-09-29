@@ -429,7 +429,8 @@ export class HostHealthMonitor {
   // ------------------------------------------------------------ editors and the VHDX
 
   private async idleEditors() {
-    for (const id of idleEditors(this.d.sandboxes(), this.d.sessions(), this.now(), this.d.cfg.unity.idleStopMinutes)) {
+    // This host's own daemon's sandboxes ("<machine>/<id>", docs/beast-machine.md) have their daemon's idle stop, with the same limit.
+    for (const id of idleEditors(this.d.sandboxes().filter((s) => !s.id.includes('/')), this.d.sessions(), this.now(), this.d.cfg.unity.idleStopMinutes)) {
       await this.d.stopEditor(id).catch(() => undefined);
       this.d.report('Stopped an idle editor', `${id}: no agent activity for ${this.d.cfg.unity.idleStopMinutes} min (unity.idleStopMinutes).`);
     }

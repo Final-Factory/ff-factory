@@ -41,7 +41,11 @@ export function NewSandboxModal({ app, onClose }: { app: AppState; onClose: () =
       }),
     );
     setBusy(false);
-    if (sb) {
+    if (sb && 'machine' in sb) {
+      // Made by this host's own daemon: its page fills in from the daemon's next report.
+      navigate({ view: 'msandbox', machineId: sb.machine, sandboxId: sb.id });
+      onClose();
+    } else if (sb) {
       upsertSandbox(sb);
       navigate({ view: 'sandbox', sandboxId: sb.id });
       onClose();

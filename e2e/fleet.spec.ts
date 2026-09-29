@@ -139,7 +139,36 @@ function fleet(s: AppState): AppState {
   };
 }
 
-async function fixedFleet(page: Page, hash = '#/') {
+/**
+ * After the migration (docs/beast-machine.md): BEAST's own daemon, machine "beast", holds its two sandboxes; the host
+ * has none of its own. `online` false: that daemon is down.
+ */
+function migratedFleet(online = true) {
+  return (s: AppState): AppState => {
+    const f = fleet(s);
+    const onBeast = (x: SessionInfo) => (x.sandboxId ? { ...x, sandboxId: undefined, machineId: 'beast', machineSandbox: x.sandboxId } : x);
+    const beast = machine('beast', {
+      name: 'BEAST',
+      local: true,
+      host: 'localhost',
+      platform: 'win32',
+      online,
+      repoPath: 'C:/ffsb/_base',
+      sandboxRoot: 'F:/ffsb',
+      maxSandboxes: 5,
+      maxUnity: 4,
+      maxSandboxAgents: 6,
+      sessionIds: ['b-play', 'b-old'],
+      sandboxes: [
+        { ...machineSb('agent-a', 'Honest co-op playthrough', ['b-play', 'b-old'], 'running', 'feature/honest-coop'), path: 'F:/ffsb/agent-a' },
+        { ...machineSb('agent-b', 'unused', [], 'stopped', 'sandbox/agent-b'), path: 'F:/ffsb/agent-b' },
+      ],
+    });
+    return { ...f, sandboxes: [], sessions: f.sessions.map(onBeast), machines: [beast, ...f.machines] };
+  };
+}
+
+async function fixedFleet(page: Page, hash = '#/', shape: (s: AppState) => AppState = fleet) {
   await page.routeWebSocket('**/ws', (ws) => {
     const server = ws.connectToServer();
     let orchId = '';
@@ -147,7 +176,7 @@ async function fixedFleet(page: Page, hash = '#/') {
       const e = JSON.parse(String(raw)) as ServerEvent;
       if (e.type === 'state') {
         orchId = e.state.orchestratorId;
-        ws.send(JSON.stringify({ type: 'state', state: fleet(e.state) } satisfies ServerEvent));
+        ws.send(JSON.stringify({ type: 'state', state: shape(e.state) } satisfies ServerEvent));
         return;
       }
       // What the live server says about sandboxes, machines and other tests' agents is not this fleet.
@@ -309,4 +338,37 @@ test('fleet: the machine sandbox routes answer, and name what is missing', async
   expect(await r.text()).toMatch(/nosuch/);
   const u = await page.request.post('/api/machines/nosuch/sandboxes/sb1/unity', { data: { action: 'reboot' } });
   expect(u.status()).toBe(400);
+});
+
+test("fleet: BEAST's own daemon holds its sandboxes: they stay under BEAST, and open as its machine sandboxes", async ({ page }) => {
+  await fixedFleet(page, '#/', migratedFleet());
+  const sidebar = await openSidebar(page);
+  const groups = sidebar.locator('.fl-group');
+  // No group of its own for the daemon: the same four computers as before the migration.
+  expect(await groups.evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')))).toEqual(['fl-group-host', 'fl-group-lothdesktop', 'fl-group-m5', 'fl-group-m3']);
+  await expect(sidebar.locator('.section-head', { hasText: 'Computers' }).locator('.count')).toHaveText('4');
+  const beast = sidebar.getByTestId('fl-group-host');
+  await expect(beast.locator('.fl-name')).toHaveText('BEAST');
+  await expect(beast.getByTestId('fl-os')).toHaveText('Windows · host');
+  // Its limits are the daemon's pool now (max_sandboxes 5, max_unity 4).
+  await expect(beast.getByTestId('fl-capacity')).toHaveText('2/5 sandboxes · 1/4 editors');
+  await expect(beast.getByTestId('fl-agents-sum')).toHaveText('1 agent, 1 busy');
+  const play = beast.getByTestId('fl-sandbox-beast/agent-a');
+  await expect(play.getByTestId('fl-agent')).toContainText(/Honest co-op: BEAST client\s*busy\s*1m/);
+  await expect(beast.getByTestId('fl-sandbox-beast/agent-b').locator('.fl-free')).toHaveText('FREE');
+  if (!isMobile(page)) await proof(page, 'sidebar-beast-daemon');
+  await play.getByTestId('fl-agent').click();
+  await expect(page).toHaveURL(/#\/machine\/beast\/sandbox\/agent-a\/b-play$/);
+  await expect(page.getByTestId('machine-sandbox-panel')).toBeVisible();
+});
+
+test("fleet: BEAST's card says when its daemon is down, and opens the daemon's page", async ({ page }) => {
+  await fixedFleet(page, '#/overview', migratedFleet(false));
+  const board = page.getByTestId('overview');
+  await expect(board.locator('.board-card')).toHaveCount(4);
+  const card = board.getByTestId('board-host');
+  await expect(card.getByTestId('fl-os')).toHaveText('Windows · host · daemon offline');
+  await expect(card.locator('.board-head-link')).toHaveAttribute('title', "Open BEAST's daemon (beast)");
+  await card.locator('.board-head-link').click();
+  await expect(page).toHaveURL(/#\/machine\/beast$/);
 });

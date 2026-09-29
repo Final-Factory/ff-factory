@@ -610,8 +610,11 @@ export class SessionManager {
     this.store.deleteTranscript(id);
   }
 
-  /** The server is stopping: every process goes, but what each was doing is kept for the next server. */
-  stopAll() {
-    for (const s of this.sessions.values()) s.stop(false);
+  /**
+   * The server is stopping: every process goes (all of them, or those `which` picks), but what each was doing is kept
+   * for the next server.
+   */
+  stopAll(which: (s: SessionHandle) => boolean = () => true) {
+    for (const s of this.sessions.values()) if (which(s)) s.stop(false);
   }
 }
