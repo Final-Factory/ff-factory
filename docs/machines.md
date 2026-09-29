@@ -374,6 +374,14 @@ by one shows as an error: delete it again). The portal keeps each sandbox (daemo
 the machine record (`sandboxes`). Git operations on the main clone's repository (fetch, worktree add and remove, the
 main clone's own branch switch) take one lock in the daemon.
 
+**In the web UI.** The sidebar groups everything by computer: this host, then each machine, each a collapsible group
+whose header shows its load and `sandboxes/max_sandboxes · editors/max_unity`, then one row per sandbox (label, branch,
+editor, a **FREE** badge) with its live agents under it, then the machine's main clone and its agents. The Overview
+page (`#/overview`) shows the same as one card per computer. A machine sandbox has its own page,
+`#/machine/<machine>/sandbox/<id>`: its agents as tabs, its editor (start, stop, the log read through the daemon), its
+git state and a branch switch (`POST /api/machines/<machine>/sandboxes/<id>/unity`, `GET …/unity-log`,
+`POST …/switch-branch`). The machine's own page keeps its main-clone agents.
+
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the

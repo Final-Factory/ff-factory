@@ -4692,3 +4692,346 @@ body {
 .pv-sig-counts {
   margin: 2px 0 0 18px;
 }
+
+/* ---------- fleet: every computer, its sandboxes and agents (sidebar groups, Overview board) ---------- */
+
+.fl-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: var(--s-2);
+}
+
+.fl-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 6px var(--s-2) 6px 10px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+}
+
+.fl-head:hover {
+  background: var(--hover);
+}
+
+.fl-title > .icon {
+  flex: none;
+  color: var(--text-3);
+  transform: rotate(90deg);
+  transition: transform 0.15s;
+}
+
+.fl-group.collapsed .fl-title > .icon {
+  transform: rotate(-90deg);
+}
+
+.board-head-link {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fl-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.fl-name {
+  font-weight: 680;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.fl-os {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-meters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 7px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.fl-meters-off {
+  font-style: italic;
+}
+
+.fl-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.fl-meter .mbar {
+  height: 11px;
+}
+
+.fl-meter b {
+  font-weight: 600;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.fl-cap {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-places {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 4px;
+  margin-left: 6px;
+  border-left: 1px solid var(--border);
+}
+
+.fl-sb {
+  display: flex;
+  flex-direction: column;
+}
+
+.row.fl-place {
+  min-height: 44px;
+}
+
+.fl-place-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fl-place-title .row-title {
+  min-width: 0;
+}
+
+.fl-free {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid rgba(60, 207, 138, 0.45);
+  background: var(--green-soft);
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  line-height: 15px;
+}
+
+.fl-unity {
+  flex: none;
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.fl-unity.tone-grey {
+  color: var(--text-3);
+  opacity: 0.7;
+}
+
+.fl-branch {
+  font-size: var(--fs-xs);
+}
+
+.fl-agents {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 4px 16px;
+}
+
+.fl-agent {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 26px;
+  padding: 2px var(--s-2) 2px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  text-align: left;
+}
+
+.fl-agent:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.fl-agent.active {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.fl-agent .dot {
+  width: 6px;
+  height: 6px;
+}
+
+.fl-agent-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-agent-for,
+.fl-agent-age {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.fl-agent-age {
+  min-width: 26px;
+  text-align: right;
+}
+
+.fl-agent-state {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.fl-stopped {
+  padding: 1px var(--s-2) 2px 19px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.fl-add-machine {
+  align-self: flex-start;
+  margin: 2px var(--s-3) 0;
+}
+
+.fl-sb-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+
+@media (hover: none) {
+  .fl-agent {
+    min-height: 40px;
+  }
+}
+
+/* The Overview board: one card per computer. */
+.overview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.overview-sum {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.board {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-items: start;
+  gap: var(--s-4);
+  padding: var(--s-4) var(--s-6) var(--s-6);
+}
+
+.board-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-2);
+  min-width: 0;
+}
+
+.board-head-link {
+  padding: 4px 6px 6px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+button.board-head-link:hover {
+  background: var(--hover);
+}
+
+.board-card .fl-name {
+  font-size: var(--fs-lg);
+}
+
+.board-card .fl-places {
+  padding-left: 0;
+  margin-left: 0;
+  border-left: none;
+}
+
+.fl-free-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px var(--s-3);
+}
+
+.fl-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+
+.fl-chip:hover {
+  border-color: var(--text-3);
+  color: var(--text);
+}
+
+@media (max-width: 860px) {
+  .board {
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--s-3);
+  }
+
+  .fl-chip {
+    min-height: 32px;
+  }
+}
