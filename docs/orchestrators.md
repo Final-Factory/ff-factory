@@ -37,13 +37,13 @@ the server (`server/work.ts`) does three things:
 
 1. **Repeats.** An open request of the same person with the same title (ignoring case and punctuation) is returned
    instead of a new one, and the new text goes into its log.
-2. **Overlaps.** It pulls keys out of the request (specs like `098`, PR numbers, branches of sandboxes and machines,
-   and the ids in `related_ids`) and compares it with open requests and those closed in the last 48 hours, live and
+2. **Overlaps.** It pulls keys out of the request (specs like `098`, PRs named as such, other `#N` references,
+   branch-like names of the branches checked out anywhere, and the ids in `related_ids`) and compares it with open requests and those closed in the last 48 hours, live and
    recent workers wherever they run (their title, and the branch and open PR of their sandbox, this host's or a
    machine's, or of the machine's main clone), pending delegation requests, and commits on the base branch in the last
-   48 hours. A shared request, worker, PR or branch scores 1; a shared spec with a similar title scores 0.8;
-   otherwise title similarity. 0.8 and over is strong. The person's orchestrator gets the overlaps at once, in the
-   tool's answer.
+   48 hours. A shared request, worker, PR or branch scores 1; a shared spec or `#N` with a similar title scores 0.8,
+   without one 0.5; otherwise title similarity. 0.8 and over is strong. The person's orchestrator gets the overlaps at
+   once, in the tool's answer.
 3. **Limits.** Below.
 
 The dispatcher then does one of these for each request:
@@ -57,10 +57,11 @@ The dispatcher then does one of these for each request:
 | ask | `decide_work ask`, at most 3 questions per request | `question` |
 | reject it, or close it | `decide_work reject` / `done`, saying why | `rejected` / `done` |
 
-`start_agent` refuses a request with a strong overlap still in flight unless `override_duplicate` says what is
-different. A worker started for a request runs for the person who filed it, on their account. The requester's
-orchestrator can add a note (which answers a question), change the priority, close the request, or reopen it within 7
-days (`update_work`).
+`start_agent` refuses a request with a strong overlap still in flight (a commit only informs), or one that already has a
+live worker, unless `override_duplicate` says what is different. `work_id` is the dispatcher's alone. A worker started
+for a request runs for the person who filed it, on their account. The requester's orchestrator can add a note (which
+answers a question), change the priority, close the request, or reopen it within 7 days (`update_work`). Closing is the
+filer's: the others still on the request hear it. Someone whose request was merged into it only leaves it.
 
 The ledger is `data/work.json`: every open request and the newest 300 closed ones. The page gets the open ones and those
 closed in the last 3 days.
@@ -72,7 +73,8 @@ closed in the last 3 days.
 | `[work request]`, `[work update]` | the dispatcher, gathered for 1.5 s per person |
 | `[dispatch]` (a decision) | the orchestrators of the people the request is for; a question only to its filer |
 | `[worker update]` (a turn an orchestrator started ended, or a permission is waiting) | the orchestrators of the people the worker works for: its requests' requesters, else whoever started it, else the system payer. The ledger records the worker's last line; the dispatcher is not woken |
-| `[ledger]` capacity | the dispatcher, when requests are queued and a worker ends a turn: after 30 s of quiet, at least 2 minutes apart, at most 20 an hour |
+| `[ledger]` | the dispatcher: after a restart or a fresh conversation, the requests still waiting (what it had not answered died with its process); and when requests are queued and a worker ends a turn, after 30 s of quiet, at least 2 minutes apart and at most 20 an hour (a wake that comes too soon waits) |
+| a failed worker of an open request | the dispatcher, as a `[work update]` |
 | `[standing agent]`, `[auto-delegation]` | the orchestrator of the person the run was for (the system payer for a scheduled run) |
 | `[unity blocked]` | the dispatcher, and the people whose workers are in that sandbox |
 | `[app restarted]`, `[machines]`, `[unity]`, `[host]`, the orchestrator inbox | the dispatcher. A person's orchestrator cut off mid-turn by a restart is told to pick its turn up again |
@@ -91,9 +93,12 @@ closed in the last 3 days.
   conversation shows asking, or the system payer; with neither, the tool refuses. "Whoever wrote last" is never used,
   because most of what the dispatcher hears is the harness.
 - The dispatcher's destructive and admin tools (`delete_sandbox`, `set_app_config`, `request_app_update`,
-  `republish_public`, `remove_machine`, `delete_standing_agent`, `approve_delegation`) run only for a request its person
-  filed in a turn of their own (`humanAsked`), or when the owner writes to the dispatcher. Request text is written by a
-  model that may be relaying injected text, so its "the user asked" is not enough.
+  `republish_public`, `add_machine`, `remove_machine`, `create_standing_agent`, `update_standing_agent`,
+  `delete_standing_agent`, `approve_delegation`; `server/belts.ts`) run only for a request its person filed or last
+  changed in a turn of their own (`humanAsked`), or in a turn the owner started in the dispatcher's chat. A turn counts as
+  a person's only when every message it answers is theirs: the CLI folds messages sent during a turn into it. Request
+  text is written by a model that may be relaying injected text, so its "the user asked" is not enough. Recovery tools
+  (`host_recovery`, `machine_daemon`) stay free.
 - Only its person writes to a personal orchestrator, and only an owner to the dispatcher (HTTP 403 otherwise). This
   covers messages, interrupts, permission answers and the permission mode.
 

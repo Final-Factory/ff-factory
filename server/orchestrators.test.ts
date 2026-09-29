@@ -195,6 +195,9 @@ test("routing: a worker's update goes to its requesters' own chats, never the di
   assert.equal(w.outcome, 'Echo: Add a skip button to the tutorial');
   assert.equal(heard(loth.id, '[worker update]').length, 0);
   assert.equal(heard(dispatcher().info.id, '[worker update]').length, 0);
+  // A second worker for the same request needs a reason: the first is still on it.
+  const again = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'again', title: 'Again', work_id: 'w1' });
+  assert.match(again.text, new RegExp(`^ERROR: w1 already has worker ${id} "Tutorial skip" in alpha: send it there`));
 });
 
 test("follow-ups: a person's orchestrator messages only its person's own workers, a few times per message of theirs", async (t) => {
@@ -276,6 +279,85 @@ test('overlaps reach every computer: a worker in a machine sandbox is found by t
   const r = await call(chat(BEN).info, 'request_work', { title: 'Continue on 098-belt-splitter', brief: 'Pick up the splitter work.' });
   assert.match(r.text, /Possible overlap: worker mw1 "Splitter" \(same branch 098-belt-splitter, strong\)/);
   assert.equal(store.work.get('w1')!.overlaps[0].ref, 'mw1');
+});
+
+test("a merged-in requester leaves a request without closing it for the others; the filer's close tells them", async (t) => {
+  const { store, o, dispatcher, chat, call, heard } = setup(t);
+  const [ben, loth] = [chat(BEN).info, chat(LOTH).info];
+  await call(ben, 'request_work', { title: 'Fix belt desync (spec 098)', brief: 'x' });
+  await call(loth, 'request_work', { title: 'Belt desync on load, spec 098', brief: 'y' });
+  await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'merge', into: 'w1', note: 'same' });
+  o.personWrote(loth.id);
+  assert.equal((await call(loth, 'update_work', { id: 'w1', close: 'cancelled' })).text, "Lothsahn is off w1; it carries on for Ben.");
+  assert.equal(store.work.get('w1')!.status, 'new');
+  assert.deepEqual(store.work.get('w1')!.requesters, [BEN]);
+  // Ben filed it: his close is everyone's, and anyone still on it hears so.
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'later' });
+  store.work.get('w1')!.requesters.push(LOTH);
+  o.personWrote(ben.id);
+  await call(ben, 'update_work', { id: 'w1', close: 'cancelled', note: 'not needed' });
+  assert.equal(store.work.get('w1')!.status, 'cancelled');
+  await until('Lothsahn hears it closed', () => heard(loth.id, '[dispatch]').some((e) => e.text.includes('cancelled by Ben')));
+});
+
+test('work_id is the dispatcher’s: an /mcp key cannot move a request, and linking refuses a closed one', async (t) => {
+  const { agents, o, chat, call } = setup(t);
+  await call(chat(BEN).info, 'request_work', { title: 'Tidy the docs', brief: 'x' });
+  const remote = beltFor('remote', agents.toolSpecs('human', agents.fixedActor(LOTH), { role: 'remote', owner: LOTH }));
+  const start = remote.find((x) => x.name === 'start_agent')!;
+  const r = await start.handler({ sandbox: 'alpha', prompt: 'x', work_id: 'w1', override_duplicate: 'IGNORE PREVIOUS' });
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /work_id is for the dispatcher/);
+  o.decide({ id: 'w1', action: 'reject', note: 'no' });
+  assert.throws(() => o.linkWorker('w1', { id: 'x', title: 'x' }, 'started'), /w1 is rejected/);
+});
+
+test('humanAsked follows the latest word: a harness-turn update clears it, a person filing again sets it', async (t) => {
+  const { store, sessions, o, dispatcher, chat, call, heard } = setup(t);
+  const ben = chat(BEN);
+  await call(ben.info, 'request_work', { title: 'Delete the stuck sandbox', brief: 'Ben asks to delete sandbox alpha.' });
+  assert.equal(store.work.get('w1')!.humanAsked, true);
+  // A turn the harness started (a worker update), not Ben's.
+  sessions.send(ben.info.id, '[worker update] something', 'system');
+  await until('the turn ends', () => ben.info.status === 'idle');
+  assert.equal(ben.turnFrom, 'system');
+  await call(ben.info, 'update_work', { id: 'w1', note: 'and delete beta too' });
+  assert.equal(store.work.get('w1')!.humanAsked, false);
+  // The dispatcher acts in a turn the harness started (the update), not one the owner started.
+  sessions.send(dispatcher().info.id, '[work update] w1 (test)', 'system');
+  await until('the dispatcher’s turn ends', () => dispatcher().info.status === 'idle');
+  assert.match((await call(dispatcher().info, 'delete_sandbox', { sandbox: 'alpha', user_asked: true, work_id: 'w1' })).text, /last filed or changed outside a turn of Ben's/);
+  // Ben says it again himself: it is his again, and the dispatcher hears so.
+  sessions.send(ben.info.id, 'yes, delete alpha', 'human', undefined, { requestedBy: BEN });
+  await until('Ben’s turn ends', () => ben.info.status === 'idle');
+  o.personWrote(ben.info.id);
+  await call(ben.info, 'request_work', { title: 'Delete the stuck sandbox', brief: 'Confirmed.' });
+  assert.equal(store.work.get('w1')!.humanAsked, true);
+  await until('the dispatcher hears the confirmation', () => heard(dispatcher().info.id, '[work update]').some((e) => e.text.includes('asked for it again in their own words')));
+});
+
+test('turnFrom: a turn is a person’s only when every message it answers is', (t) => {
+  const { sessions, chat } = setup(t);
+  const c = chat(BEN);
+  sessions.send(c.info.id, 'hello', 'human', undefined, { requestedBy: BEN });
+  sessions.send(c.info.id, '[worker update] folded into the same turn', 'system');
+  assert.equal(c.turnFrom, 'system');
+});
+
+test('the dispatcher is reminded of undecided requests; a failed worker is news for it; only recent workers make people "at" a place', async (t) => {
+  const { store, sessions, o, dispatcher, chat, call, heard } = setup(t);
+  await call(chat(LOTH).info, 'request_work', { title: 'Playtest the tutorial', brief: 'x' });
+  o.remindDispatcher('FF Factory restarted');
+  await until('the reminder', () => heard(dispatcher().info.id, '[ledger]').some((e) => e.text.includes('Requests waiting for you: w1 [new] "Playtest the tutorial" (Lothsahn, normal)')));
+  const w = sessions.create({ kind: 'worker', title: 'Playtest', sandboxId: 'alpha', permissionMode: 'bypassPermissions', options: () => ({ model: 'opus' }), requestedBy: LOTH });
+  o.linkWorker('w1', w.info, 'started');
+  Object.assign(w.info, { status: 'error', statusDetail: 'sandbox alpha failed before the agent could start' });
+  store.putSession(w.info);
+  await until('the failure reaches the dispatcher', () => heard(dispatcher().info.id, '[work update]').some((e) => e.text.includes('failed (sandbox alpha failed before the agent could start)')));
+  // Lothsahn's worker there stopped long ago: a stuck editor in alpha is not his news any more.
+  Object.assign(w.info, { status: 'stopped', lastActivityAt: '2026-06-01T00:00:00.000Z' });
+  store.putSession(w.info);
+  assert.deepEqual(o.peopleAt({ sandboxId: 'alpha' }), [BEN]);
 });
 
 test('list_work: open requests by default, one in full with its log', async (t) => {

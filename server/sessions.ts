@@ -76,8 +76,9 @@ export interface SessionHandle {
   readonly live: boolean;
   lastFrom: 'human' | 'orchestrator' | 'system';
   /**
-   * Who sent the message the current turn is answering: the oldest one not answered yet (a message sent meanwhile only
-   * queues). Without one, the last sender. What decides whether a turn is a person's (docs/orchestrators.md).
+   * Who the current turn is answering: 'human' only when every message it has not answered yet is a person's (the CLI
+   * folds messages sent during a turn into it, so harness text can share a person's turn); else the first sender that
+   * is not a person. Without any, the last sender. What decides whether a turn is a person's (docs/orchestrators.md).
    */
   readonly turnFrom?: 'human' | 'orchestrator' | 'system';
   /** `requestedBy`: the person who wrote it, or for whom the orchestrator or the harness sends it (docs/identity.md). */
@@ -167,8 +168,9 @@ export class AgentSession implements SessionHandle {
   }
 
   get turnFrom(): 'human' | 'orchestrator' | 'system' {
-    const first = this.outstanding.values().next();
-    return first.done ? this.lastFrom : first.value.from;
+    const froms = [...this.outstanding.values()].map((u) => u.from);
+    if (!froms.length) return this.lastFrom;
+    return froms.find((f) => f !== 'human') ?? 'human';
   }
 
   private update(patch: Partial<SessionInfo>) {

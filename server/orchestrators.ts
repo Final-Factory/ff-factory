@@ -14,6 +14,7 @@ import {
   firstLine,
   isFor,
   isOpen,
+  ledgerOrder,
   limitProblem,
   logLine,
   names,
@@ -225,9 +226,9 @@ export class Orchestrators {
     }
   }
 
-  /** The open and recent ledger items a worker works on. */
+  /** The open ledger items a worker works on (a closed one no longer hears from it, even if the worker is reused). */
   itemsOf(sessionId: string): WorkItem[] {
-    return [...this.store.work.values()].filter((w) => w.sessionIds.includes(sessionId) && w.status !== 'merged');
+    return [...this.store.work.values()].filter((w) => w.sessionIds.includes(sessionId) && isOpen(w));
   }
 
   /**
@@ -251,8 +252,10 @@ export class Orchestrators {
   peopleAt(where: { sandboxId?: string; machineId?: string; machineSandbox?: string }): Requester[] {
     const out = new Map<string, Requester>();
     const here = (s: SessionInfo) => (where.sandboxId ? s.sandboxId === where.sandboxId : s.machineId === where.machineId && (s.machineSandbox ?? '') === (where.machineSandbox ?? ''));
+    // Only workers busy now or active in the last two hours: someone whose work there ended long ago is not concerned.
+    const recent = (s: SessionInfo) => BUSY.includes(s.status) || this.now().getTime() - Date.parse(s.lastActivityAt) < 2 * 3_600_000;
     for (const s of this.store.sessions.values()) {
-      if (s.kind !== 'worker' || !here(s)) continue;
+      if (s.kind !== 'worker' || !here(s) || !recent(s)) continue;
       for (const r of this.audienceOf(s)) out.set(r.userId.toLowerCase(), r);
     }
     return out.size ? [...out.values()] : [this.d.identity.owner()];
@@ -382,10 +385,15 @@ export class Orchestrators {
     const title = input.title.replace(/\s+/g, ' ').trim();
     const brief = input.brief.trim();
     if (!title || !brief) throw new Error('give a title and a brief');
+    const human = (chat.turnFrom ?? chat.lastFrom) === 'human';
     const repeat = repeatOf(this.store.work.values(), owner, title);
     if (repeat) {
-      this.stamp(repeat, `filed again by ${owner.displayName}'s orchestrator: ${firstLine(brief)}`);
+      this.stamp(repeat, `filed again by ${owner.displayName}'s orchestrator${human ? ' in their own turn' : ''}: ${firstLine(brief)}`);
+      // Filed again in the person's own turn: they asked for it themselves now, which the destructive tools need.
+      const confirmed = human && !repeat.humanAsked;
+      if (confirmed) repeat.humanAsked = true;
       this.store.putWork(repeat);
+      if (confirmed) this.gatherForDispatcher(owner, updateNotice(repeat, owner, 'asked for it again in their own words'));
       return `Already filed as ${repeat.id} (${repeat.status}); the new text is in its log. To change what it asks for, use update_work with a note.`;
     }
     this.spend(chat.info.id, owner);
@@ -416,7 +424,7 @@ export class Orchestrators {
       keys: [...keys],
       requestedBy: asRequester(owner),
       requesters: [asRequester(owner)],
-      humanAsked: (chat.turnFrom ?? chat.lastFrom) === 'human',
+      humanAsked: human,
       status: 'new',
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
@@ -452,6 +460,15 @@ export class Orchestrators {
     const problem = updateProblem(w, input, this.now().getTime());
     if (problem) throw new Error(problem);
     this.spend(chat.info.id, owner);
+    // Someone whose request was merged into this one leaves it; it carries on for the others.
+    if (input.close && !same(w.requestedBy.userId, owner.userId)) {
+      w.requesters = w.requesters.filter((r) => !same(r.userId, owner.userId));
+      this.stamp(w, `${owner.displayName} left it (${input.close}${note ? `: ${note}` : ''})`);
+      this.store.putWork(w);
+      return `${owner.displayName} is off ${w.id}; it carries on for ${names(w.requesters)}.`;
+    }
+    // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn.
+    w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
     const what: string[] = [];
     if (input.reopen) {
       w.status = 'new';
@@ -470,8 +487,11 @@ export class Orchestrators {
       if (note) w.outcome = clip(note, 300);
       what.push(input.close === 'done' ? 'closed as done' : 'cancelled');
     }
-    this.stamp(w, `${owner.displayName}: ${what.join('; ')}`);
+    this.stamp(w, `${owner.displayName}: ${what.join('; ')}${w.humanAsked ? '' : ' (not in a turn of theirs)'}`);
     this.store.putWork(w);
+    // The others it is for hear that it closed.
+    const others = w.requesters.filter((r) => !same(r.userId, owner.userId));
+    if (input.close && others.length) this.toPeople(others, dispatchNotice(w, `${input.close === 'done' ? 'closed as done' : 'cancelled'} by ${owner.displayName}`, note));
     // Closing as done needs nothing from the dispatcher; anything else may.
     if (input.close !== 'done') {
       const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
@@ -541,13 +561,16 @@ export class Orchestrators {
         return !!s && s.status !== 'stopped' && s.status !== 'error' && !w.sessionIds.includes(s.id);
       }
       if (o.kind === 'delegation') return this.store.delegations.get(o.ref)?.status === 'pending';
-      return true;
+      // A commit is work already merged: the dispatcher judges whether the request is still needed.
+      return false;
     });
   }
 
   /** A worker was started, messaged or approved for a request: link it, mark the request active, tell its requesters. */
   linkWorker(workId: string, s: Pick<SessionInfo, 'id' | 'title'>, what: string, opts: { reply?: boolean } = {}) {
     const w = this.requireWork(workId);
+    const problem = startProblem(w);
+    if (problem) throw new Error(problem);
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
     w.status = 'active';
     this.stamp(w, `dispatcher: ${what}`);
@@ -633,6 +656,32 @@ export class Orchestrators {
     }
   }
 
+  /**
+   * Requests still waiting for the dispatcher, as one [ledger] message. After a restart (notices it had not answered
+   * die with its process) or a fresh dispatcher conversation, nothing else would bring them back.
+   */
+  remindDispatcher(why: string) {
+    const waiting = [...this.store.work.values()].filter((w) => w.status === 'new' || w.status === 'queued').sort(ledgerOrder);
+    if (!waiting.length) return;
+    this.toDispatcher(`[ledger] ${why}. Requests waiting for you: ${waiting.map((w) => `${w.id} [${w.status}] "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority})`).join('; ')}. list_work shows them in full.`);
+  }
+
+  private readonly failed = new Set<string>();
+
+  /** A worker's status changed: when one of an open request's workers fails, the dispatcher hears it (once per failure). */
+  workerStatus(s: SessionInfo) {
+    if (s.kind !== 'worker') return;
+    if (s.status !== 'error') return void this.failed.delete(s.id);
+    if (this.failed.has(s.id)) return;
+    this.failed.add(s.id);
+    for (const w of this.itemsOf(s.id)) {
+      const why = clip(s.statusDetail ?? 'an error', 200);
+      this.stamp(w, `worker ${s.id} failed: ${why}`);
+      this.store.putWork(w);
+      this.gatherForDispatcher(w.requestedBy, updateNotice(w, w.requestedBy, `its ${this.workerLine(s.id)} failed (${why}). Start it again, queue it, or tell its people (decide_work).`));
+    }
+  }
+
   // ---------------------------------------------------------------- capacity
 
   /**
@@ -642,16 +691,22 @@ export class Orchestrators {
   capacityMayHaveFreed(what: string) {
     if (![...this.store.work.values()].some((w) => w.status === 'queued')) return;
     clearTimeout(this.capacityTimer);
-    this.capacityTimer = setTimeout(() => {
+    const fire = () => {
       const now = this.now().getTime();
       while (this.capacityWakes.length && now - this.capacityWakes[0] > 3_600_000) this.capacityWakes.shift();
-      const last = this.capacityWakes.at(-1) ?? 0;
-      if (now - last < CAPACITY.gapMs || this.capacityWakes.length >= CAPACITY.perHour) return;
+      // Too soon after the last wake, or too many this hour: wait until one is allowed rather than dropping it.
+      const wait = Math.max((this.capacityWakes.at(-1) ?? 0) + CAPACITY.gapMs - now, this.capacityWakes.length >= CAPACITY.perHour ? this.capacityWakes[0] + 3_600_000 - now : 0);
+      if (wait > 0) {
+        this.capacityTimer = setTimeout(fire, wait);
+        this.capacityTimer.unref?.();
+        return;
+      }
       const queued = [...this.store.work.values()].filter((w) => w.status === 'queued');
       if (!queued.length) return;
       this.capacityWakes.push(now);
       this.toDispatcher(`[ledger] Capacity may have freed (${what}). Queued: ${queued.map((w) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority})`).join('; ')}. Start what fits now, or leave it queued.`);
-    }, CAPACITY.quietMs);
+    };
+    this.capacityTimer = setTimeout(fire, CAPACITY.quietMs);
     this.capacityTimer.unref?.();
   }
 }

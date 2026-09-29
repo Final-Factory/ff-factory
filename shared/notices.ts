@@ -54,7 +54,7 @@ const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1).trimEnd
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 /** `agent "T" (session S) (requested by P) in sandbox X` / `on machine M`: the worker a [worker update] is about. */
-const WORKER = /^agent "(.+?)" \(session ([\w-]+)\)(?: \(requested by [^)]*\))? (?:in sandbox ([\w.-]+(?:\/[\w.-]+)?|\?)|on machine ([\w.-]+))/;
+const WORKER = /^agent "(.+?)" \(session ([\w-]+)\)(?: \(requested by .*?\))? (?:in sandbox ([\w.-]+(?:\/[\w.-]+)?|\?)|on machine ([\w.-]+))/;
 
 /** What a tool call wants, in a few words: the command, the file, or the first string it was given. */
 function describeInput(tool: string, json: string): string | undefined {
@@ -160,6 +160,8 @@ export function parseNotice(text: string): Notice {
     return { kind: 'work-update', summary: u ? `${u[3]} updated “${clip(u[2], 90)}”` : 'A request was updated', attention: false, body: rest.trim(), workId: u?.[1] };
   }
   if (tag === 'ledger') {
+    const waiting = /Requests waiting for you: ([\s\S]*?)\. list_work shows/.exec(rest)?.[1];
+    if (waiting) return { kind: 'ledger', summary: `${waiting.split('; ').length} request(s) still waiting`, attention: false, body: rest.trim() };
     const queued = /Queued: ([\s\S]*?)\. Start what fits/.exec(rest)?.[1];
     const n = queued ? queued.split('; ').length : 0;
     return { kind: 'ledger', summary: `Capacity may have freed${n ? `; ${n} queued` : ''}`, attention: false, body: rest.trim() };

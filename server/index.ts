@@ -202,7 +202,8 @@ notifier.audience = (s, kind) => {
   const owner = agents.orchestrators.ownerOf(s);
   if (owner) return [owner.userId];
   if (agents.orchestrators.isDispatcher(s)) return kind === 'turnEnd' ? [] : identity.list().filter((u) => u.role === 'owner').map((u) => u.userId);
-  if (s.kind === 'worker' && kind === 'turnEnd') return agents.orchestrators.audienceOf(s).map((r) => r.userId);
+  // A worker's finished turn: the people it works for, and whoever wrote to it last (they may be following it).
+  if (s.kind === 'worker' && kind === 'turnEnd') return [...new Set([...agents.orchestrators.audienceOf(s), ...(s.lastRequestedBy ? [s.lastRequestedBy] : [])].map((r) => r.userId.toLowerCase()))];
   return undefined;
 };
 agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));

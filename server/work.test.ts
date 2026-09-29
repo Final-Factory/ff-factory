@@ -53,11 +53,15 @@ test('keys: specs, PRs and known branches, whatever way they are written', () =>
   assert.deepEqual(textKeys('Fix the belt desync from spec 98').sort(), ['spec:098']);
   assert.deepEqual(textKeys('see specs/098-belt-splitter/plan.md').sort(), ['spec:098']);
   assert.deepEqual(textKeys('continue on 098-belt-splitter').sort(), ['spec:098']);
-  assert.deepEqual(textKeys('PR #412, pull request 413, /pull/414 and #415').sort(), ['pr:412', 'pr:413', 'pr:414', 'pr:415']);
+  assert.deepEqual(textKeys('PR #412, pull request 413 and /pull/414').sort(), ['pr:412', 'pr:413', 'pr:414']);
+  // A bare "#N" may be an issue, a bug or a colour: a reference, not a PR.
+  assert.deepEqual(textKeys('Bug #1 again, colour #123456').sort(), ['ref:1', 'ref:123456']);
+  assert.deepEqual(textKeys('PR #7 (#7)'), ['pr:7']);
   assert.deepEqual(textKeys('rebase sandbox/shader-dissolve on develop', ['sandbox/shader-dissolve', 'develop']), ['branch:sandbox/shader-dissolve']);
-  // A branch name inside a longer word is not a mention; develop/main are never keys.
+  // A branch name inside a longer word is not a mention; develop/main are never keys; nor is a branch named like a plain word.
   assert.deepEqual(textKeys('the shader-dissolved look', ['shader-dissolve']), []);
   assert.deepEqual(textKeys('merge develop into main', ['develop', 'main']), []);
+  assert.deepEqual(textKeys('update the docs and the audio', ['docs', 'audio']), []);
 });
 
 test('keys: related ids resolve to what they are, and the rest is read as text', () => {
@@ -81,6 +85,8 @@ test('overlaps: a shared request, worker, PR or branch is the same work; a share
   assert.deepEqual(overlapOf(req, e('w1', 'Anything at all', ['pr:412'])), { ref: 'w1', kind: 'work', title: 'Anything at all', score: 1, why: 'same PR #412' });
   assert.equal(overlapOf(req, e('w2', 'Belt splitter desync on load', ['spec:098']))?.score, STRONG);
   assert.equal(overlapOf(req, e('w2', 'Belt splitter desync on load', ['spec:098']))?.why, 'same spec 098, similar title');
+  // A shared bare "#N" is like a shared spec: strong only with a similar title.
+  assert.equal(overlapOf({ keys: ['ref:1'], title: 'Crash on load' }, e('w7', 'Tutorial text is wrong', ['ref:1']))?.score, 0.5);
   // Same spec, different job: listed for the dispatcher, not strong.
   const playtest = overlapOf(req, e('w3', 'Playtest the tutorial', ['spec:098']));
   assert.equal(playtest?.score, 0.5);

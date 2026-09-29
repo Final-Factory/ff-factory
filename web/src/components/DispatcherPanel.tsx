@@ -101,7 +101,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
         <Confirm
           title="Start the dispatcher afresh?"
           confirmLabel="New conversation"
-          body="The dispatcher forgets its conversation. The requests, sandboxes and agents all stay; it reads them again from the ledger."
+          body="The dispatcher forgets its conversation. The requests, sandboxes and agents all stay, and it is told which requests still wait for it."
           onConfirm={async () => {
             const ok = await attempt(api.resetOrchestrator('dispatcher'));
             if (ok !== undefined) reloadTranscript(ok.id);

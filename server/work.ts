@@ -28,20 +28,27 @@ export function normalizeTitle(t: string): string {
 
 // ---------------------------------------------------------------- keys
 
-/** What the text names that other work would name too: specs, PRs, and branches of the sandboxes and machines. */
+/**
+ * What the text names that other work would name too: specs, PRs, other "#N" references, and branches of the sandboxes
+ * and machines. Only an explicit PR ("PR 412", "pull request #412", ".../pull/412") is a PR: a bare "#412" could be an
+ * issue, a bug number or a colour, so it is a weaker reference.
+ */
 export function textKeys(text: string, knownBranches: readonly string[] = []): string[] {
   const keys = new Set<string>();
   const spec = (n: string) => keys.add(`spec:${String(Number(n)).padStart(3, '0')}`);
   for (const m of text.matchAll(/\bspecs?[\s#/-]*(\d{2,4})\b/gi)) spec(m[1]);
   // A spec's folder or branch: "098-belt-splitter".
   for (const m of text.matchAll(/(?<![\w/.-])(\d{3})-[a-z][a-z0-9]*(?:-[a-z0-9]+)*/g)) spec(m[1]);
-  for (const m of text.matchAll(/\b(?:PR|pull request)\s*#?\s*(\d{1,6})\b/gi)) keys.add(`pr:${Number(m[1])}`);
-  for (const m of text.matchAll(/\/pull\/(\d{1,6})\b/g)) keys.add(`pr:${Number(m[1])}`);
-  for (const m of text.matchAll(/(?<![\w&])#(\d{1,6})\b/g)) keys.add(`pr:${Number(m[1])}`);
+  const prs = new Set<number>();
+  for (const m of text.matchAll(/\b(?:PR|pull request)\s*#?\s*(\d{1,6})\b/gi)) prs.add(Number(m[1]));
+  for (const m of text.matchAll(/\/pull\/(\d{1,6})\b/g)) prs.add(Number(m[1]));
+  for (const n of prs) keys.add(`pr:${n}`);
+  for (const m of text.matchAll(/(?<![\w&])#(\d{1,6})\b/g)) if (!prs.has(Number(m[1]))) keys.add(`ref:${Number(m[1])}`);
   const lower = text.toLowerCase();
   for (const b of knownBranches) {
     const name = b.trim().toLowerCase();
-    if (name.length < 4 || ['develop', 'main', 'master', 'detached head'].includes(name)) continue;
+    // A branch named like a plain word ("docs", "audio") would match ordinary text: only branch-like names count.
+    if (name.length < 4 || !/[/\d-]/.test(name) || ['develop', 'main', 'master', 'detached head'].includes(name)) continue;
     const at = lower.indexOf(name);
     const edge = (i: number) => i < 0 || i >= lower.length || !/[\w/.-]/.test(lower[i]);
     if (at >= 0 && edge(at - 1) && edge(at + name.length)) keys.add(`branch:${name}`);
@@ -107,7 +114,7 @@ export interface PoolEntry {
 
 const keyName = (k: string) => {
   const [kind, v] = [k.slice(0, k.indexOf(':')), k.slice(k.indexOf(':') + 1)];
-  return kind === 'pr' ? `PR #${v}` : kind === 'spec' ? `spec ${v}` : kind === 'work' ? `request ${v}` : `${kind} ${v}`;
+  return kind === 'pr' ? `PR #${v}` : kind === 'ref' ? `#${v}` : kind === 'spec' ? `spec ${v}` : kind === 'work' ? `request ${v}` : `${kind} ${v}`;
 };
 
 /** How much `e` overlaps a request with these keys and title, and why; undefined below the listing bar. */
@@ -115,7 +122,8 @@ export function overlapOf(req: { keys: readonly string[]; title: string }, e: Po
   const shared = req.keys.filter((k) => e.keys.includes(k));
   const identity = shared.find((k) => IDENTITY.test(k));
   const sim = jaccard(words(req.title), words(`${e.title} ${e.text ?? ''}`));
-  const spec = shared.find((k) => k.startsWith('spec:'));
+  // A shared spec or "#N" says the same subject, not the same work: strong only with a similar title.
+  const spec = shared.find((k) => k.startsWith('spec:') || k.startsWith('ref:'));
   let score = sim;
   let why = 'similar title';
   if (identity) [score, why] = [1, `same ${keyName(identity)}`];

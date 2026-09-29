@@ -71,6 +71,7 @@ export function OrchestratorView({ session, compact, readOnly }: { session: Sess
         <Transcript
           session={session}
           size={compact ? 'normal' : 'large'}
+          readOnlyFor={owner.displayName}
           empty={
             <div className="panel-empty">
               <p>{owner.displayName} has not written to their orchestrator yet.</p>

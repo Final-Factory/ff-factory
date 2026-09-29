@@ -46,10 +46,22 @@ const NOT_DISPATCHER: ReadonlySet<string> = new Set([...PERSONAL_ONLY, 'set_hear
 const DISPATCHER_ONLY: ReadonlySet<string> = new Set(['decide_work']);
 
 /**
- * The dispatcher's tools that take user_asked (destructive or administrative). They run only in a turn a person
- * started in the dispatcher's own chat, or for a request (work_id) its person filed in a turn of their own.
+ * The dispatcher's destructive and administrative tools, which run only when a person asked. They run in a turn a
+ * person started in the dispatcher's own chat, or for a request (work_id) its person filed or last changed in a turn of
+ * their own. Recovery tools (host_recovery, machine_daemon) stay free: the dispatcher answers the host's notices alone.
  */
-export const USER_ASKED_TOOLS: ReadonlySet<string> = new Set(['delete_sandbox', 'request_app_update', 'set_app_config', 'republish_public', 'remove_machine', 'delete_standing_agent', 'approve_delegation']);
+export const USER_ASKED_TOOLS: ReadonlySet<string> = new Set([
+  'delete_sandbox',
+  'request_app_update',
+  'set_app_config',
+  'republish_public',
+  'add_machine',
+  'remove_machine',
+  'create_standing_agent',
+  'update_standing_agent',
+  'delete_standing_agent',
+  'approve_delegation',
+]);
 
 export type BeltRole = 'dispatcher' | 'personal' | 'remote';
 

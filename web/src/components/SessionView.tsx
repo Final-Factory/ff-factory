@@ -49,7 +49,7 @@ export function SessionView({
         </>
       )}
       {session.status === 'error' && session.statusDetail && <div className="banner banner-error">{session.statusDetail}</div>}
-      <Transcript session={session} size={fullWidth ? 'large' : 'normal'} />
+      <Transcript session={session} size={fullWidth ? 'large' : 'normal'} readOnlyFor={readOnly ? 'the owner' : undefined} />
       {readOnly ? (
         <p className="orch-readonly-note" data-testid="read-only-note">
           {readOnly}
