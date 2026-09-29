@@ -15,14 +15,21 @@ import { emit } from './store.ts';
 import { redactSecrets } from './secrets.ts';
 import {
   CLOSE,
+  FROM_CONNECTOR_TYPES,
   FromConnectorSchema,
   LIMITS,
   PROVIDER_PROTOCOL,
   PROVIDER_TOKEN,
+  acceptsWork,
   describeIssues,
   tokenSha256,
+  type BoardCheckMessage,
   type FromConnector,
+  type ProviderRequestMessage,
+  type SubmitMessage,
   type ToConnector,
+  type WorkReply,
+  type ResultMessage,
 } from './providerProtocol.ts';
 import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent } from '../shared/types.ts';
 
@@ -357,7 +364,7 @@ export class ProviderManager {
       return;
     }
     if (!parsed.success) {
-      if (type && !['hello', 'capacity', 'conversation', 'intake'].includes(type)) return this.invalid(link, 'unknown_type', `unknown message type "${type}" (ignored)`, type);
+      if (type && !(FROM_CONNECTOR_TYPES as readonly string[]).includes(type)) return this.invalid(link, 'unknown_type', `unknown message type "${type}" (ignored)`, type);
       return this.invalid(link, 'bad_message', describeIssues(parsed.error), type);
     }
     this.apply(link, parsed.data);
@@ -385,6 +392,7 @@ export class ProviderManager {
         list.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
         this.data.conversations = list.slice(0, KEEP_CONVERSATIONS);
         this.data.cursors.conversation = msg.cursor;
+        this.hook(() => this.onConversation?.(c));
         return this.changed();
       }
       case 'intake': {
@@ -397,6 +405,59 @@ export class ProviderManager {
         this.data.cursors.intake = msg.cursor;
         return this.changed();
       }
+      case 'accepted':
+      case 'refused':
+        return this.hook(() => this.onWorkReply?.(msg));
+      case 'result':
+        return this.hook(() => this.onResult?.(msg));
+      case 'request': {
+        const r = this.onRequest?.(msg);
+        if (!r) return this.send(link, { type: 'error', code: 'not_enabled', message: 'FF Factory does not take requests from FFBox now (intake.ffbox)', ref: msg.ref });
+        return this.send(link, { type: 'filed', ref: msg.ref, status: r.status, ...(r.workId ? { workId: r.workId } : {}), ...(r.repeat ? { repeat: true } : {}), ...(r.why ? { why: r.why } : {}) });
+      }
+      case 'board_check': {
+        const a = this.onBoardCheck?.(msg);
+        if (!a) return this.send(link, { type: 'error', code: 'not_enabled', message: 'the ledger check is off in FF Factory (intake.ffbox.boardCheck)', ref: msg.ref });
+        return this.send(link, { type: 'board', ref: msg.ref, ...a });
+      }
     }
+  }
+
+  /** Run an intake hook; its failure is logged, never the connector's problem. */
+  private hook(f: () => void) {
+    try {
+      f();
+    } catch (e) {
+      console.warn(`provider ${this.id}: an intake hook failed:`, (e as Error).message);
+    }
+  }
+
+  // ---------------------------------------------------------------- the intake, both ways (docs/intake.md)
+
+  /** A conversation arrived or changed (server/intake.ts: FFBox's fix branches become review requests). */
+  onConversation?: (c: ProviderConversation) => void;
+  /** FFBox filed a request; the ledger item it became, or undefined while intake.ffbox is off. */
+  onRequest?: (m: ProviderRequestMessage) => { workId?: string; status: string; repeat?: boolean; why?: string } | undefined;
+  /** FFBox asks the ledger; undefined while intake.ffbox.boardCheck is off. */
+  onBoardCheck?: (m: BoardCheckMessage) => Omit<Extract<ToConnector, { type: 'board' }>, 'type' | 'ref'> | undefined;
+  /** FFBox accepted or refused a submit. */
+  onWorkReply?: (m: WorkReply) => void;
+  /** A submitted turn finished. */
+  onResult?: (m: ResultMessage) => void;
+
+  /** Why a submit cannot go to FFBox now, or undefined. */
+  submitProblem(): string | undefined {
+    if (!this.enabled) return 'FFBox is switched off (providers.ffbox.enabled)';
+    if (this.settings.sendWork !== true) return 'sending work to FFBox is off (providers.ffbox.sendWork)';
+    if (!this.online) return 'the FFBox connector is offline';
+    if (!acceptsWork(this.data.accepts, 'submit')) return 'the FFBox connector does not take work yet (its hello does not list "submit")';
+    return undefined;
+  }
+
+  /** Send a submit (built with buildSubmit, so it is checked and redacted); throws when it cannot go now. */
+  submitWork(msg: SubmitMessage) {
+    const why = this.submitProblem();
+    if (why) throw new Error(why);
+    this.send(this.link!, msg);
   }
 }

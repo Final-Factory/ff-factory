@@ -107,6 +107,10 @@ export class MaxManager {
   private emitTimer?: NodeJS.Timeout;
   private resolving = new Set<string>();
   private busy: Promise<unknown> = Promise.resolve();
+  /** The bot's own user id, learnt from the token check (the intake recognises messages addressed to Max by it). */
+  botId?: string;
+  /** Each new activity event (server/intake.ts follows replies and closes in intake threads). */
+  onEvent?: (ev: MaxEvent) => void;
   /** Tests move the clock and replace fetch. */
   now = () => Date.now();
   fetch: typeof fetch = (...a) => fetch(...a);
@@ -258,6 +262,11 @@ export class MaxManager {
     if (!ev.ok && (!this.data.lastError || Date.parse(ev.at) >= Date.parse(this.data.lastError.at))) this.data.lastError = { at: ev.at, message: ev.error || 'failed', channel: this.channelLabel(ev), action: ev.action, session: ev.session, eventId: ev.id };
     this.changed();
     this.resolveChannels(ev);
+    try {
+      this.onEvent?.(ev);
+    } catch (e) {
+      console.warn('max: an event hook failed:', (e as Error).message);
+    }
     return ev;
   }
 
@@ -374,7 +383,8 @@ export class MaxManager {
       this.data.health = { state: 'no_token', checkedAt: at, error: cfg.problem };
     } else {
       try {
-        const me = (await this.get('/users/@me')) as { username?: string; global_name?: string };
+        const me = (await this.get('/users/@me')) as { id?: string; username?: string; global_name?: string };
+        if (me.id && /^\d{5,25}$/.test(me.id)) this.botId = me.id;
         this.data.health = { state: 'ok', bot: cleanLine(me.global_name || me.username || 'bot', 60), checkedAt: at };
       } catch (e) {
         const err = e as DiscordHttpError;
@@ -396,6 +406,52 @@ export class MaxManager {
     await this.checkHealth();
     if (this.inboundAliases().length) await this.pollInbound();
     return { ok: true };
+  }
+
+  // ---------------------------------------------------------------- reads for the intake (docs/intake.md)
+
+  /** A channel alias from the ffbox config's discord.channels, or an id as given; undefined when unknown. */
+  channelIdOf(alias: string): string | undefined {
+    return /^\d{5,25}$/.test(alias) ? alias : this.config().channels[alias];
+  }
+
+  get guildId(): string | undefined {
+    return this.config().guildId;
+  }
+
+  get hasToken(): boolean {
+    return !!this.config().token;
+  }
+
+  /** The bot's id: known after a token check, else looked up now. */
+  async ensureBotId(): Promise<string | undefined> {
+    if (!this.botId) await this.checkHealth();
+    return this.botId;
+  }
+
+  /** "#bug-reports" for a channel id, looked up once. */
+  async channelName(id: string): Promise<string | undefined> {
+    return (await this.channelInfo(id, DAY_MS)).name;
+  }
+
+  /** The active threads of a forum channel (raw, oldest first). */
+  async forumThreads(channelId: string): Promise<{ id: string; parent_id?: string; name?: string; owner_id?: string; message_count?: number }[]> {
+    const g = this.config().guildId;
+    if (!g) throw new Error('no server_id in the ffbox config (needed to list forum threads)');
+    const r = (await this.get(`/guilds/${g}/threads/active`)) as { threads?: { id: string; parent_id?: string; name?: string; owner_id?: string; message_count?: number }[] };
+    return (r.threads ?? []).filter((t) => t.parent_id === channelId && /^\d+$/.test(t.id)).sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+  }
+
+  /** One message (a forum thread's first message has the thread's id). */
+  async message(channelId: string, messageId: string): Promise<unknown> {
+    return this.get(`/channels/${channelId}/messages/${messageId}`);
+  }
+
+  /** The messages of a channel after a message id (or the newest), oldest first, at most 50. */
+  async messagesAfter(channelId: string, after?: string): Promise<{ id: string }[]> {
+    const q = after ? `after=${after}&limit=50` : 'limit=50';
+    const list = ((await this.get(`/channels/${channelId}/messages?${q}`)) as { id: string }[]) ?? [];
+    return list.filter((m) => /^\d+$/.test(m.id)).sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
   }
 
   // ---------------------------------------------------------------- inbound (read-only)

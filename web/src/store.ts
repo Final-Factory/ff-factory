@@ -186,6 +186,9 @@ function applyEvent(ev: ServerEvent) {
     case 'work':
       set((s) => (s.app ? { app: { ...s.app, work: upsertById(s.app.work ?? [], ev.item) } } : {}));
       return;
+    case 'intake':
+      set((s) => (s.app ? { app: { ...s.app, intake: ev.intake } } : {}));
+      return;
     case 'sandbox_removed':
       set((s) => (s.app ? { app: { ...s.app, sandboxes: s.app.sandboxes.filter((x) => x.id !== ev.id) } } : {}));
       return;

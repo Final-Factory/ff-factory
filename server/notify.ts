@@ -4,7 +4,7 @@ import webpush from 'web-push';
 import { nameWithSlot } from '../shared/labels.ts';
 import { bus, emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager } from './sessions.ts';
-import type { DelegationRequest, NotifyKind, NotifyPrefs, Requester, Sandbox, ServerEvent, SessionInfo, StandingAgent, StandingRun, UnityBlocked } from '../shared/types.ts';
+import type { DelegationRequest, NotifyKind, NotifyPrefs, Requester, Sandbox, ServerEvent, SessionInfo, StandingAgent, StandingRun, UnityBlocked, WorkItem } from '../shared/types.ts';
 
 /** A browser's push subscription, as PushSubscription.toJSON() gives it, plus that device's choices. */
 export interface PushSub {
@@ -127,6 +127,16 @@ export class Notifier {
     // Auto-approved requests say so when they start (delegationUpdate); only the user's to-do list pings here.
     if (d.auto) return;
     this.fire({ kind: 'delegation', title: `${d.agentName} asks for a worker`, body: clip(d.title, 180), url: `#/agent/${encodeURIComponent(d.agentId)}/delegations`, tag: `deleg-${d.id}` });
+  }
+
+  /**
+   * The intake (docs/intake.md): a Discord or FFBox request waits for someone to approve it (everyone), or a worker on
+   * one stopped at a design question (its reviewers). Shown under "Delegation requests": both ask a person for a go.
+   */
+  intake(w: WorkItem, what: 'pending' | 'design', users?: string[]) {
+    const title = what === 'pending' ? 'Intake: approve or decline' : 'Intake: a design question';
+    const body = what === 'pending' ? `${w.id} ${w.title}` : `${w.id}: ${w.flag?.text ?? w.title}`;
+    this.fire({ kind: 'delegation', title, body: clip(body, 180), url: `#/dispatcher/${encodeURIComponent(w.id)}`, tag: `intake-${w.id}` }, users);
   }
 
   /** An auto-approved delegation started, finished its first turn, or expired unstarted. */

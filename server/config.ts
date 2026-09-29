@@ -14,6 +14,49 @@ const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator',
 /** Roles as people read them: "the orchestrator, standing agents". */
 export const roleNames = (roles: readonly HostRole[]) => roles.map((r) => ROLE_NAMES[r]).join(', ');
 
+/** config.json "intake" (docs/intake.md). Every switch defaults to off, every number to a small cap. */
+export interface IntakeConfig {
+  discord?: {
+    enabled?: boolean;
+    /** Forum channels whose new threads are bug reports: aliases from the ffbox config's discord.channels, or ids. Default ["bug_reports"]. */
+    bugChannels?: string[];
+    /** Channels where trusted people ask Max for work (a message that mentions the bot or replies to it). Default ["dev_chat"]. */
+    requestChannels?: string[];
+    /** Discord user ids trusted to ask for work, each mapped to an FF Factory login: { "<discord id>": "<user id>" }. Default none. */
+    trusted?: Record<string, string>;
+    /** Minutes between polls (>= 2, default 5). */
+    pollMinutes?: number;
+    /** Intake requests filed from Discord per day, all channels (default 10). */
+    dailyCap?: number;
+    /** Bug reports filed per reporter per day (default 2). */
+    perReporterPerDay?: number;
+    /** Start without a person's click, at most maxPerDay a day (default off, 3). */
+    autoApprove?: { enabled?: boolean; maxPerDay?: number; bugs?: boolean; requests?: boolean };
+  };
+  ffbox?: {
+    enabled?: boolean;
+    /** ffbox/* fix branches become "review and merge" requests (default true once ffbox is enabled). */
+    branches?: boolean;
+    /** Finished diagnoses with a verdict and a branch become review requests (default true once enabled). */
+    diagnoses?: boolean;
+    /** Requests FFBox files itself (the connector's "request" message; default true once enabled). */
+    requests?: boolean;
+    /** Answer the connector's board_check: FFBox asks the ledger before it works a report (default false). */
+    boardCheck?: boolean;
+    dailyCap?: number;
+    autoApprove?: { enabled?: boolean; maxPerDay?: number };
+  };
+  /** The "live in 0.50.0.X" follow-up: watch the base branch for the release that carries each landed fix. */
+  release?: { enabled?: boolean; delayMinutes?: number };
+  /**
+   * The people who decide (user ids, e.g. ["ben", "lothsahn"]): they approve or decline what needs a human and answer
+   * design questions; nobody else can. Default: the owner.
+   */
+  reviewers?: string[];
+  /** How far back finished requests count as duplicates (days, default 14). */
+  lookbackDays?: number;
+}
+
 export interface Config {
   port: number;
   host: string;
@@ -84,7 +127,23 @@ export interface Config {
    * false) lets it connect; `tokenSha256` is the SHA-256 of its connector token (ffpv1_…), set with
    * `node server/providerToken.ts` or set_app_config providers.ffbox.token; the token itself is never kept.
    */
-  providers?: { ffbox?: { enabled?: boolean; tokenSha256?: string } };
+  providers?: {
+    ffbox?: {
+      enabled?: boolean;
+      tokenSha256?: string;
+      /**
+       * Let the dispatcher hand ledger requests to FFBox (send_to_ffbox; docs/intake.md, "Ledger → FFBox"). Default
+       * false; a submit also needs a connector that lists "submit" in hello.accepts.
+       */
+      sendWork?: boolean;
+    };
+  };
+  /**
+   * The intake (docs/intake.md): Discord #bug-reports threads, trusted people's requests to Max in #dev-chat, and
+   * FFBox's diagnoses and fix branches become ledger requests. Everything is off unless switched on here; config.json
+   * only (set_app_config cannot change it). Read by server/intakeRules.ts intakeSettings(), which fills the defaults.
+   */
+  intake?: IntakeConfig;
   /**
    * Max, the Discord bot agents post as (docs/max.md). Activity needs nothing: agents' ffdiscord calls append to
    * `eventsFile` (default ~/.config/ff-factory/max-events.jsonl). The token check and inbound read the bot token
