@@ -1,7 +1,6 @@
 // What waits on the user, everywhere at once: agents asking for a permission, Unity editors stuck on
 // a dialog, and standing agents' delegation requests. The sidebar lists them, the phone's bell and the
 // tab title count them, and each one opens the place where it is answered.
-import { useMemo } from 'react';
 import type { AppState, SessionInfo } from '../../shared/types';
 import { summarizeToolInput, toolDisplayName } from './components/toolSummary';
 import { focusDetails, focusPermission } from './store';
@@ -82,6 +81,17 @@ export function attentionItems(app: AppState): AttentionItem[] {
   return items.sort((a, b) => a.at.localeCompare(b.at));
 }
 
+const attentionCache = new WeakMap<AppState, AttentionItem[]>();
+
+/** The attention list, worked out once per state (the shell, the sidebar and the Overview all ask for it). */
 export function useAttention(app: AppState | null): AttentionItem[] {
-  return useMemo(() => (app ? attentionItems(app) : []), [app]);
+  if (!app) return NONE;
+  let items = attentionCache.get(app);
+  if (!items) {
+    items = attentionItems(app);
+    attentionCache.set(app, items);
+  }
+  return items;
 }
+
+const NONE: AttentionItem[] = [];

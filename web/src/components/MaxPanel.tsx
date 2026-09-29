@@ -5,6 +5,7 @@
 import { useEffect, useState } from 'react';
 import type { AppState, MaxEvent, MaxInboundChannel, MaxInboundItem, MaxSummary } from '../../../shared/types';
 import { api } from '../api';
+import { sessionIndex } from '../store';
 import { fmtRelative, maxGlance, navigate, useNow } from '../util';
 import { Chip, Dot, Icon } from './ui';
 
@@ -74,7 +75,7 @@ export function MaxPanel({ app, max: m, tab, onClose }: { app: AppState; max: Ma
   };
 
   const h = m.health;
-  const sessionsById = new Map(app.sessions.map((s) => [s.id, s]));
+  const sessionsById = sessionIndex(app.sessions);
   return (
     <section className="sb-panel sa-panel pv-panel mx-panel" data-testid="max-panel">
       <header className="sb-head">

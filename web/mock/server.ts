@@ -17,6 +17,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { AppState, SearchHit, ServerEvent, SessionInfo, TranscriptEvent } from '../../shared/types.ts';
 import { buildWorld, type ImageKey, type Scenario } from './scenario.ts';
 import { phoneShot, spaceScene } from './png.ts';
+import { scaleWorld, startLiveTraffic } from './scale.ts';
 
 const PORT = Number(process.env.PORT ?? 8790);
 const NOAUTH = process.env.MOCK_NOAUTH === '1';
@@ -25,6 +26,7 @@ const SCENARIO = (process.env.MOCK_SCENARIO ?? 'busy') as Scenario;
 const DIST = path.resolve(process.env.MOCK_DIST ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '../dist'));
 
 const world = buildWorld(SCENARIO);
+scaleWorld(world);
 const state: AppState = world.state;
 const transcripts = world.transcripts;
 const seqs: Record<string, number> = {};
@@ -475,5 +477,7 @@ if (!FROZEN) {
     broadcast({ type: 'system', system: sys });
   }, 3000);
 }
+
+startLiveTraffic(world, broadcast, append as never);
 
 server.listen(PORT, () => console.log(`mock FF Factory backend (${SCENARIO}) on http://localhost:${PORT}: any username, password "mock"`));

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import type { AppState, Machine, MachineSandbox, SessionInfo } from '../../../shared/types';
+import type { AppState, Machine, MachineSandbox } from '../../../shared/types';
 import { api } from '../api';
-import { attempt, toast, useStore } from '../store';
+import { attempt, sessionsByIds, toast, useStore } from '../store';
 import { displayName, fmtRelative, isUnused, machineSandboxGlance, navigate, unityLabel, unityTone, useNow } from '../util';
 import { NewAgentModal } from './Modals';
 import { GitFacts, SwitchBranchModal } from './Git';
@@ -17,7 +17,7 @@ import { Chip, CopyButton, Icon, StateText } from './ui';
  */
 export function MachineSandboxPanel({ app, machine: m, sandbox: sb, sessionId, onClose }: { app: AppState; machine: Machine; sandbox: MachineSandbox; sessionId?: string; onClose?: () => void }) {
   const now = useNow();
-  const sessions = sb.sessionIds.map((id) => app.sessions.find((s) => s.id === id)).filter((s): s is SessionInfo => !!s);
+  const sessions = sessionsByIds(app.sessions, sb.sessionIds);
   const selected = sessions.find((s) => s.id === sessionId) ?? sessions[sessions.length - 1];
   const [newAgent, setNewAgent] = useState(false);
   const [logOpen, setLogOpen] = useState(false);

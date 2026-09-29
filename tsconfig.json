@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["server", "shared", "machine", "web/mock", "scripts", "e2e", "playwright.config.ts"]
+  "include": ["server", "shared", "machine", "web/mock", "web/perf", "scripts", "e2e", "playwright.config.ts"]
 }

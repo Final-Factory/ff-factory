@@ -1,9 +1,9 @@
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { AppState, PendingPermission, SessionInfo, TranscriptEvent } from '../../../shared/types';
+import type { Machine, PendingPermission, Sandbox, SessionInfo, StandingAgent, TranscriptEvent } from '../../../shared/types';
 import { parseNotice, type Notice, type NoticeKind } from '../../../shared/notices';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
-import { attempt, clearFocusEvent, focusPermission, useStore } from '../store';
+import { attempt, clearFocusEvent, focusPermission, sessionIndex, useStore } from '../store';
 import { displayName, fmtClock, fmtCost, fmtDivider, fmtDuration, FREE_TEXT, navigate, sameTitle, useNow, type Route } from '../util';
 import { Markdown } from './Markdown';
 import { ImageStrip, MentionedImages, uploadUrl } from './Images';
@@ -105,7 +105,7 @@ const scrollMemory = new Map<string, number | 'bottom'>();
 /** Set on someone else's conversation (docs/orchestrators.md): its permission requests are theirs to answer. */
 const ReadOnly = createContext<string | undefined>(undefined);
 
-export function Transcript({
+export const Transcript = memo(function Transcript({
   session,
   size = 'normal',
   empty,
@@ -259,7 +259,7 @@ export function Transcript({
     </div>
     </ReadOnly.Provider>
   );
-}
+});
 
 const ItemView = memo(function ItemView({ it, sessionId, pending, live, owner }: { it: Item; sessionId: string; pending: Map<string, PendingPermission>; live: boolean; owner?: string }) {
   switch (it.type) {
@@ -447,15 +447,31 @@ const NOTICE_ICON: Record<NoticeKind, IconName> = {
   other: 'info',
 };
 
+/** What a notice names, as the page knows it now: each one only, so a row re-renders when its own things change. */
+interface NoticeRefs {
+  s?: SessionInfo;
+  sb?: Sandbox;
+  m?: Machine;
+  standing?: StandingAgent;
+  orchestratorId?: string;
+}
+
+function useNoticeRefs(n: Notice): NoticeRefs {
+  return {
+    s: useStore((st) => (n.sessionId && st.app ? sessionIndex(st.app.sessions).get(n.sessionId) : undefined)),
+    sb: useStore((st) => (n.sandboxId ? st.app?.sandboxes.find((x) => x.id === n.sandboxId) : undefined)),
+    m: useStore((st) => (n.machineId ? st.app?.machines.find((x) => x.id === n.machineId) : undefined)),
+    standing: useStore((st) => (n.kind === 'delegation-request' ? st.app?.standingAgents.find((x) => x.name === n.standingName) : undefined)),
+    orchestratorId: useStore((st) => st.app?.orchestratorId),
+  };
+}
+
 /** A notice's line with today's names (a session's title, a sandbox's label), and where it points. */
-function describeNotice(n: Notice, app: AppState | null): { text: string; route?: Route; where?: string } {
-  const s = n.sessionId ? app?.sessions.find((x) => x.id === n.sessionId) : undefined;
-  const sb = n.sandboxId ? app?.sandboxes.find((x) => x.id === n.sandboxId) : undefined;
-  const m = n.machineId ? app?.machines.find((x) => x.id === n.machineId) : undefined;
+function describeNotice(n: Notice, { s, sb, m, standing, orchestratorId }: NoticeRefs): { text: string; route?: Route; where?: string } {
   const agent = s?.title ?? n.agentTitle;
   const placeName = sb ? displayName(sb) : m ? displayName(m) : n.sandboxId ?? n.machineId;
   const where = placeName && !(agent && sameTitle(agent, placeName)) ? placeName : undefined;
-  const route: Route | undefined = s && app ? sessionRoute(s, app) : sb ? { view: 'sandbox', sandboxId: sb.id } : m ? { view: 'machine', machineId: m.id } : undefined;
+  const route: Route | undefined = s && orchestratorId !== undefined ? sessionRoute(s, { orchestratorId }) : sb ? { view: 'sandbox', sandboxId: sb.id } : m ? { view: 'machine', machineId: m.id } : undefined;
   switch (n.kind) {
     case 'worker-done':
       return { text: `${agent ?? 'A worker'} finished a turn`, route, where };
@@ -463,10 +479,8 @@ function describeNotice(n: Notice, app: AppState | null): { text: string; route?
       return { text: `${agent ?? 'A worker'} wants to use ${n.tool}${n.detail ? `: ${n.detail}` : ''}`, route, where };
     case 'unity-blocked':
       return { text: `${n.summary}${placeName ? ` in ${placeName}` : ''}`, route: sb ? { view: 'sandbox', sandboxId: sb.id } : undefined };
-    case 'delegation-request': {
-      const a = app?.standingAgents.find((x) => x.name === n.standingName);
-      return { text: n.summary, route: a ? { view: 'agent', agentId: a.id, tab: 'delegations' } : undefined };
-    }
+    case 'delegation-request':
+      return { text: n.summary, route: standing ? { view: 'agent', agentId: standing.id, tab: 'delegations' } : undefined };
     case 'auto-started':
     case 'auto-finished':
       return { text: n.summary, route, where: placeName };
@@ -485,9 +499,8 @@ function describeNotice(n: Notice, app: AppState | null): { text: string; route?
 
 /** A message from the harness, not from the user: one quiet line with an icon; amber when it needs the user. */
 function NoticeRow({ ev }: { ev: UserEv }) {
-  const app = useStore((s) => s.app);
   const n = useMemo(() => parseNotice(ev.text), [ev.text]);
-  const d = describeNotice(n, app);
+  const d = describeNotice(n, useNoticeRefs(n));
   // A message from another person is to be read, not skimmed: it starts open.
   const [open, setOpen] = useState(n.kind === 'person-message');
   return (

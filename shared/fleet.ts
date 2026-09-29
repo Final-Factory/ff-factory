@@ -92,8 +92,8 @@ function summarize(c: Omit<FleetComputer, 'live' | 'busy' | 'attention'>): Fleet
 
 const shortHost = (h: string) => h.replace(/\.(local|lan|home)$/i, '');
 
-export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines' | 'system' | 'machineStats'>): FleetComputer[] {
-  const byId = new Map(app.sessions.map((s) => [s.id, s]));
+/** `byId`: the sessions by id, when the caller already has them (the page keeps one per sessions list). */
+export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines' | 'system' | 'machineStats'>, byId: Map<string, SessionInfo> = new Map(app.sessions.map((s) => [s.id, s]))): FleetComputer[] {
 
   const hostSandboxes = app.sandboxes.map((sb): FleetSandbox => {
     const agents = agentsIn(sb.sessionIds, byId);

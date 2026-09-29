@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import type { AppState, SessionInfo, WorkItem } from '../../../shared/types';
+import type { AppState, WorkItem } from '../../../shared/types';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
-import { attempt, reloadTranscript } from '../store';
+import { attempt, reloadTranscript, sessionsByIds } from '../store';
 import { dispatcherGlance, fmtCost, fmtRelative, isBusy, isOpenWork, navigate, useNow, workLabel, workTone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
@@ -150,7 +150,7 @@ function Requests({ app, open, closed, focus, now }: { app: AppState; open: Work
 }
 
 function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; open: boolean; onToggle: () => void; now: number }) {
-  const workers = w.sessionIds.map((id) => app.sessions.find((s) => s.id === id)).filter((s): s is SessionInfo => !!s);
+  const workers = sessionsByIds(app.sessions, w.sessionIds);
   const working = workers.some(isBusy);
   const tone = workTone(w.status);
   return (

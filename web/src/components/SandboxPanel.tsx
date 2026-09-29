@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AppState, Sandbox, SessionInfo } from '../../../shared/types';
+import type { AppState, Sandbox } from '../../../shared/types';
 import { api } from '../api';
-import { attempt, focusDetails, useStore } from '../store';
+import { attempt, focusDetails, sessionsByIds, useStore } from '../store';
 import { displayName, fmtRelative, isUnused, navigate, sandboxGlance, unityLabel, unityTone, useNow } from '../util';
 import { NewAgentModal } from './Modals';
 import { ScreenshotsDrawer } from './Images';
@@ -22,9 +22,7 @@ export function SandboxPanel({
   onClose?: () => void;
 }) {
   const now = useNow();
-  const sessions = sandbox.sessionIds
-    .map((id) => app.sessions.find((s) => s.id === id))
-    .filter((s): s is SessionInfo => !!s);
+  const sessions = sessionsByIds(app.sessions, sandbox.sessionIds);
   // Default to the most recent session.
   const selected = sessions.find((s) => s.id === sessionId) ?? sessions[sessions.length - 1];
 
