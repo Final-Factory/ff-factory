@@ -69,7 +69,11 @@ export type ToDaemon =
   /** The daemon's clean-up settings (server/cleanup.ts), at connect and when they change. Kept on the machine. */
   | { type: 'cleanup_config'; config: { everyMinutes: number; softFreeGB: number } }
   /** A clean-up pass now (the orchestrator asked); answered by a `cleanup` report. */
-  | { type: 'cleanup_now' };
+  | { type: 'cleanup_now' }
+  /** How often the daemon polls its Mac's own Claude login's plan usage (config usagePollMinutes), at connect and when it changes. */
+  | { type: 'usage_config'; config: { everyMinutes: number } }
+  /** Poll that usage now (the usage meters' Refresh); answered by a `usage` report. A daemon before these ignores both. */
+  | { type: 'usage_now' };
 
 export type FromDaemon =
   /** `catalog`: the MCP tools this daemon can serve (protocol 3+); info.daemon is the commit it was deployed from. */
@@ -99,7 +103,7 @@ export type FromDaemon =
   | { type: 'sandbox_event'; text: string; sandbox?: string; checkpoint?: boolean }
   /** The Mac's CPU, RAM, GPU and disk (server/system.ts), every 15 s (protocol 4+). */
   | { type: 'stats'; stats: HostStats }
-  /** The plan usage of the Mac's own Claude login (not the host token), every 5 minutes (protocol 4+). */
+  /** The plan usage of the Mac's own Claude login (not the host token), every config usagePollMinutes and on usage_now (protocol 4+). */
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
   /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */
   | { type: 'cleanup'; summary: CleanupSummary; notice?: string }

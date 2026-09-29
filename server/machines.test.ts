@@ -149,6 +149,11 @@ test('machine: the daemon reports its Mac\'s load and its own login\'s usage; of
   assert.deepEqual(Object.keys(mm.allStats()), ['mx']);
   await until('usage', () => usage.length > 0);
   assert.deepEqual(usage[0], { id: 'mx', email: 'someone@example.com', weekly: 41 });
+  // It polls on the portal's interval (config usagePollMinutes, default 15), and at once when the meters' Refresh asks.
+  await until('the interval', () => (d as unknown as { usageMs: number }).usageMs === 15 * 60_000);
+  assert.equal(usage.length, 1);
+  assert.equal(mm.requestUsage(), 1);
+  await until('usage on request', () => usage.length === 2);
   d.shutdown();
   await until('offline', () => !mm.isOnline('mx'));
   assert.equal(mm.statsOf('mx'), undefined, "an offline machine's numbers are gone, not shown stale");

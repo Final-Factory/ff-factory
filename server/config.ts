@@ -33,6 +33,11 @@ export interface Config {
    */
   ownerName?: string;
   /**
+   * How often the Claude plan usage of every account is polled, in minutes (docs/accounts.md): this host's token,
+   * login and people's own tokens, and each machine daemon's login. Default 15. The usage endpoint rate-limits.
+   */
+  usagePollMinutes: number;
+  /**
    * Repos whose history is public, and the identity agents commit to them with. The guard refuses a push
    * to one of `repos` (default: this app's own origin) when a commit in it has an author or committer
    * email that is neither a GitHub noreply address nor `email`. Example:
@@ -255,8 +260,12 @@ export const VOICE_DEFAULTS: Omit<VoiceConfig, 'toolsDir'> = {
   ttsDevice: 'auto',
 };
 
+/** The default of config usagePollMinutes. */
+export const DEFAULT_USAGE_POLL_MINUTES = 15;
+
 const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' | 'voice' | 'hostGuard'> = {
   port: 8790,
+  usagePollMinutes: DEFAULT_USAGE_POLL_MINUTES,
   trustProxy: true,
   host: '0.0.0.0',
   dataDir: './data',

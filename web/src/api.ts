@@ -93,6 +93,7 @@ export const api = {
   maxActivity: (limit = 200) => request<MaxEvent[]>('GET', `/api/max/activity?limit=${limit}`),
   maxInbound: () => request<(MaxInboundChannel & { items: MaxInboundItem[] })[]>('GET', '/api/max/inbound'),
   maxSeen: (alias: string) => request<{ ok: boolean }>('POST', `/api/max/inbound/${encodeURIComponent(alias)}/seen`),
+  refreshUsage: () => request<{ started: boolean; machines: number }>('POST', '/api/usage/refresh'),
   maxRefresh: () => request<{ ok: boolean; note?: string }>('POST', '/api/max/refresh'),
   events: (sessionId: string, limit = 500) =>
     request<TranscriptEvent[]>('GET', `/api/sessions/${enc(sessionId)}/events?limit=${limit}`),

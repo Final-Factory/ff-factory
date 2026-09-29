@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { Config } from './config.ts';
 import {
   accountLines,
   addSpend,
@@ -597,7 +598,7 @@ test('tracker: every token shows numbers or "usage unknown: <reason>" after one 
   fs.rmSync(dir, { recursive: true });
 });
 
-test('tracker: a poll that has run longer than the interval no longer blocks the next one', async () => {
+test('tracker: a poll that has run longer than 5 minutes no longer blocks the next one', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-stuck-'));
   const logs: string[] = [];
   let calls = 0;
@@ -618,4 +619,66 @@ test('tracker: a poll that has run longer than the interval no longer blocks the
   assert.equal(calls, 2);
   assert.ok(logs.some((l) => /has not finished; polling again/.test(l)), logs.join('\n'));
   fs.rmSync(dir, { recursive: true });
+});
+
+test('tracker: one poll at start, then one every usagePollMinutes; Refresh polls at once and moves the next; system_status polls only when stale', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: Date.parse(AS_OF) });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-every-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let calls = 0;
+  const cfg = { dataDir: dir, usagePollMinutes: 15, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN, CLAUDE_CONFIG_DIR: dir } } as never as Config;
+  const tr = new UsageTracker(cfg, () => undefined, {
+    fetchLogin: async () => {
+      throw new UsageFetchError('no login here');
+    },
+    fetchToken: async () => {
+      calls++;
+      return { rate_limits_available: true, rate_limits: endpointBody(41, 33, 0) };
+    },
+    log: () => undefined,
+  });
+  t.after(() => tr.stop());
+  const settle = () => new Promise((r) => setImmediate(r));
+  const minutes = async (n: number) => {
+    for (let i = 0; i < n; i++) {
+      t.mock.timers.tick(60_000);
+      await settle();
+    }
+  };
+  tr.start();
+  await settle();
+  assert.equal(calls, 1, 'one poll at start, so the meters are not empty');
+  await minutes(14);
+  assert.equal(calls, 1, 'nothing before the interval (the 10 s token check polls only a new token)');
+  await minutes(1);
+  assert.equal(calls, 2, 'the next one 15 minutes after');
+
+  // system_status: numbers under an interval old are used as they are.
+  tr.ensureFresh();
+  await settle();
+  assert.equal(calls, 2);
+
+  // The Refresh button polls now, not twice within seconds, and the next scheduled poll counts from it.
+  await minutes(5);
+  assert.equal(tr.refreshNow(), true);
+  await settle();
+  assert.equal(calls, 3);
+  assert.equal(tr.refreshNow(), false, 'a second click within seconds does not poll again');
+  await minutes(14);
+  assert.equal(calls, 3, 'the scheduled poll moved to 15 minutes after the refresh');
+  await minutes(1);
+  assert.equal(calls, 4);
+
+  // A new interval (set_app_config usagePollMinutes) applies at once.
+  cfg.usagePollMinutes = 5;
+  tr.reschedule();
+  await minutes(5);
+  assert.equal(calls, 5);
+
+  // Stale numbers (the timer was held up): a look at system_status polls.
+  tr.stop();
+  await minutes(6);
+  tr.ensureFresh();
+  await settle();
+  assert.equal(calls, 6);
 });

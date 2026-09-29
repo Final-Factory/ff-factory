@@ -3,6 +3,8 @@ import type { AccountUsage, AppState, CleanupSummary, HostHealth, HostStats, Pla
 import { memUsed as memUsedOf } from '../../../shared/stats';
 import { fmtBytes, fmtClock, fmtCost, fmtRelative, lsGet, lsSet, useNow } from '../util';
 import { Icon } from './ui';
+import { api } from '../api';
+import { attempt } from '../store';
 
 // The sidebar's footer: the load of every computer and the plan usage of every Claude account, in two
 // quiet lines; a tap opens the meters. With machines connected each computer is a name and three mini
@@ -117,6 +119,7 @@ export function SystemFooter({ app }: { app: AppState }) {
             <Meters sys={sys} health={app.host?.health} limits={<Limits sys={sys} unityOn={unityOn} agentsOn={agentsOn} />} />
           )}
           <CleanupLines computers={computers} />
+          {hasPlan && <UsageRefresh />}
           {app.accounts ? <AccountsMeters app={app} /> : app.usage && <PlanMeters usage={app.usage} />}
         </div>
       )}
@@ -344,6 +347,27 @@ function Limits({ sys, unityOn, agentsOn }: { sys: SystemStats; unityOn: number;
       <span className={agentsOn >= sys.limits.maxSessions ? 'at-limit' : ''}>
         Agents here <b>{agentsOn}/{sys.limits.maxSessions}</b>
       </span>
+    </div>
+  );
+}
+
+/**
+ * Poll every Claude account's usage now (they are polled every config usagePollMinutes, default 15): here and on each
+ * connected machine. The numbers arrive by themselves; each account's "as of" says when.
+ */
+function UsageRefresh() {
+  const [busy, setBusy] = useState(false);
+  const refresh = async () => {
+    setBusy(true);
+    await attempt(api.refreshUsage());
+    // A poll takes a few seconds (a minute at most); the button stays quiet meanwhile.
+    setTimeout(() => setBusy(false), 5_000);
+  };
+  return (
+    <div className="plan-refresh">
+      <button className="btn btn-ghost btn-sm" onClick={() => void refresh()} disabled={busy} title="Ask every Claude account for its usage now, here and on each machine" data-testid="usage-refresh">
+        <Icon name="refresh" size={12} /> {busy ? 'Refreshing…' : 'Refresh usage'}
+      </button>
     </div>
   );
 }

@@ -452,6 +452,8 @@ route('POST', '/api/max/inbound/([\\w-]+)/seen', async (_r, [alias]) => {
   return { ok: true };
 });
 route('POST', '/api/max/refresh', async () => max.refresh());
+// The usage meters' Refresh: poll every account now, here and on each connected machine (docs/accounts.md).
+route('POST', '/api/usage/refresh', async () => ({ started: usage.refreshNow(), machines: machines.requestUsage() }));
 
 route('GET', '/api/sessions/([\\w-]+)/events', async (_r, [id], url) => {
   sessions.get(id);
@@ -1190,7 +1192,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   process.exit(0);
 }
 
-// The user's Claude plan usage (server/usage.ts): refreshed every few minutes and after rate-limit events.
+// The user's Claude plan usage (server/usage.ts): polled at startup, then every config usagePollMinutes (default 15).
 // Every account in use: this host's login and token here, each Mac's own login reported by its daemon.
 const usage = new UsageTracker(cfg, () => {
   if (usage.usage) broadcast({ type: 'usage', usage: usage.usage });
@@ -1238,7 +1240,6 @@ bus.on('event', (e: ServerEvent) => {
 });
 machines.onUsage = (id, account, u) => usage.report(id, account, u);
 for (const s of sessions.sessions.values()) usage.recordCost(s.info.id, s.info.costUsd); // baselines
-sessions.events.on('rateLimit', () => usage.poke());
 sessions.events.on('result', (s: { info: { id: string; costUsd: number } }) => usage.recordCost(s.info.id, s.info.costUsd));
 /** Whose account each orchestrator runs on (docs/orchestrators.md), for system_status: a person without a token of their own is on the owner's. */
 function orchestratorAccountsLine() {
@@ -1252,11 +1253,20 @@ function orchestratorAccountsLine() {
     `; the dispatcher runs for the system payer, ${payer.displayName}, on ${userToken(cfg, payer.userId) ? 'their own token' : "the orchestrator's account above"}.`
   );
 }
-agents.usageLines = () => [
-  ...accountSetupLines(cfg, os.hostname(), hostToken(cfg), machines.list(), personTokens().map((p) => p.displayName)),
-  orchestratorAccountsLine(),
-  ...accountLines(accountsNow(), store.sessions, new Date()),
-];
+agents.usageLines = () => {
+  // Numbers under one interval old are used as they are; older, a poll starts (docs/accounts.md, "How often").
+  usage.ensureFresh();
+  return [
+    ...accountSetupLines(cfg, os.hostname(), hostToken(cfg), machines.list(), personTokens().map((p) => p.displayName)),
+    orchestratorAccountsLine(),
+    ...accountLines(accountsNow(), store.sessions, new Date()),
+  ];
+};
+// usagePollMinutes changed (set_app_config): this host's next poll moves, and the daemons hear the new interval.
+agents.usagePollChanged = () => {
+  usage.reschedule();
+  machines.pushUsageConfig();
+};
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();

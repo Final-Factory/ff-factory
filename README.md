@@ -151,8 +151,9 @@ banner. The Unity watchdog reports editors stuck on dialogs and dismisses the kn
 
 The sidebar's "Claude plan" meters (weekly, 5-hour session, per-model weekly) come from the same
 claude.ai usage data as Claude Code's `/usage`: `server/usage.ts` asks a short-lived, promptless CLI
-process for it (the Agent SDK's experimental usage request; no model call) every 5 minutes and
-after rate-limit events. The orchestrator's `system_status` tool reports the same numbers.
+process for it (the Agent SDK's experimental usage request; no model call) at startup and every
+config `usagePollMinutes` (default 15); **Refresh usage** under the meters asks at once. Each account says
+"as of" when. The orchestrator's `system_status` tool reports the same numbers.
 
 They cover every Claude account in use, each with its own meters: the agents' token
 (`claudeEnv.CLAUDE_CODE_OAUTH_TOKEN`, shown as "host token …abcd"), this host's own claude.ai login,

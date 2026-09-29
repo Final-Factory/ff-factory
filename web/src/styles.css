@@ -989,6 +989,11 @@ select.input {
   text-align: right;
 }
 
+.plan-refresh {
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* Every computer's load, one row each. */
 .mt-row {
   display: grid;

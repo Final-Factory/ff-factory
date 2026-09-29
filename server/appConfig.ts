@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, ROOT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole } from './config.ts';
+import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, ROOT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole } from './config.ts';
 import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret } from './secrets.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
@@ -26,6 +26,8 @@ export const SETTABLE_KEYS = [
   'hostGuard.cleanup.softFreeGB',
   'machines.cleanup.everyMinutes',
   'machines.cleanup.softFreeGB',
+  // How often every Claude account's plan usage is polled, here and by the machines' daemons (the endpoint rate-limits).
+  'usagePollMinutes',
   // How many Unity editors may run at once on this host (each takes ~8-12 GB of RAM).
   'limits.maxUnity',
   // How many sandboxes may exist (each holds a worktree and a ~70 GB Library), and live agents on this host.
@@ -141,6 +143,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       const max = key === 'limits.maxSandboxes' ? 8 : 12;
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > max) throw new Error(`${key} is a whole number from 1 to ${max}`);
+      return n;
+    }
+    case 'usagePollMinutes': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 5 || n > 240) throw new Error('usagePollMinutes is a whole number of minutes from 5 to 240');
       return n;
     }
     case 'limits.maxUnity': {
@@ -284,6 +291,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     cfg.providers = { ...cfg.providers, ffbox };
   }
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
+  else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;
   else if (key === 'hostGuard.cleanup.softFreeGB') cfg.hostGuard.cleanup.softFreeGB = (v as number | undefined) ?? DEFAULT_CLEANUP.softFreeGB;
   else if (key === 'machines.cleanup.everyMinutes' || key === 'machines.cleanup.softFreeGB') {

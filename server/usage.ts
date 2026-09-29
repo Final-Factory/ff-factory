@@ -10,7 +10,7 @@ import type { AccountUsage, PlanUsage, SessionInfo, SessionKind, UsageMeter } fr
  * The user's Claude plan usage: the weekly limit, the 5-hour session limit and any per-model weekly limit,
  * as the claude.ai usage endpoint reports them (the data behind Claude Code's /usage). The Agent SDK
  * exposes it as an experimental control request on a live query; the tracker runs a short-lived CLI
- * process with no prompt (no model call, about a second) every few minutes and after rate-limit events.
+ * process with no prompt (no model call, about a second) at startup and every config usagePollMinutes (default 15).
  *
  * Credentials: the CLI only asks for usage (GET /api/oauth/usage) when its OAuth login carries the
  * `user:profile` scope. The agents' long-lived `claude setup-token` token never does: setup-token logs in
@@ -465,6 +465,9 @@ export class UsageFetchError extends Error {
 /** Keeps any credential out of a message that came from elsewhere. */
 const scrub = (s: string) => s.replace(/sk-ant-[\w-]+/g, 'sk-ant-…');
 
+/** How long a 429 without a Retry-After keeps the tracker off the endpoint for that token. */
+const RETRY_DEFAULT_MS = 5 * 60_000;
+
 /**
  * A token's plan usage, asked of the usage endpoint with that token as the only credential: no CLI, so
  * nothing can fall back to a login stored on this machine (top of this file). The reply has the same
@@ -486,7 +489,7 @@ export async function fetchTokenUsage(token: string, fetchImpl: typeof fetch = f
       // no JSON body
     }
     const seconds = Number(res.headers.get('retry-after'));
-    const retryAfterMs = res.status === 429 ? (Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : REFRESH_MS) : undefined;
+    const retryAfterMs = res.status === 429 ? (Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : RETRY_DEFAULT_MS) : undefined;
     const what =
       res.status === 401 ? 'the token was rejected (expired or revoked?)'
       : res.status === 403 ? 'the token may not read usage'
@@ -557,14 +560,16 @@ const brief = (u: PlanUsage) =>
 
 // ---------------------------------------------------------------- the tracker
 
-const REFRESH_MS = 5 * 60_000;
-const EVENT_DEBOUNCE_MS = 60_000;
 /**
  * The longest the tracker waits for any one request (the login's CLI, the token's endpoint, its headers),
  * whatever the request's own timeout says. A token asks at most two, so a poll settles well within
- * REFRESH_MS and every credential has numbers or a reason by the next one.
+ * STUCK_MS, and every credential has numbers or a reason by the next one.
  */
 const ANSWER_MS = 75_000;
+/** A poll still marked running after this long is taken as stuck: the next one goes ahead (it cannot happen while ANSWER_MS holds). */
+const STUCK_MS = 5 * 60_000;
+/** A new token (set_app_config) is polled this soon, and a manual refresh no sooner than this after the last poll. */
+const SOON_MS = 5_000;
 
 /** What usage.json holds; a file from before per-account usage is one PlanUsage (this host's login). */
 interface UsageFile {
@@ -586,8 +591,11 @@ export interface UsageDeps {
 }
 
 /**
- * Polls this host's login and its token (when set) every few minutes and after rate-limit events, and
- * keeps what the machine daemons report for their Macs' logins. `usage` is this host's login, as before.
+ * Polls this host's login and the tokens (the host's and people's own) once at startup, then every config
+ * usagePollMinutes (default 15), and keeps what the machine daemons report for their Macs' logins. A manual
+ * refresh polls at once; system_status polls only when the numbers are older than the interval. Rate-limit
+ * events no longer poll: the endpoint rate-limits, and one poll per interval is enough. `usage` is this host's
+ * login, as before.
  */
 export class UsageTracker {
   private readonly cfg: Config;
@@ -601,6 +609,8 @@ export class UsageTracker {
   private pollId = 0;
   private lastFetch = 0;
   private soon?: NodeJS.Timeout;
+  private next?: NodeJS.Timeout;
+  private started = false;
   private readonly changed: () => void;
   private readonly fetchLogin: NonNullable<UsageDeps['fetchLogin']>;
   private readonly fetchToken: NonNullable<UsageDeps['fetchToken']>;
@@ -658,22 +668,62 @@ export class UsageTracker {
     return this.tokens().map((x) => tokenKey(x.token)).join() || undefined;
   }
 
+  /** The poll interval (config usagePollMinutes), read afresh so a change applies at the next scheduling. */
+  get intervalMs(): number {
+    return Math.max(1, this.cfg.usagePollMinutes || 15) * 60_000;
+  }
+
+  /** One poll now (so the meters are not empty), then one every interval; a new token is polled within seconds. */
   start() {
+    this.started = true;
     void this.refresh();
-    setInterval(() => void this.refresh(), REFRESH_MS);
     setInterval(() => {
       if (this.tokensKey() !== this.tokenSeen) this.poke();
     }, 10_000).unref();
   }
 
-  /** A session saw a rate-limit event: the numbers moved, fetch them again soon (at most once a minute). */
+  /** Stop the timers (tests, shutdown). */
+  stop() {
+    this.started = false;
+    clearTimeout(this.next);
+    clearTimeout(this.soon);
+    this.soon = undefined;
+  }
+
+  /** The next scheduled poll: one interval after the last one, whatever started it. Again after the interval changes. */
+  reschedule() {
+    clearTimeout(this.next);
+    if (!this.started) return;
+    this.next = setTimeout(() => void this.refresh(), Math.max(1_000, this.lastFetch + this.intervalMs - Date.now()));
+    this.next.unref?.();
+  }
+
+  /** A new token appeared (set_app_config): poll within seconds rather than at the next interval. */
   poke() {
     if (this.soon) return;
-    const wait = Math.max(5_000, EVENT_DEBOUNCE_MS - (Date.now() - this.lastFetch));
     this.soon = setTimeout(() => {
       this.soon = undefined;
       void this.refresh();
-    }, wait);
+    }, SOON_MS);
+    this.soon.unref?.();
+  }
+
+  /**
+   * Someone looked (system_status): the numbers are fine up to one interval old; older (the last poll failed, or
+   * the timer was held up), a poll starts and the caller shows what there is, with its "as of".
+   */
+  ensureFresh() {
+    if (Date.now() - this.lastFetch >= this.intervalMs) void this.refresh();
+  }
+
+  /**
+   * The Refresh button: poll now, whatever the interval says, unless a poll is running or one started a few
+   * seconds ago. Returns whether a poll started.
+   */
+  refreshNow(): boolean {
+    if (this.inFlightSince || Date.now() - this.lastFetch < SOON_MS) return false;
+    void this.refresh();
+    return true;
   }
 
   /** A session's cumulative cost changed: record the increase (the fallback's "our own spend"). */
@@ -725,13 +775,14 @@ export class UsageTracker {
   async refresh() {
     const now = Date.now();
     if (this.inFlightSince) {
-      if (now - this.inFlightSince < REFRESH_MS) return;
+      if (now - this.inFlightSince < STUCK_MS) return;
       // Cannot happen while every request has a deadline; if it does, one stuck poll must not stop the rest.
       this.log(`usage: the poll started at ${new Date(this.inFlightSince).toISOString()} has not finished; polling again`);
     }
     const mine = ++this.pollId;
     this.inFlightSince = now;
     this.lastFetch = now;
+    this.reschedule();
     try {
       const base = { ...process.env, ...this.cfg.claudeEnv };
       const tokens = this.tokens();

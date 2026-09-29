@@ -90,6 +90,17 @@ test('app config: limits.maxUnity caps editors at once, live, 1 to 8', (t) => {
   assert.equal(full.limits.maxUnity, 3, 'null: back to the default');
 });
 
+test('app config: usagePollMinutes, live, 5 to 240 minutes, default 15', (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg, usagePollMinutes: 15 } as unknown as Config;
+  setAppConfig(file, full, 'usagePollMinutes', 30);
+  assert.equal(full.usagePollMinutes, 30, 'applies at once');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).usagePollMinutes, 30);
+  for (const bad of ['4', '241', '7.5', 'often']) assert.throws(() => setAppConfig(file, full, 'usagePollMinutes', bad), /5 to 240/, bad);
+  setAppConfig(file, full, 'usagePollMinutes', null);
+  assert.equal(full.usagePollMinutes, 15, 'null: back to the default');
+});
+
 test('app config: publicUrl (the portal address machines and the outside watchdog use)', (t) => {
   const { file, cfg } = setup(t);
   const full = { ...cfg } as unknown as Config;

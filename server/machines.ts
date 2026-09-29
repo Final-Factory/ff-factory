@@ -5,7 +5,7 @@ import type http from 'node:http';
 import type { Duplex } from 'node:stream';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { ROOT, type Config } from './config.ts';
+import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
@@ -356,6 +356,18 @@ export class MachineManager {
       const c = this.cleanupFor?.(id);
       if (c) this.post(id, { type: 'cleanup_config', config: c }, false);
     }
+  }
+
+  /** Send every connected daemon the usage poll interval (config usagePollMinutes, after it changed). */
+  pushUsageConfig() {
+    for (const id of this.links.keys()) this.post(id, { type: 'usage_config', config: { everyMinutes: this.cfg.usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES } }, false);
+  }
+
+  /** Ask every connected daemon for its login's usage now (the meters' Refresh). Returns how many were asked. */
+  requestUsage(): number {
+    const ids = [...this.links.keys()];
+    for (const id of ids) this.post(id, { type: 'usage_now' }, false);
+    return ids.length;
   }
 
   /** A clean-up pass on the machine now; its result arrives as the machine's lastCleanup. */
@@ -896,6 +908,7 @@ export class MachineManager {
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
     const cleanup = this.cleanupFor?.(id);
     if (cleanup) ws.send(JSON.stringify({ type: 'cleanup_config', config: cleanup } satisfies ToDaemon));
+    ws.send(JSON.stringify({ type: 'usage_config', config: { everyMinutes: this.cfg.usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES } } satisfies ToDaemon));
     console.log(`machine ${id} connected`);
   }
 
