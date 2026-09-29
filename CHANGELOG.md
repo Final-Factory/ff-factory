@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **People message each other through their orchestrators** (`message_person`,
+  [docs/orchestrators.md](docs/orchestrators.md)). A person's own orchestrator can send another person a message: it
+  lands in that person's own chat as a `[person message]` from the sender, which their orchestrator shows them and
+  never acts on by itself, and they answer the same way. It is unread (an amber count on the sidebar's Orchestrator
+  row) until they open or write to their chat, sends them a push or in-page notification (a new "Messages from people"
+  choice in Settings), and survives a restart. At most 3 messages to one person until they write to their own
+  orchestrator, 2000 characters each; workers, standing agents, machine agents and the dispatcher cannot send one.
 - **An orchestrator for each person, and a dispatcher** ([docs/orchestrators.md](docs/orchestrators.md)). Each
   login gets their own orchestrator chat on the home page: only they write to it, it runs on their own Claude token
   when they have one, sees everything, follows up with their own workers, and files work requests. The shared chat

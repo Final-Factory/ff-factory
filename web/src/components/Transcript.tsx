@@ -443,6 +443,7 @@ const NOTICE_ICON: Record<NoticeKind, IconName> = {
   'work-request': 'inbox',
   'work-update': 'inbox',
   ledger: 'clock',
+  'person-message': 'chat',
   other: 'info',
 };
 
@@ -474,6 +475,9 @@ function describeNotice(n: Notice, app: AppState | null): { text: string; route?
     case 'work-update':
       // The request on the dispatcher's page (docs/orchestrators.md).
       return { text: n.summary, route: n.workId ? { view: 'dispatcher', tab: n.workId } : { view: 'dispatcher' } };
+    case 'person-message':
+      // The sender's own chat (read only here), where their side of it is.
+      return { text: n.summary, route: n.fromUserId ? { view: 'chat', userId: n.fromUserId } : undefined };
     default:
       return { text: n.summary, route };
   }
@@ -484,7 +488,8 @@ function NoticeRow({ ev }: { ev: UserEv }) {
   const app = useStore((s) => s.app);
   const n = useMemo(() => parseNotice(ev.text), [ev.text]);
   const d = describeNotice(n, app);
-  const [open, setOpen] = useState(false);
+  // A message from another person is to be read, not skimmed: it starts open.
+  const [open, setOpen] = useState(n.kind === 'person-message');
   return (
     <div className={`notice${n.attention ? ' notice-attn' : ''}${open ? ' open' : ''}`} data-seq={ev.seq}>
       <div className="notice-row">

@@ -4,7 +4,7 @@ import webpush from 'web-push';
 import { nameWithSlot } from '../shared/labels.ts';
 import { bus, emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager } from './sessions.ts';
-import type { DelegationRequest, NotifyKind, NotifyPrefs, Sandbox, ServerEvent, SessionInfo, StandingAgent, StandingRun, UnityBlocked } from '../shared/types.ts';
+import type { DelegationRequest, NotifyKind, NotifyPrefs, Requester, Sandbox, ServerEvent, SessionInfo, StandingAgent, StandingRun, UnityBlocked } from '../shared/types.ts';
 
 /** A browser's push subscription, as PushSubscription.toJSON() gives it, plus that device's choices. */
 export interface PushSub {
@@ -17,7 +17,7 @@ export interface PushSub {
   device: string;
 }
 
-export const DEFAULT_PREFS: NotifyPrefs = { permission: true, turnEnd: true, error: true, standing: true, delegation: true, unity: true, host: true };
+export const DEFAULT_PREFS: NotifyPrefs = { permission: true, person: true, turnEnd: true, error: true, standing: true, delegation: true, unity: true, host: true };
 
 export interface Notice {
   kind: NotifyKind;
@@ -111,6 +111,11 @@ export class Notifier {
   unityBlocked(sb: Sandbox, b: UnityBlocked) {
     const what = b.reason === 'dialog' ? `"${b.title}"${b.text ? `: ${b.text.replace(/\s+/g, ' ')}` : ''}` : b.title ?? 'stuck';
     this.fire({ kind: 'unity', title: `Unity in ${nameWithSlot(sb)} is stuck`, body: clip(what, 180), url: `#/sandbox/${encodeURIComponent(sb.id)}`, tag: `unity-${sb.id}` });
+  }
+
+  /** Someone's orchestrator sent this person a message (message_person): it waits in their own chat. */
+  personMessage(from: Requester, to: Requester, text: string) {
+    this.fire({ kind: 'person', title: `Message from ${from.displayName}`, body: clip(firstLine(text), 180), url: '#/', tag: `person-${from.userId}` }, [to.userId]);
   }
 
   /** A host-health step (disk guard, sandbox drive recovery): server/hostHealth.ts. */

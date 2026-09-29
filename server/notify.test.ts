@@ -109,7 +109,7 @@ test('notify: saved subscriptions without a newer kind start at its default', (t
   fs.writeFileSync(path.join(dir, 'push-subscriptions.json'), JSON.stringify([old]));
   const store = new Store(dir);
   const n = new Notifier(dir, store, new SessionManager({ limits: { maxSessions: 6 } } as Config, store));
-  assert.deepEqual(n.list('alice')[0].prefs, { ...old.prefs, unity: true, host: true });
+  assert.deepEqual(n.list('alice')[0].prefs, { ...old.prefs, person: true, unity: true, host: true });
   store.flush();
 });
 
@@ -138,4 +138,19 @@ test("notify: a person's own orchestrator, and a worker's finished turn, reach o
   assert.deepEqual(seen, [['ben'], ['ben'], ['LothSahn'], ['everyone']]);
   assert.equal(sessionRoute(info({ kind: 'orchestrator', orchestratorRole: 'dispatcher' })), '#/dispatcher/conversation');
   assert.equal(sessionRoute(info({ id: 'p1', kind: 'orchestrator', orchestratorRole: 'personal' })), '#/');
+});
+
+test('notify: a message from another person reaches only its recipient, and opens their chat', async (t) => {
+  const { n, sent } = setup(t);
+  const seen: string[][] = [];
+  const onBus = (e: ServerEvent) => e.type === 'notify' && seen.push(e.users ?? ['everyone']);
+  bus.on('event', onBus);
+  t.after(() => bus.off('event', onBus));
+  n.subscribe('ben', sub('ben-phone'), {}, 'Safari on iPhone');
+  n.subscribe('lothsahn', sub('loth-desk'), {}, 'Chrome on Windows');
+  n.subscribe('ben', sub('ben-quiet'), { person: false }, 'Firefox');
+  n.personMessage({ userId: 'lothsahn', displayName: 'Lothsahn' }, { userId: 'ben', displayName: 'Ben' }, 'Deploy now or tonight?\nw22 is ready too.');
+  await flush();
+  assert.deepEqual(sent.map((x) => [x.endpoint.split('/').pop(), x.payload.kind, x.payload.title, (x.payload as { body?: string }).body, x.payload.url]), [['ben-phone', 'person', 'Message from Lothsahn', 'Deploy now or tonight?', '#/']]);
+  assert.deepEqual(seen, [['ben']]);
 });

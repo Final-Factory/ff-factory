@@ -45,6 +45,18 @@ export function OrchestratorView({ session, compact, readOnly }: { session: Sess
 
   useEffect(() => (session ? openSession(session.id) : undefined), [session?.id]);
 
+  // Messages from other people are unread until you have your own chat in front of you.
+  const unread = !readOnly && !!session?.personMessages?.length;
+  useEffect(() => {
+    if (!unread || !session) return;
+    const mark = () => {
+      if (document.visibilityState === 'visible') void attempt(api.seen(session.id));
+    };
+    mark();
+    document.addEventListener('visibilitychange', mark);
+    return () => document.removeEventListener('visibilitychange', mark);
+  }, [unread, session?.id]);
+
   if (!session) {
     return (
       <section className="orch orch-missing">

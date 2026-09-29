@@ -1,7 +1,7 @@
 // Which tools each orchestrator gets (docs/orchestrators.md). Every tool is built once, by Agents.toolSpecs; a role's
 // belt is a selection of them. A person's own orchestrator gets an allow-list: looking, its own wake-ups and heartbeat,
-// follow-ups to its person's workers, and the ledger. The dispatcher gets the rest. A tool added later is the
-// dispatcher's until someone adds it here, which is the safe way round.
+// follow-ups to its person's workers, the ledger, and messages to other people. The dispatcher gets the rest. A tool
+// added later is the dispatcher's until someone adds it here, which is the safe way round.
 import { z } from 'zod';
 
 /** What a tool belt is built from: the shape of Agents.toolSpecs's entries. */
@@ -34,10 +34,12 @@ export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
   'request_work',
   'list_work',
   'update_work',
+  // another person's own orchestrator (scoped in the handler)
+  'message_person',
 ]);
 
-/** Tools that need a person's own orchestrator (its chat's budget, its person's requests). */
-const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work']);
+/** Tools that need a person's own orchestrator (its chat's budget, its person's requests, its person as the sender). */
+const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work', 'message_person']);
 
 /** The dispatcher has no heartbeat of its own: each person's wakes their own orchestrator. */
 const NOT_DISPATCHER: ReadonlySet<string> = new Set([...PERSONAL_ONLY, 'set_heartbeat']);

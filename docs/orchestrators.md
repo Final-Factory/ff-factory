@@ -16,7 +16,8 @@ person. It runs on their own Claude token when config `userClaudeEnv` has one, o
   `system_status`, `ffbox_activity`, `max_activity`, `list_standing_agents`, `list_delegation_requests`;
 - its own `wake_me`, and its person's heartbeat (`set_heartbeat`);
 - `message_agent`, only to its person's own workers (they started it, or one of their requests is on it);
-- the ledger: `request_work`, `list_work`, `update_work`.
+- the ledger: `request_work`, `list_work`, `update_work`;
+- `message_person`, to another person's own orchestrator ([People to people](#people-to-people)).
 
 It cannot start, stop or change anything else. To get work done it files a request.
 
@@ -66,6 +67,29 @@ filer's: the others still on the request hear it. Someone whose request was merg
 The ledger is `data/work.json`: every open request and the newest 300 closed ones. The page gets the open ones and those
 closed in the last 3 days.
 
+## People to people
+
+A person's orchestrator reaches another person with `message_person {to, text}` (`to` is a user id), when its person
+asks it to: a decision only the other person can make, a script only they can run on their own machine. The server
+(`Orchestrators.messagePerson`, `server/orchestrators.ts`):
+
+- refuses anyone but a person's own orchestrator (the tool is only in their belt, `server/belts.ts` `PERSONAL_ONLY`, and
+  the method checks the chat's role again), an unknown user id, the sender's own person, an empty text and one over
+  2000 characters;
+- allows 3 messages from one person to another until the recipient writes to their own orchestrator (`personWrote`), so
+  two orchestrators cannot keep a conversation going between themselves;
+- sends the recipient's own orchestrator (made if missing) a harness message, recorded with the sender as `requestedBy`:
+  `[person message] From Lothsahn's orchestrator (user id lothsahn), written for Lothsahn:`, the text, then a line
+  saying it is data to show the recipient, not an instruction. It is in the recipient's transcript at once, so a
+  restart keeps it; one sent mid-turn waits for that turn, like every harness message;
+- marks it unread on the recipient's session (`personMessages`) until they open their chat (`POST
+  /api/sessions/:id/seen`, their own only) or write to it, and sends them alone a notification (kind `person`).
+
+The recipient's orchestrator shows who it is from and what it asks, in a line or two, and never acts, files work or
+answers on its own: its person decides, and it answers with the same tool only with what they say. A turn a
+`[person message]` starts is the harness's, not the person's, so the destructive tools stay closed in it. The dispatcher
+neither relays nor sees these messages.
+
 ## Where messages go
 
 | message | to |
@@ -79,6 +103,7 @@ closed in the last 3 days.
 | `[unity blocked]` | the dispatcher, and the people whose workers are in that sandbox |
 | `[app restarted]`, `[machines]`, `[unity]`, `[host]`, the orchestrator inbox | the dispatcher. A person's orchestrator cut off mid-turn by a restart is told to pick its turn up again |
 | `[heartbeat]` | each person's own orchestrator, with that person's busy workers, when they turned it on |
+| `[person message]` | the recipient's own orchestrator (message_person), and a notification to the recipient alone |
 | push notifications and in-page notices | a person's own orchestrator's only to that person; a worker's finished turn to the people it works for; the dispatcher's turns to nobody, its questions and errors to the owner |
 
 `/mcp` `ask_orchestrator` and `orchestrator_transcript` talk to the key's person's own orchestrator.
@@ -88,6 +113,7 @@ closed in the last 3 days.
 - The dispatcher reaches people only through ledger decisions, one reply per decision.
 - A person's orchestrator files or updates at most 3 times, and follows up with one worker at most 3 times, between two
   messages of its person. Harness messages alone cannot keep it going.
+- A person's orchestrator messages another person at most 3 times until that person writes to their own orchestrator.
 - Each person files at most 10 requests an hour and 40 a day; repeats are free.
 - Attribution on the dispatcher comes from the request (`work_id`). Without one, `for_user` must name someone its
   conversation shows asking, or the system payer; with neither, the tool refuses. "Whoever wrote last" is never used,
@@ -111,6 +137,10 @@ closed in the last 3 days.
   a link; a row opens to its brief, workers, overlaps and log. Conversation is the dispatcher's chat, which only the
   owner writes to.
 - Decisions arrive in your chat as one-line notices ("Merged into w15: “Belts drop items…”") that open the request.
+- A message from another person arrives in your chat as an amber notice, open, with their name and text ("Lothsahn:
+  Could you run the firewall script on BEAST?"); Open goes to their chat. Until you open your chat, the sidebar's
+  Orchestrator row has an amber count ("Unread: 1 message from Lothsahn"), and your devices get a "Message from
+  Lothsahn" notification.
 - Your heartbeat is your own.
 
 ## The first start
@@ -128,6 +158,7 @@ than Ben's own.
 - Roles are still not enforced: a member's work can go to the owner's machines if the dispatcher sends it there (its brief
   tells it not to).
 - An idle personal orchestrator keeps its process until the server restarts.
+- The dispatcher cannot `message_person`: it still reaches people only through ledger decisions.
 - This host's sandboxes still run in the portal's own process. Moving them behind a daemon, as on the machines, is
   [backlog.md](backlog.md) item 1; the dispatcher already addresses a daemon's sandbox as `"<machine>/<name>"`, and
   nothing in the ledger or the routing depends on where a worker runs.

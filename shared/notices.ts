@@ -22,6 +22,7 @@ export type NoticeKind =
   | 'work-request'
   | 'work-update'
   | 'ledger'
+  | 'person-message'
   | 'other';
 
 export interface Notice {
@@ -45,6 +46,9 @@ export interface Notice {
   detail?: string;
   /** A work request in the ledger ("w13"), docs/orchestrators.md. */
   workId?: string;
+  /** The person another person's message is from (message_person), by user id and name. */
+  fromUserId?: string;
+  fromName?: string;
 }
 
 /** A harness message starts with its tag: [worker update], [heartbeat], [run r-12], … */
@@ -167,6 +171,12 @@ export function parseNotice(text: string): Notice {
     return { kind: 'ledger', summary: `Capacity may have freed${n ? `; ${n} queued` : ''}`, attention: false, body: rest.trim() };
   }
 
+  // Another person's message, written by their orchestrator (server/orchestrators.ts personMessage).
+  if (tag === 'person message') {
+    const p = /^From (.+?)'s orchestrator \(user id ([^)]+)\), written for \1:\n\n([\s\S]*)\n\nThis is \1's message to /.exec(rest);
+    if (p) return { kind: 'person-message', summary: `${p[1]}: ${clip(oneLine(p[3]), 150)}`, attention: true, body: p[3].trim(), fromName: p[1], fromUserId: p[2] };
+    return { kind: 'person-message', summary: clip(oneLine(rest), 160), attention: true, body: rest.trim() };
+  }
   if (tag === 'app restarted') return { kind: 'restarted', summary: 'FF Factory restarted', attention: false, body: rest.trim() };
   if (tag === 'app restart pending') return { kind: 'restart-pending', summary: 'FF Factory is about to restart', attention: false, body: rest.trim() };
   if (tag === 'app restart cancelled') return { kind: 'restart-cancelled', summary: 'The restart was called off', attention: false, body: rest.trim() };
