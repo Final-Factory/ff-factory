@@ -349,9 +349,10 @@ const server = http.createServer(async (req, res) => {
     return json(200, list);
   }
   if (url.pathname === '/api/orchestrator/reset') {
-    transcripts[state.orchestratorId] = [];
-    seqs[state.orchestratorId] = 0;
-    return json(200, {});
+    const id = data.which === 'dispatcher' ? (state.dispatcherId ?? state.orchestratorId) : state.orchestratorId;
+    transcripts[id] = [];
+    seqs[id] = 0;
+    return json(200, { id });
   }
   if (url.pathname === '/api/sandboxes' && method === 'POST') {
     const id = String(data.name);
@@ -438,7 +439,12 @@ const server = http.createServer(async (req, res) => {
     return json(200, { note: r[2] === 'run' ? `Started a run of ${a.name}.` : `Stopped ${a.name}'s run.` });
   }
   if (url.pathname === '/api/settings' && method === 'POST') {
-    state.settings = { ...state.settings, ...data };
+    // heartbeatMinutes is the signed-in person's own heartbeat (docs/orchestrators.md).
+    const me = state.me?.userId ?? 'ben';
+    const heartbeat = { ...state.settings.heartbeat };
+    if (data.heartbeatMinutes) heartbeat[me] = Number(data.heartbeatMinutes);
+    else delete heartbeat[me];
+    state.settings = { ...state.settings, heartbeat };
     broadcast({ type: 'settings', settings: state.settings });
     return json(200, state.settings);
   }

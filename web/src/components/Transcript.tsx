@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AppState, PendingPermission, SessionInfo, TranscriptEvent } from '../../../shared/types';
 import { parseNotice, type Notice, type NoticeKind } from '../../../shared/notices';
 import { api } from '../api';
@@ -102,14 +102,20 @@ const seqsOf = (steps: Step[]) => steps.flatMap((s) => (s.kind === 'tool' ? [s.u
 /** Where each chat was scrolled to, so leaving and coming back keeps the place ('bottom': follow new messages). */
 const scrollMemory = new Map<string, number | 'bottom'>();
 
+/** Set on someone else's conversation (docs/orchestrators.md): its permission requests are theirs to answer. */
+const ReadOnly = createContext<string | undefined>(undefined);
+
 export function Transcript({
   session,
   size = 'normal',
   empty,
+  readOnlyFor,
 }: {
   session: SessionInfo;
   size?: 'normal' | 'large';
   empty?: ReactNode;
+  /** Someone else's conversation: the name of the person who answers its permission requests. */
+  readOnlyFor?: string;
 }) {
   const events = useStore((s) => s.transcripts[session.id]);
   const loaded = useStore((s) => !!s.loaded[session.id]);
@@ -220,6 +226,7 @@ export function Transcript({
   const isEmpty = loaded && items.length === 0 && !streaming && orphanPending.length === 0;
 
   return (
+    <ReadOnly.Provider value={readOnlyFor}>
     <div className={`transcript transcript-${size}`}>
       <div className="transcript-scroll" ref={scroller} onScroll={onScroll}>
         <div className="transcript-inner">
@@ -250,6 +257,7 @@ export function Transcript({
         </button>
       )}
     </div>
+    </ReadOnly.Provider>
   );
 }
 
@@ -431,6 +439,10 @@ const NOTICE_ICON: Record<NoticeKind, IconName> = {
   'restart-pending': 'refresh',
   'restart-cancelled': 'refresh',
   resumed: 'refresh',
+  dispatch: 'inbox',
+  'work-request': 'inbox',
+  'work-update': 'inbox',
+  ledger: 'clock',
   other: 'info',
 };
 
@@ -442,7 +454,7 @@ function describeNotice(n: Notice, app: AppState | null): { text: string; route?
   const agent = s?.title ?? n.agentTitle;
   const placeName = sb ? displayName(sb) : m ? displayName(m) : n.sandboxId ?? n.machineId;
   const where = placeName && !(agent && sameTitle(agent, placeName)) ? placeName : undefined;
-  const route: Route | undefined = s && app ? sessionRoute(s, app.orchestratorId) : sb ? { view: 'sandbox', sandboxId: sb.id } : m ? { view: 'machine', machineId: m.id } : undefined;
+  const route: Route | undefined = s && app ? sessionRoute(s, app) : sb ? { view: 'sandbox', sandboxId: sb.id } : m ? { view: 'machine', machineId: m.id } : undefined;
   switch (n.kind) {
     case 'worker-done':
       return { text: `${agent ?? 'A worker'} finished a turn`, route, where };
@@ -457,6 +469,11 @@ function describeNotice(n: Notice, app: AppState | null): { text: string; route?
     case 'auto-started':
     case 'auto-finished':
       return { text: n.summary, route, where: placeName };
+    case 'dispatch':
+    case 'work-request':
+    case 'work-update':
+      // The request on the dispatcher's page (docs/orchestrators.md).
+      return { text: n.summary, route: n.workId ? { view: 'dispatcher', tab: n.workId } : { view: 'dispatcher' } };
     default:
       return { text: n.summary, route };
   }
@@ -668,13 +685,14 @@ function PermissionCard({
   };
 
   const cls = pending ? 'pending' : decision === 'allow' ? 'allowed' : decision === 'deny' ? 'denied' : 'resolved';
+  const answeredBy = useContext(ReadOnly);
 
-  if (!pending) {
+  if (!pending || answeredBy) {
     return (
       <div className={`perm perm-${cls}`} data-request-id={requestId}>
         <div className="perm-head">
           <Icon name={decision === 'deny' ? 'x' : decision === 'allow' ? 'check' : 'bell'} size={13} />
-          <span className="perm-title">{decision === 'allow' ? 'Allowed' : decision === 'deny' ? 'Denied' : 'Permission request'}</span>
+          <span className="perm-title">{decision === 'allow' ? 'Allowed' : decision === 'deny' ? 'Denied' : pending && answeredBy ? `Waiting for ${answeredBy}` : 'Permission request'}</span>
           <span className="perm-tool">{toolLabel(toolName)}</span>
           {summary && <span className="perm-summary-inline">{summary}</span>}
         </div>

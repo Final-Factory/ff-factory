@@ -75,9 +75,11 @@ Tool groups (none by default, so the default is read-only on files only):
 
 ### Delegation
 
-`request_delegation(title, task)` records a delegation request and tells the orchestrator. The user
-approves or rejects it on the dashboard (or tells the orchestrator to: `approve_delegation` requires
-`user_asked`, like `delete_sandbox`). Approving picks a ready sandbox labelled `unused` with no live
+`request_delegation(title, task)` records a delegation request and tells the orchestrator of the person
+the run was for (the system payer's for a scheduled run; [orchestrators.md](orchestrators.md)). The user
+approves or rejects it on the dashboard, or asks their orchestrator, which files it as a work request for
+the dispatcher: `approve_delegation` requires `user_asked` and a request its person asked for, like
+`delete_sandbox`. Approving picks a ready sandbox labelled `unused` with no live
 agent, or else an online machine labelled `unused` with no agents and a clean tree, relabels it, and
 starts a worker with the task. No free target: the approval fails and the request stays pending.
 `my_delegations` lets the agent see its requests and, once approved, the worker's status and last
@@ -90,8 +92,8 @@ machines; `exclude` default `mp-r2`; a sandbox not labelled `unused` is never us
 the limits waits for the user as before. One with no free target is queued and retried every tick until
 `expiryHours` (default 8) after it was filed, then marked `expired`. The worker gets the normal
 guard plus a brief: its own branch, a PR into develop only, never merge. Every step is in the
-request's log, pushed as a notification, and the orchestrator is woken (`[auto-delegation]`) when a
-worker starts, finishes its first turn, or a request expires.
+request's log, pushed as a notification, and the orchestrator of the person the request is for is woken
+(`[auto-delegation]`) when a worker starts, finishes its first turn, or a request expires.
 
 ## Dashboard and orchestrator
 
@@ -99,10 +101,10 @@ worker starts, finishes its first turn, or a request expires.
   The agent page shows status, trigger, next run, today's spend vs budget, the last run's result
   and summary, run history, pending delegation requests (Approve / Reject), and the conversation.
   Buttons: Run now, Stop run, Pause / Resume, Edit, Delete (confirms).
-- Orchestrator tools (also on `/mcp`): `list_standing_agents`, `create_standing_agent`,
+- Dispatcher tools (also on `/mcp`): `list_standing_agents`, `create_standing_agent`,
   `update_standing_agent`, `run_standing_agent_now`, `pause_standing_agent`,
   `resume_standing_agent`, `list_delegation_requests`, `approve_delegation` / `reject_delegation`,
-  and `delete_standing_agent` (requires `user_asked`).
+  and `delete_standing_agent` (requires `user_asked`). People's own orchestrators have the two lists.
 
 ## Decisions and changes from the brief
 

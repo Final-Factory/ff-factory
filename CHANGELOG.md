@@ -12,6 +12,26 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **An orchestrator for each person, and a dispatcher** ([docs/orchestrators.md](docs/orchestrators.md)). Each
+  login gets their own orchestrator chat on the home page: only they write to it, it runs on their own Claude token
+  when they have one, sees everything, follows up with their own workers, and files work requests. The shared chat
+  becomes the **dispatcher**, keeping its conversation: it owns every tool that changes something and answers each
+  request through the work ledger (start, merge, link, queue, ask, reject, done).
+  - The ledger (`data/work.json`) checks each request against open and recent requests, live workers, open PRs on
+    their branches, pending delegations and recent commits (specs, PRs, branches, ids, similar titles). A repeat of an
+    open request returns it, and `start_agent` refuses a strong overlap without `override_duplicate`.
+  - Worker updates go to the chats of the people the work is for; the dispatcher sees them in the ledger. Standing
+    agents' delegation notices go to the person the run was for; restarts and host notices to the dispatcher.
+  - Limits: 3 filings and 3 follow-ups per worker between two messages of a person, 10 requests an hour and 40 a
+    day per person, 3 questions per request. The dispatcher's destructive tools run only for a request its person
+    asked for in their own turn, or when the owner writes to it.
+  - No interruptions: only its person writes to a chat (403 otherwise), only the owner to the dispatcher;
+    notifications, in-page notices and the heartbeat are per person.
+  - The sidebar lists the other people's chats (read only) and the Dispatcher; its page shows the requests and its
+    conversation. Decisions arrive in your chat as notices that open the request.
+- **docs/backlog.md**: the planned BEAST split (a portal plus a machine daemon owning BEAST's sandboxes, not before
+  2026-09-30), then portal restarts that leave daemon agents running.
+
 - **Every computer at a glance.** The sidebar groups sandboxes and agents by computer: BEAST, then each machine,
   each a collapsible group (remembered per browser) whose header has its CPU, RAM, GPU and disk and its sandbox and
   editor counts ("2/3 sandboxes · 1/2 editors"). Under it, one row per sandbox with its label, branch, Unity state and
@@ -174,6 +194,8 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Worker updates named "A worker" in the chat.** Since updates carry "(requested by …)", the page could not
+  read which worker one was about; it names the worker and links to it again.
 - **A dropped machine link resumed every old agent on it** (21 on M3 and M5, 2026-09-29). The daemon's session
   reports are JSON, which drops a cleared `turnOpenSince`, so the portal kept every finished turn marked open; the
   cut-off resume (#20) and a clean portal restart's resume file then treated them all as mid-turn. The portal now

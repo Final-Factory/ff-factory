@@ -135,7 +135,7 @@ export function NewAgentModal({ app, target, onClose }: { app: AppState; target:
     setBusy(false);
     if (s) {
       upsertSession(s);
-      navigate(sessionRoute(s, app.orchestratorId));
+      navigate(sessionRoute(s, app));
       onClose();
     }
   };

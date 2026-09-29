@@ -3,7 +3,11 @@ import type { AppState, SessionInfo } from '../../../shared/types';
 import { fleetOf, type FleetComputer } from '../../../shared/fleet';
 import { useAttention, type AttentionItem } from '../attention';
 import {
+  chatOwner,
+  dispatcherGlance,
   fmtCost,
+  isBusy,
+  isOpenWork,
   navigate,
   providerGlance,
   sessionLabel,
@@ -42,6 +46,10 @@ export function Sidebar({
   const attention = useAttention(app);
   const sessionsById = new Map(app.sessions.map((s) => [s.id, s]));
   const orch = sessionsById.get(app.orchestratorId);
+  // The other people's own orchestrators (read only here), and the dispatcher with its open requests (docs/orchestrators.md).
+  const others = app.sessions.filter((s) => s.id !== app.orchestratorId && chatOwner(s)).sort((a, b) => a.title.localeCompare(b.title));
+  const dispatcher = app.dispatcherId ? sessionsById.get(app.dispatcherId) : undefined;
+  const ledger = dispatcherGlance(dispatcher, (app.work ?? []).filter(isOpenWork), app.me?.userId);
   const selection = selectionOf(route, sessionsById);
   const fleet = fleetOf(app);
 
@@ -82,6 +90,39 @@ export function Sidebar({
             title="Orchestrator"
             sub={<span className={`tone-${sessionTone(orch.status)}`}>{sessionLabel[orch.status]}</span>}
             onClick={() => go({ view: 'home' })}
+          />
+        )}
+        {others.map((s) => {
+          const who = chatOwner(s)!;
+          return (
+            <Row
+              key={s.id}
+              active={route.view === 'chat' && route.userId.toLowerCase() === who.userId.toLowerCase()}
+              icon="chat"
+              tone={sessionTone(s.status)}
+              pulse={s.status === 'running'}
+              title={who.displayName}
+              sub={
+                <>
+                  <span className="row-prefix">Orchestrator · </span>
+                  <span className={`tone-${sessionTone(s.status)}`}>{sessionLabel[s.status]}</span>
+                </>
+              }
+              hint={`${who.displayName}’s own orchestrator (read only)`}
+              onClick={() => go({ view: 'chat', userId: who.userId })}
+            />
+          );
+        })}
+        {dispatcher && (
+          <Row
+            active={route.view === 'dispatcher'}
+            icon="inbox"
+            tone={ledger.tone}
+            pulse={isBusy(dispatcher)}
+            title="Dispatcher"
+            sub={<span className={`tone-${ledger.tone}`}>{ledger.label}</span>}
+            hint="Everyone’s requests for work and what became of them"
+            onClick={() => go({ view: 'dispatcher' })}
           />
         )}
 
@@ -179,9 +220,9 @@ function overviewLine(fleet: FleetComputer[]): string {
 
 // ---------------------------------------------------------------- rows
 
-function Row({ active, icon, tone, pulse, title, sub, onClick }: { active: boolean; icon: IconName; tone: Glance['tone']; pulse?: boolean; title: string; sub: ReactNode; onClick: () => void }) {
+function Row({ active, icon, tone, pulse, title, sub, hint, onClick }: { active: boolean; icon: IconName; tone: Glance['tone']; pulse?: boolean; title: string; sub: ReactNode; hint?: string; onClick: () => void }) {
   return (
-    <button className={`row${active ? ' active' : ''}`} onClick={onClick} aria-current={active ? 'page' : undefined}>
+    <button className={`row${active ? ' active' : ''}`} onClick={onClick} aria-current={active ? 'page' : undefined} title={hint}>
       <span className="row-icon">
         <Icon name={icon} size={16} />
       </span>

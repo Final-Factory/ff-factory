@@ -32,8 +32,12 @@ export interface Notice {
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 const firstLine = (s: string) => s.split('\n').map((l) => l.replace(/^[\s#>*_`-]+/, '').trim()).find(Boolean) ?? '';
 
-/** The app route for a session: where a notification click lands. */
+/**
+ * The app route for a session: where a notification click lands. A person's own orchestrator is their home page (its
+ * notices go to them only); the dispatcher has its own page.
+ */
 export function sessionRoute(s: SessionInfo, orchestratorId?: string): string {
+  if (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher') return '#/dispatcher/conversation';
   if (s.id === orchestratorId || s.kind === 'orchestrator') return '#/';
   if (s.sandboxId) return `#/sandbox/${encodeURIComponent(s.sandboxId)}/${encodeURIComponent(s.id)}`;
   if (s.standingId) return `#/agent/${encodeURIComponent(s.standingId)}/conversation`;
@@ -53,6 +57,11 @@ export class Notifier {
   private subs: PushSub[];
   private readonly lastStatus = new Map<string, SessionInfo['status']>();
   orchestratorId?: () => string | undefined;
+  /**
+   * Who a session's notices are for (docs/orchestrators.md), by user id: undefined means everyone, [] nobody. Wired by
+   * index.ts: a person's own orchestrator's go to that person only, a worker's finished turns to the people it works for.
+   */
+  audience?: (s: SessionInfo, kind: 'permission' | 'turnEnd' | 'error') => string[] | undefined;
 
   constructor(dataDir: string, store: Store, sessions: SessionManager) {
     this.store = store;
@@ -69,12 +78,12 @@ export class Notifier {
     for (const s of store.sessions.values()) this.lastStatus.set(s.id, s.status);
 
     sessions.events.on('permission', (s: SessionHandle, p: { toolName: string; input: unknown }) =>
-      this.fire({ kind: 'permission', title: `${this.name(s.info)} needs you`, body: `Wants to use ${p.toolName}`, url: this.route(s.info), tag: `perm-${s.info.id}` }),
+      this.fire({ kind: 'permission', title: `${this.name(s.info)} needs you`, body: `Wants to use ${p.toolName}`, url: this.route(s.info), tag: `perm-${s.info.id}` }, this.audience?.(s.info, 'permission')),
     );
     sessions.events.on('turnEnd', (s: SessionHandle, text: string) => {
       if (s.info.kind === 'standing') return; // runs are reported below, and only when they go wrong
       if (s.info.status === 'error') return;
-      this.fire({ kind: 'turnEnd', title: `${this.name(s.info)} finished`, body: clip(firstLine(text || s.info.lastResult || 'Turn finished.'), 180), url: this.route(s.info), tag: `turn-${s.info.id}` });
+      this.fire({ kind: 'turnEnd', title: `${this.name(s.info)} finished`, body: clip(firstLine(text || s.info.lastResult || 'Turn finished.'), 180), url: this.route(s.info), tag: `turn-${s.info.id}` }, this.audience?.(s.info, 'turnEnd'));
     });
     // Errors: a session record that turns to 'error'.
     bus.on('event', (e: ServerEvent) => {
@@ -82,7 +91,7 @@ export class Notifier {
       const was = this.lastStatus.get(e.session.id);
       this.lastStatus.set(e.session.id, e.session.status);
       if (e.session.status === 'error' && was !== 'error') {
-        this.fire({ kind: 'error', title: `${this.name(e.session)} hit an error`, body: clip(e.session.statusDetail ?? 'The session stopped with an error.', 180), url: this.route(e.session), tag: `err-${e.session.id}` });
+        this.fire({ kind: 'error', title: `${this.name(e.session)} hit an error`, body: clip(e.session.statusDetail ?? 'The session stopped with an error.', 180), url: this.route(e.session), tag: `err-${e.session.id}` }, this.audience?.(e.session, 'error'));
       }
     });
   }
@@ -126,6 +135,8 @@ export class Notifier {
   }
 
   private name(s: SessionInfo) {
+    if (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher') return 'The dispatcher';
+    if (s.kind === 'orchestrator' && s.orchestratorRole === 'personal') return 'Your orchestrator';
     return s.kind === 'orchestrator' || s.id === this.orchestratorId?.() ? 'The orchestrator' : s.title;
   }
 
@@ -181,10 +192,13 @@ export class Notifier {
 
   // ---------------------------------------------------------------- delivery
 
-  private fire(n: Notice) {
+  /** `users`: who it is for, by user id (the login a subscription belongs to); undefined: everyone; []: nobody. */
+  private fire(n: Notice, users?: string[]) {
+    if (users && !users.length) return;
+    const only = users ? new Set(users.map((u) => u.toLowerCase())) : undefined;
     // Open pages without push show it themselves (in-page Notification) if their own settings say so.
-    emit({ type: 'notify', notice: n });
-    for (const s of this.subs) if (s.prefs[n.kind]) void this.push(s, n);
+    emit({ type: 'notify', notice: n, ...(users ? { users } : {}) });
+    for (const s of this.subs) if (s.prefs[n.kind] && (!only || only.has(s.user.toLowerCase()))) void this.push(s, n);
   }
 
   private async push(s: PushSub, n: Notice): Promise<boolean> {

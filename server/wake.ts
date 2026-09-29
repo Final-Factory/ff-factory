@@ -26,8 +26,9 @@ export class Waker {
   private readonly store: Store;
   private readonly file?: string;
   private readonly timers = new Map<string, { timer: NodeJS.Timeout } & WakeRecord>();
-  private lastBeat = 0;
-  private busySince = 0;
+  /** Per orchestrator woken by the heartbeat: when it last was, and since when its person's workers are busy. */
+  private readonly lastBeat = new Map<string, number>();
+  private readonly busySince = new Map<string, number>();
   now: () => number = Date.now;
 
   constructor(sessions: SessionManager, store: Store, file?: string) {
@@ -119,23 +120,27 @@ export class Waker {
     this.save();
   }
 
-  // ---------------------------------------------------------------- the orchestrator's heartbeat
+  // ---------------------------------------------------------------- the heartbeat
 
-  /** Called every minute. Wakes the orchestrator with the busy list when a heartbeat is due. */
-  heartbeat(orchestratorId: string | undefined, minutes: number | null | undefined, describe: (s: SessionInfo) => string) {
-    const busy = [...this.store.sessions.values()].filter((s) => s.kind === 'worker' && BUSY.includes(s.status));
+  /**
+   * Called every minute for each orchestrator whose person turned the heartbeat on (docs/orchestrators.md): wakes it
+   * with the busy list when a beat is due. `mine` picks that person's workers (default: every worker).
+   */
+  heartbeat(orchestratorId: string | undefined, minutes: number | null | undefined, describe: (s: SessionInfo) => string, mine: (s: SessionInfo) => boolean = () => true) {
+    if (!orchestratorId) return;
+    const busy = [...this.store.sessions.values()].filter((s) => s.kind === 'worker' && BUSY.includes(s.status) && mine(s));
     const now = this.now();
     if (!busy.length) {
-      this.busySince = 0;
+      this.busySince.delete(orchestratorId);
       return;
     }
-    if (!this.busySince) this.busySince = now;
-    if (!minutes || !orchestratorId) return;
-    const since = Math.max(this.lastBeat, this.busySince);
+    if (!this.busySince.has(orchestratorId)) this.busySince.set(orchestratorId, now);
+    if (!minutes) return;
+    const since = Math.max(this.lastBeat.get(orchestratorId) ?? 0, this.busySince.get(orchestratorId)!);
     if (now - since < minutes * 60_000) return;
     const orch = this.store.sessions.get(orchestratorId);
     if (!orch || BUSY.includes(orch.status)) return; // it is working already; next minute
-    this.lastBeat = now;
+    this.lastBeat.set(orchestratorId, now);
     const lines = busy.map((s) => `- ${describe(s)}`);
     try {
       this.sessions.send(orchestratorId, `[heartbeat] ${busy.length} worker(s) busy:\n${lines.join('\n')}\nPost the user a one-line status (what each is doing, anything stuck or waiting on them). No tool calls needed unless something looks wrong.`, 'system');

@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { query, type Options, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Config } from './config.ts';
 import type { Store } from './store.ts';
-import type { EffortLevel, ImageInput, ImageRef, PendingPermission, PermissionMode, Requester, SessionInfo, SessionKind } from '../shared/types.ts';
+import type { EffortLevel, ImageInput, ImageRef, OrchestratorRole, PendingPermission, PermissionMode, Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { emit } from './store.ts';
 import { accountKeyOf } from './usage.ts';
 import type { SessionSnapshot, Unanswered } from './restart.ts';
@@ -75,6 +75,12 @@ export interface SessionHandle {
   readonly info: SessionInfo;
   readonly live: boolean;
   lastFrom: 'human' | 'orchestrator' | 'system';
+  /**
+   * Who the current turn is answering: 'human' only when every message it has not answered yet is a person's (the CLI
+   * folds messages sent during a turn into it, so harness text can share a person's turn); else the first sender that
+   * is not a person. Without any, the last sender. What decides whether a turn is a person's (docs/orchestrators.md).
+   */
+  readonly turnFrom?: 'human' | 'orchestrator' | 'system';
   /** `requestedBy`: the person who wrote it, or for whom the orchestrator or the harness sends it (docs/identity.md). */
   send(text: string, from?: 'human' | 'orchestrator' | 'system', uuid?: string, images?: ImageInput[], requestedBy?: Requester): string;
   interrupt(): Promise<void>;
@@ -159,6 +165,12 @@ export class AgentSession implements SessionHandle {
 
   get live() {
     return !!this.q;
+  }
+
+  get turnFrom(): 'human' | 'orchestrator' | 'system' {
+    const froms = [...this.outstanding.values()].map((u) => u.from);
+    if (!froms.length) return this.lastFrom;
+    return froms.find((f) => f !== 'human') ?? 'human';
   }
 
   private update(patch: Partial<SessionInfo>) {
@@ -513,7 +525,7 @@ export class SessionManager {
     return cutOff;
   }
 
-  create(opts: { kind: SessionKind; title: string; sandboxId?: string; standingId?: string; model?: string; effort?: EffortLevel; permissionMode: PermissionMode; options: OptionsFactory; id?: string; requestedBy?: Requester }) {
+  create(opts: { kind: SessionKind; title: string; sandboxId?: string; standingId?: string; model?: string; effort?: EffortLevel; permissionMode: PermissionMode; options: OptionsFactory; id?: string; requestedBy?: Requester; orchestratorRole?: OrchestratorRole }) {
     const now = new Date().toISOString();
     const info: SessionInfo = {
       id: opts.id ?? randomUUID().slice(0, 8),
@@ -531,6 +543,7 @@ export class SessionManager {
       costUsd: 0,
       pendingPermissions: [],
       ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}),
+      ...(opts.orchestratorRole ? { orchestratorRole: opts.orchestratorRole } : {}),
     };
     const s = new AgentSession(info, this.store, opts.options, this.events);
     this.sessions.set(info.id, s);

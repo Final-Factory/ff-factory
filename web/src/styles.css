@@ -1160,6 +1160,17 @@ select.input {
   justify-content: center;
 }
 
+/* Someone else's conversation, or the dispatcher's for a member: a quiet line where the composer would be. */
+.orch-readonly-note {
+  flex: none;
+  margin: 0;
+  padding: var(--s-3) var(--s-4) calc(var(--s-3) + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
 /* A small menu under a button (the chat's ⋯). */
 .menu {
   position: relative;
@@ -3155,6 +3166,65 @@ select.input {
   padding: var(--s-2) 14px var(--s-3) var(--s-8);
   background: var(--bg-2);
   font-size: var(--fs-md);
+}
+
+/* The dispatcher's requests: two lines, like the sidebar's rows: the request, then its state, id and people. */
+.work-row .run-row-top {
+  align-items: flex-start;
+}
+
+.work-row .run-row-top > .dot {
+  margin-top: 6px;
+}
+
+.work-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.work-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-row.open .work-title {
+  white-space: normal;
+}
+
+.work-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+
+.work-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s-2);
+  justify-items: start;
+}
+
+.work-detail > * {
+  margin: 0;
+}
+
+.work-detail .deleg-log {
+  justify-self: stretch;
+}
+
+.ledger-closed {
+  align-self: flex-start;
+  padding: var(--s-1) 2px;
+}
+
+.ledger-none {
+  margin: 0;
+  padding: var(--s-2) 2px;
 }
 
 .deleg {

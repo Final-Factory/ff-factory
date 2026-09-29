@@ -1,7 +1,8 @@
 # People: identity, attribution and whose account pays
 
-Ben and Lothsahn share one FF Factory, including one orchestrator chat. Each has their own login, every
-message records who wrote it, and everything a message causes carries that person as `requestedBy`. A
+Ben and Lothsahn share one FF Factory. Each has their own login and their own orchestrator chat
+([orchestrators.md](orchestrators.md)), every message records who wrote it, and everything a message causes carries
+that person as `requestedBy`. A
 worker then runs on that person's Claude account when FF Factory holds one for them, and FFBox (from phase
 3 of [ffbox-integration.md](ffbox-integration.md)) bills the work to that person's account on its side.
 
@@ -33,25 +34,27 @@ worker then runs on that person's Claude account when FF Factory holds one for t
 | what | field | set from |
 |---|---|---|
 | a person's message, any chat | transcript `user` event `requestedBy` | the login that sent it (`server/index.ts`, `requesterOf`) |
-| a message the orchestrator sends a worker (`message_agent`) | the event's `requestedBy` | the person the orchestrator acts for (below) |
-| a worker | `SessionInfo.requestedBy` | who started it: the login (Start agent) or the person the orchestrator acts for (`start_agent`) |
+| a message an orchestrator sends a worker (`message_agent`) | the event's `requestedBy` | a person's own orchestrator: its person; the dispatcher: the person it acts for (below) |
+| a worker | `SessionInfo.requestedBy` | who started it: the login (Start agent), or the person the dispatcher acts for (`start_agent`): the filer of the request it serves |
+| a person's own orchestrator | `SessionInfo.requestedBy` | its person |
+| a work request | `WorkItem.requestedBy`, `requesters` | the person whose orchestrator filed it; a merge adds the merged request's people to `requesters` |
 | the latest person a session heard from | `SessionInfo.lastRequestedBy` | set by people's and the orchestrator's messages, not by harness messages |
 | a standing run | `StandingRun.requestedBy`, and the session's `requestedBy` for that run | the login that pressed Run now or wrote to it; the **system payer** for a scheduled run |
 | a delegation request | `DelegationRequest.requestedBy` | whoever the run that filed it was for |
 | a delegation approval | `DelegationRequest.approvedBy`; its worker's `requestedBy` | the person who approved it. An auto-approved worker is requested by the request's `requestedBy` |
-| a `[worker update]` to the orchestrator | the event's `requestedBy` | the worker's `requestedBy` |
+| a `[worker update]` to a person's orchestrator | the event's `requestedBy` | that person |
 
-### The shared orchestrator chat
+### Who the orchestrators act for
 
-The model reads each person's message with a first line `[from <display name>]` (`server/sessions.ts`,
-`promptText`). The transcript keeps the text without it. A worker hears the orchestrator's briefs as
-`[from the orchestrator, for <name>]`.
+Each person writes only to their own orchestrator, and its tools act for them. The model still reads each message
+with a first line `[from <display name>]` (`server/sessions.ts`, `promptText`); the transcript keeps the text without
+it. A worker hears an orchestrator's messages as `[from the orchestrator, for <name>]`.
 
-The orchestrator's tools (`start_agent`, `message_agent`, `run_standing_agent_now`, `approve_delegation`)
-act for **the author of the latest person's message** (`server/identity.ts`, `actingFor`). When two people's
-requests interleave, the orchestrator passes `for_user` to act on an earlier one. `for_user` may only name
-someone the last 200 transcript events show asking, meaning someone who wrote or whom a `[worker update]` was
-for, so text an agent wrote cannot bill a stranger. The brief lists the logins.
+The dispatcher's tools (`start_agent`, `message_agent`, `run_standing_agent_now`, `approve_delegation`) act for the
+person who filed the request they serve (`work_id`; `server/orchestrators.ts`, `dispatcherActor`). Without a
+`work_id`, `for_user` may only name someone the last 200 transcript events show asking (`server/identity.ts`,
+`actingFor`: the people whose requests it heard, or who wrote to it) or the system payer, so text an agent wrote
+cannot bill a stranger. With neither, the call is refused, unless the owner is writing to the dispatcher in that turn.
 
 ### The system payer
 
@@ -64,8 +67,8 @@ login. It applies to scheduled standing runs now, and to intake-triggered FFBox 
 
 - Agent tabs show the person's name, and the phone's agent switcher adds "for <name>". An agent's details
   show "for <name>".
-- In the orchestrator's chat, each person's message has their name above it. In an agent's chat, only
-  messages from someone other than the person it works for do.
+- In an agent's chat, messages from someone other than the person it works for have their name above them. A
+  person's own orchestrator only has their messages.
 - Standing runs show who started them by hand, and delegations show "approved by <name>".
 - `[worker update]` lines say "(requested by <name>)".
 
@@ -86,8 +89,9 @@ access to the M5.
   (`workerOptions`), Mac workers (`machineWorkerSpec`) and standing runs on either (`standing.ts`, `place`).
 - The env is fixed when an agent's process starts. A worker keeps the account of the person who started it.
   A message from someone else is recorded, but it does not move the worker to another account.
-- The orchestrator is one shared process. It runs on the owner's account whoever is talking to it: the
-  host token, or this host's login with `claudeAccounts.orchestrator: "login"`.
+- A person's own orchestrator runs on their entry when they have one, otherwise on the owner's orchestrator account
+  (the host token, or this host's login with `claudeAccounts.orchestrator: "login"`); `system_status` names who is on
+  the owner's. The dispatcher runs for the system payer, on their entry if they have one.
 - The usage meters list each person's token as its own account ("Lothsahn's token …abcd", "agents working
   for Lothsahn"). It is polled like the host token, with that token alone (`server/usage.ts`).
 

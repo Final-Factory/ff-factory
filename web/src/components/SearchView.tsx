@@ -2,13 +2,19 @@ import { useEffect, useRef, useState } from 'react';
 import type { AppState, SearchHit } from '../../../shared/types';
 import { api } from '../api';
 import { focusEvent, toastError } from '../store';
+import { sessionRoute } from '../attention';
 import { displayName, navigate, PLAIN_TEXT, sameTitle, useMediaQuery, type Route } from '../util';
 import { AttentionButton, DrawerButton } from './ShellButtons';
 import { Icon } from './ui';
 
 /** Where a hit's session lives in the app, and a label for it (the place's name, not its id). */
 function placeOf(h: SearchHit, app: AppState): { route: Route; label: string } {
-  if (h.sessionKind === 'orchestrator') return { route: { view: 'home' }, label: '' };
+  if (h.sessionKind === 'orchestrator') {
+    // Your own chat, someone else's (read only), or the dispatcher's (docs/orchestrators.md).
+    const s = app.sessions.find((x) => x.id === h.sessionId);
+    if (!s || s.id === app.orchestratorId) return { route: { view: 'home' }, label: '' };
+    return { route: sessionRoute(s, app), label: s.orchestratorRole === 'dispatcher' ? 'Dispatcher' : `${s.title}'s orchestrator` };
+  }
   if (h.sandboxId) {
     const sb = app.sandboxes.find((x) => x.id === h.sandboxId);
     return { route: { view: 'sandbox', sandboxId: h.sandboxId, sessionId: h.sessionId }, label: sb ? displayName(sb) : h.sandboxId };

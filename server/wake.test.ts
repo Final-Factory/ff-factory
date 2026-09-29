@@ -159,3 +159,39 @@ test('wake_me: pending wakes survive a restart; one that came due while the serv
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), {});
   store.flush();
 });
+
+test("heartbeat per person: each orchestrator hears only its person's busy workers, on its own clock", (t) => {
+  const { w, store, sent, advance } = setup(t);
+  const describe = (s: SessionInfo) => `${s.id} ${s.status}`;
+  const mine = (who: string) => (s: SessionInfo) => s.requestedBy?.userId === who;
+  store.putSession(info('ben-chat', { kind: 'orchestrator' }));
+  store.putSession(info('loth-chat', { kind: 'orchestrator' }));
+  store.putSession(info('w1', { status: 'running', requestedBy: { userId: 'ben', displayName: 'Ben' } }));
+  const beat = () => {
+    w.heartbeat('ben-chat', 15, describe, mine('ben'));
+    w.heartbeat('loth-chat', 15, describe, mine('lothsahn'));
+  };
+  beat();
+  advance(15 * 60_000);
+  beat();
+  assert.deepEqual(
+    sent.map((x) => x.id),
+    ['ben-chat'],
+    "Lothsahn's orchestrator is not woken for Ben's worker",
+  );
+  assert.match(sent[0].text, /^\[heartbeat\] 1 worker\(s\) busy:\n- w1 running/);
+  // Lothsahn's worker starts now: his clock starts now too.
+  store.putSession(info('w2', { status: 'running', requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' } }));
+  beat();
+  advance(14 * 60_000);
+  beat();
+  assert.equal(sent.filter((x) => x.id === 'loth-chat').length, 0);
+  advance(60_000);
+  beat();
+  assert.deepEqual(
+    sent.map((x) => x.id),
+    ['ben-chat', 'ben-chat', 'loth-chat'],
+  );
+  assert.match(sent[2].text, /- w2 running/);
+  assert.doesNotMatch(sent[2].text, /w1/);
+});

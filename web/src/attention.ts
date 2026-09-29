@@ -18,9 +18,14 @@ export interface AttentionItem {
   open: () => void;
 }
 
-/** Where a session's conversation is shown. */
-export function sessionRoute(s: SessionInfo, orchestratorId: string): Route {
-  if (s.id === orchestratorId) return { view: 'home' };
+/**
+ * Where a session's conversation is shown: your own orchestrator on the home page, someone else's on theirs, the
+ * dispatcher on its page (docs/orchestrators.md).
+ */
+export function sessionRoute(s: SessionInfo, app: Pick<AppState, 'orchestratorId'>): Route {
+  if (s.id === app.orchestratorId) return { view: 'home' };
+  if (s.kind === 'orchestrator' && s.orchestratorRole === 'personal' && s.requestedBy) return { view: 'chat', userId: s.requestedBy.userId };
+  if (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher') return { view: 'dispatcher', tab: 'conversation' };
   if (s.sandboxId) return { view: 'sandbox', sandboxId: s.sandboxId, sessionId: s.id };
   if (s.standingId) return { view: 'agent', agentId: s.standingId, tab: 'conversation' };
   if (s.machineId && s.machineSandbox) return { view: 'msandbox', machineId: s.machineId, sandboxId: s.machineSandbox, sessionId: s.id };
@@ -31,16 +36,18 @@ export function sessionRoute(s: SessionInfo, orchestratorId: string): Route {
 export function attentionItems(app: AppState): AttentionItem[] {
   const items: AttentionItem[] = [];
   for (const s of app.sessions) {
+    // Someone else's orchestrator is theirs to answer; the dispatcher is the owner's.
+    if (s.kind === 'orchestrator' && s.id !== app.orchestratorId && (s.orchestratorRole === 'personal' || app.me?.role !== 'owner')) continue;
     for (const p of s.pendingPermissions) {
       const what = summarizeToolInput(p.toolName, p.input);
       items.push({
         key: `p:${p.requestId}`,
         kind: 'permission',
-        title: s.id === app.orchestratorId ? 'Orchestrator' : s.title,
+        title: s.id === app.orchestratorId ? 'Orchestrator' : s.kind === 'orchestrator' ? 'Dispatcher' : s.title,
         detail: `Allow ${toolDisplayName(p.toolName).tool}${what ? `: ${what}` : '?'}`,
         at: p.createdAt,
         open: () => {
-          navigate(sessionRoute(s, app.orchestratorId));
+          navigate(sessionRoute(s, app));
           focusPermission(p.requestId);
         },
       });

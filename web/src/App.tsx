@@ -4,6 +4,7 @@ import { useAttention } from './attention';
 import { Login } from './components/Login';
 import { NewSandboxModal } from './components/Modals';
 import { OrchestratorView } from './components/OrchestratorView';
+import { DispatcherPanel } from './components/DispatcherPanel';
 import { SandboxPanel } from './components/SandboxPanel';
 import { SessionView } from './components/SessionView';
 import { Sidebar } from './components/Sidebar';
@@ -19,6 +20,7 @@ import { Toasts } from './components/Toasts';
 import { Lightbox } from './components/Images';
 import { SearchView } from './components/SearchView';
 import { setDrawer, useStore } from './store';
+import { sessionRoute } from './attention';
 import { displayName, fmtBytes, fmtClock, href, navigate, useMediaQuery, useRoute, type Route } from './util';
 
 export function App() {
@@ -185,6 +187,29 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
 
 function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactNode; layout: string; title: string } {
   const orch = app.sessions.find((s) => s.id === app.orchestratorId);
+  if (route.view === 'chat') {
+    // Someone else's own orchestrator, read only; your own is the home page.
+    const s = app.sessions.find((x) => x.kind === 'orchestrator' && x.orchestratorRole === 'personal' && x.requestedBy?.userId.toLowerCase() === route.userId.toLowerCase());
+    if (!s) return { node: <Missing what="conversation" />, layout: 'single', title: 'Not found' };
+    if (s.id === app.orchestratorId) return { node: null, layout: 'single', title: 'Orchestrator' };
+    return { layout: 'single', title: s.title, node: <OrchestratorView key={s.id} session={s} readOnly /> };
+  }
+  if (route.view === 'dispatcher') {
+    const panel = <DispatcherPanel app={app} tab={route.tab} onClose={() => navigate({ view: 'home' })} />;
+    if (wide) {
+      return {
+        layout: 'split',
+        title: 'Dispatcher',
+        node: (
+          <>
+            <OrchestratorView session={orch} compact />
+            {panel}
+          </>
+        ),
+      };
+    }
+    return { layout: 'single', title: 'Dispatcher', node: panel };
+  }
   if (route.view === 'sandbox') {
     const sb = app.sandboxes.find((s) => s.id === route.sandboxId);
     if (!sb) return { node: <Missing what="sandbox" />, layout: 'single', title: 'Not found' };
@@ -307,6 +332,7 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
     const s = app.sessions.find((x) => x.id === route.sessionId);
     if (!s) return { node: <Missing what="session" />, layout: 'single', title: 'Not found' };
     if (s.id === app.orchestratorId) return { node: null, layout: 'single', title: 'Orchestrator' };
+    if (s.kind === 'orchestrator') return renderRoute(sessionRoute(s, app), app, wide);
     return {
       layout: 'single',
       title: s.title,

@@ -12,18 +12,21 @@ import { accountOf, accountTag } from './SystemMeters';
 /**
  * A conversation: the transcript takes the height, the composer sits under it. Inside a sandbox or
  * machine panel (`embedded`) the panel's header and details carry the controls; on its own page it
- * has a one-row header and its controls in the details sheet.
+ * has a one-row header and its controls in the details sheet. `readOnly`: a line saying who writes
+ * here, in place of the composer (the dispatcher, for anyone but the owner).
  */
 export function SessionView({
   session,
   fullWidth,
   embedded,
   onBack,
+  readOnly,
 }: {
   session: SessionInfo;
   fullWidth?: boolean;
   embedded?: boolean;
   onBack?: () => void;
+  readOnly?: string;
 }) {
   useEffect(() => openSession(session.id), [session.id]);
   const [details, setDetails] = useDetailsOpen('session');
@@ -46,14 +49,20 @@ export function SessionView({
         </>
       )}
       {session.status === 'error' && session.statusDetail && <div className="banner banner-error">{session.statusDetail}</div>}
-      <Transcript session={session} size={fullWidth ? 'large' : 'normal'} />
-      <Composer
-        key={session.id}
-        session={session}
-        size={fullWidth ? 'large' : 'normal'}
-        placeholder={session.kind === 'standing' ? `Message ${session.title} (starts a run, or joins one)` : `Message ${session.title}`}
-        autoFocus
-      />
+      <Transcript session={session} size={fullWidth ? 'large' : 'normal'} readOnlyFor={readOnly ? 'the owner' : undefined} />
+      {readOnly ? (
+        <p className="orch-readonly-note" data-testid="read-only-note">
+          {readOnly}
+        </p>
+      ) : (
+        <Composer
+          key={session.id}
+          session={session}
+          size={fullWidth ? 'large' : 'normal'}
+          placeholder={session.kind === 'standing' ? `Message ${session.title} (starts a run, or joins one)` : `Message ${session.title}`}
+          autoFocus
+        />
+      )}
     </section>
   );
 }
