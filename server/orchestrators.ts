@@ -777,7 +777,7 @@ export class Orchestrators {
       this.store.putWork(repeat);
       return { item: repeat, repeat: true };
     }
-    const skipped = f.limit?.();
+    const skipped = f.limit?.() ?? this.intakeCap(now.getTime(), f.source.kind);
     if (skipped) return { skipped };
     const title = f.title.replace(/\s+/g, ' ').trim().slice(0, 120);
     const fromText = (f.source.untrusted ? textKeys(title) : textKeys(`${title}\n${f.brief}`, this.knownBranches())).filter((k) => !/^(work|session|delegation|pr|branch|discord|ffbox|release):/.test(k));
@@ -847,6 +847,27 @@ export class Orchestrators {
     if (why) this.onIntakeAttention?.(w, 'pending');
     else this.gatherForDispatcher(w.requestedBy, requestNotice(w), 'intake');
     return { item: w };
+  }
+
+  /**
+   * The intake as a whole is an automated source (work.ts limitsFor('intake'), config workLimits.intake, 10 an hour and
+   * 40 a day by default), on top of each source's own daily cap. The release follow-up is not counted.
+   */
+  private intakeCap(now: number, kind: WorkSourceKind): string | undefined {
+    if (kind === 'release') return undefined;
+    const lim = limitsFor('intake', this.d.cfg.workLimits);
+    if (!lim) return undefined;
+    let hour = 0;
+    let day = 0;
+    for (const w of this.store.work.values()) {
+      if (!w.source || w.source.kind === 'release') continue;
+      const age = now - Date.parse(w.createdAt);
+      if (age < 3_600_000) hour++;
+      if (age < 86_400_000) day++;
+    }
+    if (hour >= lim.perHour) return `the intake's cap: ${lim.perHour} an hour (config workLimits.intake)`;
+    if (day >= lim.perDay) return `the intake's cap: ${lim.perDay} a day (config workLimits.intake)`;
+    return undefined;
   }
 
   /** A person approved an intake request (the Intake tab): the dispatcher hears of it now. */

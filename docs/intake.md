@@ -73,7 +73,8 @@ stop with a design question. The classification and its reason are on the reques
   operator opened it.
 - Caps, like the sentry's (`capProblem`, `reporterProblem`): at most `intake.discord.dailyCap` (default 10) Discord
   requests in 24 hours, at most `perReporterPerDay` (default 2) bug reports from one Discord author (the in-game
-  reporter posts as one webhook, so only the daily cap applies to it), `intake.ffbox.dailyCap` for FFBox. A skipped
+  reporter posts as one webhook, so only the daily cap applies to it), `intake.ffbox.dailyCap` for FFBox, and over
+  the whole intake the automated-source cap of `workLimits.intake` (10 an hour, 40 a day by default). A skipped
   report is logged on the Intake tab with why; the thread stays in Discord for people.
 - `humanAsked` is never set on an intake request, so the dispatcher's destructive and admin tools stay closed for it
   (docs/orchestrators.md, "Loops, limits and safety").

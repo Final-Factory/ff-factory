@@ -395,7 +395,7 @@ test('one place: work started outside the ledger (over /mcp, from the dashboard,
   assert.match(text, /recorded in the ledger as w1/);
   const [w] = work();
   assert.deepEqual([w.status, w.requestedBy.userId, w.source, w.humanAsked, w.recorded], ['active', 'lothsahn', undefined, true, true]);
-  assert.equal(limitProblem(Array.from({ length: 20 }, () => w), LOTH, Date.now()), undefined, 'recorded starts are not filings: they never use up the limits');
+  assert.equal(limitProblem(Array.from({ length: 20 }, () => w), LOTH, Date.now(), { perHour: 1, perDay: 1 }), undefined, 'recorded starts are not filings: they never use up the limits');
   assert.match(w.log[0], /started over \/mcp for Lothsahn: worker .* in alpha/);
   const worker = store.sessions.get(w.sessionIds[0])!;
   assert.equal(o.recordStart(worker, 'again', BEN, 'started by Ben from the dashboard', true), 'w1', 'a worker already on a request is not recorded twice');
