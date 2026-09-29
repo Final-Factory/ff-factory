@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import type { AppState, SessionInfo } from '../../../shared/types';
-import { fleetOf, type FleetComputer } from '../../../shared/fleet';
+import type { FleetComputer } from '../../../shared/fleet';
+import { sessionIndex } from '../store';
 import { useAttention, type AttentionItem } from '../attention';
 import {
   chatOwner,
@@ -23,7 +24,7 @@ import { usePush } from '../notify';
 import { SettingsModal } from './Settings';
 import { SystemFooter } from './SystemMeters';
 import { ExternalStrip } from './External';
-import { FleetGroups, type FleetSelection } from './Fleet';
+import { FleetGroups, fleetFor, type FleetSelection } from './Fleet';
 
 export function Sidebar({
   app,
@@ -44,14 +45,14 @@ export function Sidebar({
   const now = useNow(15_000);
   const [settings, setSettings] = useState(false);
   const attention = useAttention(app);
-  const sessionsById = new Map(app.sessions.map((s) => [s.id, s]));
+  const sessionsById = sessionIndex(app.sessions);
   const orch = sessionsById.get(app.orchestratorId);
   // The other people's own orchestrators (read only here), and the dispatcher with its open requests (docs/orchestrators.md).
   const others = app.sessions.filter((s) => s.id !== app.orchestratorId && chatOwner(s)).sort((a, b) => a.title.localeCompare(b.title));
   const dispatcher = app.dispatcherId ? sessionsById.get(app.dispatcherId) : undefined;
   const ledger = dispatcherGlance(dispatcher, (app.work ?? []).filter(isOpenWork), app.me?.userId);
   const selection = selectionOf(route, sessionsById);
-  const fleet = fleetOf(app);
+  const fleet = fleetFor(app);
 
   const go = (r: Route) => {
     navigate(r);

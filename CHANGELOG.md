@@ -12,6 +12,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The web UI stays responsive at thousands of agents** (a portal with 7,200 sessions, 6,500 of them in one sandbox).
+  Beside that sandbox, typing in the orchestrator's chat went from 71 ms at the 95th percentile (long tasks of up to
+  150 ms, the page 64% busy with nothing typed) to 21 ms with no long tasks and 5.6% busy. Server events are applied
+  once per frame; sessions are looked up by id instead of by scanning the list (`sessionIndex`); a place's agent tabs
+  and picker list the live agents and the most recent past ones, with a "+N older" button for the rest; notices in a
+  chat follow only the session they name; the progress bar animates `transform` rather than `left`, so a page at
+  rest no longer lays itself out 60 times a second; live transcript events are kept only for chats on screen and the
+  last few closed; the message draft is saved after typing pauses rather than on every key. The server gzips big
+  JSON replies and the web bundle (`server/compress.ts`) and compresses big WebSocket messages. `web/perf/bench.ts`
+  measures all of this at a real portal's scale, and CI holds the page to its budgets (`--check`).
 - **A window title or command line with control characters no longer stops the Unity watch** on Windows machines
   ("Bad control character in string literal in JSON", LothDesktop). `scripts/unity-windows.ps1` and the daemon's
   process listing drop them before `ConvertTo-Json`, and `parsePsJson` escapes any that still come through and skips

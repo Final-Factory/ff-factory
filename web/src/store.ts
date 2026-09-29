@@ -58,10 +58,57 @@ let state: StoreState = {
 
 const listeners = new Set<() => void>();
 
+/** Inside flushEvents: changes are applied but the listeners hear of them once, at the end. */
+let batching = false;
+let dirty = false;
+
 function set(patch: Partial<StoreState> | ((s: StoreState) => Partial<StoreState>)) {
+  // A change from outside the socket (a fetch, a click) lands after the server events that came before it.
+  if (!batching && queue.length) flushEvents();
   const p = typeof patch === 'function' ? patch(state) : patch;
+  if (!Object.keys(p).length) return;
   state = { ...state, ...p };
-  listeners.forEach((l) => l());
+  if (batching) dirty = true;
+  else listeners.forEach((l) => l());
+}
+
+// ---------- server events, one render per frame ----------
+
+/**
+ * Server events wait for the next frame and are applied together, so a burst (agents' tool calls, streamed text,
+ * meters) costs the page one render rather than one each: typing stays responsive while agents work. A timer
+ * backs up the frame, which a hidden tab never draws.
+ */
+const queue: ServerEvent[] = [];
+let frame = 0;
+let timer: ReturnType<typeof setTimeout> | undefined;
+
+function enqueueEvent(ev: ServerEvent) {
+  // A notice has no state to batch, and may need to reach a hidden page at once.
+  if (ev.type === 'notify') return onNotice(ev.notice);
+  queue.push(ev);
+  if (timer !== undefined) return;
+  frame = requestAnimationFrame(flushEvents);
+  timer = setTimeout(flushEvents, 100);
+}
+
+/** Applies every queued server event, then tells the page once. Exported for the tests. */
+export function flushEvents() {
+  cancelAnimationFrame(frame);
+  clearTimeout(timer);
+  timer = undefined;
+  if (!queue.length) return;
+  const events = queue.splice(0);
+  batching = true;
+  try {
+    for (const ev of events) applyEvent(ev);
+  } finally {
+    batching = false;
+  }
+  if (dirty) {
+    dirty = false;
+    listeners.forEach((l) => l());
+  }
 }
 
 export function getState() {
@@ -78,6 +125,29 @@ export const subscribeStore = subscribe;
 
 export function useStore<T>(selector: (s: StoreState) => T): T {
   return useSyncExternalStore(subscribe, () => selector(state));
+}
+
+const indexes = new WeakMap<SessionInfo[], Map<string, SessionInfo>>();
+
+/** Sessions by id, built once per sessions list (a portal holds thousands: never look them up with find). */
+export function sessionIndex(sessions: SessionInfo[]): Map<string, SessionInfo> {
+  let m = indexes.get(sessions);
+  if (!m) {
+    m = new Map(sessions.map((s) => [s.id, s]));
+    indexes.set(sessions, m);
+  }
+  return m;
+}
+
+/** The sessions with these ids, in that order, skipping any that are gone. */
+export function sessionsByIds(sessions: SessionInfo[], ids: string[]): SessionInfo[] {
+  const byId = sessionIndex(sessions);
+  const out: SessionInfo[] = [];
+  for (const id of ids) {
+    const s = byId.get(id);
+    if (s) out.push(s);
+  }
+  return out;
 }
 
 // ---------- merge helpers ----------
@@ -209,6 +279,9 @@ function applyEvent(ev: ServerEvent) {
       }));
       return;
     case 'transcript':
+      // Only chats on screen or cached keep their live events; any other is fetched when it opens (a portal's
+      // running agents would otherwise pile up every tool call they make in the page's memory).
+      if (!openSessions.has(ev.sessionId) && !state.loaded[ev.sessionId]) return;
       set((s) => {
         const patch: Partial<StoreState> = {
           transcripts: { ...s.transcripts, [ev.sessionId]: mergeEvents(s.transcripts[ev.sessionId], [ev.event]) },
@@ -226,6 +299,7 @@ function applyEvent(ev: ServerEvent) {
       onNotice(ev.notice);
       return;
     case 'delta':
+      if (!openSessions.has(ev.sessionId)) return;
       set((s) => ({ streaming: { ...s.streaming, [ev.sessionId]: (s.streaming[ev.sessionId] ?? '') + ev.text } }));
       return;
   }
@@ -235,6 +309,9 @@ function applyEvent(ev: ServerEvent) {
 
 /** Ref-counted set of sessions currently on screen; refetched after a reconnect. */
 const openSessions = new Map<string, number>();
+/** Chats that left the screen, oldest first: the last few stay cached (instant to reopen), older ones are dropped. */
+const closedSessions: string[] = [];
+const KEEP_CLOSED = 6;
 
 export async function loadTranscript(sessionId: string) {
   try {
@@ -250,11 +327,26 @@ export async function loadTranscript(sessionId: string) {
 
 export function openSession(sessionId: string): () => void {
   openSessions.set(sessionId, (openSessions.get(sessionId) ?? 0) + 1);
+  const i = closedSessions.indexOf(sessionId);
+  if (i !== -1) closedSessions.splice(i, 1);
   if (!state.loaded[sessionId]) void loadTranscript(sessionId);
   return () => {
     const n = (openSessions.get(sessionId) ?? 1) - 1;
-    if (n <= 0) openSessions.delete(sessionId);
-    else openSessions.set(sessionId, n);
+    if (n > 0) return void openSessions.set(sessionId, n);
+    openSessions.delete(sessionId);
+    closedSessions.push(sessionId);
+    const drop = closedSessions.splice(0, Math.max(0, closedSessions.length - KEEP_CLOSED));
+    if (drop.length) {
+      set((s) => {
+        let { transcripts, loaded, streaming } = s;
+        for (const id of drop) {
+          transcripts = omit(transcripts, id);
+          loaded = omit(loaded, id);
+          streaming = omit(streaming, id);
+        }
+        return { transcripts, loaded, streaming };
+      });
+    }
   };
 }
 
@@ -265,7 +357,7 @@ let disconnect: (() => void) | null = null;
 function startSocket() {
   if (disconnect) return;
   disconnect = connectSocket({
-    onEvent: applyEvent,
+    onEvent: enqueueEvent,
     onStatus: (ws) => set({ ws }),
     onReconnect: () => {
       // Deltas from the gap are gone; the persisted transcript is the truth.

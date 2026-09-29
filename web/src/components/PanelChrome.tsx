@@ -12,6 +12,27 @@ import { Dot, Icon } from './ui';
 
 export const PHONE = '(max-width: 860px)';
 
+/**
+ * The agents a place lists by default: every live one, the most recent `recent` that stopped or failed, and the one
+ * selected, in their order. A sandbox can hold thousands of past agents; rendering them all on every server event is
+ * what made the page (and typing beside it) slow. `older` is how many are left out.
+ */
+export function recentAgents(sessions: SessionInfo[], selected: SessionInfo | undefined, recent: number): { shown: SessionInfo[]; older: number } {
+  let past = 0;
+  const keep = new Set<SessionInfo>();
+  for (let i = sessions.length - 1; i >= 0; i--) {
+    const s = sessions[i];
+    if (s.status !== 'stopped' && s.status !== 'error') keep.add(s);
+    else if (past < recent) {
+      past++;
+      keep.add(s);
+    }
+  }
+  if (selected) keep.add(selected);
+  if (keep.size === sessions.length) return { shown: sessions, older: 0 };
+  return { shown: sessions.filter((s) => keep.has(s)), older: sessions.length - keep.size };
+}
+
 /** Details open or closed: remembered per kind of page on desktop; on a phone it always starts closed. */
 export function useDetailsOpen(kind: string): [boolean, (open: boolean) => void] {
   const phone = useMediaQuery(PHONE);
@@ -101,7 +122,9 @@ export function AgentPicker({
   onNew?: () => void;
   newDisabled?: boolean;
 }) {
+  const [all, setAll] = useState(false);
   if (!sessions.length && !onNew) return null;
+  const { shown, older } = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 100);
   const text = !selected ? 'No agents yet' : sameTitle(selected.title, place) ? `${sessions.length} ${sessions.length === 1 ? 'agent' : 'agents'}` : selected.title;
   return (
     <label className="agent-pick show-phone" title="Agent">
@@ -117,11 +140,15 @@ export function AgentPicker({
           if (e.target.value === '__new') {
             e.target.value = selected?.id ?? '';
             onNew?.();
+          } else if (e.target.value === '__all') {
+            e.target.value = selected?.id ?? '';
+            setAll(true);
           } else onSelect(e.target.value);
         }}
       >
         {!selected && <option value="">No agents yet</option>}
-        {sessions.map((s) => (
+        {older > 0 && <option value="__all">Show {older} older agents…</option>}
+        {shown.map((s) => (
           <option key={s.id} value={s.id}>
             {s.title} · {sessionLabel[s.status]}
             {s.requestedBy ? ` · for ${s.requestedBy.displayName}` : ''}
@@ -152,10 +179,17 @@ export function AgentTabs({
   onNew?: () => void;
   newDisabled?: boolean;
 }) {
+  const [all, setAll] = useState(false);
   if (!sessions.length && !onNew) return null;
+  const { shown, older } = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 12);
   return (
     <nav className="tabs hide-phone" role="tablist">
-      {sessions.map((s) => (
+      {older > 0 && (
+        <button className="tab tab-older" onClick={() => setAll(true)} title={`Show the ${older} older agents that stopped here as tabs too`}>
+          +{older} older
+        </button>
+      )}
+      {shown.map((s) => (
         <button
           key={s.id}
           role="tab"

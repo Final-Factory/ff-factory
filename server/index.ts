@@ -29,6 +29,7 @@ import { HostHealthMonitor } from './hostHealth.ts';
 import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
+import { acceptsGzip, endMaybeGzip, gzippedFile } from './compress.ts';
 import { appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
 import { pruneEditorLogs, slugify } from './sandboxes.ts';
 import { reapBrowsers } from './reaper.ts';
@@ -411,8 +412,8 @@ class HttpError extends Error {
 
 function send(res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
   const json = JSON.stringify(body ?? {});
-  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers });
-  res.end(json);
+  // Gzipped when big (server/compress.ts): /api/state at thousands of sessions is megabytes.
+  void endMaybeGzip(res.req, res, status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers }, json);
 }
 
 async function readJson<T>(req: http.IncomingMessage, maxBytes = 2 * 1024 * 1024): Promise<T> {
@@ -962,7 +963,7 @@ const TYPES: Record<string, string> = {
   '.webmanifest': 'application/manifest+json',
 };
 
-function serveStatic(url: URL, res: http.ServerResponse) {
+async function serveStatic(req: http.IncomingMessage, url: URL, res: http.ServerResponse) {
   let file = path.normalize(path.join(WEB, decodeURIComponent(url.pathname)));
   if (!file.startsWith(WEB)) return send(res, 403, { error: 'forbidden' });
   if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(WEB, 'index.html');
@@ -971,10 +972,17 @@ function serveStatic(url: URL, res: http.ServerResponse) {
     return res.end('Web UI not built. Run: npm run build');
   }
   const immutable = file.includes(`${path.sep}assets${path.sep}`);
-  res.writeHead(200, {
+  const headers = {
     'content-type': TYPES[path.extname(file)] ?? 'application/octet-stream',
     'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
-  });
+  };
+  // The bundle and styles gzipped (made once per build, server/compress.ts).
+  const gz = acceptsGzip(req.headers['accept-encoding']) ? await gzippedFile(file, fs.statSync(file)) : undefined;
+  if (gz) {
+    res.writeHead(200, { ...headers, 'content-encoding': 'gzip', vary: 'Accept-Encoding', 'content-length': gz.length });
+    return res.end(gz);
+  }
+  res.writeHead(200, headers);
   fs.createReadStream(file)
     .on('error', () => res.destroy())
     .pipe(res);
@@ -1036,14 +1044,16 @@ const server = http.createServer(async (req, res) => {
       }
       return send(res, 404, { error: 'no such endpoint' });
     }
-    serveStatic(url, res);
+    await serveStatic(req, url, res);
   } catch (e) {
     const status = e instanceof HttpError ? e.status : /^no (sandbox|session|standing agent|delegation|machine)/.test((e as Error).message) ? 404 : 400;
     send(res, status, { error: (e as Error).message });
   }
 });
 
-const wss = new WebSocketServer({ noServer: true });
+// Big messages (the full state a page gets when it connects, megabytes at thousands of sessions) go compressed;
+// the stream of small events does not pay for zlib. No context takeover: no zlib memory kept per page between messages.
+const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
 

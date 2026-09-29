@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import type { ImageInput } from '../../../shared/types';
@@ -13,7 +13,7 @@ import { onScreenKeyboard } from '../viewport';
 import { VoiceModeButton, VoiceModeOverlay, useVoiceMode } from './VoiceMode';
 import { Icon } from './ui';
 
-export function Composer({
+export const Composer = memo(function Composer({
   session,
   size = 'normal',
   placeholder,
@@ -64,9 +64,21 @@ export function Composer({
     }
   };
 
+  // The draft is saved a moment after typing stops (not on every key), and at once when the chat closes or the page goes.
+  const draft = useRef(text);
+  draft.current = text;
   useEffect(() => {
-    lsSet(key, text);
+    const t = setTimeout(() => lsSet(key, text), 400);
+    return () => clearTimeout(t);
   }, [key, text]);
+  useEffect(() => {
+    const save = () => lsSet(key, draft.current);
+    window.addEventListener('pagehide', save);
+    return () => {
+      window.removeEventListener('pagehide', save);
+      save();
+    };
+  }, [key]);
 
   // The box is not controlled by React: what the user types is read from it (onInput), and a text
   // that comes from elsewhere (the draft, a suggestion, a dictation, the empty box after sending) is
@@ -323,4 +335,4 @@ export function Composer({
       </div>
     </div>
   );
-}
+});

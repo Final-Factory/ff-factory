@@ -5,6 +5,7 @@ import { useState, type ReactNode } from 'react';
 import type { AppState, HostHealth, Machine, SessionInfo } from '../../../shared/types';
 import { capacityLine, fleetOf, type FleetComputer, type FleetSandbox, type PlaceAgents } from '../../../shared/fleet';
 import { useAttention } from '../attention';
+import { sessionIndex } from '../store';
 import { displayName, fmtBytes, fmtRelative, isUnused, lsGet, lsSet, machineGlance, machineSandboxGlance, navigate, sandboxGlance, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
 import { AttentionButton, DrawerButton } from './ShellButtons';
 import { describe, gpuPct, level, ramLvl, ramPct, type Lvl } from './SystemMeters';
@@ -310,6 +311,16 @@ function Places({ c, now, sel, variant, go, onNewSandbox }: { c: FleetComputer; 
   );
 }
 
+/** The inputs and result of the last fleetFor: the sidebar, its groups and the Overview share one per state change. */
+let lastFleet: { key: unknown[]; fleet: FleetComputer[] } | undefined;
+
+/** fleetOf, computed once per change of what it reads (the page re-renders on every server event). */
+export function fleetFor(app: AppState): FleetComputer[] {
+  const key = [app.sandboxes, app.sessions, app.machines, app.system, app.machineStats];
+  if (!lastFleet || key.some((k, i) => k !== lastFleet!.key[i])) lastFleet = { key, fleet: fleetOf(app, sessionIndex(app.sessions)) };
+  return lastFleet.fleet;
+}
+
 // ---------------------------------------------------------------- the sidebar's groups
 
 export function FleetGroups({ app, sel, go, onNewSandbox }: { app: AppState; sel: FleetSelection; go: (r: Route) => void; onNewSandbox: () => void }) {
@@ -317,7 +328,7 @@ export function FleetGroups({ app, sel, go, onNewSandbox }: { app: AppState; sel
   const [collapsed, toggle] = useCollapsed();
   return (
     <>
-      {fleetOf(app).map((c) => {
+      {fleetFor(app).map((c) => {
         const closed = collapsed.has(c.key);
         return (
           <div key={c.key} className={`fl-group${closed ? ' collapsed' : ''}`} data-testid={`fl-group-${c.key}`}>
@@ -336,7 +347,7 @@ export function FleetGroups({ app, sel, go, onNewSandbox }: { app: AppState; sel
 
 export function OverviewBoard({ app }: { app: AppState }) {
   const now = useNow(15_000);
-  const fleet = fleetOf(app);
+  const fleet = fleetFor(app);
   const live = fleet.reduce((n, c) => n + c.live, 0);
   const busy = fleet.reduce((n, c) => n + c.busy, 0);
   const waiting = useAttention(app).length;

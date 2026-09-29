@@ -4,7 +4,7 @@ import { memUsed as memUsedOf } from '../../../shared/stats';
 import { fmtBytes, fmtClock, fmtCost, fmtRelative, lsGet, lsSet, useNow } from '../util';
 import { Icon } from './ui';
 import { api } from '../api';
-import { attempt } from '../store';
+import { attempt, sessionIndex } from '../store';
 
 // The sidebar's footer: the load of every computer and the plan usage of every Claude account, in two
 // quiet lines; a tap opens the meters. With machines connected each computer is a name and three mini
@@ -374,7 +374,7 @@ function UsageRefresh() {
 
 /** Every Claude account in use: who it is, where it is used, which agents run on it, its limits. */
 function AccountsMeters({ app }: { app: AppState }) {
-  const sessions = new Map(app.sessions.map((s) => [s.id, s]));
+  const sessions = sessionIndex(app.sessions);
   return (
     <>
       {app.accounts!.map((a) => {

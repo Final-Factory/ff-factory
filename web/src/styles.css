@@ -473,13 +473,17 @@ select.input {
   bottom: 0;
   width: 40%;
   border-radius: 2px;
+  left: 0;
   background: linear-gradient(90deg, transparent, var(--blue), transparent);
+  /* transform, not left: it runs on the compositor, so the page is not laid out and repainted every frame. */
   animation: slide 1.4s ease-in-out infinite;
+  will-change: transform;
 }
 
+/* In the bar's own width (40% of the track): from just off its left end to just off its right. */
 @keyframes slide {
-  from { left: -40%; }
-  to { left: 100%; }
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
 }
 
 /* ---------- shell ---------- */
@@ -2611,6 +2615,11 @@ select.input {
 
 .tabs::-webkit-scrollbar {
   display: none;
+}
+
+.tab-older {
+  color: var(--text-3);
+  font-weight: 500;
 }
 
 .tab {

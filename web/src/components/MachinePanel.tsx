@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { platformNoun, type AppState, type Machine, type SessionInfo } from '../../../shared/types';
+import { platformNoun, type AppState, type Machine } from '../../../shared/types';
 import { api } from '../api';
-import { attempt, toast, upsertMachine, useStore } from '../store';
+import { attempt, sessionsByIds, toast, upsertMachine, useStore } from '../store';
 import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
 import { NewAgentModal } from './Modals';
 import { ScreenshotsDrawer } from './Images';
@@ -14,7 +14,8 @@ import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
 export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: AppState; machine: Machine; sessionId?: string; onClose?: () => void }) {
   const now = useNow();
   // Standing agents assigned here have their own page, and so do its sandboxes; the tabs are the main clone's workers.
-  const sessions = m.sessionIds.map((id) => app.sessions.find((s) => s.id === id)).filter((s): s is SessionInfo => !!s && s.kind !== 'standing' && !s.machineSandbox);
+  const here = sessionsByIds(app.sessions, m.sessionIds);
+  const sessions = here.filter((s) => s.kind !== 'standing' && !s.machineSandbox);
   const selected = sessions.find((s) => s.id === sessionId) ?? sessions[sessions.length - 1];
   const [newAgent, setNewAgent] = useState(false);
   const [label, setLabel] = useState(false);
@@ -24,7 +25,7 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
   const [shotsOpen, setShotsOpen] = useState(false);
   const [switchOpen, setSwitchOpen] = useState(false);
   // A redeploy or daemon restart stops every agent there, its sandboxes' too.
-  const live = m.sessionIds.map((id) => app.sessions.find((s) => s.id === id)).filter((s) => s && s.kind !== 'standing' && (s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission')).length;
+  const live = here.filter((s) => s.kind !== 'standing' && (s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission')).length;
   const g = m.git;
 
   const redeploy = async () => {

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import type { AppState, IntakeSummary, SessionInfo, WorkItem, WorkSource } from '../../../shared/types';
+import type { AppState, IntakeSummary, WorkItem, WorkSource } from '../../../shared/types';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
-import { attempt, reloadTranscript } from '../store';
+import { attempt, reloadTranscript, sessionsByIds } from '../store';
 import { dispatcherGlance, fmtCost, fmtRelative, isBusy, isOpenWork, navigate, useNow, workLabel, workTone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
@@ -306,7 +306,7 @@ function deliveryLine(w: WorkItem): string {
 }
 
 function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; open: boolean; onToggle: () => void; now: number }) {
-  const workers = w.sessionIds.map((id) => app.sessions.find((s) => s.id === id)).filter((s): s is SessionInfo => !!s);
+  const workers = sessionsByIds(app.sessions, w.sessionIds);
   const working = workers.some(isBusy);
   const tone = w.approval?.state === 'pending' && isOpenWork(w) ? 'amber' : workTone(w.status);
   const s = w.source;

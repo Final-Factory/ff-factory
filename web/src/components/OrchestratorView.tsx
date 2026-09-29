@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useState } from 'react';
 import type { SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, openSession, reloadTranscript, useStore } from '../store';
@@ -35,7 +35,7 @@ function HeartbeatSelect() {
  * An orchestrator's chat (docs/orchestrators.md): your own, or with `readOnly`, someone else's, which only they write
  * to (their name in the header, no menu, and a line where the composer would be).
  */
-export function OrchestratorView({ session, compact, readOnly }: { session: SessionInfo | undefined; compact?: boolean; readOnly?: boolean }) {
+export const OrchestratorView = memo(function OrchestratorView({ session, compact, readOnly }: { session: SessionInfo | undefined; compact?: boolean; readOnly?: boolean }) {
   const [prefill, setPrefill] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const clearPrefill = useCallback(() => setPrefill(null), []);
@@ -181,4 +181,4 @@ export function OrchestratorView({ session, compact, readOnly }: { session: Sess
       )}
     </section>
   );
-}
+});
