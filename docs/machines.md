@@ -382,6 +382,9 @@ page (`#/overview`) shows the same as one card per computer. A machine sandbox h
 git state and a branch switch (`POST /api/machines/<machine>/sandboxes/<id>/unity`, `GET …/unity-log`,
 `POST …/switch-branch`). The machine's own page keeps its main-clone agents.
 
+![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
+![The Overview board](images/fleet-overview-desktop-chromium.png)
+
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
