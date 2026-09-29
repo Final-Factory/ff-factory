@@ -244,6 +244,7 @@ export interface DaemonExtras {
   unityMcpServer?: { command: string; args: string[]; env?: Record<string, string> };
   maxEventsFile?: string | null;
   sandboxIdleStopMinutes?: number;
+  cleanup?: { everyMinutes: number; softFreeGB: number };
 }
 
 /** A machine's folder options, as add_machine takes them and daemon.json keeps them. */

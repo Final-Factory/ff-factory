@@ -703,6 +703,8 @@ export class MachineManager {
       ...(u.mcpServer ? { unityMcpServer: { command: u.mcpServer.command, args: u.mcpServer.args, ...(u.mcpServer.env ? { env: u.mcpServer.env } : {}) } } : {}),
       maxEventsFile: null,
       sandboxIdleStopMinutes: u.idleStopMinutes,
+      // No clean-up of its own even before the portal's first welcome: this host's guard cleans this computer.
+      cleanup: { everyMinutes: 0, softFreeGB: 0 },
     };
   }
 
@@ -1276,9 +1278,10 @@ export class MachineManager {
     const m = this.requireSandboxDaemon(machineId);
     const h = this.hellos.get(m.id);
     if (!h || h.protocol < ADOPT_PROTOCOL) throw new Error(`${m.id}'s daemon speaks protocol ${h?.protocol ?? '?'} and cannot release sandboxes`);
-    const sb = this.requireSandbox(m.id, sandbox);
-    const text = await this.sandboxCall(m.id, { op: 'release', sandbox: sb.id }, 60_000);
-    m.sandboxes = (m.sandboxes ?? []).filter((s) => s.id !== sb.id);
+    // Not only one the record shows: a migration undoes an adopt whose snapshot may not have arrived.
+    const id = slugify(sandbox);
+    const text = await this.sandboxCall(m.id, { op: 'release', sandbox: id }, 60_000);
+    m.sandboxes = (m.sandboxes ?? []).filter((s) => s.id !== id);
     this.store.putMachine(m);
     return text;
   }

@@ -11,6 +11,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { daemonRecordFrom, moveStateToHost, moveStateToMachine, type StateFile } from '../server/hostMigration.ts';
 
 export interface OfflineArgs {
@@ -47,6 +48,26 @@ function pidAlive(file: string): number | undefined {
   }
 }
 
+/**
+ * The pids of machine daemons running on this computer (a node process running machine/daemon.ts). With
+ * machines.keepAgentsOnRestart the daemon and its agents outlive the portal, and a running daemon would put the
+ * sandboxes back with its next snapshot. Exported for tests.
+ */
+export function runningDaemons(list: () => string = listProcesses): number[] {
+  return list()
+    .split('\n')
+    .map((l) => /^\s*(\d+)\s+(.*)$/.exec(l))
+    .filter((m): m is RegExpExecArray => !!m && /machine[\\/]daemon\.ts/i.test(m[2]) && Number(m[1]) !== process.pid)
+    .map((m) => Number(m[1]));
+}
+
+function listProcesses(): string {
+  if (process.platform === 'win32') {
+    return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }"], { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+  }
+  return execFileSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+}
+
 /** Daemon rows (machine/sandboxes.ts Rec) after the move: the moved sandboxes added (to_machine) or dropped (back). Exported for tests. */
 export function daemonRowsAfter(rows: { id: string }[], state: StateFile, a: Pick<OfflineArgs, 'direction' | 'machine'>, moved: string[]): { id: string }[] {
   if (a.direction === 'back') return rows.filter((r) => !moved.includes(r.id));
@@ -55,7 +76,7 @@ export function daemonRowsAfter(rows: { id: string }[], state: StateFile, a: Pic
   return [...rows.filter((r) => !moved.includes(r.id)), ...added];
 }
 
-export function main(argv: string[], log: (line: string) => void = console.log): number {
+export function main(argv: string[], log: (line: string) => void = console.log, daemons: () => number[] = runningDaemons): number {
   const a = parseArgs(argv);
   if (typeof a === 'string') {
     log(`usage: node scripts/host-migration.ts to_machine|back --data <dir> --machine <id> [--daemon-dir <dir>] [--dry-run]\n${a}`);
@@ -65,6 +86,11 @@ export function main(argv: string[], log: (line: string) => void = console.log):
   const pid = pidAlive(path.join(a.data, 'server.pid'));
   if (pid && !a.dryRun) {
     log(`the portal still runs (pid ${pid} in ${path.join(a.data, 'server.pid')}): stop it first (scripts\\stop-server.ps1), or it overwrites state.json`);
+    return 1;
+  }
+  const live = a.dryRun ? [] : daemons();
+  if (live.length) {
+    log(`a machine daemon still runs here (pid ${live.join(', ')}): stop it first (machine_daemon stop while the portal ran, or end its task and that node process), or it puts its sandboxes back`);
     return 1;
   }
   const state = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as StateFile;

@@ -60,6 +60,8 @@ export interface DaemonConfig {
    * Default: the UnityMCP entry the machine's own Claude Code has in ~/.claude.json.
    */
   unityMcpServer?: StdioServer;
+  /** Clean-up settings until the portal sends its own (the portal's own host: 0/0, it never cleans by itself). */
+  cleanup?: { everyMinutes: number; softFreeGB: number };
 }
 
 const BUSY = new Set(['running', 'starting', 'waiting_permission']);
@@ -163,6 +165,7 @@ export class Daemon {
     bus.on('event', (e) => {
       if (e.type === 'delta' && this.entries.has(e.sessionId)) this.out({ type: 'delta', sessionId: e.sessionId, text: e.text });
     });
+    if (cfg.cleanup) this.cleanupSettings = { ...cfg.cleanup };
     try {
       this.cleanupSettings = { ...this.cleanupSettings, ...JSON.parse(fs.readFileSync(cleanupConfigFile(appDirOfConfig(cfg)), 'utf8')) };
     } catch {

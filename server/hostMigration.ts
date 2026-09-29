@@ -334,13 +334,26 @@ export class HostMigrator {
       const movedSessions: string[] = [];
       const failures: string[] = [];
       for (const sb of host) {
+        // A wake, a resume or a message can start one of its agents here while earlier sandboxes move: then it stays.
+        const liveNow = () => sb.sessionIds.filter((id) => this.d.sessions.sessions.get(id)?.live);
+        if (liveNow().length) {
+          failures.push(`${sb.id}: agent(s) ${liveNow().join(', ')} started again meanwhile`);
+          continue;
+        }
         try {
           const msb = machineSandboxFrom(sb);
           await this.d.machines.adoptSandbox(machine.id, { id: sb.id, path: sb.path, branch: msb.branch, base: sb.base, createdAt: sb.createdAt, logPath: sb.unity.logPath, purpose: sb.purpose });
         } catch (e) {
-          failures.push(`${sb.id}: ${(e as Error).message}`);
+          // It may have been taken all the same (an answer that came too late): give it back, so only this host owns it.
+          failures.push(`${sb.id}: ${(e as Error).message}${await this.undoAdopt(machine.id, sb.id)}`);
           continue;
         }
+        const late = liveNow();
+        if (late.length) {
+          failures.push(`${sb.id}: agent(s) ${late.join(', ')} started while it was being moved, so it stays here${await this.undoAdopt(machine.id, sb.id)}`);
+          continue;
+        }
+        // From here to the end of the pass nothing awaits: no agent can start between the check above and the move.
         // The daemon's snapshot (sent before its answer) made the machine's record; the records move in one go.
         const state = this.plainState();
         const mm = state.machines!.find((x) => x.id === machine.id)!;
@@ -377,6 +390,38 @@ export class HostMigrator {
     }
   }
 
+  /** A failed or overtaken adopt: make sure the daemon does not keep the sandbox too. Returns a note for the report. */
+  private async undoAdopt(machineId: string, id: string): Promise<string> {
+    try {
+      await this.d.machines.releaseSandbox(machineId, id);
+      return `; ${machineId} had taken it and gave it back`;
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (/no sandbox/i.test(msg)) return '';
+      return `; CHECK ${machineId}: it may list ${id} as well (${msg}): release it with migrate_host_sandboxes back once it answers`;
+    }
+  }
+
+  /** A failed release: make sure the daemon still has it and the portal's record keeps its label and agents. */
+  private async undoRelease(machineId: string, msb: MachineSandbox): Promise<string> {
+    const m = this.d.store.machines.get(machineId);
+    const restore = () => {
+      const mm = this.d.store.machines.get(machineId);
+      if (!mm) return;
+      mm.sandboxes = [...(mm.sandboxes ?? []).filter((x) => x.id !== msb.id), { ...(mm.sandboxes ?? []).find((x) => x.id === msb.id), ...msb, purpose: msb.purpose, sessionIds: msb.sessionIds }];
+      this.d.store.putMachine(mm);
+    };
+    if (m?.sandboxes?.some((x) => x.id === msb.id)) return '';
+    try {
+      await this.d.machines.adoptSandbox(machineId, { id: msb.id, path: msb.path, branch: msb.branch, base: msb.base, createdAt: msb.createdAt, logPath: msb.unity.logPath, purpose: msb.purpose });
+      restore();
+      return `; ${machineId} had released it, so it was taken back there`;
+    } catch (e) {
+      restore();
+      return `; CHECK ${machineId}: it may no longer hold ${msb.id} (${(e as Error).message})`;
+    }
+  }
+
   /** Move the local machine's sandboxes back to this host's own pool (the rollback). */
   async back(dryRun = false): Promise<string> {
     if (this.running) throw new Error('a migration is already running');
@@ -394,11 +439,19 @@ export class HostMigrator {
       const moved: string[] = [];
       const movedSessions: string[] = [];
       const failures: string[] = [];
-      for (const msb of list) {
+      for (const { id } of list) {
+        // The record as it is now: an agent record made in this sandbox while earlier ones moved belongs to it too.
+        const msb = st.machines.get(machine.id)?.sandboxes?.find((x) => x.id === id);
+        if (!msb) {
+          failures.push(`${id}: no longer on ${machine.id}`);
+          continue;
+        }
+        const keep = { ...msb, sessionIds: [...msb.sessionIds] };
         try {
+          // The daemon refuses while an agent process runs there.
           await this.d.machines.releaseSandbox(machine.id, msb.id);
         } catch (e) {
-          failures.push(`${msb.id}: ${(e as Error).message}`);
+          failures.push(`${msb.id}: ${(e as Error).message}${await this.undoRelease(machine.id, keep)}`);
           continue;
         }
         const state = this.plainState();

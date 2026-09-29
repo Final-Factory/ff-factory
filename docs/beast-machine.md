@@ -144,3 +144,16 @@ agents running and the reconnect replays their transcripts.
   `nightly.sh` and `beast_watchdog.sh` (`F:/ffsb/_nightly-e2e/reports`), `install_schedule.sh` (the watchdog task over
   ssh), and `player_slots.py` / `setup_player_slot_firewall.ps1` (BEAST picks `F:\ff-players` because `F:\ffsb` exists).
 - Agents on machines have no `wait_for_unity` tool (they poll `unity status`), as on LothDesktop.
+
+## Known limits
+
+- The migration re-checks each sandbox's agents just before and after its adopt: one a wake or a message started in
+  the meantime keeps that sandbox on the host (the daemon gives it back), and a failed adopt or release is undone the
+  same way. The report says so; run the migration again once those agents are idle.
+- Between the daemon's deploy and the migration, the host's pool and the daemon both run git in the base clone, each
+  with its own lock. Git's lock files make a clash fail rather than corrupt, but do the migration right after the deploy
+  and create no sandbox in between.
+- While the Dev Drive is gone, the daemon's editor watch finds its sandbox editors crashed and gives up after its
+  restart budget; once the host guard has reattached the drive it starts those editors again through the daemon. A
+  remount self-test (`host_recovery selftest`) with a migrated sandbox's editor running is worth doing once.
+- The offline script refuses while a daemon runs on the computer (with `keepAgentsOnRestart` it outlives the portal).
