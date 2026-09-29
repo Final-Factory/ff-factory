@@ -3,7 +3,7 @@
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
-import type { HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { CleanupSummary, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 /**
  * Bumped when either side must be redeployed to keep talking. 4: the daemon reports its Mac's load
@@ -52,7 +52,11 @@ export type ToDaemon =
   /** The Unity editor of the machine's clone (machine/unity.ts); answered by unity_result. */
   | { type: 'unity'; id: string; action: 'status' | 'start' | 'stop' | 'restart'; force?: boolean; sandbox?: string }
   /** Watch this portal's host from outside (machine/outsideWatch.ts); null: this machine does not watch. Kept on the Mac. */
-  | { type: 'outside_watch'; config: OutsideWatchConfig | null };
+  | { type: 'outside_watch'; config: OutsideWatchConfig | null }
+  /** The daemon's clean-up settings (server/cleanup.ts), at connect and when they change. Kept on the machine. */
+  | { type: 'cleanup_config'; config: { everyMinutes: number; softFreeGB: number } }
+  /** A clean-up pass now (the orchestrator asked); answered by a `cleanup` report. */
+  | { type: 'cleanup_now' };
 
 export type FromDaemon =
   /** `catalog`: the MCP tools this daemon can serve (protocol 3+); info.daemon is the commit it was deployed from. */
@@ -84,5 +88,7 @@ export type FromDaemon =
   | { type: 'stats'; stats: HostStats }
   /** The plan usage of the Mac's own Claude login (not the host token), every 5 minutes (protocol 4+). */
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
+  /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */
+  | { type: 'cleanup'; summary: CleanupSummary; notice?: string }
   /** A line the ffdiscord CLI appended to the Mac's Max events file (docs/max.md), forwarded as is; the portal validates it. */
   | { type: 'max_event'; line: string };

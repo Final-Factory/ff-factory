@@ -52,7 +52,14 @@ export interface Config {
    * of the Mac's own login. `false` turns it off everywhere; an object sets it per machine, "*" for the rest:
    * { "m3": false, "m5": false } or { "*": false, "m5": true }.
    */
-  machines?: { useHostClaudeEnv?: boolean | Record<string, boolean> };
+  machines?: {
+    useHostClaudeEnv?: boolean | Record<string, boolean>;
+    /**
+     * Each machine daemon's own clean-up (docs/self-recovery.md): a pass every `everyMinutes` (default 60) and
+     * sooner below `softFreeGB` (default 80). A number for every machine, or per machine with "*" for the rest.
+     */
+    cleanup?: { everyMinutes?: number | Record<string, number>; softFreeGB?: number | Record<string, number> };
+  };
   /**
    * Which Claude account THIS host's agents run on, per role (docs/accounts.md): "token" (the default) is
    * claudeEnv's CLAUDE_CODE_OAUTH_TOKEN; "login" starts the process with no credential in its environment, so
@@ -262,24 +269,72 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
 const UNITY_WATCHDOG_DEFAULTS: Config['unity']['watchdog'] = { stallMinutes: 15, autoDismiss: true, startingPollSeconds: 10, runningPollSeconds: 60 };
 
 export interface CleanupPolicy {
+  /** A clean-up pass this often (minutes; 0: only when free space is below softFreeGB). */
+  everyMinutes: number;
+  /** Below this much free space: a pass every 15 minutes, including the rules that empty whole caches. 0: warnFreeGB + 40. */
+  softFreeGB: number;
   /** Folder name patterns in the temp folder that are scratch, removed when older than tempOlderThanHours. */
   tempPatterns: string[];
   tempOlderThanHours: number;
+  /** A finished agent session's own temp folder (ffa-<session>) goes once untouched this long. */
+  sessionTempHours: number;
+  /** Anything else in the temp folder goes once untouched this many days (a clone only with nothing unpushed). */
+  tempAnyOlderThanDays: number;
+  /** Build outputs (a sandbox's Builds folder, build archives in ff-worker) go once untouched this many days. */
+  buildsOlderThanDays: number;
+  /** The game's PlaytestSessions (playtest screenshots and recordings) go once untouched this many days. */
+  playtestDays: number;
+  /** Claude Code's task output folders (<temp>/claude/<project>/<session>) go once untouched this many days. */
+  claudeTempDays: number;
+  /** A GitHub Actions runner's job folders (_work in the actions-runner folders) go once untouched this many days. */
+  runnerWorkDays: number;
+  /** A Unity project not opened for this many days has its Library reported (system_status, notices)... */
+  libraryReportDays: number;
+  /** ...and removed past this many (Unity rebuilds it on open). 0: never removed. */
+  libraryDeleteDays: number;
   /** Agent temp clones (fff-*, ffsb-*), removed when older than this and without uncommitted or unpushed work. 0: never. */
   cloneOlderThanDays: number;
   clonePatterns: string[];
-  /** Explicit rules: entries directly inside `path` older than `olderThanDays` go (e.g. old audit reports). */
+  /** Explicit rules: entries directly inside `path` older than `olderThanDays` go (e.g. old build outputs). */
   ageRules: { path: string; olderThanDays: number }[];
 }
 
 export const DEFAULT_CLEANUP: CleanupPolicy = {
+  everyMinutes: 60,
+  softFreeGB: 0,
   // Headless-browser profiles from screenshot scripts, and the fast suite's own scratch folders.
-  tempPatterns: ['edge-shot-*', 'edge-keys-*', 'edge-icon-*', 'playwright_*dev_profile-*', 'ffsb-voice-*', 'ffsb-auth-*', 'ffsb-integ-*', 'ffsb-smoke-*', 'republish-??????', 'update-steps-??????', 'editor-log-??????', 'appcfg-??????', 'scenes-??????', 'pushed-??????'],
+  tempPatterns: ['edge-shot-*', 'edge-keys-*', 'edge-icon-*', 'playwright_*dev_profile-*', 'ffsb-voice-*', 'ffsb-auth-*', 'ffsb-integ-*', 'ffsb-smoke-*', 'republish-??????', 'update-steps-??????', 'editor-log-??????', 'appcfg-??????', 'scenes-??????', 'pushed-??????', 'cleanup-test-*', 'ffsb-max-*', 'ffsb-e2e-*', 'ffsb-config-*'],
   tempOlderThanHours: 1,
+  sessionTempHours: 2,
+  tempAnyOlderThanDays: 7,
+  buildsOlderThanDays: 7,
+  playtestDays: 14,
+  claudeTempDays: 3,
+  runnerWorkDays: 14,
+  libraryReportDays: 30,
+  libraryDeleteDays: 180,
   cloneOlderThanDays: 3,
   clonePatterns: ['fff-*', 'ffsb-*'],
   ageRules: [],
 };
+
+/** The soft threshold the host uses: softFreeGB, or warnFreeGB + 40 when unset. */
+export const hostSoftFreeGB = (g: Pick<HostGuardConfig, 'warnFreeGB' | 'cleanup'>) => g.cleanup.softFreeGB || g.warnFreeGB + 40;
+
+/** A machine's clean-up when config machines.cleanup says nothing about it. */
+export const MACHINE_CLEANUP_DEFAULTS = { everyMinutes: 60, softFreeGB: 80 };
+
+/** A per-machine setting: a number for every machine, or { "<id>": n, "*": n } (the id wins, then "*"). */
+const perMachine = (v: number | Record<string, number> | undefined, id: string): number | undefined => (typeof v === 'number' ? v : v ? (v[id] ?? v['*']) : undefined);
+
+/** What machine `id`'s daemon runs its clean-up with (config machines.cleanup, else the defaults). */
+export function machineCleanupSettings(cfg: Pick<Config, 'machines'>, id: string): { everyMinutes: number; softFreeGB: number } {
+  const c = cfg.machines?.cleanup;
+  return {
+    everyMinutes: perMachine(c?.everyMinutes, id) ?? MACHINE_CLEANUP_DEFAULTS.everyMinutes,
+    softFreeGB: perMachine(c?.softFreeGB, id) ?? MACHINE_CLEANUP_DEFAULTS.softFreeGB,
+  };
+}
 
 export interface HostGuardConfig {
   /** How often the guard looks (seconds). 0 turns the whole guard off. */
