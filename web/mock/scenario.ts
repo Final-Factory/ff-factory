@@ -16,6 +16,7 @@ import type {
   StandingAgent,
   StandingRun,
   TranscriptEvent,
+  WorkItem,
 } from '../../shared/types.ts';
 
 export type Scenario = 'busy' | 'fresh';
@@ -114,8 +115,10 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
       models: [{ label: 'Weekly Fable', percent: 81, severity: 'warning', resetsAt: new Date(now + 2.6 * 24 * 60 * MIN).toISOString() }],
     },
     orchestratorId: 'orch',
+    dispatcherId: 'dispatcher',
+    me: { userId: 'ben', displayName: 'Ben', role: 'owner' },
     config: { defaultModel: 'opus', models: ['opus', 'sonnet', 'haiku', 'fable'], defaultBase: 'origin/develop' },
-    settings: { heartbeatMinutes: 15 },
+    settings: { heartbeatMinutes: null, heartbeat: { ben: 15 } },
   };
 
   const session = (id: string, kind: SessionInfo['kind'], title: string, extra: Partial<SessionInfo> = {}): SessionInfo => ({
@@ -139,12 +142,15 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
         ...base,
         usage: { ...base.usage!, weekly: { label: 'Weekly', percent: 4 }, session: { label: '5-hour session', percent: 0 }, models: [] },
         sandboxes: [],
-        sessions: [session('orch', 'orchestrator', 'Main', { permissionMode: 'default', createdAt: iso(1), lastActivityAt: iso(1) })],
+        sessions: [
+          session('orch', 'orchestrator', 'Ben', { orchestratorRole: 'personal', requestedBy: { userId: 'ben', displayName: 'Ben' }, permissionMode: 'default', createdAt: iso(1), lastActivityAt: iso(1) }),
+          session('dispatcher', 'orchestrator', 'Dispatcher', { orchestratorRole: 'dispatcher', permissionMode: 'default', createdAt: iso(1), lastActivityAt: iso(1), status: 'stopped' }),
+        ],
         standingAgents: [],
         delegations: [],
         machines: [],
       },
-      transcripts: { orch: [] },
+      transcripts: { orch: [], dispatcher: [] },
       uploads,
       files,
     };
@@ -443,7 +449,9 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
   // ------------------------------------------------------------------ sessions
 
   const sessions: SessionInfo[] = [
-    session('orch', 'orchestrator', 'Main', { permissionMode: 'default', createdAt: iso(60 * 30), lastActivityAt: iso(3), turns: 86, costUsd: 41.72, model: 'claude-opus-5-5' }),
+    session('orch', 'orchestrator', 'Ben', { orchestratorRole: 'personal', requestedBy: { userId: 'ben', displayName: 'Ben' }, permissionMode: 'default', createdAt: iso(60 * 30), lastActivityAt: iso(3), turns: 86, costUsd: 41.72, model: 'claude-opus-5-5' }),
+    session('orch-loth', 'orchestrator', 'Lothsahn', { orchestratorRole: 'personal', requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' }, permissionMode: 'default', createdAt: iso(60 * 30), lastActivityAt: iso(22), turns: 14, costUsd: 3.9, model: 'claude-opus-5-5' }),
+    session('dispatcher', 'orchestrator', 'Dispatcher', { orchestratorRole: 'dispatcher', permissionMode: 'default', createdAt: iso(60 * 30), lastActivityAt: iso(21), turns: 41, costUsd: 11.3, model: 'claude-opus-5-5' }),
     session('s-light-0', 'worker', 'Restart & dialog fixer', { sandboxId: 'agent-mcp', status: 'idle', turns: 9, costUsd: 3.1, lastActivityAt: iso(60 * 5), createdAt: iso(60 * 7), lastResult: 'The watchdog now reloads clean scenes instead of reporting the dialog.' }),
     session('s-light-1', 'worker', 'Lighting pass (AAA space look)', { sandboxId: 'agent-mcp', status: 'running', effort: 'high', turns: 31, costUsd: 12.84, createdAt: iso(189), lastActivityAt: iso(1) }),
     session('s-coop', 'worker', 'Honest co-op client (BEAST)', { sandboxId: 'spec-074', status: 'waiting_permission', permissionMode: 'default', turns: 57, costUsd: 18.2, createdAt: iso(262), lastActivityAt: iso(58), pendingPermissions: [coopPerm] }),
@@ -494,11 +502,13 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
       })
       .done(199.2, 0.31, 4, 38_000)
       .at(190, { kind: 'user', from: 'human', text: 'start the lighting pass in agent-mcp. AAA space look, bloom and exposure and the star field. screenshots as you go' })
-      .tool(189.9, 'o6', 'mcp__sandboxes__set_sandbox_label', { sandbox: 'agent-mcp', label: 'Lighting pass: AAA space look' }, 'agent-mcp is now "Lighting pass: AAA space look".')
-      .tool(189.8, 'o7', 'mcp__sandboxes__unity', { sandbox: 'agent-mcp', action: 'start' }, 'Starting Unity for agent-mcp (warm Library: usually 2 to 4 minutes).')
-      .tool(189.6, 'o8', 'mcp__sandboxes__start_agent', { sandbox: 'agent-mcp', title: 'Lighting pass (AAA space look)', model: 'opus', effort: 'high', prompt: 'Lighting pass for the space scene: an AAA look. Bloom that holds up on the stars and engines, auto-exposure, a richer star field…' }, '{"sessionId":"s-light-1","status":"starting"}')
-      .at(189.4, { kind: 'assistant', text: "Started **Lighting pass (AAA space look)** in agent-mcp (Opus, high effort). Unity is warming up; I'll tell you when it has screenshots." })
-      .done(189.4, 0.22, 4, 21_000)
+      .tool(189.9, 'o6', 'mcp__sandboxes__list_work', {}, '- w12 [active] "Tutorial playthrough bug hunt" for Ben …\n- w15 [queued] "Fix belt splitter desync at 3-way junctions (spec 098)" for Lothsahn …')
+      .tool(189.8, 'o8', 'mcp__sandboxes__request_work', { title: 'Lighting pass: AAA space look', brief: 'An AAA look for the space scene: bloom that holds up on the stars and engines, auto-exposure, a richer star field. Screenshots as it goes. Ben wants it in agent-mcp.', priority: 'normal' }, 'Filed w14 with the dispatcher. You get a [dispatch] message with its decision.')
+      .at(189.6, { kind: 'assistant', text: 'Filed it as **w14**. Nothing else in flight touches lighting; the dispatcher will start it in agent-mcp.' })
+      .done(189.6, 0.09, 3, 11_000)
+      .at(189.2, { kind: 'user', from: 'system', text: '[dispatch] w14 "Lighting pass: AAA space look": started worker s-light-1 "Lighting pass (AAA space look)" in agent-mcp.' })
+      .at(189.1, { kind: 'assistant', text: "Started: **Lighting pass (AAA space look)** in agent-mcp. Unity is warming up; I'll tell you when it has screenshots." })
+      .done(189.1, 0.03, 1, 4_000)
       .at(150, {
         kind: 'user',
         from: 'system',
@@ -562,7 +572,51 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
       .tool(3.8, 'o16', 'mcp__sandboxes__wake_me', { minutes: 20, note: 'lighting PR → ask the PR reviewer' }, 'I will wake you at 10:46.')
       .at(3.6, { kind: 'assistant', text: "Will do. The lighting pass opens a PR when it's done, and I'll hand it to the PR reviewer then (checking back in 20 min)." })
       .done(3.6, 0.06, 3, 9_000);
+    // A decision about a request of Ben's that repeated one of Lothsahn's.
+    o.at(22, { kind: 'user', from: 'human', text: 'belts are dropping items at 3-way junctions again, can someone look' })
+      .tool(21.9, 'o17', 'mcp__sandboxes__request_work', { title: 'Belts drop items at 3-way junctions', brief: 'Ben sees belts drop items at three-way junctions again.' }, 'Filed w16 with the dispatcher. Possible overlap: w15 "Fix belt splitter desync at 3-way junctions (spec 098)" (same spec 098, similar title, strong). Tell Ben; the dispatcher decides.')
+      .at(21.8, { kind: 'assistant', text: 'Filed as **w16**, but Lothsahn already asked for the same fix this morning (**w15**, queued for a free sandbox). The dispatcher will likely merge the two.' })
+      .done(21.8, 0.06, 2, 7_000)
+      .at(21, { kind: 'user', from: 'system', text: '[dispatch] w16 "Belts drop items at 3-way junctions": merged into w15 "Fix belt splitter desync at 3-way junctions (spec 098)" (queued), which Lothsahn and Ben will hear about.\nSame bug as Lothsahn\'s request; it starts as soon as a sandbox frees up.' })
+      .at(20.9, { kind: 'assistant', text: 'Merged with Lothsahn’s **w15**: one worker will fix it for both of you, as soon as a sandbox frees up.' })
+      .done(20.9, 0.03, 1, 4_000);
     transcripts.orch = o.events;
+  }
+
+  // Lothsahn's own orchestrator (read only for Ben).
+  {
+    const l = new Tx(now);
+    l.at(95, { kind: 'user', from: 'human', text: 'the belt splitter desyncs at 3-way junctions, spec 098 players are hitting it. please get someone on it', requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' } })
+      .tool(94.9, 'l1', 'mcp__sandboxes__request_work', { title: 'Fix belt splitter desync at 3-way junctions (spec 098)', brief: 'Players on the 098 build desync when a splitter feeds three belts. Repro save in #bug-reports.', priority: 'high', related_ids: ['098'] }, 'Filed w15 with the dispatcher. You get a [dispatch] message with its decision.')
+      .at(94.7, { kind: 'assistant', text: 'Filed as **w15** (high). The dispatcher picks a sandbox for it.' })
+      .done(94.7, 0.08, 2, 8_000)
+      .at(94, { kind: 'user', from: 'system', text: '[dispatch] w15 "Fix belt splitter desync at 3-way junctions (spec 098)": queued.\nEvery sandbox is busy; it starts when the lighting pass or the tutorial hunt finishes.' })
+      .at(93.9, { kind: 'assistant', text: 'Queued: every sandbox is busy. It starts as soon as one frees up.' })
+      .done(93.9, 0.03, 1, 4_000)
+      .at(30, { kind: 'user', from: 'human', text: 'can we also playtest the new tutorial', requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' } })
+      .tool(29.9, 'l2', 'mcp__sandboxes__request_work', { title: 'Playtest the new tutorial', brief: 'Look for soft locks in the new tutorial.' }, 'Filed w17 with the dispatcher. You get a [dispatch] message with its decision.')
+      .at(29.8, { kind: 'assistant', text: 'Filed as **w17**.' })
+      .done(29.8, 0.05, 2, 6_000)
+      .at(28, { kind: 'user', from: 'system', text: '[dispatch] w17 "Playtest the new tutorial": a question.\nSingle-player, or co-op with the M3 and BEAST clients?' })
+      .at(27.9, { kind: 'assistant', text: 'The dispatcher asks: **single-player, or co-op** with the M3 and BEAST clients?' })
+      .done(27.9, 0.03, 1, 4_000);
+    transcripts['orch-loth'] = l.events;
+  }
+
+  // The dispatcher: requests coming in, decisions going out.
+  {
+    const d = new Tx(now);
+    d.at(189.9, { kind: 'user', from: 'system', text: '[work request] w14 from Ben: "Lighting pass: AAA space look"\n\nAn AAA look for the space scene: bloom that holds up on the stars and engines, auto-exposure, a richer star field. Screenshots as it goes. Ben wants it in agent-mcp.\n\nNo overlap found with open or recent work.', requestedBy: { userId: 'ben', displayName: 'Ben' } })
+      .tool(189.8, 'd1', 'mcp__sandboxes__start_agent', { sandbox: 'agent-mcp', title: 'Lighting pass (AAA space look)', model: 'opus', effort: 'high', work_id: 'w14', prompt: 'Lighting pass for the space scene: an AAA look…' }, 'Started agent s-light-1 "Lighting pass (AAA space look)" in agent-mcp, requested by Ben for w14; Ben\'s orchestrator is told.')
+      .at(189.3, { kind: 'assistant', text: 'w14 started in agent-mcp.' })
+      .done(189.3, 0.11, 2, 9_000)
+      .at(94.8, { kind: 'user', from: 'system', text: '[work request] w15 from Lothsahn (high): "Fix belt splitter desync at 3-way junctions (spec 098)"\n\nPlayers on the 098 build desync when a splitter feeds three belts.\n\nNo overlap found with open or recent work.', requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' } })
+      .tool(94.6, 'd2', 'mcp__sandboxes__decide_work', { id: 'w15', action: 'queue', note: 'Every sandbox is busy; it starts when the lighting pass or the tutorial hunt finishes.' }, 'w15 queued.')
+      .done(94.4, 0.07, 2, 7_000)
+      .at(21.7, { kind: 'user', from: 'system', text: '[work request] w16 from Ben: "Belts drop items at 3-way junctions"\n\nBen sees belts drop items at three-way junctions again.\n\nPossible overlaps (the server\'s check): w15 "Fix belt splitter desync at 3-way junctions (spec 098)" (same spec 098, similar title, strong).', requestedBy: { userId: 'ben', displayName: 'Ben' } })
+      .tool(21.5, 'd3', 'mcp__sandboxes__decide_work', { id: 'w16', action: 'merge', into: 'w15', note: "Same bug as Lothsahn's request; it starts as soon as a sandbox frees up." }, 'w16 merged: merged into w15.')
+      .done(21.3, 0.06, 2, 6_000);
+    transcripts.dispatcher = d.events;
   }
 
   // Lighting pass: working now, with tool calls, a subagent, edits, test runs, screenshots.
@@ -718,11 +772,45 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
   }
 
   return {
-    state: { ...base, sandboxes, sessions, standingAgents, delegations, machines, machineStats: macStats(), accounts: accounts(sessions.map((s) => s.id)) },
+    state: { ...base, sandboxes, sessions, standingAgents, delegations, machines, work: ledger(now), machineStats: macStats(), accounts: accounts(sessions.map((s) => s.id)) },
     transcripts,
     uploads,
     files,
   };
+}
+
+/** The work ledger of the busy day: requests from both people in every state (docs/orchestrators.md). */
+function ledger(now: number): WorkItem[] {
+  const iso = (minAgo: number) => new Date(now - minAgo * MIN).toISOString();
+  const BEN = { userId: 'ben', displayName: 'Ben' };
+  const LOTH = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const item = (id: string, minAgo: number, patch: Partial<WorkItem>): WorkItem => ({
+    id,
+    title: id,
+    brief: '',
+    priority: 'normal',
+    keys: [],
+    requestedBy: BEN,
+    requesters: [BEN],
+    humanAsked: true,
+    status: 'new',
+    createdAt: iso(minAgo),
+    updatedAt: iso(minAgo),
+    sessionIds: [],
+    overlaps: [],
+    asks: 0,
+    log: [`${clock(now, minAgo)} filed by ${patch.requestedBy?.displayName ?? 'Ben'}`],
+    ...patch,
+  });
+  return [
+    item('w14', 190, { title: 'Lighting pass: AAA space look', brief: 'An AAA look for the space scene: bloom that holds up on the stars and engines, auto-exposure, a richer star field. Screenshots as it goes.', status: 'active', sessionIds: ['s-light-1'], updatedAt: iso(12), outcome: 'Bloom and auto-exposure are in; retuning the belt materials.' }),
+    item('w12', 98, { title: 'Tutorial playthrough bug hunt', brief: 'Play the tutorial single-player from a fresh profile and file each bug as an issue.', status: 'active', sessionIds: ['s-tut'], updatedAt: iso(94), outcome: 'Unity is stuck on the Safe Mode dialog; waiting for someone to press Ignore.' }),
+    item('w15', 95, { title: 'Fix belt splitter desync at 3-way junctions (spec 098)', brief: 'Players on the 098 build desync when a splitter feeds three belts. Repro save in #bug-reports.', priority: 'high', requestedBy: LOTH, requesters: [LOTH, BEN], status: 'queued', keys: ['spec:098'], updatedAt: iso(21), log: [`${clock(now, 95)} filed by Lothsahn`, `${clock(now, 94)} dispatcher: queued: Every sandbox is busy.`, `${clock(now, 21)} merged w16 from Ben: Same bug as Lothsahn's request.`] }),
+    item('w17', 30, { title: 'Playtest the new tutorial', brief: 'Look for soft locks in the new tutorial.', requestedBy: LOTH, requesters: [LOTH], status: 'question', asks: 1, updatedAt: iso(28), log: [`${clock(now, 30)} filed by Lothsahn`, `${clock(now, 28)} dispatcher: a question: Single-player, or co-op with the M3 and BEAST clients?`] }),
+    item('w16', 22, { title: 'Belts drop items at 3-way junctions', brief: 'Ben sees belts drop items at three-way junctions again.', status: 'merged', mergedInto: 'w15', updatedAt: iso(21), overlaps: [{ ref: 'w15', kind: 'work', title: 'Fix belt splitter desync at 3-way junctions (spec 098)', score: 0.8, why: 'same spec 098, similar title' }] }),
+    item('w10', 420, { title: 'Black hole shader v2 (lensing + Doppler beaming)', brief: 'Make the black hole 30% cheaper and add Doppler beaming.', status: 'done', sessionIds: ['s-bh'], updatedAt: iso(176), outcome: 'v2 is 30% cheaper (1.34 ms vs 1.92 ms). PR #583 is up.' }),
+    item('w9', 300, { title: 'Post the 0.50.0.46 patch notes', brief: 'Post the patch notes in #dev-patch-notes.', requestedBy: LOTH, requesters: [LOTH], status: 'rejected', updatedAt: iso(290), outcome: 'Already posted by the release job at 06:10.' }),
+  ];
 }
 
 function localDay(now: number) {

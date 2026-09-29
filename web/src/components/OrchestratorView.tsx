@@ -1,22 +1,24 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { SessionInfo } from '../../../shared/types';
 import { api } from '../api';
-import { attempt, getState, openSession, reloadTranscript, useStore } from '../store';
+import { attempt, openSession, reloadTranscript, useStore } from '../store';
 import { Composer } from './Composer';
 import { ModeSelect } from './SessionView';
 import { Transcript } from './Transcript';
 import { AttentionButton, DrawerButton } from './ShellButtons';
 import { Confirm, Icon, Menu, StateText } from './ui';
-import { fmtCost, fmtRelative, sessionLabel, sessionTone, useNow } from '../util';
+import { chatOwner, fmtCost, fmtRelative, sessionLabel, sessionTone, useNow } from '../util';
 import { accountOf } from './SystemMeters';
 
 const SUGGESTIONS = ["What's running, and what needs me?", 'Start work on spec 098', 'Play the tutorial single-player and log the bugs', 'Read the Discord forums and find bugs'];
 
 const HEARTBEATS = [10, 15, 30, 60];
 
-/** While workers are busy, wake the orchestrator every N minutes for a one-line status (server/wake.ts). */
+/** Your heartbeat: while your workers are busy, your orchestrator is woken every N minutes for a one-line status (server/wake.ts). */
+const useHeartbeat = () => useStore((s) => (s.app?.me ? (s.app.settings?.heartbeat?.[s.app.me.userId] ?? null) : (s.app?.settings?.heartbeatMinutes ?? null)));
+
 function HeartbeatSelect() {
-  const minutes = useStore((s) => s.app?.settings?.heartbeatMinutes ?? null);
+  const minutes = useHeartbeat();
   return (
     <select className="input input-sm" value={minutes ?? ''} aria-label="Heartbeat" onChange={(e) => void attempt(api.setSettings({ heartbeatMinutes: e.target.value ? Number(e.target.value) : null }))}>
       <option value="">Off</option>
@@ -29,13 +31,17 @@ function HeartbeatSelect() {
   );
 }
 
-export function OrchestratorView({ session, compact }: { session: SessionInfo | undefined; compact?: boolean }) {
+/**
+ * An orchestrator's chat (docs/orchestrators.md): your own, or with `readOnly`, someone else's, which only they write
+ * to (their name in the header, no menu, and a line where the composer would be).
+ */
+export function OrchestratorView({ session, compact, readOnly }: { session: SessionInfo | undefined; compact?: boolean; readOnly?: boolean }) {
   const [prefill, setPrefill] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const clearPrefill = useCallback(() => setPrefill(null), []);
-  const heartbeat = useStore((s) => s.app?.settings?.heartbeatMinutes ?? null);
+  const heartbeat = useHeartbeat();
   const now = useNow(30_000);
-  const account = useStore((s) => (s.app ? accountOf(s.app, s.app.orchestratorId) : undefined));
+  const account = useStore((s) => (s.app && session ? accountOf(s.app, session.id) : undefined));
 
   useEffect(() => (session ? openSession(session.id) : undefined), [session?.id]);
 
@@ -50,6 +56,33 @@ export function OrchestratorView({ session, compact }: { session: SessionInfo | 
   }
 
   const running = session.status === 'running' || session.status === 'starting';
+  const owner = readOnly ? chatOwner(session) : undefined;
+  if (owner) {
+    return (
+      <section className={`orch orch-readonly${compact ? ' orch-compact' : ''}`}>
+        <header className="orch-head">
+          {!compact && <DrawerButton />}
+          <div className="orch-title">
+            <span className="orch-name">{owner.displayName}</span>
+            <StateText tone={sessionTone(session.status)} label={sessionLabel[session.status]} pulse={running} className="orch-state" />
+          </div>
+          {!compact && <AttentionButton />}
+        </header>
+        <Transcript
+          session={session}
+          size={compact ? 'normal' : 'large'}
+          empty={
+            <div className="panel-empty">
+              <p>{owner.displayName} has not written to their orchestrator yet.</p>
+            </div>
+          }
+        />
+        <p className="orch-readonly-note" data-testid="read-only-note">
+          {owner.displayName}’s conversation · only {owner.displayName} writes here
+        </p>
+      </section>
+    );
+  }
   const empty = (
     <div className="orch-empty">
       <div className="orch-mark" aria-hidden>
@@ -58,7 +91,7 @@ export function OrchestratorView({ session, compact }: { session: SessionInfo | 
         <span />
       </div>
       <h1>What should the factory work on?</h1>
-      <p>Say it in plain words. The orchestrator creates sandboxes, starts Unity and runs agents, then reports back here.</p>
+      <p>Say it in plain words. Your orchestrator checks what is already in flight, hands the work to the dispatcher, and reports back here.</p>
       <div className="chips">
         {SUGGESTIONS.map((s) => (
           <button key={s} className="suggest" onClick={() => setPrefill(s)}>
@@ -125,10 +158,10 @@ export function OrchestratorView({ session, compact }: { session: SessionInfo | 
         <Confirm
           title="Start a new conversation?"
           confirmLabel="New conversation"
-          body="The orchestrator starts fresh. Sandboxes and worker agents keep running."
+          body="Your orchestrator starts fresh. Your requests, sandboxes and worker agents carry on."
           onConfirm={async () => {
-            const ok = await attempt(api.resetOrchestrator());
-            if (ok !== undefined) reloadTranscript(getState().app?.orchestratorId ?? session.id);
+            const ok = await attempt(api.resetOrchestrator('mine'));
+            if (ok !== undefined) reloadTranscript(ok.id);
           }}
           onClose={() => setConfirmReset(false)}
         />

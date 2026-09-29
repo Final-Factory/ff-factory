@@ -23,7 +23,7 @@ import { accountSource, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } fro
 import { Identity, claudeEnvFor, forLine } from './identity.ts';
 import { FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, Orchestrators } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
-import { DECISIONS, describeItem, findOverlaps, isFor, ledgerOrder, names, overlapLine, startProblem } from './work.ts';
+import { DECISIONS, describeItem, isFor, ledgerOrder, names, overlapLine, startProblem } from './work.ts';
 import { isUnused, labelAfterEnd, labelDecision, type Place } from './labelPolicy.ts';
 import { ghNoreply, githubSlug, publicIdentityEnv, publicReposOf } from './publicGit.ts';
 import { statsLine, systemStats } from './system.ts';

@@ -166,8 +166,8 @@ test('lines: the dispatcher reads the request and the overlap check; people see 
   assert.equal(merged.kind, 'dispatch');
   assert.equal(merged.workId, 'w13');
   assert.equal(merged.attention, false);
-  assert.match(merged.summary, /^“Fix belt desync”: merged into w11/);
-  assert.equal(merged.body, 'Same fix. Ben started it an hour ago.');
+  assert.equal(merged.summary, 'Merged into w11: “Fix belt desync”');
+  assert.equal(merged.body, 'w13: merged into w11 "Belt desync" (active: worker ab12 "Belt" in alpha), which Ben and Lothsahn will hear about.\nSame fix. Ben started it an hour ago.');
   const asked = parseNotice(dispatchNotice(w, 'a question', 'Which save shows it?'));
   assert.equal(asked.attention, true);
   assert.equal(asked.summary, 'The dispatcher asks about “Fix belt desync”');

@@ -18,6 +18,27 @@ test('[worker update] finished a turn: who, where, and the final message without
   assert.equal(n.body, 'Bloom is in.\n\nTests pass.');
 });
 
+test('[worker update] for a person: the "(requested by …)" the label carries still names the worker', () => {
+  const n = parseNotice('[worker update] agent "Skip button" (session ab12cd34) (requested by Team Mate) in sandbox alpha finished a turn. Its final message:\n\nDone.\n\nTell the user what matters…');
+  assert.equal(n.summary, 'Skip button finished a turn');
+  assert.deepEqual([n.agentTitle, n.sessionId, n.sandboxId], ['Skip button', 'ab12cd34', 'alpha']);
+  const m = parseNotice('[worker update] agent "Host" (session m5-host) (requested by Ben) on machine m5 is waiting for permission to use Bash with {"command":"ls"}. You cannot approve it; tell the user it needs them.');
+  assert.deepEqual([m.kind, m.machineId, m.detail], ['worker-permission', 'm5', 'ls']);
+});
+
+test('[dispatch], [work request], [work update], [ledger]: the ledger’s notices (docs/orchestrators.md)', () => {
+  const started = parseNotice('[dispatch] w14 "Lighting pass": started worker s-light-1 "Lighting pass (AAA)" in agent-mcp.');
+  assert.deepEqual([started.kind, started.summary, started.workId, started.attention], ['dispatch', 'Started: “Lighting pass”', 'w14', false]);
+  assert.equal(started.body, 'w14: started worker s-light-1 "Lighting pass (AAA)" in agent-mcp.');
+  assert.equal(parseNotice('[dispatch] w9 "Patch notes": declined.\nAlready posted.').summary, 'Declined: “Patch notes”');
+  const update = parseNotice('[work update] w13 "Fix belt desync" (question) from Lothsahn: note: Single-player.');
+  assert.deepEqual([update.kind, update.summary, update.workId], ['work-update', 'Lothsahn updated “Fix belt desync”', 'w13']);
+  const two = parseNotice('[work request] w15 from Ben (high): "A"\n\nbrief\n\n---\n\n[work update] w13 "B" (new) from Ben: note: x.');
+  assert.equal(two.summary, 'Ben asks: “A” (and 1 more)');
+  const ledger = parseNotice('[ledger] Capacity may have freed (worker ab12 "T" finished a turn). Queued: w15 "A" (Ben, high); w17 "B" (Lothsahn, normal). Start what fits now, or leave it queued.');
+  assert.deepEqual([ledger.kind, ledger.summary], ['ledger', 'Capacity may have freed; 2 queued']);
+});
+
 test('[worker update] on a machine', () => {
   const n = parseNotice('[worker update] agent "Co-op host" (session m5-host) on machine m5 finished a turn. Its final message:\n\nWave 5 done.\n\nTell the user what matters…');
   assert.equal(n.machineId, 'm5');

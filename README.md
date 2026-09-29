@@ -20,9 +20,11 @@ voice input), and adapting it to another Unity project is mostly editing prompts
 [Tailscale](https://tailscale.com) to reach it from elsewhere. macOS machines can be added as extra
 agent hosts.
 
-You talk to the **orchestrator** on the main page ("start work on spec 098", "play the tutorial
-single-player and log the bugs", "read the Discord forums and find bugs"). It creates sandboxes,
-starts editors, launches **worker** agents with a full brief, and reports back when they finish.
+You talk to your own **orchestrator** on the main page ("start work on spec 098", "play the tutorial
+single-player and log the bugs", "read the Discord forums and find bugs"). It files the work with the
+**dispatcher**, which checks it against what everyone else has in flight, creates sandboxes, starts
+editors, launches **worker** agents with a full brief, and reports back when they finish
+([docs/orchestrators.md](docs/orchestrators.md)).
 Everything it does is also a button: the sidebar lists every sandbox, and opening one shows its
 agents' live transcripts, where you can type to them directly, interrupt them, approve their tool
 requests and start or stop Unity.
@@ -34,7 +36,7 @@ requests and start or stop Unity.
 | sandbox | `git worktree` of a base clone at `<sandboxRoot>/<id>`, on its own branch, with a copy of a warm `Library/` so Unity starts without a cold import. The folder name is the Unity project name, so its editor's MCP instance is `<id>@<hash>` |
 | Unity | launched natively (`Unity.exe -projectPath …`) so it renders on the GPU; the server tracks the pid, proves the pid is still that editor (command line contains the sandbox path) before ever killing it, and marks it running once the MCP bridge logs `StdioBridgeHost started` |
 | worker agent | a Claude Code session via the [Agent SDK](https://code.claude.com/docs/en/agent-sdk), `cwd` = the sandbox, loading user + project settings (so CLAUDE.md, the ff-agents/ff-speckit/ff-discord plugins and the Unity MCP server all apply), with a sandbox brief appended to the system prompt and a `sandbox` MCP server: `mcp__sandbox__unity` to manage its own editor and `mcp__sandbox__set_label` to relabel its own sandbox |
-| orchestrator | another Agent SDK session with read-only repo tools and an in-process `sandboxes` MCP server (create/delete/relabel sandbox, start/stop Unity, start/message/interrupt/stop agents, read transcripts, list branches, machine stats) |
+| orchestrator | another Agent SDK session with read-only repo tools and an in-process `sandboxes` MCP server. Each person has their own, which sees everything, follows up with that person's workers and files work requests; one **dispatcher** has the tools that change things (create/delete/relabel sandbox, start/stop Unity, start/message/interrupt/stop agents, machines, standing agents) and turns the requests into work without doing the same work twice, recording each in the work ledger. See [docs/orchestrators.md](docs/orchestrators.md) |
 | standing agent | a long-lived agent with a charter and a schedule (interval, cron or manual), apart from the sandboxes: its own folder under `<sandboxRoot>/_agents` with a `NOTES.md`, one conversation resumed every run, a fresh process per run that stops when the turn ends (so it only holds an agent slot while running), and hard per-run and per-day budgets. Read-only by default; tool groups add a read-only shell, GitHub comments, or delegation requests that the user approves. See [docs/standing-agents.md](docs/standing-agents.md) |
 | machine | one of the user's Macs or Windows PCs. A daemon there (`machine/daemon.ts`: a LaunchAgent on a Mac, a scheduled task at logon on Windows, in the user's session) connects out to `/machine` with a per-machine token and runs agents in the user's main clone with the same session code, streaming everything back. Set up and updated over ssh from this host by `add_machine` / the Add button; no sandboxes, own agent limit, extra guard rules for the user's uncommitted work. See [docs/machines.md](docs/machines.md) |
 | provider | FFBox, Lothsahn's CPU-only build server, which runs agents in its own hardened containers. Its connector dials out to `/provider` with a token whose SHA-256 is in `config.json`, and reports its container classes (network, model, tier, free slots), its conversations and the crash/desync reports its intake files. Phase 1 is read-only: a card in the sidebar, a page, the orchestrator's `ffbox_activity` tool, nothing that sends it work. Off unless `providers.ffbox.enabled`. See [docs/ffbox-integration.md](docs/ffbox-integration.md) and, for the connector's author, [docs/ffbox-connector-contract.md](docs/ffbox-connector-contract.md) |
@@ -79,8 +81,8 @@ server-side 30-day sessions (`data/auth-sessions.json`; delete it to sign everyo
 HttpOnly + SameSite=Strict cookies (Secure over HTTPS), 5 failed logins per IP per 15 minutes,
 JSON-only writes (CSRF) and a same-origin check on the WebSocket.
 
-Several people can share one portal and one orchestrator chat. Every message records who wrote it, and
-the workers, standing runs and approvals it causes are recorded as requested by that person. A person
+Several people can share one portal, each with their own orchestrator chat. Every message records who wrote
+it, and the workers, standing runs and approvals it causes are recorded as requested by that person. A person
 can have their own Claude token (`userClaudeEnv`), which the agents they ask for run on. The first login
 is the owner. Roles are recorded but not enforced yet. See [docs/identity.md](docs/identity.md).
 
@@ -106,7 +108,7 @@ them.
 ### Driving it from Claude Code
 
 `/mcp` serves the same tool belt the orchestrator has (sandboxes, Unity, agents, transcripts,
-branches, machine stats) plus `ask_orchestrator` (talk to the main chat and wait for its reply)
+branches, machine stats) plus `ask_orchestrator` (talk to your own orchestrator and wait for its reply)
 over MCP Streamable HTTP, authenticated with an API key:
 
 ```powershell

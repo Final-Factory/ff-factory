@@ -53,8 +53,8 @@ export const NOTICE_TAG = /^\[([a-z_][a-z0-9_ -]*)\]\s*/i;
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s);
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 
-/** `agent "T" (session S) in sandbox X` / `on machine M`: the worker a [worker update] is about. */
-const WORKER = /^agent "(.+?)" \(session ([\w-]+)\) (?:in sandbox ([\w.-]+|\?)|on machine ([\w.-]+))/;
+/** `agent "T" (session S) (requested by P) in sandbox X` / `on machine M`: the worker a [worker update] is about. */
+const WORKER = /^agent "(.+?)" \(session ([\w-]+)\)(?: \(requested by [^)]*\))? (?:in sandbox ([\w.-]+|\?)|on machine ([\w.-]+))/;
 
 /** What a tool call wants, in a few words: the command, the file, or the first string it was given. */
 function describeInput(tool: string, json: string): string | undefined {
@@ -141,8 +141,13 @@ export function parseNotice(text: string): Notice {
     if (!d) return { kind: 'dispatch', summary: clip(oneLine(rest), 160), attention: false, body: rest };
     const [, workId, title, what] = d;
     const question = what.startsWith('a question');
-    const body = note.join('\n').trim() || undefined;
-    return { kind: 'dispatch', summary: question ? `The dispatcher asks about “${clip(title, 70)}”` : `“${clip(title, 70)}”: ${clip(what, 110)}`, attention: question, body, workId };
+    const said = note.join('\n').trim();
+    // The decision first, so it survives a narrow screen: "Merged into w15: “Belts drop items…”".
+    const verdict =
+      /^merged into (w\d+)/.exec(what)?.[0].replace(/^m/, 'M') ??
+      (/^started /.test(what) ? 'Started' : /^sent to /.test(what) ? 'Given to its worker' : /^linked to /.test(what) ? 'Linked to a running worker' : /^approved /.test(what) ? 'Approved' : what.charAt(0).toUpperCase() + what.slice(1));
+    const body = question ? said || undefined : [`${workId}: ${what}.`, said].filter(Boolean).join('\n');
+    return { kind: 'dispatch', summary: question ? `The dispatcher asks about “${clip(title, 70)}”` : `${verdict}: “${clip(title, 90)}”`, attention: question, body, workId };
   }
   if (tag === 'work request') {
     const r = /^(w\d+) from (.+?)(?: \((?:low|high|urgent)\))?: "(.+?)"/.exec(rest);

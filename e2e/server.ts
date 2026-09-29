@@ -91,7 +91,8 @@ fs.writeFileSync(
       limits: { maxUnity: 2, maxSessions: 50, maxSandboxes: 10, minFreeGB: 0 },
       models: ['opus', 'sonnet'],
       defaultModel: 'opus',
-      orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false },
+      // Worker updates reach people's own orchestrators (docs/orchestrators.md; e2e/orchestrators.spec.ts).
+      orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: true },
       worker: { permissionMode: 'bypassPermissions', effort: 'low' },
       voice: { enabled: false, autoInstall: false, tts: false },
       max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },

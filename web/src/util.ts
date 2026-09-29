@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import type { AppVersion, ImageInput, Machine, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
+import type { AppVersion, ImageInput, Machine, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 
 export { displayName, isUnused };
@@ -207,6 +207,50 @@ export function isBusy(s: SessionInfo | undefined): boolean {
   return !!s && (s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission');
 }
 
+// ---------- the work ledger (docs/orchestrators.md) ----------
+
+export const workLabel: Record<WorkStatus, string> = {
+  new: 'New',
+  question: 'Question',
+  queued: 'Queued',
+  active: 'Active',
+  merged: 'Merged',
+  done: 'Done',
+  rejected: 'Declined',
+  cancelled: 'Cancelled',
+};
+
+export function workTone(s: WorkStatus): Tone {
+  if (s === 'active') return 'blue';
+  if (s === 'question') return 'amber';
+  if (s === 'done') return 'green';
+  return 'grey';
+}
+
+export const isOpenWork = (w: Pick<WorkItem, 'status'>) => w.status === 'new' || w.status === 'question' || w.status === 'queued' || w.status === 'active';
+
+/** Whose orchestrator a session is (a person's own), or undefined for the dispatcher and every other session. */
+export const chatOwner = (s: SessionInfo | undefined) => (s?.kind === 'orchestrator' && s.orchestratorRole === 'personal' ? s.requestedBy : undefined);
+
+/**
+ * The dispatcher at a glance for its sidebar row and page: its open requests by state (questions first). Blue while it
+ * works a turn; amber only when one of its questions waits on `me`.
+ */
+export function dispatcherGlance(dispatcher: SessionInfo | undefined, work: WorkItem[], me?: string): Glance {
+  const count = (st: WorkStatus) => work.filter((w) => w.status === st).length;
+  const mine = me ? work.some((w) => w.status === 'question' && w.requestedBy.userId.toLowerCase() === me.toLowerCase()) : false;
+  const parts = [
+    [count('question'), 'question'],
+    [count('active'), 'active'],
+    [count('queued'), 'queued'],
+    [count('new'), 'new'],
+  ].filter(([n]) => n) as [number, string][];
+  const busy = isBusy(dispatcher);
+  const tone: Tone = busy ? 'blue' : mine ? 'amber' : 'grey';
+  const label = parts.length ? parts.slice(0, 2).map(([n, w]) => `${n} ${n > 1 && w === 'question' ? 'questions' : w}`).join(' · ') : busy ? 'Working' : 'Nothing open';
+  return { tone, label, attention: 0 };
+}
+
 // ---------- at a glance: what a sandbox, machine or standing agent is doing ----------
 
 /** A place's state for the lists and headers: a tone, the word for it, and what it is about. */
@@ -339,6 +383,10 @@ export const PERMISSION_MODES: { value: PermissionMode; label: string; hint: str
 
 export type Route =
   | { view: 'home' }
+  /** Someone else's own orchestrator, read only (docs/orchestrators.md). */
+  | { view: 'chat'; userId: string }
+  /** The dispatcher: its requests (the ledger), one request (a work id), or its conversation. */
+  | { view: 'dispatcher'; tab?: string }
   | { view: 'sandbox'; sandboxId: string; sessionId?: string }
   | { view: 'session'; sessionId: string }
   | { view: 'agent'; agentId: string; tab?: string }
@@ -349,6 +397,8 @@ export type Route =
 
 export function parseRoute(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === 'chat' && parts[1]) return { view: 'chat', userId: parts[1] };
+  if (parts[0] === 'dispatcher') return { view: 'dispatcher', tab: parts[1] };
   if (parts[0] === 'sandbox' && parts[1]) return { view: 'sandbox', sandboxId: parts[1], sessionId: parts[2] };
   if (parts[0] === 'session' && parts[1]) return { view: 'session', sessionId: parts[1] };
   if (parts[0] === 'search') return { view: 'search', q: parts[1] };
@@ -363,6 +413,10 @@ export function href(r: Route): string {
   switch (r.view) {
     case 'home':
       return '#/';
+    case 'chat':
+      return `#/chat/${encodeURIComponent(r.userId)}`;
+    case 'dispatcher':
+      return `#/dispatcher${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
     case 'sandbox':
       return `#/sandbox/${encodeURIComponent(r.sandboxId)}${r.sessionId ? '/' + encodeURIComponent(r.sessionId) : ''}`;
     case 'session':
