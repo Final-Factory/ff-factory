@@ -11,6 +11,8 @@ import { SessionManager, snapshotOf } from './sessions.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, machineForPath } from './machines.ts';
 import { ProviderManager } from './providers.ts';
+import { MaxManager } from './max.ts';
+import { groupIntake } from '../shared/intake.ts';
 import { Notifier } from './notify.ts';
 import { refreshSandboxGit } from './gitStatus.ts';
 import { describeBusy } from './wake.ts';
@@ -70,6 +72,12 @@ const sessions = new SessionManager(cfg, store);
 const machines = new MachineManager(cfg, store, sessions);
 // FFBox, through the connector it runs (docs/ffbox-integration.md): read-only reports, off by default.
 const providers = new ProviderManager(cfg);
+// Max, the Discord bot agents post as (docs/max.md): their ffdiscord calls, the token's health, a read-only inbound.
+const max = new MaxManager(cfg, {
+  session: (id) => store.sessions.get(id),
+  standingName: (id) => store.standing.get(id)?.name,
+}).start();
+machines.maxEvent = (machineId, line) => max.ingestLine(line, machineId);
 // A daemon that has not come back 2 minutes after a restart (or a drop) while ssh reaches its Mac is redeployed.
 // The machines' own Unity watch: tell the orchestrator and the user, and the machine's agents after a restart.
 machines.unityEvent = (machineId, text, restarted) => {
@@ -236,6 +244,7 @@ sessions.startGate = () => hostHealth.blockReason('agent');
 agents.standing.hostGate = () => hostHealth.blockReason('agent');
 agents.hostHealth = hostHealth;
 agents.providers = providers;
+agents.max = max;
 if (cfg.hostGuard.pollSeconds > 0) {
   setInterval(() => void hostHealth.tick(), cfg.hostGuard.pollSeconds * 1000);
   setTimeout(() => void hostHealth.tick(), 5000);
@@ -255,6 +264,8 @@ function appState(): AppState {
     delegations: [...store.delegations.values()],
     machines: machines.list(),
     providers: providers.enabled || providers.summary().tokenSet ? [providers.summary()] : [],
+    ffbox: providers.summary(),
+    max: max.summary(),
     system: lastSystem,
     host: { ...host, drain: drainer.status },
     usage: usage.usage,
@@ -318,6 +329,21 @@ route('GET', '/api/me', async (req) => {
 // ---- providers (docs/ffbox-integration.md): what FFBox's connector reported, newest first
 route('GET', '/api/providers/ffbox/conversations', async (_r, _m, url) => providers.conversations(Number(url.searchParams.get('limit')) || 100));
 route('GET', '/api/providers/ffbox/intake', async (_r, _m, url) => providers.intake(Number(url.searchParams.get('limit')) || 200));
+// Grouped by coarse signature, with the numbers automatic investigations will be capped by (shared/intake.ts).
+route('GET', '/api/providers/ffbox/signatures', async () => groupIntake(providers.intake(2000), Date.now()));
+
+// ---- Max (docs/max.md): what agents did as Max, the token's health, and a read-only look at a few channels
+route('GET', '/api/max/activity', async (_r, _m, url) => max.activity(Number(url.searchParams.get('limit')) || 100));
+route('GET', '/api/max/inbound', async () => max.inbound());
+route('POST', '/api/max/inbound/([\\w-]+)/seen', async (_r, [alias]) => {
+  try {
+    max.markSeen(alias);
+  } catch (e) {
+    throw new HttpError(404, (e as Error).message);
+  }
+  return { ok: true };
+});
+route('POST', '/api/max/refresh', async () => max.refresh());
 
 route('GET', '/api/sessions/([\\w-]+)/events', async (_r, [id], url) => {
   sessions.get(id);
@@ -980,6 +1006,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   sessions.stopAll();
   voice.unload('server stopping');
   providers.close();
+  max.close();
   store.flush();
   process.exit(0);
 }
@@ -1041,7 +1068,7 @@ agents.usageLines = () => [
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), ...outsideWatchLines()];
+  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines()];
 };
 const outsideWatchLines = () => {
   const w = watcher();
@@ -1118,7 +1145,7 @@ setInterval(() => {
 }, 5000);
 
 /** The managers, for the E2E harness (e2e/server.ts) to set up states no browser can reach (a blocked editor). */
-export const internals = { cfg, store, sandboxes, sessions, agents, providers };
+export const internals = { cfg, store, sandboxes, sessions, agents, providers, max };
 
 // Resume what the last server recorded (or report what a crash cut off), once the managers are up.
 // After a stop that was not clean (no resume file: a power cut, a crash, a kill), make one from what the last

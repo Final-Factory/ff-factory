@@ -67,6 +67,15 @@ export interface Config {
    * `node server/providerToken.ts` or set_app_config providers.ffbox.token; the token itself is never kept.
    */
   providers?: { ffbox?: { enabled?: boolean; tokenSha256?: string } };
+  /**
+   * Max, the Discord bot agents post as (docs/max.md). Activity needs nothing: agents' ffdiscord calls append to
+   * `eventsFile` (default ~/.config/ff-factory/max-events.jsonl). The token check and inbound read the bot token
+   * where it already is, the "discord" section of the ffbox config in `ffboxConfigDir` (default ~/.config/ffbox)
+   * and its secrets.env. `inbound.channels`: aliases (or ids) to show read-only, default bug_reports and dev_chat;
+   * `inbound.enabled: false` turns it off; `inbound.pollMinutes` (>= 2, default 5). `discordApi`: tests only (a
+   * local mock; anything but discord.com or this machine is ignored).
+   */
+  max?: { eventsFile?: string; ffboxConfigDir?: string; inbound?: { enabled?: boolean; channels?: string[]; pollMinutes?: number }; discordApi?: string };
   /** Where state.json and transcripts live. */
   dataDir: string;
   /** Every sandbox worktree is created as <sandboxRoot>/<id>. */

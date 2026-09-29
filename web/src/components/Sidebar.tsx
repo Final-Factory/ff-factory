@@ -21,6 +21,7 @@ import { Dot, Icon, type IconName } from './ui';
 import { usePush } from '../notify';
 import { SettingsModal } from './Settings';
 import { SystemFooter } from './SystemMeters';
+import { ExternalStrip } from './External';
 
 export function Sidebar({
   app,
@@ -178,6 +179,7 @@ export function Sidebar({
         </Section>
       </div>
 
+      <ExternalStrip app={app} route={route} onNavigate={onNavigate} />
       <SystemFooter app={app} />
       {app.app && (
         <div className="side-foot" data-testid="app-version" title="FF Factory version and git commit">

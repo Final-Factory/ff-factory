@@ -12,6 +12,22 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Max, and FFBox at a glance** (docs/max.md). A Max page (`#/max`) shows what FF Factory's agents did as
+  the Discord bot: every post, reply, question, edit, thread opened, renamed or closed, with its channel or
+  thread, a Discord link, the first line, the session and where it ran. The ffdiscord CLI appends each one to
+  the file in `FF_MAX_EVENTS`, which every agent now gets with `FF_SESSION_ID`; the server tails the host's
+  file and each Mac's daemon forwards its own (`max_event`). The page also checks the bot token every
+  15 minutes (`/users/@me`, the token read from the ffbox config's secrets.env and never copied or sent to
+  the page), shows the last error (such as Missing Permissions on #dev-patch-notes), and, read-only, the
+  newest messages in #bug-reports and #dev-chat with unread counts, as plain text. `max_activity` gives the
+  orchestrator the same, marked as data to relay.
+  - A compact **External** strip above the meters: `Max ok 20m · FFBox 7 free` (or `off`), each opening its page.
+  - The FFBox page opens while FFBox is off and lists what it needs (the token, the switch, the connector,
+    linking the contract); when connected, a **Signatures** tab groups intake reports by coarse signature
+    (reports, events, senders, host+client pairs, trusted or not) under the numbers automatic
+    investigations will be capped by: new today, past the trust bar, would start (of 20 a day), and the
+    storm breaker. `ffbox_activity show: signatures` returns the same.
+
 - **A machine's own folders** (docs/machines.md, "A machine's own folders"). `add_machine` (and the Add
   machine form) takes `app_dir` (the daemon's folder instead of `~/.ff-factory`, e.g.
   `D:\work\.ff-factory`), `unity_editor_root` (a folder of Unity versions), `unity_path` (the editor
