@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { run } from './proc.ts';
 import * as win from './machineDeployWin.ts';
-import type { MachinePlatform } from '../shared/types.ts';
+import { platformNoun, type MachinePlatform } from '../shared/types.ts';
 
 /**
  * Install or update the daemon on a machine over ssh (docs/machines.md), with this host's own ssh setup:
@@ -156,9 +156,13 @@ export function agentPath(home: string, node: string, userPath: string): string 
   return [...new Set(dirs)].join(':');
 }
 
-export function plist(home: string, node: string, flag: boolean, userPath = ''): string {
-  const app = `${home}/.ff-factory/app`;
-  const args = [node, ...(flag ? ['--experimental-strip-types'] : []), '--disable-warning=ExperimentalWarning', `${app}/machine/daemon.ts`];
+/** The daemon's folder on a Mac: the machine's app_dir, else ~/.ff-factory. */
+export const macAppDir = (home: string, appDir?: string) => appDir || `${home}/.ff-factory`;
+
+export function plist(home: string, node: string, flag: boolean, userPath = '', appDir?: string): string {
+  const dir = macAppDir(home, appDir);
+  const app = `${dir}/app`;
+  const args = [node, ...(flag ? ['--experimental-strip-types'] : []), '--disable-warning=ExperimentalWarning', `${app}/machine/daemon.ts`, `${dir}/daemon.json`];
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -171,8 +175,8 @@ export function plist(home: string, node: string, flag: boolean, userPath = ''):
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>ProcessType</key><string>Interactive</string>
-  <key>StandardOutPath</key><string>${xml(home)}/.ff-factory/logs/daemon.log</string>
-  <key>StandardErrorPath</key><string>${xml(home)}/.ff-factory/logs/daemon.log</string>
+  <key>StandardOutPath</key><string>${xml(dir)}/logs/daemon.log</string>
+  <key>StandardErrorPath</key><string>${xml(dir)}/logs/daemon.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key><string>${xml(home)}</string>
@@ -183,11 +187,15 @@ export function plist(home: string, node: string, flag: boolean, userPath = ''):
 `;
 }
 
-/** Stream `git archive` of this checkout's HEAD into ~/.ff-factory/app.new on the host. */
-function upload(root: string, host: string): Promise<void> {
+/** The daemon's folder in a remote shell command: quoted, or ~/.ff-factory. Exported for tests. */
+export const macDirArg = (appDir?: string) => (appDir ? sq(appDir) : '~/.ff-factory');
+
+/** Stream `git archive` of this checkout's HEAD into app.new in the daemon's folder on the host. */
+function upload(root: string, host: string, appDir?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const git = spawn('git', ['-C', root, 'archive', '--format=tar', 'HEAD', 'server', 'shared', 'machine', 'package.json', 'package-lock.json'], { windowsHide: true });
-    const ssh = spawn('ssh', [...SSH, host, 'rm -rf ~/.ff-factory/app.new && mkdir -p ~/.ff-factory/app.new ~/.ff-factory/logs && tar -xf - -C ~/.ff-factory/app.new'], { windowsHide: true });
+    const d = macDirArg(appDir);
+    const ssh = spawn('ssh', [...SSH, host, `rm -rf ${d}/app.new && mkdir -p ${d}/app.new ${d}/logs && tar -xf - -C ${d}/app.new`], { windowsHide: true });
     let err = '';
     git.stderr.on('data', (d) => (err += d));
     ssh.stderr.on('data', (d) => (err += d));
@@ -209,7 +217,27 @@ export interface DeployOptions {
   maxSessions: number;
   /** "owner/name" of the game repo (config repo.url), to find its clone when repoPath is not given. */
   repoSlug?: string;
+  /** The machine's own folders (add_machine; docs/machines.md): unset means the defaults. */
+  dirs?: MachineDirs;
+  /** The daemon's folder of the previous deploy, when it moves (Windows stops the daemon running from there). */
+  previousAppDir?: string;
   step?: (what: string) => void;
+}
+
+/** A machine's folder options, as add_machine takes them and daemon.json keeps them. */
+export interface MachineDirs {
+  appDir?: string;
+  unityEditorRoot?: string;
+  unityPath?: string;
+  tempDir?: string;
+}
+
+/** Throws when a folder option is for the other OS (a D:\ path on a Mac, a /Users path on Windows). Exported for tests. */
+export function checkDirs(dirs: MachineDirs | undefined, platform: MachinePlatform, host: string) {
+  for (const [k, v] of Object.entries(dirs ?? {})) {
+    if (!v) continue;
+    if (/^[a-zA-Z]:\\/.test(v) !== (platform === 'win32')) throw new Error(`${k} "${v}" is not a ${platform === 'win32' ? 'Windows' : 'Mac'} path, and ${host} is a ${platformNoun(platform)}`);
+  }
 }
 
 /**
@@ -254,9 +282,11 @@ async function deployMac(opts: DeployOptions): Promise<DeployResult> {
   if (!p.node || !support.ok) throw new Error(`${opts.host} needs Node ${MIN_NODE.join('.')}+ (found ${p.nodeVersion ?? 'none'} at ${p.node ?? '-'})`);
   const repoPath = opts.repoPath ?? p.repos.sort((a, b) => a.length - b.length)[0];
   if (!repoPath) throw new Error(`no clone of ${opts.repoSlug || 'the game repo'} found under ${p.home} on ${opts.host}; pass its path`);
+  checkDirs(opts.dirs, 'darwin', opts.host);
+  const appDir = opts.dirs?.appDir;
 
   step('copying code');
-  await upload(opts.root, opts.host);
+  await upload(opts.root, opts.host, appDir);
   const version = (await run('git', ['-C', opts.root, 'rev-parse', '--short', 'HEAD'])).stdout.trim() || 'unknown';
 
   step('npm ci');
@@ -265,7 +295,7 @@ async function deployMac(opts: DeployOptions): Promise<DeployResult> {
     opts.host,
     'npm ci',
     `set -e
-cd "$HOME/.ff-factory/app.new"
+cd ${appDir ? sq(appDir) : '"$HOME/.ff-factory"'}/app.new
 echo ${sq(version)} > machine/VERSION
 export PATH=${sq(nodeDir)}:"$PATH"
 npm ci --omit=dev --no-audit --no-fund --loglevel=error
@@ -274,13 +304,13 @@ npm ci --omit=dev --no-audit --no-fund --loglevel=error
   );
 
   step('installing');
-  const config = JSON.stringify({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions }, null, 2);
+  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, ...opts.dirs });
   await must(
     opts.host,
     'install',
     `set -e
 umask 077
-F="$HOME/.ff-factory"
+F=${appDir ? sq(appDir) : '"$HOME/.ff-factory"'}
 rm -rf "$F/app.old"
 [ -d "$F/app" ] && mv "$F/app" "$F/app.old"
 mv "$F/app.new" "$F/app"
@@ -290,7 +320,7 @@ ${config}
 FFCONFIG
 umask 022
 cat > "$HOME/Library/LaunchAgents/${LABEL}.plist" <<'FFPLIST'
-${plist(p.home, p.node, support.flag, p.path)}FFPLIST
+${plist(p.home, p.node, support.flag, p.path, appDir)}FFPLIST
 launchctl bootout gui/${p.uid}/${LABEL} 2>/dev/null || true
 sleep 1
 launchctl bootstrap gui/${p.uid} "$HOME/Library/LaunchAgents/${LABEL}.plist"
@@ -349,9 +379,13 @@ async function mustPs(host: string, what: string, script: string, opts: { timeou
   return r.stdout;
 }
 
-/** The daemon's config file (both platforms). Exported for tests. */
-export function daemonConfig(o: { portalUrl: string; id: string; token: string; repoPath: string; claude?: string; maxSessions: number }): string {
-  return JSON.stringify({ portalUrl: o.portalUrl, id: o.id, token: o.token, repoPath: o.repoPath, claude: o.claude, maxSessions: o.maxSessions }, null, 2);
+/** The daemon's config file (both platforms); a folder option left unset is left out. Exported for tests. */
+export function daemonConfig(o: { portalUrl: string; id: string; token: string; repoPath: string; claude?: string; maxSessions: number } & MachineDirs): string {
+  return JSON.stringify(
+    { portalUrl: o.portalUrl, id: o.id, token: o.token, repoPath: o.repoPath, claude: o.claude, maxSessions: o.maxSessions, appDir: o.appDir, unityEditorRoot: o.unityEditorRoot, unityPath: o.unityPath, tempDir: o.tempDir },
+    null,
+    2,
+  );
 }
 
 /** A git archive of this checkout's committed code as a base64 .tar.gz (the Windows upload's payload). */
@@ -383,17 +417,19 @@ async function deployWindows(opts: DeployOptions): Promise<DeployResult> {
   if (!p.tar) throw new Error(`${opts.host} has no tar.exe in System32 (Windows 10 1803 or newer has it)`);
   const repoPath = pickRepo(opts.repoPath, p.repos);
   if (!repoPath) throw new Error(`no clone of ${opts.repoSlug || 'the game repo'} found under ${p.home} or near the top of a drive on ${opts.host}; pass its path`);
+  checkDirs(opts.dirs, 'win32', opts.host);
+  const appDir = opts.dirs?.appDir;
 
   step('copying code');
-  await mustPs(opts.host, 'copying the code', win.uploadScript(), { data: await bundle(opts.root), timeoutMs: 10 * 60_000 });
+  await mustPs(opts.host, 'copying the code', win.uploadScript(appDir), { data: await bundle(opts.root), timeoutMs: 10 * 60_000 });
   const version = (await run('git', ['-C', opts.root, 'rev-parse', '--short', 'HEAD'])).stdout.trim() || 'unknown';
 
   step('npm ci');
-  await mustPs(opts.host, 'npm ci', win.npmScript(p.node, version), { timeoutMs: 10 * 60_000 });
+  await mustPs(opts.host, 'npm ci', win.npmScript(p.node, version, appDir), { timeoutMs: 10 * 60_000 });
 
   step('installing');
-  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions });
-  const out = await mustPs(opts.host, 'install', win.installScript({ sid: p.sid, home: p.home, config, node: p.node, flag: support.flag }), { timeoutMs: 3 * 60_000 });
+  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, ...opts.dirs });
+  const out = await mustPs(opts.host, 'install', win.installScript({ sid: p.sid, home: p.home, config, node: p.node, flag: support.flag, appDir, previousAppDir: opts.previousAppDir }), { timeoutMs: 3 * 60_000 });
   return { platform: 'win32', home: p.home, repoPath, node: p.node, nodeVersion: p.nodeVersion ?? '', claude: p.claude, version, started: /started=True/.test(out) };
 }
 
@@ -421,10 +457,10 @@ export function macControlScript(action: DaemonAction | 'uninstall'): string {
  * Start, stop or restart the daemon on a machine. A stopped Mac daemon loads again at the next login, a
  * Windows one starts again at the next logon. Returns what happened, in a few words.
  */
-export async function controlDaemon(host: string, platform: MachinePlatform | undefined, action: DaemonAction): Promise<string> {
+export async function controlDaemon(host: string, platform: MachinePlatform | undefined, action: DaemonAction, appDir?: string): Promise<string> {
   const pf = platform ?? (await detectPlatform(host));
   if (pf === 'win32') {
-    const out = await mustPs(host, `daemon ${action}`, win.controlScript(action), { timeoutMs: 2 * 60_000 });
+    const out = await mustPs(host, `daemon ${action}`, win.controlScript(action, appDir), { timeoutMs: 2 * 60_000 });
     const stopped = /stopped=(\d+)/.exec(out)?.[1];
     const started = /started=(True|False)/.exec(out)?.[1];
     return [
@@ -438,9 +474,9 @@ export async function controlDaemon(host: string, platform: MachinePlatform | un
   return action === 'stop' ? 'unloaded the LaunchAgent (it loads again at the next login)' : action === 'start' ? 'loaded the LaunchAgent' : 'restarted the LaunchAgent';
 }
 
-/** Stop and unload the daemon (its files stay in the .ff-factory folder). */
-export async function undeploy(host: string, platform?: MachinePlatform) {
+/** Stop and unload the daemon (its files stay in its folder). */
+export async function undeploy(host: string, platform?: MachinePlatform, appDir?: string) {
   const pf = platform ?? (await detectPlatform(host));
-  if (pf === 'win32') await mustPs(host, 'uninstall', win.uninstallScript(), { timeoutMs: 2 * 60_000 });
+  if (pf === 'win32') await mustPs(host, 'uninstall', win.uninstallScript(appDir), { timeoutMs: 2 * 60_000 });
   else await must(host, 'uninstall', macControlScript('uninstall'), 60_000);
 }

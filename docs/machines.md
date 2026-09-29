@@ -63,7 +63,7 @@ before redeploying by hand.
   commands until a backup folder from the last 2 hours exists, and its refusal gives the backup recipe
   (`backupRecipe` in `server/guard.ts`). Staging or committing everything (`add -A`/`.`, `commit -a`),
   force pushes and pushes to the game repo's master/main stay refused. The daemon's own folder
-  (`~/.ff-factory`, which holds the token) is protected.
+  (`~/.ff-factory`, or the machine's `app_dir`; it holds the token) is protected.
 - **Claude account.** Portal-run agents on a Mac (workers and standing agents) use this host's
   `claudeEnv`, so with `CLAUDE_CODE_OAUTH_TOKEN` set (`set_app_config`, write-only) they run on the same
   Claude account as the agents here, not on the Mac's own login. The portal puts it in the launch spec,
@@ -83,8 +83,8 @@ before redeploying by hand.
 - **Limits.** Machine agents run on the Mac, so they do not count toward this host's
   `limits.maxSessions`; each machine has its own limit (default 3).
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
-- **Standing agents** can be assigned to a machine: their folder is `~/.ff-factory/agents/<id>` on
-  that Mac, runs wait (like a full slot) while the machine is offline, and budgets work unchanged.
+- **Standing agents** can be assigned to a machine: their folder is `agents/<id>` in the daemon's folder
+  (`~/.ff-factory/agents/<id>` by default) on that Mac, runs wait (like a full slot) while the machine is offline, and budgets work unchanged.
 
 ## Setup and updates, from this host
 
@@ -96,6 +96,30 @@ terminal sees, e.g. `~/bin/gh`), writes `~/.ff-factory/daemon.json` (portal URL,
 `claude` path) and the LaunchAgent plist, and (re)loads it with `launchctl bootstrap gui/<uid>`.
 Running `add_machine` again for the same id (or Redeploy in the UI) updates the code and issues a fresh
 token; it refuses while agents are running there unless forced. The user does nothing on the Macs.
+
+**A machine's own folders.** `add_machine` (and the Add machine form) takes four optional absolute paths,
+kept on the machine's record (shown by `list_machines` and on the machine page) and in its `daemon.json`:
+
+| Option | What it sets | Default |
+|---|---|---|
+| `app_dir` | The daemon's folder: `app/` (the code), `logs/`, `agents/` (standing agents), `daemon.json`, `outside-watch.json`, the public-repo identity | `~/.ff-factory` (`%USERPROFILE%\.ff-factory`) |
+| `unity_editor_root` | A folder of Unity versions, searched first: `<root>/<version>/Unity.app` on a Mac, `<root>\<version>\Editor\Unity.exe` on Windows | Unity Hub's folders |
+| `unity_path` | The Unity editor executable itself, used whatever the project's version | the lookup |
+| `temp_dir` | `TMP`, `TEMP` and `TMPDIR` of its agents' processes (made if missing) | the system's |
+
+On a redeploy an option left out keeps its value and `""` clears it. A path for the other OS is refused
+(`checkDirs`). On a Mac with an `app_dir` the deploy writes there and the LaunchAgent runs
+`<app_dir>/app/machine/daemon.ts <app_dir>/daemon.json`, logging to `<app_dir>/logs/daemon.log`. The guard
+protects the `app_dir` as it protects `~/.ff-factory`. Moving it leaves the old folder's files in place (delete
+them by hand); the old LaunchAgent is replaced as on any redeploy.
+
+**Finding Unity** (`editorBinary` in `machine/unity.ts`, both OSes): `unity_path`; else the project's version
+(`ProjectSettings/ProjectVersion.txt`) in `unity_editor_root`; then the editors Unity Hub lists in its settings
+folder (`editors-v2.json`, or the older `editors.json`: editors the Hub was pointed at, anywhere); then the
+install location chosen in the Hub (`secondaryInstallPath.json`); then the Hub's defaults
+(`/Applications/Unity/Hub/Editor`, `~/Applications/Unity/Hub/Editor`; `Program Files\Unity\Hub\Editor`). The
+Hub's settings folder is `~/Library/Application Support/UnityHub` on a Mac and `%APPDATA%\UnityHub` on Windows,
+so a Hub whose install location is, say, `C:\Program Files\Unity\Editor` needs no option.
 
 **Load and usage (protocol 4).** Every 15 s the daemon reports its Mac's CPU, RAM, GPU and disk
 (`stats`, measured by `server/system.ts` as the portal measures its own host: RAM from `vm_stat` and
@@ -131,7 +155,8 @@ PowerShell, and the two quote differently. So the command line is only
 either shell), a small bootstrap that reads the real script from stdin as UTF-8 and runs it; the code bundle
 follows the script on stdin (`server/machineDeployWin.ts`). Nothing depends on which default shell is set.
 
-**What a deploy does** (all in `%USERPROFILE%\.ff-factory`, the same folder as on a Mac):
+**What a deploy does** (all in `%USERPROFILE%\.ff-factory`, the same folder as on a Mac, or in the machine's
+`app_dir`, e.g. `D:\work\.ff-factory` on a PC with several drives; see "A machine's own folders" above):
 
 1. Probe: the user's SID and home, the newest node (the PATH, then nodejs.org, nvm-windows, Volta, fnm and
    Scoop installs), Claude Code's native `claude.exe` (an npm `claude.cmd` shim cannot be started by the Agent
@@ -141,7 +166,10 @@ follows the script on stdin (`server/machineDeployWin.ts`). Nothing depends on w
 2. Copy the portal's code (the same `git archive` of `server/ shared/ machine/ package*.json`, as a .tar.gz)
    into `app.new`, unpacked with System32's tar; `npm ci --omit=dev` with that node's own npm.
 3. Stop the old daemon, `app` → `app.old`, `app.new` → `app`, write `daemon.json` (portal URL, id, token,
-   repo path, claude path) and `run-daemon.ps1`, register the **`FFFactoryDaemon`** scheduled task and start it.
+   repo path, claude path, the folder options) and `run-daemon.ps1`, register the **`FFFactoryDaemon`**
+   scheduled task (its action and working folder in the daemon's folder) and start it. The stop looks for a
+   daemon running from the daemon's folder, the default one and the previous deploy's `app_dir`, so moving the
+   folder does not leave the old daemon running.
 
 **What runs it.** The task starts at logon of that user (trigger and principal by SID), in their interactive
 session (the Claude login, the GPU and the desktop Unity needs), not elevated (`LeastPrivilege`), at normal
@@ -149,7 +177,7 @@ priority (a task's default 7 would give every agent and Unity below-normal CPU, 
 no time limit and no battery or idle conditions. Its action is `powershell.exe -WindowStyle Hidden -File
 run-daemon.ps1`, a supervisor like the portal's own `scripts/supervise.ps1`: it starts
 `node machine/daemon.ts <daemon.json>` hidden, and again whenever it exits (10 s, doubling up to 5 minutes
-while it keeps dying within 5 minutes). Its output is in `.ff-factory\logs\daemon.log` and `daemon.err.log`
+while it keeps dying within 5 minutes). Its output is in `logs\daemon.log` and `daemon.err.log` in its folder
 (the previous run's in `*.prev`), the supervisor's own lines in `supervisor.log`. Task Scheduler restarts the
 supervisor itself if it fails.
 
@@ -173,16 +201,17 @@ log on again. A deploy while nobody is logged on installs everything and says so
   The display may still turn off; set sleep to never anyway (below).
 - **Load**: `server/system.ts` as on the BEAST host: CPU, RAM, disk, and an NVIDIA GPU through `nvidia-smi`.
 - **Unity**: the `unity` tool and the hang/crash watch work as on a Mac (`machine/unity.ts` with platform
-  win32): the editor is `Unity.exe` with `-projectPath` of the clone, found in Unity Hub's editor folders
-  (Program Files, or the install location set in the Hub); its log is
+  win32): the editor is `Unity.exe` with `-projectPath` of the clone, found as above ("Finding Unity":
+  `unity_path`, `unity_editor_root`, the editors the Hub lists, its chosen install location, Program Files); its
+  log is
   `%LOCALAPPDATA%\Unity\Editor\Editor.log`. The editor is launched through `Start-Process` so that it is
   nobody's child and outlives a daemon restart. There is no dialog watch on Windows machines yet (the Mac's
   reads windows through macOS's System Events), and no App Nap.
 - **Guard**: the same rules. Killing `node.exe` or `claude.exe`, and ending, changing or deleting the
   `FFFactoryDaemon` task (`schtasks /End|/Change|/Delete`, `Stop-/Disable-/Unregister-/Set-ScheduledTask`) are
-  refused; Unity, Unity Hub and crash handlers are fine to kill. The `.ff-factory` folder is protected in
-  every spelling (`C:\Users\x\.ff-factory`, `~/.ff-factory`, `%USERPROFILE%`, `$env:USERPROFILE`, Git Bash's
-  `/c/Users/...`). The backup-before-discard rule is the same, into `ff-local-backups` beside the clone (e.g.
+  refused; Unity, Unity Hub and crash handlers are fine to kill. The daemon's folder (`.ff-factory`, or the
+  `app_dir`) is protected in every spelling (`C:\Users\x\.ff-factory`, `~/.ff-factory`, `%USERPROFILE%`,
+  `$env:USERPROFILE`, Git Bash's `/c/Users/...`; `D:\work\.ff-factory`, `D:/work/...`, `/d/work/...`). The backup-before-discard rule is the same, into `ff-local-backups` beside the clone (e.g.
   `D:\ff-local-backups\<time>\`); the recipe is a Git Bash line that copies the changed and untracked files
   with tar, since Git Bash has no rsync.
 
@@ -237,7 +266,9 @@ PowerShell unless it says otherwise.
 
    Clone from a normal terminal: a clone made from an administrator one is owned by Administrators, and git
    in the (non-elevated) daemon then refuses it as "dubious ownership". For Unity work, install Unity Hub and
-   the project's Unity version (ProjectSettings\ProjectVersion.txt) in the Hub's default or chosen folder.
+   the project's Unity version (ProjectSettings\ProjectVersion.txt) in the Hub's default or chosen folder
+   (the daemon reads the Hub's choice). Unity installed elsewhere, or files on another drive: give `add_machine`
+   `unity_editor_root` or `unity_path`, `app_dir` and `temp_dir` (above).
 5. **Never sleep** while plugged in, and stay logged on (locking the screen is fine):
 
    ```powershell

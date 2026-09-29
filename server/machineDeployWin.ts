@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process';
 
 /**
  * The Windows half of server/machineDeploy.ts (docs/machines.md, "Windows machines"): the PowerShell scripts
- * that probe a Windows PC over ssh, unpack the portal's code into %USERPROFILE%\.ff-factory\app, write the
+ * that probe a Windows PC over ssh, unpack the portal's code into the daemon's folder (%USERPROFILE%\.ff-factory, or
+ * the machine's app_dir), write the
  * daemon's config and supervisor, and register the Task Scheduler task that runs the daemon in the user's
  * logged-on session. The script builders are pure (tested in machineDeployWin.test.ts); `psScript` runs one.
  *
@@ -103,10 +104,10 @@ function Invoke-Native([string]$Exe, [string[]]$Argv) {
  */
 const STOP = `
 function Stop-FFDaemon {
-  $F = Join-Path $env:USERPROFILE '.ff-factory'
   $task = Get-ScheduledTask -TaskName '${TASK_NAME}' -ErrorAction SilentlyContinue
   if ($task) { $null = $task | Disable-ScheduledTask -ErrorAction SilentlyContinue; $task | Stop-ScheduledTask -ErrorAction SilentlyContinue }
-  $marks = @((Join-Path $F 'app\\machine\\daemon.ts'), (Join-Path $F 'run-daemon.ps1'))
+  $marks = @()
+  foreach ($d in $FFDirs) { $marks += (Join-Path $d 'app\\machine\\daemon.ts'); $marks += (Join-Path $d 'run-daemon.ps1') }
   $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine)
   $queue = New-Object System.Collections.Generic.Queue[int]
   foreach ($p in $all) {
@@ -142,8 +143,23 @@ function Test-FFLoggedOn {
   $false
 }`;
 
-/** The shared head of every script: stop on errors, and the helpers. */
-const HEAD = `$ErrorActionPreference = 'Stop'\n${NATIVE}\n${STOP}\n`;
+/** A Windows folder as the scripts and command lines spell it: backslashes, no trailing one (but C:\ keeps its own). */
+export const winDir = (p: string) => p.replace(/\//g, '\\').replace(/(?<![:\\])\\+$/, '');
+
+/** The daemon's folder as a PowerShell expression: the machine's app_dir, else %USERPROFILE%\.ff-factory. */
+export function appDirExpr(appDir?: string): string {
+  return appDir ? psq(winDir(appDir)) : "(Join-Path $env:USERPROFILE '.ff-factory')";
+}
+
+/**
+ * The shared head of every script: stop on errors, the helpers, $F (the daemon's folder) and $FFDirs (every folder
+ * a daemon of ours may run from, for Stop-FFDaemon: $F, the default one, and the previous deploy's, so a deploy
+ * that moves the folder still stops the old daemon).
+ */
+function head(dirs: { appDir?: string; previous?: string } = {}): string {
+  const prev = dirs.previous && dirs.previous !== dirs.appDir ? `, ${appDirExpr(dirs.previous)}` : '';
+  return `$ErrorActionPreference = 'Stop'\n${NATIVE}\n${STOP}\n$F = ${appDirExpr(dirs.appDir)}\n$FFDirs = @(@($F, ${appDirExpr()}${prev}) | Select-Object -Unique)\n`;
+}
 
 /**
  * Probe a Windows PC: its user (SID for the task), home, OS, the newest node (PATH and the usual installers:
@@ -152,7 +168,7 @@ const HEAD = `$ErrorActionPreference = 'Stop'\n${NATIVE}\n${STOP}\n`;
  */
 export function probeScript(slug: string): string {
   if (slug && !/^[\w.-]+\/[\w.-]+$/.test(slug)) throw new Error(`"${slug}" is not an owner/name repo slug`);
-  return `${HEAD}
+  return `${head()}
 $ErrorActionPreference = 'Continue'
 # A value beyond ASCII (a path with an accented user name) goes as base64: the output may be re-encoded on its way back.
 function Emit($k, $v) {
@@ -221,10 +237,9 @@ if ($git -and $slug) {
 `;
 }
 
-/** Unpack the code bundle ($FFData: a base64 .tar.gz) into .ff-factory\app.new with Windows' own tar. */
-export function uploadScript(): string {
-  return `${HEAD}
-$F = Join-Path $env:USERPROFILE '.ff-factory'
+/** Unpack the code bundle ($FFData: a base64 .tar.gz) into app.new in the daemon's folder with Windows' own tar. */
+export function uploadScript(appDir?: string): string {
+  return `${head({ appDir })}
 $new = Join-Path $F 'app.new'
 if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Recurse -Force }
 New-Item -ItemType Directory -Force $new, (Join-Path $F 'logs') | Out-Null
@@ -238,9 +253,9 @@ if ($r.Code -ne 0) { throw "tar failed ($($r.Code)): $($r.Out)" }
 }
 
 /** Stamp the version and install the production dependencies with the chosen node's own npm. */
-export function npmScript(node: string, version: string): string {
-  return `${HEAD}
-$app = Join-Path $env:USERPROFILE '.ff-factory\\app.new'
+export function npmScript(node: string, version: string, appDir?: string): string {
+  return `${head({ appDir })}
+$app = Join-Path $F 'app.new'
 Set-Location -LiteralPath $app
 [IO.File]::WriteAllText((Join-Path $app 'machine\\VERSION'), ${psq(version)} + [char]10)
 $nodeDir = Split-Path -Parent ${psq(node)}
@@ -260,7 +275,7 @@ if ($r.Code -ne 0) { throw "npm ci failed ($($r.Code)): $($r.Out)" }
 export function supervisorScript(node: string, flag: boolean): string {
   const flags = [...(flag ? ['--experimental-strip-types'] : []), '--disable-warning=ExperimentalWarning'].join(' ');
   return `# FF Factory machine daemon supervisor (docs/machines.md), started at logon by the ${TASK_NAME} task.
-# Written by the portal's deploy into the .ff-factory folder (its own folder here); a redeploy replaces it.
+# Written by the portal's deploy into the daemon's folder (its own folder here); a redeploy replaces it.
 $ErrorActionPreference = 'Continue'
 $F = $PSScriptRoot
 $app = Join-Path $F 'app'
@@ -303,9 +318,9 @@ const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
  * daemon's agents and Unity below-normal CPU, I/O and memory priority), no time limit, never stopped for
  * batteries or idleness, one instance, restarted by Task Scheduler if the supervisor itself fails.
  */
-export function taskXml(sid: string, home: string): string {
+export function taskXml(sid: string, home: string, appDir?: string): string {
   if (!/^S-1-[\d-]+$/.test(sid)) throw new Error(`"${sid}" is not a Windows SID`);
-  const f = `${home.replace(/[\\/]+$/, '')}\\.ff-factory`;
+  const f = appDir ? winDir(appDir) : `${home.replace(/[\\/]+$/, '')}\\.ff-factory`;
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -366,9 +381,8 @@ const b64 = (s: string, enc: 'utf8' | 'utf8bom') => (enc === 'utf8bom' ? Buffer.
  * PowerShell reads a non-ASCII path right), register the task and run it.
  * Prints `started=True` or `started=False` (nobody is logged on: it starts at the next logon).
  */
-export function installScript(o: { sid: string; home: string; config: string; node: string; flag: boolean }): string {
-  return `${HEAD}
-$F = Join-Path $env:USERPROFILE '.ff-factory'
+export function installScript(o: { sid: string; home: string; config: string; node: string; flag: boolean; appDir?: string; previousAppDir?: string }): string {
+  return `${head({ appDir: o.appDir, previous: o.previousAppDir })}
 $app = Join-Path $F 'app'; $old = Join-Path $F 'app.old'; $new = Join-Path $F 'app.new'
 if (-not (Test-Path -LiteralPath $new)) { throw 'the new code is missing (app.new)' }
 $null = Stop-FFDaemon
@@ -386,23 +400,23 @@ New-Item -ItemType Directory -Force (Join-Path $F 'agents'), (Join-Path $F 'logs
 function Write-B64($name, $data) { [IO.File]::WriteAllBytes((Join-Path $F $name), [Convert]::FromBase64String($data)) }
 Write-B64 'daemon.json' '${b64(o.config, 'utf8')}'
 Write-B64 'run-daemon.ps1' '${b64(supervisorScript(o.node, o.flag), 'utf8bom')}'
-$xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(taskXml(o.sid, o.home), 'utf8')}'))
+$xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(taskXml(o.sid, o.home, o.appDir), 'utf8')}'))
 try { $null = Register-ScheduledTask -TaskName '${TASK_NAME}' -Xml $xml -Force } catch { throw "registering the ${TASK_NAME} task failed: $($_.Exception.Message)" }
 if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }
 `;
 }
 
 /** Start, stop or restart the daemon (its task and processes). Prints `stopped=<n>` and/or `started=True|False`. */
-export function controlScript(action: 'start' | 'stop' | 'restart'): string {
-  return `${HEAD}
+export function controlScript(action: 'start' | 'stop' | 'restart', appDir?: string): string {
+  return `${head({ appDir })}
 ${action !== 'start' ? "'stopped=' + (Stop-FFDaemon)" : ''}
 ${action !== 'stop' ? "if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }" : ''}
 `;
 }
 
-/** Stop the daemon and delete its task; its files stay in .ff-factory. */
-export function uninstallScript(): string {
-  return `${HEAD}
+/** Stop the daemon and delete its task; its files stay in its folder. */
+export function uninstallScript(appDir?: string): string {
+  return `${head({ appDir })}
 $null = Stop-FFDaemon
 Unregister-ScheduledTask -TaskName '${TASK_NAME}' -Confirm:$false -ErrorAction SilentlyContinue
 `;

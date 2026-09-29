@@ -27,7 +27,7 @@ import type { HostHealth } from '../shared/types.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
 import type { LaunchSpec } from './launch.ts';
-import { EFFORT_LEVELS, platformNoun, type AutoApprove, type EffortLevel, type Machine } from '../shared/types.ts';
+import { EFFORT_LEVELS, appDirOf, platformNoun, type AutoApprove, type EffortLevel, type Machine } from '../shared/types.ts';
 import { describeTrigger } from './schedule.ts';
 import { describeGit, refreshSandboxGit } from './gitStatus.ts';
 import { displayName } from '../shared/labels.ts';
@@ -884,7 +884,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
       guard: {
         id: path.basename(m.repoPath),
         ownPath: m.repoPath,
-        protectedPaths: [`${m.home}/.ff-factory`],
+        protectedPaths: [appDirOf(m)],
         gameRepos: [this.cfg.repo.url],
         publicIdentity: publicIdentityOf(this.cfg),
         ownCheckout: true,
@@ -1279,6 +1279,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${platformNoun(m.platform)}, ssh ${m.host}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
       `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; up to ${m.maxSessions} agents; Claude account of its agents: ${accountSource(this.cfg, m.id)}`,
+      `  folders: ${describeDirs(m)}`,
       `  ${describeGit(g)}`,
       agents ? `  agents:\n${agents}` : '  agents: none',
     ].join('\n');
@@ -1322,10 +1323,14 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
           portal_url: z.string().optional().describe("The URL the machine reaches this portal at, e.g. the Funnel URL https://<host>.<tailnet>.ts.net. Default: config publicUrl, or the machine's previous one."),
           repo_path: z.string().optional().describe('Its main Final Factory clone (default: found automatically).'),
           max_agents: z.number().int().min(1).max(8).optional().describe('Agents that may run there at once (default 3).'),
+          app_dir: z.string().optional().describe('Absolute folder on the machine for the daemon (its code, logs, agents, daemon.json), e.g. "D:\\work\\.ff-factory". Default ~/.ff-factory (%USERPROFILE%\\.ff-factory). Omitted on a redeploy: kept; "": back to the default.'),
+          unity_editor_root: z.string().optional().describe("Absolute folder holding Unity editor versions (<root>/<version>/Editor/Unity.exe on Windows, <root>/<version>/Unity.app on a Mac), searched before Unity Hub's folders. Omitted: kept; \"\": cleared."),
+          unity_path: z.string().optional().describe('The Unity editor executable itself (e.g. "E:\\Unity\\6000.3.2f1\\Editor\\Unity.exe"): used whatever the project\'s version. Omitted: kept; "": cleared.'),
+          temp_dir: z.string().optional().describe('Absolute scratch folder for its agents (their TMP, TEMP and TMPDIR). Default: the system\'s. Omitted: kept; "": cleared.'),
           force: z.boolean().optional().describe('Redeploy even though agents are running there (they stop).'),
         },
         wrap(async (a) => {
-          const m = mm.deployMachine({ id: a.id, host: a.ssh_host, portalUrl: a.portal_url, repoPath: a.repo_path, maxSessions: a.max_agents, force: a.force });
+          const m = mm.deployMachine({ id: a.id, host: a.ssh_host, portalUrl: a.portal_url, repoPath: a.repo_path, maxSessions: a.max_agents, appDir: a.app_dir, unityEditorRoot: a.unity_editor_root, unityPath: a.unity_path, tempDir: a.temp_dir, force: a.force });
           return `Deploying to ${m.id} (ssh ${m.host}, portal ${m.portalUrl}); list_machines shows progress.`;
         }),
       ),
@@ -1651,4 +1656,10 @@ function hostHealthLines(h: HostHealth | undefined): string[] {
     ...(h.unityRestarts?.length ? [`Unity restarted automatically in the last hour: ${h.unityRestarts.map((r) => `${r.sandbox} at ${r.at.slice(11, 16)} (${r.reason.slice(0, 80)})`).join('; ')}`] : []),
     ...(h.lastCleanup ? [`Last clean-up ${h.lastCleanup.at}: ${h.lastCleanup.removed} item(s)${h.lastCleanup.freedBytes !== undefined ? `, ${gb(h.lastCleanup.freedBytes)}` : ''}`] : []),
   ];
+}
+
+/** A machine's folders for list_machines: the daemon's, where Unity is looked up, the agents' temp. */
+function describeDirs(m: Machine) {
+  const unity = m.unityPath ? `Unity ${m.unityPath}` : m.unityEditorRoot ? `Unity versions in ${m.unityEditorRoot}, then Unity Hub's` : "Unity from Unity Hub's folders";
+  return `daemon ${m.appDir ?? `${appDirOf(m)} (default)`}; ${unity}; agents' temp ${m.tempDir ?? 'the system default'}`;
 }

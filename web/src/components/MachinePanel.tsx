@@ -118,6 +118,20 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
               {m.repoPath && <CopyButton text={m.repoPath} label="Copy path" />}
             </span>
             <GitFacts git={g} />
+            {(m.appDir || m.unityEditorRoot || m.unityPath || m.tempDir) && (
+              <span className="fact mono" title="The machine's folders (add_machine app_dir, unity_editor_root, unity_path, temp_dir)">
+                <Icon name="folder" size={13} />
+                <span className="ellipsis dim">
+                  {[
+                    m.appDir && `daemon ${m.appDir}`,
+                    m.unityPath ? `Unity ${m.unityPath}` : m.unityEditorRoot && `Unity versions ${m.unityEditorRoot}`,
+                    m.tempDir && `temp ${m.tempDir}`,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </span>
+              </span>
+            )}
             {m.info && (
               <span className="fact">
                 <Icon name="bot" size={13} />
@@ -196,7 +210,7 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
           body={
             <>
               <p>Unloads its daemon over ssh and removes it and its agents from here.</p>
-              <p className="dim">Nothing in its Final Factory clone is touched; the daemon's files stay in ~/.ff-factory.</p>
+              <p className="dim">Nothing in its Final Factory clone is touched; the daemon's files stay in {m.appDir ?? '~/.ff-factory'}.</p>
             </>
           }
           onConfirm={async () => {
@@ -268,6 +282,9 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
   const [portalUrl, setPortalUrl] = useState(location.origin);
   const [repoPath, setRepoPath] = useState('');
   const [max, setMax] = useState('3');
+  const [appDir, setAppDir] = useState('');
+  const [unityRoot, setUnityRoot] = useState('');
+  const [tempDir, setTempDir] = useState('');
   const [busy, setBusy] = useState(false);
   const slug = id.trim().toLowerCase();
   const valid = /^[a-z0-9][a-z0-9-]{0,23}$/.test(slug) && /^https?:\/\/[^/\s]+$/.test(portalUrl.trim().replace(/\/+$/, ''));
@@ -275,7 +292,17 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
     if (!valid || busy) return;
     setBusy(true);
     const m = await attempt(
-      api.addMachine({ id: id.trim(), host: host.trim() || undefined, portalUrl: portalUrl.trim().replace(/\/+$/, ''), repoPath: repoPath.trim() || undefined, maxSessions: Number(max) || 3 }),
+      api.addMachine({
+        id: id.trim(),
+        host: host.trim() || undefined,
+        portalUrl: portalUrl.trim().replace(/\/+$/, ''),
+        repoPath: repoPath.trim() || undefined,
+        maxSessions: Number(max) || 3,
+        appDir: appDir.trim() || undefined,
+        // A path to the executable itself (Unity.exe, .../MacOS/Unity) is unity_path; a folder of versions is unity_editor_root.
+        ...(/(Unity\.exe|\/MacOS\/Unity)$/i.test(unityRoot.trim()) ? { unityPath: unityRoot.trim() } : { unityEditorRoot: unityRoot.trim() || undefined }),
+        tempDir: tempDir.trim() || undefined,
+      }),
     );
     setBusy(false);
     if (m) {
@@ -334,6 +361,20 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
             <input className="input mono" type="number" min={1} max={8} value={max} onChange={(e) => setMax(e.target.value)} />
           </label>
         </div>
+        <div className="field-row">
+          <label className="field">
+            <span>Daemon folder</span>
+            <input className="input mono" value={appDir} onChange={(e) => setAppDir(e.target.value)} placeholder="~/.ff-factory" />
+          </label>
+          <label className="field">
+            <span>Agents' temp folder</span>
+            <input className="input mono" value={tempDir} onChange={(e) => setTempDir(e.target.value)} placeholder="the system's" />
+          </label>
+        </div>
+        <label className="field">
+          <span>Unity editors folder, or Unity executable</span>
+          <input className="input mono" value={unityRoot} onChange={(e) => setUnityRoot(e.target.value)} placeholder="Unity Hub's folders" />
+        </label>
         <button type="submit" hidden />
       </form>
     </Modal>

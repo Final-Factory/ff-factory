@@ -113,7 +113,8 @@ export const api = {
     request<unknown>('POST', `/api/sandboxes/${enc(id)}/unity`, { action }),
   unityLog: (id: string, lines = 200) =>
     request<{ lines: string[] }>('GET', `/api/sandboxes/${enc(id)}/unity-log?lines=${lines}`),
-  addMachine: (req: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number }) => request<Machine>('POST', '/api/machines', req),
+  addMachine: (req: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string }) =>
+    request<Machine>('POST', '/api/machines', req),
   redeployMachine: (id: string, force = false) => request<Machine>('POST', `/api/machines/${enc(id)}/redeploy`, { force }),
   machineDaemon: (id: string, action: 'start' | 'stop' | 'restart', force = false) => request<{ note: string }>('POST', `/api/machines/${enc(id)}/daemon`, { action, force }),
   labelMachine: (id: string, purpose: string) => request<Machine>('POST', `/api/machines/${enc(id)}/label`, { purpose }),

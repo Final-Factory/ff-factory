@@ -353,12 +353,14 @@ test('windows (real PowerShell): the bootstrap runs a script from stdin with its
   assert.equal(empty.code, 3, 'nothing on stdin is an error, not a silent success');
 });
 
-test('windows (real PowerShell): probe, unpack, npm ci, install, the daemon says hello as win32, stop, uninstall', { skip: !onWindowsCi && 'Windows CI only', timeout: 12 * 60_000 }, async (t) => {
+test('windows (real PowerShell): probe, unpack, npm ci, install into an app_dir, the daemon says hello as win32, stop, uninstall', { skip: !onWindowsCi && 'Windows CI only', timeout: 12 * 60_000 }, async (t) => {
   // A user folder with a non-ASCII name, as a Björn would have.
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-hömé-'));
   const env = { USERPROFILE: home };
+  // The daemon's folder elsewhere than %USERPROFILE%\.ff-factory (add_machine app_dir, e.g. D:\work\.ff-factory).
+  const appDir = path.join(home, 'work drive', '.ff-factory');
   t.after(async () => {
-    await runPs(win.uninstallScript(), { env });
+    await runPs(win.uninstallScript(appDir), { env });
     fs.rmSync(home, { recursive: true, force: true });
   });
   // A clone of the game repo in the throwaway home, found by its origin.
@@ -379,13 +381,13 @@ test('windows (real PowerShell): probe, unpack, npm ci, install, the daemon says
   assert.equal(p.tar, true);
   assert.deepEqual(p.repos.map(real), [real(clone)]);
 
-  const up = await runPs(win.uploadScript(), { env, data: await bundle(ROOT), timeoutMs: 5 * 60_000, shell: 'powershell' });
+  const up = await runPs(win.uploadScript(appDir), { env, data: await bundle(ROOT), timeoutMs: 5 * 60_000, shell: 'powershell' });
   assert.equal(up.code, 0, up.stderr);
-  assert.ok(fs.existsSync(path.join(home, '.ff-factory', 'app.new', 'machine', 'daemon.ts')));
+  assert.ok(fs.existsSync(path.join(appDir, 'app.new', 'machine', 'daemon.ts')));
 
-  const npm = await runPs(win.npmScript(p.node!, 'abc1234'), { env, timeoutMs: 8 * 60_000 });
+  const npm = await runPs(win.npmScript(p.node!, 'abc1234', appDir), { env, timeoutMs: 8 * 60_000 });
   assert.equal(npm.code, 0, npm.stderr || npm.stdout);
-  assert.equal(fs.readFileSync(path.join(home, '.ff-factory', 'app.new', 'machine', 'VERSION'), 'utf8').trim(), 'abc1234');
+  assert.equal(fs.readFileSync(path.join(appDir, 'app.new', 'machine', 'VERSION'), 'utf8').trim(), 'abc1234');
 
   // A stand-in portal: the daemon must connect and say hello as a Windows machine.
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0, path: '/machine' });
@@ -396,34 +398,35 @@ test('windows (real PowerShell): probe, unpack, npm ci, install, the daemon says
     if (m.type === 'hello') resolve(m);
   })));
   const portalUrl = `http://127.0.0.1:${(wss.address() as AddressInfo).port}`;
-  const config = daemonConfig({ portalUrl, id: 'lothdesktop', token: 'ffm_lothdesktop_' + 'x'.repeat(43), repoPath: clone, claude: p.claude, maxSessions: 1 });
-  const inst = await runPs(win.installScript({ sid: p.sid, home, config, node: p.node!, flag: false }), { env, timeoutMs: 3 * 60_000 });
+  const config = daemonConfig({ portalUrl, id: 'lothdesktop', token: 'ffm_lothdesktop_' + 'x'.repeat(43), repoPath: clone, claude: p.claude, maxSessions: 1, appDir });
+  const inst = await runPs(win.installScript({ sid: p.sid, home, config, node: p.node!, flag: false, appDir }), { env, timeoutMs: 3 * 60_000 });
   assert.equal(inst.code, 0, inst.stderr);
   assert.match(inst.stdout, /started=(True|False)/);
-  assert.ok(fs.existsSync(path.join(home, '.ff-factory', 'app', 'machine', 'daemon.ts')), 'app.new became app');
+  assert.ok(fs.existsSync(path.join(appDir, 'app', 'machine', 'daemon.ts')), 'app.new became app');
+  assert.ok(!fs.existsSync(path.join(home, '.ff-factory')), 'nothing went to the default folder');
   assert.equal(execFileSync('powershell.exe', ['-NoProfile', '-Command', `(Get-ScheduledTask -TaskName '${win.TASK_NAME}').Principal.LogonType`], { encoding: 'utf8' }).trim(), 'Interactive');
   // The runner may have no desktop session (started=False), or one the task does not start in: then run the
   // supervisor as the task would.
   const within = <T,>(pr: Promise<T>, ms: number) => Promise.race([pr, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
   let h = /started=True/.test(inst.stdout) ? await within(hello, 30_000) : undefined;
   if (!h) {
-    const sup = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', path.join(home, '.ff-factory', 'run-daemon.ps1')], { detached: true, stdio: 'ignore', windowsHide: true });
+    const sup = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', path.join(appDir, 'run-daemon.ps1')], { detached: true, stdio: 'ignore', windowsHide: true });
     sup.unref();
     h = await within(hello, 90_000);
   }
-  assert.ok(h, `no hello from the daemon; logs:\n${logs(home)}`);
+  assert.ok(h, `no hello from the daemon; logs:\n${logs(appDir)}`);
   const info = h.info as { platform?: string; os?: string };
   assert.equal(info.platform, 'win32');
   assert.match(info.os ?? '', /^Windows/);
 
-  const stop = await runPs(win.controlScript('stop'), { env });
+  const stop = await runPs(win.controlScript('stop', appDir), { env });
   assert.equal(stop.code, 0, stop.stderr);
   const n = Number(/stopped=(\d+)/.exec(stop.stdout)?.[1]);
   assert.ok(n >= 2, `the supervisor and the daemon were stopped (${stop.stdout.trim()})`);
 });
 
-function logs(home: string) {
-  const dir = path.join(home, '.ff-factory', 'logs');
+function logs(appDir: string) {
+  const dir = path.join(appDir, 'logs');
   try {
     return fs.readdirSync(dir).map((f) => `${f}: ${fs.readFileSync(path.join(dir, f), 'utf8').slice(-800)}`).join('\n');
   } catch {

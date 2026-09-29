@@ -139,15 +139,26 @@ export function reportersFor(procs: Proc[], repo: string, platform: UnityPlatfor
   return procs.filter((p) => /Unity ?Bug ?Reporter|UnityCrashHandler/i.test(p.cmd) && p.cmd.includes(norm(repo)));
 }
 
+/** Unity Hub's settings folder: %APPDATA%\UnityHub on Windows, ~/Library/Application Support/UnityHub on a Mac. */
+export function hubConfigDir(platform: UnityPlatform, env: NodeJS.ProcessEnv, home: string): string | undefined {
+  if (platform === 'win32') return env.APPDATA ? path.win32.join(env.APPDATA, 'UnityHub') : undefined;
+  return path.posix.join(home, 'Library', 'Application Support', 'UnityHub');
+}
+
 /**
- * Unity Hub's editor folders on Windows: Program Files (both), and the install location chosen in the Hub
- * (%APPDATA%\UnityHub\secondaryInstallPath.json, a JSON string).
+ * Unity Hub's editor folders, each holding <version>/...: the install location chosen in the Hub
+ * (secondaryInstallPath.json, a JSON string; e.g. C:\Program Files\Unity\Editor), then the defaults (Program Files
+ * on Windows, /Applications and ~/Applications on a Mac).
  */
-export function hubEditorDirsWin(env: NodeJS.ProcessEnv, read: (p: string) => string): string[] {
-  const dirs = [env.ProgramFiles, env.ProgramW6432, 'C:\\Program Files'].filter((d): d is string => !!d).map((d) => path.win32.join(d, 'Unity', 'Hub', 'Editor'));
-  if (env.APPDATA) {
+export function hubEditorDirs(platform: UnityPlatform, env: NodeJS.ProcessEnv, home: string, read: (p: string) => string): string[] {
+  const dirs =
+    platform === 'win32'
+      ? [env.ProgramFiles, env.ProgramW6432, 'C:\\Program Files'].filter((d): d is string => !!d).map((d) => path.win32.join(d, 'Unity', 'Hub', 'Editor'))
+      : ['/Applications/Unity/Hub/Editor', path.posix.join(home, 'Applications/Unity/Hub/Editor')];
+  const hub = hubConfigDir(platform, env, home);
+  if (hub) {
     try {
-      const custom = JSON.parse(read(path.win32.join(env.APPDATA, 'UnityHub', 'secondaryInstallPath.json')));
+      const custom = JSON.parse(read((platform === 'win32' ? path.win32 : path.posix).join(hub, 'secondaryInstallPath.json')));
       if (typeof custom === 'string' && custom.trim()) dirs.unshift(custom.trim());
     } catch {
       // no custom location
@@ -156,8 +167,53 @@ export function hubEditorDirsWin(env: NodeJS.ProcessEnv, read: (p: string) => st
   return [...new Set(dirs)];
 }
 
-/** The editor binary for the project's Unity version (ProjectSettings/ProjectVersion.txt), in the Hub's folders. */
-export function editorBinary(repo: string, exists: (p: string) => boolean, read: (p: string) => string, home = os.homedir(), platform: UnityPlatform = 'darwin', env: NodeJS.ProcessEnv = process.env): string {
+/**
+ * The editors Unity Hub lists in its settings folder (editors-v2.json, the older editors.json: installs it was
+ * pointed at, wherever they are), as version and executable. Read leniently: any entry with a `version` and a
+ * `location` (a path or a list of paths; on a Mac the .app or the binary in it).
+ */
+export function hubListedEditors(platform: UnityPlatform, env: NodeJS.ProcessEnv, home: string, read: (p: string) => string): { version: string; bin: string }[] {
+  const hub = hubConfigDir(platform, env, home);
+  if (!hub) return [];
+  const P = platform === 'win32' ? path.win32 : path.posix;
+  const out: { version: string; bin: string }[] = [];
+  const visit = (v: unknown) => {
+    if (Array.isArray(v)) return v.forEach(visit);
+    if (!v || typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+    const locs = typeof o.location === 'string' ? [o.location] : Array.isArray(o.location) ? o.location.filter((l): l is string => typeof l === 'string') : [];
+    if (typeof o.version === 'string' && locs.length) {
+      for (const l of locs) out.push({ version: o.version, bin: platform === 'darwin' && /\.app\/?$/.test(l) ? P.join(l, 'Contents/MacOS/Unity') : l });
+    } else Object.values(o).forEach(visit);
+  };
+  for (const f of ['editors-v2.json', 'editors.json']) {
+    try {
+      visit(JSON.parse(read(P.join(hub, f))));
+    } catch {
+      // not there, or not JSON
+    }
+  }
+  return out;
+}
+
+/** Where a machine keeps Unity when not (only) where Unity Hub says (add_machine unity_editor_root / unity_path). */
+export interface UnityLocation {
+  /** A folder of editor versions, <root>/<version>/..., searched first. */
+  editorRoot?: string;
+  /** The editor executable itself: used as is, whatever the project's version. */
+  unityPath?: string;
+}
+
+/**
+ * The editor binary: the machine's unity_path, else the project's Unity version (ProjectSettings/ProjectVersion.txt)
+ * in its unity_editor_root, then the editors Unity Hub lists, then the Hub's install folders (its chosen one first).
+ * A folder of versions holds <version>\Editor\Unity.exe on Windows, <version>/Unity.app on a Mac.
+ */
+export function editorBinary(repo: string, exists: (p: string) => boolean, read: (p: string) => string, home = os.homedir(), platform: UnityPlatform = 'darwin', env: NodeJS.ProcessEnv = process.env, where: UnityLocation = {}): string {
+  if (where.unityPath) {
+    if (exists(where.unityPath)) return where.unityPath;
+    throw new Error(`the machine's unity_path ${where.unityPath} does not exist`);
+  }
   let version = '';
   try {
     version = /m_EditorVersion:\s*(\S+)/.exec(read(path.posix.join(repo, 'ProjectSettings', 'ProjectVersion.txt')))?.[1] ?? '';
@@ -165,19 +221,11 @@ export function editorBinary(repo: string, exists: (p: string) => boolean, read:
     // no version file
   }
   if (!version) throw new Error(`no Unity version in ${repo}/ProjectSettings/ProjectVersion.txt`);
-  if (platform === 'win32') {
-    const bases = hubEditorDirsWin(env, read);
-    for (const base of bases) {
-      const bin = path.win32.join(base, version, 'Editor', 'Unity.exe');
-      if (exists(bin)) return bin;
-    }
-    throw new Error(`Unity ${version} is not installed in ${bases.join(' or ')} (install it with Unity Hub)`);
-  }
-  for (const base of ['/Applications/Unity/Hub/Editor', path.posix.join(home, 'Applications/Unity/Hub/Editor')]) {
-    const bin = path.posix.join(base, version, 'Unity.app/Contents/MacOS/Unity');
-    if (exists(bin)) return bin;
-  }
-  throw new Error(`Unity ${version} is not installed in /Applications/Unity/Hub/Editor (install it with Unity Hub)`);
+  const inBase = (base: string) => (platform === 'win32' ? path.win32.join(base, version, 'Editor', 'Unity.exe') : path.posix.join(base, version, 'Unity.app/Contents/MacOS/Unity'));
+  const bases = [...(where.editorRoot ? [where.editorRoot] : []), ...hubEditorDirs(platform, env, home, read)];
+  const listed = hubListedEditors(platform, env, home, read).filter((e) => e.version === version).map((e) => e.bin);
+  for (const bin of [...(where.editorRoot ? [inBase(where.editorRoot)] : []), ...listed, ...bases.map(inBase)]) if (exists(bin)) return bin;
+  throw new Error(`Unity ${version} is not installed in ${bases.join(' or ')}${listed.length ? ` (Unity Hub lists it at ${listed.join(', ')})` : ''} (install it with Unity Hub, or give the machine's unity_editor_root or unity_path)`);
 }
 
 export class MacUnity {
@@ -186,11 +234,11 @@ export class MacUnity {
   private readonly d: UnityDeps;
   private readonly bin: () => string;
 
-  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin') {
+  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}) {
     this.repo = norm(repo);
     this.platform = platform;
     this.d = deps ?? realDeps(platform);
-    this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8'), os.homedir(), platform));
+    this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8'), os.homedir(), platform, process.env, where));
   }
 
   /** This platform's view of the processes (editorsFor, reportersFor, editorTree with it). */

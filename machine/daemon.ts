@@ -3,7 +3,7 @@
 // portal's agents for this machine locally with the same AgentSession code the portal uses, streaming
 // everything they record back.
 //
-//   node machine/daemon.ts [config.json]      (default <home>/.ff-factory/daemon.json)
+//   node machine/daemon.ts [config.json]      (default <home>/.ff-factory/daemon.json; a deploy passes it)
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,6 +35,22 @@ export interface DaemonConfig {
   /** The machine's own `claude` (its login, settings and plugins). */
   claude?: string;
   maxSessions?: number;
+  /** The daemon's folder (add_machine app_dir): agents, outside-watch.json, the public identity. Default <home>/.ff-factory. */
+  appDir?: string;
+  /** A folder of Unity editor versions searched before Unity Hub's (machine/unity.ts editorBinary). */
+  unityEditorRoot?: string;
+  /** The Unity editor executable itself. */
+  unityPath?: string;
+  /** Scratch folder for agents: their TMP, TEMP and TMPDIR. */
+  tempDir?: string;
+}
+
+/** The daemon's folder. Exported for tests. */
+export const appDirOfConfig = (cfg: Pick<DaemonConfig, 'appDir'>, home = HOME) => cfg.appDir || path.join(home, '.ff-factory');
+
+/** The environment an agent's process gets for the machine's temp_dir (none without one). Exported for tests. */
+export function tempEnv(tempDir: string | undefined): Record<string, string> {
+  return tempDir ? { TMP: tempDir, TEMP: tempDir, TMPDIR: tempDir } : {};
 }
 
 /** How the daemon measures its Mac and reads its login's plan usage; tests pass fakes (no CLI, no tools). */
@@ -89,7 +105,8 @@ export class Daemon {
   constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES) {
     this.cfg = cfg;
     this.probes = probes;
-    this.unity = new MacUnity(cfg.repoPath, realDeps(process.platform === 'win32' ? 'win32' : 'darwin'), undefined, process.platform === 'win32' ? 'win32' : 'darwin');
+    const platform = process.platform === 'win32' ? 'win32' : 'darwin';
+    this.unity = new MacUnity(cfg.repoPath, realDeps(platform), undefined, platform, { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath });
     this.makeSession = makeSession;
     this.maxSessions = cfg.maxSessions ?? 3;
     for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'] as SignalName[]) {
@@ -118,7 +135,7 @@ export class Daemon {
     // App Nap off for Unity (takes effect at the editor's next launch; start() does it too).
     if (process.platform === 'darwin') void this.unity.noAppNap().catch(() => undefined);
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
-    const watch = readOutsideWatch(outsideWatchFile(HOME));
+    const watch = readOutsideWatch(outsideWatchFile(appDirOfConfig(this.cfg)));
     if (watch) this.outsideWatch = new OutsideWatch(watch);
     this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
     this.timers.push(setInterval(() => this.heartbeat(), 20_000));
@@ -345,7 +362,7 @@ export class Daemon {
       const holder: { e?: Entry } = {};
       const s = this.makeSession({ ...info, pendingPermissions: [] }, this.sink(), () => {
         const spec = holder.e!.spec!;
-        return buildOptions({ ...spec, claudeExecutable: spec.claudeExecutable ?? this.cfg.claude }, this.handlers(info.id));
+        return buildOptions({ ...spec, claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...tempEnv(this.cfg.tempDir) } }, this.handlers(info.id));
       }, events);
       e = { s, seq: lastSeq };
       holder.e = e;
@@ -383,7 +400,7 @@ export class Daemon {
   private onMessage(msg: ToDaemon) {
     switch (msg.type) {
       case 'outside_watch': {
-        const file = outsideWatchFile(HOME);
+        const file = outsideWatchFile(appDirOfConfig(this.cfg));
         try {
           if (!msg.config) {
             fs.rmSync(file, { force: true });
@@ -415,7 +432,7 @@ export class Daemon {
           const e = this.entry(msg.info, msg.lastSeq);
           if (!e.s.live && this.liveCount() >= this.maxSessions) throw new Error(`already ${this.maxSessions} agents running on this machine`);
           e.spec = msg.spec;
-          if (!e.s.live) prepare(msg.spec);
+          if (!e.s.live) prepare(msg.spec, this.cfg.tempDir);
           e.s.send(msg.text, msg.from, msg.uuid, msg.images, msg.requestedBy);
         } catch (err) {
           this.out({ type: 'failed', sessionId: msg.info.id, error: (err as Error).message });
@@ -474,7 +491,7 @@ export class Daemon {
         return;
       case 'fs': {
         // Only the clone and the standing agents' folders: the gallery and inline images, nothing else.
-        const roots = [this.cfg.repoPath, path.join(HOME, '.ff-factory', 'agents')];
+        const roots = [this.cfg.repoPath, path.join(appDirOfConfig(this.cfg), 'agents')];
         try {
           if (msg.op === 'read') {
             const img = readImage(msg.path, roots);
@@ -500,9 +517,10 @@ export class Daemon {
   }
 }
 
-/** Make the spec's folder and seed files exist before its process starts. */
-function prepare(spec: LaunchSpec) {
+/** Make the spec's folder, seed files and the machine's temp_dir exist before its process starts. */
+function prepare(spec: LaunchSpec, tempDir?: string) {
   fs.mkdirSync(spec.cwd, { recursive: true });
+  if (tempDir) fs.mkdirSync(tempDir, { recursive: true });
   for (const [name, content] of Object.entries(spec.init?.files ?? {})) {
     const f = path.join(spec.cwd, name);
     if (!fs.existsSync(f)) fs.writeFileSync(f, content);
@@ -547,6 +565,8 @@ function readVersion() {
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
   const file = process.argv[2] ?? path.join(HOME, '.ff-factory', 'daemon.json');
   const cfg: DaemonConfig = JSON.parse(fs.readFileSync(file, 'utf8'));
+  // server/launch.ts keeps the public identity's gitconfig in the daemon's folder.
+  process.env.FF_APP_DIR = appDirOfConfig(cfg);
   const d = new Daemon(cfg);
   d.start();
   log(`FF Factory daemon for machine ${cfg.id}, repo ${cfg.repoPath}, portal ${cfg.portalUrl}`);

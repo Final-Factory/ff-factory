@@ -44,6 +44,7 @@ import type {
   StandingRunTrigger,
   StandingToolGroup,
 } from '../shared/types.ts';
+import { appDirOf } from '../shared/types.ts';
 
 /** What a standing agent needs from a session: SessionManager and AgentSession satisfy it; tests fake it. */
 export interface SessionLike {
@@ -790,7 +791,7 @@ export class StandingAgents {
 
   private folderFor(id: string, machineId: string | undefined) {
     const m = machineId ? this.deps.machines?.get(machineId.trim().toLowerCase()) : undefined;
-    return m ? `${m.home}/.ff-factory/agents/${id}` : path.join(this.root, id);
+    return m ? `${appDirOf(m)}/agents/${id}` : path.join(this.root, id);
   }
 
   private notesSeed(a: StandingAgent) {
@@ -815,12 +816,12 @@ export class StandingAgents {
   private place(a: StandingAgent) {
     if (a.machineId) {
       const m = this.deps.machines?.get(a.machineId);
-      const home = m?.home ?? '~';
+      const dir = m ? appDirOf(m) : '~/.ff-factory';
       return {
         where: `the machine ${a.machineId}`,
         repoNote: m ? `The user's main Final Factory clone on this machine is \`${m.repoPath}\`. Read it with Read/Grep; never change it.` : '',
-        protectedPaths: [`${home}/.ff-factory/app`, `${home}/.ff-factory/daemon.json`],
-        offLimits: [`${home}/.ff-factory/app`],
+        protectedPaths: [`${dir}/app`, `${dir}/daemon.json`],
+        offLimits: [`${dir}/app`],
         gameRepos: [this.cfg.repo.url],
         // The host's Claude account (config machines.useHostClaudeEnv), for this agent only; the run's person's own
         // when they have one (config userClaudeEnv, docs/identity.md).
