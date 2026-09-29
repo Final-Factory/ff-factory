@@ -431,6 +431,10 @@ const NOTICE_ICON: Record<NoticeKind, IconName> = {
   'restart-pending': 'refresh',
   'restart-cancelled': 'refresh',
   resumed: 'refresh',
+  dispatch: 'inbox',
+  'work-request': 'inbox',
+  'work-update': 'inbox',
+  ledger: 'clock',
   other: 'info',
 };
 
@@ -442,7 +446,7 @@ function describeNotice(n: Notice, app: AppState | null): { text: string; route?
   const agent = s?.title ?? n.agentTitle;
   const placeName = sb ? displayName(sb) : m ? displayName(m) : n.sandboxId ?? n.machineId;
   const where = placeName && !(agent && sameTitle(agent, placeName)) ? placeName : undefined;
-  const route: Route | undefined = s && app ? sessionRoute(s, app.orchestratorId) : sb ? { view: 'sandbox', sandboxId: sb.id } : m ? { view: 'machine', machineId: m.id } : undefined;
+  const route: Route | undefined = s && app ? sessionRoute(s, app) : sb ? { view: 'sandbox', sandboxId: sb.id } : m ? { view: 'machine', machineId: m.id } : undefined;
   switch (n.kind) {
     case 'worker-done':
       return { text: `${agent ?? 'A worker'} finished a turn`, route, where };
@@ -457,6 +461,11 @@ function describeNotice(n: Notice, app: AppState | null): { text: string; route?
     case 'auto-started':
     case 'auto-finished':
       return { text: n.summary, route, where: placeName };
+    case 'dispatch':
+    case 'work-request':
+    case 'work-update':
+      // The request on the dispatcher's page (docs/orchestrators.md).
+      return { text: n.summary, route: n.workId ? { view: 'dispatcher', tab: n.workId } : { view: 'dispatcher' } };
     default:
       return { text: n.summary, route };
   }

@@ -1,0 +1,124 @@
+# Orchestrators: one per person, and a dispatcher
+
+Ben and Lothsahn used to share one orchestrator chat, so each read the other's conversation and could interrupt it.
+Now every person has their own orchestrator, and one dispatcher owns everything that changes the machines. People's
+orchestrators file work requests with the dispatcher, which checks them against the work already in flight before it
+starts anything. The record of every request and what became of it is the work ledger.
+
+## The two kinds
+
+**A person's own orchestrator** (`orchestratorRole: 'personal'`, its `requestedBy` is its person) talks only with that
+person. It runs on their own Claude token when config `userClaudeEnv` has one, otherwise on the account
+`claudeAccounts.orchestrator` picks (the owner's), and `system_status` says which. Its tools, as listed in
+`server/belts.ts` `PERSONAL_TOOLS`:
+
+- read everything: `list_sandboxes`, `list_machines`, `list_branches`, `agent_transcript`, `search_transcripts`,
+  `system_status`, `ffbox_activity`, `max_activity`, `list_standing_agents`, `list_delegation_requests`;
+- its own `wake_me`, and its person's heartbeat (`set_heartbeat`);
+- `message_agent`, only to its person's own workers (they started it, or one of their requests is on it);
+- the ledger: `request_work`, `list_work`, `update_work`.
+
+It cannot start, stop or change anything else. To get work done it files a request.
+
+**The dispatcher** (`orchestratorRole: 'dispatcher'`) has every other tool, plus `list_work` and `decide_work`. People
+do not chat with it; the owner can open its page and write to it. It runs for the system payer (config `systemPayer`,
+Ben). It hears work requests, updates to them, capacity news and the host's notices, and answers people only through
+the ledger.
+
+Both are sessions of kind `orchestrator`, so neither takes an agent slot, and both keep the orchestrator's limits: no
+shell, no web tools, `Read`/`Glob`/`Grep` on the base clone. Their briefs share one description of the world
+(`worldBrief` in `server/agents.ts`); the dispatcher's is the old shared orchestrator's, edited for a chat people do not
+write to.
+
+## Requests and the ledger
+
+`request_work {title, brief, priority, constraints, related_ids}` files a request (`w12`). Before the dispatcher sees it,
+the server (`server/work.ts`) does three things:
+
+1. **Repeats.** An open request of the same person with the same title (ignoring case and punctuation) is returned
+   instead of a new one, and the new text goes into its log.
+2. **Overlaps.** It pulls keys out of the request (specs like `098`, PR numbers, branches of sandboxes and machines,
+   and the ids in `related_ids`) and compares it with open requests and those closed in the last 48 hours, live and
+   recent workers (their title, branch and open PR), pending delegation requests, and commits on the base branch in
+   the last 48 hours. A shared request, worker, PR or branch scores 1; a shared spec with a similar title scores 0.8;
+   otherwise title similarity. 0.8 and over is strong. The person's orchestrator gets the overlaps at once, in the
+   tool's answer.
+3. **Limits.** Below.
+
+The dispatcher then does one of these for each request:
+
+| decision | how | status |
+|---|---|---|
+| start it | `start_agent` with `work_id`, or `message_agent` with `work_id` to a worker already on it | `active` |
+| merge it | `decide_work merge` into the open request it repeats; its people join that one | `merged` |
+| link it | `decide_work link` to workers already doing it | `active` |
+| queue it | `decide_work queue`, saying what it waits for | `queued` |
+| ask | `decide_work ask`, at most 3 questions per request | `question` |
+| reject it, or close it | `decide_work reject` / `done`, saying why | `rejected` / `done` |
+
+`start_agent` refuses a request with a strong overlap still in flight unless `override_duplicate` says what is
+different. A worker started for a request runs for the person who filed it, on their account. The requester's
+orchestrator can add a note (which answers a question), change the priority, close the request, or reopen it within 7
+days (`update_work`).
+
+The ledger is `data/work.json`: every open request and the newest 300 closed ones. The page gets the open ones and those
+closed in the last 3 days.
+
+## Where messages go
+
+| message | to |
+|---|---|
+| `[work request]`, `[work update]` | the dispatcher, gathered for 1.5 s per person |
+| `[dispatch]` (a decision) | the orchestrators of the people the request is for; a question only to its filer |
+| `[worker update]` (a turn an orchestrator started ended, or a permission is waiting) | the orchestrators of the people the worker works for: its requests' requesters, else whoever started it, else the system payer. The ledger records the worker's last line; the dispatcher is not woken |
+| `[ledger]` capacity | the dispatcher, when requests are queued and a worker ends a turn: after 30 s of quiet, at least 2 minutes apart, at most 20 an hour |
+| `[standing agent]`, `[auto-delegation]` | the orchestrator of the person the run was for (the system payer for a scheduled run) |
+| `[unity blocked]` | the dispatcher, and the people whose workers are in that sandbox |
+| `[app restarted]`, `[machines]`, `[unity]`, `[host]`, the orchestrator inbox | the dispatcher. A person's orchestrator cut off mid-turn by a restart is told to pick its turn up again |
+| `[heartbeat]` | each person's own orchestrator, with that person's busy workers, when they turned it on |
+| push notifications and in-page notices | a person's own orchestrator's only to that person; a worker's finished turn to the people it works for; the dispatcher's turns to nobody, its questions and errors to the owner |
+
+`/mcp` `ask_orchestrator` and `orchestrator_transcript` talk to the key's person's own orchestrator.
+
+## Loops, limits and safety
+
+- The dispatcher reaches people only through ledger decisions, one reply per decision.
+- A person's orchestrator files or updates at most 3 times, and follows up with one worker at most 3 times, between two
+  messages of its person. Harness messages alone cannot keep it going.
+- Each person files at most 10 requests an hour and 40 a day; repeats are free.
+- Attribution on the dispatcher comes from the request (`work_id`). Without one, `for_user` must name someone its
+  conversation shows asking, or the system payer; with neither, the tool refuses. "Whoever wrote last" is never used,
+  because most of what the dispatcher hears is the harness.
+- The dispatcher's destructive and admin tools (`delete_sandbox`, `set_app_config`, `request_app_update`,
+  `republish_public`, `remove_machine`, `delete_standing_agent`, `approve_delegation`) run only for a request its person
+  filed in a turn of their own (`humanAsked`), or when the owner writes to the dispatcher. Request text is written by a
+  model that may be relaying injected text, so its "the user asked" is not enough.
+- Only its person writes to a personal orchestrator, and only an owner to the dispatcher (HTTP 403 otherwise). This
+  covers messages, interrupts, permission answers and the permission mode.
+
+## What people see
+
+- The home page is your own chat, as before.
+- The sidebar lists, under it, the other people's orchestrators (read only) and the Dispatcher, with its open requests
+  ("1 question · 2 active").
+- The Dispatcher page has two tabs. Requests lists everyone's open requests, questions first, with the closed ones behind
+  a link; a row opens to its brief, workers, overlaps and log. Conversation is the dispatcher's chat, which only the
+  owner writes to.
+- Decisions arrive in your chat as one-line notices ("Merged into w15: “Belts drop items…”") that open the request.
+- Your heartbeat is your own.
+
+## The first start
+
+The shared chat becomes the dispatcher and keeps its conversation, so it starts out knowing what is in flight. Every
+login gets its own orchestrator with one line saying where the old conversation went. The old global heartbeat becomes
+the owner's. Pending `wake_me` wakes, standing agents and delegation requests carry on unchanged. Everything the harness
+already sent to the shared chat still reaches the dispatcher, which is why the shared chat became the dispatcher rather
+than Ben's own.
+
+## Not in this version
+
+- Delegation requests are not ledger items, so a dashboard or automatic approval skips the overlap check.
+- `/mcp` has `list_work` but not `request_work`.
+- Roles are still not enforced: a member's work can go to the owner's machines if the dispatcher sends it there (its brief
+  tells it not to).
+- An idle personal orchestrator keeps its process until the server restarts.

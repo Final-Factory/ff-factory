@@ -12,6 +12,24 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **An orchestrator for each person, and a dispatcher** ([docs/orchestrators.md](docs/orchestrators.md)). Each
+  login gets their own orchestrator chat on the home page: only they write to it, it runs on their own Claude token
+  when they have one, sees everything, follows up with their own workers, and files work requests. The shared chat
+  becomes the **dispatcher**, keeping its conversation: it owns every tool that changes something and answers each
+  request through the work ledger (start, merge, link, queue, ask, reject, done).
+  - The ledger (`data/work.json`) checks each request against open and recent requests, live workers, open PRs on
+    their branches, pending delegations and recent commits (specs, PRs, branches, ids, similar titles). A repeat of an
+    open request returns it, and `start_agent` refuses a strong overlap without `override_duplicate`.
+  - Worker updates go to the chats of the people the work is for; the dispatcher sees them in the ledger. Standing
+    agents' delegation notices go to the person the run was for; restarts and host notices to the dispatcher.
+  - Limits: 3 filings and 3 follow-ups per worker between two messages of a person, 10 requests an hour and 40 a
+    day per person, 3 questions per request. The dispatcher's destructive tools run only for a request its person
+    asked for in their own turn, or when the owner writes to it.
+  - No interruptions: only its person writes to a chat (403 otherwise), only the owner to the dispatcher;
+    notifications, in-page notices and the heartbeat are per person.
+  - The sidebar lists the other people's chats (read only) and the Dispatcher; its page shows the requests and its
+    conversation. Decisions arrive in your chat as notices that open the request.
+
 - **Max, and FFBox at a glance** (docs/max.md). A Max page (`#/max`) shows what FF Factory's agents did as
   the Discord bot: every post, reply, question, edit, thread opened, renamed or closed, with its channel or
   thread, a Discord link, the first line, the session and where it ran. The ffdiscord CLI appends each one to
@@ -126,6 +144,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   side gets a one-row composer.
 
 ### Fixed
+
+- **Worker updates named "A worker" in the chat.** Since updates carry "(requested by …)", the page could not
+  read which worker one was about; it names the worker and links to it again.
 
 - **Unity MCP calls could land in another sandbox's editor.** Every worker's MCP-for-Unity server
   discovered all editors on the machine, and when its pinned editor was restarting or reloading it

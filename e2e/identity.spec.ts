@@ -55,20 +55,23 @@ test('who am I: each login has its user id, display name and role', async ({ aut
   await mate.dispose();
 });
 
-test("the shared orchestrator chat records each message's author and shows it", async ({ authed: page }) => {
-  const tag = uniq('shared');
+test("each person's message goes to their own orchestrator, recorded with its author; the other's chat is read only", async ({ authed: page }) => {
+  const tag = uniq('own');
   const mate = await asMate();
-  const orch = (await appState(page.request)).orchestratorId;
-  await sendMessage(mate, orch, `from the teammate ${tag}`);
-  await sendMessage(page.request, orch, `from the owner ${tag}`);
-  const events = await transcript(page.request, orch);
-  const mine = (text: string) => events.find((e) => e.kind === 'user' && e.text === text);
-  expect(mine(`from the teammate ${tag}`)).toMatchObject({ from: 'human', requestedBy: MATE });
-  expect(mine(`from the owner ${tag}`)).toMatchObject({ from: 'human', requestedBy: OWNER });
+  const mine = (await appState(page.request)).orchestratorId;
+  const theirs = (await appState(mate)).orchestratorId;
+  expect(theirs).not.toBe(mine);
+  await sendMessage(mate, theirs, `from the teammate ${tag}`);
+  await sendMessage(page.request, mine, `from the owner ${tag}`);
+  const find = async (id: string, text: string) => (await transcript(page.request, id)).find((e) => e.kind === 'user' && e.text === text);
+  expect(await find(theirs, `from the teammate ${tag}`)).toMatchObject({ from: 'human', requestedBy: MATE });
+  expect(await find(mine, `from the owner ${tag}`)).toMatchObject({ from: 'human', requestedBy: OWNER });
+  // Nobody writes to someone else's orchestrator (docs/orchestrators.md).
+  expect((await mate.post(`/api/sessions/${mine}/message`, { data: { text: 'hi' } })).status()).toBe(403);
   // The fake agent echoes the message without the "[from <name>]" line the model reads.
-  await expect(page.locator('.orch .msg-assistant', { hasText: `Echo: from the teammate ${tag}` })).toBeVisible();
-  await expect(page.locator('.orch .msg-user', { hasText: `from the teammate ${tag}` }).getByTestId('msg-author')).toHaveText('Team Mate');
-  await expect(page.locator('.orch .msg-user', { hasText: `from the owner ${tag}` }).getByTestId('msg-author')).toHaveText('tester');
+  await expect(page.locator('.orch .msg-assistant', { hasText: `Echo: from the owner ${tag}` })).toBeVisible();
+  // In a person's own chat, their messages carry no name: it is theirs.
+  await expect(page.locator('.orch .msg-user', { hasText: `from the owner ${tag}` }).getByTestId('msg-author')).toHaveCount(0);
   await mate.dispose();
 });
 

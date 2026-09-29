@@ -183,6 +183,9 @@ function applyEvent(ev: ServerEvent) {
     case 'delegation':
       set((s) => (s.app ? { app: { ...s.app, delegations: upsertById(s.app.delegations, ev.request) } } : {}));
       return;
+    case 'work':
+      set((s) => (s.app ? { app: { ...s.app, work: upsertById(s.app.work ?? [], ev.item) } } : {}));
+      return;
     case 'sandbox_removed':
       set((s) => (s.app ? { app: { ...s.app, sandboxes: s.app.sandboxes.filter((x) => x.id !== ev.id) } } : {}));
       return;

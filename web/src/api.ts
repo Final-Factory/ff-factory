@@ -116,7 +116,8 @@ export const api = {
     request<unknown>('POST', `/api/sessions/${enc(sessionId)}/mode`, { mode }),
   startSession: (req: StartSessionRequest) => request<SessionInfo>('POST', '/api/sessions', req),
   deleteSession: (sessionId: string) => request<unknown>('DELETE', `/api/sessions/${enc(sessionId)}`),
-  resetOrchestrator: () => request<unknown>('POST', '/api/orchestrator/reset'),
+  /** A fresh conversation: your own orchestrator's, or the dispatcher's (the owner only). */
+  resetOrchestrator: (which: 'mine' | 'dispatcher' = 'mine') => request<{ id: string }>('POST', '/api/orchestrator/reset', { which }),
   createSandbox: (req: CreateSandboxRequest) => request<Sandbox>('POST', '/api/sandboxes', req),
   deleteSandbox: (id: string) => request<unknown>('DELETE', `/api/sandboxes/${enc(id)}`),
   unity: (id: string, action: 'start' | 'stop') =>
