@@ -136,6 +136,8 @@ export interface SessionInfo {
   standingId?: string;
   /** Set when the session runs on a machine (docs/machines.md) rather than on this host. */
   machineId?: string;
+  /** With machineId: the machine sandbox it works in (docs/machines.md, "Machine sandboxes"), not the machine's main clone. */
+  machineSandbox?: string;
   /** The last label this agent gave its sandbox or machine (set_label), restored when a helper there finishes. */
   label?: string;
   labelAt?: string;
@@ -293,6 +295,20 @@ export interface Machine {
   unityPath?: string;
   /** Scratch folder for its agents (TMP, TEMP and TMPDIR of their processes); unset: the system's. */
   tempDir?: string;
+  /** The folder its sandboxes (git worktrees of repoPath) live in; unset: the machine has no sandboxes. */
+  sandboxRoot?: string;
+  /** Sandboxes that may exist there at once (default 3 once sandboxRoot is set). */
+  maxSandboxes?: number;
+  /** Agents that may run at once in one of its sandboxes (default 2). */
+  maxAgentsPerSandbox?: number;
+  /** Unity editors of its sandboxes that may run at once (default 2; the main clone's editor is not counted). */
+  maxUnity?: number;
+  /** Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 50). */
+  diskWarnGB?: number;
+  /** Below this, idle sandbox editors are stopped and busy sandbox agents asked to checkpoint (default 20). */
+  diskCriticalGB?: number;
+  /** Its sandboxes, as its daemon last reported them (portal-owned: purpose and sessionIds). */
+  sandboxes?: MachineSandbox[];
   /** Portal URL the daemon connects to. */
   portalUrl: string;
   maxSessions: number;
@@ -301,6 +317,43 @@ export interface Machine {
   info?: { hostname: string; os: string; node: string; claude?: string; daemon: string; platform?: MachinePlatform };
   git?: GitStatus;
   createdAt: string;
+}
+
+/**
+ * A sandbox on a machine (docs/machines.md, "Machine sandboxes"): a git worktree of the machine's main clone in its
+ * sandboxRoot, on its own branch, with its own Library and Unity editor. The daemon owns the folder, git and Unity
+ * state; the portal owns purpose and sessionIds.
+ */
+export interface MachineSandbox {
+  /** The folder name, also the Unity project and MCP instance name ("<id>@<hash>"). Addressed as "<machine>/<id>". */
+  id: string;
+  branch: string;
+  base: string;
+  path: string;
+  purpose: string;
+  status: SandboxStatus;
+  statusDetail?: string;
+  createdAt: string;
+  unity: MachineSandboxUnity;
+  sessionIds: string[];
+  git?: GitStatus;
+}
+
+export interface MachineSandboxUnity {
+  state: 'stopped' | 'starting' | 'running' | 'crashed';
+  pid?: number;
+  detail?: string;
+  logPath?: string;
+}
+
+/** The pool settings the portal sends a daemon (welcome) and a deploy writes into daemon.json. */
+export interface SandboxPoolSettings {
+  root: string;
+  maxSandboxes: number;
+  maxAgentsPerSandbox: number;
+  maxUnity: number;
+  diskWarnGB: number;
+  diskCriticalGB: number;
 }
 
 // ---- providers (docs/ffbox-integration.md): FFBox, reached through the connector it runs ----

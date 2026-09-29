@@ -231,12 +231,15 @@ export function editorBinary(repo: string, exists: (p: string) => boolean, read:
 export class MacUnity {
   readonly repo: string;
   readonly platform: UnityPlatform;
+  /** The editor's own log (-logFile), for a sandbox editor (machine/sandboxes.ts); unset: Unity's default Editor.log. */
+  readonly logFile?: string;
   private readonly d: UnityDeps;
   private readonly bin: () => string;
 
-  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}) {
+  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string } = {}) {
     this.repo = norm(repo);
     this.platform = platform;
+    this.logFile = opts.logFile;
     this.d = deps ?? realDeps(platform);
     this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8'), os.homedir(), platform, process.env, where));
   }
@@ -326,7 +329,7 @@ export class MacUnity {
     if (this.d.exists(lock)) this.d.remove(lock); // no editor has the project open, so the lock is stale
     const bin = this.bin();
     await this.noAppNap(bin);
-    const pid = await this.d.launch(bin, ['-projectPath', this.repo], this.repo);
+    const pid = await this.d.launch(bin, ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])], this.repo);
     for (let i = 0; i < 10; i++) {
       await this.d.sleep(1000);
       if (this.editors(await this.d.procs()).length) break;
@@ -525,7 +528,7 @@ export class MacUnityWatch {
     this.u = u;
     this.report = report;
     this.opts = { max: 3, windowMinutes: 30, hang: DEFAULT_HANG, ...opts };
-    const log = editorLogPath(u.platform);
+    const log = u.logFile ?? editorLogPath(u.platform);
     const mac = u.platform !== 'win32';
     this.d = {
       logStat: () => {

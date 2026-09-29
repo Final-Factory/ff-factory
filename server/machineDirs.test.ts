@@ -25,9 +25,9 @@ test('machine dirs: given folders are absolute and normalised; unset keeps the p
   assert.throws(() => machineDir('~/ff', 'app_dir'), /app_dir "~\/ff" must be an absolute path/);
   assert.throws(() => machineDir('work\\ff', 'temp_dir'), /temp_dir/);
 
-  const prev = { appDir: APP, unityEditorRoot: 'C:\\Program Files\\Unity\\Editor', tempDir: 'D:\\tmp' };
+  const prev = { appDir: APP, unityEditorRoot: 'C:\\Program Files\\Unity\\Editor', tempDir: 'D:\\tmp', sandboxRoot: 'D:\\work\\ffsb' };
   assert.deepEqual(dirOptions({}, prev), { ...prev, unityPath: undefined }, 'a redeploy without options keeps them');
-  assert.deepEqual(dirOptions({ appDir: '', unityPath: 'E:/U/Unity.exe' }, prev), { appDir: undefined, unityEditorRoot: prev.unityEditorRoot, unityPath: 'E:\\U\\Unity.exe', tempDir: 'D:\\tmp' });
+  assert.deepEqual(dirOptions({ appDir: '', unityPath: 'E:/U/Unity.exe', sandboxRoot: 'D:/work/ffsb2/' }, prev), { appDir: undefined, unityEditorRoot: prev.unityEditorRoot, unityPath: 'E:\\U\\Unity.exe', tempDir: 'D:\\tmp', sandboxRoot: 'D:\\work\\ffsb2' });
 
   assert.doesNotThrow(() => checkDirs({ appDir: APP }, 'win32', 'lothdesktop'));
   assert.throws(() => checkDirs({ appDir: APP }, 'darwin', 'm5'), /appDir "D:\\work\\.ff-factory" is not a Mac path, and m5 is a Mac/);

@@ -12,6 +12,30 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Machine sandboxes** (docs/machines.md, "Machine sandboxes"). A Mac or Windows PC can now hold a pool of
+  sandboxes like the host's: git worktrees of its main clone in its `sandbox_root`, each on its own branch,
+  with a warm Library copied from the main clone (or another sandbox) and its own Unity editor, which the
+  daemon starts, stops, watches for hangs and crashes, and stops after 2 hours without agent activity.
+  `add_machine` (and a redeploy) takes `sandbox_root`, `max_sandboxes` (default 3), `max_agents_per_sandbox`
+  (2), `max_unity` (2) and the disk guard's `disk_warn_gb` / `disk_critical_gb` (50 / 20), kept on the record
+  and in `daemon.json`. The sandbox tools take a machine: `create_sandbox {machine}`, and `"<machine>/<name>"`
+  in `set_sandbox_label`, `delete_sandbox`, `unity`, `start_agent` and `switch_branch`. The machine's disk
+  guard refuses new sandboxes and editors when space is low and, when critical, stops idle editors and asks
+  busy sandbox agents to checkpoint. Daemon protocol 5 (older daemons are redeployed as usual; sandbox
+  commands are never sent to them).
+- **Windows GPU numbers for any card.** Without `nvidia-smi` (an Intel or AMD GPU), the host and Windows
+  daemons read Windows' GPU performance counters (`\GPU Engine(*)\Utilization Percentage`,
+  `\GPU Adapter Memory(*)\Dedicated Usage`, or their CIM classes on a localized Windows) and the adapter's
+  name and memory from the registry.
+
+### Changed
+
+- **`list_sandboxes` is compact and grouped by computer**: this host, then each machine with sandboxes, each
+  with its limits and free count; one line per sandbox with a **FREE** flag, and only its live agents (the
+  number of stopped ones in brackets). It had grown past a million characters on BEAST by listing every agent a
+  sandbox ever had. `list_machines` lists only live agents too. A machine's `max_agents` now counts the agents
+  in its main clone (and its standing agents); its sandboxes' agents count separately.
+
 - **Max, and FFBox at a glance** (docs/max.md). A Max page (`#/max`) shows what FF Factory's agents did as
   the Discord bot: every post, reply, question, edit, thread opened, renamed or closed, with its channel or
   thread, a Discord link, the first line, the session and where it ran. The ffdiscord CLI appends each one to

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { run } from './proc.ts';
 import * as win from './machineDeployWin.ts';
-import { platformNoun, type MachinePlatform } from '../shared/types.ts';
+import { platformNoun, type MachinePlatform, type SandboxPoolSettings } from '../shared/types.ts';
 
 /**
  * Install or update the daemon on a machine over ssh (docs/machines.md), with this host's own ssh setup:
@@ -226,6 +226,8 @@ export interface DeployOptions {
   repoSlug?: string;
   /** The machine's own folders (add_machine; docs/machines.md): unset means the defaults. */
   dirs?: MachineDirs;
+  /** The sandbox pool (sandbox_root and limits), written to daemon.json; null: no sandboxes. */
+  sandboxes?: SandboxPoolSettings | null;
   /** The daemon's folder of the previous deploy, when it moves (Windows stops the daemon running from there). */
   previousAppDir?: string;
   step?: (what: string) => void;
@@ -239,6 +241,8 @@ export interface MachineDirs {
   unityEditorRoot?: string;
   unityPath?: string;
   tempDir?: string;
+  /** The folder its sandboxes (worktrees of the main clone) go in (docs/machines.md, "Machine sandboxes"). */
+  sandboxRoot?: string;
 }
 
 /** Throws when a folder option is for the other OS (a D:\ path on a Mac, a /Users path on Windows). Exported for tests. */
@@ -316,7 +320,7 @@ npm ci --omit=dev --no-audit --no-fund --loglevel=error
   );
 
   step('installing');
-  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, ...opts.dirs });
+  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, sandboxes: opts.sandboxes, ...opts.dirs });
   await must(
     opts.host,
     'install',
@@ -392,9 +396,9 @@ async function mustPs(host: string, what: string, script: string, opts: { timeou
 }
 
 /** The daemon's config file (both platforms); a folder option left unset is left out. Exported for tests. */
-export function daemonConfig(o: { portalUrl: string; id: string; token: string; repoPath: string; claude?: string; maxSessions: number } & MachineDirs): string {
+export function daemonConfig(o: { portalUrl: string; id: string; token: string; repoPath: string; claude?: string; maxSessions: number; sandboxes?: SandboxPoolSettings | null } & MachineDirs): string {
   return JSON.stringify(
-    { portalUrl: o.portalUrl, id: o.id, token: o.token, repoPath: o.repoPath, claude: o.claude, maxSessions: o.maxSessions, appDir: o.appDir, unityEditorRoot: o.unityEditorRoot, unityPath: o.unityPath, tempDir: o.tempDir },
+    { portalUrl: o.portalUrl, id: o.id, token: o.token, repoPath: o.repoPath, claude: o.claude, maxSessions: o.maxSessions, appDir: o.appDir, unityEditorRoot: o.unityEditorRoot, unityPath: o.unityPath, tempDir: o.tempDir, sandboxes: o.sandboxes ?? undefined },
     null,
     2,
   );
@@ -459,7 +463,7 @@ async function deployWindows(opts: DeployOptions): Promise<DeployResult> {
   await mustPs(opts.host, 'npm ci', win.npmScript(p.node, version, appDir), { timeoutMs: 10 * 60_000 });
 
   step('installing');
-  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, ...opts.dirs });
+  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, sandboxes: opts.sandboxes, ...opts.dirs });
   const out = await mustPs(opts.host, 'install', win.installScript({ sid: p.sid, home: p.home, config, node: p.node, flag: support.flag, appDir, previousAppDir: opts.previousAppDir }), { timeoutMs: 3 * 60_000 });
   return { platform: 'win32', home: p.home, repoPath, node: p.node, nodeVersion: p.nodeVersion ?? '', claude: p.claude, version, started: /started=True/.test(out) };
 }

@@ -86,13 +86,85 @@ export function parsePressure(out: string): HostStats['memPressure'] {
   return n === 1 ? 'normal' : n === 2 ? 'warn' : n === 4 ? 'critical' : undefined;
 }
 
+/**
+ * Windows' own GPU numbers, for any vendor (Intel, AMD, NVIDIA without nvidia-smi): the performance counters
+ * `\GPU Engine(*)\Utilization Percentage` and `\GPU Adapter Memory(*)\Dedicated Usage` (Get-Counter; where their
+ * English names are unknown, a localized Windows, the same counters through their CIM classes), and each display
+ * adapter's name and dedicated memory from the registry (Win32_VideoController's AdapterRAM stops at 4 GB). One line per
+ * value: `engine|<instance>|<percent>`, `mem|<instance>|<bytes>`, `adapter|<name>|<bytes>`; parseWinGpu reads them.
+ */
+export const WIN_GPU_SCRIPT = [
+  "$ErrorActionPreference = 'SilentlyContinue'",
+  "$s = (Get-Counter -Counter '\\GPU Engine(*)\\Utilization Percentage','\\GPU Adapter Memory(*)\\Dedicated Usage').CounterSamples",
+  "if ($s) { foreach ($x in $s) { $k = if ($x.Path -like '*utilization percentage') { 'engine' } else { 'mem' }; \"$k|$($x.InstanceName)|$($x.CookedValue)\" } }",
+  'else {',
+  '  foreach ($x in Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine) { "engine|$($x.Name)|$($x.UtilizationPercentage)" }',
+  '  foreach ($x in Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory) { "mem|$($x.Name)|$($x.DedicatedUsage)" }',
+  '}',
+  "Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' | ForEach-Object {",
+  "  $b = $_.'HardwareInformation.qwMemorySize'",
+  "  if (-not $b) { $v = $_.'HardwareInformation.MemorySize'; if ($v -is [byte[]]) { $b = [BitConverter]::ToUInt32($v, 0) } elseif ($v) { $b = $v } }",
+  '  if ($_.DriverDesc) { "adapter|$($_.DriverDesc)|$([uint64]$b)" }',
+  '}',
+].join('\n');
+
+/**
+ * The GPU from WIN_GPU_SCRIPT's lines. Utilisation as Task Manager shows it: per engine (adapter, physical GPU, engine
+ * index) the sum over the processes using it, and the adapter's figure is its busiest engine. The adapter reported is
+ * the one with the most dedicated memory in use (the one doing the work); its name and total are the display adapter's
+ * with the most memory of its own (virtual adapters such as Remote Display have none). Undefined without any numbers.
+ */
+export function parseWinGpu(out: string): HostStats['gpu'] {
+  const engines = new Map<string, number>();
+  const used = new Map<string, number>();
+  const adapters: { name: string; bytes: number }[] = [];
+  for (const line of out.split(/\r?\n/)) {
+    const [kind, inst = '', raw = ''] = line.trim().split('|');
+    const v = Number(raw.replace(',', '.'));
+    if (!Number.isFinite(v)) continue;
+    if (kind === 'adapter') {
+      if (inst && v > 0) adapters.push({ name: inst.trim(), bytes: v });
+      continue;
+    }
+    const luid = /luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_(\d+)/i.exec(inst);
+    if (!luid) continue;
+    const adapter = `${luid[1].toLowerCase()}_${luid[2]}`;
+    if (kind === 'mem') used.set(adapter, Math.max(used.get(adapter) ?? 0, v));
+    else if (kind === 'engine') {
+      const eng = /_eng_(\d+)/i.exec(inst)?.[1] ?? '0';
+      const key = `${adapter}|${eng}`;
+      engines.set(key, (engines.get(key) ?? 0) + v);
+    }
+  }
+  const util = new Map<string, number>();
+  for (const [key, v] of engines) {
+    const a = key.split('|')[0];
+    util.set(a, Math.max(util.get(a) ?? 0, v));
+  }
+  const luids = [...new Set([...used.keys(), ...util.keys()])];
+  const best = adapters.sort((a, b) => b.bytes - a.bytes)[0];
+  if (!luids.length && !best) return undefined;
+  const pick = luids.sort((a, b) => (used.get(b) ?? 0) - (used.get(a) ?? 0) || (util.get(b) ?? 0) - (util.get(a) ?? 0))[0];
+  const memUsedMiB = Math.round((pick ? (used.get(pick) ?? 0) : 0) / 2 ** 20);
+  return {
+    name: best?.name ?? 'GPU',
+    memTotalMiB: Math.max(Math.round((best?.bytes ?? 0) / 2 ** 20), memUsedMiB),
+    memUsedMiB,
+    utilPct: Math.min(100, Math.round(pick ? (util.get(pick) ?? 0) : 0)),
+  };
+}
+
 async function gpu(memTotalBytes: number): Promise<HostStats['gpu']> {
   if (process.platform === 'darwin') {
     const r = await run('ioreg', ['-r', '-d', '1', '-c', 'IOAccelerator'], { timeoutMs: 5000 });
     return r.code === 0 ? parseIoregGpu(r.stdout, memTotalBytes) : undefined;
   }
   const r = await run('nvidia-smi', ['--query-gpu=name,memory.total,memory.used,utilization.gpu', '--format=csv,noheader,nounits'], { timeoutMs: 5000 });
-  return r.code === 0 ? parseNvidiaSmi(r.stdout) : undefined;
+  const nvidia = r.code === 0 ? parseNvidiaSmi(r.stdout) : undefined;
+  if (nvidia || process.platform !== 'win32') return nvidia;
+  // No nvidia-smi (an Intel or AMD card): Windows' own counters. Get-Counter takes a second or two.
+  const w = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WIN_GPU_SCRIPT], { timeoutMs: 20_000 });
+  return w.code === 0 ? parseWinGpu(w.stdout) : undefined;
 }
 
 async function memory(): Promise<Pick<HostStats, 'memTotalBytes' | 'memFreeBytes' | 'memUsedBytes' | 'memPressure'>> {

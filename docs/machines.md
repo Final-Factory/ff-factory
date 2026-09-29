@@ -1,8 +1,8 @@
 # Machines: agents on the user's Macs and Windows PCs
 
-A machine is a whole computer the portal can run agents on, beside the sandboxes on the host. There
-is no partitioning: agents work in the machine's main game clone, the one the user uses (no worktree
-unless a task truly needs one). Machines are Macs (the daemon is a LaunchAgent) or Windows PCs (the
+A machine is a whole computer the portal can run agents on, beside the sandboxes on the host. By default
+agents work in the machine's main game clone, the one the user uses (no worktree unless a task truly needs
+one); a machine given a `sandbox_root` also holds its own pool of sandboxes ([Machine sandboxes](#machine-sandboxes)). Machines are Macs (the daemon is a LaunchAgent) or Windows PCs (the
 daemon is a scheduled task at the user's logon, [below](#windows-machines)), with ids such as `m5` or
 `lothdesktop`. Ids are lower-case letters, digits and dashes; one given with capitals (`LothDesktop`) is
 stored lower-case and shown as typed, and either spelling works in every tool.
@@ -81,7 +81,8 @@ before redeploying by hand.
   [identity.md](identity.md)) runs on that token instead, on any Mac. Every account switch, including the
   orchestrator's and this host's workers': [accounts.md](accounts.md).
 - **Limits.** Machine agents run on the Mac, so they do not count toward this host's
-  `limits.maxSessions`; each machine has its own limit (default 3).
+  `limits.maxSessions`; each machine has its own limit for its main clone and standing agents (`max_agents`,
+  default 3), and each of its sandboxes its own (`max_agents_per_sandbox`, below).
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
 - **Standing agents** can be assigned to a machine: their folder is `agents/<id>` in the daemon's folder
   (`~/.ff-factory/agents/<id>` by default) on that Mac, runs wait (like a full slot) while the machine is offline, and budgets work unchanged.
@@ -97,7 +98,8 @@ terminal sees, e.g. `~/bin/gh`), writes `~/.ff-factory/daemon.json` (portal URL,
 Running `add_machine` again for the same id (or Redeploy in the UI) updates the code and issues a fresh
 token; it refuses while agents are running there unless forced. The user does nothing on the Macs.
 
-**A machine's own folders.** `add_machine` (and the Add machine form) takes four optional absolute paths,
+**A machine's own folders.** `add_machine` (and the Add machine form) takes four optional absolute paths (and
+`sandbox_root`, [below](#machine-sandboxes)),
 kept on the machine's record (shown by `list_machines` and on the machine page) and in its `daemon.json`:
 
 | Option | What it sets | Default |
@@ -202,7 +204,11 @@ log on again. A deploy while nobody is logged on installs everything and says so
 - **Awake**: while any agent runs it holds `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`
   from a hidden PowerShell that waits on the daemon's pid (so a crashed daemon cannot keep the PC awake).
   The display may still turn off; set sleep to never anyway (below).
-- **Load**: `server/system.ts` as on the BEAST host: CPU, RAM, disk, and an NVIDIA GPU through `nvidia-smi`.
+- **Load**: `server/system.ts` as on the BEAST host: CPU, RAM, disk, and the GPU: through `nvidia-smi` when it is
+  there, else (an Intel or AMD card) from Windows' own performance counters, `\GPU Engine(*)\Utilization Percentage`
+  (the busiest engine, summed over the processes using it, as Task Manager shows it) and `\GPU Adapter
+  Memory(*)\Dedicated Usage`, read with Get-Counter (their CIM classes on a Windows whose counter names are
+  localized), with the adapter's name and memory from the registry (`WIN_GPU_SCRIPT`, `parseWinGpu`).
 - **Unity**: the `unity` tool and the hang/crash watch work as on a Mac (`machine/unity.ts` with platform
   win32): the editor is `Unity.exe` with `-projectPath` of the clone, found as above ("Finding Unity":
   `unity_path`, `unity_editor_root`, the editors the Hub lists, its chosen install location, Program Files); its
@@ -294,6 +300,73 @@ Host lothdesktop
 
 `ssh lothdesktop exit 0` must return at once. Then `add_machine` with `id: LothDesktop` and
 `ssh_host: lothdesktop` (or the Add button in the sidebar) does the rest; `list_machines` shows the progress.
+
+## Machine sandboxes
+
+A machine with a `sandbox_root` holds a pool of sandboxes, as the host does: each a **git worktree of the
+machine's main clone** (`repo_path`) at `<sandbox_root>/<name>`, on its own branch, with its own `Library` and at
+most one Unity editor. The folder name is also the Unity project name, so the editor's MCP instance is
+`<name>@<hash>`, which the guard pins its agents to. They are addressed as `<machine>/<name>`, e.g.
+`lothdesktop/sb1`. The daemon does the work (`machine/sandboxes.ts`, `SandboxPool`); the portal keeps the labels
+and agents and shows what the daemon reports.
+
+**Settings** (`add_machine`, kept on the record and in `daemon.json`, and sent to the daemon in every `welcome`, so a
+change applies on the next reconnect; omitted on a redeploy: kept):
+
+| Option | What | Default |
+|---|---|---|
+| `sandbox_root` | Absolute folder for the sandboxes, e.g. `D:\work\ffsb`; unset: no sandboxes. Moving it is refused while sandboxes exist. | none |
+| `max_sandboxes` | Sandboxes that may exist at once | 3 |
+| `max_agents_per_sandbox` | Agents that may run at once in one sandbox (apart from `max_agents`, the main clone's) | 2 |
+| `max_unity` | Sandbox editors that may run at once (the main clone's editor is not counted) | 2 |
+| `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors | 50 |
+| `disk_critical_gb` | Below this: idle sandbox editors stop, and agents mid-turn in sandboxes are asked to commit, push and end their turn | 20 |
+
+LothDesktop, for example: `sandbox_root: "D:\work\ffsb"`, `max_sandboxes: 3`, `max_agents_per_sandbox: 2` (six
+sandbox agents in all), `max_unity: 2`.
+
+**Tools.** The host's sandbox tools take a machine:
+
+- `create_sandbox {name, purpose, machine: "lothdesktop", branch?, base?, start_unity?, seed_library?}`: returns once
+  the daemon has recorded it; the fetch, `git worktree add --no-checkout`, checkout and Library copy go on in the
+  background (`list_sandboxes` shows the step), and `start_agent` can be called at once: the prompt waits until
+  the sandbox is ready. The branch defaults to `sandbox/<name>`; an existing local or remote branch is checked out
+  (tracking origin); never master, main or develop.
+- `set_sandbox_label {sandbox: "lothdesktop/sb1", purpose}`, `delete_sandbox {sandbox: "lothdesktop/sb1", user_asked}`
+  (stops its agents and editor, removes the Library, the worktree and the folder; the branch stays),
+  `unity {sandbox: "lothdesktop/sb1", action}` (status, start, stop, restart, log), `start_agent {sandbox:
+  "lothdesktop/sb1", prompt, ...}`, `switch_branch {sandbox: "lothdesktop/sb1", branch}` (refused while its editor
+  runs: stop it first, since Windows machines have no dialog watch for Unity's "modified externally" question).
+- `list_sandboxes` shows this host's sandboxes and then each machine's, grouped, with each group's limits and free
+  count, one line per sandbox (a **FREE** flag when it is ready, labelled unused and has no live agent) and only
+  its live agents. An offline machine's sandboxes show as last reported.
+
+**Agents in a machine sandbox** get their own brief (the worktree, their editor's instance name) and the `machine`
+tools `set_label` (the sandbox's label), `wake_me`, `unity` (their sandbox's editor) and `switch_branch`. Their guard
+is the sandbox one, not the main clone's backup rules: their worktree is theirs, the main clone and the daemon's
+folder are protected, killing Unity by hand is refused (other sandboxes' editors share the machine), and a raw
+`git switch` is refused while their editor runs.
+
+**Warm Library.** A new sandbox's `Library` is copied from the main clone's, or, when that is empty (a clone that never
+opened Unity), from a ready sandbox's, preferring one whose editor is stopped: robocopy on Windows, an APFS clone
+(`cp -c`) on a Mac. It needs `disk_warn_gb` + 30 GB free first. `seed_library: false` skips it.
+
+**Editors.** Each sandbox editor logs to its own `Logs/sandbox-editor.log` in the worktree (`-logFile`; the previous
+run's kept as `sandbox-editor-<time>.log`, the newest three), so its hang and crash watch (the same `MacUnityWatch` as
+the main clone's) reads its own log, not the shared `Editor.log`. The daemon looks every 30 s: the editor's state
+(starting until its MCP bridge is up), the watch (a hung or crashed editor restarted, at most 3 in 30 minutes, and
+its agents told), git status every 2 minutes, the disk guard, and the idle stop (an editor with no agent activity
+there for 2 hours, and no agent mid-turn, is stopped; `daemon.json` `sandboxIdleStopMinutes`).
+
+**Where things live.** `<app_dir>/sandboxes.json` keeps the pool across daemon restarts (a create or delete cut off
+by one shows as an error: delete it again). The portal keeps each sandbox (daemon facts plus purpose and agents) on
+the machine record (`sandboxes`). Git operations on the main clone's repository (fetch, worktree add and remove, the
+main clone's own branch switch) take one lock in the daemon.
+
+**Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
+on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
+an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
+portal never sends it one: it says the daemon is being redeployed.
 
 ## Not in v1
 
