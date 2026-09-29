@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Config, HostGuardConfig } from './config.ts';
+import { hostSoftFreeGB, type Config, type HostGuardConfig } from './config.ts';
+import { CleanupRunner, type CleanupRun } from './cleanup.ts';
 import type { HelperAction, HelperResult } from './privileged.ts';
 import type { DiskLevel, HostHealth, Sandbox, SessionInfo } from '../shared/types.ts';
 
@@ -82,7 +83,14 @@ export interface HostDeps {
   /** A message to the orchestrator, and a push notification to the user. */
   report(title: string, body: string): void;
   runHelper(action: HelperAction): Promise<HelperResult>;
-  cleanup(): Promise<{ removed: number }>;
+  /** The continuous clean-up (server/cleanup.ts): one pass, the biggest consumers, the log, the volumes it frees. */
+  cleanup: {
+    pass(low: boolean): Promise<CleanupRun>;
+    consumers(): Promise<{ path: string; bytes: number }[]>;
+    stale?(): Promise<{ path: string; days: number }[]>;
+    log(entry: object): void;
+    diskPaths(): string[];
+  };
   /** Kill stale automation browsers (server/reaper.ts); one line per reaped tree. */
   reap?(maxAgeHours: number): Promise<string[]>;
   changed(h: HostHealth): void;
@@ -111,6 +119,7 @@ export class HostHealthMonitor {
   /** Set while a helper detaches the drive on purpose (compaction): its absence is not an outage. */
   private maintenance = false;
   private lastCleanupAt = 0;
+  readonly cleaner: CleanupRunner;
   private criticalSince = 0;
   private lastReapAt = 0;
   private ticking = false;
@@ -119,6 +128,20 @@ export class HostHealthMonitor {
     this.d = deps;
     const m = deps.mem();
     this.health = { checkedAt: new Date(0).toISOString(), disks: [], level: 'ok', sandboxRoot: 'ok', memFreeBytes: m.free, memTotalBytes: m.total };
+    this.cleaner = new CleanupRunner({
+      settings: () => ({ everyMinutes: this.g().cleanup.everyMinutes, softFreeGB: hostSoftFreeGB(this.g()) }),
+      diskPaths: () => [...deps.cleanup.diskPaths(), ...deps.cfg.hostDiskPaths],
+      statfs: (p) => deps.statfs(p),
+      pass: (low) => deps.cleanup.pass(low),
+      consumers: () => deps.cleanup.consumers(),
+      stale: deps.cleanup.stale && (() => deps.cleanup.stale!()),
+      log: (e) => deps.cleanup.log(e),
+      done: (summary, notice) => {
+        this.health.lastCleanup = summary;
+        if (notice) this.d.report('Clean-up cannot free enough disk space', notice);
+      },
+      now: deps.now,
+    });
   }
 
   private now() {
@@ -148,6 +171,9 @@ export class HostHealthMonitor {
       await this.diskGuard();
       await this.idleEditors();
       await this.reapBrowsers();
+      // The regular pass, and sooner below the soft threshold: before the warn level blocks new work. Not awaited:
+      // a pass can walk big folders for minutes, and the guard must keep looking meanwhile.
+      if (this.health.sandboxRoot === 'ok') void this.cleaner.tick().catch((e) => this.d.log?.(`clean-up failed: ${(e as Error).message}`));
       this.health.blocked = this.blockReason('agent');
       this.d.changed(this.health);
     } catch (e) {
@@ -213,8 +239,8 @@ export class HostHealthMonitor {
     if (this.helperBusy || this.now() < r.nextTryAt || this.health.sandboxRoot === 'failed') return;
     const free = this.hostFreeGB();
     if (free !== undefined && free < this.g().remountMinFreeGB) {
-      if (this.now() - this.lastCleanupAt > 10 * 60_000) await this.cleanup('the sandbox drive is offline and the host volume is nearly full');
-      if (!r.waitingForSpace) this.d.report('Sandbox drive: waiting for disk space', `The host volume has ${free.toFixed(0)} GB free; reattaching the sandbox drive needs ${this.g().remountMinFreeGB} GB (hostGuard.remountMinFreeGB). Cleaned up what is safe; waiting for more.`);
+      if (this.now() - this.lastCleanupAt > 10 * 60_000) void this.cleanup('critical');
+      if (!r.waitingForSpace) this.d.report('Sandbox drive: waiting for disk space', `The host volume has ${free.toFixed(0)} GB free; reattaching the sandbox drive needs ${this.g().remountMinFreeGB} GB (hostGuard.remountMinFreeGB). Cleaning up what is safe; waiting for more.`);
       r.waitingForSpace = true;
       r.nextTryAt = this.now() + 5 * 60_000;
       this.health.detail = `waiting for ${this.g().remountMinFreeGB} GB free on the host volume (${free.toFixed(0)} GB now)`;
@@ -362,7 +388,7 @@ export class HostHealthMonitor {
     }
     const first = !prev;
     if (first) this.criticalSince = this.now();
-    if (this.now() - this.lastCleanupAt > 10 * 60_000) await this.cleanup('disk space is critical');
+    if (this.now() - this.lastCleanupAt > 10 * 60_000) void this.cleanup('critical');
     if (first) {
       for (const s of this.d.sessions().filter((x) => x.kind !== 'orchestrator' && !x.machineId && BUSY.has(x.status))) {
         try {
@@ -380,15 +406,11 @@ export class HostHealthMonitor {
   }
   private lastReported?: DiskLevel;
 
-  private async cleanup(why: string) {
+  /** A pass now (critical disk, waiting to remount, asked for), at most every 10 minutes unless asked. */
+  private async cleanup(trigger: 'critical' | 'asked') {
     this.lastCleanupAt = this.now();
-    const before = this.hostFreeGB();
-    const r = await this.d.cleanup().catch(() => ({ removed: 0 }));
+    await this.cleaner.run(trigger).catch((e) => this.d.log?.(`clean-up failed: ${(e as Error).message}`));
     await this.measure();
-    const after = this.hostFreeGB();
-    const freed = before !== undefined && after !== undefined ? Math.max(0, after - before) * GB : undefined;
-    this.health.lastCleanup = { at: new Date(this.now()).toISOString(), removed: r.removed, freedBytes: freed };
-    if (r.removed) this.d.report('Cleaned up known-safe junk', `${why}: removed ${r.removed} item(s)${freed !== undefined ? `, about ${(freed / GB).toFixed(1)} GB` : ''}.`);
   }
 
   /** The orphan headless-browser reaper: at the first look after startup, then every reapEveryMinutes. */
@@ -445,8 +467,11 @@ export class HostHealthMonitor {
 
   /** host_recovery "cleanup". */
   async cleanupNow(): Promise<string> {
-    await this.cleanup('asked for');
+    await this.cleanup('asked');
     const c = this.health.lastCleanup;
-    return c ? `Removed ${c.removed} item(s)${c.freedBytes !== undefined ? `, about ${(c.freedBytes / GB).toFixed(1)} GB` : ''}.` : 'Nothing removed.';
+    if (!c) return 'Nothing removed (a pass is already running).';
+    const top = c.top?.length ? ` Biggest: ${c.top.map((t) => `${t.path} ${(t.bytes / GB).toFixed(1)} GB`).join(', ')}.` : '';
+    const low = c.belowSoft ? ` Still below the soft threshold of ${c.softFreeGB} GB${c.consumers?.length ? `; biggest remaining: ${c.consumers.map((x) => `${x.path} ${(x.bytes / GB).toFixed(1)} GB`).join(', ')}` : ''}.` : '';
+    return `Removed ${c.removed} item(s), ${((c.freedBytes ?? 0) / GB).toFixed(1)} GB${c.failed ? ` (${c.failed} skipped: in use or refused)` : ''}.${top}${low}`;
   }
 }

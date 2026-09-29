@@ -61,7 +61,7 @@ sandbox root exists.
 | Level | When (any watched volume) | What happens |
 |---|---|---|
 | warn | below `warnFreeGB` (80) | a `[host]` message to the orchestrator and a push (kind "Host health"); new editors and new agent processes on this host are refused with the reason; standing runs wait |
-| critical | below `criticalFreeGB` (40) | also: busy agents get "commit and push now, end your turn" once per episode; editors nobody is working in are stopped; the clean-up runs (at most every 10 minutes) |
+| critical | below `criticalFreeGB` (40) | also: busy agents get "commit and push now, end your turn" once per episode; editors nobody is working in are stopped; a clean-up pass with every rule runs (at most every 10 minutes) |
 
 **The sandbox drive.** When the sandbox root disappears:
 1. The guard remembers the editors that were up and the agents mid-turn in sandboxes (from its
@@ -76,16 +76,9 @@ sandbox root exists.
 **Memory and editors.** A new editor needs `limits.minFreeRamGB` (10) free. An editor whose sandbox
 has had no agent activity for `unity.idleStopMinutes` (120), and no agent mid-turn, is stopped.
 
-**The known-safe clean-up** (`server/cleanup.ts`, `hostGuard.cleanup`):
-- scratch in the temp folder: headless-browser profiles (`edge-shot-*`, `edge-keys-*`) and the
-  test suite's own folders, when untouched for `tempOlderThanHours` (1);
-- agent temp clones (`fff-*`, `ffsb-*`) untouched for `cloneOlderThanDays` (3), only when every repo
-  in them has no uncommitted changes and no commits that no remote has;
-- rotated editor logs beyond the newest three per sandbox;
-- `ageRules`: entries in a named folder older than N days, for example
-  `[{"path": "C:/Users/<you>/AppData/LocalLow/<studio>/<game>/DeterminismAudit", "olderThanDays": 14}, {"path": "C:/Users/<you>/ff-worker", "olderThanDays": 7}]`.
-  An age rule never covers a drive root, the home folder, the sandboxes, the base clone, this app,
-  its data or a protected path.
+**Clean-up** runs all the time, not only in an emergency: see [Continuous clean-up](#5-continuous-clean-up)
+below. The critical level also starts a pass (at most every 10 minutes), and so does a sandbox drive that
+waits for space before it can be reattached.
 
 **The orphan headless-browser reaper** (`server/reaper.ts`). Scripts that drive a headless browser
 (screenshots, Playwright checks) sometimes die or hang and leave it running. Agents may not end
@@ -109,7 +102,7 @@ drive and reattach it through `ffsb-helper-mount` exactly as in a real outage, c
 sandbox's folder is back, and reports the timings (detach, noticed after, reattached after, total). Run
 it after installing or changing the helpers.
 
-The orchestrator can set `hostGuard.cleanup.ageRules` and `hostGuard.devDriveVhdx` with
+The orchestrator can set `hostGuard.devDriveVhdx` and the clean-up settings (below) with
 `set_app_config`, and act by hand with `host_recovery`
 (remount, cleanup, trim, compact, reboot with `confirm_reboot`). `system_status` and the sidebar's
 meters show the guard: one disk meter per watched volume in its guard colour, and a banner while
@@ -182,3 +175,91 @@ Config (`config.json`, all optional): `"outsideWatch": { "machine": "m5", "healt
 "...", "ntfyServer": "https://ntfy.sh", "enabled": true }`. Without `publicUrl` (and no `healthUrl`)
 there is nothing to watch. The Macs get the watch with the daemon: they redeploy themselves when idle after
 an update.
+
+## 5. Continuous clean-up
+
+On 2026-09-28 BEAST's guard refused new agents at 75 GB free on C:, and `host_recovery cleanup` freed
+0 GB: it only knew browser profiles, test scratch and agent clones, and it ran only below the critical
+level, long after the warn level (80 GB) had stopped the work. What filled the disk was elsewhere: Unity
+Libraries of projects nobody had opened for over a year (63 GB), an Actions runner's checkout idle since
+August (46 GB), Claude Code's `bash-edit-diff` snapshots in `%TEMP%\claude` (14.5 GB in three days), a
+sandbox's `Builds` (78 GB on F:), and build archives in `ff-worker` (27 GB). Nothing cleaned the Macs at all.
+
+Now the host guard and every machine daemon clean up by themselves (`server/cleanup.ts`; the daemon side in
+`machine/daemon.ts`), with the same code on Windows and macOS:
+
+- **A pass every hour** (`everyMinutes`, 60).
+- **A pass every 15 minutes while free space is below the soft threshold** (`softFreeGB`), which also runs
+  the rules that empty whole caches. On BEAST the soft threshold defaults to `warnFreeGB` + 40 = **120 GB**,
+  so clean-up works hard well before the hard block at 80 GB; on the machines it is **80 GB**. The volumes
+  measured are the home folder's, the temp folder's and (host) `hostDiskPaths`; the fullest one counts.
+- The critical level, a sandbox drive waiting for space, `host_recovery cleanup` and `machine_cleanup` run
+  a pass at once, with every rule.
+
+**The rules**: each is an allowlisted folder and an age; an entry goes only when nothing anywhere inside it
+changed for that long (a bounded walk, so a folder something still writes to stays).
+
+| Rule | Where | Goes when untouched for |
+|---|---|---|
+| test and browser scratch | temp: this app's own test folders (`ffsb-voice-*`, `scenes-??????`, …), headless-browser profiles | 1 h |
+| agent temp | temp: `ffa-<session>`, each agent's own TMP (below) | 2 h, and never while its session runs |
+| agent clones | temp: `fff-*`, `ffsb-*` with nothing uncommitted or unpushed | 3 days |
+| anything else in temp | temp (not Claude Code's folder); a clone only when fully pushed | 7 days |
+| Claude Code edit snapshots | `<temp>/claude*/bash-edit-diff/*` | 12 h |
+| Claude Code task output | `<temp>/claude*/<project>/*`, and `/tmp/claude-<uid>/*/*` on a Mac | 3 days |
+| Actions runner jobs | `actions-runner*/_work/*` in the home folder (and `C:\`), except `_tool`, `_actions` | 14 days |
+| sandbox builds (host) | `<sandboxRoot>/*/Builds/*` | 7 days |
+| build archives | `~/ff-worker/*.tar`, `*.tgz`, `*.tar.gz`, `*.zip`, `*.bundle` | 7 days |
+| playtest output | the game's `Never Games/finalfactory*/PlaytestSessions/*` (screenshots, recordings) | 14 days |
+| crash dumps | Windows: `%LOCALAPPDATA%\CrashDumps`, `%TEMP%\Unity\Editor\Crashes`; Mac: `~/Library/Logs/Unity` crashes | 2 days |
+| macOS crash reports | `~/Library/Logs/DiagnosticReports` | 14 days |
+| old logs | Unity editor logs; the sandboxes' rotated editor logs beyond the newest three | 7 days |
+| Unity GI cache | `LocalLow\Unity\Caches\GiCache`; Mac `~/Library/Caches/com.unity3d.UnityEditor/GiCache` | 7 days |
+| Unity package cache | `Unity/cache/packages/*` | 30 days (a whole cache: below the soft threshold, 1 day) |
+| Xcode DerivedData | `~/Library/Developer/Xcode/DerivedData/*` | 3 days (6 h below the soft threshold) |
+| Playwright browsers | `ms-playwright/<browser>-<build>` that a newer build of the same browser replaced | 7 days |
+| npx, Homebrew downloads | `npm-cache/_npx`, `~/.npm/_npx`; `~/Library/Caches/Homebrew` | 7 / 14 days |
+| whole caches, below the soft threshold only | npm `_cacache`, NuGet HTTP caches, pip, uv, Go build cache | 1 day |
+| stale Unity Libraries | `<project>/Library` up to three folders below the home folder, for a project not opened (its Library entries, Temp, Logs, UserSettings) for `libraryDeleteDays` (180); never while `Temp/UnityLockfile` exists, never a linked Library (a ParrelSync clone) | 180 days; **reported** from 30 (`libraryReportDays`) |
+| age rules | `hostGuard.cleanup.ageRules` | as configured |
+
+**Never deleted**, whatever a rule says (`neverDelete`, checked again right before each removal):
+a drive root, the home folder and its top-level folders; system folders (`C:\Windows`, `Program Files`,
+`ProgramData`, `/Applications`, `/System`, `/Library`, …); the sandbox root and every sandbox (a Builds
+folder's entries excepted), the standing agents' folder, the base clone, this app and its data, protected
+paths, a machine's clone, daemon folder and Unity; anything that is or holds a git repo, unless the rule
+says otherwise (pushed agent clones, runner checkouts, this app's test scratch); `.claude` (settings,
+transcripts), `.ssh`, `.gnupg`, `.aws`, `.config`, keychains and names that look like secrets;
+`ff-local-backups`; `~/torque`; anything named like lab or audit artifacts (`DeterminismAudit`,
+`ff-audit-artifacts`, `lab`); Steam and Unity installs; `.vhdx`/`.vhd` files (the F: VHDX); and the temp
+folders of agents running now. **In use**: besides the age walk, each entry is renamed before it is
+deleted. On Windows a folder with a file open inside cannot be renamed, so an entry in use is skipped
+whole instead of half removed; a removal that fails after the rename leaves `<name>.ffclean-<n>`, which
+the next pass removes.
+
+**Per-agent hygiene.** Every worker on this host and every agent on a machine gets its own temp folder,
+`<temp>/ffa-<session>` (under the machine's `temp_dir` when it has one), as TMP, TEMP and TMPDIR. It goes
+when the session is removed, and two hours after the session stopped otherwise. The worker and machine
+briefs tell agents to put builds, recordings and screenshot sets there and to delete them once reported.
+
+**Visibility.** Every pass appends one line to `cleanup-log.jsonl` (the app's `dataDir` on the host, the
+daemon's folder on a machine): when, why, free space before and after, each entry removed with its size
+and rule, and what was skipped. `system_status` shows the host's last pass, `list_machines` each
+machine's, and the dashboard's meters list every computer's (hover for the biggest entries). A pass that
+leaves free space below the soft threshold reports the biggest remaining consumers (the home folder's,
+LocalAppData's and the temp folders' children, files at the drive root such as the VHDX) and the stale
+Unity Libraries, as a `[host]` message or `[machine <id>]` message to the orchestrator plus a push, once
+per episode and at most once a day while it lasts. Passes that are fine say nothing.
+
+**Settings** (`set_app_config`, applied at once): `hostGuard.cleanup.everyMinutes` (0 = only below the
+soft threshold, else 15-1440), `hostGuard.cleanup.softFreeGB` (above `warnFreeGB`), and for the machines
+`machines.cleanup.everyMinutes` / `machines.cleanup.softFreeGB`, optionally with `machine` for one
+machine (`{ "*": 80, "m3": 40 }` in config.json). The ages are in `hostGuard.cleanup` in config.json
+(`tempAnyOlderThanDays`, `sessionTempHours`, `claudeTempDays`, `runnerWorkDays`, `buildsOlderThanDays`,
+`playtestDays`, `libraryReportDays`, `libraryDeleteDays`, `cloneOlderThanDays`). The machines use the
+defaults.
+
+What clean-up cannot fix is reported, not removed: user data (OneDrive, Videos, Downloads), the audit
+artifacts, and on BEAST the Dev Drive VHDX, which grows but never shrinks by itself (634 GB for 334 GB used
+on 2026-09-28): compact it by hand (section 3).
+

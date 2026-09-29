@@ -53,13 +53,15 @@ function harness(over: Partial<{ helper: (n: number) => HelperResult }> = {}) {
     sessions: [sess('w1', 'blackhole', 'running'), sess('w2', 'agent-mcp', 'idle'), { ...sess('orch', undefined, 'running'), kind: 'orchestrator' } as SessionInfo],
   };
   const log: string[] = [];
+  /** Each clean-up pass: "low" (below the soft threshold, or asked/critical) or "regular". */
+  const cleaned: string[] = [];
   let helperCalls = 0;
   const cfg = {
     sandboxRoot: 'F:\\ffsb',
     hostDiskPaths: ['C:\\'],
     limits: { minFreeRamGB: 10 },
     unity: { idleStopMinutes: 0 },
-    hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', compactWhenReclaimGB: 0, cleanup: {} },
+    hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', compactWhenReclaimGB: 0, cleanup: { everyMinutes: 60, softFreeGB: 0 } },
   } as unknown as Config;
   const deps: HostDeps = {
     cfg,
@@ -80,11 +82,16 @@ function harness(over: Partial<{ helper: (n: number) => HelperResult }> = {}) {
       if (r.ok) world.driveThere = true;
       return r;
     },
-    cleanup: async () => (log.push('cleanup'), { removed: 3 }),
+    cleanup: {
+      pass: async (low) => (cleaned.push(low ? 'low' : 'regular'), { removed: [{ path: 'C:/Temp/x', bytes: 3 * GB, rule: 'temp-old' }], failed: [], bytes: 3 * GB }),
+      consumers: async () => [{ path: 'C:/Users/me/big', bytes: 500 * GB }],
+      log: () => undefined,
+      diskPaths: () => ['C:\\'],
+    },
     changed: () => undefined,
     now: () => world.now,
   };
-  return { world, log, m: new HostHealthMonitor(deps) };
+  return { world, log, cleaned, m: new HostHealthMonitor(deps) };
 }
 
 test('sandbox drive lost: turns stopped, remounted by the helper (retrying), editors restarted, agents resumed', async () => {
@@ -111,13 +118,19 @@ test('sandbox drive lost: turns stopped, remounted by the helper (retrying), edi
   assert.match(after[2], /^tell w1: The sandbox drive went offline/);
 });
 
+/** Let the passes the guard started without waiting (the clean-up) finish. */
+const settle = () => new Promise((r) => setTimeout(r, 20));
+
 test('sandbox drive lost with the host volume nearly full: clean up and wait before remounting', async () => {
-  const { world, log, m } = harness();
+  const { world, log, cleaned, m } = harness();
   await m.tick();
+  await settle();
+  cleaned.length = 0;
   world.driveThere = false;
   world.freeC = 10 * GB;
   await m.tick();
-  assert.ok(log.includes('cleanup'));
+  await settle();
+  assert.deepEqual(cleaned, ['low']);
   assert.ok(!log.includes('helper mount'), log.join('\n'));
   assert.match(m.status.detail ?? '', /waiting for 30 GB free/);
   world.freeC = 60 * GB;
@@ -128,12 +141,13 @@ test('sandbox drive lost with the host volume nearly full: clean up and wait bef
 });
 
 test('disk critical: busy agents asked to checkpoint once, idle editors stopped, junk cleaned', async () => {
-  const { world, log, m } = harness();
+  const { world, log, cleaned, m } = harness();
   world.freeC = 30 * GB;
   await m.tick();
+  await settle();
   assert.equal(m.status.level, 'critical');
   assert.ok(log.includes('report Disk space critical'));
-  assert.ok(log.includes('cleanup'));
+  assert.ok(cleaned.includes('low'));
   assert.ok(log.some((l) => l.startsWith('tell w1: [disk critical]')));
   assert.ok(!log.some((l) => l.startsWith('tell orch')), 'the orchestrator is not told to stop');
   assert.ok(log.includes('stop agent-mcp') && !log.includes('stop blackhole'), 'only the editor nobody is working in');
@@ -179,4 +193,44 @@ test('recovery self-test: detach through the helper, the guard notices and reatt
   world.sandboxes = [{ ...world.sandboxes[0], unity: { state: 'starting' } } as Sandbox];
   assert.match((await m.compact('asked for')).detail, /^refused: editors are up/);
   assert.deepEqual(log.filter((l) => l.startsWith('helper')), []);
+});
+
+test('continuous clean-up: a regular pass each hour, sooner below the soft threshold, a notice only when it cannot get above', async () => {
+  const { world, log, cleaned, m } = harness();
+  await m.tick();
+  await settle();
+  assert.deepEqual(cleaned, ['regular'], 'the first look runs a pass');
+  assert.equal(m.status.lastCleanup?.trigger, 'hourly');
+  assert.equal(m.status.lastCleanup?.freedBytes, 3 * GB);
+  assert.equal(m.status.lastCleanup?.softFreeGB, 120, 'default soft threshold: warnFreeGB + 40');
+  assert.ok(!log.some((l) => l.startsWith('report Clean-up')), 'a pass that is fine says nothing');
+  world.now += 30 * 60_000;
+  await m.tick();
+  await settle();
+  assert.equal(cleaned.length, 1, 'not due yet');
+  world.now += 31 * 60_000;
+  await m.tick();
+  await settle();
+  assert.deepEqual(cleaned, ['regular', 'regular']);
+  // Below the soft threshold (120 GB) but above the warn level: a pass every 15 minutes, with the low rules.
+  world.freeC = 100 * GB;
+  world.now += 15 * 60_000;
+  await m.tick();
+  await settle();
+  assert.deepEqual(cleaned.slice(2), ['low']);
+  assert.equal(m.status.lastCleanup?.trigger, 'low-space');
+  assert.equal(m.status.lastCleanup?.belowSoft, true);
+  assert.deepEqual(m.status.lastCleanup?.consumers, [{ path: 'C:/Users/me/big', bytes: 500 * GB }]);
+  assert.equal(log.filter((l) => l === 'report Clean-up cannot free enough disk space').length, 1);
+  assert.equal(m.blockReason('agent'), undefined, 'still above the hard block');
+  world.now += 15 * 60_000;
+  await m.tick();
+  await settle();
+  assert.equal(cleaned.length, 4);
+  assert.equal(log.filter((l) => l === 'report Clean-up cannot free enough disk space').length, 1, 'the notice is not repeated every pass');
+  world.now += 5 * 60_000;
+  await m.tick();
+  await settle();
+  assert.equal(cleaned.length, 4, 'at most every 15 minutes while low');
+  assert.match(await m.cleanupNow(), /Removed 1 item\(s\), 3\.0 GB\. Biggest: C:\/Temp\/x 3\.0 GB\. Still below the soft threshold of 120 GB/);
 });

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, loadConfig, ROOT } from './config.ts';
+import { HOST_ROLES, loadConfig, machineCleanupSettings, ROOT } from './config.ts';
 import { Store, bus } from './store.ts';
 import { SandboxManager } from './sandboxes.ts';
 import { SessionManager, snapshotOf } from './sessions.ts';
@@ -27,7 +27,8 @@ import { HostHealthMonitor } from './hostHealth.ts';
 import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
-import { planCleanup, runCleanup } from './cleanup.ts';
+import { appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
+import { pruneEditorLogs } from './sandboxes.ts';
 import { reapBrowsers } from './reaper.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
@@ -139,6 +140,12 @@ machines.report = (text) => {
     }
   }
 };
+// Each machine's own clean-up (docs/self-recovery.md): its settings, and a notice when it cannot free enough.
+machines.cleanupFor = (id) => machineCleanupSettings(cfg, id);
+machines.cleanupNotice = (machineId, text) => {
+  notifier.host(`Disk space on ${machineId}`, text);
+  machines.report?.(`[machine ${machineId}] Clean-up cannot free enough disk space. ${text}`);
+};
 // The outside watchdog (docs/self-recovery.md): a Mac watches this host and alerts the user's phone through ntfy.
 const outside = loadOutsideWatchState(cfg.dataDir);
 const watcher = () => (cfg.outsideWatch?.enabled === false ? undefined : watcherOf(cfg.outsideWatch?.machine, machines.list().map((m) => m.id)));
@@ -243,6 +250,13 @@ sandboxes.events.on('unityRestart', (sb, r) => {
 });
 
 // The host guard: disk space, the sandbox drive's self-recovery, RAM and idle editors (docs/self-recovery.md).
+const cleanupEnv = { ...hostCleanupEnv(), sandboxRoots: [cfg.sandboxRoot] };
+/** What clean-up never touches here: the sandbox root, the standing agents, the base clone, this app and its data, and the temp folders of agents running now. */
+const hostCleanupGuard = () => ({
+  keep: [...cfg.protectedPaths, cfg.sandboxRoot, cfg.standingRoot, cfg.repo.basePath, ROOT, cfg.dataDir, cfg.hostGuard.devDriveVhdx].filter(Boolean),
+  inUse: [...sessions.sessions.values()].filter((s) => s.live && !s.info.machineId).map((s) => sessionTempDir(os.tmpdir(), s.info.id)),
+  home: cleanupEnv.home,
+});
 const hostHealth = new HostHealthMonitor({
   cfg,
   statfs: async (p) => {
@@ -274,12 +288,20 @@ const hostHealth = new HostHealthMonitor({
     }
   },
   runHelper: (a) => runHelper(a),
-  cleanup: async () => {
-    const keep = [...cfg.protectedPaths, cfg.sandboxRoot, cfg.standingRoot, cfg.repo.basePath, ROOT, cfg.dataDir];
-    const items = planCleanup({ policy: cfg.hostGuard.cleanup, keep });
-    const logs = sandboxes.list().filter((s) => s.unity.logPath).map((s) => ({ logsDir: path.dirname(s.unity.logPath!), current: s.unity.logPath! }));
-    const r = runCleanup(items, logs);
-    return { removed: r.removed.length };
+  cleanup: {
+    pass: async (low) => {
+      const guard = hostCleanupGuard();
+      const libraries = cfg.hostGuard.cleanup.libraryDeleteDays > 0 ? { roots: [cleanupEnv.home], deleteDays: cfg.hostGuard.cleanup.libraryDeleteDays } : undefined;
+      const r = await runCleanup(await planCleanup({ rules: cleanupRules(cleanupEnv, cfg.hostGuard.cleanup), guard, low, libraries }), guard);
+      for (const s of sandboxes.list().filter((x) => x.unity.logPath)) {
+        for (const p of pruneEditorLogs(path.dirname(s.unity.logPath!), s.unity.logPath!)) r.removed.push({ path: p, bytes: 0, rule: 'editor-logs' });
+      }
+      return r;
+    },
+    consumers: () => biggestConsumers(cleanupEnv, [cfg.hostGuard.devDriveVhdx].filter(Boolean)),
+    stale: async () => (await staleUnityLibraries([cleanupEnv.home], cfg.hostGuard.cleanup.libraryReportDays)).filter((l) => !neverDelete(l.path, hostCleanupGuard())),
+    log: (e) => appendCleanupLog(cfg.dataDir, e),
+    diskPaths: () => [cleanupEnv.home, cleanupEnv.tmp],
   },
   reap: (hours) => reapBrowsers(hours),
   changed: (h) => {
@@ -1009,6 +1031,10 @@ function broadcast(e: ServerEvent) {
   for (const [c, user] of clients) if (c.readyState === c.OPEN && (!only || only.has(user.toLowerCase()))) c.send(data);
 }
 bus.on('event', broadcast);
+// A removed session's own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene").
+bus.on('event', (e: ServerEvent) => {
+  if (e.type === 'session_removed') void fs.promises.rm(sessionTempDir(os.tmpdir(), e.id), { recursive: true, force: true, maxRetries: 2 }).catch(() => undefined);
+});
 
 setInterval(() => sandboxes.poll(), 3000);
 

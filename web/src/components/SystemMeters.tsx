@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
-import type { AccountUsage, AppState, HostHealth, HostStats, PlanUsage, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
+import type { AccountUsage, AppState, CleanupSummary, HostHealth, HostStats, PlanUsage, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
 import { memUsed as memUsedOf } from '../../../shared/stats';
-import { fmtBytes, fmtClock, fmtCost, lsGet, lsSet, useNow } from '../util';
+import { fmtBytes, fmtClock, fmtCost, fmtRelative, lsGet, lsSet, useNow } from '../util';
 import { Icon } from './ui';
 
 // The sidebar's footer: the load of every computer and the plan usage of every Claude account, in two
@@ -18,11 +18,13 @@ export interface Computer {
   stats?: HostStats;
   online: boolean;
   host?: boolean;
+  /** Its last clean-up pass (server/cleanup.ts). */
+  cleanup?: CleanupSummary;
 }
 
 export function computersOf(app: AppState): Computer[] {
-  const host: Computer[] = app.system ? [{ name: shortHost(app.system.hostname), stats: app.system, online: true, host: true }] : [];
-  return [...host, ...app.machines.map((m) => ({ name: m.id, stats: app.machineStats?.[m.id], online: m.online }))];
+  const host: Computer[] = app.system ? [{ name: shortHost(app.system.hostname), stats: app.system, online: true, host: true, cleanup: app.host?.health?.lastCleanup }] : [];
+  return [...host, ...app.machines.map((m) => ({ name: m.id, stats: app.machineStats?.[m.id], online: m.online, cleanup: m.lastCleanup }))];
 }
 
 const shortHost = (h: string) => h.replace(/\.(local|lan|home)$/i, '');
@@ -47,6 +49,7 @@ function describe(c: Computer): string {
     `RAM ${Math.round(ramPct(s))}% (${fmtBytes(memUsedOf(s))} of ${fmtBytes(s.memTotalBytes)})${s.memPressure ? `, pressure ${s.memPressure}` : ''}`,
     gpu,
     s.diskFreeBytes !== undefined ? `Disk ${fmtBytes(s.diskFreeBytes)} free` : '',
+    c.cleanup ? `Last clean-up ${fmtClock(c.cleanup.at)}: ${fmtBytes(c.cleanup.freedBytes ?? 0)} freed (${c.cleanup.removed} item(s))` : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -112,6 +115,7 @@ export function SystemFooter({ app }: { app: AppState }) {
           ) : (
             <Meters sys={sys} health={app.host?.health} limits={<Limits sys={sys} unityOn={unityOn} agentsOn={agentsOn} />} />
           )}
+          <CleanupLines computers={computers} />
           {app.accounts ? <AccountsMeters app={app} /> : app.usage && <PlanMeters usage={app.usage} />}
         </div>
       )}
@@ -306,6 +310,26 @@ function MachineTable({ computers, health, limits }: { computers: Computer[]; he
         );
       })}
       {limits}
+    </div>
+  );
+}
+
+/** Each computer's last clean-up pass: when, what it freed, and whether free space is still below its soft threshold. */
+function CleanupLines({ computers }: { computers: Computer[] }) {
+  const now = useNow(60_000);
+  const withCleanup = computers.filter((c) => c.cleanup);
+  if (!withCleanup.length) return null;
+  return (
+    <div className="meters cleanup-lines" data-testid="cleanup-lines">
+      {withCleanup.map((c) => {
+        const x = c.cleanup!;
+        return (
+          <div key={c.name} className={`plan-asof${x.belowSoft ? ' lvl-warn' : ''}`} title={x.top?.map((t) => `${t.path}: ${fmtBytes(t.bytes)}`).join('\n') || undefined}>
+            Clean-up {c.name}: {fmtRelative(x.at, now)}, {fmtBytes(x.freedBytes ?? 0)} freed
+            {x.belowSoft && x.freeBytes !== undefined ? ` · only ${fmtBytes(x.freeBytes)} free (soft ${x.softFreeGB} GB)` : ''}
+          </div>
+        );
+      })}
     </div>
   );
 }

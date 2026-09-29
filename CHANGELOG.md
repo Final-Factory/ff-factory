@@ -47,6 +47,21 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   daemons read Windows' GPU performance counters (`\GPU Engine(*)\Utilization Percentage`,
   `\GPU Adapter Memory(*)\Dedicated Usage`, or their CIM classes on a localized Windows) and the adapter's
   name and memory from the registry.
+- **Continuous disk clean-up, on the host and every machine** (docs/self-recovery.md, "Continuous
+  clean-up"). The host guard and each machine daemon now run a pass every hour, and every 15 minutes while
+  free space is below a soft threshold (host: `warnFreeGB` + 40 = 120 GB, before the 80 GB block; machines:
+  80 GB; `hostGuard.cleanup.everyMinutes` / `.softFreeGB` and `machines.cleanup.*`, per machine). Rules per
+  platform cover what actually filled BEAST: Claude Code's `bash-edit-diff` snapshots and task output,
+  Actions runner job folders, sandbox `Builds`, build archives in `ff-worker`, playtest sessions, crash
+  dumps, old logs, the Unity GI and package caches, superseded Playwright browsers, Xcode DerivedData, old
+  temp entries and, below the soft threshold, whole npm/NuGet/pip/uv caches; Unity Libraries of projects not
+  opened for 30 days are reported and removed past 180. Repos, sandboxes, `.claude`, secrets,
+  `ff-local-backups`, `~/torque`, audit artifacts, Steam and Unity installs, VHDX files and anything an agent
+  is using are never removed (checked again before each removal; on Windows an entry in use is skipped
+  whole). Each agent gets its own temp folder (`ffa-<session>`), removed after its session; the briefs tell
+  workers to delete big scratch once reported. Each pass is logged (`cleanup-log.jsonl`) and shown in
+  `system_status`, `list_machines` and the meters; the orchestrator hears only when a pass cannot get back
+  above the soft threshold, with the biggest remaining consumers. New tool `machine_cleanup`.
 
 ### Changed
 
@@ -173,6 +188,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 - **Worker updates named "A worker" in the chat.** Since updates carry "(requested by …)", the page could not
   read which worker one was about; it names the worker and links to it again.
+
+- **Clean-up freed nothing while the disk filled.** It ran only below the critical level (40 GB), after the
+  warn level (80 GB) had already stopped new work, and its rules did not cover what fills the disk
+  (`host_recovery cleanup` freed 0 GB on BEAST at 75 GB free). It no longer reports every pass to the
+  orchestrator. Checking a temp clone for local work no longer rewrites its `.git/index` (`git
+  --no-optional-locks`), which had made every checked clone look freshly used, so none ever aged out.
 
 - **Unity MCP calls could land in another sandbox's editor.** Every worker's MCP-for-Unity server
   discovered all editors on the machine, and when its pinned editor was restarting or reloading it

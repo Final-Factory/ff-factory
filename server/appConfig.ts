@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROOT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole } from './config.ts';
+import { DEFAULT_CLEANUP, ROOT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole } from './config.ts';
 import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret } from './secrets.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
@@ -21,6 +21,11 @@ export const SETTABLE_KEYS = [
   // The host guard's housekeeping (docs/self-recovery.md), so it can be tuned without anyone at the desk.
   'hostGuard.devDriveVhdx',
   'hostGuard.cleanup.ageRules',
+  // The continuous clean-up's pace and soft threshold, on this host and on the machines (optional `machine`).
+  'hostGuard.cleanup.everyMinutes',
+  'hostGuard.cleanup.softFreeGB',
+  'machines.cleanup.everyMinutes',
+  'machines.cleanup.softFreeGB',
   // How many Unity editors may run at once on this host (each takes ~8-12 GB of RAM).
   'limits.maxUnity',
   // How many sandboxes may exist (each holds a worktree and a ~70 GB Library), and live agents on this host.
@@ -149,6 +154,19 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
     }
     case 'hostGuard.cleanup.ageRules':
       return checkAgeRules(value, cfg);
+    case 'hostGuard.cleanup.everyMinutes':
+    case 'machines.cleanup.everyMinutes': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || (n !== 0 && (n < 15 || n > 1440))) throw new Error(`${key} is 0 (only when disk space is low) or a whole number of minutes from 15 to 1440`);
+      return n;
+    }
+    case 'hostGuard.cleanup.softFreeGB':
+    case 'machines.cleanup.softFreeGB': {
+      const n = Number(value);
+      const floor = key === 'hostGuard.cleanup.softFreeGB' && cfg ? cfg.hostGuard.warnFreeGB + 1 : 10;
+      if (!Number.isInteger(n) || n < floor || n > 2000) throw new Error(`${key} is a whole number of GB from ${floor} to 2000${floor > 10 ? ' (above hostGuard.warnFreeGB, where new work is refused)' : ''}`);
+      return n;
+    }
     case 'providers.ffbox.enabled': {
       if (value === true || value === 'true') return true;
       if (value === false || value === 'false') return false;
@@ -186,16 +204,17 @@ function getPath(obj: unknown, key: string): unknown {
   return key.split('.').reduce<unknown>((o, p) => (o && typeof o === 'object' ? (o as Record<string, unknown>)[p] : undefined), obj);
 }
 
-/** A machine id as config machines.useHostClaudeEnv names it (server/machines.ts MACHINE_ID). */
+/** A machine id as config machines.useHostClaudeEnv and machines.cleanup.* name it (server/machines.ts MACHINE_ID). */
 const MACHINE_KEY = /^[a-z0-9][a-z0-9-]{0,23}$/;
 
 /**
- * machines.useHostClaudeEnv after setting it to `v` (undefined: removing it) for `machine`, or for every machine
- * not named when `machine` is absent. Per-machine entries survive a change of the rest, which is "*" once
- * there are any: { "*": false, "m5": true }. Collapses back to a plain boolean (or nothing) when it can.
+ * A per-machine setting (machines.useHostClaudeEnv, machines.cleanup.*) after setting it to `v` (undefined:
+ * removing it) for `machine`, or for every machine not named when `machine` is absent. Per-machine entries
+ * survive a change of the rest, which is "*" once there are any: { "*": false, "m5": true }. Collapses back to a
+ * plain value (or nothing) when it can.
  */
-export function nextUseHostClaudeEnv(cur: unknown, machine: string | undefined, v: boolean | undefined): boolean | Record<string, boolean> | undefined {
-  const obj: Record<string, boolean> = typeof cur === 'object' && cur !== null ? { ...(cur as Record<string, boolean>) } : typeof cur === 'boolean' ? { '*': cur } : {};
+export function nextPerMachine<T extends boolean | number>(cur: unknown, machine: string | undefined, v: T | undefined): T | Record<string, T> | undefined {
+  const obj: Record<string, T> = typeof cur === 'object' && cur !== null ? { ...(cur as Record<string, T>) } : typeof cur === 'boolean' || typeof cur === 'number' ? { '*': cur as T } : {};
   const at = machine ?? '*';
   if (v === undefined) delete obj[at];
   else obj[at] = v;
@@ -216,13 +235,14 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   const perUser = key.startsWith('userClaudeEnv.');
   // The user id becomes a key path segment: no dots (edit config.json by hand for such a login).
   if (perUser && !(opts.user && USER_ID.test(opts.user) && !opts.user.includes('.'))) throw new Error(`${key} needs user: the user id (login name, without dots) whose account it is`);
-  if (opts.machine !== undefined && (key !== 'machines.useHostClaudeEnv' || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.useHostClaudeEnv, and is a machine id such as "m5"`);
+  const perMachine = key === 'machines.useHostClaudeEnv' || key.startsWith('machines.cleanup.');
+  if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.useHostClaudeEnv and machines.cleanup.*, and is a machine id such as "m5"`);
   const v = normalizeSetting(key, value, cfg);
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
   const stored = perUser ? `userClaudeEnv.${opts.user}.${key.slice('userClaudeEnv.'.length)}` : (STORED_AS[key] ?? key);
   const before = getPath(raw, stored);
-  const next = key === 'machines.useHostClaudeEnv' ? nextUseHostClaudeEnv(before, opts.machine, v as boolean | undefined) : v;
+  const next = perMachine ? nextPerMachine(before, opts.machine, v as boolean | number | undefined) : v;
   setPath(raw, stored, next);
   fs.writeFileSync(file + '.prev', text);
   fs.writeFileSync(file + '.tmp', JSON.stringify(raw, null, 2) + '\n');
@@ -264,6 +284,12 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     cfg.providers = { ...cfg.providers, ffbox };
   }
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
+  else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;
+  else if (key === 'hostGuard.cleanup.softFreeGB') cfg.hostGuard.cleanup.softFreeGB = (v as number | undefined) ?? DEFAULT_CLEANUP.softFreeGB;
+  else if (key === 'machines.cleanup.everyMinutes' || key === 'machines.cleanup.softFreeGB') {
+    const field = key === 'machines.cleanup.everyMinutes' ? 'everyMinutes' : 'softFreeGB';
+    cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, [field]: next as number | Record<string, number> | undefined } };
+  }
   else if (key === 'publicGitIdentity.name' || key === 'publicGitIdentity.email') {
     const field = key === 'publicGitIdentity.name' ? 'name' : 'email';
     cfg.publicGitIdentity = { ...cfg.publicGitIdentity, [field]: v as string | undefined };
