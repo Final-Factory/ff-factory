@@ -6,7 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { checkAccountConfig, type Config } from './config.ts';
 import { accountSetupLines, hostAccount, hostClaudeEnv, hostLoginProblem, hostProcessEnv, hostRole, machineUsesLogin } from './secrets.ts';
-import { nextUseHostClaudeEnv, setAppConfig } from './appConfig.ts';
+import { nextPerMachine, setAppConfig } from './appConfig.ts';
 import { claudeEnvFor } from './identity.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { HOST_LOGIN, accountKeyOf, buildAccounts, sessionSource, tokenKey, tokenLabel } from './usage.ts';
@@ -246,10 +246,10 @@ test('accounts: set_app_config sets machines.useHostClaudeEnv for all machines o
   setAppConfig(file, cfg, 'machines.useHostClaudeEnv', true);
   assert.deepEqual(cfg.machines?.useHostClaudeEnv, { m3: false, m5: false, '*': true });
 
-  assert.equal(nextUseHostClaudeEnv(undefined, undefined, false), false);
-  assert.deepEqual(nextUseHostClaudeEnv(false, 'm5', true), { '*': false, m5: true }, 'a plain value becomes the rest');
-  assert.equal(nextUseHostClaudeEnv({ '*': false, m5: true }, 'm5', undefined), false, 'collapses back');
-  assert.equal(nextUseHostClaudeEnv({ m3: false }, 'm3', undefined), undefined);
+  assert.equal(nextPerMachine(undefined, undefined, false), false);
+  assert.deepEqual(nextPerMachine(false, 'm5', true), { '*': false, m5: true }, 'a plain value becomes the rest');
+  assert.equal(nextPerMachine({ '*': false, m5: true }, 'm5', undefined), false, 'collapses back');
+  assert.equal(nextPerMachine({ m3: false }, 'm3', undefined), undefined);
 });
 
 test('accounts: config load refuses a malformed claudeAccounts or machines.useHostClaudeEnv', () => {

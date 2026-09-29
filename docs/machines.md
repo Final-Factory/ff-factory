@@ -84,6 +84,17 @@ before redeploying by hand.
   `limits.maxSessions`; each machine has its own limit for its main clone and standing agents (`max_agents`,
   default 3), and each of its sandboxes its own (`max_agents_per_sandbox`, below).
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
+- **Clean-up.** The daemon cleans its machine's disk by itself (the continuous clean-up,
+  [self-recovery.md](self-recovery.md#5-continuous-clean-up)): a pass every hour, every 15 minutes while
+  free space is below its soft threshold (80 GB by default), with the rules for its platform. Each agent
+  gets its own temp folder (`ffa-<session>` under `temp_dir` or the system's temp), removed when the
+  session is removed or two hours after it stopped. The portal sends the settings at connect and when they
+  change (`cleanup_config`; config `machines.cleanup.everyMinutes` / `.softFreeGB`, per machine with
+  `set_app_config ... machine: "<id>"`); the daemon keeps them in `cleanup.json` in its folder, so it goes on
+  while the portal is down. After each pass it reports a summary (`cleanup`), shown by `list_machines` and
+  the dashboard's meters; one that cannot get back above the soft threshold also tells the orchestrator,
+  with the biggest remaining consumers. Every pass is logged to `cleanup-log.jsonl` in the daemon's folder.
+  `machine_cleanup` runs a pass now.
 - **Standing agents** can be assigned to a machine: their folder is `agents/<id>` in the daemon's folder
   (`~/.ff-factory/agents/<id>` by default) on that Mac, runs wait (like a full slot) while the machine is offline, and budgets work unchanged.
 

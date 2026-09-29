@@ -316,6 +316,8 @@ export interface Machine {
   /** Reported by the daemon. */
   info?: { hostname: string; os: string; node: string; claude?: string; daemon: string; platform?: MachinePlatform };
   git?: GitStatus;
+  /** The daemon's last clean-up pass (server/cleanup.ts). */
+  lastCleanup?: CleanupSummary;
   createdAt: string;
 }
 
@@ -722,11 +724,34 @@ export interface HostHealth {
   memTotalBytes: number;
   /** Why new editors and new agent processes are refused right now, if they are. */
   blocked?: string;
-  lastCleanup?: { at: string; removed: number; freedBytes?: number };
+  /** The last clean-up pass (server/cleanup.ts). */
+  lastCleanup?: CleanupSummary;
   /** Automatic Unity restarts in the last hour, per sandbox (docs/unity-lifecycle.md). */
   unityRestarts?: { sandbox: string; at: string; reason: string }[];
   /** The orphan headless-browser reaper's last pass that found something (server/reaper.ts). */
   lastReap?: { at: string; killed: number; lines: string[] };
+}
+
+/** One clean-up pass on a computer (server/cleanup.ts): the host guard's or a machine daemon's. */
+export interface CleanupSummary {
+  at: string;
+  /** hourly: the regular pass; low-space: below the soft threshold; critical: the host guard's critical level; asked: by hand. */
+  trigger: 'hourly' | 'low-space' | 'critical' | 'asked';
+  removed: number;
+  freedBytes?: number;
+  /** Entries skipped (in use, refused by the guard, or only partly removed). */
+  failed?: number;
+  /** Free space after the pass on the fullest volume it watches. */
+  freeBytes?: number;
+  softFreeGB: number;
+  /** Still below the soft threshold after the pass. */
+  belowSoft?: boolean;
+  /** The biggest entries it removed. */
+  top?: { path: string; bytes: number; rule: string }[];
+  /** When it could not get above the soft threshold: the biggest remaining consumers. */
+  consumers?: { path: string; bytes: number }[];
+  /** Unity Libraries of projects not opened for a long time: reported, removed only past a longer age. */
+  staleLibraries?: { path: string; days: number }[];
 }
 
 export interface DrainStatus {
