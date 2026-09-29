@@ -20,6 +20,12 @@ import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox,
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
+/** Statuses of an agent in the middle of a turn. */
+const MID_TURN = new Set(['running', 'starting', 'waiting_permission']);
+/** Agents cut off longer ago than this are reported, not resumed. */
+const RESUME_WITHIN_MS = 6 * 3_600_000;
+/** How long after a daemon's hello the resume messages go out. */
+export const RESUME_DELAY_MS = { value: 3000 };
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
 /** Machine ids: short, lower-case, safe in a path and a LaunchAgent label. */
@@ -203,6 +209,55 @@ export class MachineManager {
 
   /** Tells the orchestrator (wired by index.ts). */
   report?: (text: string) => void;
+
+  // ---------------------------------------------------------------- agents cut off by a dropped link
+
+  /** Agents that were mid-turn when a machine's link dropped: resumed if its daemon comes back without them. */
+  private readonly cutOff = new Map<string, { at: number; why: string; sessions: string[] }>();
+  /** Why the next drop of a machine's link is expected (a forced redeploy, a daemon restart); false: do not resume. */
+  private readonly dropWhy = new Map<string, string | false>();
+
+  /**
+   * Say why a machine's link is about to drop: the resume message names it, and `false` (a daemon stopped on
+   * purpose) means its agents stay stopped.
+   */
+  expectDrop(machineId: string, why: string | false) {
+    this.dropWhy.set(machineId, why);
+    // Stopped on purpose, also when its link was already down: nothing cut off earlier is resumed later.
+    if (why === false) this.cutOff.delete(machineId);
+  }
+
+  /**
+   * The daemon is back (hello): agents that were mid-turn when its link dropped and that it no longer runs (it
+   * was redeployed, restarted or crashed; not a network blip, after which they are still live) get a resume
+   * message, as after a portal restart. An outdated daemon cannot start them: that waits for its redeploy.
+   */
+  private resumeCutOff(machineId: string, live: Set<string>, now = Date.now()) {
+    const c = this.cutOff.get(machineId);
+    if (!c || this.outdated(machineId)) return;
+    this.cutOff.delete(machineId);
+    const gone = c.sessions.filter((sid) => !live.has(sid) && this.handle(sid));
+    if (!gone.length) return;
+    const when = new Date(c.at).toLocaleTimeString();
+    if (now - c.at > RESUME_WITHIN_MS) {
+      this.report?.(`[machines] ${machineId} is back; ${gone.length} agent(s) were mid-turn when its daemon ${c.why} at ${when}, too long ago to resume by themselves: ${gone.join(', ')}. Message them to continue.`);
+      return;
+    }
+    const resumed: string[] = [];
+    for (const sid of gone) {
+      try {
+        this.sessions.send(
+          sid,
+          `[machine ${machineId}] The FF Factory daemon on this machine ${c.why} at ${when} while you were mid-turn, which stopped your turn. Your folder is as you left it. Check git status for half-written edits, re-pin your Unity instance if you use one (mcpforunity://instances, then set_active_instance; the editor may have restarted), and continue where you left off.`,
+          'system',
+        );
+        resumed.push(sid);
+      } catch (e) {
+        this.report?.(`[machines] ${machineId}: could not resume ${sid} after its daemon ${c.why}: ${(e as Error).message}`);
+      }
+    }
+    if (resumed.length) this.report?.(`[machines] ${machineId} is back after its daemon ${c.why}; resumed ${resumed.length} agent(s) that were mid-turn: ${resumed.join(', ')}.`);
+  }
 
   /** A machine's clean-up settings (config machines.cleanup; wired by index.ts). */
   cleanupFor?: (machineId: string) => { everyMinutes: number; softFreeGB: number };
@@ -414,6 +469,7 @@ export class MachineManager {
     const portalUrl = (opts.portalUrl ?? prev?.portalUrl ?? this.cfg.publicUrl ?? '').replace(/\/+$/, '');
     if (!/^https?:\/\/[^/\s]+$/.test(portalUrl)) throw new Error('portal_url is required: the address the machine reaches this portal at, e.g. https://<host>.<tailnet>.ts.net (or set publicUrl in config.json)');
     if (prev && !opts.force && this.liveCount(id) > 0) throw new Error(`${id} has agents running; a redeploy restarts its daemon and stops them. Stop them first or pass force.`);
+    if (prev && this.liveCount(id) > 0) this.expectDrop(id, 'was redeployed (add_machine with force)');
     const dirs = dirOptions(opts, prev);
     const limits = limitOptions(opts, prev);
     if (prev?.sandboxRoot && dirs.sandboxRoot !== prev.sandboxRoot && prev.sandboxes?.length) {
@@ -474,6 +530,7 @@ export class MachineManager {
       this.update(m.id, { status: 'error', statusDetail: (e as Error).message });
     } finally {
       this.deploying.delete(m.id);
+      this.dropWhy.delete(m.id); // the old daemon's link has dropped by now, or the deploy never got that far
     }
   }
 
@@ -501,6 +558,8 @@ export class MachineManager {
     if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
     const live = this.liveCount(m.id);
     if (action !== 'start' && live > 0 && !force) throw new Error(`${m.id} has ${live} agent(s) running; a daemon ${action} stops them. Stop them first or pass force.`);
+    // A stop is on purpose: its agents stay stopped. A restart resumes the ones it cut off mid-turn.
+    if (action !== 'start') this.expectDrop(m.id, action === 'stop' ? false : 'was restarted (machine_daemon restart)');
     const { controlDaemon } = await import('./machineDeploy.ts');
     const done = await controlDaemon(m.host, m.platform, action, m.appDir);
     this.update(m.id, { daemonStopped: action === 'stop' ? true : undefined });
@@ -666,6 +725,17 @@ export class MachineManager {
       Object.assign(m, { online: false, lastSeen: new Date().toISOString() });
       this.store.putMachine(m);
     }
+    // Workers mid-turn now: resumed when the daemon is back without them (resumeCutOff). Standing runs have their own schedule.
+    const why = this.dropWhy.get(id) ?? 'lost its connection to the portal';
+    this.dropWhy.delete(id);
+    const midTurn = [...this.sessions.sessions.values()]
+      .filter((s) => s.info.machineId === id && s instanceof RemoteSession && s.info.kind === 'worker' && (MID_TURN.has(s.info.status) || !!s.info.turnOpenSince))
+      .map((s) => s.info.id);
+    if (why === false) this.cutOff.delete(id);
+    else if (midTurn.length) {
+      const had = this.cutOff.get(id);
+      this.cutOff.set(id, { at: had?.at ?? Date.now(), why: had?.why ?? why, sessions: [...new Set([...(had?.sessions ?? []), ...midTurn])] });
+    }
     // Its processes may well still be running, but nothing reaches them: show them stopped until it is back.
     for (const s of this.sessions.sessions.values()) {
       if (s.info.machineId !== id || !(s instanceof RemoteSession)) continue;
@@ -713,6 +783,10 @@ export class MachineManager {
           if (s) s.liveFlag = live.has(sid);
         }
         if (why) this.checkOutdated();
+        // After the daemon's own session reports (sent right after its hello), so a resume starts from its state.
+        // Only for this connection: if it drops first, the next hello tries again.
+        const link = this.links.get(id);
+        setTimeout(() => this.links.get(id) === link && this.resumeCutOff(id, live), RESUME_DELAY_MS.value);
         return;
       }
       case 'session': {

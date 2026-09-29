@@ -10,6 +10,7 @@ import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeInfo } from '../server/unityHang.ts';
 import { copyTree, removeTree, run, type RunResult } from '../server/proc.ts';
+import { armScriptReimport } from './scriptReimport.ts';
 import { MacUnity, MacUnityWatch, realDeps, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
 import type { DiskLevel, GitStatus, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
@@ -326,6 +327,10 @@ export class SandboxPool {
           await this.requireFreeSpace(gb, `the Library copy (~${gb} GB)`);
           step(`copying the warm Library from ${src} (a few minutes)`);
           await this.d.copyTree(src, path.join(r.path, 'Library'), signal);
+          // The copy keeps the other project's script-to-class mappings: the first editor start reimports the scripts.
+          const common = await this.d.git(['-C', r.path, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { signal });
+          if (common.code !== 0) throw new Error(`could not find the repo's git folder (${common.code}): ${tail(common.stderr)}`);
+          armScriptReimport(r.path, common.stdout.trim());
         }
       }
       step();
