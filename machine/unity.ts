@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,11 +8,15 @@ import { decide, describeDialog, sceneFilesUnchanged, type Dialog } from '../ser
 import { accessibilityStep, axPrompt, axTrusted, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
 /**
- * The Unity editor of a machine's clone (docs/unity-lifecycle.md), managed by the daemon on the Mac: status,
+ * The Unity editor of a machine's clone (docs/unity-lifecycle.md), managed by the daemon on the machine: status,
  * start, stop (graceful, then forced) and restart, for the orchestrator and machine workers (the "unity" tool),
  * and an automatic restart of a hung or crashed editor (MacUnityWatch). It only ever touches the editor that
  * has this clone open (and the processes that editor started), never git and never another project's editor.
+ * Written for the Macs first (hence the names); a Windows PC (`platform` win32) gets the same, minus the
+ * macOS dialog watch and App Nap.
  */
+
+export type UnityPlatform = 'darwin' | 'win32';
 
 export interface Proc {
   pid: number;
@@ -24,7 +28,8 @@ export interface UnityDeps {
   /** Every process: pid, parent, full command line. */
   procs(): Promise<Proc[]>;
   kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void;
-  launch(bin: string, args: string[], cwd: string): number;
+  /** Start the editor detached; its pid (the Windows launch goes through PowerShell, so it may be a promise). */
+  launch(bin: string, args: string[], cwd: string): number | Promise<number>;
   exists(p: string): boolean;
   remove(p: string): void;
   sleep(ms: number): Promise<void>;
@@ -33,7 +38,10 @@ export interface UnityDeps {
   noAppNap?(bin: string): Promise<void>;
 }
 
-const norm = (p: string) => p.replace(/\/+$/, '');
+const norm = (p: string) => p.replace(/[\\/]+$/, '');
+
+/** A path as compared on `platform`: Windows paths are case-insensitive and take either slash. */
+export const pathKey = (p: string, platform: UnityPlatform = 'darwin') => (platform === 'win32' ? p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : norm(p));
 
 /** The -projectPath of a Unity command line (Hub writes -projectpath), or undefined. */
 export function projectPathOf(cmd: string): string | undefined {
@@ -41,12 +49,20 @@ export function projectPathOf(cmd: string): string | undefined {
   return m ? norm(m[2] ?? m[3]) : undefined;
 }
 
+/** The Unity editor binary in a command line: Unity.app's on a Mac, Unity.exe on Windows (not "Unity Hub.exe"). */
+const isEditorCmd = (cmd: string, platform: UnityPlatform) => (platform === 'win32' ? /[\\/]Unity\.exe"?(\s|$)/i.test(cmd) : /\/Unity\.app\/Contents\/MacOS\/Unity(\s|$)/.test(cmd));
+
 /**
  * The Unity editor with `repo` open: the Unity binary with that project path, not a -batchMode one (its
  * AssetImportWorkers, a command-line build), which has no windows and no bridge and is not the editor.
  */
-export function editorsFor(procs: Proc[], repo: string): Proc[] {
-  return procs.filter((p) => /\/Unity\.app\/Contents\/MacOS\/Unity(\s|$)/.test(p.cmd) && projectPathOf(p.cmd) === norm(repo) && !/\s-batchmode(\s|$)/i.test(p.cmd));
+export function editorsFor(procs: Proc[], repo: string, platform: UnityPlatform = 'darwin'): Proc[] {
+  const want = pathKey(repo, platform);
+  return procs.filter((p) => {
+    if (!isEditorCmd(p.cmd, platform) || /\s-batchmode(\s|$)/i.test(p.cmd)) return false;
+    const proj = projectPathOf(p.cmd);
+    return proj !== undefined && pathKey(proj, platform) === want;
+  });
 }
 
 /** A process and everything it started (shader compilers, bee, Unity Helper, a crash reporter it spawned). */
@@ -61,7 +77,8 @@ export function treeOf(procs: Proc[], root: number): number[] {
  * other than Unity.app, e.g. the 074 host player launched from the editor), another project's editor (a
  * ParrelSync clone), Unity Hub, and node or claude (the daemon, an agent).
  */
-export function spareOnRestart(p: Proc, repo: string): string | undefined {
+export function spareOnRestart(p: Proc, repo: string, platform: UnityPlatform = 'darwin'): string | undefined {
+  if (platform === 'win32') return spareOnRestartWin(p, repo);
   const app = /\/([^/]+)\.app\/Contents\//.exec(p.cmd)?.[1];
   if (app && app !== 'Unity') return app === 'Unity Hub' ? 'Unity Hub' : `the ${app} app`;
   if (/\/Unity\.app\/Contents\/MacOS\/Unity(\s|$)/.test(p.cmd)) {
@@ -72,14 +89,40 @@ export function spareOnRestart(p: Proc, repo: string): string | undefined {
   return undefined;
 }
 
+/** The program a Windows command line starts: its full path (quoted or not). */
+const exeOf = (cmd: string) => (/^\s*"([^"]+)"/.exec(cmd)?.[1] ?? /^\s*(\S+)/.exec(cmd)?.[1] ?? '');
+
+/**
+ * spareOnRestart on Windows. Part of the editor: Unity's own helpers (anything in the editor's install, the
+ * shader compiler, bee, the ILPP runner, the package manager, the crash handler), what the build writes under
+ * the project's Library, and console hosts and shells. Spared: Unity Hub, another project's editor, node or
+ * claude, and any other program (a game player such as a build of the game launched from the editor).
+ */
+function spareOnRestartWin(p: Proc, repo: string): string | undefined {
+  const exe = exeOf(p.cmd);
+  const name = path.win32.basename(exe);
+  if (/^Unity Hub\.exe$/i.test(name)) return 'Unity Hub';
+  if (isEditorCmd(p.cmd, 'win32')) {
+    const proj = projectPathOf(p.cmd);
+    if (proj && pathKey(proj, 'win32') !== pathKey(repo, 'win32')) return `another project's editor (${proj})`;
+    return undefined;
+  }
+  if (/^(node|claude)(\.exe)?$/i.test(name)) return 'node/claude';
+  const key = pathKey(exe, 'win32');
+  if (/\/unity\/hub\/editor\/|\/editor\/data\//.test(key)) return undefined;
+  if (key.startsWith(`${pathKey(repo, 'win32')}/library/`)) return undefined;
+  if (/^(conhost|cmd|dotnet|mono|UnityShaderCompiler|UnityCrashHandler(32|64)?|bee_backend|Unity\.ILPP\.Runner|Unity\.Licensing\.Client|UnityPackageManager|UnityAutoQuitter)(\.exe)?$/i.test(name)) return undefined;
+  return name ? `${name.replace(/\.exe$/i, '')} (a program it started)` : undefined;
+}
+
 /** The editor and the processes it started that go with it (treeOf minus spareOnRestart and what those started), and what is spared. */
-export function editorTree(procs: Proc[], root: number, repo: string): { kill: number[]; spared: string[] } {
+export function editorTree(procs: Proc[], root: number, repo: string, platform: UnityPlatform = 'darwin'): { kill: number[]; spared: string[] } {
   const kill = [root];
   const spared: string[] = [];
   for (let i = 0; i < kill.length; i++) {
     for (const p of procs) {
       if (p.ppid !== kill[i] || kill.includes(p.pid)) continue;
-      const why = spareOnRestart(p, repo);
+      const why = spareOnRestart(p, repo, platform);
       if (why) spared.push(`${why} (pid ${p.pid})`);
       else kill.push(p.pid);
     }
@@ -87,13 +130,34 @@ export function editorTree(procs: Proc[], root: number, repo: string): { kill: n
   return { kill, spared };
 }
 
-/** Crash reporters left for this project (their parent editor may be gone already). */
-export function reportersFor(procs: Proc[], repo: string): Proc[] {
+/**
+ * Crash reporters left for this project (their parent editor may be gone already). On Windows only Unity's bug
+ * reporter counts: UnityCrashHandler64 runs beside every editor there (docs/unity-lifecycle.md).
+ */
+export function reportersFor(procs: Proc[], repo: string, platform: UnityPlatform = 'darwin'): Proc[] {
+  if (platform === 'win32') return procs.filter((p) => /Unity ?Bug ?Reporter/i.test(p.cmd) && pathKey(p.cmd, 'win32').includes(pathKey(repo, 'win32')));
   return procs.filter((p) => /Unity ?Bug ?Reporter|UnityCrashHandler/i.test(p.cmd) && p.cmd.includes(norm(repo)));
 }
 
+/**
+ * Unity Hub's editor folders on Windows: Program Files (both), and the install location chosen in the Hub
+ * (%APPDATA%\UnityHub\secondaryInstallPath.json, a JSON string).
+ */
+export function hubEditorDirsWin(env: NodeJS.ProcessEnv, read: (p: string) => string): string[] {
+  const dirs = [env.ProgramFiles, env.ProgramW6432, 'C:\\Program Files'].filter((d): d is string => !!d).map((d) => path.win32.join(d, 'Unity', 'Hub', 'Editor'));
+  if (env.APPDATA) {
+    try {
+      const custom = JSON.parse(read(path.win32.join(env.APPDATA, 'UnityHub', 'secondaryInstallPath.json')));
+      if (typeof custom === 'string' && custom.trim()) dirs.unshift(custom.trim());
+    } catch {
+      // no custom location
+    }
+  }
+  return [...new Set(dirs)];
+}
+
 /** The editor binary for the project's Unity version (ProjectSettings/ProjectVersion.txt), in the Hub's folders. */
-export function editorBinary(repo: string, exists: (p: string) => boolean, read: (p: string) => string, home = os.homedir()): string {
+export function editorBinary(repo: string, exists: (p: string) => boolean, read: (p: string) => string, home = os.homedir(), platform: UnityPlatform = 'darwin', env: NodeJS.ProcessEnv = process.env): string {
   let version = '';
   try {
     version = /m_EditorVersion:\s*(\S+)/.exec(read(path.posix.join(repo, 'ProjectSettings', 'ProjectVersion.txt')))?.[1] ?? '';
@@ -101,6 +165,14 @@ export function editorBinary(repo: string, exists: (p: string) => boolean, read:
     // no version file
   }
   if (!version) throw new Error(`no Unity version in ${repo}/ProjectSettings/ProjectVersion.txt`);
+  if (platform === 'win32') {
+    const bases = hubEditorDirsWin(env, read);
+    for (const base of bases) {
+      const bin = path.win32.join(base, version, 'Editor', 'Unity.exe');
+      if (exists(bin)) return bin;
+    }
+    throw new Error(`Unity ${version} is not installed in ${bases.join(' or ')} (install it with Unity Hub)`);
+  }
   for (const base of ['/Applications/Unity/Hub/Editor', path.posix.join(home, 'Applications/Unity/Hub/Editor')]) {
     const bin = path.posix.join(base, version, 'Unity.app/Contents/MacOS/Unity');
     if (exists(bin)) return bin;
@@ -110,13 +182,28 @@ export function editorBinary(repo: string, exists: (p: string) => boolean, read:
 
 export class MacUnity {
   readonly repo: string;
+  readonly platform: UnityPlatform;
   private readonly d: UnityDeps;
   private readonly bin: () => string;
 
-  constructor(repo: string, deps: UnityDeps = realDeps(), bin?: () => string) {
+  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin') {
     this.repo = norm(repo);
-    this.d = deps;
-    this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8')));
+    this.platform = platform;
+    this.d = deps ?? realDeps(platform);
+    this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8'), os.homedir(), platform));
+  }
+
+  /** This platform's view of the processes (editorsFor, reportersFor, editorTree with it). */
+  editors(procs: Proc[]) {
+    return editorsFor(procs, this.repo, this.platform);
+  }
+
+  reporters(procs: Proc[]) {
+    return reportersFor(procs, this.repo, this.platform);
+  }
+
+  private get lock() {
+    return (this.platform === 'win32' ? path.win32 : path.posix).join(this.repo, 'Temp', 'UnityLockfile');
   }
 
   /** Every process now (for the watch). */
@@ -126,9 +213,9 @@ export class MacUnity {
 
   async status(): Promise<string> {
     const procs = await this.d.procs();
-    const eds = editorsFor(procs, this.repo);
-    const reporters = reportersFor(procs, this.repo);
-    const lock = path.posix.join(this.repo, 'Temp', 'UnityLockfile');
+    const eds = this.editors(procs);
+    const reporters = this.reporters(procs);
+    const lock = this.lock;
     const parts = [eds.length ? `running: pid ${eds.map((e) => e.pid).join(', ')}` : 'not running', `project ${this.repo}`];
     if (reporters.length) parts.push(`crash reporter open (pid ${reporters.map((r) => r.pid).join(', ')}): the editor crashed`);
     if (!eds.length && this.d.exists(lock)) parts.push('a stale Temp/UnityLockfile is left (start removes it)');
@@ -142,7 +229,7 @@ export class MacUnity {
    */
   async stop(opts: { force?: boolean; graceMs?: number } = {}): Promise<string> {
     let procs = await this.d.procs();
-    const eds = editorsFor(procs, this.repo);
+    const eds = this.editors(procs);
     const notes: string[] = [];
     if (!eds.length) notes.push('no editor was running');
     if (eds.length && !opts.force) {
@@ -151,13 +238,13 @@ export class MacUnity {
       while (this.d.now() < until) {
         await this.d.sleep(1000);
         procs = await this.d.procs();
-        if (!editorsFor(procs, this.repo).length) break;
+        if (!this.editors(procs).length) break;
       }
-      if (!editorsFor(procs, this.repo).length) notes.push(`quit gracefully (pid ${eds.map((e) => e.pid).join(', ')})`);
+      if (!this.editors(procs).length) notes.push(`quit gracefully (pid ${eds.map((e) => e.pid).join(', ')})`);
     }
-    const left = editorsFor(procs, this.repo);
+    const left = this.editors(procs);
     if (left.length) {
-      const trees = left.map((e) => editorTree(procs, e.pid, this.repo));
+      const trees = left.map((e) => editorTree(procs, e.pid, this.repo, this.platform));
       const pids = [...new Set(trees.flatMap((t) => t.kill))];
       const spared = trees.flatMap((t) => t.spared);
       for (const pid of pids) this.d.kill(pid, 'SIGKILL');
@@ -166,15 +253,15 @@ export class MacUnity {
       for (let i = 0; i < 15; i++) {
         await this.d.sleep(1000);
         procs = await this.d.procs();
-        if (!editorsFor(procs, this.repo).length) break;
+        if (!this.editors(procs).length) break;
       }
     }
-    const reporters = reportersFor(procs, this.repo);
+    const reporters = this.reporters(procs);
     for (const r of reporters) this.d.kill(r.pid, 'SIGKILL');
     if (reporters.length) notes.push(`closed ${reporters.length} crash reporter(s)`);
     procs = await this.d.procs();
-    if (editorsFor(procs, this.repo).length) throw new Error(`the editor is still running after SIGKILL (${notes.join('; ')})`);
-    const lock = path.posix.join(this.repo, 'Temp', 'UnityLockfile');
+    if (this.editors(procs).length) throw new Error(`the editor is still running after SIGKILL (${notes.join('; ')})`);
+    const lock = this.lock;
     if (this.d.exists(lock)) {
       this.d.remove(lock);
       notes.push('removed the stale Temp/UnityLockfile');
@@ -185,16 +272,16 @@ export class MacUnity {
   /** Start the editor for this clone (nothing if one already has it open). */
   async start(): Promise<string> {
     const procs = await this.d.procs();
-    const eds = editorsFor(procs, this.repo);
+    const eds = this.editors(procs);
     if (eds.length) return `Already running (pid ${eds.map((e) => e.pid).join(', ')}).`;
-    const lock = path.posix.join(this.repo, 'Temp', 'UnityLockfile');
+    const lock = this.lock;
     if (this.d.exists(lock)) this.d.remove(lock); // no editor has the project open, so the lock is stale
     const bin = this.bin();
     await this.noAppNap(bin);
-    const pid = this.d.launch(bin, ['-projectPath', this.repo], this.repo);
+    const pid = await this.d.launch(bin, ['-projectPath', this.repo], this.repo);
     for (let i = 0; i < 10; i++) {
       await this.d.sleep(1000);
-      if (editorsFor(await this.d.procs(), this.repo).length) break;
+      if (this.editors(await this.d.procs()).length) break;
     }
     return `Started ${bin} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
   }
@@ -218,8 +305,57 @@ export class MacUnity {
   }
 }
 
-/** The real Mac: ps, signals, a detached launch. */
-export function realDeps(): UnityDeps {
+/**
+ * A Windows process listing (Win32_Process as JSON: pid, parent, full command line). The CIM query costs a
+ * second or two, which the watch's 30 s look can afford. Exported for tests (the parser).
+ */
+export function parseWinProcs(json: string): Proc[] {
+  if (!json.trim()) return [];
+  const rows = JSON.parse(json) as { pid: number; ppid: number; cmd?: string | null; name?: string | null } | { pid: number; ppid: number; cmd?: string | null; name?: string | null }[];
+  return (Array.isArray(rows) ? rows : [rows]).map((r) => ({ pid: Number(r.pid), ppid: Number(r.ppid), cmd: r.cmd || r.name || '' }));
+}
+
+const WIN_PROCS = "Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name; cmd = [string]$_.CommandLine } } | ConvertTo-Json -Compress";
+
+/** The PowerShell that starts the editor so that it is nobody's child (it outlives a daemon restart) and prints its pid. */
+export function winLaunchScript(bin: string, args: string[], cwd: string): string {
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  // Start-Process joins -ArgumentList with spaces and quotes nothing: each argument is quoted here.
+  const argLine = args.map((a) => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(' ');
+  return `(Start-Process -FilePath ${q(bin)} -ArgumentList ${q(argLine)} -WorkingDirectory ${q(cwd)} -PassThru).Id`;
+}
+
+/** The real machine: ps, signals and a detached launch on a Mac; CIM, taskkill and Start-Process on Windows. */
+export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
+  const base = realDepsMac();
+  if (platform !== 'win32') return base;
+  const ps = (script: string, timeoutMs: number) => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs });
+  return {
+    ...base,
+    procs: async () => {
+      const r = await ps(WIN_PROCS, 60_000);
+      if (r.code !== 0) throw new Error(`listing processes failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`);
+      return parseWinProcs(r.stdout);
+    },
+    // taskkill without /F asks the program to close (the editor may save and quit); /F ends it at once.
+    kill: (pid, signal) => {
+      try {
+        execFileSync('taskkill.exe', ['/PID', String(pid), ...(signal === 'SIGKILL' ? ['/F'] : [])], { stdio: 'ignore', windowsHide: true, timeout: 15_000 });
+      } catch {
+        // already gone
+      }
+    },
+    launch: async (bin, args, cwd) => {
+      const r = await ps(winLaunchScript(bin, args, cwd), 60_000);
+      const pid = Number(r.stdout.trim().split(/\s+/).pop());
+      if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) throw new Error(`could not start ${bin}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+      return pid;
+    },
+    noAppNap: undefined,
+  };
+}
+
+function realDepsMac(): UnityDeps {
   return {
     procs: async () => {
       const r = await run('ps', ['-axo', 'pid=,ppid=,command='], { timeoutMs: 15_000 });
@@ -286,10 +422,16 @@ export interface WatchDeps {
   axPrompt?(): Promise<void>;
 }
 
-/** What Unity writes to its log when it crashes (macOS: signals and the native crash reporter). */
-export const CRASH_MARKERS = /Crash!!!|Received signal SIG(SEGV|BUS|ABRT|ILL|FPE)|Native Crash Reporting|Obtained \d+ stack frames/;
+/** What Unity writes to its log when it crashes (macOS: signals and the native crash reporter; Windows: its stack trace dump). */
+export const CRASH_MARKERS = /Crash!!!|Received signal SIG(SEGV|BUS|ABRT|ILL|FPE)|Native Crash Reporting|Obtained \d+ stack frames|=+ OUTPUTTING STACK TRACE =+/;
 
 export const MAC_EDITOR_LOG = path.join(os.homedir(), 'Library', 'Logs', 'Unity', 'Editor.log');
+
+/** The editor log Unity writes by default: ~/Library/Logs/Unity on a Mac, %LOCALAPPDATA%\Unity\Editor on Windows. */
+export function editorLogPath(platform: UnityPlatform, env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
+  if (platform === 'win32') return path.win32.join(env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local'), 'Unity', 'Editor', 'Editor.log');
+  return MAC_EDITOR_LOG;
+}
 
 /**
  * Watches the editor of a machine's clone every `everyMs` (the daemon starts it): an editor judged hung by
@@ -335,10 +477,12 @@ export class MacUnityWatch {
     this.u = u;
     this.report = report;
     this.opts = { max: 3, windowMinutes: 30, hang: DEFAULT_HANG, ...opts };
+    const log = editorLogPath(u.platform);
+    const mac = u.platform !== 'win32';
     this.d = {
       logStat: () => {
         try {
-          const s = fs.statSync(MAC_EDITOR_LOG);
+          const s = fs.statSync(log);
           return { size: s.size, mtimeMs: s.mtimeMs };
         } catch {
           return undefined;
@@ -346,7 +490,7 @@ export class MacUnityWatch {
       },
       logTail: () => {
         try {
-          const fd = fs.openSync(MAC_EDITOR_LOG, 'r');
+          const fd = fs.openSync(log, 'r');
           try {
             const size = fs.fstatSync(fd).size;
             const n = Math.min(size, 16 * 1024);
@@ -368,15 +512,16 @@ export class MacUnityWatch {
         const r = await run('osascript', ['-l', 'JavaScript', '-e', 'ObjC.import("CoreGraphics"); $.CGDisplayIsAsleep($.CGMainDisplayID())'], { timeoutMs: 15_000 });
         return r.code === 0 && /^(true|1)$/.test(r.stdout.trim());
       },
-      listDialogs: (pid) => listMacDialogs(pid),
-      pressButton: (pid, d, button) => pressMacButton(pid, d, button),
+      // The dialog watch reads windows through macOS's System Events; Windows machines do without it for now.
+      listDialogs: (pid) => (mac ? listMacDialogs(pid) : Promise.resolve({ dialogs: [] })),
+      pressButton: (pid, d, button) => (mac ? pressMacButton(pid, d, button) : Promise.resolve(false)),
       sceneFilesClean: () => sceneFilesUnchanged(u.repo),
       nodePath: () => nodeBinary(),
       sessionState: () => sessionState(),
       axTrusted: () => axTrusted(),
       log: (line) => console.log(new Date().toISOString(), line),
-      tccEntry: () => tccAccessibility(nodeBinary()),
-      axPrompt: () => axPrompt(),
+      tccEntry: mac ? () => tccAccessibility(nodeBinary()) : undefined,
+      axPrompt: mac ? () => axPrompt() : undefined,
       ...deps,
     };
   }
@@ -403,7 +548,7 @@ export class MacUnityWatch {
   private async look(): Promise<'ok' | 'restarted' | 'gave-up'> {
     const now = this.d.now();
     const procs = await this.u.procsNow();
-    const eds = editorsFor(procs, this.u.repo);
+    const eds = this.u.editors(procs);
     const st = this.d.logStat();
     if (st && st.size !== this.logSize) {
       if (this.logSize >= 0 || !this.logGrewAt) this.logGrewAt = st.mtimeMs;
@@ -415,7 +560,7 @@ export class MacUnityWatch {
       this.bridgeUp = false;
       this.bridgeFailingSince = undefined;
       if (!had || now < this.expectedUntil) return 'ok';
-      const evidence = reportersFor(procs, this.u.repo).length ? 'its crash reporter is open' : CRASH_MARKERS.test(this.d.logTail()) ? 'its log ends in a crash' : '';
+      const evidence = this.u.reporters(procs).length ? 'its crash reporter is open' : CRASH_MARKERS.test(this.d.logTail()) ? 'its log ends in a crash' : '';
       if (!evidence) return 'ok'; // quit by someone: leave it closed
       return this.restart(`the editor crashed (${evidence})`, now);
     }
@@ -449,7 +594,7 @@ export class MacUnityWatch {
     const v = editorVerdict(
       {
         alive: true,
-        crashReporter: reportersFor(procs, this.u.repo).length > 0,
+        crashReporter: this.u.reporters(procs).length > 0,
         phase: this.launchedByUs && !this.bridgeUp ? 'starting' : 'running',
         dialog: dialogOpen,
         bridgeFailingSince: this.bridgeFailingSince,

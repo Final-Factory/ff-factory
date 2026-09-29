@@ -482,3 +482,46 @@ test('machine: a lockout does not feed itself, and a good token gets through it'
   assert.equal(attempt(bad), false);
   assert.equal(answers.at(-1), '401');
 });
+
+test('machine: the hello reports the platform (a Windows PC), and a mixed-case id is stored lower-case and shown as typed', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  daemon();
+  await until('online', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
+  const hello = (platform: 'win32' | 'darwin') =>
+    (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', { type: 'hello', protocol: PROTOCOL_VERSION, home: 'C:\\Users\\Loth', live: [], info: { ...store.machines.get('mx')!.info, platform } });
+  hello('win32');
+  assert.equal(store.machines.get('mx')!.platform, 'win32');
+  assert.equal(store.machines.get('mx')!.home, 'C:\\Users\\Loth');
+  // add_machine "LothDesktop": id lothdesktop, shown as LothDesktop; a later redeploy by id keeps the name.
+  (mm as unknown as { runDeploy: () => Promise<void> }).runDeploy = async () => undefined;
+  const m = mm.deployMachine({ id: 'LothDesktop', host: 'lothdesktop', portalUrl: 'https://beast.example.ts.net' });
+  assert.equal(m.id, 'lothdesktop');
+  assert.equal(m.name, 'LothDesktop');
+  assert.equal(mm.require('LothDesktop').id, 'lothdesktop', 'either spelling finds it');
+  assert.equal(mm.deployMachine({ id: 'lothdesktop' }).name, 'LothDesktop');
+  assert.throws(() => mm.deployMachine({ id: 'Loth Desktop' }), /lower-case letters, digits and dashes/);
+});
+
+test('machine: stopping or restarting a daemon is refused while agents run unless forced; a stopped daemon is not redeployed', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  sessions.send(s.info.id, 'hello');
+  await until('live', () => mm.liveCount('mx') === 1);
+  await assert.rejects(mm.controlDaemon('mx', 'stop'), /mx has 1 agent\(s\) running; a daemon stop stops them/);
+  await assert.rejects(mm.controlDaemon('mx', 'restart'), /Stop them first or pass force/);
+  // Stopped on purpose: the offline watch leaves it down even when ssh answers.
+  d.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  mm.update('mx', { daemonStopped: true });
+  const redeployed: string[] = [];
+  mm.deployMachine = ((o: { id: string }) => (redeployed.push(o.id), store.machines.get(o.id)!)) as typeof mm.deployMachine;
+  await mm.watchOffline(Date.now(), async () => true);
+  assert.deepEqual(await mm.watchOffline(Date.now() + 10 * 60_000, async () => true), []);
+  assert.deepEqual(redeployed, []);
+  mm.update('mx', { daemonStopped: undefined });
+  assert.deepEqual(await mm.watchOffline(Date.now() + 20 * 60_000, async () => true), ['mx'], 'otherwise it is redeployed as before');
+});

@@ -1,10 +1,14 @@
 import { spawn } from 'node:child_process';
 import { run } from './proc.ts';
+import * as win from './machineDeployWin.ts';
+import type { MachinePlatform } from '../shared/types.ts';
 
 /**
- * Install or update the daemon on a Mac over ssh (docs/machines.md), with this host's own ssh setup:
- * probe (uid, home, node, claude, the FF clone), copy this checkout's committed code, npm ci, write
- * the config and the LaunchAgent, (re)load it. The user does nothing on the Mac.
+ * Install or update the daemon on a machine over ssh (docs/machines.md), with this host's own ssh setup:
+ * find out what the machine runs (detectPlatform), probe it (user, home, node, claude, the FF clone), copy
+ * this checkout's committed code, npm ci, write the config and what keeps the daemon running (a LaunchAgent
+ * on a Mac, a Task Scheduler task on Windows: server/machineDeployWin.ts), (re)start it. The user does
+ * nothing on the machine.
  */
 
 export const LABEL = 'com.fffactory.daemon';
@@ -25,12 +29,15 @@ export interface Probe {
 }
 
 export interface DeployResult {
+  platform: MachinePlatform;
   home: string;
   repoPath: string;
   node: string;
   nodeVersion: string;
   claude?: string;
   version: string;
+  /** Windows: the daemon starts only in a logged-on session; false means it starts at the user's next logon. */
+  started?: boolean;
 }
 
 /** Run a bash script on `host` (fed on stdin, so no quoting through ssh). */
@@ -191,7 +198,7 @@ function upload(root: string, host: string): Promise<void> {
   });
 }
 
-export async function deploy(opts: {
+export interface DeployOptions {
   host: string;
   id: string;
   portalUrl: string;
@@ -203,7 +210,42 @@ export async function deploy(opts: {
   /** "owner/name" of the game repo (config repo.url), to find its clone when repoPath is not given. */
   repoSlug?: string;
   step?: (what: string) => void;
-}): Promise<DeployResult> {
+}
+
+/**
+ * What `uname -s` said over ssh, as a platform. A Windows PC answers only when Git's or MSYS's Unix tools are
+ * on its PATH (MINGW64_NT-10.0-26100, MSYS_NT-...); otherwise its shell fails the command (undefined).
+ */
+export function platformOfUname(out: string, code: number): MachinePlatform | 'other' | undefined {
+  const s = out.trim().split('\n').pop()?.trim() ?? '';
+  if (/^(MINGW|MSYS|CYGWIN)/i.test(s)) return 'win32';
+  if (code !== 0) return undefined;
+  if (/^Darwin$/i.test(s)) return 'darwin';
+  return s ? 'other' : undefined;
+}
+
+/**
+ * Which OS `host` runs, over ssh: `uname -s` answers on a Mac (whatever its login shell); a Windows PC is
+ * recognised by PowerShell answering (OpenSSH Server's default shell there is cmd.exe or PowerShell, and
+ * both run the same encoded command, server/machineDeployWin.ts).
+ */
+export async function detectPlatform(host: string): Promise<MachinePlatform> {
+  const r = await run('ssh', [...SSH, host, 'uname', '-s'], { timeoutMs: 30_000 });
+  if (r.code === 255) throw new Error(`ssh ${host} failed: ${(r.stderr || r.stdout).trim().split('\n').slice(-2).join(' | ')}`);
+  const u = platformOfUname(r.stdout, r.code);
+  if (u === 'darwin' || u === 'win32') return u;
+  if (u === 'other') throw new Error(`${host} runs ${r.stdout.trim()}; machines are Macs or Windows PCs`);
+  const w = await win.psScript(host, "'platform=' + [Environment]::OSVersion.Platform", { timeoutMs: 60_000 });
+  if (w.code === 0 && /platform=Win32NT/.test(w.stdout)) return 'win32';
+  throw new Error(`could not tell what ${host} runs: uname -s failed (${(r.stderr || r.stdout).trim().slice(0, 200)}) and PowerShell did not answer (${(w.stderr || w.stdout).trim().slice(0, 200)})`);
+}
+
+export async function deploy(opts: DeployOptions): Promise<DeployResult> {
+  (opts.step ?? (() => undefined))('checking the OS');
+  return (await detectPlatform(opts.host)) === 'win32' ? deployWindows(opts) : deployMac(opts);
+}
+
+async function deployMac(opts: DeployOptions): Promise<DeployResult> {
   const step = opts.step ?? (() => undefined);
   step('probing');
   const p = await probe(opts.host, opts.repoSlug);
@@ -255,10 +297,150 @@ launchctl bootstrap gui/${p.uid} "$HOME/Library/LaunchAgents/${LABEL}.plist"
 `,
     60_000,
   );
-  return { home: p.home, repoPath, node: p.node, nodeVersion: p.nodeVersion ?? '', claude: p.claude, version };
+  return { platform: 'darwin', home: p.home, repoPath, node: p.node, nodeVersion: p.nodeVersion ?? '', claude: p.claude, version };
 }
 
-/** Stop and unload the daemon (its files stay in ~/.ff-factory). */
-export async function undeploy(host: string) {
-  await must(host, 'uninstall', `launchctl bootout gui/$(id -u)/${LABEL} 2>/dev/null || true\nrm -f "$HOME/Library/LaunchAgents/${LABEL}.plist"\n`, 60_000);
+// ---------------------------------------------------------------- Windows (server/machineDeployWin.ts)
+
+export interface WinProbe {
+  home: string;
+  sid: string;
+  user: string;
+  os?: string;
+  loggedOn: boolean;
+  tar: boolean;
+  node?: string;
+  nodeVersion?: string;
+  claude?: string;
+  /** Claude Code found only as an npm shim (claude.cmd), which the Agent SDK cannot start: it uses its own. */
+  claudeShim?: string;
+  git?: string;
+  gh?: string;
+  repos: string[];
+}
+
+/** The Windows probe's `key=value` lines (`key~b64=<base64>` for a value beyond ASCII). Exported for tests. */
+export function parseWinProbe(out: string): WinProbe {
+  const kv = out.split('\n').map((l) => {
+    const [k, v = ''] = l.trim().split(/=(.*)/s);
+    return k.endsWith('~b64') ? [k.slice(0, -4), Buffer.from(v, 'base64').toString('utf8')] : [k, v];
+  });
+  const get = (k: string) => kv.find(([key]) => key === k)?.[1]?.trim() || undefined;
+  return {
+    home: get('home') ?? '',
+    sid: get('sid') ?? '',
+    user: get('user') ?? '',
+    os: get('os'),
+    loggedOn: get('loggedOn') === 'True',
+    tar: get('tar') === 'True',
+    node: get('node'),
+    nodeVersion: get('nodev'),
+    claude: get('claude'),
+    claudeShim: get('claudeShim'),
+    git: get('git'),
+    gh: get('gh'),
+    repos: kv.filter(([k]) => k === 'repo').map(([, v]) => v.trim()),
+  };
+}
+
+async function mustPs(host: string, what: string, script: string, opts: { timeoutMs?: number; data?: string } = {}) {
+  const r = await win.psScript(host, script, opts);
+  if (r.code !== 0) throw new Error(`${what} on ${host} failed (${r.code}): ${(r.stderr || r.stdout).trim().split('\n').slice(-6).join(' | ')}`);
+  return r.stdout;
+}
+
+/** The daemon's config file (both platforms). Exported for tests. */
+export function daemonConfig(o: { portalUrl: string; id: string; token: string; repoPath: string; claude?: string; maxSessions: number }): string {
+  return JSON.stringify({ portalUrl: o.portalUrl, id: o.id, token: o.token, repoPath: o.repoPath, claude: o.claude, maxSessions: o.maxSessions }, null, 2);
+}
+
+/** A git archive of this checkout's committed code as a base64 .tar.gz (the Windows upload's payload). */
+export function bundle(root: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const git = spawn('git', ['-C', root, 'archive', '--format=tar.gz', 'HEAD', 'server', 'shared', 'machine', 'package.json', 'package-lock.json'], { windowsHide: true });
+    const chunks: Buffer[] = [];
+    let err = '';
+    git.stdout.on('data', (d: Buffer) => chunks.push(d));
+    git.stderr.on('data', (d) => (err += d));
+    git.on('error', reject);
+    git.on('close', (code) => (code === 0 ? resolve(Buffer.concat(chunks).toString('base64')) : reject(new Error(`git archive failed (${code}): ${err.trim().slice(-400)}`))));
+  });
+}
+
+/** The game clone: the given path, else the shortest one found (the clone, not a copy nested in it). */
+export function pickRepo(given: string | undefined, found: string[]): string | undefined {
+  return given || [...found].sort((a, b) => a.length - b.length)[0];
+}
+
+async function deployWindows(opts: DeployOptions): Promise<DeployResult> {
+  const step = opts.step ?? (() => undefined);
+  step('probing');
+  const p = parseWinProbe(await mustPs(opts.host, 'probe', win.probeScript(opts.repoSlug ?? ''), { timeoutMs: 3 * 60_000 }));
+  if (!p.home || !p.sid) throw new Error(`could not read the user and home folder on ${opts.host}`);
+  const support = nodeSupport(p.nodeVersion);
+  if (!p.node || !support.ok) throw new Error(`${opts.host} needs Node ${MIN_NODE.join('.')}+ (found ${p.nodeVersion ?? 'none'} at ${p.node ?? '-'})`);
+  if (!p.git) throw new Error(`${opts.host} has no git (install Git for Windows: Claude Code also needs its bash)`);
+  if (!p.tar) throw new Error(`${opts.host} has no tar.exe in System32 (Windows 10 1803 or newer has it)`);
+  const repoPath = pickRepo(opts.repoPath, p.repos);
+  if (!repoPath) throw new Error(`no clone of ${opts.repoSlug || 'the game repo'} found under ${p.home} or near the top of a drive on ${opts.host}; pass its path`);
+
+  step('copying code');
+  await mustPs(opts.host, 'copying the code', win.uploadScript(), { data: await bundle(opts.root), timeoutMs: 10 * 60_000 });
+  const version = (await run('git', ['-C', opts.root, 'rev-parse', '--short', 'HEAD'])).stdout.trim() || 'unknown';
+
+  step('npm ci');
+  await mustPs(opts.host, 'npm ci', win.npmScript(p.node, version), { timeoutMs: 10 * 60_000 });
+
+  step('installing');
+  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions });
+  const out = await mustPs(opts.host, 'install', win.installScript({ sid: p.sid, home: p.home, config, node: p.node, flag: support.flag }), { timeoutMs: 3 * 60_000 });
+  return { platform: 'win32', home: p.home, repoPath, node: p.node, nodeVersion: p.nodeVersion ?? '', claude: p.claude, version, started: /started=True/.test(out) };
+}
+
+// ---------------------------------------------------------------- start, stop, restart, remove
+
+export type DaemonAction = 'start' | 'stop' | 'restart';
+
+/** The Mac's launchctl lines for each action on the LaunchAgent. Exported for tests. */
+export function macControlScript(action: DaemonAction | 'uninstall'): string {
+  const plistPath = `"$HOME/Library/LaunchAgents/${LABEL}.plist"`;
+  const target = `gui/$(id -u)/${LABEL}`;
+  switch (action) {
+    case 'start':
+      return `set -e\nlaunchctl print ${target} >/dev/null 2>&1 || launchctl bootstrap gui/$(id -u) ${plistPath}\n`;
+    case 'stop':
+      return `launchctl bootout ${target} 2>/dev/null || true\n`;
+    case 'restart':
+      return `set -e\nif launchctl print ${target} >/dev/null 2>&1; then launchctl kickstart -k ${target}; else launchctl bootstrap gui/$(id -u) ${plistPath}; fi\n`;
+    case 'uninstall':
+      return `launchctl bootout ${target} 2>/dev/null || true\nrm -f ${plistPath}\n`;
+  }
+}
+
+/**
+ * Start, stop or restart the daemon on a machine. A stopped Mac daemon loads again at the next login, a
+ * Windows one starts again at the next logon. Returns what happened, in a few words.
+ */
+export async function controlDaemon(host: string, platform: MachinePlatform | undefined, action: DaemonAction): Promise<string> {
+  const pf = platform ?? (await detectPlatform(host));
+  if (pf === 'win32') {
+    const out = await mustPs(host, `daemon ${action}`, win.controlScript(action), { timeoutMs: 2 * 60_000 });
+    const stopped = /stopped=(\d+)/.exec(out)?.[1];
+    const started = /started=(True|False)/.exec(out)?.[1];
+    return [
+      stopped !== undefined ? `stopped the ${win.TASK_NAME} task (${stopped} process(es) ended; Unity editors left running)` : '',
+      started === 'True' ? `started the ${win.TASK_NAME} task` : started === 'False' ? 'nobody is logged on there, so the daemon starts at the next logon' : '',
+    ]
+      .filter(Boolean)
+      .join('; ');
+  }
+  await must(host, `daemon ${action}`, macControlScript(action), 60_000);
+  return action === 'stop' ? 'unloaded the LaunchAgent (it loads again at the next login)' : action === 'start' ? 'loaded the LaunchAgent' : 'restarted the LaunchAgent';
+}
+
+/** Stop and unload the daemon (its files stay in the .ff-factory folder). */
+export async function undeploy(host: string, platform?: MachinePlatform) {
+  const pf = platform ?? (await detectPlatform(host));
+  if (pf === 'win32') await mustPs(host, 'uninstall', win.uninstallScript(), { timeoutMs: 2 * 60_000 });
+  else await must(host, 'uninstall', macControlScript('uninstall'), 60_000);
 }

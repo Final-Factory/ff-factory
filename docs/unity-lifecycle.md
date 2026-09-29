@@ -9,10 +9,10 @@ The dialog watchdog (modal dialogs, recovery prompts) is separate: [unity-dialog
 | Who | Tool | Actions |
 |---|---|---|
 | sandbox worker (host) | `mcp__sandbox__unity` | `status`, `start`, `stop`, `restart`, `log`; `force: true` kills a frozen editor at once |
-| machine worker (Mac) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart` (`force` as above) |
+| machine worker (Mac or Windows PC) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart` (`force` as above) |
 | orchestrator | `unity` with `sandbox` or `machine` | the same; `log` is sandbox-only |
 
-A normal stop asks the editor to quit, then kills it after 15 s (host) or 30 s (Mac). A forced one
+A normal stop asks the editor to quit, then kills it after 15 s (host) or 30 s (machine). A forced one
 kills at once. Both kill what the editor started and any crash reporter left open for the project
 (`UnityBugReporter`, `UnityCrashHandler64`), then remove a stale `Temp/UnityLockfile`. Start picks a
 fresh log name when the old log is still locked. Restarting is fine with unsaved scene changes.
@@ -86,7 +86,7 @@ touches git.
 }
 ```
 
-The Macs get the watch and the `unity` tool with the daemon: redeploy it (`add_machine`) after an
+The machines (Macs and Windows PCs, [machines.md](machines.md#windows-machines); no dialog watch on Windows yet) get the watch and the `unity` tool with the daemon: redeploy it (`add_machine`) after an
 update. An older daemon ignores the `unity` message, and the tool times out with that advice.
 
 Tests: `server/unityHang.test.ts` (verdicts, budget, a fake bridge), `server/macUnity.test.ts`

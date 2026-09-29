@@ -9,7 +9,7 @@ import { Store, bus } from './store.ts';
 import { SandboxManager } from './sandboxes.ts';
 import { SessionManager, snapshotOf } from './sessions.ts';
 import { Agents } from './agents.ts';
-import { MachineManager } from './machines.ts';
+import { MachineManager, machineForPath } from './machines.ts';
 import { ProviderManager } from './providers.ts';
 import { Notifier } from './notify.ts';
 import { refreshSandboxGit } from './gitStatus.ts';
@@ -419,8 +419,8 @@ function imageRoots(url: URL, file?: string): { machine?: string; roots: string[
   if (s.sandboxId) return { roots: [sandboxes.require(s.sandboxId).path] };
   if (s.standingId) return { roots: [agents.standing.require(s.standingId).folder] };
   if (s.kind === 'orchestrator') {
-    const onMac = file && file.startsWith('/') ? machines.list().find((m) => [m.repoPath, m.home].some((r) => r && (file === r || file.startsWith(r.replace(/\/+$/, '') + '/')))) : undefined;
-    if (onMac) return { machine: onMac.id, roots: [] };
+    const onMachine = file ? machineForPath(file, machines.list()) : undefined;
+    if (onMachine) return { machine: onMachine.id, roots: [] };
     return { roots: [cfg.repo.basePath, cfg.sandboxRoot, cfg.standingRoot] };
   }
   throw new HttpError(404, 'no folder for this session');
@@ -621,6 +621,12 @@ route('POST', '/api/machines', async (req) => {
 route('POST', '/api/machines/([\\w-]+)/redeploy', async (req, [id]) => {
   const b = await readJson<{ force?: boolean }>(req);
   return machines.deployMachine({ id, force: !!b.force });
+});
+
+route('POST', '/api/machines/([\\w-]+)/daemon', async (req, [id]) => {
+  const b = await readJson<{ action?: string; force?: boolean }>(req);
+  if (b.action !== 'start' && b.action !== 'stop' && b.action !== 'restart') throw new HttpError(400, 'action must be start, stop or restart');
+  return { note: await machines.controlDaemon(id, b.action, !!b.force) };
 });
 
 route('POST', '/api/machines/([\\w-]+)/label', async (req, [id]) => {

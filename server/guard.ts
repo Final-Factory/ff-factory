@@ -159,10 +159,17 @@ export function hasRecentBackup(root: string, withinMs = 2 * 3_600_000, now = Da
   }
 }
 
-/** The shell lines that back up everything a discard could lose (the recipe the refusals and the brief give). */
-export const backupRecipe = (root: string) =>
+/**
+ * The shell lines that back up everything a discard could lose (the recipe the refusals and the brief give). A
+ * Bash line on both platforms: on Windows, Claude Code's Bash is Git Bash, which has no rsync, so the changed and
+ * untracked files are copied with tar there (a deleted file in the list is skipped, not fatal).
+ */
+export const backupRecipe = (root: string, platform: NodeJS.Platform = process.platform) =>
   `b="${root}/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$b"; git diff > "$b/unstaged.patch"; git diff --cached > "$b/staged.patch"; ` +
-  `git ls-files -z -m -o --exclude-standard | rsync -a --from0 --files-from=- ./ "$b/files/"; git stash list > "$b/stash-list.txt"; ls -R "$b" | head -50`;
+  (platform === 'win32'
+    ? `mkdir -p "$b/files"; git ls-files -z -m -o --exclude-standard | tar --null --ignore-failed-read -T - -cf - | tar -xf - -C "$b/files"; `
+    : `git ls-files -z -m -o --exclude-standard | rsync -a --from0 --files-from=- ./ "$b/files/"; `) +
+  `git stash list > "$b/stash-list.txt"; ls -R "$b" | head -50`;
 
 /**
  * Why a git command is refused in the user's own clone (a machine, docs/machines.md), or undefined.
@@ -468,13 +475,17 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
   const all = cmd.toLowerCase().split(/[\s|;&]+/);
   const killer = all.some((w) => ['taskkill', 'taskkill.exe', 'stop-process', 'kill', 'pkill', 'killall', 'spps'].includes(w));
   if (ctx?.ownMachine) {
-    // A machine (one of the user's Macs, docs/machines.md): its agents manage Unity like the user's own
-    // sessions there do, killing and relaunching editors, Hub and crash handlers freely. Only the FF Factory
-    // daemon (node, ~/.ff-factory) and Claude itself are off limits, as is unloading the daemon's LaunchAgent.
-    if (killer && all.some((w) => /^(node|claude)$|claude|ff-factory|daemon\.ts|com\.fffactory/.test(w))) {
+    // A machine (one of the user's Macs or Windows PCs, docs/machines.md): its agents manage Unity like the user's
+    // own sessions there do, killing and relaunching editors, Hub and crash handlers freely. Only the FF Factory
+    // daemon (node, the .ff-factory folder) and Claude itself are off limits, as is unloading the daemon's
+    // LaunchAgent (Mac) or ending, disabling or deleting its scheduled task (Windows).
+    if (killer && all.some((w) => /^(node|claude)(\.exe)?$|claude|ff-?factory|daemon\.ts|com\.fffactory|run-daemon/.test(w.replace(/^["']|["']$/g, '')))) {
       return "Killing node or claude processes is blocked on a machine: that would take down the FF Factory daemon or this agent. Unity, Unity Hub and crash handlers are fine to kill.";
     }
-    if (/launchctl\s+(bootout|unload|remove|kill|disable)\b[^;&|]*com\.fffactory/.test(cmd.toLowerCase())) return "Unloading the FF Factory daemon's LaunchAgent is blocked.";
+    const lc = cmd.toLowerCase();
+    if (/launchctl\s+(bootout|unload|remove|kill|disable)\b[^;&|]*com\.fffactory/.test(lc)) return "Unloading the FF Factory daemon's LaunchAgent is blocked.";
+    if (/schtasks(\.exe)?\s+[^;&|]*\/(end|delete|change)\b[^;&|]*fffactory|schtasks(\.exe)?\s+[^;&|]*fffactory[^;&|]*\/(end|delete|change)\b/.test(lc)) return "Ending, changing or deleting the FF Factory daemon's scheduled task is blocked.";
+    if (/(stop|disable|unregister|set)-scheduledtask\b[^;&]*fffactory|fffactory[^;&]*\|\s*(stop|disable|unregister|set)-scheduledtask\b/.test(lc)) return "Ending, changing or deleting the FF Factory daemon's scheduled task is blocked.";
     return undefined;
   }
   if (killer && all.some((w) => /unity|node|claude|powershell|pwsh|tailscale|supervise/.test(w))) {
