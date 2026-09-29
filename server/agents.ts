@@ -87,6 +87,9 @@ type Where = { sandboxId?: string; machineId?: string; machineSandbox?: string }
 
 const BUSY_STATUS = new Set(['running', 'starting', 'waiting_permission']);
 
+/** A machine's clone folder name (its Unity instance name), read as a path of the machine's own platform, not this host's. */
+const cloneName = (m: Pick<Machine, 'platform' | 'repoPath'>) => (m.platform === 'win32' ? path.win32 : path.posix).basename(m.repoPath);
+
 /** Who a tool call is for, when not the author of the latest message (docs/identity.md). */
 const FOR_USER = z
   .string()
@@ -1004,7 +1007,7 @@ ${ownerLine(this.cfg)}
 - Do not create a git worktree unless the task truly needs one (a Unity project is large); if you must, say why.
 
 ## Unity
-Unity on this ${mac}: the \`mcp__machine__unity\` tool starts, stops and restarts the editor of this clone (\`force: true\` for a frozen one), and a watch restarts a hung or crashed editor by itself and tells you. You may also start, quit, kill and relaunch the Unity editor of this clone (and Unity Hub, crash reporters) whenever it is hung, crashed or misbehaving, as the user's own sessions here do; unsaved in-editor changes may be lost, which is accepted. Never kill node or claude processes: that takes down the FF Factory daemon or you.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like C:\\Users\\... (forward slashes work in Bash and in git).' : ''} Before Unity MCP calls, pin the editor (read \`mcpforunity://instances\`, then \`set_active_instance\` with the instance whose name starts with "${path.basename(m.repoPath)}@").
+Unity on this ${mac}: the \`mcp__machine__unity\` tool starts, stops and restarts the editor of this clone (\`force: true\` for a frozen one), and a watch restarts a hung or crashed editor by itself and tells you. You may also start, quit, kill and relaunch the Unity editor of this clone (and Unity Hub, crash reporters) whenever it is hung, crashed or misbehaving, as the user's own sessions here do; unsaved in-editor changes may be lost, which is accepted. Never kill node or claude processes: that takes down the FF Factory daemon or you.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like C:\\Users\\... (forward slashes work in Bash and in git).' : ''} Before Unity MCP calls, pin the editor (read \`mcpforunity://instances\`, then \`set_active_instance\` with the instance whose name starts with "${cloneName(m)}@").
 
 ## Waiting
 Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back once your turn ends. To come back later (a long build, a test run), call \`mcp__machine__wake_me\` with minutes and a note, then end your turn: after that many minutes you get a message with your note (one pending wake per session; a new one replaces it). Do not poll in the foreground for more than a few minutes: anything longer (a Unity import, a build, a play leg, CI) is a wake_me and an ended turn.
@@ -1051,7 +1054,7 @@ To show the user an image (a screenshot, a proof), save it in your working tree 
         ],
       },
       guard: {
-        id: path.basename(m.repoPath),
+        id: cloneName(m),
         ownPath: m.repoPath,
         protectedPaths: [appDirOf(m)],
         gameRepos: [this.cfg.repo.url],

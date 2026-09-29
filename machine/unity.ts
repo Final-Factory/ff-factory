@@ -783,7 +783,7 @@ export class MacUnityWatch {
   private answered(d: Dialog, button: string, now: number) {
     this.dismissed = [...this.dismissed, { at: new Date(now).toISOString(), title: d.title, button }].slice(-40);
     const what = d.buttons.length ? `dismissed "${d.title}" with "${button}"` : `closed "${d.title}"`;
-    this.d.log?.(`unity ${path.basename(this.u.repo)}: ${what}`);
+    this.d.log?.(`unity ${(this.u.platform === 'win32' ? path.win32 : path.posix).basename(this.u.repo)}: ${what}`);
   }
 
   /**
