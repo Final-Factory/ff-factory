@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DISMISS_LIMIT, KNOWN_DIALOGS, decide, describeDialog, findDialogs, isStalled, type EditorWindow } from './watchdog.ts';
+import { DISMISS_LIMIT, KNOWN_DIALOGS, decide, describeDialog, escapeControlInStrings, findDialogs, isStalled, parsePsJson, type EditorWindow } from './watchdog.ts';
 import { editorTitleNames } from './sandboxes.ts';
 
 const win = (w: Partial<EditorWindow>): EditorWindow => ({ hwnd: 1, pid: 100, class: '#32770', title: '', enabled: true, owned: true, text: [], buttons: [], ...w });
@@ -236,4 +236,38 @@ test('project tools: the Font Coverage summary is closed with OK only when it re
   const now = Date.parse('2026-09-24T12:00:00Z');
   const recent = [60, 120, 180, 240].map((s) => ({ at: new Date(now - s * 1000).toISOString(), title: 'Font Coverage' }));
   assert.deepEqual(decide(d('No coverage errors.'), { autoDismiss: true, recent, nowMs: now }), { click: 'OK' });
+});
+
+// Every control character, U+0000 to U+001F, as Windows PowerShell 5.1's ConvertTo-Json let them through raw in a
+// window title ("Bad control character in string literal in JSON at position 88189", LothDesktop, 2026-09-29).
+const CONTROLS = Array.from({ length: 0x20 }, (_, i) => String.fromCharCode(i)).join('');
+
+test('PowerShell JSON: raw control characters in strings (U+0000-U+001F) are read, not a failed watch', () => {
+  const title = `Unity ${CONTROLS} dialog`;
+  const raw = `[{"hwnd":1,"pid":7,"class":"#32770","title":"${title}","text":["line${CONTROLS}"],"buttons":["OK"]},{"hwnd":2,"pid":7,"class":"UnityContainerWndClass","title":"sb1 - Unity","text":[],"buttons":[]}]`;
+  assert.throws(() => JSON.parse(raw), /control character/i, 'what JSON.parse alone says');
+  const logs: string[] = [];
+  const wins = parsePsJson<EditorWindow>(raw, 'unity-windows.ps1', (l) => logs.push(l));
+  assert.deepEqual(wins.map((w) => w.title), [title, 'sb1 - Unity'], 'every character kept, as JSON.parse reads \\u00XX');
+  assert.equal(wins[0].text[0], `line${CONTROLS}`);
+  assert.deepEqual(logs, [], 'nothing skipped');
+  // Escaped already (what ConvertTo-Json does for most), after a backslash, and outside strings (pretty output): unchanged in meaning.
+  assert.equal(JSON.parse(escapeControlInStrings('{"a":"x\\u0001y","b":"q\\\\"}')).a, 'x\u0001y');
+  assert.equal(JSON.parse(escapeControlInStrings('[\n  {"a": 1},\r\n  {"a": 2}\n]')).length, 2);
+  assert.equal(JSON.parse(escapeControlInStrings(`{"a":"x\\${String.fromCharCode(1)}y"}`)).a, 'x\u0001y', 'a backslash before a raw control character');
+  // One object (ConvertTo-Json for a single window), and nothing at all.
+  assert.deepEqual(parsePsJson<{ pid: number }>('{"pid":4}', 'x').map((r) => r.pid), [4]);
+  assert.deepEqual(parsePsJson('  \r\n', 'x'), []);
+});
+
+test('PowerShell JSON: an entry that still does not parse is skipped and logged; the rest are read', () => {
+  const logs: string[] = [];
+  const rows = parsePsJson<{ pid: number }>('[{"pid":1,"cmd":"a"},{"pid":2,"cmd":"bad \\q escape"},{"pid":3,"cmd":"c, d [e] {f}"}]', 'the Windows process list', (l) => logs.push(l));
+  assert.deepEqual(rows.map((r) => r.pid), [1, 3]);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /^the Windows process list: skipped 1 unreadable of 3 entries/);
+  // A cut-off output keeps its complete entries.
+  assert.deepEqual(parsePsJson<{ pid: number }>('[{"pid":1},{"pid":2},{"pid":', 'x', () => undefined).map((r) => r.pid), [1, 2]);
+  // Not a list and not JSON: the error names the probe.
+  assert.throws(() => parsePsJson('Get-CimInstance : Access denied', 'the Windows process list', () => undefined), /^Error: the Windows process list: unreadable output/);
 });

@@ -287,6 +287,14 @@ test('windows unity: the editor binary from the Hub (a custom install folder fir
   assert.equal(editorLogPath('win32', env), 'C:\\Users\\L\\AppData\\Local\\Unity\\Editor\\Editor.log');
   assert.deepEqual(parseWinProcs('{"pid":4,"ppid":0,"name":"System","cmd":""}'), [{ pid: 4, ppid: 0, cmd: 'System' }], 'ConvertTo-Json gives one object for one process');
   assert.deepEqual(parseWinProcs('[{"pid":1,"ppid":0,"name":"a.exe","cmd":"a.exe -x"},{"pid":2,"ppid":1,"name":"b.exe","cmd":null}]').map((p) => p.cmd), ['a.exe -x', 'b.exe']);
+  // A command line with raw control characters (U+0000-U+001F) among ~90 KB of processes: read, not a failed watch.
+  const many = Array.from({ length: 600 }, (_, i) => `{"pid":${i + 10},"ppid":1,"name":"p${i}.exe","cmd":"C:\\\\Tools\\\\p${i}.exe --a-long-argument-list-to-reach-the-size-seen-on-LothDesktop ${'x'.repeat(80)}"}`);
+  const ctl = Array.from({ length: 0x20 }, (_, i) => String.fromCharCode(i)).join('');
+  const listing = `[${many.join(',')},{"pid":9999,"ppid":1,"name":"Unity.exe","cmd":"Unity.exe -projectPath D:\\\\FF ${ctl}"}]`;
+  assert.ok(listing.length > 88_189);
+  const procs = parseWinProcs(listing, () => assert.fail('nothing to skip'));
+  assert.equal(procs.length, 601);
+  assert.equal(procs.at(-1)!.cmd, `Unity.exe -projectPath D:\\FF ${ctl}`);
   assert.equal(
     winLaunchScript("C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.1f1\\Editor\\Unity.exe", ['-projectPath', "D:\\Loth's Games\\FF"], "D:\\Loth's Games\\FF"),
     `(Start-Process -FilePath 'C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.1f1\\Editor\\Unity.exe' -ArgumentList '-projectPath "D:\\Loth''s Games\\FF"' -WorkingDirectory 'D:\\Loth''s Games\\FF' -PassThru).Id`,

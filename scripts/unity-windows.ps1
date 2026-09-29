@@ -73,14 +73,18 @@ for ($grew = $true; $grew; ) {
   foreach ($p in $all) { if ($set.Contains([uint32]$p.ParentProcessId) -and $set.Add([uint32]$p.ProcessId)) { $grew = $true } }
 }
 
+# Window titles and texts can hold control characters, which Windows PowerShell 5.1's ConvertTo-Json passes through
+# raw and JSON.parse refuses. Tab and line breaks stay (ConvertTo-Json escapes those); the rest go.
+function Clean([string]$s) { if ($null -eq $s) { return '' }; return ($s -replace '[\x00-\x08\x0b\x0c\x0e-\x1f]', '') }
+
 function Describe([IntPtr]$h) {
   $texts = New-Object System.Collections.Generic.List[string]
   $buttons = New-Object System.Collections.Generic.List[string]
   $kids = [FfsbWin]::Children($h)
   foreach ($c in $kids) {
     $cls = [FfsbWin]::ClassOf($c)
-    if ($cls -eq 'Button') { if ($buttons.Count -lt 12) { $t = [FfsbWin]::TextOf($c); if ($t.Trim()) { $buttons.Add($t) } } }
-    elseif ($cls -eq 'Static' -or $cls -eq 'Edit' -or $cls -like 'RichEdit*') { if ($texts.Count -lt 20) { $t = [FfsbWin]::TextOf($c); if ($t.Trim()) { $texts.Add($t) } } }
+    if ($cls -eq 'Button') { if ($buttons.Count -lt 12) { $t = [FfsbWin]::TextOf($c); if ($t.Trim()) { $buttons.Add((Clean $t)) } } }
+    elseif ($cls -eq 'Static' -or $cls -eq 'Edit' -or $cls -like 'RichEdit*') { if ($texts.Count -lt 20) { $t = [FfsbWin]::TextOf($c); if ($t.Trim()) { $texts.Add((Clean $t)) } } }
   }
   if ($kids.Count -eq 0 -or ($texts.Count -eq 0 -and $buttons.Count -eq 0 -and [FfsbWin]::ClassOf($h) -eq '#32770')) {
     try {
@@ -90,8 +94,8 @@ function Describe([IntPtr]$h) {
       foreach ($d in $el.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
         $name = [string]$d.Current.Name
         if (!$name.Trim()) { continue }
-        if ($d.Current.ControlType -eq $CT::Button) { if ($buttons.Count -lt 12) { $buttons.Add($name) } }
-        elseif ($texts.Count -lt 20) { $texts.Add($name) }
+        if ($d.Current.ControlType -eq $CT::Button) { if ($buttons.Count -lt 12) { $buttons.Add((Clean $name)) } }
+        elseif ($texts.Count -lt 20) { $texts.Add((Clean $name)) }
       }
     } catch { }
   }
@@ -99,7 +103,7 @@ function Describe([IntPtr]$h) {
     hwnd    = [long]$h
     pid     = [FfsbWin]::PidOf($h)
     class   = [FfsbWin]::ClassOf($h)
-    title   = [FfsbWin]::TitleOf($h)
+    title   = Clean ([FfsbWin]::TitleOf($h))
     enabled = [FfsbWin]::IsWindowEnabled($h)
     hung    = [FfsbWin]::IsHungAppWindow($h)
     owned   = [FfsbWin]::GetWindow($h, 4) -ne [IntPtr]::Zero   # GW_OWNER
@@ -111,7 +115,7 @@ function Describe([IntPtr]$h) {
 if ($Close) {
   $h = [IntPtr]$Hwnd
   if (![FfsbWin]::IsWindow($h) -or !$set.Contains([FfsbWin]::PidOf($h))) { throw "window $Hwnd is gone or does not belong to pids $Pids" }
-  if (!$Title -or [FfsbWin]::TitleOf($h).Trim() -ne $Title) { throw "window $Hwnd is not titled '$Title'" }
+  if (!$Title -or (Clean ([FfsbWin]::TitleOf($h))).Trim() -ne $Title) { throw "window $Hwnd is not titled '$Title'" }
   [FfsbWin]::CloseWindow($h)
   for ($i = 0; $i -lt 10 -and [FfsbWin]::IsWindow($h) -and [FfsbWin]::IsWindowVisible($h); $i++) { Start-Sleep -Milliseconds 200 }
   [pscustomobject]@{ closed = $Title; hwnd = $Hwnd; stillOpen = [FfsbWin]::IsWindow($h) -and [FfsbWin]::IsWindowVisible($h) } | ConvertTo-Json -Compress
