@@ -20,6 +20,8 @@ const IPAD = /ipad\.spec\.ts/;
 // FFBox's card and page (e2e/provider.spec.ts) run on servers of their own with the provider switched on
 // (E2E_PROVIDER=1), so the sidebar every other test and snapshot sees stays as it was.
 const PROVIDER = /provider\.spec\.ts/;
+// The intake (e2e/intake.spec.ts) likewise, with the Discord intake switched on (E2E_INTAKE=1).
+const INTAKE = /intake\.spec\.ts/;
 
 const PROJECTS = [
   { name: 'desktop-chromium', port: 8791, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
@@ -32,6 +34,8 @@ const PROJECTS = [
   { name: 'ipad-chrome', port: 8795, use: { ...devices['iPad Pro 11'], userAgent: CHROME_IPAD_UA }, only: IPAD },
   { name: 'provider-desktop', port: 8796, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } }, only: PROVIDER, env: { E2E_PROVIDER: '1' } },
   { name: 'provider-mobile', port: 8797, use: { ...devices['Pixel 5'] }, only: PROVIDER, env: { E2E_PROVIDER: '1' } },
+  { name: 'intake-desktop', port: 8798, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } }, only: INTAKE, env: { E2E_INTAKE: '1' } },
+  { name: 'intake-mobile', port: 8799, use: { ...devices['iPhone 13'] }, only: INTAKE, env: { E2E_INTAKE: '1' } },
 ] as { name: string; port: number; use: Record<string, unknown>; only?: RegExp; env?: Record<string, string> }[];
 
 export default defineConfig({
@@ -60,7 +64,7 @@ export default defineConfig({
   projects: PROJECTS.map((p) => ({
     name: p.name,
     use: { ...p.use, baseURL: `http://127.0.0.1:${p.port}` },
-    ...(p.only ? { testMatch: p.only } : { testIgnore: [IPAD, PROVIDER] }),
+    ...(p.only ? { testMatch: p.only } : { testIgnore: [IPAD, PROVIDER, INTAKE] }),
   })),
   webServer: PROJECTS.map((p) => ({
     command: 'node e2e/server.ts',

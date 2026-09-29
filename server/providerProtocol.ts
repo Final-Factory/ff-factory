@@ -166,11 +166,9 @@ export const CapacitySchema = z.object({
 export const ConversationMessageSchema = z.object({ type: z.literal('conversation'), cursor, conversation: ProviderConversationSchema });
 export const IntakeMessageSchema = z.object({ type: z.literal('intake'), cursor, event: ProviderIntakeSchema });
 
-export const FromConnectorSchema = z.discriminatedUnion('type', [HelloSchema, CapacitySchema, ConversationMessageSchema, IntakeMessageSchema]);
 
 export type ProviderHello = z.infer<typeof HelloSchema>;
 export type ProviderCapacityMessage = z.infer<typeof CapacitySchema>;
-export type FromConnector = z.infer<typeof FromConnectorSchema>;
 
 // ---------------------------------------------------------------- portal → connector
 
@@ -178,7 +176,13 @@ export type ToConnector =
   /** The answer to a valid hello: where each stream left off, so the connector resends only what is newer. */
   | { type: 'welcome'; protocol: number; provider: 'ffbox'; cursors: { conversation?: string; intake?: string }; limits: typeof LIMITS }
   /** A message the portal did not take; the connection stays up. */
-  | { type: 'error'; code: 'bad_json' | 'bad_message' | 'unknown_type' | 'hello_twice'; message: string; ref?: string };
+  | { type: 'error'; code: 'bad_json' | 'bad_message' | 'unknown_type' | 'hello_twice' | 'not_enabled'; message: string; ref?: string }
+  /** The answer to board_check (docs/intake.md): what the ledger holds that matches, open or finished. */
+  | { type: 'board'; ref: string; verdict: 'clear' | 'in_flight' | 'done'; matches: { id: string; status: string; title: string; score: number; why: string; updatedAt: string }[] }
+  /** Receipt of a request FFBox filed: the ledger item it became (or the one it repeats). */
+  | { type: 'filed'; ref: string; workId?: string; status: string; repeat?: boolean; why?: string }
+  /** The work messages (docs/ffbox-connector-contract.md), sent only to a connector that lists them in hello.accepts. */
+  | ToConnectorWork;
 
 // ---------------------------------------------------------------- work messages (phase 3, docs/ffbox-connector-contract.md)
 //
@@ -319,3 +323,67 @@ export function describeIssues(e: z.ZodError): string {
     .map((i) => `${i.path.join('.') || '(message)'}: ${i.message}`)
     .join('; ');
 }
+
+// ---------------------------------------------------------------- the intake, both ways (docs/intake.md)
+
+/**
+ * connector → portal: FFBox files a request into FF Factory's ledger: a fix branch to review and merge, an escalation
+ * (a fork that needs the three-machine rig, a GPU), or an operator's request. It lands waiting for a person unless the
+ * portal's intake.ffbox auto-approve rule allows it. Title and brief are untrusted text (they can carry what a player
+ * wrote); the portal fences them off.
+ */
+export const RequestSchema = z.object({
+  type: z.literal('request'),
+  /** FFBox's id for it; the portal answers with "filed". */
+  ref: requestId,
+  kind: z.enum(['review-branch', 'escalate', 'dev']),
+  title: z.string().min(1).max(300),
+  brief: z.string().min(1).max(8000),
+  /** Who opened the conversation behind it: an operator, a player, or FFBox itself. */
+  opener: z.enum(['operator', 'player', 'system']),
+  /** The operator it is for, when an operator asked (an FF Factory login; the portal checks it exists). */
+  requestedBy: RequesterSchema.optional(),
+  conversation: conversationId.optional(),
+  branch: gitRef.optional(),
+  pr: z.number().int().min(1).optional(),
+  verdict: z.string().regex(/^[A-Z][A-Z-]{0,39}$/).optional(),
+  key: boardKey.optional(),
+  url: z.string().max(300).regex(/^https:\/\/[^\s"'<>]+$/).optional(),
+});
+
+/**
+ * connector → portal: before FFBox works a report or starts an operator's dev turn, it asks the ledger whether the
+ * same work is open or done (docs/intake.md). The portal answers "board", or error not_enabled while
+ * intake.ffbox.boardCheck is off.
+ */
+export const BoardCheckSchema = z.object({
+  type: z.literal('board_check'),
+  ref: requestId,
+  keys: z.array(boardKey).max(20).default([]),
+  /** Untrusted: compared by its words, never shown to a model. */
+  title: z.string().max(300).optional(),
+});
+
+/** connector → portal: a turn FF Factory submitted finished (or failed). The summary is untrusted text. */
+export const ResultSchema = z.object({
+  type: z.literal('result'),
+  ref: requestId,
+  conversation: conversationId,
+  state: z.enum(['done', 'failed']),
+  branch: gitRef.optional(),
+  pr: z.number().int().min(1).optional(),
+  verdict: z.string().regex(/^[A-Z][A-Z-]{0,39}$/).optional(),
+  noBranchReason: z.string().max(300).optional(),
+  summary: z.string().max(2000).optional(),
+  costUsd: z.number().min(0).max(100_000).optional(),
+  url: z.string().max(300).regex(/^https:\/\/[^\s"'<>]+$/).optional(),
+});
+
+export type ProviderRequestMessage = z.infer<typeof RequestSchema>;
+export type BoardCheckMessage = z.infer<typeof BoardCheckSchema>;
+export type ResultMessage = z.infer<typeof ResultSchema>;
+
+/** Everything the connector may send. */
+export const FromConnectorSchema = z.discriminatedUnion('type', [HelloSchema, CapacitySchema, ConversationMessageSchema, IntakeMessageSchema, AcceptedSchema, RefusedSchema, ResultSchema, RequestSchema, BoardCheckSchema]);
+export type FromConnector = z.infer<typeof FromConnectorSchema>;
+export const FROM_CONNECTOR_TYPES = ['hello', 'capacity', 'conversation', 'intake', 'accepted', 'refused', 'result', 'request', 'board_check'] as const;

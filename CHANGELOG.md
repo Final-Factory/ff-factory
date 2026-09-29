@@ -26,6 +26,20 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The intake: Discord and FFBox into the work ledger** ([docs/intake.md](docs/intake.md)), every switch off by default
+  (config `intake`). New #bug-reports threads (the in-game reporter's too) and trusted people's requests to Max in
+  #dev-chat (trusted by Discord author id, config `intake.discord.trusted`) become ledger requests with the thread link,
+  reporter, version and attachments, marked as players' text. A fixed-code triage classes each one: an obvious bug may be
+  worked without a person when auto-approve is on; anything else **needs a human** and waits until a reviewer (config
+  `intake.reviewers`) approves or declines it on the Dispatcher page's new Intake tab. Duplicates of open or finished
+  work fold into the request they repeat; daily and per-reporter caps. Intake workers get fixed rules (untrusted input,
+  posting limits, stop at design decisions) and end with FIX-LANDED, RESOLVED or DESIGN-QUESTION, which close the
+  request or flag the question to the reviewers; a release follow-up tells reporters their fix is live. FFBox, later
+  and optional: its fix branches and `request` messages become review requests, `board_check` lets it ask the ledger
+  first, and `send_to_ffbox` hands it work once `providers.ffbox.sendWork` is on. `list_work` gains `source` and
+  `status: needs_human`; the heartbeat gains an Intake line. Work started from the dashboard, over `/mcp` or for a
+  delegation is recorded in the ledger too.
+
 - **Claude plan usage is polled every 15 minutes** (config `usagePollMinutes`, 5 to 240, settable with
   `set_app_config`; [docs/accounts.md](docs/accounts.md#how-often)), on the portal and by each machine daemon, instead
   of every 5 minutes plus up to once a minute after rate-limit events. One poll at startup or connect; **Refresh

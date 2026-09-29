@@ -183,7 +183,8 @@ Never send the description, log lines, file names from inside the zip, or the se
 | message | when |
 |---|---|
 | `welcome` | the answer to a valid `hello` (above) |
-| `error` | `{ "type": "error", "code": "bad_json" \| "bad_message" \| "unknown_type" \| "hello_twice", "message": "…", "ref": "<type>" }`. A message was not taken, and the connection stays up. `message` names the field and the rule, never the value. Log it |
+| `error` | `{ "type": "error", "code": "bad_json" \| "bad_message" \| "unknown_type" \| "hello_twice" \| "not_enabled", "message": "…", "ref": "<type or ref>" }`. A message was not taken, and the connection stays up. `message` names the field and the rule, never the value. `not_enabled`: a `request` or `board_check` while FF Factory has that part of the intake off. Log it |
+| `filed`, `board` | the answers to `request` and `board_check` ([The intake](#the-intake-requests-and-the-ledger-check)) |
 
 Ignore any other message type: protocol 2 may add some.
 
@@ -276,7 +277,61 @@ stricter.
 | `reason` | refused: `unknown_requester`, `no_account`, `class_not_allowed`, `budget_hold`, `draining`, `already_diagnosed`, `bad_request` or `other` |
 | `message` | optional, up to 300 characters, one line for people. Shown as data |
 
-Until phase 3, FF Factory answers these two with `unknown_type`, like any message it does not take yet.
+FF Factory takes these two, and `result` below, from any connector; they change only a request it submitted (a
+`ref` it knows). It sends `submit` only when its config `providers.ffbox.sendWork` is on (docs/intake.md).
+
+```json
+{ "type": "result", "ref": "fff-w12-lx3", "conversation": "813", "state": "done", "branch": "ffbox/fff-w12",
+  "pr": 771, "verdict": "FIX-PROPOSED", "summary": "…", "url": "https://ffbox.example/conv/813" }
+```
+
+`result` (connector → FF Factory): a turn FF Factory submitted ended. `state` `done` or `failed`; `branch`, `pr`,
+`verdict` (`^[A-Z][A-Z-]{0,39}$`), `noBranchReason` (300), `summary` (2000, untrusted text), `costUsd` and `url`
+are optional. A pushed branch makes FF Factory start a worker that reviews and merges it.
+
+## The intake: requests and the ledger check
+
+FF Factory's work ledger is where both teams' work is recorded (docs/intake.md). These messages let FFBox file into
+it and ask it before starting work. FF Factory answers them only while its config `intake.ffbox` has them on;
+otherwise it sends `error` `not_enabled` and FFBox carries on as before. Schemas: `RequestSchema`,
+`BoardCheckSchema` and `ResultSchema` in `server/providerProtocol.ts`, tested in `server/providerWork.test.ts`.
+
+```json
+{ "type": "request", "ref": "r-2291", "kind": "review-branch", "title": "Fix alt-tab freeze", "brief": "…",
+  "opener": "player", "conversation": "812", "branch": "ffbox/alt-tab-1", "pr": 770 }
+{ "type": "filed", "ref": "r-2291", "workId": "w41", "status": "pending_approval" }
+
+{ "type": "board_check", "ref": "q-17", "keys": ["branch:ffbox/alt-tab-1", "pr#770"], "title": "alt-tab freeze" }
+{ "type": "board", "ref": "q-17", "verdict": "in_flight",
+  "matches": [{ "id": "w23", "status": "active", "title": "Fix the alt-tab freeze", "score": 0.8, "why": "similar title", "updatedAt": "2026-09-29T10:00:00.000Z" }] }
+```
+
+`request` (connector → FF Factory):
+
+| field | rule |
+|---|---|
+| `ref` | FFBox's id for it, `^[A-Za-z0-9._:-]{1,80}$`; `filed` refers to it. Resending it (or the same conversation) files nothing new |
+| `kind` | `review-branch` (a fix branch to review and merge), `escalate` (work FFBox cannot do: a GPU, the three-machine rig), `dev` (an operator's request) |
+| `title`, `brief` | 1-300 and 1-8000 characters. Untrusted unless `opener` is `operator`: FF Factory quotes it as players' text |
+| `opener` | `operator`, `player` or `system`: who started the conversation behind it. Say `player` for anything a player started |
+| `requestedBy` | optional, as in the work messages: the operator it is for. FF Factory checks the login exists; otherwise it is the system payer's |
+| `conversation`, `branch`, `pr`, `verdict`, `key`, `url` | optional, the same patterns as in `conversation` |
+
+`filed` (FF Factory → connector): `workId` (the ledger request, or the one it repeats), `status` (`pending_approval`
+until one of the reviewers approves it: players' reports do not steer the game; otherwise the request's status),
+`repeat: true` for a repeat, or `status: "skipped"` with `why` past FF Factory's daily cap.
+
+`board_check` (connector → FF Factory), before FFBox works a report or starts an operator's dev turn: `ref`, up to 20
+`keys` in the board's spelling (`branch:<name>`, `pr#N`, `issue#N`, `spec-NNN`, a desync signature, a conversation
+id), and an optional `title` whose words are compared (untrusted; never shown to a model).
+
+`board` (FF Factory → connector): `verdict` `in_flight` (a strong match is open), `done` (a strong match finished
+within FF Factory's lookback, default 14 days) or `clear`, and up to five `matches`, strongest first: ledger id,
+status, title (120 characters), score 0 to 1 (0.8 and over is strong), why, last change. Never a brief. FFBox MUST
+NOT pass a match's title into a container that runs player text.
+
+**FFBox SHOULD** skip work whose check says `in_flight` or `done`, and point at the ledger id instead (an operator
+may override), so the two teams never build the same fix twice.
 
 ## Limits and close codes
 

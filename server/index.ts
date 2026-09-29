@@ -13,6 +13,7 @@ import { MachineManager, machineForPath, parseSandboxRef } from './machines.ts';
 import { hostSandboxFrom } from './hostMigration.ts';
 import { ProviderManager } from './providers.ts';
 import { MaxManager } from './max.ts';
+import { IntakeManager } from './intake.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { Notifier } from './notify.ts';
 import { refreshSandboxGit } from './gitStatus.ts';
@@ -206,6 +207,8 @@ notifier.audience = (s, kind) => {
   if (owner) return [owner.userId];
   if (agents.orchestrators.isDispatcher(s)) return kind === 'turnEnd' ? [] : identity.list().filter((u) => u.role === 'owner').map((u) => u.userId);
   // A worker's finished turn: the people it works for, and whoever wrote to it last (they may be following it).
+  // Intake work nobody asked for in person (docs/intake.md) reaches people through the ledger and the heartbeat instead.
+  if (s.kind === 'worker' && kind === 'turnEnd' && agents.orchestrators.intakeOnly(s.id)) return [];
   if (s.kind === 'worker' && kind === 'turnEnd') return [...new Set([...agents.orchestrators.audienceOf(s), ...(s.lastRequestedBy ? [s.lastRequestedBy] : [])].map((r) => r.userId.toLowerCase()))];
   return undefined;
 };
@@ -346,6 +349,16 @@ agents.standing.hostGate = () => hostHealth.blockReason('agent');
 agents.hostHealth = hostHealth;
 agents.providers = providers;
 agents.max = max;
+// The intake (docs/intake.md): Discord and FFBox into the work ledger. Everything in it is off unless config intake
+// switches it on; the hooks below only record what already arrives while it is off.
+const intake = new IntakeManager({ cfg, store, identity, orchestrators: agents.orchestrators, discord: max }).start();
+max.onEvent = (ev) => intake.onMaxEvent(ev);
+providers.onConversation = (c) => intake.onConversation(c);
+providers.onRequest = (m) => intake.onRequest(m);
+providers.onBoardCheck = (m) => intake.onBoardCheck(m);
+providers.onWorkReply = (m) => intake.onWorkReply(m);
+providers.onResult = (m) => intake.onResult(m);
+agents.orchestrators.onIntakeAttention = (w, what) => notifier.intake(w, what, (what === 'design' && w.flag ? w.flag.for : agents.orchestrators.reviewers()).map((r) => r.userId));
 if (cfg.hostGuard.pollSeconds > 0) {
   setInterval(() => void hostHealth.tick(), cfg.hostGuard.pollSeconds * 1000);
   setTimeout(() => void hostHealth.tick(), 5000);
@@ -380,6 +393,7 @@ function appState(user: string | undefined): AppState {
     dispatcherId: agents.dispatcherId,
     me,
     work: agents.orchestrators.forPage(),
+    intake: intake.summary(),
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase },
     settings: store.settings,
   };
@@ -452,6 +466,19 @@ route('POST', '/api/max/inbound/([\\w-]+)/seen', async (_r, [alias]) => {
   return { ok: true };
 });
 route('POST', '/api/max/refresh', async () => max.refresh());
+
+// ---- the intake (docs/intake.md): Discord and FFBox requests in the ledger; a person approves or declines them
+route('GET', '/api/intake', async () => intake.summary());
+route('POST', '/api/intake/poll', async () => intake.checkNow());
+route('POST', '/api/work/(w[0-9]+)/approve', async (req, [id]) => {
+  const w = agents.orchestrators.approveIntake(id, requesterOf(req));
+  return { id: w.id, status: w.status, approval: w.approval };
+});
+route('POST', '/api/work/(w[0-9]+)/decline', async (req, [id]) => {
+  const b = await readJson<{ note?: string }>(req);
+  const w = agents.orchestrators.declineIntake(id, requesterOf(req), typeof b.note === 'string' ? b.note.slice(0, 300) : undefined);
+  return { id: w.id, status: w.status, approval: w.approval };
+});
 // The usage meters' Refresh: poll every account now, here and on each connected machine (docs/accounts.md).
 route('POST', '/api/usage/refresh', async () => ({ started: usage.refreshNow(), machines: machines.requestUsage() }));
 
@@ -641,6 +668,12 @@ route('POST', '/api/sessions', async (req) => {
     from: 'human',
     requestedBy: requesterOf(req),
   });
+  // Started from the dashboard: in the ledger too, so it shows all work in flight (docs/intake.md, "One place").
+  if (s.info.status !== 'error') {
+    const by = requesterOf(req);
+    const where = s.info.machineSandbox ? `in ${s.info.machineId}/${s.info.machineSandbox}` : s.info.machineId ? `on ${s.info.machineId}` : `in ${s.info.sandboxId}`;
+    agents.orchestrators.recordStart(s.info, b.prompt, by, `started by ${by.displayName} from the dashboard: worker ${s.info.id} ${where}`, true);
+  }
   return s.info;
 });
 
@@ -774,7 +807,7 @@ setInterval(() => {
   for (const [userId, minutes] of Object.entries(store.settings.heartbeat ?? {})) {
     const chat = agents.orchestrators.personalOf(userId);
     if (!chat) continue;
-    agents.waker.heartbeat(chat.info.id, minutes, describe, (s) => agents.orchestrators.audienceOf(s).some((r) => r.userId.toLowerCase() === userId.toLowerCase()));
+    agents.waker.heartbeat(chat.info.id, minutes, describe, (s) => agents.orchestrators.audienceOf(s).some((r) => r.userId.toLowerCase() === userId.toLowerCase()), () => agents.orchestrators.intakeLine(userId));
   }
 }, 60_000);
 
@@ -1188,6 +1221,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   voice.unload('server stopping');
   providers.close();
   max.close();
+  intake.close();
   store.flush();
   process.exit(0);
 }

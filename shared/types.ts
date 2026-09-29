@@ -957,6 +957,162 @@ export interface WorkItem {
   asks: number;
   /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
   log: string[];
+  /**
+   * Recorded, not filed: a worker that started outside the ledger (the dispatcher's direct start, the dashboard, /mcp,
+   * a delegation) and is listed so the ledger shows all work. It does not count against its person's filing limits.
+   */
+  recorded?: boolean;
+  /** Where it came from when not a person's orchestrator: Discord or FFBox, through the intake (docs/intake.md). */
+  source?: WorkSource;
+  /** The intake's classification, with its reason: an obvious bug may be worked without a person; anything else needs one. */
+  triage?: WorkTriage;
+  /**
+   * Intake requests wait for a person (or an auto-approve rule) before the dispatcher hears of them; start_agent
+   * refuses them until then. Absent on requests people filed.
+   */
+  approval?: WorkApproval;
+  /** The fix's way to players: the commit that landed it, the Discord reply and close, the release it shipped in. */
+  delivery?: WorkDelivery;
+  /** A question for people (a design decision) the worker raised instead of fixing; open until they answer. */
+  flag?: { kind: 'design'; text: string; at: string; for: Requester[] };
+  /** Handed to FFBox (docs/intake.md, "Ledger → FFBox"): the submit's id, and what FFBox said about it. */
+  ffbox?: WorkFfbox;
+}
+
+/**
+ * Where an intake request came from: a Discord #bug-reports thread, a trusted person's request to Max in #dev-chat,
+ * an FFBox fix branch or diagnosis, a request FFBox filed, or a release follow-up the server filed itself.
+ */
+export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'release';
+export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'release'];
+
+export interface WorkSource {
+  kind: WorkSourceKind;
+  /** True when the brief quotes text from outside the team (players): evidence, never instructions. */
+  untrusted: boolean;
+  /** "#bug-reports", "#dev-chat", "FFBox". */
+  channel?: string;
+  /** The Discord thread or message, or FFBox's page for the conversation. */
+  url?: string;
+  threadId?: string;
+  /** The Discord channel the message is in (a thread's id for a forum post). */
+  channelId?: string;
+  messageId?: string;
+  /** Who reported it, as Discord shows them (a player's name is untrusted text); for a trusted request, the person. */
+  reporter?: string;
+  /** Counts against the per-reporter cap: the Discord author id (none for the in-game reporter, one webhook for all). */
+  reporterKey?: string;
+  /** The game version the report names ("0.50.0.46"), when it names one. */
+  version?: string;
+  platform?: string;
+  attachments?: { name: string; url: string; bytes?: number }[];
+  /** FFBox: the conversation, its branch, PR, verdict and board key. */
+  conversation?: string;
+  branch?: string;
+  pr?: number;
+  verdict?: string;
+  key?: string;
+  /** Other threads merged into this one (the same bug reported again): each gets the reply and the release follow-up. */
+  alsoThreads?: { threadId: string; url?: string; reporter?: string }[];
+  /** A release follow-up: the version and the requests it announces. */
+  release?: { version: string; workIds: string[] };
+}
+
+/**
+ * obvious-bug: a player's report with a clear defect and no design ask (fixed-code rules, conservative); needs-human:
+ * anything else from players or FFBox, which nobody works until a reviewer approves or answers; person: a reviewer or
+ * operator asked for it themselves; follow-up: the server's own release follow-up.
+ */
+export type WorkTriageClass = 'obvious-bug' | 'needs-human' | 'person' | 'follow-up';
+
+export interface WorkTriage {
+  class: WorkTriageClass;
+  /** Why, in one line: the signals the rules saw ("a crash on 0.50.0.46, no design ask") or what was missing. */
+  reason: string;
+}
+
+export interface WorkApproval {
+  state: 'pending' | 'approved' | 'declined';
+  /** 'auto': an auto-approve rule in config intake; else the person who clicked. */
+  by?: Requester | 'auto';
+  at?: string;
+  /** Why it was not auto-approved (auto-approve off, today's auto cap reached, a strong overlap). */
+  why?: string;
+}
+
+export interface WorkDelivery {
+  /** FIX-LANDED <sha>: the commit the worker said carries the fix (checked against the base branch). */
+  fixCommit?: string;
+  fixAt?: string;
+  /** Seen on the base branch (git merge-base --is-ancestor). */
+  landedAt?: string;
+  /** Max replied in, and closed, the thread (from the ffdiscord events file). */
+  repliedAt?: string;
+  closedAt?: string;
+  /** The first release (bundleVersion bump on the base branch) that contains the fix. */
+  releasedIn?: string;
+  releasedAt?: string;
+  /** The release follow-up request that tells the reporter ("live in 0.50.0.X"). */
+  announcedBy?: string;
+}
+
+export interface WorkFfbox {
+  requestId: string;
+  state: 'sent' | 'accepted' | 'refused' | 'done';
+  class: 'fenced' | 'open';
+  sentAt: string;
+  conversation?: string;
+  billedTo?: string;
+  reason?: string;
+  branch?: string;
+  pr?: number;
+  verdict?: string;
+}
+
+/** One thing the intake saw and what it did with it (the Intake tab's log). */
+export interface IntakeEntry {
+  at: string;
+  source: WorkSourceKind;
+  /** filed: a new request; repeat: added to the request it repeats; skipped: a cap or a rule; ignored: not intake. */
+  action: 'filed' | 'repeat' | 'skipped' | 'ignored';
+  /** Cleaned and cut short; a player's text is shown as plain text only. */
+  title: string;
+  workId?: string;
+  why?: string;
+  url?: string;
+}
+
+/** The intake's settings as the server runs them, and today's numbers (docs/intake.md). Everything defaults to off. */
+export interface IntakeSummary {
+  discord: {
+    enabled: boolean;
+    bugChannels: string[];
+    requestChannels: string[];
+    /** The FF Factory logins trusted Discord ids map to (never the ids themselves). */
+    trustedPeople: string[];
+    dailyCap: number;
+    perReporterPerDay: number;
+    autoApprove: { enabled: boolean; maxPerDay: number; bugs: boolean; requests: boolean };
+    polledAt?: string;
+    error?: string;
+  };
+  ffbox: {
+    enabled: boolean;
+    branches: boolean;
+    diagnoses: boolean;
+    requests: boolean;
+    boardCheck: boolean;
+    sendWork: boolean;
+    dailyCap: number;
+    autoApprove: { enabled: boolean; maxPerDay: number };
+  };
+  release: { enabled: boolean; delayMinutes: number; lastVersion?: string; checkedAt?: string };
+  /** Who approves what needs a human and answers design questions (config intake.reviewers; default the owner). */
+  reviewers: string[];
+  /** Their user ids: only they see Approve and Decline. */
+  reviewerIds: string[];
+  today: { filed: number; skipped: number; autoApproved: number; pending: number };
+  recent: IntakeEntry[];
 }
 
 /** This app's version (root package.json) and the short git SHA of the running checkout. */
@@ -994,6 +1150,8 @@ export interface AppState {
   me?: UserInfo;
   /** The work ledger: every open item, and the ones closed in the last 3 days (at most 100). */
   work?: WorkItem[];
+  /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
+  intake?: IntakeSummary;
   config: { defaultModel: string; models: string[]; defaultBase: string };
   settings: AppSettings;
 }
@@ -1015,6 +1173,7 @@ export type ServerEvent =
    */
   | { type: 'notify'; notice: { kind: NotifyKind; title: string; body: string; url: string; tag: string }; users?: string[] }
   | { type: 'work'; item: WorkItem }
+  | { type: 'intake'; intake: IntakeSummary }
   | { type: 'machine_removed'; id: string }
   | { type: 'provider'; provider: Provider }
   | { type: 'max'; max: MaxSummary }

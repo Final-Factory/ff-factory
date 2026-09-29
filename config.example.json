@@ -57,8 +57,36 @@
   ],
   "providers": {
     "ffbox": {
-      "enabled": false
+      "enabled": false,
+      "sendWork": false
     }
+  },
+  "intake": {
+    "discord": {
+      "enabled": false,
+      "bugChannels": [
+        "bug_reports"
+      ],
+      "requestChannels": [
+        "dev_chat"
+      ],
+      "trusted": {},
+      "dailyCap": 10,
+      "perReporterPerDay": 2,
+      "autoApprove": {
+        "enabled": false,
+        "maxPerDay": 3
+      }
+    },
+    "ffbox": {
+      "enabled": false,
+      "boardCheck": false
+    },
+    "release": {
+      "enabled": false,
+      "delayMinutes": 60
+    },
+    "reviewers": []
   },
   "hostGuard": {
     "warnFreeGB": 80,

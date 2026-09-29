@@ -112,3 +112,58 @@ test('hello.accepts: a phase 1 connector takes no work; one that lists the work 
   assert.deepEqual(pm.summary().accepts, ['submit', 'diagnose', 'stop', 'future_thing']);
   assert.equal(acceptsWork(pm.summary().accepts, 'submit'), true);
 });
+
+test('the intake over the socket: request and board_check are answered by the hooks, not_enabled without them; replies reach the hooks; a submit goes only when allowed', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-provwork-'));
+  const token = mintProviderToken();
+  const cfg = { dataDir, providers: { ffbox: { enabled: true, tokenSha256: tokenSha256(token) } } } as unknown as Config;
+  const pm = new ProviderManager(cfg);
+  const server = http.createServer();
+  server.on('upgrade', (req, socket, head) => pm.upgrade(req, socket, head, '127.0.0.1'));
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const c = new MockConnector(url, token);
+  t.after(() => {
+    c.close();
+    pm.close();
+    server.close();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+  await c.hello();
+  // No hooks (the intake is off): said plainly, the connection stays up.
+  c.send({ type: 'request', ref: 'r1', kind: 'review-branch', title: 'Review ffbox/x', brief: 'please', opener: 'system', branch: 'ffbox/x' });
+  assert.deepEqual(await c.next('error'), { type: 'error', code: 'not_enabled', message: 'FF Factory does not take requests from FFBox now (intake.ffbox)', ref: 'r1' });
+  c.send({ type: 'board_check', ref: 'q1', keys: ['desync:0.50.0:power'] });
+  assert.equal((await c.next('error')).code, 'not_enabled');
+
+  const seen: string[] = [];
+  pm.onRequest = (m) => (seen.push(`request ${m.ref} ${m.kind}`), { workId: 'w7', status: 'pending_approval' });
+  pm.onBoardCheck = (m) => (seen.push(`check ${m.keys.join(',')}`), { verdict: 'in_flight', matches: [{ id: 'w7', status: 'active', title: 'Review ffbox/x', score: 1, why: 'same branch ffbox/x', updatedAt: '2026-09-29T10:00:00.000Z' }] });
+  pm.onWorkReply = (m) => seen.push(`${m.type} ${m.ref}`);
+  pm.onResult = (m) => seen.push(`result ${m.ref} ${m.state} ${m.branch}`);
+  pm.onConversation = (x) => seen.push(`conversation ${x.id}`);
+  c.send({ type: 'request', ref: 'r2', kind: 'escalate', title: 'Needs the rig', brief: 'three peers', opener: 'player' });
+  assert.deepEqual(await c.next('filed'), { type: 'filed', ref: 'r2', status: 'pending_approval', workId: 'w7' });
+  c.send({ type: 'board_check', ref: 'q2', keys: ['branch:ffbox/x'], title: 'x' });
+  assert.equal((await c.next('board')).verdict, 'in_flight');
+  c.send({ type: 'accepted', ref: 'fff-w1-a', conversation: 'c1', billedTo: 'ben' });
+  c.send({ type: 'refused', ref: 'fff-w2-a', reason: 'no_account' });
+  c.send({ type: 'result', ref: 'fff-w1-a', conversation: 'c1', state: 'done', branch: 'ffbox/fff-w1' });
+  c.conversation({ id: 'c1', source: 'fff', opener: 'fff', title: 't', state: 'idle', agentClass: 'ffagent', createdAt: '2026-09-29T10:00:00Z', updatedAt: '2026-09-29T10:05:00Z' });
+  c.send({ type: 'request', ref: 'bad', kind: 'nope', title: 't', brief: 'b', opener: 'system' });
+  assert.equal((await c.next('error')).code, 'bad_message', 'checked like every message');
+  assert.deepEqual(seen, ['request r2 escalate', 'check branch:ffbox/x', 'accepted fff-w1-a', 'refused fff-w2-a', 'result fff-w1-a done ffbox/fff-w1', 'conversation c1']);
+
+  // Ledger → FFBox: refused while providers.ffbox.sendWork is off or the connector does not take submits.
+  const msg = buildSubmit(base);
+  assert.throws(() => pm.submitWork(msg), /providers\.ffbox\.sendWork/);
+  (cfg.providers!.ffbox as { sendWork?: boolean }).sendWork = true;
+  assert.throws(() => pm.submitWork(msg), /does not take work yet/);
+  c.close();
+  const c2 = new MockConnector(url, token);
+  t.after(() => c2.close());
+  await c2.hello({ accepts: ['submit'] });
+  pm.submitWork(msg);
+  const got = await c2.next('submit');
+  assert.deepEqual([got.id, (got.requestedBy as { userId: string }).userId, got.class, got.untrustedInput], ['fff-1', 'lothsahn', 'fenced', false]);
+});
