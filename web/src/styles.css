@@ -2083,6 +2083,56 @@ select.input {
   border-radius: 0;
 }
 
+/* Images in a message: their own size up to the column's width; a click opens the lightbox. */
+.md .md-img {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0;
+  margin: 2px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  cursor: zoom-in;
+  vertical-align: top;
+  overflow: hidden;
+}
+
+.md .md-img img {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  height: auto;
+  object-fit: contain;
+}
+
+.md-code-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.md-mermaid-diagram {
+  padding: var(--s-3);
+  overflow-x: auto;
+  cursor: zoom-in;
+  text-align: center;
+}
+
+.md-mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.md-mermaid-loading {
+  padding: var(--s-3);
+}
+
+.md-mermaid-error {
+  padding: 6px var(--s-3);
+  color: var(--red);
+  border-bottom: 1px solid var(--border);
+}
+
 .md blockquote {
   border-left: 3px solid var(--border-2);
   padding-left: var(--s-3);
@@ -3599,6 +3649,25 @@ select.input {
   object-fit: contain;
   border-radius: 4px;
   box-shadow: var(--shadow);
+}
+
+/* Images keep a backdrop of their own: a transparent PNG or SVG (a diagram) would show the page through it. */
+.lightbox-stage img {
+  background: var(--bg);
+  cursor: zoom-in;
+}
+
+.lightbox-stage.zoomed {
+  overflow: auto;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.lightbox-stage.zoomed img {
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  cursor: zoom-out;
 }
 
 .lightbox-nav {

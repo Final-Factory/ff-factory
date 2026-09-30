@@ -45,6 +45,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Images and Mermaid diagrams inline in every conversation** (orchestrators, dispatcher, workers, standing agents).
+  A markdown image `![alt](/absolute/path.png)` shows where it is in the message, at its own size up to the column's
+  width, and a click opens it full size (click again for actual size, scrolled). PNG, JPEG, GIF, WebP and SVG, from the
+  agent's sandbox, machine clone, standing agent folder or its own temp folder, through the guarded `/api/image`
+  (machine files through the daemon, which now also allows the session's temp folder). `data:image/…;base64` URIs up
+  to ~1.5 MB show too. The server copies each image into the transcript's store as the message arrives
+  (`server/inlineImages.ts`), so the chat keeps it after the file or its sandbox is gone. SVGs are rebuilt from an
+  allowlist (`shared/svg.ts`: no scripts, handlers, `foreignObject`, animation or external references), on the server
+  for files and in the page for data URIs, and every served file carries a sandboxing CSP. ```` ```mermaid ````
+  blocks render as diagrams (mermaid loaded only when one is shown, `securityLevel: 'strict'`, the dagre layout),
+  with Source/Diagram and open-large buttons. The briefs tell agents how to show an image and that diagrams render.
+
 - **The intake: Discord and FFBox into the work ledger** ([docs/intake.md](docs/intake.md)), every switch off by default
   (config `intake`). New #bug-reports threads (the in-game reporter's too) and trusted people's requests to Max in
   #dev-chat (trusted by Discord author id, config `intake.discord.trusted`) become ledger requests with the thread link,

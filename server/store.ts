@@ -320,7 +320,7 @@ export class Store {
   }
 }
 
-export const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+export const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
 
 /** Ids become file names: keep them to [\w-]. */
 const safeId = (id: string) => id.replace(/[^\w-]/g, '_');

@@ -25,6 +25,7 @@ import { Identity, asRequester, userToken } from './identity.ts';
 import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
+import { keepMessageImages } from './inlineImages.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
@@ -563,6 +564,9 @@ class StreamReply {
   }
 }
 
+/** Served files are never pages: an SVG opened on its own runs nothing and loads nothing, in an origin of its own. */
+const FILE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox";
+
 class FileReply {
   readonly type: string;
   readonly data: Buffer;
@@ -579,21 +583,31 @@ route('GET', '/api/uploads/([\\w-]+)/([\\w-]+)', async (_r, [sessionId, imageId]
 });
 
 /**
- * Where a session, sandbox or machine may show images from. `machine` means: ask that machine's daemon.
- * The orchestrator oversees everything: the base clone, every sandbox and standing agent folder, and (for a
- * path under a machine's clone or home) that machine's own folders, which its daemon checks.
+ * Where a session, sandbox or machine may show images from. `machine` means: ask that machine's daemon
+ * (`session`: for that session, whose own temp folder it adds).
  */
-function imageRoots(url: URL, file?: string): { machine?: string; roots: string[] } {
+type ImageRoots = { machine?: string; session?: string; roots: string[] };
+function imageRoots(url: URL, file?: string): ImageRoots {
   const sessionId = url.searchParams.get('session');
   const sandboxId = url.searchParams.get('sandbox');
   const machineId = url.searchParams.get('machine');
   if (sandboxId) return { roots: [sandboxes.require(sandboxId).path] };
   if (machineId) return { machine: machines.require(machineId).id, roots: [] };
   if (!sessionId) throw new HttpError(400, 'give session, sandbox or machine');
+  return sessionImageRoots(sessionId, file);
+}
+
+/**
+ * A session's folders: its sandbox or standing agent folder and its own temp folder. The orchestrator oversees
+ * everything: the base clone, every sandbox and standing agent folder, and (for a path under a machine's clone or
+ * home) that machine's own folders, which its daemon checks.
+ */
+function sessionImageRoots(sessionId: string, file?: string): ImageRoots {
   const s = sessions.get(sessionId).info;
-  if (s.machineId) return { machine: s.machineId, roots: [] };
-  if (s.sandboxId) return { roots: [sandboxes.require(s.sandboxId).path] };
-  if (s.standingId) return { roots: [agents.standing.require(s.standingId).folder] };
+  if (s.machineId) return { machine: s.machineId, session: s.id, roots: [] };
+  const temp = sessionTempDir(os.tmpdir(), s.id);
+  if (s.sandboxId) return { roots: [sandboxes.require(s.sandboxId).path, temp] };
+  if (s.standingId) return { roots: [agents.standing.require(s.standingId).folder, temp] };
   if (s.kind === 'orchestrator') {
     const onMachine = file ? machineForPath(file, machines.list()) : undefined;
     if (onMachine) return { machine: onMachine.id, roots: [] };
@@ -601,6 +615,8 @@ function imageRoots(url: URL, file?: string): { machine?: string; roots: string[
   }
   throw new HttpError(404, 'no folder for this session');
 }
+
+const readImageIn = (where: ImageRoots, file: string) => (where.machine ? machines.readImage(where.machine, file, where.session) : Promise.resolve(readImage(file, where.roots)));
 
 route('GET', '/api/image', async (_r, _p, url) => {
   const file = need(url.searchParams.get('path'), 'path');
@@ -611,7 +627,7 @@ route('GET', '/api/image', async (_r, _p, url) => {
       const v = openVideo(file, where.roots);
       return new StreamReply(v.mediaType, v.path, v.size);
     }
-    const img = where.machine ? await machines.readImage(where.machine, file) : readImage(file, where.roots);
+    const img = await readImageIn(where, file);
     return new FileReply(img.mediaType, img.data);
   } catch (e) {
     throw new HttpError(404, (e as Error).message);
@@ -1037,7 +1053,7 @@ const server = http.createServer(async (req, res) => {
         const out = await h(req, m.slice(1), url);
         if (out instanceof StreamReply) return sendStream(req, res, out);
         if (out instanceof FileReply) {
-          res.writeHead(200, { 'content-type': out.type, 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'" });
+          res.writeHead(200, { 'content-type': out.type, 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff', 'content-security-policy': FILE_CSP });
           return res.end(out.data);
         }
         return send(res, 200, out);
@@ -1097,7 +1113,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 function sendStream(req: http.IncomingMessage, res: http.ServerResponse, f: StreamReply) {
-  const headers = { 'content-type': f.type, 'accept-ranges': 'bytes', 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'" };
+  const headers = { 'content-type': f.type, 'accept-ranges': 'bytes', 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff', 'content-security-policy': FILE_CSP };
   const range = parseRange(req.headers.range, f.size);
   if (range === 'unsatisfiable') {
     res.writeHead(416, { ...headers, 'content-range': `bytes */${f.size}` });
@@ -1140,6 +1156,12 @@ bus.on('event', broadcast);
 // A removed session's own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene").
 bus.on('event', (e: ServerEvent) => {
   if (e.type === 'session_removed') void fs.promises.rm(sessionTempDir(os.tmpdir(), e.id), { recursive: true, force: true, maxRetries: 2 }).catch(() => undefined);
+});
+// The images an agent's message shows are copied into the transcript's store as it arrives (server/inlineImages.ts).
+bus.on('event', (e: ServerEvent) => {
+  if (e.type !== 'transcript' || e.event.kind !== 'assistant' || e.event.images) return;
+  const { sessionId, event } = e;
+  void keepMessageImages(store, sessionId, event, (file) => readImageIn(sessionImageRoots(sessionId, file), file)).catch(() => undefined);
 });
 
 setInterval(() => sandboxes.poll(), 3000);

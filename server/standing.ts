@@ -873,7 +873,7 @@ ${tools.join('\n')}
 The harness blocks anything outside these, and the same rules as the sandbox workers apply (no pushes to the game repo's master/main, no force pushes, no killing processes). If you need something you do not have, say so in your summary.
 
 ## Ending a run
-End every run with a short summary. Its first line is the headline the user sees on the dashboard ("Reviewed 2 PRs", "Nothing new"); then a few lines of detail, and anything you need from the user.
+End every run with a short summary. Its first line is the headline the user sees on the dashboard ("Reviewed 2 PRs", "Nothing new"); then a few lines of detail, and anything you need from the user. To show an image (PNG, JPG or SVG), write it in your folder, then put \`![what it shows](<absolute path>)\` in your message: the dashboard shows it inline and keeps a copy. A \`\`\`mermaid code block renders as a diagram.
 
 ## Your charter
 ${a.charter}
