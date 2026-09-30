@@ -5,3 +5,5 @@ d41697a9e6214ca92c3738ff93b6f8027976712e:web/mock/scenario.ts:generic-api-key:28
 d41697a9e6214ca92c3738ff93b6f8027976712e:web/mock/scenario.ts:generic-api-key:291
 d41697a9e6214ca92c3738ff93b6f8027976712e:e2e/meters.spec.ts:generic-api-key:59
 d41697a9e6214ca92c3738ff93b6f8027976712e:e2e/meters.spec.ts:generic-api-key:62
+# A made-up AWS key in the first commit of the orchestrator memory tests (built at run time since).
+412a407a1caccff5008c3160f8144cdf1f361c22:server/orchestratorMemory.test.ts:aws-access-token:152
