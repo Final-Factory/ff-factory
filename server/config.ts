@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { PermissionMode } from '../shared/types.ts';
 import { DEFAULT_HANG, type HangThresholds } from './unityHang.ts';
+import { checkObject, dataRecoveries, readJsonDurable } from './durable.ts';
 
 /** What a portal-run agent runs on (docs/accounts.md): the computer's stored claude.ai login, or config claudeEnv's token. */
 export type ClaudeAccount = 'login' | 'token';
@@ -490,10 +491,11 @@ export function configPath(): string {
 
 export function loadConfig(): Config {
   const file = configPath();
-  if (!fs.existsSync(file)) {
-    throw new Error(`No config at ${file}. Copy config.example.json to config.json and edit it.`);
+  // Damaged by a crash: the newest good version (config.json.1.., or the .prev setAppConfig keeps) takes its place.
+  const raw = readJsonDurable<any>(file, { check: checkObject, extra: [`${file}.prev`] });
+  if (!raw) {
+    throw new Error(fs.existsSync(file) || dataRecoveries.some((r) => r.file === file) ? `${file} is damaged and no good earlier version is left; restore it by hand.` : `No config at ${file}. Copy config.example.json to config.json and edit it.`);
   }
-  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
   const cfg: Config = {
     ...DEFAULTS,
     ...raw,

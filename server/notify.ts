@@ -5,6 +5,7 @@ import { nameWithSlot } from '../shared/labels.ts';
 import { bus, emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager } from './sessions.ts';
 import type { DelegationRequest, NotifyKind, NotifyPrefs, Requester, Sandbox, ServerEvent, SessionInfo, StandingAgent, StandingRun, UnityBlocked, WorkItem } from '../shared/types.ts';
+import { checkArray, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
 
 /** A browser's push subscription, as PushSubscription.toJSON() gives it, plus that device's choices. */
 export interface PushSub {
@@ -50,6 +51,8 @@ export function sessionRoute(s: SessionInfo, orchestratorId?: string): string {
  * pages that have no push subscription): a session waiting on a permission, a turn finished, a session
  * erroring, a standing-agent run failing or hitting its budget, a delegation request.
  */
+const checkVapid: Check = (v) => (isObject(v) && typeof v.publicKey === 'string' && typeof v.privateKey === 'string' ? undefined : 'not a VAPID key pair');
+
 export class Notifier {
   private readonly store: Store;
   private readonly file: string;
@@ -67,14 +70,14 @@ export class Notifier {
     this.store = store;
     this.file = path.join(dataDir, 'push-subscriptions.json');
     const keyFile = path.join(dataDir, 'vapid.json');
-    if (!fs.existsSync(keyFile)) fs.writeFileSync(keyFile, JSON.stringify(webpush.generateVAPIDKeys(), null, 2), { mode: 0o600 });
-    this.vapid = JSON.parse(fs.readFileSync(keyFile, 'utf8'));
-    try {
-      // A kind added after a device subscribed starts at its default.
-      this.subs = (JSON.parse(fs.readFileSync(this.file, 'utf8')) as PushSub[]).map((s) => ({ ...s, prefs: { ...DEFAULT_PREFS, ...s.prefs } }));
-    } catch {
-      this.subs = [];
+    let vapid = readJsonDurable<typeof this.vapid>(keyFile, { check: checkVapid, mode: 0o600 });
+    if (!vapid) {
+      vapid = webpush.generateVAPIDKeys();
+      writeJsonDurable(keyFile, vapid, { indent: 2, mode: 0o600 });
     }
+    this.vapid = vapid;
+    // A kind added after a device subscribed starts at its default.
+    this.subs = (readJsonDurable<PushSub[]>(this.file, { check: checkArray, mode: 0o600 }) ?? []).map((s) => ({ ...s, prefs: { ...DEFAULT_PREFS, ...s.prefs } }));
     for (const s of store.sessions.values()) this.lastStatus.set(s.id, s.status);
 
     sessions.events.on('permission', (s: SessionHandle, p: { toolName: string; input: unknown }) =>
@@ -202,7 +205,7 @@ export class Notifier {
   }
 
   private save() {
-    fs.writeFileSync(this.file, JSON.stringify(this.subs, null, 2), { mode: 0o600 });
+    writeJsonDurable(this.file, this.subs, { indent: 2, mode: 0o600 });
   }
 
   // ---------------------------------------------------------------- delivery

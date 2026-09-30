@@ -123,11 +123,16 @@ export class HostHealthMonitor {
   private criticalSince = 0;
   private lastReapAt = 0;
   private ticking = false;
+  /** The drive was missing when this server started (a reboot or a power cut), not lost while it ran. */
+  private bootMissing = false;
 
   constructor(deps: HostDeps) {
     this.d = deps;
     const m = deps.mem();
-    this.health = { checkedAt: new Date(0).toISOString(), disks: [], level: 'ok', sandboxRoot: 'ok', memFreeBytes: m.free, memTotalBytes: m.total };
+    // After a reboot the sandbox drive may not be attached yet: nothing may start on it before the guard has seen it.
+    const drive = this.watchesDrive() && !deps.exists(deps.cfg.sandboxRoot) ? 'missing' : 'ok';
+    this.health = { checkedAt: new Date(0).toISOString(), disks: [], level: 'ok', sandboxRoot: drive, memFreeBytes: m.free, memTotalBytes: m.total };
+    this.bootMissing = drive === 'missing';
     this.cleaner = new CleanupRunner({
       settings: () => ({ everyMinutes: this.g().cleanup.everyMinutes, softFreeGB: hostSoftFreeGB(this.g()) }),
       diskPaths: () => [...deps.cleanup.diskPaths(), ...deps.cfg.hostDiskPaths],
@@ -154,7 +159,15 @@ export class HostHealthMonitor {
 
   /** Why a new editor / agent process must wait, or undefined. */
   blockReason(kind: 'editor' | 'agent'): string | undefined {
-    return blockReason(this.health, kind, { freeGB: this.d.mem().free / GB, minFreeRamGB: this.d.cfg.limits.minFreeRamGB });
+    // Between two looks, a drive that is gone blocks at once (the next look starts the remount).
+    const gone = this.health.sandboxRoot === 'ok' && this.watchesDrive() && !this.d.exists(this.d.cfg.sandboxRoot);
+    const h = gone ? { ...this.health, sandboxRoot: 'missing' as const } : this.health;
+    return blockReason(h, kind, { freeGB: this.d.mem().free / GB, minFreeRamGB: this.d.cfg.limits.minFreeRamGB });
+  }
+
+  /** The guard runs (hostGuard.pollSeconds > 0): only then is a missing sandbox drive reattached, so only then does it block. */
+  private watchesDrive() {
+    return this.d.cfg.hostGuard.pollSeconds > 0;
   }
 
   private g() {
@@ -223,6 +236,7 @@ export class HostHealthMonitor {
     const root = this.d.cfg.sandboxRoot;
     const there = this.d.exists(root);
     if (there) {
+      this.bootMissing = false;
       if (this.recovery) await this.recovered();
       this.health.sandboxRoot = 'ok';
       this.health.detail = undefined;
@@ -277,6 +291,11 @@ export class HostHealthMonitor {
       nextTryAt: this.now(),
     };
     this.health.sandboxRoot = 'missing';
+    if (this.bootMissing) {
+      this.bootMissing = false;
+      this.d.report('Sandbox drive not attached at startup', `${this.d.cfg.sandboxRoot} was not there when the app started (a reboot or a power cut). Nothing starts on it until it is back; reattaching it automatically.`);
+      return;
+    }
     // Agents in sandboxes cannot work without their folders: stop their turns now; they are resumed later.
     for (const id of busyNow) await this.d.interrupt(id).catch(() => undefined);
     this.d.report(

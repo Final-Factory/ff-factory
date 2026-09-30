@@ -29,6 +29,8 @@ import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type Se
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { keepMessageImages } from './inlineImages.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
+import { dataRecoveries, describeRecovery } from './durable.ts';
+import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
@@ -69,6 +71,20 @@ writeAlive(cfg.dataDir);
 setInterval(() => writeAlive(cfg.dataDir), 30_000);
 
 const store = new Store(cfg.dataDir);
+// The orchestrators' memory (Claude Code writes it, so it cannot be written crash-safe): a file a crash damaged gets its
+// newest good backup back, and a backup is taken every 10 minutes when something changed (server/orchestratorMemory.ts).
+const memoryRoot = memoryRootOf(cfg);
+const guardMemory = (what: 'heal' | 'backup') => {
+  try {
+    if (what === 'heal') healMemory(memoryRoot);
+    else backupMemory(memoryRoot);
+  } catch (e) {
+    console.warn(`orchestrator memory ${what} failed: ${(e as Error).message}`);
+  }
+};
+guardMemory('heal');
+guardMemory('backup');
+setInterval(() => guardMemory('backup'), 10 * 60_000).unref();
 // Transcripts written before redaction existed: no Claude OAuth or Discord token stays on disk (server/secrets.ts).
 setTimeout(() => {
   const n = scrubTranscripts(path.join(cfg.dataDir, 'transcripts'));
@@ -1442,6 +1458,39 @@ setInterval(() => {
 /** The managers, for the E2E harness (e2e/server.ts) to set up states no browser can reach (a blocked editor). */
 export const internals = { cfg, store, sandboxes, sessions, agents, providers, max };
 
+// Data files a crash damaged and that were restored from an earlier version (server/durable.ts). The owner hears at
+// once (a push and their own orchestrator); the restart summary carries the same lines to the dispatcher.
+let recoveriesTold = 0;
+function takeRecoveryLines(): string[] {
+  const fresh = dataRecoveries.slice(recoveriesTold);
+  recoveriesTold = dataRecoveries.length;
+  return fresh.map(describeRecovery);
+}
+function tellOwnerRecovered(text: string) {
+  notifier.host('Data restored after a crash', text);
+  if (!cfg.orchestrator.notifyOnWorkerEvents) return;
+  try {
+    agents.orchestrators.toPeople([identity.owner()], `[data restored] ${text}`);
+  } catch (e) {
+    console.warn(`could not tell the owner about the data recovery: ${(e as Error).message}`);
+  }
+}
+// A file read on demand (users.json, api-keys.json, machine-tokens.json) can be healed later: the dispatcher hears too.
+setInterval(() => {
+  const lines = takeRecoveryLines();
+  if (!lines.length) return;
+  const text = `DATA RESTORED: ${lines.join(' ')}`;
+  tellOwnerRecovered(text);
+  const orch = store.orchestratorId;
+  if (orch) {
+    try {
+      sessions.send(orch, `[data restored] ${text}`, 'system');
+    } catch {
+      // no orchestrator right now; the push went out
+    }
+  }
+}, 60_000).unref();
+
 // Resume what the last server recorded (or report what a crash cut off), once the managers are up.
 // After a stop that was not clean (no resume file: a power cut, a crash, a kill), make one from what the last
 // server left (the sessions it had mid-turn, the editors that were up) and resume those too; an update that
@@ -1449,6 +1498,12 @@ export const internals = { cfg, store, sandboxes, sessions, agents, providers, m
 setTimeout(() => {
   try {
     const notes = host.elevated ? [`WARNING: the server is running elevated, so it will not start Unity editors: ${host.elevatedWhy ?? ''}`] : [];
+    const recovered = takeRecoveryLines();
+    if (recovered.length) {
+      const text = `DATA RESTORED AFTER A CRASH (the last server was last alive ${lastAlive ? new Date(lastAlive.at).toISOString() : 'at an unknown time'}): ${recovered.join(' ')}`;
+      notes.push(text);
+      tellOwnerRecovered(text);
+    }
     const clean = takeResumeFile(cfg.dataDir);
     const pending = takePendingRestart(cfg.dataDir);
     if (clean) {

@@ -18,6 +18,7 @@ import { openPr } from './gitStatus.ts';
 import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
+import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -552,15 +553,11 @@ export class MachineManager {
   }
 
   private tokens(): Record<string, string> {
-    try {
-      return JSON.parse(fs.readFileSync(this.tokensFile, 'utf8'));
-    } catch {
-      return {};
-    }
+    return readJsonDurable<Record<string, string>>(this.tokensFile, { check: checkStringMap, mode: 0o600 }) ?? {};
   }
 
   private writeTokens(t: Record<string, string>) {
-    fs.writeFileSync(this.tokensFile, JSON.stringify(t, null, 2), { mode: 0o600 });
+    writeJsonDurable(this.tokensFile, t, { indent: 2, mode: 0o600 });
   }
 
   /** The machine a bearer token belongs to, or undefined. Constant-time on the secret. */

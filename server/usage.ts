@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { HOST_ROLES, roleNames, type Config, type HostRole } from './config.ts';
 import type { AccountUsage, PlanUsage, SessionInfo, SessionKind, UsageMeter } from '../shared/types.ts';
+import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 /**
  * The user's Claude plan usage: the weekly limit, the 5-hour session limit and any per-model weekly limit,
@@ -631,7 +632,8 @@ export class UsageTracker {
     this.file = path.join(cfg.dataDir, 'usage.json');
     this.spendFile = path.join(cfg.dataDir, 'spend.json');
     try {
-      const f = JSON.parse(fs.readFileSync(this.file, 'utf8')) as UsageFile | PlanUsage;
+      const f = readJsonDurable<UsageFile | PlanUsage>(this.file, { check: checkObject });
+      if (!f) throw new Error('none yet');
       if ('entries' in f) {
         // A token's numbers saved before it was asked directly were the stored login's: never show them.
         for (const [k, e] of Object.entries(f.entries)) if (e.kind !== 'token' || e.direct) this.entries.set(k, e);
@@ -640,7 +642,7 @@ export class UsageTracker {
       // first run
     }
     try {
-      this.ledger = JSON.parse(fs.readFileSync(this.spendFile, 'utf8'));
+      this.ledger = readJsonDurable<Record<string, number>>(this.spendFile, { check: checkObject }) ?? {};
     } catch {
       // first run
     }
@@ -733,7 +735,7 @@ export class UsageTracker {
     if (before === undefined || costUsd <= before) return; // first sighting after a restart: no baseline
     this.ledger = addSpend(this.ledger, localDay(), costUsd - before);
     try {
-      fs.writeFileSync(this.spendFile, JSON.stringify(this.ledger));
+      writeJsonDurable(this.spendFile, this.ledger);
     } catch {
       // not fatal
     }
@@ -880,7 +882,7 @@ export class UsageTracker {
 
   private save() {
     try {
-      fs.writeFileSync(this.file, JSON.stringify({ entries: Object.fromEntries(this.entries) } satisfies UsageFile));
+      writeJsonDurable(this.file, { entries: Object.fromEntries(this.entries) } satisfies UsageFile);
     } catch {
       // not fatal
     }

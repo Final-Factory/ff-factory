@@ -58,6 +58,7 @@ import {
 } from './intakeRules.ts';
 import { mentionsScenario, nightlyAgainLine, nightlyDraft, nightlyKey, nightlySkip, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
 import { isOpen } from './work.ts';
+import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import type { IntakeEntry, IntakeSummary, MaxEvent, ProviderConversation, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 
 const DISCORD_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request'];
@@ -170,7 +171,8 @@ export class IntakeManager {
 
   private load(): Persisted {
     try {
-      const d = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<Persisted>;
+      const d = readJsonDurable<Partial<Persisted>>(this.file, { check: checkObject });
+      if (!d) throw new Error('none yet');
       return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, escalations: d.escalations };
     } catch {
       return { cursors: {}, recent: [], versions: {} };
@@ -182,8 +184,7 @@ export class IntakeManager {
     this.saveTimer = undefined;
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(this.file + '.tmp', JSON.stringify(this.data));
-      fs.renameSync(this.file + '.tmp', this.file);
+      writeJsonDurable(this.file, this.data);
     } catch (e) {
       console.warn('intake: could not save its state:', (e as Error).message);
     }

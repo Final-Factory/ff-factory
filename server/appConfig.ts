@@ -5,6 +5,7 @@ import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, ROOT, VOICE_DEFAULTS, type
 import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret } from './secrets.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
+import { writeFileDurable } from './durable.ts';
 
 /**
  * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
@@ -251,9 +252,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   const before = getPath(raw, stored);
   const next = perMachine ? nextPerMachine(before, opts.machine, v as boolean | number | undefined) : v;
   setPath(raw, stored, next);
-  fs.writeFileSync(file + '.prev', text);
-  fs.writeFileSync(file + '.tmp', JSON.stringify(raw, null, 2) + '\n');
-  fs.renameSync(file + '.tmp', file);
+  writeFileDurable(file + '.prev', text, { generations: 0 });
+  writeFileDurable(file, JSON.stringify(raw, null, 2) + '\n');
   // Live: the running server reads these through the shared config object.
   if (key === 'ownerName') cfg.ownerName = v as string | undefined;
   else if (key === 'voice.vocabulary') cfg.voice.vocabulary = (v as string[] | undefined) ?? [];

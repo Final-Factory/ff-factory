@@ -17,6 +17,7 @@ import { redactSecrets } from './secrets.ts';
 import { readDiscordConfig, type DiscordConfig } from './discordConfig.ts';
 import { FileTail, cleanLine, eventsFileOf, parseEventLine, type CliEvent } from './maxEvents.ts';
 import type { MaxEvent, MaxInboundChannel, MaxInboundItem, MaxSummary, SessionInfo } from '../shared/types.ts';
+import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 const KEEP_EVENTS = 500;
 const HEALTH_EVERY_MS = 15 * 60_000;
@@ -186,7 +187,8 @@ export class MaxManager {
 
   private load(): Persisted {
     try {
-      const d = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<Persisted>;
+      const d = readJsonDurable<Partial<Persisted>>(this.file, { check: checkObject });
+      if (!d) throw new Error('none yet');
       return { offset: d.offset, events: d.events ?? [], cursors: d.cursors ?? {}, channels: d.channels ?? {}, health: d.health, lastError: d.lastError };
     } catch {
       return { events: [], cursors: {}, channels: {} };
@@ -205,8 +207,7 @@ export class MaxManager {
     if (this.tail) this.data.offset = this.tail.position;
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(this.file + '.tmp', JSON.stringify(this.data));
-      fs.renameSync(this.file + '.tmp', this.file);
+      writeJsonDurable(this.file, this.data);
     } catch (e) {
       console.warn('max: could not save its state:', (e as Error).message);
     }

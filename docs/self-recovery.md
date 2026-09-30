@@ -1,4 +1,4 @@
-# Self-recovery: disk space, the sandbox drive, memory
+# Self-recovery: disk space, the sandbox drive, memory, crash-safe data
 
 The point of FF Factory is that nobody has to be at the host. So the failures that stop everything
 must heal by themselves. On 2026-09-24 one did not. C: filled up: leaked headless browsers held
@@ -72,6 +72,11 @@ sandbox root exists.
    (host_recovery "remount" tries again).
 4. When the drive is back, it restarts those editors one at a time and sends each interrupted
    agent a resume message (check git status, re-pin Unity, continue).
+
+The guard knows the drive's state from the moment the server starts: before its first look (5 s in) it used to say
+"ok", so after a reboot an agent could start on a missing F:. Now a drive missing at start blocks new agents and editors
+at once, the first look reports "Sandbox drive not attached at startup" and remounts it, and between two looks a drive
+that went away blocks new work immediately.
 
 **Memory and editors.** A new editor needs `limits.minFreeRamGB` (10) free. An editor whose sandbox
 has had no agent activity for `unity.idleStopMinutes` (120), and no agent mid-turn, is stopped.
@@ -263,3 +268,65 @@ What clean-up cannot fix is reported, not removed: user data (OneDrive, Videos, 
 artifacts, and on BEAST the Dev Drive VHDX, which grows but never shrinks by itself (634 GB for 334 GB used
 on 2026-09-28): compact it by hand (section 3).
 
+## 6. Crash-safe data files
+
+On 2026-09-30 BEAST hard-crashed (a WHEA hardware error) while the server was saving `data/state.json`. The save wrote a
+temp file and renamed it over the old one, but never flushed it to disk: after the crash the rename was there and the
+data was not, so `state.json` was 4.4 MB of zero bytes. Every start failed to parse it, the supervisor backed off, and
+the portal stayed down until someone restored the file from a shadow copy of 13:04:57, losing the 16 minutes after it.
+
+**Writes** (`server/durable.ts` `writeFileDurable`). A temp file, fsynced, renamed over the old file, then the folder
+fsynced (not on Windows, where NTFS journals the rename itself). A crash at any moment leaves the old version or the new
+one, never a torn or zeroed file. The earlier versions stay beside it:
+
+| Version | What it is | Age after a crash |
+|---|---|---|
+| `state.json.1` | the save before the current one (a hard link, not a copy) | seconds |
+| `state.json.2` | takes the old `.1` at most once a minute | up to a minute |
+| `state.json.3` | takes the old `.2` at most every 10 minutes | 1 to 11 minutes |
+
+So a failure that damaged every recent write still leaves an older good one.
+
+**Loads** (`readJsonDurable`). A file is good when it is not empty, not zero bytes, parses, and passes its schema check
+(`state.json`: its lists, and an id on every entry). A damaged file is moved aside as `<name>.damaged-<time>` (never
+deleted), the newest good version is written back in its place, and the server starts from it. When nothing good is
+left, that file starts empty and the log says so in capitals. Every recovery goes into the restart summary the
+dispatcher gets, a push ("Data restored after a crash") and a message to the owner's own orchestrator: which file, what
+was wrong with it, which version was restored, when that version was saved and how much was lost. A restored `work.json`
+moves its numbering on by 100, so a work item number the lost version handed out is not reused.
+
+**How much a crash loses.** `state.json` is written at most 200 ms after a change and at most once a second, however
+busy the agents are. (The old save restarted a 200 ms timer on every change, so a steady stream of session updates
+could postpone it indefinitely.) The main thread serializes the state; the write and the fsync run off it.
+`node scripts/bench-state-save.ts` measures it:
+
+| Where | Sessions (size) | Main thread per save | Write + fsync (off the main thread) |
+|---|---|---|---|
+| BEAST (i9-14900KF, Windows) | 7,265 (5.7 MB) | 12 ms serialize, 17 ms worst stall | 23 ms |
+| BEAST | 12,000 (9.5 MB) | 23 ms serialize, 24 ms worst stall | 35 ms |
+| M3 Pro (BEAST's real state.json) | 7,265 (4.4 MB) | 5 ms serialize, 9 ms worst stall | 17 ms |
+
+At most one save a second, that is under 2 % of the main thread at BEAST's size. A crash loses about a second of
+`state.json`; if the disk lost the last write anyway, it goes back to `.1`, seconds earlier.
+
+**Files covered.** `state.json` (sandboxes, sessions, standing agents, delegations, machines, settings), `work.json`
+(the ledger), `intake.json`, `max.json`, `providers/*.json`, `users.json`, `api-keys.json`, `auth-sessions.json`,
+`machine-tokens.json`, `wakes.json`, `usage.json`, `spend.json`, `push-subscriptions.json`, `vapid.json`,
+`outside-watch.json`, `host-migration.json`, `resume.json`, `alive.json`, `restart.pending.json`, and `config.json`
+(whose `config.json.prev` counts as one more version). Transcripts stay append-only: a rewrite (a permission decision,
+the secret scrub) is crash-safe without versions, the first append after a start completes a line a crash tore, and
+zero bytes a crash left in one are skipped.
+
+**Orchestrator memory.** Claude Code writes those files itself, so the app keeps copies instead:
+`<memory root>.backup/1` to `3`, taken at start and every 10 minutes when something changed. They are copies, not hard
+links: the memory guard refuses to write a hard-linked file. At startup a memory file left empty or zeroed gets its
+newest good copy back and the damaged one moves to `<memory root>.backup/damaged/`. A damaged file is never backed up
+over its good copy.
+
+**The supervisor** (`scripts/supervise.ps1`) backs off at most a minute in a crash loop (it was 5), and its log line
+names the error that ended each run. A damaged data file no longer causes a loop.
+
+**Tests:** `server/durable.test.ts` (zeroed, cut off, partly written and empty files, every recent version damaged, a
+writer killed at random six times mid-write, background saves under a steady stream of changes) and
+`server/crashRecovery.test.ts` (the store, transcripts, memory, and the real server started on a zeroed `state.json` and
+`users.json`, which comes up, answers and reports the recovery).

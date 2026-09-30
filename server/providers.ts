@@ -33,6 +33,7 @@ import {
   type ResultMessage,
 } from './providerProtocol.ts';
 import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent } from '../shared/types.ts';
+import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -124,7 +125,8 @@ export class ProviderManager {
 
   private load(): Persisted {
     try {
-      const d = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<Persisted>;
+      const d = readJsonDurable<Partial<Persisted>>(this.file, { check: checkObject });
+      if (!d) throw new Error('none yet');
       return { cursors: d.cursors ?? {}, conversations: d.conversations ?? [], intake: d.intake ?? [], connector: d.connector, web: d.web, accepts: d.accepts, capacity: d.capacity, lastSeen: d.lastSeen };
     } catch {
       return { cursors: {}, conversations: [], intake: [] };
@@ -143,8 +145,7 @@ export class ProviderManager {
     this.saveTimer = undefined;
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(this.file + '.tmp', JSON.stringify(this.data));
-      fs.renameSync(this.file + '.tmp', this.file);
+      writeJsonDurable(this.file, this.data);
     } catch (e) {
       console.warn(`provider ${this.id}: could not save its state:`, (e as Error).message);
     }

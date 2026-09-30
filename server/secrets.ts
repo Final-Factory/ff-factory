@@ -4,6 +4,7 @@ import path from 'node:path';
 import { HOST_ROLES, roleNames, type ClaudeAccount, type Config, type HostRole } from './config.ts';
 import type { SessionKind } from '../shared/types.ts';
 import { credentialsFile, loginUnusable, readStoredLogin, usageEnv } from './usage.ts';
+import { writeFileDurable } from './durable.ts';
 
 /**
  * Secrets agents may set but nobody may read back (set_app_config's write-only keys): the Claude OAuth token
@@ -78,8 +79,7 @@ export function scrubTranscripts(dir: string): number {
       if (!maybeSecret(text)) continue;
       const clean = redactSecrets(text);
       if (clean === text) continue;
-      fs.writeFileSync(file + '.tmp', clean);
-      fs.renameSync(file + '.tmp', file);
+      writeFileDurable(file, clean, { generations: 0 });
       n++;
     } catch {
       // being written, or gone: the next start tries again

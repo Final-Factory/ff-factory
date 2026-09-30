@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DrainStatus, SessionInfo, SessionKind } from '../shared/types.ts';
+import { writeJsonDurable } from './durable.ts';
 
 /**
  * Restarts that do not lose work (docs/restart.md). Before the server stops it records which agent
@@ -198,9 +199,7 @@ export const RESUME_FILE = 'resume.json';
 export const UPDATE_RESULT_FILE = 'update.result.json';
 
 export function writeResumeFile(dataDir: string, f: ResumeFile) {
-  const p = path.join(dataDir, RESUME_FILE);
-  fs.writeFileSync(p + '.tmp', JSON.stringify(f, null, 2));
-  fs.renameSync(p + '.tmp', p);
+  writeJsonDurable(path.join(dataDir, RESUME_FILE), f, { indent: 2, generations: 0 });
 }
 
 /** Read and retire the resume file (renamed first, so a crash while resuming cannot resume twice). */
@@ -427,9 +426,7 @@ export const PENDING_RESTART_FILE = 'restart.pending.json';
 /** The server's heartbeat (every 30 s): after an unclean stop it says when the server was last alive. */
 export function writeAlive(dataDir: string, now = Date.now()) {
   try {
-    const p = path.join(dataDir, ALIVE_FILE);
-    fs.writeFileSync(p + '.tmp', JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid }));
-    fs.renameSync(p + '.tmp', p);
+    writeJsonDurable(path.join(dataDir, ALIVE_FILE), { at: new Date(now).toISOString(), pid: process.pid }, { generations: 0 });
   } catch {
     // next beat
   }
@@ -452,7 +449,7 @@ export function readAlive(dataDir: string): { at: number } | undefined {
 export function writePendingRestart(dataDir: string, req: RestartRequest) {
   if (!req.update) return;
   try {
-    fs.writeFileSync(path.join(dataDir, PENDING_RESTART_FILE), JSON.stringify({ ...req, at: new Date().toISOString() }));
+    writeJsonDurable(path.join(dataDir, PENDING_RESTART_FILE), { ...req, at: new Date().toISOString() }, { generations: 0 });
   } catch {
     // best effort
   }
