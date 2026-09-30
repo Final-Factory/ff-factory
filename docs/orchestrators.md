@@ -26,6 +26,11 @@ do not chat with it; the owner can open its page and write to it. It runs for th
 Ben). It hears work requests, updates to them, capacity news and the host's notices, and answers people only through
 the ledger.
 
+Both briefs describe the same world (`worldBrief` in `server/agents.ts`). Its FFBox paragraph is Lothsahn's text,
+verbatim (`FFBOX_BRIEF`): what FFBox is, that it owns #bug-reports and dev_bug_reports, and that the ffbox repo can be
+changed through workers, who push straight to its master one change at a time because a push goes live on the box within
+about five minutes. The longer version is [ffbox.md](ffbox.md). `ffbox_activity` stays read-only.
+
 Both are sessions of kind `orchestrator`, so neither takes an agent slot, and both keep the orchestrator's limits: no
 shell, no web tools, `Read`/`Glob`/`Grep` on the base clone, and `Write`/`Edit` only in their own memory folder
 ([Memory](#memory)). Their briefs share one description of the world
