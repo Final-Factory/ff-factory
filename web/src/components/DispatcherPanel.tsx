@@ -38,6 +38,8 @@ export function sourceLabel(s: WorkSource): string {
       return 'FFBox request';
     case 'release':
       return 'Release follow-up';
+    case 'nightly':
+      return `Nightly e2e${s.nightly?.date ? ` ${s.nightly.date}` : ''}`;
   }
 }
 
@@ -49,6 +51,7 @@ export const triageLabel: Record<NonNullable<WorkItem['triage']>['class'], strin
   'needs-human': 'needs a human',
   person: 'asked by a person',
   'follow-up': 'follow-up',
+  regression: 'nightly regression',
 };
 
 /** What a pending intake request waits for, as its status reads. */
@@ -202,7 +205,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
   const pending = items.filter(pendingApproval);
   const reviewer = !!app.me && s.reviewerIds.some((id) => id.toLowerCase() === app.me!.userId.toLowerCase());
   const rest = items.filter((w) => !pendingApproval(w));
-  const anyOn = s.discord.enabled || s.ffbox.enabled || s.release.enabled;
+  const anyOn = s.discord.enabled || s.ffbox.enabled || s.release.enabled || !!s.nightly?.enabled;
   const act = async (id: string, f: () => Promise<unknown>) => {
     setBusy(id);
     await attempt(f());
@@ -211,6 +214,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
   const row = (w: WorkItem) => <WorkRow key={w.id} app={app} w={w} open={expanded === w.id} onToggle={() => setExpanded(expanded === w.id ? null : w.id)} now={now} />;
   const d = s.discord;
   const f = s.ffbox;
+  const n = s.nightly;
   return (
     <div className="sa-scroll intake-tab" data-testid="intake-tab">
       <section className="intake-settings" data-testid="intake-settings">
@@ -233,8 +237,17 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
             a “live in {s.release.lastVersion ?? '<version>'}” reply {s.release.delayMinutes} min after the release that carries each fix{s.release.checkedAt ? `; checked ${fmtRelative(s.release.checkedAt, now)}` : ''}
           </span>
         </div>
+        {n && (
+          <div className="intake-source">
+            <Chip tone={n.enabled ? 'green' : 'grey'}>Nightly e2e {onOff(n.enabled)}</Chip>
+            <span className="dim small">
+              new regressions, and scenarios flaky {n.flakyNights} nights running, from the lab's report; more than {n.batchOver} in a night become one request; at most {n.dailyCap} a day; auto-approve {n.autoApprove.enabled ? `on, ${n.autoApprove.maxPerDay} a day` : 'off'}
+              {n.last ? `; last report ${n.last.date} from ${n.last.lab} (develop ${n.last.sha.slice(0, 9)}): ${n.last.filed} filed, ${n.last.attached} added to open requests, ${n.last.skipped} skipped` : ''}
+            </span>
+          </div>
+        )}
         <p className="dim small">
-          Today: {s.today.filed} filed, {s.today.autoApproved} auto-approved, {s.today.skipped} skipped, {s.today.pending} need a human. Reviewers (approve, decline, answer design questions): {s.reviewers.join(', ') || 'the owner'}. Only obvious bugs are ever worked without them, and only with auto-approve on.{' '}
+          Today: {s.today.filed} filed, {s.today.autoApproved} auto-approved, {s.today.skipped} skipped, {s.today.pending} need a human. Reviewers (approve, decline, answer design questions): {s.reviewers.join(', ') || 'the owner'}. Only obvious bugs and nightly regressions are ever worked without them, and only with their auto-approve on.{' '}
           {anyOn ? 'Settings live in config.json, "intake".' : 'Everything is off: switch it on in config.json, "intake" (docs/intake.md).'}
         </p>
         {d.error && <p className="small tone-red">Last problem: {d.error}</p>}

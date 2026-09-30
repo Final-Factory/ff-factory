@@ -48,6 +48,7 @@ export interface IntakeSettings {
     autoApprove: { enabled: boolean; maxPerDay: number };
   };
   release: { enabled: boolean; delayMinutes: number };
+  nightly: { enabled: boolean; autoApprove: { enabled: boolean; maxPerDay: number }; dailyCap: number; flakyNights: number; batchOver: number };
   reviewers: string[];
   lookbackDays: number;
 }
@@ -59,6 +60,7 @@ const list = (v: unknown, def: string[]) => (Array.isArray(v) ? v.filter((x): x 
 export function intakeSettings(cfg: Pick<Config, 'intake' | 'providers'>): IntakeSettings {
   const d = cfg.intake?.discord ?? {};
   const f = cfg.intake?.ffbox ?? {};
+  const n = cfg.intake?.nightly ?? {};
   const trusted: Record<string, string> = {};
   for (const [discordId, userId] of Object.entries(d.trusted ?? {})) {
     // Discord ids are snowflakes; anything else in the map is a typo that must not trust anyone.
@@ -93,6 +95,13 @@ export function intakeSettings(cfg: Pick<Config, 'intake' | 'providers'>): Intak
       autoApprove: { enabled: f.autoApprove?.enabled === true, maxPerDay: int(f.autoApprove?.maxPerDay, 3, 0, 100) },
     },
     release: { enabled: cfg.intake?.release?.enabled === true, delayMinutes: int(cfg.intake?.release?.delayMinutes, 60, 0, 24 * 60) },
+    nightly: {
+      enabled: n.enabled === true,
+      autoApprove: { enabled: n.autoApprove?.enabled === true, maxPerDay: int(n.autoApprove?.maxPerDay, 10, 0, 100) },
+      dailyCap: int(n.dailyCap, 10, 0, 100),
+      flakyNights: int(n.flakyNights, 3, 1, 30),
+      batchOver: int(n.batchOver, 4, 1, 50),
+    },
     reviewers: list(cfg.intake?.reviewers, []),
     lookbackDays: int(cfg.intake?.lookbackDays, 14, 1, 90),
   };
@@ -370,6 +379,7 @@ export function identityKeys(s: WorkSource): string[] {
   if (s.branch) keys.push(`branch:${s.branch.toLowerCase()}`);
   if (s.pr) keys.push(`pr:${s.pr}`);
   if (s.release) keys.push(`release:${s.release.version}`);
+  for (const sc of s.nightly?.scenarios ?? []) keys.push(`nightly:${sc.toLowerCase()}`);
   return keys;
 }
 
@@ -551,6 +561,23 @@ export function workerRules(w: Pick<WorkItem, 'id' | 'source' | 'brief' | 'triag
       .filter((l) => l !== '')
       .join('\n');
   }
+  if (s.kind === 'nightly') {
+    return [
+      head,
+      '',
+      `This came from the team's own nightly e2e lab (${s.nightly?.lab ?? 'the lab'}, ${s.nightly?.date ?? ''}, develop ${s.nightly?.sha?.slice(0, 9) ?? '?'}): a scripted oracle failed. No players' text is involved.`,
+      '- Reproduce it first: `python3 scripts/nightly/ffnightly.py run --scenario <id> --no-retry` on a player built from the commit tested (specs/075-nightly-e2e-regression/quickstart.md; players launch from the slot pool, never a new exe path). Say in your report whether it reproduced.',
+      "- Then fix the game bug, or, when the scenario is what is wrong, fix the scenario with the evidence for why. Never loosen an oracle, add an allowlist line or quarantine a scenario to hide a real regression; a quarantine is Ben's call.",
+      '- It is determinism-critical: follow CLAUDE.md (fp math, the crown-jewel surfaces, save compatibility) and verify a multiplayer fix with the determinism audit. Show the scenario red before and green after.',
+      "- A regression the nightly missed until now gets its entry in scripts/nightly/ledger.json by that file's rule.",
+      '- Post nothing to Discord about it.',
+      '',
+      'End your final message with exactly one of these lines, on a line of its own; the harness reads it and closes or flags the request:',
+      '- `FIX-LANDED: <commit sha>` once the fix (of the game or of the scenario) is on develop.',
+      '- `RESOLVED: <one line>` when nothing needs changing (it does not reproduce and the lab was at fault, already fixed on develop, a duplicate).',
+      '- `DESIGN-QUESTION: <one line>` when fixing it needs a design, balance or gameplay decision: the question goes to Ben or Lothsahn.',
+    ].join('\n');
+  }
   if (s.kind === 'release') {
     return [head, '', POSTING_RULES, '', 'Post exactly one short follow-up in each thread listed in the brief, opening with the reporter\'s @-mention if the thread shows who they are, saying the fix is live in the version named. Do not reopen closed threads beyond what posting needs; post nowhere else.', '', 'End with `RESOLVED: announced <version> in <n> threads`.'].join('\n');
   }
@@ -587,8 +614,8 @@ export function sourceTag(w: Pick<WorkItem, 'source' | 'approval' | 'triage'>): 
   const s = w.source;
   if (!s) return '';
   const where =
-    s.kind === 'discord-bug' ? `Discord ${s.channel ?? 'bug report'}` : s.kind === 'discord-request' ? `Discord request from ${s.reporter ?? '?'}` : s.kind === 'release' ? 'release follow-up' : `FFBox ${s.kind === 'ffbox-diagnosis' ? 'diagnosis' : s.kind === 'ffbox-branch' ? 'branch' : 'request'}`;
-  const triage = w.triage?.class === 'obvious-bug' ? ', obvious bug' : '';
+    s.kind === 'discord-bug' ? `Discord ${s.channel ?? 'bug report'}` : s.kind === 'discord-request' ? `Discord request from ${s.reporter ?? '?'}` : s.kind === 'release' ? 'release follow-up' : s.kind === 'nightly' ? `nightly e2e ${s.nightly?.date ?? ''}`.trim() : `FFBox ${s.kind === 'ffbox-diagnosis' ? 'diagnosis' : s.kind === 'ffbox-branch' ? 'branch' : 'request'}`;
+  const triage = w.triage?.class === 'obvious-bug' ? ', obvious bug' : w.triage?.class === 'regression' ? `, ${w.triage.reason.replace(/^nightly e2e: /, '')}` : '';
   const approval =
     w.approval?.state === 'pending' ? (w.triage?.class === 'needs-human' ? ', needs a human' : ', awaiting approval') : w.approval?.state === 'declined' ? ', declined' : w.approval?.by === 'auto' ? ', auto-approved' : w.approval?.by ? `, approved by ${w.approval.by.displayName}` : '';
   return `${where}${s.untrusted ? ', untrusted' : ''}${triage}${approval}`;

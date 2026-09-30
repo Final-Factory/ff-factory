@@ -34,6 +34,7 @@ threads by default, and the ledger check both ways (provider protocol 2) is buil
 | an FFBox conversation that left an unreviewed `ffbox/*` branch (a fix, a diagnosis) | "Review and merge ffbox/…" | the system payer | needs a human (a person's own when an operator opened it) |
 | a `request` FFBox's connector files (review, escalation, an operator's dev work) | "FFBox …: <title>" | the operator, else the system payer | the same |
 | a release (a `bundleVersion` bump on the base branch) that carries landed fixes with threads | "Tell reporters their fixes are live in 0.50.0.X" | the system payer | follow-up |
+| the nightly e2e lab's report: a new regression, a scenario still failing, or one flaky `flakyNights` nights running | "Nightly e2e: <scenario> fails on develop <sha>" | the system payer | regression |
 
 Code: `server/intake.ts` (`IntakeManager`: the polls and hooks), `server/intakeRules.ts` (the rules, pure),
 `Orchestrators.fileIntake` in `server/orchestrators.ts` (filing, duplicates, approval).
@@ -171,6 +172,54 @@ to them as usual.
 The dispatcher handles intake requests like any other, batching small ones: one worker can take several (start it with
 one `work_id`, then `decide_work link` the others).
 
+## Nightly e2e regressions
+
+Ben, 2026-09-30: "stop this falling through the cracks." The nightly e2e lab (FinalFactory spec 075,
+`scripts/nightly/`, Lothsahn's lab PC, around 07:00 UTC) used to post only a summary in #dev-chat, so a red night
+became work only when someone happened to read it. Now the lab also posts its results here, and each regression is a
+ledger request, or a line on the request already fixing it.
+
+- **The hook.** After `ffnightly.py report`, `ffnightly.py deliver` POSTs the night to `POST /api/intake/nightly` (the
+  public Funnel URL; the lab PC is not on the tailnet) with `Authorization: Bearer <key>`. The key is an API key minted
+  **`--scope nightly`** (`node server/apikey.ts nightly-lab --scope nightly`): it reaches this one endpoint and is refused
+  on `/mcp`, so a leaked lab key can file nightly requests and nothing else. The lab keeps the URL and key in a local file
+  (`~/.config/ffnightly/ffactory.json`), never in git. A failed post never fails the night: the report says it was not
+  filed, and the #dev-chat post still goes out.
+- **The report** (`server/nightlyRules.ts` `parseNightlyReport`, version 1): the night, the lab, the develop commit,
+  the release that contains it, where the report file is, and one result per failing or flaky scenario with its class
+  (`new`, `still`, `flaky`), the oracle's step and reason, the last green and first red nights, the GitHub compare link,
+  the regression-ledger entries that name the scenario, the evidence folder, desync reports, a repro line and whether the
+  failing code shipped. Every field is checked and cleaned; a malformed result is dropped, a malformed header refused (400).
+- **What becomes work** (`IntakeManager.onNightly`): every `new` and `still` result, and a `flaky` one flaky
+  `intake.nightly.flakyNights` nights running (default 3). For each, in order:
+  1. an **open** request with the key `nightly:<scenario>` takes it: one log line per night and scenario (a resent report
+     adds nothing), urgent once the failing code shipped, and a worker on it is told (`Orchestrators.attachNightly`);
+  2. else an open request whose title or brief names the scenario id as a whole word (a person filed the fix by hand,
+     like w84 triaging the 2026-09-30 night) takes it the same way, and gets the key so later nights find it at once;
+  3. else a still-failing scenario whose nightly request a reviewer **declined** within `lookbackDays` is skipped;
+  4. else it is filed. A request closed as done does not take a new failure: that is news (the fix did not hold, or it
+     broke again), so it is filed afresh with the done one listed as an overlap.
+  More to file in one night than `intake.nightly.batchOver` (default 4) become **one request for the night**, keyed by
+  every scenario: many at once usually share a cause (a broken build, the lab).
+- **The request.** Title `Nightly e2e: <scenario> fails on develop <sha9>` (`… (shipped in 0.50.0.53)` when it did);
+  priority **urgent when the failing code is in a release, high otherwise**; triage `regression`; billed to the system
+  payer. The brief carries the commit tested, the scenario and its file, the oracle's verdict, the last green and first
+  red nights and the compare link, the release line, the regression-ledger entries, the evidence folder on the lab, the
+  report's paths on the lab and on BEAST, the repro command, "reproduce first, then fix the bug or fix the test", and
+  "determinism-critical: start its worker on Opus". The worker rules (`workerRules`) repeat the method, forbid hiding a
+  regression (a loosened oracle, an allowlist line, a quarantine: Ben's call), require the scenario red before and green
+  after, and end with the usual markers.
+- **Shipped or not** comes from the lab, which has the clone: a release is a commit on `origin/develop` or
+  `origin/master` that changes `bundleVersion` (ff-agents `ci-release`: the version bump is the release). `yes` when a
+  release contains the first failing night's commit, `maybe` when a release lies between the last green and the first
+  red night (bisect to tell; high, not urgent), `no` otherwise, with the newest release named. The night's report.md says
+  the same for the commit it tested.
+- **Approval and caps.** `intake.nightly.autoApprove` (default off, 10 a day) as for the other sources: off, each
+  request waits on the Intake tab for a reviewer; on, it goes to the dispatcher at once unless a strong overlap is in
+  flight. At most `intake.nightly.dailyCap` (default 10) a day, inside the intake's own `workLimits.intake`.
+- **Off by default** (`intake.nightly.enabled`). Off, the endpoint still checks the key and the report, files nothing,
+  and answers `{enabled: false}`; the lab prints that in its log.
+
 ## FFBox, both ways (later, optional)
 
 FFBox is not wired into this portal yet (`providers.ffbox.enabled` is false). Everything below is built on FF
@@ -243,6 +292,7 @@ defaults and clamps the numbers.
   },
   "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "repo": "Final-Factory/FinalFactory", "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 } },
   "release": { "enabled": false, "delayMinutes": 60 },
+  "nightly": { "enabled": false, "autoApprove": { "enabled": false, "maxPerDay": 10 }, "dailyCap": 10, "flakyNights": 3, "batchOver": 4 },
   "reviewers": ["ben", "lothsahn"],
   "lookbackDays": 14
 },
@@ -271,6 +321,12 @@ snowflakes; an entry that is not one trusts nobody.
    empty: FFBox owns #bug-reports (above).
 8. Standing agents that read Discord and file delegations for bug reports now duplicate the intake: pause them once
    the intake runs.
+9. **Nightly e2e** (independent of the rest): mint the lab's key on BEAST, `node server/apikey.ts nightly-lab --scope
+   nightly`, and hand it to Lothsahn out of band with the public URL. Set `intake.nightly.enabled: true` (leave
+   `autoApprove` off for the first nights) and restart. After the next night, the Intake tab's Nightly line shows the
+   last report and what it came to. Turn on `intake.nightly.autoApprove.enabled` once the requests look right. The
+   nightly-regression-sentry standing agent now duplicates this: narrow its charter to what the intake does not do, or
+   pause it.
 
 ## Rollout checklist: Lothsahn (FFBox's side)
 

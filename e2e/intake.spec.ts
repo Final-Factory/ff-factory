@@ -63,6 +63,7 @@ test('Discord reports and trusted requests land in the Intake tab, wait for a pe
   await expect(settings).toContainText('Discord on');
   await expect(settings).toContainText('FFBox off');
   await expect(settings).toContainText('Release follow-ups off');
+  await expect(settings).toContainText('Nightly e2e off');
   await expect(settings).toContainText('from tester');
   await expect(settings).toContainText('auto-approve off');
   await expect(settings).toContainText("#bug-reports, #dev-bug-reports: FFBox's, never filed from");

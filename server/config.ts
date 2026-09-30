@@ -54,6 +54,22 @@ export interface IntakeConfig {
   /** The "live in 0.50.0.X" follow-up: watch the base branch for the release that carries each landed fix. */
   release?: { enabled?: boolean; delayMinutes?: number };
   /**
+   * The nightly e2e lab (FinalFactory scripts/nightly) posts each night's results to POST /api/intake/nightly with an
+   * API key minted `--scope nightly`: every new regression, and a scenario flaky `flakyNights` nights running, becomes
+   * a request, or is added to the open request already on that scenario (docs/intake.md, "Nightly e2e regressions").
+   */
+  nightly?: {
+    enabled?: boolean;
+    /** Start without a person's click, at most maxPerDay a day (default off, 10). */
+    autoApprove?: { enabled?: boolean; maxPerDay?: number };
+    /** Nightly requests filed per day (default 10). */
+    dailyCap?: number;
+    /** A scenario flaky this many nights running is filed like a regression (default 3). */
+    flakyNights?: number;
+    /** More new requests than this from one night become one batched request for the night (default 4). */
+    batchOver?: number;
+  };
+  /**
    * The people who decide (user ids, e.g. ["ben", "lothsahn"]): they approve or decline what needs a human and answer
    * design questions; nobody else can. Default: the owner.
    */
