@@ -156,3 +156,13 @@ test('API keys: shown once, stored hashed, revocable; bad keys are throttled per
   assert.equal(a.revokeApiKey('laptop'), false);
   assert.deepEqual(bearer(key2), { ok: false, status: 401 });
 });
+
+test('API keys: a key minted with a scope says so, so /mcp can refuse it; an unknown scope is refused', (t) => {
+  const a = new Auth(dataDir(t), { trustProxy: false });
+  const lab = a.createApiKey('nightly-lab', undefined, 'nightly');
+  const mcp = a.createApiKey('laptop');
+  const bearer = (k: string) => a.bearer(req({ headers: { authorization: `Bearer ${k}` } }));
+  assert.deepEqual(bearer(lab), { ok: true, name: 'nightly-lab', scope: 'nightly' });
+  assert.deepEqual(bearer(mcp), { ok: true, name: 'laptop' });
+  assert.throws(() => a.createApiKey('x-lab', undefined, 'admin' as never), /key scope/);
+});

@@ -14,6 +14,7 @@ import { hostSandboxFrom } from './hostMigration.ts';
 import { ProviderManager } from './providers.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
+import { parseNightlyReport } from './nightlyRules.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { Notifier } from './notify.ts';
 import { refreshSandboxGit } from './gitStatus.ts';
@@ -1024,6 +1025,7 @@ const server = http.createServer(async (req, res) => {
       // Machine clients authenticate with an API key, not a browser session; no cookies, so no CSRF.
       const who = auth.bearer(req);
       if (!who.ok) return send(res, who.status, { error: who.status === 429 ? 'too many failures' : 'API key required' });
+      if (who.scope) return send(res, 403, { error: `this key is for ${who.scope} reports only` });
       // A key bound to a login acts for that person; an unbound one (made before keys had users) for the owner.
       const keyUser = auth.userInfo(who.user);
       return await handleMcp(agents, who.name, keyUser ? asRequester(keyUser) : identity.owner(), req, res, req.method === 'POST' ? await readJson(req) : undefined);
@@ -1033,6 +1035,17 @@ const server = http.createServer(async (req, res) => {
       if (req.method !== 'DELETE' && !String(req.headers['content-type'] ?? '').startsWith('application/json')) {
         return send(res, 415, { error: 'JSON only' });
       }
+    }
+    // The nightly e2e lab's report (docs/intake.md, "Nightly e2e regressions"): a key minted --scope nightly, nothing else.
+    if (url.pathname === '/api/intake/nightly' && req.method === 'POST') {
+      const who = auth.bearer(req);
+      if (!who.ok) return send(res, who.status, { error: who.status === 429 ? 'too many failures' : 'API key required' });
+      if (who.scope !== 'nightly') return send(res, 403, { error: 'a nightly-scoped key is required (node server/apikey.ts <name> --scope nightly)' });
+      const parsed = parseNightlyReport(await readJson(req, 256 * 1024));
+      if ('error' in parsed) return send(res, 400, { error: parsed.error });
+      const results = intake.onNightly(parsed.report);
+      if (!results) return send(res, 200, { enabled: false, note: 'the nightly intake is off (config intake.nightly.enabled)' });
+      return send(res, 200, { enabled: true, results });
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
     // version of an open-source app is public anyway.

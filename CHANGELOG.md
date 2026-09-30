@@ -19,6 +19,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Nightly e2e regressions become ledger work** ([docs/intake.md](docs/intake.md#nightly-e2e-regressions)). The
+  FinalFactory nightly lab posts each night to `POST /api/intake/nightly` with an API key minted `--scope nightly`
+  (refused on `/mcp`). A new regression, a scenario still failing, or one flaky 3 nights running becomes a request
+  (urgent when the failing code shipped in a release, high otherwise; brief: commit, scenario, oracle, ledger entry,
+  links, release, reproduce-then-fix, Opus), or a line on the open request already on that scenario, a person's own
+  included. Many in one night become one request. Off by default (`intake.nightly.enabled`); the Intake tab shows it.
 - **Provider protocol 2: the ledger check both ways with FFBox** (w55; [docs/ffbox-connector-contract.md](docs/ffbox-connector-contract.md#protocol-2-the-ledger-check-both-ways)).
   The portal speaks protocols 1 and 2 and answers each connector in its own; `hello.accepts` and `welcome.accepts` say
   what each side takes. FFBox asks the ledger with exact keys (`board_check` by `discord:<thread id>`, `report:<id>`) before

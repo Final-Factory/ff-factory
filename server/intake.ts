@@ -7,6 +7,8 @@
 // - FFBox: its fix branches and diagnoses (the connector's conversations), the requests it files itself, and its
 //   question "is this already in the ledger?" before it works a report (board_check).
 // - Releases: once a landed fix ships in a version, one follow-up request tells its reporters.
+// - The nightly e2e lab: each night's new regressions (and long-flaky scenarios) become requests, or are added to the
+//   open request already on that scenario (POST /api/intake/nightly, server/nightlyRules.ts).
 //
 // Every switch is off by default (config intake, server/intakeRules.ts intakeSettings). The rules that are not a
 // model's to decide (trust, caps, approval, quoting players' text) are fixed code here and in intakeRules.ts.
@@ -45,10 +47,13 @@ import {
   type DiscordMessage,
   type IntakeSettings,
 } from './intakeRules.ts';
+import { mentionsScenario, nightlyAgainLine, nightlyDraft, nightlyKey, nightlySkip, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
+import { isOpen } from './work.ts';
 import type { IntakeEntry, IntakeSummary, MaxEvent, ProviderConversation, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 
 const DISCORD_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request'];
 const FFBOX_KINDS: readonly WorkSourceKind[] = ['ffbox-branch', 'ffbox-diagnosis', 'ffbox-request'];
+const NIGHTLY_KINDS: readonly WorkSourceKind[] = ['nightly'];
 const KEEP_RECENT = 200;
 const RELEASE_EVERY_MS = 10 * 60_000;
 const RELEASE_LOOKBACK_MS = 30 * 86_400_000;
@@ -95,6 +100,8 @@ interface Persisted {
   versions: Record<string, string>;
   lastVersion?: string;
   checkedAt?: string;
+  /** The last nightly report and what it came to (the Intake tab). */
+  nightly?: NonNullable<IntakeSummary['nightly']>['last'];
   polledAt?: string;
   error?: string;
 }
@@ -153,7 +160,7 @@ export class IntakeManager {
   private load(): Persisted {
     try {
       const d = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<Persisted>;
-      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error };
+      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly };
     } catch {
       return { cursors: {}, recent: [], versions: {} };
     }
@@ -528,6 +535,69 @@ export class IntakeManager {
     );
   }
 
+  // ---------------------------------------------------------------- the nightly e2e lab
+
+  /**
+   * A night's results from the lab (POST /api/intake/nightly). Each new regression, still-failing scenario and scenario
+   * flaky intake.nightly.flakyNights nights running either joins the open request already on that scenario (a nightly
+   * request, or a person's own that names the scenario id) or is filed; more to file than batchOver become one request
+   * for the night. A still-failing scenario whose request a reviewer declined within the lookback is not filed again.
+   * Undefined while intake.nightly is off.
+   */
+  onNightly(rep: NightlyReport): { scenario: string; action: 'filed' | 'attached' | 'skipped'; workId?: string; why?: string }[] | undefined {
+    const s = this.settings;
+    if (!s.nightly.enabled) return undefined;
+    const now = this.now();
+    const lookbackMs = s.lookbackDays * 86_400_000;
+    const out: { scenario: string; action: 'filed' | 'attached' | 'skipped'; workId?: string; why?: string }[] = [];
+    const toFile: NightlyResult[] = [];
+    const work = () => [...this.d.store.work.values()];
+    for (const r of rep.results) {
+      const skip = nightlySkip(r, s.nightly);
+      if (skip) {
+        out.push({ scenario: r.scenario, action: 'skipped', why: skip });
+        continue;
+      }
+      const key = nightlyKey(r.scenario);
+      // The open request on it: a nightly one (or one that took a nightly line before), else a person's that names it.
+      const open = work().filter((w) => isOpen(w) && !w.mergedInto);
+      const target = open.find((w) => w.keys.includes(key)) ?? open.find((w) => w.source?.kind !== 'nightly' && mentionsScenario(`${w.title}\n${w.brief}`, r.scenario));
+      if (target) {
+        const added = this.d.orchestrators.attachNightly(target.id, { key, line: nightlyAgainLine(rep, r), night: rep.date, scenario: r.scenario, urgent: r.release?.shipped === 'yes' });
+        if (added) this.record({ source: 'nightly', action: 'repeat', title: `${r.scenario} failed again (${rep.date})`, workId: target.id, why: `added to ${target.id}, open on it` });
+        out.push({ scenario: r.scenario, action: 'attached', workId: target.id, why: added ? `added to ${target.id}, open on it` : `already on ${target.id} for ${rep.date}` });
+        continue;
+      }
+      const declined = r.class !== 'new' && work().find((w) => w.source?.kind === 'nightly' && w.keys.includes(key) && w.approval?.state === 'declined' && now - Date.parse(w.updatedAt) < lookbackMs);
+      if (declined) {
+        out.push({ scenario: r.scenario, action: 'skipped', workId: declined.id, why: `${declined.id} for it was declined${declined.approval?.by && declined.approval.by !== 'auto' ? ` by ${declined.approval.by.displayName}` : ''}` });
+        continue;
+      }
+      toFile.push(r);
+    }
+    const groups = toFile.length > s.nightly.batchOver ? [toFile] : toFile.map((r) => [r]);
+    for (const g of groups) {
+      const draft = nightlyDraft(rep, g);
+      const res = this.d.orchestrators.fileIntake({
+        ...draft,
+        requestedBy: this.d.identity.systemPayer(),
+        autoApprove: s.nightly.autoApprove,
+        kinds: NIGHTLY_KINDS,
+        lookbackDays: s.lookbackDays,
+        limit: () => capProblem(this.d.store.work.values(), NIGHTLY_KINDS, s.nightly.dailyCap, now),
+      });
+      this.outcome('nightly', draft.title, draft.source.url, res);
+      for (const r of g) {
+        if (res.skipped) out.push({ scenario: r.scenario, action: 'skipped', why: res.skipped });
+        else out.push({ scenario: r.scenario, action: res.repeat ? 'attached' : 'filed', workId: res.item?.id, ...(g.length > 1 ? { why: `the night's batch of ${g.length}` } : {}) });
+      }
+    }
+    const count = (a: string) => out.filter((o) => o.action === a).length;
+    this.data.nightly = { at: new Date(now).toISOString(), date: rep.date, lab: rep.lab, sha: rep.sha, filed: count('filed'), attached: count('attached'), skipped: count('skipped') };
+    this.changed();
+    return out;
+  }
+
   // ---------------------------------------------------------------- releases
 
   private async git(args: string[]): Promise<{ code: number; stdout: string }> {
@@ -638,6 +708,7 @@ export class IntakeManager {
         autoApprove: s.ffbox.autoApprove,
       },
       release: { enabled: s.release.enabled, delayMinutes: s.release.delayMinutes, ...(this.data.lastVersion ? { lastVersion: this.data.lastVersion } : {}), ...(this.data.checkedAt ? { checkedAt: this.data.checkedAt } : {}) },
+      nightly: { ...s.nightly, ...(this.data.nightly ? { last: this.data.nightly } : {}) },
       reviewers: this.d.orchestrators.reviewers().map((r) => r.displayName),
       reviewerIds: this.d.orchestrators.reviewers().map((r) => r.userId),
       today: {

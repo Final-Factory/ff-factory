@@ -81,6 +81,10 @@ function checkProfile(p: UserProfile): Partial<UserRecord> {
   return out;
 }
 
+/** What a scoped API key may reach: "nightly" is the nightly e2e lab's report endpoint (docs/intake.md) and nothing else. */
+export type ApiKeyScope = 'nightly';
+export const API_KEY_SCOPES: readonly ApiKeyScope[] = ['nightly'];
+
 export class Auth {
   private readonly usersFile: string;
   private readonly sessionsFile: string;
@@ -159,21 +163,23 @@ export class Auth {
     return path.join(path.dirname(this.usersFile), 'api-keys.json');
   }
 
-  private keys(): { name: string; sha256: string; createdAt: string; user?: string }[] {
+  private keys(): { name: string; sha256: string; createdAt: string; user?: string; scope?: ApiKeyScope }[] {
     return fs.existsSync(this.keysFile) ? JSON.parse(fs.readFileSync(this.keysFile, 'utf8')) : [];
   }
 
   /**
    * Mint a key (shown once; only its SHA-256 is stored). Re-minting a name replaces its old key. `user`: the login
-   * it acts for (work it starts is requested by them); a key without one acts for the owner.
+   * it acts for (work it starts is requested by them); a key without one acts for the owner. `scope`: a key for one
+   * endpoint only ("nightly": POST /api/intake/nightly), refused on /mcp; a key without one is an MCP key.
    */
-  createApiKey(name: string, user?: string) {
+  createApiKey(name: string, user?: string, scope?: ApiKeyScope) {
     if (!/^[a-zA-Z0-9._-]{2,40}$/.test(name)) throw new Error('key name: 2-40 letters, digits, . _ -');
+    if (scope !== undefined && !API_KEY_SCOPES.includes(scope)) throw new Error(`key scope: one of ${API_KEY_SCOPES.join(', ')}`);
     if (user !== undefined && !this.users().some((u) => u.username === user)) throw new Error(`no login "${user}" to bind the key to`);
     const key = `ffsb_${randomBytes(32).toString('base64url')}`;
     const sha256 = createHash('sha256').update(key).digest('hex');
     const keys = this.keys().filter((k) => k.name !== name);
-    keys.push({ name, sha256, createdAt: new Date().toISOString(), ...(user ? { user } : {}) });
+    keys.push({ name, sha256, createdAt: new Date().toISOString(), ...(user ? { user } : {}), ...(scope ? { scope } : {}) });
     fs.writeFileSync(this.keysFile, JSON.stringify(keys, null, 2));
     return key;
   }
@@ -190,7 +196,7 @@ export class Auth {
    * gets in and clears the address (one bad client must not lock out every key behind the same address): keys
    * are 256 random bits checked with one SHA-256, so the throttle is not what stops guessing.
    */
-  bearer(req: http.IncomingMessage): { ok: true; name: string; user?: string } | { ok: false; status: number } {
+  bearer(req: http.IncomingMessage): { ok: true; name: string; user?: string; scope?: ApiKeyScope } | { ok: false; status: number } {
     const ip = this.clientIp(req);
     const now = Date.now();
     const recent = (this.keyFailures.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
@@ -199,7 +205,7 @@ export class Auth {
     const hit = digest && this.keys().find((k) => timingSafeEqual(Buffer.from(k.sha256, 'hex'), digest));
     if (hit) {
       this.keyFailures.delete(ip);
-      return { ok: true, name: hit.name, ...(hit.user ? { user: hit.user } : {}) };
+      return { ok: true, name: hit.name, ...(hit.user ? { user: hit.user } : {}), ...(hit.scope ? { scope: hit.scope } : {}) };
     }
     const locked = recent.length >= 10;
     if (!locked) recent.push(now);

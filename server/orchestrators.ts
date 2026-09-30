@@ -793,15 +793,47 @@ export class Orchestrators {
     const now = this.now().getTime();
     // Within one family only: an FFBox review request carries its Discord thread's key too, and is not a repeat of the
     // bug report filed from that thread (nor the other way round).
-    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : 'release');
+    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' ? 'nightly' : 'release');
     const prefix = family(kind);
     const ids = keys.filter((k) => k.startsWith(`${prefix}:`));
     if (!ids.length) return undefined;
+    // A scenario failing again after its request closed is news (the fix did not hold, or it regressed again): only an
+    // open nightly request takes it.
+    const lookback = prefix === 'nightly' ? -1 : lookbackMs;
     for (const w of this.store.work.values()) {
-      if (!w.source || family(w.source.kind) !== prefix || (!isOpen(w) && now - Date.parse(w.updatedAt) > lookbackMs)) continue;
+      if (!w.source || family(w.source.kind) !== prefix || (!isOpen(w) && now - Date.parse(w.updatedAt) > lookback)) continue;
       if (w.keys.some((k) => ids.includes(k))) return w;
     }
     return undefined;
+  }
+
+  /**
+   * A later nightly result for a scenario an open request already covers (a nightly request, or a person's own that
+   * names the scenario): one log line per night and scenario, the scenario's key added so later nights find it at once,
+   * urgent once the failing code shipped, and a worker on it told. False when that night was already added.
+   */
+  attachNightly(id: string, a: { key: string; line: string; night: string; scenario: string; urgent: boolean }): boolean {
+    const w = this.requireWork(id);
+    const mark = `nightly ${a.night}: ${a.scenario} `;
+    if (w.log.some((l) => l.includes(mark)) || w.source?.nightly?.nights.includes(`${a.night} ${a.scenario}`)) return false;
+    if (!w.keys.includes(a.key)) w.keys = [...w.keys, a.key];
+    if (w.source?.nightly) w.source.nightly.nights = [...w.source.nightly.nights, `${a.night} ${a.scenario}`].slice(-60);
+    this.stamp(w, a.line);
+    if (a.urgent && w.priority !== 'urgent') {
+      w.priority = 'urgent';
+      this.stamp(w, 'priority urgent: the failing code shipped in a release');
+    }
+    this.store.putWork(w);
+    for (const sid of w.sessionIds) {
+      const s = this.store.sessions.get(sid);
+      if (!s || !BUSY.includes(s.status)) continue;
+      try {
+        this.sessions.send(sid, `[nightly] ${a.line} (${w.id})`, 'system', undefined, { requestedBy: w.requestedBy });
+      } catch {
+        // it is at a limit; the request's log has it
+      }
+    }
+    return true;
   }
 
   /** An FFBox review request whose pull request merged or closed on FFBox's side needs nothing more. */
@@ -835,7 +867,7 @@ export class Orchestrators {
     const skipped = f.limit?.() ?? this.intakeCap(now.getTime(), f.source.kind);
     if (skipped) return { skipped };
     const title = f.title.replace(/\s+/g, ' ').trim().slice(0, 120);
-    const fromText = (f.source.untrusted ? textKeys(title) : textKeys(`${title}\n${f.brief}`, this.knownBranches())).filter((k) => !/^(work|session|delegation|pr|branch|discord|ffbox|release):/.test(k));
+    const fromText = (f.source.untrusted ? textKeys(title) : textKeys(`${title}\n${f.brief}`, this.knownBranches())).filter((k) => !/^(work|session|delegation|pr|branch|discord|ffbox|release|nightly):/.test(k));
     const keys = [...new Set([...idKeys, ...fromText])];
     const overlaps = findOverlaps({ keys, title }, this.pool(undefined, lookbackMs));
     const w: WorkItem = {

@@ -986,10 +986,11 @@ export interface WorkItem {
 
 /**
  * Where an intake request came from: a Discord #bug-reports thread, a trusted person's request to Max in #dev-chat,
- * an FFBox fix branch or diagnosis, a request FFBox filed, or a release follow-up the server filed itself.
+ * an FFBox fix branch or diagnosis, a request FFBox filed, a release follow-up the server filed itself, or a
+ * regression the nightly e2e lab found (docs/intake.md, "Nightly e2e regressions").
  */
-export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'release';
-export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'release'];
+export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'release' | 'nightly';
+export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'release', 'nightly'];
 
 export interface WorkSource {
   kind: WorkSourceKind;
@@ -1021,14 +1022,41 @@ export interface WorkSource {
   alsoThreads?: { threadId: string; url?: string; reporter?: string }[];
   /** A release follow-up: the version and the requests it announces. */
   release?: { version: string; workIds: string[] };
+  /** A nightly e2e regression: the scenarios, the develop commit tested and the release that carries it. */
+  nightly?: WorkNightly;
+}
+
+/** What the nightly e2e lab reported about a regression request (docs/intake.md, "Nightly e2e regressions"). */
+export interface WorkNightly {
+  /** The scenario ids ("MP-slow-client-catchup"); more than one for a night's batched request. */
+  scenarios: string[];
+  /** The night that filed it ("2026-09-30"), the lab and the develop commit it tested. */
+  date: string;
+  lab: string;
+  sha: string;
+  /** "<night> <scenario>" for every night that reported it, oldest first: the filing night, then each night it failed again. */
+  nights: string[];
+  /** The first release that carries the failing code, and whether it did for sure ("yes") or may have ("maybe"). */
+  release?: NightlyRelease;
+}
+
+export interface NightlyRelease {
+  /** yes: a release contains the first failing commit; maybe: a release lies between the last green and the first red; no: none yet. */
+  shipped: 'yes' | 'maybe' | 'no';
+  /** That release's version ("0.50.0.53") and its version-bump commit; absent when shipped is "no". */
+  version?: string;
+  sha?: string;
+  /** The newest release on record, for context. */
+  latest?: string;
 }
 
 /**
  * obvious-bug: a player's report with a clear defect and no design ask (fixed-code rules, conservative); needs-human:
  * anything else from players or FFBox, which nobody works until a reviewer approves or answers; person: a reviewer or
- * operator asked for it themselves; follow-up: the server's own release follow-up.
+ * operator asked for it themselves; follow-up: the server's own release follow-up; regression: a scripted oracle of
+ * the team's own nightly e2e lab failed (no players' text).
  */
-export type WorkTriageClass = 'obvious-bug' | 'needs-human' | 'person' | 'follow-up';
+export type WorkTriageClass = 'obvious-bug' | 'needs-human' | 'person' | 'follow-up' | 'regression';
 
 export interface WorkTriage {
   class: WorkTriageClass;
@@ -1114,6 +1142,16 @@ export interface IntakeSummary {
     autoApprove: { enabled: boolean; maxPerDay: number };
   };
   release: { enabled: boolean; delayMinutes: number; lastVersion?: string; checkedAt?: string };
+  /** The nightly e2e lab's regressions (config intake.nightly); optional for a page from before it existed. */
+  nightly?: {
+    enabled: boolean;
+    autoApprove: { enabled: boolean; maxPerDay: number };
+    dailyCap: number;
+    flakyNights: number;
+    batchOver: number;
+    /** The last report the lab posted, and what it came to. */
+    last?: { at: string; date: string; lab: string; sha: string; filed: number; attached: number; skipped: number };
+  };
   /** Who approves what needs a human and answers design questions (config intake.reviewers; default the owner). */
   reviewers: string[];
   /** Their user ids: only they see Approve and Decline. */

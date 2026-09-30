@@ -2170,7 +2170,7 @@ To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`A
           id: z.string().optional().describe('A request id, e.g. "w12".'),
           status: z.enum(['open', 'all', 'needs_human', 'new', 'question', 'queued', 'active', 'merged', 'done', 'rejected', 'cancelled']).optional().describe('Default open. needs_human: the intake requests nobody works until a reviewer approves or answers them.'),
           mine: z.boolean().optional().describe("Only your person's requests (a personal orchestrator)."),
-          source: z.enum(['people', 'intake', 'discord', 'ffbox']).optional().describe("people: filed by people's orchestrators; intake: from Discord and FFBox; discord or ffbox: one of the two."),
+          source: z.enum(['people', 'intake', 'discord', 'ffbox', 'nightly']).optional().describe("people: filed by people's orchestrators; intake: from Discord, FFBox and the nightly e2e lab; discord, ffbox or nightly: one of them."),
         },
         wrap(async (a) => this.listWork(a, ctx)),
       ),
@@ -2250,7 +2250,7 @@ To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`A
   }
 
   /** list_work's answer: one request in full, or one line per request. */
-  private listWork(a: { id?: string; status?: string; mine?: boolean; source?: 'people' | 'intake' | 'discord' | 'ffbox' }, ctx: BeltCtx): string {
+  private listWork(a: { id?: string; status?: string; mine?: boolean; source?: 'people' | 'intake' | 'discord' | 'ffbox' | 'nightly' }, ctx: BeltCtx): string {
     const o = this.orchestrators;
     if (a.id) {
       const w = o.requireWork(a.id);
@@ -2402,12 +2402,13 @@ ${this.worldBrief(false)}
 }
 
 /** list_work's source filter: people's own requests, the intake's, or Discord's or FFBox's alone. */
-function sourceMatches(w: WorkItem, source?: 'people' | 'intake' | 'discord' | 'ffbox'): boolean {
+function sourceMatches(w: WorkItem, source?: 'people' | 'intake' | 'discord' | 'ffbox' | 'nightly'): boolean {
   if (!source) return true;
   const k = w.source?.kind;
   if (source === 'people') return !k;
   if (source === 'intake') return !!k;
   if (source === 'discord') return k === 'discord-bug' || k === 'discord-request' || k === 'release';
+  if (source === 'nightly') return k === 'nightly';
   return k === 'ffbox-branch' || k === 'ffbox-diagnosis' || k === 'ffbox-request';
 }
 

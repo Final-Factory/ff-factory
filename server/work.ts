@@ -110,7 +110,7 @@ export function relatedKeys(ids: readonly string[], known: { work: (id: string) 
 }
 
 /** Keys that name one piece of work: sharing one means the same work. A sandbox or a machine is only a place. */
-const IDENTITY = /^(work|session|delegation|pr|branch|discord|ffbox|release|report):/;
+const IDENTITY = /^(work|session|delegation|pr|branch|discord|ffbox|release|report|nightly):/;
 
 // ---------------------------------------------------------------- overlaps
 

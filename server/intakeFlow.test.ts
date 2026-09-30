@@ -14,9 +14,10 @@ import { IntakeManager, type DiscordReader } from './intake.ts';
 import { beltFor } from './belts.ts';
 import { limitProblem } from './work.ts';
 import { UNTRUSTED_HEADER, parseBugThread, type DiscordMessage, type DiscordThread } from './intakeRules.ts';
+import type { NightlyReport, NightlyResult } from './nightlyRules.ts';
 import { run } from './proc.ts';
 import type { Config } from './config.ts';
-import type { ProviderConversation, Requester, SessionInfo, TranscriptEvent, UserInfo } from '../shared/types.ts';
+import type { ProviderConversation, Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 
 /**
@@ -451,4 +452,93 @@ test('a reviewer approves or declines from their own chat, only in a turn of the
   loth.lastFrom = 'human';
   intake.fileBug(parseBugThread({ id: flake(3), parent_id: BUGS, name: 'Add a new ship' }, undefined, { channel: '#beta-bugs' }));
   assert.match((await call(loth.info, 'update_work', { id: work().at(-1)!.id, approve: true })).text, /only Ben approve or decline intake requests/, 'not a reviewer');
+});
+
+// ---------------------------------------------------------------- the nightly e2e lab (docs/intake.md, "Nightly e2e regressions")
+
+const NSHA = (c: string) => c.repeat(40);
+const night = (date: string, sha: string, results: NightlyResult[]): NightlyReport => ({ v: 1, date, lab: 'lothdesktop', sha, results });
+const fail = (scenario: string, o: Partial<NightlyResult> = {}): NightlyResult => ({ scenario, class: 'new', step: '3 assert', reason: `${scenario}: census differs`, ...o });
+
+test('nightly: off by default; nothing is filed', (t) => {
+  const { intake, work } = setup(t);
+  assert.equal(intake.onNightly(night('2026-09-30', NSHA('a'), [fail('MP-slow-client-catchup')])), undefined);
+  assert.equal(work().length, 0);
+  assert.equal(intake.summary().nightly?.enabled, false);
+});
+
+test('nightly: a new regression is filed once, urgent when it shipped; later nights add a line to it, once each', async (t) => {
+  const { intake, work, heard, dispatcher, attention } = setup(t, { nightly: { enabled: true } });
+  const shipped = { shipped: 'yes' as const, version: '0.50.0.53' };
+  const first = intake.onNightly(night('2026-09-30', NSHA('a'), [fail('MP-slow-client-catchup', { release: shipped }), fail('S4-rejoin-dwell', { class: 'flaky', flakyNights: 2 })]))!;
+  assert.deepEqual(first.map((r) => [r.scenario, r.action]), [['S4-rejoin-dwell', 'skipped'], ['MP-slow-client-catchup', 'filed']], 'flaky 2 nights is under the 3 that file it');
+  const [w] = work();
+  assert.deepEqual([w.title, w.priority, w.status, w.approval?.state, w.approval?.why, w.triage?.class, w.source?.kind, w.requestedBy.userId], ['Nightly e2e: MP-slow-client-catchup fails on develop aaaaaaaaa (shipped in 0.50.0.53)', 'urgent', 'new', 'pending', 'auto-approve is off', 'regression', 'nightly', 'ben']);
+  assert.deepEqual(attention, [`pending ${w.id}`], 'the reviewers hear it needs approval');
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(heard(dispatcher().info.id, '[work request]').length, 0);
+
+  // The lab posts the same night again (a retry): nothing new.
+  const again = intake.onNightly(night('2026-09-30', NSHA('a'), [fail('MP-slow-client-catchup', { release: shipped })]))!;
+  assert.deepEqual(again.map((r) => [r.action, r.workId]), [['attached', w.id]]);
+  assert.equal(work().length, 1);
+  const lines = () => w.log.filter((l) => l.includes('failed again')).length;
+  assert.equal(lines(), 0);
+  // The next night it still fails: one line, once, even when posted twice.
+  intake.onNightly(night('2026-10-01', NSHA('b'), [fail('MP-slow-client-catchup', { class: 'still' })]));
+  intake.onNightly(night('2026-10-01', NSHA('b'), [fail('MP-slow-client-catchup', { class: 'still' })]));
+  assert.equal(lines(), 1);
+  assert.equal(work().length, 1);
+  assert.deepEqual(intake.summary().nightly?.last && [intake.summary().nightly!.last!.date, intake.summary().nightly!.last!.attached], ['2026-10-01', 1]);
+});
+
+test('nightly: a person\'s open request that names the scenario takes it (w84 triaging by hand), and becomes urgent once it shipped', (t) => {
+  const { intake, work, store } = setup(t, { nightly: { enabled: true } });
+  const now = new Date().toISOString();
+  const mine: WorkItem = { id: 'w84', title: 'Triage the 2026-09-30 nightly regressions', brief: 'Look at MP-slow-client-catchup and R4-join-during-autosave first.', priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active', createdAt: now, updatedAt: now, sessionIds: [], overlaps: [], asks: 0, log: [] };
+  store.putWork(mine);
+  const out = intake.onNightly(night('2026-09-30', NSHA('a'), [fail('MP-slow-client-catchup', { release: { shipped: 'yes', version: '0.50.0.53' } }), fail('R4-join-during-autosave', { class: 'still' }), fail('MP-slow-client')]))!;
+  assert.deepEqual(out.map((r) => [r.scenario, r.action, r.workId]).slice(0, 2), [['MP-slow-client-catchup', 'attached', 'w84'], ['R4-join-during-autosave', 'attached', 'w84']]);
+  assert.equal(out[2].action, 'filed', 'a scenario id that is only a prefix of a named one is not the same');
+  const w84 = store.work.get('w84')!;
+  assert.equal(w84.priority, 'urgent');
+  assert.ok(w84.keys.includes('nightly:mp-slow-client-catchup'));
+  assert.equal(w84.log.filter((l) => /nightly 2026-09-30: MP-slow-client-catchup failed again/.test(l)).length, 1);
+  assert.equal(work().length, 2);
+});
+
+test('nightly: declined stays declined while it keeps failing; a request closed as done does not swallow a new failure', (t) => {
+  const { intake, work, o } = setup(t, { nightly: { enabled: true } });
+  intake.onNightly(night('2026-09-30', NSHA('a'), [fail('S2-passive-fleet-fires'), fail('A1-station-ride-in-flight')]));
+  const [a, b] = work();
+  o.declineIntake(a.id, BEN, 'the lab, not the game');
+  const still = intake.onNightly(night('2026-10-01', NSHA('b'), [fail('S2-passive-fleet-fires', { class: 'still' })]))!;
+  assert.deepEqual([still[0].action, still[0].workId], ['skipped', a.id]);
+  assert.match(still[0].why!, /declined by Ben/);
+  // It passed, then broke again: news, filed afresh.
+  assert.equal(intake.onNightly(night('2026-10-03', NSHA('c'), [fail('S2-passive-fleet-fires')]))![0].action, 'filed');
+  // The other one was marked done, yet fails again: a new request, with the done one listed as an overlap.
+  Object.assign(b, { status: 'done' });
+  const again = intake.onNightly(night('2026-10-04', NSHA('d'), [fail('A1-station-ride-in-flight', { class: 'still' })]))!;
+  assert.equal(again[0].action, 'filed');
+  const nw = work().find((w) => w.id === again[0].workId)!;
+  assert.notEqual(nw.id, b.id);
+  assert.ok(nw.overlaps.some((x) => x.ref === b.id));
+});
+
+test('nightly: many at once become one batched request; flaky N nights running is filed; the daily cap and auto-approve apply', async (t) => {
+  const { intake, work, heard, dispatcher } = setup(t, { nightly: { enabled: true, batchOver: 2, dailyCap: 2, autoApprove: { enabled: true } } });
+  const out = intake.onNightly(night('2026-09-30', NSHA('a'), ['A1-x', 'A2-y', 'A3-z'].map((s) => fail(s))))!;
+  assert.deepEqual(new Set(out.map((r) => r.workId)).size, 1);
+  const [batch] = work();
+  assert.equal(batch.title, 'Nightly e2e 2026-09-30: 3 regressions on develop aaaaaaaaa');
+  assert.deepEqual([batch.approval?.state, batch.approval?.by, batch.priority], ['approved', 'auto', 'high']);
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request]').length === 1);
+  // A later night: one of them again goes to the batch.
+  assert.deepEqual(intake.onNightly(night('2026-10-01', NSHA('b'), [fail('A2-y', { class: 'still' })]))!.map((r) => [r.action, r.workId]), [['attached', batch.id]]);
+  // Flaky three nights running is filed like a regression; the next is past the daily cap of 2.
+  assert.equal(intake.onNightly(night('2026-10-01', NSHA('b'), [fail('S4-rejoin-dwell', { class: 'flaky', flakyNights: 3 })]))![0].action, 'filed');
+  assert.match(work().at(-1)!.title, /S4-rejoin-dwell flaky 3 nights running/);
+  const capped = intake.onNightly(night('2026-10-01', NSHA('b'), [fail('B1-frenzy-sp')]))!;
+  assert.deepEqual([capped[0].action, /daily cap/.test(capped[0].why ?? '')], ['skipped', true]);
 });
