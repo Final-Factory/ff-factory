@@ -82,7 +82,7 @@ fs.writeFileSync(path.join(dataDir, 'max.json'), JSON.stringify({ events: [], cu
 // The intake's first look is done: only threads and messages posted from now on are new.
 if (withIntake) {
   const start = snowflake(new Date(Date.now() - 1000).toISOString());
-  fs.writeFileSync(path.join(dataDir, 'intake.json'), JSON.stringify({ cursors: { [`bug:${CH.bugs}`]: start, [`req:${CH.devChat}`]: start }, recent: [], versions: {} }));
+  fs.writeFileSync(path.join(dataDir, 'intake.json'), JSON.stringify({ cursors: { [`bug:${CH.betaBugs}`]: start, [`bug:${CH.bugs}`]: start, [`req:${CH.devChat}`]: start }, recent: [], versions: {} }));
 }
 
 const configFile = path.join(base, 'config.json');
@@ -107,8 +107,7 @@ fs.writeFileSync(
       worker: { permissionMode: 'bypassPermissions', effort: 'low' },
       voice: { enabled: false, autoInstall: false, tts: false },
       max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },
-      // FFBox owns #bug-reports by default (docs/intake.md): this server takes it back, to test the Discord intake.
-      ...(withIntake ? { intake: { discord: { enabled: true, trusted: { [INTAKE_TRUSTED]: 'tester' }, pollMinutes: 120, bugChannels: ['bug_reports'], ffboxOwns: [] }, reviewers: ['tester'] } } : {}),
+      ...(withIntake ? { intake: { discord: { enabled: true, bugChannels: ['beta_bugs', 'bug_reports'], trusted: { [INTAKE_TRUSTED]: 'tester' }, pollMinutes: 120 }, reviewers: ['tester'] } } : {}),
       // The provider projects also take FFBox's ledger check and its fix branches (docs/intake.md; e2e/provider.spec.ts).
       ...(withProvider
         ? {

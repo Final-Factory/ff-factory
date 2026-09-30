@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **#bug-reports and dev_bug_reports belong to FFBox** ([docs/intake.md](docs/intake.md#ffbox-owns-bug-reports)). The
+  intake never files work from them (config.json naming them, or their ids, is ignored), its worker rules for a thread
+  there say not to post or close and to put `Discord: <thread url>` in the PR, and release follow-ups skip them. The
+  Intake tab says which channels FFBox owns. `intake.discord.bugChannels` now defaults to none.
+
 ### Added
 
 - **Provider protocol 2: the ledger check both ways with FFBox** (w55; [docs/ffbox-connector-contract.md](docs/ffbox-connector-contract.md#protocol-2-the-ledger-check-both-ways)).
@@ -21,11 +28,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   `mergedIn`; answers that change are pushed again (`update: true`). `conversation.threadId` gives each `ffbox/*` PR's
   review request its thread, and the request closes when FFBox reports the PR merged or closed. FFBox's own conversation
   never matches itself.
-
-### Changed
-
-- **FFBox owns #bug-reports and dev_bug_reports** (Lothsahn, 2026-09-29): `intake.discord.bugChannels` defaults to none,
-  and channels in `intake.discord.ffboxOwns` (default those two) are never read for bug reports ([docs/intake.md](docs/intake.md#who-owns-bug-reports)).
 
 - **Orchestrators remember** ([docs/orchestrators.md](docs/orchestrators.md#memory)). Every person's orchestrator
   and the dispatcher have a memory folder of their own (`data/orchestrator-memory/<person-id|dispatcher>`, config

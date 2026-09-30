@@ -19,6 +19,8 @@ import {
   parseMarkers,
   quoteUntrusted,
   releaseDraft,
+  isFfboxOwned,
+  discordPrLine,
   reporterProblem,
   sourceTag,
   versionIn,
@@ -45,8 +47,8 @@ test('settings: everything is off by default, numbers are small caps, a malforme
   assert.equal(s.ffbox.boardCheck, false);
   assert.equal(s.ffbox.sendWork, false);
   assert.equal(s.release.enabled, false);
-  assert.deepEqual(s.discord.bugChannels, [], 'FFBox owns #bug-reports: the intake files no bug threads by default');
-  assert.deepEqual(s.discord.ffboxOwns, ['bug_reports', 'dev_bug_reports']);
+  assert.deepEqual(s.discord.bugChannels, [], 'no bug channel by default: #bug-reports is FFBox\'s');
+  assert.deepEqual(s.discord.ffboxOwned, ['bug_reports', 'dev_bug_reports']);
   assert.deepEqual(s.discord.requestChannels, ['dev_chat']);
   assert.deepEqual(s.discord.trusted, {});
   assert.equal(s.discord.dailyCap, 10);
@@ -182,6 +184,7 @@ test('worker rules: a bug report brings the untrusted rules, the posting limits,
   assert.match(req, /RESOLVED/);
   const br = workerRules(item({ source: { kind: 'ffbox-branch', untrusted: true, branch: 'ffbox/fix-1', pr: 5 } }));
   assert.match(br, /Review FFBox's branch `ffbox\/fix-1` \(PR #5\)/);
+  assert.match(br, /Never post a "fixed" or "merged" notice .* FFBox sees the merge and tells the thread itself/);
   assert.match(br, /untrusted/);
   assert.equal(workerRules(item({})), '', 'a person’s request gets nothing');
 });
@@ -240,4 +243,30 @@ test('releases: the version out of ProjectSettings, and one follow-up listing ev
   assert.deepEqual(d.source.release, { version: '0.50.0.51', workIds: ['w3'] });
   assert.deepEqual(identityKeys(d.source), ['release:0.50.0.51']);
   assert.equal(sourceTag(item({ source: { kind: 'discord-bug', untrusted: true, channel: '#bug-reports' }, approval: { state: 'pending' } })), 'Discord #bug-reports, untrusted, awaiting approval');
+});
+
+test('FFBox owns #bug-reports and dev_bug_reports: never an intake source, however config.json names them', () => {
+  for (const c of ['bug_reports', '#bug-reports', 'bug-reports', 'dev_bug_reports', '#dev-bug-reports', 'Bug_Reports']) assert.equal(isFfboxOwned(c), true, c);
+  for (const c of ['beta_bugs', '#dev-chat', '', undefined]) assert.equal(isFfboxOwned(c), false, String(c));
+  const s = intakeSettings({ intake: { discord: { bugChannels: ['bug_reports', '#dev-bug-reports', 'beta_bugs'], requestChannels: ['dev_chat', 'dev_bug_reports'] } } });
+  assert.deepEqual(s.discord.bugChannels, ['beta_bugs']);
+  assert.deepEqual(s.discord.requestChannels, ['dev_chat']);
+});
+
+test('worker rules: a thread in a channel FFBox owns is not posted in or closed; the PR carries its Discord line', () => {
+  const url = 'https://discord.com/channels/530867164866150410/1554590085884682252';
+  const also = 'https://discord.com/channels/530867164866150410/1554602295864467509';
+  const r = workerRules(item({ id: 'w9', source: { kind: 'discord-bug', untrusted: true, channel: '#bug-reports', threadId: '1554590085884682252', url, alsoThreads: [{ threadId: '1554602295864467509', url: also }] } }));
+  assert.match(r, /FFBox owns #bug-reports/);
+  assert.ok(r.includes(`\`${discordPrLine(url)}\``) && r.includes(`\`${discordPrLine(also)}\``), r);
+  assert.equal(discordPrLine(url), `Discord: ${url}`, 'the line PRs #778, #781 and #784 carry');
+  for (const not of ['ffdiscord close', 'Post only in the thread', 'Reply in and close']) assert.ok(!r.includes(not), not);
+  assert.ok(r.includes('ffdiscord thread 1554590085884682252'), 'reading it is still the way in');
+  assert.ok(r.includes('FIX-LANDED: <commit sha>'));
+  // A release follow-up never goes to FFBox's threads; other channels' still get one.
+  const owned = item({ id: 'w3', source: { kind: 'discord-bug', untrusted: true, channel: '#bug-reports', threadId: '1', url: 'https://d/1' } });
+  const other = item({ id: 'w4', source: { kind: 'discord-bug', untrusted: true, channel: '#beta-bugs', threadId: '2', url: 'https://d/2' } });
+  const d = releaseDraft('0.50.0.52', [owned, other]);
+  assert.doesNotMatch(d.brief, /https:\/\/d\/1/);
+  assert.match(d.brief, /https:\/\/d\/2 \(w4/);
 });

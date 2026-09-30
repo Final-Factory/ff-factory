@@ -35,6 +35,7 @@ import {
   quoteUntrusted,
   cleanBlock,
   releaseDraft,
+  isFfboxOwned,
   reporterProblem,
   requestBrief,
   requestSource,
@@ -199,16 +200,6 @@ export class IntakeManager {
 
   // ---------------------------------------------------------------- Discord
 
-  private readonly ownedLogged = new Set<string>();
-
-  /** Whether FFBox owns this channel (by alias, or by the id either names). */
-  private ffboxOwns(alias: string): boolean {
-    const owned = this.settings.discord.ffboxOwns;
-    if (owned.includes(alias)) return true;
-    const id = this.d.discord?.channelIdOf(alias);
-    return !!id && owned.some((o) => o === id || this.d.discord?.channelIdOf(o) === id);
-  }
-
   private lastCheck = 0;
 
   /** The Intake tab's "Check Discord now": a poll now, at most every 30 s. */
@@ -232,17 +223,11 @@ export class IntakeManager {
     }
     this.polling = true;
     const errors: string[] = [];
+    // A bug channel configured by id is still FFBox's when that id is one of its channels.
+    const ffboxIds = new Set(s.ffboxOwned.map((a) => dc.channelIdOf(a)).filter(Boolean));
     try {
       for (const alias of s.bugChannels) {
-        // FFBox answers these threads and fixes their bugs (Lothsahn, 2026-09-29): filing them here too would build every
-        // fix twice. Named in ffboxOwns, a channel is left alone whatever bugChannels says.
-        if (this.ffboxOwns(alias)) {
-          if (!this.ownedLogged.has(alias)) {
-            this.ownedLogged.add(alias);
-            this.record({ source: 'discord-bug', action: 'ignored', title: `#${alias.replace(/_/g, '-')}`, why: 'FFBox owns this channel (config intake.discord.ffboxOwns): its bug reports are FFBox\'s to fix' });
-          }
-          continue;
-        }
+        if (ffboxIds.has(dc.channelIdOf(alias))) continue;
         try {
           await this.pollBugChannel(alias);
         } catch (e) {
@@ -250,6 +235,7 @@ export class IntakeManager {
         }
       }
       for (const alias of s.requestChannels) {
+        if (ffboxIds.has(dc.channelIdOf(alias))) continue;
         try {
           await this.pollRequestChannel(alias);
         } catch (e) {
@@ -591,7 +577,8 @@ export class IntakeManager {
           if (!version || !(await this.isAncestor(fix, b.sha))) continue;
           if (now - b.at < s.release.delayMinutes * 60_000) break;
           this.d.orchestrators.noteRelease(w.id, { releasedIn: version, releasedAt: new Date(b.at).toISOString() }, `shipped in ${version}`);
-          const threads = w.source?.threadId || w.source?.alsoThreads?.length;
+          // A thread in a channel FFBox owns hears from FFBox when the fix merges, not from a release follow-up.
+          const threads = !isFfboxOwned(w.source?.channel) && (w.source?.threadId || w.source?.alsoThreads?.length);
           if (threads && !w.delivery?.announcedBy) shipped.set(version, [...(shipped.get(version) ?? []), w]);
           break;
         }
@@ -631,8 +618,8 @@ export class IntakeManager {
       discord: {
         enabled: s.discord.enabled,
         bugChannels: s.discord.bugChannels,
-        ffboxOwns: s.discord.ffboxOwns,
         requestChannels: s.discord.requestChannels,
+        ffboxOwned: s.discord.ffboxOwned,
         trustedPeople: [...new Set(Object.values(s.discord.trusted))],
         dailyCap: s.discord.dailyCap,
         perReporterPerDay: s.discord.perReporterPerDay,

@@ -65,10 +65,6 @@
     "discord": {
       "enabled": false,
       "bugChannels": [],
-      "ffboxOwns": [
-        "bug_reports",
-        "dev_bug_reports"
-      ],
       "requestChannels": [
         "dev_chat"
       ],
