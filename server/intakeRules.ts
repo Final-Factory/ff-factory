@@ -394,6 +394,7 @@ export function ffboxReviewFrom(c: ProviderConversation, s: Pick<IntakeSettings[
   const diagnosis = c.source === 'intake';
   if (diagnosis ? !s.diagnoses : !s.branches) return undefined;
   const untrusted = c.opener === 'player' || c.source === 'discord' || diagnosis;
+  const thread = c.threadId && /^\d{15,25}$/.test(c.threadId) ? c.threadId : undefined;
   const title = clip(`Review and merge ${c.branch}${diagnosis && c.verdict ? ` (FFBox diagnosis ${c.verdict})` : ''}`, 120);
   const brief = [
     `FFBox finished ${diagnosis ? 'a diagnosis of a player report' : 'a conversation'} and pushed \`${c.branch}\`${c.pr ? ` (PR #${c.pr.number})` : ''}. Nobody has reviewed it.`,
@@ -411,6 +412,8 @@ export function ffboxReviewFrom(c: ProviderConversation, s: Pick<IntakeSettings[
       untrusted,
       channel: 'FFBox',
       conversation: c.id,
+      // The Discord thread it came from: its discord:<thread> key is what a board_check for that thread finds.
+      ...(thread ? { threadId: thread } : {}),
       branch: c.branch,
       ...(c.pr ? { pr: c.pr.number } : {}),
       ...(c.verdict ? { verdict: c.verdict } : {}),

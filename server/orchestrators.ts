@@ -33,6 +33,7 @@ import {
   type PoolEntry,
 } from './work.ts';
 import { autoApproveProblem, identityKeys, parseMarkers, sourceTag } from './intakeRules.ts';
+import { readDiscordConfig } from './discordConfig.ts';
 import { displayName } from '../shared/labels.ts';
 import type { Machine, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkItem, WorkOverlap, WorkPriority, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
@@ -95,7 +96,26 @@ export interface IntakeFiling {
 /** What FFBox gets back when it asks the ledger about a report before working it (the board_check message). */
 export interface BoardAnswer {
   verdict: 'clear' | 'in_flight' | 'done';
-  matches: { id: string; status: WorkItem['status']; title: string; score: number; why: string; updatedAt: string }[];
+  matches: BoardMatch[];
+}
+
+/**
+ * One ledger request that matched a board_check (docs/ffbox-connector-contract.md, "board"). `watch`, on a request in
+ * flight: the branch FFBox watches for the merge (the worker's PR head branch and PR, or its sandbox branch), the repo and
+ * the branch it lands on. On a finished one: `version`, the first release that carries the fix (null while merged but
+ * not released), `mergedIn` (`develop@<sha>`) and the branch the work was on.
+ */
+export interface BoardMatch {
+  id: string;
+  status: WorkItem['status'];
+  title: string;
+  score: number;
+  why: string;
+  updatedAt: string;
+  watch?: { repo: string; branch: string; pr?: number; target: string };
+  version?: string | null;
+  mergedIn?: string | null;
+  branch?: string;
 }
 
 /** What a filing asks for (the request_work tool's arguments). */
@@ -428,15 +448,36 @@ export class Orchestrators {
     return { name: m.id, label: displayName(m), branch: branchOf(m.git), pr: m.git?.pr?.number };
   }
 
+  private threadCache?: { at: number; ids: Set<string> };
+
+  /** The Discord channels the ffbox config names (#dev-chat, #bug-reports): channels, never a piece of work's thread. */
+  notThreads(): Set<string> {
+    const now = this.now().getTime();
+    if (!this.threadCache || now - this.threadCache.at > 60_000) {
+      let ids = new Set<string>();
+      try {
+        ids = new Set(Object.values(readDiscordConfig(this.d.cfg.max?.ffboxConfigDir).channels));
+      } catch {
+        // no ffbox config on this host: every id counts
+      }
+      this.threadCache = { at: now, ids };
+    }
+    return this.threadCache.ids;
+  }
+
   /** Everything a new request may repeat: requests open or closed in the last 48 hours, live and recent workers, pending delegations, recent commits. */
   private pool(exceptId?: string, closedWithinMs = 48 * 3_600_000): PoolEntry[] {
     const now = this.now().getTime();
     const branches = this.knownBranches();
     const out: PoolEntry[] = [];
+    const notThreads = this.notThreads();
     for (const w of this.store.work.values()) {
       if (w.id === exceptId || w.status === 'merged' || w.status === 'cancelled') continue;
       if (!isOpen(w) && now - Date.parse(w.updatedAt) > closedWithinMs) continue;
-      out.push({ ref: w.id, kind: 'work', title: w.title, keys: [...w.keys, `work:${w.id}`] });
+      // A Discord thread or report a request names is its key even when it was filed before those keys existed
+      // (w50, w53). Never from players' text: an untrusted brief does not get to claim a thread.
+      const named = w.source?.untrusted ? [] : textKeys(`${w.title}\n${w.brief}\n${(w.relatedIds ?? []).join(' ')}`, [], notThreads).filter((k) => /^(discord|report):/.test(k));
+      out.push({ ref: w.id, kind: 'work', title: w.title, keys: [...new Set([...w.keys, ...named, `work:${w.id}`])] });
     }
     for (const s of this.store.sessions.values()) {
       if (s.kind !== 'worker') continue;
@@ -491,7 +532,7 @@ export class Orchestrators {
     const { sandboxes, machines } = this.d.places();
     const related = (input.related_ids ?? []).map((x) => String(x).trim()).filter(Boolean).slice(0, 10);
     const keys = new Set([
-      ...textKeys(`${title}\n${brief}\n${input.constraints ?? ''}`, branches),
+      ...textKeys(`${title}\n${brief}\n${input.constraints ?? ''}`, branches, this.notThreads()),
       ...relatedKeys(related, {
         work: (id) => this.store.work.has(id.toLowerCase()),
         session: (id) => this.store.sessions.has(id),
@@ -748,15 +789,29 @@ export class Orchestrators {
   // ---------------------------------------------------------------- the intake (docs/intake.md)
 
   /** An open or recent intake item that shares an identity key (the same thread, conversation, release). */
-  private intakeRepeat(keys: readonly string[], lookbackMs: number): WorkItem | undefined {
+  private intakeRepeat(kind: WorkSourceKind, keys: readonly string[], lookbackMs: number): WorkItem | undefined {
     const now = this.now().getTime();
-    const ids = keys.filter((k) => /^(discord|ffbox|release):/.test(k));
+    // Within one family only: an FFBox review request carries its Discord thread's key too, and is not a repeat of the
+    // bug report filed from that thread (nor the other way round).
+    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : 'release');
+    const prefix = family(kind);
+    const ids = keys.filter((k) => k.startsWith(`${prefix}:`));
     if (!ids.length) return undefined;
     for (const w of this.store.work.values()) {
-      if (!w.source || (!isOpen(w) && now - Date.parse(w.updatedAt) > lookbackMs)) continue;
+      if (!w.source || family(w.source.kind) !== prefix || (!isOpen(w) && now - Date.parse(w.updatedAt) > lookbackMs)) continue;
       if (w.keys.some((k) => ids.includes(k))) return w;
     }
     return undefined;
+  }
+
+  /** An FFBox review request whose pull request merged or closed on FFBox's side needs nothing more. */
+  closeIntake(id: string, outcome: string) {
+    const w = this.requireWork(id);
+    if (!isOpen(w)) return;
+    w.status = 'done';
+    w.outcome = clip(outcome, 300);
+    this.stamp(w, outcome);
+    this.store.putWork(w);
   }
 
   /**
@@ -770,7 +825,7 @@ export class Orchestrators {
     const now = this.now();
     const lookbackMs = f.lookbackDays * 86_400_000;
     const idKeys = identityKeys(f.source);
-    const repeat = this.intakeRepeat(idKeys, lookbackMs);
+    const repeat = this.intakeRepeat(f.source.kind, idKeys, lookbackMs);
     if (repeat) {
       if (f.source.pr && repeat.source && repeat.source.pr !== f.source.pr) repeat.source.pr = f.source.pr;
       this.stamp(repeat, `seen again by the intake: ${clip(f.title, 120)}`);
@@ -976,15 +1031,59 @@ export class Orchestrators {
    * FFBox asks the ledger before it works a report (board_check): requests open, or finished within the lookback,
    * that its keys and title match, strongest first. Only ids, states, titles and scores cross; never a brief.
    */
-  boardCheck(q: { keys: readonly string[]; title?: string }, lookbackDays: number): BoardAnswer {
-    const pool = this.pool(undefined, lookbackDays * 86_400_000).filter((e) => e.kind === 'work');
-    const matches = findOverlaps({ keys: q.keys, title: q.title ?? '' }, pool).map((o) => {
-      const w = this.store.work.get(o.ref)!;
-      return { id: w.id, status: w.status, title: clip(w.title, 120), score: o.score, why: o.why, updatedAt: w.updatedAt };
-    });
+  boardCheck(q: { keys: readonly string[]; title?: string; conversation?: string }, lookbackDays: number): BoardAnswer {
+    // FFBox's own conversation (the review request filed from it) is not someone else's work on its thread.
+    const own = (w: WorkItem) => !!q.conversation && (w.source?.conversation === q.conversation || w.keys.includes(`ffbox:${q.conversation}`));
+    const pool = this.pool(undefined, lookbackDays * 86_400_000).filter((e) => e.kind === 'work' && !own(this.store.work.get(e.ref)!));
+    const seen = new Set<string>();
+    const matches: BoardMatch[] = [];
+    for (const o of findOverlaps({ keys: q.keys, title: q.title ?? '' }, pool)) {
+      // A request merged into another is that one.
+      let w = this.store.work.get(o.ref)!;
+      if (w.status === 'merged' && w.mergedInto && this.store.work.get(w.mergedInto)) w = this.store.work.get(w.mergedInto)!;
+      if (seen.has(w.id)) continue;
+      seen.add(w.id);
+      matches.push({ id: w.id, status: w.status, title: clip(w.title, 120), score: o.score, why: o.why, updatedAt: w.updatedAt, ...this.boardFacts(w) });
+    }
     const strong = matches.filter((m) => m.score >= STRONG);
     const verdict = strong.some((m) => isOpen({ status: m.status })) ? 'in_flight' : strong.some((m) => m.status === 'done') ? 'done' : 'clear';
     return { verdict, matches };
+  }
+
+  /** "Final-Factory/FinalFactory": config intake.ffbox.repo, else the game repo's GitHub URL. */
+  private repoSlug(): string | undefined {
+    const set = this.d.cfg.intake?.ffbox?.repo;
+    if (set && /^[\w.-]+\/[\w.-]+$/.test(set)) return set;
+    const m = /github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(this.d.cfg.repo.url ?? '');
+    return m ? `${m[1]}/${m[2]}` : undefined;
+  }
+
+  /** What FFBox needs to follow a match (BoardMatch): the branch to watch while it is open, the release once it is done. */
+  private boardFacts(w: WorkItem): Pick<BoardMatch, 'watch' | 'version' | 'mergedIn' | 'branch'> {
+    const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'develop';
+    const trunk = (b?: string) => !b || ['develop', 'main', 'master', 'detached HEAD', target].includes(b);
+    // The branch the work is on: FFBox's own (a request it took), else the newest worker's, with its open PR.
+    let branch: string | undefined;
+    let pr: number | undefined;
+    if (w.ffbox?.branch) [branch, pr] = [w.ffbox.branch, w.ffbox.pr];
+    for (const sid of [...w.sessionIds].reverse()) {
+      if (branch) break;
+      const s = this.store.sessions.get(sid);
+      const place = s ? this.placeOf(s) : undefined;
+      if (place && !trunk(place.branch)) [branch, pr] = [place.branch, place.pr];
+    }
+    if (!branch && w.source?.branch) [branch, pr] = [w.source.branch, w.source.pr];
+    if (isOpen(w)) {
+      const repo = this.repoSlug();
+      return branch && repo ? { watch: { repo, branch, ...(pr ? { pr } : {}), target } } : {};
+    }
+    if (w.status !== 'done') return {};
+    const d = w.delivery;
+    return {
+      version: d?.releasedIn ?? null,
+      mergedIn: d?.fixCommit ? `${target}@${d.fixCommit}` : null,
+      ...(branch ? { branch } : {}),
+    };
   }
 
   /** A request was handed to FFBox (send_to_ffbox): recorded on it, and it is active. */

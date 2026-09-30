@@ -64,9 +64,7 @@
   "intake": {
     "discord": {
       "enabled": false,
-      "bugChannels": [
-        "bug_reports"
-      ],
+      "bugChannels": [],
       "requestChannels": [
         "dev_chat"
       ],

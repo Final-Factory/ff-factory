@@ -16,7 +16,7 @@ import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import { emit } from './store.ts';
 import type { Identity } from './identity.ts';
-import type { Orchestrators } from './orchestrators.ts';
+import type { BoardAnswer, Orchestrators } from './orchestrators.ts';
 import type { BoardCheckMessage, ProviderRequestMessage, ResultMessage, WorkReply } from './providerProtocol.ts';
 import { run } from './proc.ts';
 import {
@@ -52,6 +52,13 @@ const FFBOX_KINDS: readonly WorkSourceKind[] = ['ffbox-branch', 'ffbox-diagnosis
 const KEEP_RECENT = 200;
 const RELEASE_EVERY_MS = 10 * 60_000;
 const RELEASE_LOOKBACK_MS = 30 * 86_400_000;
+/** What FFBox acts on in a board answer: an update goes only when this changes, not for a new updatedAt or title. */
+const boardDigest = (a: BoardAnswer) => JSON.stringify([a.verdict, a.matches.map((m) => [m.id, m.status, m.watch ?? null, m.version, m.mergedIn, m.branch])]);
+
+/** Board answers FFBox follows: re-checked this often, for at most this long, at most this many. */
+const BOARD_RECHECK_MS = 60_000;
+const BOARD_FOLLOW_MS = 30 * 86_400_000;
+const BOARD_MAX = 500;
 const VERSION_FILE = 'ProjectSettings/ProjectSettings.asset';
 
 /** What server/max.ts gives the intake: reads only, the token stays there. */
@@ -73,6 +80,8 @@ export interface IntakeDeps {
   identity: Identity;
   orchestrators: Orchestrators;
   discord?: DiscordReader;
+  /** Send FFBox a board answer again when it changed (server/providers.ts pushBoard); false when it could not go. */
+  pushBoard?: (ref: string, answer: BoardAnswer) => boolean;
   /** git in the base clone; the default runs it there. */
   git?: (args: string[]) => Promise<{ code: number; stdout: string }>;
   now?: () => number;
@@ -128,6 +137,8 @@ export class IntakeManager {
     };
     if (s.discord.enabled) every(s.discord.pollMinutes * 60_000, () => void this.pollDiscord(), 20_000);
     if (s.release.enabled) every(RELEASE_EVERY_MS, () => void this.checkReleases(), 60_000);
+    // Board answers FFBox still follows are re-checked every minute; a change goes to it at once (docs/intake.md).
+    every(BOARD_RECHECK_MS, () => this.recheckBoards(), BOARD_RECHECK_MS);
     return this;
   }
 
@@ -356,6 +367,13 @@ export class IntakeManager {
     this.d.orchestrators.ffboxConversation(c);
     const s = this.settings.ffbox;
     if (!s.enabled) return;
+    // Its pull request merged or closed on FFBox's side: the review request for it needs nothing more.
+    if (c.pr && c.pr.state !== 'open') {
+      for (const w of this.d.store.work.values()) {
+        if (w.source?.conversation !== c.id || !w.source.kind.startsWith('ffbox') || !['new', 'question', 'queued', 'active'].includes(w.status)) continue;
+        this.d.orchestrators.closeIntake(w.id, `FFBox's PR #${c.pr.number} ${c.pr.state === 'merged' ? 'merged' : 'was closed'}`);
+      }
+    }
     const draft = ffboxReviewFrom(c, s);
     if (!draft) return;
     const now = this.now();
@@ -419,7 +437,7 @@ export class IntakeManager {
   }
 
   /** FFBox asks the ledger before it works a report; undefined while the check is off. */
-  onBoardCheck(m: BoardCheckMessage) {
+  onBoardCheck(m: BoardCheckMessage): BoardAnswer | undefined {
     const s = this.settings;
     if (!s.ffbox.enabled || !s.ffbox.boardCheck) return undefined;
     // FFBox's board keys in the ledger's spelling: "pr#412" is PR 412, "spec-098" spec 098, "issue#7" a #7 reference.
@@ -429,10 +447,64 @@ export class IntakeManager {
       if ((x = /^pr#(\d+)$/.exec(l))) return [`pr:${Number(x[1])}`];
       if ((x = /^spec-(\d{2,4})$/.exec(l))) return [`spec:${x[1].padStart(3, '0')}`];
       if ((x = /^issue#(\d+)$/.exec(l))) return [`ref:${Number(x[1])}`];
-      if (/^(branch|ffbox|discord|pr|spec|ref):/.test(l)) return [l];
+      // Exact keys, as FFBox sends them for its bug_report and suggestion turns and its intake diagnoses.
+      if ((x = /^discord:(\d{15,25})$/.exec(l))) return [`discord:${x[1]}`];
+      if ((x = /^report:(\d{8}t\d{6}z-(?:crash|desync)-[0-9a-f]{6,32})$/.exec(l))) return [`report:${x[1].replace(/t/, 'T').replace(/z-/, 'Z-')}`];
+      if (/^(branch|ffbox|pr|spec|ref):/.test(l)) return [l];
       return [l, `ffbox:${l}`];
     });
-    return this.d.orchestrators.boardCheck({ keys, title: m.title ? cleanLine(m.title, 300) : undefined }, s.lookbackDays);
+    const q = { keys, title: m.title ? cleanLine(m.title, 300) : undefined, conversation: m.conversation };
+    const answer = this.d.orchestrators.boardCheck(q, s.lookbackDays);
+    this.watchBoard(m.ref, q, answer);
+    return answer;
+  }
+
+  // ---------------------------------------------------------------- board answers FFBox follows
+
+  /** Per board_check ref: what was asked and the last answer sent. In memory: FFBox asks again after a reconnect. */
+  private readonly boards = new Map<string, { q: { keys: string[]; title?: string; conversation?: string }; last: string; at: number }>();
+
+  /**
+   * Remember a board answer FFBox will follow: one in flight (until it is done), or done but not yet released (until the
+   * version is known). A clear answer, or a released fix, needs no follow-up.
+   */
+  private watchBoard(ref: string, q: { keys: string[]; title?: string; conversation?: string }, answer: BoardAnswer) {
+    const follow = answer.verdict === 'in_flight' || (answer.verdict === 'done' && answer.matches.some((m) => m.status === 'done' && !m.version));
+    if (!follow) {
+      this.boards.delete(ref);
+      return;
+    }
+    this.boards.set(ref, { q, last: boardDigest(answer), at: this.now() });
+    // Oldest first out, past the cap.
+    while (this.boards.size > BOARD_MAX) this.boards.delete(this.boards.keys().next().value!);
+  }
+
+  /** Recompute every followed answer; push the ones that changed (a PR opened, a merge, a release). Returns how many went. */
+  recheckBoards(): number {
+    const s = this.settings;
+    if (!s.ffbox.enabled || !s.ffbox.boardCheck || !this.d.pushBoard) return 0;
+    let sent = 0;
+    for (const [ref, b] of [...this.boards]) {
+      if (this.now() - b.at > BOARD_FOLLOW_MS) {
+        this.boards.delete(ref);
+        continue;
+      }
+      const answer = this.d.orchestrators.boardCheck(b.q, s.lookbackDays);
+      if (boardDigest(answer) === b.last) continue;
+      if (!this.d.pushBoard(ref, answer)) continue;
+      sent++;
+      this.watchBoard(ref, b.q, answer);
+      const kept = this.boards.get(ref);
+      if (kept) kept.at = b.at;
+    }
+    return sent;
+  }
+
+  /** The connector→portal messages this portal takes now beyond the reports (a protocol 2 welcome's accepts). */
+  portalAccepts(): string[] {
+    const f = this.settings.ffbox;
+    if (!f.enabled) return [];
+    return [...(f.boardCheck ? ['board_check'] : []), ...(f.requests ? ['request'] : []), 'accepted', 'refused', 'result'];
   }
 
   /** FFBox accepted or refused a submit. */

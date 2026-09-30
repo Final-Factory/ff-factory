@@ -2,7 +2,8 @@
 
 Status: built 2026-09-29, **every switch off**. Nothing changes on a running portal until Ben edits config.json
 (checklist at the end). The Discord intake works on its own; FFBox is a later, optional part behind its own
-settings.
+settings. 2026-09-29 (w55): **FFBox owns #bug-reports and dev_bug_reports** (Lothsahn), so the intake files no bug
+threads by default, and the ledger check both ways (provider protocol 2) is built on both sides, off.
 
 **TL;DR**
 
@@ -59,6 +60,20 @@ been fixed' comments, and the FFBox harness is designed to see merged PRs and re
   #781 and #784 do. FFBox's merge notice (`ffwatch.py` `take_merge` → `conversations_for_pull_request`) finds a
   conversation today only by the PR it published or by a branch it pushed or adopted, so a worker's PR still needs
   FFBox to read that line (proposed to Lothsahn with w56; nothing changed on FFBox's side here).
+- **The ledger check links the thread to the work** (w55, protocol 2, below). When FFBox's check for a thread finds
+  a ledger request in flight, FFBox starts no turn and sets the request's branch and PR (`watch`) on its conversation,
+  so its merge watcher announces that PR's merge on the thread; a request already done gets FFBox's merged notice with
+  the release version. A worker that lands on develop without a PR is covered by the answer FF Factory pushes when the
+  request turns done.
+
+**This differs from Ben's w39 framing** (the intake as the one route for #bug-reports, with FF Factory's human-approval
+triage in front of every player report). Open for Ben and Lothsahn to settle:
+
+1. Who triages #bug-reports: FFBox's gate plus its fenced container (a stranger's report can reach an open PR with no
+   human step before the merge), or FF Factory's "needs a human" triage. Giving the channel back to FF Factory is a code
+   change (`FFBOX_OWNED_CHANNELS`), and FFBox would then have to stop answering there.
+2. #dev-chat: FFBox watches it too (engage all, operators get `ffdev` turns), and FF Factory's intake files trusted
+   people's requests to Max from it. Both can act on one message from Ben or Lothsahn today.
 
 ## Triage: an obvious bug, or it needs a human
 
@@ -159,14 +174,24 @@ one `work_id`, then `decide_work link` the others).
 ## FFBox, both ways (later, optional)
 
 FFBox is not wired into this portal yet (`providers.ffbox.enabled` is false). Everything below is built on FF
-Factory's side, off, and needs the connector changes Lothsahn makes (checklist below). The Discord intake needs none of
-it.
+Factory's side, off. The connector's half of the ledger check (protocol 2) is built in the ffbox repo, off behind
+FFBox's `fff.board_check` switch; submitting work (phase 3) is not built there yet. The Discord intake needs none of it.
 
 - **FFBox → ledger.** An idle or closed conversation with an `ffbox/*` branch and no merged or closed PR becomes a
   "review and merge" request (`ffboxReviewFrom`; the w34/w35 pattern). The connector may also file a `request`
   (review, escalation, an operator's dev work) and gets `filed` back with the ledger id.
-- **FFBox checks the ledger first.** `board_check {keys, title}` gets `board {verdict: clear | in_flight | done,
-  matches}`: request ids, states, titles and scores, never a brief. Off until `intake.ffbox.boardCheck`.
+- **FFBox checks the ledger first** (protocol 2, docs/ffbox-connector-contract.md). Before a `bug_report` or
+  `suggestion` turn, or an intake diagnosis, FFBox's host sends `board_check {ref, keys: ["discord:<thread id>"] or
+  ["report:<report id>"], conversation}` and gets `board {verdict: clear | in_flight | done, matches}`: request ids and
+  states, never a brief. Every ledger request that names a Discord thread (a link or a bare id, in its title, brief or
+  related ids) has the key `discord:<thread id>`, older requests included (w50, w53). A match in flight carries
+  `watch` (the worker's PR head branch and PR, or its sandbox branch, the repo and `develop`); a done one `version`
+  (the release that carries it, or null while merged but not released) and `mergedIn` (`develop@<sha>`). FF Factory
+  re-checks those answers each minute and pushes the ones that change. FFBox's own conversation never matches itself.
+  FFBox fails open, starts no turn on `in_flight` (it watches the branch and reports the merge on the thread) and
+  answers `done` with its merged notice. Off until `intake.ffbox.boardCheck` here and `fff.board_check.enabled` there.
+- **Each new `ffbox/*` PR is filed as a review request** with its Discord thread's key (`conversation.threadId`), and
+  closes when FFBox reports the PR merged or closed.
 - **Ledger → FFBox.** The dispatcher's `send_to_ffbox {work_id, class}` sends a phase 3 `submit` (fenced by default,
   always fenced for untrusted text, the intake rules added) when `providers.ffbox.sendWork` is on and the connector's
   hello lists `submit`. `accepted`, `refused` and `result` update the request (`WorkItem.ffbox`); a pushed branch
@@ -216,7 +241,7 @@ defaults and clamps the numbers.
     "perReporterPerDay": 2,
     "autoApprove": { "enabled": false, "maxPerDay": 3, "bugs": true, "requests": true }
   },
-  "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 } },
+  "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "repo": "Final-Factory/FinalFactory", "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 } },
   "release": { "enabled": false, "delayMinutes": 60 },
   "reviewers": ["ben", "lothsahn"],
   "lookbackDays": 14
@@ -242,21 +267,33 @@ snowflakes; an entry that is not one trusts nobody.
    and your own Discord requests are ever auto-approved.
 6. Turn on `intake.release.enabled` once a fix has landed through the intake, and check the first follow-up.
 7. FFBox stays off until Lothsahn's side is ready (below): then `providers.ffbox.enabled` (docs/ffbox-integration.md),
-   `intake.ffbox.enabled`, later `boardCheck`, and last `providers.ffbox.sendWork`.
+   `intake.ffbox.enabled` with `boardCheck: true`, and last `providers.ffbox.sendWork`. Leave `intake.discord.bugChannels`
+   empty: FFBox owns #bug-reports (above).
 8. Standing agents that read Discord and file delegations for bug reports now duplicate the intake: pause them once
    the intake runs.
 
 ## Rollout checklist: Lothsahn (FFBox's side)
 
-FF Factory's side speaks protocol 1 with these additions; nothing is sent to FFBox until its hello asks for it.
+FF Factory's side speaks protocols 1 and 2; nothing is sent to FFBox until its hello asks for it. Items 1 and 2 are
+built in the ffbox repo (the "provider protocol 2" PR), off; the box steps are:
+
+- Merge the ffbox PR (it changes nothing while `fff.board_check.enabled` is false).
+- The connector token: Ben mints it on BEAST (`node server/providerToken.ts`, which sets `providers.ffbox.tokenSha256`)
+  and hands it over; on FFBox, `sudo python3 /opt/ffbox/scripts/fffconnector.py set-token` reads it from stdin. The unit
+  starts once the token file exists.
+- Only after the w54 security prerequisites (the model proxy and its budget, reply scanning) are merged and live: set
+  `fff.board_check.enabled: true` in `~/.config/ffbox/config.json` (live within a tick, no restart). Ben sets
+  `providers.ffbox.enabled` and `intake.ffbox: { enabled: true, boardCheck: true }` on his side.
 
 1. **Report conversations with their branch and PR.** The existing `conversation` message: set `branch` to the
    `ffbox/*` branch and `pr` with its state, and `opener` truthfully (`player` for anything a player started). An idle
    or closed conversation with an unreviewed branch becomes a review request; a merged or closed PR does not.
-2. **Check the ledger before working a report or an operator's dev turn.** Send `board_check {ref, keys, title}`
-   (keys: `branch:ffbox/…`, `pr#N`, `issue#N`, `spec-NNN`, a desync signature); on `board` with `verdict: in_flight`
-   or `done`, skip the work and point at the ledger id (or ask the operator). `error not_enabled` means the check is
-   off: carry on as today. Never feed the answer's titles to a container that runs player text.
+2. **Check the ledger before working a report or an operator's dev turn.** Send `board_check {ref, keys:
+   ["discord:<thread id>"], conversation}` (exact keys; `report:<id>` for a diagnosis). On `in_flight`, start no turn and
+   watch `watch.branch`/`pr` for the merge; on `done`, post the merged notice with `version`. `error not_enabled`, no
+   answer within seconds, or `board_check` missing from the welcome's `accepts` means carry on as today (fail open).
+   Never feed anything from the answer to a container. Send `conversation.threadId` so each `ffbox/*` PR's review
+   request carries its thread.
 3. **File requests instead of pushing unreviewed branches.** For a fix branch, an `ESCALATE` diagnosis or an operator's
    request for GPU-side work, send `request {ref, kind: review-branch | escalate | dev, title, brief, opener,
    requestedBy?, conversation?, branch?, pr?, verdict?, key?, url?}`. The answer is `filed {ref, workId, status,
@@ -265,8 +302,8 @@ FF Factory's side speaks protocol 1 with these additions; nothing is sent to FFB
 4. **Take work when ready (phase 3).** List `submit` (and `stop`) in `hello.accepts`, honour `requestedBy` for billing
    and `untrustedInput` (fenced only), and answer `accepted` / `refused` as the contract says. When the turn ends,
    send `result {ref, conversation, state: done | failed, branch?, pr?, verdict?, noBranchReason?, summary?, url?}`.
-5. Stop FFBox's own Discord intake from fixing player reports that FF Factory's intake already files (or make it call
-   `board_check` first), so the two never build the same fix again (the alt-tab fix and w23/#764).
+5. FFBox owns #bug-reports and dev_bug_reports (Lothsahn, 2026-09-29), and FF Factory's intake leaves them alone by
+   default; the ledger check covers the threads FF Factory's people work on anyway.
 
 ## Not in this version
 

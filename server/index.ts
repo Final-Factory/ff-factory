@@ -352,11 +352,12 @@ agents.providers = providers;
 agents.max = max;
 // The intake (docs/intake.md): Discord and FFBox into the work ledger. Everything in it is off unless config intake
 // switches it on; the hooks below only record what already arrives while it is off.
-const intake = new IntakeManager({ cfg, store, identity, orchestrators: agents.orchestrators, discord: max }).start();
+const intake = new IntakeManager({ cfg, store, identity, orchestrators: agents.orchestrators, discord: max, pushBoard: (ref, answer) => providers.pushBoard(ref, answer) }).start();
 max.onEvent = (ev) => intake.onMaxEvent(ev);
 providers.onConversation = (c) => intake.onConversation(c);
 providers.onRequest = (m) => intake.onRequest(m);
 providers.onBoardCheck = (m) => intake.onBoardCheck(m);
+providers.portalAccepts = () => intake.portalAccepts();
 providers.onWorkReply = (m) => intake.onWorkReply(m);
 providers.onResult = (m) => intake.onResult(m);
 agents.orchestrators.onIntakeAttention = (w, what) => notifier.intake(w, what, (what === 'design' && w.flag ? w.flag.for : agents.orchestrators.reviewers()).map((r) => r.userId));

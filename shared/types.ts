@@ -455,6 +455,8 @@ export interface ProviderConversation {
   costUsd?: number;
   key?: string;
   url?: string;
+  /** Protocol 2: the Discord thread (or reply-chain root message) the conversation lives in. */
+  threadId?: string;
   createdAt: string;
   updatedAt: string;
 }

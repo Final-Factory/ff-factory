@@ -19,6 +19,7 @@ import {
   FromConnectorSchema,
   LIMITS,
   PROVIDER_PROTOCOL,
+  SUPPORTED_PROTOCOLS,
   PROVIDER_TOKEN,
   acceptsWork,
   describeIssues,
@@ -58,6 +59,8 @@ interface Link {
   lastPong: number;
   since: number;
   hello: boolean;
+  /** The protocol the hello named (1 or 2), which the session speaks. */
+  protocol: number;
   /** Token bucket for messages. */
   tokens: number;
   refilled: number;
@@ -256,7 +259,7 @@ export class ProviderManager {
     const old = this.link;
     if (old) old.ws.close(CLOSE.replaced, 'replaced by a newer connection');
     const now = this.now();
-    const link: Link = { ws, lastPong: now, since: now, hello: false, tokens: this.rate.burst, refilled: now, invalid: [] };
+    const link: Link = { ws, lastPong: now, since: now, hello: false, protocol: 1, tokens: this.rate.burst, refilled: now, invalid: [] };
     this.link = link;
     link.helloTimer = setTimeout(() => {
       if (!link.hello) ws.close(CLOSE.noHello, `no hello within ${this.helloTimeoutMs / 1000} s`);
@@ -347,10 +350,13 @@ export class ProviderManager {
         link.ws.close(CLOSE.badMessage, parsed.success ? 'the first message must be hello' : `bad hello: ${describeIssues(parsed.error)}`.slice(0, 120));
         return;
       }
-      if (parsed.data.protocol !== PROVIDER_PROTOCOL) {
-        link.ws.close(CLOSE.protocol, `protocol ${parsed.data.protocol} is not supported; this portal speaks ${PROVIDER_PROTOCOL}`);
+      // Mixed versions during a rollout: any version this portal speaks is answered in that version; a newer connector
+      // closed with 4426 falls back to an older one (docs/ffbox-connector-contract.md, "Protocol 2").
+      if (!SUPPORTED_PROTOCOLS.includes(parsed.data.protocol)) {
+        link.ws.close(CLOSE.protocol, `protocol ${parsed.data.protocol} is not supported; this portal speaks ${SUPPORTED_PROTOCOLS.join(' and ')}`);
         return;
       }
+      link.protocol = parsed.data.protocol;
       clearTimeout(link.helloTimer);
       link.hello = true;
       this.data.connector = { version: parsed.data.connector.version, commit: parsed.data.connector.commit, protocol: parsed.data.protocol };
@@ -358,7 +364,14 @@ export class ProviderManager {
       this.data.accepts = parsed.data.accepts;
       this.data.lastSeen = new Date(now).toISOString();
       this.statusDetail = undefined;
-      this.send(link, { type: 'welcome', protocol: PROVIDER_PROTOCOL, provider: 'ffbox', cursors: { ...this.data.cursors }, limits: LIMITS });
+      this.send(link, {
+        type: 'welcome',
+        protocol: link.protocol,
+        provider: 'ffbox',
+        cursors: { ...this.data.cursors },
+        limits: LIMITS,
+        ...(link.protocol >= 2 ? { accepts: this.portalAccepts?.() ?? [] } : {}),
+      });
       console.log(`provider ${this.id}: connector ${parsed.data.connector.version} connected`);
       this.changed();
       return;
@@ -440,10 +453,23 @@ export class ProviderManager {
   onRequest?: (m: ProviderRequestMessage) => { workId?: string; status: string; repeat?: boolean; why?: string } | undefined;
   /** FFBox asks the ledger; undefined while intake.ffbox.boardCheck is off. */
   onBoardCheck?: (m: BoardCheckMessage) => Omit<Extract<ToConnector, { type: 'board' }>, 'type' | 'ref'> | undefined;
+  /** The connector→portal messages the portal takes now (a protocol 2 welcome's accepts; server/intake.ts portalAccepts). */
+  portalAccepts?: () => string[];
   /** FFBox accepted or refused a submit. */
   onWorkReply?: (m: WorkReply) => void;
   /** A submitted turn finished. */
   onResult?: (m: ResultMessage) => void;
+
+  /**
+   * A board answer again, changed since FFBox asked (a PR opened, the fix merged or released): `update: true`, the same
+   * ref. Only to a protocol 2 connector that takes board. False when it could not go (FFBox asks again on reconnect).
+   */
+  pushBoard(ref: string, answer: Omit<Extract<ToConnector, { type: 'board' }>, 'type' | 'ref' | 'update'>): boolean {
+    const link = this.link;
+    if (!link?.hello || link.protocol < 2 || !this.data.accepts?.includes('board')) return false;
+    this.send(link, { type: 'board', ref, ...answer, update: true });
+    return true;
+  }
 
   /** Why a submit cannot go to FFBox now, or undefined. */
   submitProblem(): string | undefined {

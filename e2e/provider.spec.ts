@@ -1,6 +1,8 @@
 // FFBox's card and page (docs/ffbox-integration.md, phase 1). Runs only on the provider projects
 // (playwright.config.ts), whose servers have providers.ffbox switched on with E2E_PROVIDER_TOKEN.
-import { expect, expectNoHorizontalOverflow, openSidebar, test } from './fixtures.ts';
+import type { APIRequestContext } from '@playwright/test';
+import { appState, expect, expectNoHorizontalOverflow, go, openSidebar, sendMessage, test, uniq } from './fixtures.ts';
+import type { TranscriptEvent } from '../shared/types.ts';
 import { E2E_PROVIDER_TOKEN, MockConnector, SAMPLE_CONVERSATIONS } from './mockConnector.ts';
 
 test('FFBox: the card follows the connector, and its page lists capacity, conversations and intake reports', async ({ authed: page, request }) => {
@@ -20,7 +22,7 @@ test('FFBox: the card follows the connector, and its page lists capacity, conver
   const c = new MockConnector(base, E2E_PROVIDER_TOKEN);
   try {
     const welcome = await c.hello({ version: 'e2e-1', web: 'https://ffbox.example:8787' });
-    expect(welcome.protocol).toBe(1);
+    expect(welcome.protocol).toBe(2);
     c.sendSamples();
     // A player's title with markup in it: shown as text, never as HTML.
     c.conversation({ ...SAMPLE_CONVERSATIONS[1], id: '850', title: 'Crash <img src=x onerror="document.title=1"> on load', updatedAt: '2026-09-27T09:10:00Z' });
@@ -102,6 +104,58 @@ test('FFBox: the card follows the connector, and its page lists capacity, conver
   await expect(page.getByTestId('provider-intake').locator('.run-row')).toHaveCount(3);
   sidebar = await openSidebar(page);
   await expect(sidebar.locator('.row.place', { hasText: 'FFBox' })).toContainText('Connector offline');
+});
+
+/** Ask an orchestrator's fake model to call one of its tools (e2e/fakeAgent.ts "#tool"); what the tool answered. */
+async function useTool(request: APIRequestContext, chatId: string, tool: string, args: Record<string, unknown>): Promise<string> {
+  const events = async () => (await (await request.get(`/api/sessions/${chatId}/events?limit=500`)).json()) as TranscriptEvent[];
+  const before = (await events()).at(-1)?.seq ?? 0;
+  await sendMessage(request, chatId, `#tool ${tool} ${JSON.stringify(args)}`);
+  let answer = '';
+  await expect
+    .poll(async () => {
+      const r = (await events()).find((e) => e.seq > before && e.kind === 'assistant' && e.text.startsWith(`Called ${tool}:`));
+      answer = r && r.kind === 'assistant' ? r.text : '';
+      return answer;
+    }, { timeout: 15_000 })
+    .not.toBe('');
+  return answer.slice(`Called ${tool}: `.length);
+}
+
+test('FFBox protocol 2: the handshake, a board_check by thread key, and an ffbox/* PR filed as a review request', async ({ authed: page }) => {
+  const base = test.info().project.use.baseURL!;
+  const tag = uniq('ledger');
+  // A Discord thread id unique to this run, so a reused server's ledger cannot answer for it.
+  const thread = String(1554582984567562253n + BigInt(Date.now() % 1_000_000) * 1000n + BigInt(Math.floor(Math.random() * 1000)));
+  const me = await appState(page.request);
+  const filed = await useTool(page.request, me.orchestratorId, 'request_work', { title: `Lag when leading a fleet ${tag}`, brief: `Players report it in https://discord.com/channels/530867164866150410/${thread}` });
+  expect(filed).toMatch(/^Filed w\d+ with the dispatcher\./);
+  const id = /^Filed (w\d+)/.exec(filed)![1];
+
+  const c = new MockConnector(base, E2E_PROVIDER_TOKEN);
+  try {
+    const welcome = (await c.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as { protocol: number; accepts: string[] };
+    expect(welcome.protocol).toBe(2);
+    expect(welcome.accepts).toContain('board_check');
+
+    c.send({ type: 'board_check', ref: `conv-${tag}`, keys: [`discord:${thread}`], conversation: `c${tag}` });
+    const board = (await c.next('board')) as { ref: string; verdict: string; matches: { id: string; status: string }[] };
+    expect(board.ref).toBe(`conv-${tag}`);
+    expect(board.verdict).toBe('in_flight');
+    expect(board.matches[0].id).toBe(id);
+
+    // FFBox's own fix for the same thread: its ffbox/* PR becomes a review request the Intake tab lists.
+    c.conversation({ id: `c${tag}`, source: 'discord', opener: 'player', title: 'Lag when leading', state: 'idle', agentClass: 'ffagent', branch: `ffbox/lag-fix-${tag}`, pr: { number: 900, state: 'open' }, threadId: thread, createdAt: '2026-09-29T10:00:00Z', updatedAt: new Date().toISOString() } as never);
+    await go(page, '#/dispatcher/intake');
+    const tab = page.getByTestId('intake-tab');
+    await expect(tab).toContainText(`Review and merge ffbox/lag-fix-${tag}`);
+    await expect(page.getByTestId('intake-settings')).toContainText('FFBox on');
+    const review = (await appState(page.request)).work?.find((w) => w.title === `Review and merge ffbox/lag-fix-${tag}`);
+    expect(review?.source?.threadId).toBe(thread);
+    expect(review?.keys).toContain(`discord:${thread}`);
+  } finally {
+    c.close();
+  }
 });
 
 test('FFBox: a wrong token is refused and changes nothing', async ({ authed: page }) => {

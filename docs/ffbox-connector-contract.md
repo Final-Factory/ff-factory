@@ -1,4 +1,4 @@
-# FFBox connector contract (provider protocol 1)
+# FFBox connector contract (provider protocol 2)
 
 What FFBox's connector must do to talk to FF Factory. Written for Lothsahn, who builds the connector in
 the ffbox repo. The design and the reasons behind it are in [ffbox-integration.md](ffbox-integration.md).
@@ -8,6 +8,12 @@ source of truth when this page and the code disagree. A working reference client
 
 Protocol 1 is **read-only**. The connector reports capacity, conversations and intake reports, and
 FF Factory records and shows them. Nothing FF Factory sends asks FFBox to do anything.
+
+**Protocol 2** (2026-09-29, [Protocol 2](#protocol-2-the-ledger-check-both-ways)) adds what the ledger check both ways
+needs: each side says what it takes (`hello.accepts`, `welcome.accepts`), a conversation names its Discord thread
+(`threadId`), and FFBox asks the ledger before it starts a fix (`board_check`) and follows the answer (`board`,
+pushed again as it changes). Still, nothing FF Factory sends starts anything on FFBox: a `board` answer is data that
+FFBox's host code reads to decide whether to start a turn of its own.
 
 The phase 3 work messages are specified below, in [Work messages](#work-messages-phase-3-who-asked-and-who-pays):
 `submit`, `diagnose` and `stop`, each naming the person it is for, and the connector's `accepted` and
@@ -58,12 +64,12 @@ The connector's first message is `hello`:
 
 | field | rule |
 |---|---|
-| `protocol` | must be `1`. Any other number closes with `4426` |
+| `protocol` | `2` (or `1`, as before). FF Factory speaks both and answers in the hello's; any other number closes with `4426`. Against an older FF Factory that speaks only `1`, a protocol 2 hello is closed with `4426`: fall back to `1` at once (no hourly wait), stay there a while, then try `2` again |
 | `provider` | `"ffbox"` |
 | `connector.version` | 1-40 characters of `A-Z a-z 0-9 . _ + -` |
 | `connector.commit` | optional, 7-40 hex characters |
 | `web` | optional, an `https://` URL where people read FFBox's own page. FF Factory only links to it and never fetches it, so a LAN address is fine |
-| `accepts` | optional, the work messages this connector takes: `submit`, `diagnose`, `stop` ([Work messages](#work-messages-phase-3-who-asked-and-who-pays)). Leave it out until the connector implements them. Up to 20 words matching `^[a-z_]{1,32}$`; unknown ones are kept |
+| `accepts` | optional, the FF Factory → connector messages this connector takes: `board` and `filed` (protocol 2, [Protocol 2](#protocol-2-the-ledger-check-both-ways)), and later the work messages `submit`, `diagnose`, `stop` ([Work messages](#work-messages-phase-3-who-asked-and-who-pays)). List only what it implements (FFBox lists none while its inbound switch is off). Up to 20 words matching `^[a-z_]{1,32}$`; unknown ones are kept |
 
 FF Factory answers with `welcome`:
 
@@ -72,6 +78,10 @@ FF Factory answers with `welcome`:
   "cursors": { "conversation": "2026-09-27T09:20:00Z#812", "intake": "20260927T090000Z-desync-3a9f01c2d4" },
   "limits": { "maxMessageBytes": 65536, "messagesPerSecond": 100, "burst": 1000, "helloTimeoutMs": 10000, "invalidPerMinute": 20 } }
 ```
+
+A protocol 2 welcome also carries `"accepts"`: the connector → FF Factory messages it takes now beyond the reports,
+as its config allows (`board_check`, `request`, `accepted`, `refused`, `result`). Send only those; with
+`board_check` missing, do not ask and carry on (fail open).
 
 `cursors` holds the `cursor` of the last `conversation` and `intake` message FF Factory stored. A
 stream FF Factory has never seen has no cursor. After the welcome, the connector sends the current
@@ -147,6 +157,7 @@ keyed by `id`.
 | `costUsd` | optional, 0 or more |
 | `key` | optional, the board's dedupe key when FFBox knows it (`^[A-Za-z0-9_:#.+/-]{1,160}$`), for example `desync:0.50.0:minerBots+census` |
 | `url` | optional, `https://`, where a person reads it on FFBox's page |
+| `threadId` | protocol 2, optional, `^\d{15,25}$`: the Discord thread the conversation lives in (a forum post's thread, or a reply chain's root message). FF Factory keys it `discord:<threadId>`, which is how an `ffbox/*` review request and a board check find each other |
 | `createdAt`, `updatedAt` | ISO 8601 with a zone |
 
 ### `intake`
@@ -301,9 +312,15 @@ otherwise it sends `error` `not_enabled` and FFBox carries on as before. Schemas
   "opener": "player", "conversation": "812", "branch": "ffbox/alt-tab-1", "pr": 770 }
 { "type": "filed", "ref": "r-2291", "workId": "w41", "status": "pending_approval" }
 
-{ "type": "board_check", "ref": "q-17", "keys": ["branch:ffbox/alt-tab-1", "pr#770"], "title": "alt-tab freeze" }
-{ "type": "board", "ref": "q-17", "verdict": "in_flight",
-  "matches": [{ "id": "w23", "status": "active", "title": "Fix the alt-tab freeze", "score": 0.8, "why": "similar title", "updatedAt": "2026-09-29T10:00:00.000Z" }] }
+{ "type": "board_check", "ref": "conv-812", "keys": ["discord:1554582984567562253"], "conversation": "812" }
+{ "type": "board", "ref": "conv-812", "verdict": "in_flight",
+  "matches": [{ "id": "w50", "status": "active", "title": "Lag when leading a fleet", "score": 1, "why": "same discord 1554582984567562253",
+                "updatedAt": "2026-09-29T10:00:00.000Z",
+                "watch": { "repo": "Final-Factory/FinalFactory", "branch": "sandbox/lag-lead", "pr": 812, "target": "develop" } }] }
+{ "type": "board", "ref": "conv-812", "verdict": "done", "update": true,
+  "matches": [{ "id": "w50", "status": "done", "title": "Lag when leading a fleet", "score": 1, "why": "same discord 1554582984567562253",
+                "updatedAt": "2026-09-30T08:00:00.000Z",
+                "version": null, "mergedIn": "develop@abc1234def5678", "branch": "sandbox/lag-lead" }] }
 ```
 
 `request` (connector → FF Factory):
@@ -322,13 +339,42 @@ until one of the reviewers approves it: players' reports do not steer the game; 
 `repeat: true` for a repeat, or `status: "skipped"` with `why` past FF Factory's daily cap.
 
 `board_check` (connector → FF Factory), before FFBox works a report or starts an operator's dev turn: `ref`, up to 20
-`keys` in the board's spelling (`branch:<name>`, `pr#N`, `issue#N`, `spec-NNN`, a desync signature, a conversation
-id), and an optional `title` whose words are compared (untrusted; never shown to a model).
+`keys` in the board's spelling, an optional `conversation` (protocol 2: FFBox's conversation id; the ledger requests
+filed from that conversation are its own and never match), and an optional `title` whose words are compared
+(untrusted; never shown to a model). **Exact keys are what match**: send `discord:<thread id>` for a `bug_report` or
+`suggestion` turn and `report:<report id>` for an intake diagnosis, and no title. Other spellings still work:
+`branch:<name>`, `pr#N`, `issue#N`, `spec-NNN`, a desync signature, a conversation id. FF Factory gives every
+ledger request that names a Discord thread (a `discord.com/channels/…` link or a bare thread id, in its title, brief
+or related ids) the key `discord:<thread id>`, including requests filed before this existed.
 
 `board` (FF Factory → connector): `verdict` `in_flight` (a strong match is open), `done` (a strong match finished
 within FF Factory's lookback, default 14 days) or `clear`, and up to five `matches`, strongest first: ledger id,
 status, title (120 characters), score 0 to 1 (0.8 and over is strong), why, last change. Never a brief. FFBox MUST
-NOT pass a match's title into a container that runs player text.
+NOT pass a match's title into a container that runs player text. Protocol 2 adds, per match:
+
+| field | on | what |
+|---|---|---|
+| `watch` | an open match, when FF Factory knows the branch | `{ "repo", "branch", "pr"?, "target" }`: the branch the fix is being made on (the worker's PR head branch, with `pr` once a PR is open, else its sandbox branch such as `sandbox/lag-lead`), the repo (`Final-Factory/FinalFactory`, config `intake.ffbox.repo` or the game repo's URL) and the branch it lands on (`develop`). FFBox watches it for the merge, read-only |
+| `version` | a done match | the first release (`FFVersion.cs` bump on the base branch) that contains the fix, e.g. `0.50.0.51`; `null` while it is merged but not yet released ("coming in the next beta build") |
+| `mergedIn` | a done match | `<target>@<sha>`, e.g. `develop@abc1234`, when the fix commit is known; else `null` |
+| `branch` | a done match | the branch the work was on, when known |
+
+**Updates** (protocol 2): while the link is up, FF Factory re-checks every answer it gave `in_flight` (or `done` with
+`version: null`) each minute, for up to 30 days, and sends the `board` again with the same `ref` and `"update": true`
+when what FFBox acts on changed: the verdict, a match's status, `watch` (a PR opened, a branch renamed), `version`,
+`mergedIn`. Only to a connector that lists `board` in `accepts`. FF Factory forgets these on a restart, so the connector
+re-sends `board_check` for everything it still follows after every (re)connect.
+
+**FFBox MUST** (its host code, never a container):
+
+- fail open: without an answer within a few seconds, or with FF Factory unreachable, or `board_check` not in the
+  welcome's `accepts`, start its turn as it would have;
+- on `in_flight`: start no turn, set the returned `watch.branch` (and `pr`) as the conversation's branch and watch it
+  read-only for the merge; never push to it;
+- on `done`: start no turn, and reply with its usual merged notice filled with `version` ("the next beta build" when it
+  is `null`);
+- use only `verdict`, the ids, statuses, `watch`, `version`, `mergedIn` and `branch`, validated against the patterns
+  above. Titles and `why` are for logs at most.
 
 **FFBox SHOULD** skip work whose check says `in_flight` or `done`, and point at the ledger id instead (an operator
 may override), so the two teams never build the same fix twice.
@@ -349,7 +395,7 @@ may override), so the two teams never build the same fix twice.
 | `4400` | the first message was not a valid `hello`, or too many invalid messages | fix, then retry in 5 minutes |
 | `4403` | switched off in FF Factory while connected | retry in 5 minutes |
 | `4408` | no `hello` within 10 s | the normal backoff |
-| `4426` | FF Factory speaks another protocol | stop, say so in FFBox's journal and status, and retry every hour (an update on either side fixes it) |
+| `4426` | FF Factory speaks another protocol | a protocol 2 hello: retry at once with protocol 1. Protocol 1 refused: stop, say so in FFBox's journal and status, and retry every hour (an update on either side fixes it) |
 | `4429` | too many messages | wait 60 s, then send more slowly |
 
 ## Reconnect and backoff
@@ -403,7 +449,20 @@ Either side can end the link on its own:
 
 ## Versioning
 
-Additive changes keep protocol 1: a new optional field, a new message type from FF Factory (which the
-connector ignores), or a new `unity` mode. A change that needs both sides updated bumps
-`PROVIDER_PROTOCOL`. FF Factory then closes old connectors with `4426`, which tells them to wait for
-an update.
+Additive changes keep the protocol number: a new optional field, a new message type from FF Factory (which the
+connector ignores), or a new `unity` mode. A change that needs both sides updated bumps `PROVIDER_PROTOCOL`, and FF
+Factory keeps speaking the older numbers in `SUPPORTED_PROTOCOLS` (now 1 and 2) so a rollout can update either side
+first: it answers each connector in the version its hello names. A number it does not speak closes with `4426`; a
+newer connector then falls back to an older version at once, and an older one waits for an update.
+
+## Protocol 2: the ledger check both ways
+
+| | protocol 1 connector | protocol 2 connector |
+|---|---|---|
+| FF Factory 1 (before 2026-09-29) | as before | hello closed `4426`; the connector falls back to 1 and runs without the ledger check |
+| FF Factory 2 | welcome protocol 1, no `accepts`, no `board` pushes; a `board_check` is still answered | welcome protocol 2 with `accepts`; `board` answers, updates pushed |
+
+What changed from 1: `hello.accepts` names `board` and `filed`; `welcome.accepts`; `conversation.threadId`;
+`board_check.conversation`; the `board` match fields `watch`, `version`, `mergedIn`, `branch`; `board` updates.
+FFBox's side: `scripts/fffconnector.py`, `scripts/fff_feed.py` and `scripts/ffwatch.py` in the ffbox repo, behind its
+`fff.board_check` switch.

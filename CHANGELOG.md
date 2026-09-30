@@ -19,6 +19,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Provider protocol 2: the ledger check both ways with FFBox** (w55; [docs/ffbox-connector-contract.md](docs/ffbox-connector-contract.md#protocol-2-the-ledger-check-both-ways)).
+  The portal speaks protocols 1 and 2 and answers each connector in its own; `hello.accepts` and `welcome.accepts` say
+  what each side takes. FFBox asks the ledger with exact keys (`board_check` by `discord:<thread id>`, `report:<id>`) before
+  it starts a fix; every ledger request that names a Discord thread (link or bare id, older requests included) carries
+  that key. A `board` match says what to watch while in flight (the worker's PR head branch and PR, or its sandbox
+  branch, the repo, `develop`) and, once done, the release that carries the fix (`version`, null while unreleased) and
+  `mergedIn`; answers that change are pushed again (`update: true`). `conversation.threadId` gives each `ffbox/*` PR's
+  review request its thread, and the request closes when FFBox reports the PR merged or closed. FFBox's own conversation
+  never matches itself.
+
 - **Orchestrators remember** ([docs/orchestrators.md](docs/orchestrators.md#memory)). Every person's orchestrator
   and the dispatcher have a memory folder of their own (`data/orchestrator-memory/<person-id|dispatcher>`, config
   `orchestrator.memoryRoot`), Claude Code's auto memory pointed there: its `MEMORY.md` is loaded at every start. They
