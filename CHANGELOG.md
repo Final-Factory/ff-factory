@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **#bug-reports and dev_bug_reports belong to FFBox** ([docs/intake.md](docs/intake.md#ffbox-owns-bug-reports)). The
+  intake never files work from them (config.json naming them, or their ids, is ignored), its worker rules for a thread
+  there say not to post or close and to put `Discord: <thread url>` in the PR, and release follow-ups skip them. The
+  Intake tab says which channels FFBox owns. `intake.discord.bugChannels` now defaults to none.
+
 ### Fixed
 
 - **The web UI stays responsive at thousands of agents** (a portal with 7,200 sessions, 6,500 of them in one sandbox).

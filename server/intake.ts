@@ -35,6 +35,7 @@ import {
   quoteUntrusted,
   cleanBlock,
   releaseDraft,
+  isFfboxOwned,
   reporterProblem,
   requestBrief,
   requestSource,
@@ -211,8 +212,11 @@ export class IntakeManager {
     }
     this.polling = true;
     const errors: string[] = [];
+    // A bug channel configured by id is still FFBox's when that id is one of its channels.
+    const ffboxIds = new Set(s.ffboxOwned.map((a) => dc.channelIdOf(a)).filter(Boolean));
     try {
       for (const alias of s.bugChannels) {
+        if (ffboxIds.has(dc.channelIdOf(alias))) continue;
         try {
           await this.pollBugChannel(alias);
         } catch (e) {
@@ -220,6 +224,7 @@ export class IntakeManager {
         }
       }
       for (const alias of s.requestChannels) {
+        if (ffboxIds.has(dc.channelIdOf(alias))) continue;
         try {
           await this.pollRequestChannel(alias);
         } catch (e) {
@@ -500,7 +505,8 @@ export class IntakeManager {
           if (!version || !(await this.isAncestor(fix, b.sha))) continue;
           if (now - b.at < s.release.delayMinutes * 60_000) break;
           this.d.orchestrators.noteRelease(w.id, { releasedIn: version, releasedAt: new Date(b.at).toISOString() }, `shipped in ${version}`);
-          const threads = w.source?.threadId || w.source?.alsoThreads?.length;
+          // A thread in a channel FFBox owns hears from FFBox when the fix merges, not from a release follow-up.
+          const threads = !isFfboxOwned(w.source?.channel) && (w.source?.threadId || w.source?.alsoThreads?.length);
           if (threads && !w.delivery?.announcedBy) shipped.set(version, [...(shipped.get(version) ?? []), w]);
           break;
         }
@@ -541,6 +547,7 @@ export class IntakeManager {
         enabled: s.discord.enabled,
         bugChannels: s.discord.bugChannels,
         requestChannels: s.discord.requestChannels,
+        ffboxOwned: s.discord.ffboxOwned,
         trustedPeople: [...new Set(Object.values(s.discord.trusted))],
         dailyCap: s.discord.dailyCap,
         perReporterPerDay: s.discord.perReporterPerDay,

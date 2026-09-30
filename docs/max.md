@@ -11,9 +11,16 @@ posts.
 | Max page (`#/max`) | the token check and the last error; **Activity**: every post, reply, question, edit, thread opened, renamed or closed by an FF Factory agent, with its channel (and thread), a link, the first line, the session that did it and where it ran; **Discord inbound**: the newest messages in a few channels, with unread counts |
 | orchestrator | `max_activity` (read-only; `show: inbound` adds the channels), and a line in `system_status` |
 
-The intake ([intake.md](intake.md)) reads through the same token when config `intake.discord` is on: new
-#bug-reports threads and messages addressed to Max (`forumThreads`, `message`, `messagesAfter`, the bot's id from the
-token check), and each new event (`onEvent`) to record Max's replies and closes in intake threads. It still never posts.
+The intake ([intake.md](intake.md)) reads through the same token when config `intake.discord` is on: new threads in
+the bug channels it is given and messages addressed to Max (`forumThreads`, `message`, `messagesAfter`, the bot's id
+from the token check), and each new event (`onEvent`) to record Max's replies and closes in intake threads. It still
+never posts.
+
+**#bug-reports and dev_bug_reports belong to FFBox** (Lothsahn, 2026-09-30): FFBox's harness answers their threads
+and reports merged fixes there. The intake never files from them, and FF Factory's agents only read them: the
+`ffdiscord` CLI refuses to post, reply, react, edit, rename or close in those channels and their threads. A worker that
+fixes a bug from one adds `Discord: https://discord.com/channels/<guild id>/<thread id>` to its PR description instead
+([intake.md](intake.md#ffbox-owns-bug-reports)). The Discord inbound below still shows them, read-only.
 
 The code: `server/max.ts` (the manager), `server/maxEvents.ts` (the events file), `server/discordConfig.ts`
 (where the token is), `web/src/components/MaxPanel.tsx` and `External.tsx`.

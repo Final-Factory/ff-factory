@@ -7,9 +7,12 @@ settings.
 **TL;DR**
 
 - The dispatcher's ledger is the one place for all work. Besides what people file through their orchestrators, it now
-  gets: new **#bug-reports** threads (the in-game reporter's too), **requests to Max in #dev-chat from trusted
+  gets: new threads in the **bug channels you name** (`bugChannels`; none by default), **requests to Max in #dev-chat from trusted
   people** (Ben, Lothsahn, identified by Discord author id), and, later, **FFBox's fix branches and requests**. Work
   started from the dashboard, over `/mcp` or for a standing agent's delegation is recorded in it too.
+- **#bug-reports and dev_bug_reports belong to FFBox** (Lothsahn, 2026-09-30): its harness answers their threads and
+  reports a merged fix there. The intake never files work from them, whatever config.json says, and no worker posts in
+  or closes their threads; a worker that fixes one adds `Discord: <thread url>` to its PR ([below](#ffbox-owns-bug-reports)).
 - **Players do not steer the game** (Lothsahn's rule). Fixed code classifies each report: an **obvious bug** (a clear
   defect, a game version, no design ask) may be worked without a person when auto-approve is on. Everything else
   **needs a human**: it waits, visible in `list_work` and the Intake tab, until a reviewer (Ben or Lothsahn) approves
@@ -25,7 +28,7 @@ settings.
 
 | source | becomes | for (who pays) | triage |
 |---|---|---|---|
-| a new thread in a bug channel (`intake.discord.bugChannels`, default `bug_reports`), the in-game reporter's or a player's | "Discord bug: <title>" | the system payer (Ben) | obvious bug, or needs a human |
+| a new thread in a bug channel (`intake.discord.bugChannels`, default none; never `bug_reports` or `dev_bug_reports`), the in-game reporter's or a player's | "Discord bug: <title>" | the system payer (Ben) | obvious bug, or needs a human |
 | a message in a request channel (`requestChannels`, default `dev_chat`) that mentions Max or replies to it, from a Discord id in `intake.discord.trusted` | "Discord request: <first line>" | that person | a person's own request |
 | an FFBox conversation that left an unreviewed `ffbox/*` branch (a fix, a diagnosis) | "Review and merge ffbox/…" | the system payer | needs a human (a person's own when an operator opened it) |
 | a `request` FFBox's connector files (review, escalation, an operator's dev work) | "FFBox …: <title>" | the operator, else the system payer | the same |
@@ -38,6 +41,24 @@ Discord is read with Max's bot token through `server/max.ts` (`forumThreads`, `m
 `intake.discord.pollMinutes` (default 5), or by **Check Discord now** on the Intake tab (at most every 30 s). The
 first look after switching it on only marks where "new" starts: older threads and messages are never filed. The
 cursors live in `<dataDir>/intake.json`. FF Factory still never posts; the workers do, as before, with `ffdiscord`.
+
+## FFBox owns #bug-reports
+
+Lothsahn decided (2026-09-30) that FFBox owns #bug-reports and dev_bug_reports: "There are a lot of duplicate 'this has
+been fixed' comments, and the FFBox harness is designed to see merged PRs and report back on the thread."
+
+- **Never an intake source.** `FFBOX_OWNED_CHANNELS` (`server/intakeRules.ts`) is dropped from `bugChannels` and
+  `requestChannels` whatever config.json says, and a channel configured by id is skipped when its id is one of them
+  (`pollDiscord`). The Intake tab says so. The read-only Max panel (docs/max.md) still shows them, as context.
+- **Workers read, never write there.** They may read a thread and download its files; the ffdiscord CLI refuses to post,
+  reply, react, edit, rename or close in those channels and their threads (the ff-discord plugin, final-factory-agents).
+  An intake request already filed from one gets worker rules that say so (`workerRules`), and no release follow-up
+  (`releaseDraft` skips them).
+- **The PR says which thread.** A worker that fixes a bug from a thread adds one line per thread to its PR
+  description, exactly `Discord: https://discord.com/channels/<guild id>/<thread id>` (`discordPrLine`), as PRs #778,
+  #781 and #784 do. FFBox's merge notice (`ffwatch.py` `take_merge` → `conversations_for_pull_request`) finds a
+  conversation today only by the PR it published or by a branch it pushed or adopted, so a worker's PR still needs
+  FFBox to read that line (proposed to Lothsahn with w56; nothing changed on FFBox's side here).
 
 ## Triage: an obvious bug, or it needs a human
 
@@ -187,7 +208,7 @@ defaults and clamps the numbers.
 "intake": {
   "discord": {
     "enabled": false,
-    "bugChannels": ["bug_reports"],
+    "bugChannels": [],
     "requestChannels": ["dev_chat"],
     "trusted": { "<Ben's Discord user id>": "ben", "<Lothsahn's Discord user id>": "lothsahn" },
     "pollMinutes": 5,
@@ -215,7 +236,8 @@ snowflakes; an entry that is not one trusts nobody.
 3. In config.json add `intake.discord`: `enabled: true`, the two ids in `trusted` mapped to `ben` and `lothsahn`,
    and `intake.reviewers: ["ben", "lothsahn"]`. Leave `autoApprove` off for the first days. Restart.
 4. Watch the Intake tab: every new report lands under Needs a human or as an obvious bug waiting for approval, with its
-   triage. Approve a few by hand and check the workers reply in and close their threads and end with a marker.
+   triage. Approve a few by hand and check the workers reply in and close their threads (never FFBox's: those only
+   get the PR's `Discord:` line) and end with a marker.
 5. When the triage looks right, turn on `intake.discord.autoApprove.enabled` (3 a day to start). Only obvious bugs
    and your own Discord requests are ever auto-approved.
 6. Turn on `intake.release.enabled` once a fix has landed through the intake, and check the first follow-up.
