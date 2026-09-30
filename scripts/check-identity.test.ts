@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { isPublicEmail, offenders, parseLog } from './check-identity.ts';
+import { IDENTITY_BASELINE, isPublicEmail, logArgs, offenders, parseLog } from './check-identity.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 
@@ -34,4 +34,9 @@ test('parseLog reads real git output', () => {
     assert.match(c.sha, /^[0-9a-f]{40}$/);
     assert.match(c.author, /@/);
   }
+});
+
+test('history before the baseline (2026-09-30) is not checked again; a clone without it checks everything', () => {
+  assert.deepEqual(logArgs('HEAD', () => true), ['log', '--format=%H%x1f%ae%x1f%ce%x1f%s', 'HEAD', `^${IDENTITY_BASELINE}`]);
+  assert.deepEqual(logArgs('a..b', () => false), ['log', '--format=%H%x1f%ae%x1f%ce%x1f%s', 'a..b']);
 });

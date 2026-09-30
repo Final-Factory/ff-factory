@@ -4,6 +4,8 @@
  *
  *   node scripts/check-identity.ts <rev-range>     e.g. origin/main..HEAD, or a single SHA
  *
+ * History up to IDENTITY_BASELINE (before 2026-09-30) is not checked: see there.
+ *
  * Allowed: <id>+<login>@users.noreply.github.com (and <login>@users.noreply...), plus GitHub's own
  * noreply@github.com, which commits merges and edits made on github.com.
  */
@@ -18,6 +20,27 @@ export interface CommitIdentity {
 }
 
 export const isPublicEmail = (email: string) => isNoreplyEmail(email) || email.trim().toLowerCase() === 'noreply@github.com';
+
+/**
+ * The tip of main when Ben made his GitHub commit email private (2026-09-30). The merge commits before it were made on
+ * github.com with his personal address; the history is public and is not rewritten, so the commits reachable from here
+ * are not checked again. Everything after it is, and so is every commit when a clone does not have this one.
+ */
+export const IDENTITY_BASELINE = '9ee9959164e848c70c258df5b6f075a6e013c3dc';
+
+/** The `git log` arguments for `range`: the baseline's own history left out when the clone has it. */
+export function logArgs(range: string, hasCommit: (sha: string) => boolean): string[] {
+  return ['log', '--format=%H%x1f%ae%x1f%ce%x1f%s', range, ...(hasCommit(IDENTITY_BASELINE) ? [`^${IDENTITY_BASELINE}`] : [])];
+}
+
+const hasCommit = (sha: string) => {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /** Parse `git log --format=%H%x1f%ae%x1f%ce%x1f%s` output. */
 export function parseLog(out: string): CommitIdentity[] {
@@ -46,7 +69,7 @@ if (import.meta.main ?? process.argv[1] === import.meta.filename) {
     console.error('usage: node scripts/check-identity.ts <rev-range>');
     process.exit(2);
   }
-  const log = execFileSync('git', ['log', '--format=%H%x1f%ae%x1f%ce%x1f%s', range], { encoding: 'utf8' });
+  const log = execFileSync('git', logArgs(range, hasCommit), { encoding: 'utf8' });
   const commits = parseLog(log);
   const bad = offenders(commits);
   if (bad.length) {
@@ -54,5 +77,5 @@ if (import.meta.main ?? process.argv[1] === import.meta.filename) {
     for (const b of bad) console.error(`  ${b}`);
     process.exit(1);
   }
-  console.log(`commit identities OK: ${commits.length} commit(s) in ${range}, all noreply`);
+  console.log(`commit identities OK: ${commits.length} commit(s) in ${range} after ${IDENTITY_BASELINE.slice(0, 9)}, all noreply`);
 }
