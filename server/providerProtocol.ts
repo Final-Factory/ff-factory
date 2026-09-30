@@ -8,8 +8,14 @@ import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { redactSecrets } from './secrets.ts';
 
-/** Bumped when a change needs both sides updated. The portal refuses a hello with another number (close 4426). */
-export const PROVIDER_PROTOCOL = 1;
+/**
+ * Bumped when a change needs both sides updated. 2 (2026-09-29, docs/ffbox-connector-contract.md "Protocol 2") adds
+ * hello.accepts and welcome.accepts, conversation.threadId, board_check.conversation, and a board that says what to
+ * watch and what shipped. The portal speaks every version in SUPPORTED_PROTOCOLS and answers in the hello's; any other
+ * is closed 4426, and a newer connector falls back.
+ */
+export const PROVIDER_PROTOCOL = 2;
+export const SUPPORTED_PROTOCOLS: readonly number[] = [1, 2];
 
 /** A connector token: `ffpv1_` and 32 random bytes, base64url. The portal keeps only its SHA-256. */
 export const PROVIDER_TOKEN = /^ffpv1_[A-Za-z0-9_-]{43}$/;
@@ -107,6 +113,8 @@ export const ProviderConversationSchema = z.object({
   key: z.string().regex(/^[A-Za-z0-9_:#.+/-]{1,160}$/).optional(),
   /** Where a person reads it on FFBox's own page. */
   url: z.string().max(300).regex(/^https:\/\/[^\s"'<>]+$/).optional(),
+  /** Protocol 2: the Discord thread (or reply-chain root message) it lives in; its ledger key is discord:<threadId>. */
+  threadId: z.string().regex(/^\d{15,25}$/).optional(),
   createdAt: iso,
   updatedAt: iso,
 });
@@ -174,11 +182,15 @@ export type ProviderCapacityMessage = z.infer<typeof CapacitySchema>;
 
 export type ToConnector =
   /** The answer to a valid hello: where each stream left off, so the connector resends only what is newer. */
-  | { type: 'welcome'; protocol: number; provider: 'ffbox'; cursors: { conversation?: string; intake?: string }; limits: typeof LIMITS }
+  /**
+   * protocol: the hello's (1 or 2). accepts (protocol 2): the connector→portal messages this portal takes now beyond the
+   * reports, as config allows: board_check, request, accepted, refused, result.
+   */
+  | { type: 'welcome'; protocol: number; provider: 'ffbox'; cursors: { conversation?: string; intake?: string }; limits: typeof LIMITS; accepts?: string[] }
   /** A message the portal did not take; the connection stays up. */
   | { type: 'error'; code: 'bad_json' | 'bad_message' | 'unknown_type' | 'hello_twice' | 'not_enabled'; message: string; ref?: string }
   /** The answer to board_check (docs/intake.md): what the ledger holds that matches, open or finished. */
-  | { type: 'board'; ref: string; verdict: 'clear' | 'in_flight' | 'done'; matches: { id: string; status: string; title: string; score: number; why: string; updatedAt: string }[] }
+  | { type: 'board'; ref: string; verdict: 'clear' | 'in_flight' | 'done'; matches: BoardMatchWire[]; update?: true }
   /** Receipt of a request FFBox filed: the ledger item it became (or the one it repeats). */
   | { type: 'filed'; ref: string; workId?: string; status: string; repeat?: boolean; why?: string }
   /** The work messages (docs/ffbox-connector-contract.md), sent only to a connector that lists them in hello.accepts. */
@@ -360,9 +372,29 @@ export const BoardCheckSchema = z.object({
   type: z.literal('board_check'),
   ref: requestId,
   keys: z.array(boardKey).max(20).default([]),
-  /** Untrusted: compared by its words, never shown to a model. */
+  /** Untrusted: compared by its words, never shown to a model. FFBox sends keys only. */
   title: z.string().max(300).optional(),
+  /** Protocol 2: the FFBox conversation asking; the ledger requests filed from it are its own, not a match. */
+  conversation: conversationId.optional(),
 });
+
+/**
+ * One match in a board answer. watch (in flight, when the branch is known): the branch FFBox watches for the merge, the
+ * PR once open, the repo and the branch it lands on. version / mergedIn / branch (done): the first release carrying the
+ * fix (null while merged but unreleased), "<target>@<sha>", and the branch the work was on.
+ */
+export interface BoardMatchWire {
+  id: string;
+  status: string;
+  title: string;
+  score: number;
+  why: string;
+  updatedAt: string;
+  watch?: { repo: string; branch: string; pr?: number; target: string };
+  version?: string | null;
+  mergedIn?: string | null;
+  branch?: string;
+}
 
 /** connector → portal: a turn FF Factory submitted finished (or failed). The summary is untrusted text. */
 export const ResultSchema = z.object({

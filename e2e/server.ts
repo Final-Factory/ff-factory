@@ -108,7 +108,13 @@ fs.writeFileSync(
       voice: { enabled: false, autoInstall: false, tts: false },
       max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },
       ...(withIntake ? { intake: { discord: { enabled: true, trusted: { [INTAKE_TRUSTED]: 'tester' }, pollMinutes: 120 }, reviewers: ['tester'] } } : {}),
-      ...(withProvider ? { providers: { ffbox: { enabled: true, tokenSha256: createHash('sha256').update(E2E_PROVIDER_TOKEN).digest('hex') } } } : {}),
+      // The provider projects also take FFBox's ledger check and its fix branches (docs/intake.md; e2e/provider.spec.ts).
+      ...(withProvider
+        ? {
+            providers: { ffbox: { enabled: true, tokenSha256: createHash('sha256').update(E2E_PROVIDER_TOKEN).digest('hex') } },
+            intake: { ffbox: { enabled: true, boardCheck: true, repo: 'Final-Factory/FinalFactory' } },
+          }
+        : {}),
     },
     null,
     2,

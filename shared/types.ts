@@ -455,6 +455,8 @@ export interface ProviderConversation {
   costUsd?: number;
   key?: string;
   url?: string;
+  /** Protocol 2: the Discord thread (or reply-chain root message) the conversation lives in. */
+  threadId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1087,6 +1089,8 @@ export interface IntakeSummary {
   discord: {
     enabled: boolean;
     bugChannels: string[];
+    /** Channels FFBox owns: never polled for bug reports. */
+    ffboxOwns: string[];
     requestChannels: string[];
     /** The FF Factory logins trusted Discord ids map to (never the ids themselves). */
     trustedPeople: string[];

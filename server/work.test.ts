@@ -65,6 +65,20 @@ test('keys: specs, PRs and known branches, whatever way they are written', () =>
   assert.deepEqual(textKeys('update the docs and the audio', ['docs', 'audio']), []);
 });
 
+test('keys: a Discord thread by its link or bare id is discord:<thread>, never a watched channel; a report id is report:<id>', () => {
+  const DEV = '1012843817981976686';
+  const channels = new Set([DEV]);
+  assert.deepEqual(textKeys('see https://discord.com/channels/530867164866150410/1554582984567562253'), ['discord:1554582984567562253']);
+  assert.deepEqual(textKeys('https://discord.com/channels/530867164866150410/1554582984567562253/1554582984567562299'), ['discord:1554582984567562253'], 'a message inside a thread names the thread');
+  assert.deepEqual(textKeys(`https://discord.com/channels/530867164866150410/${DEV}/1554500000000000001`, [], channels), ['discord:1554500000000000001'], 'a message in #dev-chat: its root message, not the channel');
+  assert.deepEqual(textKeys('#bug-reports threads 1554582984567562253 and 1554588033704005712').sort(), ['discord:1554582984567562253', 'discord:1554588033704005712']);
+  assert.deepEqual(textKeys(`posted in #dev-chat (${DEV})`, [], channels), [], 'the channel itself is not a piece of work');
+  assert.deepEqual(textKeys('build 12345678901234 and sha abc1554582984567562253def'), [], 'not a snowflake: too short, or inside a word');
+  assert.deepEqual(textKeys('report 20260927T090000Z-desync-3a9f01c2d4 again'), ['report:20260927T090000Z-desync-3a9f01c2d4']);
+  // Shared, they are the same work.
+  assert.equal(overlapOf({ keys: ['discord:1554582984567562253'], title: 'x' }, { ref: 'w50', kind: 'work', title: 'y', keys: ['discord:1554582984567562253'] })?.score, 1);
+});
+
 test('keys: related ids resolve to what they are, and the rest is read as text', () => {
   const known = { work: (id: string) => id === 'w3', session: (id: string) => id === 'ab12cd34', delegation: (id: string) => id === 'd1', sandbox: (id: string) => id === 'alpha', machine: (id: string) => id.toLowerCase() === 'm3' };
   assert.deepEqual(relatedKeys(['w3', 'ab12cd34', 'd1', 'alpha', 'M3', '098', 'PR 412', '099-new-thing', 'desync'], known).sort(), [

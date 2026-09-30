@@ -45,7 +45,8 @@ test('settings: everything is off by default, numbers are small caps, a malforme
   assert.equal(s.ffbox.boardCheck, false);
   assert.equal(s.ffbox.sendWork, false);
   assert.equal(s.release.enabled, false);
-  assert.deepEqual(s.discord.bugChannels, ['bug_reports']);
+  assert.deepEqual(s.discord.bugChannels, [], 'FFBox owns #bug-reports: the intake files no bug threads by default');
+  assert.deepEqual(s.discord.ffboxOwns, ['bug_reports', 'dev_bug_reports']);
   assert.deepEqual(s.discord.requestChannels, ['dev_chat']);
   assert.deepEqual(s.discord.trusted, {});
   assert.equal(s.discord.dailyCap, 10);

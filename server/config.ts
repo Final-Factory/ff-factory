@@ -18,8 +18,17 @@ export const roleNames = (roles: readonly HostRole[]) => roles.map((r) => ROLE_N
 export interface IntakeConfig {
   discord?: {
     enabled?: boolean;
-    /** Forum channels whose new threads are bug reports: aliases from the ffbox config's discord.channels, or ids. Default ["bug_reports"]. */
+    /**
+     * Forum channels whose new threads are bug reports: aliases from the ffbox config's discord.channels, or ids.
+     * Default none: FFBox owns #bug-reports and dev_bug_reports (Lothsahn, 2026-09-29; docs/intake.md, "Who owns
+     * #bug-reports").
+     */
     bugChannels?: string[];
+    /**
+     * Channels FFBox works itself (default ["bug_reports", "dev_bug_reports"]): the intake never files their threads, even
+     * when bugChannels names them. Empty it only when FFBox stops answering there.
+     */
+    ffboxOwns?: string[];
     /** Channels where trusted people ask Max for work (a message that mentions the bot or replies to it). Default ["dev_chat"]. */
     requestChannels?: string[];
     /** Discord user ids trusted to ask for work, each mapped to an FF Factory login: { "<discord id>": "<user id>" }. Default none. */
@@ -43,6 +52,8 @@ export interface IntakeConfig {
     requests?: boolean;
     /** Answer the connector's board_check: FFBox asks the ledger before it works a report (default false). */
     boardCheck?: boolean;
+    /** The game repo as board answers name it to FFBox ("Final-Factory/FinalFactory"); default: from repo.url. */
+    repo?: string;
     dailyCap?: number;
     autoApprove?: { enabled?: boolean; maxPerDay?: number };
   };

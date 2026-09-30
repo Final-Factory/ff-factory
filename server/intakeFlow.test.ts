@@ -145,7 +145,21 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg
   return { dir, cfg, store, sessions, agents, o, intake, discord, dispatcher, call, heard, work, attention };
 }
 
-const on = { discord: { enabled: true, trusted: { [LOTH_ID]: 'lothsahn' } } };
+// Bug reports from #bug-reports, which FFBox owns by default: these tests take it back (ffboxOwns []).
+const on = { discord: { enabled: true, trusted: { [LOTH_ID]: 'lothsahn' }, bugChannels: ['bug_reports'], ffboxOwns: [] } };
+
+test('intake: FFBox owns #bug-reports and dev_bug_reports: the intake never files their threads, even when told to poll them', async (t) => {
+  const { intake, discord, work } = setup(t, { discord: { enabled: true, bugChannels: ['bug_reports'], requestChannels: [] } });
+  await intake.pollDiscord();
+  discord.thread(5, 'Belts stop after loading a save');
+  await intake.pollDiscord();
+  assert.equal(work().length, 0);
+  assert.equal(discord.calls, 0, 'the channel is not even read');
+  const logged = intake.summary().recent.filter((e) => e.action === 'ignored' && e.title === '#bug-reports');
+  assert.equal(logged.length, 1, 'said once');
+  assert.match(logged[0].why!, /FFBox owns this channel/);
+  assert.deepEqual(intake.summary().discord.ffboxOwns, ['bug_reports', 'dev_bug_reports']);
+});
 
 test('intake: off by default; a poll reads nothing and files nothing', async (t) => {
   const { intake, discord, work } = setup(t);

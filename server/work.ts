@@ -48,10 +48,25 @@ export function normalizeTitle(t: string): string {
 /**
  * What the text names that other work would name too: specs, PRs, other "#N" references, and branches of the sandboxes
  * and machines. Only an explicit PR ("PR 412", "pull request #412", ".../pull/412") is a PR: a bare "#412" could be an
- * issue, a bug number or a colour, so it is a weaker reference.
+ * issue, a bug number or a colour, so it is a weaker reference. A Discord thread, by its link or its bare id, is
+ * `discord:<thread id>` (docs/intake.md, "The ledger check"), except the ids in `notThreads` (the watched channels
+ * themselves, from the ffbox config: a link to a message in #dev-chat names the channel, not a piece of work). An
+ * ffintake report id is `report:<id>`.
  */
-export function textKeys(text: string, knownBranches: readonly string[] = []): string[] {
+export function textKeys(text: string, knownBranches: readonly string[] = [], notThreads: ReadonlySet<string> = new Set()): string[] {
   const keys = new Set<string>();
+  const thread = (id: string) => {
+    if (!notThreads.has(id)) keys.add(`discord:${id}`);
+  };
+  // https://discord.com/channels/<guild>/<thread>[/<message>]: the thread is the channel the link opens.
+  for (const m of text.matchAll(/https?:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/channels\/(?:\d{15,25}|@me)\/(\d{15,25})(?:\/(\d{15,25}))?/g)) {
+    thread(m[1]);
+    // A message in a text channel (a reply chain) is its own thread for FFBox: its root message id.
+    if (m[2] && m[2] !== m[1] && notThreads.has(m[1])) thread(m[2]);
+  }
+  // A bare snowflake ("thread 1554582984567562253"), not part of a link or a longer word.
+  for (const m of text.matchAll(/(?<![\w/@])(\d{17,20})(?![\w/])/g)) thread(m[1]);
+  for (const m of text.matchAll(/(?<![\w-])(\d{8}T\d{6}Z-(?:crash|desync)-[0-9a-f]{6,32})(?![\w-])/g)) keys.add(`report:${m[1]}`);
   const spec = (n: string) => keys.add(`spec:${String(Number(n)).padStart(3, '0')}`);
   for (const m of text.matchAll(/\bspecs?[\s#/-]*(\d{2,4})\b/gi)) spec(m[1]);
   // A spec's folder or branch: "098-belt-splitter".
@@ -95,7 +110,7 @@ export function relatedKeys(ids: readonly string[], known: { work: (id: string) 
 }
 
 /** Keys that name one piece of work: sharing one means the same work. A sandbox or a machine is only a place. */
-const IDENTITY = /^(work|session|delegation|pr|branch|discord|ffbox|release):/;
+const IDENTITY = /^(work|session|delegation|pr|branch|discord|ffbox|release|report):/;
 
 // ---------------------------------------------------------------- overlaps
 

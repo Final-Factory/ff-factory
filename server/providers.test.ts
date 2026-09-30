@@ -198,11 +198,35 @@ test('the first message must be a hello of this protocol, within the hello timeo
   await assert.rejects(b.hello({ protocol: PROVIDER_PROTOCOL + 1 }));
   const closed = await b.closed;
   assert.equal(closed.code, CLOSE.protocol);
-  assert.match(closed.reason, new RegExp(`speaks ${PROVIDER_PROTOCOL}`));
+  assert.match(closed.reason, /speaks 1 and 2/);
   pm.helloTimeoutMs = 100;
   const d = connect();
   assert.equal((await d.closed).code, CLOSE.noHello);
   assert.equal(pm.online, false);
+});
+
+test('mixed versions: a protocol 1 hello gets a protocol 1 welcome with no accepts; a protocol 2 hello the portal\'s accepts', async (t) => {
+  const { connect, pm } = await setup(t);
+  pm.portalAccepts = () => ['board_check', 'request'];
+  const one = connect();
+  const w1 = (await one.hello({ protocol: 1 })) as unknown as Record<string, unknown>;
+  assert.equal(w1.protocol, 1);
+  assert.equal('accepts' in w1, false, 'a protocol 1 connector is told nothing it cannot read');
+  assert.equal(pm.summary().connector?.protocol, 1);
+  one.close();
+  const two = connect();
+  const w2 = (await two.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as Record<string, unknown>;
+  assert.equal(w2.protocol, 2);
+  assert.deepEqual(w2.accepts, ['board_check', 'request']);
+  assert.equal(pm.summary().connector?.protocol, 2);
+  // An answer pushed again goes only to a protocol 2 connector that takes board.
+  assert.equal(pm.pushBoard('conv-7', { verdict: 'done', matches: [] }), true);
+  const pushed = await two.next('board');
+  assert.deepEqual(pushed, { type: 'board', ref: 'conv-7', verdict: 'done', matches: [], update: true });
+  two.close();
+  const quiet = connect();
+  await quiet.hello({ protocol: 2, accepts: [] });
+  assert.equal(pm.pushBoard('conv-7', { verdict: 'done', matches: [] }), false, 'not to one that does not take board');
 });
 
 test('too many messages too fast: closed with 4429', async (t) => {

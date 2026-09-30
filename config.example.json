@@ -64,8 +64,10 @@
   "intake": {
     "discord": {
       "enabled": false,
-      "bugChannels": [
-        "bug_reports"
+      "bugChannels": [],
+      "ffboxOwns": [
+        "bug_reports",
+        "dev_bug_reports"
       ],
       "requestChannels": [
         "dev_chat"

@@ -6,6 +6,13 @@ coarse signature with the step 4 counts (`shared/intake.ts`), before phase 4 act
 specified in [ffbox-connector-contract.md](ffbox-connector-contract.md). Every later phase is a
 separate, reviewable change.
 
+**2026-09-29 (w55): provider protocol 2, the ledger check both ways.** Built on both sides and off: FFBox asks the ledger
+(`board_check` by `discord:<thread id>`) before a bug-report or suggestion turn or an intake diagnosis, links instead of
+fixing twice, and follows the answer (the branch to watch, the release that carries the fix); each `ffbox/*` PR is
+filed as a review request with its thread. FFBox owns #bug-reports and dev_bug_reports (Lothsahn), so FF Factory's
+intake files no bug threads by default. The contract is [ffbox-connector-contract.md](ffbox-connector-contract.md),
+"Protocol 2"; the box steps are in [intake.md](intake.md), "Rollout checklist: Lothsahn".
+
 **2026-09-29: the intake ([intake.md](intake.md)).** FF Factory's side of phase 7's "both directions" and of phase 3's
 sending is built and off: FFBox's fix branches and `request` messages become ledger requests that wait for a reviewer,
 `board_check` lets FFBox ask the ledger before it works a report, and the dispatcher's `send_to_ffbox` submits work
