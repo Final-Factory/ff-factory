@@ -11,6 +11,7 @@ import type { SessionHandle } from './sessions.ts';
 import type { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { DelegationRequest, Machine, MachineSandbox, MachineSandboxUnity, Sandbox, SessionInfo } from '../shared/types.ts';
+import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 const BUSY = new Set(['running', 'starting', 'waiting_permission']);
 
@@ -261,15 +262,11 @@ export class HostMigrator {
 
   /** The last migration, if any. */
   last(): MigrationRecord | undefined {
-    try {
-      return JSON.parse(fs.readFileSync(this.file, 'utf8'));
-    } catch {
-      return undefined;
-    }
+    return readJsonDurable<MigrationRecord>(this.file, { check: checkObject });
   }
 
   private record(r: MigrationRecord) {
-    fs.writeFileSync(this.file, JSON.stringify(r, null, 2));
+    writeJsonDurable(this.file, r, { indent: 2 });
   }
 
   private now() {

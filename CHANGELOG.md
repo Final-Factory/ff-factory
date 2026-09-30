@@ -10,6 +10,21 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **A hard crash no longer takes the portal down** ([docs/self-recovery.md](docs/self-recovery.md#6-crash-safe-data-files)).
+  On 2026-09-30 BEAST crashed while saving `data/state.json` and left it full of zero bytes; every start failed to
+  parse it until someone restored it by hand. Data files are now fsynced before they replace the old one
+  (`server/durable.ts`), keep three earlier versions (`.1` seconds old, `.2` up to a minute, `.3` one to eleven
+  minutes), and a damaged file (empty, zeroed, cut off, failing its schema check) is moved aside and replaced by the
+  newest good version at load. The restart summary, a push and the owner's orchestrator say what was restored and how
+  much was lost. `state.json` is saved at most a second after a change even while agents are busy (a steady stream of
+  changes could postpone the old save indefinitely), with the write and fsync off the main thread (about 12 ms of main
+  thread per save at 7,265 sessions on BEAST). The same covers the ledger, intake, logins, API keys, machine tokens,
+  config.json and the other data files; transcripts survive a torn last line; the orchestrators' memory is backed up
+  every 10 minutes and healed at startup. The supervisor backs off at most a minute, and nothing starts on the sandbox
+  drive before the host guard has seen it attached (it used to say "ok" for the first 5 s after a boot).
+
 ### Added
 
 - **Escalations from Max** (w94; [docs/intake.md](docs/intake.md#escalations-from-max)): FFBox's host files the reports

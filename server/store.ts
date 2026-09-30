@@ -1,4 +1,5 @@
 import { redactValue } from './secrets.ts';
+import { SnapshotFile, dataRecoveries, isObject, readJsonDurable, writeFileDurable, type Check } from './durable.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -21,10 +22,33 @@ interface Persisted {
   settings?: AppSettings;
 }
 
+/** Why a parsed state.json is not a sane one (server/durable.ts falls back to an earlier version then). */
+export const checkState: Check = (v) => {
+  if (!isObject(v)) return 'not a JSON object';
+  for (const k of ['sandboxes', 'sessions'] as const) if (!Array.isArray(v[k])) return `no ${k} list`;
+  for (const k of ['standingAgents', 'delegations', 'machines'] as const) if (v[k] !== undefined && !Array.isArray(v[k])) return `${k} is not a list`;
+  for (const k of ['sandboxes', 'sessions', 'standingAgents', 'delegations', 'machines'] as const) {
+    if (((v[k] as unknown[] | undefined) ?? []).some((x) => !isObject(x) || typeof x.id !== 'string')) return `an entry of ${k} has no id`;
+  }
+  return undefined;
+};
+
+export const checkWork: Check = (v) => {
+  if (!isObject(v)) return 'not a JSON object';
+  if (v.items !== undefined && (!Array.isArray(v.items) || v.items.some((x) => !isObject(x) || typeof x.id !== 'string'))) return 'items is not a list of work items';
+  if (v.seq !== undefined && typeof v.seq !== 'number') return 'seq is not a number';
+  return undefined;
+};
+
+/** state.json: a write starts at most 200 ms after a change and at most once a second (4.5 MB at 7,000 sessions). */
+const STATE_SAVE = { delayMs: 200, intervalMs: 1000 };
+const WORK_SAVE = { delayMs: 300, intervalMs: 1000 };
+
 /**
- * The durable record: sandboxes and session metadata in one JSON file (small, rewritten whole),
- * transcripts as one append-only JSONL per session. No database, so no native modules to build
- * on the Windows host.
+ * The durable record: sandboxes and session metadata in one JSON file (rewritten whole), transcripts as one
+ * append-only JSONL per session. No database, so no native modules to build on the Windows host. The JSON files are
+ * crash-safe (server/durable.ts): fsynced before they replace the old file, the last versions kept beside them, and a
+ * damaged one replaced by the newest good version at load.
  */
 export class Store {
   readonly sandboxes = new Map<string, Sandbox>();
@@ -39,22 +63,24 @@ export class Store {
   /** The dispatcher's session id (the key keeps its old name: it was the one shared orchestrator). */
   orchestratorId?: string;
   settings: AppSettings = { heartbeatMinutes: null };
-  private readonly file: string;
-  private readonly workFile: string;
-  private workTimer?: NodeJS.Timeout;
+  private readonly stateFile: SnapshotFile;
+  private readonly workFile: SnapshotFile;
   private readonly transcriptDir: string;
   private readonly uploadDir: string;
   private readonly seqs = new Map<string, number>();
-  private saveTimer?: NodeJS.Timeout;
+  /** Transcripts whose last line this process has checked is complete (see appendLine). */
+  private readonly tailChecked = new Set<string>();
 
   constructor(dataDir: string) {
-    this.file = path.join(dataDir, 'state.json');
-    this.workFile = path.join(dataDir, 'work.json');
+    const file = path.join(dataDir, 'state.json');
+    const workFile = path.join(dataDir, 'work.json');
     this.transcriptDir = path.join(dataDir, 'transcripts');
     this.uploadDir = path.join(dataDir, 'uploads');
     fs.mkdirSync(this.transcriptDir, { recursive: true });
-    if (fs.existsSync(this.file)) {
-      const p: Persisted = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+    this.stateFile = new SnapshotFile(file, () => JSON.stringify(this.persisted(), null, 2), { ...STATE_SAVE, label: 'state' });
+    this.workFile = new SnapshotFile(workFile, () => JSON.stringify({ seq: this.workSeq, items: [...this.work.values()] }, null, 2), { ...WORK_SAVE, label: 'work ledger' });
+    const p = readJsonDurable<Persisted>(file, { check: checkState });
+    if (p) {
       for (const s of p.sandboxes) this.sandboxes.set(s.id, s);
       for (const s of p.sessions) this.sessions.set(s.id, s);
       this.orchestratorId = p.orchestratorId;
@@ -63,10 +89,12 @@ export class Store {
       for (const m of p.machines ?? []) this.machines.set(m.id, { ...m, online: false });
       this.settings = { ...this.settings, ...p.settings };
     }
-    if (fs.existsSync(this.workFile)) {
-      const w: { seq?: number; items?: WorkItem[] } = JSON.parse(fs.readFileSync(this.workFile, 'utf8'));
+    const w = readJsonDurable<{ seq?: number; items?: WorkItem[] }>(workFile, { check: checkWork });
+    if (w) {
       for (const item of w.items ?? []) this.work.set(item.id, item);
-      this.workSeq = w.seq ?? 0;
+      // An older version restored after a crash may not know the last few numbers handed out: skip past them.
+      const restored = dataRecoveries.some((r) => r.file === workFile && r.from);
+      this.workSeq = (w.seq ?? 0) + (restored ? 100 : 0);
     }
   }
 
@@ -128,21 +156,7 @@ export class Store {
   }
 
   private saveWork() {
-    clearTimeout(this.workTimer);
-    this.workTimer = setTimeout(() => this.flushWork(), 300);
-  }
-
-  private flushWork() {
-    clearTimeout(this.workTimer);
-    this.workTimer = undefined;
-    const tmp = this.workFile + '.tmp';
-    try {
-      fs.writeFileSync(tmp, JSON.stringify({ seq: this.workSeq, items: [...this.work.values()] }, null, 2));
-      fs.renameSync(tmp, this.workFile);
-    } catch (e) {
-      console.warn('work ledger save failed, retrying:', (e as Error).message);
-      this.saveWork();
-    }
+    this.workFile.changed();
   }
 
   putSettings(patch: Partial<AppSettings>) {
@@ -169,7 +183,7 @@ export class Store {
     const last = this.seqs.get(sessionId) ?? this.lastSeq(sessionId);
     if (e.seq <= last) return;
     e = redactValue(e); // never a Claude OAuth token on disk or on screen (server/secrets.ts)
-    fs.appendFileSync(this.transcriptPath(sessionId), JSON.stringify(e) + '\n');
+    this.appendLine(sessionId, JSON.stringify(e));
     this.seqs.set(sessionId, e.seq);
     emit({ type: 'transcript', sessionId, event: e });
     this.noteActivity(sessionId, e);
@@ -211,7 +225,7 @@ export class Store {
   append(sessionId: string, e: DistributiveOmit<TranscriptEvent, 'seq' | 't'>): TranscriptEvent {
     const seq = this.nextSeq(sessionId);
     const full = redactValue({ ...e, seq, t: new Date().toISOString() } as TranscriptEvent);
-    fs.appendFileSync(this.transcriptPath(sessionId), JSON.stringify(full) + '\n');
+    this.appendLine(sessionId, JSON.stringify(full));
     emit({ type: 'transcript', sessionId, event: full });
     this.noteActivity(sessionId, full);
     return full;
@@ -223,7 +237,7 @@ export class Store {
     const i = all.findIndex((e) => e.seq === seq);
     if (i < 0) return;
     all[i] = redactValue({ ...all[i], ...patch } as TranscriptEvent);
-    fs.writeFileSync(this.transcriptPath(sessionId), all.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    writeFileDurable(this.transcriptPath(sessionId), all.map((e) => JSON.stringify(e)).join('\n') + '\n', { generations: 0 });
     emit({ type: 'transcript', sessionId, event: all[i] });
   }
 
@@ -234,12 +248,28 @@ export class Store {
     const out: TranscriptEvent[] = [];
     for (const line of limit ? lines.slice(-limit) : lines) {
       try {
-        out.push(JSON.parse(line));
+        // A crash can leave zero bytes where the last lines were; the next line then starts after them.
+        out.push(JSON.parse(line.replace(/^\0+/, '')));
       } catch {
         // a torn last line after a crash; skip it
       }
     }
     return out;
+  }
+
+  /**
+   * Append one event line. The first append to a transcript in this process makes sure the file ends with a newline:
+   * after a crash its last line can be torn, and the next event would otherwise be glued to it and lost.
+   */
+  private appendLine(sessionId: string, line: string) {
+    const f = this.transcriptPath(sessionId);
+    let prefix = '';
+    if (!this.tailChecked.has(sessionId)) {
+      this.tailChecked.add(sessionId);
+      const last = lastByte(f);
+      prefix = last === undefined || last === 0x0a ? '' : '\n';
+    }
+    fs.appendFileSync(f, prefix + line + '\n');
   }
 
   deleteTranscript(sessionId: string) {
@@ -291,15 +321,24 @@ export class Store {
     return n + 1;
   }
 
+  /** Save state.json soon, in the background (STATE_SAVE). */
   save() {
-    clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => this.flush(), 200);
+    this.stateFile.changed();
   }
 
+  /** Save now, on the main thread (shutdown, tests): state.json, and the work ledger when it has changes. */
   flush() {
-    if (this.workTimer) this.flushWork();
-    clearTimeout(this.saveTimer);
-    const p: Persisted = {
+    if (this.workFile.pending) this.workFile.flushSync();
+    this.stateFile.flushSync();
+  }
+
+  /** Resolves once no background save is running or due (tests). */
+  async saved() {
+    await Promise.all([this.stateFile.idle(), this.workFile.idle()]);
+  }
+
+  private persisted(): Persisted {
+    return {
       sandboxes: [...this.sandboxes.values()],
       sessions: [...this.sessions.values()],
       orchestratorId: this.orchestratorId,
@@ -308,15 +347,23 @@ export class Store {
       machines: [...this.machines.values()],
       settings: this.settings,
     };
-    const tmp = this.file + '.tmp';
-    try {
-      fs.writeFileSync(tmp, JSON.stringify(p, null, 2));
-      fs.renameSync(tmp, this.file);
-    } catch (e) {
-      // Windows can refuse the rename while an indexer or antivirus holds the file; retry shortly.
-      console.warn('state save failed, retrying:', (e as Error).message);
-      this.save();
-    }
+  }
+}
+
+/** A file's last byte, or undefined when it is missing or empty. */
+function lastByte(f: string): number | undefined {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(f, 'r');
+    const size = fs.fstatSync(fd).size;
+    if (!size) return undefined;
+    const b = Buffer.alloc(1);
+    fs.readSync(fd, b, 0, 1, size - 1);
+    return b[0];
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 

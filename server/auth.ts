@@ -3,6 +3,7 @@ import path from 'node:path';
 import type http from 'node:http';
 import { createHash, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 import type { UserInfo, UserRole } from '../shared/types.ts';
+import { checkArray, checkObject, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
 
 /**
  * Username/password login. This page can drive agents that run shell commands on the host, so it
@@ -88,6 +89,11 @@ function checkProfile(p: UserProfile): Partial<UserRecord> {
 export type ApiKeyScope = 'nightly' | 'ffbox';
 export const API_KEY_SCOPES: readonly ApiKeyScope[] = ['nightly', 'ffbox'];
 
+/** users.json: a list of logins, each with a name and a password hash. */
+const checkUsers: Check = (v) => (Array.isArray(v) && v.every((u) => isObject(u) && typeof u.username === 'string' && typeof u.hash === 'string') ? undefined : 'not a list of logins');
+
+type ApiKeyRecord = { name: string; sha256: string; createdAt: string; user?: string; scope?: ApiKeyScope };
+
 export class Auth {
   private readonly usersFile: string;
   private readonly sessionsFile: string;
@@ -104,17 +110,14 @@ export class Auth {
     this.usersFile = path.join(dataDir, 'users.json');
     this.sessionsFile = path.join(dataDir, 'auth-sessions.json');
     this.trustProxy = opts.trustProxy;
-    if (fs.existsSync(this.sessionsFile)) {
-      const raw: Record<string, SessionRecord> = JSON.parse(fs.readFileSync(this.sessionsFile, 'utf8'));
-      const now = Date.now();
-      for (const [id, s] of Object.entries(raw)) if (s.expires > now) this.sessions.set(id, s);
-    }
+    const raw = readJsonDurable<Record<string, SessionRecord>>(this.sessionsFile, { check: checkObject });
+    const now = Date.now();
+    for (const [id, s] of Object.entries(raw ?? {})) if (s.expires > now) this.sessions.set(id, s);
     this.dummyHash = hashPassword(randomBytes(16).toString('hex'));
   }
 
   users(): UserRecord[] {
-    if (!fs.existsSync(this.usersFile)) return [];
-    return JSON.parse(fs.readFileSync(this.usersFile, 'utf8'));
+    return readJsonDurable<UserRecord[]>(this.usersFile, { check: checkUsers }) ?? [];
   }
 
   hasUsers() {
@@ -157,7 +160,7 @@ export class Auth {
   }
 
   private writeUsers(users: UserRecord[]) {
-    fs.writeFileSync(this.usersFile, JSON.stringify(users, null, 2));
+    writeJsonDurable(this.usersFile, users, { indent: 2 });
   }
 
   // ---- API keys, for machine clients such as a remote Claude Code's MCP connection ----
@@ -166,8 +169,8 @@ export class Auth {
     return path.join(path.dirname(this.usersFile), 'api-keys.json');
   }
 
-  private keys(): { name: string; sha256: string; createdAt: string; user?: string; scope?: ApiKeyScope }[] {
-    return fs.existsSync(this.keysFile) ? JSON.parse(fs.readFileSync(this.keysFile, 'utf8')) : [];
+  private keys(): ApiKeyRecord[] {
+    return readJsonDurable<ApiKeyRecord[]>(this.keysFile, { check: checkArray }) ?? [];
   }
 
   /**
@@ -183,13 +186,13 @@ export class Auth {
     const sha256 = createHash('sha256').update(key).digest('hex');
     const keys = this.keys().filter((k) => k.name !== name);
     keys.push({ name, sha256, createdAt: new Date().toISOString(), ...(user ? { user } : {}), ...(scope ? { scope } : {}) });
-    fs.writeFileSync(this.keysFile, JSON.stringify(keys, null, 2));
+    writeJsonDurable(this.keysFile, keys, { indent: 2 });
     return key;
   }
 
   revokeApiKey(name: string) {
     const keys = this.keys();
-    fs.writeFileSync(this.keysFile, JSON.stringify(keys.filter((k) => k.name !== name), null, 2));
+    writeJsonDurable(this.keysFile, keys.filter((k) => k.name !== name), { indent: 2 });
     return keys.some((k) => k.name === name);
   }
 
@@ -299,8 +302,6 @@ export class Auth {
   }
 
   private persistSessions() {
-    const tmp = this.sessionsFile + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(this.sessions)));
-    fs.renameSync(tmp, this.sessionsFile);
+    writeJsonDurable(this.sessionsFile, Object.fromEntries(this.sessions));
   }
 }

@@ -71,9 +71,18 @@ while ($true) {
   $started = Get-Date
   "$(Get-Date -Format s) started server pid $($proc.Id)" | Out-File $log -Append
   $proc.WaitForExit()
-  # Back off when it keeps dying quickly (a crash loop), reset after a healthy run.
-  if (((Get-Date) - $started).TotalMinutes -gt 5) { $delay = 3 } else { $delay = [Math]::Min($delay * 2, 300) }
+  # Back off when it keeps dying quickly (a crash loop), reset after a healthy run. At most a minute: a damaged data
+  # file no longer stops the server (server/durable.ts starts it from the last good version), so what is left loops
+  # on something that clears by itself (a port, a drive), and the portal is back within a minute of it clearing.
+  if (((Get-Date) - $started).TotalMinutes -gt 5) { $delay = 3 } else { $delay = [Math]::Min($delay * 2, 60) }
   if (Test-Path $updateFlag) { $delay = 3 }
-  "$(Get-Date -Format s) server exited with code $($proc.ExitCode); restarting in $($delay)s" | Out-File $log -Append
+  # The error that ended it, so a loop is readable in this log without opening server.err.log.
+  $why = ''
+  $errLog = Join-Path $DataDir 'server.err.log'
+  if ($proc.ExitCode -ne 0 -and (Test-Path $errLog)) {
+    $line = Get-Content $errLog -Tail 60 -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\w*(Error|Exception)\b|^\s*Error:' } | Select-Object -Last 1
+    if ($line) { $why = "; last error: $($line.Trim())" }
+  }
+  "$(Get-Date -Format s) server exited with code $($proc.ExitCode)$why; restarting in $($delay)s" | Out-File $log -Append
   Start-Sleep $delay
 }

@@ -44,10 +44,10 @@ test('idle editors: stopped only when nobody in the sandbox is busy and nothing 
 });
 
 /** A monitor over fake effects; `world` is what it sees. */
-function harness(over: Partial<{ helper: (n: number) => HelperResult }> = {}) {
+function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere: boolean }> = {}) {
   const world = {
     now: Date.parse('2026-09-24T13:00:00Z'),
-    driveThere: true,
+    driveThere: over.driveThere ?? true,
     freeC: 200 * GB,
     sandboxes: [sb('blackhole', 'running'), sb('agent-mcp', 'running'), sb('idle', 'stopped')],
     sessions: [sess('w1', 'blackhole', 'running'), sess('w2', 'agent-mcp', 'idle'), { ...sess('orch', undefined, 'running'), kind: 'orchestrator' } as SessionInfo],
@@ -116,6 +116,26 @@ test('sandbox drive lost: turns stopped, remounted by the helper (retrying), edi
   const after = log.slice(log.indexOf('report Sandbox drive is back') + 1);
   assert.deepEqual(after.slice(0, 2), ['start blackhole', 'start agent-mcp']);
   assert.match(after[2], /^tell w1: The sandbox drive went offline/);
+});
+
+test('boot without the sandbox drive: nothing starts on it before the guard has seen it back', async () => {
+  const { log, m } = harness({ driveThere: false });
+  // Before the first look (5 s after start): the old guard said "ok" here and let agents start on a missing F:.
+  assert.equal(m.status.sandboxRoot, 'missing');
+  assert.match(m.blockReason('agent') ?? '', /sandbox drive is offline/);
+  assert.match(m.blockReason('editor') ?? '', /sandbox drive is offline/);
+  await m.tick();
+  assert.deepEqual(log.slice(0, 3), ['report Sandbox drive not attached at startup', 'helper mount', 'report Sandbox drive is back']);
+  assert.ok(!log.some((l) => l.startsWith('interrupt')), 'nothing was running on it to stop');
+  assert.equal(m.blockReason('agent'), undefined);
+});
+
+test('between two looks, a drive that went away blocks new work at once', async () => {
+  const { world, m } = harness();
+  await m.tick();
+  assert.equal(m.blockReason('agent'), undefined);
+  world.driveThere = false;
+  assert.match(m.blockReason('agent') ?? '', /sandbox drive is offline/);
 });
 
 /** Let the passes the guard started without waiting (the clean-up) finish. */

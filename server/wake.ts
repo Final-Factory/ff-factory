@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import type { SessionManager } from './sessions.ts';
 import type { Store } from './store.ts';
 import type { Sandbox, SessionInfo } from '../shared/types.ts';
+import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 
@@ -70,7 +71,7 @@ export class Waker {
     if (!this.file) return 0;
     let saved: Record<string, WakeRecord> = {};
     try {
-      saved = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, WakeRecord>;
+      saved = readJsonDurable<Record<string, WakeRecord>>(this.file, { check: checkObject }) ?? {};
     } catch {
       return 0; // none, or unreadable
     }
@@ -97,8 +98,7 @@ export class Waker {
     const out: Record<string, WakeRecord> = {};
     for (const [id, t] of this.timers) out[id] = { at: t.at, note: t.note };
     try {
-      fs.writeFileSync(this.file + '.tmp', JSON.stringify(out, null, 2));
-      fs.renameSync(this.file + '.tmp', this.file);
+      writeJsonDurable(this.file, out, { indent: 2 });
     } catch (e) {
       console.warn('wake_me: could not save the pending wakes:', (e as Error).message);
     }

@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
+import { asidePath, recordRecovery, type DataRecovery } from './durable.ts';
 import type { Config } from './config.ts';
 import type { SessionInfo } from '../shared/types.ts';
 
@@ -17,6 +18,8 @@ const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
  */
 export const defaultMemoryRoot = (cfg: Pick<Config, 'dataDir'>) => path.join(cfg.dataDir, 'orchestrator-memory');
 
+export const memoryRootOf = (cfg: Pick<Config, 'orchestrator' | 'dataDir'>) => cfg.orchestrator.memoryRoot || defaultMemoryRoot(cfg);
+
 /** An orchestrator's folder name: "dispatcher", or "person-<user id>" for a person's own. */
 export function memoryKey(info: Pick<SessionInfo, 'orchestratorRole' | 'requestedBy'>): string {
   if (info.orchestratorRole === 'personal' && info.requestedBy) return `person-${info.requestedBy.userId.toLowerCase().replace(/[^a-z0-9._-]/g, '_')}`;
@@ -25,7 +28,7 @@ export function memoryKey(info: Pick<SessionInfo, 'orchestratorRole' | 'requeste
 
 /** An orchestrator's own memory folder (made if missing). */
 export function memoryDirFor(cfg: Pick<Config, 'orchestrator' | 'dataDir'>, info: Pick<SessionInfo, 'orchestratorRole' | 'requestedBy'>, mkdir = true): string {
-  const dir = path.join(cfg.orchestrator.memoryRoot || defaultMemoryRoot(cfg), memoryKey(info));
+  const dir = path.join(memoryRootOf(cfg), memoryKey(info));
   if (mkdir) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -145,4 +148,139 @@ export function memoryGuard(dir: string, personTurn: () => boolean, platform: No
     if (why) return deny(why);
     return { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'allow' as const, permissionDecisionReason: 'inside this orchestrator’s own memory folder' } };
   };
+}
+
+// ---------------------------------------------------------------- crash safety (docs/self-recovery.md)
+
+// Claude Code writes the memory files itself, so their writes cannot be made crash-safe here. Instead the app keeps
+// copies (<root>.backup/1 newest, 2, 3), taken when something changed, and at startup puts the newest good copy back
+// in place of a file a crash left empty or full of zero bytes. Copies, never hard links: the guard above refuses to
+// write a hard-linked memory file.
+
+const MEMORY_BACKUPS = 3;
+
+export const memoryBackupRoot = (root: string) => `${root}.backup`;
+
+/** Every file under `dir`, as paths relative to it, sorted. */
+function filesUnder(dir: string, rel = ''): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(path.join(dir, rel), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const e of entries) {
+    const r = rel ? path.join(rel, e.name) : e.name;
+    if (e.isDirectory()) out.push(...filesUnder(dir, r));
+    else if (e.isFile()) out.push(r);
+  }
+  return out.sort();
+}
+
+/** What a crash leaves of a file that was being written: nothing, or zero bytes. */
+export function looksDamaged(file: string): string | undefined {
+  let buf: Buffer;
+  try {
+    buf = fs.readFileSync(file);
+  } catch {
+    return undefined;
+  }
+  if (!buf.length) return 'empty (0 bytes)';
+  const zero = buf.indexOf(0);
+  if (zero < 0) return undefined;
+  return buf.some((b) => b !== 0) ? `partly written (zero bytes from byte ${zero} of ${buf.length})` : `all zero bytes (${buf.length} bytes)`;
+}
+
+/** A copy that is on disk when this returns, with the original's modification time (it dates the copy). */
+function copyDurable(from: string, to: string) {
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  const fd = fs.openSync(to, 'w');
+  try {
+    fs.writeFileSync(fd, fs.readFileSync(from));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const st = fs.statSync(from);
+  fs.utimesSync(to, st.atime, st.mtime);
+}
+
+/** The newest good copy of `rel` in the backups, if any. */
+function goodCopy(backups: string, rel: string): string | undefined {
+  return Array.from({ length: MEMORY_BACKUPS }, (_, i) => path.join(backups, String(i + 1), rel)).find((b) => fs.existsSync(b) && !looksDamaged(b));
+}
+
+/**
+ * What a backup of `root` would hold: each file from the folder, or, for a file that looks damaged, its newest good
+ * copy from the older backups, so a good copy never rotates out while the file stays damaged.
+ */
+function planBackup(root: string, backups: string): Map<string, string> {
+  const plan = new Map<string, string>();
+  for (const r of filesUnder(root)) {
+    const src = path.join(root, r);
+    const from = looksDamaged(src) ? goodCopy(backups, r) : src;
+    if (from) plan.set(r, from);
+  }
+  return plan;
+}
+
+/** Names, sizes and modification times (to the second): a backup is taken only when this changes. */
+function fingerprint(plan: Map<string, string>): string {
+  return JSON.stringify(
+    [...plan].map(([r, src]) => {
+      const st = fs.statSync(src);
+      return [r, st.size, Math.floor(st.mtimeMs / 1000)];
+    }),
+  );
+}
+
+/**
+ * Copy the memory folders to <root>.backup/1 when they changed since the last copy (the older copies move to 2 and
+ * 3). A file that looks damaged is not copied; its last good copy is carried over instead. Returns whether a copy was
+ * made.
+ */
+export function backupMemory(root: string): boolean {
+  if (!fs.existsSync(root)) return false;
+  const backups = memoryBackupRoot(root);
+  const newest = path.join(backups, '1');
+  const plan = planBackup(root, backups);
+  if (fs.existsSync(newest) && fingerprint(plan) === fingerprint(new Map(filesUnder(newest).map((r) => [r, path.join(newest, r)])))) return false;
+  const fresh = path.join(backups, 'new');
+  fs.rmSync(fresh, { recursive: true, force: true });
+  for (const [r, src] of plan) copyDurable(src, path.join(fresh, r));
+  fs.mkdirSync(fresh, { recursive: true });
+  fs.rmSync(path.join(backups, String(MEMORY_BACKUPS)), { recursive: true, force: true });
+  for (let k = MEMORY_BACKUPS - 1; k >= 1; k--) {
+    const from = path.join(backups, String(k));
+    if (fs.existsSync(from)) fs.renameSync(from, path.join(backups, String(k + 1)));
+  }
+  fs.renameSync(fresh, newest);
+  return true;
+}
+
+/**
+ * At startup: every memory file a crash left empty or zeroed gets the newest good copy from the backups; the damaged
+ * file moves to <root>.backup/damaged/ (never deleted). A file no backup has a good copy of is left alone. Each repair
+ * is logged and goes into dataRecoveries for the restart summary.
+ */
+export function healMemory(root: string): DataRecovery[] {
+  const out: DataRecovery[] = [];
+  const backups = memoryBackupRoot(root);
+  for (const r of filesUnder(root)) {
+    const file = path.join(root, r);
+    const problem = looksDamaged(file);
+    if (!problem) continue;
+    const good = goodCopy(backups, r);
+    if (!good) continue;
+    const st = fs.statSync(file);
+    const aside = asidePath(path.join(backups, 'damaged', r));
+    fs.mkdirSync(path.dirname(aside), { recursive: true });
+    fs.renameSync(file, aside);
+    copyDurable(good, file);
+    const rec: DataRecovery = { file, label: `orchestrator memory ${r.split(path.sep).join('/')}`, problem, movedTo: aside, from: good, fromTime: fs.statSync(good).mtime.toISOString(), damagedTime: st.mtime.toISOString() };
+    recordRecovery(rec);
+    out.push(rec);
+  }
+  return out;
 }

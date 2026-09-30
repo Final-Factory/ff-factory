@@ -14,3 +14,5 @@ coverage/
 # Visual baselines are CI's Linux renders; local ones stay local.
 e2e/__screenshots__/**/*-win32.png
 e2e/__screenshots__/**/*-darwin.png
+# config.json's earlier versions (server/durable.ts) and the copy setAppConfig keeps
+config.json.*

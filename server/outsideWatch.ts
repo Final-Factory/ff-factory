@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { isWindows, run } from './proc.ts';
+import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 /**
  * The portal's side of the outside watchdog (docs/self-recovery.md, "Watched from outside"): the ntfy topic
@@ -25,8 +26,8 @@ const FILE = 'outside-watch.json';
 export function loadOutsideWatchState(dataDir: string): OutsideWatchState {
   const file = path.join(dataDir, FILE);
   try {
-    const s = JSON.parse(fs.readFileSync(file, 'utf8')) as OutsideWatchState;
-    if (/^[\w-]{16,64}$/.test(s.topic ?? '')) return s;
+    const s = readJsonDurable<OutsideWatchState>(file, { check: checkObject, mode: 0o600 });
+    if (s && /^[\w-]{16,64}$/.test(s.topic ?? '')) return s;
   } catch {
     // first run
   }
@@ -36,7 +37,7 @@ export function loadOutsideWatchState(dataDir: string): OutsideWatchState {
 }
 
 export function saveOutsideWatchState(dataDir: string, s: OutsideWatchState) {
-  fs.writeFileSync(path.join(dataDir, FILE), JSON.stringify(s, null, 2), { mode: 0o600 });
+  writeJsonDurable(path.join(dataDir, FILE), s, { indent: 2, mode: 0o600 });
 }
 
 /** The broadcast address of an IPv4 network (192.168.1.37/24 -> 192.168.1.255). */
