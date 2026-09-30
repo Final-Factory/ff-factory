@@ -249,6 +249,11 @@ export interface Config {
     effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     /** Tell the orchestrator when a worker finishes a turn or needs a permission, so it can report. */
     notifyOnWorkerEvents: boolean;
+    /**
+     * Where each orchestrator's own memory folder is made (docs/orchestrators.md, "Memory"): <memoryRoot>/dispatcher
+     * and <memoryRoot>/person-<user id>. Default <dataDir>/orchestrator-memory, which workers cannot write.
+     */
+    memoryRoot?: string;
   };
   worker: {
     permissionMode: PermissionMode;

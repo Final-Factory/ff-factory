@@ -27,7 +27,8 @@ Ben). It hears work requests, updates to them, capacity news and the host's noti
 the ledger.
 
 Both are sessions of kind `orchestrator`, so neither takes an agent slot, and both keep the orchestrator's limits: no
-shell, no web tools, `Read`/`Glob`/`Grep` on the base clone. Their briefs share one description of the world
+shell, no web tools, `Read`/`Glob`/`Grep` on the base clone, and `Write`/`Edit` only in their own memory folder
+([Memory](#memory)). Their briefs share one description of the world
 (`worldBrief` in `server/agents.ts`); the dispatcher's is the old shared orchestrator's, edited for a chat people do not
 write to.
 
@@ -94,6 +95,33 @@ The recipient's orchestrator shows who it is from and what it asks, in a line or
 answers on its own: its person decides, and it answers with the same tool only with what they say. A turn a
 `[person message]` starts is the harness's, not the person's, so the destructive tools stay closed in it. The dispatcher
 neither relays nor sees these messages.
+
+## Memory
+
+Each orchestrator has a memory folder of its own: `data/orchestrator-memory/person-<user id>` for a person's (Ben's,
+Lothsahn's, anyone's), `data/orchestrator-memory/dispatcher` for the dispatcher (config `orchestrator.memoryRoot` moves
+the root). `memoryDirFor` (`server/orchestratorMemory.ts`) makes it when missing. It is Claude Code's auto memory,
+pointed there with `settings.autoMemoryDirectory`: the CLI loads its `MEMORY.md` index into every conversation's
+context and names the folder in its prompt, so what an orchestrator saves survives restarts and fresh conversations,
+and every person's orchestrator has its own though they share the base clone as their working directory. The brief
+repeats the folder and the rules.
+
+Orchestrators got `Write` and `Edit` for it, and stay read-only on everything else. A PreToolUse hook (`memoryGuard`)
+decides every write, and a hook's refusal holds in every permission mode:
+
+- **Where:** only a Markdown (`.md`) file inside its own folder, after resolving `..`, symlinks and junctions (its real
+  path must stay inside the folder's real path), with Windows' path rules (case, both slashes). Refused: the repo,
+  `config.json`, the rest of `data/`, other orchestrators' folders, relative paths, links and hard links, UNC and
+  `\\?\`/`\\.\` paths, alternate data streams (`MEMORY.md:x`), names ending in a dot or space, device names.
+- **What:** no secrets, gitleaks-style: Anthropic, GitHub, AWS, Google, Slack and npm tokens, FF Factory connector
+  tokens, Discord bot tokens, private keys, and a password or key assigned a long value.
+- **When:** only in a turn its person started with a message of their own (the dispatcher: the owner writing in its
+  chat). Orchestrators read text agents wrote (`[worker update]`, relayed Discord and FFBox reports); a harness turn
+  must not be able to plant an instruction that every later conversation loads.
+
+The folder sits in `data/`, which workers' guard already protects (`server/guard.ts`), so no worker can write an
+orchestrator's memory either. Workers and standing agents are unchanged. Reading stays as before: an orchestrator can
+read any file, other orchestrators' memory included.
 
 ## Where messages go
 
