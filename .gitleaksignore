@@ -1,7 +1,3 @@
-# Fake test values gitleaks flagged (generic-api-key) in history that cannot be rewritten; the test now assembles them at runtime.
-27d7938f3b6d089b0a40f10921938ac91d6c3dc4:server/secrets.test.ts:generic-api-key:93
-# Fake account ids (hex, like a real key's hash prefix) in the mock and the meters spec; now plain words.
-d41697a9e6214ca92c3738ff93b6f8027976712e:web/mock/scenario.ts:generic-api-key:288
-d41697a9e6214ca92c3738ff93b6f8027976712e:web/mock/scenario.ts:generic-api-key:291
-d41697a9e6214ca92c3738ff93b6f8027976712e:e2e/meters.spec.ts:generic-api-key:59
-d41697a9e6214ca92c3738ff93b6f8027976712e:e2e/meters.spec.ts:generic-api-key:62
+# Findings gitleaks may skip: <commit>:<file>:<rule>:<line>. Only fake secrets that tests use.
+# A made-up AWS key in the first commit of the orchestrator memory tests (later built at run time).
+412a407a1caccff5008c3160f8144cdf1f361c22:server/orchestratorMemory.test.ts:aws-access-token:152
