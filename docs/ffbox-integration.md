@@ -1,5 +1,7 @@
 # FFBox in FF Factory: one orchestrator, two kinds of place to run work
 
+What FFBox is, how it works, and how workers change it (straight to its master, one push at a time): [ffbox.md](ffbox.md).
+
 Status: **approved by Ben and Lothsahn 2026-09-27. Phase 1, FF Factory's side, is built**: `/provider`,
 the FFBox card and page, and `ffbox_activity` (`server/providers.ts`). The page groups intake reports by
 coarse signature with the step 4 counts (`shared/intake.ts`), before phase 4 acts on them. The connector it talks to is

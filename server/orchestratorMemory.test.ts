@@ -8,7 +8,7 @@ import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
-import { Agents } from './agents.ts';
+import { Agents, FFBOX_BRIEF } from './agents.ts';
 import { Identity } from './identity.ts';
 import { memoryDirFor, memoryGuard, memoryKey, memoryWriteProblem, secretIn, type GuardFs } from './orchestratorMemory.ts';
 import type { Config } from './config.ts';
@@ -229,6 +229,14 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
     assert.equal(x.hooks.PreToolUse.length, 1);
     assert.ok(x.systemPrompt.append.includes(`Your memory folder is \`${d}\``), 'the brief names its own folder');
     assert.ok(fs.statSync(d).isDirectory());
+  }
+  // Lothsahn's FFBox text (w49), verbatim in both kinds of brief, and the old "read-only for now" line gone.
+  assert.ok(FFBOX_BRIEF.startsWith("FFBox (repo Final-Factory/ffbox; docs/ffbox.md) is Lothsahn's Linux build server."));
+  assert.ok(FFBOX_BRIEF.endsWith("Agents' box access is limited to its config and secrets."));
+  assert.ok(FFBOX_BRIEF.includes('workers push changes straight to ffbox master (no PRs needed), one at a time'));
+  for (const x of [ben, loth, disp]) {
+    assert.ok(x.systemPrompt.append.includes(`- **FFBox**: ${FFBOX_BRIEF} \`ffbox_activity\` (read-only)`), 'the FFBox paragraph is in the brief');
+    assert.ok(!x.systemPrompt.append.includes('read-only for now'));
   }
   // The same folder after a fresh conversation (and after a restart: it depends only on who the chat is for).
   const again = opts(o.resetPersonal(BEN).info);
