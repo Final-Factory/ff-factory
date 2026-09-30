@@ -17,6 +17,8 @@ export const GUILD = '530867164866150410';
 export const CH = {
   devChat: '1012843817981976686',
   bugs: '1069745561672106015',
+  /** A bug forum that is not FFBox's (#bug-reports is), which the intake projects read (e2e/intake.spec.ts). */
+  betaBugs: '1069745561672106016',
   patchNotes: '1400000000000000001',
   askClaude: '1531433612464099521',
 };
@@ -36,6 +38,7 @@ const CRASH = snowflake(at(90), 2);
 const CHANNELS: Record<string, { id: string; name: string; type: number; parent_id?: string }> = {
   [CH.devChat]: { id: CH.devChat, name: 'dev-chat', type: 0 },
   [CH.bugs]: { id: CH.bugs, name: 'bug-reports', type: 15 },
+  [CH.betaBugs]: { id: CH.betaBugs, name: 'beta-bugs', type: 15 },
   [CH.patchNotes]: { id: CH.patchNotes, name: 'dev-patch-notes', type: 0 },
   [CH.askClaude]: { id: CH.askClaude, name: 'ask-claude', type: 0 },
   [BELTS]: { id: BELTS, name: 'Belts stop after loading a save', type: 11, parent_id: CH.bugs },
@@ -72,13 +75,15 @@ export function startMockDiscord(port: number): Promise<http.Server> {
         const b = JSON.parse(raw || '{}') as Record<string, string | boolean | undefined>;
         const id = snowflake(new Date().toISOString(), ++seq);
         if (req.url === '/_e2e/thread') {
-          added.threads.push({ id, parent_id: CH.bugs, name: String(b.name), last_message_id: id, message_count: 1 });
+          // #bug-reports by default; forum "beta" is #beta-bugs.
+          const forum = b.forum === 'beta' ? CH.betaBugs : CH.bugs;
+          added.threads.push({ id, parent_id: forum, name: String(b.name), last_message_id: id, message_count: 1 });
           added.starters[id] = {
             id,
             webhook_id: '77',
             author: { id: '77', username: 'Bug Bot', bot: true },
             embeds: [{ title: `🐛 ${b.name}`, description: String(b.description ?? ''), fields: [{ name: 'Game Version', value: String(b.version ?? '0.50.0.46') }, { name: 'Platform', value: 'WindowsPlayer' }] }],
-            attachments: [{ filename: 'Player.log', url: `https://cdn.discordapp.com/attachments/${CH.bugs}/${id}/Player.log`, size: 4096 }],
+            attachments: [{ filename: 'Player.log', url: `https://cdn.discordapp.com/attachments/${forum}/${id}/Player.log`, size: 4096 }],
           };
         } else {
           added.chat.unshift({ id, content: `${b.toBot ? `<@${BOT_ID}> ` : ''}${b.content}`, author: { id: String(b.authorId), username: String(b.name), global_name: String(b.name) }, mentions: b.toBot ? [{ id: BOT_ID }] : [] });
@@ -103,7 +108,7 @@ export function startMockDiscord(port: number): Promise<http.Server> {
 /** The ffbox config the server reads the token from: a secrets.env variable, as on BEAST and the M5. */
 export function writeFfboxConfig(dir: string) {
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ discord: { app_token: 'DISCORD_TOKEN', server_id: GUILD, channels: { bug_reports: CH.bugs, dev_chat: CH.devChat, ask_claude: CH.askClaude } } }));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ discord: { app_token: 'DISCORD_TOKEN', server_id: GUILD, channels: { bug_reports: CH.bugs, beta_bugs: CH.betaBugs, dev_chat: CH.devChat, ask_claude: CH.askClaude } } }));
   fs.writeFileSync(path.join(dir, 'secrets.env'), `DISCORD_TOKEN="${E2E_DISCORD_TOKEN}"\n`);
 }
 
