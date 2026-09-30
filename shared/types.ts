@@ -205,6 +205,8 @@ export interface SessionInfo {
 export interface ImageRef {
   id: string;
   mediaType: string;
+  /** The file an agent's message showed, copied here when the message arrived (server/inlineImages.ts). */
+  path?: string;
 }
 
 /** An image sent with a message: base64 data, plus its id once stored. */
@@ -228,7 +230,8 @@ export interface ImageFile {
 export type TranscriptEvent =
   /** requestedBy: the person who wrote it (from 'human'), or for whom the orchestrator or the harness sent it. */
   | { seq: number; t: string; kind: 'user'; text: string; from: 'human' | 'orchestrator' | 'system'; uuid?: string; images?: ImageRef[]; requestedBy?: Requester }
-  | { seq: number; t: string; kind: 'assistant'; text: string }
+  /** images: the files it shows (shared/imagePaths.ts), kept once copied, so they outlive their folder. */
+  | { seq: number; t: string; kind: 'assistant'; text: string; images?: ImageRef[] }
   | { seq: number; t: string; kind: 'thinking'; text: string }
   | { seq: number; t: string; kind: 'tool_use'; toolUseId: string; name: string; input: unknown; parentToolUseId?: string | null }
   | { seq: number; t: string; kind: 'tool_result'; toolUseId: string; isError: boolean; text: string; images?: ImageRef[] }

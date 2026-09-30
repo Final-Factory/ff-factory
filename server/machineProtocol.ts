@@ -38,7 +38,8 @@ export type ToDaemon =
   /** Start the session's process if needed (from `spec`) and send it a message. */
   | { type: 'send'; info: SessionInfo; lastSeq: number; spec: LaunchSpec; text: string; from: 'human' | 'orchestrator' | 'system'; uuid: string; images?: ImageInput[]; requestedBy?: Requester }
   /** Read an image file (under the daemon's roots) or list the recent ones: the Screenshots gallery and inline images. */
-  | { type: 'fs'; id: string; op: 'read'; path: string }
+  /** sessionId: whose image, so its own temp folder counts too (older daemons ignore it). */
+  | { type: 'fs'; id: string; op: 'read'; path: string; sessionId?: string }
   | { type: 'fs'; id: string; op: 'list'; dirs?: string[] }
   | { type: 'interrupt' | 'stop' | 'remove'; sessionId: string }
   /** Switch the clone's branch (server/switchBranch.ts); answered by switch_result. */

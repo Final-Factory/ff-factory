@@ -15,6 +15,7 @@ import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
 import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
+import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
 
@@ -1142,7 +1143,7 @@ export class MachineManager {
 
   private readonly fsCalls = new Map<string, { resolve: (m: Extract<FromDaemon, { type: 'fs_result' }>) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
-  private fsCall(machineId: string, msg: { op: 'read'; path: string } | { op: 'list'; dirs?: string[] }) {
+  private fsCall(machineId: string, msg: { op: 'read'; path: string; sessionId?: string } | { op: 'list'; dirs?: string[] }) {
     return new Promise<Extract<FromDaemon, { type: 'fs_result' }>>((resolve, reject) => {
       const id = randomUUID();
       const timer = setTimeout(() => {
@@ -1346,10 +1347,10 @@ export class MachineManager {
     });
   }
 
-  /** An image file from a machine's clone or standing-agent folders. */
-  async readImage(machineId: string, file: string) {
-    const r = await this.fsCall(machineId, { op: 'read', path: file });
-    return { mediaType: r.mediaType!, data: Buffer.from(r.data ?? '', 'base64') };
+  /** An image file from a machine's clone, sandboxes or standing-agent folders, or from that session's temp folder. */
+  async readImage(machineId: string, file: string, sessionId?: string) {
+    const r = await this.fsCall(machineId, { op: 'read', path: file, ...(sessionId ? { sessionId } : {}) });
+    return safeImage({ mediaType: r.mediaType!, data: Buffer.from(r.data ?? '', 'base64') });
   }
 
   /** The machine's recent screenshots (see server/images.ts). */

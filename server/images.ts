@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { sanitizeSvg } from '../shared/svg.ts';
 import type { ImageFile } from '../shared/types.ts';
 
 /** Image files an agent may show or a gallery may list (docs: README, Screenshots). */
-export const IMAGE_FILE = /\.(png|jpe?g|gif|webp)$/i;
+export const IMAGE_FILE = /\.(png|jpe?g|gif|webp|svg)$/i;
 /** Video files: streamed with HTTP Range (openVideo), not read whole. A Unity ".mp4.meta" is not one. */
 export const VIDEO_FILE = /\.(mp4|m4v|webm)$/i;
 export const MEDIA_TYPE: Record<string, string> = {
@@ -12,6 +13,7 @@ export const MEDIA_TYPE: Record<string, string> = {
   jpeg: 'image/jpeg',
   gif: 'image/gif',
   webp: 'image/webp',
+  svg: 'image/svg+xml',
   mp4: 'video/mp4',
   m4v: 'video/mp4',
   webm: 'video/webm',
@@ -47,11 +49,17 @@ function resolveMedia(file: string, roots: string[], kind: RegExp, what: string)
   return { real, size: st.size, mediaType: MEDIA_TYPE[real.split('.').pop()!.toLowerCase()] };
 }
 
-/** Read an image file under one of `roots`: its type and bytes. Throws with a plain reason otherwise. */
+/** Read an image file under one of `roots`: its type and bytes (an SVG sanitised). Throws with a plain reason otherwise. */
 export function readImage(file: string, roots: string[]): { mediaType: string; data: Buffer } {
   const m = resolveMedia(file, roots, IMAGE_FILE, 'an image');
   if (m.size > MAX_IMAGE_BYTES) throw new Error('too large');
-  return { mediaType: m.mediaType, data: fs.readFileSync(m.real) };
+  return safeImage({ mediaType: m.mediaType, data: fs.readFileSync(m.real) });
+}
+
+/** An SVG may only be shown sanitised (shared/svg.ts); anything else as it is. Also for bytes from a machine. */
+export function safeImage(img: { mediaType: string; data: Buffer }): { mediaType: string; data: Buffer } {
+  if (img.mediaType !== 'image/svg+xml') return img;
+  return { mediaType: img.mediaType, data: Buffer.from(sanitizeSvg(img.data.toString('utf8')), 'utf8') };
 }
 
 /** A video under one of `roots`, to stream (no size limit: it is sent in ranges). */

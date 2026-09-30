@@ -5,8 +5,8 @@ import { api } from '../api';
 import { sessionRoute } from '../attention';
 import { attempt, clearFocusEvent, focusPermission, sessionIndex, useStore } from '../store';
 import { displayName, fmtClock, fmtCost, fmtDivider, fmtDuration, FREE_TEXT, navigate, sameTitle, useNow, type Route } from '../util';
-import { Markdown } from './Markdown';
-import { ImageStrip, MentionedImages, uploadUrl } from './Images';
+import { LocalImages, Markdown } from './Markdown';
+import { fileUrl, ImageStrip, MentionedImages, uploadUrl } from './Images';
 import { prettyJson, summarizeToolInput, toolDisplayName, toolLabel, toolsSummary } from './toolSummary';
 import { Icon, type IconName } from './ui';
 
@@ -123,6 +123,8 @@ export const Transcript = memo(function Transcript({
   const focusId = useStore((s) => s.focusRequestId);
 
   const items = useMemo(() => buildItems(events ?? [], Date.now()), [events]);
+  // Images in the session's other messages (briefs, notices, a reply still streaming): the files, where it may show them.
+  const liveImage = useMemo(() => (p: string) => fileUrl({ session: session.id }, p), [session.id]);
 
   const pendingById = useMemo(() => {
     const m = new Map<string, PendingPermission>();
@@ -227,6 +229,7 @@ export const Transcript = memo(function Transcript({
 
   return (
     <ReadOnly.Provider value={readOnlyFor}>
+    <LocalImages.Provider value={liveImage}>
     <div className={`transcript transcript-${size}`}>
       <div className="transcript-scroll" ref={scroller} onScroll={onScroll}>
         <div className="transcript-inner">
@@ -257,6 +260,7 @@ export const Transcript = memo(function Transcript({
         </button>
       )}
     </div>
+    </LocalImages.Provider>
     </ReadOnly.Provider>
   );
 });
@@ -359,10 +363,17 @@ function Brief({ ev }: { ev: UserEv }) {
 }
 
 function AssistantMessage({ ev, end, sessionId }: { ev: AssistantEv; end?: ResultEv; sessionId: string }) {
+  // The copies kept with the transcript once the server has them (server/inlineImages.ts); until then, the files.
+  const src = useMemo(() => {
+    const kept = new Map((ev.images ?? []).flatMap((i) => (i.path ? [[i.path, uploadUrl(sessionId, i)] as const] : [])));
+    return (p: string) => kept.get(p) ?? fileUrl({ session: sessionId }, p);
+  }, [ev.images, sessionId]);
   return (
     <div className="msg msg-assistant" data-seq={ev.seq} data-turn-end={end ? (end.ok ? 'ok' : 'stopped') : undefined}>
-      <Markdown text={ev.text} />
-      <MentionedImages text={ev.text} place={{ session: sessionId }} />
+      <LocalImages.Provider value={src}>
+        <Markdown text={ev.text} />
+      </LocalImages.Provider>
+      <MentionedImages text={ev.text} src={src} />
       <div className="msg-meta">
         <time dateTime={ev.t} title={new Date(ev.t).toLocaleString()}>
           {fmtClock(ev.t)}

@@ -775,8 +775,10 @@ export class Daemon {
         this.entries.get(msg.sessionId)?.s.decide(msg.requestId, msg.allow, msg.message);
         return;
       case 'fs': {
-        // Only the clone and the standing agents' folders: the gallery and inline images, nothing else.
+        // Only the clone, the sandboxes and the standing agents' folders (and, for one session's image, its own temp
+        // folder): the gallery and inline images, nothing else.
         const roots = [this.cfg.repoPath, path.join(appDirOfConfig(this.cfg), 'agents'), ...this.pool.paths()];
+        if (msg.op === 'read' && msg.sessionId) roots.push(sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId));
         try {
           if (msg.op === 'read') {
             const img = readImage(msg.path, roots);

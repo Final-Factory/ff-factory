@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { isVideoPath, mentionedPaths } from '../../../shared/imagePaths';
 import type { ImageFile, ImageRef } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, closeLightbox, openLightbox, toast, useStore, type LightboxItem } from '../store';
@@ -10,8 +11,8 @@ export type ImagePlace = { session: string } | { sandbox: string } | { machine: 
 
 export const uploadUrl = (sessionId: string, ref: ImageRef) => `/api/uploads/${encodeURIComponent(sessionId)}/${encodeURIComponent(ref.id)}`;
 export const fileUrl = (place: ImagePlace, path: string) => `/api/image?${new URLSearchParams({ ...place, path })}`;
-const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
-export const isVideoPath = (p: string) => /\.(mp4|m4v|webm)$/i.test(p);
+export const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
+export { isVideoPath, mentionedPaths };
 /** "#t=0.1" makes Safari (iPad) and Chrome paint the first frame as the poster before playing. */
 const posterSrc = (src: string) => `${src}#t=0.1`;
 
@@ -31,25 +32,12 @@ export function ImageStrip({ items, size = 'normal' }: { items: LightboxItem[]; 
   );
 }
 
-// Absolute image and video paths in agent text: Windows (C:\x\y.png, C:/x/y.mp4) or POSIX (/Users/x/y.png).
-const PATH_RE = /(?:[A-Za-z]:[\\/]|\/)(?:[^\s`'"()<>|*?,;]+[\\/])*[^\s`'"()<>|*?,;:\\/]+\.(?:png|jpe?g|gif|webp|mp4|m4v|webm)\b/gi;
-
-export function mentionedPaths(text: string): string[] {
-  const out = new Set<string>();
-  for (const m of text.matchAll(PATH_RE)) {
-    // "/c/Users/…" (Git Bash) is C:/Users/…; a bare "/x.png" at a word boundary inside a URL is not a path.
-    const p = m[0].replace(/^\/([a-zA-Z])\//, '$1:/');
-    const before = text[m.index! - 1];
-    if (before && /[\w.:/]/.test(before)) continue;
-    out.add(p);
-    if (out.size >= 8) break;
-  }
-  return [...out];
-}
-
-/** Images and videos an agent wrote about by path: shown if the file is in its folders (the server checks). */
-export function MentionedImages({ text, place }: { text: string; place: ImagePlace }) {
-  const items = useMemo(() => mentionedPaths(text).map((p) => ({ src: fileUrl(place, p), name: baseName(p), video: isVideoPath(p) })), [text, place]);
+/**
+ * Images and videos an agent wrote about by bare path: shown if the file is in its folders (the server checks).
+ * `src` gives a path's URL (the copy kept with the transcript, once there is one).
+ */
+export function MentionedImages({ text, src }: { text: string; src: (path: string) => string }) {
+  const items = useMemo(() => mentionedPaths(text).map((p) => ({ src: src(p), name: baseName(p), video: isVideoPath(p) })), [text, src]);
   const images = items.filter((i) => !i.video);
   const videos = items.filter((i) => i.video);
   return (
@@ -86,7 +74,10 @@ export function VideoStrip({ items }: { items: LightboxItem[] }) {
 export function Lightbox() {
   const lb = useStore((s) => s.lightbox);
   const [i, setI] = useState(0);
+  // Actual size, scrolled: a wide diagram or a big screenshot is unreadable fitted to the screen.
+  const [zoomed, setZoomed] = useState(false);
   useEffect(() => setI(lb?.index ?? 0), [lb]);
+  useEffect(() => setZoomed(false), [lb, i]);
   useEffect(() => {
     if (!lb) return;
     const onKey = (e: KeyboardEvent) => {
@@ -121,20 +112,26 @@ export function Lightbox() {
         <a className="btn btn-ghost btn-sm" href={it.src} download={it.name} title="Download">
           <Icon name="download" size={14} /> <span className="hide-sm">Download</span>
         </a>
-        <a className="btn btn-ghost btn-sm" href={it.src} target="_blank" rel="noreferrer" title="Open on its own">
-          <Icon name="expand" size={14} />
-        </a>
+        {!it.src.startsWith('data:') && (
+          <a className="btn btn-ghost btn-sm" href={it.src} target="_blank" rel="noreferrer" title="Open on its own">
+            <Icon name="expand" size={14} />
+          </a>
+        )}
         <button className="btn btn-ghost btn-icon" onClick={closeLightbox} aria-label="Close">
           <Icon name="x" />
         </button>
       </div>
-      <div className="lightbox-stage" onMouseDown={(e) => e.target === e.currentTarget && closeLightbox()}>
+      <div className={`lightbox-stage${zoomed ? ' zoomed' : ''}`} onMouseDown={(e) => e.target === e.currentTarget && closeLightbox()}>
         {i > 0 && (
           <button className="lightbox-nav prev" onClick={() => setI(i - 1)} aria-label="Previous">
             <Icon name="back" size={22} />
           </button>
         )}
-        {it.video ? <video key={it.src} src={it.src} controls playsInline autoPlay /> : <img src={it.src} alt={it.name} />}
+        {it.video ? (
+          <video key={it.src} src={it.src} controls playsInline autoPlay />
+        ) : (
+          <img src={it.src} alt={it.name} title={zoomed ? 'Fit to the screen' : 'Actual size'} onClick={() => setZoomed(!zoomed)} />
+        )}
         {i < lb.items.length - 1 && (
           <button className="lightbox-nav next" onClick={() => setI(i + 1)} aria-label="Next">
             <Icon name="chevron" size={22} />
