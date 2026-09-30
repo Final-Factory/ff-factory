@@ -44,6 +44,11 @@ export interface IntakeConfig {
     diagnoses?: boolean;
     /** Requests FFBox files itself (the connector's "request" message; default true once enabled). */
     requests?: boolean;
+    /**
+     * Take Max's escalations from FFBox (POST /api/intake/ffbox with a key minted --scope ffbox; docs/intake.md,
+     * "Escalations from Max"). Default false.
+     */
+    escalations?: boolean;
     /** Answer the connector's board_check: FFBox asks the ledger before it works a report (default false). */
     boardCheck?: boolean;
     /** The game repo as board answers name it to FFBox ("Final-Factory/FinalFactory"); default: from repo.url. */

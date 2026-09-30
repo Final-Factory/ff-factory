@@ -172,6 +172,38 @@ to them as usual.
 The dispatcher handles intake requests like any other, batching small ones: one worker can take several (start it with
 one `work_id`, then `decide_work link` the others).
 
+## Escalations from Max
+
+w94 (Ben, 2026-09-30): Max stops saying "I've told the devs" with the report going nowhere. When Max, answering a player
+for FFBox, decides a report needs a developer (a bug it did not or may not fix, a design or balance question, anything
+else a developer must act on, like the wave-size cap in "Attack of thousands of enemies"), FFBox's host files it here.
+Until Lothsahn's next design FFBox fixes nothing itself (its `discord.route_all_to_ledger`, on), so obvious bugs come
+here too.
+
+- **One endpoint, one key.** `POST /api/intake/ffbox` with `Authorization: Bearer` and a key minted
+  `node server/apikey.ts ffbox --scope ffbox`. A key with scope `ffbox` reaches that endpoint and nothing else (`/mcp`
+  refuses it, `server/index.ts`); a key without it gets 403. FFBox gets no power beyond filing requests.
+- **The body** (`server/escalationRules.ts` `EscalationSchema`, strict, 32 KB): `ref` (idempotent), `conversation`,
+  `kind` (`bug`, `design`, `escalation`), `maxClass` (Max's own call), `title`, `diagnosis` (Max's findings),
+  `report` (the player's post), `threadId`, `url`, `channel`, `reporter`, `version`, `platform`, `attachments`
+  (Discord CDN only), `verdict`. Errors name the field and the rule, never the value. The full contract is in
+  docs/ffbox-connector-contract.md, "Escalations from Max".
+- **Checked and filed in one step** (`IntakeManager.onEscalation`): open ledger work for the thread (`discord:<threadId>`,
+  a person's request that names it included) takes it as a log line and answers `in_flight`; finished work answers `done`
+  with the release that carries it; otherwise it is filed as an `ffbox-request` for the system payer. A resend of the same
+  `ref` gets the same answer. Caps: `intake.ffbox.dailyCap` and `workLimits.intake` (answer `skipped`).
+- **Triage is FF Factory's** (w39): a `bug` is classified by the same fixed rules as any Discord report, over the player's
+  words and Max's title; `design` and `escalation` always need a human. Max's call is recorded beside it. Only an obvious
+  bug by the fixed rules can be auto-approved (`intake.ffbox.autoApprove`, off).
+- **Everything Max wrote is untrusted** (a model wrote it after reading players' text): the brief fences the diagnosis
+  and the report under the untrusted header and tells the worker to verify every claim. The worker never posts in the
+  thread: FFBox links its conversation to the request (`fff_link`) and tells the thread when the fix merges; the worker
+  puts `Discord: <thread url>` in the PR (`discordPrLine`).
+- **What Max says** comes from FFBox's host, never from the model: "Filed for the devs." only on `filed` or
+  `in_flight`; "Already fixed, it's in 0.50.0.51." on `done`; nothing about filing otherwise.
+- Off unless `intake.ffbox.enabled` and `intake.ffbox.escalations` are on. The Intake tab lists these requests with the
+  others.
+
 ## Nightly e2e regressions
 
 Ben, 2026-09-30: "stop this falling through the cracks." The nightly e2e lab (FinalFactory spec 075,
@@ -327,6 +359,10 @@ snowflakes; an entry that is not one trusts nobody.
    last report and what it came to. Turn on `intake.nightly.autoApprove.enabled` once the requests look right. The
    nightly-regression-sentry standing agent now duplicates this: narrow its charter to what the intake does not do, or
    pause it.
+10. **Escalations from Max** (w94; after Lothsahn merges the ffbox side and the w54 prerequisites): mint FFBox's key on
+   BEAST, `node server/apikey.ts ffbox --scope ffbox`, and hand it to Lothsahn out of band with the public URL. Set
+   `intake.ffbox: { enabled: true, escalations: true }` (leave `autoApprove` off) and restart. The first escalation
+   shows on the Intake tab under Needs a human.
 
 ## Rollout checklist: Lothsahn (FFBox's side)
 

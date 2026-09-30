@@ -15,6 +15,7 @@ import { beltFor } from './belts.ts';
 import { limitProblem } from './work.ts';
 import { UNTRUSTED_HEADER, parseBugThread, type DiscordMessage, type DiscordThread } from './intakeRules.ts';
 import type { NightlyReport, NightlyResult } from './nightlyRules.ts';
+import { ESCALATION } from './escalationRules.test.ts';
 import { run } from './proc.ts';
 import type { Config } from './config.ts';
 import type { ProviderConversation, Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
@@ -541,4 +542,59 @@ test('nightly: many at once become one batched request; flaky N nights running i
   assert.match(work().at(-1)!.title, /S4-rejoin-dwell flaky 3 nights running/);
   const capped = intake.onNightly(night('2026-10-01', NSHA('b'), [fail('B1-frenzy-sp')]))!;
   assert.deepEqual([capped[0].action, /daily cap/.test(capped[0].why ?? '')], ['skipped', true]);
+});
+
+test('escalations from Max: off by default; checked against the ledger and filed in one step; a resend gets the same answer', async (t) => {
+  const { intake, cfg, work, o, call } = setup(t);
+  assert.deepEqual(intake.onEscalation(ESCALATION), { status: 'off' }, 'off by default');
+  cfg.intake = { ffbox: { enabled: true, escalations: true } };
+  const filed = intake.onEscalation(ESCALATION);
+  assert.equal(filed.status, 'filed');
+  const w = o.requireWork((filed as { workId: string }).workId);
+  assert.deepEqual([w.title, w.source?.kind, w.source?.threadId, w.triage?.class, w.approval?.state, w.requestedBy.userId], ['Design question (via Max): Attack waves have no size cap', 'ffbox-request', ESCALATION.threadId, 'needs-human', 'pending', 'ben']);
+  assert.ok(w.keys.includes(`discord:${ESCALATION.threadId}`));
+  assert.deepEqual(intake.onEscalation(ESCALATION), filed, 'the same ref: the same answer, nothing new');
+  assert.equal(work().length, 1);
+
+  // Another escalation of the same thread from a later turn: the open request takes it as a log line.
+  const again = intake.onEscalation({ ...ESCALATION, ref: 'conv-412-turn-990', title: 'Waves also ignore the attack sliders' });
+  assert.deepEqual(again, { status: 'in_flight', workId: w.id });
+  assert.match(w.log.at(-1)!, /seen again by the intake: Design question \(via Max\): Waves also ignore/);
+  assert.equal(work().length, 1);
+
+  // A thread a person's request already names (w50 style) is in flight too, whatever FFBox thinks.
+  const ben = o.personalFor(BEN);
+  ben.lastFrom = 'human';
+  await call(ben.info, 'request_work', { title: 'Cap attack waves', brief: 'See thread 1554888928090263999' });
+  const person = work().find((x) => x.title === 'Cap attack waves')!;
+  assert.deepEqual(intake.onEscalation({ ...ESCALATION, ref: 'conv-500-turn-1', conversation: '500', threadId: '1554888928090263999', url: 'https://discord.com/channels/530867164866150410/1554888928090263999' }), { status: 'in_flight', workId: person.id });
+
+  // Finished work: done, with the release that carries it.
+  person.status = 'done';
+  person.delivery = { fixCommit: 'abc1234def', releasedIn: '0.50.0.51' };
+  assert.deepEqual(intake.onEscalation({ ...ESCALATION, ref: 'conv-501-turn-1', conversation: '501', threadId: '1554888928090263999', url: 'https://discord.com/channels/530867164866150410/1554888928090263999' }), { status: 'done', workId: person.id, version: '0.50.0.51' });
+});
+
+test('escalations from Max: an obvious bug by FF Factory\'s rules may be auto-approved; caps skip', async (t) => {
+  const { intake, work } = setup(t, { ffbox: { enabled: true, escalations: true, dailyCap: 2, autoApprove: { enabled: true, maxPerDay: 5 } } });
+  const bug = (n: number, text = 'The game crashes to desktop every time I dock a freighter at the station.', title = `Crash when docking ${n}`) => ({
+    ...ESCALATION,
+    ref: `conv-${n}-turn-1`,
+    conversation: String(n),
+    kind: 'bug' as const,
+    maxClass: 'obvious-bug' as const,
+    title,
+    report: text,
+    threadId: `15548889280902${String(n).padStart(5, '0')}`,
+    url: `https://discord.com/channels/530867164866150410/15548889280902${String(n).padStart(5, '0')}`,
+  });
+  const a = intake.onEscalation(bug(1));
+  assert.deepEqual([a.status, (a as { triage: string }).triage], ['filed', 'obvious-bug']);
+  assert.equal(work()[0].approval?.by, 'auto', 'auto-approve applies to an obvious bug by the fixed rules');
+  const vague = intake.onEscalation(bug(2, 'mining feels slow', 'Mining 2'));
+  assert.deepEqual([vague.status, (vague as { triage: string }).triage], ['filed', 'needs-human'], "Max calling it obvious does not make it so");
+  assert.equal(work()[1].approval?.state, 'pending');
+  const capped = intake.onEscalation(bug(3));
+  assert.equal(capped.status, 'skipped');
+  assert.match((capped as { why: string }).why, /daily cap/);
 });

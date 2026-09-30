@@ -164,5 +164,6 @@ test('API keys: a key minted with a scope says so, so /mcp can refuse it; an unk
   const bearer = (k: string) => a.bearer(req({ headers: { authorization: `Bearer ${k}` } }));
   assert.deepEqual(bearer(lab), { ok: true, name: 'nightly-lab', scope: 'nightly' });
   assert.deepEqual(bearer(mcp), { ok: true, name: 'laptop' });
+  assert.deepEqual(bearer(a.createApiKey('ffbox', undefined, 'ffbox')), { ok: true, name: 'ffbox', scope: 'ffbox' }, "FFBox's key for Max's escalations");
   assert.throws(() => a.createApiKey('x-lab', undefined, 'admin' as never), /key scope/);
 });

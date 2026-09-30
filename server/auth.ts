@@ -81,9 +81,12 @@ function checkProfile(p: UserProfile): Partial<UserRecord> {
   return out;
 }
 
-/** What a scoped API key may reach: "nightly" is the nightly e2e lab's report endpoint (docs/intake.md) and nothing else. */
-export type ApiKeyScope = 'nightly';
-export const API_KEY_SCOPES: readonly ApiKeyScope[] = ['nightly'];
+/**
+ * What a scoped API key may reach, and nothing else (docs/intake.md): "nightly" the nightly e2e lab's report endpoint,
+ * "ffbox" FFBox's escalations from Max (POST /api/intake/ffbox).
+ */
+export type ApiKeyScope = 'nightly' | 'ffbox';
+export const API_KEY_SCOPES: readonly ApiKeyScope[] = ['nightly', 'ffbox'];
 
 export class Auth {
   private readonly usersFile: string;

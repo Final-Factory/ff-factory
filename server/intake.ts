@@ -19,6 +19,15 @@ import type { Store } from './store.ts';
 import { emit } from './store.ts';
 import type { Identity } from './identity.ts';
 import type { BoardAnswer, Orchestrators } from './orchestrators.ts';
+import { escalationBrief, escalationSource, escalationTitle, escalationTriage, type Escalation } from './escalationRules.ts';
+
+/** What FFBox gets back for an escalation (docs/intake.md, "Escalations from Max"). */
+export type EscalationAnswer =
+  | { status: 'filed'; workId: string; triage: 'obvious-bug' | 'needs-human' }
+  | { status: 'in_flight'; workId: string }
+  | { status: 'done'; workId: string; version: string | null }
+  | { status: 'skipped'; why: string }
+  | { status: 'off' };
 import type { BoardCheckMessage, ProviderRequestMessage, ResultMessage, WorkReply } from './providerProtocol.ts';
 import { run } from './proc.ts';
 import {
@@ -100,6 +109,8 @@ interface Persisted {
   versions: Record<string, string>;
   lastVersion?: string;
   checkedAt?: string;
+  /** Escalations from FFBox already answered, by their ref: a resend gets the same answer and files nothing new. */
+  escalations?: Record<string, { answer: EscalationAnswer; at: number }>;
   /** The last nightly report and what it came to (the Intake tab). */
   nightly?: NonNullable<IntakeSummary['nightly']>['last'];
   polledAt?: string;
@@ -160,7 +171,7 @@ export class IntakeManager {
   private load(): Persisted {
     try {
       const d = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<Persisted>;
-      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly };
+      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, escalations: d.escalations };
     } catch {
       return { cursors: {}, recent: [], versions: {} };
     }
@@ -443,6 +454,65 @@ export class IntakeManager {
     return { workId: w?.id, status: w?.approval?.state === 'pending' ? 'pending_approval' : (w?.status ?? 'new'), ...(res.repeat || res.mergedInto ? { repeat: true } : {}) };
   }
 
+  /**
+   * Max's escalation from FFBox (POST /api/intake/ffbox; docs/intake.md, "Escalations from Max"). The ledger is checked
+   * and the request filed in one step: open work for the thread takes it as a log line (in_flight), finished work says
+   * which release carries it (done), otherwise it is filed with FF Factory's own triage. A resend of the same ref gets
+   * the same answer. `off` while intake.ffbox.escalations (or intake.ffbox) is off.
+   */
+  onEscalation(e: Escalation): EscalationAnswer {
+    const s = this.settings;
+    if (!s.ffbox.enabled || !s.ffbox.escalations) return { status: 'off' };
+    const seen = this.data.escalations?.[e.ref];
+    if (seen) return seen.answer;
+    const answer = this.escalate(e);
+    const all = { ...this.data.escalations, [e.ref]: { answer, at: this.now() } };
+    // The newest 500, and none older than 30 days.
+    const keep = Object.entries(all)
+      .filter(([, v]) => this.now() - v.at < 30 * 86_400_000)
+      .sort((a, b) => b[1].at - a[1].at)
+      .slice(0, 500);
+    this.data.escalations = Object.fromEntries(keep);
+    this.changed();
+    return answer;
+  }
+
+  private escalate(e: Escalation): EscalationAnswer {
+    const s = this.settings;
+    const title = escalationTitle(e);
+    const board = this.d.orchestrators.boardCheck({ keys: [`discord:${e.threadId}`], conversation: e.conversation }, s.lookbackDays);
+    const match = board.matches[0];
+    if (board.verdict === 'in_flight' && match) {
+      this.d.orchestrators.noteIntake(match.id, `Max escalated its thread again (${e.kind}, FFBox conversation ${e.conversation}): ${cleanLine(e.title, 160)}`);
+      this.record({ source: 'ffbox-request', action: 'repeat', title, workId: match.id, why: 'the thread is already in flight', url: e.url });
+      return { status: 'in_flight', workId: match.id };
+    }
+    if (board.verdict === 'done' && match) {
+      this.record({ source: 'ffbox-request', action: 'repeat', title, workId: match.id, why: 'the thread was already fixed', url: e.url });
+      return { status: 'done', workId: match.id, version: match.version ?? null };
+    }
+    const source = escalationSource(e);
+    const triage = escalationTriage(e);
+    const now = this.now();
+    const res = this.d.orchestrators.fileIntake({
+      title,
+      brief: escalationBrief(e),
+      source,
+      triage,
+      requestedBy: this.d.identity.systemPayer(),
+      autoApprove: s.ffbox.autoApprove,
+      kinds: FFBOX_KINDS,
+      lookbackDays: s.lookbackDays,
+      limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.ffbox.dailyCap, now),
+    });
+    this.outcome('ffbox-request', title, e.url, res);
+    if (res.skipped) return { status: 'skipped', why: res.skipped };
+    const w = res.mergedInto ? this.d.store.work.get(res.mergedInto) : res.item;
+    if (!w) return { status: 'skipped', why: 'not filed' };
+    if (res.repeat || res.mergedInto) return { status: 'in_flight', workId: w.id };
+    return { status: 'filed', workId: w.id, triage: triage.class === 'obvious-bug' ? 'obvious-bug' : 'needs-human' };
+  }
+
   /** FFBox asks the ledger before it works a report; undefined while the check is off. */
   onBoardCheck(m: BoardCheckMessage): BoardAnswer | undefined {
     const s = this.settings;
@@ -702,6 +772,7 @@ export class IntakeManager {
         branches: s.ffbox.branches,
         diagnoses: s.ffbox.diagnoses,
         requests: s.ffbox.requests,
+        escalations: s.ffbox.escalations,
         boardCheck: s.ffbox.boardCheck,
         sendWork: s.ffbox.sendWork,
         dailyCap: s.ffbox.dailyCap,

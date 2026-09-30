@@ -15,6 +15,7 @@ import { ProviderManager } from './providers.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
+import { parseEscalation } from './escalationRules.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { Notifier } from './notify.ts';
 import { refreshSandboxGit } from './gitStatus.ts';
@@ -1046,6 +1047,15 @@ const server = http.createServer(async (req, res) => {
       const results = intake.onNightly(parsed.report);
       if (!results) return send(res, 200, { enabled: false, note: 'the nightly intake is off (config intake.nightly.enabled)' });
       return send(res, 200, { enabled: true, results });
+    }
+    // Max's escalations from FFBox (docs/intake.md, "Escalations from Max"): a key minted --scope ffbox, nothing else.
+    if (url.pathname === '/api/intake/ffbox' && req.method === 'POST') {
+      const who = auth.bearer(req);
+      if (!who.ok) return send(res, who.status, { error: who.status === 429 ? 'too many failures' : 'API key required' });
+      if (who.scope !== 'ffbox') return send(res, 403, { error: 'an ffbox-scoped key is required (node server/apikey.ts <name> --scope ffbox)' });
+      const parsed = parseEscalation(await readJson(req, 32 * 1024));
+      if ('error' in parsed) return send(res, 400, { error: parsed.error });
+      return send(res, 200, intake.onEscalation(parsed.escalation));
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
     // version of an open-source app is public anyway.

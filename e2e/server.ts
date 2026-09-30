@@ -112,7 +112,7 @@ fs.writeFileSync(
       ...(withProvider
         ? {
             providers: { ffbox: { enabled: true, tokenSha256: createHash('sha256').update(E2E_PROVIDER_TOKEN).digest('hex') } },
-            intake: { ffbox: { enabled: true, boardCheck: true, repo: 'Final-Factory/FinalFactory' } },
+            intake: { ffbox: { enabled: true, boardCheck: true, escalations: true, repo: 'Final-Factory/FinalFactory' } },
           }
         : {}),
     },
@@ -186,6 +186,8 @@ const auth = new Auth(dataDir, { trustProxy: false });
 await auth.setUser(USER, PASSWORD);
 await auth.setUser(MATE, MATE_PASSWORD, { displayName: 'Team Mate', role: 'member' });
 fs.writeFileSync(path.join(base, 'teammate-key.txt'), auth.createApiKey('teammate-laptop', MATE));
+// FFBox's key for Max's escalations (docs/intake.md), scoped to POST /api/intake/ffbox (e2e/provider.spec.ts).
+if (withProvider) fs.writeFileSync(path.join(base, 'ffbox-key.txt'), auth.createApiKey('ffbox', undefined, 'ffbox'));
 
 const { setQueryForTesting } = await import('../server/sessions.ts');
 setQueryForTesting(fakeQuery() as never);

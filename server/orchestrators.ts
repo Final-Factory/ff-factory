@@ -836,6 +836,14 @@ export class Orchestrators {
     return true;
   }
 
+  /** A line in an intake request's log (an escalation that repeats it). */
+  noteIntake(id: string, line: string) {
+    const w = this.store.work.get(id);
+    if (!w) return;
+    this.stamp(w, line);
+    this.store.putWork(w);
+  }
+
   /** An FFBox review request whose pull request merged or closed on FFBox's side needs nothing more. */
   closeIntake(id: string, outcome: string) {
     const w = this.requireWork(id);
