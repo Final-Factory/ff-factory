@@ -107,7 +107,8 @@ fs.writeFileSync(
       worker: { permissionMode: 'bypassPermissions', effort: 'low' },
       voice: { enabled: false, autoInstall: false, tts: false },
       max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },
-      ...(withIntake ? { intake: { discord: { enabled: true, trusted: { [INTAKE_TRUSTED]: 'tester' }, pollMinutes: 120 }, reviewers: ['tester'] } } : {}),
+      // FFBox owns #bug-reports by default (docs/intake.md): this server takes it back, to test the Discord intake.
+      ...(withIntake ? { intake: { discord: { enabled: true, trusted: { [INTAKE_TRUSTED]: 'tester' }, pollMinutes: 120, bugChannels: ['bug_reports'], ffboxOwns: [] }, reviewers: ['tester'] } } : {}),
       // The provider projects also take FFBox's ledger check and its fix branches (docs/intake.md; e2e/provider.spec.ts).
       ...(withProvider
         ? {
