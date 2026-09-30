@@ -379,6 +379,35 @@ re-sends `board_check` for everything it still follows after every (re)connect.
 **FFBox SHOULD** skip work whose check says `in_flight` or `done`, and point at the ledger id instead (an operator
 may override), so the two teams never build the same fix twice.
 
+## Escalations from Max (HTTP, not the connector)
+
+Max's escalations do not ride the connector: FFBox's host posts them to `POST /api/intake/ffbox` with an API key minted
+`node server/apikey.ts ffbox --scope ffbox`, which reaches that endpoint and nothing else (docs/intake.md, "Escalations
+from Max"). `Content-Type: application/json`, at most 32 KB, unknown fields refused.
+
+| field | required | rule |
+|---|---|---|
+| `v` | yes | `1` |
+| `ref` | yes | `^[A-Za-z0-9._:-]{1,80}$`, idempotent (e.g. `conv-412-turn-977`): the same ref gets the same answer and files nothing new |
+| `conversation` | yes | FFBox's conversation id |
+| `kind` | yes | `bug`, `design` or `escalation` |
+| `maxClass` | yes | `obvious-bug` or `needs-human`: Max's own call (recorded; FF Factory triages by its own rules) |
+| `title` | yes | 1-200 characters, one line, untrusted |
+| `diagnosis` | yes | 1-6000 characters, Max's findings, untrusted |
+| `report` | no | up to 4000 characters, the player's post, untrusted |
+| `threadId` | yes | `^\d{15,25}$` |
+| `url` | yes | `https://discord.com/channels/<guild>/<thread>[/<message>]` |
+| `channel` | yes | the watch alias, `^[a-z0-9_]{1,40}$` |
+| `reporter`, `version`, `platform` | no | a display name (60, untrusted); `^[A-Za-z0-9._+-]{1,40}$` each |
+| `attachments` | no | up to 10 `{name, url, bytes?}`, Discord CDN URLs only |
+| `verdict` | no | `^[A-Z][A-Z-]{0,39}$` |
+
+The answer is always `200` with one of `{"status":"filed","workId","triage"}`, `{"status":"in_flight","workId"}`,
+`{"status":"done","workId","version"}` (`version` null while merged but unreleased), `{"status":"skipped","why"}` or
+`{"status":"off"}`. `401` a missing or wrong key, `403` a key without scope `ffbox`, `400` a bad body (the field and
+the rule, never the value), `413` too large. Retry network errors and 5xx, never 4xx. The ledger check and the filing
+happen in one step here, so there is no race between checking and filing.
+
 ## Limits and close codes
 
 - Rate: a token bucket of 1000 messages refilled at 100 a second, which is enough for a catch-up of

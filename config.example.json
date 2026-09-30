@@ -78,7 +78,8 @@
     },
     "ffbox": {
       "enabled": false,
-      "boardCheck": false
+      "boardCheck": false,
+      "escalations": false
     },
     "release": {
       "enabled": false,

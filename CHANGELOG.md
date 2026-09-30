@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Added
+
+- **Escalations from Max** (w94; [docs/intake.md](docs/intake.md#escalations-from-max)): FFBox's host files the reports
+  Max decides need a developer (bugs it did not or may not fix, design questions, escalations) with
+  `POST /api/intake/ffbox` and a key minted `--scope ffbox`, which reaches nothing else. The ledger is checked and the
+  request filed in one step (`in_flight` or `done` for a thread already there, `filed` otherwise, the same answer for a
+  resent `ref`). Triage stays FF Factory's (a design question always needs a human; a bug by the fixed rules); Max's
+  diagnosis and the player's report are fenced as untrusted; workers never post in the thread and put `Discord: <url>`
+  in the PR. Off unless `intake.ffbox.escalations`.
+
 ### Changed
 
 - **#bug-reports and dev_bug_reports belong to FFBox** ([docs/intake.md](docs/intake.md#ffbox-owns-bug-reports)). The

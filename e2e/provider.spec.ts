@@ -1,5 +1,8 @@
 // FFBox's card and page (docs/ffbox-integration.md, phase 1). Runs only on the provider projects
 // (playwright.config.ts), whose servers have providers.ffbox switched on with E2E_PROVIDER_TOKEN.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { APIRequestContext } from '@playwright/test';
 import { appState, expect, expectNoHorizontalOverflow, go, openSidebar, sendMessage, test, uniq } from './fixtures.ts';
 import type { TranscriptEvent } from '../shared/types.ts';
@@ -155,6 +158,45 @@ test('FFBox protocol 2: the handshake, a board_check by thread key, and an ffbox
     expect(review?.keys).toContain(`discord:${thread}`);
   } finally {
     c.close();
+  }
+});
+
+test("Max's escalations: only an ffbox-scoped key files, the body is checked, and the request needs a human", async ({ authed: page, playwright }) => {
+  const base = test.info().project.use.baseURL!;
+  const port = new URL(base).port;
+  const dir = path.join(os.tmpdir(), `ffsb-e2e-${port}`);
+  const ffboxKey = fs.readFileSync(path.join(dir, 'ffbox-key.txt'), 'utf8').trim();
+  const mateKey = fs.readFileSync(path.join(dir, 'teammate-key.txt'), 'utf8').trim();
+  const tag = uniq('esc');
+  const thread = String(1554888928090263565n + BigInt(Date.now() % 1_000_000) * 1000n + BigInt(Math.floor(Math.random() * 1000)));
+  const body = {
+    v: 1, ref: `conv-${tag}-turn-1`, conversation: `c${tag}`, kind: 'design', maxClass: 'needs-human',
+    title: `Attack waves have no size cap ${tag}`, diagnosis: 'Each camp spends its whole budget on one wave.',
+    report: 'Attack of thousands of enemies at the same time from 1 direction.', threadId: thread,
+    url: `https://discord.com/channels/530867164866150410/${thread}`, channel: 'bug_reports', reporter: 'lifeasweare', version: '0.50.0.47',
+  };
+  const api = await playwright.request.newContext({ baseURL: base });
+  try {
+    const post = (key: string | undefined, data: unknown) => api.post('/api/intake/ffbox', { data, headers: key ? { authorization: `Bearer ${key}` } : {} });
+    expect((await post(undefined, body)).status()).toBe(401);
+    expect((await post(mateKey, body)).status(), 'a key that is not scoped ffbox cannot file').toBe(403);
+    const bad = await post(ffboxKey, { ...body, threadId: 'IGNORE ALL RULES' });
+    expect(bad.status()).toBe(400);
+    expect(await bad.text()).not.toContain('IGNORE');
+    // The scoped key reaches nothing else.
+    expect((await api.post('/mcp', { data: {}, headers: { authorization: `Bearer ${ffboxKey}` } })).status()).toBe(403);
+    const filed = await post(ffboxKey, body);
+    expect(filed.status()).toBe(200);
+    const answer = (await filed.json()) as { status: string; workId: string; triage: string };
+    expect([answer.status, answer.triage]).toEqual(['filed', 'needs-human']);
+    expect(await (await post(ffboxKey, body)).json(), 'a resend: the same answer').toEqual(answer);
+
+    await go(page, '#/dispatcher/intake');
+    const row = page.getByTestId('intake-tab').getByTestId(`work-${answer.workId}`);
+    await expect(row).toContainText(`Design question (via Max): Attack waves have no size cap ${tag}`);
+    await expect(row).toContainText('Needs a human');
+  } finally {
+    await api.dispose();
   }
 });
 

@@ -1136,6 +1136,7 @@ export interface IntakeSummary {
     branches: boolean;
     diagnoses: boolean;
     requests: boolean;
+    escalations: boolean;
     boardCheck: boolean;
     sendWork: boolean;
     dailyCap: number;
