@@ -1088,6 +1088,8 @@ export interface IntakeSummary {
     enabled: boolean;
     bugChannels: string[];
     requestChannels: string[];
+    /** Channels FFBox owns, which the intake never files from (docs/intake.md). */
+    ffboxOwned?: string[];
     /** The FF Factory logins trusted Discord ids map to (never the ids themselves). */
     trustedPeople: string[];
     dailyCap: number;

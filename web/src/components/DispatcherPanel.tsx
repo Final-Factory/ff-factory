@@ -217,7 +217,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
         <div className="intake-source">
           <Chip tone={d.enabled ? 'green' : 'grey'}>Discord {onOff(d.enabled)}</Chip>
           <span className="dim small">
-            bug reports from {d.bugChannels.map((c) => `#${c.replace(/_/g, '-')}`).join(', ') || 'no channel'}; requests to Max in {d.requestChannels.map((c) => `#${c.replace(/_/g, '-')}`).join(', ') || 'no channel'} from {d.trustedPeople.length ? d.trustedPeople.join(', ') : 'nobody trusted yet'}; at most {d.dailyCap} a day, {d.perReporterPerDay} per reporter; auto-approve {d.autoApprove.enabled ? `on, ${d.autoApprove.maxPerDay} a day${!d.autoApprove.bugs ? ', not bug reports' : ''}${!d.autoApprove.requests ? ', not requests' : ''}` : 'off'}
+            bug reports from {d.bugChannels.map((c) => `#${c.replace(/_/g, '-')}`).join(', ') || 'no channel'}{d.ffboxOwned?.length ? ` (${d.ffboxOwned.map((c) => `#${c.replace(/_/g, '-')}`).join(', ')}: FFBox's, never filed from)` : ''}; requests to Max in {d.requestChannels.map((c) => `#${c.replace(/_/g, '-')}`).join(', ') || 'no channel'} from {d.trustedPeople.length ? d.trustedPeople.join(', ') : 'nobody trusted yet'}; at most {d.dailyCap} a day, {d.perReporterPerDay} per reporter; auto-approve {d.autoApprove.enabled ? `on, ${d.autoApprove.maxPerDay} a day${!d.autoApprove.bugs ? ', not bug reports' : ''}${!d.autoApprove.requests ? ', not requests' : ''}` : 'off'}
             {d.polledAt ? `; checked ${fmtRelative(d.polledAt, now)}` : ''}
           </span>
         </div>

@@ -35,6 +35,8 @@ const PEOPLE: UserInfo[] = [
 ];
 const GUILD = '530867164866150410';
 const BUGS = '1069745561672106015';
+/** #bug-reports, which FFBox owns: the intake never files from it. */
+const FFBOX_BUGS = '1069745561672106099';
 const DEV = '1012843817981976686';
 const BOT = '1450000000000000001';
 const LOTH_ID = '222222222222222222';
@@ -60,10 +62,10 @@ class FakeDiscord implements DiscordReader {
   chat: DiscordMessage[] = [];
   calls = 0;
   channelIdOf(alias: string) {
-    return ({ bug_reports: BUGS, dev_chat: DEV } as Record<string, string>)[alias];
+    return ({ beta_bugs: BUGS, dev_chat: DEV, bug_reports: FFBOX_BUGS } as Record<string, string>)[alias];
   }
   async channelName(id: string) {
-    return id === BUGS ? 'bug-reports' : 'dev-chat';
+    return id === BUGS ? 'beta-bugs' : id === FFBOX_BUGS ? 'bug-reports' : 'dev-chat';
   }
   async ensureBotId() {
     return this.botId;
@@ -107,7 +109,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg
     orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: true },
     worker: { permissionMode: 'bypassPermissions', effort: 'low' },
     unity: {},
-    intake: intakeCfg,
+    intake: intakeCfg.discord ? { ...intakeCfg, discord: { bugChannels: ['beta_bugs'], ...intakeCfg.discord } } : intakeCfg,
     ...extra,
   } as unknown as Config;
   const store = new Store(dir);
@@ -157,6 +159,36 @@ test('intake: off by default; a poll reads nothing and files nothing', async (t)
   assert.deepEqual([s.discord.enabled, s.ffbox.enabled, s.release.enabled, s.discord.autoApprove.enabled], [false, false, false, false]);
 });
 
+test('intake: #bug-reports is FFBox\'s: never polled or filed from, even when config.json names it or its id', async (t) => {
+  const { intake, discord, work } = setup(t, { discord: { enabled: true, bugChannels: ['bug_reports', FFBOX_BUGS, 'beta_bugs'] } });
+  // A thread in FFBox's forum, and one in the channel the intake still reads.
+  const ffboxThread = (min: number, title: string) => {
+    const id = discord.thread(min, title);
+    discord.threads.find((x) => x.id === id)!.parent_id = FFBOX_BUGS;
+    return id;
+  };
+  ffboxThread(-60, 'old');
+  discord.thread(-60, 'old too');
+  const polled: string[] = [];
+  const forum = discord.forumThreads.bind(discord);
+  discord.forumThreads = async (id: string) => (polled.push(id), forum(id));
+  await intake.pollDiscord();
+  ffboxThread(5, 'Belts stop after loading a save');
+  discord.thread(6, 'Splitters prefer the left belt');
+  await intake.pollDiscord();
+  assert.deepEqual([...new Set(polled)], [BUGS], "FFBox's forum is never read for filing");
+  assert.deepEqual(work().map((w) => [w.source?.channel, w.title]), [['#beta-bugs', 'Discord bug: Splitters prefer the left belt']]);
+  assert.match(intake.summary().discord.ffboxOwned!.join(), /bug_reports,dev_bug_reports/);
+});
+
+test("every worker's brief: FFBox's channels are read-only, the PR's Discord line, no fixed notice for ffbox/* work", (t) => {
+  const { agents, store } = setup(t);
+  const brief = (agents as unknown as { workerBrief: (sb: unknown) => string }).workerBrief(store.sandboxes.get('alpha'));
+  assert.match(brief, /## Discord\n#bug-reports and dev_bug_reports belong to FFBox/);
+  assert.ok(brief.includes('`Discord: https://discord.com/channels/<guild id>/<thread id>`'));
+  assert.match(brief, /never post a "fixed" or "merged" notice/);
+});
+
 test('intake: a new bug thread waits for a person; the dispatcher hears it only once approved, with the rules added to its worker', async (t) => {
   const { intake, discord, o, dispatcher, call, heard, work, sessions, store, attention } = setup(t, on);
   discord.thread(-60, 'An old report');
@@ -178,7 +210,7 @@ test('intake: a new bug thread waits for a person; the dispatcher hears it only 
   assert.equal(heard(dispatcher().info.id, '[work request]').length, 0, 'not the dispatcher’s until a person approves');
   assert.match((await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'fix it', title: 'x', work_id: w.id })).text, /waits for a person to approve it/);
   assert.match((await call(dispatcher().info, 'decide_work', { id: w.id, action: 'queue', note: 'x' })).text, /waits for a person to approve it/);
-  assert.match((await call(dispatcher().info, 'list_work', { source: 'discord' })).text, new RegExp(`${w.id} \\[new; Discord #bug-reports, untrusted, needs a human\\]`));
+  assert.match((await call(dispatcher().info, 'list_work', { source: 'discord' })).text, new RegExp(`${w.id} \\[new; Discord #beta-bugs, untrusted, needs a human\\]`));
   assert.match((await call(dispatcher().info, 'list_work', { status: 'needs_human' })).text, new RegExp(`^- ${w.id} `));
   assert.match((await call(dispatcher().info, 'list_work', { id: w.id })).text, /Triage: needs-human \(needs a human: no clear defect/);
   assert.equal((await call(dispatcher().info, 'list_work', { source: 'people' })).text, 'No open requests.');
@@ -187,7 +219,7 @@ test('intake: a new bug thread waits for a person; the dispatcher hears it only 
   o.approveIntake(w.id, BEN);
   await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request]').length === 1);
   const notice = heard(dispatcher().info.id, '[work request]')[0].text;
-  assert.match(notice, new RegExp(`\\[work request\\] ${w.id} \\(intake: Discord #bug-reports, untrusted, approved by Ben; approved by Ben\\)`));
+  assert.match(notice, new RegExp(`\\[work request\\] ${w.id} \\(intake: Discord #beta-bugs, untrusted, approved by Ben; approved by Ben\\)`));
   assert.ok(notice.includes(UNTRUSTED_HEADER));
 
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Investigate and fix the belt report.', title: 'Belt report', work_id: w.id });
@@ -212,7 +244,7 @@ test('intake: auto-approve within its daily count; the daily and per-reporter ca
     const starter: DiscordMessage = player
       ? { id, author: { id: player, global_name: 'P' }, content: text }
       : { id, webhook_id: '9', author: { id: '9', bot: true }, embeds: [{ title, description: text, fields: [{ name: 'Game Version', value: '0.50.0.46' }] }] };
-    return parseBugThread({ id, parent_id: BUGS, name: title, owner_id: player }, starter, { guildId: GUILD, channel: '#bug-reports' });
+    return parseBugThread({ id, parent_id: BUGS, name: title, owner_id: player }, starter, { guildId: GUILD, channel: '#beta-bugs' });
   };
   assert.equal(intake.fileBug(report(flake(1), 'Crash when docking at a station')), 'filed');
   assert.equal(intake.fileBug(report(flake(2), 'Research tree tooltip is blank')), 'filed');
@@ -269,7 +301,7 @@ test('intake: a trusted person’s request to Max is filed for them; a stranger�
 
 test('intake: a design question goes to the reviewers, who join the request; their answer reopens it for the dispatcher', async (t) => {
   const { intake, o, call, dispatcher, heard, store, attention } = setup(t, { discord: { enabled: true, autoApprove: { enabled: true } }, reviewers: ['ben', 'lothsahn'] });
-  intake.fileBug(parseBugThread({ id: flake(1), parent_id: BUGS, name: 'Splitters prefer the left belt' }, undefined, { channel: '#bug-reports' }));
+  intake.fileBug(parseBugThread({ id: flake(1), parent_id: BUGS, name: 'Splitters prefer the left belt' }, undefined, { channel: '#beta-bugs' }));
   const w = [...store.work.values()][0];
   assert.equal(w.triage?.class, 'needs-human', 'auto-approve is on, but this is not an obvious bug');
   assert.equal(w.approval?.state, 'pending');
@@ -292,7 +324,7 @@ test('intake: a design question goes to the reviewers, who join the request; the
 test('intake: Max’s replies and closes in an intake thread are recorded on its request', (t) => {
   const { intake, store } = setup(t, on);
   const thread = flake(1);
-  intake.fileBug(parseBugThread({ id: thread, parent_id: BUGS, name: 'x' }, undefined, { channel: '#bug-reports' }));
+  intake.fileBug(parseBugThread({ id: thread, parent_id: BUGS, name: 'x' }, undefined, { channel: '#beta-bugs' }));
   const w = [...store.work.values()][0];
   const ev = { id: 'e', at: '2026-09-29T12:00:00.000Z', ok: true, where: 'host' } as const;
   intake.onMaxEvent({ ...ev, action: 'reply', channelId: thread });
@@ -370,7 +402,7 @@ test('intake: a landed fix that ships in a release gets one follow-up, approved 
   assert.equal(cfg.repo.basePath, repo);
 
   const thread = flake(1);
-  intake.fileBug(parseBugThread({ id: thread, parent_id: BUGS, name: 'Belts stop' }, undefined, { guildId: GUILD, channel: '#bug-reports' }));
+  intake.fileBug(parseBugThread({ id: thread, parent_id: BUGS, name: 'Belts stop' }, undefined, { guildId: GUILD, channel: '#beta-bugs' }));
   const w = [...store.work.values()][0];
   o.noteRelease(w.id, { fixCommit: fix }, 'test: the fix');
   await intake.checkReleases();
@@ -404,8 +436,8 @@ test('one place: work started outside the ledger (over /mcp, from the dashboard,
 
 test('a reviewer approves or declines from their own chat, only in a turn of their own; nobody else can', async (t) => {
   const { intake, o, call, work } = setup(t, { discord: { enabled: true }, reviewers: ['ben'] });
-  intake.fileBug(parseBugThread({ id: flake(1), parent_id: BUGS, name: 'Make mining faster' }, undefined, { channel: '#bug-reports' }));
-  intake.fileBug(parseBugThread({ id: flake(2), parent_id: BUGS, name: 'Solar should give more power' }, undefined, { channel: '#bug-reports' }));
+  intake.fileBug(parseBugThread({ id: flake(1), parent_id: BUGS, name: 'Make mining faster' }, undefined, { channel: '#beta-bugs' }));
+  intake.fileBug(parseBugThread({ id: flake(2), parent_id: BUGS, name: 'Solar should give more power' }, undefined, { channel: '#beta-bugs' }));
   const [a, b] = work();
   const ben = o.personalFor(BEN);
   ben.lastFrom = 'system';
@@ -417,6 +449,6 @@ test('a reviewer approves or declines from their own chat, only in a turn of the
   assert.deepEqual([b.status, b.outcome], ['rejected', 'balance is ours to decide']);
   const loth = o.personalFor(LOTH);
   loth.lastFrom = 'human';
-  intake.fileBug(parseBugThread({ id: flake(3), parent_id: BUGS, name: 'Add a new ship' }, undefined, { channel: '#bug-reports' }));
+  intake.fileBug(parseBugThread({ id: flake(3), parent_id: BUGS, name: 'Add a new ship' }, undefined, { channel: '#beta-bugs' }));
   assert.match((await call(loth.info, 'update_work', { id: work().at(-1)!.id, approve: true })).text, /only Ben approve or decline intake requests/, 'not a reviewer');
 });
