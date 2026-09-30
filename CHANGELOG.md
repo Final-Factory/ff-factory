@@ -16,7 +16,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   intake never files work from them (config.json naming them, or their ids, is ignored), its worker rules for a thread
   there say not to post or close and to put `Discord: <thread url>` in the PR, and release follow-ups skip them. The
   Intake tab says which channels FFBox owns. `intake.discord.bugChannels` now defaults to none.
-||||||| 52b9c93
+
 ### Added
 
 - **Orchestrators remember** ([docs/orchestrators.md](docs/orchestrators.md#memory)). Every person's orchestrator
