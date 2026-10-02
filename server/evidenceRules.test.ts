@@ -7,7 +7,7 @@ import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
-import { Agents, EVIDENCE_RULES, REPORT_LABELS, WORKER_UPDATE_RELAY } from './agents.ts';
+import { Agents, EVIDENCE_RULES, MERGE_RULES, REPORT_LABELS, WORKER_UPDATE_RELAY } from './agents.ts';
 import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
@@ -69,12 +69,19 @@ test('the evidence rule: the worker settles its own guesses; a person is asked f
     "Settle your own guesses by research before you act: the tool's or platform's own docs and the value its own screen recommends first",
     'Then carry on without asking',
     'Ask the user only to confirm a money value (with the evidence beside it)',
-    'deleting, app settings and deploys, publishing in their name, merges that are not pre-approved, releases',
+    'deleting, app settings and deploys, publishing in their name, releases',
     'a real fork (give the options and your recommendation)',
     'stop and diagnose before changing anything',
     '`/ff-agents:evidence-gate`',
   ])
     assert.ok(EVIDENCE_RULES.includes(part), part);
+  // Merging is the worker's own step, not something reserved for the person (the owner, 2026-10-02).
+  assert.ok(!/pre-approved/.test(EVIDENCE_RULES), 'no merge waits for an approval');
+  assert.ok(EVIDENCE_RULES.endsWith(MERGE_RULES));
+  assert.ok(MERGE_RULES.startsWith('## Your pull requests\nMerge your own pull request once its verification is done and CI is green.'));
+  assert.match(MERGE_RULES, /Never stop at an open PR waiting for the user/);
+  assert.match(MERGE_RULES, /Hold one only for exceptional risk or a concrete timing reason, and say in your report which it is and when it will merge/);
+  assert.match(MERGE_RULES, /Verification still comes first/);
   assert.match(REPORT_LABELS, /Label each number and recommendation as measured, sourced or a guess/);
   assert.match(REPORT_LABELS, /what you saw yourself rather than what a title, a measurement table or a tool verdict implies/);
   assert.match(REPORT_LABELS, /an orchestrator relays only the start of a long report/);
@@ -98,6 +105,7 @@ test("every worker's brief carries it: a sandbox on this host, a machine's main 
     assert.ok(brief.includes(`instead of guessing. ${REPORT_LABELS}`), `${name}: the labels, in Reporting`);
     assert.ok(brief.indexOf(EVIDENCE_RULES) < brief.indexOf('## Reporting'), `${name}: the rule comes before Reporting`);
     assert.equal(brief.split('## Evidence before you act').length, 2, `${name}: once`);
+    assert.ok(brief.includes(MERGE_RULES), `${name}: merge your own pull request`);
   }
 });
 
@@ -116,11 +124,18 @@ test('orchestrators: keep the labels, send a guess back to be researched, and do
   assert.match(personal, /or for a fork research could not settle \(the options and the worker's recommendation\)/);
   assert.match(personal, /the brief also lists the decisions the work must settle \(a list of topics gets topic research\)/);
   assert.match(personal, /names the first check after it goes live: when, and by which breakdown/);
+  // Nobody waits for the person to merge.
+  assert.ok(!/pre-approved/.test(personal));
+  assert.match(personal, /Workers merge their own PRs once verification is done and CI is green/);
+  assert.match(personal, /Do not file work as "PR only", and do not present a finished PR to Ben as waiting for their approval/);
+  assert.match(personal, /holds a PR only for exceptional risk or a concrete timing reason: relay which it is and when it will merge/);
 
   // The dispatcher writes the worker's brief.
   assert.match(dispatcher, /also carries the decisions the work must settle/);
   assert.match(dispatcher, /the worker settles its own guesses by research and then proceeds/);
   assert.match(dispatcher, /decide_work ask is for what only the requester can answer, never for something a worker could research/);
+  assert.match(dispatcher, /Done means merged: a worker merges its own PR once its verification is done and CI is green/);
+  assert.match(dispatcher, /Do not write a brief that ends at an open PR waiting for a person/);
 
   // What an orchestrator is told with every finished worker turn.
   assert.match(WORKER_UPDATE_RELAY, /Keep the report's labels on any number or recommendation you pass on \(measured, sourced, guess\)/);

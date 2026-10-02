@@ -37,6 +37,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   decisions only for money, reserved actions and real forks. Briefs for consequential work list the decisions to
   settle. The orchestrators' memory brief says general lessons go to the harness repo by pull request. Prompt text
   only: no tool, setting or behaviour of the server changes.
+- **Workers merge their own pull requests** (w208; the owner, 2026-10-02: "stop holding prs, just merge them"). Every
+  worker's brief (`MERGE_RULES`) says to merge once verification is done and CI is green, and to hold a PR only for
+  exceptional risk or a concrete timing reason, reporting which and when it will merge. Merges are no longer in the
+  list of things reserved for the person, in the worker briefs or in a person's orchestrator's. Both orchestrators'
+  briefs say done means merged. The standing agents' delegated tasks keep their rule (a pull request, never merged by
+  the worker).
 - **Escalations from Max** (w94; [docs/intake.md](docs/intake.md#escalations-from-max)): FFBox's host files the reports
   Max decides need a developer (bugs it did not or may not fix, design questions, escalations) with
   `POST /api/intake/ffbox` and a key minted `--scope ffbox`, which reaches nothing else. The ledger is checked and the
