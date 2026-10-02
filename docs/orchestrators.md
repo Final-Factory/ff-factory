@@ -101,6 +101,30 @@ answers on its own: its person decides, and it answers with the same tool only w
 `[person message]` starts is the harness's, not the person's, so the destructive tools stay closed in it. The dispatcher
 neither relays nor sees these messages.
 
+## Evidence and labels
+
+In October 2026 an ad campaign went live on click caps nobody had researched, relayed to the person as recommendations,
+and visual fixes were reported as done from position numbers and a review that was still pending. Asking the person
+more often would not have helped: they were approving throughout, with no basis in front of them. So the briefs carry
+one rule, and it is the agent's own to enforce (`server/evidenceRules.test.ts` pins the text).
+
+- **Every worker** (`EVIDENCE_RULES`, in the three worker briefs): before anything that spends money, publishes,
+  changes a live setting, releases, merges a simulation or player-visible change, or deletes, and before reporting a
+  fix as done, it lists the choices or claims involved and what each rests on: measured, sourced, or a guess. It settles
+  its own guesses by research (the tool's own docs and on-screen recommendation first), then carries on without asking.
+  It asks the person only to confirm a money value, for what the rules already reserve for them, or when research
+  leaves a real fork. Its report labels each number and recommendation (`REPORT_LABELS`) and leads with the result,
+  because an orchestrator is sent only the first 3000 characters of a worker's final message.
+- **A person's orchestrator** keeps those labels when it relays (`WORKER_UPDATE_RELAY` ends every `[worker update]`),
+  says what evidence a report names instead of calling a fix done from a title or a tool verdict, and sends a guess back
+  to the worker to research. It brings its person a decision only for money, for what the rules reserve for a person,
+  or for a fork research could not settle. Its briefs for consequential work list the decisions the work must settle.
+- **The dispatcher** carries that list into the worker's brief, and uses `decide_work ask` only for what the requester
+  alone can answer.
+
+The full rule, the checklists (visual changes, merges, releases) and the dated lessons are the `evidence-gate` skill of
+the `ff-agents` plugin (repo final-factory-agents). The briefs hold only what every agent needs without loading it.
+
 ## Memory
 
 Each orchestrator has a memory folder of its own: `data/orchestrator-memory/person-<user id>` for a person's (Ben's,
@@ -127,6 +151,12 @@ decides every write, and a hook's refusal holds in every permission mode:
 The folder sits in `data/`, which workers' guard already protects (`server/guard.ts`), so no worker can write an
 orchestrator's memory either. Workers and standing agents are unchanged. Reading stays as before: an orchestrator can
 read any file, other orchestrators' memory included.
+
+**What belongs there, and what does not.** The folder is for one person's preferences and for pointers. A rule about
+how to work that every agent should follow does not stay in it, because no worker and no fork can read it: the
+orchestrator keeps a one-line pointer, files a request, a worker adds the rule to the harness repo by pull request (the
+`ff-agents` `publish-skills` skill; working rules go under `evidence-gate/lessons`), and the person approves. The brief
+says so (`memoryBrief`).
 
 ## Where messages go
 

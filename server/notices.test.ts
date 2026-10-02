@@ -1,16 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseNotice } from '../shared/notices.ts';
+import { WORKER_UPDATE_RELAY } from './agents.ts';
 
 // Inputs follow the server's templates (agents.ts onWorkerTurnEnd / onWorkerPermission / onUnityBlocked,
 // standing.ts, wake.ts, restart.ts); a change there should fail here.
 
 test('[worker update] finished a turn: who, where, and the final message without the instructions', () => {
+  // The instructions are the server's own text (w208 added the labels to it): the page must still cut them off.
   const n = parseNotice(
     '[worker update] agent "Lighting pass (AAA space look)" (session s-light-1) in sandbox agent-mcp finished a turn. Its final message:\n\n' +
       'Bloom is in.\n\nTests pass.\n\n' +
-      'Tell the user what matters in a line or two (or nothing, if it is routine progress you already reported). Follow up with the agent only if the user\'s original request clearly implies the next step.',
+      WORKER_UPDATE_RELAY,
   );
+  assert.match(WORKER_UPDATE_RELAY, /^Tell the user what matters/);
   assert.equal(n.kind, 'worker-done');
   assert.equal(n.summary, 'Lighting pass (AAA space look) finished a turn');
   assert.equal(n.attention, false);

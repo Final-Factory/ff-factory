@@ -27,6 +27,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Evidence before action, and labels on the way up** (w208;
+  [docs/orchestrators.md](docs/orchestrators.md#evidence-and-labels)). Every worker's brief now says: before anything
+  that spends money, publishes, changes a live setting, releases, merges a simulation or player-visible change, or
+  deletes, list what each choice rests on (measured, sourced or a guess) and settle your own guesses by research; ask
+  the person only to confirm a money value, for what the rules reserve for them, or at a real fork. Reports label each
+  number and recommendation and lead with the result. A person's orchestrator keeps those labels when it relays, does
+  not call a fix done from a title or a tool verdict, sends a guess back to be researched, and brings its person
+  decisions only for money, reserved actions and real forks. Briefs for consequential work list the decisions to
+  settle. The orchestrators' memory brief says general lessons go to the harness repo by pull request. Prompt text
+  only: no tool, setting or behaviour of the server changes.
 - **Escalations from Max** (w94; [docs/intake.md](docs/intake.md#escalations-from-max)): FFBox's host files the reports
   Max decides need a developer (bugs it did not or may not fix, design questions, escalations) with
   `POST /api/intake/ffbox` and a key minted `--scope ffbox`, which reaches nothing else. The ledger is checked and the
