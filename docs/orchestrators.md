@@ -113,14 +113,20 @@ one rule, and it is the agent's own to enforce (`server/evidenceRules.test.ts` p
   fix as done, it lists the choices or claims involved and what each rests on: measured, sourced, or a guess. It settles
   its own guesses by research (the tool's own docs and on-screen recommendation first), then carries on without asking.
   It asks the person only to confirm a money value, for what the rules already reserve for them, or when research
-  leaves a real fork. Its report labels each number and recommendation (`REPORT_LABELS`) and leads with the result,
+  leaves a real fork. It merges its own pull request once its verification is done and CI is green (`MERGE_RULES`;
+  the owner, 2026-10-02: "stop holding prs, just merge them"), and holds one only for exceptional risk or a concrete
+  timing reason, saying which and when it will merge. Its report labels each number and recommendation (`REPORT_LABELS`) and leads with the result,
   because an orchestrator is sent only the first 3000 characters of a worker's final message.
 - **A person's orchestrator** keeps those labels when it relays (`WORKER_UPDATE_RELAY` ends every `[worker update]`),
   says what evidence a report names instead of calling a fix done from a title or a tool verdict, and sends a guess back
   to the worker to research. It brings its person a decision only for money, for what the rules reserve for a person,
   or for a fork research could not settle. Its briefs for consequential work list the decisions the work must settle.
 - **The dispatcher** carries that list into the worker's brief, and uses `decide_work ask` only for what the requester
-  alone can answer.
+  alone can answer. For both orchestrators done means merged: no brief ends at an open PR waiting for a person.
+
+One rule keeps its hold: a task a standing agent delegated is delivered as a pull request and never merged by its
+worker (`server/standing.ts`, `startDelegated`). Its text may come from outside the team, and a person's merge is the
+review.
 
 The full rule, the checklists (visual changes, merges, releases) and the dated lessons are the `evidence-gate` skill of
 the `ff-agents` plugin (repo final-factory-agents). The briefs hold only what every agent needs without loading it.
