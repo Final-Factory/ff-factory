@@ -148,12 +148,84 @@ something is fixed.
   scroll as one ([desktop](images/ffbox-scrolled-desktop.png), [phone](images/ffbox-scrolled-mobile.png)).
   `send_to_ffbox` hands a ledger request to FFBox once `providers.ffbox.sendWork` is on and the
   connector takes submits.
+- **Dev requests.** An operator's ffdev turn comes to FF Factory instead of a container on FFBox, with its files, and
+  is filed at once as the request of the person the operator maps to (`providers.ffbox.operators`), deduplicated
+  against the ledger; the operator's follow-ups in that thread reach their orchestrator, which answers with
+  `reply_to_ffbox` ([Dev requests](#dev-requests) below).
+
+## Dev requests
+
+An operator's ffdev turn on FFBox (a Discord message in a watched channel or thread, `ffwatch submit`, ffweb's prompt
+box, #codereview or an operator's PR feedback) can be handed to FF Factory instead of starting a container there
+(Lothsahn, 2026-10-03; w240). FFBox does it by default while its connector is up, and runs the turn itself when FF
+Factory is unreachable or refuses. The messages are the contract's
+[Dev requests](ffbox-connector-contract.md#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory); FF Factory's
+side is `server/devRequests.ts` and `Orchestrators.fileDevRequest` (`server/orchestrators.ts`).
+
+**Who it is for.** Config `providers.ffbox.operators` maps FFBox's operator names to FF Factory logins:
+
+```json
+"providers": { "ffbox": { "enabled": true, "operators": { "loth": "lothsahn", "ben": "ben" },
+                          "devRequests": { "enabled": true, "perHour": 20, "maxFiles": 10, "maxRequestMB": 500 } } }
+```
+
+A request from an operator not in the map, or mapped to a name that is no login, is refused (`unknown_operator`), and
+the server log says so at startup for every entry that names no login. `devRequests` (all optional): `enabled`
+(default true; false refuses every one `not_enabled`), `perHour` (default 20 a person), `maxFiles` (default and most
+10), `maxRequestMB` (default and most 500). Each file is also capped at 200 MB and at `attachments.maxMB`. An owner
+sets either with `set_app_config` (`providers.ffbox.operators`, which must name logins, and the whole
+`providers.ffbox.devRequests` block); both apply at once.
+
+**What happens to one.** Its files go into the attachment store ([attachments.md](attachments.md)) and each SHA-256 is
+checked: a mismatch files nothing. Then it is filed at once as the mapped person's own request, with no approval step
+(an operator's own request), source `ffbox-dev`, its files attached, and the link to FFBox recorded on it
+(`WorkItem.ffboxDev`: FFBox's ref, the conversation, its thread, the operator and the person). Before filing, the ledger
+is checked three ways:
+
+1. **Identity keys**: the conversation's thread (`discord:<thread>`), branch, PR, a report id, and the FFBox
+   conversation itself (`ffbox:<id>`). The same key is the same work.
+2. **Meaning**: the title alone, and the title with the start of the brief, against open requests and those finished
+   within `intake.lookbackDays`, with the ledger check's matcher and bands ([intake.md](intake.md); config
+   `intake.ffbox.match`, high 0.7 and medium 0.45 by default). The stronger of the two counts.
+3. **Scope**: an open broad request covers the conversation when its `scope` lists the thread, or names its source
+   and/or channel with a `since` and/or `until` window holding the conversation's creation time. `request_work` takes
+   `scope { threads?, source?, channel?, since?, until? }`, and records the threads a brief lists by itself. A window
+   needs a bound, so no request covers a whole channel forever.
+
+| what matched | outcome | FFBox posts |
+|---|---|---|
+| a high-band open request, or an open request whose scope covers it | `covered`: it joins that request (a log line with the conversation and the operator, the thread added to its keys and, on an intake request, to its threads, the person added to its people, the files added, and a busy worker gets the note and a copy of each file in its Inbox) | "Covered by w38 (in progress)." |
+| a high-band request that is done | `fixed`: nothing filed; the link is recorded on the done one | "Already fixed in 0.50.0.69 (PR #412)." |
+| medium-band candidates | `linked`: filed, the candidates named in its log for the dispatcher and the person to merge | "Filed as w124; it may repeat w38, w40." |
+| nothing | `filed` | "Filed as w123." |
+
+`force` (`!fff new` on FFBox) files it whatever matched, naming what did (`linked`). The person's own orchestrator gets
+one line per outcome, labelled `[from FFBox, <operator>]`, with the conversation's link and the files' ids (and the
+files themselves, as for an attachment). The dispatcher gets a filed one like any request; it is marked as said on
+FFBox, not in FF Factory (`humanAsked` false), so the dispatcher's destructive and admin tools still need the person to
+confirm it here.
+
+**Talking to an orchestrator through Discord.** A later message in a linked conversation from its operator arrives as
+`dev_message`: the person's own orchestrator gets it as `[from FFBox via Discord, <operator>]` (via GitHub, shell or
+ffweb for the other sources), their own words relayed, and a busy worker on the request gets it too. It is sent as
+the harness's message, never as a turn of the person: tools that need the person's own turn (approving, deleting,
+settings) and the chat's filing budget still need them to write in FF Factory. The orchestrator answers with
+**`reply_to_ffbox`** `{ request?, conversation?, text }` (a person's own orchestrator only, for that person's own
+linked conversations), which sends a `dev_reply` FFBox posts in the thread; it errors plainly, "FFBox's connector is
+offline; nothing was sent", while the link is down. When a linked request is done, declined or cancelled, FF Factory
+sends the thread one line itself ("w123 is done: <outcome>"), resent on every reconnect until FFBox confirms it. The
+orchestrators' briefs say: `[from FFBox, X]` lines are FFBox's filings, `[from FFBox via Discord, X]` is X's own words,
+answer with `reply_to_ffbox`, and never post to Discord any other way.
+
+**Seeing them.** `ffbox_activity` `show: "dev_requests"` lists the newest (time, kind, ref, outcome, request, operator,
+person; 500 kept) with the settings in effect and the replies waiting for FFBox, and the status line counts them
+("N dev request(s) in 24 h").
 
 ## The status line
 
 FFBox's line in `system_status` (and the `summary` of `ffbox_activity`) reads, while the connector is up:
 
-`FFBox: online, connector <version> (<commit>) from <ip> · <capacity> · ffwatch up · <conversations and intake> ·
+`FFBox: online, connector <version> (<commit>) from <ip> · <capacity> · ffwatch up · <conversations, intake and dev requests> ·
 last query: <what> ok|<error> <time> · <load>`
 
 - **`connector <version> (<commit>) from <ip>`**: the connector that said hello, its commit and the address it came

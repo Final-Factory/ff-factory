@@ -1042,15 +1042,55 @@ export interface WorkItem {
   flag?: { kind: 'design'; text: string; at: string; for: Requester[] };
   /** Handed to FFBox (docs/intake.md, "Ledger → FFBox"): the submit's id, and what FFBox said about it. */
   ffbox?: WorkFfbox;
+  /**
+   * What a broad request covers (docs/ffbox.md, "Dev requests"): the Discord threads its brief lists, or a channel's
+   * conversations in a time window. An FFBox dev request inside an open request's scope joins it instead of being filed.
+   */
+  scope?: WorkScope;
+  /**
+   * The FFBox dev requests filed as, or joined to, this request (docs/ffbox.md, "Dev requests"): where an operator's
+   * follow-ups come from and where reply_to_ffbox and the automatic "done" reply go. Oldest first, at most 20.
+   */
+  ffboxDev?: WorkFfboxDev[];
+}
+
+/** A request's scope: its threads, or a source and channel's conversations created between since and until. */
+export interface WorkScope {
+  /** Discord thread ids (snowflakes). */
+  threads?: string[];
+  /** FFBox's conversation source: discord, codereview, shell, web. */
+  source?: string;
+  /** FFBox's watch alias for the channel, e.g. "bug_reports". */
+  channel?: string;
+  since?: string;
+  until?: string;
+}
+
+/** One FFBox dev request linked to a request: FFBox's ref, its conversation, the operator and the person it maps to. */
+export interface WorkFfboxDev {
+  ref: string;
+  conversation: string;
+  /** discord, codereview, shell or web. */
+  source: string;
+  channel?: string;
+  threadId?: string;
+  url?: string;
+  /** The operator's name in FFBox's config, and the FF Factory login it maps to (config providers.ffbox.operators). */
+  operator: string;
+  person: Requester;
+  at: string;
+  /** filed: this request was filed for it; covered: it joined this request; fixed: this finished request already fixed it. */
+  outcome: 'filed' | 'covered' | 'fixed' | 'linked';
 }
 
 /**
  * Where an intake request came from: a Discord #bug-reports thread, a trusted person's request to Max in #dev-chat,
- * an FFBox fix branch or diagnosis, a request FFBox filed, a release follow-up the server filed itself, or a
- * regression the nightly e2e lab found (docs/intake.md, "Nightly e2e regressions").
+ * an FFBox fix branch or diagnosis, a request FFBox filed, an operator's ffdev turn FFBox handed over (ffbox-dev,
+ * docs/ffbox.md "Dev requests"), a release follow-up the server filed itself, or a regression the nightly e2e lab found
+ * (docs/intake.md, "Nightly e2e regressions").
  */
-export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'release' | 'nightly';
-export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'release', 'nightly'];
+export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly';
+export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly'];
 
 export interface WorkSource {
   kind: WorkSourceKind;

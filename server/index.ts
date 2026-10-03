@@ -12,6 +12,7 @@ import { Agents } from './agents.ts';
 import { MachineManager, machineForPath, parseSandboxRef } from './machines.ts';
 import { hostSandboxFrom } from './hostMigration.ts';
 import { ProviderManager } from './providers.ts';
+import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
@@ -421,6 +422,25 @@ providers.onRequest = (m) => intake.onRequest(m);
 providers.onBoardCheck = (m) => intake.onBoardCheck(m);
 providers.onWorkReply = (m) => intake.onWorkReply(m);
 providers.onResult = (m) => intake.onResult(m);
+// FFBox operators' ffdev turns handed over (docs/ffbox.md, "Dev requests"): filed as the operator's mapped person's own.
+providers.dev = new DevRequests(
+  {
+    cfg,
+    identity,
+    orchestrators: agents.orchestrators,
+    attachments,
+    sendFiles: (id, text, files, requestedBy) => agents.sendWithAttachments(id, text, 'system', { attachments: files, requestedBy }),
+    sendText: (id, text, requestedBy) => void sessions.send(id, text, 'system', undefined, { requestedBy }),
+  },
+  providers.devLink(),
+);
+// A linked request finishing sends FFBox's thread one line saying so (queued until FFBox confirms it).
+bus.on('event', (e) => {
+  if (e.type === 'work') providers.dev?.workChanged(e.item);
+});
+for (const [name, id] of Object.entries(cfg.providers?.ffbox?.operators ?? {})) {
+  if (!identity.get(id)) console.warn(`config providers.ffbox.operators maps FFBox operator "${name}" to "${id}", which is no login: that operator's dev requests are refused`);
+}
 agents.orchestrators.onIntakeAttention = (w, what) => notifier.intake(w, what, (what === 'design' && w.flag ? w.flag.for : agents.orchestrators.reviewers()).map((r) => r.userId));
 if (cfg.hostGuard.pollSeconds > 0) {
   setInterval(() => void hostHealth.tick(), cfg.hostGuard.pollSeconds * 1000);

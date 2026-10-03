@@ -39,6 +39,7 @@ import {
 import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent, ProviderMetrics } from '../shared/types.ts';
 import { metricsLine } from '../shared/providerMetrics.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { emptyDevState, type DevLink, type DevRequests, type DevState } from './devRequests.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -71,6 +72,8 @@ interface Persisted {
   lastSeen?: string;
   conversations: ProviderConversation[];
   intake: ProviderIntakeEvent[];
+  /** Dev requests (server/devRequests.ts): refs answered, their log, and FF Factory's replies waiting for dev_received. */
+  dev?: DevState;
 }
 
 interface Link {
@@ -306,7 +309,7 @@ export class ProviderManager {
       `FFBox: online, connector ${p.connector?.version ?? '?'}${p.connector?.commit ? ` (${p.connector.commit.slice(0, 7)})` : ''}${p.remote ? ` from ${p.remote}` : ''}`,
       c ? `${c.state}; ${classes || 'no classes'}; queue ${c.queue}${c.holds.length ? `; holds: ${c.holds.join(' | ')}` : ''}` : 'no capacity report yet',
       ...(p.ffwatch ? [p.ffwatch.up ? 'ffwatch up' : `ffwatch DOWN${p.ffwatch.at ? ` since ${p.ffwatch.at}` : ''}`] : []),
-      `${p.counts.active} conversation(s) running or queued; ${p.counts.intake24h} intake report(s) in 24 h`,
+      `${p.counts.active} conversation(s) running or queued; ${p.counts.intake24h} intake report(s) in 24 h${this.dev ? `; ${this.dev.count24h()} dev request(s) in 24 h` : ''}`,
       ...(q ? [`last query: ${q.what} ${q.ok ? 'ok' : (q.error ?? 'failed')} ${q.at}`] : []),
       metricsLine(p.metrics, this.now()),
       ...(this.ledgerProblem() ? [this.ledgerProblem()!] : []),
@@ -441,6 +444,7 @@ export class ProviderManager {
   private detach(why: string) {
     const was = this.link?.hello;
     this.link = undefined;
+    this.hook(() => this.dev?.onDisconnect());
     for (const [id, q] of this.pending) {
       this.pending.delete(id);
       q.done({ id, type: 'query_result', ok: false, error: 'disconnected' });
@@ -572,6 +576,8 @@ export class ProviderManager {
       accepts: PORTAL_ACCEPTS,
     });
     console.log(`provider ${this.id}: connector ${h.connector.version} (commit ${h.connector.commit?.slice(0, 7) ?? 'unknown'}) connected from ${link.ip}, token ${link.tokenFingerprint}…`);
+    // FF Factory's own dev replies FFBox has not confirmed go again on every new link.
+    this.hook(() => this.dev?.onConnect());
     this.changed();
   }
 
@@ -637,6 +643,14 @@ export class ProviderManager {
         }
         return;
       }
+      case 'dev_request':
+      case 'dev_message':
+        if (!this.dev) return this.send(link, { type: 'dev_ack', ref: msg.ref, ok: false, error: 'not_enabled', detail: 'FF Factory does not take dev requests on this server' });
+        return this.hook(() => (msg.type === 'dev_request' ? this.dev!.onRequest(msg) : this.dev!.onMessage(msg)));
+      case 'dev_chunk':
+        return this.hook(() => this.dev?.onChunk(msg));
+      case 'dev_received':
+        return this.hook(() => this.dev?.onReceived(msg));
       case 'board_check': {
         const a = this.onBoardCheck?.(msg);
         if (!a) {
@@ -670,6 +684,23 @@ export class ProviderManager {
   onWorkReply?: (m: WorkReply) => void;
   /** A submitted turn finished. */
   onResult?: (m: ResultMessage) => void;
+  /** Operators' ffdev turns handed over (server/devRequests.ts); wired by index.ts. Without it, every one is refused not_enabled. */
+  dev?: DevRequests;
+
+  /** What server/devRequests.ts sends and keeps through: the live link, and the dev part of this provider's saved state. */
+  devLink(): DevLink {
+    return {
+      online: () => this.enabled && this.online,
+      send: (msg) => {
+        const link = this.link;
+        if (!link?.hello || link.ws.readyState !== link.ws.OPEN) return false;
+        this.send(link, msg);
+        return true;
+      },
+      state: () => (this.data.dev ??= emptyDevState()),
+      changed: () => this.changed(),
+    };
+  }
 
   /**
    * A board answer again, changed since FFBox asked (a PR opened, the fix merged or released): `update: true`, the same

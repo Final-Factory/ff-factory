@@ -36,6 +36,8 @@ export function sourceLabel(s: WorkSource): string {
       return 'FFBox diagnosis';
     case 'ffbox-request':
       return 'FFBox request';
+    case 'ffbox-dev':
+      return `FFBox dev request${s.reporter ? ` from ${s.reporter}` : ''}`;
     case 'release':
       return 'Release follow-up';
     case 'nightly':

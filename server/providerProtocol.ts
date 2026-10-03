@@ -20,7 +20,7 @@ export const PROVIDER_PROTOCOL = 2;
  * intake settings: a board_check or request while the intake is off is answered error not_enabled, so a change of
  * settings never needs a new welcome.
  */
-export const PORTAL_ACCEPTS: readonly string[] = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics'];
+export const PORTAL_ACCEPTS: readonly string[] = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received'];
 
 /** A connector token: `ffpv1_` and 32 random bytes, base64url. The portal keeps only its SHA-256. */
 export const PROVIDER_TOKEN = /^ffpv1_[A-Za-z0-9_-]{43}$/;
@@ -208,6 +208,10 @@ export type ToConnector =
   | { type: 'filed'; ref: string; workId?: string; status: string; repeat?: boolean; why?: string }
   /** A read-only question (docs/ffbox-connector-contract.md, "Read-only queries"), whatever the hello listed. */
   | QueryMessage
+  /** The answers to an operator's dev request and its follow-ups, and later replies to its thread ("Dev requests"). */
+  | DevAck
+  | DevFiled
+  | DevReply
   /** The work messages (docs/ffbox-connector-contract.md), sent only to a connector that lists them in hello.accepts. */
   | ToConnectorWork;
 
@@ -490,6 +494,157 @@ export type ProviderRequestMessage = z.infer<typeof RequestSchema>;
 export type BoardCheckMessage = z.infer<typeof BoardCheckSchema>;
 export type ResultMessage = z.infer<typeof ResultSchema>;
 
+// ---------------------------------------------------------------- dev requests (docs/ffbox-connector-contract.md, "Dev requests")
+//
+// An operator's ffdev turn, handed to FF Factory instead of a container on FFBox: the request and its files, filed at
+// once as the request of the person the operator maps to, deduplicated against the ledger (server/devRequests.ts). The
+// operator's later messages in that thread reach their orchestrator, whose replies go back as dev_reply.
+
+export const DEV_LIMITS = {
+  /** Files in one request, each file's size, and all of them together. A file is also capped by config attachments.maxMB. */
+  maxFiles: 10,
+  maxFileBytes: 200 * 1024 * 1024,
+  maxRequestBytes: 500 * 1024 * 1024,
+  /** Raw bytes in one dev_chunk: 60000 base64 characters in the frame, inside LIMITS.maxMessageBytes. */
+  maxChunkBytes: 45_000,
+  title: 120,
+  brief: 8000,
+  transcript: 24_000,
+  /** A dev_message's text, and a dev_reply's. */
+  message: 4000,
+  reply: 4000,
+  /** dev_filed.text: the line FFBox posts. */
+  filedText: 1000,
+} as const;
+
+const devRef = z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/);
+const devId = z.string().regex(/^[A-Za-z0-9._:@-]{1,64}$/);
+const workIdPattern = z.string().regex(/^w\d{1,9}$/);
+
+/** The operator as FFBox's config names it, and the ids it is known by there. Asserted by FFBox, whose token authenticates the link. */
+export const DevOperatorSchema = z.object({
+  name: z.string().regex(/^[A-Za-z0-9._-]{1,40}$/),
+  discord: z.string().regex(/^\d{15,25}$/).optional(),
+  github: z.string().regex(/^[A-Za-z0-9-]{1,39}$/).optional(),
+  shell: devId.optional(),
+  web: devId.optional(),
+});
+
+/** The FFBox conversation a dev request comes from. Its title is the operator's text, redacted on FFBox: kept as data. */
+export const DevConversationSchema = z.object({
+  id: conversationId,
+  source: z.enum(['discord', 'codereview', 'shell', 'web']),
+  /** The watch alias of its channel (bug_reports, dev_chat, ...): what a batch request's scope names. */
+  channel: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/).optional(),
+  title: z.string().max(300),
+  url: z.string().max(300).regex(/^https:\/\/[^\s"'<>]+$/).optional(),
+  threadId: z.string().regex(/^\d{15,25}$/).optional(),
+  branch: gitRef.optional(),
+  pr: z.number().int().min(1).optional(),
+  createdAt: iso,
+});
+
+export const DevAttachmentSchema = z.object({
+  n: z.number().int().min(0).max(63),
+  name: z.string().min(1).max(200),
+  size: z.number().int().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  kind: z.string().max(80).optional(),
+});
+
+/** connector → portal: an operator's ffdev turn, handed over. Answered dev_ack at once and dev_filed after the last byte. */
+export const DevRequestSchema = z.object({
+  type: z.literal('dev_request'),
+  ref: devRef,
+  operator: DevOperatorSchema,
+  conversation: DevConversationSchema,
+  title: z.string().min(1).max(DEV_LIMITS.title),
+  brief: z.string().min(1).max(DEV_LIMITS.brief),
+  transcript: z.string().max(DEV_LIMITS.transcript).optional(),
+  /** Ledger keys: discord:<thread>, branch:<name>, pr:<n>, report:<id>. Any other is dropped, never refused. */
+  keys: z.array(z.string().max(200)).max(20).default([]),
+  /** The count and size limits are the portal's to check (dev_ack too_large), so a request past them is refused, not bad_message. */
+  attachments: z.array(DevAttachmentSchema).max(64).default([]),
+  /** The operator asked to file it even if it repeats work (`!fff new`). */
+  force: z.boolean().optional(),
+});
+
+/** connector → portal: file n's bytes from offset, base64, in order, file after file. */
+export const DevChunkSchema = z.object({
+  type: z.literal('dev_chunk'),
+  ref: devRef,
+  n: z.number().int().min(0).max(63),
+  offset: z.number().int().min(0),
+  data: z
+    .string()
+    .min(1)
+    .max(Math.ceil(DEV_LIMITS.maxChunkBytes / 3) * 4)
+    .regex(/^[A-Za-z0-9+/]*={0,2}$/, 'base64'),
+});
+
+/** connector → portal: the operator's follow-up in a thread linked to `request` (FF Factory's work id). */
+export const DevMessageSchema = z.object({
+  type: z.literal('dev_message'),
+  ref: devRef,
+  request: workIdPattern,
+  operator: DevOperatorSchema,
+  conversation: conversationId,
+  text: z.string().min(1).max(DEV_LIMITS.message),
+});
+
+/** connector → portal: a dev_reply was written for ffwatch; the portal stops resending it. */
+export const DevReceivedSchema = z.object({ type: z.literal('dev_received'), id: devRef });
+
+export type DevRequestMessage = z.infer<typeof DevRequestSchema>;
+export type DevChunkMessage = z.infer<typeof DevChunkSchema>;
+export type DevMessageMessage = z.infer<typeof DevMessageSchema>;
+export type DevReceivedMessage = z.infer<typeof DevReceivedSchema>;
+
+export type DevAckError = 'unknown_operator' | 'rate_limited' | 'too_large' | 'not_enabled' | 'bad_request';
+export type DevFiledError = 'sha_mismatch' | 'too_large' | 'bad_request' | 'error';
+export type DevOutcome = 'filed' | 'covered' | 'fixed' | 'linked';
+
+/** portal → connector: within 10 s of a dev_request or dev_message. ok false: FFBox runs the turn itself. */
+export interface DevAck {
+  type: 'dev_ack';
+  ref: string;
+  ok: boolean;
+  error?: DevAckError;
+  detail?: string;
+}
+
+/** A ledger request a dev_filed names: the one it joined, the fix, or the candidates it may repeat. */
+export interface DevMatch {
+  id: string;
+  status: string;
+  score: number;
+  why: string;
+}
+
+/** portal → connector: after the last byte. `text` is the line FFBox posts: plain, at most DEV_LIMITS.filedText. */
+export interface DevFiled {
+  type: 'dev_filed';
+  ref: string;
+  ok: boolean;
+  /** Absent when ok is false. */
+  outcome?: DevOutcome;
+  workId?: string;
+  matches?: DevMatch[];
+  text: string;
+  error?: DevFiledError;
+  detail?: string;
+}
+
+/** portal → connector: a later reply for the thread. from: "orchestrator" (the person's, reply_to_ffbox) or "fff" (FF Factory itself). */
+export interface DevReply {
+  type: 'dev_reply';
+  id: string;
+  request: string;
+  conversation: string;
+  text: string;
+  from: 'orchestrator' | 'fff';
+}
+
 /** Everything the connector may send. */
 /** connector → portal: FFBox's load, memory and disks, every 30 s. Disks are named by role, never by path. */
 export const MetricsSchema = z.object({
@@ -512,7 +667,23 @@ export const MetricsSchema = z.object({
     .default([]),
 });
 
-export const FromConnectorSchema = z.discriminatedUnion('type', [HelloSchema, CapacitySchema, ConversationMessageSchema, IntakeMessageSchema, AcceptedSchema, RefusedSchema, ResultSchema, RequestSchema, BoardCheckSchema, QueryResultSchema, MetricsSchema]);
+export const FromConnectorSchema = z.discriminatedUnion('type', [
+  HelloSchema,
+  CapacitySchema,
+  ConversationMessageSchema,
+  IntakeMessageSchema,
+  AcceptedSchema,
+  RefusedSchema,
+  ResultSchema,
+  RequestSchema,
+  BoardCheckSchema,
+  QueryResultSchema,
+  MetricsSchema,
+  DevRequestSchema,
+  DevChunkSchema,
+  DevMessageSchema,
+  DevReceivedSchema,
+]);
 export type FromConnector = z.infer<typeof FromConnectorSchema>;
 /** Each connector→portal type's schema, by type: a type not here is answered error unsupported. */
 export const FROM_CONNECTOR: ReadonlyMap<string, z.ZodType<FromConnector>> = new Map(FromConnectorSchema.options.map((o) => [o.shape.type.value, o as z.ZodType<FromConnector>]));

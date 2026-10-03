@@ -107,7 +107,8 @@ FF Factory answers with `welcome`:
 { "type": "welcome", "protocol": 2, "provider": "ffbox",
   "cursors": { "conversation": "2026-09-27T09:20:00Z#812", "intake": "20260927T090000Z-desync-3a9f01c2d4" },
   "limits": { "maxMessageBytes": 65536, "messagesPerSecond": 100, "burst": 1000, "helloTimeoutMs": 10000, "invalidPerMinute": 20 },
-  "accepts": ["board_check", "board_summary", "request", "accepted", "refused", "result", "metrics"] }
+  "accepts": ["board_check", "board_summary", "request", "accepted", "refused", "result", "metrics",
+              "dev_request", "dev_chunk", "dev_message", "dev_received"] }
 ```
 
 `protocol` echoes the hello's when it is `1` or `2`, and is `2` otherwise. `accepts` is the same static list on every
@@ -229,6 +230,7 @@ Never send the description, log lines, file names from inside the zip, or the se
 | `welcome` | the answer to a valid `hello` (above) |
 | `error` | `{ "type": "error", "code": "bad_message" \| "unsupported" \| "hello_twice" \| "not_enabled", "message": "…", "ref": "<type or ref>" }`. A message was not taken, and the connection stays up. `bad_message`: a value broke its rule; `message` names the field and the rule, never the value. `unsupported`: a type FF Factory does not know (`ref` is the type). `not_enabled`: a `request` or `board_check` while FF Factory has that part of the intake off. Log it |
 | `filed`, `board` | the answers to `request` and `board_check` ([The intake](#the-intake-requests-and-the-ledger-check)) |
+| `dev_ack`, `dev_filed`, `dev_reply` | the answers to an operator's `dev_request` and `dev_message`, and later replies to that conversation ([Dev requests](#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory)) |
 
 A type the connector does not know is not fatal: answer `error` `unsupported` with the type as `ref`, or ignore it.
 
@@ -418,6 +420,68 @@ re-sends `board_check` for everything it still follows after every (re)connect.
 
 **FFBox SHOULD** skip work whose check says `in_flight` or `done`, and point at the ledger id instead (an operator
 may override), so the two teams never build the same fix twice.
+
+## Dev requests: an operator's ffdev turn, handed to FF Factory
+
+An operator's ffdev turn (a Discord message, `ffwatch submit`, ffweb, #codereview) can go to FF Factory instead of a
+container on FFBox (design: ffbox `design/fff_dev_requests_design.txt`, w240). FF Factory files it at once, as the
+request of the person the operator maps to, deduplicated against its ledger, and answers with the line FFBox posts.
+Later, the operator's messages in that conversation reach their orchestrator, and its replies come back. Schemas:
+`DevRequestSchema`, `DevChunkSchema`, `DevMessageSchema` and `DevReceivedSchema` in `server/providerProtocol.ts`, the
+types `DevAck`, `DevFiled` and `DevReply` beside them; FF Factory's side is `server/devRequests.ts`, tested in
+`server/devRequests.test.ts`. FFBox's side of the operator's experience is in [ffbox.md](ffbox.md#dev-requests).
+
+```json
+{ "type": "dev_request", "ref": "dev-570-3", "operator": { "name": "loth", "discord": "222222222222222222" },
+  "conversation": { "id": "570", "source": "discord", "channel": "dev_chat", "title": "…", "url": "https://discord.com/channels/…/1555…",
+                    "threadId": "1555000000000000001", "createdAt": "2026-10-03T09:00:00Z" },
+  "title": "Add a cargo filter to the hauler panel", "brief": "…", "keys": ["discord:1555000000000000001"],
+  "attachments": [{ "n": 0, "name": "battleship.zip", "size": 104857600, "sha256": "…", "kind": "save" }] }
+{ "type": "dev_ack", "ref": "dev-570-3", "ok": true }
+{ "type": "dev_chunk", "ref": "dev-570-3", "n": 0, "offset": 0, "data": "<base64 of up to 45000 bytes>" }
+…
+{ "type": "dev_filed", "ref": "dev-570-3", "ok": true, "outcome": "filed", "workId": "w123", "text": "Filed as w123." }
+
+{ "type": "dev_message", "ref": "msg-570-9", "request": "w123", "operator": { "name": "loth" }, "conversation": "570", "text": "…" }
+{ "type": "dev_ack", "ref": "msg-570-9", "ok": true }
+{ "type": "dev_reply", "id": "r-mg8x2-1a2b3c", "request": "w123", "conversation": "570", "text": "…", "from": "orchestrator" }
+{ "type": "dev_received", "id": "r-mg8x2-1a2b3c" }
+```
+
+Connector → FF Factory:
+
+| message | fields |
+|---|---|
+| `dev_request` | `ref` (`^[A-Za-z0-9._:-]{1,80}$`, "dev-<conversation>-<turn>"); `operator` `{ name, discord?, github?, shell?, web? }`, the name as FFBox's config `operators` has it (`^[A-Za-z0-9._-]{1,40}$`); `conversation` `{ id, source (discord, codereview, shell, web), channel? (the watch alias), title (300), url?, threadId?, branch?, pr?, createdAt }`; `title` (1-120) and `brief` (1-8000), redacted on FFBox; `transcript` (optional, 24000, newest last); `keys` (up to 20: `discord:<thread>`, `branch:<name>`, `pr:<n>`, `report:<id>`; any other is dropped, not refused); `attachments` `[{ n, name, size, sha256, kind? }]`, `n` from 0, each once; `force` (optional: file it even if it repeats work, `!fff new`) |
+| `dev_chunk` | `ref`, `n`, `offset`, `data`: file `n`'s bytes from `offset`, base64, at most 45000 bytes raw a frame, in order, file after file |
+| `dev_message` | `ref`; `request`, the work id the conversation is linked to (`^w\d+$`); `operator`; `conversation`, the id; `text` (1-4000), redacted |
+| `dev_received` | `id`: a `dev_reply` was written for ffwatch, so FF Factory stops resending it |
+
+FF Factory → connector:
+
+| message | when and what |
+|---|---|
+| `dev_ack` | at once (well within 10 s) after `dev_request` or `dev_message`: `{ ref, ok, error?, detail? }`. `ok: false`, FFBox runs the turn itself: `unknown_operator` (the operator is not in FF Factory's `providers.ffbox.operators`, or maps to no login), `rate_limited` (`providers.ffbox.devRequests.perHour`, 20 an hour per person), `too_large` (more than 10 files, a file over 200 MB or over FF Factory's `attachments.maxMB`, more than 500 MB together), `not_enabled` (`providers.ffbox.devRequests.enabled` off), `bad_request` (the files not numbered 0, 1, 2, … each once; for `dev_message`, a request or conversation that is not linked, or another operator's). `detail` is one line for logs |
+| `dev_filed` | after the last byte (at once for a request without files): `{ ref, ok, outcome?, workId?, matches?, text, error?, detail? }`. `outcome`: `filed` (a new request), `covered` (joined to open work `workId`), `fixed` (`workId` is done: `text` names the release and PR), `linked` (filed as `workId`, with candidates it may repeat). `matches`: `[{ id, status, score, why }]`. `text`, at most 1000 characters, is the line FFBox posts: "Filed as w123.", "Covered by w38 (in progress).", "Already fixed in 0.50.0.69 (PR #412).", "Filed as w124; it may repeat w38, w40.". `ok: false`: `sha_mismatch` (a file's SHA-256 is not the one announced; nothing filed), `bad_request` (a chunk out of order, past its file's size, or for a ref FF Factory is not receiving: send the `dev_request` again), `error` (storing or filing failed) |
+| `dev_reply` | later, any number of times: `{ id, request, conversation, text, from }`. `from: "orchestrator"`: the person's orchestrator answered with `reply_to_ffbox` (sent once; FF Factory refuses it while the link is down). `from: "fff"`: FF Factory itself, once, when the linked request is done, declined or cancelled ("w123 is done: <outcome>"); this one is resent on every new link until `dev_received` names its `id`. `text` is at most 4000 characters, untrusted: FFBox posts it under its own rules |
+
+**Repeats and restarts.** A `dev_request` whose `ref` FF Factory already filed is answered `dev_ack` ok and the same
+`dev_filed` again, at once and without its files (FF Factory keeps the newest 500 answers across restarts), so a
+reconnect mid-hand-over files nothing twice. One that was not filed yet starts over: send it and its files again
+from the start. When the link drops while files are arriving, FF Factory drops the partial files; the connector sends
+the hand-over again on the next link. A `dev_message` with a `ref` already answered is acknowledged and not relayed
+twice.
+
+**The chunks.** 45000 bytes raw are 60000 base64 characters, inside the 64 KB frame. The rate limit above
+(100 messages a second) is about 4.5 MB/s; the connector's own pace (about 2 MB/s) stays well under it. A chunk out of
+order fails the whole hand-over (`dev_filed` `bad_request`); FF Factory answers only the first stray chunk of a ref it
+is not receiving, and drops the rest.
+
+**What FF Factory does with it**, for the connector's author to know what the text means (the rules are
+[ffbox.md](ffbox.md#dev-requests)): the files go into its attachment store and each SHA-256 is checked; the request is
+filed as the mapped person's own, with no approval step; it is deduplicated by the conversation's identity keys, by the
+meaning of its title and brief (the ledger check's matcher and bands), and by the scope of open broad requests; the
+person's own orchestrator gets one line about it.
 
 ## Escalations from Max (HTTP, not the connector)
 

@@ -36,10 +36,12 @@ export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
   'update_work',
   // another person's own orchestrator (scoped in the handler)
   'message_person',
+  // its person's FFBox conversations (scoped in the handler: only the person's own linked requests)
+  'reply_to_ffbox',
 ]);
 
 /** Tools that need a person's own orchestrator (its chat's budget, its person's requests, its person as the sender). */
-const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work', 'message_person']);
+const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work', 'message_person', 'reply_to_ffbox']);
 
 /** The dispatcher has no heartbeat of its own: each person's wakes their own orchestrator. */
 const NOT_DISPATCHER: ReadonlySet<string> = new Set([...PERSONAL_ONLY, 'set_heartbeat']);

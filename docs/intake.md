@@ -349,7 +349,7 @@ they are off is answered `error` `not_enabled`.
   "reviewers": ["ben", "lothsahn"],
   "lookbackDays": 14
 },
-"providers": { "ffbox": { "enabled": false, "sendWork": false } }
+"providers": { "ffbox": { "enabled": false, "sendWork": false, "operators": {}, "devRequests": { "enabled": true, "perHour": 20, "maxFiles": 10, "maxRequestMB": 500 } } }
 ```
 
 Channel names are the ffbox config's `discord.channels` aliases (or channel ids). Discord ids in `trusted` are
