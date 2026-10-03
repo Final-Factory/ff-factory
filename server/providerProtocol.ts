@@ -9,13 +9,18 @@ import { z } from 'zod';
 import { redactSecrets } from './secrets.ts';
 
 /**
- * Bumped when a change needs both sides updated. 2 (2026-09-29, docs/ffbox-connector-contract.md "Protocol 2") adds
- * hello.accepts and welcome.accepts, conversation.threadId, board_check.conversation, and a board that says what to
- * watch and what shipped. The portal speaks every version in SUPPORTED_PROTOCOLS and answers in the hello's; any other
- * is closed 4426, and a newer connector falls back.
+ * The protocol number the welcome names. Information only since 2026-10-03 (docs/ffbox-connector-contract.md, "No
+ * negotiation"): nothing is gated on it, and a hello of any number, or none, is answered. The welcome echoes a hello's
+ * 1 or 2 (the connector checks 1 <= welcome.protocol <= its own) and says 2 otherwise.
  */
 export const PROVIDER_PROTOCOL = 2;
-export const SUPPORTED_PROTOCOLS: readonly number[] = [1, 2];
+
+/**
+ * welcome.accepts: every connector→portal message this portal's code handles beyond the reports. Static, never the
+ * intake settings: a board_check or request while the intake is off is answered error not_enabled, so a change of
+ * settings never needs a new welcome.
+ */
+export const PORTAL_ACCEPTS: readonly string[] = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics'];
 
 /** A connector token: `ffpv1_` and 32 random bytes, base64url. The portal keeps only its SHA-256. */
 export const PROVIDER_TOKEN = /^ffpv1_[A-Za-z0-9_-]{43}$/;
@@ -31,14 +36,12 @@ export const tokenSha256 = (token: string) => createHash('sha256').update(token)
 export const CLOSE = {
   /** A newer connection with the same token took over. */
   replaced: 4000,
-  /** The first message was not a valid hello, or too many messages were invalid. */
+  /** A frame that cannot be parsed (not JSON, no type, a field of the wrong JSON type), a bad hello, or too many invalid messages. */
   badMessage: 4400,
   /** The provider was switched off (providers.ffbox.enabled false) while connected. */
   disabled: 4403,
   /** No hello within HELLO_TIMEOUT_MS. */
   noHello: 4408,
-  /** The hello's protocol number is not PROVIDER_PROTOCOL. */
-  protocol: 4426,
   /** More messages than the rate limit allows. */
   tooFast: 4429,
 } as const;
@@ -147,21 +150,27 @@ export const ProviderIntakeSchema = z.object({
 
 // ---------------------------------------------------------------- connector → portal
 
+// Readers strip unknown fields (zod's default) and never use .strict(): a newer connector may add any field.
+
+/** protocol, accepts and queries are information only (shown, never gating anything) and may be absent. */
 export const HelloSchema = z.object({
   type: z.literal('hello'),
-  protocol: z.number().int(),
+  protocol: z.number().int().optional(),
   provider: z.literal('ffbox'),
   connector: z.object({ version: z.string().regex(/^[A-Za-z0-9._+-]{1,40}$/), commit: z.string().regex(/^[0-9a-f]{7,40}$/).optional() }),
   /** FFBox's own page, for links (LAN-only is fine: people open it, the portal never does). */
   web: z.string().max(300).regex(/^https:\/\/[^\s"'<>]+$/).optional(),
   /**
-   * The work messages this connector takes (WORK_MESSAGES: "submit", "diagnose", "stop"). The portal sends a
-   * work message only to a connector that lists it, so a phase 1 connector never gets one. Unknown words are kept.
+   * What the connector says it takes, e.g. "board", "board_maybe", "query", and the phase 3 work messages
+   * (WORK_MESSAGES). Kept for display; words that are not `^[a-z_]{1,32}$` are dropped, not refused.
    */
-  accepts: z.array(z.string().regex(/^[a-z_]{1,32}$/)).max(20).optional(),
-  /** The read-only queries it answers (with "query" in accepts): PROVIDER_QUERIES, and newer names kept as given. */
-  queries: z.array(z.string().regex(/^[a-z_]{1,32}$/)).max(20).optional(),
+  accepts: z.array(z.string()).max(64).optional(),
+  /** The read-only queries it says it answers. For display only: the portal asks any query whatever this says. */
+  queries: z.array(z.string()).max(64).optional(),
 });
+
+/** An accepts or queries list as kept: the well-formed words only, at most 20. */
+export const offerWords = (words: readonly string[] | undefined) => (words ?? []).filter((w) => /^[a-z_]{1,32}$/.test(w)).slice(0, 20);
 
 export const CapacitySchema = z.object({
   type: z.literal('capacity'),
@@ -171,6 +180,8 @@ export const CapacitySchema = z.object({
   state: z.enum(['running', 'draining', 'updating', 'stopped']),
   /** Why work waits, one line each (a subscription hold, quiet hours). */
   holds: z.array(z.string().max(160)).max(10).default([]),
+  /** ffwatch, which writes the feed the connector reads: up false means down or restarting since `at` (when it last wrote). */
+  ffwatch: z.object({ up: z.boolean(), at: iso.optional() }).optional(),
 });
 
 export const ConversationMessageSchema = z.object({ type: z.literal('conversation'), cursor, conversation: ProviderConversationSchema });
@@ -184,18 +195,18 @@ export type ProviderCapacityMessage = z.infer<typeof CapacitySchema>;
 
 export type ToConnector =
   /** The answer to a valid hello: where each stream left off, so the connector resends only what is newer. */
+  /** protocol: the hello's when it is 1 or 2, else 2. accepts: PORTAL_ACCEPTS, whatever the settings. */
+  | { type: 'welcome'; protocol: number; provider: 'ffbox'; cursors: { conversation?: string; intake?: string }; limits: typeof LIMITS; accepts: readonly string[] }
   /**
-   * protocol: the hello's (1 or 2). accepts (protocol 2): the connector→portal messages this portal takes now beyond the
-   * reports, as config allows: board_check, request, accepted, refused, result.
+   * A message the portal did not take; the connection stays up. unsupported: a message type this portal does not know
+   * (ref: the type). bad_message: a known type with a value out of range or format (counted toward LIMITS.invalidPerMinute).
    */
-  | { type: 'welcome'; protocol: number; provider: 'ffbox'; cursors: { conversation?: string; intake?: string }; limits: typeof LIMITS; accepts?: string[] }
-  /** A message the portal did not take; the connection stays up. */
-  | { type: 'error'; code: 'bad_json' | 'bad_message' | 'unknown_type' | 'hello_twice' | 'not_enabled'; message: string; ref?: string }
+  | { type: 'error'; code: 'bad_message' | 'unsupported' | 'hello_twice' | 'not_enabled'; message: string; ref?: string }
   /** The answer to board_check (docs/intake.md): what the ledger holds that matches, open or finished. */
   | { type: 'board'; ref: string; verdict: 'clear' | 'in_flight' | 'done' | 'maybe'; matches: BoardMatchWire[]; confidence?: number; update?: true }
   /** Receipt of a request FFBox filed: the ledger item it became (or the one it repeats). */
   | { type: 'filed'; ref: string; workId?: string; status: string; repeat?: boolean; why?: string }
-  /** A read-only question (docs/ffbox-connector-contract.md, "Read-only queries"), only to a connector whose hello lists it. */
+  /** A read-only question (docs/ffbox-connector-contract.md, "Read-only queries"), whatever the hello listed. */
   | QueryMessage
   /** The work messages (docs/ffbox-connector-contract.md), sent only to a connector that lists them in hello.accepts. */
   | ToConnectorWork;
@@ -206,8 +217,12 @@ export type ToConnector =
 // the config, ids for the ledger log, fixed words and numbers for the status). Nothing a query carries can make FFBox
 // write, start or change anything. Adding one: docs/ffbox.md, "Asking FFBox".
 
-/** The queries this portal knows how to ask and show. A connector offers its own list in hello.queries. */
+/**
+ * The queries the ffbox_activity tool offers. Not a gate: any name matching QUERY_NAME may be sent, and FFBox answers
+ * error unsupported for one it does not know.
+ */
 export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation'] as const;
+export const QUERY_NAME = /^[a-z_]{1,32}$/;
 export type ProviderQuery = (typeof PROVIDER_QUERIES)[number];
 
 export const QUERY_LIMITS = {
@@ -239,8 +254,15 @@ export const QueryResultSchema = z.object({
   /** When ffwatch wrote the answer. */
   at: iso.optional(),
   data: z.record(z.string(), z.unknown()).optional(),
-  /** unsupported, bad_args, not_ready, withheld, too_large, rate_limited; newer codes are kept as given. */
+  /**
+   * unsupported, bad_args, not_ready, withheld, too_large, rate_limited, unavailable (ffwatch down), disabled (queries
+   * off on FFBox); newer codes are kept as given.
+   */
   error: z.string().regex(/^[a-z_]{1,32}$/).optional(),
+  /** FFBox's words on a failure: why (reason), what to do (hint), what was wrong with the args (detail). Untrusted text. */
+  reason: z.string().optional(),
+  hint: z.string().optional(),
+  detail: z.string().optional(),
 });
 export type QueryResult = z.infer<typeof QueryResultSchema>;
 
@@ -401,8 +423,8 @@ export const RequestSchema = z.object({
   brief: z.string().min(1).max(8000),
   /** Who opened the conversation behind it: an operator, a player, or FFBox itself. */
   opener: z.enum(['operator', 'player', 'system']),
-  /** The operator it is for, when an operator asked (an FF Factory login; the portal checks it exists). */
-  requestedBy: RequesterSchema.optional(),
+  /** The operator it is for, when an operator asked (an FF Factory login; the portal checks it exists). Read without .strict(). */
+  requestedBy: z.object(RequesterSchema.shape).optional(),
   conversation: conversationId.optional(),
   branch: gitRef.optional(),
   pr: z.number().int().min(1).optional(),
@@ -469,10 +491,7 @@ export type BoardCheckMessage = z.infer<typeof BoardCheckSchema>;
 export type ResultMessage = z.infer<typeof ResultSchema>;
 
 /** Everything the connector may send. */
-/**
- * connector → portal, protocol 2, only when the welcome's accepts lists "metrics": FFBox's load, memory and disks, every
- * 30 s. Disks are named by role, never by path.
- */
+/** connector → portal: FFBox's load, memory and disks, every 30 s. Disks are named by role, never by path. */
 export const MetricsSchema = z.object({
   type: z.literal('metrics'),
   at: iso,
@@ -495,4 +514,17 @@ export const MetricsSchema = z.object({
 
 export const FromConnectorSchema = z.discriminatedUnion('type', [HelloSchema, CapacitySchema, ConversationMessageSchema, IntakeMessageSchema, AcceptedSchema, RefusedSchema, ResultSchema, RequestSchema, BoardCheckSchema, QueryResultSchema, MetricsSchema]);
 export type FromConnector = z.infer<typeof FromConnectorSchema>;
-export const FROM_CONNECTOR_TYPES = ['hello', 'capacity', 'conversation', 'intake', 'accepted', 'refused', 'result', 'request', 'board_check', 'query_result', 'metrics'] as const;
+/** Each connector→portal type's schema, by type: a type not here is answered error unsupported. */
+export const FROM_CONNECTOR: ReadonlyMap<string, z.ZodType<FromConnector>> = new Map(FromConnectorSchema.options.map((o) => [o.shape.type.value, o as z.ZodType<FromConnector>]));
+export const FROM_CONNECTOR_TYPES = [...FROM_CONNECTOR.keys()];
+
+/**
+ * Why a failed parse is fatal (docs/ffbox-connector-contract.md, "What closes the link"): a field missing or of the
+ * wrong JSON type, as `<path>: <what was expected>`; undefined when it is not. A whole-number check (`expected int`) is
+ * a value problem, like a range or a pattern, and not fatal.
+ */
+export function fatalIssue(e: z.ZodError): string | undefined {
+  const i = e.issues.find((x) => x.code === 'invalid_type' && !('format' in x && x.format));
+  if (!i) return undefined;
+  return `${i.path.map(String).join('.') || '(message)'}: ${i.message.replace(/^Invalid input: /, '')}`;
+}

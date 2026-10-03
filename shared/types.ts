@@ -511,13 +511,24 @@ export interface Provider {
   connectedSince?: string;
   lastSeen?: string;
   statusDetail?: string;
-  connector?: { version: string; commit?: string; protocol: number };
+  /** From the hello. protocol is information only, and absent when the hello did not say one. */
+  connector?: { version: string; commit?: string; protocol?: number };
   /** The provider's own page, for links. */
   web?: string;
-  /** Work messages the connector said it takes (hello.accepts, e.g. "submit"); none yet in phase 1. */
+  /** What the connector said it takes (hello.accepts, e.g. "board", "query"): information only. */
   accepts?: string[];
-  /** The read-only queries the connector answers (hello.queries), e.g. config, board_log, status. */
+  /** The read-only queries the connector said it answers (hello.queries): information only, every query is asked. */
   queries?: string[];
+  /** The address the last connection that said hello came from. */
+  remote?: string;
+  /** The first 12 hex of that connection's token SHA-256 (what FFBox's `fffconnector.py set-token` prints). */
+  tokenFingerprint?: string;
+  /** ffwatch on FFBox, as the last capacity said: up false means down or restarting since `at`. Absent when unknown. */
+  ffwatch?: { up: boolean; at?: string; receivedAt: string };
+  /** The last query sent to FFBox and how it came back (error: FFBox's code, or timeout / disconnected). */
+  lastQuery?: { what: string; ok: boolean; error?: string; at: string };
+  /** How the last link closed: the code and reason sent, by whom (portal: FF Factory closed it). */
+  lastClose?: { code: number; reason: string; by: 'portal' | 'connector'; at: string };
   /** FFBox's load, memory and disks, as last pushed (shared/providerMetrics.ts); absent from a connector that sends none. */
   metrics?: ProviderMetrics;
   /** The last half hour of CPU and RAM percentages, oldest first, for a sparkline. Not kept across restarts. */

@@ -15,6 +15,11 @@ needs: each side says what it takes (`hello.accepts`, `welcome.accepts`), a conv
 pushed again as it changes). Still, nothing FF Factory sends starts anything on FFBox: a `board` answer is data that
 FFBox's host code reads to decide whether to start a turn of its own.
 
+**No negotiation** (Lothsahn, 2026-10-03). FFBox runs ffbox master, so neither side gates anything on what the other
+says it offers. The hello's `protocol`, `accepts` and `queries` are optional and kept only for display; FF Factory never
+closes a link over a protocol number and never reconnects to change what it takes. It sends any query and any `board`
+update; FFBox answers or says why not. See [The envelope](#the-envelope-what-is-fatal-and-what-is-not).
+
 The phase 3 work messages are specified below, in [Work messages](#work-messages-phase-3-who-asked-and-who-pays):
 `submit`, `diagnose` and `stop`, each naming the person it is for, and the connector's `accepted` and
 `refused`. FF Factory does not send them yet, and it never sends one to a connector whose `hello` does not
@@ -30,6 +35,30 @@ list it in `accepts`. A connector built to this page as it was before can ignore
 - The connector is fixed code with no model. It runs as its own unix account and holds only its
   token. It reads FFBox state through `ffwatch` (for example `ffwatch intake-events --since <cursor>
   --json`), never by opening report zips.
+
+## The envelope: what is fatal and what is not
+
+Every frame, both ways, is one JSON object with a string `type`. `id` (a query) or `ref` (everything else) ties an
+answer to what it answers. The rules are the same on both sides:
+
+- **Unknown fields are ignored.** A reader drops fields it does not know and never refuses a message for having them.
+  A missing optional field takes its default.
+- **An unknown type is not fatal.** FF Factory answers it with
+  `{"type": "error", "code": "unsupported", "ref": "<the type>", "message": "…"}`, logs it once per type per link,
+  and does not count it toward the invalid-message limit. The connector does the same, or ignores it.
+- **A frame that cannot be read at all closes the link with `4400`:** not JSON, not an object, no string `type`, or a
+  known type with a required field missing or a field of the wrong JSON type (a string where a number belongs). The
+  close reason, at most 120 bytes, says where: `could not parse capacity.classes.0.free: expected number, received
+  string`. Before the hello, anything but a valid `hello` is fatal the same way. A frame over 64 KB is closed by the
+  WebSocket layer with `1009`.
+- **A value that breaks a rule is not fatal:** a number out of range, a string that does not match its pattern, a
+  whole number that is not whole. FF Factory answers `error` `bad_message` naming the field and the rule (never the
+  value), counts it, and closes with `4400` only past 20 in a minute.
+
+FF Factory logs every close with the code and reason either side sent, and shows the last one in FFBox's status line
+(`system_status`, `ffbox_activity`, the FFBox card): for its own parse failures,
+`connector closed: could not parse <type>.<path>: <detail> (ffbox commit <7 hex>, from <ip>)`. When the connector cannot
+parse something FF Factory sent, it closes with `4400` and its own reason the same way, and FF Factory shows that.
 
 ## Auth
 
@@ -57,31 +86,33 @@ The upgrade answers:
 The connector's first message is `hello`:
 
 ```json
-{ "type": "hello", "protocol": 1, "provider": "ffbox",
+{ "type": "hello", "protocol": 2, "provider": "ffbox",
   "connector": { "version": "1.0.0", "commit": "abc1234" },
   "web": "https://ffbox.lan:8787" }
 ```
 
 | field | rule |
 |---|---|
-| `protocol` | `2` (or `1`, as before). FF Factory speaks both and answers in the hello's; any other number closes with `4426`. Against an older FF Factory that speaks only `1`, a protocol 2 hello is closed with `4426`: fall back to `1` at once (no hourly wait), stay there a while, then try `2` again |
+| `protocol` | optional, a whole number, information only. Any number, or none, is welcomed |
 | `provider` | `"ffbox"` |
 | `connector.version` | 1-40 characters of `A-Z a-z 0-9 . _ + -` |
 | `connector.commit` | optional, 7-40 hex characters |
 | `web` | optional, an `https://` URL where people read FFBox's own page. FF Factory only links to it and never fetches it, so a LAN address is fine |
-| `accepts` | optional, the FF Factory → connector messages this connector takes: `board` and `filed` (protocol 2, [Protocol 2](#protocol-2-the-ledger-check-both-ways)), and later the work messages `submit`, `diagnose`, `stop` ([Work messages](#work-messages-phase-3-who-asked-and-who-pays)). List only what it implements (FFBox lists none while its inbound switch is off). Up to 20 words matching `^[a-z_]{1,32}$`; unknown ones are kept |
+| `accepts` | optional, information only: what the connector takes, e.g. `board`, `filed`, `board_maybe`, `query`, and later the work messages `submit`, `diagnose`, `stop`. Shown on the FFBox card. Words matching `^[a-z_]{1,32}$` are kept (20 at most); others are dropped, not refused. Gates nothing, except that a phase 3 `submit` still goes only to a connector that lists it ([Work messages](#work-messages-phase-3-who-asked-and-who-pays)) |
+| `queries` | optional, information only: the read-only queries it answers. FF Factory asks any query whatever this says |
 
 FF Factory answers with `welcome`:
 
 ```json
-{ "type": "welcome", "protocol": 1, "provider": "ffbox",
+{ "type": "welcome", "protocol": 2, "provider": "ffbox",
   "cursors": { "conversation": "2026-09-27T09:20:00Z#812", "intake": "20260927T090000Z-desync-3a9f01c2d4" },
-  "limits": { "maxMessageBytes": 65536, "messagesPerSecond": 100, "burst": 1000, "helloTimeoutMs": 10000, "invalidPerMinute": 20 } }
+  "limits": { "maxMessageBytes": 65536, "messagesPerSecond": 100, "burst": 1000, "helloTimeoutMs": 10000, "invalidPerMinute": 20 },
+  "accepts": ["board_check", "board_summary", "request", "accepted", "refused", "result", "metrics"] }
 ```
 
-A protocol 2 welcome also carries `"accepts"`: the connector → FF Factory messages it takes now beyond the reports,
-as its config allows (`board_check`, `request`, `accepted`, `refused`, `result`). Send only those; with
-`board_check` missing, do not ask and carry on (fail open).
+`protocol` echoes the hello's when it is `1` or `2`, and is `2` otherwise. `accepts` is the same static list on every
+welcome: everything FF Factory's code handles, whatever its settings. A `board_check` or `request` while that part of
+the intake is off is answered `error` `not_enabled` with the `ref`, so a change of settings never closes the link.
 
 `cursors` holds the `cursor` of the last `conversation` and `intake` message FF Factory stored. A
 stream FF Factory has never seen has no cursor. After the welcome, the connector sends the current
@@ -90,7 +121,8 @@ happen.
 
 ## Messages from the connector
 
-Unknown fields are dropped, and a field that fails its rule makes the message invalid.
+Unknown fields are dropped. A field of the wrong JSON type, or a required one missing, closes the link; a value that
+breaks its rule is answered `bad_message` ([The envelope](#the-envelope-what-is-fatal-and-what-is-not)).
 
 ### `capacity`
 
@@ -128,6 +160,7 @@ fenced class (Lothsahn, 2026-09-28).
 | `queue` | turns waiting for a container |
 | `state` | `running`, `draining`, `updating` or `stopped` |
 | `holds` | why work waits, one line each (a subscription hold, quiet hours); at most 10 of 160 characters |
+| `ffwatch` | optional, `{ "up": true \| false, "at": "<ISO time>"? }`: whether `ffwatch`, which writes the feed the connector reads, is running. `at` is when it last wrote; `up: false` means down or restarting since then. The status line says `ffwatch up` or `ffwatch DOWN since <at>`, and nothing when a capacity leaves it out |
 
 ### `conversation`
 
@@ -194,10 +227,10 @@ Never send the description, log lines, file names from inside the zip, or the se
 | message | when |
 |---|---|
 | `welcome` | the answer to a valid `hello` (above) |
-| `error` | `{ "type": "error", "code": "bad_json" \| "bad_message" \| "unknown_type" \| "hello_twice" \| "not_enabled", "message": "…", "ref": "<type or ref>" }`. A message was not taken, and the connection stays up. `message` names the field and the rule, never the value. `not_enabled`: a `request` or `board_check` while FF Factory has that part of the intake off. Log it |
+| `error` | `{ "type": "error", "code": "bad_message" \| "unsupported" \| "hello_twice" \| "not_enabled", "message": "…", "ref": "<type or ref>" }`. A message was not taken, and the connection stays up. `bad_message`: a value broke its rule; `message` names the field and the rule, never the value. `unsupported`: a type FF Factory does not know (`ref` is the type). `not_enabled`: a `request` or `board_check` while FF Factory has that part of the intake off. Log it |
 | `filed`, `board` | the answers to `request` and `board_check` ([The intake](#the-intake-requests-and-the-ledger-check)) |
 
-Ignore any other message type: protocol 2 may add some.
+A type the connector does not know is not fatal: answer `error` `unsupported` with the type as `ref`, or ignore it.
 
 ## Work messages (phase 3): who asked and who pays
 
@@ -341,7 +374,7 @@ until one of the reviewers approves it: players' reports do not steer the game; 
 `board_check` (connector → FF Factory), before FFBox works a report or starts an operator's dev turn: `ref`, up to 20
 `keys` in the board's spelling, an optional `conversation` (protocol 2: FFBox's conversation id; the ledger requests
 filed from that conversation are its own and never match), and an optional `title` (300) and `summary` (1000: the
-report's start), sanitized on FFBox and sent only when the welcome lists `board_summary`. Their words are compared with
+report's start), sanitized on FFBox (every welcome lists `board_summary`). Their words are compared with
 each ledger request's title and brief by meaning (server/boardMatch.ts): untrusted, never shown to a model. Send
 `discord:<thread id>` for a `bug_report` or `suggestion` turn and `report:<report id>` for an intake diagnosis: an exact
 key is a match whatever the words say. Other spellings still work:
@@ -350,8 +383,8 @@ ledger request that names a Discord thread (a `discord.com/channels/…` link or
 or related ids) the key `discord:<thread id>`, including requests filed before this existed.
 
 `board` (FF Factory → connector): `verdict` `in_flight` (a match in the high band is open), `done` (one finished
-within FF Factory's lookback, default 14 days), `maybe` (only medium-band matches: it may be the same bug; sent only to
-a connector whose hello lists `board_maybe`, any other is told `clear`) or `clear`; `confidence`, the strongest
+within FF Factory's lookback, default 14 days), `maybe` (only medium-band matches: it may be the same bug; sent whatever
+the hello lists) or `clear`; `confidence`, the strongest
 match's score; and up to five `matches`, strongest first: ledger id, status, title (120 characters), score 0 to 1, why,
 last change. Never a brief. The bands are config `intake.ffbox.match` (`high` 0.7, `medium` 0.45 by default): an exact
 key is high; by words, high also needs a shared concept few requests hold and two shared concepts that say which bug it
@@ -369,13 +402,13 @@ match's title into a container that runs player text. Protocol 2 adds, per match
 **Updates** (protocol 2): while the link is up, FF Factory re-checks every answer it gave `in_flight` (or `done` with
 `version: null`) each minute, for up to 30 days, and sends the `board` again with the same `ref` and `"update": true`
 when what FFBox acts on changed: the verdict, a match's status, `watch` (a PR opened, a branch renamed), `version`,
-`mergedIn`. Only to a connector that lists `board` in `accepts`. FF Factory forgets these on a restart, so the connector
+`mergedIn`, whatever the hello listed. FF Factory forgets these on a restart, so the connector
 re-sends `board_check` for everything it still follows after every (re)connect.
 
 **FFBox MUST** (its host code, never a container):
 
-- fail open: without an answer within a few seconds, or with FF Factory unreachable, or `board_check` not in the
-  welcome's `accepts`, start its turn as it would have;
+- fail open: without an answer within a few seconds, with `error` `not_enabled`, or with FF Factory unreachable, start
+  its turn as it would have;
 - on `in_flight`: start no turn, set the returned `watch.branch` (and `pr`) as the conversation's branch and watch it
   read-only for the merge; never push to it;
 - on `done`: start no turn, and reply with its usual merged notice filled with `version` ("the next beta build" when it
@@ -419,7 +452,7 @@ happen in one step here, so there is no race between checking and filing.
 
 - Rate: a token bucket of 1000 messages refilled at 100 a second, which is enough for a catch-up of
   a few thousand messages. Pace a larger backlog. Past the limit, FF Factory closes with `4429`.
-- More than 20 invalid messages in a minute closes with `4400`.
+- More than 20 invalid messages (`bad_message`) in a minute closes with `4400`. Unknown types do not count.
 - FF Factory pings every 20 s and drops a connection that has been silent for 45 s. The connector
   should do the same: answer pings (any WebSocket library does), and treat 45 s without a frame or
   pong as a dead link, then reconnect.
@@ -428,10 +461,10 @@ happen in one step here, so there is no race between checking and filing.
 |---|---|---|
 | `1000`, `1001` | normal, or FF Factory shutting down | the normal backoff |
 | `4000` | replaced by a newer connection with the same token | nothing, if that was this connector's own reconnect; otherwise log it, because two connectors share one token |
-| `4400` | the first message was not a valid `hello`, or too many invalid messages | fix, then retry in 5 minutes |
+| `1009` | a frame over 64 KB | fix, then the normal backoff |
+| `4400` | a frame FF Factory could not read (the reason says where), the first message was not a valid `hello`, or too many invalid messages | log the reason, fix, then retry in 5 minutes |
 | `4403` | switched off in FF Factory while connected | retry in 5 minutes |
 | `4408` | no `hello` within 10 s | the normal backoff |
-| `4426` | FF Factory speaks another protocol | a protocol 2 hello: retry at once with protocol 1. Protocol 1 refused: stop, say so in FFBox's journal and status, and retry every hour (an update on either side fixes it) |
 | `4429` | too many messages | wait 60 s, then send more slowly |
 
 ## Reconnect and backoff
@@ -443,7 +476,7 @@ long an FF Factory restart takes (20-60 s):
 - After that: `min(60 s, 1 s × 2^attempt)` with the same jitter.
 - A refused upgrade (`502` from the proxy while FF Factory is down, or a connection error) ends the
   attempt at once. Do not wait out the handshake timeout.
-- `401`, `403`, `429`, `4400`, `4403`, `4426` and `4429` use their own waits from the tables above,
+- `401`, `403`, `429`, `4400`, `4403` and `4429` use their own waits from the tables above,
   not the fast retry.
 - After any reconnect, send `hello` again, and resume from the cursors in the new `welcome`, not from
   memory.
@@ -485,20 +518,15 @@ Either side can end the link on its own:
 
 ## Versioning
 
-Additive changes keep the protocol number: a new optional field, a new message type from FF Factory (which the
-connector ignores), or a new `unity` mode. A change that needs both sides updated bumps `PROVIDER_PROTOCOL`, and FF
-Factory keeps speaking the older numbers in `SUPPORTED_PROTOCOLS` (now 1 and 2) so a rollout can update either side
-first: it answers each connector in the version its hello names. A number it does not speak closes with `4426`; a
-newer connector then falls back to an older version at once, and an older one waits for an update.
+Changes are additive: a new optional field, a new message type, a new query, a new error code, a new `unity` mode.
+The envelope rules make each safe to ship on either side first: an unknown field is ignored, an unknown type is
+answered `unsupported`, an unknown query is answered `error` `unsupported`. The protocol number is information only;
+nothing is gated on it, and FF Factory no longer closes `4426` for a number it does not know (removed 2026-10-03).
 
 ## Protocol 2: the ledger check both ways
 
-| | protocol 1 connector | protocol 2 connector |
-|---|---|---|
-| FF Factory 1 (before 2026-09-29) | as before | hello closed `4426`; the connector falls back to 1 and runs without the ledger check |
-| FF Factory 2 | welcome protocol 1, no `accepts`, no `board` pushes; a `board_check` is still answered | welcome protocol 2 with `accepts`; `board` answers, updates pushed |
-
-What changed from 1: `hello.accepts` names `board` and `filed`; `welcome.accepts`; `conversation.threadId`;
+Since 2026-10-03 a protocol 1 and a protocol 2 hello get the same welcome, answers and pushes ([No
+negotiation](#ffbox-connector-contract-provider-protocol-2)). What changed from 1: `hello.accepts` names `board` and `filed`; `welcome.accepts`; `conversation.threadId`;
 `board_check.conversation`; the `board` match fields `watch`, `version`, `mergedIn`, `branch`; `board` updates.
 FFBox's side: `scripts/fffconnector.py`, `scripts/fff_feed.py` and `scripts/ffwatch.py` in the ffbox repo, behind its
 `fff.board_check` switch.
@@ -514,17 +542,21 @@ FF Factory can ask FFBox a fixed set of read-only questions on the open link. No
 {"type": "query_result", "id": "q-mg1x2-3fa9c01c", "what": "nope", "ok": false, "error": "unsupported"}
 ```
 
-- **Offered in the hello.** A connector that answers queries puts `query` in `hello.accepts` and the names in
-  `hello.queries`. FF Factory sends a query only to such a connector, and only a name in both that list and its own
-  `PROVIDER_QUERIES`. An older portal ignores `queries` and never asks. An older connector never offers, so it is never
-  asked.
+- **Not offered, just asked.** FF Factory sends any name matching `^[a-z_]{1,32}$` while the link is up, whatever
+  the hello listed (`hello.queries` is shown, never checked). A malformed name is answered `unsupported` by FF Factory
+  without sending it. The connector answers a name it does not know with `error` `unsupported`.
 - **Answers.** `ok: true` with `data`, an object, and `at`, when FFBox wrote it. Otherwise `ok: false` with `error`:
-  `unsupported`, `bad_args`, `not_ready`, `withheld` (a secret scanner matched), `too_large`, `rate_limited`, or a
-  newer code kept as given. An answer is one frame, so the 64 KB frame limit is its cap, and a bigger frame closes
-  the link.
+  `unsupported`, `bad_args`, `not_ready`, `withheld` (a secret scanner matched), `too_large`, `rate_limited`,
+  `unavailable` (ffwatch is down), `disabled` (queries are switched off on FFBox), or a newer code kept as given. A
+  failure may carry FFBox's own words, each an optional string of at most 300 characters: `reason` (why, e.g.
+  `ffwatch down since 2026-10-03T04:28:45Z`), `hint` (what to expect, e.g. `FFBox (commit abc1234) doesn't know this
+  query; it may be updating`) and `detail` (what was wrong with the args, e.g. `args.id: a whole number from 1 to
+  1000000000000`). FF Factory treats them as untrusted text: one line, control characters out, secrets redacted, 300
+  characters kept. An answer is one frame, so the 64 KB frame limit is its cap, and a bigger frame closes the link.
 - **Limits.** The connector answers 30 queries a minute and refuses the next 30 with `rate_limited`. Past that it
-  drops them unanswered. FF Factory sends at most 30 a minute and 8 at once, and waits 10 s for each answer. When it
-  cannot ask or gets no answer, it shows the last good answer it kept, with that answer's time.
+  drops them unanswered. FF Factory sends at most 30 a minute and 8 at once, and waits 10 s for each answer (15 s for
+  `conversation`). When it cannot ask or gets no answer, it says why (`no answer from FFBox within 10 s` for a timeout)
+  and shows the last good answer it kept, with that answer's time.
 - **What answers them.** FFBox's host, never a container or a model. `ffwatch` writes each answer in advance, cut
   down: the config through an allowlist, ids for the ledger log, fixed words and numbers for the status. It scans
   each answer with `secret_in()`. The connector picks the file by the query's name, scans it again, and logs every
@@ -539,8 +571,7 @@ FF Factory can ask FFBox a fixed set of read-only questions on the open link. No
 
 ## `metrics` (protocol 2)
 
-FFBox's load, memory and disks, pushed every 30 s on the open link, only when the welcome's `accepts` lists `metrics`
-(this portal always does on protocol 2; an older portal does not, and is sent none).
+FFBox's load, memory and disks, pushed every 30 s on the open link, always.
 
 ```json
 {"type": "metrics", "at": "2026-10-02T10:00:00Z",

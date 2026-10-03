@@ -97,7 +97,7 @@ export interface IntakeDeps {
   discord?: DiscordReader;
   /** Send FFBox a board answer again when it changed (server/providers.ts pushBoard); false when it could not go. */
   pushBoard?: (ref: string, answer: BoardAnswer) => boolean;
-  /** Whether the connector takes a `maybe` board answer (its hello.accepts lists "board_maybe"); an older one is told clear. */
+  /** Whether a board answer may say `maybe` (else it says clear). server/index.ts: always, FFBox runs ffbox master. */
   takesMaybe?: () => boolean;
   /** git in the base clone; the default runs it there. */
   git?: (args: string[]) => Promise<{ code: number; stdout: string }>;
@@ -612,14 +612,6 @@ export class IntakeManager {
       if (kept) kept.at = b.at;
     }
     return sent;
-  }
-
-  /** The connector→portal messages this portal takes now beyond the reports (a protocol 2 welcome's accepts). */
-  portalAccepts(): string[] {
-    const f = this.settings.ffbox;
-    if (!f.enabled) return [];
-    // board_summary: FFBox may send the start of the report with a check, for the matching by meaning.
-    return [...(f.boardCheck ? ['board_check', 'board_summary'] : []), ...(f.requests ? ['request'] : []), 'accepted', 'refused', 'result'];
   }
 
   /** FFBox accepted or refused a submit. */

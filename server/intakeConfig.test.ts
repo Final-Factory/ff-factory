@@ -25,7 +25,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 /**
  * set_app_config intake.ffbox (w224), end to end on a real Agents, ProviderManager and IntakeManager: an owner's setting
  * only, behind the same user-asked guard as the other admin settings, validated, written to config.json, applied live,
- * and a connected FFBox connector re-linked so its welcome says the portal now takes board_check.
+ * and a connected FFBox connector kept: the welcome is static, and the ledger check answers once it is switched on.
  */
 
 setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
@@ -81,7 +81,6 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, peo
   const pm = new ProviderManager(cfg);
   const intake = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, pushBoard: (ref, a) => pm.pushBoard(ref, a) });
   pm.onBoardCheck = (m) => intake.onBoardCheck(m);
-  pm.portalAccepts = () => intake.portalAccepts();
   agents.providers = pm;
   const server = http.createServer();
   server.on('upgrade', (req, socket, head) => pm.upgrade(req, socket, head, '127.0.0.1'));
@@ -204,31 +203,30 @@ test('intake.ffbox: unknown keys and wrong types are refused, and change nothing
   assert.equal(cfg.intake, undefined);
 });
 
-test('intake.ffbox: a connected FFBox is re-linked when what the portal takes changes, and then gets board answers', async (t) => {
+test('intake.ffbox: switching the ledger check on keeps the connected FFBox, which then gets board answers', async (t) => {
   const { connect, intake, pm, remote } = await setup(t);
-  // Connected while the intake is off: the welcome takes only metrics, so FFBox never sends a board_check.
-  const before = connect();
-  const w1 = (await before.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as { accepts: string[] };
-  assert.deepEqual(w1.accepts, ['metrics']);
-  assert.equal(intake.onBoardCheck({ type: 'board_check', ref: 'x', keys: ['discord:1'] } as never), undefined, 'the ledger check is off');
-  assert.match(pm.ledgerProblem() ?? '', /^LEDGER CHECK OFF HERE/, 'FFBox takes board answers, this portal does not ask (w219)');
+  // Connected while the intake is off: the welcome is the same static list, and a board_check is answered not_enabled.
+  const c = connect();
+  const w1 = (await c.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as { accepts: string[] };
+  assert.deepEqual(w1.accepts, ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics']);
+  assert.equal(pm.ledgerProblem(), undefined, 'nothing said before FFBox has asked');
+  c.send({ type: 'board_check', ref: 'conv-570', keys: ['discord:1424000000000000001'], conversation: '570' });
+  const off = await c.next('error');
+  assert.equal(off.code, 'not_enabled');
+  assert.equal(off.ref, 'conv-570');
+  assert.match(pm.ledgerProblem() ?? '', /^LEDGER CHECK OFF HERE: FFBox asked 1 time\(s\) in 24 h and this portal answered not_enabled \(intake\.ffbox\.boardCheck\)$/);
+  assert.match(pm.statusLine()!, /LEDGER CHECK OFF HERE/);
   const r = await remote(BEN, 'set_app_config', { key: 'intake.ffbox', value: WANTED, user_asked: true });
   assert.equal(r.isError, false, r.text);
-  assert.match(r.text, /its connector was closed normally and reconnects within seconds to a new welcome/);
-  const closed = await before.closed;
-  assert.equal(closed.code, 1000);
-  assert.equal(pm.online, false);
-  // The connector's reconnect gets the new welcome, and its board_check is answered.
-  const after = connect();
-  const w2 = (await after.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as { accepts: string[] };
-  assert.deepEqual(w2.accepts, ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics']);
-  after.send({ type: 'board_check', ref: 'conv-571', keys: ['discord:1424000000000000000'], conversation: '571' });
-  const board = (await after.next('board')) as { verdict: string };
+  assert.match(r.text, /FFBox's connection stays up/);
+  assert.equal(pm.online, true, 'no reconnect for a change of settings');
+  // The same link's next board_check is answered.
+  c.send({ type: 'board_check', ref: 'conv-571', keys: ['discord:1424000000000000000'], conversation: '571' });
+  const board = (await c.next('board')) as { verdict: string };
   assert.equal(board.verdict, 'clear');
-  // A change that leaves what the portal takes alone (the daily cap, the match bands) keeps the link, and is live.
+  // Another change (the daily cap, the match bands) keeps the link too, and is live.
   const same = await remote(BEN, 'set_app_config', { key: 'intake.ffbox', value: { ...WANTED, dailyCap: 5, match: { high: 0.8 } }, user_asked: true });
   assert.equal(same.isError, false, same.text);
-  assert.doesNotMatch(same.text, /closed normally/);
   assert.equal(pm.online, true);
   assert.deepEqual(intake.settings.ffbox.match, { high: 0.8, medium: 0.45 });
   assert.equal(intake.settings.ffbox.dailyCap, 5);
