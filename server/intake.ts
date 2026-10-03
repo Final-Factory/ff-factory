@@ -97,6 +97,8 @@ export interface IntakeDeps {
   discord?: DiscordReader;
   /** Send FFBox a board answer again when it changed (server/providers.ts pushBoard); false when it could not go. */
   pushBoard?: (ref: string, answer: BoardAnswer) => boolean;
+  /** Whether the connector takes a `maybe` board answer (its hello.accepts lists "board_maybe"); an older one is told clear. */
+  takesMaybe?: () => boolean;
   /** git in the base clone; the default runs it there. */
   git?: (args: string[]) => Promise<{ code: number; stdout: string }>;
   now?: () => number;
@@ -112,11 +114,19 @@ interface Persisted {
   checkedAt?: string;
   /** Escalations from FFBox already answered, by their ref: a resend gets the same answer and files nothing new. */
   escalations?: Record<string, { answer: EscalationAnswer; at: number }>;
+  /**
+   * board_check answers of `maybe`, by FFBox conversation: the candidate requests, so that what FFBox files from that
+   * conversation later names them for a person to merge. The newest MAYBE_KEEP.
+   */
+  maybes?: Record<string, { ids: string[]; scores: number[]; at: number }>;
   /** The last nightly report and what it came to (the Intake tab). */
   nightly?: NonNullable<IntakeSummary['nightly']>['last'];
   polledAt?: string;
   error?: string;
 }
+
+/** board_check `maybe` answers kept for linking what FFBox files later. */
+const MAYBE_KEEP = 200;
 
 /** A snowflake for a moment: every Discord id made after it is larger. */
 const snowflakeAt = (ms: number) => ((BigInt(ms) - 1420070400000n) << 22n).toString();
@@ -406,7 +416,10 @@ export class IntakeManager {
       limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.dailyCap, now),
     });
     // A conversation is reported again on every change: log only what is new.
-    if (!res.repeat) this.outcome(draft.source.kind, draft.title, draft.source.url, res);
+    if (!res.repeat) {
+      this.outcome(draft.source.kind, draft.title, draft.source.url, res);
+      if (!res.mergedInto) this.linkMaybe(c.id, res.item?.id);
+    }
   }
 
   /** FFBox filed a request (the connector's "request" message); undefined while that is off. */
@@ -450,6 +463,7 @@ export class IntakeManager {
       limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.dailyCap, now),
     });
     this.outcome('ffbox-request', title, m.url, res);
+    if (!res.repeat && !res.mergedInto) this.linkMaybe(m.conversation, res.item?.id);
     if (res.skipped) return { status: 'skipped', why: res.skipped };
     const w = res.mergedInto ? this.d.store.work.get(res.mergedInto) : res.item;
     return { workId: w?.id, status: w?.approval?.state === 'pending' ? 'pending_approval' : (w?.status ?? 'new'), ...(res.repeat || res.mergedInto ? { repeat: true } : {}) };
@@ -507,6 +521,7 @@ export class IntakeManager {
       limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.ffbox.dailyCap, now),
     });
     this.outcome('ffbox-request', title, e.url, res);
+    if (!res.repeat && !res.mergedInto) this.linkMaybe(e.conversation, res.item?.id);
     if (res.skipped) return { status: 'skipped', why: res.skipped };
     const w = res.mergedInto ? this.d.store.work.get(res.mergedInto) : res.item;
     if (!w) return { status: 'skipped', why: 'not filed' };
@@ -531,22 +546,43 @@ export class IntakeManager {
       if (/^(branch|ffbox|pr|spec|ref):/.test(l)) return [l];
       return [l, `ffbox:${l}`];
     });
-    const q = { keys, title: m.title ? cleanLine(m.title, 300) : undefined, conversation: m.conversation };
-    const answer = this.d.orchestrators.boardCheck(q, s.lookbackDays);
+    const q = { keys, title: m.title ? cleanLine(m.title, 300) : undefined, summary: m.summary ? cleanBlock(m.summary, 1000) : undefined, conversation: m.conversation };
+    const answer = this.d.orchestrators.boardCheck(q, s.lookbackDays, { thresholds: s.ffbox.match, maybe: this.d.takesMaybe?.() === true });
     this.watchBoard(m.ref, q, answer);
+    this.noteBoard(m.ref, m.conversation, answer);
     return answer;
+  }
+
+  /** Every board_check decision, logged; a `maybe` remembered for what FFBox files from that conversation later. */
+  private noteBoard(ref: string, conversation: string | undefined, a: BoardAnswer) {
+    const tops = a.matches.map((x) => `${x.id} ${x.score} (${x.why})`).join(', ');
+    console.log(`intake: board_check ${ref}${conversation ? ` (FFBox conversation ${conversation})` : ''}: ${a.verdict}, confidence ${a.confidence ?? 0}${tops ? `; ${tops}` : ''}`);
+    if (a.verdict !== 'maybe' || !conversation) return;
+    const maybes = { ...this.data.maybes, [conversation]: { ids: a.matches.map((x) => x.id), scores: a.matches.map((x) => x.score), at: this.now() } };
+    const keys = Object.keys(maybes).sort((x, y) => maybes[y].at - maybes[x].at);
+    for (const k of keys.slice(MAYBE_KEEP)) delete maybes[k];
+    this.data.maybes = maybes;
+    this.changed();
+  }
+
+  /** What FFBox filed from a conversation board_check answered `maybe` for: a line naming the candidates, for a person. */
+  private linkMaybe(conversation: string | undefined, workId: string | undefined) {
+    const m = conversation ? this.data.maybes?.[conversation] : undefined;
+    if (!m || !workId || m.ids.includes(workId)) return;
+    const list = m.ids.map((id, i) => `${id} (${m.scores[i]})`).join(', ');
+    this.d.orchestrators.noteIntake(workId, `Possibly the same bug as ${list}: the ledger check answered "maybe" for FFBox conversation ${conversation}. Merge it into one of them if so.`);
   }
 
   // ---------------------------------------------------------------- board answers FFBox follows
 
   /** Per board_check ref: what was asked and the last answer sent. In memory: FFBox asks again after a reconnect. */
-  private readonly boards = new Map<string, { q: { keys: string[]; title?: string; conversation?: string }; last: string; at: number }>();
+  private readonly boards = new Map<string, { q: { keys: string[]; title?: string; summary?: string; conversation?: string }; last: string; at: number }>();
 
   /**
    * Remember a board answer FFBox will follow: one in flight (until it is done), or done but not yet released (until the
    * version is known). A clear answer, or a released fix, needs no follow-up.
    */
-  private watchBoard(ref: string, q: { keys: string[]; title?: string; conversation?: string }, answer: BoardAnswer) {
+  private watchBoard(ref: string, q: { keys: string[]; title?: string; summary?: string; conversation?: string }, answer: BoardAnswer) {
     const follow = answer.verdict === 'in_flight' || (answer.verdict === 'done' && answer.matches.some((m) => m.status === 'done' && !m.version));
     if (!follow) {
       this.boards.delete(ref);
@@ -567,7 +603,7 @@ export class IntakeManager {
         this.boards.delete(ref);
         continue;
       }
-      const answer = this.d.orchestrators.boardCheck(b.q, s.lookbackDays);
+      const answer = this.d.orchestrators.boardCheck(b.q, s.lookbackDays, { thresholds: s.ffbox.match, maybe: this.d.takesMaybe?.() === true });
       if (boardDigest(answer) === b.last) continue;
       if (!this.d.pushBoard(ref, answer)) continue;
       sent++;
@@ -582,7 +618,8 @@ export class IntakeManager {
   portalAccepts(): string[] {
     const f = this.settings.ffbox;
     if (!f.enabled) return [];
-    return [...(f.boardCheck ? ['board_check'] : []), ...(f.requests ? ['request'] : []), 'accepted', 'refused', 'result'];
+    // board_summary: FFBox may send the start of the report with a check, for the matching by meaning.
+    return [...(f.boardCheck ? ['board_check', 'board_summary'] : []), ...(f.requests ? ['request'] : []), 'accepted', 'refused', 'result'];
   }
 
   /** FFBox accepted or refused a submit. */
