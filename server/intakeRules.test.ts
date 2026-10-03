@@ -22,7 +22,9 @@ import {
   isFfboxOwned,
   discordPrLine,
   reporterProblem,
+  sandboxBranchFor,
   sourceTag,
+  usesFactoryBranch,
   versionIn,
   workerRules,
   type DiscordMessage,
@@ -269,4 +271,35 @@ test('worker rules: a thread in a channel FFBox owns is not posted in or closed;
   const d = releaseDraft('0.50.0.52', [owned, other]);
   assert.doesNotMatch(d.brief, /https:\/\/d\/1/);
   assert.match(d.brief, /https:\/\/d\/2 \(w4/);
+});
+
+test('FFBox work names its branch ffbox-f/<topic>; a branch under review, and other work, do not', () => {
+  const dev = workerRules(item({ source: { kind: 'ffbox-dev', untrusted: false, reporter: 'Lothsahn' } }), 'sandbox/alpha');
+  assert.match(dev, /goes on a `ffbox-f\/<topic>` branch \(`ffbox\/\*` is FFBox's own containers' prefix, never yours\): push to it and open your PR from it/);
+  assert.match(dev, /Your sandbox is on `sandbox\/alpha`: rename it before your first push \(`git branch -m ffbox-f\/<short-topic>`/);
+  assert.match(workerRules(item({ source: { kind: 'ffbox-dev', untrusted: false } }), 'ffbox-f/ui-fix'), /Your sandbox is already on `ffbox-f\/ui-fix`: use it/);
+  assert.match(workerRules(item({ source: { kind: 'ffbox-dev', untrusted: false } })), /Name it before your first push/, 'no sandbox known');
+  for (const kind of ['ffbox-diagnosis', 'ffbox-request'] as const) {
+    assert.match(workerRules(item({ source: { kind, untrusted: true } })), /`ffbox-f\/<topic>` branch/, `${kind} without a branch`);
+    assert.doesNotMatch(workerRules(item({ source: { kind, untrusted: true, branch: 'ffbox/x-1' } })), /ffbox-f\//, `${kind} reviewing an FFBox branch`);
+  }
+  assert.doesNotMatch(workerRules(item({ source: { kind: 'ffbox-branch', untrusted: true, branch: 'ffbox/fix-1' } })), /ffbox-f\//);
+  for (const kind of ['discord-bug', 'discord-request', 'nightly', 'release'] as const) assert.doesNotMatch(workerRules(item({ source: { kind, untrusted: false } })), /ffbox-f\//, kind);
+});
+
+test('sandboxBranchFor: ffbox-f/<slug> for FFBox work unless a branch is given; nothing for other work', () => {
+  assert.equal(sandboxBranchFor({ kind: 'ffbox-dev', untrusted: false }, 'UI fix'), 'ffbox-f/ui-fix');
+  assert.equal(sandboxBranchFor({ kind: 'ffbox-request', untrusted: false }, 'spec-098_belts!'), 'ffbox-f/spec-098-belts');
+  assert.equal(sandboxBranchFor({ kind: 'ffbox-dev', untrusted: false }, 'ui-fix', ' 098-foo '), '098-foo');
+  assert.equal(sandboxBranchFor({ kind: 'ffbox-dev', untrusted: false }, '!!!'), undefined, 'no usable slug: git\'s default');
+  assert.equal(sandboxBranchFor({ kind: 'ffbox-branch', untrusted: true, branch: 'ffbox/x' }, 'review'), undefined);
+  assert.equal(sandboxBranchFor({ kind: 'discord-bug', untrusted: true }, 'bug'), undefined);
+  assert.equal(sandboxBranchFor(undefined, 'mine'), undefined);
+  assert.equal(usesFactoryBranch(undefined), false);
+});
+
+test('FFBox review requests never take FF Factory\'s own ffbox-f/ branches for FFBox\'s', () => {
+  const on = { branches: true, diagnoses: true };
+  assert.equal(ffboxReviewFrom(conv({ branch: 'ffbox-f/ui-fix', pr: { number: 7, state: 'open' }, opener: 'player' }), on), undefined);
+  assert.ok(ffboxReviewFrom(conv({ branch: 'ffbox/ui-fix-1', pr: { number: 7, state: 'open' }, opener: 'player' }), on));
 });

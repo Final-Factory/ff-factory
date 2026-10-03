@@ -144,6 +144,9 @@ The same policy as the ff-discord plugin's `discord-answerer` and `discord-triag
 - Every intake worker gets the rules in `workerRules` added by the harness to whatever brief the dispatcher wrote: the
   untrusted-input rule, the posting limits (only in its thread, never internals, unreleased work, team members'
   details or internal channels, never a promised fix or date, the max-voice skill), and the end markers.
+  For work that came from FFBox (dev requests, and diagnoses and requests that name no FFBox branch) they also name the
+  branch: `ffbox-f/<topic>`, not `ffbox/*` (FFBox's own containers') and not `sandbox/<name>` ([ffbox.md](ffbox.md), "How work
+  leaves"); `create_sandbox` with the request's `work_id` defaults to it.
 - Discord and FFBox text goes to the dispatcher only after approval, as a `[work request]` marked intake whose notice
   says the text is players', and to people only as data (`[intake question]`).
 

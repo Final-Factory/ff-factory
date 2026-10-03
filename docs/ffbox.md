@@ -73,6 +73,18 @@ per rolling 24 hours; operators are not capped.
   compiled and its tests passed. One branch per conversation. The base is master or develop by
   the game version the report names, else the class's default. Nothing merges: a person does.
   Merged `ffbox/*` branches are deleted daily.
+- **Branch names: `ffbox/*` is FFBox's, `ffbox-f/*` is FF Factory's** (w273). FFBox's containers push
+  `ffbox/<name>-<run id>`. Work FF Factory does for a request that came from FFBox goes on
+  `ffbox-f/<name>` instead, so a branch says at a glance which side made it. That covers the dev requests
+  (source `ffbox-dev`) and the diagnoses and requests FFBox filed (`ffbox-diagnosis`, `ffbox-request`) that name
+  no branch of FFBox's to review; everything else keeps `sandbox/<name>`. Three places apply it: `create_sandbox`
+  with the dispatcher's `work_id` defaults the branch to `ffbox-f/<sandbox name>` (an explicit `branch` wins);
+  the intake rules the harness adds to the worker's brief (`workerRules`, `server/intakeRules.ts`) say to push and
+  open the PR from an `ffbox-f/<topic>` branch, and to `git branch -m` a `sandbox/<name>` sandbox before the first
+  push (a branch continuing an open PR keeps its name); and the dispatcher's prompt says so. A review of an FFBox
+  branch (`ffbox-branch`, or a diagnosis or request that carries `ffbox/<name>`) is integrated into develop and
+  names no new branch. Only `ffbox/*` conversations become "Review and merge" requests here (`ffboxReviewFrom`),
+  so an `ffbox-f/*` PR is never filed back as one.
 - **Discord replies** are composed by the host from the run's structured result, never sent by the
   container, which has no Discord access at all.
 - **Releases.** A commit on develop or master whose `FFVersion.cs` differs from its first parent's

@@ -49,6 +49,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   SHA-256, before the message goes on (daemon protocol 7; older daemons are refused attachments until redeployed).
   Workers get `fetch_attachment` and an Attachments section in their brief that says where the game loads saves from.
 
+- **FF Factory's work for FFBox goes on `ffbox-f/*` branches** (w273; [docs/ffbox.md](docs/ffbox.md#how-work-leaves)).
+  FFBox's containers keep `ffbox/<name>-<run id>`; for a dev request, and for a diagnosis or request FFBox filed that
+  names no branch of its own to review, `create_sandbox` with the dispatcher's new `work_id` defaults the branch to
+  `ffbox-f/<sandbox name>` (an explicit `branch` wins), and the worker rules the harness adds say to push and open the
+  PR from `ffbox-f/<topic>` (renaming a `sandbox/<name>` branch first). Other work keeps `sandbox/<name>`. Reviews of an
+  FFBox branch name nothing new, and `ffbox-f/*` is never filed back as a "Review and merge" request.
+
 - **`set_app_config` sets the intake reviewers** (w270; [docs/intake.md](docs/intake.md#config)). Key `intake.reviewers`,
   a list of user ids (or one comma-separated string): the people who approve or decline intake requests and answer design
   questions. Each id must be an existing login, matched without regard to case; unknown ids are refused and nothing is
