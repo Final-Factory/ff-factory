@@ -569,6 +569,28 @@ export interface ProviderUpdater {
   receivedAt: string;
 }
 
+/**
+ * FFBox's operators' dev requests, from its `status` answer's `dev_requests` block (docs/ffbox-connector-contract.md,
+ * "status"; shared/devRequestsHealth.ts): its last 24 hours of operators' ffdev turns. ok false: the newest one it
+ * decided fell back and ran on FFBox instead of coming here as a dev request.
+ */
+export interface ProviderDevRequests {
+  mode: 'prefer' | 'off';
+  ok: boolean;
+  windowHours?: number;
+  /** Handed to this portal; of those, taken (filed or delivered); run on FFBox after a failed hand-over; not eligible by
+   * design; finished without a run by a linked thread's block (somebody else's message there). */
+  handed?: number;
+  taken?: number;
+  fallback?: number;
+  skipped?: number;
+  blocked?: number;
+  /** The newest fallback: when, FFBox's conversation and turn, and its error code (no_ack, connector_not_running, ...). */
+  lastFallback?: { at?: string; conversation?: number; turn?: number; error?: string };
+  /** When the portal received the status answer it came in. */
+  receivedAt: string;
+}
+
 /** A provider as the sidebar and system_status see it. The lists are fetched separately (GET /api/providers/<id>/…). */
 export interface Provider {
   id: string;
@@ -603,6 +625,8 @@ export interface Provider {
   metrics?: ProviderMetrics;
   /** FFBox's self-updater as last pushed (shared/updaterHealth.ts); absent from a connector from before w265. */
   updater?: ProviderUpdater;
+  /** FFBox's dev requests, from its last status answer (asked every few minutes while connected); absent until one says. */
+  devRequests?: ProviderDevRequests;
   capacity?: ProviderCapacity;
   counts: { conversations: number; active: number; intake: number; intake24h: number };
   lastIntakeAt?: string;

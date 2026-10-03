@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ProviderManager, describeQuery } from './providers.ts';
+import { ProviderManager, describeQuery, devRequestsFrom } from './providers.ts';
+import { devRequestsHealth } from '../shared/devRequestsHealth.ts';
 import { cpuPct, metricsLine, metricsStale, METRICS_STALE_MS } from '../shared/providerMetrics.ts';
 import { updaterHealth, UPDATER_STALE_INTERVALS } from '../shared/updaterHealth.ts';
 import type { ProviderUpdater } from '../shared/types.ts';
@@ -28,6 +29,8 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }, opt
   const token = mintProviderToken();
   const cfg = { dataDir, providers: { ffbox: { enabled: opts.enabled ?? true, tokenSha256: tokenSha256(token) } } } as unknown as Config;
   const pm = new ProviderManager(cfg);
+  // No background status asks unless a test turns them on (the dev requests' health test does).
+  pm.statusPollMs = 0;
   const server = http.createServer();
   // The address the next connection is recorded from (the tests' sockets all come from 127.0.0.1).
   const remote = { ip: '127.0.0.1' };
@@ -752,4 +755,63 @@ test('a close by the connector: its code and reason logged, kept, and shown whil
   const p = pm.summary();
   assert.deepEqual([p.lastClose?.code, p.lastClose?.reason, p.lastClose?.by], [4400, 'could not parse board.matches.0.score: expected number', 'connector']);
   assert.match(pm.statusLine()!, /^FFBox: connector offline \(last seen [^)]+\) · closed 4400 by the connector: could not parse board\.matches\.0\.score: expected number$/);
+});
+
+// ---------------------------------------------------------------- dev requests' health (w266)
+
+const DEV_FAILING = {
+  mode: 'prefer',
+  ok: false,
+  window_hours: 24,
+  handed: 0,
+  taken: 0,
+  fallback: 2,
+  skipped: 0,
+  last_fallback: { at: '2026-10-03T18:53:10Z', conversation: 612, turn: 924, error: 'no_ack' },
+};
+
+test('dev requests: FFBox is asked for its status while connected, and a fallback there shows in the summary and the status line', async (t) => {
+  const { connect, pm } = await setup(t);
+  pm.statusPollMs = 60;
+  const c = connect();
+  let dev: Record<string, unknown> | undefined = DEV_FAILING;
+  t.after(answerQueries(c, (what) => (what === 'status' ? { ok: true, at: '2026-10-03T19:00:00Z', data: { box: { state: 'running' }, ...(dev ? { dev_requests: dev } : {}) } } : undefined)));
+  await c.hello({ protocol: 2, accepts: ['query'], queries: ['status'] });
+  await until('the status is asked unprompted', () => pm.summary().devRequests !== undefined);
+  const d = pm.summary().devRequests!;
+  assert.equal(d.ok, false);
+  assert.equal(d.fallback, 2);
+  assert.deepEqual(d.lastFallback, { at: '2026-10-03T18:53:10Z', conversation: 612, turn: 924, error: 'no_ack' });
+  assert.match(pm.statusLine()!, /FFBox dev requests falling back: conversation 612 \(turn 924\) ran on FFBox instead of coming here \(no_ack\) at 2026-10-03T18:53:10Z; 2 in 24 h/);
+
+  dev = { ...DEV_FAILING, ok: true, taken: 1, handed: 1 };
+  await until('a later answer clears it', () => pm.summary().devRequests?.ok === true);
+  assert.doesNotMatch(pm.statusLine()!, /falling back/);
+
+  dev = undefined;
+  await until('an FFBox from before the block leaves it unknown', () => pm.summary().devRequests === undefined);
+});
+
+test('dev requests: the block is FFBox data, checked field by field', () => {
+  const at = '2026-10-03T19:00:00Z';
+  assert.equal(devRequestsFrom(undefined, at), undefined);
+  assert.equal(devRequestsFrom({ dev_requests: { mode: 'sometimes', ok: false } }, at), undefined);
+  assert.equal(devRequestsFrom({ dev_requests: [1] }, at), undefined);
+  const d = devRequestsFrom(
+    { dev_requests: { mode: 'prefer', ok: false, fallback: -1, handed: 3.5, skipped: 2, last_fallback: { at: 'yesterday', conversation: '612', turn: 924, error: 'No ACK <@1>' }, extra: 'x' } },
+    at,
+  );
+  assert.deepEqual(d, { mode: 'prefer', ok: false, skipped: 2, lastFallback: { turn: 924 }, receivedAt: at });
+});
+
+test('dev requests: the health line, from shared/devRequestsHealth.ts', () => {
+  const at = '2026-10-03T19:00:00Z';
+  assert.deepEqual(devRequestsHealth(undefined), { state: 'unknown' });
+  assert.deepEqual(devRequestsHealth({ mode: 'prefer', ok: true, receivedAt: at }), { state: 'ok' });
+  assert.equal(devRequestsHealth({ mode: 'off', ok: true, receivedAt: at }).state, 'off');
+  const h = devRequestsHealth(devRequestsFrom({ dev_requests: DEV_FAILING }, at));
+  assert.equal(h.state, 'failing');
+  assert.equal(h.short, 'conv 612: no_ack');
+  const bare = devRequestsHealth({ mode: 'prefer', ok: false, receivedAt: at });
+  assert.equal(bare.line, 'FFBox dev requests falling back: an operator’s turn ran on FFBox instead of coming here (no reason given)');
 });

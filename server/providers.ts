@@ -36,9 +36,10 @@ import {
   type ResultMessage,
   type QueryResult,
 } from './providerProtocol.ts';
-import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent, ProviderMetrics, ProviderUpdater } from '../shared/types.ts';
+import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent, ProviderMetrics, ProviderUpdater, ProviderDevRequests } from '../shared/types.ts';
 import { metricsLine } from '../shared/providerMetrics.ts';
 import { updaterHealth } from '../shared/updaterHealth.ts';
+import { devRequestsHealth } from '../shared/devRequestsHealth.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { emptyDevState, type DevLink, type DevRequests, type DevState } from './devRequests.ts';
 
@@ -48,6 +49,41 @@ const DEAD_MS = 45_000;
 const KEEP_CONVERSATIONS = 500;
 const KEEP_INTAKE = 2000;
 const DAY_MS = 24 * 3600_000;
+/** FFBox's status is asked this often while connected (its dev_requests block), and first this soon after hello. */
+const STATUS_POLL_MS = 5 * 60_000;
+const STATUS_POLL_FIRST_MS = 15_000;
+
+/**
+ * status.dev_requests as FFBox's status answer carries it (scripts/fff_feed.py dev_health_view), checked field by field:
+ * the answer is FFBox's data. Undefined when there is no such block or it is not one.
+ */
+export function devRequestsFrom(data: unknown, receivedAt: string): ProviderDevRequests | undefined {
+  const d = data && typeof data === 'object' ? (data as Record<string, unknown>).dev_requests : undefined;
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return undefined;
+  const r = d as Record<string, unknown>;
+  if (r.mode !== 'prefer' && r.mode !== 'off') return undefined;
+  const count = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 1_000_000 ? v : undefined);
+  const out: ProviderDevRequests = { mode: r.mode, ok: r.ok !== false, receivedAt };
+  const hours = count(r.window_hours);
+  if (hours !== undefined) out.windowHours = hours;
+  for (const k of ['handed', 'taken', 'fallback', 'skipped', 'blocked'] as const) {
+    const n = count(r[k]);
+    if (n !== undefined) out[k] = n;
+  }
+  const f = r.last_fallback;
+  if (f && typeof f === 'object' && !Array.isArray(f)) {
+    const lf = f as Record<string, unknown>;
+    const last: NonNullable<ProviderDevRequests['lastFallback']> = {};
+    if (typeof lf.at === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/.test(lf.at)) last.at = lf.at;
+    const conv = count(lf.conversation);
+    if (conv !== undefined) last.conversation = conv;
+    const turn = count(lf.turn);
+    if (turn !== undefined) last.turn = turn;
+    if (typeof lf.error === 'string' && /^[a-z][a-z0-9_]{0,39}$/.test(lf.error)) last.error = lf.error;
+    if (Object.keys(last).length) out.lastFallback = last;
+  }
+  return out;
+}
 
 /** What is kept on disk (<dataDir>/providers/<id>.json) across restarts. */
 interface Persisted {
@@ -71,6 +107,8 @@ interface Persisted {
   metrics?: ProviderMetrics;
   /** The self-updater's last pass, as last pushed. */
   updater?: ProviderUpdater;
+  /** status.dev_requests, from the last status answer (devRequestsFrom). */
+  devRequests?: ProviderDevRequests;
   capacity?: ProviderCapacity;
   lastSeen?: string;
   conversations: ProviderConversation[];
@@ -176,6 +214,10 @@ export class ProviderManager {
   helloTimeoutMs: number = LIMITS.helloTimeoutMs;
   rate: { perSecond: number; burst: number } = { perSecond: LIMITS.messagesPerSecond, burst: LIMITS.burst };
 
+  /** How often FFBox is asked for its status while connected, for its dev_requests block (0: never; tests). */
+  statusPollMs = STATUS_POLL_MS;
+  private statusPoll?: NodeJS.Timeout;
+
   constructor(cfg: Config) {
     this.cfg = cfg;
     this.file = path.join(cfg.dataDir, 'providers', `${this.id}.json`);
@@ -186,6 +228,7 @@ export class ProviderManager {
 
   close() {
     clearInterval(this.timer);
+    clearInterval(this.statusPoll);
     clearTimeout(this.emitTimer);
     this.link?.ws.close(1001, 'portal shutting down');
     this.flush();
@@ -262,6 +305,7 @@ export class ProviderManager {
       ...(this.data.lastClose ? { lastClose: this.data.lastClose } : {}),
       ...(this.data.metrics ? { metrics: this.data.metrics } : {}),
       ...(this.data.updater ? { updater: this.data.updater } : {}),
+      ...(this.data.devRequests ? { devRequests: this.data.devRequests } : {}),
       capacity: this.data.capacity,
       counts: {
         conversations: this.data.conversations.length,
@@ -318,6 +362,7 @@ export class ProviderManager {
       ...(q ? [`last query: ${q.what} ${q.ok ? 'ok' : (q.error ?? 'failed')} ${q.at}`] : []),
       metricsLine(p.metrics, this.now()),
       ...(this.ledgerProblem() ? [this.ledgerProblem()!] : []),
+      ...(devRequestsHealth(p.devRequests).line ? [devRequestsHealth(p.devRequests).line!] : []),
     ].join(' · ');
   }
 
@@ -591,7 +636,25 @@ export class ProviderManager {
     console.log(`provider ${this.id}: connector ${h.connector.version} (commit ${h.connector.commit?.slice(0, 7) ?? 'unknown'}) connected from ${link.ip}, token ${link.tokenFingerprint}…`);
     // FF Factory's own dev replies FFBox has not confirmed go again on every new link.
     this.hook(() => this.dev?.onConnect());
+    this.pollStatus(link);
     this.changed();
+  }
+
+  /**
+   * Ask FFBox for its status soon after it says hello and every statusPollMs while this link lasts, so a dev request that
+   * fell back on FFBox (status.dev_requests, w266) shows red here without anybody asking. A failed ask is the next one's.
+   */
+  private pollStatus(link: Link) {
+    clearInterval(this.statusPoll);
+    this.statusPoll = undefined;
+    if (!(this.statusPollMs > 0)) return;
+    const ask = () => {
+      if (this.link !== link || link.closedBy) return clearInterval(this.statusPoll);
+      if (!this.queryProblem('status')) void this.query('status');
+    };
+    setTimeout(ask, Math.min(STATUS_POLL_FIRST_MS, this.statusPollMs)).unref();
+    this.statusPoll = setInterval(ask, this.statusPollMs);
+    this.statusPoll.unref();
   }
 
   private apply(link: Link, msg: FromConnector) {
@@ -824,6 +887,9 @@ export class ProviderManager {
     const at = new Date(this.now()).toISOString();
     const live = !!(result.ok && result.data);
     this.data.lastQuery = { what, ok: live, ...(live ? {} : { error: result.error ?? 'no_answer' }), at };
+    // Whoever asked, a live status answer refreshes the dev requests' health; one without the block (an FFBox from before
+    // it) leaves it unknown.
+    if (live && what === 'status') this.data.devRequests = devRequestsFrom(result.data, at);
     this.changed();
     if (live) return { what, live: true, ok: true, at: result.at, receivedAt: at, data: result.data };
     // FFBox's own words are untrusted text: one line, secrets redacted, cut.

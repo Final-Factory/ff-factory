@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { AppVersion, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 import { updaterHealth } from '../../shared/updaterHealth';
+import { devRequestsHealth } from '../../shared/devRequestsHealth';
 
 export { displayName, isUnused };
 
@@ -341,6 +342,9 @@ export function providerGlance(p: Provider, now: number): Glance {
   if (!p.online) return { tone: p.lastSeen ? 'red' : 'grey', label: p.lastSeen ? 'Connector offline' : 'Waiting for the connector', detail: p.lastSeen ? `seen ${fmtRelative(p.lastSeen, now)}` : undefined, attention: 0 };
   const u = updaterHealth(p.updater, now);
   if (u && u.state !== 'ok') return { tone: 'red', label: 'Updates failing', detail: u.line.replace(/^FFBox updates failing: /, ''), attention: 0 };
+  // An operator's dev request that fell back and ran on FFBox (shared/devRequestsHealth.ts, w266).
+  const dev = devRequestsHealth(p.devRequests);
+  if (dev.state === 'failing') return { tone: 'red', label: 'Dev requests falling back', detail: dev.short, attention: 0 };
   const c = p.capacity;
   const free = c ? c.classes.reduce((n, k) => n + k.free, 0) : undefined;
   if (c && c.state !== 'running') return { tone: 'amber', label: c.state === 'draining' ? 'Draining' : c.state === 'updating' ? 'Updating' : 'Stopped', attention: 0 };

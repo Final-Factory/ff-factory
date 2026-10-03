@@ -234,6 +234,17 @@ answer with `reply_to_ffbox`, and never post to Discord any other way.
 person; 500 kept) with the settings in effect and the replies waiting for FFBox, and the status line counts them
 ("N dev request(s) in 24 h").
 
+**Seeing the ones that never arrived** (w266). A turn FFBox could not hand over (no connector, no `dev_ack` in time, a
+refusal, an operator it could not name) runs on FFBox, and nothing reaches this portal: on 2026-10-03 two of
+Lothsahn's turns did, and this view said "0 in 24 h". FFBox's `status` answer now carries a `dev_requests` block (its
+last 24 hours: handed over, taken, fallen back, skipped by design, and the newest fallback's conversation, turn and
+error code). FF Factory asks for `status` 15 s after the connector says hello and every 5 minutes while it is up
+(`server/providers.ts` `pollStatus`; any live `status` answer refreshes it), and while the newest decided hand-over
+fell back the FFBox card turns red, "Dev requests falling back" with the conversation and the code, and the status line
+says `FFBox dev requests falling back: conversation <id> (turn <n>) ran on FFBox instead of coming here (<code>) at
+<time>; <n> in 24 h` (`shared/devRequestsHealth.ts`). It clears with the next hand-over FFBox gets through. On FFBox the
+fallen-back turn's own reply ends "Ran here on FFBox, not in FF Factory: <reason> (<code>)."
+
 ## The status line
 
 FFBox's line in `system_status` (and the `summary` of `ffbox_activity`) reads, while the connector is up:
