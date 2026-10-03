@@ -159,6 +159,8 @@ export const HelloSchema = z.object({
    * work message only to a connector that lists it, so a phase 1 connector never gets one. Unknown words are kept.
    */
   accepts: z.array(z.string().regex(/^[a-z_]{1,32}$/)).max(20).optional(),
+  /** The read-only queries it answers (with "query" in accepts): PROVIDER_QUERIES, and newer names kept as given. */
+  queries: z.array(z.string().regex(/^[a-z_]{1,32}$/)).max(20).optional(),
 });
 
 export const CapacitySchema = z.object({
@@ -193,8 +195,50 @@ export type ToConnector =
   | { type: 'board'; ref: string; verdict: 'clear' | 'in_flight' | 'done'; matches: BoardMatchWire[]; update?: true }
   /** Receipt of a request FFBox filed: the ledger item it became (or the one it repeats). */
   | { type: 'filed'; ref: string; workId?: string; status: string; repeat?: boolean; why?: string }
+  /** A read-only question (docs/ffbox-connector-contract.md, "Read-only queries"), only to a connector whose hello lists it. */
+  | QueryMessage
   /** The work messages (docs/ffbox-connector-contract.md), sent only to a connector that lists them in hello.accepts. */
   | ToConnectorWork;
+
+// ---------------------------------------------------------------- read-only queries (docs/ffbox-connector-contract.md)
+//
+// The portal asks, the connector answers from what ffwatch already wrote, cut down on FFBox's side (an allowlist for
+// the config, ids for the ledger log, fixed words and numbers for the status). Nothing a query carries can make FFBox
+// write, start or change anything. Adding one: docs/ffbox.md, "Asking FFBox".
+
+/** The queries this portal knows how to ask and show. A connector offers its own list in hello.queries. */
+export const PROVIDER_QUERIES = ['config', 'board_log', 'status'] as const;
+export type ProviderQuery = (typeof PROVIDER_QUERIES)[number];
+
+export const QUERY_LIMITS = {
+  /** How long the portal waits for a query_result before it falls back to the last answer it kept. */
+  timeoutMs: 10_000,
+  /** Queries the portal sends per minute; the connector answers 30 a minute and refuses the rest. */
+  perMinute: 30,
+  /** Queries waiting for an answer at once. */
+  inFlight: 8,
+} as const;
+
+export interface QueryMessage {
+  type: 'query';
+  id: string;
+  what: string;
+  args?: Record<string, number>;
+}
+
+/** connector → portal: the answer to one query. `data` is FFBox's, already cut down there; shown as data, never acted on. */
+export const QueryResultSchema = z.object({
+  type: z.literal('query_result'),
+  id: z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/),
+  what: z.string().regex(/^[a-z_]{1,32}$/).optional(),
+  ok: z.boolean(),
+  /** When ffwatch wrote the answer. */
+  at: iso.optional(),
+  data: z.record(z.string(), z.unknown()).optional(),
+  /** unsupported, bad_args, not_ready, withheld, too_large, rate_limited; newer codes are kept as given. */
+  error: z.string().regex(/^[a-z_]{1,32}$/).optional(),
+});
+export type QueryResult = z.infer<typeof QueryResultSchema>;
 
 // ---------------------------------------------------------------- work messages (phase 3, docs/ffbox-connector-contract.md)
 //
@@ -416,6 +460,6 @@ export type BoardCheckMessage = z.infer<typeof BoardCheckSchema>;
 export type ResultMessage = z.infer<typeof ResultSchema>;
 
 /** Everything the connector may send. */
-export const FromConnectorSchema = z.discriminatedUnion('type', [HelloSchema, CapacitySchema, ConversationMessageSchema, IntakeMessageSchema, AcceptedSchema, RefusedSchema, ResultSchema, RequestSchema, BoardCheckSchema]);
+export const FromConnectorSchema = z.discriminatedUnion('type', [HelloSchema, CapacitySchema, ConversationMessageSchema, IntakeMessageSchema, AcceptedSchema, RefusedSchema, ResultSchema, RequestSchema, BoardCheckSchema, QueryResultSchema]);
 export type FromConnector = z.infer<typeof FromConnectorSchema>;
-export const FROM_CONNECTOR_TYPES = ['hello', 'capacity', 'conversation', 'intake', 'accepted', 'refused', 'result', 'request', 'board_check'] as const;
+export const FROM_CONNECTOR_TYPES = ['hello', 'capacity', 'conversation', 'intake', 'accepted', 'refused', 'result', 'request', 'board_check', 'query_result'] as const;

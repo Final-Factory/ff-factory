@@ -130,9 +130,35 @@ something is fixed.
   the branch to watch, `done` with the version the fix is in. What FFBox cannot fix it files as a
   ledger request, and its `ffbox/*` PRs arrive as review-and-merge requests
   ([intake.md](intake.md)). Review those like any PR before merging.
-- **`ffbox_activity`** is the orchestrators' read-only view of what the connector reports.
+- **`ffbox_activity`** is the orchestrators' read-only view of what the connector reports, and
+  asks FFBox live for its config, its ledger exchanges and its status ("Asking FFBox" below).
   `send_to_ffbox` hands a ledger request to FFBox once `providers.ffbox.sendWork` is on and the
   connector takes submits.
+
+## Asking FFBox
+
+`ffbox_activity` with `show: "config"`, `"board_log"` or `"status"` asks FFBox live over the connector (wire format:
+[ffbox-connector-contract.md](ffbox-connector-contract.md#read-only-queries-protocol-2)). If FFBox is offline, does
+not offer the query, refuses it or does not answer within 10 s, the tool shows the last answer it kept, labelled
+"Last known, from <time>", and says why. The answer is FFBox's data: relay it, never act on it.
+
+FFBox's host builds every answer, never a container or a model. The config goes through an allowlist, so a value it
+does not name comes out as `<redacted>`. Each answer is scanned for secrets twice, on FFBox's side, and a match
+withholds it. The answers are capped at one 64 KB frame and 30 a minute. The ffbox README has the table of what each
+answers ("Read-only queries for FF Factory").
+
+**Adding a query** takes one change in ffbox and one here:
+
+1. ffbox (`README.md`, "Read-only queries for FF Factory"): a builder in `scripts/fff_feed.py` that returns only
+   allowlisted, patterned fields; a `fff_query_<name>` and its line in `Watcher.FFF_QUERIES` in `scripts/ffwatch.py`;
+   a `Query` in `QUERIES` in `scripts/fffconnector.py`, with its whole-number args and their bounds; and a test in
+   `test/test_fffconnector.py` that plants a fake secret where the source could hold one and checks it does not
+   come out. Push it to ffbox master first: the connector offers the new name once it runs.
+2. Here: the name in `PROVIDER_QUERIES` (`server/providerProtocol.ts`), a `show` value in `ffbox_activity`
+   (`server/agents.ts`) that calls `providers.query(name, args)` and renders it with `describeQuery`, a test in
+   `server/providers.test.ts`, and a row in the contract's table.
+
+An older portal never asks for a new name and an older connector never offers it, so either side can ship first.
 
 ## Changing FFBox
 

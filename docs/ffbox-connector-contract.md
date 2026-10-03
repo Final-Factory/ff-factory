@@ -495,3 +495,36 @@ What changed from 1: `hello.accepts` names `board` and `filed`; `welcome.accepts
 `board_check.conversation`; the `board` match fields `watch`, `version`, `mergedIn`, `branch`; `board` updates.
 FFBox's side: `scripts/fffconnector.py`, `scripts/fff_feed.py` and `scripts/ffwatch.py` in the ffbox repo, behind its
 `fff.board_check` switch.
+
+## Read-only queries (protocol 2)
+
+FF Factory can ask FFBox a fixed set of read-only questions on the open link. Nothing new listens anywhere.
+
+```json
+{"type": "query", "id": "q-mg1x2-3fa9c01b", "what": "board_log", "args": {"limit": 20}}
+{"type": "query_result", "id": "q-mg1x2-3fa9c01b", "what": "board_log", "ok": true, "at": "2026-10-02T10:00:00Z",
+ "data": {"entries": [...], "total": 50}}
+{"type": "query_result", "id": "q-mg1x2-3fa9c01c", "what": "nope", "ok": false, "error": "unsupported"}
+```
+
+- **Offered in the hello.** A connector that answers queries puts `query` in `hello.accepts` and the names in
+  `hello.queries`. FF Factory sends a query only to such a connector, and only a name in both that list and its own
+  `PROVIDER_QUERIES`. An older portal ignores `queries` and never asks. An older connector never offers, so it is never
+  asked.
+- **Answers.** `ok: true` with `data`, an object, and `at`, when FFBox wrote it. Otherwise `ok: false` with `error`:
+  `unsupported`, `bad_args`, `not_ready`, `withheld` (a secret scanner matched), `too_large`, `rate_limited`, or a
+  newer code kept as given. An answer is one frame, so the 64 KB frame limit is its cap, and a bigger frame closes
+  the link.
+- **Limits.** The connector answers 30 queries a minute and refuses the next 30 with `rate_limited`. Past that it
+  drops them unanswered. FF Factory sends at most 30 a minute and 8 at once, and waits 10 s for each answer. When it
+  cannot ask or gets no answer, it shows the last good answer it kept, with that answer's time.
+- **What answers them.** FFBox's host, never a container or a model. `ffwatch` writes each answer in advance, cut
+  down: the config through an allowlist, ids for the ledger log, fixed words and numbers for the status. It scans
+  each answer with `secret_in()`. The connector picks the file by the query's name, scans it again, and logs every
+  query. Every query is a read; none can write, start a container, change a setting or reach a model.
+
+| `what` | args | `data` |
+|---|---|---|
+| `config` | none | FFBox's effective config through its allowlist (ffbox `scripts/fff_feed.py`, `CONFIG_ALLOW`): every other value is `"<redacted>"`, and a map the allowlist does not lead into collapses whole. No token, key, password, webhook, path, host, address or person's id; Discord channels as aliases, operators as counts per service |
+| `board_log` | `limit`, 1-50, default 20 | `{entries, total}`, newest first: `kind` (`board_check` or `escalate`), `at`, `conversation`, `ref`, `keys`, `verdict` (`clear`, `in_flight`, `done`, `asked`, `no_answer`, `not_asked` with `why`, `error`, or an escalation's `filed`, `pending`, `gave_up`, ...), `matches` (work ids), and for an escalation `state`, `attempts`, `version`, `answeredAt`. No ledger text |
+| `status` | none | `box` (`state`, `config` ok or misconfigured, `killed`, `draining`, `dry_run`, `commit`, `since`), `services` (`ffwatch`, `ffweb`, `ffdiscord-listener`, `ffintake`, `fffconnector`, `ffbox-modelproxy`, `ffbox-docker`, `ffbox-egress`, `ffbox-update.timer`: `active`, `inactive`, `failed`, ...), `queue`, `classes` (name, network, model, tier, free, max), `holds`, `connector` (version, protocol, since) |

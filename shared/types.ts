@@ -504,6 +504,8 @@ export interface Provider {
   web?: string;
   /** Work messages the connector said it takes (hello.accepts, e.g. "submit"); none yet in phase 1. */
   accepts?: string[];
+  /** The read-only queries the connector answers (hello.queries), e.g. config, board_log, status. */
+  queries?: string[];
   capacity?: ProviderCapacity;
   counts: { conversations: number; active: number; intake: number; intake24h: number };
   lastIntakeAt?: string;
