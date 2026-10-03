@@ -5059,6 +5059,18 @@ body {
   gap: 3px;
 }
 
+/* Its cells carry used/total and free/total: they wrap to a second line rather than clip where the font is wider. */
+.fl-pv-meters > .fl-meters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 2px 10px;
+}
+
+.fl-pv-meters > .fl-meters > .fl-meter {
+  overflow: visible;
+}
+
 /* The last numbers, kept but dimmed once they are stale or the connector is gone. */
 .fl-pv-meters.fl-stale {
   opacity: 0.55;

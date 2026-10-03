@@ -247,7 +247,9 @@ test("FFBox among the computers: its CPU, RAM, GPU and disks in the sidebar, sta
     await expect(group.getByTestId('meter-Disk')).toHaveText('Disk 200G/500G');
     await expect(group.getByTestId('meter-Disk')).toHaveAttribute('title', /root\+runs: 200 GB free of 500 GB\nstate: 1000 GB free of 4000 GB/);
     await expect(group.getByTestId('meter-disk')).toHaveCount(0);
-    expect((await group.boundingBox())!.height, 'two lines: the name and one row of meters').toBeLessThan(64);
+    expect((await group.boundingBox())!.height, 'the name and at most two short rows of meters').toBeLessThan(80);
+    // Nothing clipped: every cell shows all of its text.
+    for (const cell of await group.locator('.fl-meter').all()) expect(await cell.evaluate((e) => e.scrollWidth <= e.clientWidth + 1)).toBe(true);
     await expect(group.getByTestId('provider-metrics-stale')).toHaveCount(0);
     await page.screenshot({ path: test.info().outputPath('sidebar-ffbox.png') });
     await test.info().attach('sidebar with FFBox', { path: test.info().outputPath('sidebar-ffbox.png'), contentType: 'image/png' });
