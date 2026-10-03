@@ -280,3 +280,50 @@ test("FFBox among the computers: its CPU, RAM, GPU and disks in the sidebar, sta
     c.close();
   }
 });
+
+test("FFBox in the sidebar's load panel: mini bars, then a row with CPU over 100%, RAM, GPU none, each disk and its history; stale after two minutes", async ({ authed: page }) => {
+  const base = test.info().project.use.baseURL!;
+  const G = 1024 ** 3;
+  const c = new MockConnector(base, E2E_PROVIDER_TOKEN);
+  try {
+    await c.hello({ protocol: 2, version: 'e2e-load' });
+    // Three updates, the last with more runnable than cores: 54 on 40 is 135%.
+    for (const [load1, used] of [[12, 300], [30, 380], [54, 425]]) {
+      c.send({ type: 'metrics', at: new Date().toISOString(), cpu: { load1, load5: 20, load15: 10, cores: 40 }, mem: { totalBytes: 756 * G, usedBytes: used * G }, disks: [{ role: 'root', totalBytes: 500 * G, freeBytes: 200 * G }, { role: 'state+cache', totalBytes: 4000 * G, freeBytes: 1000 * G }] });
+      await expect.poll(async () => (await appState(page.request)).providers?.[0]?.metrics?.cpu?.load1).toBe(load1);
+    }
+    await page.reload();
+    const foot = (await openSidebar(page)).locator('.sys-foot');
+    // Collapsed: FFBox's three mini bars beside the computers', the CPU bar full, the hover with the real share.
+    const cell = foot.getByTestId('mcell-FFBox');
+    await expect(cell).toBeVisible();
+    await expect(cell).toHaveAttribute('title', /CPU 135% \(load 54 on 40 cores/);
+    await expect(cell.locator('.mbar')).toHaveCount(3);
+    await expect(cell.locator('.mbar').first().locator('i')).toHaveAttribute('style', /height: 100%/);
+
+    // Open: its row, a line per filesystem, and the history graph.
+    if ((await foot.locator('.sys-toggle').getAttribute('aria-expanded')) !== 'true') await foot.locator('.sys-toggle').click();
+    const rows = foot.getByTestId('mrows-FFBox');
+    await expect(rows.getByTestId('mrow-FFBox')).toContainText(/FFBox\s*135%\s*56%\s*none\s*1000 GB/);
+    await expect(rows.getByTestId('mrow-disk')).toHaveText([/root · 200 GB free of 500 GB/, /state\+cache · 1000 GB free of 3\.9 TB/]);
+    await expect(rows.getByTestId('provider-history').locator('polyline')).toHaveCount(2);
+    await expect(rows.getByTestId('provider-history')).toContainText('CPU 135% · RAM 56%');
+    await expect(rows.getByTestId('provider-load-stale')).toHaveCount(0);
+    await foot.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: test.info().outputPath('load-panel-ffbox.png') });
+    await test.info().attach('load panel with FFBox', { path: test.info().outputPath('load-panel-ffbox.png'), contentType: 'image/png' });
+    await expect(rows).toHaveScreenshot('ffbox-load-rows.png');
+
+    // Five minutes without an update: the numbers stay, dimmed, under the marker.
+    await page.clock.setFixedTime(new Date(Date.now() + 5 * 60_000));
+    await page.reload();
+    const later = (await openSidebar(page)).locator('.sys-foot');
+    await expect(later.getByTestId('mcell-FFBox')).toHaveClass(/mcell-stale/);
+    await expect(later.getByTestId('provider-load-stale')).toContainText('stale · updated 5m ago');
+    await expect(later.getByTestId('mrow-FFBox')).toContainText('135%');
+    await page.screenshot({ path: test.info().outputPath('load-panel-ffbox-stale.png') });
+    await test.info().attach('load panel with FFBox, stale', { path: test.info().outputPath('load-panel-ffbox-stale.png'), contentType: 'image/png' });
+  } finally {
+    c.close();
+  }
+});
