@@ -1,6 +1,6 @@
 /**
- * A stand-in for FFBox's connector (docs/ffbox-connector-contract.md): dials /provider with a token and speaks
- * protocol 1. The unit tests (server/providers.test.ts) and the E2E suite (e2e/provider.spec.ts) use it, and it
+ * A stand-in for FFBox's connector (docs/ffbox-connector-contract.md): dials /provider with a token and says hello
+ * (protocol 2 by default; the number is information only). The unit tests (server/providers.test.ts) and the E2E suite (e2e/provider.spec.ts) use it, and it
  * doubles as a small reference for the real connector's author. Sample data only; it reads nothing on FFBox.
  *
  *   node e2e/mockConnector.ts <portal url> <token>     connect, send the samples, stay connected
@@ -128,23 +128,24 @@ export class MockConnector {
     this.ws.send(typeof msg === 'string' ? msg : JSON.stringify(msg));
   }
 
-  /** Connect, say hello, and wait for the welcome. */
-  async hello(opts: { protocol?: number; version?: string; web?: string; accepts?: string[]; queries?: string[] } = {}): Promise<Welcome> {
+  /** Connect, say hello, and wait for the welcome. protocol null: a hello without one; extra: fields a newer connector adds. */
+  async hello(opts: { protocol?: number | null; version?: string; web?: string; accepts?: string[]; queries?: string[]; extra?: Record<string, unknown> } = {}): Promise<Welcome> {
     await this.opened;
     this.send({
       type: 'hello',
-      protocol: opts.protocol ?? PROVIDER_PROTOCOL,
+      ...(opts.protocol === null ? {} : { protocol: opts.protocol ?? PROVIDER_PROTOCOL }),
       provider: 'ffbox',
       connector: { version: opts.version ?? 'mock-1', commit: 'abc1234' },
       ...(opts.web ? { web: opts.web } : {}),
       ...(opts.accepts ? { accepts: opts.accepts } : {}),
       ...(opts.queries ? { queries: opts.queries } : {}),
+      ...opts.extra,
     });
     return (await this.next('welcome')) as unknown as Welcome;
   }
 
-  capacity(classes: ProviderClass[] = SAMPLE_CLASSES, extra: { queue?: number; state?: string; holds?: string[] } = {}) {
-    this.send({ type: 'capacity', classes, queue: extra.queue ?? 2, state: extra.state ?? 'running', holds: extra.holds ?? [] });
+  capacity(classes: ProviderClass[] = SAMPLE_CLASSES, extra: { queue?: number; state?: string; holds?: string[]; ffwatch?: { up: boolean; at?: string } } = {}) {
+    this.send({ type: 'capacity', classes, queue: extra.queue ?? 2, state: extra.state ?? 'running', holds: extra.holds ?? [], ...(extra.ffwatch ? { ffwatch: extra.ffwatch } : {}) });
   }
 
   conversation(c: ProviderConversation, cursor = `${c.updatedAt}#${c.id}`) {
