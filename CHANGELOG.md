@@ -18,7 +18,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   thread, when its whole branch is already on develop, or when a linked request is done. It logs "merged as #N
   (sha) on date", starts no worker, and its people hear one line per batch. The Intake tab shows them under
   "Closed automatically" ([docs/intake.md](docs/intake.md), "Closed when it merged").
-||||||| 5abbf31
 
 - **A player's clear bug goes to a worker; anything else waits, and the thread says so** (w299, asked by Lothsahn).
   FFBox's escalations, player requests and fix branches are triaged by the same fixed rules as Discord threads, so an
