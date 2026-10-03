@@ -223,6 +223,8 @@ export function devFacts(
     if (facts.watch?.pr && extra.summary && extra.prUrl) Object.assign(out, { summary: extra.summary, pr: { number: facts.watch.pr, url: extra.prUrl } });
     const asked = w.status === 'question' ? publicText(w.flag?.text ?? w.question?.text ?? '', 1000) : '';
     if (asked) out.question = asked;
+    // HELD IN THE INTAKE (w299): the thread hears that a developer has to look first; nothing else is said about it.
+    if (w.approval?.state === 'pending') out.held = true;
     return out;
   }
   const out: Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> = { status: 'done', version: facts.version ?? null, mergedIn: facts.mergedIn ?? null, ...(facts.branch ? { branch: facts.branch } : {}) };

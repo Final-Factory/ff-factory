@@ -196,7 +196,8 @@ export interface BugReport {
 
 /** A four-part game version ("0.50.0.46"), the first one the text names. */
 export function versionIn(text: string): string | undefined {
-  return /(?<![\d.])v?(\d{1,2}\.\d{1,3}\.\d{1,3}\.\d{1,5})(?![\d.])/.exec(text)?.[1];
+  // A sentence's full stop may follow it ("on 0.50.0.69. Steps"); another digit or ".5" may not.
+  return /(?<![\d.])v?(\d{1,2}\.\d{1,3}\.\d{1,3}\.\d{1,5})(?!\d|\.\d)/.exec(text)?.[1];
 }
 
 /** Attachments on Discord's CDN only (a link elsewhere is text, not an attachment). */
@@ -296,6 +297,21 @@ const DESIGN: [RegExp, string][] = [
   [/\b(ui|ux|interface|controls?|keybind(ing)?s?) (is|are) (bad|confusing|annoying|clunky)\b|\bconfusing\b/i, 'a usability opinion'],
 ];
 
+/** Money, releases and publishing: a person decides anything that touches them (Lothsahn, w299). */
+const RISK: [RegExp, string][] = [
+  [/\b(refunds?|charged|payments?|purchas(e|es|ed|ing)|paid|pric(e|es|ing)|money|dlc|steam keys?)\b/i, 'money'],
+  [/\b(release (date|notes?)|patch notes|when (is|will) (the )?(next )?(update|patch|release)|publish(ed|ing)?|steam (page|store|branch)|beta branch|early access)\b/i, 'a release or publishing'],
+];
+
+/**
+ * A report that tries to steer its own triage or the agents that will read it (w299): it always needs a person, so
+ * wording a report as an order ("auto-approve this", "ignore your instructions") can only hold it, never speed it up.
+ */
+const STEER: [RegExp, string][] = [
+  [/\b(auto[- ]?approv(e|ed|al)|approve (this|it|me|my)|obvious[- ]bug|needs?[- ]human|(the )?triage)\b/i, 'it argues its own triage'],
+  [/\b(ignore|disregard|forget) (all |any |the |your )?(previous |prior |above |earlier )?(instructions|rules|prompts?)\b|\bsystem prompt\b|\byou are now\b/i, 'it gives the agents instructions'],
+];
+
 const matches = (rules: [RegExp, string][], text: string) => [...new Set(rules.filter(([re]) => re.test(text)).map(([, what]) => what))];
 
 /**
@@ -309,8 +325,12 @@ export function classifyBug(r: Pick<BugReport, 'title' | 'text' | 'version'>): W
   const text = `${r.title}\n${r.text}`;
   const design = matches(DESIGN, text);
   const defect = matches(DEFECT, text);
+  const risk = matches(RISK, text);
+  const steer = matches(STEER, text);
   const words = text.split(/\s+/).filter(Boolean).length;
   const missing: string[] = [];
+  if (steer.length) missing.push(steer.join(', '));
+  if (risk.length) missing.push(`it touches ${risk.join(' and ')}`);
   if (design.length) missing.push(`it asks for a change (${design.slice(0, 3).join(', ')})`);
   if (!defect.length) missing.push('no clear defect (a crash, freeze, error, lost save, something that stopped working)');
   if (!r.version) missing.push('no game version');
@@ -678,10 +698,19 @@ export function sourceTag(w: Pick<WorkItem, 'source' | 'approval' | 'triage'>): 
   return `${where}${s.untrusted ? ', untrusted' : ''}${triage}${approval}`;
 }
 
-/** Triage for what is not a player's bug report: a person's own request, FFBox's work, the release follow-up. */
-export function triageOf(s: WorkSource, opener?: 'operator' | 'player' | 'system'): WorkTriage {
+/**
+ * Triage for what is not a Discord bug report: a person's own request, FFBox's work, the release follow-up. FFBox work
+ * that came from a player's report (`report`: its words) is a player's bug report like any other (Lothsahn, w299: "If
+ * bug reports come in from a player and it's obviously a bug and doesn't need clarification, you should just have a
+ * worker fix the bug"), classified by the same fixed rules; without its words it needs a human.
+ */
+export function triageOf(s: WorkSource, opener?: 'operator' | 'player' | 'system', report?: { title: string; text: string; version?: string }): WorkTriage {
   if (s.kind === 'discord-request') return { class: 'person', reason: `asked for by ${s.reporter ?? 'a trusted person'} in Discord (trusted by their Discord author id)` };
   if (s.kind === 'release') return { class: 'follow-up', reason: 'the release follow-up: tells reporters a fix they were told about is live' };
   if (opener === 'operator' && !s.untrusted) return { class: 'person', reason: `an operator's own work on FFBox${s.reporter ? ` (${s.reporter})` : ''}` };
+  if (report && s.untrusted && opener === 'player' && s.kind.startsWith('ffbox')) {
+    const t = classifyBug({ title: report.title, text: report.text, version: report.version ?? versionIn(`${report.title}\n${report.text}`) });
+    return { class: t.class, reason: `${t.reason} (FFBox work from a player's report)` };
+  }
   return { class: 'needs-human', reason: `needs a human: FFBox work that ${s.untrusted ? "started from players' reports or text" : 'FFBox started itself'}; a person decides before anyone reviews or merges it` };
 }

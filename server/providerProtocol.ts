@@ -684,6 +684,11 @@ export interface DevUpdate {
    * answers the request.
    */
   question?: string;
+  /**
+   * open, while the request waits in the intake for a reviewer (w299): FFBox posts "Waiting on input from a developer."
+   * once in the conversation. Absent once a reviewer approves it.
+   */
+  held?: boolean;
 }
 
 /** Everything the connector may send. */

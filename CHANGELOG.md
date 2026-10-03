@@ -18,6 +18,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   thread, when its whole branch is already on develop, or when a linked request is done. It logs "merged as #N
   (sha) on date", starts no worker, and its people hear one line per batch. The Intake tab shows them under
   "Closed automatically" ([docs/intake.md](docs/intake.md), "Closed when it merged").
+||||||| 5abbf31
+
+- **A player's clear bug goes to a worker; anything else waits, and the thread says so** (w299, asked by Lothsahn).
+  FFBox's escalations, player requests and fix branches are triaged by the same fixed rules as Discord threads, so an
+  obvious bug can be auto-approved (`intake.ffbox.autoApprove`). Money, releases and publishing, and a report that
+  argues its own triage or instructs the agents, always wait. A request held for a reviewer makes FFBox post "Waiting
+  on input from a developer." once ([docs/intake.md](docs/intake.md)).
 
 - **FFBox threads hear a fix's PR, a question, and a can't-fix** (w278, asked by Lothsahn). The `dev_update` FFBox
   gets also carries a PR summary once the worker's PR is ready for review, the question a request waits on (the
@@ -153,6 +160,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   side sent, and a loud line when a new connection replaces a live one.
 
 ### Fixed
+
+- **An open tab picks up a new version by itself** (w285, asked by Lothsahn). Twice a browser kept the old UI after a
+  deploy (FFBox panes that did not scroll, a red dot that never showed). The page headers were already right
+  (`index.html` revalidated, hashed bundles immutable, no caching service worker); the old UI was a tab that stayed
+  open across the restart and reconnected with its old code. The server now names the web build it serves (a
+  `<meta name="ff-build">` in `index.html`, `web` in `/api/health` and the app state); a page that loaded another
+  build reloads itself after the reconnect. A typed message survives the reload; while one is being typed, or pictures,
+  files or a form would be lost, a "new version" bar offers the reload; with only a message being typed it also
+  happens once the tab is in the background. `index.html` gets an ETag (a 304 when unchanged), and a removed bundle is a 404 instead of the page.
 
 - **`ffbox_activity` describes all its views** (w224). The schema itself was one definition for every belt and
   current since w218, but its description and the FFBox paragraph of both orchestrators' briefs did not name all the
