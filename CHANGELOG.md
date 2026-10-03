@@ -12,6 +12,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Your own requests first on the Dispatcher page** (w307, asked by Lothsahn). The Requests list keeps its order by
+  status (question, new, queued, active, then closed) and, for open ones, by priority; within one status and priority
+  the logged-in person's requests (any where they are one of the people) come before everyone else's, then the order
+  as before. Each login sees its own first, and its rows say "yours" ([shared/workOrder.ts](shared/workOrder.ts)).
+
 - **Intake requests close themselves when their work merged** (w298, asked by Lothsahn: four FFBox review requests
   sat in "needs a human" hours after #945–#947 and #949 merged them). Every 5 minutes, and on "Check Discord now", a
   request nobody works on closes as done when a merged PR or commit names its PR or branch or carries its Discord
