@@ -12,8 +12,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
-- **Ask FFBox live for its config, its ledger exchanges and its status** (w218;
-  [docs/ffbox.md](docs/ffbox.md#asking-ffbox)). `ffbox_activity` gets `show: "config" | "board_log" | "status"`.
+- **Ask FFBox live for its config, its ledger exchanges, its status and one conversation** (w218;
+  [docs/ffbox.md](docs/ffbox.md#asking-ffbox)). `ffbox_activity` gets `show: "config" | "board_log" | "status"`, and
+  `show: "conversation"` with an `id`: one conversation's metadata and a page of its turns, with the messages and
+  replies redacted on FFBox. Players appear by display name only.
   FF Factory sends a read-only `query` down the connector's open link and waits up to 10 s for the `query_result`. When
   FFBox is offline, does not offer the query or does not answer, the tool shows the last answer kept, labelled with
   its time. FFBox's host builds the answers: the config goes through an allowlist, with everything else
