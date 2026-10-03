@@ -365,7 +365,7 @@ sandbox agents in all), `max_unity: 2`.
 - `create_sandbox {name, purpose, machine: "lothdesktop", branch?, base?, start_unity?, seed_library?}`: returns once
   the daemon has recorded it; the fetch, `git worktree add --no-checkout`, checkout and Library copy go on in the
   background (`list_sandboxes` shows the step), and `start_agent` can be called at once: the prompt waits until
-  the sandbox is ready. The branch defaults to `sandbox/<name>`; an existing local or remote branch is checked out
+  the sandbox is ready. The branch defaults to `sandbox/<name>` (`ffbox-f/<name>` when the dispatcher passes the `work_id` of a request that came from FFBox, docs/ffbox.md "How work leaves"); an existing local or remote branch is checked out
   (tracking origin); never master, main or develop.
 - `set_sandbox_label {sandbox: "lothdesktop/sb1", purpose}`, `delete_sandbox {sandbox: "lothdesktop/sb1", user_asked}`
   (stops its agents and editor, removes the Library, the worktree and the folder; the branch stays),
