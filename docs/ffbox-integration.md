@@ -157,10 +157,9 @@ this subsection and in section 6 are in that repo.
 - **CI and releases** run on the same box, through ephemeral org runners labelled
   `ffgithubrunners` (`runners/README.md`). A push to `develop` or `master` that bumps the version
   builds, checks and uploads both apps to Steam. A `develop` release's main app is set live on
-  `pre-release` and a `master` release's on `multiplayer-beta` (`scripts/release_lane.py:88`,
-  `SETLIVE`, since ffbox `1f51596`, 2026-10-02; the game repo's `scripts/release-status.py` checks it). That is where the closed-beta builds of
-  FinalFactory #613/#614 come from. ffbox #2 proposed a separate, manually dispatched beta lane and
-  was closed unmerged.
+  `development` and a `master` release's on `pre-release` (`scripts/release_lane.py` `SETLIVE`;
+  the game repo's `scripts/release-status.py` checks it). Ben or Lothsahn move the default
+  (public) branch by hand.
 - **`ffintake`**: section 6.
 
 ### Where they differ, and why it matters here
