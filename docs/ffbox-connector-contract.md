@@ -432,7 +432,7 @@ types `DevAck`, `DevFiled` and `DevReply` beside them; FF Factory's side is `ser
 `server/devRequests.test.ts`. FFBox's side of the operator's experience is in [ffbox.md](ffbox.md#dev-requests).
 
 ```json
-{ "type": "dev_request", "ref": "dev-570-3", "operator": { "name": "loth", "discord": "222222222222222222" },
+{ "type": "dev_request", "ref": "dev-570-3", "operator": { "name": "lothsahn", "discord": "222222222222222222" },
   "conversation": { "id": "570", "source": "discord", "channel": "dev_chat", "title": "…", "url": "https://discord.com/channels/…/1555…",
                     "threadId": "1555000000000000001", "createdAt": "2026-10-03T09:00:00Z" },
   "title": "Add a cargo filter to the hauler panel", "brief": "…", "keys": ["discord:1555000000000000001"],
@@ -442,7 +442,7 @@ types `DevAck`, `DevFiled` and `DevReply` beside them; FF Factory's side is `ser
 …
 { "type": "dev_filed", "ref": "dev-570-3", "ok": true, "outcome": "filed", "workId": "w123", "text": "Filed as w123." }
 
-{ "type": "dev_message", "ref": "msg-570-9", "request": "w123", "operator": { "name": "loth" }, "conversation": "570", "text": "…" }
+{ "type": "dev_message", "ref": "msg-570-9", "request": "w123", "operator": { "name": "lothsahn" }, "conversation": "570", "text": "…" }
 { "type": "dev_ack", "ref": "msg-570-9", "ok": true }
 { "type": "dev_reply", "id": "r-mg8x2-1a2b3c", "request": "w123", "conversation": "570", "text": "…", "from": "orchestrator" }
 { "type": "dev_received", "id": "r-mg8x2-1a2b3c" }
@@ -461,7 +461,7 @@ FF Factory → connector:
 
 | message | when and what |
 |---|---|
-| `dev_ack` | at once (well within 10 s) after `dev_request` or `dev_message`: `{ ref, ok, error?, detail? }`. `ok: false`, FFBox runs the turn itself: `unknown_operator` (the operator is not in FF Factory's `providers.ffbox.operators`, or maps to no login), `rate_limited` (`providers.ffbox.devRequests.perHour`, 20 an hour per person), `too_large` (more than 10 files, a file over 200 MB or over FF Factory's `attachments.maxMB`, more than 500 MB together), `not_enabled` (`providers.ffbox.devRequests.enabled` off), `bad_request` (the files not numbered 0, 1, 2, … each once; for `dev_message`, a request or conversation that is not linked, or another operator's). `detail` is one line for logs |
+| `dev_ack` | at once (well within 10 s) after `dev_request` or `dev_message`: `{ ref, ok, error?, detail? }`. `ok: false`, FFBox runs the turn itself: `unknown_operator` (the operator's name, as FFBox's `operators` block gives it, is no FF Factory login), `rate_limited` (`providers.ffbox.devRequests.perHour`, 20 an hour per person), `too_large` (more than 10 files, a file over 200 MB or over FF Factory's `attachments.maxMB`, more than 500 MB together), `not_enabled` (`providers.ffbox.devRequests.enabled` off), `bad_request` (the files not numbered 0, 1, 2, … each once; for `dev_message`, a request or conversation that is not linked, or another operator's). `detail` is one line for logs |
 | `dev_filed` | after the last byte (at once for a request without files): `{ ref, ok, outcome?, workId?, matches?, text, error?, detail? }`. `outcome`: `filed` (a new request), `covered` (joined to open work `workId`), `fixed` (`workId` is done: `text` names the release and PR), `linked` (filed as `workId`, with candidates it may repeat). `matches`: `[{ id, status, score, why }]`. `text`, at most 1000 characters, is the line FFBox posts: "Filed as w123.", "Covered by w38 (in progress).", "Already fixed in 0.50.0.69 (PR #412).", "Filed as w124; it may repeat w38, w40.". `ok: false`: `sha_mismatch` (a file's SHA-256 is not the one announced; nothing filed), `bad_request` (a chunk out of order, past its file's size, or for a ref FF Factory is not receiving: send the `dev_request` again), `error` (storing or filing failed) |
 | `dev_reply` | later, any number of times: `{ id, request, conversation, text, from }`. `from: "orchestrator"`: the person's orchestrator answered with `reply_to_ffbox` (sent once; FF Factory refuses it while the link is down). `from: "fff"`: FF Factory itself, once, when the linked request is done, declined or cancelled ("w123 is done: <outcome>"); this one is resent on every new link until `dev_received` names its `id`. `text` is at most 4000 characters, untrusted: FFBox posts it under its own rules |
 

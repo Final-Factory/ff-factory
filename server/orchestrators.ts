@@ -142,7 +142,7 @@ export interface WorkInput {
 export interface DevFiling {
   /** FFBox's ref for the hand-over. */
   ref: string;
-  /** The FF Factory login its operator maps to (config providers.ffbox.operators): it is filed as theirs. */
+  /** The FF Factory login of the operator's name: it is filed as theirs. */
   person: Requester;
   /** The operator's name in FFBox's config. */
   operator: string;

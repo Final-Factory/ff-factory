@@ -149,7 +149,7 @@ something is fixed.
   `send_to_ffbox` hands a ledger request to FFBox once `providers.ffbox.sendWork` is on and the
   connector takes submits.
 - **Dev requests.** An operator's ffdev turn comes to FF Factory instead of a container on FFBox, with its files, and
-  is filed at once as the request of the person the operator maps to (`providers.ffbox.operators`), deduplicated
+  is filed at once as the request of the person the operator is (the login of the same name), deduplicated
   against the ledger; the operator's follow-ups in that thread reach their orchestrator, which answers with
   `reply_to_ffbox` ([Dev requests](#dev-requests) below).
 
@@ -162,22 +162,23 @@ Factory is unreachable or refuses. The messages are the contract's
 [Dev requests](ffbox-connector-contract.md#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory); FF Factory's
 side is `server/devRequests.ts` and `Orchestrators.fileDevRequest` (`server/orchestrators.ts`).
 
-**Who it is for.** Config `providers.ffbox.operators` maps FFBox's operator names to FF Factory logins:
+**Who it is for.** FFBox sends the name its config's `operators` block gives the operator who wrote the turn (FFBox
+authenticated them by their Discord, GitHub, unix or web id), and those names are FF Factory's logins (`ben`,
+`lothsahn`). The request is filed as the login of that name, any case; there is nothing to map or configure here. A
+request from an operator whose name is no login is refused (`unknown_operator`), and the reason says so. Settings:
 
 ```json
-"providers": { "ffbox": { "enabled": true, "operators": { "loth": "lothsahn", "ben": "ben" },
+"providers": { "ffbox": { "enabled": true,
                           "devRequests": { "enabled": true, "perHour": 20, "maxFiles": 10, "maxRequestMB": 500 } } }
 ```
 
-A request from an operator not in the map, or mapped to a name that is no login, is refused (`unknown_operator`), and
-the server log says so at startup for every entry that names no login. `devRequests` (all optional): `enabled`
+`devRequests` (all optional): `enabled`
 (default true; false refuses every one `not_enabled`), `perHour` (default 20 a person), `maxFiles` (default and most
 10), `maxRequestMB` (default and most 500). Each file is also capped at 200 MB and at `attachments.maxMB`. An owner
-sets either with `set_app_config` (`providers.ffbox.operators`, which must name logins, and the whole
-`providers.ffbox.devRequests` block); both apply at once.
+sets them with `set_app_config` (the whole `providers.ffbox.devRequests` block); it applies at once.
 
 **What happens to one.** Its files go into the attachment store ([attachments.md](attachments.md)) and each SHA-256 is
-checked: a mismatch files nothing. Then it is filed at once as the mapped person's own request, with no approval step
+checked: a mismatch files nothing. Then it is filed at once as that person's own request, with no approval step
 (an operator's own request), source `ffbox-dev`, its files attached, and the link to FFBox recorded on it
 (`WorkItem.ffboxDev`: FFBox's ref, the conversation, its thread, the operator and the person). Before filing, the ledger
 is checked three ways:

@@ -59,7 +59,6 @@
     "ffbox": {
       "enabled": false,
       "sendWork": false,
-      "operators": {},
       "devRequests": {
         "enabled": true,
         "perHour": 20,

@@ -1075,7 +1075,7 @@ export interface WorkFfboxDev {
   channel?: string;
   threadId?: string;
   url?: string;
-  /** The operator's name in FFBox's config, and the FF Factory login it maps to (config providers.ffbox.operators). */
+  /** The operator's name in FFBox's config, and the FF Factory login of that name. */
   operator: string;
   person: Requester;
   at: string;

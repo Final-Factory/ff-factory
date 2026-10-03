@@ -1,7 +1,7 @@
 // FFBox dev requests (docs/ffbox.md, "Dev requests"; the wire is docs/ffbox-connector-contract.md): an operator's ffdev
 // turn that FFBox hands to FF Factory instead of starting a container. The request is answered dev_ack at once, its
 // files stream in as dev_chunk frames into the attachment store (server/attachments.ts), each SHA-256 is checked, and
-// it is filed at once as the request of the person the operator maps to (config providers.ffbox.operators), deduplicated
+// it is filed at once as the request of the person the operator is (the FF Factory login of the same name), deduplicated
 // against the ledger (Orchestrators.fileDevRequest). The operator's later messages in that thread reach their
 // orchestrator (dev_message); its reply_to_ffbox and FF Factory's own "it is done" line go back as dev_reply.
 import { randomBytes } from 'node:crypto';
@@ -191,13 +191,15 @@ export class DevRequests {
     return this.state.log.filter((e) => e.kind === 'request' && now - Date.parse(e.at) < DAY_MS).length;
   }
 
-  /** The operator's FF Factory login (config providers.ffbox.operators), or why there is none. */
+  /**
+   * The operator's FF Factory login, or why there is none. BY NAME, and only by name: FFBox sends the name its config's
+   * `operators` block gives the operator who wrote the turn (FFBox authenticated them by their Discord, GitHub, unix or
+   * web id), and those names are FF Factory's logins (Lothsahn, 2026-10-03: "Can't you just read that from the
+   * config.json in FFBox?"). The login of the same name, any case, is that person; there is no mapping to keep.
+   */
   personOf(operator: string): { person: Requester } | { why: string } {
-    const map = this.d.cfg.providers?.ffbox?.operators ?? {};
-    const key = Object.keys(map).find((k) => same(k, operator));
-    if (!key) return { why: `operator "${operator}" is not in FF Factory's providers.ffbox.operators` };
-    const u = this.d.identity.get(String(map[key]));
-    if (!u) return { why: `providers.ffbox.operators maps "${operator}" to "${map[key]}", which is no login in FF Factory` };
+    const u = this.d.identity.get(operator);
+    if (!u) return { why: `FFBox operator "${operator}" is no FF Factory login: FFBox's operators block names each operator by their FF Factory login` };
     return { person: asRequester(u) };
   }
 
@@ -513,7 +515,7 @@ export class DevRequests {
     const lines = s.log.slice(0, limit).map((e) => `- ${e.at} ${e.kind} ${e.ref}: ${e.outcome}${e.error ? ` (${e.error})` : ''}${e.workId ? ` ${e.workId}` : ''}${e.operator ? `, operator ${e.operator}` : ''}${e.person ? `, for ${e.person}` : ''}`);
     const st = this.settings;
     return [
-      `Dev requests: ${st.enabled ? 'on' : 'OFF (providers.ffbox.devRequests.enabled)'}; ${this.count24h()} in 24 h; ${this.inflight.size} receiving files; ${s.replies.length} reply(s) waiting for FFBox; limits ${st.perHour} an hour per person, ${st.maxFiles} files, ${st.maxRequestMB} MB a request; operators mapped: ${Object.keys(this.d.cfg.providers?.ffbox?.operators ?? {}).join(', ') || 'none'}.`,
+      `Dev requests: ${st.enabled ? 'on' : 'OFF (providers.ffbox.devRequests.enabled)'}; ${this.count24h()} in 24 h; ${this.inflight.size} receiving files; ${s.replies.length} reply(s) waiting for FFBox; limits ${st.perHour} an hour per person, ${st.maxFiles} files, ${st.maxRequestMB} MB a request; an operator is the FF Factory login of the same name.`,
       ...(lines.length ? lines : ['No dev requests yet.']),
     ].join('\n');
   }
