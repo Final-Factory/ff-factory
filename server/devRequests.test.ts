@@ -13,7 +13,8 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { ProviderManager } from './providers.ts';
-import { DevRequests, devSettings } from './devRequests.ts';
+import { DevRequests, devSettings, prSummary, publicText } from './devRequests.ts';
+import type { PrView } from './gitStatus.ts';
 import { AttachmentStore, sha256File } from './attachments.ts';
 import { mintProviderToken, tokenSha256 } from './providerProtocol.ts';
 import { SETTABLE_KEYS, checkDevRequests } from './appConfig.ts';
@@ -91,6 +92,8 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
   // A 100 MB hand-over is ~2300 frames: the tests send them as fast as the socket takes them.
   pm.rate = { perSecond: 1e6, burst: 1e6 };
   agents.providers = pm;
+  /** What `gh pr view` says about each PR number (w278). */
+  const prs = new Map<number, PrView>();
   const wire = (p: ProviderManager) => {
     p.dev = new DevRequests(
       {
@@ -100,6 +103,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
         attachments: files,
         sendFiles: (id, text, list, requestedBy) => agents.sendWithAttachments(id, text, 'system', { attachments: list, requestedBy }),
         sendText: (id, text, requestedBy) => void sessions.send(id, text, 'system', undefined, { requestedBy }),
+        prView: async (_repo, n) => prs.get(n),
       },
       p.devLink(),
     );
@@ -149,7 +153,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
   const heard = (id: string) => store.readTranscript(id).filter((e): e is UserEv => e.kind === 'user' && e.from === 'system');
   const chat = (r: Requester) => o.personalFor(r);
   const work = () => [...store.work.values()];
-  return { dir, cfg, store, sessions, agents, o, files, alpha, pm: () => pm, connect, restart, call, heard, chat, work, dispatcher: () => sessions.get(agents.dispatcherId) };
+  return { dir, cfg, store, sessions, agents, o, files, alpha, prs, pm: () => pm, connect, restart, call, heard, chat, work, dispatcher: () => sessions.get(agents.dispatcherId) };
 }
 
 /** A dev_request's body, with what a test changes. */
@@ -585,6 +589,28 @@ test('reply_to_ffbox sends a dev_reply for the person\'s own conversation, and s
   assert.match(off.text, /FFBox's connector is offline; nothing was sent/);
 });
 
+/** The next dev_update that `ok` accepts, skipping the others (intermediate states a test does not look at). */
+async function nextUpdate(c: MockConnector, ok: (u: Msg) => boolean): Promise<Msg> {
+  for (;;) {
+    const u = await c.next('dev_update');
+    if (ok(u)) return u;
+  }
+}
+
+/**
+ * A started worker's first turn, settled: the fake agent echoes its prompt, whose instructions name the DESIGN-QUESTION
+ * marker, which the ledger reads as a question. Cleared here, as a worker that did not ask.
+ */
+async function settleWorker(store: Store, started: string, wid: string) {
+  const worker = /Started agent (\w+)/.exec(started)![1];
+  await until('the worker idles', () => store.sessions.get(worker)?.status === 'idle');
+  await new Promise((r) => setTimeout(r, 20));
+  const w = store.work.get(wid)!;
+  w.flag = undefined;
+  w.status = 'active';
+  store.putWork(w);
+}
+
 test('w272: the request is followed to its result with dev_updates (branch and PR, merge, release), never a routing line, resent until dev_received', async (t) => {
   const { connect, chat, call, pm, store, o, dispatcher } = await setup(t);
   const c = await connect();
@@ -599,10 +625,11 @@ test('w272: the request is followed to its result with dev_updates (branch and P
   // A worker opens PR 901 from its sandbox: no work event, so the minute's recheck sends it.
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
   assert.equal(started.isError, false, started.text);
+  await settleWorker(store, started.text, wid);
   const sb = store.sandboxes.get('alpha')!;
   store.putSandbox({ ...sb, git: { branch: 'sandbox/filter', dirty: 0, untracked: 0, pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: false }, at: T0 } });
   pm().dev!.recheck();
-  u = await c.next('dev_update');
+  u = await nextUpdate(c, (x) => (x.watch as { pr?: number } | undefined)?.pr === 901 && !x.question);
   assert.equal(u.status, 'open');
   assert.deepEqual(u.watch, { repo: 'Final-Factory/FinalFactory', branch: 'sandbox/filter', pr: 901, target: 'develop' });
   const n = c.received.filter((m) => m.type === 'dev_update').length;
@@ -661,10 +688,126 @@ test('w272: a declined request says so as a status with no text; a done one with
   loth.lastFrom = 'human';
   assert.equal((await call(loth.info, 'update_work', { id: no, close: 'rejected', note: 'Works as designed.' })).isError, false);
   let u = await c.next('dev_update');
-  assert.deepEqual([u.request, u.status, 'text' in u, 'result' in u], [no, 'declined', false, false]);
+  assert.deepEqual([u.request, u.status, 'text' in u, u.result], [no, 'declined', false, 'Works as designed.'], "w278: a declined request carries its reason, the thread's one result");
   assert.equal((await call(loth.info, 'update_work', { id: yes, close: 'done', note: 'Belts move 4, 8 and 16 items a second.' })).isError, false);
   u = await c.next('dev_update');
   assert.deepEqual([u.request, u.status, u.mergedIn, u.result], [yes, 'done', null, 'Belts move 4, 8 and 16 items a second.']);
+});
+
+const PR_BODY = [
+  '**TL;DR:** Haulers ignored the cargo filter after a reload (w271), so they moved everything. The filter is now saved with the hauler and applied on load.',
+  '',
+  'Built in sandbox/alpha by worker 8b0ba704.',
+  '',
+  '## Evidence',
+  '- Reloaded a save with three filtered haulers: each moved only its filtered items (measured in the editor).',
+  '',
+  'Discord: https://discord.com/channels/1/2',
+  '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+].join('\n');
+
+test('w278: summaries and questions for a Discord thread carry results, never internal ids or routing', () => {
+  const s = prSummary({ title: 'Filter fix', body: PR_BODY, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', autoMerge: false });
+  assert.equal(
+    s,
+    'Haulers ignored the cargo filter after a reload, so they moved everything. The filter is now saved with the hauler and applied on load.\n' +
+      'Verified: Reloaded a save with three filtered haulers: each moved only its filtered items (measured in the editor).\n' +
+      'Waiting on review. https://github.com/Final-Factory/FinalFactory/pull/901',
+  );
+  assert.match(prSummary({ title: 'T', body: '', url: 'https://x/pull/1', autoMerge: true }), /^T\nMerging when CI is green\. https:\/\/x\/pull\/1$/);
+  const long = prSummary({ title: 'T', body: 'word '.repeat(600), url: 'https://x/pull/1', autoMerge: false });
+  assert.ok(long.length <= 1000, `at most 1000 characters (${long.length})`);
+  assert.ok(long.endsWith('Waiting on review. https://x/pull/1'), 'the link always survives the cut');
+  assert.equal(publicText('Should w271 keep the old filter on sandbox/alpha (worker 8b0ba704)? ghp_' + 'a'.repeat(36), 300).includes('w271'), false);
+  assert.doesNotMatch(publicText('w271: keep sandbox/alpha? worker 8b0ba704', 300), /w271|sandbox\/alpha|8b0ba704/);
+});
+
+test('w278: a fix up on a PR sends its summary once the PR is ready, once; a draft sends nothing', async (t) => {
+  const { connect, store, prs, pm, call, dispatcher } = await setup(t);
+  const c = await connect();
+  c.send(devRequest('dev-pr'));
+  await c.next('dev_ack');
+  const wid = String((await c.next('dev_filed')).workId);
+  await c.next('dev_update');
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
+  assert.equal(started.isError, false, started.text);
+  await settleWorker(store, started.text, wid);
+  const sb = store.sandboxes.get('alpha')!;
+  store.putSandbox({ ...sb, git: { branch: 'sandbox/filter', dirty: 0, untracked: 0, pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: true }, at: T0 } });
+  // A draft: the PR is followed, nothing to say yet.
+  prs.set(901, { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter fix', body: PR_BODY, draft: true, autoMerge: false });
+  pm().dev!.recheck();
+  let u = await nextUpdate(c, (x) => (x.watch as { pr?: number } | undefined)?.pr === 901 && !x.question);
+  await pm().dev!.summarize(store.work.get(wid)!);
+  assert.equal(u.summary, undefined, 'a draft has no summary');
+  // Ready for review: the summary goes, with the PR, once.
+  prs.set(901, { ...prs.get(901)!, draft: false });
+  await new Promise((r) => setTimeout(r, 5));
+  (pm().dev as unknown as { prs: Map<string, unknown> }).prs.clear();
+  await pm().dev!.summarize(store.work.get(wid)!);
+  u = await nextUpdate(c, (x) => !!x.summary);
+  assert.equal(u.status, 'open');
+  assert.deepEqual(u.pr, { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901' });
+  assert.match(String(u.summary), /^Haulers ignored the cargo filter after a reload/);
+  assert.match(String(u.summary), /Waiting on review\. https:\/\/github\.com\/Final-Factory\/FinalFactory\/pull\/901$/);
+  assert.doesNotMatch(String(u.summary), /w\d+|sandbox\/|8b0ba704|Discord:/, 'no internal ids, no routing');
+  const n = c.received.filter((m) => m.type === 'dev_update').length;
+  pm().dev!.recheck();
+  await pm().dev!.summarize(store.work.get(wid)!);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(c.received.filter((m) => m.type === 'dev_update').length, n, 'one summary per PR: nothing more while nothing changes');
+});
+
+test('w278: a question for the requester goes to the thread; the operator\'s answer there answers the request and the dispatcher resumes it', async (t) => {
+  const { connect, store, call, dispatcher, heard, chat } = await setup(t);
+  const c = await connect();
+  const req = devRequest('dev-ask');
+  const conv = (req.conversation as { id: string }).id;
+  c.send(req);
+  await c.next('dev_ack');
+  const wid = String((await c.next('dev_filed')).workId);
+  await c.next('dev_update');
+  const asked = await call(dispatcher().info, 'decide_work', { id: wid, action: 'ask', note: `For ${wid}: should the filter also apply to drones, or haulers only?` });
+  assert.equal(asked.isError, false, asked.text);
+  let u = await c.next('dev_update');
+  assert.equal(u.status, 'open');
+  assert.equal(u.question, 'For: should the filter also apply to drones, or haulers only?'.replace('For: ', 'For '), 'the question, without the work id');
+  assert.equal(store.work.get(wid)!.question?.text.includes('drones'), true);
+  // The operator answers in the thread: FFBox sends it as dev_message.
+  c.send({ type: 'dev_message', ref: 'msg-ans', request: wid, operator: { name: 'lothsahn' }, conversation: conv, text: 'Haulers only for now.' });
+  assert.deepEqual(await c.next('dev_ack'), { type: 'dev_ack', ref: 'msg-ans', ok: true });
+  const w = store.work.get(wid)!;
+  assert.equal(w.status, 'new', 'answered: open again for the dispatcher');
+  assert.equal(w.question, undefined);
+  assert.ok(w.log.some((l) => /answered on FFBox: note: Haulers only for now\./.test(l)), w.log.join('\n'));
+  await until('the dispatcher hears the answer', () => heard(dispatcher().info.id).some((e) => e.text.includes('Haulers only for now.') && e.text.includes('resume the work')));
+  await until("and the person's orchestrator", () => heard(chat(LOTH).info.id).some((e) => e.text.includes('Haulers only for now.')));
+  u = await c.next('dev_update');
+  assert.deepEqual([u.status, u.question], ['open', undefined], 'the question is gone from the thread\'s facts');
+});
+
+test('w278: a request filed from an FFBox escalation gets the same events in its own conversation, and its requester may answer there', async (t) => {
+  const { connect, store, call, dispatcher } = await setup(t);
+  const c = await connect();
+  const w: WorkItem = {
+    id: 'w500', title: 'Belts stall at junctions', brief: 'From FFBox.', priority: 'normal', keys: [], requestedBy: LOTH, requesters: [LOTH], humanAsked: false, status: 'new', createdAt: T0, updatedAt: T0,
+    sessionIds: [], overlaps: [], asks: 0, log: [], source: { kind: 'ffbox-request', conversation: '612', threadId: '1424000000000000612', untrusted: true },
+  } as unknown as WorkItem;
+  store.putWork(w);
+  let u = await c.next('dev_update');
+  assert.deepEqual([u.conversation, u.request, u.status], ['612', 'w500', 'open']);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w500', action: 'ask', note: 'Which save shows it?' })).isError, false);
+  u = await c.next('dev_update');
+  assert.equal(u.question, 'Which save shows it?');
+  c.send({ type: 'dev_message', ref: 'msg-esc', request: 'w500', operator: { name: 'lothsahn' }, conversation: '612', text: 'The one attached to the thread.' });
+  assert.deepEqual(await c.next('dev_ack'), { type: 'dev_ack', ref: 'msg-esc', ok: true });
+  assert.equal(store.work.get('w500')!.status, 'new');
+  u = await nextUpdate(c, (x) => !x.question);
+  c.send({ type: 'dev_message', ref: 'msg-esc2', request: 'w500', operator: { name: 'ben' }, conversation: '612', text: 'Hi' });
+  assert.equal((await c.next('dev_ack')).ok, false, 'someone it is not for is refused');
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w500', action: 'reject', note: 'Works as designed: junctions throttle on purpose.' })).isError, false);
+  u = await c.next('dev_update');
+  assert.deepEqual([u.status, u.result], ['declined', 'Works as designed: junctions throttle on purpose.']);
 });
 
 test('ffbox_activity show dev_requests lists them; config: its settings are checked, and there is no operators map', async (t) => {
