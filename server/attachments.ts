@@ -124,17 +124,21 @@ export class AttachmentStore {
    * upload: its SHA-256 is computed, the bytes move into the store (or go, when that content is there already) and the
    * record is made.
    */
-  async append(uploadId: string, offset: number, body: AsyncIterable<Buffer> | NodeJS.ReadableStream, maxChunk = MAX_CHUNK_BYTES): Promise<{ received: number; size: number; attachment?: AttachmentRecord }> {
+  async append(uploadId: string, offset: number, body: AsyncIterable<Buffer> | NodeJS.ReadableStream, maxChunk = MAX_CHUNK_BYTES, declared?: number): Promise<{ received: number; size: number; attachment?: AttachmentRecord }> {
     const meta = this.meta(uploadId);
     if (this.writing.has(uploadId)) throw new AttachmentError(409, 'another chunk of this upload is being written', this.received(uploadId));
     const start = this.received(uploadId);
     if (!Number.isSafeInteger(offset) || offset !== start) throw new AttachmentError(409, `offset ${offset} is not where the upload stands`, start);
     if (start >= meta.size) throw new AttachmentError(409, 'the upload is already complete', start);
+    const limit = Math.min(maxChunk, meta.size - start);
+    // A chunk that says it is too big (Content-Length) is refused before a byte is read, so the client hears why.
+    if (declared !== undefined && Number.isFinite(declared) && declared > limit) {
+      throw new AttachmentError(declared > maxChunk ? 413 : 400, declared > maxChunk ? `a chunk is at most ${fmtBytes(maxChunk)}` : `more bytes than the ${meta.size} announced`, start);
+    }
     this.writing.add(uploadId);
     const file = this.partialPath(uploadId);
     let written = 0;
     let refused: AttachmentError | undefined;
-    const limit = Math.min(maxChunk, meta.size - start);
     try {
       const guard = new Transform({
         transform(chunk: Buffer, _enc, done) {
@@ -389,6 +393,8 @@ export function publicRef(r: AttachmentRef): AttachmentRef {
  * daemon, which writes its copies itself.
  */
 export async function prepareInbox(folder: string, ref: { id: string; name: string }): Promise<string> {
+  // The id is part of a file name here: only ever "att_" and 12 letters or digits.
+  if (!ATTACHMENT_ID.test(ref.id)) throw new Error(`not an attachment id: ${JSON.stringify(ref.id).slice(0, 40)}`);
   const dir = path.join(folder, INBOX_DIR);
   await fs.promises.mkdir(dir, { recursive: true });
   const ignore = path.join(dir, '.gitignore');

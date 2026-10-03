@@ -159,3 +159,22 @@ test('limits and locks: the size cap in the composer and the server, login for e
   expect((await anon.get(`/machine/attachments/${attachment.id}`, { headers: { authorization: 'Bearer ffm_x_' + 'a'.repeat(43) } })).status()).toBe(401);
   await anon.dispose();
 });
+
+test('an upload goes on while its chat is closed: switch to another chat and back, and the file is there to send', async ({ authed: page }) => {
+  const tag = uniq('away');
+  const a = await startWorker(page.request, `first ${tag}`, { title: `Away A ${tag}` });
+  const b = await startWorker(page.request, `second ${tag}`, { title: `Away B ${tag}` });
+  const panel = await openSandbox(page, 'alpha', a.id);
+  await attach(page, '.sb-panel', [{ name: `big-${tag}.zip`, mimeType: 'application/zip', buffer: bytes(9 * MB, 7) }]);
+  await expect(panel.locator('.composer-file')).toHaveCount(1);
+  // Another chat at once: its composer has none of A's files.
+  await openSandbox(page, 'alpha', b.id);
+  await expect(page.locator('.sb-panel .msg-assistant', { hasText: `second ${tag}` })).toBeVisible();
+  await expect(page.locator('.sb-panel .composer-file')).toHaveCount(0);
+  // Back to A: the upload finished meanwhile, and the file goes with the message.
+  await openSandbox(page, 'alpha', a.id);
+  await expect(page.locator('.sb-panel .composer-file.done')).toHaveCount(1, { timeout: 20_000 });
+  await sendFrom(page, '.sb-panel', `came back ${tag}`);
+  await expect(page.locator('.sb-panel .msg-user', { hasText: `came back ${tag}` }).locator('.attach-chip')).toContainText(`big-${tag}.zip`);
+  await expect(page.locator('.sb-panel .composer-file')).toHaveCount(0);
+});

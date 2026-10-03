@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { Readable } from 'node:stream';
-import { AttachmentError, AttachmentStore, attachmentForMachine, downloadDisposition, machineAttachment, publicRef } from './attachments.ts';
+import { AttachmentError, AttachmentStore, attachmentForMachine, downloadDisposition, machineAttachment, prepareInbox, publicRef } from './attachments.ts';
 import { attachmentBlock, attachmentKind, attachmentName, fmtBytes, inboxName } from '../shared/attachments.ts';
 
 /**
@@ -107,6 +107,9 @@ test('size cap: refused before upload past attachments.maxMB; a chunk past the a
   assert.equal(store.status(uploadId).received, 400, 'nothing of the refused chunk is kept');
   await assert.rejects(store.append(uploadId, 400, Readable.from([Buffer.alloc(300)]), 200), (e: AttachmentError) => e.status === 413);
   assert.equal(store.status(uploadId).received, 400);
+  // Said too big by its Content-Length: refused before reading, nothing kept.
+  await assert.rejects(store.append(uploadId, 400, Readable.from([Buffer.alloc(10)]), undefined, 601), (e: AttachmentError) => e.status === 400 && e.received === 400);
+  assert.equal(store.status(uploadId).received, 400);
   store.cancel(uploadId);
   assert.throws(() => store.status(uploadId), /no such upload/);
   // The default: 200 MB (big saves exist).
@@ -166,6 +169,7 @@ test('copy into an Inbox: <folder>/Inbox/<id>-<name>, byte for byte, never seen 
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(await store.copyInto(a, repo), at);
   assert.equal(fs.statSync(at).mtimeMs, mtime, 'a copy already there is kept');
+  await assert.rejects(prepareInbox(repo, { id: '../../evil', name: 'x' }), /not an attachment id/);
 });
 
 test('retention: unused past retentionDays goes, with its stored file unless another record shares it; old unfinished uploads go', async (t) => {

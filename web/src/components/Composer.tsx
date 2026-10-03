@@ -1,9 +1,9 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { AttachmentRef, SessionInfo } from '../../../shared/types';
+import type { SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import type { ImageInput } from '../../../shared/types';
 import { attempt, toast, useStore } from '../store';
-import { uploadAttachment } from '../upload';
+import { clearPending, removePending, startUpload, usePendingFiles } from '../upload';
 import { enterAction } from '../../../shared/keys';
 import { dropCaret, EDITABLE_MODE, insertPlainText, readText, setCaret, writeText } from '../editable';
 import { fmtBytes, isBusy, lsGet, lsSet, shrinkImage, useMediaQuery } from '../util';
@@ -13,16 +13,6 @@ import { DictationBar, MicButton } from './Mic';
 import { onScreenKeyboard } from '../viewport';
 import { VoiceModeButton, VoiceModeOverlay, useVoiceMode } from './VoiceMode';
 import { Icon } from './ui';
-
-/** A file being attached (docs/attachments.md): uploading, uploaded (`ref`), or failed (`error`). */
-interface PendingFile {
-  key: number;
-  file: File;
-  sent: number;
-  ref?: AttachmentRef;
-  error?: string;
-  abort: AbortController;
-}
 
 /** Without the app's settings yet: the server's defaults (config attachments). */
 const ATTACH_DEFAULTS = { maxBytes: 200 * 1024 * 1024, retentionDays: 30, maxPerMessage: 10 };
@@ -51,7 +41,8 @@ export const Composer = memo(function Composer({
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [images, setImages] = useState<(ImageInput & { key: number })[]>([]);
-  const [files, setFiles] = useState<PendingFile[]>([]);
+  // Files upload outside the composer (web/src/upload.ts), so they go on while this chat is closed.
+  const files = usePendingFiles(session.id);
   const limits = useStore((s) => s.app?.config.attachments) ?? ATTACH_DEFAULTS;
   const [dragging, setDragging] = useState(false);
   const [reading, setReading] = useState(0);
@@ -67,31 +58,6 @@ export const Composer = memo(function Composer({
   const uploading = files.some((f) => !f.ref && !f.error);
   const failed = files.some((f) => f.error);
 
-  /** Upload a file now, in chunks that resume (web/src/upload.ts); its chip shows the progress. */
-  const upload = (file: File, key = Math.random()) => {
-    const abort = new AbortController();
-    setFiles((xs) => (xs.some((x) => x.key === key) ? xs.map((x) => (x.key === key ? { key, file, sent: 0, abort } : x)) : [...xs, { key, file, sent: 0, abort }]));
-    const update = (patch: Partial<PendingFile>) => setFiles((xs) => xs.map((x) => (x.key === key && x.abort === abort ? { ...x, ...patch } : x)));
-    let shown = -1;
-    uploadAttachment(
-      file,
-      (sent) => {
-        // A render per whole percent, not per progress event.
-        const pct = Math.floor((sent * 100) / file.size);
-        if (pct !== shown) {
-          shown = pct;
-          update({ sent });
-        }
-      },
-      abort.signal,
-    ).then(
-      (ref) => update({ sent: file.size, ref }),
-      (e: Error) => {
-        if (e.name !== 'AbortError') update({ error: e.message });
-      },
-    );
-  };
-
   /** Start uploading `f` unless it breaks a limit (said in a toast); whether it started. */
   const attachFile = (f: File, pending: number) => {
     const why = !f.size
@@ -105,7 +71,7 @@ export const Composer = memo(function Composer({
       toast(why, 'error');
       return false;
     }
-    upload(f);
+    startUpload(session.id, f);
     return true;
   };
 
@@ -129,17 +95,6 @@ export const Composer = memo(function Composer({
       }
     }
   };
-
-  const removeFile = (key: number) =>
-    setFiles((xs) => {
-      xs.find((x) => x.key === key)?.abort.abort();
-      return xs.filter((x) => x.key !== key);
-    });
-
-  // Uploads still going when the chat closes are cancelled (the server drops what arrived).
-  const filesRef = useRef(files);
-  filesRef.current = files;
-  useEffect(() => () => filesRef.current.forEach((f) => !f.ref && f.abort.abort()), []);
 
   // The draft is saved a moment after typing stops (not on every key), and at once when the chat closes or the page goes.
   const draft = useRef(text);
@@ -237,19 +192,20 @@ export const Composer = memo(function Composer({
     if ((!t && !images.length && !files.length) || sending || reading || uploading) return;
     if (failed) return toast('An attachment did not upload: retry it or remove it', 'error');
     setSending(true);
+    const sentFiles = files;
     const ok = await attempt(
       api.sendMessage(
         session.id,
         t,
         images.map(({ mediaType, data }) => ({ mediaType, data })),
-        files.map((f) => f.ref!.id),
+        sentFiles.map((f) => f.ref!.id),
       ),
     );
     setSending(false);
     if (ok !== undefined) {
       setText('');
       setImages([]);
-      setFiles([]);
+      clearPending(session.id, sentFiles);
     }
     if (ok?.note) toast(ok.note);
     ta.current?.focus();
@@ -314,11 +270,11 @@ export const Composer = memo(function Composer({
                     </span>
                   )}
                   {f.error && (
-                    <button className="composer-file-btn" onClick={() => upload(f.file, f.key)} title="Upload it again" aria-label={`Retry ${f.file.name}`}>
+                    <button className="composer-file-btn" onClick={() => startUpload(session.id, f.file, f.key)} title="Upload it again" aria-label={`Retry ${f.file.name}`}>
                       <Icon name="refresh" size={12} />
                     </button>
                   )}
-                  <button className="composer-file-btn" onClick={() => removeFile(f.key)} title="Remove" aria-label={`Remove ${f.file.name}`}>
+                  <button className="composer-file-btn" onClick={() => removePending(session.id, f.key)} title="Remove" aria-label={`Remove ${f.file.name}`}>
                     <Icon name="x" size={12} />
                   </button>
                 </span>

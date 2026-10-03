@@ -652,7 +652,8 @@ route('POST', '/api/attachments', async (req) => {
 route('GET', '/api/attachments/uploads/([a-f0-9]{32})', async (_r, [uploadId]) => attachments.status(uploadId));
 // A chunk is raw bytes (application/octet-stream with the x-ff-upload header, which the CSRF check lets through).
 route('PUT', '/api/attachments/uploads/([a-f0-9]{32})', async (req, [uploadId], url) => {
-  const r = await attachments.append(uploadId, Number(url.searchParams.get('offset')), req);
+  const length = req.headers['content-length'];
+  const r = await attachments.append(uploadId, Number(url.searchParams.get('offset')), req, undefined, length === undefined ? undefined : Number(length));
   return { received: r.received, size: r.size, ...(r.attachment ? { attachment: publicRef(r.attachment) } : {}) };
 });
 route('DELETE', '/api/attachments/uploads/([a-f0-9]{32})', async (_r, [uploadId]) => {

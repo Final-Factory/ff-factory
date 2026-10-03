@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react';
 import type { AttachmentRef } from '../../shared/types';
 import { ApiError, api, notifyUnauthorized, UnauthorizedError } from './api';
 
@@ -98,4 +99,80 @@ export async function uploadAttachment(file: File, onProgress: (sent: number) =>
     void api.cancelAttachment(uploadId).catch(() => undefined);
     throw e;
   }
+}
+
+// ---------------------------------------------------------------- files waiting to be sent, per chat
+
+/** A file being attached in a chat (docs/attachments.md): uploading, uploaded (`ref`), or failed (`error`). */
+export interface PendingFile {
+  key: number;
+  file: File;
+  sent: number;
+  ref?: AttachmentRef;
+  error?: string;
+  abort: AbortController;
+}
+
+/**
+ * Each chat's files, outside React: an upload goes on while its chat is closed (a 200 MB save takes minutes over a
+ * slow link) and its chips are there again when the chat opens. Lost with the page, like the images.
+ */
+const pendingBySession = new Map<string, PendingFile[]>();
+const listeners = new Set<() => void>();
+const NONE: PendingFile[] = [];
+
+function update(sessionId: string, fn: (xs: PendingFile[]) => PendingFile[]) {
+  const next = fn(pendingBySession.get(sessionId) ?? NONE);
+  if (next.length) pendingBySession.set(sessionId, next);
+  else pendingBySession.delete(sessionId);
+  listeners.forEach((l) => l());
+}
+
+const subscribe = (l: () => void) => {
+  listeners.add(l);
+  return () => listeners.delete(l);
+};
+
+/** A chat's files, as a React hook. */
+export function usePendingFiles(sessionId: string): PendingFile[] {
+  return useSyncExternalStore(subscribe, () => pendingBySession.get(sessionId) ?? NONE);
+}
+
+/** Upload `file` for a chat now (or again, for a failed one: same `key`); its chip follows the progress. */
+export function startUpload(sessionId: string, file: File, key = Math.random()) {
+  const abort = new AbortController();
+  update(sessionId, (xs) => (xs.some((x) => x.key === key) ? xs.map((x) => (x.key === key ? { key, file, sent: 0, abort } : x)) : [...xs, { key, file, sent: 0, abort }]));
+  const patch = (p: Partial<PendingFile>) => update(sessionId, (xs) => xs.map((x) => (x.key === key && x.abort === abort ? { ...x, ...p } : x)));
+  let shown = -1;
+  uploadAttachment(
+    file,
+    (sent) => {
+      // A render per whole percent, not per progress event.
+      const pct = Math.floor((sent * 100) / file.size);
+      if (pct !== shown) {
+        shown = pct;
+        patch({ sent });
+      }
+    },
+    abort.signal,
+  ).then(
+    (ref) => patch({ sent: file.size, ref }),
+    (e: Error) => {
+      if (e.name !== 'AbortError') patch({ error: e.message });
+    },
+  );
+}
+
+/** Drop one file from a chat (cancelling its upload). */
+export function removePending(sessionId: string, key: number) {
+  update(sessionId, (xs) => {
+    xs.find((x) => x.key === key)?.abort.abort();
+    return xs.filter((x) => x.key !== key);
+  });
+}
+
+/** The chat's message went: its files with it. */
+export function clearPending(sessionId: string, sent: PendingFile[]) {
+  const keys = new Set(sent.map((f) => f.key));
+  update(sessionId, (xs) => xs.filter((x) => !keys.has(x.key)));
 }
