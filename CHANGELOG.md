@@ -12,6 +12,22 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The ledger cleans itself up** (w304 and w306, asked by Lothsahn: about 45 finished requests had to be closed by
+  hand). Each request is linked to the pull requests its workers open (a `Request: wNNN` line the worker brief asks
+  for, a PR URL in a worker's report, or the worker's branch), shown on the request and in `list_work`. When they have
+  all merged, no worker is running and nothing is left after the merge (not a release, a step after the merge, a
+  multi-PR plan, or a report saying more is coming), it closes as done, "merged as #N (sha)"; otherwise it stays open
+  with a log line, and a PR closed without merging only adds a note. Every `ledger.cleanup.everyHours` hours (default
+  4) and on "Clean up now" the sweep also closes requests whose worker's final report plainly says delivered, resumes
+  a worker a limit or restart cut off once, and moves requests nothing has touched for 24 hours, or that a newer
+  finished request probably covers, to a new **stalled** status (its own filter; only its person closes or reopens it).
+  A request with a running worker is never touched; each person's orchestrator hears one `[ledger cleanup]` line per
+  pass ([docs/orchestrators.md](docs/orchestrators.md), "Pull requests" and "Ledger cleanup"). The first pass after
+  the deploy is the backfill for requests whose PRs already merged, and lists what stayed open and why.
+- **Reports spell out their ids** (w302, asked by Ben). The worker, orchestrator and dispatcher briefs and the
+  worker-update relay say that a request id, PR number, commit, worker id or sandbox name always comes with what it
+  is in plain English, every time ([docs/orchestrators.md](docs/orchestrators.md), "Evidence and labels").
+
 - **Intake requests close themselves when their work merged** (w298, asked by Lothsahn: four FFBox review requests
   sat in "needs a human" hours after #945–#947 and #949 merged them). Every 5 minutes, and on "Check Discord now", a
   request nobody works on closes as done when a merged PR or commit names its PR or branch or carries its Discord

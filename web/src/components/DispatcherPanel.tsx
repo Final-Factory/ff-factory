@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { AppState, IntakeSummary, WorkItem, WorkSource } from '../../../shared/types';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
-import { attempt, reloadTranscript, sessionsByIds } from '../store';
+import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
 import { dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, navigate, useNow, workLabel, workTone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
@@ -11,7 +11,7 @@ import { Chip, Confirm, Dot, Icon, Menu } from './ui';
 
 type Tab = 'requests' | 'intake' | 'conversation';
 
-const RANK: Record<WorkItem['status'], number> = { question: 0, new: 1, queued: 2, active: 3, done: 4, merged: 4, rejected: 4, cancelled: 4 };
+const RANK: Record<WorkItem['status'], number> = { question: 0, new: 1, queued: 2, active: 3, stalled: 4, done: 5, merged: 5, rejected: 5, cancelled: 5 };
 const PRIORITY: Record<WorkItem['priority'], number> = { urgent: 0, high: 1, normal: 2, low: 3 };
 
 /** Open requests first (questions, new, queued, active; then by priority and age), then the closed ones, newest first. */
@@ -83,7 +83,8 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   const session = app.sessions.find((s) => s.id === app.dispatcherId);
   const work = [...(app.work ?? [])].sort(byLedger);
   const open = work.filter(isOpenWork);
-  const closed = work.filter((w) => !isOpenWork(w));
+  const stalled = work.filter((w) => w.status === 'stalled');
+  const closed = work.filter((w) => !isOpenWork(w) && w.status !== 'stalled');
   const current: Tab = tab === 'conversation' ? 'conversation' : tab === 'intake' ? 'intake' : 'requests';
   const focus = tab && /^w\d+$/.test(tab) ? tab : undefined;
   const setTab = (t: Tab) => navigate({ view: 'dispatcher', tab: t === 'requests' ? undefined : t }, true);
@@ -143,7 +144,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
         </button>
       </nav>
 
-      {current === 'requests' && <Requests app={app} open={open} closed={closed} focus={focus} now={now} />}
+      {current === 'requests' && <Requests app={app} open={open} stalled={stalled} closed={closed} focus={focus} now={now} />}
       {current === 'intake' && app.intake && <IntakeTab app={app} intake={app.intake} work={work} now={now} />}
       {current === 'conversation' &&
         (session ? (
@@ -170,18 +171,22 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   );
 }
 
-function Requests({ app, open, closed, focus, now }: { app: AppState; open: WorkItem[]; closed: WorkItem[]; focus?: string; now: number }) {
+function Requests({ app, open, stalled, closed, focus, now }: { app: AppState; open: WorkItem[]; stalled: WorkItem[]; closed: WorkItem[]; focus?: string; now: number }) {
   const [expanded, setExpanded] = useState<string | null>(focus ?? null);
   const [showClosed, setShowClosed] = useState(() => !!focus && closed.some((w) => w.id === focus));
+  const [showStalled, setShowStalled] = useState(() => !!focus && stalled.some((w) => w.id === focus));
+  const [cleaning, setCleaning] = useState(false);
+  const ledger = app.ledger;
   useEffect(() => {
     if (!focus) return;
     setExpanded(focus);
     if (closed.some((w) => w.id === focus)) setShowClosed(true);
+    if (stalled.some((w) => w.id === focus)) setShowStalled(true);
     requestAnimationFrame(() => document.getElementById(`work-${focus}`)?.scrollIntoView({ block: 'nearest' }));
     // The focus comes from a link (a notice in a chat): open it once, then leave the rows to the user.
   }, [focus]);
 
-  if (!open.length && !closed.length) {
+  if (!open.length && !closed.length && !stalled.length) {
     return (
       <div className="panel-empty">
         <Icon name="inbox" size={28} />
@@ -194,6 +199,19 @@ function Requests({ app, open, closed, focus, now }: { app: AppState; open: Work
   return (
     <div className="sa-scroll">
       {open.length ? <div className="run-list">{open.map(row)}</div> : <p className="dim small ledger-none">Nothing open.</p>}
+      {stalled.length > 0 && (
+        <>
+          <button className="link-btn small ledger-closed" data-testid="stalled-filter" onClick={() => setShowStalled(!showStalled)} aria-expanded={showStalled}>
+            {showStalled ? 'Hide stalled' : `${stalled.length} stalled`}
+          </button>
+          {showStalled && (
+            <>
+              <p className="dim small ledger-none">Nothing is working on these. The cleanup never closes them on its own: close or reopen each (tell your orchestrator, or write a note on it to revive it).</p>
+              <div className="run-list" data-testid="stalled-list">{stalled.map(row)}</div>
+            </>
+          )}
+        </>
+      )}
       {closed.length > 0 && (
         <>
           <button className="link-btn small ledger-closed" onClick={() => setShowClosed(!showClosed)} aria-expanded={showClosed}>
@@ -201,6 +219,25 @@ function Requests({ app, open, closed, focus, now }: { app: AppState; open: Work
           </button>
           {showClosed && <div className="run-list">{closed.map(row)}</div>}
         </>
+      )}
+      {ledger?.enabled && (
+        <p className="dim small ledger-none" data-testid="ledger-cleanup">
+          Cleanup every {ledger.everyHours} h: {ledger.lastRunAt ? `last ${fmtRelative(ledger.lastRunAt, now)}, ${ledger.lastSummary ?? 'nothing to do'}` : 'not run yet'}.{' '}
+          {app.me?.role === 'owner' && (
+            <button
+              className="link-btn small"
+              disabled={cleaning || ledger.running}
+              onClick={async () => {
+                setCleaning(true);
+                const r = await attempt(api.ledgerCleanup());
+                setCleaning(false);
+                if (r?.summary) toast(`Cleanup: ${r.summary}`);
+              }}
+            >
+              Clean up now
+            </button>
+          )}
+        </p>
       )}
     </div>
   );
@@ -411,6 +448,29 @@ function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; 
               Closed automatically, no review needed: {w.autoClosed.text}.
             </p>
           )}
+          {w.stalled && (
+            <p className="small tone-amber" data-testid={`stalled-${w.id}`}>
+              Stalled ({w.stalled.kind}): {w.stalled.reason}
+            </p>
+          )}
+          {w.prs?.length ? (
+            <p className="small dim" data-testid={`prs-${w.id}`}>
+              Pull requests:{' '}
+              {w.prs.map((p, i) => (
+                <span key={`${p.repo}#${p.number}`}>
+                  {i ? ', ' : ''}
+                  {p.url ? (
+                    <a href={p.url} target="_blank" rel="noreferrer noopener">
+                      #{p.number}
+                    </a>
+                  ) : (
+                    `#${p.number}`
+                  )}{' '}
+                  {p.state}
+                </span>
+              ))}
+            </p>
+          ) : null}
           {delivery && <p className="small dim">To players: {delivery}</p>}
           {w.ffbox && (
             <p className="small dim">

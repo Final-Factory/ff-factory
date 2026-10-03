@@ -1034,8 +1034,11 @@ export interface AppSettings {
 
 // ---- the work ledger (docs/orchestrators.md) ----
 
-/** Where a work request stands. The first four are open. */
-export type WorkStatus = 'new' | 'question' | 'queued' | 'active' | 'merged' | 'done' | 'rejected' | 'cancelled';
+/**
+ * Where a work request stands. The first four are open. `stalled` is not: the cleanup (docs/orchestrators.md, "Ledger
+ * cleanup") moved it out of the active list because nothing is working on it; only its person closes or reopens it.
+ */
+export type WorkStatus = 'new' | 'question' | 'queued' | 'active' | 'stalled' | 'merged' | 'done' | 'rejected' | 'cancelled';
 export const WORK_OPEN: readonly WorkStatus[] = ['new', 'question', 'queued', 'active'];
 
 export type WorkPriority = 'low' | 'normal' | 'high' | 'urgent';
@@ -1108,6 +1111,12 @@ export interface WorkItem {
   approval?: WorkApproval;
   /** The fix's way to players: the commit that landed it, the Discord reply and close, the release it shipped in. */
   delivery?: WorkDelivery;
+  /** The pull requests of its workers (the ledger links them, docs/orchestrators.md "Pull requests"), oldest first. */
+  prs?: WorkPr[];
+  /** Why the cleanup stalled it (status `stalled`). */
+  stalled?: WorkStalled;
+  /** Workers the cleanup already resumed once after they were cut off, by session id: never a second time. */
+  resumedBy?: Record<string, string>;
   /** Set when the intake closed it as done because its work already merged (docs/intake.md, "Closed when it merged"). */
   autoClosed?: WorkAutoClosed;
   /** A question for people (a design decision) the worker raised instead of fixing; open until they answer. */
@@ -1126,11 +1135,37 @@ export interface WorkItem {
   ffboxDev?: WorkFfboxDev[];
 }
 
+/** One pull request linked to a request: where it is, and what it did. */
+export interface WorkPr {
+  /** GitHub owner/name. */
+  repo: string;
+  number: number;
+  url?: string;
+  title?: string;
+  head?: string;
+  state: 'open' | 'merged' | 'closed';
+  /** When it merged or closed. */
+  at?: string;
+  /** The merge commit. */
+  sha?: string;
+  /** What the log already said about it, so a sweep notes a state once ("merged:release", "closed"). */
+  noted?: string;
+}
+
+/** Why a request is stalled, and what kind of stop it was. */
+export interface WorkStalled {
+  at: string;
+  kind: 'idle' | 'cut-off' | 'superseded' | 'unsure';
+  reason: string;
+  /** superseded: the finished request that probably covers it. */
+  by?: string;
+}
+
 /** Why and how the intake closed a request on its own: its branch or PR merged, or the request it is linked to is done. */
 export interface WorkAutoClosed {
   at: string;
-  /** branch: a merged PR or commit names the branch; pr: the PR it names merged; thread: a merged PR carries its Discord thread; ancestor: every commit of the branch is on the base branch; linked: a linked request is done. */
-  how: 'branch' | 'pr' | 'thread' | 'ancestor' | 'linked';
+  /** branch: a merged PR or commit names the branch; pr: the PR it names merged; thread: a merged PR carries its Discord thread; ancestor: every commit of the branch is on the base branch; linked: a linked request is done; prs: every pull request linked to it merged and nothing was left to do; report: its worker's final report said it was delivered. */
+  how: 'branch' | 'pr' | 'thread' | 'ancestor' | 'linked' | 'prs' | 'report';
   /** The merging PR's number, the merge commit and when it merged (absent for a linked request). */
   pr?: number;
   sha?: string;
@@ -1289,6 +1324,16 @@ export interface WorkFfbox {
   verdict?: string;
 }
 
+/** The ledger cleanup as the Requests tab shows it. */
+export interface LedgerCleanupState {
+  enabled: boolean;
+  everyHours: number;
+  lastRunAt?: string;
+  /** What the last run did, in a line ("closed 2, resumed 1, stalled 3"), or "nothing to do". */
+  lastSummary?: string;
+  running?: boolean;
+}
+
 /** One thing the intake saw and what it did with it (the Intake tab's log). */
 export interface IntakeEntry {
   at: string;
@@ -1387,6 +1432,8 @@ export interface AppState {
   work?: WorkItem[];
   /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
   intake?: IntakeSummary;
+  /** The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): its switches and its last run. */
+  ledger?: LedgerCleanupState;
   config: { defaultModel: string; models: string[]; defaultBase: string; attachments: AttachmentSettings };
   settings: AppSettings;
 }
@@ -1409,6 +1456,7 @@ export type ServerEvent =
   | { type: 'notify'; notice: { kind: NotifyKind; title: string; body: string; url: string; tag: string }; users?: string[] }
   | { type: 'work'; item: WorkItem }
   | { type: 'intake'; intake: IntakeSummary }
+  | { type: 'ledger'; ledger: LedgerCleanupState }
   | { type: 'machine_removed'; id: string }
   | { type: 'provider'; provider: Provider }
   | { type: 'max'; max: MaxSummary }

@@ -184,6 +184,7 @@ const STATUS_WORDS: Record<WorkItem['status'], string> = {
   question: 'waiting on a question',
   queued: 'queued',
   active: 'in progress',
+  stalled: 'stalled: nothing is working on it',
   merged: 'merged into another request',
   done: 'done',
   rejected: 'declined',
@@ -502,7 +503,7 @@ export class Orchestrators {
   /** What the page shows: every open item, and those closed in the last 3 days, at most 100. */
   forPage(): WorkItem[] {
     const since = this.now().getTime() - 3 * 86_400_000;
-    const keep = [...this.store.work.values()].filter((w) => isOpen(w) || Date.parse(w.updatedAt) >= since);
+    const keep = [...this.store.work.values()].filter((w) => isOpen(w) || w.status === 'stalled' || Date.parse(w.updatedAt) >= since);
     return keep.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 100);
   }
 
@@ -703,7 +704,12 @@ export class Orchestrators {
     const what: string[] = [];
     if (input.reopen) {
       w.status = 'new';
+      w.stalled = undefined;
       what.push('reopened');
+    } else if (w.status === 'stalled' && !input.close) {
+      w.status = 'new';
+      w.stalled = undefined;
+      what.push('revived from stalled');
     }
     if (input.priority && input.priority !== w.priority) {
       what.push(`priority ${w.priority} → ${input.priority}`);
@@ -952,10 +958,25 @@ export class Orchestrators {
   }
 
   /**
+   * The ledger cleanup changes a request (server/ledgerSweep.ts): `fn` edits it and `line` goes in its log. A note
+   * (`quiet`) leaves updatedAt alone, so the cleanup's own remarks do not count as activity on the request.
+   */
+  ledgerEdit(id: string, line: string, fn: (w: WorkItem) => void, quiet = false): WorkItem | undefined {
+    const w = this.store.work.get(id);
+    if (!w) return undefined;
+    const was = w.updatedAt;
+    fn(w);
+    this.stamp(w, line);
+    if (quiet) w.updatedAt = was;
+    this.store.putWork(w);
+    return w;
+  }
+
+  /**
    * Close intake requests as done because their work already merged (server/mergedIntake.ts): no reviewer, no worker, and
    * the dispatcher is not told. Each one logs how, and the people they are for hear one line per batch. Returns the ids closed.
    */
-  closeMerged(batch: { id: string; closed: WorkAutoClosed }[]): string[] {
+  closeMerged(batch: { id: string; closed: WorkAutoClosed }[], notify = true): string[] {
     const closed: WorkItem[] = [];
     for (const { id, closed: how } of batch) {
       const w = this.store.work.get(id);
@@ -976,7 +997,7 @@ export class Orchestrators {
         byPerson.set(r.userId.toLowerCase(), e);
       }
     }
-    for (const { who, lines } of byPerson.values()) {
+    if (notify) for (const { who, lines } of byPerson.values()) {
       this.toPeople([who], `[intake auto-closed] ${lines.length === 1 ? '1 intake request' : `${lines.length} intake requests`} closed as done, their work already merged; nothing to review: ${lines.join('; ')}`);
     }
     return closed.map((w) => w.id);

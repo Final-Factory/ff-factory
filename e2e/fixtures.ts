@@ -107,6 +107,13 @@ export async function sendToChat(request: APIRequestContext, sessionId: string, 
   expect(r.ok(), await r.text()).toBeTruthy();
 }
 
+/** Set fields on a request through the test server's own door (e2e/server.ts): to age it, or give it pull requests. */
+export async function patchWork(request: APIRequestContext, id: string, patch: Record<string, unknown>) {
+  const port = Number(new URL(test.info().project.use.baseURL!).port) + 200;
+  const r = await request.post(`http://127.0.0.1:${port}/patch-work`, { data: { id, patch } });
+  expect(r.ok(), await r.text()).toBeTruthy();
+}
+
 /** Change the route without reloading the page (the app's routes live in the hash). */
 export async function go(page: Page, hash: string) {
   await page.evaluate((h) => {

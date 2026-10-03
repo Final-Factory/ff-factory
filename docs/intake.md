@@ -154,6 +154,9 @@ no review needed: merged as #946 (abc123def456) on 2026-10-03", and an entry in 
 starts, and the dispatcher is not told. The people it is for hear one `[intake auto-closed]` line per batch in their own
 orchestrator. The Intake tab lists them under **Closed automatically**.
 
+The ledger cleanup ([orchestrators.md](orchestrators.md), "Ledger cleanup") runs this rule too, in its scheduled pass, and also closes any
+request whose linked pull requests merged.
+
 ## Duplicates
 
 - The same thread, FFBox conversation or release again (a re-read after a restart, a conversation reported on every

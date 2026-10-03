@@ -187,6 +187,13 @@ export interface Config {
    */
   intake?: IntakeConfig;
   /**
+   * The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): every `everyHours` (default 4) it closes requests whose
+   * pull requests merged or whose worker reported them delivered, resumes workers a limit or restart cut off, and stalls
+   * what has gone quiet. `enabled` defaults to true. `repos`: the GitHub owner/name repos whose pull requests are linked to
+   * requests (default the game repo and this app's own; an empty list links none).
+   */
+  ledger?: { cleanup?: { enabled?: boolean; everyHours?: number; repos?: string[] } };
+  /**
    * Max, the Discord bot agents post as (docs/max.md). Activity needs nothing: agents' ffdiscord calls append to
    * `eventsFile` (default ~/.config/ff-factory/max-events.jsonl). The token check and inbound read the bot token
    * where it already is, the "discord" section of the ffbox config in `ffboxConfigDir` (default ~/.config/ffbox)

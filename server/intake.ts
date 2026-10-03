@@ -851,7 +851,7 @@ export class IntakeManager {
    * already on the base branch; or a linked request that is done. Closed as done with a log line, never worked, the
    * dispatcher not told. Returns the ids closed.
    */
-  async checkMerged(): Promise<string[]> {
+  async checkMerged(notify = true): Promise<string[]> {
     const s = this.settings;
     if (!(s.discord.enabled || s.ffbox.enabled) || this.closing) return [];
     const candidates = mergeCandidates(this.d.store.work.values());
@@ -881,7 +881,7 @@ export class IntakeManager {
         }
         if (how) closed.push({ id: w.id, closed: how });
       }
-      const ids = new Set(this.d.orchestrators.closeMerged(closed));
+      const ids = new Set(this.d.orchestrators.closeMerged(closed, notify));
       for (const { id, closed: how } of closed) {
         if (!ids.has(id)) continue;
         const w = this.d.store.work.get(id)!;

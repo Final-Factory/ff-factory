@@ -148,3 +148,13 @@ test('orchestrators: keep the labels, send a guess back to be researched, and do
     assert.ok(text.includes(`and tell ${who}. This folder is for ${who}'s own preferences and for pointers.`), who);
   }
 });
+
+test('every agent a person hears from is told to say what each id is, every time (w302)', (t) => {
+  const { agents, sessions } = world(t);
+  const brief = (info: SessionInfo) => (agents.orchestratorOptions(info) as { systemPrompt: { append: string } }).systemPrompt.append;
+  const rule = /Say what every id is, every time: a request id like w293, a PR number, a commit, a worker or session id or a sandbox name always comes with what it is in plain English/;
+  assert.match(EVIDENCE_RULES, rule, 'workers');
+  assert.match(brief(agents.orchestrators.personalFor(BEN).info), rule, "a person's orchestrator");
+  assert.match(brief(sessions.get(agents.dispatcherId!).info), rule, 'the dispatcher');
+  assert.match(WORKER_UPDATE_RELAY, rule, 'the relay of worker updates');
+});
