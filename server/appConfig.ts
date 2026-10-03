@@ -61,7 +61,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
-const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'autoApprove'];
+const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove'];
 const GITHUB_REPO = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 
 /**
@@ -94,6 +94,21 @@ export function checkFfboxIntake(value: unknown): NonNullable<IntakeConfig['ffbo
   if (r.dailyCap !== undefined) {
     if (!Number.isInteger(r.dailyCap) || (r.dailyCap as number) < 0 || (r.dailyCap as number) > 200) throw new Error('intake.ffbox.dailyCap is a whole number from 0 to 200');
     out.dailyCap = r.dailyCap as number;
+  }
+  if (r.match !== undefined) {
+    // board_check's bands (server/boardMatch.ts thresholdsOf): numbers from 0 to 1, medium at most high.
+    const m = r.match;
+    if (typeof m !== 'object' || m === null || Array.isArray(m)) throw new Error('intake.ffbox.match is an object: { "high": 0.7, "medium": 0.45 }');
+    const mm = m as Record<string, unknown>;
+    const bad = Object.keys(mm).filter((k) => k !== 'high' && k !== 'medium');
+    if (bad.length) throw new Error(`intake.ffbox.match: unknown key(s) ${bad.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}; known: high, medium`);
+    out.match = {};
+    for (const k of ['high', 'medium'] as const) {
+      if (mm[k] === undefined) continue;
+      if (typeof mm[k] !== 'number' || !Number.isFinite(mm[k]) || (mm[k] as number) < 0 || (mm[k] as number) > 1) throw new Error(`intake.ffbox.match.${k} is a number from 0 to 1`);
+      out.match[k] = mm[k] as number;
+    }
+    if (out.match.high !== undefined && out.match.medium !== undefined && out.match.medium > out.match.high) throw new Error('intake.ffbox.match.medium is at most match.high');
   }
   if (r.autoApprove !== undefined) {
     const a = r.autoApprove;

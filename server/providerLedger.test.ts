@@ -73,7 +73,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
   const o = agents.orchestrators;
   (o as unknown as { d: { intakeGatherMs: number } }).d.intakeGatherMs = 20;
   const pm = new ProviderManager(cfg);
-  const intake = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, pushBoard: (ref, a) => pm.pushBoard(ref, a) });
+  const intake = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, pushBoard: (ref, a) => pm.pushBoard(ref, a), takesMaybe: () => !!pm.summary().accepts?.includes('board_maybe') });
   pm.onBoardCheck = (m) => intake.onBoardCheck(m);
   pm.onConversation = (c) => intake.onConversation(c);
   pm.portalAccepts = () => intake.portalAccepts();
@@ -126,7 +126,7 @@ test('ledger check both ways: handshake, exact thread keys, what to watch, and t
   const c = connect();
   const welcome = (await c.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as { protocol: number; accepts: string[] };
   assert.equal(welcome.protocol, 2);
-  assert.deepEqual(welcome.accepts, ['board_check', 'request', 'accepted', 'refused', 'result', 'metrics']);
+  assert.deepEqual(welcome.accepts, ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics']);
 
   // A check by the exact key: in flight, but nobody is on a branch yet, so nothing to watch.
   c.send({ type: 'board_check', ref: 'conv-9', keys: [`discord:${THREAD_A}`], conversation: '9' });
@@ -195,4 +195,46 @@ test('ledger check both ways: handshake, exact thread keys, what to watch, and t
   v1.send({ type: 'board_check', ref: 'conv-10', keys: [`discord:${THREAD_B}`] });
   assert.equal(((await v1.next('board')) as { verdict: string }).verdict, 'in_flight');
   assert.equal(pm.pushBoard('conv-10', { verdict: 'clear', matches: [] }), false);
+});
+
+test('ledger check by meaning (w219): the words a report uses, maybe for a connector that takes it, and the candidates named later', async (t) => {
+  const { store, intake, connect } = await setup(t);
+  const item = (id: string, title: string, status: WorkItem['status'] = 'active'): WorkItem => ({ id, title, brief: title, priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status, createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] });
+  store.putWork(item('w217', 'TEST ENTRY, please ignore: purple teapot appears in the cargo hold', 'new'));
+  store.putWork(item('w301', 'Alt Tabbing still breaks movement in singleplayer'));
+  store.putWork(item('w311', 'Cargo hold UI shows the wrong item count after unloading'));
+  store.putWork(item('w312', 'Enemies never attack my base'));
+  store.putWork(item('w315', 'Belts stop after loading a save'));
+
+  // A connector that takes maybe (hello.accepts board_maybe) and sends the report's words.
+  const c = connect();
+  const welcome = (await c.hello({ protocol: 2, accepts: ['board', 'filed', 'board_maybe'] })) as unknown as { accepts: string[] };
+  assert.ok(welcome.accepts.includes('board_summary'), 'the welcome takes the words');
+  c.send({ type: 'board_check', ref: 'conv-569', keys: ['discord:1554600000000000569'], conversation: '569', title: 'I see a purple teapot in my cargo', summary: 'I see a purple teapot in my cargo\nIt is next to the iron.' });
+  let board = (await c.next('board')) as { verdict: string; confidence: number; matches: { id: string; score: number }[] };
+  assert.equal(board.verdict, 'in_flight', 'the teapot report is the held w217, though no word of its title is the same order');
+  assert.equal(board.matches[0].id, 'w217');
+  assert.ok(board.confidence >= 0.7, `confidence ${board.confidence}`);
+
+  c.send({ type: 'board_check', ref: 'conv-570', keys: ['discord:1554600000000000570'], conversation: '570', title: 'movement broken' });
+  board = (await c.next('board')) as typeof board;
+  assert.equal(board.verdict, 'maybe', 'too vague to be sure: maybe, for a person');
+  assert.equal(board.matches[0].id, 'w301');
+
+  c.send({ type: 'board_check', ref: 'conv-571', keys: ['discord:1554600000000000571'], conversation: '571', title: 'The cargo hold UI shows the wrong count' });
+  board = (await c.next('board')) as typeof board;
+  assert.notEqual(board.matches[0]?.id, 'w217', 'cargo, but not the teapot');
+
+  // What FFBox files from the `maybe` conversation names the candidates.
+  const res = intake.onRequest({ type: 'request', ref: 'conv-570-turn-1', kind: 'escalate', title: 'Movement broken after a while', brief: 'A player cannot move.', opener: 'player', conversation: '570' });
+  const filed = res?.workId ? store.work.get(res.workId) : undefined;
+  assert.ok(filed, JSON.stringify(res));
+  assert.ok(filed!.log.some((l) => /Possibly the same bug as w301 \(0\.\d+\)/.test(l)), filed!.log.join('\n'));
+
+  // An older connector (no board_maybe) is told clear instead.
+  const old = connect();
+  await old.hello({ protocol: 2, accepts: ['board', 'filed'] });
+  old.send({ type: 'board_check', ref: 'conv-572', keys: ['discord:1554600000000000572'], conversation: '572', title: 'movement broken' });
+  board = (await old.next('board')) as typeof board;
+  assert.equal(board.verdict, 'clear');
 });

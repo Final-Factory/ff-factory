@@ -265,7 +265,19 @@ export class ProviderManager {
       c ? `${c.state}; ${classes || 'no classes'}; queue ${c.queue}${c.holds.length ? `; holds: ${c.holds.join(' | ')}` : ''}` : 'no capacity report yet',
       `${p.counts.active} conversation(s) running or queued; ${p.counts.intake24h} intake report(s) in 24 h`,
       metricsLine(p.metrics, this.now()),
+      ...(this.ledgerProblem() ? [this.ledgerProblem()!] : []),
     ].join(' · ');
+  }
+
+  /**
+   * The ledger check switched on at FFBox and off here: FFBox's hello takes board answers (fff.board_check on), but this
+   * portal's welcome does not take board_check, so FFBox never asks and starts every report's turn unchecked. Said in
+   * the status line, where people and orchestrators look, rather than only in FFBox's board_log.
+   */
+  ledgerProblem(): string | undefined {
+    if (!this.online || this.link?.protocol !== 2 || !this.data.accepts?.includes('board')) return undefined;
+    if ((this.portalAccepts?.() ?? []).includes('board_check')) return undefined;
+    return 'LEDGER CHECK OFF HERE: FFBox asks before every report it works, but this portal does not take board_check (config intake.ffbox.enabled and intake.ffbox.boardCheck), so FFBox starts every report unchecked';
   }
 
   // ---------------------------------------------------------------- the /provider socket

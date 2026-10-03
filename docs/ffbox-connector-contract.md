@@ -340,17 +340,24 @@ until one of the reviewers approves it: players' reports do not steer the game; 
 
 `board_check` (connector → FF Factory), before FFBox works a report or starts an operator's dev turn: `ref`, up to 20
 `keys` in the board's spelling, an optional `conversation` (protocol 2: FFBox's conversation id; the ledger requests
-filed from that conversation are its own and never match), and an optional `title` whose words are compared
-(untrusted; never shown to a model). **Exact keys are what match**: send `discord:<thread id>` for a `bug_report` or
-`suggestion` turn and `report:<report id>` for an intake diagnosis, and no title. Other spellings still work:
+filed from that conversation are its own and never match), and an optional `title` (300) and `summary` (1000: the
+report's start), sanitized on FFBox and sent only when the welcome lists `board_summary`. Their words are compared with
+each ledger request's title and brief by meaning (server/boardMatch.ts): untrusted, never shown to a model. Send
+`discord:<thread id>` for a `bug_report` or `suggestion` turn and `report:<report id>` for an intake diagnosis: an exact
+key is a match whatever the words say. Other spellings still work:
 `branch:<name>`, `pr#N`, `issue#N`, `spec-NNN`, a desync signature, a conversation id. FF Factory gives every
 ledger request that names a Discord thread (a `discord.com/channels/…` link or a bare thread id, in its title, brief
 or related ids) the key `discord:<thread id>`, including requests filed before this existed.
 
-`board` (FF Factory → connector): `verdict` `in_flight` (a strong match is open), `done` (a strong match finished
-within FF Factory's lookback, default 14 days) or `clear`, and up to five `matches`, strongest first: ledger id,
-status, title (120 characters), score 0 to 1 (0.8 and over is strong), why, last change. Never a brief. FFBox MUST
-NOT pass a match's title into a container that runs player text. Protocol 2 adds, per match:
+`board` (FF Factory → connector): `verdict` `in_flight` (a match in the high band is open), `done` (one finished
+within FF Factory's lookback, default 14 days), `maybe` (only medium-band matches: it may be the same bug; sent only to
+a connector whose hello lists `board_maybe`, any other is told `clear`) or `clear`; `confidence`, the strongest
+match's score; and up to five `matches`, strongest first: ledger id, status, title (120 characters), score 0 to 1, why,
+last change. Never a brief. The bands are config `intake.ffbox.match` (`high` 0.7, `medium` 0.45 by default): an exact
+key is high; by words, high also needs a shared concept few requests hold and two shared concepts that say which bug it
+is, so a vague report is `maybe` at most. On `maybe` FFBox starts its turn, and whatever it files from that
+conversation later is noted on the new request with the candidates, for a person to merge. FFBox MUST NOT pass a
+match's title into a container that runs player text. Protocol 2 adds, per match:
 
 | field | on | what |
 |---|---|---|

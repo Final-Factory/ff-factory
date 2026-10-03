@@ -478,3 +478,17 @@ test('metrics: kept with a short history and shown in the status line; a connect
   const err = await c.next('error');
   assert.equal(err.code, 'bad_message', 'a disk named by a path is refused');
 });
+
+test('status line: the ledger check on at FFBox and off here is said loudly', async (t) => {
+  const { connect, pm } = await setup(t);
+  pm.portalAccepts = () => [];
+  const c = connect();
+  await c.hello({ protocol: 2, accepts: ['board', 'filed', 'board_maybe'] });
+  assert.match(pm.statusLine()!, /LEDGER CHECK OFF HERE: .*intake\.ffbox\.boardCheck/);
+  pm.portalAccepts = () => ['board_check', 'board_summary'];
+  assert.doesNotMatch(pm.statusLine()!, /LEDGER CHECK OFF/);
+  const quiet = connect();
+  await quiet.hello({ protocol: 2, accepts: [] });
+  pm.portalAccepts = () => [];
+  assert.doesNotMatch(pm.statusLine()!, /LEDGER CHECK OFF/, 'not when FFBox has its own check off');
+});

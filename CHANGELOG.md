@@ -14,11 +14,21 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 - **`set_app_config` sets the FFBox intake** (w224; [docs/intake.md](docs/intake.md#config)). Key `intake.ffbox`, the
   whole block as the value: `enabled`, `branches`, `diagnoses`, `requests`, `boardCheck`, `escalations`, `repo`,
-  `dailyCap` and `autoApprove.{enabled,maxPerDay}`. An owner's setting only, behind the same "the person asked in
+  `dailyCap`, `match.{high,medium}` (w219) and `autoApprove.{enabled,maxPerDay}`. An owner's setting only, behind the same "the person asked in
   their own words" guard as the other admin settings; unknown keys and wrong types are refused. It applies at once,
-  and when it changes what the portal takes from FFBox (`board_check`, `request`) the connector is closed normally
+  and when it changes what the portal takes from FFBox (`board_check`, `board_summary`, `request`) the connector is closed normally
   and reconnects to a new welcome. Until now the ledger check could be switched on only by editing config.json on
   BEAST, so FFBox's `board_log` showed `not_asked: portal_takes_no_board_check`.
+
+- **board_check matches a report to ledger work by meaning** (w219; [docs/intake.md](docs/intake.md)). FFBox sends the
+  report's title and start (redacted) to a portal that takes `board_summary`. FF Factory compares their concepts with
+  each request's title and brief: game phrases folded ("alt tab", "one spot"), stems, synonyms, a typo, weighted by
+  rarity. No model sees the text. High band: `in_flight`/`done` as before. Medium: the new `maybe` (to a connector that
+  takes it), and what FFBox files later from that conversation names the candidates. Bands are config
+  `intake.ffbox.match`. Every decision is logged. On the fixtures, every real duplicate (the teapot, the alt-tab
+  threads, the stacked enemies, the post-reset camps desyncs, the bug reporter drag) is high and every near-miss in the
+  same system is low. "LEDGER CHECK OFF HERE" in FFBox's status line when FFBox asks and `intake.ffbox.boardCheck` is
+  off, as it was for the w217 test.
 
 - **FFBox's CPU, RAM and disk in the sidebar** (w218; [contract](docs/ffbox-connector-contract.md#metrics-protocol-2)).
   FFBox's connector pushes its load averages and core count, memory and swap in use, and each disk's free space (named

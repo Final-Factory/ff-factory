@@ -2,6 +2,7 @@
 // work ledger (filing, the dispatcher's decisions, the replies people's orchestrators get), each chat's budget between
 // its person's messages, and where the harness's messages about work and workers go. server/agents.ts builds their
 // options and tool belts on top of this; the rules that are not the model's to decide live here.
+import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { OptionsFactory, SessionHandle, SessionManager } from './sessions.ts';
@@ -95,8 +96,14 @@ export interface IntakeFiling {
 
 /** What FFBox gets back when it asks the ledger about a report before working it (the board_check message). */
 export interface BoardAnswer {
-  verdict: 'clear' | 'in_flight' | 'done';
+  /**
+   * in_flight or done: a match in the high band (server/boardMatch.ts). maybe: only medium-band matches, said only to a
+   * connector that takes it (opts.maybe); FFBox goes ahead, and a person is shown the candidates. clear: nothing.
+   */
+  verdict: 'clear' | 'in_flight' | 'done' | 'maybe';
   matches: BoardMatch[];
+  /** The strongest match's score, 0 to 1 (0 with none). */
+  confidence?: number;
 }
 
 /**
@@ -1071,23 +1078,46 @@ export class Orchestrators {
    * FFBox asks the ledger before it works a report (board_check): requests open, or finished within the lookback,
    * that its keys and title match, strongest first. Only ids, states, titles and scores cross; never a brief.
    */
-  boardCheck(q: { keys: readonly string[]; title?: string; conversation?: string }, lookbackDays: number): BoardAnswer {
+  boardCheck(
+    q: { keys: readonly string[]; title?: string; summary?: string; conversation?: string },
+    lookbackDays: number,
+    opts: { thresholds?: MatchThresholds; maybe?: boolean } = {},
+  ): BoardAnswer {
+    const t = opts.thresholds ?? DEFAULT_THRESHOLDS;
     // FFBox's own conversation (the review request filed from it) is not someone else's work on its thread.
     const own = (w: WorkItem) => !!q.conversation && (w.source?.conversation === q.conversation || w.keys.includes(`ffbox:${q.conversation}`));
     const pool = this.pool(undefined, lookbackDays * 86_400_000).filter((e) => e.kind === 'work' && !own(this.store.work.get(e.ref)!));
-    const seen = new Set<string>();
-    const matches: BoardMatch[] = [];
-    for (const o of findOverlaps({ keys: q.keys, title: q.title ?? '' }, pool)) {
+    // BY KEY: the same thread, report, PR or branch is the same work (score 1); a shared spec or "#N" says the subject.
+    const byKey = new Map(findOverlaps({ keys: q.keys, title: '' }, pool).map((o) => [o.ref, o]));
+    // BY MEANING: the report's words against each request's title and the start of its brief (server/boardMatch.ts),
+    // weighted by how rare each concept is in this ledger. The text is only compared, never shown to a model.
+    const report = concepts([q.title, q.summary].filter(Boolean).join('\n'));
+    const items = pool.map((e) => this.store.work.get(e.ref)!);
+    const docs = items.map((w) => concepts(`${w.title}\n${w.title}\n${w.brief.slice(0, 1500)}`));
+    const ix = indexOf(docs);
+    type Band = 'high' | 'medium' | 'low';
+    const best = new Map<string, { w: WorkItem; score: number; why: string; band: Band }>();
+    items.forEach((item, i) => {
+      const k = byKey.get(item.id);
+      const m = report.length ? entryMatch(report, concepts(item.title), docs[i], ix) : undefined;
+      const keyBand: Band = k ? (k.score >= STRONG ? 'high' : 'medium') : 'low';
+      const textBand: Band = m ? band(m, t) : 'low';
+      const rank = { high: 2, medium: 1, low: 0 } as const;
+      const useKey = !!k && (rank[keyBand] > rank[textBand] || (rank[keyBand] === rank[textBand] && k.score >= (m?.score ?? 0)));
+      const top: { score: number; why: string; band: Band } | undefined = useKey ? { score: k!.score, why: k!.why, band: keyBand } : m ? { score: m.score, why: `similar: ${m.shared.slice(0, 4).join(', ')}`, band: textBand } : undefined;
+      if (!top || top.band === 'low') return;
       // A request merged into another is that one.
-      let w = this.store.work.get(o.ref)!;
+      let w = item;
       if (w.status === 'merged' && w.mergedInto && this.store.work.get(w.mergedInto)) w = this.store.work.get(w.mergedInto)!;
-      if (seen.has(w.id)) continue;
-      seen.add(w.id);
-      matches.push({ id: w.id, status: w.status, title: clip(w.title, 120), score: o.score, why: o.why, updatedAt: w.updatedAt, ...this.boardFacts(w) });
-    }
-    const strong = matches.filter((m) => m.score >= STRONG);
-    const verdict = strong.some((m) => isOpen({ status: m.status })) ? 'in_flight' : strong.some((m) => m.status === 'done') ? 'done' : 'clear';
-    return { verdict, matches };
+      const was = best.get(w.id);
+      if (!was || top.score > was.score) best.set(w.id, { w, ...top });
+    });
+    const ranked = [...best.values()].sort((a, b) => b.score - a.score || a.w.id.localeCompare(b.w.id)).slice(0, 5);
+    const matches: BoardMatch[] = ranked.map((x) => ({ id: x.w.id, status: x.w.status, title: clip(x.w.title, 120), score: x.score, why: x.why, updatedAt: x.w.updatedAt, ...this.boardFacts(x.w) }));
+    const high = ranked.filter((x) => x.band === 'high');
+    const medium = ranked.filter((x) => x.band === 'medium' && (isOpen(x.w) || x.w.status === 'done'));
+    const verdict = high.some((x) => isOpen(x.w)) ? 'in_flight' : high.some((x) => x.w.status === 'done') ? 'done' : medium.length && opts.maybe ? 'maybe' : 'clear';
+    return { verdict, matches, confidence: ranked[0]?.score ?? 0 };
   }
 
   /** "Final-Factory/FinalFactory": config intake.ffbox.repo, else the game repo's GitHub URL. */

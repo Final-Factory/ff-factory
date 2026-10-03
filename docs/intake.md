@@ -270,7 +270,20 @@ FFBox's `fff.board_check` switch; submitting work (phase 3) is not built there y
   (the release that carries it, or null while merged but not released) and `mergedIn` (`develop@<sha>`). FF Factory
   re-checks those answers each minute and pushes the ones that change. FFBox's own conversation never matches itself.
   FFBox fails open, starts no turn on `in_flight` (it watches the branch and reports the merge on the thread) and
-  answers `done` with its merged notice. Off until `intake.ffbox.boardCheck` here and `fff.board_check.enabled` there.
+  answers `done` with its merged notice. Off until `intake.ffbox.boardCheck` here and `fff.board_check.enabled` there;
+  FFBox on and this off shows as "LEDGER CHECK OFF HERE" in FFBox's status line (system_status, `ffbox_activity`).
+- **By meaning, not only by key** (w219, `server/boardMatch.ts`). With `board_summary` in the welcome, FFBox sends the
+  report's title and start, redacted. Each is turned into concepts: phrases players use folded into one ("alt tab",
+  "tabbing back in"; "one spot", "stacked"; "cargo hold"), light stemming, a small table of the game's synonyms,
+  "heartbeat 8" kept as hb8, one typo forgiven, filler words dropped. The concepts are scored against each request's
+  title and the start of its brief, weighted by how rare each is in the ledger, as the mean of a weighted cosine and the
+  shorter text's coverage. High (default 0.7, config `intake.ffbox.match.high`) also needs a rare shared concept and two
+  shared concepts that are not symptoms (break, stuck, crash, ...): `in_flight` or `done`. Medium (0.45): `maybe`, to a
+  connector that takes it: FFBox goes ahead, and what it files from that conversation is noted with the candidates.
+  Low: `clear`. Deterministic and local: the words are only compared, never given to a model, so nothing in a report can
+  steer the answer, and it costs nothing and answers in milliseconds. Every decision is logged
+  (`intake: board_check <ref>: <verdict>, confidence <n>; <id> <score> (<why>)`). The fixtures
+  (`server/boardMatch.fixtures.ts`) are real duplicate reports quoted in FFBox's PRs and near-misses in the same system.
 - **Each new `ffbox/*` PR is filed as a review request** with its Discord thread's key (`conversation.threadId`), and
   closes when FFBox reports the PR merged or closed.
 - **Ledger → FFBox.** The dispatcher's `send_to_ffbox {work_id, class}` sends a phase 3 `submit` (fenced by default,
@@ -309,11 +322,12 @@ Ben's goal (2026-09-29) is that the ledger shows all dev work. Besides people's 
 
 Everything is off by default. `intakeSettings` fills the defaults and clamps the numbers. It is all config.json
 only, except the `ffbox` block: an owner sets it with `set_app_config` key `intake.ffbox` and the whole block as the
-value (an object or its JSON; the block is replaced, so a key left out takes its default, and `null` removes it).
+value (an object or its JSON, with the keys in the `ffbox` line below, `match` included; the block is replaced, so a
+key left out takes its default, and `null` removes it).
 Like every admin setting it runs only when a person asked in their own words, and only for an owner: the dispatcher
 takes it for a request an owner filed, or from an owner writing in its chat, and an `/mcp` key only when its login is an
 owner. Unknown keys and wrong types are refused, and nothing is written then. It applies at once. When it changes what
-the portal takes from FFBox (`board_check`, `request`), the connector is closed normally (1000) and reconnects within
+the portal takes from FFBox (`board_check`, `board_summary`, `request`), the connector is closed normally (1000) and reconnects within
 seconds to a new welcome that says so.
 
 ```json
@@ -328,7 +342,7 @@ seconds to a new welcome that says so.
     "perReporterPerDay": 2,
     "autoApprove": { "enabled": false, "maxPerDay": 3, "bugs": true, "requests": true }
   },
-  "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "repo": "Final-Factory/FinalFactory", "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 } },
+  "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "match": { "high": 0.7, "medium": 0.45 }, "repo": "Final-Factory/FinalFactory", "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 } },
   "release": { "enabled": false, "delayMinutes": 60 },
   "nightly": { "enabled": false, "autoApprove": { "enabled": false, "maxPerDay": 10 }, "dailyCap": 10, "flakyNights": 3, "batchOver": 4 },
   "reviewers": ["ben", "lothsahn"],
