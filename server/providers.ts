@@ -227,6 +227,13 @@ export function transferOf(data: Record<string, unknown> | undefined): ReportTra
   };
 }
 
+/** A `report` query waiting for its answer: where the bytes go, and once the answer came, what it announced. */
+interface PendingTransfer {
+  sink: TransferSink;
+  done: (o: TransferOutcome) => void;
+  meta?: ReportTransfer;
+}
+
 /** Answers never kept for the "last known" fallback: a page of logs or reports, or one report, would answer another question. */
 const NOT_KEPT = new Set(['logs', 'reports', 'report']);
 
@@ -843,7 +850,10 @@ export class ProviderManager {
           this.pending.delete(msg.id);
           // A report's bytes follow at once, maybe in the same read: the transfer is set up before anything else runs.
           const t = q.transfer && msg.ok ? transferOf(msg.data) : undefined;
-          if (t) this.startTransfer(msg.id, t, q.transfer!);
+          if (t) {
+            q.transfer!.meta = t;
+            this.startTransfer(msg.id, t, q.transfer!);
+          }
           q.done(msg);
         }
         return;
@@ -924,7 +934,7 @@ export class ProviderManager {
 
   // ---------------------------------------------------------------- read-only queries
 
-  private readonly pending = new Map<string, { key: string; done: (r: QueryResult) => void; transfer?: { sink: TransferSink; done: (o: TransferOutcome) => void } }>();
+  private readonly pending = new Map<string, { key: string; done: (r: QueryResult) => void; transfer?: PendingTransfer }>();
   /** Reports coming in (FFBox w320), by query id. */
   private readonly transfers = new Map<string, { t: ReportTransfer; sink: TransferSink; received: number; chain: Promise<void>; done: (o: TransferOutcome) => void; idle: NodeJS.Timeout; failed?: boolean }>();
   private queryTimes: number[] = [];
@@ -1020,6 +1030,7 @@ export class ProviderManager {
     const id = `q-${this.now().toString(36)}-${randomBytes(4).toString('hex')}`;
     let finished: (o: TransferOutcome) => void = () => {};
     const ended = new Promise<TransferOutcome>((r) => (finished = r));
+    const tx: PendingTransfer = { sink, done: (o) => finished(o) };
     const result = await new Promise<QueryResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -1028,7 +1039,7 @@ export class ProviderManager {
       timer.unref();
       this.pending.set(id, {
         key: what,
-        transfer: { sink, done: finished },
+        transfer: tx,
         done: (r) => {
           clearTimeout(timer);
           resolve(r);
@@ -1049,12 +1060,13 @@ export class ProviderManager {
       return { answer: { what, live: false, ok: false, error: result.error ?? 'no_answer', ...words } };
     }
     const answer: QueryAnswer = { what, live: true, ok: true, at: result.at, receivedAt: at, data: result.data };
-    const meta = this.transfers.get(id)?.t;
+    // From the pending entry, not the transfers map: a transfer can end (or fail) in the same read as its answer.
+    const meta = tx.meta;
     if (!meta) return { answer, ...(result.data?.transfer !== undefined ? { transfer: { ok: false, error: 'bad_transfer', detail: 'the answer\'s transfer is not one this portal takes' } } : {}) };
     return { answer, transfer: await ended, meta };
   }
 
-  private startTransfer(id: string, t: ReportTransfer, q: { sink: TransferSink; done: (o: TransferOutcome) => void }) {
+  private startTransfer(id: string, t: ReportTransfer, q: PendingTransfer) {
     const idle = setTimeout(() => this.failTransfer(id, 'timeout', `nothing from FFBox for ${REPORT_LIMITS.idleMs / 1000} s`), REPORT_LIMITS.idleMs);
     idle.unref();
     const x = { t, sink: q.sink, received: 0, chain: Promise.resolve().then(() => q.sink.begin(t)), done: q.done, idle };

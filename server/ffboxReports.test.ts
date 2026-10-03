@@ -177,12 +177,14 @@ test('report: a SHA-256 that differs, a gap or a cut link is refused, and nothin
   const body = Buffer.alloc(100_000, 7);
   // A connector that announces a SHA-256 the bytes do not have (and repeats it at the end), one whose report_end differs from
   // its answer, and one that skips a byte.
-  const modes = [{ announce: 'b'.repeat(64), endSha: 'b'.repeat(64) }, { endSha: 'c'.repeat(64) }, { gapAt: REPORT_LIMITS.maxChunkBytes }];
+  // The last fails on its first chunk, likely in the same socket read as the answer: its reason must still be its own.
+  const modes = [{ announce: 'b'.repeat(64), endSha: 'b'.repeat(64) }, { endSha: 'c'.repeat(64) }, { gapAt: REPORT_LIMITS.maxChunkBytes }, { gapAt: 0 }];
   let n = 0;
   t.after(onQuery(c, (q) => sendReport(c, q.id, body, modes[n++])));
   await assert.rejects(fetchFfboxReport(pm, store, { id: RID }), /did not arrive intact \(sha_mismatch: what was stored has sha256 [0-9a-f]{12}…, FFBox sent bbbbbbbbbbbb…\)/);
   await assert.rejects(fetchFfboxReport(pm, store, { id: RID }), /did not arrive intact \(sha_mismatch: report_end's SHA-256 is not the answer's\)/);
   await assert.rejects(fetchFfboxReport(pm, store, { id: RID }), /did not arrive intact \(bad_chunk: expected offset 45000, got 45001\)/);
+  await assert.rejects(fetchFfboxReport(pm, store, { id: RID }), /did not arrive intact \(bad_chunk: expected offset 0, got 1\)/);
 });
 
 test('report: traversal is refused before anything is asked; FFBox refusing a file name fetches nothing', async (t) => {
