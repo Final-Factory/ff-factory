@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox's CPU, RAM and disk in the sidebar** (w218; [contract](docs/ffbox-connector-contract.md#metrics-protocol-2)).
+  FFBox's connector pushes its load averages and core count, memory and swap in use, and each disk's free space (named
+  by role, never by path) every 30 s. The sidebar shows FFBox among the computers with the machines' meters. CPU is
+  load1 over the logical cores, shown above 100% when it is. The meters read stale after two minutes without an
+  update, and "no metrics" for a connector that sends none. `system_status` has the numbers in FFBox's line.
+
 - **Ask FFBox live for its config, its ledger exchanges, its status and one conversation** (w218;
   [docs/ffbox.md](docs/ffbox.md#asking-ffbox)). `ffbox_activity` gets `show: "config" | "board_log" | "status"`, and
   `show: "conversation"` with an `id`: one conversation's metadata and a page of its turns, with the messages and

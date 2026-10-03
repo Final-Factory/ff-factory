@@ -464,6 +464,30 @@ export type BoardCheckMessage = z.infer<typeof BoardCheckSchema>;
 export type ResultMessage = z.infer<typeof ResultSchema>;
 
 /** Everything the connector may send. */
-export const FromConnectorSchema = z.discriminatedUnion('type', [HelloSchema, CapacitySchema, ConversationMessageSchema, IntakeMessageSchema, AcceptedSchema, RefusedSchema, ResultSchema, RequestSchema, BoardCheckSchema, QueryResultSchema]);
+/**
+ * connector → portal, protocol 2, only when the welcome's accepts lists "metrics": FFBox's load, memory and disks, every
+ * 30 s. Disks are named by role, never by path.
+ */
+export const MetricsSchema = z.object({
+  type: z.literal('metrics'),
+  at: iso,
+  cpu: z
+    .object({ load1: z.number().min(0).max(100_000), load5: z.number().min(0).max(100_000), load15: z.number().min(0).max(100_000), cores: z.number().int().min(1).max(4096) })
+    .optional(),
+  mem: z
+    .object({
+      totalBytes: z.number().int().min(1),
+      usedBytes: z.number().int().min(0),
+      swapTotalBytes: z.number().int().min(0).optional(),
+      swapUsedBytes: z.number().int().min(0).optional(),
+    })
+    .optional(),
+  disks: z
+    .array(z.object({ role: z.string().regex(/^[a-z][a-z+]{0,63}$/), totalBytes: z.number().int().min(1), freeBytes: z.number().int().min(0) }))
+    .max(12)
+    .default([]),
+});
+
+export const FromConnectorSchema = z.discriminatedUnion('type', [HelloSchema, CapacitySchema, ConversationMessageSchema, IntakeMessageSchema, AcceptedSchema, RefusedSchema, ResultSchema, RequestSchema, BoardCheckSchema, QueryResultSchema, MetricsSchema]);
 export type FromConnector = z.infer<typeof FromConnectorSchema>;
-export const FROM_CONNECTOR_TYPES = ['hello', 'capacity', 'conversation', 'intake', 'accepted', 'refused', 'result', 'request', 'board_check', 'query_result'] as const;
+export const FROM_CONNECTOR_TYPES = ['hello', 'capacity', 'conversation', 'intake', 'accepted', 'refused', 'result', 'request', 'board_check', 'query_result', 'metrics'] as const;

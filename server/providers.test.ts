@@ -6,6 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ProviderManager, describeQuery } from './providers.ts';
+import { cpuPct, metricsLine, metricsStale, METRICS_STALE_MS } from '../shared/providerMetrics.ts';
 import { CLOSE, PROVIDER_PROTOCOL, PROVIDER_TOKEN, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
 import { normalizeSetting, setAppConfig } from './appConfig.ts';
 import { redactSecrets } from './secrets.ts';
@@ -217,7 +218,7 @@ test('mixed versions: a protocol 1 hello gets a protocol 1 welcome with no accep
   const two = connect();
   const w2 = (await two.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as Record<string, unknown>;
   assert.equal(w2.protocol, 2);
-  assert.deepEqual(w2.accepts, ['board_check', 'request']);
+  assert.deepEqual(w2.accepts, ['board_check', 'request', 'metrics'], 'metrics is taken whatever the intake settings say');
   assert.equal(pm.summary().connector?.protocol, 2);
   // An answer pushed again goes only to a protocol 2 connector that takes board.
   assert.equal(pm.pushBoard('conv-7', { verdict: 'done', matches: [] }), true);
@@ -432,4 +433,48 @@ test('queries: a conversation is asked by id, and its last answer is kept per id
   silent = true;
   assert.equal((await pm.query('conversation', { id: 1000 }, 50)).data, undefined, 'the oldest of 21 is no longer kept');
   assert.ok((await pm.query('conversation', { id: 1020 }, 50)).data);
+});
+
+// ---------------------------------------------------------------- metrics (docs/ffbox-connector-contract.md)
+
+const METRICS = {
+  type: 'metrics',
+  at: '2026-10-02T10:00:00Z',
+  cpu: { load1: 21.6, load5: 18, load15: 12.5, cores: 16 },
+  mem: { totalBytes: 128 * 1024 ** 3, usedBytes: 40 * 1024 ** 3, swapTotalBytes: 8 * 1024 ** 3, swapUsedBytes: 2 * 1024 ** 3 },
+  disks: [{ role: 'root+state', totalBytes: 500 * 1024 ** 3, freeBytes: 120 * 1024 ** 3 }],
+};
+
+test('metrics: load over logical cores as a percentage, above 100% when it is; stale after two minutes', () => {
+  const m = { ...METRICS, receivedAt: '2026-10-02T10:00:00Z' };
+  assert.equal(cpuPct(m), 135);
+  assert.equal(cpuPct({ ...m, cpu: { load1: 2, load5: 1, load15: 1, cores: 16 } }), 12.5);
+  const t0 = Date.parse(m.receivedAt);
+  assert.equal(metricsStale(m, t0 + METRICS_STALE_MS), false);
+  assert.equal(metricsStale(m, t0 + METRICS_STALE_MS + 1), true);
+  assert.equal(metricsLine(m, t0), 'CPU 135% (load 21.6 on 16 cores; 5 min 18, 15 min 12.5) · RAM 40.0 GB of 128 GB, swap 2.0 GB · disk root+state 120 GB of 500 GB free');
+  assert.match(metricsLine(m, t0 + 5 * 60_000), /\(stale: last update 5 min ago\)$/);
+  assert.equal(metricsLine(undefined, t0), 'no metrics');
+});
+
+test('metrics: kept with a short history and shown in the status line; a connector that sends none says "no metrics"', async (t) => {
+  const { connect, pm } = await setup(t);
+  const old = connect();
+  await old.hello({ protocol: 2 });
+  old.capacity();
+  await until('capacity', () => !!pm.summary().capacity);
+  assert.equal(pm.summary().metrics, undefined);
+  assert.match(pm.statusLine()!, /· no metrics$/);
+  const c = connect();
+  await c.hello({ protocol: 2 });
+  c.send(METRICS);
+  c.send({ ...METRICS, at: '2026-10-02T10:00:30Z', cpu: { ...METRICS.cpu, load1: 8 } });
+  await until('metrics', () => pm.summary().metricsHistory?.length === 2);
+  const p = pm.summary();
+  assert.equal(p.metrics?.cpu?.load1, 8);
+  assert.deepEqual(p.metricsHistory?.map((h) => h.cpuPct), [135, 50]);
+  assert.match(pm.statusLine()!, /CPU 50% \(load 8 on 16 cores/);
+  c.send({ ...METRICS, disks: [{ role: '/home/someone', totalBytes: 1, freeBytes: 1 }] });
+  const err = await c.next('error');
+  assert.equal(err.code, 'bad_message', 'a disk named by a path is refused');
 });

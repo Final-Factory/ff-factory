@@ -35,7 +35,8 @@ import {
   type ResultMessage,
   type QueryResult,
 } from './providerProtocol.ts';
-import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent } from '../shared/types.ts';
+import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent, ProviderMetrics } from '../shared/types.ts';
+import { cpuPct, memPct, metricsLine } from '../shared/providerMetrics.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 const PING_MS = 20_000;
@@ -44,6 +45,8 @@ const DEAD_MS = 45_000;
 const KEEP_CONVERSATIONS = 500;
 const KEEP_INTAKE = 2000;
 const DAY_MS = 24 * 3600_000;
+/** Metrics samples kept for the sparkline: half an hour at one every 30 s. */
+const METRICS_HISTORY = 60;
 
 /** What is kept on disk (<dataDir>/providers/<id>.json) across restarts. */
 interface Persisted {
@@ -56,6 +59,8 @@ interface Persisted {
   queries?: string[];
   /** The last good answer to each query, for when FFBox cannot be asked (shown as "last known, from <time>"). */
   answers?: Record<string, KeptAnswer>;
+  /** The last metrics pushed. */
+  metrics?: ProviderMetrics;
   capacity?: ProviderCapacity;
   lastSeen?: string;
   conversations: ProviderConversation[];
@@ -168,7 +173,7 @@ export class ProviderManager {
     try {
       const d = readJsonDurable<Partial<Persisted>>(this.file, { check: checkObject });
       if (!d) throw new Error('none yet');
-      return { cursors: d.cursors ?? {}, conversations: d.conversations ?? [], intake: d.intake ?? [], connector: d.connector, web: d.web, accepts: d.accepts, queries: d.queries, answers: d.answers, capacity: d.capacity, lastSeen: d.lastSeen };
+      return { cursors: d.cursors ?? {}, conversations: d.conversations ?? [], intake: d.intake ?? [], connector: d.connector, web: d.web, accepts: d.accepts, queries: d.queries, answers: d.answers, metrics: d.metrics, capacity: d.capacity, lastSeen: d.lastSeen };
     } catch {
       return { cursors: {}, conversations: [], intake: [] };
     }
@@ -209,6 +214,7 @@ export class ProviderManager {
       web: this.data.web,
       ...(this.data.accepts?.length ? { accepts: this.data.accepts } : {}),
       ...(this.data.queries?.length ? { queries: this.data.queries } : {}),
+      ...(this.data.metrics ? { metrics: this.data.metrics, metricsHistory: [...this.metricsHistory] } : {}),
       capacity: this.data.capacity,
       counts: {
         conversations: this.data.conversations.length,
@@ -248,7 +254,7 @@ export class ProviderManager {
     const p = this.summary();
     if (!p.enabled) return p.tokenSet ? 'FFBox: switched off (providers.ffbox.enabled)' : undefined;
     if (!p.tokenSet) return 'FFBox: enabled, but no connector token is set (node server/providerToken.ts)';
-    if (!p.online) return `FFBox: connector offline${p.lastSeen ? ` (last seen ${p.lastSeen})` : ' (never connected)'}`;
+    if (!p.online) return `FFBox: connector offline${p.lastSeen ? ` (last seen ${p.lastSeen})` : ' (never connected)'}${p.metrics ? ` · ${metricsLine(p.metrics, this.now())}` : ''}`;
     const c = p.capacity;
     const models = (k: ProviderClass) => (k.models?.length ? k.models.map((m) => `${m.requester}: ${m.model} ${m.tier}`).join(', ') : `${k.model}, ${k.tier}`);
     const classes = c?.classes.map((k) => `${k.name} (${k.network}, ${models(k)}${k.gpu ? ', GPU' : ', no GPU'}) ${k.free}/${k.max} free`).join('; ');
@@ -256,6 +262,7 @@ export class ProviderManager {
       `FFBox: online, connector ${p.connector?.version ?? '?'}`,
       c ? `${c.state}; ${classes || 'no classes'}; queue ${c.queue}${c.holds.length ? `; holds: ${c.holds.join(' | ')}` : ''}` : 'no capacity report yet',
       `${p.counts.active} conversation(s) running or queued; ${p.counts.intake24h} intake report(s) in 24 h`,
+      metricsLine(p.metrics, this.now()),
     ].join(' · ');
   }
 
@@ -418,7 +425,8 @@ export class ProviderManager {
         provider: 'ffbox',
         cursors: { ...this.data.cursors },
         limits: LIMITS,
-        ...(link.protocol >= 2 ? { accepts: this.portalAccepts?.() ?? [] } : {}),
+        // metrics is the provider's own: taken whatever the intake settings say.
+        ...(link.protocol >= 2 ? { accepts: [...(this.portalAccepts?.() ?? []), 'metrics'] } : {}),
       });
       console.log(`provider ${this.id}: connector ${parsed.data.connector.version} connected`);
       this.changed();
@@ -476,6 +484,13 @@ export class ProviderManager {
         if (!r) return this.send(link, { type: 'error', code: 'not_enabled', message: 'FF Factory does not take requests from FFBox now (intake.ffbox)', ref: msg.ref });
         return this.send(link, { type: 'filed', ref: msg.ref, status: r.status, ...(r.workId ? { workId: r.workId } : {}), ...(r.repeat ? { repeat: true } : {}), ...(r.why ? { why: r.why } : {}) });
       }
+      case 'metrics': {
+        const { type: _type, ...m } = msg;
+        this.data.metrics = { ...m, receivedAt: at };
+        this.metricsHistory.push({ at, cpuPct: cpuPct(this.data.metrics), memPct: memPct(this.data.metrics) });
+        if (this.metricsHistory.length > METRICS_HISTORY) this.metricsHistory.splice(0, this.metricsHistory.length - METRICS_HISTORY);
+        return this.changed();
+      }
       case 'query_result': {
         const q = this.pending.get(msg.id);
         // Kept only for a query this portal asked: the key (a conversation's id) is what it asked.
@@ -532,6 +547,7 @@ export class ProviderManager {
   // ---------------------------------------------------------------- read-only queries
 
   private readonly pending = new Map<string, { key: string; done: (r: QueryResult) => void }>();
+  private readonly metricsHistory: { at: string; cpuPct?: number; memPct?: number }[] = [];
   private queryTimes: number[] = [];
 
   /** Why `what` cannot be asked now (a code), or undefined. */
