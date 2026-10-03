@@ -408,3 +408,28 @@ test('queries: 30 a minute; a bad result is refused; an oversized one drops the 
   assert.equal(dropped.live, false);
   assert.equal(dropped.error, 'disconnected');
 });
+
+test('queries: a conversation is asked by id, and its last answer is kept per id (20 at most)', async (t) => {
+  const { connect, pm } = await setup(t);
+  const c = connect();
+  await c.hello({ protocol: 2, accepts: ['query'], queries: ['conversation'] });
+  let silent = false;
+  t.after(answerQueries(c, (_what, args) => (silent ? undefined : { ok: true, data: { conversation: { id: String((args as { id: number }).id) }, turns: [] } })));
+  const a = await pm.query('conversation', { id: 569, offset: 0, limit: 5 });
+  assert.equal(a.live, true);
+  assert.deepEqual(a.data?.conversation, { id: '569' });
+  silent = true;
+  const other = await pm.query('conversation', { id: 570 }, 100);
+  assert.equal(other.data, undefined, "another conversation never falls back to 569's answer");
+  const again = await pm.query('conversation', { id: 569 }, 100);
+  assert.equal(again.live, false);
+  assert.deepEqual(again.data?.conversation, { id: '569' });
+  silent = false;
+  for (let id = 1000; id < 1021; id++) {
+    pm.now = () => Date.now() + id * 1000;
+    await pm.query('conversation', { id });
+  }
+  silent = true;
+  assert.equal((await pm.query('conversation', { id: 1000 }, 50)).data, undefined, 'the oldest of 21 is no longer kept');
+  assert.ok((await pm.query('conversation', { id: 1020 }, 50)).data);
+});

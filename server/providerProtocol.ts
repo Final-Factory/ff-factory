@@ -207,7 +207,7 @@ export type ToConnector =
 // write, start or change anything. Adding one: docs/ffbox.md, "Asking FFBox".
 
 /** The queries this portal knows how to ask and show. A connector offers its own list in hello.queries. */
-export const PROVIDER_QUERIES = ['config', 'board_log', 'status'] as const;
+export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation'] as const;
 export type ProviderQuery = (typeof PROVIDER_QUERIES)[number];
 
 export const QUERY_LIMITS = {
@@ -217,6 +217,10 @@ export const QUERY_LIMITS = {
   perMinute: 30,
   /** Queries waiting for an answer at once. */
   inFlight: 8,
+  /** conversation is answered on FFBox's next pass (about 5 s), and the connector gives up at 12 s. */
+  timeoutMsByQuery: { conversation: 15_000 } as Record<string, number>,
+  /** Conversations whose last answer is kept for the fallback. */
+  keptConversations: 20,
 } as const;
 
 export interface QueryMessage {

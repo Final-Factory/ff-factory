@@ -478,10 +478,8 @@ export class ProviderManager {
       }
       case 'query_result': {
         const q = this.pending.get(msg.id);
-        if (msg.ok && msg.data && msg.what) {
-          this.data.answers = { ...this.data.answers, [msg.what]: { at: msg.at, receivedAt: at, data: msg.data } };
-          this.changed();
-        }
+        // Kept only for a query this portal asked: the key (a conversation's id) is what it asked.
+        if (q && msg.ok && msg.data) this.keep(q.key, { at: msg.at, receivedAt: at, data: msg.data });
         if (q) {
           this.pending.delete(msg.id);
           q.done(msg);
@@ -533,7 +531,7 @@ export class ProviderManager {
 
   // ---------------------------------------------------------------- read-only queries
 
-  private readonly pending = new Map<string, { what: string; done: (r: QueryResult) => void }>();
+  private readonly pending = new Map<string, { key: string; done: (r: QueryResult) => void }>();
   private queryTimes: number[] = [];
 
   /** Why `what` cannot be asked now (a code), or undefined. */
@@ -549,9 +547,24 @@ export class ProviderManager {
     return undefined;
   }
 
+  /** Where a query's last good answer is kept: by name, and a conversation by its id too. */
+  private keptKey(what: string, args?: Record<string, number>) {
+    return what === 'conversation' && args?.id !== undefined ? `conversation:${args.id}` : what;
+  }
+
+  private keep(key: string, answer: KeptAnswer) {
+    const answers = { ...this.data.answers, [key]: answer };
+    // Conversations are many: keep only the newest few.
+    const convs = Object.keys(answers).filter((k) => k.startsWith('conversation:'));
+    convs.sort((a, b) => Date.parse(answers[b].receivedAt) - Date.parse(answers[a].receivedAt));
+    for (const k of convs.slice(QUERY_LIMITS.keptConversations)) delete answers[k];
+    this.data.answers = answers;
+    this.changed();
+  }
+
   /** The last good answer kept for `what`, labelled with why this call could not get a live one. */
-  private lastKnown(what: string, error: string): QueryAnswer {
-    const k = this.data.answers?.[what];
+  private lastKnown(what: string, error: string, key: string = what): QueryAnswer {
+    const k = this.data.answers?.[key];
     return k ? { what, live: false, ok: true, at: k.at, receivedAt: k.receivedAt, data: k.data, error } : { what, live: false, ok: false, error };
   }
 
@@ -559,9 +572,10 @@ export class ProviderManager {
    * Ask FFBox one read-only query and wait up to `timeoutMs` for the answer. Never throws: offline, not offered, a
    * refusal or a timeout comes back as the last answer kept (live false) with the reason in `error`.
    */
-  async query(what: string, args?: Record<string, number>, timeoutMs: number = QUERY_LIMITS.timeoutMs): Promise<QueryAnswer> {
+  async query(what: string, args?: Record<string, number>, timeoutMs: number = QUERY_LIMITS.timeoutMsByQuery[what] ?? QUERY_LIMITS.timeoutMs): Promise<QueryAnswer> {
+    const key = this.keptKey(what, args);
     const problem = this.queryProblem(what);
-    if (problem) return this.lastKnown(what, problem);
+    if (problem) return this.lastKnown(what, problem, key);
     this.queryTimes.push(this.now());
     const id = `q-${this.now().toString(36)}-${randomBytes(4).toString('hex')}`;
     const result = await new Promise<QueryResult>((resolve) => {
@@ -571,7 +585,7 @@ export class ProviderManager {
       }, timeoutMs);
       timer.unref();
       this.pending.set(id, {
-        what,
+        key,
         done: (r) => {
           clearTimeout(timer);
           resolve(r);
@@ -580,7 +594,7 @@ export class ProviderManager {
       this.send(this.link!, { type: 'query', id, what, ...(args && Object.keys(args).length ? { args } : {}) });
     });
     if (result.ok && result.data) return { what, live: true, ok: true, at: result.at, receivedAt: new Date(this.now()).toISOString(), data: result.data };
-    return this.lastKnown(what, result.error ?? 'no_answer');
+    return this.lastKnown(what, result.error ?? 'no_answer', key);
   }
 
   /** Why a submit cannot go to FFBox now, or undefined. */
