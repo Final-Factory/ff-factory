@@ -215,8 +215,8 @@ const FROM: Record<Decision, readonly WorkStatus[]> = {
   link: ['new', 'question', 'queued', 'active'],
   queue: ['new', 'question', 'active'],
   ask: ['new', 'question', 'queued'],
-  reject: WORK_OPEN,
-  done: WORK_OPEN,
+  reject: [...WORK_OPEN, 'stalled'],
+  done: [...WORK_OPEN, 'stalled'],
 };
 
 const TO: Record<Decision, WorkStatus> = { merge: 'merged', link: 'active', queue: 'queued', ask: 'question', reject: 'rejected', done: 'done' };
@@ -246,6 +246,8 @@ export function startProblem(w: WorkItem): string | undefined {
 
 /** Why a requester's update (a note, a priority, closing or reopening) cannot be made, or undefined. */
 export function updateProblem(w: WorkItem, u: { close?: 'done' | 'cancelled'; reopen?: boolean; priority?: WorkPriority }, now: number): string | undefined {
+  // The cleanup stalled it: its person closes it, reopens it, or revives it with a note (no 7-day limit).
+  if (w.status === 'stalled') return undefined;
   if (u.reopen) {
     if (w.status !== 'done' && w.status !== 'rejected' && w.status !== 'cancelled') return `${w.id} is ${w.status}; only a done, rejected or cancelled request is reopened`;
     if (now - Date.parse(w.updatedAt) > 7 * 86_400_000) return `${w.id} closed more than 7 days ago; file a new request (related_ids: ["${w.id}"])`;
@@ -274,8 +276,17 @@ export function describeItem(w: WorkItem, workerLine: (id: string) => string): s
   const workers = w.sessionIds.length ? ` workers: ${w.sessionIds.map(workerLine).join(', ')}.` : '';
   const merged = w.mergedInto ? ` → ${w.mergedInto}` : '';
   const tag = sourceTag(w) || (w.recorded ? 'recorded: started outside the ledger' : '');
-  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}] "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${workers}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
+  const stalled = w.stalled ? ` Stalled (${w.stalled.kind}): ${clip(oneLine(w.stalled.reason), 200)}.` : '';
+  const prs = w.prs?.length ? ` PRs: ${w.prs.map((p) => `#${p.number} ${p.state}`).join(', ')}.` : '';
+  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}] "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${workers}${prs}${stalled}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
 }
+
+/**
+ * What a worker is told about its request's PRs: the `Request: wNNN` line the ledger links them by, and that the request
+ * closes itself when they merge (docs/orchestrators.md, "Pull requests"), so a step that follows the merge belongs in the brief.
+ */
+export const requestLineRule = (w: Pick<WorkItem, 'id'>) =>
+  `\n\nWhen you open a pull request for this request, put a line \`Request: ${w.id}\` in its description. The ledger links the PR to the request by it, and closes the request when the PR merges and nothing is left; if more work follows the merge, say so in your last report.`;
 
 /** The message the dispatcher gets for a new request. */
 export function requestNotice(w: WorkItem): string {
@@ -343,13 +354,13 @@ export function dispatchNotice(w: WorkItem, what: string, note?: string): string
 
 /** Keep every open item and the newest closed ones; returns the ids to drop. */
 export function pruneIds(items: Iterable<WorkItem>, keepClosed = KEEP_CLOSED): string[] {
-  const closed = [...items].filter((w) => !isOpen(w)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const closed = [...items].filter((w) => !isOpen(w) && w.status !== 'stalled').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return closed.slice(keepClosed).map((w) => w.id);
 }
 
 /** Open items first (question, new, queued, active; by priority, then oldest), then closed ones, newest first. */
 export function ledgerOrder(a: WorkItem, b: WorkItem): number {
-  const rank: Record<WorkStatus, number> = { question: 0, new: 1, queued: 2, active: 3, done: 4, merged: 4, rejected: 4, cancelled: 4 };
+  const rank: Record<WorkStatus, number> = { question: 0, new: 1, queued: 2, active: 3, stalled: 4, done: 5, merged: 5, rejected: 5, cancelled: 5 };
   const prio: Record<WorkPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
   if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
   if (isOpen(a)) return prio[a.priority] - prio[b.priority] || a.createdAt.localeCompare(b.createdAt);

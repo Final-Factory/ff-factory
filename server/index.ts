@@ -15,6 +15,7 @@ import { ProviderManager } from './providers.ts';
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
+import { LedgerSweep } from './ledgerSweep.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
 import { groupIntake } from '../shared/intake.ts';
@@ -432,6 +433,16 @@ const intake = new IntakeManager({
   // FFBox runs ffbox master, which takes maybe: no offer list gates it (docs/ffbox-connector-contract.md, "No negotiation").
   takesMaybe: () => true,
 }).start();
+// The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): requests whose PRs merged close, quiet ones stall.
+const ledgerSweep = new LedgerSweep({
+  cfg,
+  store,
+  orchestrators: agents.orchestrators,
+  headsOf: (s) => agents.workerBranches(s),
+  resume: (id, text) => void sessions.send(id, text, 'system'),
+  limitsClear: (s) => limitsClearFor(s),
+  intakeMerged: () => intake.checkMerged(false),
+}).start();
 max.onEvent = (ev) => intake.onMaxEvent(ev);
 providers.onConversation = (c) => intake.onConversation(c);
 providers.onRequest = (m) => intake.onRequest(m);
@@ -492,6 +503,7 @@ function appState(user: string | undefined): AppState {
     me,
     work: agents.orchestrators.forPage(),
     intake: intake.summary(),
+    ledger: ledgerSweep.state(),
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings },
     settings: store.settings,
   };
@@ -568,6 +580,11 @@ route('POST', '/api/max/refresh', async () => max.refresh());
 // ---- the intake (docs/intake.md): Discord and FFBox requests in the ledger; a person approves or declines them
 route('GET', '/api/intake', async () => intake.summary());
 route('POST', '/api/intake/poll', async () => intake.checkNow());
+// The ledger cleanup now (an owner's): what it closed, resumed and stalled, in a line.
+route('POST', '/api/ledger/cleanup', async (req) => {
+  if (identity.get(requesterOf(req).userId)?.role !== 'owner') throw new HttpError(403, 'only the owner runs the ledger cleanup');
+  return { summary: await ledgerSweep.run() };
+});
 route('POST', '/api/work/(w[0-9]+)/approve', async (req, [id]) => {
   const w = agents.orchestrators.approveIntake(id, requesterOf(req));
   return { id: w.id, status: w.status, approval: w.approval };
@@ -1389,6 +1406,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   providers.close();
   max.close();
   intake.close();
+  ledgerSweep.close();
   store.flush();
   process.exit(0);
 }
@@ -1408,6 +1426,19 @@ function personTokens() {
     .map(({ u, token }) => ({ token, displayName: u.displayName, label: `${u.displayName}'s token …${token.slice(-4)}` }));
 }
 usage.personTokens = personTokens;
+function accountSourceOf(s: SessionInfo) {
+  const token = hostToken(cfg);
+  const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));
+  const hostLogin = (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login';
+  return sessionSource(s, token, toMachine, (id) => userToken(cfg, id), hostLogin);
+}
+/** Whether the Claude account a session ran on has room again (no meter at 90% or more), or undefined when unknown (the ledger cleanup, before it resumes a worker a limit cut off). */
+function limitsClearFor(s: SessionInfo): boolean | undefined {
+  const source = accountSourceOf(s);
+  const u = accountsNow().find((a) => a.sources.includes(source))?.usage;
+  if (!u?.available) return undefined;
+  return [u.weekly, u.session, ...u.models].filter((m): m is NonNullable<typeof m> => !!m).every((m) => m.percent < 90);
+}
 function accountsNow() {
   const token = hostToken(cfg);
   const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));

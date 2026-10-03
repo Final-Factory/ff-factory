@@ -80,8 +80,75 @@ for a request runs for the person who filed it, on their account. The requester'
 answers a question), change the priority, close the request, or reopen it within 7 days (`update_work`). Closing is the
 filer's: the others still on the request hear it. Someone whose request was merged into it only leaves it.
 
-The ledger is `data/work.json`: every open request and the newest 300 closed ones. The page gets the open ones and those
-closed in the last 3 days.
+The ledger is `data/work.json`: every open request and the newest 300 closed ones (stalled ones are kept like open
+ones). The page gets the open ones, the stalled ones and those closed in the last 3 days.
+
+## Pull requests
+
+Each request is linked to the pull requests its workers open (`WorkItem.prs`: repo, number, state, merge commit). A PR
+belongs to a request when:
+
+- its description has a line `Request: w293` (the brief of every worker started with a `work_id` asks for it:
+  `requestLineRule`, `server/work.ts`); or
+- a worker of the request wrote its URL (`https://github.com/<owner>/<name>/pull/<n>`) in its reports or transcript; or
+- it is on a branch a worker's sandbox had checked out and was opened after the request was filed (a sandbox's branch
+  is reused from request to request, so an older PR on it is not this request's); or
+- it is the request's own `pr:` key.
+
+A PR that says it is for another request is never taken by the last three. The PRs show on the request in the Requests
+tab and in `list_work`. The repos asked are the game repo's and this app's own (from their `origin`), or exactly
+`ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each, and `gh pr view` for
+a linked open PR older than that). When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
+
+**When a linked PR merges** (checked every 5 minutes, `LedgerSweep.checkPrs`, `server/ledgerSweep.ts`), the request
+closes as done, logging "merged as #N (sha) on date", when all of this holds:
+
+- none of its linked PRs is still open (the log says "#N merged; still open: PR #M is open" otherwise);
+- none of its workers has a turn running (a request with a running worker is never touched);
+- nothing is left after the merge (`afterMergeReason`, `server/ledgerRules.ts`). It stays open, with the log line
+  "#N merged; still open: …", for: a **release** (its title or brief says release, patch notes or `ci-release`: it ends
+  when the build is live and the patch notes are posted, which the worker's final report must say with the notes link); a
+  brief that asks for a step after the merge (a 2-peer check, an audit, "after the merge, verify"); a brief that plans
+  several PRs ("PR1 data, PR2 presentation"); a worker's last report that says more is coming; or an open question.
+
+A PR **closed without merging** never closes the request: the log says so once, and its person's orchestrator hears it
+when no other PR is open. Intake requests that wait for a reviewer are never closed here (the intake's own rule is in
+[intake.md](intake.md), "Closed when it merged").
+
+## Ledger cleanup
+
+Every `ledger.cleanup.everyHours` hours (config.json; default 4, 1 to 168; `enabled` defaults to true) and on demand
+(the owner's **Clean up now** on the Requests tab, `POST /api/ledger/cleanup`), `LedgerSweep.run` goes through every
+open or stalled request. **A request with a running worker (running, starting or waiting for a permission) is never
+touched**, and nothing waiting for a person (an open question, an intake request awaiting approval) is closed or
+stalled. Ben's requests are included. In this order, the first that fits applies:
+
+1. **Merged.** The pull-request rule above for every request, and the intake's merged-branch rule for intake requests.
+2. **Delivered.** A request whose worker's final report (`lastResult`, at least an hour old) states plainly that the work
+   is done ("All done", "is delivered", "nothing more to do") and says nothing is left, waiting or asked, with no open PR
+   and no step after the merge, closes as done with that report quoted. A release's report must also link the patch
+   notes and say it is live. When the report is not clear, nothing closes.
+3. **Cut off.** A worker that stopped on a usage or rate limit, an app restart (its turn was still open) or a refused tool
+   and never resumed. A limit or restart is resumed once (a message to the worker, recorded in `resumedBy`): a limit only
+   when the account it ran on has room again (no plan meter at 90% or more; unknown counts as no). A refused tool, a
+   limit that has not reset, and a worker cut off again after its one resume make the request **stalled** with the reason.
+4. **Superseded.** A request nothing has touched for 24 hours whose work a finished request covers (a newer finished
+   release, or a finished request that overlaps it strongly) is stalled with "probably superseded by w…".
+5. **Stalled.** A new, queued or active request with no running worker and no activity for 24 hours (its last update, and
+   its workers' last activity) is stalled with the reason: no worker ever started, or its last worker ended and its report
+   is not clear.
+
+**Stalled** is a status of its own (`WorkItem.stalled`: kind, reason, when): out of the open lists, behind the "N stalled"
+filter on the Requests tab and `list_work status stalled`, kept like an open request. The cleanup never closes one: its
+person closes it (`update_work close`), or reopens it, or writes a note on it, which revives it as new. A stalled request
+whose PRs later merge is closed by rule 1.
+
+Each action is logged on its request. Each person's orchestrator gets one `[ledger cleanup]` line per pass listing what
+closed, resumed and stalled for them, and nothing when nothing changed. The first pass also lists the requests with a
+merged PR that stayed open and why. The Requests tab shows when it last ran and what it did. Limits of the rules, all
+fixed code and no model: a worker's report is read by patterns, so an unclear one never closes anything, it only stalls
+the request after a day; a PR is linked only by the ways above, so an old request whose PRs carry no `Request:` line and
+whose worker's branch has since moved on is not linked.
 
 ## People to people
 
@@ -135,6 +202,11 @@ review.
 
 The full rule, the checklists (visual changes, merges, releases) and the dated lessons are the `evidence-gate` skill of
 the `ff-agents` plugin (repo final-factory-agents). The briefs hold only what every agent needs without loading it.
+
+**Ids come with words** (Ben, 2026-10-03). Every worker's and orchestrator's brief, the dispatcher's brief and the
+relay of worker updates tell the agent to say what each id is, every time it appears in something a person reads: "w293
+(stopping people from chatting with the dispatcher)", "PR #972 (the fix for lost saves on rejoin)", a commit, a worker or
+session id, a sandbox name. The same rule is in the ff-agents `evidence-gate` skill (`lessons/say-what-an-id-is.md`).
 
 ## Memory
 
@@ -252,8 +324,8 @@ says so (`memoryBrief`).
 - The home page is your own chat, as before.
 - The sidebar lists, under it, the other people's orchestrators (read only) and the Dispatcher, with its open requests
   ("1 question · 2 active").
-- The Dispatcher page has two tabs. Requests lists everyone's open requests, questions first, with the closed ones behind
-  a link; a row opens to its brief, workers, overlaps and log. Conversation is the dispatcher's log, read only. Where the
+- The Dispatcher page has two tabs. Requests lists everyone's open requests, questions first, with the stalled and the closed ones behind
+  links; a row opens to its brief, workers, pull requests, overlaps and log. Conversation is the dispatcher's log, read only. Where the
   composer would be, a line says nobody writes to the dispatcher and links "Talk to your orchestrator" (your own chat).
 - Decisions arrive in your chat as one-line notices ("Merged into w15: “Belts drop items…”") that open the request.
 - A message from another person arrives in your chat as an amber notice, open, with their name and text ("Lothsahn:

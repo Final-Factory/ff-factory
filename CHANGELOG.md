@@ -19,6 +19,21 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   md/txt/json and zip are taken, within `review.maxFileMB` (200), `review.maxCallMB` (500) and `review.maxFiles` (40).
   The answer is the paths, which show inline in reports ([docs/review.md](docs/review.md)).
 
+- **The ledger cleans itself up** (w304 and w306, asked by Lothsahn: about 45 finished requests had to be closed by
+  hand). Each request is linked to the pull requests its workers open (a `Request: wNNN` line the worker brief asks
+  for, a PR URL in a worker's report, or the worker's branch), shown on the request and in `list_work`. When they have
+  all merged, no worker is running and nothing is left after the merge (not a release, a step after the merge, a
+  multi-PR plan, or a report saying more is coming), it closes as done, "merged as #N (sha)"; otherwise it stays open
+  with a log line, and a PR closed without merging only adds a note. Every `ledger.cleanup.everyHours` hours (default
+  4) and on "Clean up now" the sweep also closes requests whose worker's final report plainly says delivered, resumes
+  a worker a limit or restart cut off once, and moves requests nothing has touched for 24 hours, or that a newer
+  finished request probably covers, to a new **stalled** status (its own filter; only its person closes or reopens it).
+  A request with a running worker is never touched; each person's orchestrator hears one `[ledger cleanup]` line per
+  pass ([docs/orchestrators.md](docs/orchestrators.md), "Pull requests" and "Ledger cleanup"). The first pass after
+  the deploy is the backfill for requests whose PRs already merged, and lists what stayed open and why.
+- **Reports spell out their ids** (w302, asked by Ben). The worker, orchestrator and dispatcher briefs and the
+  worker-update relay say that a request id, PR number, commit, worker id or sandbox name always comes with what it
+  is in plain English, every time ([docs/orchestrators.md](docs/orchestrators.md), "Evidence and labels").
 - **Your own requests first on the Dispatcher page** (w307, asked by Lothsahn). The Requests list keeps its order by
   status (question, new, queued, active, then closed) and, for open ones, by priority; within one status and priority
   the logged-in person's requests (any where they are one of the people) come before everyone else's, then the order
@@ -171,6 +186,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   side sent, and a loud line when a new connection replaces a live one.
 
 ### Fixed
+
+- **The restart report names workers waiting on a wake_me** (w311, asked by Lothsahn). After the d60dcf1b deploy,
+  f6b32781 (w283, lothdesktop/pr-fix) was on neither the resumed nor the could-not-resume list. It was between turns,
+  with a 21-minute `wake_me` that survived the restart and fired on time, but nothing said so. The `[app restarted]`
+  report now lists such workers with where they are and when their wake fires ([docs/restart.md](docs/restart.md)).
 
 - **Unity's blocking dialogs no longer wait for a person** (w294, asked by Ben). mp-r2's editor sat on "The open
   scene(s) have been modified externally" after its worker's `git merge origin/develop` staged `main.unity`, and FF

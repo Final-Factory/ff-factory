@@ -95,6 +95,8 @@ fs.writeFileSync(
       host: '127.0.0.1',
       trustProxy: false,
       ownerName: 'Tester',
+      // The ledger cleanup links no repo's PRs here (it would ask GitHub); its quiet-request rule still runs.
+      ledger: { cleanup: { repos: [] } },
       dataDir,
       sandboxRoot,
       repo: { url: path.join(base, 'base'), basePath: path.join(base, 'base') },
@@ -217,7 +219,7 @@ internals.store.putSandbox({
   },
 });
 // The dispatcher takes no person's message any more (docs/orchestrators.md), so a test that needs its fake model to take
-// a turn (call one of its tools) has this stand-in on <port + 200>: it sends the owner's words straight to the
+// a turn (call one of its tools) has this stand-in on <port + 200> (which also patches a request for e2e/ledger.spec.ts): it sends the owner's words straight to the
 // session, as the owner's message used to arrive. Only this test harness has it.
 const { default: http } = await import('node:http');
 http
@@ -226,6 +228,15 @@ http
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       try {
+        // /patch-work {id, patch}: fields set on a request, to age it or give it PRs (e2e/ledger.spec.ts).
+        if (req.url === '/patch-work') {
+          const { id, patch } = JSON.parse(body) as { id: string; patch: Record<string, unknown> };
+          const w = internals.store.work.get(id);
+          if (!w) throw new Error(`no request ${id}`);
+          internals.store.putWork({ ...w, ...patch });
+          res.writeHead(200).end('{}');
+          return;
+        }
         const { text } = JSON.parse(body) as { text: string };
         internals.sessions.send(internals.agents.dispatcherId!, text, 'human', undefined, { requestedBy: { userId: USER, displayName: 'Tester' } });
         res.writeHead(200).end('{}');
