@@ -331,6 +331,12 @@ owner. Unknown keys and wrong types are refused, and nothing is written then. It
 connection stays up: the welcome's `accepts` never depends on these settings, and a `board_check` or `request` while
 they are off is answered `error` `not_enabled`.
 
+Who may approve or decline is `intake.reviewers`: an owner sets it with `set_app_config` key `intake.reviewers` and a
+list of user ids as the value (`["ben", "lothsahn"]`, or one comma-separated string). Each id must be a login that
+exists (matched without regard to case and stored as the login spells it); an unknown id is refused and nothing is
+written. The list is replaced as a whole, and `null` removes it, so the owner decides alone again. It is an owner's
+setting under the same guard as `intake.ffbox`, and it applies at once, with no restart.
+
 ```json
 "intake": {
   "discord": {

@@ -183,7 +183,7 @@ export interface Config {
   /**
    * The intake (docs/intake.md): Discord #bug-reports threads, trusted people's requests to Max in #dev-chat, and
    * FFBox's diagnoses and fix branches become ledger requests. Everything is off unless switched on here. config.json
-   * only, except the ffbox block, which an owner can set with set_app_config intake.ffbox. Read by server/intakeRules.ts intakeSettings(), which fills the defaults.
+   * only, except the ffbox block and the reviewers list, which an owner can set with set_app_config intake.ffbox / intake.reviewers. Read by server/intakeRules.ts intakeSettings(), which fills the defaults.
    */
   intake?: IntakeConfig;
   /**

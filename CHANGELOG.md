@@ -49,6 +49,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   SHA-256, before the message goes on (daemon protocol 7; older daemons are refused attachments until redeployed).
   Workers get `fetch_attachment` and an Attachments section in their brief that says where the game loads saves from.
 
+- **`set_app_config` sets the intake reviewers** (w270; [docs/intake.md](docs/intake.md#config)). Key `intake.reviewers`,
+  a list of user ids (or one comma-separated string): the people who approve or decline intake requests and answer design
+  questions. Each id must be an existing login, matched without regard to case; unknown ids are refused and nothing is
+  written. An owner's setting only, behind the same "the person asked in their own words" guard as `intake.ffbox`; it
+  applies at once and `null` removes it (the owner alone decides). Until now the list could be edited only in config.json
+  on BEAST, so a second reviewer such as Lothsahn needed a hand edit.
+
 - **`set_app_config` sets the FFBox intake** (w224; [docs/intake.md](docs/intake.md#config)). Key `intake.ffbox`, the
   whole block as the value: `enabled`, `branches`, `diagnoses`, `requests`, `boardCheck`, `escalations`, `repo`,
   `dailyCap`, `match.{high,medium}` (w219) and `autoApprove.{enabled,maxPerDay}`. An owner's setting only, behind the same "the person asked in
