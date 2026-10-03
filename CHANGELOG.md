@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **A player's clear bug goes to a worker; anything else waits, and the thread says so** (w299, asked by Lothsahn).
+  FFBox's escalations, player requests and fix branches are triaged by the same fixed rules as Discord threads, so an
+  obvious bug can be auto-approved (`intake.ffbox.autoApprove`). Money, releases and publishing, and a report that
+  argues its own triage or instructs the agents, always wait. A request held for a reviewer makes FFBox post "Waiting
+  on input from a developer." once ([docs/intake.md](docs/intake.md)).
+
 - **FFBox threads hear a fix's PR, a question, and a can't-fix** (w278, asked by Lothsahn). The `dev_update` FFBox
   gets also carries a PR summary once the worker's PR is ready for review, the question a request waits on (the
   operator's answer in the thread answers it and the dispatcher resumes the work), and the reason a request will not be

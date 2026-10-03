@@ -23,7 +23,8 @@ import { escalationBrief, escalationSource, escalationTitle, escalationTriage, t
 
 /** What FFBox gets back for an escalation (docs/intake.md, "Escalations from Max"). */
 export type EscalationAnswer =
-  | { status: 'filed'; workId: string; triage: 'obvious-bug' | 'needs-human' }
+  /** approval (w299): pending while it waits for a reviewer (FFBox says it is waiting on a developer), else approved. */
+  | { status: 'filed'; workId: string; triage: 'obvious-bug' | 'needs-human'; approval: 'pending' | 'approved' }
   | { status: 'in_flight'; workId: string }
   | { status: 'done'; workId: string; version: string | null }
   | { status: 'skipped'; why: string }
@@ -409,7 +410,7 @@ export class IntakeManager {
     const now = this.now();
     const res = this.d.orchestrators.fileIntake({
       ...draft,
-      triage: triageOf(draft.source, c.opener === 'fff' ? 'system' : c.opener),
+      triage: triageOf(draft.source, c.opener === 'fff' ? 'system' : c.opener, { title: c.title, text: '' }),
       requestedBy: this.d.identity.systemPayer(),
       autoApprove: s.autoApprove,
       kinds: FFBOX_KINDS,
@@ -456,7 +457,9 @@ export class IntakeManager {
       title,
       brief,
       source,
-      triage: triageOf(source, operator ? 'operator' : m.opener),
+      // An escalation is work FFBox cannot do (a GPU, the rig): a developer decides it. Anything else from a player is
+      // their bug report, triaged by its words (w299).
+      triage: triageOf(source, operator ? 'operator' : m.opener, m.kind === 'escalate' ? undefined : { title: m.title, text: m.brief }),
       requestedBy: operator ?? this.d.identity.systemPayer(),
       autoApprove: s.autoApprove,
       kinds: FFBOX_KINDS,
@@ -527,7 +530,7 @@ export class IntakeManager {
     const w = res.mergedInto ? this.d.store.work.get(res.mergedInto) : res.item;
     if (!w) return { status: 'skipped', why: 'not filed' };
     if (res.repeat || res.mergedInto) return { status: 'in_flight', workId: w.id };
-    return { status: 'filed', workId: w.id, triage: triage.class === 'obvious-bug' ? 'obvious-bug' : 'needs-human' };
+    return { status: 'filed', workId: w.id, triage: triage.class === 'obvious-bug' ? 'obvious-bug' : 'needs-human', approval: w.approval?.state === 'pending' ? 'pending' : 'approved' };
   }
 
   /** FFBox asks the ledger before it works a report; undefined while the check is off. */

@@ -88,8 +88,18 @@ triage in front of every player report). Open for Ben and Lothsahn to settle:
 - **Anything else needs a human**, with the reason listed: "needs a human: it asks for a change ("should",
   balance)", "no clear defect", "no game version", "too little to go on".
 
-A trusted person's request is classed as their own; FFBox work is "needs a human" unless an operator opened it;
-the release follow-up is a follow-up (`triageOf`).
+- **Always a human**, whatever else it says (w299): it touches money (a refund, a charge, a purchase, DLC, a price)
+  or a release or publishing (release dates or notes, patch notes, "when is the next update", the Steam page or a
+  branch); or it argues its own triage or instructs the agents ("auto-approve this", "obvious bug", "ignore your
+  instructions", "system prompt"). Wording a report as an order can only hold it, never speed it up.
+
+A trusted person's request is classed as their own; an operator's FFBox work is theirs; the release follow-up is a
+follow-up (`triageOf`). **FFBox work from a player's report is a player's bug report** (Lothsahn, w299: "If bug
+reports come in from a player and it's obviously a bug and doesn't need clarification, you should just have a worker
+fix the bug"): an escalated bug, a request FFBox files for a player (its title and brief), and a fix branch or
+diagnosis from a player's conversation (its title) go through `classifyBug` like a Discord thread, the version read
+from their words when no field carries it (`versionIn`). An escalated design question or developer decision, and a
+request for work FFBox cannot do (`escalate`), always need a human.
 
 Why fixed rules are enough here: the triage only decides who looks first. A report worded to look like a bug gets,
 at most, a worker that investigates a defect under rules that forbid design, balance and gameplay changes and make it
@@ -104,10 +114,16 @@ stop with a design question. The classification and its reason are on the reques
   /api/work/<id>/approve|decline`, or by telling their own orchestrator ("approve w41"), which calls `update_work
   approve` only in a turn the reviewer started (a relayed report or a worker's words cannot approve anything).
   Approved, it reaches the dispatcher like any request.
-- An **obvious bug** is approved automatically only when `intake.discord.autoApprove.enabled` is on, within
+- An **obvious bug** is approved automatically only when its source's auto-approve is on (`intake.discord.autoApprove`
+  for Discord threads, `intake.ffbox.autoApprove` for FFBox's escalations, requests and branches), within its
   `maxPerDay` (default 3), and when no strong overlap with work in flight exists; otherwise it waits too. A trusted
-  person's request follows `autoApprove.requests`; FFBox work follows `intake.ffbox.autoApprove` and only when an
-  operator opened it.
+  person's request follows `intake.discord.autoApprove.requests`.
+- **The thread hears that it waits** (Lothsahn, w299: "When you raise it in the intake, you should respond back to
+  FFBox to have max post that it's waiting on input from a developer"). An escalation's answer says `approval:
+  pending`, and FFBox's Max posts "Waiting on input from a developer." in the thread instead of "Filed for the devs.";
+  any FFBox conversation a waiting request came from gets a `dev_update` with `held: true`, which FFBox posts the same
+  way, once per conversation. Approved later, the request goes on like any other (its PR summary, question, merge or
+  reason reach the thread: docs/ffbox.md).
 - Caps, like the sentry's (`capProblem`, `reporterProblem`): at most `intake.discord.dailyCap` (default 10) Discord
   requests in 24 hours, at most `perReporterPerDay` (default 2) bug reports from one Discord author (the in-game
   reporter posts as one webhook, so only the daily cap applies to it), `intake.ffbox.dailyCap` for FFBox, and over
