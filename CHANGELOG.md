@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **A broad request's close is no longer posted as a thread's result** (w317). A thread joined to a broad request (a
+  scope over a window, a source, a channel or several threads) hears nothing from it; a narrower request for the
+  thread takes its link (and, at start-up, every link a broad request holds), so the thread's own fix is its result.
+  Ids are taken out of FFBox's text as whole words, never from inside a path ("specs/-discord-triage").
+
 ### Added
 
 - **publish_review: review media without ssh** (w309, asked by Lothsahn). Workers on any machine publish stills, clips and

@@ -257,6 +257,16 @@ FFBox when that happens." The same `dev_update` carries three results, each post
   posts it and leaves the thread open (Lothsahn: "For can't fix, don't archive the conversation or close the thread.
   Just leave the message there."); only a merged fix is archived.
 
+**A broad request speaks for no thread (w317).** A request whose scope is a window, a source or a channel, or names
+more than one thread (`isBroad`; a request whose scope is the one thread its brief named is that thread's own), sends
+the threads it covers nothing: not its PR, its question, its summary or its result, which are the broad work's. When a
+narrower open request names a covered thread (`discord:<thread>` in its keys), the conversation's link moves to it
+(`Orchestrators.moveDevLinks`), and the thread hears that request's results. At every start
+(`relinkBroadDevLinks`, idempotent) each link a broad request holds moves to the request handling its thread, or is
+dropped when the broad request is closed and nothing handles the thread; each move is logged and stamped on both
+requests. Ids come out of the thread's text whole: a path, URL or code span that names one is dropped, never cut into,
+and a PR link stays.
+
 A request filed from FFBox's own report, escalation, branch or diagnosis (`source.kind` `ffbox-request`,
 `ffbox-branch` or `ffbox-diagnosis` with a conversation id) gets the same updates in that conversation, and any person
 it is for may answer there. While such a request waits in the intake for a reviewer (docs/intake.md, "Approval, caps

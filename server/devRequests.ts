@@ -9,7 +9,7 @@ import { Readable } from 'node:stream';
 import type { Config } from './config.ts';
 import { asRequester, type Identity } from './identity.ts';
 import { AttachmentError, publicRef, type AttachmentRecord, type AttachmentStore } from './attachments.ts';
-import { ffboxSourceConversation, type Orchestrators } from './orchestrators.ts';
+import { ffboxSourceConversation, isBroad, type Orchestrators } from './orchestrators.ts';
 import { prView as ghPrView, type PrView } from './gitStatus.ts';
 import { isFor } from './work.ts';
 import { cleanBlock, cleanLine, intakeSettings } from './intakeRules.ts';
@@ -151,13 +151,34 @@ interface InFlight {
  * Text for a Discord thread from FF Factory's own words (w278, "just results"): secrets redacted, no internal ids
  * (work ids, sandbox branches, session ids), no routing, one paragraph per line, cut at `max` on a word.
  */
+/** An internal id anywhere in a token: a work id, an FFBox or sandbox branch, a worker's or session's 8-hex id. */
+const INTERNAL = /(?:^|[^A-Za-z0-9])[wW]\d{1,7}(?![A-Za-z0-9])|\b(?:sandbox|ffbox-f|ffbox)\/|\b[0-9a-f]{8}\b/;
+const GITHUB_PR = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+[).,;:]?$/;
+
+/**
+ * A text with its internal ids taken out WHOLE (w317: "specs/w293-discord-triage" became "specs/-discord-triage"). In
+ * prose a work id that is a word of its own goes, with its brackets ("(w271)", "w271:"); a word that only contains one
+ * stays. A code span, URL or path that names an internal id is dropped entirely, never cut into, except a PR link.
+ */
+function withoutIds(s: string): string {
+  const out = s.replace(/`[^`\n]*`/g, (span) => (INTERNAL.test(span) ? ' ' : span));
+  return out
+    .split(/(\s+)/)
+    .map((tok) => {
+      if (/^\s*$/.test(tok)) return tok;
+      if (/^\(?[wW]\d{1,7}\)?[:,.;]?$/.test(tok)) return /[.,;]$/.test(tok) ? tok.slice(-1) : '';
+      if (/[/\\]|^https?:/.test(tok)) return GITHUB_PR.test(tok) || !INTERNAL.test(tok) ? tok : '';
+      if (/^(?:worker|session|sandbox)$/i.test(tok)) return tok;
+      return /^[0-9a-f]{8}[).,;:]?$/.test(tok) ? '' : tok;
+    })
+    .join('')
+    .replace(/\b(?:worker|session|sandbox)\s+(?=[.,;:)]|$)/gim, '');
+}
+
 export function publicText(s: string, max: number): string {
-  const t = redactSecrets(s)
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/\b(?:sandbox|ffbox-f|ffbox)\/[\w./+-]+/g, 'the fix branch')
-    .replace(/\(?\b[wW]\d{1,7}\b\)?:?/g, '')
-    .replace(/\b(?:worker|session|sandbox)\s+[0-9a-f]{8}\b/gi, '')
+  const t = withoutIds(redactSecrets(s).replace(/<!--[\s\S]*?-->/g, ' '))
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]+/g, '')
+    .replace(/\(\s*\)/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/ +([.,;:])/g, '$1')
     .replace(/\n\s*\n+/g, '\n')
@@ -615,8 +636,12 @@ export class DevRequests {
     const o = this.d.orchestrators;
     const target = w.status === 'merged' ? o.devTarget(w.id) : w;
     if (!target || target.status === 'merged') return;
+    // A narrower request for a thread a broad request held takes its link first (w317); the move is its own work event.
+    if (o.moveDevLinks(target)) return;
     const all = o.devLinksOf(target);
-    const links = all.filter((x) => x.link.outcome !== 'fixed');
+    // A BROAD REQUEST SPEAKS FOR NO THREAD IT COVERS (w317): its PR, its question, its summary and its result are
+    // the broad work's, not any one thread's. Those threads hear from the request that takes their thread, or nothing.
+    const links = isBroad(target) ? [] : all.filter((x) => x.link.outcome !== 'fixed');
     // The conversation a request filed from FFBox's own report or escalation came from (w278), unless a dev link
     // already speaks for it.
     const source = ffboxSourceConversation(target);
