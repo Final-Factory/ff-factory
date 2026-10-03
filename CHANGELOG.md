@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **publish_review: review media without ssh** (w309, asked by Lothsahn). Workers on any machine publish stills, clips and
+  notes into `review.root/<topic>/` on the portal's computer (default `<sandboxRoot>/_review`, `F:\ffsb\_review` on
+  BEAST) with one tool call. A machine's daemon sends the files over HTTP with its own token, in resumable chunks
+  checked by SHA-256. Names are made safe, nothing is overwritten (`name-2.ext`), and only images, video,
+  md/txt/json and zip are taken, within `review.maxFileMB` (200), `review.maxCallMB` (500) and `review.maxFiles` (40).
+  The answer is the paths, which show inline in reports ([docs/review.md](docs/review.md)).
+
 - **Your own requests first on the Dispatcher page** (w307, asked by Lothsahn). The Requests list keeps its order by
   status (question, new, queued, active, then closed) and, for open ones, by priority; within one status and priority
   the logged-in person's requests (any where they are one of the people) come before everyone else's, then the order

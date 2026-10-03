@@ -1,4 +1,5 @@
 import type { AttachmentConfig } from './attachments.ts';
+import type { ReviewConfig } from './review.ts';
 import type { DevRequestsConfig } from './devRequests.ts';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -272,6 +273,11 @@ export interface Config {
    * one nobody sent on is kept (default 30). Settable with set_app_config.
    */
   attachments?: Partial<AttachmentConfig>;
+  /**
+   * Review media workers publish with publish_review (docs/review.md): `root` (default `<sandboxRoot>/_review`), and the
+   * caps `maxFileMB` (200), `maxCallMB` (500), `maxFiles` (40).
+   */
+  review?: Partial<ReviewConfig>;
   /** Paths no sandbox agent may write to or mention in a shell command (e.g. the live co-op checkout). */
   protectedPaths: string[];
   limits: {
