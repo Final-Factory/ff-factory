@@ -206,7 +206,7 @@ is checked three ways:
    `scope { threads?, source?, channel?, since?, until? }`, and records the threads a brief lists by itself. A window
    needs a bound, so no request covers a whole channel forever.
 
-| what matched | outcome | FFBox posts |
+| what matched | outcome | `dev_filed` text (FF Factory's views; FFBox posts only "Already fixed", w272) |
 |---|---|---|
 | a high-band open request, or an open request whose scope covers it | `covered`: it joins that request (a log line with the conversation and the operator, the thread added to its keys and, on an intake request, to its threads, the person added to its people, the files added, and a busy worker gets the note and a copy of each file in its Inbox) | "Covered by w38 (in progress)." |
 | a high-band request that is done | `fixed`: nothing filed; the link is recorded on the done one | "Already fixed in 0.50.0.69 (PR #412)." |
@@ -226,13 +226,24 @@ the harness's message, never as a turn of the person: tools that need the person
 settings) and the chat's filing budget still need them to write in FF Factory. The orchestrator answers with
 **`reply_to_ffbox`** `{ request?, conversation?, text }` (a person's own orchestrator only, for that person's own
 linked conversations), which sends a `dev_reply` FFBox posts in the thread; it errors plainly, "FFBox's connector is
-offline; nothing was sent", while the link is down. When a linked request is done, declined or cancelled, FF Factory
-sends the thread one line itself ("w123 is done: <outcome>"), resent on every reconnect until FFBox confirms it. The
+offline; nothing was sent", while the link is down.
+
+**Following it to the result (w272).** Lothsahn: "when that branch closes out, FFBox will close the associated
+discord thread and reply to the user", and "we should not reply on discord with where things are going--just
+results". So the thread hears no routing ("Filed as", "Covered by", "may repeat", "w123 is done"): those lines stay in
+FF Factory (`show: "dev_requests"`, the orchestrator's `[from FFBox, …]` lines). Instead FF Factory sends a
+`dev_update` with facts whenever they change, from the same facts a board answer carries (`Orchestrators.boardFacts`):
+`open` with `watch` (repo, branch, PR, target) once the worker's PR exists, then `done` with `mergedIn` and, once a
+release carries it, `version`; or `declined` / `cancelled`. Work events send it, and a check every minute catches a
+PR opening (which changes no work item). FFBox follows the PR like its own branches, posts its usual merge notice
+("Fixed, coming in <version> and later.") replying to the reporter, files the thread away by its usual rules, and posts
+a short result for a declined or cancelled one. Only the newest update per conversation waits, resent on every
+reconnect until FFBox confirms it. "Already fixed in <version> (PR #N)." at filing is a result and is still posted. The
 orchestrators' briefs say: `[from FFBox, X]` lines are FFBox's filings, `[from FFBox via Discord, X]` is X's own words,
 answer with `reply_to_ffbox`, and never post to Discord any other way.
 
 **Seeing them.** `ffbox_activity` `show: "dev_requests"` lists the newest (time, kind, ref, outcome, request, operator,
-person; 500 kept) with the settings in effect and the replies waiting for FFBox, and the status line counts them
+person; 500 kept) with the settings in effect and the replies and updates waiting for FFBox, and the status line counts them
 ("N dev request(s) in 24 h").
 
 **Seeing the ones that never arrived** (w266). A turn FFBox could not hand over (no connector, no `dev_ack` in time, a

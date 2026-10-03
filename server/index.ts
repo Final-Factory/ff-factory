@@ -434,10 +434,12 @@ providers.dev = new DevRequests(
   },
   providers.devLink(),
 );
-// A linked request finishing sends FFBox's thread one line saying so (queued until FFBox confirms it).
+// A linked request's branch, PR, merge, release or end goes to FFBox as a dev_update (queued until FFBox confirms it),
+// on every work event and once a minute for what changes without one (a worker's PR opening).
 bus.on('event', (e) => {
   if (e.type === 'work') providers.dev?.workChanged(e.item);
 });
+setInterval(() => providers.dev?.recheck(), 60_000).unref();
 agents.orchestrators.onIntakeAttention = (w, what) => notifier.intake(w, what, (what === 'design' && w.flag ? w.flag.for : agents.orchestrators.reviewers()).map((r) => r.userId));
 if (cfg.hostGuard.pollSeconds > 0) {
   setInterval(() => void hostHealth.tick(), cfg.hostGuard.pollSeconds * 1000);

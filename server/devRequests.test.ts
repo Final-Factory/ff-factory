@@ -585,38 +585,86 @@ test('reply_to_ffbox sends a dev_reply for the person\'s own conversation, and s
   assert.match(off.text, /FFBox's connector is offline; nothing was sent/);
 });
 
-test('the request finishing sends one dev_reply, resent on every reconnect until dev_received', async (t) => {
-  const { connect, chat, call, pm, store } = await setup(t);
+test('w272: the request is followed to its result with dev_updates (branch and PR, merge, release), never a routing line, resent until dev_received', async (t) => {
+  const { connect, chat, call, pm, store, o, dispatcher } = await setup(t);
   const c = await connect();
   const req = devRequest('dev-done');
+  const conversation = (req.conversation as { id: string }).id;
   c.send(req);
   await c.next('dev_ack');
   const wid = String((await c.next('dev_filed')).workId);
+  // Filed: open, nothing to watch yet. Facts only, no text for the thread.
+  let u = await c.next('dev_update');
+  assert.deepEqual([u.request, u.conversation, u.status, u.watch, 'text' in u], [wid, conversation, 'open', undefined, false]);
+  // A worker opens PR 901 from its sandbox: no work event, so the minute's recheck sends it.
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
+  assert.equal(started.isError, false, started.text);
+  const sb = store.sandboxes.get('alpha')!;
+  store.putSandbox({ ...sb, git: { branch: 'sandbox/filter', dirty: 0, untracked: 0, pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: false }, at: T0 } });
+  pm().dev!.recheck();
+  u = await c.next('dev_update');
+  assert.equal(u.status, 'open');
+  assert.deepEqual(u.watch, { repo: 'Final-Factory/FinalFactory', branch: 'sandbox/filter', pr: 901, target: 'develop' });
+  const n = c.received.filter((m) => m.type === 'dev_update').length;
+  pm().dev!.recheck();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(c.received.filter((m) => m.type === 'dev_update').length, n, 'nothing changed, nothing sent');
+  // It merges: done, merged, not released yet.
+  const w = store.work.get(wid)!;
+  w.delivery = { fixCommit: 'abc1234def5678' };
+  store.putWork(w);
   const loth = chat(LOTH);
   loth.lastFrom = 'human';
   const closed = await call(loth.info, 'update_work', { id: wid, close: 'done', note: 'Filter shipped in PR 901.' });
   assert.equal(closed.isError, false, closed.text);
-  const done = await c.next('dev_reply');
-  assert.equal(done.from, 'fff');
-  assert.equal(done.text, `${wid} is done: Filter shipped in PR 901.`);
-  assert.equal(done.conversation, (req.conversation as { id: string }).id);
-  // Another change to the closed request: no second reply.
-  store.putWork(store.work.get(wid)!);
+  u = await c.next('dev_update');
+  assert.deepEqual([u.status, u.mergedIn, u.version, u.branch, u.result], ['done', 'develop@abc1234def5678', null, 'sandbox/filter', undefined]);
+  // Released: one more, with the version; then it is no longer followed.
+  o.noteRelease(wid, { releasedIn: '0.50.0.70' }, 'shipped in 0.50.0.70');
+  u = await c.next('dev_update');
+  assert.deepEqual([u.status, u.version], ['done', '0.50.0.70']);
+  const m = c.received.filter((x) => x.type === 'dev_update').length;
+  pm().dev!.recheck();
   await new Promise((r) => setTimeout(r, 50));
-  assert.ok(!c.received.some((m) => m.type === 'dev_reply'));
-  // Not confirmed: the next link gets it again, the same id.
+  assert.equal(c.received.filter((x) => x.type === 'dev_update').length, m, 'a released request is no longer followed');
+  assert.ok(!c.received.some((x) => x.type === 'dev_reply'), 'no "wNNN is done" text any more');
+  assert.match(pm().dev!.describe(), /update dev-|update u-/);
+  // Not confirmed: the next link gets the newest one again (only the newest per conversation waits).
   c.close();
   await until('offline', () => !pm().online);
   const c2 = await connect();
-  const again = await c2.next('dev_reply');
-  assert.deepEqual(again, done);
-  c2.send({ type: 'dev_received', id: done.id });
-  await until('received', () => !pm().devLink().state().replies.length);
+  const again = await c2.next('dev_update');
+  assert.deepEqual(again, u);
+  assert.equal(pm().devLink().state().updates?.length, 1);
+  c2.send({ type: 'dev_received', id: u.id });
+  await until('received', () => !pm().devLink().state().updates?.length);
   c2.close();
   await until('offline', () => !pm().online);
   const c3 = await connect();
   await new Promise((r) => setTimeout(r, 100));
-  assert.ok(!c3.received.some((m) => m.type === 'dev_reply'), 'not resent once FFBox has it');
+  assert.ok(!c3.received.some((x) => x.type === 'dev_update'), 'not resent once FFBox has it');
+});
+
+test('w272: a declined request says so as a status with no text; a done one with no merge carries its outcome as the result', async (t) => {
+  const { connect, chat, call } = await setup(t);
+  const c = await connect();
+  c.send(devRequest('dev-no'));
+  await c.next('dev_ack');
+  const no = String((await c.next('dev_filed')).workId);
+  await c.next('dev_update');
+  c.send(devRequest('dev-yes', { title: 'Explain the belt speeds', brief: 'How fast is each belt tier, measured?' }));
+  await c.next('dev_ack');
+  const yes = String((await c.next('dev_filed')).workId);
+  assert.notEqual(yes, no);
+  await c.next('dev_update');
+  const loth = chat(LOTH);
+  loth.lastFrom = 'human';
+  assert.equal((await call(loth.info, 'update_work', { id: no, close: 'rejected', note: 'Works as designed.' })).isError, false);
+  let u = await c.next('dev_update');
+  assert.deepEqual([u.request, u.status, 'text' in u, 'result' in u], [no, 'declined', false, false]);
+  assert.equal((await call(loth.info, 'update_work', { id: yes, close: 'done', note: 'Belts move 4, 8 and 16 items a second.' })).isError, false);
+  u = await c.next('dev_update');
+  assert.deepEqual([u.request, u.status, u.mergedIn, u.result], [yes, 'done', null, 'Belts move 4, 8 and 16 items a second.']);
 });
 
 test('ffbox_activity show dev_requests lists them; config: its settings are checked, and there is no operators map', async (t) => {
