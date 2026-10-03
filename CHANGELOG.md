@@ -31,6 +31,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **FFBox's page scrolls, and its lists page** (w223). The Conversations, Signatures and Intake reports lists were cut
+  off after the first few rows with nothing to scroll: `.run-list` (`overflow: hidden`) shrank to the space left in
+  its flex column and clipped its rows. On a phone the capacity header alone was taller than the screen. The header
+  and the lists now scroll as one, with the tabs kept at the top, and `.run-list` keeps its height everywhere. Each list
+  shows the newest 100, then "Show 100 more" up to what the portal keeps (500 conversations, 2000 reports).
+
+- **FFBox among the computers, where it can be seen** (w223). The w218 group sat below every machine's sandbox list,
+  out of view on a phone or a busy portal. It is now the first group under Computers and counted there. It shows CPU
+  (load1 over the cores, above 100% when it is) with the core count, RAM used of total, GPU "none" (no class reports a
+  GPU), and free of total for each filesystem FFBox names. Stale (two minutes without an update) or offline, the last
+  numbers stay, dimmed, under a "stale · updated …" or "offline · seen …" marker instead of disappearing.
+
 - **A hard crash no longer takes the portal down** ([docs/self-recovery.md](docs/self-recovery.md#6-crash-safe-data-files)).
   On 2026-09-30 BEAST crashed while saving `data/state.json` and left it full of zero bytes; every start failed to
   parse it until someone restored it by hand. Data files are now fsynced before they replace the old one

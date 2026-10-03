@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { APIRequestContext } from '@playwright/test';
 import { appState, expect, expectNoHorizontalOverflow, go, openSidebar, sendMessage, test, uniq } from './fixtures.ts';
 import type { TranscriptEvent } from '../shared/types.ts';
-import { E2E_PROVIDER_TOKEN, MockConnector, SAMPLE_CONVERSATIONS } from './mockConnector.ts';
+import { E2E_PROVIDER_TOKEN, MockConnector, SAMPLE_CLASSES, SAMPLE_CONVERSATIONS, SAMPLE_INTAKE } from './mockConnector.ts';
 
 test('FFBox: the card follows the connector, and its page lists capacity, conversations and intake reports', async ({ authed: page, request }) => {
   const base = test.info().project.use.baseURL!;
@@ -206,4 +206,77 @@ test('FFBox: a wrong token is refused and changes nothing', async ({ authed: pag
   expect((await c.closed).status).toBe(401);
   const state = await (await page.request.get('/api/state')).json();
   expect(state.providers.map((p: { id: string; online: boolean }) => [p.id, p.online])).toEqual([['ffbox', false]]);
+});
+
+test("FFBox among the computers: its CPU, RAM, GPU and disks in the sidebar, stale after two minutes; its long lists scroll and page", async ({ authed: page }) => {
+  const base = test.info().project.use.baseURL!;
+  const G = 1024 ** 3;
+  const c = new MockConnector(base, E2E_PROVIDER_TOKEN);
+  try {
+    await c.hello({ protocol: 2, version: 'e2e-metrics' });
+    // A tall header (six classes and a hold), as the real FFBox reports: it must not leave the lists a sliver.
+    c.capacity([...SAMPLE_CLASSES, ...SAMPLE_CLASSES.map((k) => ({ ...k, name: `${k.name}-b` }))], { holds: ['ffdev: every slot busy'] });
+    const t0 = Date.parse('2026-10-01T09:00:00Z');
+    for (let i = 0; i < 130; i++) c.conversation({ ...SAMPLE_CONVERSATIONS[i % 3], id: String(2000 + i), title: `Long list conversation ${i}`, updatedAt: new Date(t0 + i * 60_000).toISOString() });
+    for (let i = 0; i < 40; i++) {
+      const at = new Date(t0 + i * 60_000);
+      const stamp = at.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+      c.intake({ ...SAMPLE_INTAKE[0], reportId: `${stamp}-desync-${(0xa00000 + i).toString(16)}`, receivedAt: at.toISOString() });
+    }
+    c.send({ type: 'metrics', at: new Date().toISOString(), cpu: { load1: 5.01, load5: 4.2, load15: 3.9, cores: 40 }, mem: { totalBytes: 756 * G, usedBytes: 425 * G }, disks: [{ role: 'root', totalBytes: 500 * G, freeBytes: 200 * G }, { role: 'state+cache', totalBytes: 4000 * G, freeBytes: 1000 * G }] });
+
+    // The sidebar: FFBox is the first group under Computers, in view without scrolling, with its numbers.
+    const sidebar = await openSidebar(page);
+    const group = sidebar.getByTestId('fl-group-provider-ffbox');
+    await expect(group.getByTestId('meter-CPU')).toHaveText('CPU 13%');
+    await expect(sidebar.locator('.fl-group').first()).toHaveAttribute('data-testid', 'fl-group-provider-ffbox');
+    await expect(group).toBeInViewport();
+    await expect(group.getByTestId('fl-os')).toContainText('40 cores');
+    await expect(group.getByTestId('meter-RAM')).toHaveText('RAM 425G/756G');
+    await expect(group.getByTestId('meter-GPU')).toHaveText('GPU none');
+    await expect(group.getByTestId('meter-disk')).toHaveText(['root 200G/500G free', 'state+cache 1000G/3.9T free']);
+    await expect(group.getByTestId('provider-metrics-stale')).toHaveCount(0);
+    await page.screenshot({ path: test.info().outputPath('sidebar-ffbox.png') });
+    await test.info().attach('sidebar with FFBox', { path: test.info().outputPath('sidebar-ffbox.png'), contentType: 'image/png' });
+    await expect(group).toHaveScreenshot('ffbox-sidebar-group.png');
+
+    // Its page: the newest 100 conversations, then "Show 30 more"; the page scrolls to the last one, the tabs stay put.
+    await group.locator('.fl-head').click();
+    const panel = page.getByTestId('provider-panel');
+    const rows = panel.getByTestId('provider-conversations').locator('.run-row');
+    // The earlier tests' conversations are listed too: 130 of ours and theirs.
+    await expect.poll(async () => (await appState(page.request)).providers?.[0]?.counts.conversations).toBeGreaterThanOrEqual(130);
+    const total = (await appState(page.request)).providers![0].counts.conversations;
+    await expect(rows).toHaveCount(100);
+    await expect(panel.getByTestId('provider-more')).toContainText(`Showing the newest 100 of ${total} conversations`);
+    await panel.getByRole('button', { name: `Show ${total - 100} more` }).click();
+    await expect(rows).toHaveCount(total);
+    await expect(panel.getByTestId('provider-more')).toHaveCount(0);
+    const scroll = await panel.getByTestId('provider-scroll').evaluate((e) => ({ client: e.clientHeight, height: e.scrollHeight }));
+    expect(scroll.height, 'the page has more than a screen to scroll').toBeGreaterThan(scroll.client * 2);
+    await rows.last().scrollIntoViewIfNeeded();
+    await expect(rows.last()).toBeInViewport();
+    await expect(panel.getByRole('tab', { name: /Conversations/ })).toBeInViewport();
+    await page.screenshot({ path: test.info().outputPath('scrolled-conversations.png') });
+    await test.info().attach('conversations scrolled to the end', { path: test.info().outputPath('scrolled-conversations.png'), contentType: 'image/png' });
+
+    await panel.getByRole('tab', { name: /Intake reports/ }).click();
+    const reports = panel.getByTestId('provider-intake').locator('.run-row');
+    await expect(reports).toHaveCount((await appState(page.request)).providers![0].counts.intake);
+    expect(await reports.count()).toBeGreaterThanOrEqual(40);
+    await reports.last().scrollIntoViewIfNeeded();
+    await expect(reports.last()).toBeInViewport();
+    await panel.getByRole('tab', { name: /Signatures/ }).click();
+    await expect(panel.getByTestId('provider-signatures').locator('.run-row').first()).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    // Two minutes later with no update: the last numbers stay, under a stale marker.
+    await page.clock.setFixedTime(new Date(Date.now() + 5 * 60_000));
+    await page.reload();
+    const later = (await openSidebar(page)).getByTestId('fl-group-provider-ffbox');
+    await expect(later.getByTestId('provider-metrics-stale')).toContainText('stale · updated 5m ago');
+    await expect(later.getByTestId('meter-CPU')).toHaveText('CPU 13%');
+  } finally {
+    c.close();
+  }
 });

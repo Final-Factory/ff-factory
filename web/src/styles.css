@@ -3175,6 +3175,9 @@ select.input {
 .run-list {
   display: flex;
   flex-direction: column;
+  /* Its own height, never squeezed: in a flex column (.sa-scroll) overflow: hidden would let it shrink to the
+     space left and clip its rows, so the pane around it never had anything to scroll. */
+  flex: none;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
@@ -4831,6 +4834,35 @@ body {
 }
 
 /* ---- the FFBox page: setup steps, the offline note, the signature budget ---- */
+/* The header and the lists scroll as one (.pv-scroll; the panel itself is locked, web/src/viewport.ts), so a tall
+   header (several classes, holds, a phone's width) no longer leaves the lists a sliver. The tabs stay at the top. */
+.pv-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+}
+.pv-scroll > * {
+  flex: none;
+}
+.pv-scroll > .pv-body {
+  overflow: visible;
+}
+.pv-scroll > .tabs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg);
+}
+.pv-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
 .pv-offline {
   margin: 0;
   padding: 6px var(--s-4);
@@ -5002,6 +5034,32 @@ body {
 
 .fl-meters-off {
   font-style: italic;
+}
+
+/* A provider's group (FFBox): its meters, then one cell per filesystem, wrapping when they do not fit. */
+.fl-pv-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fl-pv-disks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+/* The last numbers, kept but dimmed once they are stale or the connector is gone. */
+.fl-pv-meters.fl-stale {
+  opacity: 0.55;
+}
+
+.fl-stale-tag {
+  flex: none;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
 }
 
 .fl-meter {

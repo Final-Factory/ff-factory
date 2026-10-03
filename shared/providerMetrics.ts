@@ -1,6 +1,6 @@
 // FFBox's load, memory and disks, as its connector pushes them every 30 s (docs/ffbox-connector-contract.md, "metrics"):
 // the numbers the sidebar, system_status and ffbox_activity show, worked out the same way on the server and in the page.
-import type { HostStats, ProviderMetrics } from './types.ts';
+import type { ProviderMetrics } from './types.ts';
 
 /** No update for this long and the numbers are shown as stale, not as current. */
 export const METRICS_STALE_MS = 120_000;
@@ -32,24 +32,4 @@ export function metricsLine(m: ProviderMetrics | undefined, now: number): string
   if (m.disks.length) parts.push(`disk ${m.disks.map((d) => `${d.role} ${gb(d.freeBytes)} of ${gb(d.totalBytes)} free`).join(', ')}`);
   const line = parts.join(' · ') || 'no numbers in the last report';
   return metricsStale(m, now) ? `${line} (stale: last update ${ago(m.receivedAt, now)})` : line;
-}
-
-/** The fullest disk, which stands for them all in a one-line meter. */
-export const fullestDisk = (m: ProviderMetrics) =>
-  [...m.disks].sort((a, b) => (b.totalBytes - b.freeBytes) / b.totalBytes - (a.totalBytes - a.freeBytes) / a.totalBytes)[0];
-
-/** The numbers as a computer's HostStats, so the sidebar draws FFBox's meters like a machine's. */
-export function metricsAsHostStats(m: ProviderMetrics): HostStats {
-  const disk = fullestDisk(m);
-  return {
-    hostname: 'FFBox',
-    platform: 'linux',
-    cpuModel: 'FFBox',
-    cpuCount: m.cpu?.cores ?? 0,
-    loadPct: cpuPct(m) ?? 0,
-    memTotalBytes: m.mem?.totalBytes ?? 0,
-    memFreeBytes: m.mem ? m.mem.totalBytes - m.mem.usedBytes : 0,
-    memUsedBytes: m.mem?.usedBytes,
-    ...(disk ? { diskTotalBytes: disk.totalBytes, diskFreeBytes: disk.freeBytes } : {}),
-  };
 }
