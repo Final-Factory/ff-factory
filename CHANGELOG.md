@@ -105,6 +105,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **A release is done when its patch notes are posted** (w280, asked by Lothsahn). The FFBox paragraph both
+  orchestrators carry, the dispatcher's and orchestrators' brief rules and `docs/ffbox.md` say a requested release is
+  done only when it is live on its Steam branch and its notes are posted once, as Max, in #dev-patch-notes; a release
+  brief says "post the patch notes once live", and a landed build reported without the post link stays open.
+
 - **The Steam release rule** (w277, asked by Lothsahn). The orchestrator prompt (`server/agents.ts`),
   `docs/ffbox.md` and `docs/ffbox-integration.md` say what FFBox's `SETLIVE` does: a version bump on develop goes
   live on Steam `development`, one on master on `pre-release`, and Ben or Lothsahn move the default branch by hand.

@@ -93,7 +93,9 @@ per rolling 24 hours; operators are not capped.
   Steam once the run's tests pass, sets the main app live (develop: `development`; master:
   `pre-release`; `scripts/release_lane.py` `SETLIVE`; Ben or Lothsahn move the default branch
   by hand), and
-  opens a PR for any files the build regenerated. `ff-agents:ci-release` drives it.
+  opens a PR for any files the build regenerated. `ff-agents:ci-release` drives it. A requested
+  release is done only when it is live on its branch and its patch notes are posted once, as Max,
+  in #dev-patch-notes (from a machine with the ffdiscord config, LothDesktop today).
 
 ## Crash and desync intake
 
