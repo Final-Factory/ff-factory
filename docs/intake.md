@@ -329,7 +329,7 @@ only, except the `ffbox` block: an owner sets it with `set_app_config` key `inta
 value (an object or its JSON, with the keys in the `ffbox` line below, `match` included; the block is replaced, so a
 key left out takes its default, and `null` removes it).
 Like every admin setting it runs only when a person asked in their own words, and only for an owner: the dispatcher
-takes it for a request an owner filed, or from an owner writing in its chat, and an `/mcp` key only when its login is an
+takes it for a request an owner filed (nobody writes to the dispatcher), and an `/mcp` key only when its login is an
 owner. Unknown keys and wrong types are refused, and nothing is written then. It applies at once, and FFBox's
 connection stays up: the welcome's `accepts` never depends on these settings, and a `board_check` or `request` while
 they are off is answered `error` `not_enabled`.

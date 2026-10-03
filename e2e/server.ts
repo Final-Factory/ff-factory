@@ -12,6 +12,7 @@
  *   login              tester / e2e-password-123 (the owner)
  *   second login       teammate / e2e-teammate-456, "Team Mate", a member (e2e/identity.spec.ts), with an /mcp API
  *                      key bound to it in <data folder>/../teammate-key.txt
+ *   dispatcher turns   POST <port + 200> (e2e/fixtures.ts, sendToChat): the only way a test makes the dispatcher take a turn
  *   Max                a mock Discord on <port + 100> (e2e/mockDiscord.ts) with a bot token in a scratch ffbox config, and
  *                      five seeded events from the gallery worker (e2e/max.spec.ts)
  *   provider "ffbox"   only with E2E_PROVIDER=1 (the provider projects, e2e/provider.spec.ts): switched on, with
@@ -215,4 +216,23 @@ internals.store.putSandbox({
     },
   },
 });
+// The dispatcher takes no person's message any more (docs/orchestrators.md), so a test that needs its fake model to take
+// a turn (call one of its tools) has this stand-in on <port + 200>: it sends the owner's words straight to the
+// session, as the owner's message used to arrive. Only this test harness has it.
+const { default: http } = await import('node:http');
+http
+  .createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      try {
+        const { text } = JSON.parse(body) as { text: string };
+        internals.sessions.send(internals.agents.dispatcherId!, text, 'human', undefined, { requestedBy: { userId: USER, displayName: 'Tester' } });
+        res.writeHead(200).end('{}');
+      } catch (e) {
+        res.writeHead(400).end(String((e as Error).message));
+      }
+    });
+  })
+  .listen(port + 200, '127.0.0.1');
 console.log(`e2e: FF Factory test server ready on http://127.0.0.1:${port} (data in ${base})`);

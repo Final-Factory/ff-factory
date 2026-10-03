@@ -54,7 +54,7 @@ The dispatcher's tools (`start_agent`, `message_agent`, `run_standing_agent_now`
 person who filed the request they serve (`work_id`; `server/orchestrators.ts`, `dispatcherActor`). Without a
 `work_id`, `for_user` may only name someone the last 200 transcript events show asking (`server/identity.ts`,
 `actingFor`: the people whose requests it heard, or who wrote to it) or the system payer, so text an agent wrote
-cannot bill a stranger. With neither, the call is refused, unless the owner is writing to the dispatcher in that turn.
+cannot bill a stranger. With neither, the call is refused (nobody writes to the dispatcher, so no turn of its own counts).
 
 ### The system payer
 

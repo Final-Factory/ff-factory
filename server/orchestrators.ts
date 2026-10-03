@@ -202,6 +202,16 @@ export function devKeys(keys: readonly string[]): string[] {
   return [...out];
 }
 
+/** Why a human-authored message to the dispatcher is refused (a 403 over HTTP). */
+export const DISPATCHER_CHAT_REFUSED = 'nobody chats with the dispatcher, the owner included: write to your own orchestrator, which files work with it (request_work)';
+
+export class DispatcherChatRefused extends Error {
+  readonly status = 403;
+  constructor() {
+    super(DISPATCHER_CHAT_REFUSED);
+  }
+}
+
 export class Orchestrators {
   private readonly d: OrchestratorsDeps;
   private readonly now: () => Date;
@@ -249,6 +259,11 @@ export class Orchestrators {
 
   isDispatcher(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole'>): boolean {
     return info.kind === 'orchestrator' && (info.orchestratorRole === 'dispatcher' || (!info.orchestratorRole && info.id === this.dispatcherId));
+  }
+
+  /** Nobody chats with the dispatcher (Ben, 2026-10-03): a person writes to their own orchestrator, which files work with it. */
+  refuseHumanChat(info: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole'>): void {
+    if (this.isDispatcher(info)) throw new DispatcherChatRefused();
   }
 
   isPersonal(info: Pick<SessionInfo, 'kind' | 'orchestratorRole'>): boolean {

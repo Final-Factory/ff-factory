@@ -96,6 +96,17 @@ export async function sendMessage(request: APIRequestContext, sessionId: string,
   expect(r.ok(), await r.text()).toBeTruthy();
 }
 
+/**
+ * Send a message to an orchestrator's chat as its person would. The dispatcher takes no person's message (the API
+ * refuses it), so a test that needs its fake model to take a turn goes through the test server's own door (e2e/server.ts).
+ */
+export async function sendToChat(request: APIRequestContext, sessionId: string, text: string) {
+  if ((await appState(request)).dispatcherId !== sessionId) return sendMessage(request, sessionId, text);
+  const port = Number(new URL(test.info().project.use.baseURL!).port) + 200;
+  const r = await request.post(`http://127.0.0.1:${port}/dispatcher-turn`, { data: { text } });
+  expect(r.ok(), await r.text()).toBeTruthy();
+}
+
 /** Change the route without reloading the page (the app's routes live in the hash). */
 export async function go(page: Page, hash: string) {
   await page.evaluate((h) => {
