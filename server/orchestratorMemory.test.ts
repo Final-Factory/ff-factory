@@ -237,6 +237,11 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
   for (const x of [ben, loth, disp]) {
     assert.ok(x.systemPrompt.append.includes(`- **FFBox**: ${FFBOX_BRIEF} \`ffbox_activity\` (read-only)`), 'the FFBox paragraph is in the brief');
     assert.ok(!x.systemPrompt.append.includes('read-only for now'));
+    // The views it can ask FFBox live for (w218), named in the brief, so a stale schema copy in a resumed chat is not
+    // taken as the truth (w224).
+    for (const v of ['show config', 'board_log', 'status', 'conversation with id', 'Last known, from <time>', 'it is out of date: the tool takes all eight']) {
+      assert.ok(x.systemPrompt.append.includes(v), `the FFBox paragraph names ${v}`);
+    }
   }
   // The same folder after a fresh conversation (and after a restart: it depends only on who the chat is for).
   const again = opts(o.resetPersonal(BEN).info);

@@ -307,8 +307,14 @@ Ben's goal (2026-09-29) is that the ledger shows all dev work. Besides people's 
 
 ## Config
 
-Everything is off by default; config.json only (`set_app_config` cannot change it). `intakeSettings` fills the
-defaults and clamps the numbers.
+Everything is off by default. `intakeSettings` fills the defaults and clamps the numbers. It is all config.json
+only, except the `ffbox` block: an owner sets it with `set_app_config` key `intake.ffbox` and the whole block as the
+value (an object or its JSON; the block is replaced, so a key left out takes its default, and `null` removes it).
+Like every admin setting it runs only when a person asked in their own words, and only for an owner: the dispatcher
+takes it for a request an owner filed, or from an owner writing in its chat, and an `/mcp` key only when its login is an
+owner. Unknown keys and wrong types are refused, and nothing is written then. It applies at once. When it changes what
+the portal takes from FFBox (`board_check`, `request`), the connector is closed normally (1000) and reconnects within
+seconds to a new welcome that says so.
 
 ```json
 "intake": {
@@ -349,7 +355,8 @@ snowflakes; an entry that is not one trusts nobody.
    and your own Discord requests are ever auto-approved.
 6. Turn on `intake.release.enabled` once a fix has landed through the intake, and check the first follow-up.
 7. FFBox stays off until Lothsahn's side is ready (below): then `providers.ffbox.enabled` (docs/ffbox-integration.md),
-   `intake.ffbox.enabled` with `boardCheck: true`, and last `providers.ffbox.sendWork`. Leave `intake.discord.bugChannels`
+   `intake.ffbox.enabled` with `boardCheck: true` (`set_app_config` `intake.ffbox`, no restart), and last
+   `providers.ffbox.sendWork`. Leave `intake.discord.bugChannels`
    empty: FFBox owns #bug-reports (above).
 8. Standing agents that read Discord and file delegations for bug reports now duplicate the intake: pause them once
    the intake runs.

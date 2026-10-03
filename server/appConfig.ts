@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, ROOT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole } from './config.ts';
+import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, ROOT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
 import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret } from './secrets.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
@@ -52,8 +52,67 @@ export const SETTABLE_KEYS = [
   // write-only: only its SHA-256 is stored, as providers.ffbox.tokenSha256.
   'providers.ffbox.enabled',
   'providers.ffbox.token',
+  // The FFBox intake (docs/intake.md): its whole block at once, the owner's only (OWNER_ONLY_KEYS).
+  'intake.ffbox',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
+
+/** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox']);
+
+const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
+const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'autoApprove'];
+const GITHUB_REPO = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+
+/**
+ * intake.ffbox as set_app_config takes it (an object, or its JSON): known keys only, each of its type and range, the
+ * ranges intakeRules.ts intakeSettings() clamps to. The whole block is replaced, so a key left out takes its default.
+ */
+export function checkFfboxIntake(value: unknown): NonNullable<IntakeConfig['ffbox']> {
+  let o = value;
+  if (typeof o === 'string') {
+    try {
+      o = JSON.parse(o);
+    } catch {
+      throw new Error('intake.ffbox is an object (or its JSON), e.g. { "enabled": true, "boardCheck": true }');
+    }
+  }
+  if (typeof o !== 'object' || o === null || Array.isArray(o)) throw new Error('intake.ffbox is an object, e.g. { "enabled": true, "boardCheck": true }');
+  const r = o as Record<string, unknown>;
+  const unknown = Object.keys(r).filter((k) => !FFBOX_INTAKE_KEYS.includes(k));
+  if (unknown.length) throw new Error(`intake.ffbox: unknown key(s) ${unknown.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}; known: ${FFBOX_INTAKE_KEYS.join(', ')}`);
+  const out: NonNullable<IntakeConfig['ffbox']> = {};
+  for (const k of FFBOX_INTAKE_FLAGS) {
+    if (r[k] === undefined) continue;
+    if (typeof r[k] !== 'boolean') throw new Error(`intake.ffbox.${k} is true or false`);
+    out[k] = r[k];
+  }
+  if (r.repo !== undefined) {
+    if (typeof r.repo !== 'string' || !GITHUB_REPO.test(r.repo.trim())) throw new Error('intake.ffbox.repo is a GitHub owner/name, e.g. "Final-Factory/FinalFactory"');
+    out.repo = r.repo.trim();
+  }
+  if (r.dailyCap !== undefined) {
+    if (!Number.isInteger(r.dailyCap) || (r.dailyCap as number) < 0 || (r.dailyCap as number) > 200) throw new Error('intake.ffbox.dailyCap is a whole number from 0 to 200');
+    out.dailyCap = r.dailyCap as number;
+  }
+  if (r.autoApprove !== undefined) {
+    const a = r.autoApprove;
+    if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error('intake.ffbox.autoApprove is an object: { "enabled": false, "maxPerDay": 3 }');
+    const aa = a as Record<string, unknown>;
+    const bad = Object.keys(aa).filter((k) => k !== 'enabled' && k !== 'maxPerDay');
+    if (bad.length) throw new Error(`intake.ffbox.autoApprove: unknown key(s) ${bad.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}; known: enabled, maxPerDay`);
+    out.autoApprove = {};
+    if (aa.enabled !== undefined) {
+      if (typeof aa.enabled !== 'boolean') throw new Error('intake.ffbox.autoApprove.enabled is true or false');
+      out.autoApprove.enabled = aa.enabled;
+    }
+    if (aa.maxPerDay !== undefined) {
+      if (!Number.isInteger(aa.maxPerDay) || (aa.maxPerDay as number) < 0 || (aa.maxPerDay as number) > 100) throw new Error('intake.ffbox.autoApprove.maxPerDay is a whole number from 0 to 100');
+      out.autoApprove.maxPerDay = aa.maxPerDay as number;
+    }
+  }
+  return out;
+}
 
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 
@@ -185,6 +244,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       if (typeof value !== 'string' || !PROVIDER_TOKEN.test(value.trim())) throw new Error('providers.ffbox.token must be a connector token (ffpv1_ and 43 characters, from `node server/providerToken.ts`); the value given is not one (not shown)');
       return tokenSha256(value.trim());
     }
+    case 'intake.ffbox':
+      return checkFfboxIntake(value);
     case 'voice.ttsVoice': {
       if (typeof value !== 'string' || !/^[a-z]{2}_[a-z]+$/.test(value.trim())) throw new Error('voice.ttsVoice is a Kokoro voice name such as "af_heart" or "bm_george"');
       return value.trim();
@@ -290,6 +351,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else ffbox.tokenSha256 = v as string | undefined;
     cfg.providers = { ...cfg.providers, ffbox };
   }
+  else if (key === 'intake.ffbox') cfg.intake = { ...cfg.intake, ffbox: v as IntakeConfig['ffbox'] };
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;

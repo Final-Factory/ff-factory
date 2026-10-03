@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **`set_app_config` sets the FFBox intake** (w224; [docs/intake.md](docs/intake.md#config)). Key `intake.ffbox`, the
+  whole block as the value: `enabled`, `branches`, `diagnoses`, `requests`, `boardCheck`, `escalations`, `repo`,
+  `dailyCap` and `autoApprove.{enabled,maxPerDay}`. An owner's setting only, behind the same "the person asked in
+  their own words" guard as the other admin settings; unknown keys and wrong types are refused. It applies at once,
+  and when it changes what the portal takes from FFBox (`board_check`, `request`) the connector is closed normally
+  and reconnects to a new welcome. Until now the ledger check could be switched on only by editing config.json on
+  BEAST, so FFBox's `board_log` showed `not_asked: portal_takes_no_board_check`.
+
 - **FFBox's CPU, RAM and disk in the sidebar** (w218; [contract](docs/ffbox-connector-contract.md#metrics-protocol-2)).
   FFBox's connector pushes its load averages and core count, memory and swap in use, and each disk's free space (named
   by role, never by path) every 30 s. The sidebar shows FFBox among the computers with the machines' meters. CPU is
@@ -30,6 +38,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   connector is never asked and an older portal never asks. Adding a query is a short, documented step in both repos.
 
 ### Fixed
+
+- **`ffbox_activity` describes all its views** (w224). The schema itself was one definition for every belt and
+  current since w218, but its description and the FFBox paragraph of both orchestrators' briefs did not name all the
+  views, and some orchestrators still saw the old four-value enum (most likely a schema copy loaded before the deploy
+  and kept in a resumed chat), so they assumed `config`, `board_log`, `status` and `conversation` did not exist. The description now lists each view,
+  what it returns, the `id` and paging args, the "Last known, from <time>" fallback and that player text is untrusted;
+  the brief names the live views and says an older schema copy in the chat is out of date. docs/ffbox.md has a table.
 
 - **A hard crash no longer takes the portal down** ([docs/self-recovery.md](docs/self-recovery.md#6-crash-safe-data-files)).
   On 2026-09-30 BEAST crashed while saving `data/state.json` and left it full of zero bytes; every start failed to

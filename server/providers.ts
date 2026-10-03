@@ -79,6 +79,8 @@ interface Link {
   refilled: number;
   invalid: number[];
   helloTimer?: NodeJS.Timeout;
+  /** What the welcome said the portal takes (protocol 2), so a change of the intake settings can renew it. */
+  welcomeAccepts?: string[];
 }
 
 /** A query's answer as it was received, kept for the fallback. */
@@ -359,15 +361,27 @@ export class ProviderManager {
     } else link.ws.ping();
   }
 
-  /** Called after providers.ffbox.* changed: drop a connection that is no longer allowed, refresh the card. */
-  configChanged() {
+  /**
+   * Called after providers.ffbox.* or intake.* changed: drop a connection that is no longer allowed, refresh the card.
+   * The connector learns what the portal takes (board_check, request) only from the welcome, so when that changed the
+   * link is closed normally (1000) and the connector's reconnect, about 2 s later, gets a new welcome. Returns what
+   * happened to the link: "off" (closed, switched off), "relinked" (closed for a new welcome), or undefined.
+   */
+  configChanged(): 'off' | 'relinked' | undefined {
     const link = this.link;
     if (link && !this.enabled) {
       link.ws.close(CLOSE.disabled, 'switched off in FF Factory');
       this.detach('switched off');
-      return;
+      return 'off';
+    }
+    const now = link?.welcomeAccepts ? [...(this.portalAccepts?.() ?? []), 'metrics'] : undefined;
+    if (link && now && now.join(' ') !== link.welcomeAccepts!.join(' ')) {
+      link.ws.close(1000, 'settings changed in FF Factory: reconnect for a new welcome');
+      this.detach('closed for a new welcome (settings changed)');
+      return 'relinked';
     }
     this.changed();
+    return undefined;
   }
 
   private invalid(link: Link, code: Extract<ToConnector, { type: 'error' }>['code'], message: string, ref?: string) {
@@ -419,14 +433,15 @@ export class ProviderManager {
       this.data.queries = parsed.data.accepts?.includes('query') ? (parsed.data.queries ?? []) : [];
       this.data.lastSeen = new Date(now).toISOString();
       this.statusDetail = undefined;
+      // metrics is the provider's own: taken whatever the intake settings say.
+      if (link.protocol >= 2) link.welcomeAccepts = [...(this.portalAccepts?.() ?? []), 'metrics'];
       this.send(link, {
         type: 'welcome',
         protocol: link.protocol,
         provider: 'ffbox',
         cursors: { ...this.data.cursors },
         limits: LIMITS,
-        // metrics is the provider's own: taken whatever the intake settings say.
-        ...(link.protocol >= 2 ? { accepts: [...(this.portalAccepts?.() ?? []), 'metrics'] } : {}),
+        ...(link.welcomeAccepts ? { accepts: link.welcomeAccepts } : {}),
       });
       console.log(`provider ${this.id}: connector ${parsed.data.connector.version} connected`);
       this.changed();

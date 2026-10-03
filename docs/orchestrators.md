@@ -29,7 +29,10 @@ the ledger.
 Both briefs describe the same world (`worldBrief` in `server/agents.ts`). Its FFBox paragraph is Lothsahn's text,
 verbatim (`FFBOX_BRIEF`): what FFBox is, that it owns #bug-reports and dev_bug_reports, and that the ffbox repo can be
 changed through workers, who push straight to its master one change at a time because a push goes live on the box within
-about five minutes. The longer version is [ffbox.md](ffbox.md). `ffbox_activity` stays read-only.
+about five minutes. The longer version is [ffbox.md](ffbox.md). After it, the paragraph names `ffbox_activity`'s views,
+the live ones too (`config`, `board_log`, `status`, `conversation` with `id`) and the "Last known, from <time>"
+fallback, and says that a copy of the tool's schema earlier in a resumed chat may list fewer views and is out of date.
+`ffbox_activity` stays read-only.
 
 Both are sessions of kind `orchestrator`, so neither takes an agent slot, and both keep the orchestrator's limits: no
 shell, no web tools, `Read`/`Glob`/`Grep` on the base clone, and `Write`/`Edit` only in their own memory folder
