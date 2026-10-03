@@ -20,7 +20,7 @@ import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './
 import { AgentSession, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import { HostMigrator, hostSandboxFrom } from './hostMigration.ts';
 import { WORK_OPEN, WORK_PRIORITIES, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
-import { publicRef, type AttachmentStore } from './attachments.ts';
+import { attachmentForMachine, publicRef, type AttachmentStore } from './attachments.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine } from '../shared/attachments.ts';
 import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
 import { accountSource, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
@@ -312,9 +312,7 @@ export class Agents {
    */
   private attachmentForMachine(machineId: string, id: unknown): string {
     if (!this.attachments) throw new Error('attachments are not wired into this server');
-    const [a] = this.attachments.resolve([String(id ?? '')]);
-    this.attachments.grant(machineId, [a.id]);
-    return JSON.stringify(publicRef(a));
+    return attachmentForMachine(this.attachments, machineId, id);
   }
 
   // ---------------------------------------------------------------- lifecycle

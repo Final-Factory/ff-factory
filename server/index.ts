@@ -28,7 +28,7 @@ import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { keepMessageImages } from './inlineImages.ts';
-import { AttachmentError, AttachmentStore, downloadDisposition, publicRef } from './attachments.ts';
+import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, publicRef } from './attachments.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
@@ -1137,10 +1137,9 @@ const server = http.createServer(async (req, res) => {
     const machineFile = req.method === 'GET' ? /^\/machine\/attachments\/(att_[a-z0-9]{12})$/.exec(url.pathname) : null;
     if (machineFile) {
       const machineId = machines.authenticate(req.headers.authorization);
-      if (!machineId || !store.machines.has(machineId)) return send(res, 401, { error: 'a machine token is required' });
-      const a = attachments.get(machineFile[1]);
-      if (!a || !attachments.granted(machineId, a.id)) return send(res, 404, { error: 'no such attachment for this machine' });
-      return sendStream(req, res, new StreamReply('application/octet-stream', attachments.pathOf(a), a.size, downloadDisposition(a.name)));
+      const r = machineAttachment(attachments, machineId && store.machines.has(machineId) ? machineId : undefined, machineFile[1]);
+      if ('error' in r) return send(res, r.status, { error: r.error });
+      return sendStream(req, res, new StreamReply('application/octet-stream', r.file, r.record.size, downloadDisposition(r.record.name)));
     }
     // The nightly e2e lab's report (docs/intake.md, "Nightly e2e regressions"): a key minted --scope nightly, nothing else.
     if (url.pathname === '/api/intake/nightly' && req.method === 'POST') {

@@ -358,6 +358,27 @@ export class AttachmentStore {
   }
 }
 
+/**
+ * GET /machine/attachments/<id> (docs/attachments.md): what a machine's daemon may fetch. `machineId` is the machine its
+ * token proved, or undefined; it gets only an attachment the portal handed it (grant) lately.
+ */
+export function machineAttachment(store: AttachmentStore, machineId: string | undefined, id: string): { status: 401 | 404; error: string } | { record: AttachmentRecord; file: string } {
+  if (!machineId) return { status: 401, error: 'a machine token is required' };
+  const a = store.get(id);
+  if (!a || !store.granted(machineId, a.id)) return { status: 404, error: 'no such attachment for this machine' };
+  return { record: a, file: store.pathOf(a) };
+}
+
+/**
+ * fetch_attachment from an agent on a machine: the record, as JSON, and leave for that machine's daemon to fetch the
+ * file, which it then does into the agent's Inbox itself (machine/daemon.ts).
+ */
+export function attachmentForMachine(store: AttachmentStore, machineId: string, id: unknown): string {
+  const [a] = store.resolve([String(id ?? '')]);
+  store.grant(machineId, [a.id]);
+  return JSON.stringify(publicRef(a));
+}
+
 /** What agents and the page get of a record: no uploader or dates. */
 export function publicRef(r: AttachmentRef): AttachmentRef {
   return { id: r.id, name: r.name, size: r.size, sha256: r.sha256, kind: r.kind, mediaType: r.mediaType };
