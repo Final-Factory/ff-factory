@@ -36,7 +36,7 @@ import {
 import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, parseMarkers, quoteUntrusted, sourceTag } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
 import { displayName } from '../shared/labels.ts';
-import type { AttachmentRef, Machine, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, Machine, WorkAutoClosed, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -948,6 +948,37 @@ export class Orchestrators {
     w.outcome = clip(outcome, 300);
     this.stamp(w, outcome);
     this.store.putWork(w);
+  }
+
+  /**
+   * Close intake requests as done because their work already merged (server/mergedIntake.ts): no reviewer, no worker, and
+   * the dispatcher is not told. Each one logs how, and the people they are for hear one line per batch. Returns the ids closed.
+   */
+  closeMerged(batch: { id: string; closed: WorkAutoClosed }[]): string[] {
+    const closed: WorkItem[] = [];
+    for (const { id, closed: how } of batch) {
+      const w = this.store.work.get(id);
+      if (!w || !isOpen(w) || w.status === 'active' || w.sessionIds.length) continue;
+      const at = this.now().toISOString();
+      w.status = 'done';
+      w.autoClosed = { ...how, at };
+      w.outcome = clip(`closed automatically: ${how.text}`, 300);
+      this.stamp(w, `closed automatically, no review needed: ${how.text}`);
+      this.store.putWork(w);
+      closed.push(w);
+    }
+    const byPerson = new Map<string, { who: Requester; lines: string[] }>();
+    for (const w of closed) {
+      for (const r of w.requesters) {
+        const e = byPerson.get(r.userId.toLowerCase()) ?? { who: r, lines: [] };
+        e.lines.push(`${w.id} "${clip(w.title, 70)}" (${w.autoClosed!.text})`);
+        byPerson.set(r.userId.toLowerCase(), e);
+      }
+    }
+    for (const { who, lines } of byPerson.values()) {
+      this.toPeople([who], `[intake auto-closed] ${lines.length === 1 ? '1 intake request' : `${lines.length} intake requests`} closed as done, their work already merged; nothing to review: ${lines.join('; ')}`);
+    }
+    return closed.map((w) => w.id);
   }
 
   /**
