@@ -3,7 +3,7 @@
 // sandbox and editor counts), its sandboxes with their live agents, and a machine's main-clone agents.
 import { useState, type ReactNode } from 'react';
 import type { AppState, HostHealth, Machine, Provider, SessionInfo } from '../../../shared/types';
-import { metricsAsHostStats, metricsLine, metricsStale } from '../../../shared/providerMetrics';
+import { cpuPct, memPct, metricsLine, metricsStale } from '../../../shared/providerMetrics';
 import { capacityLine, fleetOf, type FleetComputer, type FleetSandbox, type PlaceAgents } from '../../../shared/fleet';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
@@ -329,6 +329,10 @@ export function FleetGroups({ app, sel, go, onNewSandbox }: { app: AppState; sel
   const [collapsed, toggle] = useCollapsed();
   return (
     <>
+      {/* Providers first: a short group with no sandboxes, so it stays in view above the machines' lists. */}
+      {(app.providers ?? []).map((p) => (
+        <ProviderGroup key={p.id} p={p} now={now} go={go} />
+      ))}
       {fleetFor(app).map((c) => {
         const closed = collapsed.has(c.key);
         return (
@@ -340,36 +344,36 @@ export function FleetGroups({ app, sel, go, onNewSandbox }: { app: AppState; sel
           </div>
         );
       })}
-      {(app.providers ?? []).map((p) => (
-        <ProviderGroup key={p.id} p={p} now={now} go={go} />
-      ))}
     </>
   );
 }
 
+/** "425G": a byte count in the unit's letter only, so the cells fit the sidebar. */
+const short = (n: number) => fmtBytes(n).replace(/ ([KMGT])B$/, '$1');
+
 /**
- * A provider among the computers (FFBox): its load line from the metrics its connector pushes, drawn like a machine's.
- * Stale after two minutes without an update; "no metrics" for a connector that sends none. It opens the provider's page.
+ * A provider among the computers (FFBox), from the metrics its connector pushes (shared/providerMetrics.ts): CPU as the
+ * 1-minute load over the logical cores (above 100% when more is runnable than it has cores), RAM used of total, GPU
+ * "none" (its classes are CPU-only), and free of total for each filesystem it names. After two minutes without an
+ * update, or with the connector gone, the last numbers stay, dimmed, under a "stale" or "offline" marker. It opens the
+ * provider's page.
  */
 function ProviderGroup({ p, now, go }: { p: Provider; now: number; go: (r: Route) => void }) {
   const m = p.metrics;
   const stale = !!m && metricsStale(m, now);
-  const fresh = m && !stale && p.online ? m : undefined;
-  const c: FleetComputer = {
-    key: `provider-${p.id}`,
-    name: p.name,
-    host: false,
-    platform: 'linux',
-    online: p.online,
-    stats: fresh ? metricsAsHostStats(fresh) : undefined,
-    sandboxes: [],
-    editors: 0,
-    live: 0,
-    busy: 0,
-    attention: 0,
-  };
   const tone: Tone = !p.online ? 'grey' : stale || !m ? 'amber' : 'green';
-  const off = !m ? 'no metrics' : !p.online ? `offline · seen ${fmtRelative(p.lastSeen ?? m.receivedAt, now)}` : `stale · updated ${fmtRelative(m.receivedAt, now)}`;
+  const marker = !m ? undefined : !p.online ? `offline · seen ${fmtRelative(p.lastSeen ?? m.receivedAt, now)}` : stale ? `stale · updated ${fmtRelative(m.receivedAt, now)}` : undefined;
+  const cpu = m && cpuPct(m);
+  const ram = m && memPct(m);
+  const hasGpu = p.capacity?.classes.some((k) => k.gpu);
+  const cells: { label: string; pct?: number; text: string; lvl: Lvl; hint?: string }[] = m
+    ? [
+        ...(cpu !== undefined && m.cpu ? [{ label: 'CPU', pct: cpu, text: `${Math.round(cpu)}%`, lvl: level(cpu), hint: `load ${m.cpu.load1} on ${m.cpu.cores} cores` }] : []),
+        ...(ram !== undefined && m.mem ? [{ label: 'RAM', pct: ram, text: `${short(m.mem.usedBytes)}/${short(m.mem.totalBytes)}`, lvl: level(ram, 85, 95) }] : []),
+        { label: 'GPU', text: hasGpu ? 'n/a' : 'none', lvl: 'ok' as Lvl, hint: hasGpu ? 'not reported' : 'CPU-only' },
+      ]
+    : [];
+  const disks = (m?.disks ?? []).filter((d) => d.totalBytes > 0);
   return (
     <div className="fl-group" data-testid={`fl-group-provider-${p.id}`}>
       <button className="fl-head" onClick={() => go({ view: 'provider', providerId: p.id })} title={`${p.name}: ${metricsLine(m, now)}`}>
@@ -377,10 +381,52 @@ function ProviderGroup({ p, now, go }: { p: Provider; now: number; go: (r: Route
           <Dot tone={tone} title={p.online ? (stale ? 'connected, metrics stale' : 'connected') : 'offline'} />
           <span className="fl-name">{p.name}</span>
           <span className="fl-os" data-testid="fl-os">
-            Linux · provider{p.online ? '' : ' · offline'}
+            Linux · provider{m?.cpu ? ` · ${m.cpu.cores} cores` : ''}
           </span>
+          {marker && (
+            <span className={`fl-stale-tag tone-${tone}`} data-testid="provider-metrics-stale">
+              {marker}
+            </span>
+          )}
         </span>
-        {c.stats ? <Meters c={c} now={now} /> : <span className="fl-meters fl-meters-off" data-testid="provider-metrics-off">{off}</span>}
+        {!m ? (
+          <span className="fl-meters fl-meters-off" data-testid="provider-metrics-off">
+            no metrics
+          </span>
+        ) : (
+          <span className={`fl-pv-meters${marker ? ' fl-stale' : ''}`} data-testid="provider-meters">
+            <span className="fl-meters">
+              {cells.map((c) => (
+                <span key={c.label} className="fl-meter" data-testid={`meter-${c.label}`} title={c.hint}>
+                  {c.pct !== undefined && (
+                    <span className={`mbar lvl-bg-${c.lvl}`} aria-hidden>
+                      <i style={{ height: `${Math.max(8, Math.min(100, c.pct))}%` }} />
+                    </span>
+                  )}
+                  {c.label} <b className={`lvl-${c.lvl}`}>{c.text}</b>
+                </span>
+              ))}
+            </span>
+            {disks.length > 0 && (
+              <span className="fl-pv-disks">
+                {disks.map((d) => {
+                  const used = ((d.totalBytes - d.freeBytes) / d.totalBytes) * 100;
+                  const lvl = level(used, 85, 95);
+                  return (
+                    <span key={d.role} className="fl-meter" data-testid="meter-disk" title={`${d.role}: ${fmtBytes(d.freeBytes)} free of ${fmtBytes(d.totalBytes)}`}>
+                      <span className={`mbar lvl-bg-${lvl}`} aria-hidden>
+                        <i style={{ height: `${Math.max(8, Math.min(100, used))}%` }} />
+                      </span>
+                      <span>
+                        {d.role} <b className={`lvl-${lvl}`}>{short(d.freeBytes)}</b>/{short(d.totalBytes)} free
+                      </span>
+                    </span>
+                  );
+                })}
+              </span>
+            )}
+          </span>
+        )}
       </button>
     </div>
   );

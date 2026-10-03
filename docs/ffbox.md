@@ -132,9 +132,13 @@ something is fixed.
   ([intake.md](intake.md)). Review those like any PR before merging.
 - **`ffbox_activity`** is the orchestrators' read-only view of what the connector reports, and
   asks FFBox live for its config, its ledger exchanges and its status ("Asking FFBox" below).
-- **Its load.** The connector pushes FFBox's CPU load, memory and disks every 30 s; the sidebar shows FFBox among the
-  computers with the same CPU, RAM and disk meters, stale after two minutes without an update, and `system_status`
-  has the numbers in FFBox's line.
+- **Its load.** The connector pushes FFBox's CPU load, memory and disks every 30 s. The sidebar shows FFBox as the
+  first group under Computers: CPU (load1 over the cores, above 100% when it is), RAM used of total, GPU "none", and
+  free of total for each filesystem. After two minutes without an update the last numbers stay, dimmed, under a
+  "stale" marker. `system_status` has the numbers in FFBox's line
+  ([sidebar](images/ffbox-sidebar-mobile.png)).
+- **Its page** lists the newest 100 conversations and intake reports, with "Show 100 more"; the header and the lists
+  scroll as one ([desktop](images/ffbox-scrolled-desktop.png), [phone](images/ffbox-scrolled-mobile.png)).
   `send_to_ffbox` hands a ledger request to FFBox once `providers.ffbox.sendWork` is on and the
   connector takes submits.
 
