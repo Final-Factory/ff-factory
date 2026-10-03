@@ -4,6 +4,7 @@
 import type { AppState, Provider } from '../../../shared/types';
 import { fmtRelative, maxGlance, navigate, providerGlance, useNow, type Glance, type Route } from '../util';
 import { Dot } from './ui';
+import { updaterHealth } from '../../../shared/updaterHealth';
 
 /** FFBox in a word or two: off, no token, offline, draining, or its free slots. */
 export function ffboxShort(p: Provider, now: number): { tone: Glance['tone']; text: string } {
@@ -11,6 +12,7 @@ export function ffboxShort(p: Provider, now: number): { tone: Glance['tone']; te
   if (!p.enabled) return { tone: 'grey', text: 'off' };
   if (!p.tokenSet) return { tone: g.tone, text: 'no token' };
   if (!p.online) return { tone: g.tone, text: 'offline' };
+  if (g.label === 'Updates failing') return { tone: g.tone, text: 'updates failing' };
   const free = p.capacity?.classes.reduce((n, k) => n + k.free, 0);
   if (p.capacity && p.capacity.state !== 'running') return { tone: g.tone, text: p.capacity.state };
   return { tone: g.tone, text: free !== undefined ? `${free} free` : 'on' };
@@ -49,7 +51,7 @@ export function ExternalStrip({ app, route, onNavigate }: { app: AppState; route
         <button
           className={`ext-cell${route.view === 'provider' && route.providerId === 'ffbox' ? ' active' : ''}`}
           onClick={() => go({ view: 'provider', providerId: 'ffbox' })}
-          title={`FFBox: ${providerGlance(f, now).label}${f.lastSeen && !f.online ? ` (seen ${fmtRelative(f.lastSeen, now)})` : ''}`}
+          title={`FFBox: ${providerGlance(f, now).label}${f.lastSeen && !f.online ? ` (seen ${fmtRelative(f.lastSeen, now)})` : ''}${f.online && updaterHealth(f.updater, now) ? `\n${updaterHealth(f.updater, now)!.line}` : ''}`}
           data-testid="external-ffbox"
         >
           <Dot tone={fs.tone} pulse={fs.tone === 'blue'} />

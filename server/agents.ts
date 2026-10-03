@@ -1972,7 +1972,9 @@ To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`A
         wrap(async ({ show, limit, id, offset }) => {
           const p = this.providers;
           if (!p) return 'FFBox is not wired into this server.';
-          if (show === 'config' || show === 'status') return describeQuery(await p.query(show));
+          if (show === 'config') return describeQuery(await p.query(show));
+          // The updater line from what FFBox pushed, above the live answer (which carries the same block as `updater`).
+          if (show === 'status') return [p.updaterLine() ?? 'FFBox updates: not reported (a connector from before w265)', describeQuery(await p.query(show))].join('\n');
           if (show === 'board_log') return describeQuery(await p.query('board_log', { limit: Math.min(limit ?? 20, 50) }));
           if (show === 'conversation') {
             if (id === undefined) return 'show: "conversation" needs id (an FFBox conversation id; show: "conversations" lists them).';

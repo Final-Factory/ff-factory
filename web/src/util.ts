@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { AppVersion, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
+import { updaterHealth } from '../../shared/updaterHealth';
 
 export { displayName, isUnused };
 
@@ -330,11 +331,16 @@ export function machineGlance(m: Machine, sessions: SessionInfo[], now: number):
   return g.label === 'Idle' || g.label === 'No agents' ? { ...g, tone: 'green', label: 'Online' } : g;
 }
 
-/** FFBox at a glance: switched off, waiting for its connector, offline, or online with its free slots. */
+/**
+ * FFBox at a glance: switched off, waiting for its connector, offline, updates failing (a checkout its self-updater
+ * cannot update, or an updater that has stopped running: shared/updaterHealth.ts), or online with its free slots.
+ */
 export function providerGlance(p: Provider, now: number): Glance {
   if (!p.enabled) return { tone: 'grey', label: 'Switched off', attention: 0 };
   if (!p.tokenSet) return { tone: 'amber', label: 'No connector token', attention: 0 };
   if (!p.online) return { tone: p.lastSeen ? 'red' : 'grey', label: p.lastSeen ? 'Connector offline' : 'Waiting for the connector', detail: p.lastSeen ? `seen ${fmtRelative(p.lastSeen, now)}` : undefined, attention: 0 };
+  const u = updaterHealth(p.updater, now);
+  if (u && u.state !== 'ok') return { tone: 'red', label: 'Updates failing', detail: u.line.replace(/^FFBox updates failing: /, ''), attention: 0 };
   const c = p.capacity;
   const free = c ? c.classes.reduce((n, k) => n + k.free, 0) : undefined;
   if (c && c.state !== 'running') return { tone: 'amber', label: c.state === 'draining' ? 'Draining' : c.state === 'updating' ? 'Updating' : 'Stopped', attention: 0 };

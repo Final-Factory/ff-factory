@@ -7,6 +7,7 @@ import type { IntakeGroups, Provider, ProviderClass, ProviderConversation, Provi
 import { api } from '../api';
 import { fmtCost, fmtRelative, navigate, providerGlance, useNow, type Glance } from '../util';
 import { Chip, Dot, Icon } from './ui';
+import { updaterHealth } from '../../../shared/updaterHealth';
 
 type Tab = 'conversations' | 'signatures' | 'intake';
 
@@ -29,6 +30,7 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
   // The newest PAGE of each list at first; "Show more" asks for the next PAGE (the server keeps 500 conversations and 2000 reports).
   const [limits, setLimits] = useState({ conversations: PAGE, intake: PAGE });
   const g = providerGlance(p, now);
+  const updater = updaterHealth(p.updater, now);
 
   // Refetch when the summary moves (a new report, a conversation update, a reconnect); the socket carries only the summary.
   const version = `${p.counts.conversations}/${p.counts.active}/${p.counts.intake}/${p.lastIntakeAt}/${p.lastSeen}/${p.online}`;
@@ -127,6 +129,19 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
           </div>
         )}
         {c && c.holds.length > 0 && <p className="small tone-amber">Waiting: {c.holds.join(' · ')}</p>}
+        {updater && p.updater && (
+          <p
+            className={`small ${updater.state === 'ok' ? 'dim' : 'tone-red'}`}
+            data-testid="provider-updater"
+            title={[
+              ...p.updater.checkouts.map((k) => `${k.name}${k.path ? ` (${k.path})` : ''}: ${k.status}${k.message ? `, ${k.message}` : ''}${k.local ? `; local ${k.local.slice(0, 7)}` : ''}${k.origin ? `, origin ${k.origin.slice(0, 7)}` : ''}${k.okAt ? `; last ok ${when(k.okAt)}` : ''}${k.updatedAt ? `; last updated ${when(k.updatedAt)}` : ''}`),
+              ...p.updater.warnings,
+            ].join('\n')}
+          >
+            {updater.state !== 'ok' && <Dot tone="red" />} {updater.line}
+            {p.updater.runningSince && Date.parse(p.updater.runningSince) > Date.parse(p.updater.at) ? ` · a pass is running (since ${fmtRelative(p.updater.runningSince, now)})` : ''}
+          </p>
+        )}
       </header>
 
       {setup ? (

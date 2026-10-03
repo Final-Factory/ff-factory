@@ -108,7 +108,7 @@ FF Factory answers with `welcome`:
   "cursors": { "conversation": "2026-09-27T09:20:00Z#812", "intake": "20260927T090000Z-desync-3a9f01c2d4" },
   "limits": { "maxMessageBytes": 65536, "messagesPerSecond": 100, "burst": 1000, "helloTimeoutMs": 10000, "invalidPerMinute": 20 },
   "accepts": ["board_check", "board_summary", "request", "accepted", "refused", "result", "metrics",
-              "dev_request", "dev_chunk", "dev_message", "dev_received"] }
+              "dev_request", "dev_chunk", "dev_message", "dev_received", "updater"] }
 ```
 
 `protocol` echoes the hello's when it is `1` or `2`, and is `2` otherwise. `accepts` is the same static list on every
@@ -650,3 +650,35 @@ role (`root`, `state`, `golden`, `runs`, `cache`, `reports`, `docker`, joined wi
 never by path; a role outside `^[a-z][a-z+]{0,63}$` is refused. FF Factory keeps the latest and the last half hour of
 CPU and RAM percentages, and shows the numbers as stale when none has arrived for two minutes. FFBox does not send a
 reading older than five minutes. The `status` query carries the same numbers.
+
+## `updater` (w265)
+
+How FFBox's self-updater's last pass went, per checkout it pulls (ffbox itself, the agents checkout). Written by
+FFBox's `scripts/update_state.py` at the start and end of every pass (every 3 minutes) and sent when it changes and
+once on every new link; the `status` query's answer carries the same block as `updater`.
+
+```json
+{"type": "updater", "updater": {
+  "at": "2026-10-03T18:00:00Z", "interval_secs": 180, "ok": false, "since": "2026-10-03T17:00:00Z",
+  "running_since": "2026-10-03T18:03:00Z",
+  "checkouts": [
+    {"name": "ffbox", "path": "/opt/ffbox", "status": "ok", "ok": true, "local": "<40 hex>", "origin": "<40 hex>",
+     "since": "2026-10-01T00:00:00Z", "checked_at": "2026-10-03T18:00:00Z", "ok_at": "2026-10-03T18:00:00Z"},
+    {"name": "agents", "path": "/opt/final-factory-agents", "status": "diverged", "ok": false,
+     "local": "<40 hex>", "origin": "<40 hex>",
+     "message": "diverged from origin/master; not taking its commits. Fix it by hand",
+     "since": "2026-10-03T17:00:00Z", "checked_at": "2026-10-03T18:00:00Z"}],
+  "warnings": ["WARNING: the agents checkout (/opt/final-factory-agents) has diverged from origin/master — ..."]}}
+```
+
+Required: `at`, `ok`, and each checkout's `name`, `status` and `ok`; everything else is optional, and unknown fields
+are ignored. `status` is a word (`ok`, `ahead`, `diverged`, `dirty`, `failed`, `missing`, `disabled`, or a newer one):
+FF Factory goes by `ok`, so FFBox can add a word without a portal release. `since` is when the status (per checkout)
+or the overall `ok` began; `ok_at` the last pass that found the checkout ok, `updated_at` the last that moved it to new
+commits; `running_since` is present while a pass runs. Paths, commits and the updater's own messages; never a credential.
+
+FF Factory shows FFBox red, "FFBox updates failing: <checkout> <reason>, since <time>", in the sidebar, on the FFBox
+page, in `system_status` and in `ffbox_activity` (summary and status), when a checkout is not ok, or when neither `at`
+nor `running_since` is newer than three `interval_secs` (180 when absent): a stalled updater counts as failing
+(`shared/updaterHealth.ts`). A connector from before w265 sends none and nothing is said. A portal from before w265
+answers `error` `unsupported` (ref `updater`), and the connector stops sending it on that link.

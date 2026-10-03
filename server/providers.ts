@@ -36,8 +36,9 @@ import {
   type ResultMessage,
   type QueryResult,
 } from './providerProtocol.ts';
-import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent, ProviderMetrics } from '../shared/types.ts';
+import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent, ProviderMetrics, ProviderUpdater } from '../shared/types.ts';
 import { metricsLine } from '../shared/providerMetrics.ts';
+import { updaterHealth } from '../shared/updaterHealth.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { emptyDevState, type DevLink, type DevRequests, type DevState } from './devRequests.ts';
 
@@ -68,6 +69,8 @@ interface Persisted {
   answers?: Record<string, KeptAnswer>;
   /** The last metrics pushed. */
   metrics?: ProviderMetrics;
+  /** The self-updater's last pass, as last pushed. */
+  updater?: ProviderUpdater;
   capacity?: ProviderCapacity;
   lastSeen?: string;
   conversations: ProviderConversation[];
@@ -258,6 +261,7 @@ export class ProviderManager {
       ...(this.data.lastQuery ? { lastQuery: this.data.lastQuery } : {}),
       ...(this.data.lastClose ? { lastClose: this.data.lastClose } : {}),
       ...(this.data.metrics ? { metrics: this.data.metrics } : {}),
+      ...(this.data.updater ? { updater: this.data.updater } : {}),
       capacity: this.data.capacity,
       counts: {
         conversations: this.data.conversations.length,
@@ -299,7 +303,7 @@ export class ProviderManager {
     if (!p.tokenSet) return 'FFBox: enabled, but no connector token is set (node server/providerToken.ts)';
     if (!p.online) {
       const close = p.statusDetail ?? (p.lastClose ? `last close ${p.lastClose.code}${p.lastClose.reason ? `: ${p.lastClose.reason}` : ''} (${p.lastClose.at})` : undefined);
-      return [`FFBox: connector offline${p.lastSeen ? ` (last seen ${p.lastSeen})` : ' (never connected)'}`, ...(close ? [close] : []), ...(p.metrics ? [metricsLine(p.metrics, this.now())] : [])].join(' · ');
+      return [`FFBox: connector offline${p.lastSeen ? ` (last seen ${p.lastSeen})` : ' (never connected)'}`, ...(close ? [close] : []), ...(p.metrics ? [metricsLine(p.metrics, this.now())] : []), ...(this.updaterLine() ? [this.updaterLine()!] : [])].join(' · ');
     }
     const c = p.capacity;
     const models = (k: ProviderClass) => (k.models?.length ? k.models.map((m) => `${m.requester}: ${m.model} ${m.tier}`).join(', ') : `${k.model}, ${k.tier}`);
@@ -309,11 +313,20 @@ export class ProviderManager {
       `FFBox: online, connector ${p.connector?.version ?? '?'}${p.connector?.commit ? ` (${p.connector.commit.slice(0, 7)})` : ''}${p.remote ? ` from ${p.remote}` : ''}`,
       c ? `${c.state}; ${classes || 'no classes'}; queue ${c.queue}${c.holds.length ? `; holds: ${c.holds.join(' | ')}` : ''}` : 'no capacity report yet',
       ...(p.ffwatch ? [p.ffwatch.up ? 'ffwatch up' : `ffwatch DOWN${p.ffwatch.at ? ` since ${p.ffwatch.at}` : ''}`] : []),
+      ...(this.updaterLine() ? [this.updaterLine()!] : []),
       `${p.counts.active} conversation(s) running or queued; ${p.counts.intake24h} intake report(s) in 24 h${this.dev ? `; ${this.dev.count24h()} dev request(s) in 24 h` : ''}`,
       ...(q ? [`last query: ${q.what} ${q.ok ? 'ok' : (q.error ?? 'failed')} ${q.at}`] : []),
       metricsLine(p.metrics, this.now()),
       ...(this.ledgerProblem() ? [this.ledgerProblem()!] : []),
     ].join(' · ');
+  }
+
+  /**
+   * The self-updater in one line (shared/updaterHealth.ts): "FFBox updates failing: <checkout> <reason>, since <time>",
+   * or "FFBox updates ok: ...". Undefined when FFBox has never sent one.
+   */
+  updaterLine(): string | undefined {
+    return updaterHealth(this.data.updater, this.now())?.line;
   }
 
   /** When this portal answered FFBox's board_check with not_enabled (the ledger check off here), the last 24 h. */
@@ -631,6 +644,35 @@ export class ProviderManager {
       case 'metrics': {
         const { type: _type, ...m } = msg;
         this.data.metrics = { ...m, receivedAt: at };
+        return this.changed();
+      }
+      case 'updater': {
+        const u = msg.updater;
+        const was = updaterHealth(this.data.updater, this.now())?.state;
+        this.data.updater = {
+          at: u.at,
+          ...(u.interval_secs !== undefined ? { intervalSecs: u.interval_secs } : {}),
+          ok: u.ok,
+          ...(u.since ? { since: u.since } : {}),
+          ...(u.running_since ? { runningSince: u.running_since } : {}),
+          checkouts: u.checkouts.map((c) => ({
+            name: c.name,
+            status: c.status,
+            ok: c.ok,
+            ...(c.path ? { path: cleanText(c.path, 200) } : {}),
+            ...(c.local ? { local: c.local } : {}),
+            ...(c.origin ? { origin: c.origin } : {}),
+            ...(c.message ? { message: cleanText(c.message, 400) } : {}),
+            ...(c.since ? { since: c.since } : {}),
+            ...(c.checked_at ? { checkedAt: c.checked_at } : {}),
+            ...(c.ok_at ? { okAt: c.ok_at } : {}),
+            ...(c.updated_at ? { updatedAt: c.updated_at } : {}),
+          })),
+          warnings: u.warnings.map((w) => cleanText(w, 400)).filter(Boolean),
+          receivedAt: at,
+        };
+        const h = updaterHealth(this.data.updater, this.now());
+        if (h && h.state !== was) console.log(`provider ${this.id}: ${h.line}`);
         return this.changed();
       }
       case 'query_result': {
