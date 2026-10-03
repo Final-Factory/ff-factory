@@ -139,7 +139,7 @@ export function Sidebar({
 
         {attention.length > 0 && <AttentionList items={attention} onPick={onNavigate} />}
 
-        <Section title="Computers" count={app.machines.filter((m) => !m.local).length + 1} add="New sandbox" onAdd={onNewSandbox}>
+        <Section title="Computers" count={app.machines.filter((m) => !m.local).length + 1 + (app.providers?.length ?? 0)} add="New sandbox" onAdd={onNewSandbox}>
           <FleetGroups app={app} sel={selection} go={go} onNewSandbox={onNewSandbox} />
           <button className="link-btn fl-add-machine" onClick={onNewMachine}>
             {app.machines.length ? 'Add a machine' : 'Add a Mac or Windows PC where agents can work'}

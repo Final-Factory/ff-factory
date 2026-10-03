@@ -26,6 +26,8 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
   const [intake, setIntake] = useState<ProviderIntakeEvent[]>();
   const [groups, setGroups] = useState<IntakeGroups>();
   const [error, setError] = useState<string>();
+  // The newest PAGE of each list at first; "Show more" asks for the next PAGE (the server keeps 500 conversations and 2000 reports).
+  const [limits, setLimits] = useState({ conversations: PAGE, intake: PAGE });
   const g = providerGlance(p, now);
 
   // Refetch when the summary moves (a new report, a conversation update, a reconnect); the socket carries only the summary.
@@ -33,7 +35,7 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
   useEffect(() => {
     let live = true;
     const t = setTimeout(() => {
-      Promise.all([api.providerConversations(200), api.providerIntake(300), api.providerSignatures()]).then(
+      Promise.all([api.providerConversations(limits.conversations), api.providerIntake(limits.intake), api.providerSignatures()]).then(
         ([c, i, sg]) => {
           if (!live) return;
           setConversations(c);
@@ -48,13 +50,16 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
       live = false;
       clearTimeout(t);
     };
-  }, [version]);
+  }, [version, limits]);
 
   const c = p.capacity;
   // Never connected and nothing reported: what it takes to switch it on, instead of empty lists.
   const setup = !p.online && !p.lastSeen && !c && !p.counts.conversations && !p.counts.intake;
   return (
     <section className="sb-panel sa-panel pv-panel" data-testid="provider-panel">
+      {/* One scroller for the header and the lists: a tall header (several classes, holds, a phone's width) would
+          otherwise leave the lists a sliver. The panel itself must not scroll (web/src/viewport.ts LOCKED). */}
+      <div className="pv-scroll" data-testid="provider-scroll">
       <header className="sb-head">
         <div className="sb-head-top">
           {onClose && (
@@ -125,7 +130,7 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
       </header>
 
       {setup ? (
-        <div className="sa-scroll">
+        <div className="sa-scroll pv-body">
           <Setup p={p} />
         </div>
       ) : (
@@ -143,14 +148,17 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
         </button>
       </nav>
 
-      <div className="sa-scroll">
+      <div className="sa-scroll pv-body">
         {error && <p className="small tone-red">Could not load the lists: {error}</p>}
         {current === 'conversations' && <Conversations list={conversations} />}
         {current === 'signatures' && <Signatures groups={groups} now={now} />}
         {current === 'intake' && <Intake list={intake} />}
+        {current === 'conversations' && <More shown={conversations?.length} total={p.counts.conversations} what="conversations" onMore={() => setLimits((l) => ({ ...l, conversations: l.conversations + PAGE }))} />}
+        {current === 'intake' && <More shown={intake?.length} total={p.counts.intake} what="reports" onMore={() => setLimits((l) => ({ ...l, intake: l.intake + PAGE }))} />}
       </div>
       </>
       )}
+      </div>
     </section>
   );
 }
@@ -271,6 +279,23 @@ function Signatures({ groups, now }: { groups?: IntakeGroups; now: number }) {
         </div>
       )}
     </>
+  );
+}
+
+const PAGE = 100;
+
+/** "Showing 100 of 340 · Show 100 more", under a list the server has more of. */
+function More({ shown, total, what, onMore }: { shown?: number; total: number; what: string; onMore: () => void }) {
+  if (!shown || shown >= total) return null;
+  return (
+    <div className="pv-more small dim" data-testid="provider-more">
+      <span>
+        Showing the newest {shown} of {total} {what}
+      </span>
+      <button className="btn btn-sm btn-outline" onClick={onMore}>
+        Show {Math.min(PAGE, total - shown)} more
+      </button>
+    </div>
   );
 }
 
