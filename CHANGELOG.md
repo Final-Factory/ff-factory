@@ -99,6 +99,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The Steam release rule** (w277, asked by Lothsahn). The orchestrator prompt (`server/agents.ts`),
+  `docs/ffbox.md` and `docs/ffbox-integration.md` say what FFBox's `SETLIVE` does: a version bump on develop goes
+  live on Steam `development`, one on master on `pre-release`, and Ben or Lothsahn move the default branch by hand.
+
 - **FFBox's link: no capability negotiation, and a frame that cannot be read says why** (w230;
   [contract](docs/ffbox-connector-contract.md#the-envelope-what-is-fatal-and-what-is-not)). On 2026-10-03 a test run
   rewrote FFBox's connector feed, its hello lost `queries`, and every live view answered `not_offered` for hours. Now
