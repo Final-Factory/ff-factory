@@ -45,24 +45,25 @@ the title to recognise an elevated editor it can no longer read the command line
 The strings come from `Unity.dll` of 6000.3.19f1 (the dialog title, text and buttons sit side by
 side in the binary) or from the game's own editor code. The flags come from the
 [command-line docs](https://docs.unity3d.com/6000.3/Documentation/Manual/EditorCommandLineArguments.html).
-Only a button that changes nothing on disk is ever pressed. Everything destructive or ambiguous
-is notify-only.
+Only a button that changes nothing on disk is ever pressed automatically. Everything destructive or
+ambiguous is "notify": it goes to the sandbox's agents first, and to a person only when no agent can
+resolve it (see [Who answers](#who-answers)).
 
 | Dialog (title / text) | Buttons | Decision | Why |
 |---|---|---|---|
-| "Unity is running as administrator." | "I wish to continue at my own risk" / "Restart Unity as a standard user" | **Avoid**; notify if seen | The app never starts Unity elevated: an elevated server hands itself to the Limited task or refuses to start editors. "Continue" is the risky choice. "Restart as a standard user" relaunches Unity through the shell under a pid the app does not track. |
+| "Unity is running as administrator." | "I wish to continue at my own risk" / "Restart Unity as a standard user" | **Avoid**; notify a **person** if seen | The app never starts Unity elevated: an elevated server hands itself to the Limited task or refuses to start editors. "Continue" is the risky choice. "Restart as a standard user" relaunches Unity through the shell under a pid the app does not track. |
 | "Repair FMOD Libraries": "The following FMOD libraries contain incorrect line endings…" (`Assets/Plugins/FMOD/src/Editor/EditorUtils.cs` `CheckMacLibraries`, runs at every editor start) | "Repair" / "Ignore" | **Auto: Ignore** | the user's rule: anything about line endings gets Ignore, never a convert or repair button. Ignore leaves the files alone. Matched on the title or any text mentioning "line endings"; with no Ignore button it is reported instead. |
 | "Enter Safe Mode?": "The project you are opening contains compilation errors…" | "Enter Safe Mode" / "Ignore" | **Auto: Ignore** | Ignore opens the editor normally, errors and all, so the MCP bridge loads and an agent can fix the code. Safe Mode would keep the bridge from loading. Nothing on disk changes. |
 | "Addressables Build Report": "There's a new Addressables Build Report you can check out after your content build. However, this requires that 'Debug Build Layout' is turned on… Would you like to turn it on?" (com.unity.addressables 2.9.1 `BuildScriptBase.NotifyUserAboutBuildReport`, on a content or player build, not in batch mode) | "Yes" / "No" | **Auto: No** (always-rule) | the user's rule. Yes would turn on Debug Build Layout, which makes every content build slower. There is no EditorPrefs key or project setting to suppress it: the "already asked" flag (`userHasBeenInformedAboutBuildReportSettingPreBuild`) lives in the project's `Library/AddressablesConfig.dat` (`ProjectConfigData`, a BinaryFormatter file) and either answer sets it, so after the first No it does not come back for that sandbox until its Library is rebuilt. The app does not pre-write that file: its binary format belongs to the package, and one press per Library is cheap. |
 | "Font Coverage": "No coverage errors. See the Console for the full report." / "Atlases rebuilt. No coverage errors." (the game's `Assets/Editor/FontCoverage.cs`, menu Tools > Localization > Validate Font Coverage / Rebuild Font Atlases) | "OK" | **Auto: OK, only when it reports no problem** | An informational summary from a project tool: OK only closes it. The rule for such dialogs (`singleButton`, `problem`): pressed only when OK is its one button, and reported instead when its text mentions an error, a failure or something missing once "No coverage errors" is taken out, e.g. "3 coverage error(s)" or "…coverage error(s) remain". Agents should not need the dialog at all: `Editor.FontCoverage.ValidateFontCoverageOrThrow()` (through `execute_code`) validates, writes `Localization/FontCoverageReport.txt` and throws on errors, and `Editor.FontCoverage.RebuildFontAtlases()` rebuilds; both are dialog-free and are what the build scripts call (`BuildCommand2.cs`, `ReleaseBuild.cs`). |
 | "Connection Lost": "The connection with the Unity Licensing Client has been lost." | "Retry" | **Auto: Retry** (always-rule); **a fresh editor** when it is back 3 times in 10 minutes | Seen live on this sandbox's editor (agent-mcp, 2026-09-23). Retry only reconnects. When it comes back for the 4th time within 10 minutes (`restartAfter`), pressing is not helping: the editor is force-restarted, since a fresh editor starts a fresh licensing client. That counts toward the automatic restart limit (docs/unity-lifecycle.md). On the host and on the Macs. |
-| "The open scene(s) have been modified externally": "The following open scene(s) have been changed on disk: … Do you want to reload the scene(s)?" (`EditorSceneManager.cpp`) | "Reload" / "Ignore" | **Auto: Reload when the scenes count as clean**; otherwise notify | Raised when a branch switch rewrites the file of a scene open in the editor. Pressed when `switch_branch` checked over the MCP bridge within the last minutes that no open scene was dirty, or else when no `*.unity` file in the sandbox has uncommitted changes (`git status`). Never when the editor's title has a `*`. The git check cannot see edits held only in the editor, but after a branch switch Reload is the right answer anyway: Ignore keeps the old branch's scene in memory, and a later save would overwrite the new branch's file. Workers are told to switch with `mcp__sandbox__switch_branch`, and the guard refuses a raw `git switch`/`git checkout <branch>` while the editor runs. |
-| "Project Upgrade Required" / "Project Downgrade Required" / "Project Change Required" | "Continue" / quit | Notify | Continuing rewrites the project for another Unity version. The app already picks the editor from `ProjectVersion.txt`, so this means that version is missing or the file changed. |
+| "The open scene(s) have been modified externally": "The following open scene(s) have been changed on disk: … Do you want to reload the scene(s)?" (`EditorSceneManager.cpp`) | "Reload" / "Ignore" | **Auto: Reload when the scenes count as clean**; otherwise the agents decide (Reload or a restart), **never Ignore** | Raised when git rewrites the file of a scene open in the editor: a branch switch, but also a rebase, merge, reset, pull or stash (mp-r2, 2026-10-03: a worker's `git merge origin/develop` at 21:13 Z staged `main.unity`, the git check below failed, and the old rule sent it to a person). Pressed when `switch_branch` checked over the MCP bridge within the last minutes that no open scene was dirty, or else when no `*.unity` file in the sandbox has uncommitted changes (`git status`). Never when the editor's title has a `*`. Otherwise its agents get a `[unity blocked]` message naming why (`sceneEvidence`: the changed scene files, unsaved edits `switch_branch` saw, the `*`) and answer with `unity` action `answer_dialog` button `Reload`, or a restart, which is the same. "Ignore" is refused (`never`): it keeps the old scene in memory, and a later save would overwrite the file git just wrote. Edits held only in the editor cannot be kept either way (the editor cannot save while it asks), so an agent that needs them notes them, reloads and redoes them. |
+| "Project Upgrade Required" / "Project Downgrade Required" / "Project Change Required" | "Continue" / quit | Notify a **person** | Continuing rewrites the project for another Unity version. The app already picks the editor from `ProjectVersion.txt`, so this means that version is missing or the file changed. |
 | "Precompiled Assemblies Update Consent Request": "Unity found assemblies using deprecated Unity APIs…" | Yes / No | Notify | Yes rewrites assemblies; No may leave the project broken. Someone decides. |
 | "Corrupted Library Detected" | "Rebuild Library" / "Don't rebuild Library" | Notify | A rebuild re-imports everything (hours on this project); not rebuilding may not open. |
 | "Recovering Scene Backups": "Scene backups from a previous Editor session have been detected… Do you want to copy and preserve these backups in Assets/_Recovery/?" | "Yes" / "No" | **Auto: No, only when no `*.unity` file has uncommitted changes**; otherwise notify | Appears after an editor was killed or crashed. Agents do not make manual scene edits, and Yes would copy the backups into `Assets/_Recovery/` as untracked files. With a modified scene file in the tree, the backups may hold real work, so a person decides. |
-| "Unity Package Manager Error" (and "Unity Package Manager: Manifest relocation") | "Retry" / "Continue" / "Diagnose" | Notify | Retry relaunches Unity as a new process; Continue opens with packages missing. Read the log first. |
-| "License error" / "No valid Unity Editor license found…" | "Open Hub" and others | Notify | The licence has to be fixed in Unity Hub; nothing to dismiss. |
+| "Unity Package Manager Error" (and "Unity Package Manager: Manifest relocation") | "Retry" / "Continue" / "Diagnose" | Notify; agents never press Retry | Retry relaunches Unity as a new process the app does not track (a restart through the unity tool does the same, tracked); Continue opens with packages missing. Read the log first. |
+| "License error" / "No valid Unity Editor license found…" | "Open Hub" and others | Notify a **person** | The licence has to be fixed in Unity Hub; nothing to dismiss. |
 | "Unsupported Platform": "Support for the selected build platform has been deprecated…" | "Switch Platform" / "Exit Unity" | Notify | Switching changes the project's build target. |
 | "Auto Graphics API" notice | "Confirm" / "Auto" | Notify | Either choice changes Player Settings. |
 | Anything else | — | Notify | `blocked` with the full text and buttons. |
@@ -73,8 +74,11 @@ is notify-only.
   one bridge session before touching git. It reads the open scenes (`execute_code`). With none dirty
   and the editor not in play mode, it swaps them for an empty scene, switches, runs `refresh_unity`,
   then reopens them (a scene missing on the new branch is named in the result). No open scene file
-  changes, so Unity has nothing to ask. With dirty scenes it leaves them alone, says so in the result,
-  and does not wait on the refresh: Unity will ask, and a person answers. Refreshing through the
+  changes, so Unity has nothing to ask. Everything else is refused before git is touched
+  (`editorSwitchPlan`, `server/switchBranch.ts`): unsaved scene edits (save and commit them, or pass
+  `discard_scene_edits: true`, which parks the scenes anyway and drops the edits), play mode, an
+  editor that is starting, stopping or blocked, and a bridge that does not answer (stop the editor,
+  then switch). Before w294 each of these switched anyway and left Unity asking. Refreshing through the
   bridge alone would not help, because the question comes from the import itself, whoever starts it.
   Two things checked in 6000.3.19f1 that rule out shortcuts:
   - **The title bar cannot tell whether a scene is dirty.** `EditorApplication.GetDefaultMainWindowTitle`
@@ -168,10 +172,27 @@ command-line builds are not it (on m5, picking a worker was what made the watch 
 then). Each failed look is logged in the daemon log with the session state and `AXIsProcessTrusted`.
 An Accessibility entry for node that is listed but switched off is still denied (TCC `auth_value` 0).
 
+## Who answers
+
+Whatever the watchdog does not press itself is put to the agents first (`agentAnswers` in
+`server/watchdog.ts`, `server/unityBlocked.ts`). Each active worker in the sandbox (running, or active in the
+last 30 minutes) gets a `[unity blocked]` message with the exact call: `mcp__sandbox__unity` action
+`answer_dialog` with the buttons it may press, or action `restart`. The dispatcher hears the same with "No
+person is needed", and answers it itself through its own `unity` tool when no agent is there. `answer_dialog`
+(`SandboxManager.answerDialog`) presses a button only after `checkAgentAnswer`: the button must be on the open
+dialog, the dialog must not be a person's, and the button must not be a dialog's `never` button (Ignore on the
+scene reload question, Retry on a Package Manager error, Restart as a standard user). Its press is kept with
+the watchdog's own (`dismissed`, `by: "agent"`). A startup stall is the agents' too: a restart is the answer.
+
+A person is asked (their orchestrators, the "Unity editor stuck" notification, "Someone at the desktop" on the
+page) only for the dialogs marked `person` (administrator, licence, project version) and for an editor that
+used up its automatic restarts. `UnityBlocked.person` carries that to the page. Machines' editors keep their
+own watch (below); `answer_dialog` is for this host's sandboxes.
+
 ## Hooks
 
 `SandboxManager.events` emits `blocked` (sandbox, details) and `dismissed` (sandbox, what was
-pressed). Two things listen to `blocked`: the orchestrator message (`Agents.onUnityBlocked`) and a
-"Unity editor stuck" notification to the user (`Notifier.unityBlocked`, the `unity` kind in the
+pressed). Two things listen to `blocked`: the agent and orchestrator messages (`Agents.onUnityBlocked`) and,
+only when a person is needed, a "Unity editor stuck" notification to the user (`Notifier.unityBlocked`, the `unity` kind in the
 notification settings, on by default). Every dismissal is kept on the sandbox
 (`unity.dismissed`, the last 40; the card shows the last 3) and logged to `data/server.out.log`.

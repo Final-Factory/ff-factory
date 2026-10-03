@@ -240,7 +240,7 @@ export function AttentionStrip({ session, unity, onUnity }: { session?: SessionI
           <Icon name="alert" size={15} />
           <span className="attn-strip-text">
             <b>Unity is stuck</b>
-            {unity.reason === 'dialog' && unity.title ? ` on “${unity.title}”` : unity.reason === 'stalled' ? ': no log output' : ''}. Someone at the desktop has to answer it.
+            {unity.reason === 'dialog' && unity.title ? ` on “${unity.title}”` : unity.reason === 'stalled' ? ': no log output' : ''}. {unity.person ? 'Someone at the desktop has to answer it.' : 'Its agents were asked to answer it.'}
           </span>
           <span className="attn-strip-act">Details</span>
         </button>

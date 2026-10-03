@@ -165,6 +165,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Unity's blocking dialogs no longer wait for a person** (w294, asked by Ben). mp-r2's editor sat on "The open
+  scene(s) have been modified externally" after its worker's `git merge origin/develop` staged `main.unity`, and FF
+  Factory asked for someone at the desktop. Now a dialog the watchdog does not press itself goes to the sandbox's
+  agents with the exact call, the new `unity` action `answer_dialog` (Reload for that one, never Ignore), or a restart;
+  the dispatcher answers when no agent is there. Only an administrator, licence or project-version dialog and an editor
+  out of automatic restarts still ask a person (and only those send the "Unity editor stuck" notification).
+  `switch_branch` now refuses, before touching git, whenever it cannot check the open scenes (unsaved edits unless
+  `discard_scene_edits`, play mode, an editor starting or blocked, no bridge answer) instead of switching and leaving
+  Unity to ask ([docs/unity-dialogs.md](docs/unity-dialogs.md#who-answers)).
+
 - **An open tab picks up a new version by itself** (w285, asked by Lothsahn). Twice a browser kept the old UI after a
   deploy (FFBox panes that did not scroll, a red dot that never showed). The page headers were already right
   (`index.html` revalidated, hashed bundles immutable, no caching service worker); the old UI was a tab that stayed

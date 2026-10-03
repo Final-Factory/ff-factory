@@ -40,6 +40,8 @@ export interface UnityBlocked {
   dialogId?: string;
   /** What it means and what to do. */
   advice?: string;
+  /** Only a person at the desktop can resolve it (server/watchdog.ts agentAnswers); otherwise its agents are asked. */
+  person?: boolean;
   since: string;
   /** The state to return to once the dialog is gone or the log moves again. */
   resumeState: 'starting' | 'running';
@@ -50,6 +52,8 @@ export interface UnityDismissal {
   at: string;
   title: string;
   button: string;
+  /** 'agent': pressed by an agent through the unity tool's answer_dialog; absent: by the watchdog itself. */
+  by?: 'agent';
 }
 
 export type SandboxStatus = 'creating' | 'ready' | 'error' | 'deleting';
