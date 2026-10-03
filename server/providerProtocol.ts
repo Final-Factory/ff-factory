@@ -225,7 +225,7 @@ export type ToConnector =
  * The queries the ffbox_activity tool offers. Not a gate: any name matching QUERY_NAME may be sent, and FFBox answers
  * error unsupported for one it does not know.
  */
-export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation'] as const;
+export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation', 'logs'] as const;
 export const QUERY_NAME = /^[a-z_]{1,32}$/;
 export type ProviderQuery = (typeof PROVIDER_QUERIES)[number];
 
@@ -236,8 +236,9 @@ export const QUERY_LIMITS = {
   perMinute: 30,
   /** Queries waiting for an answer at once. */
   inFlight: 8,
-  /** conversation is answered on FFBox's next pass (about 5 s), and the connector gives up at 12 s. */
-  timeoutMsByQuery: { conversation: 15_000 } as Record<string, number>,
+  /** conversation and logs are answered on FFBox's next pass (about 5 s; logs reads the journal for up to 6 s), and the
+   * connector gives up at 12 s. */
+  timeoutMsByQuery: { conversation: 15_000, logs: 15_000 } as Record<string, number>,
   /** Conversations whose last answer is kept for the fallback. */
   keptConversations: 20,
 } as const;
@@ -246,7 +247,8 @@ export interface QueryMessage {
   type: 'query';
   id: string;
   what: string;
-  args?: Record<string, number>;
+  /** Whole numbers, and since FFBox w268 short words too (logs: log, grep, regex). FFBox checks each against its own table. */
+  args?: Record<string, number | string>;
 }
 
 /** connector → portal: the answer to one query. `data` is FFBox's, already cut down there; shown as data, never acted on. */
