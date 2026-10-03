@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { normalizeSetting, setAppConfig } from './appConfig.ts';
+import { checkReviewers, normalizeSetting, setAppConfig } from './appConfig.ts';
 import type { Config } from './config.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
@@ -138,4 +138,24 @@ test('app config: limits.maxSandboxes (1-8) and limits.maxSessions (1-12), live'
   for (const bad of ['0', '13']) assert.throws(() => setAppConfig(file, full, 'limits.maxSessions', bad), /1 to 12/, bad);
   setAppConfig(file, full, 'limits.maxSandboxes', null);
   assert.equal(full.limits.maxSandboxes, 4, 'null: the default');
+});
+
+test('checkReviewers: logins that exist, in their own spelling, deduplicated; the rest refused', () => {
+  const users = ['Ben', 'lothsahn'];
+  assert.deepEqual(checkReviewers(['ben', 'LOTHSAHN', 'Ben'], users), ['Ben', 'lothsahn']);
+  assert.deepEqual(checkReviewers('ben, lothsahn', users), ['Ben', 'lothsahn']);
+  assert.deepEqual(checkReviewers('["lothsahn"]', users), ['lothsahn']);
+  assert.throws(() => checkReviewers(['ben', 'max'], users), /no login "max"; the logins are Ben, lothsahn/);
+  assert.throws(() => checkReviewers([], users), /at least one/);
+  assert.throws(() => checkReviewers(Array.from({ length: 21 }, () => 'ben'), users), /at most 20/);
+  assert.throws(() => checkReviewers(['ben'], []), /no login "ben"; the logins are \(none\)/);
+  assert.equal(normalizeSetting('intake.reviewers', null, undefined, users), undefined);
+});
+
+test('set_app_config: intake.reviewers is written under intake and applied live', (t) => {
+  const { file, cfg } = setup(t);
+  assert.deepEqual(setAppConfig(file, cfg, 'intake.reviewers', ['lothsahn'], { users: ['ben', 'lothsahn'] }), { before: undefined, after: ['lothsahn'] });
+  assert.deepEqual(cfg.intake?.reviewers, ['lothsahn']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).intake, { reviewers: ['lothsahn'] });
+  assert.throws(() => setAppConfig(file, cfg, 'intake.reviewers', ['ghost'], { users: ['ben'] }), /no login "ghost"/);
 });
