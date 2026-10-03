@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
-import type { AccountUsage, AppState, CleanupSummary, HostHealth, HostStats, PlanUsage, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
+import type { AccountUsage, AppState, CleanupSummary, HostHealth, HostStats, PlanUsage, Provider, ProviderMetrics, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
+import { cpuPct, memPct, metricsLine, metricsStale } from '../../../shared/providerMetrics';
 import { memUsed as memUsedOf } from '../../../shared/stats';
 import { fmtBytes, fmtClock, fmtCost, fmtRelative, lsGet, lsSet, useNow } from '../util';
 import { Icon } from './ui';
@@ -31,6 +32,26 @@ export function computersOf(app: AppState): Computer[] {
 }
 
 const shortHost = (h: string) => h.replace(/\.(local|lan|home)$/i, '');
+
+/**
+ * A provider (FFBox) among the computers: what its connector last pushed (shared/providerMetrics.ts), and a marker
+ * once that is stale (two minutes without an update) or the connector is gone. Its last numbers stay, dimmed.
+ */
+export interface ProviderLoad {
+  p: Provider;
+  m?: ProviderMetrics;
+  /** load1 over the logical cores: above 100% when more is runnable than it has cores. */
+  cpu?: number;
+  ram?: number;
+  marker?: string;
+  title: string;
+}
+
+export function providerLoad(p: Provider, now: number): ProviderLoad {
+  const m = p.metrics;
+  const marker = !m ? undefined : !p.online ? `offline · seen ${fmtRelative(p.lastSeen ?? m.receivedAt, now)}` : metricsStale(m, now) ? `stale · updated ${fmtRelative(m.receivedAt, now)}` : undefined;
+  return { p, m, cpu: m && cpuPct(m), ram: m && memPct(m), marker, title: `${p.name} (provider, CPU-only)\n${metricsLine(m, now)}${marker ? `\n${marker}` : ''}` };
+}
 
 export const ramPct = (s: HostStats) => (memUsedOf(s) / s.memTotalBytes) * 100;
 /** RAM's level: its share, raised by the Mac's own memory pressure (the better signal where RAM is also the GPU's). */
@@ -93,6 +114,7 @@ function hottest(u: PlanUsage | undefined): UsageMeter | undefined {
 
 export function SystemFooter({ app }: { app: AppState }) {
   const [open, setOpen] = useState(() => lsGet('ffsb.meters') === '1');
+  const now = useNow(15_000);
   const sys = app.system;
   if (!sys) return null;
   const toggle = () => {
@@ -100,7 +122,8 @@ export function SystemFooter({ app }: { app: AppState }) {
     lsSet('ffsb.meters', open ? null : '1');
   };
   const computers = computersOf(app);
-  const many = computers.length > 1;
+  const providers = (app.providers ?? []).map((p) => providerLoad(p, now));
+  const many = computers.length + providers.length > 1;
   const unityOn = app.sandboxes.filter((s) => s.unity.state !== 'stopped' && s.unity.state !== 'crashed').length;
   // Workers and running standing agents on this host share limits.maxSessions; agents on a machine count toward its own limit.
   const agentsOn = app.sessions.filter((s) => s.kind !== 'orchestrator' && !s.machineId && s.status !== 'stopped' && s.status !== 'error').length;
@@ -114,7 +137,7 @@ export function SystemFooter({ app }: { app: AppState }) {
       {open && (
         <div className="sys-detail">
           {many ? (
-            <MachineTable computers={computers} health={app.host?.health} limits={<Limits sys={sys} unityOn={unityOn} agentsOn={agentsOn} />} />
+            <MachineTable computers={computers} providers={providers} health={app.host?.health} limits={<Limits sys={sys} unityOn={unityOn} agentsOn={agentsOn} />} />
           ) : (
             <Meters sys={sys} health={app.host?.health} limits={<Limits sys={sys} unityOn={unityOn} agentsOn={agentsOn} />} />
           )}
@@ -126,6 +149,7 @@ export function SystemFooter({ app }: { app: AppState }) {
       <button className="sys-toggle" onClick={toggle} aria-expanded={open} title={many ? 'Every computer and Claude account. Tap for the meters.' : `${sys.cpuModel} · ${sys.cpuCount} threads. Tap for the meters.`}>
         <span className="sys-cells">
             {many && computers.map((c) => <MiniBars key={c.name} c={c} />)}
+            {many && providers.map((l) => <ProviderMiniBars key={l.p.id} l={l} />)}
             {!many && (
               <>
                 <span>
@@ -203,6 +227,58 @@ function MiniBars({ c }: { c: Computer }) {
   );
 }
 
+/**
+ * A provider in the collapsed footer, drawn like a computer: CPU (the bar full at 100%; the hover says the real
+ * share), RAM, and an empty GPU bar (FFBox is CPU-only). Dimmed once stale or offline.
+ */
+function ProviderMiniBars({ l }: { l: ProviderLoad }) {
+  const { p, m, cpu, ram } = l;
+  const bars: [string, number | undefined, Lvl][] = [
+    ['CPU', cpu, level(cpu ?? 0)],
+    ['RAM', ram, level(ram ?? 0, 85, 95)],
+    ['GPU', undefined, 'ok'],
+  ];
+  return (
+    <span className={`mcell${m ? '' : ' mcell-off'}${l.marker ? ' mcell-stale' : ''}`} title={l.title} aria-label={l.title.replace(/\n/g, ', ')} data-testid={`mcell-${p.name}`}>
+      <span className="mname">{p.name}</span>
+      {m ? (
+        <span className="mbars" aria-hidden>
+          {bars.map(([label, pct, lvl]) => (
+            <span key={label} className={`mbar lvl-bg-${pct === undefined ? 'none' : lvl}`}>
+              <i style={{ height: `${Math.max(pct === undefined ? 0 : 8, Math.min(100, pct ?? 0))}%` }} />
+            </span>
+          ))}
+        </span>
+      ) : (
+        <span className="moff">{p.online ? '…' : 'off'}</span>
+      )}
+    </span>
+  );
+}
+
+/** A provider's CPU (blue) and RAM (grey) over its last updates, oldest on the left; CPU's scale grows past 100%. */
+function History({ points }: { points: { cpuPct?: number; memPct?: number }[] }) {
+  if (points.length < 2) return <span className="mt-note">history after the next update</span>;
+  const top = Math.max(100, ...points.map((x) => x.cpuPct ?? 0));
+  const line = (k: 'cpuPct' | 'memPct') =>
+    points
+      .map((x, i) => (x[k] === undefined ? undefined : `${((i / (points.length - 1)) * 100).toFixed(1)},${(23 - (x[k]! / top) * 22).toFixed(1)}`))
+      .filter(Boolean)
+      .join(' ');
+  const last = points[points.length - 1];
+  return (
+    <span className="mt-spark" title={`CPU (blue) and RAM (grey) over the last ${points.length} updates, 30 s apart${top > 100 ? `; the scale goes to ${Math.round(top)}%` : ''}`}>
+      <svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden>
+        <polyline className="spark-ram" points={line('memPct')} />
+        <polyline className="spark-cpu" points={line('cpuPct')} />
+      </svg>
+      <span className="mt-num">
+        CPU {last.cpuPct !== undefined ? `${Math.round(last.cpuPct)}%` : '–'} · RAM {last.memPct !== undefined ? `${Math.round(last.memPct)}%` : '–'}
+      </span>
+    </span>
+  );
+}
+
 function Meter({ label, pct, value, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; warn?: number; crit?: number; lvl?: Lvl }) {
   const p = Math.max(0, Math.min(100, pct));
   return (
@@ -268,7 +344,7 @@ function HostDisks({ sys, health }: { sys: HostStats; health?: HostHealth }) {
 }
 
 /** Every computer, one compact row each: a bar and a number per resource. */
-function MachineTable({ computers, health, limits }: { computers: Computer[]; health?: HostHealth; limits: ReactNode }) {
+function MachineTable({ computers, providers = [], health, limits }: { computers: Computer[]; providers?: ProviderLoad[]; health?: HostHealth; limits: ReactNode }) {
   const Cell = ({ pct, text, lvl, title }: { pct?: number; text: string; lvl?: Lvl; title?: string }) => (
     <span className={`mt-cell meter-${pct === undefined ? 'ok' : (lvl ?? level(pct))}`} title={title}>
       <span className="mt-num">{text}</span>
@@ -310,6 +386,49 @@ function MachineTable({ computers, health, limits }: { computers: Computer[]; he
             <Cell pct={ramPct(s)} lvl={ramLvl(s)} text={`${Math.round(ramPct(s))}%`} title={`${fmtBytes(memUsedOf(s))} of ${fmtBytes(s.memTotalBytes)}${s.memPressure ? `, pressure ${s.memPressure}` : ''}`} />
             {g === undefined ? <span className="mt-note">n/a</span> : <Cell pct={g} text={`${Math.round(g)}%`} title={s.gpu?.unified ? 'GPU busy (Apple Silicon shares the RAM)' : 'VRAM in use'} />}
             {disk ? <Cell pct={disk.used} lvl={disk.lvl} text={fmtBytes(disk.free)} title={`${fmtBytes(disk.free)} free`} /> : <span className="mt-note">n/a</span>}
+          </div>
+        );
+      })}
+      {providers.map((l) => {
+        const { p, m, cpu, ram } = l;
+        if (!m)
+          return (
+            <div key={p.id} className="mt-row mt-off" role="row" data-testid={`mrow-${p.name}`} title={l.title}>
+              <span className="mt-name">{p.name}</span>
+              <span className="mt-note">{p.online ? 'no metrics from its connector' : 'offline'}</span>
+            </div>
+          );
+        const disks = m.disks.filter((d) => d.totalBytes > 0).map((d) => ({ ...d, used: ((d.totalBytes - d.freeBytes) / d.totalBytes) * 100 }));
+        const fullest = [...disks].sort((a, b) => b.used - a.used)[0];
+        return (
+          <div key={p.id} className={`mt-provider${l.marker ? ' mt-stale' : ''}`} data-testid={`mrows-${p.name}`}>
+            <div className="mt-row" role="row" data-testid={`mrow-${p.name}`} title={l.title}>
+              <span className="mt-name">{p.name}</span>
+              {cpu !== undefined ? <Cell pct={cpu} text={`${Math.round(cpu)}%`} title={m.cpu ? `load ${m.cpu.load1} on ${m.cpu.cores} cores` : undefined} /> : <span className="mt-note">n/a</span>}
+              {ram !== undefined && m.mem ? <Cell pct={ram} lvl={level(ram, 85, 95)} text={`${Math.round(ram)}%`} title={`${fmtBytes(m.mem.usedBytes)} of ${fmtBytes(m.mem.totalBytes)}`} /> : <span className="mt-note">n/a</span>}
+              <span className="mt-note" title="CPU-only">
+                none
+              </span>
+              {fullest ? <Cell pct={fullest.used} lvl={level(fullest.used, 85, 95)} text={fmtBytes(fullest.freeBytes)} title={`${fullest.role}: ${fmtBytes(fullest.freeBytes)} free`} /> : <span className="mt-note">n/a</span>}
+            </div>
+            {l.marker && (
+              <div className="mt-row mt-sub" role="row" data-testid="provider-load-stale">
+                <span />
+                <span className="mt-note mt-marker">{l.marker}</span>
+              </div>
+            )}
+            {disks.map((d) => (
+              <div key={d.role} className="mt-row mt-sub" role="row" data-testid="mrow-disk">
+                <span className="mt-subname">
+                  {d.role} · {fmtBytes(d.freeBytes)} free of {fmtBytes(d.totalBytes)}
+                </span>
+                <Cell pct={d.used} lvl={level(d.used, 85, 95)} text={fmtBytes(d.freeBytes)} title={`${d.role}: ${fmtBytes(d.freeBytes)} free of ${fmtBytes(d.totalBytes)}`} />
+              </div>
+            ))}
+            <div className="mt-row mt-sub" role="row" data-testid="provider-history">
+              <span className="mt-subname mt-subname-short">history</span>
+              <History points={p.metricsHistory ?? []} />
+            </div>
           </div>
         );
       })}

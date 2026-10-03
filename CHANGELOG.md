@@ -69,6 +69,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   what it returns, the `id` and paging args, the "Last known, from <time>" fallback and that player text is untrusted;
   the brief names the live views and says an older schema copy in the chat is out of date. docs/ffbox.md has a table.
 
+- **FFBox in the sidebar's load panel** (w225). The footer's mini bars and its open table, where BEAST and the
+  machines show their CPU, RAM, GPU and disk, now list FFBox too. Collapsed, it has three mini bars: CPU (full at
+  100%; the hover gives the real share, which can be above 100%), RAM, and an empty GPU bar. Open, it has a row with
+  CPU, RAM, GPU "none" and its fullest disk, a line per filesystem with free of total, and a graph of CPU and RAM over
+  its last 60 updates (about half an hour, the portal's in-memory `metricsHistory`). Stale or offline, the numbers
+  stay, dimmed, under a "stale · updated …" or "offline · seen …" marker.
+
 - **FFBox's page scrolls, and its lists page** (w223). The Conversations, Signatures and Intake reports lists were cut
   off after the first few rows with nothing to scroll: `.run-list` (`overflow: hidden`) shrank to the space left in
   its flex column and clipped its rows. On a phone the capacity header alone was taller than the screen. The header
