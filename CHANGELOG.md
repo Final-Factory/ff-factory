@@ -12,6 +12,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Attach saves, logs and bug reports to chat messages, and hand them to workers** (w228, asked by Lothsahn;
+  [docs/attachments.md](docs/attachments.md)). The composer takes any file through the paperclip, paste or drop, in
+  orchestrator, dispatcher and worker chats; images still go inline. Files upload in 8 MB chunks with a progress bar
+  and resume after a dropped link; config `attachments.maxMB` (default 200) caps each one, `attachments.retentionDays`
+  (default 30) says how long an unused one is kept, both settable with `set_app_config`. The server stores each file
+  once by SHA-256 under `data/attachments/` and never opens, unpacks or runs it; downloads are always a file
+  download. The agent's prompt lists each attachment as untrusted user data with its id, name, size, type, SHA-256 and
+  where it is. `request_work`, `start_agent` (with a request's own files by itself) and `message_agent` take
+  `attachments: [ids]`; a worker in a sandbox here gets a copy in `<sandbox>/Inbox/<id>-<name>` (a `.gitignore` of
+  `*` keeps it out of git), and on a machine the daemon fetches it there over its token, resuming and checking the
+  SHA-256, before the message goes on (daemon protocol 7; older daemons are refused attachments until redeployed).
+  Workers get `fetch_attachment` and an Attachments section in their brief that says where the game loads saves from.
+
 - **`set_app_config` sets the FFBox intake** (w224; [docs/intake.md](docs/intake.md#config)). Key `intake.ffbox`, the
   whole block as the value: `enabled`, `branches`, `diagnoses`, `requests`, `boardCheck`, `escalations`, `repo`,
   `dailyCap`, `match.{high,medium}` (w219) and `autoApprove.{enabled,maxPerDay}`. An owner's setting only, behind the same "the person asked in

@@ -36,7 +36,7 @@ import {
 import { autoApproveProblem, identityKeys, parseMarkers, sourceTag } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
 import { displayName } from '../shared/labels.ts';
-import type { Machine, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkItem, WorkOverlap, WorkPriority, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, Machine, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkItem, WorkOverlap, WorkPriority, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -132,6 +132,8 @@ export interface WorkInput {
   priority?: WorkPriority;
   constraints?: string;
   related_ids?: string[];
+  /** Files its person attached (docs/attachments.md), already looked up in the store. */
+  attachments?: AttachmentRef[];
 }
 
 export class Orchestrators {
@@ -564,6 +566,7 @@ export class Orchestrators {
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       sessionIds: [],
+      ...(input.attachments?.length ? { attachments: input.attachments } : {}),
       overlaps: [],
       asks: 0,
       log: [],
