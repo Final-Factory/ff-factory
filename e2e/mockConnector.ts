@@ -129,7 +129,7 @@ export class MockConnector {
   }
 
   /** Connect, say hello, and wait for the welcome. */
-  async hello(opts: { protocol?: number; version?: string; web?: string; accepts?: string[] } = {}): Promise<Welcome> {
+  async hello(opts: { protocol?: number; version?: string; web?: string; accepts?: string[]; queries?: string[] } = {}): Promise<Welcome> {
     await this.opened;
     this.send({
       type: 'hello',
@@ -138,6 +138,7 @@ export class MockConnector {
       connector: { version: opts.version ?? 'mock-1', commit: 'abc1234' },
       ...(opts.web ? { web: opts.web } : {}),
       ...(opts.accepts ? { accepts: opts.accepts } : {}),
+      ...(opts.queries ? { queries: opts.queries } : {}),
     });
     return (await this.next('welcome')) as unknown as Welcome;
   }

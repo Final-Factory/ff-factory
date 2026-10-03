@@ -10,6 +10,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Added
+
+- **Ask FFBox live for its config, its ledger exchanges, its status and one conversation** (w218;
+  [docs/ffbox.md](docs/ffbox.md#asking-ffbox)). `ffbox_activity` gets `show: "config" | "board_log" | "status"`, and
+  `show: "conversation"` with an `id`: one conversation's metadata and a page of its turns, with the messages and
+  replies redacted on FFBox. Players appear by display name only.
+  FF Factory sends a read-only `query` down the connector's open link and waits up to 10 s for the `query_result`. When
+  FFBox is offline, does not offer the query or does not answer, the tool shows the last answer kept, labelled with
+  its time. FFBox's host builds the answers: the config goes through an allowlist, with everything else
+  `<redacted>`, and every answer is secret-scanned twice. Each answer is capped at one 64 KB frame, and FFBox answers
+  30 a minute. A connector offers the queries in its hello (`accepts: ["query"]`, `queries: [...]`), so an older
+  connector is never asked and an older portal never asks. Adding a query is a short, documented step in both repos.
+
 ### Fixed
 
 - **A hard crash no longer takes the portal down** ([docs/self-recovery.md](docs/self-recovery.md#6-crash-safe-data-files)).
