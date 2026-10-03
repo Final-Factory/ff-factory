@@ -125,7 +125,7 @@ test('ledger check both ways: handshake, exact thread keys, what to watch, and t
   const c = connect();
   const welcome = (await c.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as { protocol: number; accepts: string[] };
   assert.equal(welcome.protocol, 2);
-  assert.deepEqual(welcome.accepts, ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received']);
+  assert.deepEqual(welcome.accepts, ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater']);
 
   // A check by the exact key: in flight, but nobody is on a branch yet, so nothing to watch.
   c.send({ type: 'board_check', ref: 'conv-9', keys: [`discord:${THREAD_A}`], conversation: '9' });
