@@ -135,6 +135,7 @@ export const api = {
   resetOrchestrator: (which: 'mine' | 'dispatcher' = 'mine') => request<{ id: string }>('POST', '/api/orchestrator/reset', { which }),
   /** The intake (docs/intake.md): a person approves or declines a Discord or FFBox request. */
   approveWork: (id: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/approve`, {}),
+  ledgerCleanup: () => request<{ summary: string }>('POST', '/api/ledger/cleanup', {}),
   intakePoll: () => request<{ ok: boolean; note?: string }>('POST', '/api/intake/poll', {}),
   declineWork: (id: string, note?: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/decline`, { note }),
   /** A host sandbox, or (once the host's own daemon holds them, docs/beast-machine.md) where the daemon is making it. */

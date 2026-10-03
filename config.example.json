@@ -67,6 +67,9 @@
       }
     }
   },
+  "ledger": {
+    "cleanup": { "enabled": true, "everyHours": 4 }
+  },
   "intake": {
     "discord": {
       "enabled": false,

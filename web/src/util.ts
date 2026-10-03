@@ -216,6 +216,7 @@ export const workLabel: Record<WorkStatus, string> = {
   question: 'Question',
   queued: 'Queued',
   active: 'Active',
+  stalled: 'Stalled',
   merged: 'Merged',
   done: 'Done',
   rejected: 'Declined',
@@ -224,7 +225,7 @@ export const workLabel: Record<WorkStatus, string> = {
 
 export function workTone(s: WorkStatus): Tone {
   if (s === 'active') return 'blue';
-  if (s === 'question') return 'amber';
+  if (s === 'question' || s === 'stalled') return 'amber';
   if (s === 'done') return 'green';
   return 'grey';
 }
