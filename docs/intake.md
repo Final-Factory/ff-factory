@@ -271,15 +271,16 @@ FFBox's `fff.board_check` switch; submitting work (phase 3) is not built there y
   re-checks those answers each minute and pushes the ones that change. FFBox's own conversation never matches itself.
   FFBox fails open, starts no turn on `in_flight` (it watches the branch and reports the merge on the thread) and
   answers `done` with its merged notice. Off until `intake.ffbox.boardCheck` here and `fff.board_check.enabled` there;
-  FFBox on and this off shows as "LEDGER CHECK OFF HERE" in FFBox's status line (system_status, `ffbox_activity`).
+  FFBox asking while this is off (answered `not_enabled`) shows as "LEDGER CHECK OFF HERE: FFBox asked N time(s) in 24 h"
+  in FFBox's status line (system_status, `ffbox_activity`).
 - **By meaning, not only by key** (w219, `server/boardMatch.ts`). With `board_summary` in the welcome, FFBox sends the
   report's title and start, redacted. Each is turned into concepts: phrases players use folded into one ("alt tab",
   "tabbing back in"; "one spot", "stacked"; "cargo hold"), light stemming, a small table of the game's synonyms,
   "heartbeat 8" kept as hb8, one typo forgiven, filler words dropped. The concepts are scored against each request's
   title and the start of its brief, weighted by how rare each is in the ledger, as the mean of a weighted cosine and the
   shorter text's coverage. High (default 0.7, config `intake.ffbox.match.high`) also needs a rare shared concept and two
-  shared concepts that are not symptoms (break, stuck, crash, ...): `in_flight` or `done`. Medium (0.45): `maybe`, to a
-  connector that takes it: FFBox goes ahead, and what it files from that conversation is noted with the candidates.
+  shared concepts that are not symptoms (break, stuck, crash, ...): `in_flight` or `done`. Medium (0.45): `maybe` (whatever the
+  hello lists, since 2026-10-03): FFBox goes ahead, and what it files from that conversation is noted with the candidates.
   Low: `clear`. Deterministic and local: the words are only compared, never given to a model, so nothing in a report can
   steer the answer, and it costs nothing and answers in milliseconds. Every decision is logged
   (`intake: board_check <ref>: <verdict>, confidence <n>; <id> <score> (<why>)`). The fixtures
@@ -326,9 +327,9 @@ value (an object or its JSON, with the keys in the `ffbox` line below, `match` i
 key left out takes its default, and `null` removes it).
 Like every admin setting it runs only when a person asked in their own words, and only for an owner: the dispatcher
 takes it for a request an owner filed, or from an owner writing in its chat, and an `/mcp` key only when its login is an
-owner. Unknown keys and wrong types are refused, and nothing is written then. It applies at once. When it changes what
-the portal takes from FFBox (`board_check`, `board_summary`, `request`), the connector is closed normally (1000) and reconnects within
-seconds to a new welcome that says so.
+owner. Unknown keys and wrong types are refused, and nothing is written then. It applies at once, and FFBox's
+connection stays up: the welcome's `accepts` never depends on these settings, and a `board_check` or `request` while
+they are off is answered `error` `not_enabled`.
 
 ```json
 "intake": {
@@ -403,8 +404,8 @@ built in the ffbox repo (the "provider protocol 2" PR), off; the box steps are:
    or closed conversation with an unreviewed branch becomes a review request; a merged or closed PR does not.
 2. **Check the ledger before working a report or an operator's dev turn.** Send `board_check {ref, keys:
    ["discord:<thread id>"], conversation}` (exact keys; `report:<id>` for a diagnosis). On `in_flight`, start no turn and
-   watch `watch.branch`/`pr` for the merge; on `done`, post the merged notice with `version`. `error not_enabled`, no
-   answer within seconds, or `board_check` missing from the welcome's `accepts` means carry on as today (fail open).
+   watch `watch.branch`/`pr` for the merge; on `done`, post the merged notice with `version`. `error not_enabled` or no
+   answer within seconds means carry on as today (fail open).
    Never feed anything from the answer to a container. Send `conversation.threadId` so each `ffbox/*` PR's review
    request carries its thread.
 3. **File requests instead of pushing unreviewed branches.** For a fix branch, an `ESCALATE` diagnosis or an operator's
