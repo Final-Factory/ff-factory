@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { PermissionMode, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, openSession, useStore } from '../store';
@@ -13,7 +13,8 @@ import { accountOf, accountTag } from './SystemMeters';
  * A conversation: the transcript takes the height, the composer sits under it. Inside a sandbox or
  * machine panel (`embedded`) the panel's header and details carry the controls; on its own page it
  * has a one-row header and its controls in the details sheet. `readOnly`: a line saying who writes
- * here, in place of the composer (the dispatcher, for anyone but the owner).
+ * here, in place of the composer (the dispatcher's, for everyone). `answeredBy`: someone else's conversation, whose
+ * permission requests are theirs to answer.
  */
 export function SessionView({
   session,
@@ -21,12 +22,14 @@ export function SessionView({
   embedded,
   onBack,
   readOnly,
+  answeredBy,
 }: {
   session: SessionInfo;
   fullWidth?: boolean;
   embedded?: boolean;
   onBack?: () => void;
-  readOnly?: string;
+  readOnly?: ReactNode;
+  answeredBy?: string;
 }) {
   useEffect(() => openSession(session.id), [session.id]);
   const [details, setDetails] = useDetailsOpen('session');
@@ -49,7 +52,7 @@ export function SessionView({
         </>
       )}
       {session.status === 'error' && session.statusDetail && <div className="banner banner-error">{session.statusDetail}</div>}
-      <Transcript session={session} size={fullWidth ? 'large' : 'normal'} readOnlyFor={readOnly ? 'the owner' : undefined} />
+      <Transcript session={session} size={fullWidth ? 'large' : 'normal'} readOnlyFor={answeredBy} />
       {readOnly ? (
         <p className="orch-readonly-note" data-testid="read-only-note">
           {readOnly}

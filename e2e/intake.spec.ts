@@ -1,5 +1,5 @@
 import type { APIRequestContext } from '@playwright/test';
-import { appState, expect, go, sendMessage, test, uniq } from './fixtures.ts';
+import { appState, expect, go, sendToChat, test, uniq } from './fixtures.ts';
 import type { TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /**
@@ -30,10 +30,10 @@ async function transcript(request: APIRequestContext, id: string): Promise<Trans
   return (await r.json()) as TranscriptEvent[];
 }
 
-/** Ask the dispatcher's fake model to call one of its tools (the owner writes to it); what the tool answered. */
+/** Ask the dispatcher's fake model to call one of its tools (through the test server's door, e2e/server.ts); what the tool answered. */
 async function useTool(request: APIRequestContext, chatId: string, tool: string, args: Record<string, unknown>): Promise<string> {
   const before = (await transcript(request, chatId)).at(-1)?.seq ?? 0;
-  await sendMessage(request, chatId, `#tool ${tool} ${JSON.stringify(args)}`);
+  await sendToChat(request, chatId, `#tool ${tool} ${JSON.stringify(args)}`);
   let answer = '';
   await expect
     .poll(async () => {

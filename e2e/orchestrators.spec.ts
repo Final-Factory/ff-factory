@@ -1,5 +1,5 @@
 import type { APIRequestContext, Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
-import { BOX, appState, expect, go, isMobile, openSidebar, sendMessage, test, uniq } from './fixtures.ts';
+import { BOX, appState, expect, go, isMobile, openSidebar, sendMessage, sendToChat, test, uniq } from './fixtures.ts';
 import type { ServerEvent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /**
@@ -37,7 +37,7 @@ async function heard(request: APIRequestContext, id: string, tag: string, contai
 /** Ask an orchestrator's fake model to call one of its tools; resolves to what the tool answered. */
 async function useTool(request: APIRequestContext, chatId: string, tool: string, args: Record<string, unknown>): Promise<string> {
   const before = (await transcript(request, chatId)).at(-1)?.seq ?? 0;
-  await sendMessage(request, chatId, `#tool ${tool} ${JSON.stringify(args)}`);
+  await sendToChat(request, chatId, `#tool ${tool} ${JSON.stringify(args)}`);
   let answer = '';
   await expect
     .poll(async () => {
@@ -110,7 +110,7 @@ test('two people chat at the same time: each in their own orchestrator, and neit
     expect(await authors(page.request, me.orchestratorId)).toEqual(['tester']);
     expect(await authors(page.request, mate.orchestratorId)).toEqual(['teammate']);
 
-    // Only its person writes to a chat; only the owner to the dispatcher.
+    // Only its person writes to a chat; nobody to the dispatcher (e2e/dispatcher.spec.ts).
     expect((await mateCtx.request.post(`/api/sessions/${me.orchestratorId}/message`, { data: { text: 'let me in' } })).status()).toBe(403);
     expect((await page.request.post(`/api/sessions/${mate.orchestratorId}/message`, { data: { text: 'let me in' } })).status()).toBe(403);
     expect((await mateCtx.request.post(`/api/sessions/${me.dispatcherId}/message`, { data: { text: 'let me in' } })).status()).toBe(403);

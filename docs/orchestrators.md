@@ -37,8 +37,8 @@ fallback, and says that a copy of the tool's schema earlier in a resumed chat ma
 Both are sessions of kind `orchestrator`, so neither takes an agent slot, and both keep the orchestrator's limits: no
 shell, no web tools, `Read`/`Glob`/`Grep` on the base clone, and `Write`/`Edit` only in their own memory folder
 ([Memory](#memory)). Their briefs share one description of the world
-(`worldBrief` in `server/agents.ts`); the dispatcher's is the old shared orchestrator's, edited for a chat people do not
-write to.
+(`worldBrief` in `server/agents.ts`); the dispatcher's is the old shared orchestrator's, edited for a chat nobody
+writes to.
 
 ## Requests and the ledger
 
@@ -155,8 +155,8 @@ decides every write, and a hook's refusal holds in every permission mode:
   `\\?\`/`\\.\` paths, alternate data streams (`MEMORY.md:x`), names ending in a dot or space, device names.
 - **What:** no secrets, gitleaks-style: Anthropic, GitHub, AWS, Google, Slack and npm tokens, FF Factory connector
   tokens, Discord bot tokens, private keys, and a password or key assigned a long value.
-- **When:** only in a turn its person started with a message of their own (the dispatcher: the owner writing in its
-  chat). Orchestrators read text agents wrote (`[worker update]`, relayed Discord and FFBox reports); a harness turn
+- **When:** only in a turn its person started with a message of their own (the dispatcher has none: nobody writes to
+  it, so it never writes memory in a turn of its own). Orchestrators read text agents wrote (`[worker update]`, relayed Discord and FFBox reports); a harness turn
   must not be able to plant an instruction that every later conversation loads.
 
 ### Memory in a private repository
@@ -234,12 +234,18 @@ says so (`memoryBrief`).
 - The dispatcher's destructive and admin tools (`delete_sandbox`, `set_app_config`, `request_app_update`,
   `republish_public`, `add_machine`, `remove_machine`, `create_standing_agent`, `update_standing_agent`,
   `delete_standing_agent`, `approve_delegation`; `server/belts.ts`) run only for a request its person filed or last
-  changed in a turn of their own (`humanAsked`), or in a turn the owner started in the dispatcher's chat. A turn counts as
+  changed in a turn of their own (`humanAsked`). A turn counts as
   a person's only when every message it answers is theirs: the CLI folds messages sent during a turn into it. Request
   text is written by a model that may be relaying injected text, so its "the user asked" is not enough. Recovery tools
   (`host_recovery`, `machine_daemon`) stay free.
-- Only its person writes to a personal orchestrator, and only an owner to the dispatcher (HTTP 403 otherwise). This
-  covers messages, interrupts, permission answers and the permission mode.
+- Only its person writes to a personal orchestrator (HTTP 403 otherwise). Nobody writes to the dispatcher, the owner
+  included (Ben, 2026-10-03: people talk to their own orchestrator, which files work with it): `POST
+  /api/sessions/<dispatcher id>/message` answers 403 "nobody chats with the dispatcher…" for every login and key
+  (`DispatcherChatRefused`, checked in the route and again in `Agents.sendWithAttachments`, so no other caller can
+  send it a human-authored message either). The harness still reaches it, because those messages are `system` ones:
+  `[work request]`, `[work update]`, `[ledger]`, `[machines]`, intake and FFBox notices, `[wake_me]`. Interrupts,
+  permission answers and the permission mode of the dispatcher stay owner-only; the Intake tab's approve and decline and
+  delegation approvals are their own routes.
 
 ## What people see
 
@@ -247,8 +253,8 @@ says so (`memoryBrief`).
 - The sidebar lists, under it, the other people's orchestrators (read only) and the Dispatcher, with its open requests
   ("1 question · 2 active").
 - The Dispatcher page has two tabs. Requests lists everyone's open requests, questions first, with the closed ones behind
-  a link; a row opens to its brief, workers, overlaps and log. Conversation is the dispatcher's chat, which only the
-  owner writes to.
+  a link; a row opens to its brief, workers, overlaps and log. Conversation is the dispatcher's log, read only. Where the
+  composer would be, a line says nobody writes to the dispatcher and links "Talk to your orchestrator" (your own chat).
 - Decisions arrive in your chat as one-line notices ("Merged into w15: “Belts drop items…”") that open the request.
 - A message from another person arrives in your chat as an amber notice, open, with their name and text ("Lothsahn:
   Could you run the firewall script on BEAST?"); Open goes to their chat. Until you open your chat, the sidebar's

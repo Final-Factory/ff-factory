@@ -10,7 +10,7 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
-import { FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
+import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
@@ -246,6 +246,23 @@ test('the dispatcher acts for the request it serves, and runs destructive tools 
   assert.deepEqual(o.dispatcherActor(undefined, 'w1'), BEN);
   o.decide({ id: 'w1', action: 'done', note: 'nothing to approve' });
   assert.throws(() => o.dispatcherActor(undefined, 'w1'), /w1 is done/);
+});
+
+test('nobody chats with the dispatcher, the owner included; the harness and the people\'s own chats still get through', async (t) => {
+  const { agents, store, o, dispatcher, chat, call, heard } = setup(t);
+  const id = dispatcher().info.id;
+  for (const who of [BEN, LOTH]) {
+    await assert.rejects(agents.sendWithAttachments(id, 'do this now', 'human', { requestedBy: who }), (e: Error) => e instanceof DispatcherChatRefused && e.status === 403 && e.message === DISPATCHER_CHAT_REFUSED);
+  }
+  assert.match(DISPATCHER_CHAT_REFUSED, /write to your own orchestrator/);
+  assert.equal(store.readTranscript(id).filter((e) => e.kind === 'user' && e.from === 'human' && e.text.includes('do this now')).length, 0, 'the refused message was not recorded');
+
+  await agents.sendWithAttachments(id, '[ledger] Capacity may have freed (test)', 'system');
+  o.toDispatcher('[machines] test notice');
+  await call(chat(BEN).info, 'request_work', { title: 'Fix the belt bug', brief: 'Belts drop items at corners.' });
+  await until('the harness messages reach the dispatcher', () => heard(id, '[ledger]').length === 1 && heard(id, '[machines]').length === 1 && heard(id, '[work request]').length === 1);
+
+  await assert.doesNotReject(agents.sendWithAttachments(chat(BEN).info.id, 'a message of my own', 'human', { requestedBy: BEN }));
 });
 
 test('requests: a question goes to its filer, whose answer brings it back; closing as done does not wake the dispatcher', async (t) => {

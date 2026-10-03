@@ -111,6 +111,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **Nobody chats with the dispatcher** (w293, asked by Ben: Lothsahn was talking to it directly instead of to his
+  orchestrator). The Dispatcher page's Conversation tab is a read-only log with a "Talk to your orchestrator" link where
+  the input was, for every login including the owner. `POST /api/sessions/<dispatcher>/message` answers 403 "nobody
+  chats with the dispatcher…" (voice mode used the same route); it is also refused inside `Agents.sendWithAttachments`.
+  Harness messages (`[work request]`, `[work update]`, `[ledger]`, `[machines]`, intake, FFBox, `[wake_me]`) and the
+  Intake tab's approve, decline and delegation approvals are unchanged. The dispatcher's destructive tools now run only
+  for a request its person asked for in their own orchestrator ([docs/orchestrators.md](docs/orchestrators.md)).
+
 - **A release is done when its patch notes are posted** (w280, asked by Lothsahn). The FFBox paragraph both
   orchestrators carry, the dispatcher's and orchestrators' brief rules and `docs/ffbox.md` say a requested release is
   done only when it is live on its Steam branch and its notes are posted once, as Max, in #dev-patch-notes; a release

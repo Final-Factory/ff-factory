@@ -32,6 +32,7 @@ import { keepMessageImages } from './inlineImages.ts';
 import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, publicRef } from './attachments.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
+import { DispatcherChatRefused } from './orchestrators.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
@@ -240,8 +241,9 @@ function requesterOf(req: http.IncomingMessage) {
 }
 
 /**
- * Who may drive an orchestrator (docs/orchestrators.md): a person's own only by that person, the dispatcher only by an
- * owner. So one person's chat never gets the other's messages, and nobody spends someone else's Claude account.
+ * Who may drive an orchestrator (docs/orchestrators.md): a person's own only by that person, the dispatcher's controls
+ * (permissions, mode, interrupt) only by an owner. Nobody writes the dispatcher a message (the message route refuses it).
+ * So one person's chat never gets the other's messages, and nobody spends someone else's Claude account.
  */
 function mayDrive(req: http.IncomingMessage, s: SessionInfo) {
   if (s.kind !== 'orchestrator') return;
@@ -251,7 +253,7 @@ function mayDrive(req: http.IncomingMessage, s: SessionInfo) {
     if (owner.userId.toLowerCase() !== me.userId.toLowerCase()) throw new HttpError(403, `this is ${owner.displayName}'s own orchestrator; write to yours`);
     return;
   }
-  if (identity.get(me.userId)?.role !== 'owner') throw new HttpError(403, 'only the owner writes to the dispatcher; ask your own orchestrator, which files work with it');
+  if (identity.get(me.userId)?.role !== 'owner') throw new HttpError(403, "only the owner answers the dispatcher's permission requests or changes its mode; ask your own orchestrator, which files work with it");
 }
 const notifier = new Notifier(cfg.dataDir, store, sessions);
 notifier.orchestratorId = () => store.orchestratorId;
@@ -588,6 +590,8 @@ route('GET', '/api/search', async (_r, _p, url) => {
 });
 
 route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
+  // The page has no input here; a direct POST gets this error.
+  agents.orchestrators.refuseHumanChat(sessions.get(id).info);
   // Images come base64 in the JSON (the UI shrinks them first), so this body may be large.
   const { text, images, attachments: attachmentIds } = await readJson<SendMessageRequest>(req, 40 * 1024 * 1024);
   const imgs = checkImages(images);
@@ -1210,7 +1214,7 @@ const server = http.createServer(async (req, res) => {
     }
     await serveStatic(req, url, res);
   } catch (e) {
-    const status = e instanceof HttpError || e instanceof AttachmentError ? e.status : /^no (sandbox|session|standing agent|delegation|machine)/.test((e as Error).message) ? 404 : 400;
+    const status = e instanceof HttpError || e instanceof AttachmentError || e instanceof DispatcherChatRefused ? e.status : /^no (sandbox|session|standing agent|delegation|machine)/.test((e as Error).message) ? 404 : 400;
     // An upload that must resume elsewhere says where (docs/attachments.md).
     send(res, status, { error: (e as Error).message, ...(e instanceof AttachmentError && e.received !== undefined ? { received: e.received } : {}) });
   }

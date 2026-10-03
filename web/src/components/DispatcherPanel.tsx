@@ -3,7 +3,7 @@ import type { AppState, IntakeSummary, WorkItem, WorkSource } from '../../../sha
 import { api } from '../api';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds } from '../store';
-import { dispatcherGlance, fmtCost, fmtRelative, isBusy, isOpenWork, navigate, useNow, workLabel, workTone } from '../util';
+import { dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, navigate, useNow, workLabel, workTone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
 import { accountOf } from './SystemMeters';
@@ -58,6 +58,19 @@ export const triageLabel: Record<NonNullable<WorkItem['triage']>['class'], strin
 
 /** What a pending intake request waits for, as its status reads. */
 const waitingLabel = (w: WorkItem) => (w.triage?.class === 'needs-human' ? 'Needs a human' : 'Awaiting approval');
+
+/** Where the dispatcher's input would be: nobody chats with it, a person talks to their own orchestrator (docs/orchestrators.md). */
+function TalkToYourOrchestrator() {
+  return (
+    <>
+      Nobody writes to the dispatcher.{' '}
+      <a href={href({ view: 'home' })} data-testid="talk-to-orchestrator">
+        Talk to your orchestrator
+      </a>
+      : it files work with the dispatcher for you.
+    </>
+  );
+}
 
 /**
  * The dispatcher (docs/orchestrators.md): the ledger of everyone's requests with what was decided and who works on
@@ -134,7 +147,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
       {current === 'intake' && app.intake && <IntakeTab app={app} intake={app.intake} work={work} now={now} />}
       {current === 'conversation' &&
         (session ? (
-          <SessionView key={session.id} session={session} embedded readOnly={owner ? undefined : 'Only the owner writes to the dispatcher. To ask for work, write to your own orchestrator.'} />
+          <SessionView key={session.id} session={session} embedded readOnly={<TalkToYourOrchestrator />} answeredBy={owner ? undefined : 'the owner'} />
         ) : (
           <div className="panel-empty">
             <p>No dispatcher yet.</p>
