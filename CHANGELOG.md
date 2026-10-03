@@ -29,8 +29,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   whole block as the value: `enabled`, `branches`, `diagnoses`, `requests`, `boardCheck`, `escalations`, `repo`,
   `dailyCap`, `match.{high,medium}` (w219) and `autoApprove.{enabled,maxPerDay}`. An owner's setting only, behind the same "the person asked in
   their own words" guard as the other admin settings; unknown keys and wrong types are refused. It applies at once,
-  and when it changes what the portal takes from FFBox (`board_check`, `board_summary`, `request`) the connector is closed normally
-  and reconnects to a new welcome. Until now the ledger check could be switched on only by editing config.json on
+  and the connector's link stays up. Until now the ledger check could be switched on only by editing config.json on
   BEAST, so FFBox's `board_log` showed `not_asked: portal_takes_no_board_check`.
 
 - **board_check matches a report to ledger work by meaning** (w219; [docs/intake.md](docs/intake.md)). FFBox sends the
@@ -59,6 +58,25 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   `<redacted>`, and every answer is secret-scanned twice. Each answer is capped at one 64 KB frame, and FFBox answers
   30 a minute. A connector offers the queries in its hello (`accepts: ["query"]`, `queries: [...]`), so an older
   connector is never asked and an older portal never asks. Adding a query is a short, documented step in both repos.
+
+### Changed
+
+- **FFBox's link: no capability negotiation, and a frame that cannot be read says why** (w230;
+  [contract](docs/ffbox-connector-contract.md#the-envelope-what-is-fatal-and-what-is-not)). On 2026-10-03 a test run
+  rewrote FFBox's connector feed, its hello lost `queries`, and every live view answered `not_offered` for hours. Now
+  nothing is gated on what the hello offers: `protocol`, `accepts` and `queries` are optional and only shown; any
+  protocol number is welcomed (no more `4426`); the welcome's `accepts` is a static list, so changing the intake
+  settings no longer closes the link; any well-formed query is sent and FFBox answers or says why not; `board` updates
+  and `maybe` answers go to any connector. Unknown fields are ignored and an unknown message type is answered `error`
+  `unsupported` (not counted). Only a frame that cannot be read is fatal (not JSON, not an object, no `type`, a field
+  missing or of the wrong JSON type): closed `4400` with the place, e.g. `could not parse capacity.classes.0.free:
+  expected number, received string`, logged with FFBox's commit and address and shown in the status line. Query
+  failures carry FFBox's `reason`, `hint` and `detail` (cleaned), with the new codes `unavailable` (ffwatch down) and
+  `disabled`; a timeout reads `no answer from FFBox within 10 s`. The status line adds the connector's commit and
+  address, `ffwatch up` / `ffwatch DOWN since <time>` (from `capacity.ffwatch`), the last query, and the last close
+  reason while offline; "LEDGER CHECK OFF HERE" now counts the board checks this portal actually refused in 24 h. The
+  server log records every connect (address, commit, token fingerprint), every close with the code and reason either
+  side sent, and a loud line when a new connection replaces a live one.
 
 ### Fixed
 

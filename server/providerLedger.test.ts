@@ -21,7 +21,7 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
 
 /**
  * The ledger check both ways, end to end (docs/ffbox-connector-contract.md, "Protocol 2"): a fake FFBox connector over
- * a real /provider socket, against the real ledger. The handshake in both versions, a board_check by the exact
+ * a real /provider socket, against the real ledger. The handshake (protocol information only), a board_check by the exact
  * discord:<thread id> key of a request that only names the thread in its brief (w50, w53), the branch to watch once a
  * worker is on it, the answer pushed again as it changes (a PR, the fix landing, the release), FFBox's own conversation
  * never matching itself, and an ffbox/* PR filed as a review request with its thread's key.
@@ -73,10 +73,9 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
   const o = agents.orchestrators;
   (o as unknown as { d: { intakeGatherMs: number } }).d.intakeGatherMs = 20;
   const pm = new ProviderManager(cfg);
-  const intake = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, pushBoard: (ref, a) => pm.pushBoard(ref, a), takesMaybe: () => !!pm.summary().accepts?.includes('board_maybe') });
+  const intake = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, pushBoard: (ref, a) => pm.pushBoard(ref, a), takesMaybe: () => true });
   pm.onBoardCheck = (m) => intake.onBoardCheck(m);
   pm.onConversation = (c) => intake.onConversation(c);
-  pm.portalAccepts = () => intake.portalAccepts();
   const server = http.createServer();
   server.on('upgrade', (req, socket, head) => pm.upgrade(req, socket, head, '127.0.0.1'));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -186,18 +185,20 @@ test('ledger check both ways: handshake, exact thread keys, what to watch, and t
   pm.onConversation?.(conv({ id: '41', threadId: THREAD_B, branch: 'ffbox/tooltip-fix-1', pr: { number: 820, state: 'merged' } }));
   assert.equal(review.status, 'done');
 
-  // A protocol 1 connector still gets its answers (the check predates the version), but no pushes.
+  // No negotiation: a protocol 1 hello that lists nothing gets its answers and the pushes too; offline, nothing goes.
   c.close();
   await until('the link drops', () => !pm.online);
+  assert.equal(pm.pushBoard('conv-10', { verdict: 'clear', matches: [] }), false, 'offline');
   const v1 = connect();
   const w1 = (await v1.hello({ protocol: 1 })) as unknown as Record<string, unknown>;
   assert.equal(w1.protocol, 1);
   v1.send({ type: 'board_check', ref: 'conv-10', keys: [`discord:${THREAD_B}`] });
   assert.equal(((await v1.next('board')) as { verdict: string }).verdict, 'in_flight');
-  assert.equal(pm.pushBoard('conv-10', { verdict: 'clear', matches: [] }), false);
+  assert.equal(pm.pushBoard('conv-10', { verdict: 'clear', matches: [] }), true);
+  assert.equal(((await v1.next('board')) as { update?: boolean }).update, true);
 });
 
-test('ledger check by meaning (w219): the words a report uses, maybe for a connector that takes it, and the candidates named later', async (t) => {
+test('ledger check by meaning (w219): the words a report uses, maybe whatever the hello lists, and the candidates named later', async (t) => {
   const { store, intake, connect } = await setup(t);
   const item = (id: string, title: string, status: WorkItem['status'] = 'active'): WorkItem => ({ id, title, brief: title, priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status, createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] });
   store.putWork(item('w217', 'TEST ENTRY, please ignore: purple teapot appears in the cargo hold', 'new'));
@@ -206,7 +207,7 @@ test('ledger check by meaning (w219): the words a report uses, maybe for a conne
   store.putWork(item('w312', 'Enemies never attack my base'));
   store.putWork(item('w315', 'Belts stop after loading a save'));
 
-  // A connector that takes maybe (hello.accepts board_maybe) and sends the report's words.
+  // A connector that sends the report's words.
   const c = connect();
   const welcome = (await c.hello({ protocol: 2, accepts: ['board', 'filed', 'board_maybe'] })) as unknown as { accepts: string[] };
   assert.ok(welcome.accepts.includes('board_summary'), 'the welcome takes the words');
@@ -231,10 +232,10 @@ test('ledger check by meaning (w219): the words a report uses, maybe for a conne
   assert.ok(filed, JSON.stringify(res));
   assert.ok(filed!.log.some((l) => /Possibly the same bug as w301 \(0\.\d+\)/.test(l)), filed!.log.join('\n'));
 
-  // An older connector (no board_maybe) is told clear instead.
-  const old = connect();
-  await old.hello({ protocol: 2, accepts: ['board', 'filed'] });
-  old.send({ type: 'board_check', ref: 'conv-572', keys: ['discord:1554600000000000572'], conversation: '572', title: 'movement broken' });
-  board = (await old.next('board')) as typeof board;
-  assert.equal(board.verdict, 'clear');
+  // A hello that lists nothing (no board_maybe) is still told maybe: no offer list gates an answer.
+  const bare = connect();
+  await bare.hello({ protocol: 2 });
+  bare.send({ type: 'board_check', ref: 'conv-572', keys: ['discord:1554600000000000572'], conversation: '572', title: 'movement broken' });
+  board = (await bare.next('board')) as typeof board;
+  assert.equal(board.verdict, 'maybe');
 });

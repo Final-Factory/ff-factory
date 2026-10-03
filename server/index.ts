@@ -412,13 +412,13 @@ const intake = new IntakeManager({
   orchestrators: agents.orchestrators,
   discord: max,
   pushBoard: (ref, answer) => providers.pushBoard(ref, answer),
-  takesMaybe: () => !!providers.summary().accepts?.includes('board_maybe'),
+  // FFBox runs ffbox master, which takes maybe: no offer list gates it (docs/ffbox-connector-contract.md, "No negotiation").
+  takesMaybe: () => true,
 }).start();
 max.onEvent = (ev) => intake.onMaxEvent(ev);
 providers.onConversation = (c) => intake.onConversation(c);
 providers.onRequest = (m) => intake.onRequest(m);
 providers.onBoardCheck = (m) => intake.onBoardCheck(m);
-providers.portalAccepts = () => intake.portalAccepts();
 providers.onWorkReply = (m) => intake.onWorkReply(m);
 providers.onResult = (m) => intake.onResult(m);
 agents.orchestrators.onIntakeAttention = (w, what) => notifier.intake(w, what, (what === 'design' && w.flag ? w.flag.for : agents.orchestrators.reviewers()).map((r) => r.userId));

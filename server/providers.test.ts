@@ -7,7 +7,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ProviderManager, describeQuery } from './providers.ts';
 import { cpuPct, metricsLine, metricsStale, METRICS_STALE_MS } from '../shared/providerMetrics.ts';
-import { CLOSE, PROVIDER_PROTOCOL, PROVIDER_TOKEN, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
+import { CLOSE, LIMITS, PROVIDER_PROTOCOL, PROVIDER_TOKEN, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
 import { normalizeSetting, setAppConfig } from './appConfig.ts';
 import { redactSecrets } from './secrets.ts';
 import { MockConnector, SAMPLE_CLASSES, SAMPLE_CONVERSATIONS, SAMPLE_INTAKE } from '../e2e/mockConnector.ts';
@@ -27,7 +27,9 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }, opt
   const cfg = { dataDir, providers: { ffbox: { enabled: opts.enabled ?? true, tokenSha256: tokenSha256(token) } } } as unknown as Config;
   const pm = new ProviderManager(cfg);
   const server = http.createServer();
-  server.on('upgrade', (req, socket, head) => pm.upgrade(req, socket, head, '127.0.0.1'));
+  // The address the next connection is recorded from (the tests' sockets all come from 127.0.0.1).
+  const remote = { ip: '127.0.0.1' };
+  server.on('upgrade', (req, socket, head) => pm.upgrade(req, socket, head, remote.ip));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const connectors: MockConnector[] = [];
@@ -42,7 +44,7 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }, opt
     server.close();
     if (!opts.dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
-  return { cfg, pm, url, token, connect, dataDir };
+  return { cfg, pm, url, token, connect, dataDir, remote };
 }
 
 test('tokens: ffpv1_ plus 43 base64url characters, stored as SHA-256, redacted everywhere', () => {
@@ -170,64 +172,115 @@ test('titles are untrusted text: control characters out, one line, tokens redact
   assert.ok(title.length <= 300);
 });
 
-test('a bad message is answered with an error and the connection stays; unknown types are ignored', async (t) => {
+test('not fatal: a value out of range is bad_message (counted), an unknown type is unsupported (not counted), hello twice', async (t) => {
   const { connect, pm } = await setup(t);
+  const logs = t.mock.method(console, 'log', () => undefined);
   const c = connect();
   await c.hello();
-  c.send('{not json');
-  assert.equal((await c.next('error')).code, 'bad_json');
   c.send({ type: 'intake', cursor: 'x', event: { ...SAMPLE_INTAKE[0], reportId: '../../etc/passwd' } });
   const bad = await c.next('error');
   assert.equal(bad.code, 'bad_message');
   assert.match(String(bad.message), /event\.reportId/);
   assert.ok(!String(bad.message).includes('passwd'), 'the error never echoes the value');
-  c.send({ type: 'submit', prompt: 'from a newer connector' });
-  assert.equal((await c.next('error')).code, 'unknown_type');
+  // More unknown types than the invalid-per-minute limit: each answered, none counted, the link stays.
+  for (let i = 0; i < LIMITS.invalidPerMinute + 5; i++) c.send({ type: 'submit_v9', prompt: 'from a newer connector' });
+  c.send({ type: 'telemetry' });
+  for (let i = 0; i < LIMITS.invalidPerMinute + 5; i++) {
+    const u = await c.next('error');
+    assert.deepEqual([u.code, u.ref], ['unsupported', 'submit_v9']);
+  }
+  const u2 = await c.next('error');
+  assert.deepEqual([u2.code, u2.ref], ['unsupported', 'telemetry']);
+  assert.equal(
+    logs.mock.calls.filter((x) => /does not know, "submit_v9"/.test(String(x.arguments[0]))).length,
+    1,
+    'an unknown type is logged once per link',
+  );
   c.send({ type: 'hello', protocol: PROVIDER_PROTOCOL, provider: 'ffbox', connector: { version: 'again' } });
   assert.equal((await c.next('error')).code, 'hello_twice');
   assert.equal(pm.online, true);
   assert.equal(pm.intake().length, 0);
 });
 
-test('the first message must be a hello of this protocol, within the hello timeout', async (t) => {
+test('fatal: not JSON, not an object, no string type, or a field of the wrong JSON type closes 4400 with the reason, logged and in the status line', async (t) => {
+  const { connect, pm, remote } = await setup(t);
+  const warns = t.mock.method(console, 'warn', () => undefined);
+  t.mock.method(console, 'log', () => undefined);
+  const cases: [unknown, RegExp][] = [
+    ['{not json', /^could not parse a frame: not JSON$/],
+    [[1, 2], /^could not parse a frame: not a JSON object$/],
+    [{ kind: 'capacity' }, /^could not parse a frame: no string "type"$/],
+    [{ type: 'capacity', classes: [{ ...SAMPLE_CLASSES[0], free: 'four' }], queue: 0, state: 'running' }, /^could not parse capacity\.classes\.0\.free: expected number, received string$/],
+    [{ type: 'board_check', keys: [] }, /^could not parse board_check\.ref: expected string, received undefined$/],
+  ];
+  for (const [i, [frame, want]] of cases.entries()) {
+    remote.ip = `10.0.0.${i + 1}`;
+    const c = connect();
+    await c.hello();
+    c.send(typeof frame === 'string' ? frame : JSON.stringify(frame));
+    const closed = await c.closed;
+    assert.equal(closed.code, CLOSE.badMessage, String(want));
+    assert.match(closed.reason, want);
+    assert.ok(Buffer.byteLength(closed.reason) <= 120);
+    await until('offline', () => !pm.online);
+    const line = `connector closed: ${closed.reason} (ffbox commit abc1234, from 10.0.0.${i + 1})`;
+    assert.ok(warns.mock.calls.some((x) => String(x.arguments[0]).includes(line)), `logged: ${line}`);
+    assert.equal(pm.summary().statusDetail, line);
+    assert.ok(pm.statusLine()!.includes(line), pm.statusLine() ?? '');
+    assert.deepEqual([pm.summary().lastClose?.code, pm.summary().lastClose?.by], [CLOSE.badMessage, 'portal']);
+  }
+});
+
+test('the first message must be a hello, within the hello timeout; a bad hello is fatal with its path', async (t) => {
   const { connect, pm } = await setup(t);
+  t.mock.method(console, 'warn', () => undefined);
   const a = connect();
   await new Promise((r) => a.ws.once('open', r));
   a.send({ type: 'capacity', classes: [], queue: 0, state: 'running' });
-  assert.equal((await a.closed).code, CLOSE.badMessage);
+  const ca = await a.closed;
+  assert.equal(ca.code, CLOSE.badMessage);
+  assert.equal(ca.reason, 'the first message must be hello, not "capacity"');
   const b = connect();
-  await assert.rejects(b.hello({ protocol: PROVIDER_PROTOCOL + 1 }));
-  const closed = await b.closed;
-  assert.equal(closed.code, CLOSE.protocol);
-  assert.match(closed.reason, /speaks 1 and 2/);
+  await new Promise((r) => b.ws.once('open', r));
+  b.send({ type: 'hello', provider: 'ffbox', connector: { version: 7, commit: 'def5678' } });
+  const cb = await b.closed;
+  assert.equal(cb.code, CLOSE.badMessage);
+  assert.equal(cb.reason, 'could not parse hello.connector.version: expected string, received number');
+  await until('the status', () => /ffbox commit def5678, from 127\.0\.0\.1/.test(pm.summary().statusDetail ?? ''));
   pm.helloTimeoutMs = 100;
   const d = connect();
   assert.equal((await d.closed).code, CLOSE.noHello);
   assert.equal(pm.online, false);
 });
 
-test('mixed versions: a protocol 1 hello gets a protocol 1 welcome with no accepts; a protocol 2 hello the portal\'s accepts', async (t) => {
+test('no negotiation: any protocol or none is welcomed with the static accepts; protocol 1 or 2 echoed, else 2', async (t) => {
   const { connect, pm } = await setup(t);
-  pm.portalAccepts = () => ['board_check', 'request'];
-  const one = connect();
-  const w1 = (await one.hello({ protocol: 1 })) as unknown as Record<string, unknown>;
-  assert.equal(w1.protocol, 1);
-  assert.equal('accepts' in w1, false, 'a protocol 1 connector is told nothing it cannot read');
-  assert.equal(pm.summary().connector?.protocol, 1);
-  one.close();
-  const two = connect();
-  const w2 = (await two.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as Record<string, unknown>;
-  assert.equal(w2.protocol, 2);
-  assert.deepEqual(w2.accepts, ['board_check', 'request', 'metrics'], 'metrics is taken whatever the intake settings say');
-  assert.equal(pm.summary().connector?.protocol, 2);
-  // An answer pushed again goes only to a protocol 2 connector that takes board.
-  assert.equal(pm.pushBoard('conv-7', { verdict: 'done', matches: [] }), true);
-  const pushed = await two.next('board');
-  assert.deepEqual(pushed, { type: 'board', ref: 'conv-7', verdict: 'done', matches: [], update: true });
-  two.close();
-  const quiet = connect();
-  await quiet.hello({ protocol: 2, accepts: [] });
-  assert.equal(pm.pushBoard('conv-7', { verdict: 'done', matches: [] }), false, 'not to one that does not take board');
+  const all = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics'];
+  for (const [protocol, want] of [[1, 1], [2, 2], [3, 2], [null, 2]] as const) {
+    const c = connect();
+    const w = (await c.hello({ protocol, accepts: protocol === 1 ? undefined : ['board'] })) as unknown as Record<string, unknown>;
+    assert.equal(w.protocol, want, `hello protocol ${protocol}`);
+    assert.deepEqual(w.accepts, all, 'the same list whatever the hello or the intake settings say');
+    assert.equal(pm.summary().connector?.protocol, protocol ?? undefined);
+    // A board answer pushed again goes to any connector that said hello.
+    assert.equal(pm.pushBoard('conv-7', { verdict: 'done', matches: [] }), true);
+    assert.deepEqual(await c.next('board'), { type: 'board', ref: 'conv-7', verdict: 'done', matches: [], update: true });
+    c.close();
+    await until('offline', () => !pm.online);
+  }
+});
+
+test('unknown fields are ignored: a hello and a capacity with extra fields are taken', async (t) => {
+  const { connect, pm } = await setup(t);
+  const c = connect();
+  const w = await c.hello({ extra: { features: { x: 1 }, region: 'eu' }, accepts: ['board', 'Weird-Word', 'query'] });
+  assert.equal(w.type, 'welcome');
+  assert.deepEqual(pm.summary().accepts, ['board', 'query'], 'malformed words are dropped, not refused');
+  c.send({ type: 'capacity', classes: [{ ...SAMPLE_CLASSES[1], cpuShares: 4 }], queue: 1, state: 'running', holds: [], future: { a: [1] } });
+  await until('the capacity', () => pm.summary().capacity?.queue === 1);
+  assert.equal(pm.summary().capacity?.classes[0].name, 'ffdev');
+  assert.equal('cpuShares' in pm.summary().capacity!.classes[0], false, 'stripped, not kept');
+  assert.equal(pm.online, true);
 });
 
 test('too many messages too fast: closed with 4429', async (t) => {
@@ -239,13 +292,25 @@ test('too many messages too fast: closed with 4429', async (t) => {
   assert.equal((await c.closed).code, CLOSE.tooFast);
 });
 
-test('switched off while connected: closed with 4403 at once; a newer connection replaces an older one (4000)', async (t) => {
-  const { connect, pm, cfg } = await setup(t);
+test('switched off while connected: closed with 4403 at once; a newer connection replaces an older one (4000), said loudly', async (t) => {
+  const { connect, pm, cfg, remote, token } = await setup(t);
+  const warns = t.mock.method(console, 'warn', () => undefined);
+  const logs = t.mock.method(console, 'log', () => undefined);
+  remote.ip = '192.168.1.20';
   const a = connect();
   await a.hello();
+  const fp = tokenSha256(token).slice(0, 12);
+  assert.ok(logs.mock.calls.some((x) => String(x.arguments[0]) === `provider ffbox: connector mock-1 (commit abc1234) connected from 192.168.1.20, token ${fp}…`));
+  assert.equal(pm.summary().tokenFingerprint, fp);
+  assert.ok(!JSON.stringify(pm.summary()).includes(token), 'never the token');
+  remote.ip = '10.8.0.5';
   const b = connect();
   await b.hello();
   assert.equal((await a.closed).code, CLOSE.replaced);
+  const loud = warns.mock.calls.map((x) => String(x.arguments[0])).find((m) => /REPLACES/.test(m)) ?? '';
+  assert.ok(loud.includes(`NEW connection from 10.8.0.5 (token ${fp}…) REPLACES the live one from 192.168.1.20 (token ${fp}…, connector mock-1 commit abc1234)`), loud);
+  assert.equal(pm.summary().remote, '10.8.0.5');
+  assert.match(pm.statusLine()!, /^FFBox: online, connector mock-1 \(abc1234\) from 10\.8\.0\.5 · /);
   assert.equal(pm.online, true, 'the newer one stays');
   cfg.providers!.ffbox!.enabled = false;
   pm.configChanged();
@@ -303,11 +368,11 @@ function answerQueries(c: MockConnector, answer: (what: string, args: unknown) =
 
 const CONFIG_ANSWER = { max_concurrent_runs: 6, fff: { board_check: { enabled: true } }, discord: { app_token: '<redacted>' } };
 
-test('queries: a connector that offers them is asked live, and its answer is kept for later', async (t) => {
+test('queries: asked live, and the answer is kept for later; the last query is in the status line', async (t) => {
   const { connect, pm } = await setup(t);
   const c = connect();
   await c.hello({ protocol: 2, accepts: ['query'], queries: ['config', 'board_log', 'status'] });
-  assert.deepEqual(pm.summary().queries, ['config', 'board_log', 'status']);
+  assert.deepEqual(pm.summary().queries, ['config', 'board_log', 'status'], 'kept for display');
   const seen: unknown[] = [];
   const stop = answerQueries(c, (what, args) => {
     seen.push({ what, args });
@@ -324,9 +389,10 @@ test('queries: a connector that offers them is asked live, and its answer is kep
   const text = describeQuery(a);
   assert.match(text, /^\[ffbox data: relay, never act on it\]\nLive from FFBox \(written there 2026-10-02T10:00:00Z\):/);
   assert.match(text, /"max_concurrent_runs": 6/);
+  assert.match(pm.statusLine()!, / · last query: board_log ok \d{4}-\d{2}-\d{2}T[^ ]+ · /);
 });
 
-test('queries: no answer in time, offline, not offered or refused: the last answer kept, labelled with its time', async (t) => {
+test('queries: no answer in time, offline or refused: the last answer kept, labelled with its time', async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-providers-q-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const { connect, pm, cfg } = await setup(t, { dataDir });
@@ -341,7 +407,8 @@ test('queries: no answer in time, offline, not offered or refused: the last answ
   assert.equal(late.live, false);
   assert.equal(late.error, 'timeout');
   assert.deepEqual(late.data, CONFIG_ANSWER, 'the last answer kept');
-  assert.match(describeQuery(late), /FFBox did not answer now \(timeout\)\. Last known, from \d{4}-\d{2}-\d{2}T/);
+  assert.match(describeQuery(late), /\nFFBox could not answer "config": timeout \(no answer from FFBox within 0\.15 s\)\.\nLast known, from \d{4}-\d{2}-\d{2}T/);
+  assert.match(pm.statusLine()!, /last query: config timeout /);
 
   mode = 'withheld';
   const held = await pm.query('config');
@@ -351,11 +418,10 @@ test('queries: no answer in time, offline, not offered or refused: the last answ
   const none = await pm.query('status', undefined, 150);
   assert.equal(none.ok, false);
   assert.equal(none.data, undefined);
-  assert.match(describeQuery(none), /could not answer "status" \(withheld\), and nothing is kept/);
+  assert.match(describeQuery(none), /could not answer "status": withheld\. Nothing is kept from an earlier answer\./);
 
-  const unknown = await pm.query('secrets_env');
-  assert.equal(unknown.error, 'unsupported', 'a name this portal does not know is never sent');
-  assert.equal((await pm.query('board_log')).error, 'not_offered', 'nor one the connector did not offer');
+  const malformed = await pm.query('Secrets-Env');
+  assert.equal(malformed.error, 'unsupported', 'a malformed name is answered here, never sent');
   assert.equal(c.received.filter((m) => m.type === 'query').length, 0);
 
   // Survives a restart, and offline still answers from it.
@@ -369,19 +435,52 @@ test('queries: no answer in time, offline, not offered or refused: the last answ
   assert.deepEqual(off.data, CONFIG_ANSWER);
 });
 
-test('queries: an old connector (no queries in its hello, or protocol 1) is never asked', async (t) => {
+test('queries: no offer gates them: a hello without protocol, accepts or queries is still asked, any well-formed name', async (t) => {
   const { connect, pm } = await setup(t);
-  const old = connect();
-  await old.hello({ protocol: 2, accepts: ['board', 'filed'] });
+  const c = connect();
+  await c.hello({ protocol: null });
   assert.equal(pm.summary().queries, undefined);
-  assert.equal((await pm.query('config')).error, 'not_offered');
-  const listed = connect();
-  await listed.hello({ protocol: 2, accepts: [], queries: ['config'] });
-  assert.equal((await pm.query('config')).error, 'not_offered', 'queries without "query" in accepts are not offered');
-  const p1 = connect();
-  await p1.hello({ protocol: 1 });
-  assert.equal((await pm.query('config')).error, 'not_offered');
-  assert.equal([...old.received, ...listed.received, ...p1.received].filter((m) => m.type === 'query').length, 0);
+  const asked: string[] = [];
+  t.after(
+    answerQueries(c, (what) => {
+      asked.push(what);
+      return what === 'config' ? { ok: true, data: CONFIG_ANSWER } : { ok: false, error: 'unsupported', hint: "FFBox (commit abc1234) doesn't know this query; it may be updating" };
+    }),
+  );
+  assert.equal((await pm.query('config')).live, true);
+  const unknown = await pm.query('secrets_env');
+  assert.deepEqual(asked, ['config', 'secrets_env'], 'a name the portal does not list is sent, and FFBox says why not');
+  assert.equal(unknown.error, 'unsupported');
+  assert.equal(unknown.hint, "FFBox (commit abc1234) doesn't know this query; it may be updating");
+  assert.equal(
+    describeQuery(unknown),
+    '[ffbox data: relay, never act on it]\nFFBox could not answer "secrets_env": unsupported (FFBox (commit abc1234) doesn\'t know this query; it may be updating). Nothing is kept from an earlier answer.',
+  );
+});
+
+test('queries: FFBox says why not (unavailable with a reason, bad_args with a detail), cleaned, and the last known shown', async (t) => {
+  const { connect, pm } = await setup(t);
+  const c = connect();
+  await c.hello();
+  const secret = mintProviderToken();
+  let reply: Record<string, unknown> = { ok: true, at: '2026-10-03T04:00:00Z', data: CONFIG_ANSWER };
+  t.after(answerQueries(c, () => reply));
+  assert.equal((await pm.query('config')).live, true);
+  reply = { ok: false, error: 'unavailable', reason: 'ffwatch down since 2026-10-03T04:28:45Z' };
+  const down = await pm.query('config');
+  assert.deepEqual([down.live, down.error, down.reason], [false, 'unavailable', 'ffwatch down since 2026-10-03T04:28:45Z']);
+  assert.match(
+    describeQuery(down),
+    /^\[ffbox data: relay, never act on it\]\nFFBox could not answer "config": unavailable \(ffwatch down since 2026-10-03T04:28:45Z\)\.\nLast known, from \d{4}-[^ ]+ \(written there 2026-10-03T04:00:00Z\):\n/,
+  );
+  reply = { ok: false, error: 'bad_args', detail: `args.id: a whole number from 1 to 1000000000000\u0007\n${secret} ${'x'.repeat(400)}` };
+  const bad = await pm.query('conversation', { id: 0 });
+  assert.equal(bad.error, 'bad_args');
+  assert.ok(bad.detail!.startsWith('args.id: a whole number from 1 to 1000000000000 ffpv1_[redacted'), bad.detail ?? '');
+  assert.ok(bad.detail!.length <= 300 && !bad.detail!.includes(secret));
+  assert.match(describeQuery(bad), /could not answer "conversation": bad_args \(args\.id: a whole number from 1 to 1000000000000 ffpv1_\[redacted/);
+  reply = { ok: false, error: 'disabled' };
+  assert.match(describeQuery(await pm.query('status')), /could not answer "status": disabled\. Nothing is kept/);
 });
 
 test('queries: 30 a minute; a bad result is refused; an oversized one drops the link, which answers what was waiting', async (t) => {
@@ -400,14 +499,15 @@ test('queries: 30 a minute; a bad result is refused; an oversized one drops the 
   await quiet.hello({ protocol: 2, accepts: ['query'], queries: ['status'] });
   const waiting = pm.query('status', undefined, 5000);
   await until('the query is sent', () => quiet.received.some((m) => m.type === 'query'));
-  quiet.send({ type: 'query_result', id: 'not-the-one', ok: true, data: 'not an object' });
+  quiet.send({ type: 'query_result', id: 'not the one!', ok: true, data: {} });
   const err = await quiet.next('error');
-  assert.equal(err.code, 'bad_message', 'a query_result that breaks the schema is refused like any message');
+  assert.equal(err.code, 'bad_message', 'a query_result with a malformed id is refused like any message');
   // One frame is the size cap: a bigger one closes the link (1009), and the query waiting on it is answered.
   quiet.send({ type: 'query_result', id: 'too-big', ok: true, data: { blob: 'x'.repeat(70 * 1024) } });
   const dropped = await waiting;
   assert.equal(dropped.live, false);
   assert.equal(dropped.error, 'disconnected');
+  assert.match(pm.summary().statusDetail ?? '', /^connector closed: frame over 65536 bytes \(ffbox commit abc1234, from 127\.0\.0\.1\)$/);
 });
 
 test('queries: a conversation is asked by id, and its last answer is kept per id (20 at most)', async (t) => {
@@ -479,16 +579,62 @@ test('metrics: kept with a short history and shown in the status line; a connect
   assert.equal(err.code, 'bad_message', 'a disk named by a path is refused');
 });
 
-test('status line: the ledger check on at FFBox and off here is said loudly', async (t) => {
+test('status line: FFBox asking the ledger and told not_enabled is said loudly, from what happened, for 24 h', async (t) => {
   const { connect, pm } = await setup(t);
-  pm.portalAccepts = () => [];
   const c = connect();
-  await c.hello({ protocol: 2, accepts: ['board', 'filed', 'board_maybe'] });
-  assert.match(pm.statusLine()!, /LEDGER CHECK OFF HERE: .*intake\.ffbox\.boardCheck/);
-  pm.portalAccepts = () => ['board_check', 'board_summary'];
+  await c.hello({ protocol: null });
+  assert.doesNotMatch(pm.statusLine()!, /LEDGER CHECK OFF/, 'nothing before FFBox asks, whatever its hello listed');
+  c.send({ type: 'board_check', ref: 'conv-1', keys: ['discord:1424000000000000001'] });
+  c.send({ type: 'board_check', ref: 'conv-2', keys: ['discord:1424000000000000002'] });
+  assert.equal((await c.next('error')).code, 'not_enabled');
+  assert.equal((await c.next('error')).code, 'not_enabled');
+  assert.match(pm.statusLine()!, / · LEDGER CHECK OFF HERE: FFBox asked 2 time\(s\) in 24 h and this portal answered not_enabled \(intake\.ffbox\.boardCheck\)$/);
+  const later = pm.now;
+  pm.now = () => later() + 24 * 3600_000 + 1;
+  assert.doesNotMatch(pm.statusLine()!, /LEDGER CHECK OFF/, 'a day later it is no longer said');
+  pm.now = later;
+  // Switched on here: the next check is answered, and the line goes.
+  c.send({ type: 'board_check', ref: 'conv-3', keys: ['discord:1424000000000000003'] });
+  await c.next('error');
+  assert.match(pm.statusLine()!, /LEDGER CHECK OFF HERE: FFBox asked 1 time/);
+  pm.onBoardCheck = () => ({ verdict: 'clear', matches: [] });
+  c.send({ type: 'board_check', ref: 'conv-4', keys: ['discord:1424000000000000004'] });
+  await c.next('board');
   assert.doesNotMatch(pm.statusLine()!, /LEDGER CHECK OFF/);
-  const quiet = connect();
-  await quiet.hello({ protocol: 2, accepts: [] });
-  pm.portalAccepts = () => [];
-  assert.doesNotMatch(pm.statusLine()!, /LEDGER CHECK OFF/, 'not when FFBox has its own check off');
+});
+
+test('capacity.ffwatch: up, DOWN since, and up again on the same link; queries keep going, no reconnect', async (t) => {
+  const { connect, pm } = await setup(t);
+  const c = connect();
+  await c.hello();
+  t.after(answerQueries(c, () => ({ ok: true, data: { queue: 0 } })));
+  c.capacity();
+  await until('capacity', () => !!pm.summary().capacity);
+  assert.doesNotMatch(pm.statusLine()!, /ffwatch/, 'not said while unknown');
+  c.capacity(SAMPLE_CLASSES, { ffwatch: { up: true, at: '2026-10-03T04:20:00Z' } });
+  await until('ffwatch up', () => pm.summary().ffwatch?.up === true);
+  assert.match(pm.statusLine()!, / · ffwatch up · /);
+  const since = pm.summary().connectedSince;
+  c.capacity(SAMPLE_CLASSES, { ffwatch: { up: false, at: '2026-10-03T04:28:45Z' } });
+  await until('ffwatch down', () => pm.summary().ffwatch?.up === false);
+  assert.match(pm.statusLine()!, / · ffwatch DOWN since 2026-10-03T04:28:45Z · /);
+  assert.equal((await pm.query('status')).live, true, 'queries are still sent while ffwatch is down');
+  c.capacity(SAMPLE_CLASSES, { ffwatch: { up: true, at: '2026-10-03T04:31:00Z' } });
+  await until('ffwatch up again', () => pm.summary().ffwatch?.up === true);
+  assert.match(pm.statusLine()!, / · ffwatch up · /);
+  assert.equal(pm.summary().connectedSince, since, 'the same link throughout');
+  assert.equal(pm.online, true);
+});
+
+test('a close by the connector: its code and reason logged, kept, and shown while offline', async (t) => {
+  const { connect, pm } = await setup(t);
+  const logs = t.mock.method(console, 'log', () => undefined);
+  const c = connect();
+  await c.hello();
+  c.ws.close(4400, 'could not parse board.matches.0.score: expected number');
+  await until('offline', () => !pm.online);
+  assert.ok(logs.mock.calls.some((x) => /closed 4400 "could not parse board\.matches\.0\.score: expected number" by the connector/.test(String(x.arguments[0]))));
+  const p = pm.summary();
+  assert.deepEqual([p.lastClose?.code, p.lastClose?.reason, p.lastClose?.by], [4400, 'could not parse board.matches.0.score: expected number', 'connector']);
+  assert.match(pm.statusLine()!, /^FFBox: connector offline \(last seen [^)]+\) · closed 4400 by the connector: could not parse board\.matches\.0\.score: expected number$/);
 });
