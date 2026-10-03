@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox's intake switches can be set without hand-editing config.json** (w219). `set_app_config` takes
+  `intake.ffbox.enabled`, `intake.ffbox.boardCheck`, `intake.ffbox.escalations` and the ledger check's bands
+  `intake.ffbox.match.high` / `.medium`, when the person asked. They are checked and applied live. Changing a switch drops
+  FFBox's connector once (1012), so it reconnects in about 2 s and hears the new welcome. The w217 test never reached
+  the ledger because `intake.ffbox.boardCheck` was never set.
+
 - **board_check matches a report to ledger work by meaning** (w219; [docs/intake.md](docs/intake.md)). FFBox sends the
   report's title and start (redacted) to a portal that takes `board_summary`. FF Factory compares their concepts with
   each request's title and brief: game phrases folded ("alt tab", "one spot"), stems, synonyms, a typo, weighted by

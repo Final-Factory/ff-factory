@@ -492,3 +492,28 @@ test('status line: the ledger check on at FFBox and off here is said loudly', as
   pm.portalAccepts = () => [];
   assert.doesNotMatch(pm.statusLine()!, /LEDGER CHECK OFF/, 'not when FFBox has its own check off');
 });
+
+test('set_app_config: intake.ffbox switches and the match bands are settable, checked, and live; relink makes FFBox hear them', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcfg-intake-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'config.json');
+  fs.writeFileSync(file, JSON.stringify({ port: 8790 }, null, 2));
+  const cfg = {} as Config;
+  setAppConfig(file, cfg, 'intake.ffbox.enabled', true);
+  setAppConfig(file, cfg, 'intake.ffbox.boardCheck', 'true');
+  setAppConfig(file, cfg, 'intake.ffbox.match.high', 0.8);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).intake, { ffbox: { enabled: true, boardCheck: true, match: { high: 0.8 } } });
+  assert.deepEqual(cfg.intake?.ffbox, { enabled: true, boardCheck: true, match: { high: 0.8 } }, 'applied to the running config');
+  assert.throws(() => normalizeSetting('intake.ffbox.boardCheck', 'yes'), /true or false/);
+  assert.throws(() => normalizeSetting('intake.ffbox.match.medium', 2), /0 to 1/);
+  setAppConfig(file, cfg, 'intake.ffbox.boardCheck', null);
+  assert.equal(cfg.intake?.ffbox?.boardCheck, undefined, 'null takes it back to the default');
+
+  const { connect, pm } = await setup(t);
+  const c = connect();
+  await c.hello({ protocol: 2 });
+  assert.equal(pm.relink('intake.ffbox changed'), true);
+  const closed = await c.closed;
+  assert.equal(closed.code, 1012, 'the connector retries 1012 in about 2 s and reads the new welcome');
+  assert.equal(pm.relink('again'), false, 'nothing to drop while it is away');
+});

@@ -371,6 +371,18 @@ export class ProviderManager {
     } else link.ws.ping();
   }
 
+  /**
+   * Drop the link so the connector reconnects at once (1012, which it retries in about 2 s) and reads a welcome that
+   * says what this portal takes now. For a change to intake.ffbox.*; nothing is lost, the connector resends from its
+   * cursors.
+   */
+  relink(why: string): boolean {
+    const link = this.link;
+    if (!link?.hello) return false;
+    link.ws.close(1012, why.slice(0, 100));
+    return true;
+  }
+
   /** Called after providers.ffbox.* changed: drop a connection that is no longer allowed, refresh the card. */
   configChanged() {
     const link = this.link;

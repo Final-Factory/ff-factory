@@ -320,8 +320,10 @@ Ben's goal (2026-09-29) is that the ledger shows all dev work. Besides people's 
 
 ## Config
 
-Everything is off by default; config.json only (`set_app_config` cannot change it). `intakeSettings` fills the
-defaults and clamps the numbers.
+Everything is off by default. `intakeSettings` fills the defaults and clamps the numbers. config.json only, except
+FFBox's switches and bands, which an orchestrator can set when its person asks (`set_app_config`, live):
+`intake.ffbox.enabled`, `intake.ffbox.boardCheck`, `intake.ffbox.escalations` (changing one makes FFBox's connector
+reconnect to hear the new welcome), `intake.ffbox.match.high` and `.medium`.
 
 ```json
 "intake": {

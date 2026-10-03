@@ -52,6 +52,13 @@ export const SETTABLE_KEYS = [
   // write-only: only its SHA-256 is stored, as providers.ffbox.tokenSha256.
   'providers.ffbox.enabled',
   'providers.ffbox.token',
+  // The intake from FFBox (docs/intake.md): taking its reports and requests, answering its ledger check, Max's
+  // escalations, and how sure the ledger check must be to say a report is already in hand.
+  'intake.ffbox.enabled',
+  'intake.ffbox.boardCheck',
+  'intake.ffbox.escalations',
+  'intake.ffbox.match.high',
+  'intake.ffbox.match.medium',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
@@ -175,10 +182,19 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       if (!Number.isInteger(n) || n < floor || n > 2000) throw new Error(`${key} is a whole number of GB from ${floor} to 2000${floor > 10 ? ' (above hostGuard.warnFreeGB, where new work is refused)' : ''}`);
       return n;
     }
-    case 'providers.ffbox.enabled': {
+    case 'providers.ffbox.enabled':
+    case 'intake.ffbox.enabled':
+    case 'intake.ffbox.boardCheck':
+    case 'intake.ffbox.escalations': {
       if (value === true || value === 'true') return true;
       if (value === false || value === 'false') return false;
-      throw new Error('providers.ffbox.enabled is true or false');
+      throw new Error(`${key} is true or false`);
+    }
+    case 'intake.ffbox.match.high':
+    case 'intake.ffbox.match.medium': {
+      const n = Number(value);
+      if (typeof value === 'boolean' || !Number.isFinite(n) || n < 0 || n > 1) throw new Error(`${key} is a number from 0 to 1 (defaults: high 0.7, medium 0.45)`);
+      return n;
     }
     case 'providers.ffbox.token': {
       // Never echo the value, not even in the error. Stored as its hash (STORED_AS).
@@ -289,6 +305,15 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (key === 'providers.ffbox.enabled') ffbox.enabled = v as boolean | undefined;
     else ffbox.tokenSha256 = v as string | undefined;
     cfg.providers = { ...cfg.providers, ffbox };
+  }
+  else if (key.startsWith('intake.ffbox.')) {
+    // Read live: intakeSettings(cfg) is computed from this object on every use.
+    const ffbox = { ...cfg.intake?.ffbox };
+    if (key.startsWith('intake.ffbox.match.')) {
+      const match = { ...ffbox.match, [key.slice('intake.ffbox.match.'.length)]: v as number | undefined };
+      ffbox.match = match;
+    } else (ffbox as Record<string, unknown>)[key.slice('intake.ffbox.'.length)] = v as boolean | undefined;
+    cfg.intake = { ...cfg.intake, ffbox };
   }
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
