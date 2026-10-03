@@ -139,6 +139,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **An open tab picks up a new version by itself** (w285, asked by Lothsahn). Twice a browser kept the old UI after a
+  deploy (FFBox panes that did not scroll, a red dot that never showed). The page headers were already right
+  (`index.html` revalidated, hashed bundles immutable, no caching service worker); the old UI was a tab that stayed
+  open across the restart and reconnected with its old code. The server now names the web build it serves (a
+  `<meta name="ff-build">` in `index.html`, `web` in `/api/health` and the app state); a page that loaded another
+  build reloads itself after the reconnect. A typed message survives the reload; while one is being typed, or pictures,
+  files or a form would be lost, a "new version" bar offers the reload; with only a message being typed it also
+  happens once the tab is in the background. `index.html` gets an ETag (a 304 when unchanged), and a removed bundle is a 404 instead of the page.
+
 - **`ffbox_activity` describes all its views** (w224). The schema itself was one definition for every belt and
   current since w218, but its description and the FFBox paragraph of both orchestrators' briefs did not name all the
   views, and some orchestrators still saw the old four-value enum (most likely a schema copy loaded before the deploy
