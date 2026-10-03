@@ -59,14 +59,19 @@ import {
 } from './intakeRules.ts';
 import { mentionsScenario, nightlyAgainLine, nightlyDraft, nightlyKey, nightlySkip, type NightlyReport, type NightlyResult } from './nightlyRules.ts';
 import { isOpen } from './work.ts';
+import { linkedClosed, linkedDone, mergeCandidates, mergedBy, mergedText, parseLog, prNumberOf, type MergeRecord } from './mergedIntake.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
-import type { IntakeEntry, IntakeSummary, MaxEvent, ProviderConversation, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
+import type { IntakeEntry, IntakeSummary, MaxEvent, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 
 const DISCORD_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request'];
 const FFBOX_KINDS: readonly WorkSourceKind[] = ['ffbox-branch', 'ffbox-diagnosis', 'ffbox-request'];
 const NIGHTLY_KINDS: readonly WorkSourceKind[] = ['nightly'];
 const KEEP_RECENT = 200;
 const RELEASE_EVERY_MS = 10 * 60_000;
+const MERGED_EVERY_MS = 5 * 60_000;
+/** Commits read from each base branch, and merged PRs read from GitHub, when looking for what a request's work became. */
+const MERGED_LOG = 400;
+const MERGED_PRS = 100;
 const RELEASE_LOOKBACK_MS = 30 * 86_400_000;
 /** What FFBox acts on in a board answer: an update goes only when this changes, not for a new updatedAt or title. */
 const boardDigest = (a: BoardAnswer) => JSON.stringify([a.verdict, a.matches.map((m) => [m.id, m.status, m.watch ?? null, m.version, m.mergedIn, m.branch])]);
@@ -100,6 +105,8 @@ export interface IntakeDeps {
   pushBoard?: (ref: string, answer: BoardAnswer) => boolean;
   /** Whether a board answer may say `maybe` (else it says clear). server/index.ts: always, FFBox runs ffbox master. */
   takesMaybe?: () => boolean;
+  /** The newest merged PRs of the repo (gh); the default asks gh. Undefined when it could not say: git alone is then used. */
+  mergedPrs?: () => Promise<MergeRecord[] | undefined>;
   /** git in the base clone; the default runs it there. */
   git?: (args: string[]) => Promise<{ code: number; stdout: string }>;
   now?: () => number;
@@ -140,6 +147,7 @@ export class IntakeManager {
   private readonly timers: NodeJS.Timeout[] = [];
   private polling = false;
   private checking = false;
+  private closing = false;
   private saveTimer?: NodeJS.Timeout;
   private emitTimer?: NodeJS.Timeout;
   readonly now: () => number;
@@ -167,6 +175,8 @@ export class IntakeManager {
     };
     if (s.discord.enabled) every(s.discord.pollMinutes * 60_000, () => void this.pollDiscord(), 20_000);
     if (s.release.enabled) every(RELEASE_EVERY_MS, () => void this.checkReleases(), 60_000);
+    // Requests whose branch or PR merged some other way close themselves (docs/intake.md, "Closed when it merged").
+    every(MERGED_EVERY_MS, () => void this.checkMerged(), 90_000);
     // Board answers FFBox still follows are re-checked every minute; a change goes to it at once (docs/intake.md).
     every(BOARD_RECHECK_MS, () => this.recheckBoards(), BOARD_RECHECK_MS);
     return this;
@@ -239,6 +249,7 @@ export class IntakeManager {
     if (now - this.lastCheck < 30_000) return { ok: false, note: `checked ${Math.round((now - this.lastCheck) / 1000)} s ago; try again in a moment` };
     this.lastCheck = now;
     await this.pollDiscord();
+    await this.checkMerged();
     return { ok: true };
   }
 
@@ -777,6 +788,111 @@ export class IntakeManager {
       this.data.error = `release check: ${cleanLine((e as Error).message, 200)}`;
     } finally {
       this.checking = false;
+      this.changed();
+    }
+  }
+
+  // ---------------------------------------------------------------- merged work
+
+  private async mergedPrs(): Promise<MergeRecord[] | undefined> {
+    if (this.d.mergedPrs) return this.d.mergedPrs();
+    const origin = (await run('git', ['-C', this.d.cfg.repo.basePath, 'remote', 'get-url', 'origin'], { timeoutMs: 10_000 })).stdout.trim();
+    const slug = /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(origin)?.[1];
+    if (!slug) return undefined;
+    const r = await run('gh', ['pr', 'list', '-R', slug, '--state', 'merged', '--limit', String(MERGED_PRS), '--json', 'number,title,body,headRefName,baseRefName,mergedAt,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+    if (r.code !== 0) return undefined;
+    try {
+      const prs = JSON.parse(r.stdout) as { number: number; title: string; body?: string; headRefName: string; baseRefName: string; mergedAt?: string; mergeCommit?: { oid?: string } }[];
+      const bases = this.mergeTargets().map((t) => t.slice(t.indexOf('/') + 1));
+      return prs.filter((p) => bases.includes(p.baseRefName) && p.mergedAt).map((p) => ({ sha: p.mergeCommit?.oid ?? '', at: p.mergedAt!, number: p.number, head: p.headRefName, text: `${p.title}\n${p.body ?? ''}` }));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The branches work merges into: the base branch and master beside it (a master release carries develop's fixes too). */
+  private mergeTargets(): string[] {
+    const base = this.d.cfg.defaultBase;
+    const slash = base.indexOf('/');
+    const master = slash > 0 ? `${base.slice(0, slash)}/master` : 'master';
+    return base === master ? [base] : [base, master];
+  }
+
+  private async exists(ref: string): Promise<string | undefined> {
+    const r = await this.git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    return r.code === 0 ? r.stdout.trim() : undefined;
+  }
+
+  /**
+   * Every commit of a request's branch is already on a base branch, though no PR or commit message says so (merged by hand, or
+   * rebased). Only counts when the branch joined the base after the request was filed: a branch that never moved past the
+   * commit it started from is an ancestor of the base from the start.
+   */
+  private async branchInBase(w: WorkItem, targets: { ref: string; sha: string }[]): Promise<WorkAutoClosed | undefined> {
+    const branch = w.source?.branch;
+    if (!branch) return undefined;
+    const remote = this.d.cfg.defaultBase.indexOf('/') > 0 ? this.d.cfg.defaultBase.slice(0, this.d.cfg.defaultBase.indexOf('/')) : 'origin';
+    const tip = (await this.exists(`${remote}/${branch}`)) ?? (await this.exists(branch));
+    if (!tip) return undefined;
+    for (const t of targets) {
+      if (!(await this.isAncestor(tip, t.sha))) continue;
+      const then = (await this.git(['rev-list', '-1', `--before=${w.createdAt}`, t.sha])).stdout.trim();
+      if (then && (await this.isAncestor(tip, then))) continue;
+      const first = (await this.git(['log', t.sha, '--first-parent', '--ancestry-path', '--reverse', '-1', '--format=%H%x1f%cI%x1f%s', `${tip}..${t.sha}`])).stdout.trim().split('\x1f');
+      const [sha, at, subject] = first.length >= 2 ? first : [tip, new Date(this.now()).toISOString(), ''];
+      return { at: '', how: 'ancestor', ...(prNumberOf(subject ?? '') ? { pr: prNumberOf(subject!) } : {}), sha, mergedAt: at, text: mergedText({ number: prNumberOf(subject ?? ''), sha, at, base: t.ref }) };
+    }
+    return undefined;
+  }
+
+  /**
+   * Close the intake requests whose work merged (docs/intake.md, "Closed when it merged"): a merged PR or commit on the base
+   * branch or master that is the request's PR, names its branch or carries its Discord thread; every commit of its branch
+   * already on the base branch; or a linked request that is done. Closed as done with a log line, never worked, the
+   * dispatcher not told. Returns the ids closed.
+   */
+  async checkMerged(): Promise<string[]> {
+    const s = this.settings;
+    if (!(s.discord.enabled || s.ffbox.enabled) || this.closing) return [];
+    const candidates = mergeCandidates(this.d.store.work.values());
+    if (!candidates.length) return [];
+    this.closing = true;
+    try {
+      const targets: { ref: string; sha: string }[] = [];
+      for (const ref of this.mergeTargets()) {
+        const slash = ref.indexOf('/');
+        if (slash > 0) await this.git(['fetch', '--quiet', ref.slice(0, slash), ref.slice(slash + 1)]);
+        const sha = await this.exists(ref);
+        if (sha) targets.push({ ref, sha });
+      }
+      const remote = this.d.cfg.defaultBase.indexOf('/') > 0 ? this.d.cfg.defaultBase.slice(0, this.d.cfg.defaultBase.indexOf('/')) : '';
+      if (remote) for (const b of new Set(candidates.map((w) => w.source?.branch).filter((x): x is string => !!x))) await this.git(['fetch', '--quiet', remote, `+refs/heads/${b}:refs/remotes/${remote}/${b}`]);
+      const records: MergeRecord[] = [];
+      for (const t of targets) records.push(...parseLog((await this.git(['log', t.sha, `-n`, String(MERGED_LOG), '--format=%H%x1f%cI%x1f%s%x1f%b%x1e'])).stdout));
+      records.push(...((await this.mergedPrs().catch(() => undefined)) ?? []));
+      records.sort((a, b) => b.at.localeCompare(a.at));
+      const closed: { id: string; closed: WorkAutoClosed }[] = [];
+      const done = [...this.d.store.work.values()];
+      for (const w of candidates) {
+        let how = mergedBy(w, records) ?? (await this.branchInBase(w, targets));
+        if (!how) {
+          const y = linkedDone(w, done);
+          if (y) how = linkedClosed(w, y);
+        }
+        if (how) closed.push({ id: w.id, closed: how });
+      }
+      const ids = new Set(this.d.orchestrators.closeMerged(closed));
+      for (const { id, closed: how } of closed) {
+        if (!ids.has(id)) continue;
+        const w = this.d.store.work.get(id)!;
+        this.record({ source: w.source!.kind, action: 'closed', title: w.title, workId: id, why: how.text, url: w.source!.url });
+      }
+      return [...ids];
+    } catch (e) {
+      this.data.error = `merged check: ${cleanLine((e as Error).message, 200)}`;
+      return [];
+    } finally {
+      this.closing = false;
       this.changed();
     }
   }

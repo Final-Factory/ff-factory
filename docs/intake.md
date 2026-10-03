@@ -132,6 +132,28 @@ stop with a design question. The classification and its reason are on the reques
 - `humanAsked` is never set on an intake request, so the dispatcher's destructive and admin tools stay closed for it
   (docs/orchestrators.md, "Loops, limits and safety").
 
+## Closed when it merged
+
+An intake request whose work merged some other way (a PR sweep, a merge by hand, a cherry-pick) does not wait for a
+reviewer to find out. `IntakeManager.checkMerged` (`server/intake.ts`; rules in `server/mergedIntake.ts`) runs every 5
+minutes while the Discord or FFBox intake is on, and on **Check Discord now**. It looks at the intake requests nobody
+works on (new, queued or a question, no worker; not release, nightly or FFBox dev requests) and closes one **as done** when:
+
+- a merged PR or commit on the base branch or `master` is its PR, names its branch (a merge, a squash, or a cherry-pick
+  whose message says where it came from), or carries its Discord thread in the `Discord: https://discord.com/channels/…`
+  line every fix PR has (its `alsoThreads` count). Evidence comes from `git log` of both branches (400 commits) and from
+  `gh pr list --state merged` (100 PRs; skipped when gh cannot say, git alone then decides);
+- every commit of its branch is already on the base branch, and the branch joined it after the request was filed (a
+  branch that never moved past its starting commit is not a merge);
+- a request linked to it is done: named in either one's `related_ids`, on the same `pr:`/`branch:` key, or on the same
+  Discord thread. Rejected, cancelled and merged-into requests count for nothing.
+
+Closing as done is the point: approving would only start a review of work that is already in. The request gets
+`autoClosed` (how, the PR number, the commit, when it merged; or the linked request), the log line "closed automatically,
+no review needed: merged as #946 (abc123def456) on 2026-10-03", and an entry in "What the intake saw lately". No worker
+starts, and the dispatcher is not told. The people it is for hear one `[intake auto-closed]` line per batch in their own
+orchestrator. The Intake tab lists them under **Closed automatically**.
+
 ## Duplicates
 
 - The same thread, FFBox conversation or release again (a re-read after a restart, a conversation reported on every

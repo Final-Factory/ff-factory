@@ -129,6 +129,54 @@ test('Discord reports and trusted requests land in the Intake tab, wait for a pe
   await expect(page.locator('.dispatcher-panel').getByTestId(`work-${bug.id}`)).toContainText('Discord bug');
 });
 
+test('a request whose linked request is done closes by itself and shows under Closed automatically, with no worker', async ({ authed: page, baseURL }) => {
+  test.setTimeout(120_000);
+  const tag = uniq('autoclose');
+  await post(`${mockUrl(baseURL)}/_e2e/thread`, { forum: 'beta', name: `Splitter loses items ${tag}`, description: 'Items vanish at the splitter.', version: '0.50.0.47' });
+  const find = async (pred: (w: WorkItem) => boolean) => (await appState(page.request)).work?.find(pred);
+  await go(page, '#/dispatcher/intake');
+  const tab = page.getByTestId('intake-tab');
+  await expect
+    .poll(
+      async () => {
+        if (!(await find((w) => w.title.includes(tag) && w.source?.kind === 'discord-bug'))) await page.getByRole('button', { name: 'Check Discord now' }).click();
+        return !!(await find((w) => w.title.includes(tag) && w.source?.kind === 'discord-bug'));
+      },
+      { timeout: 80_000, intervals: [1000, 2000, 5000] },
+    )
+    .toBe(true);
+  const bug = (await find((w) => w.title.includes(tag) && w.source?.kind === 'discord-bug'))!;
+  await expect(tab.getByRole('button', { name: `Approve ${bug.id}` })).toBeVisible();
+
+  // The person's own request covers it and is closed as done.
+  const me = await appState(page.request);
+  const filed = await useTool(page.request, me.orchestratorId, 'request_work', { title: `Fix the splitter item loss ${tag}`, brief: `The same bug as ${bug.id}.`, related_ids: [bug.id] });
+  const covering = filed.match(/Filed (w\d+)/)![1];
+  await useTool(page.request, me.orchestratorId, 'update_work', { id: covering, close: 'done', note: `fixed ${tag}` });
+  await expect.poll(async () => (await find((w) => w.id === covering))?.status).toBe('done');
+
+  await expect
+    .poll(
+      async () => {
+        if ((await find((w) => w.id === bug.id))?.status !== 'done') await page.getByRole('button', { name: 'Check Discord now' }).click();
+        return (await find((w) => w.id === bug.id))?.status;
+      },
+      { timeout: 80_000, intervals: [1000, 2000, 5000] },
+    )
+    .toBe('done');
+  const closed = (await find((w) => w.id === bug.id))!;
+  expect([closed.autoClosed?.how, closed.autoClosed?.by]).toEqual(['linked', covering]);
+  expect(closed.sessionIds).toEqual([]);
+
+  const section = tab.getByTestId('intake-auto-closed');
+  await expect(section).toContainText('Closed automatically');
+  const row = section.getByTestId(`work-${bug.id}`);
+  await expect(row).toContainText('Auto-closed');
+  await row.getByRole('button', { name: new RegExp(tag) }).click();
+  await expect(row.getByTestId(`auto-closed-${bug.id}`)).toContainText(`covered by ${covering}`);
+  await expect(tab.getByTestId(`work-${bug.id}`).locator('xpath=..').getByRole('button', { name: `Approve ${bug.id}` })).toHaveCount(0);
+});
+
 test('the intake summary is served with the state, and a person can only approve what is pending', async ({ authed: page }) => {
   const s = await appState(page.request);
   expect(s.intake?.discord.enabled).toBe(true);
