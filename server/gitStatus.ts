@@ -59,6 +59,28 @@ export async function openPr(where: { cwd?: string; repo?: string }, branch: str
   return pr ?? undefined;
 }
 
+/** One PR as FFBox's thread summary needs it (w278): `gh pr view`, or undefined when gh could not say. */
+export interface PrView {
+  number: number;
+  url: string;
+  title: string;
+  body: string;
+  draft: boolean;
+  /** Auto-merge is set: it merges by itself when CI is green. */
+  autoMerge: boolean;
+}
+
+export async function prView(repo: string, number: number): Promise<PrView | undefined> {
+  const r = await run('gh', ['pr', 'view', String(number), '-R', repo.replace(/\.git$/, ''), '--json', 'number,url,title,body,isDraft,autoMergeRequest'], { timeoutMs: 20_000, env: ENV });
+  if (r.code !== 0) return undefined;
+  try {
+    const p = JSON.parse(r.stdout) as { number: number; url: string; title: string; body?: string; isDraft: boolean; autoMergeRequest?: unknown };
+    return { number: p.number, url: p.url, title: p.title, body: p.body ?? '', draft: p.isDraft, autoMerge: !!p.autoMergeRequest };
+  } catch {
+    return undefined;
+  }
+}
+
 const gitBusy = new Set<string>();
 
 /** Read a sandbox's git state (and PR) into its record; emits only when something changed. */

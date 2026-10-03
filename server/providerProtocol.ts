@@ -669,8 +669,21 @@ export interface DevUpdate {
   /** done: `<target>@<sha>`, null when it finished with no merge. */
   mergedIn?: string | null;
   branch?: string;
-  /** done with no merge: the request's outcome, one line, for the thread as its result. */
+  /** done with no merge: the request's outcome; declined or cancelled: the reason. One line, for the thread as its result. */
   result?: string;
+  /**
+   * open, once the worker's PR is ready for review (not a draft) (w278): what was wrong, what changed, how it was
+   * verified and what happens next ("Waiting on review." or "Merging when CI is green."), from the PR, at most
+   * 1000 characters, no internal ids. FFBox posts it once per PR.
+   */
+  summary?: string;
+  pr?: { number: number; url: string };
+  /**
+   * open, while the request waits on its requester (w278): the question (a design question, or the dispatcher's).
+   * FFBox posts it once and marks the conversation waiting; the operator's answer comes back as dev_message, which
+   * answers the request.
+   */
+  question?: string;
 }
 
 /** Everything the connector may send. */

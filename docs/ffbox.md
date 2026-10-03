@@ -238,7 +238,25 @@ release carries it, `version`; or `declined` / `cancelled`. Work events send it,
 PR opening (which changes no work item). FFBox follows the PR like its own branches, posts its usual merge notice
 ("Fixed, coming in <version> and later.") replying to the reporter, files the thread away by its usual rules, and posts
 a short result for a declined or cancelled one. Only the newest update per conversation waits, resent on every
-reconnect until FFBox confirms it. "Already fixed in <version> (PR #N)." at filing is a result and is still posted. The
+reconnect until FFBox confirms it. "Already fixed in <version> (PR #N)." at filing is a result and is still posted.
+
+**What the thread hears along the way (w278).** Lothsahn: "Is a summary posted when a fix is put up on a PR by
+FFFactory, or when FFFactory needs clarification on a fix, or it can't do a fix? I want FFFactory to respond back to
+FFBox when that happens." The same `dev_update` carries three results, each posted once by FFBox:
+- **A fix up on a PR.** Once the worker's PR is ready for review (not a draft; read with `gh pr view` at most once a
+  minute), `summary` and `pr`: the PR's TL;DR or first paragraph, the first line of its evidence or test section,
+  "Waiting on review." or "Merging when CI is green." (auto-merge set), and the link; at most 1000 characters, with
+  work ids, sandbox branches and session ids taken out (`publicText`).
+- **A question.** While the request is `question` (a worker's DESIGN-QUESTION, or the dispatcher's `decide_work`
+  ask, now kept as `question` on the request), `question`. FFBox posts it and marks the conversation waiting. The
+  operator's answer in the thread arrives as `dev_message` and answers the request (`Orchestrators.answerFromFfbox`): a
+  note, the request open again, and the dispatcher told to resume the work with it.
+- **Can't fix.** Declined or cancelled with the reason as `result`, or done with nothing merged and its outcome. FFBox
+  posts it and leaves the thread open (Lothsahn: "For can't fix, don't archive the conversation or close the thread.
+  Just leave the message there."); only a merged fix is archived.
+
+A request filed from FFBox's own report or escalation (`source.kind` `ffbox-request` with a conversation id) gets the
+same updates in that conversation, and any person it is for may answer there. The
 orchestrators' briefs say: `[from FFBox, X]` lines are FFBox's filings, `[from FFBox via Discord, X]` is X's own words,
 answer with `reply_to_ffbox`, and never post to Discord any other way.
 

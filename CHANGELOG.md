@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox threads hear a fix's PR, a question, and a can't-fix** (w278, asked by Lothsahn). The `dev_update` FFBox
+  gets also carries a PR summary once the worker's PR is ready for review, the question a request waits on (the
+  operator's answer in the thread answers it and the dispatcher resumes the work), and the reason a request will not be
+  fixed. For dev requests and for requests filed from FFBox's own reports and escalations. Results only, no internal
+  ids ([docs/ffbox.md](docs/ffbox.md)).
+
 - **FFBox dev requests are followed to their result** (w272, asked by Lothsahn). FF Factory sends FFBox a
   `dev_update` whenever a linked request's facts change: the worker's PR to watch, the merge, the release, or that it
   was declined or cancelled ([contract](docs/ffbox-connector-contract.md), [docs/ffbox.md](docs/ffbox.md)). FFBox

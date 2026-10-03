@@ -94,6 +94,12 @@ export interface IntakeFiling {
   limit?: () => string | undefined;
 }
 
+/** The FFBox conversation a request filed from FFBox's own report or escalation came from (its source), or undefined. */
+export function ffboxSourceConversation(w: Pick<WorkItem, 'source'>): string | undefined {
+  const c = w.source?.kind === 'ffbox-request' ? w.source.conversation : undefined;
+  return c && /^\d{1,12}$/.test(c) ? c : undefined;
+}
+
 /** What FFBox gets back when it asks the ledger about a report before working it (the board_check message). */
 export interface BoardAnswer {
   /**
@@ -690,6 +696,7 @@ export class Orchestrators {
     if (note) {
       what.push(`note: ${note}`);
       if (w.status === 'question') w.status = 'new';
+      w.question = undefined;
       if (w.flag) {
         what.push(`answers the design question "${clip(w.flag.text, 120)}"`);
         w.flag = undefined;
@@ -743,6 +750,7 @@ export class Orchestrators {
       what = `linked to ${ids.map((sid) => this.workerLine(sid)).join(', ')}, already on it`;
     } else if (input.action === 'ask') {
       w.asks++;
+      w.question = { text: clip(note, 1000), at: this.now().toISOString() };
       what = 'a question';
     } else if (input.action === 'queue') what = 'queued';
     else if (input.action === 'reject') what = 'declined';
@@ -1520,15 +1528,45 @@ export class Orchestrators {
     return out;
   }
 
-  /** Every request a dev link lives on now (devTarget of each request with ffboxDev links), once each. */
+  /** Every request a dev link lives on now (devTarget of each request with ffboxDev links or an FFBox source conversation), once each. */
   devLinkedWork(): WorkItem[] {
     const out = new Map<string, WorkItem>();
     for (const x of this.store.work.values()) {
-      if (!x.ffboxDev?.length) continue;
+      if (!x.ffboxDev?.length && !ffboxSourceConversation(x)) continue;
       const w = this.devTarget(x.id) ?? x;
       out.set(w.id, w);
     }
     return [...out.values()];
+  }
+
+  /** The PR summary's facts, with the repo it is in (w278); undefined until the request has a PR. */
+  prOf(w: WorkItem): { repo: string; number: number } | undefined {
+    const repo = this.repoSlug();
+    const pr = this.boardFacts(w).watch?.pr;
+    return repo && pr ? { repo, number: pr } : undefined;
+  }
+
+  /**
+   * An operator answered the request's question in its FFBox thread (dev_message, w278): the answer is a note on the
+   * request, as update_work's would be, so it is open again and the dispatcher hears it and resumes the work. Not a turn
+   * of theirs here (humanAsked false): approving and the like still need them in FF Factory. The request, or undefined
+   * when it was not waiting on a question.
+   */
+  answerFromFfbox(id: string, person: Requester, text: string): WorkItem | undefined {
+    const w = this.devTarget(id);
+    if (!w || w.status !== 'question') return undefined;
+    const note = clip(text.replace(/\s+/g, ' ').trim(), 1000);
+    const what = [`note: ${note}`];
+    if (w.flag) what.push(`answers the design question "${clip(w.flag.text, 120)}"`);
+    else if (w.question) what.push(`answers "${clip(w.question.text, 120)}"`);
+    w.status = 'new';
+    w.flag = undefined;
+    w.question = undefined;
+    w.humanAsked = false;
+    this.stamp(w, `${person.displayName} answered on FFBox: ${what.join('; ')} (not in a turn of theirs)`);
+    this.store.putWork(w);
+    this.gatherForDispatcher(person, updateNotice(w, person, `${what.join('; ')} (their answer in the FFBox thread: resume the work with it).`));
+    return w;
   }
 
   /** The newest dev link for an FFBox conversation, and the request it lives on now. */

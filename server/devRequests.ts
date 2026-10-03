@@ -9,7 +9,9 @@ import { Readable } from 'node:stream';
 import type { Config } from './config.ts';
 import { asRequester, type Identity } from './identity.ts';
 import { AttachmentError, publicRef, type AttachmentRecord, type AttachmentStore } from './attachments.ts';
-import type { Orchestrators } from './orchestrators.ts';
+import { ffboxSourceConversation, type Orchestrators } from './orchestrators.ts';
+import { prView as ghPrView, type PrView } from './gitStatus.ts';
+import { isFor } from './work.ts';
 import { cleanBlock, cleanLine, intakeSettings } from './intakeRules.ts';
 import { redactSecrets } from './secrets.ts';
 import { DEV_LIMITS, type DevAck, type DevAckError, type DevChunkMessage, type DevFiled, type DevFiledError, type DevMessageMessage, type DevReceivedMessage, type DevReply, type DevRequestMessage, type DevUpdate } from './providerProtocol.ts';
@@ -94,6 +96,8 @@ export interface DevDeps {
   sendFiles: (sessionId: string, text: string, files: AttachmentRef[], requestedBy: Requester) => Promise<unknown>;
   /** Send a session a plain harness message (SessionManager.send, from 'system'). */
   sendText: (sessionId: string, text: string, requestedBy: Requester) => void;
+  /** A PR's title, body, draft and auto-merge state (gh pr view); tests give their own. */
+  prView?: (repo: string, number: number) => Promise<PrView | undefined>;
   now?: () => number;
 }
 
@@ -143,14 +147,86 @@ interface InFlight {
   failed?: boolean;
 }
 
+/**
+ * Text for a Discord thread from FF Factory's own words (w278, "just results"): secrets redacted, no internal ids
+ * (work ids, sandbox branches, session ids), no routing, one paragraph per line, cut at `max` on a word.
+ */
+export function publicText(s: string, max: number): string {
+  const t = redactSecrets(s)
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/\b(?:sandbox|ffbox-f|ffbox)\/[\w./+-]+/g, 'the fix branch')
+    .replace(/\(?\b[wW]\d{1,7}\b\)?:?/g, '')
+    .replace(/\b(?:worker|session|sandbox)\s+[0-9a-f]{8}\b/gi, '')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]+/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ +([.,;:])/g, '$1')
+    .replace(/\n\s*\n+/g, '\n')
+    .trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max - 1);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(' '), max / 2))}…`;
+}
+
+/**
+ * The thread's summary of a fix that is up on a PR (w278): the PR's TL;DR or first paragraph (what was wrong and what
+ * changed), the first line of its evidence or test section (how it was verified), then what happens next and the link.
+ * At most 1000 characters, nothing internal.
+ */
+export function prSummary(v: Pick<PrView, 'title' | 'body' | 'url' | 'autoMerge'>): string {
+  const lines = v.body
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => !/^(Discord:|🤖|Co-Authored-By|Generated with)/i.test(l));
+  const plain = (l: string) => l.replace(/^#+\s*/, '').replace(/^[-*]\s+/, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim();
+  const tldr = lines.find((l) => /^\**TL;?DR:?\**/i.test(l));
+  let lead = tldr ? plain(tldr).replace(/^TL;?DR:?\s*/i, '') : '';
+  if (!lead) {
+    const para: string[] = [];
+    for (const l of lines) {
+      if (/^#/.test(l) || /^```/.test(l)) {
+        if (para.length) break;
+        continue;
+      }
+      if (!l) {
+        if (para.length) break;
+        continue;
+      }
+      para.push(plain(l));
+    }
+    lead = para.join(' ') || v.title;
+  }
+  const at = lines.findIndex((l) => /^#+\s*(evidence|verif|test|how (it was )?tested)/i.test(l));
+  const verified = at >= 0 ? lines.slice(at + 1).map(plain).find((l) => l && !/^```/.test(l)) : undefined;
+  const next = v.autoMerge ? 'Merging when CI is green.' : 'Waiting on review.';
+  const tail = `${next} ${v.url}`;
+  const room = 1000 - tail.length - 2;
+  const verifiedText = verified ? publicText(`Verified: ${verified}`, Math.min(300, Math.floor(room / 3))) : '';
+  const leadText = publicText(lead, room - (verifiedText ? verifiedText.length + 1 : 0));
+  return [leadText, verifiedText, tail].filter(Boolean).join('\n');
+}
+
 /** A request's standing for FFBox (DevUpdate less its envelope), from the board answer's facts. */
-export function devFacts(w: WorkItem, facts: { watch?: DevUpdate['watch']; version?: string | null; mergedIn?: string | null; branch?: string }): Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> {
-  if (w.status === 'rejected' || w.status === 'cancelled') return { status: w.status === 'rejected' ? 'declined' : 'cancelled' };
+export function devFacts(
+  w: WorkItem,
+  facts: { watch?: DevUpdate['watch']; version?: string | null; mergedIn?: string | null; branch?: string },
+  extra: { summary?: string; prUrl?: string } = {},
+): Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> {
+  if (w.status === 'rejected' || w.status === 'cancelled') {
+    const reason = publicText(w.outcome ?? '', 300);
+    return { status: w.status === 'rejected' ? 'declined' : 'cancelled', ...(reason ? { result: reason } : {}) };
+  }
   // ONLY WITH A PR: a sandbox's own branch (sandbox/<name>) carries one task after another, and FFBox following it by
   // name could announce some later task's merge in this thread. The PR number is this work's alone.
-  if (w.status !== 'done') return { status: 'open', ...(facts.watch?.pr ? { watch: facts.watch } : {}) };
+  if (w.status !== 'done') {
+    const out: Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> = { status: 'open', ...(facts.watch?.pr ? { watch: facts.watch } : {}) };
+    if (facts.watch?.pr && extra.summary && extra.prUrl) Object.assign(out, { summary: extra.summary, pr: { number: facts.watch.pr, url: extra.prUrl } });
+    const asked = w.status === 'question' ? publicText(w.flag?.text ?? w.question?.text ?? '', 1000) : '';
+    if (asked) out.question = asked;
+    return out;
+  }
   const out: Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> = { status: 'done', version: facts.version ?? null, mergedIn: facts.mergedIn ?? null, ...(facts.branch ? { branch: facts.branch } : {}) };
-  const result = cleanLine(w.outcome ?? '', 300);
+  const result = publicText(w.outcome ?? '', 300);
   if (!out.mergedIn && result) out.result = result;
   return out;
 }
@@ -168,6 +244,8 @@ export class DevRequests {
   private readonly link: DevLink;
   private readonly now: () => number;
   private readonly inflight = new Map<string, InFlight>();
+  /** Each PR's thread summary once it is ready ("<repo>#<n>"), and when it was last looked at. In memory: re-read after a restart. */
+  private readonly prs = new Map<string, { at: number; summary?: string; url?: string }>();
   /** Refs that failed or were never known, whose chunks are dropped without another answer each. */
   private readonly dead = new Set<string>();
 
@@ -445,14 +523,21 @@ export class DevRequests {
     const w = o.devTarget(m.request);
     if (!w) return refuse('bad_request', `no request ${m.request} in FF Factory`, person.userId);
     const links = o.devLinksOf(w).filter((x) => x.link.conversation === m.conversation);
-    if (!links.length) return refuse('bad_request', `${w.id} is not linked to FFBox conversation ${m.conversation}`, person.userId);
-    const { link } = links.sort((a, b) => b.link.at.localeCompare(a.link.at))[0];
-    if (!same(link.person.userId, person.userId)) return refuse('bad_request', `conversation ${m.conversation} is ${link.operator}'s dev request`, person.userId);
+    // A REQUEST FILED FROM FFBOX'S OWN REPORT OR ESCALATION (w278) has no dev link: its source names the conversation,
+    // and any person it is for may answer in that thread.
+    const fromSource = !links.length && ffboxSourceConversation(w) === m.conversation;
+    if (!links.length && !fromSource) return refuse('bad_request', `${w.id} is not linked to FFBox conversation ${m.conversation}`, person.userId);
+    const link = links.length ? links.sort((a, b) => b.link.at.localeCompare(a.link.at))[0].link : undefined;
+    if (link && !same(link.person.userId, person.userId)) return refuse('bad_request', `conversation ${m.conversation} is ${link.operator}'s dev request`, person.userId);
+    if (!link && !isFor(w, person.userId)) return refuse('bad_request', `${w.id} is not ${person.displayName}'s request`, person.userId);
     this.ack(m.ref);
     this.remember(m.ref, 'message');
-    this.log({ ref: m.ref, kind: 'message', operator: m.operator.name, person: person.userId, outcome: 'relayed', workId: w.id });
-    const label = `[from FFBox via ${viaWord(link.source)}, ${m.operator.name}]`;
-    const where = link.url ?? `FFBox conversation ${m.conversation}`;
+    // AN ANSWER TO THE QUESTION THE REQUEST WAITS ON (w278): a note on the request, so it reopens and the dispatcher
+    // resumes the work with it. Relayed to the person's orchestrator as well, as any follow-up is.
+    const answered = w.status === 'question' ? o.answerFromFfbox(w.id, person, cleanBlock(m.text, DEV_LIMITS.message)) : undefined;
+    this.log({ ref: m.ref, kind: 'message', operator: m.operator.name, person: person.userId, outcome: answered ? 'answered' : 'relayed', workId: w.id });
+    const label = `[from FFBox via ${viaWord(link?.source ?? w.source?.channel ?? 'discord')}, ${m.operator.name}]`;
+    const where = link?.url ?? w.source?.url ?? `FFBox conversation ${m.conversation}`;
     const text = cleanBlock(m.text, DEV_LIMITS.message) || '(no text)';
     o.noteDev(w.id, `${m.operator.name} (${person.displayName}) wrote on FFBox, ${where}: ${cleanLine(m.text, 120)}`);
     const say = (id: string, t: string, by: Requester) => {
@@ -528,22 +613,31 @@ export class DevRequests {
     const o = this.d.orchestrators;
     const target = w.status === 'merged' ? o.devTarget(w.id) : w;
     if (!target || target.status === 'merged') return;
-    const links = o.devLinksOf(target).filter((x) => x.link.outcome !== 'fixed');
-    if (!links.length) return;
+    const all = o.devLinksOf(target);
+    const links = all.filter((x) => x.link.outcome !== 'fixed');
+    // The conversation a request filed from FFBox's own report or escalation came from (w278), unless a dev link
+    // already speaks for it.
+    const source = ffboxSourceConversation(target);
+    const conversations = [...new Set(links.map((x) => x.link.conversation))];
+    if (source && !all.some((x) => x.link.conversation === source)) conversations.push(source);
+    if (!conversations.length) return;
     const s = this.state;
     s.updates ??= [];
     s.sentUpdates ??= {};
-    const facts = devFacts(target, o.boardFacts(target));
+    const board = o.boardFacts(target);
+    const pr = board.watch?.pr && o.prOf(target);
+    const known = pr ? this.prs.get(`${pr.repo}#${pr.number}`) : undefined;
+    const facts = devFacts(target, board, known?.summary ? { summary: known.summary, prUrl: known.url } : {});
     const digest = JSON.stringify(facts);
     let changed = false;
-    for (const conversation of [...new Set(links.map((x) => x.link.conversation))]) {
+    for (const conversation of conversations) {
       if (facts.status !== 'open' && s.finals.includes(`${target.id}:${conversation}`)) continue;
       const key = conversation;
       if (s.sentUpdates[key] === `${target.id} ${digest}`) continue;
       s.sentUpdates[key] = `${target.id} ${digest}`;
       const msg: DevUpdate = { type: 'dev_update', id: `u-${target.id}-${this.now().toString(36)}-${randomBytes(3).toString('hex')}`, request: target.id, conversation, ...facts };
       s.updates = [...s.updates.filter((u) => u.conversation !== conversation), { ...msg, at: this.iso() }].slice(-KEEP_UPDATES);
-      const person = links.find((x) => x.link.conversation === conversation)?.link.person.userId;
+      const person = links.find((x) => x.link.conversation === conversation)?.link.person.userId ?? target.requestedBy.userId;
       this.log({ ref: msg.id, kind: 'update', ...(person ? { person } : {}), outcome: updateWords(msg), workId: target.id });
       this.link.send(msg);
       changed = true;
@@ -563,8 +657,32 @@ export class DevRequests {
       if (FINAL.includes(w.status)) {
         if (w.status !== 'done' || w.delivery?.releasedIn) continue;
         if (now - Date.parse(w.updatedAt) > FOLLOW_DONE_MS) continue;
-      }
+      } else void this.summarize(w);
       this.workChanged(w);
+    }
+  }
+
+  /**
+   * The thread's summary of an open request's PR, once the PR is ready for review (w278: "a summary posted when a fix
+   * is put up on a PR"). Read with gh at most once a minute per PR while it is a draft, and once when ready; then
+   * workChanged sends it. Never throws.
+   */
+  async summarize(w: WorkItem): Promise<void> {
+    const pr = this.d.orchestrators.prOf(w);
+    if (!pr) return;
+    const key = `${pr.repo}#${pr.number}`;
+    const known = this.prs.get(key);
+    if (known?.summary || (known && this.now() - known.at < 55_000)) return;
+    this.prs.set(key, { at: this.now() });
+    try {
+      const v = await (this.d.prView ?? ghPrView)(pr.repo, pr.number);
+      if (!v || v.draft) return;
+      this.prs.set(key, { at: this.now(), summary: prSummary(v), url: v.url });
+      if (this.prs.size > KEEP) this.prs.delete(this.prs.keys().next().value!);
+      const now = this.d.orchestrators.devTarget(w.id);
+      if (now) this.workChanged(now);
+    } catch (e) {
+      console.warn(`dev requests: could not read PR ${key}: ${(e as Error).message}`);
     }
   }
 

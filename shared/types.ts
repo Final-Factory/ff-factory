@@ -1085,6 +1085,11 @@ export interface WorkItem {
   outcome?: string;
   /** Questions the dispatcher asked about it (at most 3). */
   asks: number;
+  /**
+   * The question it waits on, from the dispatcher (decide_work ask) to its requester, until a note answers it (w278:
+   * FFBox posts it in the requester's thread). A design question is `flag` instead.
+   */
+  question?: { text: string; at: string };
   /** What happened, oldest first: "10:02 filed by Lothsahn", "10:03 merged into w11: same fix". */
   log: string[];
   /**
