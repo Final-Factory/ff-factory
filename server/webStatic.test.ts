@@ -18,7 +18,13 @@ async function withSite(fn: (get: (p: string, headers?: Record<string, string>) 
   fs.writeFileSync(path.join(dir, 'assets', 'index-aaaa.js'), 'console.log(1)');
   fs.writeFileSync(path.join(dir, 'sw.js'), '// sw');
   fs.writeFileSync(path.join(dir, 'manifest.webmanifest'), '{}');
-  const server = http.createServer((req, res) => void serveStatic(dir, req, new URL(req.url ?? '/', 'http://x'), res));
+  // A throw answers 500 with its message, so a test fails on it rather than waiting forever for a reply.
+  const server = http.createServer((req, res) =>
+    serveStatic(dir, req, new URL(req.url ?? '/', 'http://x'), res).catch((e: Error) => {
+      if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end(String(e?.stack ?? e));
+    }),
+  );
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address() as { port: number };
   const get = (p: string, headers: Record<string, string> = {}) =>
@@ -34,8 +40,9 @@ async function withSite(fn: (get: (p: string, headers?: Record<string, string>) 
   try {
     await fn(get, dir);
   } finally {
-    server.close();
-    fs.rmSync(dir, { recursive: true, force: true });
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
   }
 }
 
