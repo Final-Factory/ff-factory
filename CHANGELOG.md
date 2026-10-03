@@ -165,6 +165,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The restart report names workers waiting on a wake_me** (w311, asked by Lothsahn). After the d60dcf1b deploy,
+  f6b32781 (w283, lothdesktop/pr-fix) was on neither the resumed nor the could-not-resume list. It was between turns,
+  with a 21-minute `wake_me` that survived the restart and fired on time, but nothing said so. The `[app restarted]`
+  report now lists such workers with where they are and when their wake fires ([docs/restart.md](docs/restart.md)).
+
 - **Unity's blocking dialogs no longer wait for a person** (w294, asked by Ben). mp-r2's editor sat on "The open
   scene(s) have been modified externally" after its worker's `git merge origin/develop` staged `main.unity`, and FF
   Factory asked for someone at the desktop. Now a dialog the watchdog does not press itself goes to the sandbox's
