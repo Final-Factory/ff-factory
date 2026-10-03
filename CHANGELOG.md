@@ -12,6 +12,24 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox dev requests: an operator's ffdev turn handed to FF Factory** (w240, asked by Lothsahn;
+  [docs/ffbox.md](docs/ffbox.md#dev-requests), the wire in
+  [docs/ffbox-connector-contract.md](docs/ffbox-connector-contract.md#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory)).
+  New connector messages `dev_request`, `dev_chunk`, `dev_message` and `dev_received`, answered `dev_ack`, `dev_filed`
+  and `dev_reply`, all in `welcome.accepts`. A hand-over's files (at most 10, 200 MB each and `attachments.maxMB`,
+  500 MB together) stream into the attachment store in base64 chunks of 45000 bytes and each SHA-256 is checked; the
+  request is then filed at once as the request of the person its operator maps to (new config
+  `providers.ffbox.operators`), with no approval step, after the ledger check: identity keys, the meaning of its title
+  and brief (w219's matcher), and the new `scope` of open broad requests (`request_work` takes `scope { threads,
+  source, channel, since, until }` and records the threads a brief lists). Covered, already fixed, filed with
+  candidates, or filed, each with the line FFBox posts and one `[from FFBox, <operator>]` line in the person's own
+  orchestrator. The operator's follow-ups in that thread reach their orchestrator as `[from FFBox via Discord,
+  <operator>]` (and a busy worker on it); the orchestrator answers with the new `reply_to_ffbox` tool, and a linked
+  request finishing sends the thread one line, resent until FFBox confirms it. A repeated ref is answered the same way,
+  across restarts. Config `providers.ffbox.devRequests` (`enabled` true, `perHour` 20, `maxFiles` 10, `maxRequestMB`
+  500); both keys are an owner's to set with `set_app_config`. `ffbox_activity` `show: "dev_requests"` lists them and
+  the status line counts them.
+
 - **Attach saves, logs and bug reports to chat messages, and hand them to workers** (w228, asked by Lothsahn;
   [docs/attachments.md](docs/attachments.md)). The composer takes any file through the paperclip, paste or drop, in
   orchestrator, dispatcher and worker chats; images still go inline. Files upload in 8 MB chunks with a progress bar

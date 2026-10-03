@@ -6,6 +6,7 @@ import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret } from './secret
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
+import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 
 /**
  * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
@@ -55,17 +56,75 @@ export const SETTABLE_KEYS = [
   // write-only: only its SHA-256 is stored, as providers.ffbox.tokenSha256.
   'providers.ffbox.enabled',
   'providers.ffbox.token',
+  // FFBox dev requests (docs/ffbox.md, "Dev requests"): which FFBox operator is which login, and the switch and caps. The
+  // owner's only (OWNER_ONLY_KEYS): the map decides whose request, and whose account, an operator's turn becomes.
+  'providers.ffbox.operators',
+  'providers.ffbox.devRequests',
   // The FFBox intake (docs/intake.md): its whole block at once, the owner's only (OWNER_ONLY_KEYS).
   'intake.ffbox',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'providers.ffbox.operators', 'providers.ffbox.devRequests']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove'];
 const GITHUB_REPO = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+
+/** A value given as an object or its JSON text. */
+function objectOf(value: unknown, key: string, example: string): Record<string, unknown> {
+  let o = value;
+  if (typeof o === 'string') {
+    try {
+      o = JSON.parse(o);
+    } catch {
+      throw new Error(`${key} is an object (or its JSON), e.g. ${example}`);
+    }
+  }
+  if (typeof o !== 'object' || o === null || Array.isArray(o)) throw new Error(`${key} is an object, e.g. ${example}`);
+  return o as Record<string, unknown>;
+}
+
+/**
+ * providers.ffbox.operators: { "<FFBox operator name>": "<FF Factory user id>" }. The ids' logins are checked by the
+ * caller (set_app_config knows the people); here only the shapes.
+ */
+export function checkFfboxOperators(value: unknown): Record<string, string> {
+  const r = objectOf(value, 'providers.ffbox.operators', '{ "lothsahn": "lothsahn" }');
+  const out: Record<string, string> = {};
+  const entries = Object.entries(r);
+  if (entries.length > 50) throw new Error('providers.ffbox.operators: at most 50 operators');
+  for (const [name, id] of entries) {
+    if (!/^[A-Za-z0-9._-]{1,40}$/.test(name)) throw new Error(`providers.ffbox.operators: ${JSON.stringify(name.slice(0, 40))} is not an FFBox operator name (letters, digits, . _ -; at most 40)`);
+    if (typeof id !== 'string' || !USER_ID.test(id.trim())) throw new Error(`providers.ffbox.operators.${name} is an FF Factory user id (a login name)`);
+    out[name] = id.trim();
+  }
+  return out;
+}
+
+const DEV_REQUEST_KEYS = ['enabled', 'perHour', 'maxFiles', 'maxRequestMB'];
+
+/** providers.ffbox.devRequests: the whole block, unknown keys refused (server/devRequests.ts devSettings fills the rest). */
+export function checkDevRequests(value: unknown): DevRequestsConfig {
+  const r = objectOf(value, 'providers.ffbox.devRequests', '{ "enabled": true, "perHour": 20 }');
+  const unknown = Object.keys(r).filter((k) => !DEV_REQUEST_KEYS.includes(k));
+  if (unknown.length) throw new Error(`providers.ffbox.devRequests: unknown key(s) ${unknown.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}; known: ${DEV_REQUEST_KEYS.join(', ')}`);
+  const out: DevRequestsConfig = {};
+  if (r.enabled !== undefined) {
+    if (typeof r.enabled !== 'boolean') throw new Error('providers.ffbox.devRequests.enabled is true or false');
+    out.enabled = r.enabled;
+  }
+  const whole = (k: 'perHour' | 'maxFiles' | 'maxRequestMB', lo: number, hi: number) => {
+    if (r[k] === undefined) return;
+    if (!Number.isInteger(r[k]) || (r[k] as number) < lo || (r[k] as number) > hi) throw new Error(`providers.ffbox.devRequests.${k} is a whole number from ${lo} to ${hi}`);
+    out[k] = r[k] as number;
+  };
+  whole('perHour', 0, 1000);
+  whole('maxFiles', 0, DEV_DEFAULTS.maxFiles);
+  whole('maxRequestMB', 1, DEV_DEFAULTS.maxRequestMB);
+  return out;
+}
 
 /**
  * intake.ffbox as set_app_config takes it (an object, or its JSON): known keys only, each of its type and range, the
@@ -274,6 +333,10 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
     }
     case 'intake.ffbox':
       return checkFfboxIntake(value);
+    case 'providers.ffbox.operators':
+      return checkFfboxOperators(value);
+    case 'providers.ffbox.devRequests':
+      return checkDevRequests(value);
     case 'voice.ttsVoice': {
       if (typeof value !== 'string' || !/^[a-z]{2}_[a-z]+$/.test(value.trim())) throw new Error('voice.ttsVoice is a Kokoro voice name such as "af_heart" or "bm_george"');
       return value.trim();
@@ -380,9 +443,11 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     cfg.claudeAccounts = accounts;
   } else if (key === 'machines.useHostClaudeEnv') cfg.machines = { ...cfg.machines, useHostClaudeEnv: next as boolean | Record<string, boolean> | undefined };
   else if (key === 'systemPayer') cfg.systemPayer = v as string | undefined;
-  else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.token') {
+  else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.token' || key === 'providers.ffbox.operators' || key === 'providers.ffbox.devRequests') {
     const ffbox = { ...cfg.providers?.ffbox };
     if (key === 'providers.ffbox.enabled') ffbox.enabled = v as boolean | undefined;
+    else if (key === 'providers.ffbox.operators') ffbox.operators = v as Record<string, string> | undefined;
+    else if (key === 'providers.ffbox.devRequests') ffbox.devRequests = v as DevRequestsConfig | undefined;
     else ffbox.tokenSha256 = v as string | undefined;
     cfg.providers = { ...cfg.providers, ffbox };
   }

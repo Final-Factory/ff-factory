@@ -399,7 +399,8 @@ export class IntakeManager {
     // Its pull request merged or closed on FFBox's side: the review request for it needs nothing more.
     if (c.pr && c.pr.state !== 'open') {
       for (const w of this.d.store.work.values()) {
-        if (w.source?.conversation !== c.id || !w.source.kind.startsWith('ffbox') || !['new', 'question', 'queued', 'active'].includes(w.status)) continue;
+        // An operator's dev request is theirs to close, whatever FFBox's conversation does.
+        if (w.source?.conversation !== c.id || !w.source.kind.startsWith('ffbox') || w.source.kind === 'ffbox-dev' || !['new', 'question', 'queued', 'active'].includes(w.status)) continue;
         this.d.orchestrators.closeIntake(w.id, `FFBox's PR #${c.pr.number} ${c.pr.state === 'merged' ? 'merged' : 'was closed'}`);
       }
     }

@@ -255,7 +255,7 @@ test('the first message must be a hello, within the hello timeout; a bad hello i
 
 test('no negotiation: any protocol or none is welcomed with the static accepts; protocol 1 or 2 echoed, else 2', async (t) => {
   const { connect, pm } = await setup(t);
-  const all = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics'];
+  const all = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received'];
   for (const [protocol, want] of [[1, 1], [2, 2], [3, 2], [null, 2]] as const) {
     const c = connect();
     const w = (await c.hello({ protocol, accepts: protocol === 1 ? undefined : ['board'] })) as unknown as Record<string, unknown>;

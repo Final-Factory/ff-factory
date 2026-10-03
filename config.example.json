@@ -58,7 +58,14 @@
   "providers": {
     "ffbox": {
       "enabled": false,
-      "sendWork": false
+      "sendWork": false,
+      "operators": {},
+      "devRequests": {
+        "enabled": true,
+        "perHour": 20,
+        "maxFiles": 10,
+        "maxRequestMB": 500
+      }
     }
   },
   "intake": {
