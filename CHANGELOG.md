@@ -12,6 +12,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Your own requests first on the Dispatcher page** (w307, asked by Lothsahn). The Requests list keeps its order by
+  status (question, new, queued, active, then closed) and, for open ones, by priority; within one status and priority
+  the logged-in person's requests (any where they are one of the people) come before everyone else's, then the order
+  as before. Each login sees its own first, and its rows say "yours" ([shared/workOrder.ts](shared/workOrder.ts)).
+
+- **Intake requests close themselves when their work merged** (w298, asked by Lothsahn: four FFBox review requests
+  sat in "needs a human" hours after #945–#947 and #949 merged them). Every 5 minutes, and on "Check Discord now", a
+  request nobody works on closes as done when a merged PR or commit names its PR or branch or carries its Discord
+  thread, when its whole branch is already on develop, or when a linked request is done. It logs "merged as #N
+  (sha) on date", starts no worker, and its people hear one line per batch. The Intake tab shows them under
+  "Closed automatically" ([docs/intake.md](docs/intake.md), "Closed when it merged").
+
 - **A player's clear bug goes to a worker; anything else waits, and the thread says so** (w299, asked by Lothsahn).
   FFBox's escalations, player requests and fix branches are triaged by the same fixed rules as Discord threads, so an
   obvious bug can be auto-approved (`intake.ffbox.autoApprove`). Money, releases and publishing, and a report that
@@ -157,6 +169,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   f6b32781 (w283, lothdesktop/pr-fix) was on neither the resumed nor the could-not-resume list. It was between turns,
   with a 21-minute `wake_me` that survived the restart and fired on time, but nothing said so. The `[app restarted]`
   report now lists such workers with where they are and when their wake fires ([docs/restart.md](docs/restart.md)).
+
+- **Unity's blocking dialogs no longer wait for a person** (w294, asked by Ben). mp-r2's editor sat on "The open
+  scene(s) have been modified externally" after its worker's `git merge origin/develop` staged `main.unity`, and FF
+  Factory asked for someone at the desktop. Now a dialog the watchdog does not press itself goes to the sandbox's
+  agents with the exact call, the new `unity` action `answer_dialog` (Reload for that one, never Ignore), or a restart;
+  the dispatcher answers when no agent is there. Only an administrator, licence or project-version dialog and an editor
+  out of automatic restarts still ask a person (and only those send the "Unity editor stuck" notification).
+  `switch_branch` now refuses, before touching git, whenever it cannot check the open scenes (unsaved edits unless
+  `discard_scene_edits`, play mode, an editor starting or blocked, no bridge answer) instead of switching and leaving
+  Unity to ask ([docs/unity-dialogs.md](docs/unity-dialogs.md#who-answers)).
 
 - **An open tab picks up a new version by itself** (w285, asked by Lothsahn). Twice a browser kept the old UI after a
   deploy (FFBox panes that did not scroll, a red dot that never showed). The page headers were already right

@@ -40,6 +40,8 @@ export interface UnityBlocked {
   dialogId?: string;
   /** What it means and what to do. */
   advice?: string;
+  /** Only a person at the desktop can resolve it (server/watchdog.ts agentAnswers); otherwise its agents are asked. */
+  person?: boolean;
   since: string;
   /** The state to return to once the dialog is gone or the log moves again. */
   resumeState: 'starting' | 'running';
@@ -50,6 +52,8 @@ export interface UnityDismissal {
   at: string;
   title: string;
   button: string;
+  /** 'agent': pressed by an agent through the unity tool's answer_dialog; absent: by the watchdog itself. */
+  by?: 'agent';
 }
 
 export type SandboxStatus = 'creating' | 'ready' | 'error' | 'deleting';
@@ -1108,6 +1112,8 @@ export interface WorkItem {
   approval?: WorkApproval;
   /** The fix's way to players: the commit that landed it, the Discord reply and close, the release it shipped in. */
   delivery?: WorkDelivery;
+  /** Set when the intake closed it as done because its work already merged (docs/intake.md, "Closed when it merged"). */
+  autoClosed?: WorkAutoClosed;
   /** A question for people (a design decision) the worker raised instead of fixing; open until they answer. */
   flag?: { kind: 'design'; text: string; at: string; for: Requester[] };
   /** Handed to FFBox (docs/intake.md, "Ledger → FFBox"): the submit's id, and what FFBox said about it. */
@@ -1122,6 +1128,21 @@ export interface WorkItem {
    * follow-ups come from and where reply_to_ffbox and the automatic "done" reply go. Oldest first, at most 20.
    */
   ffboxDev?: WorkFfboxDev[];
+}
+
+/** Why and how the intake closed a request on its own: its branch or PR merged, or the request it is linked to is done. */
+export interface WorkAutoClosed {
+  at: string;
+  /** branch: a merged PR or commit names the branch; pr: the PR it names merged; thread: a merged PR carries its Discord thread; ancestor: every commit of the branch is on the base branch; linked: a linked request is done. */
+  how: 'branch' | 'pr' | 'thread' | 'ancestor' | 'linked';
+  /** The merging PR's number, the merge commit and when it merged (absent for a linked request). */
+  pr?: number;
+  sha?: string;
+  mergedAt?: string;
+  /** The done request it was linked to ("w12"). */
+  by?: string;
+  /** The line the log carries: "merged as #946 (abc123def456) on 2026-10-03". */
+  text: string;
 }
 
 /** A request's scope: its threads, or a source and channel's conversations created between since and until. */
@@ -1276,8 +1297,8 @@ export interface WorkFfbox {
 export interface IntakeEntry {
   at: string;
   source: WorkSourceKind;
-  /** filed: a new request; repeat: added to the request it repeats; skipped: a cap or a rule; ignored: not intake. */
-  action: 'filed' | 'repeat' | 'skipped' | 'ignored';
+  /** filed: a new request; repeat: added to the request it repeats; skipped: a cap or a rule; ignored: not intake; closed: its work merged. */
+  action: 'filed' | 'repeat' | 'skipped' | 'ignored' | 'closed';
   /** Cleaned and cut short; a player's text is shown as plain text only. */
   title: string;
   workId?: string;

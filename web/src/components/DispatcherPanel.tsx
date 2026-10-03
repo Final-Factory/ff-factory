@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { AppState, IntakeSummary, WorkItem, WorkSource } from '../../../shared/types';
 import { api } from '../api';
+import { isMine, ledgerOrder } from '../../../shared/workOrder';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds } from '../store';
 import { dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, navigate, useNow, workLabel, workTone } from '../util';
@@ -10,16 +11,6 @@ import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu } from './ui';
 
 type Tab = 'requests' | 'intake' | 'conversation';
-
-const RANK: Record<WorkItem['status'], number> = { question: 0, new: 1, queued: 2, active: 3, done: 4, merged: 4, rejected: 4, cancelled: 4 };
-const PRIORITY: Record<WorkItem['priority'], number> = { urgent: 0, high: 1, normal: 2, low: 3 };
-
-/** Open requests first (questions, new, queued, active; then by priority and age), then the closed ones, newest first. */
-function byLedger(a: WorkItem, b: WorkItem) {
-  if (RANK[a.status] !== RANK[b.status]) return RANK[a.status] - RANK[b.status];
-  if (isOpenWork(a)) return PRIORITY[a.priority] - PRIORITY[b.priority] || a.createdAt.localeCompare(b.createdAt);
-  return b.updatedAt.localeCompare(a.updatedAt);
-}
 
 const names = (w: WorkItem) => w.requesters.map((r) => r.displayName).join(', ');
 
@@ -81,7 +72,8 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   const now = useNow(15_000);
   const [confirmReset, setConfirmReset] = useState(false);
   const session = app.sessions.find((s) => s.id === app.dispatcherId);
-  const work = [...(app.work ?? [])].sort(byLedger);
+  // Open requests first (questions, new, queued, active), then the closed ones; the viewer's own first within each (shared/workOrder.ts).
+  const work = ledgerOrder(app.work ?? [], app.me?.userId);
   const open = work.filter(isOpenWork);
   const closed = work.filter((w) => !isOpenWork(w));
   const current: Tab = tab === 'conversation' ? 'conversation' : tab === 'intake' ? 'intake' : 'requests';
@@ -219,7 +211,8 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
   const items = work.filter((w) => w.source);
   const pending = items.filter(pendingApproval);
   const reviewer = !!app.me && s.reviewerIds.some((id) => id.toLowerCase() === app.me!.userId.toLowerCase());
-  const rest = items.filter((w) => !pendingApproval(w));
+  const auto = items.filter((w) => w.autoClosed).sort((a, b) => b.autoClosed!.at.localeCompare(a.autoClosed!.at));
+  const rest = items.filter((w) => !pendingApproval(w) && !w.autoClosed);
   const anyOn = s.discord.enabled || s.ffbox.enabled || s.release.enabled || !!s.nightly?.enabled;
   const act = async (id: string, f: () => Promise<unknown>) => {
     setBusy(id);
@@ -305,6 +298,14 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
         <p className="dim small ledger-none">Nothing needs a human.</p>
       )}
 
+      {auto.length > 0 && (
+        <section data-testid="intake-auto-closed">
+          <h3 className="intake-h">Closed automatically · {auto.length}</h3>
+          <p className="dim small ledger-none">Their work already merged (a branch, a PR, or a linked request that is done), so they closed as done without a review.</p>
+          <div className="run-list">{auto.map(row)}</div>
+        </section>
+      )}
+
       <h3 className="intake-h">In the ledger</h3>
       {rest.length ? <div className="run-list">{rest.map(row)}</div> : <p className="dim small ledger-none">No Discord or FFBox requests yet.</p>}
 
@@ -314,7 +315,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
           <ul className="intake-log">
             {s.recent.map((e, i) => (
               <li key={`${e.at}-${i}`} className="small">
-                <span className="mono dim">{fmtRelative(e.at, now)}</span> <span className={e.action === 'filed' ? 'tone-green' : e.action === 'skipped' ? 'tone-amber' : 'dim'}>{e.action}</span> {e.title}
+                <span className="mono dim">{fmtRelative(e.at, now)}</span> <span className={e.action === 'filed' || e.action === 'closed' ? 'tone-green' : e.action === 'skipped' ? 'tone-amber' : 'dim'}>{e.action}</span> {e.title}
                 {e.workId ? <span className="mono"> {e.workId}</span> : null}
                 {e.why ? <span className="dim"> ({e.why})</span> : null}
               </li>
@@ -346,8 +347,9 @@ function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; 
         <span className="work-main">
           <span className="work-title">{w.title}</span>
           <span className="work-sub">
-            <span className={`tone-${tone}`}>{pendingApproval(w) ? waitingLabel(w) : workLabel[w.status]}</span>
+            <span className={`tone-${tone}`}>{pendingApproval(w) ? waitingLabel(w) : w.autoClosed ? 'Auto-closed' : workLabel[w.status]}</span>
             {w.mergedInto ? ` into ${w.mergedInto}` : ''} · <span className="mono">{w.id}</span> · {s ? sourceLabel(s) : names(w)}
+            {isMine(w, app.me?.userId) ? <span className="tone-blue" data-testid="work-yours"> · yours</span> : null}
             {w.triage && !(pendingApproval(w) && w.triage.class === 'needs-human') ? <span className={w.triage.class === 'needs-human' ? 'tone-amber' : ''}> · {triageLabel[w.triage.class]}</span> : null}
             {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : null}
             {w.flag ? <span className="tone-amber"> · design question</span> : null}
@@ -395,6 +397,11 @@ function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; 
             <p className="small">
               <span className="dim">Latest: </span>
               {w.outcome}
+            </p>
+          )}
+          {w.autoClosed && (
+            <p className="small dim" data-testid={`auto-closed-${w.id}`}>
+              Closed automatically, no review needed: {w.autoClosed.text}.
             </p>
           )}
           {delivery && <p className="small dim">To players: {delivery}</p>}

@@ -421,6 +421,96 @@ test('intake: a landed fix that ships in a release gets one follow-up, approved 
   assert.equal((await run('git', ['-C', repo, 'merge-base', '--is-ancestor', fix, 'develop'])).code, 0);
 });
 
+test('merged work closes its intake request on its own: a merged branch, a cherry-pick with its Discord line, a linked request that is done; an unmerged branch stays; no worker starts', async (t) => {
+  const { intake, store, o, dir, heard, dispatcher, work } = setup(t, { ffbox: { enabled: true } });
+  const repo = path.join(dir, 'base');
+  fs.mkdirSync(repo, { recursive: true });
+  const stamp = (at: Date) => ({ ...process.env, GIT_COMMITTER_DATE: at.toISOString(), GIT_AUTHOR_DATE: at.toISOString() });
+  const git = (env: NodeJS.ProcessEnv, ...a: string[]) => execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@users.noreply.github.com', ...a], { cwd: repo, encoding: 'utf8', env }).trim();
+  const past = stamp(new Date(Date.now() - 3 * 3_600_000));
+  const later = stamp(new Date(Date.now() + 3_600_000));
+  const commit = (env: NodeJS.ProcessEnv, file: string, msg: string) => {
+    fs.writeFileSync(path.join(repo, file), msg);
+    git(env, 'add', '-A');
+    git(env, 'commit', '-q', '-m', msg);
+  };
+  git(past, 'init', '-q', '-b', 'develop');
+  commit(past, 'base.txt', 'base');
+  const branch = (name: string, file: string, env = past) => {
+    git(env, 'checkout', '-q', '-b', name, 'develop');
+    commit(env, file, `work on ${name.split('/')[1]}`);
+    git(env, 'checkout', '-q', 'develop');
+  };
+  const THREAD = '1111111111111111111';
+  const ids: Record<string, string> = {};
+  const file = (name: string, o2: Partial<ProviderConversation> = {}) => {
+    intake.onConversation(conv({ id: `c-${name}`, branch: `ffbox/${name}`, title: name, ...o2 }));
+    ids[name] = work().find((w) => w.source?.branch === `ffbox/${name}`)!.id;
+  };
+  branch('ffbox/merged', 'm.txt');
+  branch('ffbox/unmerged', 'u.txt');
+  branch('ffbox/pick', 'p.txt');
+  branch('ffbox/squash', 's.txt');
+  branch('ffbox/handmerged', 'h.txt', later);
+  git(past, 'branch', 'ffbox/idle', 'develop');
+  for (const n of ['merged', 'unmerged', 'pick', 'squash', 'handmerged', 'idle']) file(n, n === 'pick' ? { threadId: THREAD } : {});
+  file('linkedto');
+  const covering = { ...structuredClone(o.requireWork(ids.linkedto)), id: 'w900', source: undefined, status: 'done' as const, relatedIds: [ids.linkedto], approval: undefined, triage: undefined };
+  store.putWork(covering as WorkItem);
+  assert.equal(work().filter((w) => w.approval?.state === 'pending').length, 7, 'all wait for a person');
+
+  git(past, 'merge', '--no-ff', '-q', 'ffbox/merged', '-m', 'Merge pull request #945 from Final-Factory/ffbox/merged');
+  commit(past, 'pick.txt', `Fix the picked thing (#946)\n\nDiscord: https://discord.com/channels/${GUILD}/${THREAD}`);
+  commit(past, 'squash.txt', 'Fix the squashed thing (#947)\n\nFrom ffbox/squash');
+  git(later, 'rebase', '-q', 'develop', 'ffbox/handmerged');
+  git(later, 'checkout', '-q', 'develop');
+  git(later, 'merge', '--ff-only', '-q', 'ffbox/handmerged');
+
+  const closed = await intake.checkMerged();
+  assert.deepEqual(closed.sort(), [ids.merged, ids.pick, ids.squash, ids.handmerged, ids.linkedto].sort());
+  const w = (n: string) => o.requireWork(ids[n]);
+  for (const n of ['merged', 'pick', 'squash', 'handmerged', 'linkedto']) assert.equal(w(n).status, 'done', `${n} is done`);
+  assert.deepEqual([w('merged').autoClosed?.how, w('merged').autoClosed?.pr], ['branch', 945]);
+  assert.match(w('merged').autoClosed!.text, /^merged as #945 \([0-9a-f]{12}\) on \d{4}-\d\d-\d\d$/);
+  assert.match(w('merged').log.at(-1)!, /closed automatically, no review needed: merged as #945/);
+  assert.deepEqual([w('pick').autoClosed?.how, w('pick').autoClosed?.pr], ['thread', 946]);
+  assert.deepEqual([w('squash').autoClosed?.how, w('squash').autoClosed?.pr], ['branch', 947]);
+  assert.equal(w('handmerged').autoClosed?.how, 'ancestor');
+  assert.deepEqual([w('linkedto').autoClosed?.how, w('linkedto').autoClosed?.by], ['linked', 'w900']);
+  assert.equal(w('unmerged').status, 'new', 'an unmerged branch stays open');
+  assert.equal(w('unmerged').approval?.state, 'pending');
+  assert.equal(w('idle').status, 'new', 'a branch that never moved past the base is not a merge');
+  assert.equal(intake.summary().recent.filter((e) => e.action === 'closed').length, 5);
+
+  assert.equal([...store.sessions.values()].filter((x) => x.kind === 'worker').length, 0, 'no worker was started');
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(heard(dispatcher().info.id, '[work request]').length, 0, 'the dispatcher heard nothing');
+  const mine = heard(o.personalFor({ userId: 'ben', displayName: 'Ben' }).info.id, '[intake auto-closed]');
+  assert.equal(mine.length, 1, 'one line for the whole batch');
+  assert.match(mine[0].text, /^\[intake auto-closed\] 5 intake requests closed as done/);
+
+  assert.deepEqual(await intake.checkMerged(), [], 'closed once');
+  assert.deepEqual(work().filter((x) => x.source && x.status === 'new').map((x) => x.id).sort(), [ids.unmerged, ids.idle].sort());
+});
+
+test('merged work: a PR gh lists as merged closes its request when its branch is gone; gh failing changes nothing', async (t) => {
+  const { intake, o, dir, work } = setup(t, { ffbox: { enabled: true } });
+  const repo = path.join(dir, 'base');
+  fs.mkdirSync(repo, { recursive: true });
+  execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@users.noreply.github.com', 'init', '-q', '-b', 'develop'], { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+  execFileSync('git', ['add', '-A'], { cwd: repo });
+  execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@users.noreply.github.com', 'commit', '-q', '-m', 'base'], { cwd: repo });
+  intake.onConversation(conv({ id: 'c-gone', branch: 'ffbox/gone', title: 'gone' }));
+  const id = work()[0].id;
+  const deps = (intake as unknown as { d: { mergedPrs?: () => Promise<unknown> } }).d;
+  deps.mergedPrs = async () => undefined;
+  assert.deepEqual(await intake.checkMerged(), [], 'gh could not say: still open');
+  deps.mergedPrs = async () => [{ sha: 'b'.repeat(40), at: '2026-10-03T08:00:00Z', number: 949, head: 'ffbox/gone', text: 'Tidy\n' }];
+  assert.deepEqual(await intake.checkMerged(), [id]);
+  assert.equal(o.requireWork(id).autoClosed?.text, 'merged as #949 (bbbbbbbbbbbb) on 2026-10-03');
+});
+
 test('one place: work started outside the ledger (over /mcp, from the dashboard, for a delegation) is recorded in it, once', async (t) => {
   const { agents, o, store, work } = setup(t);
   const remote = beltFor('remote', agents.toolSpecs('human', agents.fixedActor(LOTH), { role: 'remote', owner: LOTH })).find((x) => x.name === 'start_agent')!;
