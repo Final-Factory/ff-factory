@@ -829,6 +829,82 @@ test('w299: a request held in the intake tells its FFBox conversation once that 
   assert.deepEqual([u.status, u.held], ['open', undefined], 'approved: the normal flow, no longer held');
 });
 
+test('w317: ids come out whole: a path, URL or code span that names one is dropped, never cut into; a PR link stays', () => {
+  const t = publicText('Triage of all 25 threads is done; the table is in specs/w293-discord-triage/README.md (#985). Fixed in w271, see `sandbox/alpha` and https://github.com/Final-Factory/FinalFactory/pull/980.', 1000);
+  assert.doesNotMatch(t, /specs\/-|-discord-triage|w293|w271|sandbox/, t);
+  assert.match(t, /https:\/\/github\.com\/Final-Factory\/FinalFactory\/pull\/980/);
+  assert.equal(publicText('See docs/intake.md and `npm test` for the rule (w12).', 200), 'See docs/intake.md and `npm test` for the rule.');
+  assert.equal(publicText('Worker 8b0ba704 fixed it in w271: the dock is saved.', 200), 'Worker fixed it in the dock is saved.'.replace('in the', 'in: the').replace('in: the', 'in the'));
+});
+
+test('w317: a thread joined to a scoped (broad) request hears nothing from it; a narrower request takes its link, and its merge is the thread\'s result', async (t) => {
+  const { connect, chat, call, store } = await setup(t);
+  const c = await connect();
+  const loth = chat(LOTH);
+  loth.lastFrom = 'human';
+  const thread = newThread();
+  const broad = await call(loth.info, 'request_work', { title: 'Triage every Discord thread since Oct 3', brief: 'Go through the threads and fix or file each.', scope: { source: 'discord', since: '2026-10-03T00:00:00Z' } });
+  assert.equal(broad.isError, false, broad.text);
+  const b = [...store.work.values()].find((w) => w.title.startsWith('Triage every Discord thread'))!;
+  assert.ok(b.scope?.since, 'a broad request: a window over a source');
+  const req = devRequest('dev-broad', { thread });
+  const conversation = (req.conversation as { id: string }).id;
+  c.send(req);
+  await c.next('dev_ack');
+  const filed = await c.next('dev_filed');
+  assert.deepEqual([filed.outcome, filed.workId], ['covered', b.id], 'inside the broad request\'s scope');
+  // The broad request closes with its own summary: nothing goes to the joined thread.
+  assert.equal((await call(loth.info, 'update_work', { id: b.id, close: 'done', note: `Triage of all 25 threads is done; the table is in specs/${b.id}-discord-triage/README.md (#985).` })).isError, false);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok(!c.received.some((m) => m.type === 'dev_update'), "a broad request's close is not the thread's result");
+  // A narrower request for this thread: the link moves to it, and the thread hears it from there.
+  const narrow = await call(loth.info, 'request_work', { title: 'Ship location wrong after a portal', brief: `The ship is placed at the wrong spot after using a portal. See https://discord.com/channels/530867164866150410/${thread}` });
+  assert.equal(narrow.isError, false, narrow.text);
+  const n = [...store.work.values()].find((w) => w.title === 'Ship location wrong after a portal')!;
+  assert.ok(n.keys.includes(`discord:${thread}`));
+  let u = await c.next('dev_update');
+  assert.deepEqual([u.conversation, u.request, u.status], [conversation, n.id, 'open']);
+  assert.deepEqual(store.work.get(n.id)!.ffboxDev?.map((l) => l.conversation), [conversation], 'the link moved here');
+  assert.equal(store.work.get(b.id)!.ffboxDev?.some((l) => l.conversation === conversation), false, 'and left the broad request');
+  assert.ok(store.work.get(n.id)!.log.some((l) => /moved here from/.test(l)));
+  // The narrow request's own fix merges: that is the thread's result.
+  const w = store.work.get(n.id)!;
+  // (Closed as its worker's FIX-LANDED would: the person's chat has used its filings for this test.)
+  Object.assign(w, { status: 'done', outcome: 'Portal placement fixed in PR 990.', delivery: { fixCommit: 'abc1234def5678' } });
+  store.putWork(w);
+  for (;;) {
+    u = await c.next('dev_update');
+    if (u.status === 'done') break;
+  }
+  assert.deepEqual([u.request, u.mergedIn], [n.id, 'develop@abc1234def5678']);
+});
+
+test('w317 backfill: at start-up a closed broad request\'s threads move to the request handling each, or are unlinked; an open broad one keeps an unclaimed thread', async (t) => {
+  const { connect, store, o } = await setup(t);
+  const c = await connect();
+  const base = { brief: 'x', priority: 'normal' as const, requestedBy: LOTH, requesters: [LOTH], humanAsked: true, createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] };
+  const link = (conversation: string, threadId: string) => ({ ref: `dev-${conversation}-1`, conversation, source: 'discord', channel: 'dev_chat', threadId, url: `https://discord.com/channels/530867164866150410/${threadId}`, operator: 'lothsahn', person: LOTH, at: T0, outcome: 'covered' as const });
+  // w314 handles thread 1556008532338278470 (its own scope: one thread); w291 is the broad triage that held it.
+  store.putWork({ ...base, id: 'w314', title: 'Ship location incorrect after a portal', keys: ['discord:1556008532338278470'], scope: { threads: ['1556008532338278470'] }, status: 'active' } as unknown as WorkItem);
+  store.putWork({ ...base, id: 'w291', title: 'Triage all Discord threads since Oct 3', keys: ['discord:1556008532338278470', 'discord:1556000000000000001'], scope: { source: 'discord', since: '2026-10-03T00:00:00Z' }, status: 'done', outcome: 'Triage of all 25 threads is done', ffboxDev: [link('610', '1556008532338278470'), link('611', '1556000000000000001')] } as unknown as WorkItem);
+  store.putWork({ ...base, id: 'w300', title: 'Look over the dev channel this week', keys: [], scope: { channel: 'dev_chat', since: '2026-10-01T00:00:00Z' }, status: 'active', ffboxDev: [link('620', '1556000000000000002')] } as unknown as WorkItem);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(!c.received.some((m) => m.type === 'dev_update'), 'a broad request sends no thread anything');
+  const done = o.relinkBroadDevLinks();
+  assert.deepEqual(done, [
+    { conversation: '610', threadId: '1556008532338278470', from: 'w291', to: 'w314' },
+    { conversation: '611', threadId: '1556000000000000001', from: 'w291' },
+  ]);
+  assert.deepEqual(store.work.get('w314')!.ffboxDev?.map((l) => l.conversation), ['610']);
+  assert.deepEqual(store.work.get('w291')!.ffboxDev, []);
+  assert.deepEqual(store.work.get('w300')!.ffboxDev?.map((l) => l.conversation), ['620'], 'an open broad request keeps a thread nothing else handles');
+  assert.ok(store.work.get('w314')!.log.some((l) => /moved here from w291 at start-up/.test(l)));
+  assert.ok(store.work.get('w291')!.log.some((l) => /611 unlinked at start-up/.test(l)));
+  const u = await c.next('dev_update');
+  assert.deepEqual([u.conversation, u.request, u.status], ['610', 'w314', 'open'], "results now flow from the thread's own request");
+  assert.deepEqual(o.relinkBroadDevLinks(), [], 'idempotent: a second start changes nothing');
+});
+
 test('ffbox_activity show dev_requests lists them; config: its settings are checked, and there is no operators map', async (t) => {
   const { connect, chat, call } = await setup(t);
   const c = await connect();

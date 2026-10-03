@@ -94,6 +94,15 @@ export interface IntakeFiling {
   limit?: () => string | undefined;
 }
 
+/**
+ * A broad request (w317): its scope is a window, a source or a channel, or names more than one thread. A request whose
+ * scope is the one thread its brief named (request_work records that by itself) is that thread's own.
+ */
+export function isBroad(w: Pick<WorkItem, 'scope'>): boolean {
+  const s = w.scope;
+  return !!s && (!!(s.source || s.channel || s.since || s.until) || (s.threads?.length ?? 0) > 1);
+}
+
 /** The FFBox conversation a request filed from FFBox's own report or escalation came from (its source), or undefined. */
 export function ffboxSourceConversation(w: Pick<WorkItem, 'source'>): string | undefined {
   const k = w.source?.kind;
@@ -308,6 +317,7 @@ export class Orchestrators {
     }
     const m = this.store.settings.heartbeatMinutes;
     if (m) this.store.putSettings({ heartbeat: { ...this.store.settings.heartbeat, [this.d.identity.owner().userId]: m }, heartbeatMinutes: null });
+    this.relinkBroadDevLinks();
   }
 
   /** A person's own orchestrator, if they have one yet. */
@@ -1593,6 +1603,72 @@ export class Orchestrators {
   devLinksOf(w: WorkItem): { link: WorkFfboxDev; on: WorkItem }[] {
     const out = (w.ffboxDev ?? []).map((link) => ({ link, on: w }));
     for (const x of this.store.work.values()) if (x.id !== w.id && x.mergedInto === w.id) out.push(...(x.ffboxDev ?? []).map((link) => ({ link, on: x })));
+    return out;
+  }
+
+  /**
+   * A NARROWER REQUEST TAKES THE THREAD (w317): a dev link on a scoped (broad) request moves to an open request without a
+   * scope whose keys name the link's thread (`discord:<thread>`), so the thread's results come from the work for that
+   * thread, never from the broad request's close (Lothsahn, w317: a broad triage's summary was posted as the result of a
+   * portal bug it had not fixed). Returns how many links moved; both requests record it.
+   */
+  moveDevLinks(w: WorkItem): number {
+    if (isBroad(w) || !isOpen(w)) return 0;
+    const threads = w.keys.filter((k) => k.startsWith('discord:')).map((k) => k.slice('discord:'.length));
+    if (!threads.length) return 0;
+    let moved = 0;
+    for (const x of this.store.work.values()) {
+      if (x.id === w.id || !isBroad(x) || !x.ffboxDev?.length) continue;
+      const going = x.ffboxDev.filter((l) => l.threadId && threads.includes(l.threadId));
+      if (!going.length) continue;
+      x.ffboxDev = x.ffboxDev.filter((l) => !going.includes(l));
+      w.ffboxDev = [...(w.ffboxDev ?? []).filter((l) => !going.some((g) => g.conversation === l.conversation)), ...going.map((l) => ({ ...l, outcome: 'covered' as const }))].slice(-20);
+      for (const l of going) {
+        this.stamp(x, `FFBox conversation ${l.conversation} moved to ${w.id}, the narrower request for its thread`);
+        this.stamp(w, `FFBox conversation ${l.conversation} (${l.operator}) moved here from ${x.id}: this request is its thread's own`);
+        if (!isFor(w, l.person.userId)) w.requesters = [...w.requesters, l.person];
+      }
+      this.store.putWork(x);
+      moved += going.length;
+    }
+    if (moved) this.store.putWork(w);
+    return moved;
+  }
+
+  /**
+   * THE BACKFILL (w317), run at every start and idempotent: each dev link a broad request holds moves to the request now
+   * handling its thread (an open one without a broad scope whose keys name the thread, else the newest such), and a link
+   * on a closed broad request with no such request is dropped, so no broad close ever speaks for that thread. Lothsahn,
+   * 2026-10-03: FFBox conversation 610 (thread 1556008532338278470) moves from w291 to w314. Returns what it did.
+   */
+  relinkBroadDevLinks(): { conversation: string; threadId?: string; from: string; to?: string }[] {
+    const out: { conversation: string; threadId?: string; from: string; to?: string }[] = [];
+    for (const x of [...this.store.work.values()]) {
+      if (!isBroad(x) || !x.ffboxDev?.length) continue;
+      const keep: WorkFfboxDev[] = [];
+      for (const l of x.ffboxDev) {
+        const takers = l.threadId
+          ? [...this.store.work.values()].filter((y) => y.id !== x.id && !isBroad(y) && y.status !== 'merged' && y.keys.includes(`discord:${l.threadId}`))
+          : [];
+        const to = takers.find((y) => isOpen(y)) ?? takers.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+        if (to) {
+          to.ffboxDev = [...(to.ffboxDev ?? []).filter((m) => m.conversation !== l.conversation), { ...l, outcome: 'covered' as const }].slice(-20);
+          if (!isFor(to, l.person.userId)) to.requesters = [...to.requesters, l.person];
+          this.stamp(to, `FFBox conversation ${l.conversation} (${l.operator}) moved here from ${x.id} at start-up: this request is its thread's own`);
+          this.stamp(x, `FFBox conversation ${l.conversation} moved to ${to.id}, the request for its thread`);
+          this.store.putWork(to);
+          out.push({ conversation: l.conversation, ...(l.threadId ? { threadId: l.threadId } : {}), from: x.id, to: to.id });
+        } else if (!isOpen(x)) {
+          this.stamp(x, `FFBox conversation ${l.conversation} unlinked at start-up: no request handles its thread, and this broad one is closed`);
+          out.push({ conversation: l.conversation, ...(l.threadId ? { threadId: l.threadId } : {}), from: x.id });
+        } else keep.push(l);
+      }
+      if (keep.length !== x.ffboxDev.length) {
+        x.ffboxDev = keep;
+        this.store.putWork(x);
+      }
+    }
+    for (const m of out) console.log(`dev links: FFBox conversation ${m.conversation}${m.threadId ? ` (thread ${m.threadId})` : ''} ${m.to ? `moved from ${m.from} to ${m.to}` : `unlinked from ${m.from} (closed, nothing handles its thread)`}`);
     return out;
   }
 
