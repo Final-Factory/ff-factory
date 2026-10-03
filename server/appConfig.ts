@@ -61,11 +61,13 @@ export const SETTABLE_KEYS = [
   'providers.ffbox.devRequests',
   // The FFBox intake (docs/intake.md): its whole block at once, the owner's only (OWNER_ONLY_KEYS).
   'intake.ffbox',
+  // Who may approve or decline intake requests (docs/intake.md): login names known to identity. The owner's only.
+  'intake.reviewers',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'providers.ffbox.devRequests']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove'];
@@ -83,6 +85,38 @@ function objectOf(value: unknown, key: string, example: string): Record<string, 
   }
   if (typeof o !== 'object' || o === null || Array.isArray(o)) throw new Error(`${key} is an object, e.g. ${example}`);
   return o as Record<string, unknown>;
+}
+
+/**
+ * intake.reviewers as set_app_config takes it (a list of user ids, one comma-separated string, or its JSON): each must be
+ * a login in `users`, stored in the login's own spelling, no duplicates. The whole list is replaced; `null` removes it
+ * (the owner decides alone).
+ */
+export function checkReviewers(value: unknown, users: readonly string[]): string[] {
+  let list = value;
+  if (typeof list === 'string') {
+    const t = list.trim();
+    if (t.startsWith('[')) {
+      try {
+        list = JSON.parse(t);
+      } catch {
+        throw new Error('intake.reviewers is a list of user ids, e.g. ["ben", "lothsahn"]');
+      }
+    } else list = t.split(',');
+  }
+  if (!Array.isArray(list) || list.some((id) => typeof id !== 'string')) throw new Error('intake.reviewers is a list of user ids, e.g. ["ben", "lothsahn"]');
+  const ids = (list as string[]).map((id) => id.trim()).filter(Boolean);
+  if (!ids.length) throw new Error('intake.reviewers needs at least one user id; use null to remove it (then only the owner decides)');
+  if (ids.length > 20) throw new Error('intake.reviewers: at most 20 user ids');
+  const out: string[] = [];
+  const unknown: string[] = [];
+  for (const id of ids) {
+    const known = users.find((u) => u.toLowerCase() === id.toLowerCase());
+    if (!known) unknown.push(JSON.stringify(id.slice(0, 40)));
+    else if (!out.includes(known)) out.push(known);
+  }
+  if (unknown.length) throw new Error(`intake.reviewers: no login ${unknown.join(', ')}; the logins are ${users.join(', ') || '(none)'}`);
+  return out;
 }
 
 const DEV_REQUEST_KEYS = ['enabled', 'perHour', 'maxFiles', 'maxRequestMB'];
@@ -202,7 +236,7 @@ export function checkAgeRules(value: unknown, cfg?: Pick<Config, 'protectedPaths
 }
 
 /** The value to store for `key`, or throws with what is wrong. `null` removes the key (back to the default). */
-export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config): unknown {
+export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config, users?: readonly string[]): unknown {
   if (value === null || value === undefined) return undefined;
   switch (key) {
     case 'ownerName': {
@@ -317,6 +351,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config)
       return checkFfboxIntake(value);
     case 'providers.ffbox.devRequests':
       return checkDevRequests(value);
+    case 'intake.reviewers':
+      return checkReviewers(value, users ?? []);
     case 'voice.ttsVoice': {
       if (typeof value !== 'string' || !/^[a-z]{2}_[a-z]+$/.test(value.trim())) throw new Error('voice.ttsVoice is a Kokoro voice name such as "af_heart" or "bm_george"');
       return value.trim();
@@ -370,14 +406,14 @@ export function nextPerMachine<T extends boolean | number>(cur: unknown, machine
  * per-person keys (userClaudeEnv.*, stored as userClaudeEnv.<user>.*). `opts.machine`: for
  * machines.useHostClaudeEnv, the one machine to set (absent: every machine not named).
  */
-export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { user?: string; machine?: string } = {}): { before: unknown; after: unknown } {
+export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { user?: string; machine?: string; users?: readonly string[] } = {}): { before: unknown; after: unknown } {
   if (!SETTABLE_KEYS.includes(key)) throw new Error(`${key} cannot be changed by an agent; allowed: ${SETTABLE_KEYS.join(', ')}`);
   const perUser = key.startsWith('userClaudeEnv.');
   // The user id becomes a key path segment: no dots (edit config.json by hand for such a login).
   if (perUser && !(opts.user && USER_ID.test(opts.user) && !opts.user.includes('.'))) throw new Error(`${key} needs user: the user id (login name, without dots) whose account it is`);
   const perMachine = key === 'machines.useHostClaudeEnv' || key.startsWith('machines.cleanup.');
   if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.useHostClaudeEnv and machines.cleanup.*, and is a machine id such as "m5"`);
-  const v = normalizeSetting(key, value, cfg);
+  const v = normalizeSetting(key, value, cfg, opts.users);
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
   const stored = perUser ? `userClaudeEnv.${opts.user}.${key.slice('userClaudeEnv.'.length)}` : (STORED_AS[key] ?? key);
@@ -431,6 +467,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     cfg.providers = { ...cfg.providers, ffbox };
   }
   else if (key === 'intake.ffbox') cfg.intake = { ...cfg.intake, ffbox: v as IntakeConfig['ffbox'] };
+  else if (key === 'intake.reviewers') cfg.intake = { ...cfg.intake, reviewers: v as string[] | undefined };
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;

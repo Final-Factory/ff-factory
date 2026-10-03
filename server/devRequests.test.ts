@@ -686,3 +686,38 @@ test('ffbox_activity show dev_requests lists them; config: its settings are chec
   assert.throws(() => checkDevRequests({ maxFiles: 11 }), /maxFiles is a whole number from 0 to 10/);
   assert.ok(!(SETTABLE_KEYS as readonly string[]).includes('providers.ffbox.operators'), 'no operators map to set');
 });
+
+test('a dev request names its branch ffbox-f/: the sandbox default and the worker rules; other work keeps sandbox/', async (t) => {
+  const { connect, store, chat, call, dispatcher, agents } = await setup(t);
+  const c = await connect();
+  c.send(devRequest('dev-branch', { thread: newThread() }));
+  await c.next('dev_ack');
+  const wid = String((await c.next('dev_filed')).workId);
+
+  const made: { name: string; branch?: string }[] = [];
+  const sandboxes = (agents as unknown as { sandboxes: { create: (r: { name: string; branch?: string }) => unknown } }).sandboxes;
+  sandboxes.create = (r) => {
+    made.push(r);
+    return { id: r.name, branch: r.branch ?? `sandbox/${r.name}`, base: 'origin/develop', path: '' };
+  };
+  const d = dispatcher().info;
+  assert.equal((await call(d, 'create_sandbox', { name: 'ui-fix', purpose: 'FFBox dev request', work_id: wid })).isError, false);
+  assert.equal(made[0].branch, 'ffbox-f/ui-fix', 'FFBox work: ffbox-f/<name>');
+  await call(d, 'create_sandbox', { name: 'ui-two', purpose: 'x', work_id: wid, branch: '098-foo' });
+  assert.equal(made[1].branch, '098-foo', 'an explicit branch wins');
+  await call(d, 'create_sandbox', { name: 'plain', purpose: 'x' });
+  assert.equal(made[2].branch, undefined, 'no request: git\'s own sandbox/<name> default');
+  const ben = chat(BEN);
+  ben.lastFrom = 'human';
+  await call(ben.info, 'request_work', { title: 'A person asked', brief: 'Something else.' });
+  const own = [...store.work.values()].find((w) => w.title === 'A person asked')!;
+  await call(d, 'create_sandbox', { name: 'own', purpose: 'x', work_id: own.id });
+  assert.equal(made[3].branch, undefined, "a person's own request keeps sandbox/<name>");
+
+  const started = await call(d, 'start_agent', { sandbox: 'alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
+  const worker = /Started agent (\w+)/.exec(started.text)![1];
+  await until('the worker idles', () => store.sessions.get(worker)?.status === 'idle');
+  const first = store.readTranscript(worker).filter((e): e is UserEv => e.kind === 'user').map((e) => e.text).join('\n');
+  assert.match(first, /Branch name: FF Factory's work for a request that came from FFBox goes on a `ffbox-f\/<topic>` branch/);
+  assert.match(first, /Your sandbox is on `sandbox\/alpha`: rename it before your first push \(`git branch -m ffbox-f\/<short-topic>`/);
+});

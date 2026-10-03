@@ -144,6 +144,9 @@ The same policy as the ff-discord plugin's `discord-answerer` and `discord-triag
 - Every intake worker gets the rules in `workerRules` added by the harness to whatever brief the dispatcher wrote: the
   untrusted-input rule, the posting limits (only in its thread, never internals, unreleased work, team members'
   details or internal channels, never a promised fix or date, the max-voice skill), and the end markers.
+  For work that came from FFBox (dev requests, and diagnoses and requests that name no FFBox branch) they also name the
+  branch: `ffbox-f/<topic>`, not `ffbox/*` (FFBox's own containers') and not `sandbox/<name>` ([ffbox.md](ffbox.md), "How work
+  leaves"); `create_sandbox` with the request's `work_id` defaults to it.
 - Discord and FFBox text goes to the dispatcher only after approval, as a `[work request]` marked intake whose notice
   says the text is players', and to people only as data (`[intake question]`).
 
@@ -330,6 +333,12 @@ takes it for a request an owner filed, or from an owner writing in its chat, and
 owner. Unknown keys and wrong types are refused, and nothing is written then. It applies at once, and FFBox's
 connection stays up: the welcome's `accepts` never depends on these settings, and a `board_check` or `request` while
 they are off is answered `error` `not_enabled`.
+
+Who may approve or decline is `intake.reviewers`: an owner sets it with `set_app_config` key `intake.reviewers` and a
+list of user ids as the value (`["ben", "lothsahn"]`, or one comma-separated string). Each id must be a login that
+exists (matched without regard to case and stored as the login spells it); an unknown id is refused and nothing is
+written. The list is replaced as a whole, and `null` removes it, so the owner decides alone again. It is an owner's
+setting under the same guard as `intake.ffbox`, and it applies at once, with no restart.
 
 ```json
 "intake": {
