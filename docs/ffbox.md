@@ -140,7 +140,8 @@ something is fixed.
   ([intake.md](intake.md#config)). A change applies at once and never drops the connector's link.
 - **Its load.** The connector pushes FFBox's CPU load, memory and disks every 30 s. The sidebar shows FFBox as the
   first group under Computers: CPU (load1 over the cores, above 100% when it is), RAM used of total, GPU "none", and
-  free of total for each filesystem. After two minutes without an update the last numbers stay, dimmed, under a
+  free of total for the root filesystem (`root+runs`; every filesystem is in its hover). The sidebar's load panel
+  (its footer) has FFBox beside the machines, with the same numbers and no history graph. After two minutes without an update the last numbers stay, dimmed, under a
   "stale" marker. `system_status` has the numbers in FFBox's line
   ([sidebar](images/ffbox-sidebar-mobile.png)).
 - **Its page** lists the newest 100 conversations and intake reports, with "Show 100 more"; the header and the lists

@@ -562,8 +562,6 @@ export interface Provider {
   lastClose?: { code: number; reason: string; by: 'portal' | 'connector'; at: string };
   /** FFBox's load, memory and disks, as last pushed (shared/providerMetrics.ts); absent from a connector that sends none. */
   metrics?: ProviderMetrics;
-  /** The last half hour of CPU and RAM percentages, oldest first, for a sparkline. Not kept across restarts. */
-  metricsHistory?: { at: string; cpuPct?: number; memPct?: number }[];
   capacity?: ProviderCapacity;
   counts: { conversations: number; active: number; intake: number; intake24h: number };
   lastIntakeAt?: string;
