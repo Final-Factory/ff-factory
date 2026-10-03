@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **publish_review: review media without ssh** (w309, asked by Lothsahn). Workers on any machine publish stills, clips and
+  notes into `review.root/<topic>/` on the portal's computer (default `<sandboxRoot>/_review`, `F:fsb\_review` on
+  BEAST) with one tool call. A machine's daemon sends the files over HTTP with its own token, in resumable chunks
+  checked by SHA-256. Names are made safe, nothing is overwritten (`name-2.ext`), and only images, video,
+  md/txt/json and zip are taken, within `review.maxFileMB` (200), `review.maxCallMB` (500) and `review.maxFiles` (40).
+  The answer is the paths, which show inline in reports ([docs/review.md](docs/review.md)).
+
 - **A player's clear bug goes to a worker; anything else waits, and the thread says so** (w299, asked by Lothsahn).
   FFBox's escalations, player requests and fix branches are triaged by the same fixed rules as Discord threads, so an
   obvious bug can be auto-approved (`intake.ffbox.autoApprove`). Money, releases and publishing, and a report that
