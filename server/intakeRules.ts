@@ -2,6 +2,7 @@
 // branch or a release becomes in the ledger, how players' text is fenced off as untrusted, the caps and auto-approve
 // rules, the markers a worker ends its turn with, and the rules every intake worker gets on top of its brief. Pure:
 // server/intake.ts polls and wires, server/orchestrators.ts files.
+import { thresholdsOf } from './boardMatch.ts';
 import type { Config } from './config.ts';
 import { redactSecrets } from './secrets.ts';
 import type { ProviderConversation, WorkItem, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
@@ -44,6 +45,8 @@ export interface IntakeSettings {
     requests: boolean;
     escalations: boolean;
     boardCheck: boolean;
+    /** board_check's match bands (config intake.ffbox.match; server/boardMatch.ts). */
+    match: { high: number; medium: number };
     sendWork: boolean;
     dailyCap: number;
     autoApprove: { enabled: boolean; maxPerDay: number };
@@ -92,6 +95,7 @@ export function intakeSettings(cfg: Pick<Config, 'intake' | 'providers'>): Intak
       requests: f.requests !== false,
       escalations: f.escalations === true,
       boardCheck: f.boardCheck === true,
+      match: thresholdsOf(f.match),
       sendWork: cfg.providers?.ffbox?.sendWork === true,
       dailyCap: int(f.dailyCap, 10, 0, 200),
       autoApprove: { enabled: f.autoApprove?.enabled === true, maxPerDay: int(f.autoApprove?.maxPerDay, 3, 0, 100) },

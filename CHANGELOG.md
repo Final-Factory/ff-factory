@@ -12,6 +12,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **board_check matches a report to ledger work by meaning** (w219; [docs/intake.md](docs/intake.md)). FFBox sends the
+  report's title and start (redacted) to a portal that takes `board_summary`. FF Factory compares their concepts with
+  each request's title and brief: game phrases folded ("alt tab", "one spot"), stems, synonyms, a typo, weighted by
+  rarity. No model sees the text. High band: `in_flight`/`done` as before. Medium: the new `maybe` (to a connector that
+  takes it), and what FFBox files later from that conversation names the candidates. Bands are config
+  `intake.ffbox.match`. Every decision is logged. On the fixtures, every real duplicate (the teapot, the alt-tab
+  threads, the stacked enemies, the post-reset camps desyncs, the bug reporter drag) is high and every near-miss in the
+  same system is low. "LEDGER CHECK OFF HERE" in FFBox's status line when FFBox asks and `intake.ffbox.boardCheck` is
+  off, as it was for the w217 test.
+
 - **FFBox's CPU, RAM and disk in the sidebar** (w218; [contract](docs/ffbox-connector-contract.md#metrics-protocol-2)).
   FFBox's connector pushes its load averages and core count, memory and swap in use, and each disk's free space (named
   by role, never by path) every 30 s. The sidebar shows FFBox among the computers with the machines' meters. CPU is

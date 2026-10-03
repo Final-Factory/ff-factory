@@ -192,7 +192,7 @@ export type ToConnector =
   /** A message the portal did not take; the connection stays up. */
   | { type: 'error'; code: 'bad_json' | 'bad_message' | 'unknown_type' | 'hello_twice' | 'not_enabled'; message: string; ref?: string }
   /** The answer to board_check (docs/intake.md): what the ledger holds that matches, open or finished. */
-  | { type: 'board'; ref: string; verdict: 'clear' | 'in_flight' | 'done'; matches: BoardMatchWire[]; update?: true }
+  | { type: 'board'; ref: string; verdict: 'clear' | 'in_flight' | 'done' | 'maybe'; matches: BoardMatchWire[]; confidence?: number; update?: true }
   /** Receipt of a request FFBox filed: the ledger item it became (or the one it repeats). */
   | { type: 'filed'; ref: string; workId?: string; status: string; repeat?: boolean; why?: string }
   /** A read-only question (docs/ffbox-connector-contract.md, "Read-only queries"), only to a connector whose hello lists it. */
@@ -424,6 +424,11 @@ export const BoardCheckSchema = z.object({
   title: z.string().max(300).optional(),
   /** Protocol 2: the FFBox conversation asking; the ledger requests filed from it are its own, not a match. */
   conversation: conversationId.optional(),
+  /**
+   * The start of the report, sanitized on FFBox (secrets and paths out), sent only when the welcome lists
+   * "board_summary". Untrusted: split into words and compared (server/boardMatch.ts), never shown to a model.
+   */
+  summary: z.string().max(1000).optional(),
 });
 
 /**

@@ -52,6 +52,12 @@ export interface IntakeConfig {
     escalations?: boolean;
     /** Answer the connector's board_check: FFBox asks the ledger before it works a report (default false). */
     boardCheck?: boolean;
+    /**
+     * How sure a board_check match must be (server/boardMatch.ts): at or above `high` the ledger has it (in_flight or
+     * done); at or above `medium` it may (maybe: FFBox goes ahead and the candidates are linked for a person). Defaults
+     * 0.7 and 0.45.
+     */
+    match?: { high?: number; medium?: number };
     /** The game repo as board answers name it to FFBox ("Final-Factory/FinalFactory"); default: from repo.url. */
     repo?: string;
     dailyCap?: number;
