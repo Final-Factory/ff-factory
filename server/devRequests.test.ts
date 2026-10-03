@@ -810,6 +810,25 @@ test('w278: a request filed from an FFBox escalation gets the same events in its
   assert.deepEqual([u.status, u.result], ['declined', 'Works as designed: junctions throttle on purpose.']);
 });
 
+test('w299: a request held in the intake tells its FFBox conversation once that it waits on a developer; approved, the flag goes', async (t) => {
+  const { connect, store, o } = await setup(t);
+  const c = await connect();
+  const w: WorkItem = {
+    id: 'w600', title: 'Discord bug (via Max): Mining odd', brief: 'From FFBox.', priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: false, status: 'new', createdAt: T0, updatedAt: T0,
+    sessionIds: [], overlaps: [], asks: 0, log: [], source: { kind: 'ffbox-request', conversation: '640', threadId: '1424000000000000640', untrusted: true },
+    triage: { class: 'needs-human', reason: 'needs a human: no clear defect' }, approval: { state: 'pending', why: 'needs a human: no clear defect' },
+  } as unknown as WorkItem;
+  store.putWork(w);
+  let u = await c.next('dev_update');
+  assert.deepEqual([u.conversation, u.status, u.held, 'text' in u], ['640', 'open', true, false]);
+  store.putWork(store.work.get('w600')!);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(c.received.filter((m) => m.type === 'dev_update').length, 0, 'once: nothing changed, nothing more sent');
+  o.approveIntake('w600', BEN);
+  u = await c.next('dev_update');
+  assert.deepEqual([u.status, u.held], ['open', undefined], 'approved: the normal flow, no longer held');
+});
+
 test('ffbox_activity show dev_requests lists them; config: its settings are checked, and there is no operators map', async (t) => {
   const { connect, chat, call } = await setup(t);
   const c = await connect();

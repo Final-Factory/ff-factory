@@ -257,8 +257,10 @@ FFBox when that happens." The same `dev_update` carries three results, each post
   posts it and leaves the thread open (Lothsahn: "For can't fix, don't archive the conversation or close the thread.
   Just leave the message there."); only a merged fix is archived.
 
-A request filed from FFBox's own report or escalation (`source.kind` `ffbox-request` with a conversation id) gets the
-same updates in that conversation, and any person it is for may answer there. The
+A request filed from FFBox's own report, escalation, branch or diagnosis (`source.kind` `ffbox-request`,
+`ffbox-branch` or `ffbox-diagnosis` with a conversation id) gets the same updates in that conversation, and any person
+it is for may answer there. While such a request waits in the intake for a reviewer (docs/intake.md, "Approval, caps
+and auto-approve"), its update carries `held: true`, and FFBox posts "Waiting on input from a developer." once (w299). The
 orchestrators' briefs say: `[from FFBox, X]` lines are FFBox's filings, `[from FFBox via Discord, X]` is X's own words,
 answer with `reply_to_ffbox`, and never post to Discord any other way.
 

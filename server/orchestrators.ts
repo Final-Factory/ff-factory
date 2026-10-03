@@ -96,7 +96,8 @@ export interface IntakeFiling {
 
 /** The FFBox conversation a request filed from FFBox's own report or escalation came from (its source), or undefined. */
 export function ffboxSourceConversation(w: Pick<WorkItem, 'source'>): string | undefined {
-  const c = w.source?.kind === 'ffbox-request' ? w.source.conversation : undefined;
+  const k = w.source?.kind;
+  const c = k === 'ffbox-request' || k === 'ffbox-branch' || k === 'ffbox-diagnosis' ? w.source?.conversation : undefined;
   return c && /^\d{1,12}$/.test(c) ? c : undefined;
 }
 
