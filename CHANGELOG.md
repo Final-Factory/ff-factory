@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox updates failing: a red dot** (w265, asked by Lothsahn). FFBox's connector (2.4.0) pushes its self-updater's
+  last pass as an `updater` message ([contract](docs/ffbox-connector-contract.md#updater-w265)): per checkout ok,
+  diverged, dirty or failed, with commits and the updater's words. FFBox turns red in the sidebar and on its page, and
+  `system_status` and `ffbox_activity` (summary and status) say "FFBox updates failing: <checkout> <reason>, since
+  <time>", when a checkout is failing or no pass has run for three timer intervals (`shared/updaterHealth.ts`).
+
 - **FFBox dev requests: an operator's ffdev turn handed to FF Factory** (w240, asked by Lothsahn;
   [docs/ffbox.md](docs/ffbox.md#dev-requests), the wire in
   [docs/ffbox-connector-contract.md](docs/ffbox-connector-contract.md#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory)).

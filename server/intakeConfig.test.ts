@@ -208,7 +208,7 @@ test('intake.ffbox: switching the ledger check on keeps the connected FFBox, whi
   // Connected while the intake is off: the welcome is the same static list, and a board_check is answered not_enabled.
   const c = connect();
   const w1 = (await c.hello({ protocol: 2, accepts: ['board', 'filed'] })) as unknown as { accepts: string[] };
-  assert.deepEqual(w1.accepts, ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received']);
+  assert.deepEqual(w1.accepts, ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater']);
   assert.equal(pm.ledgerProblem(), undefined, 'nothing said before FFBox has asked');
   c.send({ type: 'board_check', ref: 'conv-570', keys: ['discord:1424000000000000001'], conversation: '570' });
   const off = await c.next('error');

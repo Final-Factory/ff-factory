@@ -7,6 +7,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ProviderManager, describeQuery } from './providers.ts';
 import { cpuPct, metricsLine, metricsStale, METRICS_STALE_MS } from '../shared/providerMetrics.ts';
+import { updaterHealth, UPDATER_STALE_INTERVALS } from '../shared/updaterHealth.ts';
+import type { ProviderUpdater } from '../shared/types.ts';
 import { CLOSE, LIMITS, PROVIDER_PROTOCOL, PROVIDER_TOKEN, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
 import { normalizeSetting, setAppConfig } from './appConfig.ts';
 import { redactSecrets } from './secrets.ts';
@@ -255,7 +257,7 @@ test('the first message must be a hello, within the hello timeout; a bad hello i
 
 test('no negotiation: any protocol or none is welcomed with the static accepts; protocol 1 or 2 echoed, else 2', async (t) => {
   const { connect, pm } = await setup(t);
-  const all = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received'];
+  const all = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater'];
   for (const [protocol, want] of [[1, 1], [2, 2], [3, 2], [null, 2]] as const) {
     const c = connect();
     const w = (await c.hello({ protocol, accepts: protocol === 1 ? undefined : ['board'] })) as unknown as Record<string, unknown>;
@@ -577,6 +579,119 @@ test('metrics: the latest kept and shown in the status line; a connector that se
   c.send({ ...METRICS, disks: [{ role: '/home/someone', totalBytes: 1, freeBytes: 1 }] });
   const err = await c.next('error');
   assert.equal(err.code, 'bad_message', 'a disk named by a path is refused');
+});
+
+// w265: FFBox's self-updater, as fffconnector 2.4.0 sends it (scripts/update_state.py's document).
+const DIVERGED = 'diverged from origin/master; not taking its commits. Fix it by hand';
+const UPDATER_MSG = {
+  type: 'updater',
+  updater: {
+    at: '2026-10-03T18:00:00Z',
+    interval_secs: 180,
+    ok: false,
+    since: '2026-10-03T17:00:00Z',
+    checkouts: [
+      { name: 'ffbox', path: '/opt/ffbox', status: 'ok', ok: true, local: 'a'.repeat(40), origin: 'a'.repeat(40), since: '2026-10-01T00:00:00Z', checked_at: '2026-10-03T18:00:00Z', ok_at: '2026-10-03T18:00:00Z' },
+      { name: 'agents', path: '/opt/final-factory-agents', status: 'diverged', ok: false, local: 'b'.repeat(40), origin: 'c'.repeat(40), message: DIVERGED, since: '2026-10-03T17:00:00Z', checked_at: '2026-10-03T18:00:00Z' },
+    ],
+    warnings: ['WARNING: the agents checkout (/opt/final-factory-agents) has diverged from origin/master — not taking its commits.'],
+    some_future_field: { anything: true },
+  },
+};
+
+const updater = (over: Partial<ProviderUpdater> = {}): ProviderUpdater => ({
+  at: '2026-10-03T18:00:00Z',
+  intervalSecs: 180,
+  ok: true,
+  since: '2026-10-01T00:00:00Z',
+  checkouts: [
+    { name: 'ffbox', status: 'ok', ok: true, since: '2026-10-01T00:00:00Z' },
+    { name: 'agents', status: 'ok', ok: true, since: '2026-10-01T00:00:00Z' },
+  ],
+  warnings: [],
+  receivedAt: '2026-10-03T18:00:01Z',
+  ...over,
+});
+
+test('updater health: green when every checkout is ok; red for a failing checkout, naming it, its reason and since when', () => {
+  const t0 = Date.parse('2026-10-03T18:01:00Z');
+  assert.equal(updaterHealth(undefined, t0), undefined, 'a connector from before w265: nothing known, nothing said');
+  const ok = updaterHealth(updater(), t0)!;
+  assert.equal(ok.state, 'ok');
+  assert.equal(ok.line, 'FFBox updates ok: ffbox ok, agents ok; last pass 2026-10-03 18:00 UTC');
+  const ahead = updaterHealth(updater({ checkouts: [{ name: 'agents', status: 'ahead', ok: true }] }), t0)!;
+  assert.equal(ahead.state, 'ok', "ahead of origin is FFBox's ok, and FFBox's ok decides");
+  const bad = updaterHealth(updater({ ok: false, checkouts: [{ name: 'ffbox', status: 'ok', ok: true }, { name: 'agents', status: 'diverged', ok: false, message: DIVERGED, since: '2026-10-03T17:00:00Z' }] }), t0)!;
+  assert.equal(bad.state, 'failing');
+  assert.deepEqual(bad.failing.map((c) => c.name), ['agents']);
+  assert.equal(bad.line, `FFBox updates failing: agents ${DIVERGED}, since 2026-10-03 17:00 UTC`);
+  const two = updaterHealth(updater({ ok: false, checkouts: [{ name: 'ffbox', status: 'failed', ok: false, since: '2026-10-03T17:30:00Z' }, { name: 'agents', status: 'dirty', ok: false, since: '2026-10-03T16:00:00Z' }] }), t0)!;
+  assert.equal(two.line, 'FFBox updates failing: ffbox failed; agents dirty, since 2026-10-03 16:00 UTC', 'every failing checkout, the status word when there is no message, since the oldest');
+  const word = updaterHealth(updater({ checkouts: [{ name: 'ffbox', status: 'brand_new', ok: false }] }), t0)!;
+  assert.equal(word.state, 'failing', 'a status word this portal does not know goes by ok');
+  assert.equal(updaterHealth(updater({ ok: false, checkouts: [] }), t0)!.state, 'failing', 'not ok overall with no checkout to blame is still red');
+});
+
+test('updater health: an updater with no pass for three intervals is stale, and counts as failing; a running pass keeps it fresh', () => {
+  const u = updater();
+  const at = Date.parse(u.at);
+  const limit = UPDATER_STALE_INTERVALS * 180_000;
+  assert.equal(updaterHealth(u, at + limit)!.state, 'ok');
+  const stale = updaterHealth(u, at + limit + 1)!;
+  assert.equal(stale.state, 'stale');
+  assert.equal(stale.line, 'FFBox updates failing: the updater has not run a pass since 2026-10-03 18:00 UTC (due every 3 min)');
+  assert.equal(updaterHealth(updater({ intervalSecs: 600 }), at + limit + 1)!.state, 'ok', 'three of its own intervals, not of ours');
+  assert.equal(updaterHealth(updater({ intervalSecs: undefined }), at + limit + 1)!.state, 'stale', '180 s when it does not say');
+  const running = updater({ runningSince: '2026-10-03T18:08:00Z' });
+  assert.equal(updaterHealth(running, at + limit + 1)!.state, 'ok', 'a pass started 1 min ago: alive');
+  assert.equal(updaterHealth(running, Date.parse('2026-10-03T18:17:01Z'))!.state, 'stale', 'a pass hung for over 9 min: stale');
+  const failingAndStale = updater({ ok: false, checkouts: [{ name: 'agents', status: 'diverged', ok: false }] });
+  assert.equal(updaterHealth(failingAndStale, at + limit + 1)!.state, 'stale', 'a stalled updater says so first: its checkout news is old');
+});
+
+test('updater: pushed by the connector, kept and shown; ok -> failing -> ok on one link; bad values refused, unknown fields ignored', async (t) => {
+  const { connect, pm } = await setup(t);
+  const c = connect();
+  await c.hello({ protocol: 2 });
+  c.capacity();
+  await until('capacity', () => !!pm.summary().capacity);
+  assert.equal(pm.summary().updater, undefined);
+  assert.equal(pm.updaterLine(), undefined);
+  assert.doesNotMatch(pm.statusLine()!, /updates/, 'nothing said before FFBox sends one');
+  c.send(UPDATER_MSG);
+  await until('updater', () => !!pm.summary().updater);
+  // The clock moved only now: the link's own timers (rate limit, liveness) run on it too.
+  const realNow = pm.now;
+  t.after(() => {
+    pm.now = realNow;
+  });
+  const at = (iso: string) => {
+    pm.now = () => Date.parse(iso);
+  };
+  at('2026-10-03T18:01:00Z');
+  const u = pm.summary().updater!;
+  assert.equal(u.intervalSecs, 180);
+  assert.equal(u.checkouts[1].status, 'diverged');
+  assert.equal(u.checkouts[1].origin, 'c'.repeat(40));
+  assert.equal(u.checkouts[0].okAt, '2026-10-03T18:00:00Z');
+  assert.equal(u.warnings.length, 1);
+  assert.equal('some_future_field' in u, false, 'an unknown field is dropped, not refused');
+  assert.match(pm.statusLine()!, new RegExp(`FFBox updates failing: agents ${DIVERGED}, since 2026-10-03 17:00 UTC`));
+  pm.now = realNow;
+  // Fixed by hand: the next pass says ok.
+  c.send({ ...UPDATER_MSG, updater: { ...UPDATER_MSG.updater, at: '2026-10-03T18:03:00Z', ok: true, since: '2026-10-03T18:03:00Z', checkouts: [UPDATER_MSG.updater.checkouts[0], { ...UPDATER_MSG.updater.checkouts[1], status: 'ok', ok: true, message: undefined, origin: 'b'.repeat(40) }] } });
+  await until('ok', () => pm.summary().updater?.ok === true);
+  at('2026-10-03T18:04:00Z');
+  assert.match(pm.statusLine()!, /FFBox updates ok: ffbox ok, agents ok; last pass 2026-10-03 18:03 UTC/);
+  // The updater stops: nothing new for over three intervals is red again.
+  at('2026-10-03T18:12:01Z');
+  assert.match(pm.updaterLine()!, /^FFBox updates failing: the updater has not run a pass since 2026-10-03 18:03 UTC/);
+  pm.now = realNow;
+  c.send({ ...UPDATER_MSG, updater: { ...UPDATER_MSG.updater, interval_secs: 0 } });
+  assert.equal((await c.next('error')).code, 'bad_message', 'a value out of range is refused, not fatal');
+  c.send({ ...UPDATER_MSG, updater: { ...UPDATER_MSG.updater, checkouts: [{ ...UPDATER_MSG.updater.checkouts[0], local: 'not-a-commit' }] } });
+  assert.equal((await c.next('error')).code, 'bad_message');
+  assert.equal(pm.summary().updater?.ok, true, 'and the last good one stays');
 });
 
 test('status line: FFBox asking the ledger and told not_enabled is said loudly, from what happened, for 24 h', async (t) => {

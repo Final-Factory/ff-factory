@@ -530,6 +530,45 @@ export interface ProviderMetrics {
   disks: { role: string; totalBytes: number; freeBytes: number }[];
 }
 
+/** One checkout FFBox's self-updater pulls (ffbox itself, the agents checkout), as its last pass found it. */
+export interface ProviderUpdaterCheckout {
+  /** "ffbox", "agents", or another short name. */
+  name: string;
+  /** ok, ahead, diverged, dirty, failed, missing, disabled, or a newer word. FFBox's `ok` is what decides health. */
+  status: string;
+  ok: boolean;
+  path?: string;
+  /** The checkout's HEAD and origin's commit, when known. */
+  local?: string;
+  origin?: string;
+  /** The updater's own words, e.g. "diverged from origin/master; not taking its commits. Fix it by hand". */
+  message?: string;
+  /** When this status began. */
+  since?: string;
+  checkedAt?: string;
+  /** The last pass that found it ok, and the last that moved it to new commits. */
+  okAt?: string;
+  updatedAt?: string;
+}
+
+/** FFBox's self-updater (docs/ffbox-connector-contract.md, "updater"); shared/updaterHealth.ts decides red or green. */
+export interface ProviderUpdater {
+  /** When the last pass ended. */
+  at: string;
+  /** The timer's interval (180 on FFBox): a stall is UPDATER_STALE_INTERVALS of these with no pass. */
+  intervalSecs?: number;
+  ok: boolean;
+  /** Since when `ok` has been what it is. */
+  since?: string;
+  /** Set while a pass is running, from its start. */
+  runningSince?: string;
+  checkouts: ProviderUpdaterCheckout[];
+  /** The WARNING and ERROR lines of the last pass. */
+  warnings: string[];
+  /** When the portal received it. */
+  receivedAt: string;
+}
+
 /** A provider as the sidebar and system_status see it. The lists are fetched separately (GET /api/providers/<id>/…). */
 export interface Provider {
   id: string;
@@ -562,6 +601,8 @@ export interface Provider {
   lastClose?: { code: number; reason: string; by: 'portal' | 'connector'; at: string };
   /** FFBox's load, memory and disks, as last pushed (shared/providerMetrics.ts); absent from a connector that sends none. */
   metrics?: ProviderMetrics;
+  /** FFBox's self-updater as last pushed (shared/updaterHealth.ts); absent from a connector from before w265. */
+  updater?: ProviderUpdater;
   capacity?: ProviderCapacity;
   counts: { conversations: number; active: number; intake: number; intake24h: number };
   lastIntakeAt?: string;

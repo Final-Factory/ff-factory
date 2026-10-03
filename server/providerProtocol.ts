@@ -20,7 +20,7 @@ export const PROVIDER_PROTOCOL = 2;
  * intake settings: a board_check or request while the intake is off is answered error not_enabled, so a change of
  * settings never needs a new welcome.
  */
-export const PORTAL_ACCEPTS: readonly string[] = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received'];
+export const PORTAL_ACCEPTS: readonly string[] = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater'];
 
 /** A connector token: `ffpv1_` and 32 random bytes, base64url. The portal keeps only its SHA-256. */
 export const PROVIDER_TOKEN = /^ffpv1_[A-Za-z0-9_-]{43}$/;
@@ -667,6 +667,39 @@ export const MetricsSchema = z.object({
     .default([]),
 });
 
+/**
+ * connector → portal: how FFBox's self-updater's last pass went, per checkout, sent when it changes (a pass starting
+ * or ending) and on every new link. Every field but at, ok and each checkout's name, status and ok is optional, and
+ * the words are not enumerated, so FFBox can say more without a portal release (w265).
+ */
+export const UpdaterCheckoutSchema = z.object({
+  name: z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/),
+  status: z.string().regex(/^[a-z_]{1,40}$/),
+  ok: z.boolean(),
+  path: z.string().max(400).optional(),
+  local: z.string().regex(/^[0-9a-f]{7,40}$/).optional(),
+  origin: z.string().regex(/^[0-9a-f]{7,40}$/).optional(),
+  message: z.string().max(1000).optional(),
+  since: iso.optional(),
+  checked_at: iso.optional(),
+  ok_at: iso.optional(),
+  updated_at: iso.optional(),
+});
+
+export const UpdaterSchema = z.object({
+  type: z.literal('updater'),
+  updater: z.object({
+    at: iso,
+    ok: z.boolean(),
+    interval_secs: z.number().int().min(10).max(86_400).optional(),
+    since: iso.optional(),
+    running_since: iso.optional(),
+    checkouts: z.array(UpdaterCheckoutSchema).max(12).default([]),
+    warnings: z.array(z.string().max(1000)).max(20).default([]),
+  }),
+});
+export type UpdaterMessage = z.infer<typeof UpdaterSchema>;
+
 export const FromConnectorSchema = z.discriminatedUnion('type', [
   HelloSchema,
   CapacitySchema,
@@ -679,6 +712,7 @@ export const FromConnectorSchema = z.discriminatedUnion('type', [
   BoardCheckSchema,
   QueryResultSchema,
   MetricsSchema,
+  UpdaterSchema,
   DevRequestSchema,
   DevChunkSchema,
   DevMessageSchema,
