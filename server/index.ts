@@ -31,6 +31,7 @@ import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type Se
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { keepMessageImages } from './inlineImages.ts';
 import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, publicRef } from './attachments.ts';
+import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
@@ -240,6 +241,9 @@ const auth = new Auth(cfg.dataDir, { trustProxy: cfg.trustProxy });
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sandboxes, sessions, machines, identity);
 agents.attachments = attachments;
+// Review media workers publish (docs/review.md): <sandboxRoot>/_review unless config review.root says otherwise.
+const review = new ReviewStore(() => ({ ...REVIEW_DEFAULTS, ...cfg.review, root: cfg.review?.root ?? path.join(cfg.sandboxRoot, '_review') }));
+agents.review = review;
 if (host.elevated) sandboxes.refuseUnityWhileElevated(host.elevatedWhy ?? 'Run scripts/restart.ps1 to relaunch it non-elevated.');
 
 /** The signed-in person making this request, as work records them (a route only runs for a signed-in user). */
@@ -732,6 +736,8 @@ route('GET', '/api/uploads/([\\w-]+)/([\\w-]+)', async (_r, [sessionId, imageId]
  */
 type ImageRoots = { machine?: string; session?: string; roots: string[] };
 function imageRoots(url: URL, file?: string): ImageRoots {
+  // Review media (docs/review.md) is on this computer whoever published it, a worker on a machine included.
+  if (file && review.contains(file)) return { roots: [review.root] };
   const sessionId = url.searchParams.get('session');
   const sandboxId = url.searchParams.get('sandbox');
   const machineId = url.searchParams.get('machine');
@@ -1151,6 +1157,12 @@ const server = http.createServer(async (req, res) => {
       const r = machineAttachment(attachments, machineId && store.machines.has(machineId) ? machineId : undefined, machineFile[1]);
       if ('error' in r) return send(res, r.status, { error: r.error });
       return sendStream(req, res, new StreamReply('application/octet-stream', r.file, r.record.size, downloadDisposition(r.record.name)));
+    }
+    // A machine's daemon sending review media its agent published (docs/review.md): its own token, chunks that resume.
+    const reviewUpload = /^\/machine\/review\/(rv_[a-f0-9]{24})$/.exec(url.pathname);
+    if (reviewUpload) {
+      const machineId = machines.authenticate(req.headers.authorization);
+      return await reviewHttp(review, machineId && store.machines.has(machineId) ? machineId : undefined, req, res, reviewUpload[1], Number(url.searchParams.get('offset') ?? 0));
     }
     // The nightly e2e lab's report (docs/intake.md, "Nightly e2e regressions"): a key minted --scope nightly, nothing else.
     if (url.pathname === '/api/intake/nightly' && req.method === 'POST') {
