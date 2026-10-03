@@ -153,6 +153,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The restart report names workers waiting on a wake_me** (w311, asked by Lothsahn). After the d60dcf1b deploy,
+  f6b32781 (w283, lothdesktop/pr-fix) was on neither the resumed nor the could-not-resume list. It was between turns,
+  with a 21-minute `wake_me` that survived the restart and fired on time, but nothing said so. The `[app restarted]`
+  report now lists such workers with where they are and when their wake fires ([docs/restart.md](docs/restart.md)).
+
 - **An open tab picks up a new version by itself** (w285, asked by Lothsahn). Twice a browser kept the old UI after a
   deploy (FFBox panes that did not scroll, a red dot that never showed). The page headers were already right
   (`index.html` revalidated, hashed bundles immutable, no caching service worker); the old UI was a tab that stayed
