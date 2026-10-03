@@ -2,7 +2,8 @@
 // sidebar, and as one card per computer on the Overview board. A group is its header (name, online, load,
 // sandbox and editor counts), its sandboxes with their live agents, and a machine's main-clone agents.
 import { useState, type ReactNode } from 'react';
-import type { AppState, HostHealth, Machine, SessionInfo } from '../../../shared/types';
+import type { AppState, HostHealth, Machine, Provider, SessionInfo } from '../../../shared/types';
+import { metricsAsHostStats, metricsLine, metricsStale } from '../../../shared/providerMetrics';
 import { capacityLine, fleetOf, type FleetComputer, type FleetSandbox, type PlaceAgents } from '../../../shared/fleet';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
@@ -339,7 +340,49 @@ export function FleetGroups({ app, sel, go, onNewSandbox }: { app: AppState; sel
           </div>
         );
       })}
+      {(app.providers ?? []).map((p) => (
+        <ProviderGroup key={p.id} p={p} now={now} go={go} />
+      ))}
     </>
+  );
+}
+
+/**
+ * A provider among the computers (FFBox): its load line from the metrics its connector pushes, drawn like a machine's.
+ * Stale after two minutes without an update; "no metrics" for a connector that sends none. It opens the provider's page.
+ */
+function ProviderGroup({ p, now, go }: { p: Provider; now: number; go: (r: Route) => void }) {
+  const m = p.metrics;
+  const stale = !!m && metricsStale(m, now);
+  const fresh = m && !stale && p.online ? m : undefined;
+  const c: FleetComputer = {
+    key: `provider-${p.id}`,
+    name: p.name,
+    host: false,
+    platform: 'linux',
+    online: p.online,
+    stats: fresh ? metricsAsHostStats(fresh) : undefined,
+    sandboxes: [],
+    editors: 0,
+    live: 0,
+    busy: 0,
+    attention: 0,
+  };
+  const tone: Tone = !p.online ? 'grey' : stale || !m ? 'amber' : 'green';
+  const off = !m ? 'no metrics' : !p.online ? `offline · seen ${fmtRelative(p.lastSeen ?? m.receivedAt, now)}` : `stale · updated ${fmtRelative(m.receivedAt, now)}`;
+  return (
+    <div className="fl-group" data-testid={`fl-group-provider-${p.id}`}>
+      <button className="fl-head" onClick={() => go({ view: 'provider', providerId: p.id })} title={`${p.name}: ${metricsLine(m, now)}`}>
+        <span className="fl-title">
+          <Dot tone={tone} title={p.online ? (stale ? 'connected, metrics stale' : 'connected') : 'offline'} />
+          <span className="fl-name">{p.name}</span>
+          <span className="fl-os" data-testid="fl-os">
+            Linux · provider{p.online ? '' : ' · offline'}
+          </span>
+        </span>
+        {c.stats ? <Meters c={c} now={now} /> : <span className="fl-meters fl-meters-off" data-testid="provider-metrics-off">{off}</span>}
+      </button>
+    </div>
   );
 }
 

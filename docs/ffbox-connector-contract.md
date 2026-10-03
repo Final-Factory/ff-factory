@@ -529,3 +529,22 @@ FF Factory can ask FFBox a fixed set of read-only questions on the open link. No
 | `board_log` | `limit`, 1-50, default 20 | `{entries, total}`, newest first: `kind` (`board_check` or `escalate`), `at`, `conversation`, `ref`, `keys`, `verdict` (`clear`, `in_flight`, `done`, `asked`, `no_answer`, `not_asked` with `why`, `error`, or an escalation's `filed`, `pending`, `gave_up`, ...), `matches` (work ids), and for an escalation `state`, `attempts`, `version`, `answeredAt`. No ledger text |
 | `conversation` | `id` (required), `offset`, `limit` 1-20 turns (default 5), `text` 200-8000 characters per text | one conversation, answered on demand by `ffwatch` from its database: `conversation` (the `conversation` message's fields plus `kind`, `updatedAt`, `discordLink`, `reportIds`, `ledger`), `turns`, newest first (times, `requester` as a role, `runs` with state, cost, branch, PR and verification, `summary`, the `messages` it answered, the `replies` it posted), `page` (`offset`, `limit`, `total`) and `untrusted`, a label. Every text is redacted on FFBox (secrets taken out, not the answer dropped) and cut with a `[truncated: N more characters]` marker; players appear by display name only, never by id; a held reply shows its status and not its text. Errors also `not_found`, `timeout` (FFBox did not answer within its 12 s), `busy` (4 already waiting). FF Factory waits 15 s for it |
 | `status` | none | `box` (`state`, `config` ok or misconfigured, `killed`, `draining`, `dry_run`, `commit`, `since`), `services` (`ffwatch`, `ffweb`, `ffdiscord-listener`, `ffintake`, `fffconnector`, `ffbox-modelproxy`, `ffbox-docker`, `ffbox-egress`, `ffbox-update.timer`: `active`, `inactive`, `failed`, ...), `queue`, `classes` (name, network, model, tier, free, max), `holds`, `connector` (version, protocol, since) |
+
+## `metrics` (protocol 2)
+
+FFBox's load, memory and disks, pushed every 30 s on the open link, only when the welcome's `accepts` lists `metrics`
+(this portal always does on protocol 2; an older portal does not, and is sent none).
+
+```json
+{"type": "metrics", "at": "2026-10-02T10:00:00Z",
+ "cpu": {"load1": 21.6, "load5": 18.0, "load15": 12.5, "cores": 16},
+ "mem": {"totalBytes": 137438953472, "usedBytes": 42949672960, "swapTotalBytes": 8589934592, "swapUsedBytes": 2147483648},
+ "disks": [{"role": "root+state", "totalBytes": 536870912000, "freeBytes": 128849018880}]}
+```
+
+`cores` is the number of logical cores; FF Factory shows `load1 / cores` as a percentage and does not clamp it, so a box
+with more runnable work than cores reads above 100%. Memory in use is MemTotal minus MemAvailable. A disk is named by
+role (`root`, `state`, `golden`, `runs`, `cache`, `reports`, `docker`, joined with `+` where they share a filesystem),
+never by path; a role outside `^[a-z][a-z+]{0,63}$` is refused. FF Factory keeps the latest and the last half hour of
+CPU and RAM percentages, and shows the numbers as stale when none has arrived for two minutes. FFBox does not send a
+reading older than five minutes. The `status` query carries the same numbers.

@@ -487,6 +487,18 @@ export interface ProviderIntakeEvent {
   };
 }
 
+/** FFBox's load, memory and disks, as its connector pushes them (docs/ffbox-connector-contract.md, "metrics"). */
+export interface ProviderMetrics {
+  /** When FFBox measured them. */
+  at: string;
+  /** When the portal received them: stale after shared/providerMetrics.ts METRICS_STALE_MS. */
+  receivedAt: string;
+  cpu?: { load1: number; load5: number; load15: number; cores: number };
+  mem?: { totalBytes: number; usedBytes: number; swapTotalBytes?: number; swapUsedBytes?: number };
+  /** By role (root, state, cache, ...; joined with "+" where they share a filesystem), never by path. */
+  disks: { role: string; totalBytes: number; freeBytes: number }[];
+}
+
 /** A provider as the sidebar and system_status see it. The lists are fetched separately (GET /api/providers/<id>/…). */
 export interface Provider {
   id: string;
@@ -506,6 +518,10 @@ export interface Provider {
   accepts?: string[];
   /** The read-only queries the connector answers (hello.queries), e.g. config, board_log, status. */
   queries?: string[];
+  /** FFBox's load, memory and disks, as last pushed (shared/providerMetrics.ts); absent from a connector that sends none. */
+  metrics?: ProviderMetrics;
+  /** The last half hour of CPU and RAM percentages, oldest first, for a sparkline. Not kept across restarts. */
+  metricsHistory?: { at: string; cpuPct?: number; memPct?: number }[];
   capacity?: ProviderCapacity;
   counts: { conversations: number; active: number; intake: number; intake24h: number };
   lastIntakeAt?: string;
