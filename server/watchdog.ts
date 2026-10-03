@@ -67,6 +67,13 @@ export interface KnownDialog {
   action: DialogAction;
   /** One line for people: what it means and what to do. */
   advice: string;
+  /**
+   * Only a person can resolve it (a licence, an elevated app, a missing Unity version): no agent is asked. Every other
+   * dialog the watchdog does not answer itself goes to the sandbox's agents first (agentAnswers).
+   */
+  person?: true;
+  /** Buttons an agent may never press through the unity tool's answer_dialog (checkAgentAnswer). */
+  never?: { button: RegExp; why: string };
 }
 
 /**
@@ -81,6 +88,8 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
     action: { kind: 'notify' },
     advice:
       'the editor was started with administrator rights. Stop it and start it again once the app runs non-elevated (scripts/restart.ps1). Its "Restart Unity as a standard user" button relaunches Unity under a new process the app does not track.',
+    person: true,
+    never: { button: /restart unity/i, why: 'it relaunches Unity under a process the app does not track' },
   },
   {
     id: 'fmod-line-endings',
@@ -133,13 +142,15 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
     match: /open scene\(s\) have been (modified externally|changed on disk)/i,
     action: { kind: 'dismiss', button: 'Reload', onlyIf: 'scenesClean' },
     advice:
-      'files of scenes open in the editor changed on disk, usually because a branch was switched with the editor open. "Reload" loads the new files and throws away unsaved in-editor scene edits; "Ignore" keeps the editor\'s copy, and saving it later overwrites the branch\'s version. Save or discard the edits first, then press Reload.',
+      'files of scenes open in the editor changed on disk (a branch switch, rebase, merge, reset, pull or stash with the editor open). "Reload" loads the new files and throws away unsaved in-editor scene edits. With no in-editor scene edits worth keeping, answer Reload (unity action "answer_dialog", button "Reload"), or restart the editor, which is the same. With edits you need, note them, Reload, and redo them: the editor cannot save them while it asks, and "Ignore" followed by a save would overwrite the new scene file with the old one, so Ignore is refused.',
+    never: { button: /^ignore$/i, why: 'Ignore keeps the old scene in the editor, and a later save overwrites the scene file git just wrote' },
   },
   {
     id: 'project-version',
     match: /Project (Upgrade|Downgrade|Change) Required/i,
     action: { kind: 'notify' },
     advice: "the project was saved with another Unity version. Continuing would upgrade or downgrade it; check the sandbox's ProjectVersion.txt and the installed editors.",
+    person: true,
   },
   {
     id: 'api-updater',
@@ -166,13 +177,15 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
     id: 'package-manager',
     match: /Unity Package Manager Error|Unity Package Manager: Manifest relocation/i,
     action: { kind: 'notify' },
-    advice: 'the Package Manager failed to resolve packages ("Retry" relaunches Unity as a new process). Read the log first.',
+    advice: 'the Package Manager failed to resolve packages ("Retry" relaunches Unity as a new process). Read the log first; "Continue" opens the editor without the missing packages, or fix the manifest and restart the editor.',
+    never: { button: /^retry$/i, why: 'it relaunches Unity as a new process the app does not track; restart the editor with the unity tool instead' },
   },
   {
     id: 'license',
     match: /No valid Unity Editor license|License error|active license/i,
     action: { kind: 'notify' },
     advice: 'Unity has no valid licence on this machine; sign in or activate it in Unity Hub.',
+    person: true,
   },
   {
     id: 'unsupported-platform',
@@ -302,6 +315,36 @@ export function decide(
   }
   if (ago.filter((ms) => ms < DISMISS_LIMIT.windowMs).length >= DISMISS_LIMIT.count) return { report: true, repeated: true };
   return { click: button };
+}
+
+/**
+ * Who resolves a stuck editor the watchdog did not answer itself: its agents, through the unity tool (answer_dialog
+ * with one of `buttons`, or a restart), unless the dialog is one only a person can resolve (`person`). A startup stall
+ * is the agents' too: a restart is the answer. Only the automatic restart limit, an elevated editor and the `person`
+ * dialogs need someone at the desktop.
+ */
+export function agentAnswers(b: { reason: string; dialogId?: string; buttons?: string[] }): { person: boolean; buttons: string[] } {
+  if (b.reason === 'stalled') return { person: false, buttons: [] };
+  if (b.reason !== 'dialog') return { person: true, buttons: [] };
+  const known = KNOWN_DIALOGS.find((k) => k.id === b.dialogId);
+  if (known?.person) return { person: true, buttons: [] };
+  return { person: false, buttons: (b.buttons ?? []).filter((x) => !known?.never?.button.test(norm(x))) };
+}
+
+/** Why an agent may not press `button` in this dialog through answer_dialog, or undefined when it may. */
+export function checkAgentAnswer(d: Pick<Dialog, 'title' | 'buttons' | 'known'>, button: string): string | undefined {
+  const name = `"${d.title || 'the dialog'}"`;
+  const real = d.buttons.find((b) => norm(b) === norm(button));
+  if (!real) return `${name} has no "${button}" button (its buttons: ${d.buttons.map((b) => `"${norm(b)}"`).join(', ') || 'none'})`;
+  if (d.known?.person) return `${name} needs a person: ${d.known.advice}`;
+  if (d.known?.never?.button.test(norm(real))) return `"${norm(real)}" is never pressed in ${name}: ${d.known.never.why}`;
+  return undefined;
+}
+
+/** Unity's main window among an editor's windows: its own UnityContainerWndClass window whose title names Unity, else its first one. */
+export function mainWindow(windows: EditorWindow[], pid: number): EditorWindow | undefined {
+  const own = windows.filter((w) => w.pid === pid && w.class === 'UnityContainerWndClass');
+  return own.find((w) => /\bUnity\b/.test(w.title)) ?? own[0];
 }
 
 /** Why an always-answered window coming back after these many ms since each earlier answer is a loop, or undefined (ALWAYS_LIMIT). */
@@ -439,8 +482,18 @@ export function parsePsJson<T>(text: string, what: string, log: (line: string) =
 
 /** Whether no *.unity file in the working tree at `dir` has uncommitted changes (false when git cannot tell). */
 export async function sceneFilesUnchanged(dir: string): Promise<boolean> {
+  return (await modifiedSceneFiles(dir))?.length === 0;
+}
+
+/** The *.unity files in the working tree at `dir` with uncommitted changes (git status), or undefined when git cannot tell. */
+export async function modifiedSceneFiles(dir: string): Promise<string[] | undefined> {
   const r = await run('git', ['-C', dir, 'status', '--porcelain', '--', '*.unity'], { timeoutMs: 30_000 });
-  return r.code === 0 && r.stdout.trim() === '';
+  if (r.code !== 0) return undefined;
+  return r.stdout
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter(Boolean)
+    .map((l) => `${l.slice(3)} (${l.slice(0, 2).trim()})`);
 }
 
 /**

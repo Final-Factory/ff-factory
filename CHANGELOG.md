@@ -27,6 +27,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 - **Reports spell out their ids** (w302, asked by Ben). The worker, orchestrator and dispatcher briefs and the
   worker-update relay say that a request id, PR number, commit, worker id or sandbox name always comes with what it
   is in plain English, every time ([docs/orchestrators.md](docs/orchestrators.md), "Evidence and labels").
+- **Your own requests first on the Dispatcher page** (w307, asked by Lothsahn). The Requests list keeps its order by
+  status (question, new, queued, active, then closed) and, for open ones, by priority; within one status and priority
+  the logged-in person's requests (any where they are one of the people) come before everyone else's, then the order
+  as before. Each login sees its own first, and its rows say "yours" ([shared/workOrder.ts](shared/workOrder.ts)).
 
 - **Intake requests close themselves when their work merged** (w298, asked by Lothsahn: four FFBox review requests
   sat in "needs a human" hours after #945–#947 and #949 merged them). Every 5 minutes, and on "Check Discord now", a
@@ -175,6 +179,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   side sent, and a loud line when a new connection replaces a live one.
 
 ### Fixed
+
+- **Unity's blocking dialogs no longer wait for a person** (w294, asked by Ben). mp-r2's editor sat on "The open
+  scene(s) have been modified externally" after its worker's `git merge origin/develop` staged `main.unity`, and FF
+  Factory asked for someone at the desktop. Now a dialog the watchdog does not press itself goes to the sandbox's
+  agents with the exact call, the new `unity` action `answer_dialog` (Reload for that one, never Ignore), or a restart;
+  the dispatcher answers when no agent is there. Only an administrator, licence or project-version dialog and an editor
+  out of automatic restarts still ask a person (and only those send the "Unity editor stuck" notification).
+  `switch_branch` now refuses, before touching git, whenever it cannot check the open scenes (unsaved edits unless
+  `discard_scene_edits`, play mode, an editor starting or blocked, no bridge answer) instead of switching and leaving
+  Unity to ask ([docs/unity-dialogs.md](docs/unity-dialogs.md#who-answers)).
 
 - **An open tab picks up a new version by itself** (w285, asked by Lothsahn). Twice a browser kept the old UI after a
   deploy (FFBox panes that did not scroll, a red dot that never showed). The page headers were already right

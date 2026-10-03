@@ -12,7 +12,9 @@ import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock, type SandboxManager } from './sandboxes.ts';
 import { machineDir, parseSandboxRef, poolSettingsOf } from './machines.ts';
-import { switchBranch } from './switchBranch.ts';
+import { editorSwitchPlan, switchBranch } from './switchBranch.ts';
+import { unityBlockedNotices } from './unityBlocked.ts';
+import { agentAnswers } from './watchdog.ts';
 import { searchTranscripts } from './search.ts';
 import { openUnity, unityMcpServerFor, type SceneState, type UnityBridge } from './unityMcp.ts';
 import { CATALOG } from './launch.ts';
@@ -566,14 +568,26 @@ export class Agents {
     }
   }
 
-  /** A stuck editor: the dispatcher, and the people whose workers are in that sandbox, who may be needed at the desktop. */
+  /**
+   * A stuck editor the watchdog could not answer (server/unityBlocked.ts): the sandbox's active workers are asked to
+   * answer it with the unity tool, the dispatcher hears it, and the people whose workers are there only when it needs
+   * a person at the desktop.
+   */
   private onUnityBlocked(sb: Sandbox, b: UnityBlocked) {
-    const what = b.reason === 'dialog' ? `a "${b.title}" dialog${b.text ? `: ${b.text.replace(/\s+/g, ' ').slice(0, 400)}` : ''}` : `${b.title} (${b.text ?? ''})`;
-    const text =
-      `[unity blocked] The Unity editor of sandbox ${sb.id} is stuck on ${what}. ${b.advice ?? ''} ` +
-      `Its workers see "blocked" in their unity status. Tell the user if it needs them at the desktop (buttons: ${(b.buttons ?? []).join(' / ') || 'n/a'}).`;
-    this.notifyDispatcher(text);
-    this.notifyPeople(this.orchestrators.peopleAt({ sandboxId: sb.id }), text);
+    const recent = Date.now() - 30 * 60_000;
+    const workers = sb.sessionIds
+      .map((id) => this.store.sessions.get(id))
+      .filter((s): s is SessionInfo => !!s && s.kind === 'worker' && (['running', 'starting', 'waiting_permission'].includes(s.status) || Date.parse(s.lastActivityAt) >= recent));
+    const n = unityBlockedNotices(sb.id, b, workers.map((w) => w.title));
+    for (const w of workers) {
+      try {
+        this.sessions.send(w.id, n.workers!, 'system');
+      } catch (e) {
+        console.warn(`unity ${sb.id}: could not tell ${w.id} about the blocked editor: ${(e as Error).message}`);
+      }
+    }
+    this.notifyDispatcher(n.dispatcher);
+    if (n.person) this.notifyPeople(this.orchestrators.peopleAt({ sandboxId: sb.id }), n.dispatcher);
   }
 
   /**
@@ -905,7 +919,7 @@ Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back: once yo
 Your editor's MCP instance is named \`${sb.id}@<hash>\`. Before ANY Unity MCP call, read \`mcpforunity://instances\` and \`set_active_instance\` with that full Name@hash. The harness refuses Unity MCP calls until you pin, and refuses any other instance (other editors belong to other sandboxes or to the live game).
 
 ## Git
-${publicIdentityLine(this.cfg)}To change branches, ALWAYS call \`mcp__sandbox__switch_branch\`, never \`git switch\` / \`git checkout <branch>\` yourself: under a running editor that makes Unity stop on "The open scene(s) have been modified externally" (the harness refuses those while the editor runs). \`git checkout -- <path>\` and \`git restore\` for files are fine.
+${publicIdentityLine(this.cfg)}To change branches, ALWAYS call \`mcp__sandbox__switch_branch\`, never \`git switch\` / \`git checkout <branch>\` yourself: under a running editor that makes Unity stop on "The open scene(s) have been modified externally" (the harness refuses those while the editor runs). \`git checkout -- <path>\` and \`git restore\` for files are fine. A rebase, merge, reset, pull or stash that rewrites an open scene can still raise that question: the harness answers Reload itself when it can tell the scenes are clean, and otherwise sends you a \`[unity blocked]\` message; then decide and answer it with \`mcp__sandbox__unity\` action "answer_dialog" (button "Reload", which drops unsaved in-editor scene edits) or action "restart". Never "Ignore" (refused anyway): a later save would overwrite the new scene file.
 \`develop\` is the integration branch and the user wants work landing there often, not piling up on side branches. Commit on \`${branch}\` as you reach good checkpoints. When a piece is done and verified (compiles, tests pass, per the repo's CLAUDE.md), integrate it:
 \`git fetch origin && git rebase origin/develop\`, re-verify if the rebase pulled in changes, then \`git push origin HEAD:develop\`. If the push is rejected because develop moved, fetch, rebase and push again. Also push your own branch (\`git push -u origin ${branch}\`) so work is never only on this machine.
 Never force-push anywhere. Never push to or open PRs into the Final Factory game repo's master/main (blocked here and on GitHub; releases are the user's call); other repos' master/main (e.g. the agents harness, this app) are fine when that is their normal workflow.
@@ -933,13 +947,18 @@ To show the user an image (a screenshot, a proof, a chart), save it as PNG, JPG 
       tools: [
         tool(
           'unity',
-          `Control or inspect this sandbox's own Unity editor (sandbox ${id}). action: status | start | stop | restart | log. Restart whenever the editor is hung, crashed or misbehaving: stop asks it to quit and kills it (and what it started) after 15 s; force: true kills at once, for a frozen editor. Starting returns at once; poll status until state is "running" (the MCP bridge is up).`,
+          `Control or inspect this sandbox's own Unity editor (sandbox ${id}). action: status | start | stop | restart | log | answer_dialog. Restart whenever the editor is hung, crashed or misbehaving: stop asks it to quit and kills it (and what it started) after 15 s; force: true kills at once, for a frozen editor. Starting returns at once; poll status until state is "running" (the MCP bridge is up). answer_dialog presses \`button\` in the modal dialog the editor is stuck on (status shows it, and a [unity blocked] message names the allowed buttons); "Ignore" on "The open scene(s) have been modified externally" is always refused (Reload, or a restart, is the answer).`,
           {
-            action: z.enum(['status', 'start', 'stop', 'restart', 'log']),
+            action: z.enum(['status', 'start', 'stop', 'restart', 'log', 'answer_dialog']),
             force: z.boolean().optional().describe('stop/restart: kill the editor at once instead of asking it to quit first (a frozen editor ignores that).'),
             lines: z.number().int().min(10).max(2000).optional(),
+            button: z.string().optional().describe('answer_dialog: the button to press, as the dialog shows it, e.g. "Reload".'),
           },
-          wrap(async ({ action, force, lines }) => {
+          wrap(async ({ action, force, lines, button }) => {
+            if (action === 'answer_dialog') {
+              if (!button) throw new Error('answer_dialog needs button, e.g. "Reload" (unity status shows the dialog and its buttons)');
+              return this.sandboxes.answerDialog(id, button);
+            }
             if (action === 'start') await this.sandboxes.startUnity(id);
             if (action === 'stop') await this.sandboxes.stopUnity(id, { force });
             if (action === 'restart') {
@@ -958,12 +977,13 @@ To show the user an image (a screenshot, a proof, a chart), save it as PNG, JPG 
         ),
         tool(
           'switch_branch',
-          `Switch this sandbox (${id}) to another branch. ALWAYS use this instead of git switch / git checkout <branch> while the editor runs (the harness refuses those then). Refused if the tree has uncommitted changes or another agent in this sandbox is mid-turn; pushes commits of the current branch that no remote has first; fetches, then switches to the local branch, tracks origin/<branch>, or creates it from create_from (default origin/develop). With the editor running it closes the open scenes across the switch (if none has unsaved edits), refreshes and recompiles, and reopens them, so Unity does not stop on "The open scene(s) have been modified externally". Never master/main/develop.`,
+          `Switch this sandbox (${id}) to another branch. ALWAYS use this instead of git switch / git checkout <branch> while the editor runs (the harness refuses those then). Refused if the tree has uncommitted changes or another agent in this sandbox is mid-turn; pushes commits of the current branch that no remote has first; fetches, then switches to the local branch, tracks origin/<branch>, or creates it from create_from (default origin/develop). With the editor running it checks the open scenes over the MCP bridge, closes them across the switch, refreshes and recompiles, and reopens them, so Unity does not stop on "The open scene(s) have been modified externally". It refuses, before touching git, when it cannot check them: unsaved scene edits (save and commit them, or pass discard_scene_edits: true), play mode, an editor that is starting or blocked, or no bridge answer (stop the editor, then switch). Never master/main/develop.`,
           {
             branch: z.string().describe('The branch to switch to, e.g. "spec-098-belts".'),
             create_from: z.string().optional().describe('Base for a branch that exists neither here nor on origin. Default origin/develop.'),
+            discard_scene_edits: z.boolean().optional().describe("Throw away unsaved scene edits in the running editor instead of refusing (they are lost; the scenes reopen from the new branch's files)."),
           },
-          wrap(async ({ branch, create_from }) => this.switchBranch({ sandbox: id, branch, createFrom: create_from, callerSessionId: sessionId })),
+          wrap(async ({ branch, create_from, discard_scene_edits }) => this.switchBranch({ sandbox: id, branch, createFrom: create_from, callerSessionId: sessionId, discardSceneEdits: discard_scene_edits })),
         ),
         tool(
           'wait_for_unity',
@@ -1124,7 +1144,7 @@ To show the user an image (a screenshot, a proof, a chart), save it as PNG, JPG 
    * mid-turn or the tree has uncommitted changes; pushes stranded commits first; refreshes a running
    * sandbox editor afterwards. Returns a summary.
    */
-  async switchBranch(req: { sandbox?: string; machine?: string; branch: string; createFrom?: string; callerSessionId?: string }): Promise<string> {
+  async switchBranch(req: { sandbox?: string; machine?: string; branch: string; createFrom?: string; callerSessionId?: string; discardSceneEdits?: boolean }): Promise<string> {
     const t = this.target(req.sandbox, req.machine);
     // The worker calling its own switch_branch is mid-turn by definition; any OTHER busy agent refuses it.
     const busy = (ids: string[]) =>
@@ -1154,28 +1174,39 @@ To show the user an image (a screenshot, a proof, a chart), save it as PNG, JPG 
     if (b.length) throw new Error(`agent(s) ${b.map((s) => `"${s.title}"`).join(', ')} are mid-turn in ${sb.id}; wait for them (or stop them) first`);
     // With the editor open, a switch that rewrites an open scene's file makes Unity ask "The open scene(s)
     // have been modified externally… reload?" and hold the editor. So: check the open scenes over the
-    // bridge first; if none has unsaved edits, park them (an empty scene) across the switch and open them
-    // again after the refresh. docs/unity-dialogs.md.
+    // bridge first; if none has unsaved edits (or the caller discards them), park them (an empty scene)
+    // across the switch and open them again after the refresh. Anything else is refused before git is
+    // touched (editorSwitchPlan). docs/unity-dialogs.md.
     const pre: string[] = [];
     let unity: UnityBridge | undefined;
     let parked: SceneState | undefined;
-    let dirty: string[] = [];
+    let st: SceneState | Error | undefined;
     if (sb.unity.state === 'running') {
       try {
         unity = await openUnity(this.cfg, sb.id, sb.path);
-        const st = await unity.sceneState();
-        dirty = st.dirty;
-        if (st.playing) pre.push('the editor is in play mode, so its scenes were left alone');
-        else if (dirty.length) pre.push(`unsaved scene edits in the editor (${dirty.join(', ')}): Unity will ask whether to reload them, and the watchdog leaves that to a person`);
-        else {
-          this.sandboxes.markScenesClean(sb.id, 10 * 60_000);
-          if (st.scenes.length) {
-            await unity.parkScenes();
-            parked = st;
-          }
-        }
+        st = await unity.sceneState();
       } catch (e) {
-        pre.push(`could not check the editor's scenes first (${(e as Error).message})`);
+        st = e as Error;
+      }
+    }
+    const plan = editorSwitchPlan(sb.unity.state, st, req.discardSceneEdits);
+    if ('refuse' in plan) {
+      if (st && !(st instanceof Error) && st.dirty.length) this.sandboxes.markScenesDirty(sb.id, st.dirty);
+      await unity?.close();
+      throw new Error(`${sb.id}: ${plan.refuse}`);
+    }
+    if (unity && st && !(st instanceof Error)) {
+      try {
+        this.sandboxes.markScenesClean(sb.id, 10 * 60_000);
+        if (plan.park) {
+          await unity.parkScenes();
+          parked = st;
+        }
+        if (plan.discarded.length) pre.push(`discarded unsaved edits in ${plan.discarded.join(', ')}`);
+      } catch (e) {
+        this.sandboxes.markScenesClean(sb.id, 0);
+        await unity.close();
+        throw new Error(`${sb.id}: could not close the editor's open scenes before the switch (${(e as Error).message}); nothing was switched. Try again, or stop the editor (unity action "stop") and switch.`);
       }
     }
     let r;
@@ -1200,13 +1231,9 @@ To show the user an image (a screenshot, a proof, a chart), save it as PNG, JPG 
     if (unity) {
       try {
         this.sandboxes.probeSoon(sb.id); // a dialog the refresh raises is seen within seconds
-        // With unsaved scene edits the refresh would wait on Unity's reload question; don't hold the tool on it.
-        await unity.refresh(!dirty.length);
-        if (dirty.length) notes.push('Unity refresh requested (not waited for: it will ask about the modified scenes)');
-        else {
-          const errors = new Set(this.sandboxes.unityLog(sb.id, 600).filter((l) => /error CS\d{4}/.test(l)));
-          notes.push(errors.size ? `Unity refreshed and recompiled, with ${errors.size} compile error line(s) in the log` : 'Unity refreshed and recompiled');
-        }
+        await unity.refresh(true);
+        const errors = new Set(this.sandboxes.unityLog(sb.id, 600).filter((l) => /error CS\d{4}/.test(l)));
+        notes.push(errors.size ? `Unity refreshed and recompiled, with ${errors.size} compile error line(s) in the log` : 'Unity refreshed and recompiled');
         if (parked) {
           const missing = await unity.reopenScenes(parked.scenes, parked.active);
           notes.push(missing.length ? `reopened the editor's scenes; not on ${r.to}: ${missing.join(', ')}` : `reopened ${parked.scenes.join(', ')}`);
@@ -1216,7 +1243,7 @@ To show the user an image (a screenshot, a proof, a chart), save it as PNG, JPG 
       } finally {
         await unity.close();
         // A reload question can still come after the refresh (focus); the clean check stays good briefly.
-        if (!dirty.length) this.sandboxes.markScenesClean(sb.id, 2 * 60_000);
+        this.sandboxes.markScenesClean(sb.id, 2 * 60_000);
       }
     } else if (sb.unity.state === 'running') {
       notes.push('Unity was not refreshed; it picks the change up when it next gets focus');
@@ -1585,16 +1612,22 @@ To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`A
         ),
         tool(
           'unity',
-          "Start, stop, restart or inspect the Unity editor of a sandbox (this host's, or a machine's as \"<machine>/<name>\"), or of a machine's main clone (machine alone: the user's Mac or Windows PC; log is for sandboxes). action: start | stop | restart | status | log. Restart whenever an editor is hung, crashed or misbehaving, without asking: stop asks it to quit and kills it (and what it started) after a grace period; force: true kills at once, for a frozen editor.",
+          "Start, stop, restart or inspect the Unity editor of a sandbox (this host's, or a machine's as \"<machine>/<name>\"), or of a machine's main clone (machine alone: the user's Mac or Windows PC; log is for sandboxes). action: start | stop | restart | status | log | answer_dialog. Restart whenever an editor is hung, crashed or misbehaving, without asking: stop asks it to quit and kills it (and what it started) after a grace period; force: true kills at once, for a frozen editor. answer_dialog (this host's sandboxes) presses `button` in the dialog an editor is stuck on, as a [unity blocked] message says; \"Ignore\" on the scene reload question is always refused.",
           {
             sandbox: z.string().optional().describe('A sandbox id: "spec-098" on this host, "lothdesktop/sb1" on a machine. Give this or machine.'),
             machine: z.string().optional().describe("A machine id (list_machines): its main clone's editor. Give this or sandbox."),
-            action: z.enum(['start', 'stop', 'restart', 'status', 'log']),
+            action: z.enum(['start', 'stop', 'restart', 'status', 'log', 'answer_dialog']),
             force: z.boolean().optional().describe('stop/restart: kill at once instead of asking the editor to quit first.'),
             lines: z.number().int().min(1).max(2000).optional(),
+            button: z.string().optional().describe('answer_dialog: the button to press, e.g. "Reload".'),
           },
-          wrap(async ({ sandbox: sandboxArg, machine, action, force, lines }) => {
+          wrap(async ({ sandbox: sandboxArg, machine, action, force, lines, button }) => {
             const t = this.target(sandboxArg, machine);
+            if (action === 'answer_dialog') {
+              if (t.machine) throw new Error("answer_dialog is for this host's sandboxes; a machine's own watch answers its safe dialogs, and restart clears the rest");
+              if (!button) throw new Error('answer_dialog needs button, e.g. "Reload"');
+              return this.sandboxes.answerDialog(t.sandbox!, button);
+            }
             if (t.machine) {
               if (t.machineSandbox) {
                 if (action === 'log') return this.machines.sandboxLog(t.machine, t.machineSandbox, lines ?? 80);
@@ -1758,14 +1791,15 @@ To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`A
         ),
         tool(
           'switch_branch',
-          "Switch a sandbox's (\"spec-098\", or \"lothdesktop/sb1\" on a machine, refused there while its editor runs) or a machine's main clone's working tree to another branch: refused while an agent there is mid-turn or there are uncommitted changes (it says which). Pushes the current branch first if it has commits no remote has, fetches, then switches to the local branch, tracks origin/<branch>, or creates it from create_from (default origin/develop). A running sandbox editor is refreshed and recompiled afterwards; if none of its open scenes has unsaved edits they are closed across the switch and reopened, so Unity does not stop to ask whether to reload them. Sandboxes can never be on master/main/develop.",
+          "Switch a sandbox's (\"spec-098\", or \"lothdesktop/sb1\" on a machine, refused there while its editor runs) or a machine's main clone's working tree to another branch: refused while an agent there is mid-turn or there are uncommitted changes (it says which). Pushes the current branch first if it has commits no remote has, fetches, then switches to the local branch, tracks origin/<branch>, or creates it from create_from (default origin/develop). A running sandbox editor's open scenes are checked over the MCP bridge, closed across the switch and reopened, then it is refreshed and recompiled, so Unity does not stop to ask whether to reload them; the switch is refused before git is touched when they cannot be checked (unsaved edits unless discard_scene_edits, play mode, an editor starting or blocked, no bridge answer). Sandboxes can never be on master/main/develop.",
           {
             sandbox: z.string().optional(),
             machine: z.string().optional(),
             branch: z.string(),
             create_from: z.string().optional().describe('Base for a new branch (default origin/develop).'),
+            discard_scene_edits: z.boolean().optional().describe("A host sandbox: throw away its editor's unsaved scene edits instead of refusing."),
           },
-          wrap(async (a) => this.switchBranch({ sandbox: a.sandbox, machine: a.machine, branch: a.branch, createFrom: a.create_from })),
+          wrap(async (a) => this.switchBranch({ sandbox: a.sandbox, machine: a.machine, branch: a.branch, createFrom: a.create_from, discardSceneEdits: a.discard_scene_edits })),
         ),
         tool(
           'search_transcripts',
@@ -2730,12 +2764,20 @@ function intakeLines(w: WorkItem): string {
 }
 
 /** The unity status tool's answer: a first line people can read ("blocked: <dialog>"), then the raw state. */
+/** How a blocked editor is answered, for unity status (agentAnswers). */
+function answerLine(b: UnityBlocked): string {
+  const a = agentAnswers(b);
+  if (a.person) return 'This one needs a person at the desktop.';
+  const buttons = a.buttons.map((x) => `"${x.replace(/&/g, '').trim()}"`).join(' or ');
+  return buttons ? `Answer it: action "answer_dialog" with button ${buttons}, or action "restart".` : 'Answer it: action "restart" (force: true).';
+}
+
 function unityStatus(sb: Sandbox, pretty: boolean): string {
   const u = sb.unity;
   const b = u.blocked;
   const head =
     u.state === 'blocked' && b
-      ? `blocked: ${b.title}${b.text ? `: ${b.text.replace(/\s+/g, ' ').slice(0, 600)}` : ''}${b.buttons?.length ? ` [buttons: ${b.buttons.join(' / ')}]` : ''}\n${b.advice ?? ''}`.trim()
+      ? `blocked: ${b.title}${b.text ? `: ${b.text.replace(/\s+/g, ' ').slice(0, 600)}` : ''}${b.buttons?.length ? ` [buttons: ${b.buttons.join(' / ')}]` : ''}\n${b.advice ?? ''}\n${answerLine(b)}`.trim()
       : `${u.state}${u.detail ? `: ${u.detail}` : ''}`;
   return `${head}\n${JSON.stringify(u, null, pretty ? 2 : undefined)}`;
 }

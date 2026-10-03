@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { CreateSandboxRequest, Sandbox, UnityBlocked, UnityDismissal } from '../shared/types.ts';
-import { decide, describeDialog, findDialogs, isStalled, listWindows, pressButton, sceneFilesUnchanged, type Dialog } from './watchdog.ts';
+import { agentAnswers, checkAgentAnswer, decide, describeDialog, findDialogs, isStalled, listWindows, mainWindow, modifiedSceneFiles, pressButton, type Dialog } from './watchdog.ts';
 import { bridgeInfo, bridgePing, crashLeftoversFor, crashReportersFor, editorVerdict, restartAllowed } from './unityHang.ts';
 import { readStatusFiles, statusDirFor, syncStatusDir } from './unityMcp.ts';
 import { listProcs } from './reaper.ts';
@@ -199,6 +199,8 @@ export class SandboxManager {
   private readonly restarting = new Set<string>();
   /** Until when (ms) the open scenes of a sandbox's editor are known to have no unsaved edits. */
   private readonly scenesClean = new Map<string, number>();
+  /** Open scenes with unsaved edits that switch_branch saw in a sandbox's editor (markScenesDirty), and when. */
+  private readonly scenesDirty = new Map<string, { at: number; scenes: string[] }>();
   private probing = false;
   /** Set when the server runs elevated: Unity is not started (it would stop on the administrator dialog). */
   private elevatedWhy?: string;
@@ -768,8 +770,46 @@ export class SandboxManager {
    * `forMs` 0 withdraws it.
    */
   markScenesClean(id: string, forMs: number) {
-    if (forMs > 0) this.scenesClean.set(id, Date.now() + forMs);
-    else this.scenesClean.delete(id);
+    if (forMs > 0) {
+      this.scenesClean.set(id, Date.now() + forMs);
+      this.scenesDirty.delete(id);
+    } else this.scenesClean.delete(id);
+  }
+
+  /** switch_branch saw unsaved edits in these open scenes: named when the reload question is put to the agents. */
+  markScenesDirty(id: string, scenes: string[]) {
+    this.scenesClean.delete(id);
+    this.scenesDirty.set(id, { at: Date.now(), scenes });
+  }
+
+  /**
+   * An agent answers the dialog its editor is stuck on (the unity tool's answer_dialog): the open dialog with this
+   * button, if checkAgentAnswer allows it (never "Ignore" on the scene reload question, nothing on a dialog only a
+   * person can answer). Returns what happened.
+   */
+  async answerDialog(id: string, button: string): Promise<string> {
+    const s = this.require(id);
+    const pid = s.unity.pid;
+    if (!pid || !isActive(s.unity.state)) throw new Error(`the editor of ${s.id} is ${s.unity.state}; there is no dialog to answer`);
+    const dialogs = findDialogs(await listWindows([pid]));
+    if (!dialogs.length) {
+      this.probeSoon(s.id);
+      return `No dialog is open in the editor of ${s.id} now (it may have closed already). ${s.unity.state}`;
+    }
+    const d = dialogs.find((x) => !checkAgentAnswer(x, button)) ?? dialogs[0];
+    const refused = checkAgentAnswer(d, button);
+    if (refused) throw new Error(`${refused}. Nothing was pressed.`);
+    const real = d.buttons.find((b) => b.replace(/&/g, '').trim().toLowerCase() === button.replace(/&/g, '').trim().toLowerCase())!;
+    const closed = await pressButton(d.pid, d.hwnd, real);
+    const dismissal: UnityDismissal = { at: new Date().toISOString(), title: d.title || describeDialog(d, 80), button: real.replace(/&/g, '').trim(), by: 'agent' };
+    const dismissed = [...(s.unity.dismissed ?? []), dismissal].slice(-40);
+    console.log(`unity ${s.id}: an agent answered "${dismissal.title}" with "${dismissal.button}"${closed ? '' : ' (the window is still open)'}`);
+    this.update(s, { unity: { ...s.unity, dismissed, detail: `answered "${dismissal.title}" with "${dismissal.button}"` } });
+    this.events.emit('dismissed', s, dismissal);
+    this.probeSoon(s.id);
+    if (!closed) return `Pressed "${dismissal.button}" in "${dismissal.title}", but the window is still open. Check unity status again in a few seconds.`;
+    if (s.unity.state === 'blocked' && s.unity.blocked?.reason === 'dialog' && dialogs.length === 1) this.unblock(s, `answered "${dismissal.title}" with "${dismissal.button}"`);
+    return `Pressed "${dismissal.button}" in "${dismissal.title}"; the dialog closed.${dialogs.length > 1 ? ` ${dialogs.length - 1} other dialog(s) are still open: see unity status.` : ' Re-pin your Unity MCP instance if a call fails, and carry on.'}`;
   }
 
   /** Look at this editor's windows on the next poll instead of waiting out the interval. */
@@ -860,7 +900,7 @@ export class SandboxManager {
   private block(s: Sandbox, b: UnityBlocked) {
     const u = s.unity;
     if (u.state === 'blocked' && u.blocked?.reason === b.reason && u.blocked?.title === b.title && u.blocked?.text === b.text) return;
-    const blocked: UnityBlocked = { ...b, resumeState: u.state === 'blocked' ? (u.blocked?.resumeState ?? b.resumeState) : b.resumeState };
+    const blocked: UnityBlocked = { ...b, person: agentAnswers(b).person || undefined, resumeState: u.state === 'blocked' ? (u.blocked?.resumeState ?? b.resumeState) : b.resumeState };
     const detail = `blocked: ${b.title}${b.text ? `: ${b.text.replace(/\s+/g, ' ')}` : ''}`;
     this.update(s, { unity: { ...u, state: 'blocked', blocked, detail: detail.length > 400 ? detail.slice(0, 399) + '…' : detail } });
     console.warn(`unity ${s.id} ${detail.slice(0, 500)}`);
@@ -904,7 +944,7 @@ export class SandboxManager {
         }
         // The editor may have been stopped or replaced while we looked.
         if (s.unity.pid !== pid || !isActive(s.unity.state) || this.store.sandboxes.get(s.id) !== s) continue;
-        const main = windows.find((x) => x.pid === pid && x.class === 'UnityContainerWndClass');
+        const main = mainWindow(windows, pid);
         const dialogs = findDialogs(windows);
         this.noteResponding(s, pid, main?.hung, dialogs.length);
         await this.handleDialogs(s, dialogs, main?.title);
@@ -925,7 +965,8 @@ export class SandboxManager {
     // *.unity file with uncommitted changes. Only looked up when the reload question is actually up.
     // The git check (no *.unity file with uncommitted changes) runs only when a dialog that needs it is up.
     const needsGit = dialogs.some((d) => d.known?.action.kind === 'dismiss' && d.known.action.onlyIf);
-    const sceneFilesClean = needsGit ? await sceneFilesUnchanged(s.path) : false;
+    const modified = needsGit ? await modifiedSceneFiles(s.path) : undefined;
+    const sceneFilesClean = modified?.length === 0;
     const scenesClean = (this.scenesClean.get(s.id) ?? 0) > Date.now() || sceneFilesClean;
     let report: { d: Dialog; repeated?: boolean; why?: string } | undefined;
     for (const d of dialogs) {
@@ -964,7 +1005,9 @@ export class SandboxManager {
       this.suspect.set(s.id, key);
       return;
     }
-    const advice = d.known?.advice ?? 'an unknown dialog: someone has to look at it on the desktop, or stop and start the editor.';
+    const advice =
+      (d.known?.action.kind === 'dismiss' && d.known.action.onlyIf ? sceneEvidence(modified, this.scenesDirty.get(s.id), editorTitle) : '') +
+      (d.known?.advice ?? 'an unknown dialog: read its text and answer it (unity action "answer_dialog" with one of its buttons), or restart the editor.');
     this.block(s, {
       reason: 'dialog',
       title: d.title || '(untitled dialog)',
@@ -1005,6 +1048,20 @@ export class SandboxManager {
         .catch(() => undefined);
     }
   }
+}
+
+/**
+ * Why the watchdog could not tell that the editor's scenes are clean, for the agents who decide: the scene files git
+ * reports changed, the unsaved edits switch_branch saw, a "*" in the main window title.
+ */
+export function sceneEvidence(modified: string[] | undefined, dirty: { at: number; scenes: string[] } | undefined, editorTitle: string | undefined, nowMs = Date.now()): string {
+  const seen: string[] = [];
+  if (dirty) seen.push(`switch_branch saw unsaved edits in ${dirty.scenes.join(', ')} ${Math.max(0, Math.round((nowMs - dirty.at) / 60_000))} min ago`);
+  if (modified === undefined) seen.push('git status could not be read');
+  else if (modified.length) seen.push(`scene files with uncommitted changes (git status): ${modified.slice(0, 5).join(', ')}${modified.length > 5 ? ', …' : ''}`);
+  if (!editorTitle) seen.push("the editor's main window was not found");
+  else if (editorTitle.includes('*')) seen.push('an editor window has unsaved changes (a "*" in the title)');
+  return seen.length ? `Not answered automatically, because ${seen.join('; ')}. Whether the editor holds scene edits worth keeping is the agents' call: ` : '';
 }
 
 /** Whether a Unity main window title ("[Administrator: ]<project> - <scene> - ... - Unity 6.3 ...") is this project's. */

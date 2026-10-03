@@ -43,6 +43,7 @@ import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
 import { appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
 import { pruneEditorLogs, slugify } from './sandboxes.ts';
+import { agentAnswers } from './watchdog.ts';
 import { reapBrowsers } from './reaper.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
@@ -280,7 +281,10 @@ agents.orchestrators.onPersonMessage = (from, to, text) => notifier.personMessag
 agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));
 agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
-sandboxes.events.on('blocked', (sb, b) => notifier.unityBlocked(sb, b));
+// The "Unity editor stuck" notification only when a person is needed; agents answer the rest (server/unityBlocked.ts).
+sandboxes.events.on('blocked', (sb, b) => {
+  if (agentAnswers(b).person) notifier.unityBlocked(sb, b);
+});
 
 // Automatic editor restarts (docs/unity-lifecycle.md): a [unity] notice, and once the editor is back up, a
 // message to the sandbox's agents to re-pin and carry on.
