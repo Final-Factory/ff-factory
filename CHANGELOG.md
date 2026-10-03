@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Intake requests close themselves when their work merged** (w298, asked by Lothsahn: four FFBox review requests
+  sat in "needs a human" hours after #945–#947 and #949 merged them). Every 5 minutes, and on "Check Discord now", a
+  request nobody works on closes as done when a merged PR or commit names its PR or branch or carries its Discord
+  thread, when its whole branch is already on develop, or when a linked request is done. It logs "merged as #N
+  (sha) on date", starts no worker, and its people hear one line per batch. The Intake tab shows them under
+  "Closed automatically" ([docs/intake.md](docs/intake.md), "Closed when it merged").
+
 - **A player's clear bug goes to a worker; anything else waits, and the thread says so** (w299, asked by Lothsahn).
   FFBox's escalations, player requests and fix branches are triaged by the same fixed rules as Discord threads, so an
   obvious bug can be auto-approved (`intake.ffbox.autoApprove`). Money, releases and publishing, and a report that

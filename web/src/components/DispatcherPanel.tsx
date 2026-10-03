@@ -219,7 +219,8 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
   const items = work.filter((w) => w.source);
   const pending = items.filter(pendingApproval);
   const reviewer = !!app.me && s.reviewerIds.some((id) => id.toLowerCase() === app.me!.userId.toLowerCase());
-  const rest = items.filter((w) => !pendingApproval(w));
+  const auto = items.filter((w) => w.autoClosed).sort((a, b) => b.autoClosed!.at.localeCompare(a.autoClosed!.at));
+  const rest = items.filter((w) => !pendingApproval(w) && !w.autoClosed);
   const anyOn = s.discord.enabled || s.ffbox.enabled || s.release.enabled || !!s.nightly?.enabled;
   const act = async (id: string, f: () => Promise<unknown>) => {
     setBusy(id);
@@ -305,6 +306,14 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
         <p className="dim small ledger-none">Nothing needs a human.</p>
       )}
 
+      {auto.length > 0 && (
+        <section data-testid="intake-auto-closed">
+          <h3 className="intake-h">Closed automatically · {auto.length}</h3>
+          <p className="dim small ledger-none">Their work already merged (a branch, a PR, or a linked request that is done), so they closed as done without a review.</p>
+          <div className="run-list">{auto.map(row)}</div>
+        </section>
+      )}
+
       <h3 className="intake-h">In the ledger</h3>
       {rest.length ? <div className="run-list">{rest.map(row)}</div> : <p className="dim small ledger-none">No Discord or FFBox requests yet.</p>}
 
@@ -314,7 +323,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
           <ul className="intake-log">
             {s.recent.map((e, i) => (
               <li key={`${e.at}-${i}`} className="small">
-                <span className="mono dim">{fmtRelative(e.at, now)}</span> <span className={e.action === 'filed' ? 'tone-green' : e.action === 'skipped' ? 'tone-amber' : 'dim'}>{e.action}</span> {e.title}
+                <span className="mono dim">{fmtRelative(e.at, now)}</span> <span className={e.action === 'filed' || e.action === 'closed' ? 'tone-green' : e.action === 'skipped' ? 'tone-amber' : 'dim'}>{e.action}</span> {e.title}
                 {e.workId ? <span className="mono"> {e.workId}</span> : null}
                 {e.why ? <span className="dim"> ({e.why})</span> : null}
               </li>
@@ -346,7 +355,7 @@ function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; 
         <span className="work-main">
           <span className="work-title">{w.title}</span>
           <span className="work-sub">
-            <span className={`tone-${tone}`}>{pendingApproval(w) ? waitingLabel(w) : workLabel[w.status]}</span>
+            <span className={`tone-${tone}`}>{pendingApproval(w) ? waitingLabel(w) : w.autoClosed ? 'Auto-closed' : workLabel[w.status]}</span>
             {w.mergedInto ? ` into ${w.mergedInto}` : ''} · <span className="mono">{w.id}</span> · {s ? sourceLabel(s) : names(w)}
             {w.triage && !(pendingApproval(w) && w.triage.class === 'needs-human') ? <span className={w.triage.class === 'needs-human' ? 'tone-amber' : ''}> · {triageLabel[w.triage.class]}</span> : null}
             {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : null}
@@ -395,6 +404,11 @@ function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; 
             <p className="small">
               <span className="dim">Latest: </span>
               {w.outcome}
+            </p>
+          )}
+          {w.autoClosed && (
+            <p className="small dim" data-testid={`auto-closed-${w.id}`}>
+              Closed automatically, no review needed: {w.autoClosed.text}.
             </p>
           )}
           {delivery && <p className="small dim">To players: {delivery}</p>}
