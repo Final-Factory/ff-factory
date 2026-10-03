@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox dev requests are followed to their result** (w272, asked by Lothsahn). FF Factory sends FFBox a
+  `dev_update` whenever a linked request's facts change: the worker's PR to watch, the merge, the release, or that it
+  was declined or cancelled ([contract](docs/ffbox-connector-contract.md), [docs/ffbox.md](docs/ffbox.md)). FFBox
+  announces the merge in the thread and files it away; the plain "wNNN is done: …" reply is gone, so the thread hears
+  results, not routing.
+
 - **FFBox updates failing: a red dot** (w265, asked by Lothsahn). FFBox's connector (2.4.0) pushes its self-updater's
   last pass as an `updater` message ([contract](docs/ffbox-connector-contract.md#updater-w265)): per checkout ok,
   diverged, dirty or failed, with commits and the updater's words. FFBox turns red in the sidebar and on its page, and

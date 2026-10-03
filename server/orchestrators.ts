@@ -1203,7 +1203,7 @@ export class Orchestrators {
   }
 
   /** What FFBox needs to follow a match (BoardMatch): the branch to watch while it is open, the release once it is done. */
-  private boardFacts(w: WorkItem): Pick<BoardMatch, 'watch' | 'version' | 'mergedIn' | 'branch'> {
+  boardFacts(w: WorkItem): Pick<BoardMatch, 'watch' | 'version' | 'mergedIn' | 'branch'> {
     const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'develop';
     const trunk = (b?: string) => !b || ['develop', 'main', 'master', 'detached HEAD', target].includes(b);
     // The branch the work is on: FFBox's own (a request it took), else the newest worker's, with its open PR.
@@ -1518,6 +1518,17 @@ export class Orchestrators {
     const out = (w.ffboxDev ?? []).map((link) => ({ link, on: w }));
     for (const x of this.store.work.values()) if (x.id !== w.id && x.mergedInto === w.id) out.push(...(x.ffboxDev ?? []).map((link) => ({ link, on: x })));
     return out;
+  }
+
+  /** Every request a dev link lives on now (devTarget of each request with ffboxDev links), once each. */
+  devLinkedWork(): WorkItem[] {
+    const out = new Map<string, WorkItem>();
+    for (const x of this.store.work.values()) {
+      if (!x.ffboxDev?.length) continue;
+      const w = this.devTarget(x.id) ?? x;
+      out.set(w.id, w);
+    }
+    return [...out.values()];
   }
 
   /** The newest dev link for an FFBox conversation, and the request it lives on now. */

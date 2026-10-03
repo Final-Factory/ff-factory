@@ -12,7 +12,7 @@ import { AttachmentError, publicRef, type AttachmentRecord, type AttachmentStore
 import type { Orchestrators } from './orchestrators.ts';
 import { cleanBlock, cleanLine, intakeSettings } from './intakeRules.ts';
 import { redactSecrets } from './secrets.ts';
-import { DEV_LIMITS, type DevAck, type DevAckError, type DevChunkMessage, type DevFiled, type DevFiledError, type DevMessageMessage, type DevReceivedMessage, type DevReply, type DevRequestMessage } from './providerProtocol.ts';
+import { DEV_LIMITS, type DevAck, type DevAckError, type DevChunkMessage, type DevFiled, type DevFiledError, type DevMessageMessage, type DevReceivedMessage, type DevReply, type DevRequestMessage, type DevUpdate } from './providerProtocol.ts';
 import type { AttachmentRef, Requester, WorkItem } from '../shared/types.ts';
 
 /** config providers.ffbox.devRequests. */
@@ -45,7 +45,7 @@ export function devSettings(c: DevRequestsConfig | undefined): Required<DevReque
 export interface DevLogEntry {
   at: string;
   ref: string;
-  kind: 'request' | 'message' | 'reply';
+  kind: 'request' | 'message' | 'reply' | 'update';
   operator?: string;
   /** The FF Factory login. */
   person?: string;
@@ -63,17 +63,21 @@ export interface DevState {
   log: DevLogEntry[];
   /** FF Factory's own replies (the request finished), resent on every reconnect until dev_received; oldest first. */
   replies: (DevReply & { at: string })[];
-  /** "<work id>:<conversation>" for every link that got its automatic final reply. */
+  /** "<work id>:<conversation>" for every link that got the plain final reply FF Factory sent before w272: no update repeats it. */
   finals: string[];
+  /** The newest dev_update per conversation that FFBox has not confirmed (dev_received), resent on every reconnect. */
+  updates?: (DevUpdate & { at: string })[];
+  /** What each conversation was last sent ("<conversation>" → the update's facts as JSON), so only a change goes. */
+  sentUpdates?: Record<string, string>;
 }
 
-export const emptyDevState = (): DevState => ({ answered: [], log: [], replies: [], finals: [] });
+export const emptyDevState = (): DevState => ({ answered: [], log: [], replies: [], finals: [], updates: [], sentUpdates: {} });
 
 /** The connector, as the provider gives it to this module. */
 export interface DevLink {
   online(): boolean;
   /** False when nothing went (offline). */
-  send(msg: DevAck | DevFiled | DevReply): boolean;
+  send(msg: DevAck | DevFiled | DevReply | DevUpdate): boolean;
   state(): DevState;
   changed(): void;
 }
@@ -96,6 +100,9 @@ export interface DevDeps {
 const KEEP = 500;
 const KEEP_REPLIES = 200;
 const KEEP_FINALS = 2000;
+const KEEP_UPDATES = 500;
+/** A done request is followed this long for its release version. */
+const FOLLOW_DONE_MS = 30 * 24 * 3600_000;
 const DAY_MS = 24 * 3600_000;
 const MB = 1024 * 1024;
 const FINAL: readonly WorkItem['status'][] = ['done', 'rejected', 'cancelled'];
@@ -135,6 +142,26 @@ interface InFlight {
   chain: Promise<void>;
   failed?: boolean;
 }
+
+/** A request's standing for FFBox (DevUpdate less its envelope), from the board answer's facts. */
+export function devFacts(w: WorkItem, facts: { watch?: DevUpdate['watch']; version?: string | null; mergedIn?: string | null; branch?: string }): Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> {
+  if (w.status === 'rejected' || w.status === 'cancelled') return { status: w.status === 'rejected' ? 'declined' : 'cancelled' };
+  // ONLY WITH A PR: a sandbox's own branch (sandbox/<name>) carries one task after another, and FFBox following it by
+  // name could announce some later task's merge in this thread. The PR number is this work's alone.
+  if (w.status !== 'done') return { status: 'open', ...(facts.watch?.pr ? { watch: facts.watch } : {}) };
+  const out: Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> = { status: 'done', version: facts.version ?? null, mergedIn: facts.mergedIn ?? null, ...(facts.branch ? { branch: facts.branch } : {}) };
+  const result = cleanLine(w.outcome ?? '', 300);
+  if (!out.mergedIn && result) out.result = result;
+  return out;
+}
+
+/** An update in a few words, for the dev_requests view: "open, watching fix/x PR #12", "done, develop@abc1234, 0.50.0.70". */
+const updateWords = (u: DevUpdate) =>
+  u.status === 'open'
+    ? `open${u.watch ? `, watching ${u.watch.branch}${u.watch.pr ? ` PR #${u.watch.pr}` : ''}` : ''}`
+    : u.status === 'done'
+      ? `done${u.mergedIn ? `, ${u.mergedIn.replace(/@([0-9a-f]{7})[0-9a-f]*$/, '@$1')}` : ', no merge'}${u.version ? `, ${u.version}` : ''}`
+      : u.status;
 
 export class DevRequests {
   private readonly d: DevDeps;
@@ -373,10 +400,14 @@ export class DevRequests {
 
   // ---------------------------------------------------------------- the link
 
-  /** A new link said hello: FF Factory's own replies not yet received go again. */
+  /** A new link said hello: FF Factory's own replies and updates not yet received go again. */
   onConnect() {
     for (const r of this.state.replies) {
       const { at: _at, ...msg } = r;
+      this.link.send(msg);
+    }
+    for (const u of this.state.updates ?? []) {
+      const { at: _at, ...msg } = u;
       this.link.send(msg);
     }
   }
@@ -388,9 +419,10 @@ export class DevRequests {
 
   onReceived(m: DevReceivedMessage) {
     const s = this.state;
-    const before = s.replies.length;
+    const before = s.replies.length + (s.updates?.length ?? 0);
     s.replies = s.replies.filter((r) => r.id !== m.id);
-    if (s.replies.length !== before) this.link.changed();
+    s.updates = (s.updates ?? []).filter((u) => u.id !== m.id);
+    if (s.replies.length + s.updates.length !== before) this.link.changed();
   }
 
   // ---------------------------------------------------------------- two-way (docs/ffbox.md, "Talking to an orchestrator through Discord")
@@ -485,26 +517,55 @@ export class DevRequests {
   }
 
   /**
-   * A request changed (the ledger's work events): once it is done, declined or cancelled, each FFBox conversation linked
-   * to it (and to the requests merged into it) gets one reply saying so, queued and resent until FFBox has it.
+   * A request changed (the ledger's work events, and recheck() every minute for what changes without one: a worker's PR
+   * opening). Each FFBox conversation linked to it (and to the requests merged into it) is sent a dev_update when its
+   * facts change: the branch and PR to follow, then the merge and the release, or that it was declined or cancelled
+   * (w272; Lothsahn: "when that branch closes out, FFBox will close the associated discord thread and reply to the
+   * user"). Facts only, never routing text: FFBox posts the result. A link whose filing already said "Already fixed"
+   * gets nothing more, and neither does one that got the plain final reply FF Factory sent before w272.
    */
   workChanged(w: WorkItem) {
-    if (!FINAL.includes(w.status)) return;
-    const links = this.d.orchestrators.devLinksOf(w).filter((x) => x.link.outcome !== 'fixed');
+    const o = this.d.orchestrators;
+    const target = w.status === 'merged' ? o.devTarget(w.id) : w;
+    if (!target || target.status === 'merged') return;
+    const links = o.devLinksOf(target).filter((x) => x.link.outcome !== 'fixed');
     if (!links.length) return;
     const s = this.state;
-    for (const { link } of links) {
-      const key = `${w.id}:${link.conversation}`;
-      if (s.finals.includes(key)) continue;
-      s.finals = [...s.finals, key].slice(-KEEP_FINALS);
-      const outcome = cleanLine(w.outcome ?? '', 300);
-      const text = w.status === 'done' ? `${w.id} is done${outcome ? `: ${outcome}` : '.'}` : `${w.id} was ${w.status === 'rejected' ? 'declined' : 'cancelled'}${outcome ? `: ${outcome}` : '.'}`;
-      const msg: DevReply = { type: 'dev_reply', id: `fin-${w.id}-${randomBytes(3).toString('hex')}`, request: w.id, conversation: link.conversation, text, from: 'fff' };
-      s.replies = [...s.replies, { ...msg, at: this.iso() }].slice(-KEEP_REPLIES);
-      this.log({ ref: msg.id, kind: 'reply', person: link.person.userId, outcome: 'queued', workId: w.id });
+    s.updates ??= [];
+    s.sentUpdates ??= {};
+    const facts = devFacts(target, o.boardFacts(target));
+    const digest = JSON.stringify(facts);
+    let changed = false;
+    for (const conversation of [...new Set(links.map((x) => x.link.conversation))]) {
+      if (facts.status !== 'open' && s.finals.includes(`${target.id}:${conversation}`)) continue;
+      const key = conversation;
+      if (s.sentUpdates[key] === `${target.id} ${digest}`) continue;
+      s.sentUpdates[key] = `${target.id} ${digest}`;
+      const msg: DevUpdate = { type: 'dev_update', id: `u-${target.id}-${this.now().toString(36)}-${randomBytes(3).toString('hex')}`, request: target.id, conversation, ...facts };
+      s.updates = [...s.updates.filter((u) => u.conversation !== conversation), { ...msg, at: this.iso() }].slice(-KEEP_UPDATES);
+      const person = links.find((x) => x.link.conversation === conversation)?.link.person.userId;
+      this.log({ ref: msg.id, kind: 'update', ...(person ? { person } : {}), outcome: updateWords(msg), workId: target.id });
       this.link.send(msg);
+      changed = true;
     }
-    this.link.changed();
+    const keys = Object.keys(s.sentUpdates);
+    if (keys.length > KEEP_FINALS) for (const k of keys.slice(0, keys.length - KEEP_FINALS)) delete s.sentUpdates[k];
+    if (changed) this.link.changed();
+  }
+
+  /**
+   * Every minute: the requests dev links live on, worked or done within FOLLOW_DONE_MS and not yet released, through
+   * workChanged. A worker's PR opening changes no work item, so without this FFBox would hear of it only at the merge.
+   */
+  recheck() {
+    const now = this.now();
+    for (const w of this.d.orchestrators.devLinkedWork()) {
+      if (FINAL.includes(w.status)) {
+        if (w.status !== 'done' || w.delivery?.releasedIn) continue;
+        if (now - Date.parse(w.updatedAt) > FOLLOW_DONE_MS) continue;
+      }
+      this.workChanged(w);
+    }
   }
 
   // ---------------------------------------------------------------- views
@@ -515,7 +576,7 @@ export class DevRequests {
     const lines = s.log.slice(0, limit).map((e) => `- ${e.at} ${e.kind} ${e.ref}: ${e.outcome}${e.error ? ` (${e.error})` : ''}${e.workId ? ` ${e.workId}` : ''}${e.operator ? `, operator ${e.operator}` : ''}${e.person ? `, for ${e.person}` : ''}`);
     const st = this.settings;
     return [
-      `Dev requests: ${st.enabled ? 'on' : 'OFF (providers.ffbox.devRequests.enabled)'}; ${this.count24h()} in 24 h; ${this.inflight.size} receiving files; ${s.replies.length} reply(s) waiting for FFBox; limits ${st.perHour} an hour per person, ${st.maxFiles} files, ${st.maxRequestMB} MB a request; an operator is the FF Factory login of the same name.`,
+      `Dev requests: ${st.enabled ? 'on' : 'OFF (providers.ffbox.devRequests.enabled)'}; ${this.count24h()} in 24 h; ${this.inflight.size} receiving files; ${s.replies.length} reply(s) and ${s.updates?.length ?? 0} update(s) waiting for FFBox; limits ${st.perHour} an hour per person, ${st.maxFiles} files, ${st.maxRequestMB} MB a request; an operator is the FF Factory login of the same name.`,
       ...(lines.length ? lines : ['No dev requests yet.']),
     ].join('\n');
   }

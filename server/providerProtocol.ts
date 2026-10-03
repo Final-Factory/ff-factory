@@ -212,6 +212,7 @@ export type ToConnector =
   | DevAck
   | DevFiled
   | DevReply
+  | DevUpdate
   /** The work messages (docs/ffbox-connector-contract.md), sent only to a connector that lists them in hello.accepts. */
   | ToConnectorWork;
 
@@ -643,6 +644,31 @@ export interface DevReply {
   conversation: string;
   text: string;
   from: 'orchestrator' | 'fff';
+}
+
+/**
+ * portal → connector (w272): where a request an FFBox dev-request conversation is linked to stands, as it changes, with
+ * the board answer's facts (BoardMatch): `watch` while it is worked and a branch is known, then `mergedIn` and `version`
+ * once it is done. FFBox follows the branch and PR like a board_check in_flight match, announces the merge in the thread
+ * and files the thread away by its own rules; a declined or cancelled request gets a short result. Nothing here is
+ * routing for a person to read. Resent on every reconnect until dev_received; only the newest per conversation waits.
+ */
+export interface DevUpdate {
+  type: 'dev_update';
+  id: string;
+  /** The request the conversation's link lives on now (a request merged into another continues as that one). */
+  request: string;
+  conversation: string;
+  /** open while it is worked; done, declined (the ledger's rejected) or cancelled once it is finished. */
+  status: 'open' | 'done' | 'declined' | 'cancelled';
+  watch?: { repo: string; branch: string; pr?: number; target: string };
+  /** done: the first release that carries it, null while merged but not released. */
+  version?: string | null;
+  /** done: `<target>@<sha>`, null when it finished with no merge. */
+  mergedIn?: string | null;
+  branch?: string;
+  /** done with no merge: the request's outcome, one line, for the thread as its result. */
+  result?: string;
 }
 
 /** Everything the connector may send. */
