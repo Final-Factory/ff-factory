@@ -995,7 +995,7 @@ export class Orchestrators {
       w.status = 'done';
       w.autoClosed = { ...how, at };
       w.outcome = clip(`closed automatically: ${how.text}`, 300);
-      this.stamp(w, `closed automatically, no review needed: ${how.text}`);
+      this.stamp(w, `closed automatically, no review needed: ${how.text}${w.approval?.state === 'pending' && w.triage?.class === 'needs-human' ? ` (triage at filing: ${clip(w.triage.reason, 160)})` : ''}`);
       this.store.putWork(w);
       closed.push(w);
     }
@@ -1131,7 +1131,7 @@ export class Orchestrators {
     if (w.approval?.state !== 'pending') throw new Error(`${w.id} is not waiting for approval`);
     this.requireReviewer(by);
     w.approval = { state: 'approved', by: asRequester(by), at: this.now().toISOString() };
-    this.stamp(w, `approved by ${by.displayName}`);
+    this.stamp(w, `approved by ${by.displayName}${w.triage?.class === 'needs-human' ? ` (triage at filing: ${clip(w.triage.reason, 160)})` : ''}`);
     this.store.putWork(w);
     this.gatherForDispatcher(w.requestedBy, requestNotice(w), 'intake');
     return w;
@@ -1145,7 +1145,7 @@ export class Orchestrators {
     w.approval = { state: 'declined', by: asRequester(by), at: this.now().toISOString() };
     w.status = 'rejected';
     w.outcome = clip(note?.trim() || `declined by ${by.displayName}`, 300);
-    this.stamp(w, `declined by ${by.displayName}${note?.trim() ? `: ${note.trim()}` : ''}`);
+    this.stamp(w, `declined by ${by.displayName}${note?.trim() ? `: ${note.trim()}` : ''}${w.triage?.class === 'needs-human' ? ` (triage at filing: ${clip(w.triage.reason, 160)})` : ''}`);
     this.store.putWork(w);
     return w;
   }

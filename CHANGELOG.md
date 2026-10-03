@@ -158,6 +158,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **An approved request no longer says "needs a human"** (w319, asked by Lothsahn: w233 still showed it after Ben approved
+  it). The Intake and Requests tabs, `list_work`'s one-line summary and the item detail say "approved by <who> <time>",
+  "declined by <who> <time>" or "closed: merged as #N" once a request is decided or auto-closed; "needs a human" shows
+  only while it waits. The triage reason from filing stays as "Triage at filing" and in the log. Applies to existing
+  requests too ([docs/intake.md](docs/intake.md), "Approval, caps and auto-approve").
+
 - **Nobody chats with the dispatcher** (w293, asked by Ben: Lothsahn was talking to it directly instead of to his
   orchestrator). The Dispatcher page's Conversation tab is a read-only log with a "Talk to your orchestrator" link where
   the input was, for every login including the owner. `POST /api/sessions/<dispatcher>/message` answers 403 "nobody

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { AppState, IntakeSummary, WorkItem, WorkSource } from '../../../shared/types';
+import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
 import { sessionRoute } from '../attention';
@@ -49,6 +50,21 @@ export const triageLabel: Record<NonNullable<WorkItem['triage']>['class'], strin
 
 /** What a pending intake request waits for, as its status reads. */
 const waitingLabel = (w: WorkItem) => (w.triage?.class === 'needs-human' ? 'Needs a human' : 'Awaiting approval');
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * A row's status in words (w319): "Needs a human" only while it waits; then who approved or declined it and when, or that
+ * it closed by itself. Past approval, a working or finished request shows its status and the approval after it.
+ */
+function statusText(w: WorkItem): string {
+  const d = decisionOf(w);
+  if (w.autoClosed) return 'Auto-closed';
+  if (pendingApproval(w)) return waitingLabel(w);
+  if (!d) return workLabel[w.status];
+  if (d.state === 'declined') return cap(d.text);
+  if (d.state === 'approved' || d.state === 'auto-approved') return w.status === 'new' || w.status === 'queued' ? cap(d.text) : `${workLabel[w.status]} · ${d.text}`;
+  return workLabel[w.status];
+}
 
 /** Where the dispatcher's input would be: nobody chats with it, a person talks to their own orchestrator (docs/orchestrators.md). */
 function TalkToYourOrchestrator() {
@@ -384,10 +400,10 @@ function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; 
         <span className="work-main">
           <span className="work-title">{w.title}</span>
           <span className="work-sub">
-            <span className={`tone-${tone}`}>{pendingApproval(w) ? waitingLabel(w) : w.autoClosed ? 'Auto-closed' : workLabel[w.status]}</span>
+            <span className={`tone-${tone}`}>{statusText(w)}</span>
             {w.mergedInto ? ` into ${w.mergedInto}` : ''} · <span className="mono">{w.id}</span> · {s ? sourceLabel(s) : names(w)}
             {isMine(w, app.me?.userId) ? <span className="tone-blue" data-testid="work-yours"> · yours</span> : null}
-            {w.triage && !(pendingApproval(w) && w.triage.class === 'needs-human') ? <span className={w.triage.class === 'needs-human' ? 'tone-amber' : ''}> · {triageLabel[w.triage.class]}</span> : null}
+            {w.triage && w.triage.class !== 'needs-human' ? <span> · {triageLabel[w.triage.class]}</span> : null}
             {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : null}
             {w.flag ? <span className="tone-amber"> · design question</span> : null}
           </span>
@@ -418,8 +434,13 @@ function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; 
             </p>
           )}
           {w.triage && (
-            <p className={`small ${w.triage.class === 'needs-human' ? 'tone-amber' : 'dim'}`} data-testid="triage">
-              Triage: {w.triage.reason}
+            <p className={`small ${pendingApproval(w) && w.triage.class === 'needs-human' ? 'tone-amber' : 'dim'}`} data-testid="triage">
+              {decisionOf(w) && decisionOf(w)!.state !== 'waiting' ? 'Triage at filing' : 'Triage'}: {w.triage.reason}
+            </p>
+          )}
+          {decisionOf(w) && decisionOf(w)!.state !== 'waiting' && (
+            <p className="small" data-testid="decision">
+              {cap(decisionOf(w)!.text)}
             </p>
           )}
           {/* Players' text is shown as it is, never as Markdown: no links, images or formatting from it. */}

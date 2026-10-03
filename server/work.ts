@@ -325,7 +325,7 @@ export function intakeNotice(w: WorkItem): string {
   const s = w.source!;
   const approved = w.approval?.by === 'auto' ? 'auto-approved under the intake rules' : w.approval?.by ? `approved by ${w.approval.by.displayName}` : 'filed';
   return [
-    `[work request] ${w.id} (intake: ${sourceTag(w)}; ${approved}) for ${w.requestedBy.displayName}: "${w.title}"`,
+    `[work request] ${w.id} (intake: ${sourceTag(w, false)}; ${approved}) for ${w.requestedBy.displayName}: "${w.title}"`,
     '',
     w.brief,
     ...(w.attachments?.length ? ['', attachmentsNote(w.attachments)] : []),
