@@ -93,3 +93,25 @@ export async function switchBranch(opts: {
   if (st.untracked) notes.push(`${st.untracked} untracked file(s) came along unchanged`);
   return { from, to: branch, notes };
 }
+
+/**
+ * What a sandbox switch does about the editor (Agents.switchBranch, docs/unity-dialogs.md): its open scenes are
+ * parked across the switch only when the bridge says none has unsaved edits, so Unity has nothing to ask. Everything
+ * else is refused before git is touched: a switch under an editor whose scenes were not checked is how Unity ends up
+ * asking "The open scene(s) have been modified externally". `scenes` is the bridge's answer, or the error it gave.
+ */
+export function editorSwitchPlan(
+  state: string,
+  scenes: { playing: boolean; dirty: string[]; scenes: string[] } | Error | undefined,
+  discardSceneEdits = false,
+): { refuse: string } | { park: boolean; discarded: string[] } {
+  const stopFirst = 'or stop it (unity action "stop") and switch with no editor running';
+  if (state === 'stopped' || state === 'crashed') return { park: false, discarded: [] };
+  if (state !== 'running') return { refuse: `the editor is ${state}, so its open scenes cannot be checked; nothing was switched. Wait until it runs (wait_for_unity "ready"; a "blocked" editor needs its dialog answered first, unity status), ${stopFirst}.` };
+  if (!scenes || scenes instanceof Error) return { refuse: `could not check the editor's open scenes over the MCP bridge (${scenes?.message ?? 'no answer'}); nothing was switched. Try again once the editor answers, ${stopFirst}.` };
+  if (scenes.playing) return { refuse: 'the editor is in play mode; nothing was switched. Leave play mode first (manage_editor action "stop"), then switch.' };
+  if (scenes.dirty.length && !discardSceneEdits) {
+    return { refuse: `unsaved scene edits in the editor (${scenes.dirty.join(', ')}); nothing was switched. Save them (manage_scene action "save") and commit them, or call switch_branch again with discard_scene_edits: true to throw them away.` };
+  }
+  return { park: scenes.scenes.length > 0, discarded: scenes.dirty };
+}

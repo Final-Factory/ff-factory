@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { run } from '../server/proc.ts';
 import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, type HangThresholds } from '../server/unityHang.ts';
-import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
+import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, mainWindow, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
 import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
 /**
@@ -492,8 +492,7 @@ export const MAC_EDITOR_LOG = path.join(os.homedir(), 'Library', 'Logs', 'Unity'
  */
 export async function listWinDialogs(pid: number): Promise<{ dialogs: Dialog[]; closable: Dialog[]; mainTitle?: string; windows: number }> {
   const wins = await listWindows([pid]);
-  const own = wins.filter((w) => w.pid === pid && w.class === 'UnityContainerWndClass');
-  const main = own.find((w) => /\bUnity\b/.test(w.title)) ?? own[0];
+  const main = mainWindow(wins, pid);
   return { dialogs: findDialogs(wins), closable: findClosable(wins), mainTitle: main?.title, windows: wins.length };
 }
 
