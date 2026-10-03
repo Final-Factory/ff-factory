@@ -78,7 +78,8 @@ per rolling 24 hours; operators are not capped.
 - **Releases.** A commit on develop or master whose `FFVersion.cs` differs from its first parent's
   is a release (game repo `.github/workflows/main.yml`, `scripts/trigger-ci-release.sh`). The host
   decides whether to grant it (`scripts/release_lane.py`), checks the players, uploads both apps to
-  Steam once the run's tests pass, sets only develop's main app live on `multiplayer-beta`, and
+  Steam once the run's tests pass, sets the main app live (develop: `pre-release`; master:
+  `multiplayer-beta`; `scripts/release_lane.py` `SETLIVE`, ffbox `1f51596`), and
   opens a PR for any files the build regenerated. `ff-agents:ci-release` drives it.
 
 ## Crash and desync intake
