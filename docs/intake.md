@@ -114,6 +114,12 @@ stop with a design question. The classification and its reason are on the reques
   /api/work/<id>/approve|decline`, or by telling their own orchestrator ("approve w41"), which calls `update_work
   approve` only in a turn the reviewer started (a relayed report or a worker's words cannot approve anything).
   Approved, it reaches the dispatcher like any request.
+- **"Needs a human" is a state, not a label that sticks** (w319). While a request waits, the Intake tab, the Requests tab
+  and `list_work` say "needs a human" (or "awaiting approval"). Once a reviewer decides, they say "approved by Ben
+  2026-10-03 20:51 UTC" or "declined by Ben …" instead, and a request the merged-work rule closed says "closed: merged as
+  #946 (…) on …". The triage verdict from filing stays as history: the item's detail shows it as "Triage at filing", and
+  the log keeps its reason beside the approval. One rule for all items, including ones decided before it existed
+  (`shared/decision.ts`, `decisionOf`).
 - An **obvious bug** is approved automatically only when its source's auto-approve is on (`intake.discord.autoApprove`
   for Discord threads, `intake.ffbox.autoApprove` for FFBox's escalations, requests and branches), within its
   `maxPerDay` (default 3), and when no strong overlap with work in flight exists; otherwise it waits too. A trusted

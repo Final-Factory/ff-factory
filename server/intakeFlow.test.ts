@@ -221,8 +221,19 @@ test('intake: a new bug thread waits for a person; the dispatcher hears it only 
   o.approveIntake(w.id, BEN);
   await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request]').length === 1);
   const notice = heard(dispatcher().info.id, '[work request]')[0].text;
-  assert.match(notice, new RegExp(`\\[work request\\] ${w.id} \\(intake: Discord #beta-bugs, untrusted, approved by Ben; approved by Ben\\)`));
+  assert.match(notice, new RegExp(`\\[work request\\] ${w.id} \\(intake: Discord #beta-bugs, untrusted; approved by Ben\\)`));
   assert.ok(notice.includes(UNTRUSTED_HEADER));
+
+  // w319: once approved, "needs a human" is gone from the one-line tag and the detail; the filing verdict is history.
+  const afterApproval = (await call(dispatcher().info, 'list_work', { source: 'discord' })).text;
+  assert.match(afterApproval, new RegExp(`${w.id} \\[new; Discord #beta-bugs, untrusted, approved by Ben \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d UTC\\]`));
+  assert.ok(!afterApproval.includes('needs a human'));
+  const detail = (await call(dispatcher().info, 'list_work', { id: w.id })).text;
+  assert.match(detail, /Triage at filing: needs-human \(needs a human: it gives the agents instructions/);
+  assert.ok(!/^Triage: /m.test(detail));
+  assert.match(detail, /Approval: approved by Ben/);
+  assert.match(w.log.join('\n'), /approved by Ben \(triage at filing: needs a human: it gives the agents instructions/);
+  assert.equal((await call(dispatcher().info, 'list_work', { status: 'needs_human' })).text, 'Nothing needs a human.');
 
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Investigate and fix the belt report.', title: 'Belt report', work_id: w.id });
   assert.equal(started.isError, false, started.text);
@@ -422,7 +433,7 @@ test('intake: a landed fix that ships in a release gets one follow-up, approved 
 });
 
 test('merged work closes its intake request on its own: a merged branch, a cherry-pick with its Discord line, a linked request that is done; an unmerged branch stays; no worker starts', async (t) => {
-  const { intake, store, o, dir, heard, dispatcher, work } = setup(t, { ffbox: { enabled: true } });
+  const { intake, store, o, dir, heard, dispatcher, work, call } = setup(t, { ffbox: { enabled: true } });
   const repo = path.join(dir, 'base');
   fs.mkdirSync(repo, { recursive: true });
   const stamp = (at: Date) => ({ ...process.env, GIT_COMMITTER_DATE: at.toISOString(), GIT_AUTHOR_DATE: at.toISOString() });
@@ -481,6 +492,12 @@ test('merged work closes its intake request on its own: a merged branch, a cherr
   assert.equal(w('unmerged').approval?.state, 'pending');
   assert.equal(w('idle').status, 'new', 'a branch that never moved past the base is not a merge');
   assert.equal(intake.summary().recent.filter((e) => e.action === 'closed').length, 5);
+  // w319: closed by its merge, it reads that, not "needs a human", though nobody approved it.
+  const listed = (await call(dispatcher().info, 'list_work', { id: ids.merged })).text;
+  assert.match(listed, new RegExp(`${ids.merged} \\[done; FFBox branch, untrusted, closed: merged as #945`));
+  assert.ok(!listed.split('\n')[0].includes('needs a human'));
+  assert.match(listed, /Triage at filing: needs-human/);
+  assert.match(w('merged').log.at(-1)!, /\(triage at filing: needs a human/);
 
   assert.equal([...store.sessions.values()].filter((x) => x.kind === 'worker').length, 0, 'no worker was started');
   await new Promise((r) => setTimeout(r, 60));

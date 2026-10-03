@@ -5,6 +5,7 @@
 import { thresholdsOf } from './boardMatch.ts';
 import type { Config } from './config.ts';
 import { redactSecrets } from './secrets.ts';
+import { decisionOf } from '../shared/decision.ts';
 import type { ProviderConversation, WorkItem, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const DAY = 24 * 3600_000;
@@ -686,15 +687,18 @@ export function releaseDraft(version: string, items: WorkItem[]): IntakeDraft {
   };
 }
 
-/** A one-line tag for list_work and the heartbeat: "Discord #bug-reports, untrusted, needs a human". */
-export function sourceTag(w: Pick<WorkItem, 'source' | 'approval' | 'triage'>): string {
+/**
+ * A one-line tag for list_work and the heartbeat: "Discord #bug-reports, untrusted, needs a human" while it waits, then
+ * "…, approved by Ben 2026-10-03 20:51 UTC", "…, declined by Ben …" or "…, closed: merged as #946 …" (shared/decision.ts).
+ */
+export function sourceTag(w: Pick<WorkItem, 'source' | 'approval' | 'triage' | 'status' | 'autoClosed'>, withDecision = true): string {
   const s = w.source;
   if (!s) return '';
   const where =
     s.kind === 'discord-bug' ? `Discord ${s.channel ?? 'bug report'}` : s.kind === 'discord-request' ? `Discord request from ${s.reporter ?? '?'}` : s.kind === 'release' ? 'release follow-up' : s.kind === 'nightly' ? `nightly e2e ${s.nightly?.date ?? ''}`.trim() : s.kind === 'ffbox-dev' ? `FFBox dev request from ${s.reporter ?? '?'}` : `FFBox ${s.kind === 'ffbox-diagnosis' ? 'diagnosis' : s.kind === 'ffbox-branch' ? 'branch' : 'request'}`;
   const triage = w.triage?.class === 'obvious-bug' ? ', obvious bug' : w.triage?.class === 'regression' ? `, ${w.triage.reason.replace(/^nightly e2e: /, '')}` : '';
-  const approval =
-    w.approval?.state === 'pending' ? (w.triage?.class === 'needs-human' ? ', needs a human' : ', awaiting approval') : w.approval?.state === 'declined' ? ', declined' : w.approval?.by === 'auto' ? ', auto-approved' : w.approval?.by ? `, approved by ${w.approval.by.displayName}` : '';
+  const d = withDecision ? decisionOf(w) : undefined;
+  const approval = d ? `, ${d.text}` : '';
   return `${where}${s.untrusted ? ', untrusted' : ''}${triage}${approval}`;
 }
 

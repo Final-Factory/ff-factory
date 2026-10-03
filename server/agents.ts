@@ -2795,12 +2795,15 @@ function intakeLines(w: WorkItem): string {
   const delivery = d
     ? [d.fixCommit && `fix ${d.fixCommit.slice(0, 12)}`, d.landedAt && 'on the base branch', d.repliedAt && 'replied in Discord', d.closedAt && 'thread closed', d.releasedIn && `released in ${d.releasedIn}`, d.announcedBy && `follow-up ${d.announcedBy}`].filter(Boolean).join(', ')
     : '';
+  const decided = !!w.approval && w.approval.state !== 'pending' || !!w.autoClosed;
   const approvedBy = w.approval?.by === 'auto' ? ' (auto)' : w.approval?.by ? ` by ${w.approval.by.displayName}` : '';
   return [
     `Source: ${sourceTag(w)}${facts.length ? `; ${facts.join('; ')}` : ''}`,
     s.alsoThreads?.length ? `Also reported in: ${s.alsoThreads.map((t) => t.url ?? t.threadId).join(', ')}` : '',
-    w.triage ? `Triage: ${w.triage.class} (${w.triage.reason})` : '',
+    // "needs a human" is the state only while it waits; once decided or closed the filing verdict is history (shared/decision.ts).
+    w.triage ? `${decided ? 'Triage at filing' : 'Triage'}: ${w.triage.class} (${w.triage.reason})` : '',
     w.approval ? `Approval: ${w.approval.state}${approvedBy}${w.approval.why && w.approval.why !== w.triage?.reason ? ` (${w.approval.why})` : ''}` : '',
+    w.autoClosed ? `Closed automatically: ${w.autoClosed.text}` : '',
     w.flag ? `Design question for ${names(w.flag.for)}: ${w.flag.text}` : '',
     delivery ? `Delivery: ${delivery}` : '',
     w.ffbox ? `FFBox: ${w.ffbox.state} (${w.ffbox.class}, request ${w.ffbox.requestId}${w.ffbox.conversation ? `, conversation ${w.ffbox.conversation}` : ''}${w.ffbox.branch ? `, branch ${w.ffbox.branch}` : ''}${w.ffbox.reason ? `, ${w.ffbox.reason}` : ''})` : '',
