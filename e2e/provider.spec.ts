@@ -208,9 +208,18 @@ test('FFBox: a wrong token is refused and changes nothing', async ({ authed: pag
   expect(state.providers.map((p: { id: string; online: boolean }) => [p.id, p.online])).toEqual([['ffbox', false]]);
 });
 
+// FFBox's filesystems as its connector names them: the UI shows only root+runs, the rest in the hover.
+const G = 1024 ** 3;
+const FFBOX_DISKS = [
+  { role: 'root+runs', totalBytes: 500 * G, freeBytes: 200 * G },
+  { role: 'state', totalBytes: 4000 * G, freeBytes: 1000 * G },
+  { role: 'golden', totalBytes: 2000 * G, freeBytes: 1500 * G },
+  { role: 'cache+reports', totalBytes: 1000 * G, freeBytes: 900 * G },
+  { role: 'docker', totalBytes: 300 * G, freeBytes: 30 * G },
+];
+
 test("FFBox among the computers: its CPU, RAM, GPU and disks in the sidebar, stale after two minutes; its long lists scroll and page", async ({ authed: page }) => {
   const base = test.info().project.use.baseURL!;
-  const G = 1024 ** 3;
   const c = new MockConnector(base, E2E_PROVIDER_TOKEN);
   try {
     await c.hello({ protocol: 2, version: 'e2e-metrics' });
@@ -223,7 +232,7 @@ test("FFBox among the computers: its CPU, RAM, GPU and disks in the sidebar, sta
       const stamp = at.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
       c.intake({ ...SAMPLE_INTAKE[0], reportId: `${stamp}-desync-${(0xa00000 + i).toString(16)}`, receivedAt: at.toISOString() });
     }
-    c.send({ type: 'metrics', at: new Date().toISOString(), cpu: { load1: 5.01, load5: 4.2, load15: 3.9, cores: 40 }, mem: { totalBytes: 756 * G, usedBytes: 425 * G }, disks: [{ role: 'root', totalBytes: 500 * G, freeBytes: 200 * G }, { role: 'state+cache', totalBytes: 4000 * G, freeBytes: 1000 * G }] });
+    c.send({ type: 'metrics', at: new Date().toISOString(), cpu: { load1: 5.01, load5: 4.2, load15: 3.9, cores: 40 }, mem: { totalBytes: 756 * G, usedBytes: 425 * G }, disks: FFBOX_DISKS });
 
     // The sidebar: FFBox is the first group under Computers, in view without scrolling, with its numbers.
     const sidebar = await openSidebar(page);
@@ -234,7 +243,11 @@ test("FFBox among the computers: its CPU, RAM, GPU and disks in the sidebar, sta
     await expect(group.getByTestId('fl-os')).toContainText('40 cores');
     await expect(group.getByTestId('meter-RAM')).toHaveText('RAM 425G/756G');
     await expect(group.getByTestId('meter-GPU')).toHaveText('GPU none');
-    await expect(group.getByTestId('meter-disk')).toHaveText(['root 200G/500G free', 'state+cache 1000G/3.9T free']);
+    // One disk, root+runs, free of total; the other filesystems only in its hover.
+    await expect(group.getByTestId('meter-Disk')).toHaveText('Disk 200G/500G');
+    await expect(group.getByTestId('meter-Disk')).toHaveAttribute('title', /root\+runs: 200 GB free of 500 GB\nstate: 1000 GB free of 4000 GB/);
+    await expect(group.getByTestId('meter-disk')).toHaveCount(0);
+    expect((await group.boundingBox())!.height, 'two lines: the name and one row of meters').toBeLessThan(64);
     await expect(group.getByTestId('provider-metrics-stale')).toHaveCount(0);
     await page.screenshot({ path: test.info().outputPath('sidebar-ffbox.png') });
     await test.info().attach('sidebar with FFBox', { path: test.info().outputPath('sidebar-ffbox.png'), contentType: 'image/png' });
@@ -281,15 +294,14 @@ test("FFBox among the computers: its CPU, RAM, GPU and disks in the sidebar, sta
   }
 });
 
-test("FFBox in the sidebar's load panel: mini bars, then a row with CPU over 100%, RAM, GPU none, each disk and its history; stale after two minutes", async ({ authed: page }) => {
+test("FFBox in the sidebar's load panel: mini bars, then a row with CPU over 100%, RAM, GPU none and the root disk; stale after two minutes", async ({ authed: page }) => {
   const base = test.info().project.use.baseURL!;
-  const G = 1024 ** 3;
   const c = new MockConnector(base, E2E_PROVIDER_TOKEN);
   try {
     await c.hello({ protocol: 2, version: 'e2e-load' });
     // Three updates, the last with more runnable than cores: 54 on 40 is 135%.
     for (const [load1, used] of [[12, 300], [30, 380], [54, 425]]) {
-      c.send({ type: 'metrics', at: new Date().toISOString(), cpu: { load1, load5: 20, load15: 10, cores: 40 }, mem: { totalBytes: 756 * G, usedBytes: used * G }, disks: [{ role: 'root', totalBytes: 500 * G, freeBytes: 200 * G }, { role: 'state+cache', totalBytes: 4000 * G, freeBytes: 1000 * G }] });
+      c.send({ type: 'metrics', at: new Date().toISOString(), cpu: { load1, load5: 20, load15: 10, cores: 40 }, mem: { totalBytes: 756 * G, usedBytes: used * G }, disks: FFBOX_DISKS });
       await expect.poll(async () => (await appState(page.request)).providers?.[0]?.metrics?.cpu?.load1).toBe(load1);
     }
     await page.reload();
@@ -301,13 +313,16 @@ test("FFBox in the sidebar's load panel: mini bars, then a row with CPU over 100
     await expect(cell.locator('.mbar')).toHaveCount(3);
     await expect(cell.locator('.mbar').first().locator('i')).toHaveAttribute('style', /height: 100%/);
 
-    // Open: its row, a line per filesystem, and the history graph.
+    // Open: one row, like a machine's (Lothsahn, 2026-10-03): no line per filesystem, no history graph.
     if ((await foot.locator('.sys-toggle').getAttribute('aria-expanded')) !== 'true') await foot.locator('.sys-toggle').click();
     const rows = foot.getByTestId('mrows-FFBox');
-    await expect(rows.getByTestId('mrow-FFBox')).toContainText(/FFBox\s*135%\s*56%\s*none\s*1000 GB/);
-    await expect(rows.getByTestId('mrow-disk')).toHaveText([/root · 200 GB free of 500 GB/, /state\+cache · 1000 GB free of 3\.9 TB/]);
-    await expect(rows.getByTestId('provider-history').locator('polyline')).toHaveCount(2);
-    await expect(rows.getByTestId('provider-history')).toContainText('CPU 135% · RAM 56%');
+    // Disk is root+runs alone (not the fullest, docker); every filesystem is in its hover.
+    await expect(rows.getByTestId('mrow-FFBox')).toContainText(/FFBox\s*135%\s*56%\s*none\s*200 GB/);
+    await expect(rows.getByTestId('mrow-FFBox').locator('.mt-cell').last()).toHaveAttribute('title', /^200 GB free of 500 GB\n[^]*docker: 30\.0 GB free of 300 GB$/);
+    await expect(rows.getByTestId('mrow-disk')).toHaveCount(0);
+    await expect(rows.getByTestId('provider-history')).toHaveCount(0);
+    await expect(rows.locator('svg')).toHaveCount(0);
+    await expect(rows.locator('.mt-row')).toHaveCount(1);
     await expect(rows.getByTestId('provider-load-stale')).toHaveCount(0);
     await foot.scrollIntoViewIfNeeded();
     await page.screenshot({ path: test.info().outputPath('load-panel-ffbox.png') });

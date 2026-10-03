@@ -557,7 +557,7 @@ test('metrics: load over logical cores as a percentage, above 100% when it is; s
   assert.equal(metricsLine(undefined, t0), 'no metrics');
 });
 
-test('metrics: kept with a short history and shown in the status line; a connector that sends none says "no metrics"', async (t) => {
+test('metrics: the latest kept and shown in the status line; a connector that sends none says "no metrics"', async (t) => {
   const { connect, pm } = await setup(t);
   const old = connect();
   await old.hello({ protocol: 2 });
@@ -569,10 +569,10 @@ test('metrics: kept with a short history and shown in the status line; a connect
   await c.hello({ protocol: 2 });
   c.send(METRICS);
   c.send({ ...METRICS, at: '2026-10-02T10:00:30Z', cpu: { ...METRICS.cpu, load1: 8 } });
-  await until('metrics', () => pm.summary().metricsHistory?.length === 2);
+  await until('metrics', () => pm.summary().metrics?.cpu?.load1 === 8);
   const p = pm.summary();
-  assert.equal(p.metrics?.cpu?.load1, 8);
-  assert.deepEqual(p.metricsHistory?.map((h) => h.cpuPct), [135, 50]);
+  assert.equal(p.metrics?.at, '2026-10-02T10:00:30Z');
+  assert.equal('metricsHistory' in p, false, 'no history is kept or sent (w226)');
   assert.match(pm.statusLine()!, /CPU 50% \(load 8 on 16 cores/);
   c.send({ ...METRICS, disks: [{ role: '/home/someone', totalBytes: 1, freeBytes: 1 }] });
   const err = await c.next('error');

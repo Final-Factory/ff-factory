@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import type { AccountUsage, AppState, CleanupSummary, HostHealth, HostStats, PlanUsage, Provider, ProviderMetrics, SessionInfo, SystemStats, UsageMeter } from '../../../shared/types';
-import { cpuPct, memPct, metricsLine, metricsStale } from '../../../shared/providerMetrics';
+import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
 import { memUsed as memUsedOf } from '../../../shared/stats';
 import { fmtBytes, fmtClock, fmtCost, fmtRelative, lsGet, lsSet, useNow } from '../util';
 import { Icon } from './ui';
@@ -256,29 +256,6 @@ function ProviderMiniBars({ l }: { l: ProviderLoad }) {
   );
 }
 
-/** A provider's CPU (blue) and RAM (grey) over its last updates, oldest on the left; CPU's scale grows past 100%. */
-function History({ points }: { points: { cpuPct?: number; memPct?: number }[] }) {
-  if (points.length < 2) return <span className="mt-note">history after the next update</span>;
-  const top = Math.max(100, ...points.map((x) => x.cpuPct ?? 0));
-  const line = (k: 'cpuPct' | 'memPct') =>
-    points
-      .map((x, i) => (x[k] === undefined ? undefined : `${((i / (points.length - 1)) * 100).toFixed(1)},${(23 - (x[k]! / top) * 22).toFixed(1)}`))
-      .filter(Boolean)
-      .join(' ');
-  const last = points[points.length - 1];
-  return (
-    <span className="mt-spark" title={`CPU (blue) and RAM (grey) over the last ${points.length} updates, 30 s apart${top > 100 ? `; the scale goes to ${Math.round(top)}%` : ''}`}>
-      <svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden>
-        <polyline className="spark-ram" points={line('memPct')} />
-        <polyline className="spark-cpu" points={line('cpuPct')} />
-      </svg>
-      <span className="mt-num">
-        CPU {last.cpuPct !== undefined ? `${Math.round(last.cpuPct)}%` : '–'} · RAM {last.memPct !== undefined ? `${Math.round(last.memPct)}%` : '–'}
-      </span>
-    </span>
-  );
-}
-
 function Meter({ label, pct, value, warn = 75, crit = 90, lvl }: { label: string; pct: number; value: string; warn?: number; crit?: number; lvl?: Lvl }) {
   const p = Math.max(0, Math.min(100, pct));
   return (
@@ -398,8 +375,9 @@ function MachineTable({ computers, providers = [], health, limits }: { computers
               <span className="mt-note">{p.online ? 'no metrics from its connector' : 'offline'}</span>
             </div>
           );
-        const disks = m.disks.filter((d) => d.totalBytes > 0).map((d) => ({ ...d, used: ((d.totalBytes - d.freeBytes) / d.totalBytes) * 100 }));
-        const fullest = [...disks].sort((a, b) => b.used - a.used)[0];
+        // One disk, the root filesystem; the others are in its hover.
+        const disk = rootDisk(m);
+        const used = disk && ((disk.totalBytes - disk.freeBytes) / disk.totalBytes) * 100;
         return (
           <div key={p.id} className={`mt-provider${l.marker ? ' mt-stale' : ''}`} data-testid={`mrows-${p.name}`}>
             <div className="mt-row" role="row" data-testid={`mrow-${p.name}`} title={l.title}>
@@ -409,7 +387,8 @@ function MachineTable({ computers, providers = [], health, limits }: { computers
               <span className="mt-note" title="CPU-only">
                 none
               </span>
-              {fullest ? <Cell pct={fullest.used} lvl={level(fullest.used, 85, 95)} text={fmtBytes(fullest.freeBytes)} title={`${fullest.role}: ${fmtBytes(fullest.freeBytes)} free`} /> : <span className="mt-note">n/a</span>}
+              {disk ? <Cell pct={used} lvl={level(used!, 85, 95)} text={fmtBytes(disk.freeBytes)} title={`${fmtBytes(disk.freeBytes)} free of ${fmtBytes(disk.totalBytes)}
+${disksHint(m)}`} /> : <span className="mt-note">n/a</span>}
             </div>
             {l.marker && (
               <div className="mt-row mt-sub" role="row" data-testid="provider-load-stale">
@@ -417,18 +396,6 @@ function MachineTable({ computers, providers = [], health, limits }: { computers
                 <span className="mt-note mt-marker">{l.marker}</span>
               </div>
             )}
-            {disks.map((d) => (
-              <div key={d.role} className="mt-row mt-sub" role="row" data-testid="mrow-disk">
-                <span className="mt-subname">
-                  {d.role} · {fmtBytes(d.freeBytes)} free of {fmtBytes(d.totalBytes)}
-                </span>
-                <Cell pct={d.used} lvl={level(d.used, 85, 95)} text={fmtBytes(d.freeBytes)} title={`${d.role}: ${fmtBytes(d.freeBytes)} free of ${fmtBytes(d.totalBytes)}`} />
-              </div>
-            ))}
-            <div className="mt-row mt-sub" role="row" data-testid="provider-history">
-              <span className="mt-subname mt-subname-short">history</span>
-              <History points={p.metricsHistory ?? []} />
-            </div>
           </div>
         );
       })}

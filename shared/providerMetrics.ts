@@ -33,3 +33,15 @@ export function metricsLine(m: ProviderMetrics | undefined, now: number): string
   const line = parts.join(' · ') || 'no numbers in the last report';
   return metricsStale(m, now) ? `${line} (stale: last update ${ago(m.receivedAt, now)})` : line;
 }
+
+/**
+ * The one disk the UI shows: the filesystem whose role names "root" (FFBox's "root+runs"), else the first reported.
+ * The others (state, golden, cache, ...) stay in the data, in metricsLine and in disksHint.
+ */
+export const rootDisk = (m: ProviderMetrics) => {
+  const disks = m.disks.filter((d) => d.totalBytes > 0);
+  return disks.find((d) => d.role.split('+').includes('root')) ?? disks[0];
+};
+
+/** Every filesystem, one per line, for a hover: "root+runs: 200 GB free of 500 GB". */
+export const disksHint = (m: ProviderMetrics) => m.disks.map((d) => `${d.role}: ${gb(d.freeBytes)} free of ${gb(d.totalBytes)}`).join('\n');

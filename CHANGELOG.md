@@ -76,10 +76,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 - **FFBox in the sidebar's load panel** (w225). The footer's mini bars and its open table, where BEAST and the
   machines show their CPU, RAM, GPU and disk, now list FFBox too. Collapsed, it has three mini bars: CPU (full at
-  100%; the hover gives the real share, which can be above 100%), RAM, and an empty GPU bar. Open, it has a row with
-  CPU, RAM, GPU "none" and its fullest disk, a line per filesystem with free of total, and a graph of CPU and RAM over
-  its last 60 updates (about half an hour, the portal's in-memory `metricsHistory`). Stale or offline, the numbers
-  stay, dimmed, under a "stale · updated …" or "offline · seen …" marker.
+  100%; the hover gives the real share, which can be above 100%), RAM, and an empty GPU bar. Open, it has one row
+  like a machine's: CPU, RAM, GPU "none" and the root disk's free space. Stale or offline, the numbers stay, dimmed,
+  under a "stale · updated …" or "offline · seen …" marker. (w226, Lothsahn: too much room) No line per filesystem
+  and no history graph: the only disk shown is the root filesystem (`root+runs`), with every filesystem in its hover,
+  in `system_status` and in the data. The portal no longer keeps or sends a `metricsHistory`.
 
 - **FFBox's page scrolls, and its lists page** (w223). The Conversations, Signatures and Intake reports lists were cut
   off after the first few rows with nothing to scroll: `.run-list` (`overflow: hidden`) shrank to the space left in
@@ -90,7 +91,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 - **FFBox among the computers, where it can be seen** (w223). The w218 group sat below every machine's sandbox list,
   out of view on a phone or a busy portal. It is now the first group under Computers and counted there. It shows CPU
   (load1 over the cores, above 100% when it is) with the core count, RAM used of total, GPU "none" (no class reports a
-  GPU), and free of total for each filesystem FFBox names. Stale (two minutes without an update) or offline, the last
+  GPU), and free of total for its root filesystem (the others in the hover, w226). Stale (two minutes without an update) or offline, the last
   numbers stay, dimmed, under a "stale · updated …" or "offline · seen …" marker instead of disappearing.
 
 - **A hard crash no longer takes the portal down** ([docs/self-recovery.md](docs/self-recovery.md#6-crash-safe-data-files)).

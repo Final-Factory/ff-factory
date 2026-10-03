@@ -1046,14 +1046,13 @@ select.input {
   grid-column: auto;
 }
 
-/* A provider (FFBox): its row, a line per filesystem and its CPU/RAM history; dimmed once stale or offline. */
+/* A provider (FFBox): its row, like a machine's; dimmed once stale or offline. */
 .mt-provider {
   display: grid;
   gap: 4px;
 }
 
 .mt-stale .mt-cell,
-.mt-stale .mt-spark,
 .mt-stale .mt-note:not(.mt-marker),
 .mcell-stale .mbars {
   opacity: 0.55;
@@ -1061,49 +1060,6 @@ select.input {
 
 .mt-marker {
   color: var(--amber);
-}
-
-.mt-subname {
-  grid-column: 1 / 5;
-  padding-left: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-3);
-}
-
-.mt-subname-short {
-  grid-column: 1;
-}
-
-.mt-spark {
-  grid-column: 2 / -1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: var(--s-2);
-}
-
-.mt-spark svg {
-  display: block;
-  width: 100%;
-  height: 24px;
-  background: var(--panel-3);
-  border-radius: 2px;
-}
-
-.mt-spark polyline {
-  fill: none;
-  stroke-width: 1.5;
-  vector-effect: non-scaling-stroke;
-}
-
-.spark-cpu {
-  stroke: var(--blue);
-}
-
-.spark-ram {
-  stroke: var(--text-3);
 }
 
 /* One Claude account: who, how many agents, where it is used. */
@@ -5096,19 +5052,11 @@ body {
   font-style: italic;
 }
 
-/* A provider's group (FFBox): its meters, then one cell per filesystem, wrapping when they do not fit. */
+/* A provider's group (FFBox): its meters in one line, like a machine's. */
 .fl-pv-meters {
   display: flex;
   flex-direction: column;
   gap: 3px;
-}
-
-.fl-pv-disks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 10px;
-  font-size: 10.5px;
-  color: var(--text-3);
 }
 
 /* The last numbers, kept but dimmed once they are stale or the connector is gone. */

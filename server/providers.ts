@@ -37,7 +37,7 @@ import {
   type QueryResult,
 } from './providerProtocol.ts';
 import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent, ProviderMetrics } from '../shared/types.ts';
-import { cpuPct, memPct, metricsLine } from '../shared/providerMetrics.ts';
+import { metricsLine } from '../shared/providerMetrics.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 const PING_MS = 20_000;
@@ -46,8 +46,6 @@ const DEAD_MS = 45_000;
 const KEEP_CONVERSATIONS = 500;
 const KEEP_INTAKE = 2000;
 const DAY_MS = 24 * 3600_000;
-/** Metrics samples kept for the sparkline: half an hour at one every 30 s. */
-const METRICS_HISTORY = 60;
 
 /** What is kept on disk (<dataDir>/providers/<id>.json) across restarts. */
 interface Persisted {
@@ -256,7 +254,7 @@ export class ProviderManager {
       ...(this.data.ffwatch ? { ffwatch: this.data.ffwatch } : {}),
       ...(this.data.lastQuery ? { lastQuery: this.data.lastQuery } : {}),
       ...(this.data.lastClose ? { lastClose: this.data.lastClose } : {}),
-      ...(this.data.metrics ? { metrics: this.data.metrics, metricsHistory: [...this.metricsHistory] } : {}),
+      ...(this.data.metrics ? { metrics: this.data.metrics } : {}),
       capacity: this.data.capacity,
       counts: {
         conversations: this.data.conversations.length,
@@ -627,8 +625,6 @@ export class ProviderManager {
       case 'metrics': {
         const { type: _type, ...m } = msg;
         this.data.metrics = { ...m, receivedAt: at };
-        this.metricsHistory.push({ at, cpuPct: cpuPct(this.data.metrics), memPct: memPct(this.data.metrics) });
-        if (this.metricsHistory.length > METRICS_HISTORY) this.metricsHistory.splice(0, this.metricsHistory.length - METRICS_HISTORY);
         return this.changed();
       }
       case 'query_result': {
@@ -689,7 +685,6 @@ export class ProviderManager {
   // ---------------------------------------------------------------- read-only queries
 
   private readonly pending = new Map<string, { key: string; done: (r: QueryResult) => void }>();
-  private readonly metricsHistory: { at: string; cpuPct?: number; memPct?: number }[] = [];
   private queryTimes: number[] = [];
 
   /**
