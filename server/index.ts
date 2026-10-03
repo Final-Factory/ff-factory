@@ -438,9 +438,6 @@ providers.dev = new DevRequests(
 bus.on('event', (e) => {
   if (e.type === 'work') providers.dev?.workChanged(e.item);
 });
-for (const [name, id] of Object.entries(cfg.providers?.ffbox?.operators ?? {})) {
-  if (!identity.get(id)) console.warn(`config providers.ffbox.operators maps FFBox operator "${name}" to "${id}", which is no login: that operator's dev requests are refused`);
-}
 agents.orchestrators.onIntakeAttention = (w, what) => notifier.intake(w, what, (what === 'design' && w.flag ? w.flag.for : agents.orchestrators.reviewers()).map((r) => r.userId));
 if (cfg.hostGuard.pollSeconds > 0) {
   setInterval(() => void hostHealth.tick(), cfg.hostGuard.pollSeconds * 1000);

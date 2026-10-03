@@ -18,8 +18,8 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   New connector messages `dev_request`, `dev_chunk`, `dev_message` and `dev_received`, answered `dev_ack`, `dev_filed`
   and `dev_reply`, all in `welcome.accepts`. A hand-over's files (at most 10, 200 MB each and `attachments.maxMB`,
   500 MB together) stream into the attachment store in base64 chunks of 45000 bytes and each SHA-256 is checked; the
-  request is then filed at once as the request of the person its operator maps to (new config
-  `providers.ffbox.operators`), with no approval step, after the ledger check: identity keys, the meaning of its title
+  request is then filed at once as the request of the person its operator is (the FF Factory login of the
+  same name as FFBox's `operators` block gives them; nothing to map), with no approval step, after the ledger check: identity keys, the meaning of its title
   and brief (w219's matcher), and the new `scope` of open broad requests (`request_work` takes `scope { threads,
   source, channel, since, until }` and records the threads a brief lists). Covered, already fixed, filed with
   candidates, or filed, each with the line FFBox posts and one `[from FFBox, <operator>]` line in the person's own

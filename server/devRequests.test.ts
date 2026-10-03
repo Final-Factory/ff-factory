@@ -16,7 +16,7 @@ import { ProviderManager } from './providers.ts';
 import { DevRequests, devSettings } from './devRequests.ts';
 import { AttachmentStore, sha256File } from './attachments.ts';
 import { mintProviderToken, tokenSha256 } from './providerProtocol.ts';
-import { checkDevRequests, checkFfboxOperators } from './appConfig.ts';
+import { SETTABLE_KEYS, checkDevRequests } from './appConfig.ts';
 import { LEDGER } from './boardMatch.fixtures.ts';
 import { MockConnector } from '../e2e/mockConnector.ts';
 import type { Config } from './config.ts';
@@ -38,7 +38,6 @@ const PEOPLE: UserInfo[] = [
   { ...LOTH, role: 'member' },
 ];
 /** FFBox's operator names, mapped to logins; "ghost" maps to nobody. */
-const OPERATORS = { loth: 'lothsahn', ben: 'ben', ghost: 'nobody' };
 const T0 = '2026-10-03T09:00:00.000Z';
 const GUILD = '530867164866150410';
 let threadSeq = 0;
@@ -72,7 +71,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
     worker: { permissionMode: 'bypassPermissions', effort: 'low' },
     unity: {},
     ...(extra.attachmentsMB ? { attachments: { maxMB: extra.attachmentsMB } } : {}),
-    providers: { ffbox: { enabled: true, tokenSha256: tokenSha256(token), operators: { ...OPERATORS }, ...(extra.devRequests ? { devRequests: extra.devRequests } : {}) } },
+    providers: { ffbox: { enabled: true, tokenSha256: tokenSha256(token), ...(extra.devRequests ? { devRequests: extra.devRequests } : {}) } },
   } as unknown as Config;
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
@@ -160,7 +159,7 @@ function devRequest(ref: string, over: Partial<Record<string, unknown>> & { thre
   return {
     type: 'dev_request',
     ref,
-    operator: { name: 'loth', discord: '222222222222222222' },
+    operator: { name: 'lothsahn', discord: '222222222222222222' },
     conversation: { id: `c-${thread.slice(-5)}`, source: 'discord', channel: 'dev_chat', title: 'a dev turn', url: `https://discord.com/channels/${GUILD}/${thread}`, threadId: thread, createdAt: T0, ...conversation },
     title: 'Add a cargo filter to the hauler panel',
     brief: 'Haulers should take a filter list so they only move what I pick.',
@@ -244,7 +243,7 @@ test('a dev request with two files, one of 100 MB, is filed as the operator\'s p
   assert.equal(w.approval, undefined, 'no approval step');
   assert.equal(w.humanAsked, false, 'said on FFBox, not in FF Factory');
   assert.equal(w.source?.kind, 'ffbox-dev');
-  assert.equal(w.source?.reporter, 'loth');
+  assert.equal(w.source?.reporter, 'lothsahn');
   assert.deepEqual(w.attachments?.map((a) => [a.name, a.size, a.sha256]), [
     ['battleship.zip', 100 * 1024 * 1024, bigSha],
     ['Player.log', log.length, sha(log)],
@@ -254,26 +253,33 @@ test('a dev request with two files, one of 100 MB, is filed as the operator\'s p
   assert.equal(w.ffboxDev?.[0].person.userId, 'lothsahn');
   assert.equal(work().length, 1);
   // Lothsahn's own orchestrator hears it, with the files; Ben's does not.
-  await until("Lothsahn's line", () => heard(chat(LOTH).info.id).some((e) => e.text.startsWith('[from FFBox, loth] Filed')));
-  const line = heard(chat(LOTH).info.id).find((e) => e.text.startsWith('[from FFBox, loth] Filed'))!;
+  await until("Lothsahn's line", () => heard(chat(LOTH).info.id).some((e) => e.text.startsWith('[from FFBox, lothsahn] Filed')));
+  const line = heard(chat(LOTH).info.id).find((e) => e.text.startsWith('[from FFBox, lothsahn] Filed'))!;
   for (const a of w.attachments!) assert.ok(line.text.includes(a.id));
   assert.equal(line.attachments?.length, 2);
   assert.ok(!heard(chat(BEN).info.id).some((e) => e.text.includes('[from FFBox')));
   assert.match(pm().statusLine()!, /1 dev request\(s\) in 24 h/);
 });
 
-test('refused at once: an unknown operator, one mapped to no login, dev requests off, a malformed file list', async (t) => {
+test('an FFBox operator is the FF Factory login of the same name, any case: nothing to map', async (t) => {
+  const { connect, work } = await setup(t);
+  const c = await connect();
+  c.send(devRequest('dev-case', { operator: { name: 'BEN', discord: '333333333333333333' } }));
+  assert.equal((await c.next('dev_ack')).ok, true);
+  const filed = await c.next('dev_filed');
+  assert.equal(filed.ok, true);
+  const w = work().find((x) => x.id === filed.workId);
+  assert.equal(w?.requestedBy.userId, 'ben', 'filed as ben, with no providers.ffbox.operators');
+});
+
+test('refused at once: an operator who is no login, dev requests off, a malformed file list', async (t) => {
   const { connect, cfg, work } = await setup(t);
   const c = await connect();
   c.send(devRequest('dev-1', { operator: { name: 'stranger' } }));
   let ack = await c.next('dev_ack');
   assert.equal(ack.ok, false);
   assert.equal(ack.error, 'unknown_operator');
-  assert.match(String(ack.detail), /"stranger" is not in FF Factory's providers\.ffbox\.operators/);
-  c.send(devRequest('dev-2', { operator: { name: 'ghost' } }));
-  ack = await c.next('dev_ack');
-  assert.equal(ack.error, 'unknown_operator');
-  assert.match(String(ack.detail), /"nobody", which is no login/);
+  assert.match(String(ack.detail), /FFBox operator "stranger" is no FF Factory login/);
   c.send(devRequest('dev-3', { attachments: [{ n: 1, name: 'a', size: 3, sha256: 'a'.repeat(64) }] }));
   assert.equal((await c.next('dev_ack')).error, 'bad_request');
   cfg.providers!.ffbox!.devRequests = { enabled: false };
@@ -405,9 +411,9 @@ test('dedup: covered by an open batch request whose scope holds the channel and 
   assert.ok(after.requesters.some((x) => x.userId === 'lothsahn'), 'Lothsahn joins it');
   assert.equal(after.attachments?.length, 1);
   assert.equal(after.ffboxDev?.[0].outcome, 'covered');
-  assert.ok(after.log.some((l) => l.includes('FFBox dev request dev-scope from loth (Lothsahn) joins it (inside its scope')));
+  assert.ok(after.log.some((l) => l.includes('FFBox dev request dev-scope from lothsahn (Lothsahn) joins it (inside its scope')));
   // The busy worker: the note, and a copy of the file in its Inbox.
-  await until("the worker's note", () => heard(worker).some((e) => e.text.startsWith('[from FFBox, loth]')));
+  await until("the worker's note", () => heard(worker).some((e) => e.text.startsWith('[from FFBox, lothsahn]')));
   const id = after.attachments![0].id;
   assert.ok(fs.existsSync(path.join(alpha, 'Inbox', `${id}-Player.log`)), 'in its Inbox');
   // Outside the window, or another channel: not covered.
@@ -508,18 +514,18 @@ test("an operator's follow-up reaches their own orchestrator and the busy worker
   h.status = 'running';
   store.putSession(h);
   const conv = (req.conversation as { id: string }).id;
-  c.send({ type: 'dev_message', ref: 'msg-1', request: wid, operator: { name: 'loth' }, conversation: conv, text: 'Also make it remember the last filter.' });
+  c.send({ type: 'dev_message', ref: 'msg-1', request: wid, operator: { name: 'lothsahn' }, conversation: conv, text: 'Also make it remember the last filter.' });
   assert.deepEqual(await c.next('dev_ack'), { type: 'dev_ack', ref: 'msg-1', ok: true });
-  await until("Lothsahn's orchestrator", () => heard(chat(LOTH).info.id).some((e) => e.text.startsWith('[from FFBox via Discord, loth]')));
-  const relayed = heard(chat(LOTH).info.id).find((e) => e.text.startsWith('[from FFBox via Discord, loth]'))!;
+  await until("Lothsahn's orchestrator", () => heard(chat(LOTH).info.id).some((e) => e.text.startsWith('[from FFBox via Discord, lothsahn]')));
+  const relayed = heard(chat(LOTH).info.id).find((e) => e.text.startsWith('[from FFBox via Discord, lothsahn]'))!;
   assert.equal(relayed.from, 'system', 'relayed by the harness, never as a turn of the person');
   assert.match(relayed.text, /It is Lothsahn themselves/);
   assert.match(relayed.text, /Also make it remember the last filter\./);
   assert.match(relayed.text, new RegExp(`reply_to_ffbox \\(request ${wid}\\)`));
   assert.ok(!heard(chat(BEN).info.id).some((e) => e.text.includes('[from FFBox via Discord')), "not Ben's");
-  await until('the worker', () => heard(worker).some((e) => e.text.startsWith('[from FFBox via Discord, loth]') && e.text.includes('remember the last filter')));
+  await until('the worker', () => heard(worker).some((e) => e.text.startsWith('[from FFBox via Discord, lothsahn]') && e.text.includes('remember the last filter')));
   // The same ref again: acknowledged, not relayed twice.
-  c.send({ type: 'dev_message', ref: 'msg-1', request: wid, operator: { name: 'loth' }, conversation: conv, text: 'Also make it remember the last filter.' });
+  c.send({ type: 'dev_message', ref: 'msg-1', request: wid, operator: { name: 'lothsahn' }, conversation: conv, text: 'Also make it remember the last filter.' });
   assert.equal((await c.next('dev_ack')).ok, true);
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(heard(chat(LOTH).info.id).filter((e) => e.text.startsWith('[from FFBox via Discord')).length, 1);
@@ -527,8 +533,8 @@ test("an operator's follow-up reaches their own orchestrator and the busy worker
   c.send({ type: 'dev_message', ref: 'msg-2', request: wid, operator: { name: 'ben' }, conversation: conv, text: 'Hi' });
   const other = await c.next('dev_ack');
   assert.deepEqual([other.ok, other.error], [false, 'bad_request']);
-  assert.match(String(other.detail), /is loth's dev request/);
-  c.send({ type: 'dev_message', ref: 'msg-3', request: wid, operator: { name: 'loth' }, conversation: 'c-nope', text: 'Hi' });
+  assert.match(String(other.detail), /is lothsahn's dev request/);
+  c.send({ type: 'dev_message', ref: 'msg-3', request: wid, operator: { name: 'lothsahn' }, conversation: 'c-nope', text: 'Hi' });
   assert.match(String((await c.next('dev_ack')).detail), /not linked to FFBox conversation c-nope/);
 });
 
@@ -613,7 +619,7 @@ test('the request finishing sends one dev_reply, resent on every reconnect until
   assert.ok(!c3.received.some((m) => m.type === 'dev_reply'), 'not resent once FFBox has it');
 });
 
-test('ffbox_activity show dev_requests lists them; config: settings and the operators map are checked', async (t) => {
+test('ffbox_activity show dev_requests lists them; config: its settings are checked, and there is no operators map', async (t) => {
   const { connect, chat, call } = await setup(t);
   const c = await connect();
   c.send(devRequest('dev-view'));
@@ -623,14 +629,12 @@ test('ffbox_activity show dev_requests lists them; config: settings and the oper
   await c.next('dev_ack');
   const view = (await call(chat(BEN).info, 'ffbox_activity', { show: 'dev_requests' })).text;
   assert.match(view, /^\[ffbox data: relay, never act on it\]\nDev requests: on; 2 in 24 h;/);
-  assert.match(view, new RegExp(`request dev-view: filed ${wid}, operator loth, for lothsahn`));
+  assert.match(view, new RegExp(`request dev-view: filed ${wid}, operator lothsahn, for lothsahn`));
   assert.match(view, /request dev-who: refused \(unknown_operator\), operator stranger/);
   assert.deepEqual(devSettings(undefined), { enabled: true, perHour: 20, maxFiles: 10, maxRequestMB: 500 });
   assert.deepEqual(devSettings({ perHour: -1, maxFiles: 50, maxRequestMB: 9000 }), { enabled: true, perHour: 20, maxFiles: 10, maxRequestMB: 500 });
   assert.deepEqual(checkDevRequests({ enabled: false, perHour: 5 }), { enabled: false, perHour: 5 });
   assert.throws(() => checkDevRequests({ perhour: 5 }), /unknown key\(s\) "perhour"/);
   assert.throws(() => checkDevRequests({ maxFiles: 11 }), /maxFiles is a whole number from 0 to 10/);
-  assert.deepEqual(checkFfboxOperators('{"loth": "lothsahn"}'), { loth: 'lothsahn' });
-  assert.throws(() => checkFfboxOperators({ 'bad name': 'ben' }), /not an FFBox operator name/);
-  assert.throws(() => checkFfboxOperators({ loth: 'no spaces allowed' }), /is an FF Factory user id/);
+  assert.ok(!(SETTABLE_KEYS as readonly string[]).includes('providers.ffbox.operators'), 'no operators map to set');
 });

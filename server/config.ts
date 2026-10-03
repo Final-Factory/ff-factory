@@ -176,12 +176,6 @@ export interface Config {
        * false; a submit also needs a connector that lists "submit" in hello.accepts.
        */
       sendWork?: boolean;
-      /**
-       * FFBox's operators, by the name FFBox's config gives them, mapped to FF Factory logins:
-       * { "lothsahn": "lothsahn" }. A dev request (docs/ffbox.md, "Dev requests") is filed as that person's own; one
-       * from an operator not named here, or mapped to no login, is refused (unknown_operator). Default {}.
-       */
-      operators?: Record<string, string>;
       /** Operators' ffdev turns handed to FF Factory (docs/ffbox.md, "Dev requests"); server/devRequests.ts fills the defaults. */
       devRequests?: DevRequestsConfig;
     };
