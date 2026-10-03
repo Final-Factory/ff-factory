@@ -35,6 +35,9 @@ import {
   type WorkReply,
   type ResultMessage,
   type QueryResult,
+  REPORT_LIMITS,
+  type ReportChunkMessage,
+  type ReportEndMessage,
 } from './providerProtocol.ts';
 import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent, ProviderMetrics, ProviderUpdater, ProviderDevRequests } from '../shared/types.ts';
 import { metricsLine } from '../shared/providerMetrics.ts';
@@ -178,6 +181,54 @@ export interface QueryAnswer {
   hint?: string;
   detail?: string;
 }
+
+/** What a `report` answer's `transfer` says is coming (FFBox w320); its bytes follow as report_chunk frames. */
+export interface ReportTransfer {
+  name: string;
+  bytes: number;
+  sha256: string;
+  /** The file inside the zip, when one was asked for. */
+  member?: string;
+  /** The whole zip: whether its SHA-256 is the one ffintake recorded at upload. */
+  matchesManifest?: boolean;
+}
+
+/** Where a transfer's bytes go (server/ffboxReports.ts: the attachment store). Every call is awaited in order. */
+export interface TransferSink {
+  begin(t: ReportTransfer): void | Promise<void>;
+  chunk(offset: number, data: Buffer): Promise<void>;
+  /** Every byte is in and report_end agreed with the answer; the sink checks the SHA-256 of what it stored. */
+  finish(): Promise<void>;
+  /** It failed part way: drop what arrived. */
+  abort(why: string): void;
+}
+
+/** How a transfer ended. */
+export interface TransferOutcome {
+  ok: boolean;
+  error?: string;
+  detail?: string;
+}
+
+/** The `transfer` of a `report` answer, checked field by field (it is FFBox's data), or undefined. */
+export function transferOf(data: Record<string, unknown> | undefined): ReportTransfer | undefined {
+  const t = data?.transfer;
+  if (!t || typeof t !== 'object' || Array.isArray(t)) return undefined;
+  const r = t as Record<string, unknown>;
+  if (typeof r.name !== 'string' || !/^[^\x00-\x1f\x7f/\\]{1,120}$/.test(r.name)) return undefined;
+  if (typeof r.bytes !== 'number' || !Number.isSafeInteger(r.bytes) || r.bytes < 0 || r.bytes > REPORT_LIMITS.maxBytes) return undefined;
+  if (typeof r.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(r.sha256)) return undefined;
+  return {
+    name: r.name,
+    bytes: r.bytes,
+    sha256: r.sha256,
+    ...(typeof r.member === 'string' ? { member: cleanText(r.member, 260) } : {}),
+    ...(typeof r.matches_manifest === 'boolean' ? { matchesManifest: r.matches_manifest } : {}),
+  };
+}
+
+/** Answers never kept for the "last known" fallback: a page of logs or reports, or one report, would answer another question. */
+const NOT_KEPT = new Set(['logs', 'reports', 'report']);
 
 /** A query's answer as the orchestrator's tool shows it: data, labelled live or last known, redacted again. */
 export function describeQuery(a: QueryAnswer): string {
@@ -551,6 +602,7 @@ export class ProviderManager {
       this.pending.delete(id);
       q.done({ id, type: 'query_result', ok: false, error: 'disconnected' });
     }
+    for (const id of [...this.transfers.keys()]) this.failTransfer(id, 'disconnected', 'the FFBox link dropped while the report was coming');
     this.data.lastSeen = new Date(this.now()).toISOString();
     this.statusDetail = why;
     if (was) console.log(`provider ${this.id}: connector ${why}`);
@@ -786,13 +838,20 @@ export class ProviderManager {
         const q = this.pending.get(msg.id);
         // Kept only for a query this portal asked: the key (a conversation's id) is what it asked.
         // A page of logs is not kept: shown later as "last known" it would answer a question nobody asked.
-        if (q && msg.ok && msg.data && q.key !== 'logs') this.keep(q.key, { at: msg.at, receivedAt: at, data: msg.data });
+        if (q && msg.ok && msg.data && !NOT_KEPT.has(q.key)) this.keep(q.key, { at: msg.at, receivedAt: at, data: msg.data });
         if (q) {
           this.pending.delete(msg.id);
+          // A report's bytes follow at once, maybe in the same read: the transfer is set up before anything else runs.
+          const t = q.transfer && msg.ok ? transferOf(msg.data) : undefined;
+          if (t) this.startTransfer(msg.id, t, q.transfer!);
           q.done(msg);
         }
         return;
       }
+      case 'report_chunk':
+        return this.onReportChunk(msg);
+      case 'report_end':
+        return this.onReportEnd(msg);
       case 'dev_request':
       case 'dev_message':
         if (!this.dev) return this.send(link, { type: 'dev_ack', ref: msg.ref, ok: false, error: 'not_enabled', detail: 'FF Factory does not take dev requests on this server' });
@@ -865,7 +924,9 @@ export class ProviderManager {
 
   // ---------------------------------------------------------------- read-only queries
 
-  private readonly pending = new Map<string, { key: string; done: (r: QueryResult) => void }>();
+  private readonly pending = new Map<string, { key: string; done: (r: QueryResult) => void; transfer?: { sink: TransferSink; done: (o: TransferOutcome) => void } }>();
+  /** Reports coming in (FFBox w320), by query id. */
+  private readonly transfers = new Map<string, { t: ReportTransfer; sink: TransferSink; received: number; chain: Promise<void>; done: (o: TransferOutcome) => void; idle: NodeJS.Timeout; failed?: boolean }>();
   private queryTimes: number[] = [];
 
   /**
@@ -944,6 +1005,104 @@ export class ProviderManager {
       if (v) words[f] = v;
     }
     return this.lastKnown(what, result.error ?? 'no_answer', key, words);
+  }
+
+  /**
+   * Ask FFBox a query whose answer is followed by a file (`report`, FFBox w320): the answer as query() gives it (never a
+   * kept one), and when it carried a `transfer`, how the bytes went into `sink`. Never throws. Each chunk must come at
+   * the offset the transfer stands at, the whole must be the size the answer said, and report_end's SHA-256 must be the
+   * answer's; the sink checks the SHA-256 of what it stored.
+   */
+  async queryTransfer(what: string, args: Record<string, number | string>, sink: TransferSink, timeoutMs: number = QUERY_LIMITS.timeoutMsByQuery[what] ?? QUERY_LIMITS.timeoutMs): Promise<{ answer: QueryAnswer; transfer?: TransferOutcome; meta?: ReportTransfer }> {
+    const problem = this.queryProblem(what);
+    if (problem) return { answer: { what, live: false, ok: false, error: problem } };
+    this.queryTimes.push(this.now());
+    const id = `q-${this.now().toString(36)}-${randomBytes(4).toString('hex')}`;
+    let finished: (o: TransferOutcome) => void = () => {};
+    const ended = new Promise<TransferOutcome>((r) => (finished = r));
+    const result = await new Promise<QueryResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve({ id, type: 'query_result', ok: false, error: 'timeout', detail: `no answer from FFBox within ${timeoutMs / 1000} s` });
+      }, timeoutMs);
+      timer.unref();
+      this.pending.set(id, {
+        key: what,
+        transfer: { sink, done: finished },
+        done: (r) => {
+          clearTimeout(timer);
+          resolve(r);
+        },
+      });
+      this.send(this.link!, { type: 'query', id, what, args });
+    });
+    const at = new Date(this.now()).toISOString();
+    const live = !!(result.ok && result.data);
+    this.data.lastQuery = { what, ok: live, ...(live ? {} : { error: result.error ?? 'no_answer' }), at };
+    this.changed();
+    if (!live) {
+      const words: Pick<QueryAnswer, 'reason' | 'hint' | 'detail'> = {};
+      for (const f of ['reason', 'hint', 'detail'] as const) {
+        const v = result[f] === undefined ? '' : cleanText(result[f]!, 300);
+        if (v) words[f] = v;
+      }
+      return { answer: { what, live: false, ok: false, error: result.error ?? 'no_answer', ...words } };
+    }
+    const answer: QueryAnswer = { what, live: true, ok: true, at: result.at, receivedAt: at, data: result.data };
+    const meta = this.transfers.get(id)?.t;
+    if (!meta) return { answer, ...(result.data?.transfer !== undefined ? { transfer: { ok: false, error: 'bad_transfer', detail: 'the answer\'s transfer is not one this portal takes' } } : {}) };
+    return { answer, transfer: await ended, meta };
+  }
+
+  private startTransfer(id: string, t: ReportTransfer, q: { sink: TransferSink; done: (o: TransferOutcome) => void }) {
+    const idle = setTimeout(() => this.failTransfer(id, 'timeout', `nothing from FFBox for ${REPORT_LIMITS.idleMs / 1000} s`), REPORT_LIMITS.idleMs);
+    idle.unref();
+    const x = { t, sink: q.sink, received: 0, chain: Promise.resolve().then(() => q.sink.begin(t)), done: q.done, idle };
+    // A sink that cannot even begin (the store refuses the size) fails the transfer; the chunks after are dropped.
+    x.chain.catch((e: Error) => this.failTransfer(id, 'store_failed', e.message));
+    this.transfers.set(id, x);
+  }
+
+  private failTransfer(id: string, error: string, detail: string) {
+    const x = this.transfers.get(id);
+    if (!x || x.failed) return;
+    x.failed = true;
+    clearTimeout(x.idle);
+    this.transfers.delete(id);
+    void x.chain.catch(() => {}).finally(() => x.sink.abort(detail));
+    console.warn(`provider ${this.id}: report transfer ${id} failed: ${error}: ${detail}`);
+    x.done({ ok: false, error, detail: cleanText(detail, 300) });
+  }
+
+  private onReportChunk(m: ReportChunkMessage) {
+    const x = this.transfers.get(m.id);
+    if (!x) return;
+    const buf = Buffer.from(m.data, 'base64');
+    if (m.offset !== x.received) return this.failTransfer(m.id, 'bad_chunk', `expected offset ${x.received}, got ${m.offset}`);
+    if (!buf.length || buf.length > REPORT_LIMITS.maxChunkBytes) return this.failTransfer(m.id, 'bad_chunk', `a chunk is 1 to ${REPORT_LIMITS.maxChunkBytes} bytes`);
+    if (x.received + buf.length > x.t.bytes) return this.failTransfer(m.id, 'bad_chunk', `more than the ${x.t.bytes} bytes announced`);
+    x.received += buf.length;
+    x.idle.refresh();
+    const offset = m.offset;
+    x.chain = x.chain.then(() => x.sink.chunk(offset, buf));
+    x.chain.catch((e: Error) => this.failTransfer(m.id, 'store_failed', e.message));
+  }
+
+  private onReportEnd(m: ReportEndMessage) {
+    const x = this.transfers.get(m.id);
+    if (!x) return;
+    if (!m.ok) return this.failTransfer(m.id, m.error ?? 'failed', m.detail ? cleanText(m.detail, 300) : 'FFBox could not send the report');
+    if (x.received !== x.t.bytes || m.bytes !== x.t.bytes) return this.failTransfer(m.id, 'short', `${x.received} of ${x.t.bytes} bytes arrived`);
+    if (m.sha256 !== x.t.sha256) return this.failTransfer(m.id, 'sha_mismatch', 'report_end\'s SHA-256 is not the answer\'s');
+    clearTimeout(x.idle);
+    x.chain
+      .then(() => x.sink.finish())
+      .then(() => {
+        if (x.failed) return;
+        this.transfers.delete(m.id);
+        x.done({ ok: true });
+      })
+      .catch((e: Error) => this.failTransfer(m.id, 'sha_mismatch', e.message));
   }
 
   /** Why a submit cannot go to FFBox now, or undefined. */

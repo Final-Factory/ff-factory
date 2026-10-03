@@ -99,6 +99,11 @@ export const CATALOG = {
   fetch_attachment: {
     id: z.string().describe('The attachment id, e.g. "att_k2m9x0q7p3a1" (from an [attachments] list).'),
   },
+  /** docs/ffbox.md, "Players' reports". On a machine the portal fetches the report from FFBox and the daemon the files. */
+  fetch_ffbox_report: {
+    id: z.string().max(64).describe('The FFBox report id, e.g. "20261003T101500Z-desync-3a9f01c2d4".'),
+    file: z.string().max(260).optional().describe('One file inside the zip, exactly as the report lists it (e.g. "logs/Player.log"). Default: the whole zip.'),
+  },
 } satisfies Record<string, z.ZodRawShape>;
 
 export type CatalogTool = keyof typeof CATALOG;
