@@ -10,6 +10,12 @@ parsing, no preview.
 
 ## In the chat
 
+![Three files on their way in the composer: a save at 47% with its progress bar, a Player.log and a desync report uploaded](images/attachments-uploading.png)
+
+![The sent message with its three files as download chips, and the orchestrator's prompt listing them as untrusted files with ids and stored paths](images/attachments-sent-desktop.png)
+
+<img src="images/attachments-sent-mobile.png" alt="The same on a phone" width="320">
+
 - **Paperclip, paste or drop**, in every chat with a composer except standing agents' (their runs are text only):
   orchestrators, the dispatcher, workers. The paperclip opens the system's file picker, on a phone too. A paste takes
   whatever files the browser puts on the clipboard event (a screenshot always; files copied in Finder or Explorer
@@ -61,8 +67,9 @@ and the reason; the message still goes.
 - **The dispatcher**: `start_agent` with a `work_id` hands that request's attachments over by itself; `attachments`
   adds others. `message_agent` takes `attachments`; with a `work_id` it also sends the request's own files to a worker
   newly given that request (one already on it has them).
-- **The /mcp API** has the same tools, so the same arguments.
-- An unknown or expired id is refused with the reason.
+- **The /mcp API**'s `start_agent` and `message_agent` take the same `attachments`.
+- An unknown or expired id given in `attachments` is refused with the reason. A request's own file that retention
+  deleted before the work started is left out, and the tool's answer names it so the person can attach it again.
 
 ### Fetching one again
 

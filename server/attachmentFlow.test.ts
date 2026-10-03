@@ -155,6 +155,14 @@ test("a person's files reach their orchestrator as stored files, go with request
   assert.deepEqual(users(worker)[1].attachments?.map((x) => x.id), [c.id]);
   assert.equal(fs.existsSync(inbox(c)), true);
 
+  // A request's file deleted by retention before the work starts: the work starts without it, and the answer says so.
+  const e = await upload('old.zip', Buffer.from('old save'));
+  assert.equal((await call(loth, 'request_work', { title: 'An old save', brief: 'Look at it.', attachments: [e.id] })).isError, false);
+  (files as unknown as { records: Map<string, unknown> }).records.delete(e.id);
+  const late = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Look at the old save.', title: 'Old save', work_id: 'w2' });
+  assert.equal(late.isError, false, late.text);
+  assert.ok(late.text.includes(`Not sent, deleted by retention (ask the person to attach them again): ${e.id} "old.zip".`), late.text);
+
   // The person's own orchestrator follows up on its person's worker with a file too.
   const d = await upload('Player-prev.log', Buffer.from('earlier log'));
   const follow = await call(loth, 'message_agent', { session_id: worker, text: 'And the log from the run before.', attachments: [d.id] });

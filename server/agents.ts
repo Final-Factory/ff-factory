@@ -744,12 +744,25 @@ export class Agents {
     return send(delivered);
   }
 
-  /** The attachments a tool call names, with a request's own first (each once); throws for an id the store lacks. */
-  private attachmentsFor(ids: string[] | undefined, w?: WorkItem): AttachmentRef[] {
-    const all = [...(w?.attachments ?? []).map((a) => a.id), ...(ids ?? [])];
-    if (!all.length) return [];
-    if (!this.attachments) throw new Error('attachments are not wired into this server');
-    return this.attachments.resolve(all).map(publicRef);
+  /**
+   * The attachments a tool call names, with a request's own first (each once). An id given is refused when the store
+   * lacks it; a request's own file deleted since (retention) is left out and named in `gone`, so the work can still start.
+   */
+  private attachmentsFor(ids: string[] | undefined, w?: WorkItem): AttachmentRef[] & { gone?: string[] } {
+    const own = w?.attachments ?? [];
+    if (!own.length && !ids?.length) return [];
+    const store = this.attachments;
+    if (!store) throw new Error('attachments are not wired into this server');
+    const kept = own.filter((a) => store.get(a.id));
+    const out: AttachmentRef[] & { gone?: string[] } = store.resolve([...kept.map((a) => a.id), ...(ids ?? [])]).map(publicRef);
+    const gone = own.filter((a) => !store.get(a.id)).map((a) => `${a.id} "${a.name}"`);
+    if (gone.length) out.gone = gone;
+    return out;
+  }
+
+  /** What a tool answer says of a request's files that retention deleted before they went. */
+  private static goneLine(files: { gone?: string[] }): string {
+    return files.gone?.length ? ` Not sent, deleted by retention (ask the person to attach them again): ${files.gone.join(', ')}.` : '';
   }
 
   /** fetch_attachment on a sandbox of this host: copy one into its Inbox again. */
@@ -1620,7 +1633,7 @@ To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`A
               item = `; recorded in the ledger as ${this.orchestrators.recordStart(s.info, a.prompt, requestedBy, `started over /mcp for ${requestedBy.displayName}: worker ${s.info.id} ${where}`, from === 'human')}`;
             }
             const withFiles = files.length ? ` It gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
-            return `Started agent ${s.info.id} "${s.info.title}" ${where}, requested by ${requestedBy.displayName}${item}.${withFiles}`;
+            return `Started agent ${s.info.id} "${s.info.title}" ${where}, requested by ${requestedBy.displayName}${item}.${withFiles}${Agents.goneLine(files)}`;
           }),
         ),
         ...this.machineToolSpecs(tool, from),
@@ -1647,7 +1660,7 @@ To show the user an image, save it as PNG, JPG or SVG in your worktree (e.g. \`A
             const files = this.attachmentsFor(attachments, linked ? undefined : item);
             await this.sendWithAttachments(session_id, item?.source && !linked ? `${text}${workerRules(item)}` : text, from, { requestedBy, attachments: files });
             if (work_id) this.orchestrators.linkWorker(work_id, w.info, `sent to ${this.orchestrators.workerLine(w.info.id)}, already on it`);
-            return `Sent, for ${requestedBy.displayName}${work_id ? ` (${work_id})` : ''}${sent(files.length)}.`;
+            return `Sent, for ${requestedBy.displayName}${work_id ? ` (${work_id})` : ''}${sent(files.length)}.${Agents.goneLine(files)}`;
           }),
         ),
         tool(
