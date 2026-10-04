@@ -20,6 +20,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   request FF Factory holds (`held`, `approval: pending`) is recorded by FFBox and silent; FF Factory still sends
   the flag for FFBox's record.
 
+- **"DESIGN-QUESTION: none" is not a question** (w355, asked by Lothsahn). w349's worker ended two turns with
+  "DESIGN-QUESTION: none — waiting on CI for PR #1018", which made w349 a design question for Ben and Lothsahn and sent
+  both an [intake question]. A marker whose text is empty, none, n/a, no, -, or starts with none, no question, nothing or
+  waiting on is ignored (`noQuestion`); the worker rules say to use it only for a real decision and to end a turn still
+  in progress with no marker ([docs/intake.md](docs/intake.md)).
+
 - **A request claims only the threads and reports it is the work for** (w343, asked by Lothsahn). FFBox's ledger check
   held five new desync reports (conversations 640-644) on w331, a Steam lobby request, and answered "done" for the
   ten reports w312 (a fetch request) had listed. w331 had no report keys: its title, "<@…> Please diagnose this", was
