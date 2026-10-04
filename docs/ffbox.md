@@ -231,7 +231,8 @@ is checked three ways:
    `intake.ffbox.match`, high 0.7 and medium 0.45 by default). The stronger of the two counts.
 3. **Scope**: an open broad request covers the conversation when its `scope` lists the thread, or names its source
    and/or channel with a `since` and/or `until` window holding the conversation's creation time. `request_work` takes
-   `scope { threads?, source?, channel?, since?, until? }`, and records the threads a brief lists by itself. A window
+   `scope { threads?, source?, channel?, since?, until? }`, and records as its scope the threads it is the work for
+   (its title's, its `subjects`; a brief's mentions are references, w343). A window
    needs a bound, so no request covers a whole channel forever.
 
 | what matched | outcome | `dev_filed` text (FF Factory's views; FFBox posts only "Already fixed", w272) |

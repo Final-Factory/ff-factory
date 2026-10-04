@@ -669,10 +669,13 @@ test('escalations from Max: off by default; checked against the ledger and filed
   assert.match(w.log.at(-1)!, /seen again by the intake: Design question \(via Max\): Waves also ignore/);
   assert.equal(work().length, 1);
 
-  // A thread a person's request already names (w50 style) is in flight too, whatever FFBox thinks.
+  // A thread a person's request is the work for (its subjects, w343) is in flight too, whatever FFBox thinks. One its
+  // brief only mentions claims nothing.
   const ben = o.personalFor(BEN);
   ben.lastFrom = 'human';
-  await call(ben.info, 'request_work', { title: 'Cap attack waves', brief: 'See thread 1554888928090263999' });
+  await call(ben.info, 'request_work', { title: 'Read the wave logs', brief: 'Evidence in thread 1554888928090263999' });
+  assert.equal(o.boardCheck({ keys: ['discord:1554888928090263999'] }, 30).verdict, 'clear');
+  await call(ben.info, 'request_work', { title: 'Cap attack waves', brief: 'See thread 1554888928090263999', subjects: ['1554888928090263999'] });
   const person = work().find((x) => x.title === 'Cap attack waves')!;
   assert.deepEqual(intake.onEscalation({ ...ESCALATION, ref: 'conv-500-turn-1', conversation: '500', threadId: '1554888928090263999', url: 'https://discord.com/channels/530867164866150410/1554888928090263999' }), { status: 'in_flight', workId: person.id });
 

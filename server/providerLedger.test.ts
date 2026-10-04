@@ -113,12 +113,13 @@ test('ledger check both ways: handshake, exact thread keys, what to watch, and t
   const { store, o, intake, pm, connect, dispatcher, call } = await setup(t);
   const ben = o.personalFor(BEN);
   ben.lastFrom = 'human';
-  // Ben's request names the thread by its link; an older one (filed before discord keys existed) by its bare id.
-  const filed = await call(ben.info, 'request_work', { title: 'Lag when leading a fleet', brief: `Players report lag, see https://discord.com/channels/530867164866150410/${THREAD_A}` });
+  // Ben's request is the work for the thread (its subjects, w343); an older one (filed before discord keys existed) names
+  // it by its bare id in its title. A brief's mention alone claims nothing.
+  const filed = await call(ben.info, 'request_work', { title: 'Lag when leading a fleet', brief: `Players report lag, see https://discord.com/channels/530867164866150410/${THREAD_A}`, subjects: [`https://discord.com/channels/530867164866150410/${THREAD_A}`] });
   assert.equal(filed.isError, false, filed.text);
   const a = [...store.work.values()].find((w) => w.title === 'Lag when leading a fleet')!;
   assert.ok(a.keys.includes(`discord:${THREAD_A}`), 'the thread link is the request key');
-  const old: WorkItem = { id: 'w90', title: 'Tooltips flicker', brief: `From #bug-reports thread ${THREAD_B}.`, priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active', createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] };
+  const old: WorkItem = { id: 'w90', title: `Tooltips flicker (thread ${THREAD_B})`, brief: `From #bug-reports thread ${THREAD_B}.`, priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active', createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] };
   store.putWork(old);
 
   // The handshake: protocol 2, each side says what it takes.

@@ -27,7 +27,9 @@ const STOP = new Set(
     'bug bugs issue issues problem problems game report reported reporting seem seems seemed look looks looked see saw seen ' +
     'appear appears appeared happen happens happened sometimes still again always just really very anyone someone something ' +
     'test entry ignore ffbox please couldn didn doesn isn wasn won don can aren haven entire entirely completely totally ' +
-    'windowsplayer osxplayer linuxplayer windows mac macos linux steam'
+    'windowsplayer osxplayer linuxplayer windows mac macos linux steam ' +
+    // What the request asks someone to do, not which bug it is (w343: "Please diagnose this" matched every report).
+    'diagnose diagnosis diagnos diagnosi investigate investigation investigat'
   ).split(' '),
 );
 
@@ -187,21 +189,34 @@ export interface TextMatch {
 /** How many ledger entries may hold a concept for it to still say which bug this is: 3% of the ledger, at least one. */
 export const distinctiveDf = (ix: MatchIndex) => Math.max(1, Math.round(ix.docs * 0.03));
 
+/** A text's concepts once each, near-duplicates (one typo apart) folded into the first. */
+function distinct(xs: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const c of new Set(xs)) if (!out.some((d) => same(c, d))) out.push(c);
+  return out;
+}
+
 /** How alike two texts' concepts are, weighted by `ix`. */
 export function similarity(a: readonly string[], b: readonly string[], ix: MatchIndex): TextMatch {
-  const A = [...new Set(a)];
-  const B = [...new Set(b)];
+  // Concepts within one typo of each other are one concept ("diagnos" and "diagnosi"), and each concept of one text
+  // pairs with at most one of the other's: two report words once both matched a request's one title word, counted as
+  // two shared concepts with coverage above 1, and scored 1 (w343).
+  const A = distinct(a);
+  const B = distinct(b);
   if (!A.length || !B.length) return { score: 0, shared: [], distinctive: false, core: 0 };
   const wa = A.reduce((n, c) => n + weight(c, ix), 0);
   const wb = B.reduce((n, c) => n + weight(c, ix), 0);
   const shared: { c: string; w: number }[] = [];
+  const used = new Set<number>();
   for (const c of A) {
-    const hit = B.find((d) => same(c, d));
-    if (hit) shared.push({ c, w: Math.min(weight(c, ix), weight(hit, ix)) });
+    const i = B.findIndex((d, j) => !used.has(j) && same(c, d));
+    if (i < 0) continue;
+    used.add(i);
+    shared.push({ c, w: Math.min(weight(c, ix), weight(B[i], ix)) });
   }
   const s = shared.reduce((n, x) => n + x.w, 0);
   const cos = s / Math.sqrt(wa * wb);
-  const cover = s / Math.min(wa, wb);
+  const cover = Math.min(1, s / Math.min(wa, wb));
   // One shared concept says little whatever its weight: a lone shared word ("cargo") is capped below any useful band.
   const score = shared.length < 2 ? Math.min(0.45, (cos + cover) / 2) : (cos + cover) / 2;
   const dmax = distinctiveDf(ix);

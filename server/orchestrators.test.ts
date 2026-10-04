@@ -460,3 +460,117 @@ test('message_person: a message to an orchestrator mid-turn waits for that turn,
   assert.equal((await call(chat(LOTH).info, 'message_person', { to: 'ben', text: 'The portal deploy: now or tonight?' })).isError, false);
   await until('both answered', () => store.readTranscript(ben.info.id).some((e) => e.kind === 'assistant' && e.text.includes('The portal deploy: now or tonight?')), 15_000);
 });
+
+// ---------------------------------------------------------------- w343: which threads and reports a request claims
+
+const R1 = '20261003T222237Z-desync-87b7e4f96f';
+const R2 = '20261003T222246Z-desync-03a1228f27';
+const R3 = '20261004T013255Z-desync-a18df1bf15';
+const TH = '1556096235277000837';
+
+test('w343: a brief and related ids only reference reports and threads; the title and subjects claim them', async (t) => {
+  const { store, o, chat, call } = setup(t);
+  const ben = chat(BEN);
+  ben.lastFrom = 'human';
+  // w312: a fetch request whose brief lists the reports it is to copy. It claims none, before or after it is done.
+  const fetch = await call(ben.info, 'request_work', { title: "Fetch tonight's host desync reports", brief: `Copy ${R1} and ${R2} off FFBox; see https://discord.com/channels/530867164866150410/${TH}.`, related_ids: [R3, 'w1'] });
+  assert.equal(fetch.isError, false, fetch.text);
+  const w = [...store.work.values()].find((x) => x.title.startsWith('Fetch tonight'))!;
+  assert.deepEqual(w.keys.filter((k) => /^(report|discord):/.test(k)), []);
+  assert.equal(w.scope, undefined, 'no scope from a brief');
+  for (const k of [`report:${R1}`, `report:${R3}`, `discord:${TH}`]) assert.equal(o.boardCheck({ keys: [k] }, 30).verdict, 'clear', k);
+  w.status = 'done';
+  store.putWork(w);
+  assert.equal(o.boardCheck({ keys: [`report:${R1}`] }, 30).verdict, 'clear', 'a done fetch is not the fix');
+  // A request whose title names the report, or whose filer gave it as a subject, is the work for it.
+  await call(ben.info, 'request_work', { title: `Diagnose desync ${R2}`, brief: 'From the host report.' });
+  await call(ben.info, 'request_work', { title: "Fix tonight's cbots fork", brief: `The fork in ${R1}.`, subjects: [R1, `https://discord.com/channels/530867164866150410/${TH}`] });
+  const byTitle = [...store.work.values()].find((x) => x.title.startsWith('Diagnose desync'))!;
+  const bySubject = [...store.work.values()].find((x) => x.title.startsWith('Fix tonight'))!;
+  assert.deepEqual(byTitle.keys.filter((k) => k.startsWith('report:')), [`report:${R2}`]);
+  assert.deepEqual(bySubject.subjects, [`report:${R1}`, `discord:${TH}`]);
+  assert.deepEqual(bySubject.scope, { threads: [TH] }, 'its own thread is its scope');
+  const a = o.boardCheck({ keys: [`report:${R1}`] }, 30);
+  assert.deepEqual([a.verdict, a.matches[0].id], ['in_flight', bySubject.id]);
+});
+
+test('w343: notes and worker reports never add a report or thread key; board_check never answers by a worker', async (t) => {
+  const { store, o, chat, call } = setup(t);
+  const ben = chat(BEN);
+  ben.lastFrom = 'human';
+  await call(ben.info, 'request_work', { title: 'Host kicked from its own game', brief: 'Diagnose the Steam lobby problem.' });
+  const w = [...store.work.values()][0];
+  const before = [...w.keys];
+  assert.equal((await call(ben.info, 'update_work', { id: w.id, note: `Also seen in ${R3} and https://discord.com/channels/530867164866150410/${TH}` })).isError, false);
+  // Its worker's report names the reports it downloaded.
+  const worker = { id: 'wk1', kind: 'worker', title: 'Diagnose host kick', status: 'running', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date().toISOString(), turns: 1, costUsd: 0, pendingPermissions: [], lastResult: `Read ${R3} and ${R1} from the zip.` } as unknown as SessionInfo;
+  store.putSession(worker);
+  w.sessionIds = ['wk1'];
+  store.putWork(w);
+  assert.deepEqual(store.work.get(w.id)!.keys, before);
+  for (const k of [`report:${R3}`, `report:${R1}`, `discord:${TH}`]) assert.equal(o.boardCheck({ keys: [k] }, 30).verdict, 'clear', k);
+});
+
+test('w343: "Please diagnose this" is not every diagnosis (the text match that held conversations 640-644 on w331)', (t) => {
+  const { store, o } = setup(t);
+  const now = new Date().toISOString();
+  store.putWork({
+    id: 'w331',
+    title: '<@1531428813538590841> Please diagnose this',
+    brief: 'lothsahn asked for this through FFBox (dev request dev-637-957). Bug Bot: Disconnected as host from multiplayer game. Host Kicked.',
+    priority: 'normal',
+    keys: [`discord:${TH}`, 'ffbox:637'],
+    requestedBy: LOTH,
+    requesters: [LOTH],
+    humanAsked: true,
+    status: 'queued',
+    createdAt: now,
+    updatedAt: now,
+    sessionIds: [],
+    overlaps: [],
+    asks: 0,
+    log: [],
+    source: { kind: 'ffbox-dev', untrusted: true, conversation: '637', threadId: TH },
+  });
+  const a = o.boardCheck({ keys: [`report:${R3}`], title: 'Please diagnose this desync report', summary: 'A desync diagnosis: the host and a client forked at heartbeat 1424 (containers, directions).' }, 30);
+  assert.equal(a.verdict, 'clear', JSON.stringify(a));
+});
+
+test('w343: the start-up detach drops referenced report keys (backed up, logged, stamped), keeps own ones, and is idempotent', (t) => {
+  const { dir, store, o } = setup(t);
+  const now = new Date().toISOString();
+  const base = { priority: 'normal' as const, requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active' as const, createdAt: now, updatedAt: now, sessionIds: [], overlaps: [], asks: 0, log: [] };
+  // w312: report ids from its brief.
+  store.putWork({ ...base, id: 'w312', title: "Fetch tonight's host desync reports", brief: `Copy ${R1} and ${R2}.`, keys: [`report:${R1}`, `report:${R2}`, 'work:w297'] });
+  // w343: its brief's report and thread, and the one-thread scope made from that thread.
+  store.putWork({ ...base, id: 'w343', title: 'Ledger: detach wrong report keys', brief: `See ${R3} and https://discord.com/channels/530867164866150410/${TH}`, keys: [`discord:${TH}`, `report:${R3}`, 'ref:991'], scope: { threads: [TH] } });
+  // Own keys stay: a title's thread, a report the title names by stamp or hash, given subjects, a broad scope.
+  store.putWork({ ...base, id: 'w314', title: 'Fix: ship lands in the wrong place (Discord thread 1556008532338278470)', brief: 'x', keys: ['discord:1556008532338278470', 'pr:985'], scope: { threads: ['1556008532338278470'] } });
+  store.putWork({ ...base, id: 'w197', title: 'Reproduce desync 20261002T043752Z (Bats target on the host only)', brief: 'x', keys: ['report:20261002T043752Z-desync-f4f4952e62', 'report:20261002T043921Z-desync-1d460c8b98'] });
+  store.putWork({ ...base, id: 'w260', title: 'Desync 3fad4b829b: orphan StationGrid entities', brief: 'x', keys: ['report:20261003T072652Z-desync-3fad4b829b'] });
+  store.putWork({ ...base, id: 'w350', title: 'Fix the cbots fork', brief: `See ${R2}`, keys: [`report:${R1}`, `report:${R2}`], subjects: [`report:${R1}`] });
+  store.putWork({ ...base, id: 'w351', title: 'Triage the threads since Oct 3', brief: 'x', keys: ['discord:1556000000000000001', 'discord:1556000000000000002'], scope: { threads: ['1556000000000000001', '1556000000000000002'] } });
+  // An intake request's keys are its source's: untouched.
+  store.putWork({ ...base, id: 'w331', title: 'Please diagnose this', brief: `Bug Bot ${R3}`, keys: [`discord:${TH}`, 'ffbox:637', `report:${R3}`], source: { kind: 'ffbox-dev', untrusted: true, conversation: '637', threadId: TH } });
+
+  const done = o.detachBorrowedSubjects();
+  assert.deepEqual(done.map((d) => d.id).sort(), ['w197', 'w312', 'w343', 'w350']);
+  assert.deepEqual(store.work.get('w312')!.keys, ['work:w297']);
+  // Old thread keys and scopes stay (most were a fix request's own thread, linked in its brief): only reports go.
+  assert.deepEqual(store.work.get('w343')!.keys, [`discord:${TH}`, 'ref:991']);
+  assert.deepEqual(store.work.get('w197')!.keys, ['report:20261002T043752Z-desync-f4f4952e62']);
+  assert.equal(store.work.get('w260')!.keys.length, 1);
+  assert.deepEqual(store.work.get('w314')!.keys, ['discord:1556008532338278470', 'pr:985']);
+  assert.deepEqual(store.work.get('w350')!.keys, [`report:${R1}`]);
+  assert.equal(store.work.get('w351')!.keys.length, 2);
+  assert.equal(store.work.get('w331')!.keys.length, 3);
+  assert.match(store.work.get('w312')!.log.at(-1)!, new RegExp(`keys detached at start-up \\(w343\\): report:${R1}, report:${R2}\\..*Backup: ledger-detach-`));
+  const backups = fs.readdirSync(dir).filter((f) => f.startsWith('ledger-detach-'));
+  assert.equal(backups.length, 1);
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, backups[0]), 'utf8')) as { items: { id: string; keys: string[] }[] };
+  assert.deepEqual(saved.items.find((i) => i.id === 'w312')!.keys, [`report:${R1}`, `report:${R2}`, 'work:w297'], 'the backup holds the keys as they were');
+  // Run again (every start): nothing to do, no new backup.
+  assert.deepEqual(o.detachBorrowedSubjects(), []);
+  assert.equal(fs.readdirSync(dir).filter((f) => f.startsWith('ledger-detach-')).length, 1);
+  for (const k of [`report:${R1}`, `report:${R2}`]) assert.notEqual(o.boardCheck({ keys: [k] }, 30).matches[0]?.id, 'w312');
+});

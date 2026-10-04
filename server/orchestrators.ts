@@ -2,6 +2,8 @@
 // work ledger (filing, the dispatcher's decisions, the replies people's orchestrators get), each chat's budget between
 // its person's messages, and where the harness's messages about work and workers go. server/agents.ts builds their
 // options and tool belts on top of this; the rules that are not the model's to decide live here.
+import fs from 'node:fs';
+import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import type { Config } from './config.ts';
 import type { Store } from './store.ts';
@@ -28,6 +30,8 @@ import {
   startProblem,
   statusAfter,
   textKeys,
+  SUBJECT_KEY,
+  filingKeys,
   updateNotice,
   updateProblem,
   type Decision,
@@ -103,6 +107,27 @@ export function isBroad(w: Pick<WorkItem, 'scope'>): boolean {
   return !!s && (!!(s.source || s.channel || s.since || s.until) || (s.threads?.length ?? 0) > 1);
 }
 
+/**
+ * The thread and report keys that name a request's own subject (w343): its title (unless players wrote it), its
+ * `subjects`, the threads of its dev links and of a broad scope. Anything else a brief or a related id named is a
+ * reference, never a key FFBox's board_check should answer by.
+ */
+export function ownSubjectKeys(w: Pick<WorkItem, 'title' | 'subjects' | 'ffboxDev' | 'scope' | 'source'>, notThreads: ReadonlySet<string> = new Set()): Set<string> {
+  const out = new Set<string>(w.subjects ?? []);
+  if (!w.source?.untrusted) for (const k of textKeys(w.title, [], notThreads)) if (SUBJECT_KEY.test(k)) out.add(k);
+  for (const l of w.ffboxDev ?? []) if (l.threadId) out.add(`discord:${l.threadId}`);
+  if (isBroad(w)) for (const t of w.scope?.threads ?? []) out.add(`discord:${t}`);
+  return out;
+}
+
+/** Whether a title names this report by its whole id, its time stamp ("20261002T043752Z") or its hash ("3fad4b829b"). */
+export function titleNamesReport(title: string, id: string): boolean {
+  const m = /^(\d{8}T\d{6}Z)-(?:crash|desync)-([0-9a-f]{6,32})$/.exec(id);
+  if (!m) return false;
+  const words = new Set(title.toLowerCase().split(/[^0-9a-z-]+/).flatMap((w) => [w, ...w.split('-')]));
+  return [id.toLowerCase(), m[1].toLowerCase(), m[2]].some((x) => words.has(x));
+}
+
 /** The FFBox conversation a request filed from FFBox's own report or escalation came from (its source), or undefined. */
 export function ffboxSourceConversation(w: Pick<WorkItem, 'source'>): string | undefined {
   const k = w.source?.kind;
@@ -152,6 +177,8 @@ export interface WorkInput {
   attachments?: AttachmentRef[];
   /** What a broad request covers (request_work scope): FFBox dev requests inside it join it instead of being filed. */
   scope?: WorkScope;
+  /** The Discord threads and player reports it is the work for (request_work subjects): their keys (w343). */
+  subjects?: string[];
 }
 
 /** An operator's ffdev turn FFBox handed over (server/devRequests.ts), its files already in the attachment store. */
@@ -318,6 +345,7 @@ export class Orchestrators {
     const m = this.store.settings.heartbeatMinutes;
     if (m) this.store.putSettings({ heartbeat: { ...this.store.settings.heartbeat, [this.d.identity.owner().userId]: m }, heartbeatMinutes: null });
     this.relinkBroadDevLinks();
+    this.detachBorrowedSubjects();
   }
 
   /** A person's own orchestrator, if they have one yet. */
@@ -576,9 +604,10 @@ export class Orchestrators {
     for (const w of this.store.work.values()) {
       if (w.id === exceptId || w.status === 'merged' || w.status === 'cancelled') continue;
       if (!isOpen(w) && now - Date.parse(w.updatedAt) > closedWithinMs) continue;
-      // A Discord thread or report a request names is its key even when it was filed before those keys existed
-      // (w50, w53). Never from players' text: an untrusted brief does not get to claim a thread.
-      const named = w.source?.untrusted ? [] : textKeys(`${w.title}\n${w.brief}\n${(w.relatedIds ?? []).join(' ')}`, [], notThreads).filter((k) => /^(discord|report):/.test(k));
+      // A Discord thread or report a request's TITLE names is its key even when it was filed before those keys existed
+      // (w50, w53). Never from players' text: an untrusted title does not get to claim a thread. Never from its brief or
+      // related ids either, which only reference them (w343).
+      const named = w.source?.untrusted ? [] : textKeys(w.title, [], notThreads).filter((k) => SUBJECT_KEY.test(k));
       out.push({ ref: w.id, kind: 'work', title: w.title, keys: [...new Set([...w.keys, ...named, `work:${w.id}`])] });
     }
     for (const s of this.store.sessions.values()) {
@@ -633,18 +662,24 @@ export class Orchestrators {
     const branches = this.knownBranches();
     const { sandboxes, machines } = this.d.places();
     const related = (input.related_ids ?? []).map((x) => String(x).trim()).filter(Boolean).slice(0, 10);
+    // Its own threads and reports: the title, `subjects` and a given scope; the brief's are references (w343).
+    const own = filingKeys(
+      { title, rest: `${brief}\n${input.constraints ?? ''}`, subjects: (input.subjects ?? []).map(String).slice(0, 50), scopeThreads: input.scope?.threads },
+      branches,
+      this.notThreads(),
+    );
     const keys = new Set([
-      ...textKeys(`${title}\n${brief}\n${input.constraints ?? ''}`, branches, this.notThreads()),
+      ...own.keys,
       ...relatedKeys(related, {
         work: (id) => this.store.work.has(id.toLowerCase()),
         session: (id) => this.store.sessions.has(id),
         delegation: (id) => this.store.delegations.has(id),
         sandbox: (id) => sandboxes.some((s) => same(s.id, id)),
         machine: (id) => machines.some((m) => same(m.id, id)),
-      }, branches),
+      }, branches).filter((k) => !SUBJECT_KEY.test(k)),
     ]);
     const id = `w${++this.store.workSeq}`;
-    // The threads its brief lists are its scope: a dev request from one of them joins it (docs/ffbox.md, "Dev requests").
+    // The threads it is the work for are its scope: a dev request from one of them joins it (docs/ffbox.md, "Dev requests").
     const scope = scopeOf(input.scope, [...keys].filter((k) => k.startsWith('discord:')).map((k) => k.slice('discord:'.length)));
     const w: WorkItem = {
       id,
@@ -654,6 +689,7 @@ export class Orchestrators {
       priority: input.priority ?? 'normal',
       ...(related.length ? { relatedIds: related } : {}),
       keys: [...keys],
+      ...(own.subjects.length ? { subjects: own.subjects } : {}),
       requestedBy: asRequester(owner),
       requesters: [asRequester(owner)],
       humanAsked: human,
@@ -1670,6 +1706,38 @@ export class Orchestrators {
     }
     for (const m of out) console.log(`dev links: FFBox conversation ${m.conversation}${m.threadId ? ` (thread ${m.threadId})` : ''} ${m.to ? `moved from ${m.from} to ${m.to}` : `unlinked from ${m.from} (closed, nothing handles its thread)`}`);
     return out;
+  }
+
+  /**
+   * THE DETACH (w343), run at every start and idempotent: a person's request (no intake source) keeps only the report
+   * keys that name its own subject: its `subjects`, or a report its title names (the whole id, its time stamp or its
+   * hash: "Desync 3fad4b829b: …"). Report keys it got from ids its brief or related ids merely listed are dropped, so
+   * FFBox's board_check stops answering for reports it is not the work for. Lothsahn, 2026-10-04: w312 (ten fetched
+   * reports, "done") and w343 itself (the five reports FFBox could not diagnose). Thread keys stay as they are on old
+   * requests: on the live ledger most came from a fix request's own thread link in its brief (w254, w282, w295, w296),
+   * and dropping them would let FFBox redo that work; new filings follow the full rule (filingKeys). Every request
+   * changed is backed up first (data/ledger-detach-<time>.json), logged and stamped. Returns what it did.
+   */
+  detachBorrowedSubjects(): { id: string; keys: string[] }[] {
+    const notThreads = this.notThreads();
+    const plan: { w: WorkItem; keys: string[] }[] = [];
+    for (const w of this.store.work.values()) {
+      if (w.source) continue;
+      const own = ownSubjectKeys(w, notThreads);
+      const keys = w.keys.filter((k) => k.startsWith('report:') && !own.has(k) && !titleNamesReport(w.title, k.slice('report:'.length)));
+      if (keys.length) plan.push({ w, keys });
+    }
+    if (!plan.length) return [];
+    const at = this.now().toISOString();
+    const backup = path.join(this.d.cfg.dataDir, `ledger-detach-${at.replace(/[:.]/g, '-')}.json`);
+    fs.writeFileSync(backup, JSON.stringify({ at, why: 'w343: report keys a request only referenced', items: plan.map((p) => ({ id: p.w.id, keys: p.w.keys })) }, null, 1));
+    for (const p of plan) {
+      p.w.keys = p.w.keys.filter((k) => !p.keys.includes(k));
+      this.stamp(p.w, `keys detached at start-up (w343): ${p.keys.join(', ')}. Its brief only referenced them; a request is the work for a report its title or subjects name. Backup: ${path.basename(backup)}`);
+      this.store.putWork(p.w);
+      console.log(`ledger: ${p.w.id}: detached ${p.keys.join(', ')} (w343; backup ${backup})`);
+    }
+    return plan.map((p) => ({ id: p.w.id, keys: p.keys }));
   }
 
   /** Every request a dev link lives on now (devTarget of each request with ffboxDev links or an FFBox source conversation), once each. */

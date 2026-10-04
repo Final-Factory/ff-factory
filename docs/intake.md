@@ -314,8 +314,14 @@ FFBox's `fff.board_check` switch; submitting work (phase 3) is not built there y
 - **FFBox checks the ledger first** (protocol 2, docs/ffbox-connector-contract.md). Before a `bug_report` or
   `suggestion` turn, or an intake diagnosis, FFBox's host sends `board_check {ref, keys: ["discord:<thread id>"] or
   ["report:<report id>"], conversation}` and gets `board {verdict: clear | in_flight | done, matches}`: request ids and
-  states, never a brief. Every ledger request that names a Discord thread (a link or a bare id, in its title, brief or
-  related ids) has the key `discord:<thread id>`, older requests included (w50, w53). A match in flight carries
+  states, never a brief. A request has the key `discord:<thread id>` or `report:<report id>` only for what it is the
+  work for (w343): its own source (the intake item's thread or report, its own dev request's thread, the keys FFBox
+  sent with it), its title (a link, a bare id, a report id; older requests included, w50, w53), the `subjects` its
+  filer gave to `request_work`, the threads of a dev request that joined it, and a broad scope's threads. Ids its brief
+  or related ids only mention (reports to fetch, evidence, other threads), notes, worker reports and attachments'
+  contents claim nothing: w312, a fetch request, held "done" for the ten reports its brief listed. Every start drops
+  such report keys from people's requests (thread keys of old requests stay: most were a fix's own thread) (`Orchestrators.detachBorrowedSubjects`; backup `data/ledger-detach-<time>.json`,
+  a log line on each request). A match in flight carries
   `watch` (the worker's PR head branch and PR, or its sandbox branch, the repo and `develop`); a done one `version`
   (the release that carries it, or null while merged but not released) and `mergedIn` (`develop@<sha>`). FF Factory
   re-checks those answers each minute and pushes the ones that change. FFBox's own conversation never matches itself.

@@ -1071,6 +1071,12 @@ export interface WorkItem {
   relatedIds?: string[];
   /** What overlaps are matched on: "spec:098", "pr:412", "branch:098-belts", "session:ab12cd34". */
   keys: string[];
+  /**
+   * The Discord threads and player reports its filer said it is the work for (request_work `subjects`), as keys
+   * ("discord:<thread>", "report:<id>"). With its title, its dev links and a broad scope, the only place its thread and
+   * report keys may come from (w343): a brief's ids are references.
+   */
+  subjects?: string[];
   /** Who filed it: its workers run on their account. */
   requestedBy: Requester;
   /** Everyone it is for, the filer first, then the people whose requests were merged into it. They hear its news. */

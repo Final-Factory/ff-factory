@@ -2539,10 +2539,17 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           brief: z.string().min(1).max(8000).describe('The full brief: goal, done-criteria, constraints, the skill to use, what your person said.'),
           priority: priority.optional().describe('Default normal. urgent: broken for players, or blocking someone.'),
           constraints: z.string().max(2000).optional().describe('Where it must or must not run, deadlines, what not to touch.'),
-          related_ids: z.array(z.string()).max(10).optional().describe('What it is about: specs ("098"), PRs ("PR 412"), sessions, sandboxes, delegation requests, other requests ("w11").'),
+          related_ids: z.array(z.string()).max(10).optional().describe('What it is about: specs ("098"), PRs ("PR 412"), sessions, sandboxes, delegation requests, other requests ("w11"). References only: a Discord thread or player report here is not claimed (use subjects).'),
+          subjects: z
+            .array(z.string())
+            .max(50)
+            .optional()
+            .describe(
+              'The Discord threads (link or id) and player reports ("20261003T222237Z-desync-87b7e4f96f") this request is THE WORK FOR: fixing or diagnosing them. FFBox then treats them as in hand (its ledger check answers in_flight, later done) and does not work them itself. Ids in the title count too. Ids only mentioned in the brief (reports to fetch, evidence, other people\'s threads) are references and claim nothing, so leave out any the request does not fix.',
+            ),
           attachments: ATTACHMENTS.describe('Files your person attached, by id ("att_k2m9x0q7p3a1", from an [attachments] list): saves, bug-report zips, logs. Every worker started for the request gets a copy in Inbox/ in its working folder.'),
           scope: SCOPE.optional().describe(
-            'For a broad request (triage a batch of threads, "the bug reports since <date>"): what it covers. While it is open, an FFBox dev request from inside its scope joins it instead of being filed. threads: Discord thread ids (those its brief lists are added by themselves); or source (discord, codereview, shell, web) and/or channel (FFBox\'s watch alias, e.g. "bug_reports") with since and/or until (ISO times): the conversations created in that window.',
+            'For a broad request (triage a batch of threads, "the bug reports since <date>"): what it covers. While it is open, an FFBox dev request from inside its scope joins it instead of being filed. threads: Discord thread ids (those its title or subjects name are added by themselves; not those a brief only mentions); or source (discord, codereview, shell, web) and/or channel (FFBox\'s watch alias, e.g. "bug_reports") with since and/or until (ISO times): the conversations created in that window.',
           ),
         },
         wrap(async (a) => o.file(chat(), { ...a, attachments: this.attachmentsFor(a.attachments) })),
