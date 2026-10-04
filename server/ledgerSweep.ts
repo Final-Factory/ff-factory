@@ -26,12 +26,14 @@ import {
   cutOffOf,
   isRelease,
   mergePrs,
-  prMergedText,
+  ownerAt,
   prUrlsIn,
+  prMergedText,
   prsOf,
   reportVerdict,
   stallCandidate,
   supersededBy,
+  type OpenedPr,
   type PrRecord,
 } from './ledgerRules.ts';
 import type { LedgerCleanupState, Requester, SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
@@ -51,8 +53,6 @@ export interface LedgerSweepDeps {
   prs?: (repos: string[]) => Promise<PrRecord[] | undefined>;
   /** One PR by number, for a linked PR older than the list reaches. */
   viewPr?: (repo: string, number: number) => Promise<PrRecord | undefined>;
-  /** The branches a worker had checked out (its sandbox's), for linking its PRs. */
-  headsOf?: (s: SessionInfo) => string[];
   /** Send a stopped worker a message, which resumes it. */
   resume?: (sessionId: string, text: string) => void;
   /** Whether the Claude account a worker ran on has room again (no meter near its limit), or undefined when unknown. */
@@ -166,8 +166,9 @@ export class LedgerSweep {
     const acts: Action[] = [];
     try {
       const backfill = !this.data.backfilledAt;
-      const work = [...this.d.store.work.values()];
       const prs = await this.loadPrs();
+      if (prs) await this.recheckClosed(prs, acts);
+      const work = [...this.d.store.work.values()];
       if (full && this.d.intakeMerged) {
         for (const id of await this.d.intakeMerged().catch(() => [] as string[])) {
           const w = this.d.store.work.get(id);
@@ -265,20 +266,70 @@ export class LedgerSweep {
     }
   }
 
-  /** The PR URLs a request's workers wrote in their last events (gh pr create prints one). */
-  private linkedByWorkers(workers: readonly SessionInfo[]): { repo: string; number: number }[] {
-    const out: { repo: string; number: number }[] = [];
+  /**
+   * The PRs this request's workers opened while working on it (w340): the URL a `gh pr create` printed, at the time it ran,
+   * kept only when this request is the one the worker was on then (the latest filed by then of the requests that share the
+   * worker). A URL a worker merely mentions, or a PR of an earlier request the same worker did, is not one.
+   */
+  private openedBy(w: WorkItem, workers: readonly SessionInfo[], limit = 2000): OpenedPr[] {
+    const out: OpenedPr[] = [];
+    const all = [...this.d.store.work.values()];
     for (const s of workers) {
-      const texts = this.d.store.readTranscript(s.id, 300).flatMap((e) => (e.kind === 'assistant' || e.kind === 'tool_result' || e.kind === 'result' ? [e.text] : []));
-      for (const t of [...texts, s.lastResult ?? '']) out.push(...prUrlsIn(t));
+      const sharing = all.filter((x) => x.sessionIds.includes(s.id));
+      const created = new Set<string>();
+      for (const e of this.d.store.readTranscript(s.id, limit)) {
+        if (e.kind === 'tool_use' && /bash/i.test(e.name) && /\bgh\s+pr\s+create\b/.test(String((e.input as { command?: unknown } | null)?.command ?? ''))) created.add(e.toolUseId);
+        if (e.kind !== 'tool_result' || !created.has(e.toolUseId) || e.isError) continue;
+        if (ownerAt(sharing, e.t)?.id !== w.id) continue;
+        for (const u of prUrlsIn(e.text)) out.push({ ...u, at: e.t });
+      }
     }
     return out;
   }
 
+  /**
+   * w340: requests this cleanup closed on a merged PR within the last 14 days are checked against the strict link rules
+   * (server/ledgerRules.ts prsOf). One whose closing PR no longer qualifies is reopened (active with its worker, else new),
+   * its wrong links dropped, and its person told. A PR gh cannot show is left alone: no evidence either way.
+   */
+  private async recheckClosed(all: readonly PrRecord[], acts: Action[]) {
+    const since = this.now() - 14 * 86_400_000;
+    for (const w of [...this.d.store.work.values()]) {
+      if (w.status !== 'done' || w.autoClosed?.how !== 'prs' || !w.autoClosed.pr || Date.parse(w.autoClosed.at) < since) continue;
+      try {
+        const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+        const listed = new Map(all.map((p) => [`${p.repo.toLowerCase()}#${p.number}`, p]));
+        const records = [...all];
+        for (const p of w.prs ?? []) {
+          if (listed.has(`${p.repo.toLowerCase()}#${p.number}`)) continue;
+          const v = await this.view(p.repo, p.number);
+          if (v) records.push(v);
+        }
+        const strong = prsOf(w, records, { opened: this.openedBy(w, workers, 100_000) });
+        const closing = w.prs?.find((p) => p.number === w.autoClosed!.pr);
+        if (!closing) continue;
+        if (closing.via) continue;
+        if (strong.some((p) => p.number === closing.number && p.repo === closing.repo)) continue;
+        if (!records.some((p) => p.number === closing.number && p.repo === closing.repo)) continue;
+        const keep = (w.prs ?? []).filter((p) => strong.some((q) => q.number === p.number && q.repo === p.repo));
+        const status = workers.length ? 'active' : 'new';
+        const text = `PR #${closing.number} is not this request's by the strict link rules (no Request: ${w.id} line, not opened by its own worker after it was filed, not its branch)`;
+        this.d.orchestrators.ledgerEdit(w.id, `reopened by the ledger cleanup: ${text}; it was closed automatically as "${w.autoClosed.text}"`, (x) => {
+          x.status = status;
+          x.autoClosed = undefined;
+          if (x.outcome?.startsWith('closed automatically')) x.outcome = undefined;
+          x.prs = keep;
+        });
+        acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'note', text: `reopened: ${text}` });
+      } catch (e) {
+        console.warn(`ledger cleanup: recheck ${w.id}: ${(e as Error).message}`);
+      }
+    }
+  }
+
   /** Link PRs, note what changed, close or leave open. True when the request was closed (it needs nothing more). */
   private async prStep(w: WorkItem, workers: readonly SessionInfo[], all: readonly PrRecord[], acts: Action[]): Promise<boolean> {
-    const heads = workers.flatMap((s) => this.d.headsOf?.(s) ?? []);
-    const found = prsOf(w, all, { heads, linked: this.linkedByWorkers(workers) });
+    const found = prsOf(w, all, { opened: this.openedBy(w, workers) });
     let prs = mergePrs(w.prs ?? [], found);
     // A linked PR the list no longer reaches: ask for it by number (a few per pass).
     const listed = new Set(all.map((p) => `${p.repo.toLowerCase()}#${p.number}`));

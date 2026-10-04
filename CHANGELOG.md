@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The cleanup links a PR to a request only on strong evidence** (w340, asked by Lothsahn: it closed w339 on #988, an
+  earlier request's PR that merged before w339 existed, while w339's worker was still working). A PR is a request's
+  only by its `Request: wNNN` line, because the request's own worker opened it (`gh pr create`) after the request was filed,
+  or because its head is the request's branch. Never from related ids or PR numbers in a brief or report, from a merge
+  before the request was filed, or from a worker or sandbox shared with another request. Automatic closes made on the old
+  rules are checked again and reopened when their PR no longer qualifies
+  ([docs/orchestrators.md](docs/orchestrators.md), "Pull requests").
+
 - **A broad request's close is no longer posted as a thread's result** (w317). A thread joined to a broad request (a
   scope over a window, a source, a channel or several threads) hears nothing from it; a narrower request for the
   thread takes its link (and, at start-up, every link a broad request holds), so the thread's own fix is its result.

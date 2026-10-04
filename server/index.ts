@@ -438,7 +438,6 @@ const ledgerSweep = new LedgerSweep({
   cfg,
   store,
   orchestrators: agents.orchestrators,
-  headsOf: (s) => agents.workerBranches(s),
   resume: (id, text) => void sessions.send(id, text, 'system'),
   limitsClear: (s) => limitsClearFor(s),
   intakeMerged: () => intake.checkMerged(false),

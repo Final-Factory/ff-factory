@@ -1152,6 +1152,8 @@ export interface WorkPr {
   at?: string;
   /** The merge commit. */
   sha?: string;
+  /** The strong evidence that linked it (server/ledgerRules.ts prsOf): its Request line, its own worker opened it, or its head branch is the request's. Absent on links made before w340, which are checked again. */
+  via?: 'line' | 'worker' | 'branch';
   /** What the log already said about it, so a sweep notes a state once ("merged:release", "closed"). */
   noted?: string;
 }

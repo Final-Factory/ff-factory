@@ -85,20 +85,24 @@ ones). The page gets the open ones, the stalled ones and those closed in the las
 
 ## Pull requests
 
-Each request is linked to the pull requests its workers open (`WorkItem.prs`: repo, number, state, merge commit). A PR
-belongs to a request when:
+Each request is linked to the pull requests its workers open (`WorkItem.prs`: repo, number, state, merge commit, and
+`via`, the evidence). A PR belongs to a request only on strong evidence (`prsOf`, `server/ledgerRules.ts`):
 
 - its description has a line `Request: w293` (the brief of every worker started with a `work_id` asks for it:
   `requestLineRule`, `server/work.ts`); or
-- a worker of the request wrote its URL (`https://github.com/<owner>/<name>/pull/<n>`) in its reports or transcript; or
-- it is on a branch a worker's sandbox had checked out and was opened after the request was filed (a sandbox's branch
-  is reused from request to request, so an older PR on it is not this request's); or
-- it is the request's own `pr:` key.
+- the request's own worker opened it: a `gh pr create` in the worker's transcript printed its URL, after the request was
+  filed, while the worker was on this request (a worker that did several requests in a row owns each PR for the latest
+  request filed by the time it ran the command, `ownerAt`); or
+- its head branch is the request's own branch (an intake request's `ffbox/...`).
 
-A PR that says it is for another request is never taken by the last three. The PRs show on the request in the Requests
-tab and in `list_work`. The repos asked are the game repo's and this app's own (from their `origin`), or exactly
-`ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each, and `gh pr view` for
-a linked open PR older than that). When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
+It is **never** linked from related ids, from a PR number the brief or a worker's report mentions, or from a worker or
+sandbox the request merely shares, and never when the PR merged before the request was filed. A PR whose description says it
+is for another request is not this one's. Links made before these rules (no `via`) are dropped unless the rules find them
+again, and an automatic close whose closing PR no longer qualifies is reopened by the next pass (active when a worker is on
+it, else new), with a line in its log and a note to its person (w340: w339 was closed on #988, an earlier request's PR). The PRs show on
+the request in the Requests tab and in `list_work`. The repos asked are the game repo's and this app's own (from their
+`origin`), or exactly `ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each, and
+`gh pr view` for a linked open PR older than that). When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
 
 **When a linked PR merges** (checked every 5 minutes, `LedgerSweep.checkPrs`, `server/ledgerSweep.ts`), the request
 closes as done, logging "merged as #N (sha) on date", when all of this holds:
