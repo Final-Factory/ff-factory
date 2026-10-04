@@ -29,6 +29,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A person's close is final** (w370, asked by Lothsahn). The ledger cleanup's re-check reopened w50 a minute after
+  Lothsahn closed it by hand: its old automatic-close mark from #1002 had survived a hand reopen made before #83 and the
+  hand close. Any close or reopen not made by the cleanup (a person's, the dispatcher's, a worker's marker, the intake's)
+  now clears the mark and the loose PR links, and the re-check skips a request whose log shows such a close after its own.
+
 - **The ledger cleanup's full pass runs** (w363, asked by Lothsahn). It never had: due 10 minutes after each start, it found
   the 5-minute pull-request pass still running and skipped for `everyHours`, so `lastRunAt` was never written and no
   finished, cut-off, superseded or idle request was ever closed, resumed or stalled. It now waits for the running pass.

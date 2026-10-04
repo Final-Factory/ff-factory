@@ -31,6 +31,7 @@ import {
   statusAfter,
   textKeys,
   SUBJECT_KEY,
+  settleByHand,
   filingKeys,
   updateNotice,
   updateProblem,
@@ -759,10 +760,7 @@ export class Orchestrators {
       w.status = 'new';
       w.stalled = undefined;
       // A wrong automatic close, reopened by hand (w340: w50 and w128 on 2026-10-04): it no longer says it was closed.
-      if (w.autoClosed) {
-        w.autoClosed = undefined;
-        if (w.outcome?.startsWith('closed automatically')) w.outcome = undefined;
-      }
+      settleByHand(w);
       what.push('reopened');
     } else if (w.status === 'stalled' && !input.close) {
       w.status = 'new';
@@ -783,6 +781,9 @@ export class Orchestrators {
       }
     }
     if (input.close) {
+      // A PERSON'S CLOSE IS FINAL (w370): no automatic-close mark or loose PR link survives it for the cleanup's
+      // re-check to act on (w50 on 2026-10-04: closed by hand at 06:33, reopened by the re-check at 06:34).
+      settleByHand(w);
       w.status = input.close;
       if (note) w.outcome = clip(note, 300);
       what.push(input.close === 'done' ? 'closed as done' : 'cancelled');
@@ -835,6 +836,9 @@ export class Orchestrators {
     } else if (input.action === 'queue') what = 'queued';
     else if (input.action === 'reject') what = 'declined';
     else what = 'done';
+    // The dispatcher's decision is a hand close or reopen too (w370: w339, closed by it at 02:26, reopened by the
+    // re-check at 05:30 on the stale mark of an earlier automatic close).
+    if (statusAfter(input.action) !== w.status) settleByHand(w);
     w.status = statusAfter(input.action);
     if (input.action === 'reject' || input.action === 'done') w.outcome = clip(note, 300);
     this.stamp(w, `dispatcher: ${what}: ${note}`);
@@ -1029,6 +1033,7 @@ export class Orchestrators {
   closeIntake(id: string, outcome: string) {
     const w = this.requireWork(id);
     if (!isOpen(w)) return;
+    settleByHand(w);
     w.status = 'done';
     w.outcome = clip(outcome, 300);
     this.stamp(w, outcome);
@@ -1279,11 +1284,13 @@ export class Orchestrators {
         this.onIntakeAttention?.(w, 'design');
       } else if (m.fixCommit) {
         w.delivery = { ...w.delivery, fixCommit: m.fixCommit, fixAt: at };
+        settleByHand(w);
         w.status = 'done';
         w.outcome = clip(`Fix landed in ${m.fixCommit.slice(0, 12)}${m.resolved ? `: ${m.resolved}` : ''}`, 300);
         this.stamp(w, `worker ${s.id}: FIX-LANDED ${m.fixCommit}`);
         this.store.putWork(w);
       } else if (m.resolved) {
+        settleByHand(w);
         w.status = 'done';
         w.outcome = clip(m.resolved, 300);
         this.stamp(w, `worker ${s.id}: RESOLVED ${m.resolved}`);

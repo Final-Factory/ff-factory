@@ -9,7 +9,7 @@ import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
-import { LedgerSweep } from './ledgerSweep.ts';
+import { LedgerSweep, handledAfterAutoClose } from './ledgerSweep.ts';
 import type { PrRecord } from './ledgerRules.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
@@ -552,4 +552,53 @@ test('w363: a usage limit not yet reset stalls the request with the reason; a wo
   assert.match(get('w34').stalled!.reason, /weekly limit.*the limit has not reset yet/);
   assert.equal(world.resumed.length, 0);
   assert.equal(get('w35').status, 'active', 'a report that mentions a limit is not a cut-off');
+});
+
+test('w370: auto-closed on a loose link, reopened by hand, closed by hand: the re-check leaves it closed', async (t) => {
+  const { request, pr, world, sweep, get, o } = setup(t);
+  const closedBy = { at: ago(4), how: 'prs' as const, pr: 1002, sha: 'a'.repeat(40), text: 'merged as #1002 (a684e5257e6b) on 2026-10-04' };
+  request('w50', {
+    requestedBy: LOTH, requesters: [LOTH], createdAt: ago(120), updatedAt: ago(4), status: 'done',
+    autoClosed: closedBy, outcome: 'closed automatically: merged as #1002 (a684e5257e6b) on 2026-10-04',
+    prs: [{ repo: REPO, number: 884, state: 'merged' }, { repo: REPO, number: 1002, state: 'merged' }],
+    log: ['01:41 linked PR #884 (merged), PR #1002 (open)', '02:29 closed automatically by the ledger cleanup: merged as #1002 (a684e5257e6b) on 2026-10-04'],
+  });
+  world.prs = [pr(1002, { head: 'ffbox-f/altd-desync', createdAt: ago(6), mergedAt: ago(5) }), pr(884, { createdAt: ago(130), mergedAt: ago(125) })];
+  const loth = o.personalFor(LOTH);
+  loth.lastFrom = 'human';
+  o.update(loth, { id: 'w50', reopen: true, note: 'Reopened: it was wrongly auto-closed as "merged as #1002".' });
+  o.update(loth, { id: 'w50', close: 'done', note: "Closed at lothsahn's request (likely covered by w257/#961 and w287)." });
+  const w = get('w50');
+  assert.deepEqual([w.status, w.autoClosed, w.prs], ['done', undefined, []], 'a hand close clears the mark and the loose links');
+  await sweep.checkPrs();
+  assert.equal(get('w50').status, 'done', 'a person’s close is final');
+  assert.equal(get('w50').outcome, "Closed at lothsahn's request (likely covered by w257/#961 and w287).");
+  assert.doesNotMatch(get('w50').log.join('\n'), /reopened by the ledger cleanup/);
+});
+
+test('w370: a stale auto-close mark under a later hand close (from before the fix) is dropped, never acted on; the dispatcher’s close counts too', async (t) => {
+  const { request, pr, world, sweep, get } = setup(t);
+  const closedBy = (n: number) => ({ at: ago(4), how: 'prs' as const, pr: n, sha: 'a'.repeat(40), text: `merged as #${n} (aaaaaaaaaaaa) on 2026-10-04` });
+  // w50 as it was at 06:33: reopened by hand on the old code (the mark stayed), then closed by hand.
+  request('w50', {
+    requestedBy: LOTH, requesters: [LOTH], createdAt: ago(120), updatedAt: ago(1), status: 'done', autoClosed: closedBy(1002),
+    outcome: "Closed at lothsahn's request.", prs: [{ repo: REPO, number: 1002, state: 'merged' }],
+    log: ['02:29 closed automatically by the ledger cleanup: merged as #1002 (a684e5257e6b) on 2026-10-04', '05:29 lothsahn: reopened; note: Reopened: wrongly auto-closed', "06:33 lothsahn: note: Closed at lothsahn's request.; closed as done"],
+  });
+  // w339 as it was at 02:26: auto-closed on #988, reopened by hand, then closed by the dispatcher on its own PR #1011.
+  request('w339', {
+    requestedBy: LOTH, requesters: [LOTH], createdAt: ago(10), updatedAt: ago(2), status: 'done', autoClosed: closedBy(988),
+    outcome: 'Merged as PR #1011: the Express Logistics Bay text.', prs: [{ repo: REPO, number: 988, state: 'merged' }],
+    log: ['01:54 closed automatically by the ledger cleanup: merged as #988 (3e375ee92d6e) on 2026-10-04', '01:54 lothsahn: reopened; note: Reopened', '02:26 dispatcher: done: Merged as PR #1011'],
+  });
+  // An ordinary automatic close on a loose link, nobody touched since: still checked and reopened.
+  request('w8', { createdAt: ago(200), updatedAt: ago(4), status: 'done', autoClosed: closedBy(1013), outcome: 'closed automatically: merged as #1013', prs: [{ repo: REPO, number: 1013, state: 'merged' }], log: ['03:39 closed automatically by the ledger cleanup: merged as #1013 (7ee49a003bc9) on 2026-10-04'] });
+  world.prs = [pr(1002, { createdAt: ago(6), mergedAt: ago(5) }), pr(988, { createdAt: ago(20), mergedAt: ago(15) }), pr(1013, { createdAt: ago(6), mergedAt: ago(5) })];
+  await sweep.checkPrs();
+  assert.deepEqual([get('w50').status, get('w50').autoClosed, get('w50').outcome], ['done', undefined, "Closed at lothsahn's request."]);
+  assert.deepEqual([get('w339').status, get('w339').autoClosed, get('w339').outcome], ['done', undefined, 'Merged as PR #1011: the Express Logistics Bay text.']);
+  assert.equal(get('w8').status, 'new', 'the cleanup’s own close is still checked');
+  assert.equal(handledAfterAutoClose(['03:39 closed automatically by the ledger cleanup: merged as #1013', '05:30 reopened by the ledger cleanup: PR #1013 is not this request\'s']), false);
+  assert.equal(handledAfterAutoClose(['02:29 closed automatically by the ledger cleanup: x', '05:29 ben: reopened']), true);
+  assert.equal(handledAfterAutoClose(['02:29 closed automatically by the ledger cleanup: x', '05:31 worker ab12cd34: FIX-LANDED 1a2b3c4d']), true);
 });
