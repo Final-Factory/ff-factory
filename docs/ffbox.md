@@ -115,6 +115,12 @@ during play, the hash, the census, per-heartbeat or per-frame capture (tick and 
 and after: under 1% merges with the numbers recorded, above stays open and goes back to the intake for a developer,
 `PERF-ESCALATION`). The daily caps and the duplicate checks still apply.
 
+**A finished diagnosis is filed into the ledger** (w361; docs/intake.md, "Intake diagnoses from FFBox"): FFBox's
+host posts it to `POST /api/intake/ffbox` with `source: "intake"`, root cause found or not, PR or not, and records
+the `workId` it gets back. FF Factory joins it to ledger work only on an exact key (a report id, the desync group,
+FFBox's own PR or branch), notes a shared signature as a maybe, and answers `done` only for a fix released after the
+report's game version. FFBox's switch is `fff.escalate.intake` (off until FF Factory accepts the source).
+
 ### Players' reports, read from FF Factory (w320)
 
 Lothsahn, 2026-10-03: FF Factory may read the reports on FFBox, and must not be able to modify them. Two read-only

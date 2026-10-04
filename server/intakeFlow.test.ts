@@ -16,6 +16,8 @@ import { limitProblem } from './work.ts';
 import { UNTRUSTED_HEADER, parseBugThread, type DiscordMessage, type DiscordThread } from './intakeRules.ts';
 import type { NightlyReport, NightlyResult } from './nightlyRules.ts';
 import { ESCALATION } from './escalationRules.test.ts';
+import { DIAGNOSIS } from './diagnosisRules.test.ts';
+import type { Diagnosis } from './diagnosisRules.ts';
 import { run } from './proc.ts';
 import type { Config } from './config.ts';
 import type { ProviderConversation, Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
@@ -873,4 +875,108 @@ test('desync PR policy: what each class ends with; a class 3 PR with a cost goes
   await until('the worker idles', () => sessions.get(ow.id).info.status === 'idle');
   o.workerTurnEnded(ow, 'PERF-ESCALATION: tick +5%');
   assert.equal(other.approval?.state, 'approved');
+});
+
+// ---------------------------------------------------------------- FFBox's intake diagnoses (w361)
+
+const DLEAD = '20261004T090000Z-desync-3a9f01c2d4';
+/** A diagnosis body with its own report, conversation and turn; `o` patches it. */
+const diag = (n: number, o: Partial<Diagnosis> = {}, report: Partial<Diagnosis['report']> = {}): Diagnosis => {
+  const lead = `20261004T0900${String(n).padStart(2, '0')}Z-desync-${(0xabc000 + n).toString(16)}`;
+  return {
+    ...DIAGNOSIS,
+    ref: `intake-${900 + n}-turn-1`,
+    conversation: String(900 + n),
+    pr: undefined,
+    attachments: [{ name: `${lead}.zip`, kind: 'report_zip', bytes: 1000, sha256: `${n}`.padStart(64, '0'), reportId: lead }],
+    ...o,
+    report: { ...DIAGNOSIS.report, lead, reportIds: [lead], group: `${n}`.padStart(12, 'e'), signature: `desync:0.50.0:surface${n}`, ...report },
+  };
+};
+
+test('intake diagnoses: off by switch, idempotent by ref, filed per category with their locators', async (t) => {
+  const { intake, work, cfg } = setup(t);
+  assert.deepEqual(intake.onDiagnosis(diag(1)), { status: 'off' });
+  cfg.intake = { ffbox: { enabled: true, escalations: true, diagnoses: false } };
+  assert.deepEqual(intake.onDiagnosis(diag(1)), { status: 'off' }, 'intake.ffbox.diagnoses gates it');
+  cfg.intake = { ffbox: { enabled: true, escalations: true } };
+
+  // A desync with a fix pushed: the desync PR policy (w358), approved at once.
+  const pr = intake.onDiagnosis(diag(1, { pr: { branch: 'ffbox/fix-1', number: 1001 } }));
+  assert.equal(pr.status, 'filed');
+  const w = work().find((x) => x.id === (pr as { workId: string }).workId)!;
+  assert.deepEqual([w.source?.kind, w.triage?.class, w.approval?.state, w.source?.pr, w.source?.branch], ['ffbox-diagnosis', 'ffbox-desync', 'approved', 1001, 'ffbox/fix-1']);
+  assert.deepEqual(w.source?.reportFiles?.map((f) => [f.kind, f.reportId]), [['report_zip', diag(1).report.lead]], 'the fetch locators are stored');
+  assert.ok(w.keys.includes(`report:${diag(1).report.lead}`) && w.keys.includes('pr:1001'));
+  assert.deepEqual(intake.onDiagnosis(diag(1, { pr: { branch: 'ffbox/fix-1', number: 1001 } })), pr, 'a resend of the ref: the same answer');
+  assert.equal(work().length, 1);
+  // A desync whose root cause was found, no PR: the policy too (the worker writes the class 2 fix).
+  const found = intake.onDiagnosis(diag(2));
+  assert.equal(work().find((x) => x.id === (found as { workId: string }).workId)!.triage?.class, 'ffbox-desync');
+  // No PR, root cause not found: an investigation item by the w299 triage, held while auto-approve is off.
+  const inv = intake.onDiagnosis(diag(3, { rootCause: 'not_found', verdict: 'NEEDS-INFO' }));
+  assert.equal(inv.status, 'held');
+  const iw = work().find((x) => x.id === (inv as { workId: string }).workId)!;
+  assert.deepEqual([iw.triage?.class, iw.approval?.state, iw.source?.rootCause], ['obvious-bug', 'pending', 'not_found']);
+  // A crash with a PR is not a desync PR: the w299 triage.
+  const crash = '20261004T090009Z-crash-abc009';
+  const c = intake.onDiagnosis(diag(9, { pr: { branch: 'ffbox/crash-9', number: 1009 } }, { kind: 'crash', lead: crash, reportIds: [crash], group: undefined, signature: undefined, divergedSurfaces: undefined, heartbeat: undefined, role: undefined, paired: undefined, correlationId: undefined }));
+  assert.notEqual(work().find((x) => x.id === (c as { workId: string }).workId)!.triage?.class, 'ffbox-desync');
+});
+
+test('intake diagnoses: exact keys join, a signature is only a maybe, feature work never matches, the done/version rule', async (t) => {
+  const { intake, work, o, call, store } = setup(t, { ffbox: { enabled: true, escalations: true, autoApprove: { enabled: true, maxPerDay: 20 } } });
+  // FFBox's PR is already a review item (its conversation reported the branch): the diagnosis attaches to it.
+  intake.onConversation(conv({ id: '7001', source: 'intake', opener: 'system', agentClass: 'ffdiagnose', title: 'Desync powerGrid at heartbeat 900', branch: 'ffbox/power-7', pr: { number: 1100, state: 'open' } }));
+  const review = work()[0];
+  const a = intake.onDiagnosis(diag(1, { pr: { branch: 'ffbox/power-7', number: 1100 } }));
+  assert.deepEqual(a, { status: 'in_flight', workId: review.id }, 'no second item for the same PR');
+  assert.ok(review.keys.includes(`report:${diag(1).report.lead}`), 'its report keys join the review item');
+  assert.equal(review.source?.reportFiles?.length, 1, 'and its files');
+  assert.match(review.log.join('\n'), /FFBox's diagnosis intake-901-turn-1 joined it \(the same (pr 1100|branch ffbox\/power-7)\)/);
+  assert.equal(work().length, 1);
+
+  // A later diagnosis of a partner report of the same desync event (group) joins too; so does one naming a report already on it.
+  assert.equal(intake.onDiagnosis(diag(2, {}, { group: diag(1).report.group })).status, 'in_flight');
+  assert.equal(intake.onDiagnosis(diag(3, {}, { reportIds: [diag(3).report.lead, diag(1).report.lead] })).status, 'in_flight');
+  assert.equal(work().length, 1);
+
+  // The same signature alone: filed anew, with the candidate noted as a maybe.
+  const sig = intake.onDiagnosis(diag(4));
+  const first = work().find((x) => x.id === (sig as { workId: string }).workId)!;
+  const maybe = intake.onDiagnosis(diag(5, {}, { signature: first.source!.key }));
+  const mw = work().find((x) => x.id === (maybe as { workId: string }).workId)!;
+  assert.notEqual(mw.id, first.id, 'a shared signature never joins');
+  assert.match(mw.log.join('\n'), new RegExp(`Possibly the same bug as ${first.id} \\(the same signature`));
+
+  // Feature work that happens to hold the same branch name, PR number or signature: never matched.
+  const person = o.personalFor(BEN);
+  person.lastFrom = 'human';
+  await call(person.info, 'request_work', { title: 'Polish the power grid UI (PR #1200)', brief: 'Feature work on branch ffbox/feature-12.' });
+  const feature = work().find((x) => !x.source)!;
+  feature.keys.push('pr:1200', 'branch:ffbox/feature-12');
+  const f = intake.onDiagnosis(diag(6, { pr: { branch: 'ffbox/feature-12', number: 1200 } }));
+  assert.notEqual((f as { workId: string }).workId, feature.id);
+  assert.equal(feature.log.some((l) => l.includes('intake-906')), false);
+
+  // done: a released fix newer than the report's game covers it; one the forked game already had does not.
+  const fixed = work().find((x) => x.id === (sig as { workId: string }).workId)!;
+  Object.assign(fixed, { status: 'done', delivery: { fixCommit: 'abc1234def', releasedIn: '0.50.0.50' } });
+  store.putWork(fixed);
+  assert.deepEqual(intake.onDiagnosis(diag(7, {}, { reportIds: [diag(7).report.lead, diag(4).report.lead] })), { status: 'done', workId: fixed.id, version: '0.50.0.50' });
+  const late = intake.onDiagnosis(diag(8, {}, { gameVersion: '0.50.0.51', reportIds: [diag(8).report.lead, diag(4).report.lead] }));
+  assert.equal(late.status === 'filed' || late.status === 'held', true, 'the game that forked already had the 0.50.0.50 fix: a new item');
+  assert.notEqual((late as { workId: string }).workId, fixed.id);
+  assert.match(work().find((x) => x.id === (late as { workId: string }).workId)!.log.join('\n'), new RegExp(`Not the bug of ${fixed.id} \\(fixed in 0\\.50\\.0\\.50, which game 0\\.50\\.0\\.51 already had\\)`));
+  // Merged but not released yet: on its way.
+  Object.assign(fixed.delivery!, { releasedIn: undefined });
+  assert.deepEqual(intake.onDiagnosis(diag(10, {}, { group: diag(4).report.group })), { status: 'in_flight', workId: fixed.id });
+});
+
+test('intake diagnoses: the FFBox daily cap and the intake cap skip, with why', (t) => {
+  const { intake } = setup(t, { ffbox: { enabled: true, escalations: true, dailyCap: 1 } });
+  assert.equal(intake.onDiagnosis(diag(1)).status, 'filed');
+  const capped = intake.onDiagnosis(diag(2));
+  assert.equal(capped.status, 'skipped');
+  assert.match((capped as { why: string }).why, /daily cap/);
 });

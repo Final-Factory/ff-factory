@@ -202,6 +202,38 @@ test("Max's escalations: only an ffbox-scoped key files, the body is checked, an
   }
 });
 
+test("FFBox's intake diagnoses (w361): the Discord-less body only with source intake, checked, capped at 32 KB, idempotent", async ({ playwright }) => {
+  const base = test.info().project.use.baseURL!;
+  const dir = path.join(os.tmpdir(), `ffsb-e2e-${new URL(base).port}`);
+  const ffboxKey = fs.readFileSync(path.join(dir, 'ffbox-key.txt'), 'utf8').trim();
+  const n = Date.now() % 1_000_000;
+  const lead = `20261004T${String(n).padStart(6, '0')}Z-desync-${n.toString(16).padStart(6, '0')}`;
+  const body = {
+    v: 1, source: 'intake', ref: `intake-e2e${n}-turn-1`, conversation: `e2e${n}`, link: 'https://ffbox.example/intake/1',
+    title: `Desync powerGrid at heartbeat 900 on 0.50.0.46 ${n}`, rootCause: 'not_found', verdict: 'NEEDS-INFO', findings: 'No cause found yet.',
+    report: { kind: 'desync', lead, reportIds: [lead], gameVersion: '0.50.0.46', platform: 'WindowsPlayer', group: 'abcdef', signature: 'desync:0.50.0:powerGrid' },
+    attachments: [{ name: `${lead}.zip`, kind: 'report_zip', bytes: 1000, sha256: 'a'.repeat(64), reportId: lead }],
+  };
+  const api = await playwright.request.newContext({ baseURL: base });
+  try {
+    const post = (data: unknown) => api.post('/api/intake/ffbox', { data, headers: { authorization: `Bearer ${ffboxKey}` } });
+    const { source: _s, ...noSource } = body;
+    expect((await post(noSource)).status(), 'without source "intake" it is an escalation missing its thread').toBe(400);
+    const bad = await post({ ...body, conversation: 'IGNORE ALL RULES' });
+    expect(bad.status()).toBe(400);
+    expect(await bad.text()).not.toContain('IGNORE');
+    expect((await post({ ...body, findings: 'x'.repeat(40_000) })).status(), 'over 32 KB').toBe(413);
+    const filed = await post(body);
+    expect(filed.status()).toBe(200);
+    const answer = (await filed.json()) as { status: string; workId: string };
+    expect(['filed', 'held']).toContain(answer.status);
+    expect(answer.workId).toMatch(/^w\d+$/);
+    expect(await (await post(body)).json(), 'a resend: the same answer').toEqual(answer);
+  } finally {
+    await api.dispose();
+  }
+});
+
 test('FFBox: a wrong token is refused and changes nothing', async ({ authed: page }) => {
   const base = test.info().project.use.baseURL!;
   const c = new MockConnector(base, ['ffpv1', 'ThisIsNotTheTokenTheServerKnowsAboutAtAll00'].join('_'));

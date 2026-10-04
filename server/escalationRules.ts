@@ -4,6 +4,7 @@
 // body and what it becomes in the ledger. Pure: server/intake.ts files it.
 import { z } from 'zod';
 import { classifyBug, cleanBlock, cleanLine, quoteUntrusted } from './intakeRules.ts';
+import { DiagnosisSchema, type Diagnosis } from './diagnosisRules.ts';
 import type { WorkSource, WorkTriage } from '../shared/types.ts';
 
 const oneLine = /^[^\u0000-\u001f]*$/;
@@ -36,11 +37,20 @@ export const EscalationSchema = z
 
 export type Escalation = z.infer<typeof EscalationSchema>;
 
-/** The body checked, or what was wrong with it: field names and rules, never the values. */
-export function parseEscalation(raw: unknown): { escalation: Escalation } | { error: string } {
+/**
+ * The body checked, or what was wrong with it: field names and rules, never the values. `source: "intake"` is FFBox's
+ * finished intake diagnosis (w361, server/diagnosisRules.ts), with no Discord fields; anything else is Max's escalation,
+ * whose strict schema refuses a `source` field, so a Discord-less body is accepted only as a diagnosis.
+ */
+export function parseEscalation(raw: unknown): { escalation: Escalation } | { diagnosis: Diagnosis } | { error: string } {
+  const why = (issues: z.core.$ZodIssue[]) => issues.slice(0, 5).map((i) => `${i.path.join('.') || '(body)'}: ${i.message}`).join('; ');
+  if (raw && typeof raw === 'object' && !Array.isArray(raw) && (raw as Record<string, unknown>).source === 'intake') {
+    const d = DiagnosisSchema.safeParse(raw);
+    return d.success ? { diagnosis: d.data } : { error: why(d.error.issues) };
+  }
   const r = EscalationSchema.safeParse(raw);
   if (r.success) return { escalation: r.data };
-  return { error: r.error.issues.slice(0, 5).map((i) => `${i.path.join('.') || '(body)'}: ${i.message}`).join('; ') };
+  return { error: why(r.error.issues) };
 }
 
 const KIND_WORDS: Record<Escalation['kind'], string> = { bug: 'Discord bug', design: 'Design question', escalation: 'Escalation' };
