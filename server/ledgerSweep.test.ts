@@ -226,6 +226,34 @@ test('today’s automatic closes are checked again: a close whose PR no longer q
   assert.equal(get('w339').status, 'active', 'and it stays open');
 });
 
+test('w340: the w50 and w312 shapes are reopened at the first pass after a start, and the server log says so', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  const lines: string[] = [];
+  t.mock.method(console, 'log', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+  const closedBy = (number: number) => ({ at: ago(4), how: 'prs' as const, pr: number, sha: 'b'.repeat(40), text: `merged as #${number} (bbbbbbbbbbbb) on 2026-10-04` });
+  // w50: an old request, closed on a PR opened days after by someone else, with no Request: line.
+  request('w50', { status: 'done', createdAt: ago(24 * 5), updatedAt: ago(4), autoClosed: closedBy(1002), outcome: 'closed automatically: merged as #1002', prs: [{ repo: REPO, number: 1002, state: 'merged' }] });
+  // w312: a fetch request whose worker merged FFBox's PR #991 (an ffbox/ branch) but did not open it.
+  request('w312', { status: 'done', createdAt: ago(8), updatedAt: ago(4), sessionIds: ['s9'], autoClosed: closedBy(991), outcome: 'closed automatically: merged as #991', prs: [{ repo: REPO, number: 984, state: 'merged' }, { repo: REPO, number: 991, state: 'merged' }] });
+  worker('s9', { lastActivityAt: ago(5) });
+  world.prs = [
+    pr(1002, { head: 'ffbox-f/altd-desync', createdAt: ago(6), mergedAt: ago(5) }),
+    pr(984, { head: 'w297-desync-fix', createdAt: ago(7), mergedAt: ago(6) }),
+    pr(991, { head: 'ffbox/desync-report-hauler-departure-d627t1-7ecb12b4', createdAt: ago(7), mergedAt: ago(6) }),
+  ];
+  await sweep.checkPrs();
+  assert.deepEqual([get('w50').status, get('w312').status], ['new', 'active']);
+  assert.equal(get('w312').autoClosed, undefined);
+  assert.equal(get('w50').outcome, undefined);
+  assert.ok(lines.some((l) => /^ledger cleanup: reopened w312 \(active\): PR #991 is not this request's/.test(l)), lines.join('\n'));
+  assert.ok(lines.some((l) => /^ledger cleanup: reopened w50 \(new\): PR #1002/.test(l)), lines.join('\n'));
+  assert.ok(lines.some((l) => /^ledger cleanup: rechecked 2 automatic close\(s\) from the last 14 days; reopened 2$/.test(l)), lines.join('\n'));
+  // Later passes with nothing to reopen stay quiet.
+  const n = lines.length;
+  await sweep.checkPrs();
+  assert.equal(lines.filter((l) => l.startsWith('ledger cleanup:')).length, lines.slice(0, n).filter((l) => l.startsWith('ledger cleanup:')).length);
+});
+
 test('two PRs, one merged: the request stays open and the log says why, once', async (t) => {
   const { request, worker, pr, world, sweep, get, heard } = setup(t);
   request('w1', { sessionIds: ['s1'] });
@@ -455,4 +483,73 @@ test('gh down: the pull-request rule waits, the rest of the cleanup still runs',
   assert.deepEqual(await sweep.checkPrs(), []);
   await sweep.run();
   assert.equal(get('w1').status, 'stalled');
+});
+
+test('w363: a full pass that starts while a PR pass runs waits for it, then closes, resumes and stalls every category, and logs each', async (t) => {
+  const { request, worker, world, sweep, get } = setup(t);
+  const lines: string[] = [];
+  t.mock.method(console, 'log', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+  // FINISHED, in the words Ben's workers used (old requests, no Request: lines, no PRs).
+  const done = (id: string, report: string) => {
+    request(id, { createdAt: ago(130), updatedAt: ago(30), sessionIds: [`s-${id}`] });
+    worker(`s-${id}`, { lastActivityAt: ago(30), lastResult: report });
+  };
+  done('w92', "TL;DR: It's fully merged to develop, so I'm idle.");
+  done('w157', 'TL;DR:** Deploy is fixed and merged into develop as 1e0ba7209.');
+  done('w122', 'Nothing is open or pending.');
+  done('w89', 'My task is finished.');
+  // Not finished: waiting on CI.
+  done('w95', 'Waiting on CI; I will merge when it is green.');
+  // CUT OFF by a usage limit: the turn ended idle with Claude's limit line as its result.
+  request('w17', { createdAt: ago(130), updatedAt: ago(30), sessionIds: ['s-w17'] });
+  worker('s-w17', { lastActivityAt: ago(30), lastResult: "You've hit your session limit · resets 7pm" });
+  // IDLE for days with no worker; and a SUPERSEDED old release.
+  request('w10', { createdAt: ago(130), updatedAt: ago(100) });
+  request('w83', { title: 'Release 0.50.0.60', brief: '/ff-agents:ci-release', status: 'active', createdAt: ago(130), updatedAt: ago(120) });
+  request('w300', { title: 'Release 0.50.0.72', brief: '/ff-agents:ci-release', status: 'done', createdAt: ago(20), updatedAt: ago(10) });
+  // A RUNNING worker is never touched, whatever its report says.
+  request('w200', { createdAt: ago(130), updatedAt: ago(100), sessionIds: ['s-w200'] });
+  worker('s-w200', { status: 'running', lastActivityAt: ago(100), lastResult: 'Done.' });
+
+  // The PR pass holds the sweep busy (gh slow) when the full pass is due.
+  let release!: () => void;
+  const slow = new Promise<PrRecord[]>((r) => (release = () => r([])));
+  world.prs = slow as unknown as PrRecord[];
+  const prPass = sweep.checkPrs();
+  await new Promise((r) => setTimeout(r, 20));
+  const full = sweep.run();
+  await new Promise((r) => setTimeout(r, 50));
+  release();
+  world.prs = [];
+  await prPass;
+  const summary = await full;
+  assert.notEqual(summary, 'a cleanup is already running', 'it waited instead of skipping');
+  assert.ok(sweep.state().lastRunAt, 'and recorded the run');
+
+  assert.deepEqual(['w92', 'w157', 'w122', 'w89'].map((id) => get(id).status), ['done', 'done', 'done', 'done']);
+  assert.match(get('w92').outcome ?? '', /final report says it is delivered/);
+  assert.notEqual(get('w95').status, 'done', 'waiting on CI is not finished');
+  assert.equal(world.resumed.length, 1, 'the limit-cut worker is resumed once (its limit has reset)');
+  assert.equal(world.resumed[0].id, 's-w17');
+  assert.deepEqual([get('w10').status, get('w10').stalled?.kind], ['stalled', 'idle']);
+  assert.deepEqual([get('w83').status, get('w83').stalled?.kind, get('w83').stalled?.by], ['stalled', 'superseded', 'w300']);
+  assert.equal(get('w200').status, 'active', 'a running worker is never touched');
+  for (const re of [/^ledger cleanup: closed w92 \(ben\): /, /^ledger cleanup: resumed w17 \(ben\): /, /^ledger cleanup: stalled w10 \(ben\): /, /^ledger cleanup: stalled w83 \(ben\): probably superseded by w300/, /^ledger cleanup: full pass: closed 4, resumed 1, stalled/]) {
+    assert.ok(lines.some((l) => re.test(l)), `${re}\n${lines.join('\n')}`);
+  }
+});
+
+test('w363: a usage limit not yet reset stalls the request with the reason; a worker that is idle for another reason is not cut off', async (t) => {
+  const { request, worker, world, sweep, get } = setup(t);
+  world.prs = [];
+  world.clear = false;
+  request('w34', { createdAt: ago(130), updatedAt: ago(30), sessionIds: ['s-w34'] });
+  worker('s-w34', { lastActivityAt: ago(30), lastResult: "You've hit your weekly limit · resets Oct 6" });
+  request('w35', { createdAt: ago(130), updatedAt: ago(2), sessionIds: ['s-w35'] });
+  worker('s-w35', { lastActivityAt: ago(2), lastResult: 'I looked at the limit code: the weekly limit resets on Monday.' });
+  await sweep.run();
+  assert.deepEqual([get('w34').status, get('w34').stalled?.kind], ['stalled', 'cut-off']);
+  assert.match(get('w34').stalled!.reason, /weekly limit.*the limit has not reset yet/);
+  assert.equal(world.resumed.length, 0);
+  assert.equal(get('w35').status, 'active', 'a report that mentions a limit is not a cut-off');
 });

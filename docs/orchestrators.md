@@ -100,7 +100,10 @@ It is **never** linked from related ids, from a PR number the brief or a worker'
 sandbox the request merely shares, and never when the PR merged before the request was filed. A PR whose description says it
 is for another request is not this one's. Links made before these rules (no `via`) are dropped unless the rules find them
 again, and an automatic close whose closing PR no longer qualifies is reopened by the next pass (active when a worker is on
-it, else new), with a line in its log and a note to its person (w340: w339 was closed on #988, an earlier request's PR). The PRs show on
+it, else new), with a line in its log and a note to its person (w340: w339 was closed on #988, an earlier request's PR), and a
+`ledger cleanup: reopened <id>` line in the server log; the first pass after a start also logs how many closes it checked
+(after the f4ce1cd deploy it reopened 42, w312 among them, and the log said nothing). A request reopened by hand loses its
+`autoClosed` mark and its "closed automatically" outcome. The PRs show on
 the request in the Requests tab and in `list_work`. The repos asked are the game repo's and this app's own (from their
 `origin`), or exactly `ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each, and
 `gh pr view` for a linked open PR older than that). When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
@@ -124,16 +127,22 @@ when no other PR is open. Intake requests that wait for a reviewer are never clo
 
 Every `ledger.cleanup.everyHours` hours (config.json; default 4, 1 to 168; `enabled` defaults to true) and on demand
 (the owner's **Clean up now** on the Requests tab, `POST /api/ledger/cleanup`), `LedgerSweep.run` goes through every
-open or stalled request. **A request with a running worker (running, starting or waiting for a permission) is never
+open or stalled request. The first full pass after a start comes 10 minutes after it (or `everyHours` after the last one).
+A full pass that finds the 5-minute pull-request pass still running waits for it (up to 10 minutes) instead of skipping:
+until w363 it skipped, so no full pass ever completed (`lastRunAt` was never written in `data/ledger.json`) and nothing
+below was ever applied. Each close, resume and stall is a `ledger cleanup: <closed|resumed|stalled> <id> (<people>)` line in
+the server log, and each full pass ends with `ledger cleanup: full pass: <summary>`. **A request with a running worker (running, starting or waiting for a permission) is never
 touched**, and nothing waiting for a person (an open question, an intake request awaiting approval) is closed or
 stalled. Ben's requests are included. In this order, the first that fits applies:
 
 1. **Merged.** The pull-request rule above for every request, and the intake's merged-branch rule for intake requests.
 2. **Delivered.** A request whose worker's final report (`lastResult`, at least an hour old) states plainly that the work
-   is done ("All done", "is delivered", "nothing more to do") and says nothing is left, waiting or asked, with no open PR
+   is done ("All done", "is delivered", "nothing more to do", "fully merged to develop, so I'm idle", "is fixed and merged into
+   develop", "nothing is open or pending") and says nothing is left, waiting or asked, with no open PR
    and no step after the merge, closes as done with that report quoted. A release's report must also link the patch
    notes and say it is live. When the report is not clear, nothing closes.
-3. **Cut off.** A worker that stopped on a usage or rate limit, an app restart (its turn was still open) or a refused tool
+3. **Cut off.** A worker that stopped on a usage or rate limit (also one whose turn simply ended with Claude's "You've hit
+   your session/weekly limit" as its whole result), an app restart (its turn was still open) or a refused tool
    and never resumed. A limit or restart is resumed once (a message to the worker, recorded in `resumedBy`): a limit only
    when the account it ran on has room again (no plan meter at 90% or more; unknown counts as no). A refused tool, a
    limit that has not reset, and a worker cut off again after its one resume make the request **stalled** with the reason.

@@ -153,7 +153,9 @@ export function prMergedText(p: WorkPr): string {
 
 // ---------------------------------------------------------------- a worker's final report
 
-const DONE_STATEMENT = /(^|\n)\s*[*_#>\s-]*(done|delivered|complete[d]?|finished|all done)\b|\b(is|are|was|were|now|has been|have been) (done|complete[d]?|delivered|finished|merged|live|posted|published|sent)\b|\bnothing (more|else|left) to do\b|\bno further (work|steps?|action)\b/i;
+const DONE_STATEMENT = /(^|\n)\s*[*_#>\s-]*(done|delivered|complete[d]?|finished|all done)\b|\b(is|are|was|were|now|has been|have been) (done|complete[d]?|delivered|finished|merged|live|posted|published|sent|fixed)\b|\bnothing (more|else|left) to do\b|\bno further (work|steps?|action)\b|\b(fully |already )?merged (in)?to (develop|main|master)\b|\bso I'?m idle\b|\bnothing (is |was )?(still )?(open|pending)( or (open|pending))?\b/i;
+/** Phrases that say nothing is left, which NOT_DONE's words (open, pending) would otherwise read as work left (w363). */
+const NOTHING_LEFT = /\bnothing (is |was )?(still )?(open|pending|left)( or (open|pending))?\b|\bno (open|pending) (PRs?|work|questions?|steps?)\b/gi;
 const NOT_DONE = /\b(blocked|waiting (for|on)|needs? (your|a|an|the) (decision|input|approval|answer|confirmation)|could(n'?t| not)|cannot|can'?t|unable|failed|errors?|still (needs?|to|have|open)|remaining|next steps?|follow-?ups?|todo|not yet|pending|question|please (decide|confirm|tell|let)|let me know)\b/i;
 const NOTES_POSTED = /discord\.com\/channels\/\d+\/\d+\/\d+/;
 
@@ -166,7 +168,7 @@ export function reportVerdict(report: string | undefined, release = false): 'del
   const text = (report ?? '').trim();
   if (!text) return 'unsure';
   const tail = text.slice(-700);
-  if (NOT_DONE.test(tail) || /\?\s*$/.test(tail)) return 'more';
+  if (NOT_DONE.test(tail.replace(NOTHING_LEFT, '')) || /\?\s*$/.test(tail)) return 'more';
   if (!DONE_STATEMENT.test(tail)) return 'unsure';
   if (release && !(NOTES_POSTED.test(tail) && /\b(live|landed)\b/i.test(tail))) return 'unsure';
   return 'delivered';
@@ -179,13 +181,20 @@ const REFUSED = /permission (was )?denied|was denied|denied by|refused|not allow
 
 export type CutOff = { kind: 'limit' | 'restart' | 'refused'; reason: string };
 
+/** A turn whose whole result is Claude's limit line ("You've hit your session limit · resets 7pm"). */
+const LIMIT_END = /^\W*(you'?ve (hit|reached) your (\w+[ -])?limit|(claude )?(usage|session|weekly) limit (reached|hit))/i;
+
 /**
  * Whether a worker that is not running stopped for a reason a resume could fix: a usage or rate limit, an app restart
  * (its turn was still open when its process ended), or a refused tool (which would refuse again). `evidence` is its
  * status detail and the text of its last few events.
  */
-export function cutOffOf(s: Pick<SessionInfo, 'status' | 'statusDetail' | 'turnOpenSince'>, evidence: readonly string[]): CutOff | undefined {
-  if (s.status !== 'stopped' && s.status !== 'error') return undefined;
+export function cutOffOf(s: Pick<SessionInfo, 'status' | 'statusDetail' | 'turnOpenSince'> & { lastResult?: string }, evidence: readonly string[]): CutOff | undefined {
+  // A usage limit ends the turn normally (idle) with only Claude's limit line as its result (w363: w17, w34, w36, w83, w93
+  // said "You've hit your session/weekly limit" and nothing resumed or stalled them).
+  const limitEnd = s.status === 'idle' && LIMIT_END.test((s.lastResult ?? '').trim());
+  if (s.status !== 'stopped' && s.status !== 'error' && !limitEnd) return undefined;
+  if (limitEnd) return { kind: 'limit', reason: `stopped on a usage or rate limit: ${(s.lastResult ?? '').replace(/\s+/g, ' ').trim().slice(0, 160)}` };
   const text = [s.statusDetail ?? '', ...evidence].join('\n');
   const clip = (t: string) => t.replace(/\s+/g, ' ').trim().slice(0, 160);
   if (LIMIT.test(text)) return { kind: 'limit', reason: `stopped on a usage or rate limit: ${clip(text.split('\n').find((l) => LIMIT.test(l)) ?? text)}` };

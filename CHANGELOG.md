@@ -29,6 +29,20 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The ledger cleanup's full pass runs** (w363, asked by Lothsahn). It never had: due 10 minutes after each start, it found
+  the 5-minute pull-request pass still running and skipped for `everyHours`, so `lastRunAt` was never written and no
+  finished, cut-off, superseded or idle request was ever closed, resumed or stalled. It now waits for the running pass.
+  A report like "fully merged to develop, so I'm idle", "is fixed and merged into develop" or "nothing is open or
+  pending" counts as delivered, and a turn that ended on "You've hit your session/weekly limit" counts as cut off by a
+  limit. Each action and each full pass is a line in the server log.
+
+- **The ledger's re-check of automatic closes says what it did** (w340, reopened by Lothsahn). After the f4ce1cd deploy it
+  ran at 05:30 and reopened 42 wrongly closed requests (w312 among them), but wrote nothing to the server log, so it looked
+  as if it had not run; w50 and w128 had been reopened by hand a minute before. Each reopen is now a
+  `ledger cleanup: reopened <id>` line, the first pass after a start logs how many closes it checked, and a request
+  reopened by hand no longer says "closed automatically". The w343 detach's two wrong removals (w197's partner report,
+  w313's report fixed by #983) are given back once at start-up, as subjects.
+
 - **No GitHub link in a public Discord thread** (w352, asked by Lothsahn: linking the PR "exposes which github we use.
   I would like that to remain private."). FF Factory's PR-up summary ends "Waiting on review. PR #N." with no link, and
   GitHub links, repo names and ffbox branch names in the PR's TL;DR or evidence line are taken out (`withoutRepo`).

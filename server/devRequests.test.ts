@@ -578,7 +578,8 @@ test("w344: a follow-up's files join its request and reach the busy worker's Inb
   await until("the worker's Inbox/", () => fs.existsSync(path.join(alpha, 'Inbox')) && fs.readdirSync(path.join(alpha, 'Inbox')).filter((f) => f.endsWith('.zip') || f.endsWith('.txt')).length === 2);
   const inbox = fs.readdirSync(path.join(alpha, 'Inbox')).filter((f) => f.endsWith('.zip'));
   assert.deepEqual(fs.readFileSync(path.join(alpha, 'Inbox', inbox[0])), zip);
-  assert.ok(heard(worker).some((e) => e.text.includes("follow-up on " + wid + " came with 2 file(s)")), 'the worker is told');
+  // Waited for, not asserted at once: the copies can land before the message is recorded (a Windows CI flake, w340).
+  await until('the worker is told', () => heard(worker).some((e) => e.text.includes("follow-up on " + wid + " came with 2 file(s)")));
   assert.ok(heard(chat(LOTH).info.id).some((e) => e.text.includes('came with 2 file(s)')), "and Lothsahn's orchestrator");
   // A follow-up whose file does not match its SHA-256: dev_filed sha_mismatch, nothing added.
   c.send({ type: 'dev_message', ref: 'devm-2', request: wid, operator: { name: 'lothsahn' }, conversation: conv, text: 'one more', attachments: [{ n: 0, name: 'x.zip', size: 1000, sha256: 'd'.repeat(64) }] });

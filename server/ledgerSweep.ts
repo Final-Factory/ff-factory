@@ -39,6 +39,8 @@ import {
 import type { LedgerCleanupState, Requester, SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
 
 const CHECK_EVERY_MS = 5 * 60_000;
+/** How long a full pass waits for a running pass to end before giving up this turn. */
+const RUN_WAIT_MS = 10 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
 const PRS_PER_REPO = 200;
 const REFRESH_OLD_PRS = 12;
@@ -89,6 +91,8 @@ export class LedgerSweep {
   private readonly timers: NodeJS.Timeout[] = [];
   private busy = false;
   private repoCache?: string[];
+  /** The first re-check of automatic closes since this server started has been logged (w340: say it ran). */
+  private recheckLogged = false;
   readonly now: () => number;
 
   constructor(d: LedgerSweepDeps) {
@@ -155,9 +159,17 @@ export class LedgerSweep {
   /** The whole cleanup (w306), on its schedule or on demand. Returns what it did, in a line. */
   async run(): Promise<string> {
     if (!this.settings.enabled) return 'the ledger cleanup is off (config ledger.cleanup.enabled)';
-    if (this.busy) return 'a cleanup is already running';
+    // A PR-only pass may be running (every 5 minutes, and the first full pass comes 10 minutes after a start): wait for it
+    // rather than skip. Skipping is how no full pass ever ran (w363: `lastRunAt` never written, so nothing finished, cut
+    // off, superseded or idle was ever closed, resumed or stalled; each restart put the next try 10 minutes after it).
+    for (const end = this.now() + RUN_WAIT_MS; this.busy; ) {
+      if (this.now() > end) return 'a cleanup is already running';
+      await new Promise((r) => setTimeout(r, 2000));
+    }
     const acts = await this.pass(true);
-    return this.data.lastSummary ?? summaryOf(acts);
+    const summary = this.data.lastSummary ?? summaryOf(acts);
+    console.log(`ledger cleanup: full pass: ${summary}`);
+    return summary;
   }
 
   private async pass(full: boolean): Promise<Action[]> {
@@ -192,6 +204,8 @@ export class LedgerSweep {
         }
       }
       const notable = acts.filter((a) => a.kind !== 'open' || backfill);
+      // Each change in the server log too (w363), with whose request it is.
+      for (const a of acts) if (a.kind === 'closed' || a.kind === 'stalled' || a.kind === 'resumed') console.log(`ledger cleanup: ${a.kind} ${a.id} (${a.who.map((r) => r.userId).join(', ')}): ${clip(oneLine(a.text), 200)}`);
       this.tell(notable);
       if (full) {
         this.data.lastRunAt = new Date(this.now()).toISOString();
@@ -294,8 +308,11 @@ export class LedgerSweep {
    */
   private async recheckClosed(all: readonly PrRecord[], acts: Action[]) {
     const since = this.now() - 14 * 86_400_000;
+    let checked = 0;
+    let reopened = 0;
     for (const w of [...this.d.store.work.values()]) {
       if (w.status !== 'done' || w.autoClosed?.how !== 'prs' || !w.autoClosed.pr || Date.parse(w.autoClosed.at) < since) continue;
+      checked++;
       try {
         const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
         const listed = new Map(all.map((p) => [`${p.repo.toLowerCase()}#${p.number}`, p]));
@@ -321,9 +338,17 @@ export class LedgerSweep {
           x.prs = keep;
         });
         acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'note', text: `reopened: ${text}` });
+        reopened++;
+        // IN THE SERVER LOG TOO (w340: after the f4ce1cd deploy it reopened 42 requests, w312 among them, and the log
+        // said nothing, so it looked as if it had not run).
+        console.log(`ledger cleanup: reopened ${w.id} (${status}): ${text}`);
       } catch (e) {
         console.warn(`ledger cleanup: recheck ${w.id}: ${(e as Error).message}`);
       }
+    }
+    if (!this.recheckLogged || reopened) {
+      this.recheckLogged = true;
+      console.log(`ledger cleanup: rechecked ${checked} automatic close(s) from the last 14 days; reopened ${reopened}`);
     }
   }
 
