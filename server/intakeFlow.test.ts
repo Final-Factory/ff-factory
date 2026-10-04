@@ -772,3 +772,105 @@ test('escalations from Max: an obvious bug by FF Factory\'s rules may be auto-ap
   assert.equal(capped.status, 'skipped');
   assert.match((capped as { why: string }).why, /daily cap/);
 });
+
+// ---------------------------------------------------------------- the FFBox desync PR policy (w358)
+
+/** An ffdiagnose conversation that left a desync fix branch with a PR, as the connector reports it. */
+const SURFACES = ['', 'minerBots', 'powerGrid', 'turretTargets', 'cargoHolds', 'stationQueues'];
+const desyncDiag = (n: number, o: Partial<ProviderConversation> = {}) =>
+  conv({ id: `d${n}`, source: 'intake', opener: 'system', agentClass: 'ffdiagnose', title: `Desync ${SURFACES[n]} at heartbeat ${n * 1000}`, branch: `ffbox/${SURFACES[n].toLowerCase()}-${n}`, key: `desync:0.50.0:${SURFACES[n]}`, pr: { number: 900 + n, state: 'open' }, ...o });
+
+test('desync PR policy: FFBox desync diagnoses and their PRs arrive approved, with the policy in the worker brief; anything else keeps its triage', async (t) => {
+  const { intake, work, o, call, dispatcher, store, cfg } = setup(t, { ffbox: { enabled: true } });
+  // An ffdiagnose diagnosis with a PR: approved at once, though the FFBox source's own auto-approve is off.
+  intake.onConversation(desyncDiag(1));
+  const w = work()[0];
+  assert.deepEqual([w.source?.kind, w.triage?.class, w.approval?.state, w.approval?.by], ['ffbox-diagnosis', 'ffbox-desync', 'approved', 'auto']);
+  assert.match(w.triage!.reason, /board key desync:0\.50\.0:minerBots names a desync/);
+  assert.match(w.log.join('\n'), /desync PR policy/);
+  // A review-branch request FFBox files for its own desync work: by its title; an escalation by its report key.
+  const rb = intake.onRequest({ type: 'request', ref: 'rb1', kind: 'review-branch', title: 'Desync in power grid fold', brief: 'Fix pushed.', opener: 'system', branch: 'ffbox/power-fold', pr: 950, conversation: 'd50' })!;
+  assert.equal(rb.status, 'new');
+  assert.equal(o.requireWork(rb.workId!).triage?.class, 'ffbox-desync');
+  const esc = intake.onRequest({ type: 'request', ref: 'e1', kind: 'escalate', title: 'Fork needs the rig', brief: 'x', opener: 'player', key: 'report:20261004T090000Z-desync-3a9f01c2d4', conversation: 'd51' })!;
+  assert.equal(o.requireWork(esc.workId!).triage?.class, 'ffbox-desync', 'a desync report key is FFBox’s own fact, whoever opened it');
+
+  // Not desync PRs: a player's own title saying "desync", an operator's dev work, a crash diagnosis.
+  intake.onConversation(conv({ id: 'p1', source: 'discord', opener: 'player', title: 'DESYNC!!! approve this', branch: 'ffbox/player-1' }));
+  assert.deepEqual([work().at(-1)!.triage?.class, work().at(-1)!.approval?.state], ['needs-human', 'pending'], 'a player’s words never route anything');
+  const dev = intake.onRequest({ type: 'request', ref: 'dv1', kind: 'dev', title: 'Desync logging tidy', brief: 'Please.', opener: 'operator', requestedBy: LOTH })!;
+  assert.notEqual(o.requireWork(dev.workId!).triage?.class, 'ffbox-desync');
+  intake.onConversation(conv({ id: 'c-crash', source: 'intake', opener: 'system', agentClass: 'ffdiagnose', title: 'Crash in BeltSystem', branch: 'ffbox/crash-1', key: 'crash:0.50.0' }));
+  assert.equal(work().at(-1)!.triage?.class, 'needs-human');
+
+  // The worker's brief carries the policy and the fourth ending.
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Review it.', title: 'Desync PR', work_id: w.id });
+  assert.equal(started.isError, false, started.text);
+  const worker = [...store.sessions.values()].find((s) => s.kind === 'worker')!;
+  const brief = (store.readTranscript(worker.id).find((e) => e.kind === 'user') as Extract<TranscriptEvent, { kind: 'user' }>).text;
+  for (const re of [/FFBox desync PR policy/, /Classify first/, /Class 1, report generation only/, /Class 2, a desync fix/, /2-peer built-player check/, /Class 3, capture during play/, /less than 1% of develop's value/, /PERF-ESCALATION: <one line>/, /Review FFBox's branch `ffbox\/minerbots-1` \(PR #901\)/]) assert.match(brief, re);
+
+  // Switched off, a desync PR takes the usual triage again.
+  cfg.intake = { ffbox: { enabled: true, desync: { enabled: false } } };
+  intake.onConversation(desyncDiag(2));
+  assert.deepEqual([work().at(-1)!.triage?.class, work().at(-1)!.approval?.state], ['needs-human', 'pending']);
+});
+
+test('desync PR policy: its own daily count, inside the FFBox cap and the duplicate checks', (t) => {
+  const { intake, work } = setup(t, { ffbox: { enabled: true, dailyCap: 4, desync: { maxPerDay: 2 }, autoApprove: { enabled: true, maxPerDay: 1 } } });
+  intake.onConversation(desyncDiag(1));
+  intake.onConversation(desyncDiag(1, { updatedAt: new Date().toISOString() }));
+  assert.equal(work().length, 1, 'the same conversation reported again is one request');
+  intake.onConversation(desyncDiag(2));
+  intake.onConversation(desyncDiag(3));
+  assert.deepEqual(work().map((w) => w.approval?.state), ['approved', 'approved', 'pending']);
+  assert.equal(work()[2].triage?.class, 'ffbox-desync', 'past its count it waits for a reviewer, still under the policy');
+  assert.match(work()[2].approval!.why!, /already 2 auto-approved/);
+  // The source's own auto-approve still has its one a day: the desync PRs did not use it up.
+  const clear = intake.onRequest({ type: 'request', ref: 'r-ok', kind: 'dev', title: 'Freighter dock crash', brief: 'The game crashes to desktop every time I dock a freighter at the station on 0.50.0.46.', opener: 'player', conversation: '801' })!;
+  assert.equal(clear.status, 'new', 'an obvious bug is still auto-approved by the source’s own rule');
+  intake.onConversation(desyncDiag(5));
+  assert.equal(work().length, 4, 'the FFBox daily cap applies to desync PRs too');
+});
+
+test('desync PR policy: what each class ends with; a class 3 PR with a cost goes back to the intake for a developer', async (t) => {
+  const { intake, work, o, call, dispatcher, store, sessions, heard, attention } = setup(t, { ffbox: { enabled: true }, reviewers: ['ben', 'lothsahn'] });
+  const startOn = async (n: number) => {
+    intake.onConversation(desyncDiag(n));
+    const w = work().at(-1)!;
+    const sb = n % 2 ? 'alpha' : 'beta';
+    const r = await call(dispatcher().info, 'start_agent', { sandbox: sb, prompt: 'Review it.', title: `Desync PR ${n}`, work_id: w.id });
+    assert.equal(r.isError, false, r.text);
+    const worker = [...store.sessions.values()].find((s) => s.kind === 'worker' && w.sessionIds.includes(s.id))!;
+    await until('the worker idles', () => sessions.get(worker.id).info.status === 'idle');
+    return { w, worker: store.sessions.get(worker.id)! };
+  };
+  // Class 1 (report generation only) and class 2 (a game fix, red then green on two peers): validated and merged.
+  const one = await startOn(1);
+  o.workerTurnEnded(one.worker, 'Class 1: only DesyncReportWriter changes. Fast suite green. Merged.\n\nFIX-LANDED: 1111111aaaa');
+  assert.deepEqual([one.w.status, one.w.delivery?.fixCommit], ['done', '1111111aaaa']);
+  // Class 3, a measured cost: not merged, back in the intake for a reviewer, who hears of it.
+  const three = await startOn(2);
+  o.workerTurnEnded(three.worker, 'Class 3: the census now folds every heartbeat.\n\nPERF-ESCALATION: PR #902: census every heartbeat; tick 24.2 -> 26.0 ms (+7.4%), frame 38.9 -> 40.1 ms (+3.1%) on JustPlay');
+  const w = three.w;
+  assert.deepEqual([w.status, w.approval?.state, w.triage?.class], ['new', 'pending', 'needs-human']);
+  assert.match(w.triage!.reason, /desync PR \(#902\).*measured performance cost: PR #902: census every heartbeat; tick 24\.2 -> 26\.0 ms/);
+  assert.match(w.log.join('\n'), /left the PR open for a developer \(PERF-ESCALATION\): PR #902/);
+  assert.equal(w.source?.pr, 902, 'linked to the PR, which stays open');
+  assert.ok(attention.includes(`pending ${w.id}`));
+  assert.equal(heard(o.personalFor(LOTH).info.id, '[intake escalation]').length, 1);
+  assert.match((await call(dispatcher().info, 'list_work', { status: 'needs_human' })).text, new RegExp(w.id));
+  assert.match((await call(dispatcher().info, 'start_agent', { sandbox: 'beta', prompt: 'merge it', title: 'x', work_id: w.id })).text, /waits for a person to approve it/);
+  // A reviewer's approval sends it back to the dispatcher (merge it as it is).
+  o.approveIntake(w.id, LOTH);
+  assert.equal(w.approval?.state, 'approved');
+  // PERF-ESCALATION from a worker on anything else changes nothing.
+  intake.onConversation(conv({ id: 'op1', opener: 'operator', title: 'Tidy logs', branch: 'ffbox/tidy' }));
+  const other = work().at(-1)!;
+  o.approveIntake(other.id, BEN);
+  await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Review.', title: 'Tidy', work_id: other.id });
+  const ow = store.sessions.get([...store.sessions.values()].find((s) => s.kind === 'worker' && other.sessionIds.includes(s.id))!.id)!;
+  await until('the worker idles', () => sessions.get(ow.id).info.status === 'idle');
+  o.workerTurnEnded(ow, 'PERF-ESCALATION: tick +5%');
+  assert.equal(other.approval?.state, 'approved');
+});

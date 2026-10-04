@@ -529,7 +529,8 @@ export function parseMarkers(text: string): Markers {
     ...(fix ? { fixCommit: fix.toLowerCase() } : {}),
     ...(resolved ? { resolved: cleanLine(resolved.replace(/[`*_]+$/, ''), 300) } : {}),
     ...(question && !noQuestion(question) ? { designQuestion: question } : {}),
-    ...(perfLine && !noQuestion(perfLine) ? { perfEscalation: perfLine } : {}),
+    // The rule's own template echoed back ("<one line>") is no escalation.
+    ...(perfLine && !noQuestion(perfLine) && !/^<[^<>]{1,40}>/.test(perfLine) ? { perfEscalation: perfLine } : {}),
   };
 }
 
