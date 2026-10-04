@@ -13,7 +13,7 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { ProviderManager } from './providers.ts';
-import { DevRequests, devSettings, prSummary, publicText } from './devRequests.ts';
+import { DevRequests, devSettings, prSummary, publicText, withoutRepo } from './devRequests.ts';
 import type { PrView } from './gitStatus.ts';
 import { AttachmentStore, sha256File } from './attachments.ts';
 import { mintProviderToken, tokenSha256 } from './providerProtocol.ts';
@@ -753,18 +753,32 @@ const PR_BODY = [
   '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
 ].join('\n');
 
+test('w352: a public PR summary never names where the code lives: no GitHub link, repo or ffbox branch', () => {
+  const body = [
+    '**TL;DR:** Haulers ignored their filter; see https://github.com/Final-Factory/FinalFactory/pull/899 and Final-Factory/FinalFactory@abc.',
+    '',
+    '## Evidence',
+    '- Built `ffbox/hauler-filter-d12t3` and [PR #899](https://github.com/Final-Factory/FinalFactory/pull/899): green (https://github.com/Final-Factory/FinalFactory/actions/runs/1).',
+  ].join('\n');
+  const s = prSummary({ title: 'Filter fix', body, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', autoMerge: false });
+  assert.doesNotMatch(s, /github|Final-Factory|ffbox\//i, s);
+  assert.match(s, /PR #899/, s);
+  assert.ok(s.endsWith('Waiting on review. PR #901.'), s);
+  assert.equal(withoutRepo('Nothing to take out here.'), 'Nothing to take out here.');
+});
+
 test('w278: summaries and questions for a Discord thread carry results, never internal ids or routing', () => {
   const s = prSummary({ title: 'Filter fix', body: PR_BODY, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', autoMerge: false });
   assert.equal(
     s,
     'Haulers ignored the cargo filter after a reload, so they moved everything. The filter is now saved with the hauler and applied on load.\n' +
       'Verified: Reloaded a save with three filtered haulers: each moved only its filtered items (measured in the editor).\n' +
-      'Waiting on review. PR #901: https://github.com/Final-Factory/FinalFactory/pull/901',
+      'Waiting on review. PR #901.',
   );
-  assert.match(prSummary({ title: 'T', body: '', url: 'https://x/pull/1', autoMerge: true }), /^T\nMerging when CI is green\. PR #1: https:\/\/x\/pull\/1$/, 'w351: the PR by number, beside its link');
+  assert.equal(prSummary({ title: 'T', body: '', url: 'https://x/pull/1', autoMerge: true }), 'T\nMerging when CI is green. PR #1.', 'w351/w352: the PR by number, never its link');
   const long = prSummary({ title: 'T', body: 'word '.repeat(600), url: 'https://x/pull/1', autoMerge: false });
   assert.ok(long.length <= 1000, `at most 1000 characters (${long.length})`);
-  assert.ok(long.endsWith('Waiting on review. PR #1: https://x/pull/1'), 'the PR and its link always survive the cut');
+  assert.ok(long.endsWith('Waiting on review. PR #1.'), 'the PR number always survives the cut');
   assert.equal(publicText('Should w271 keep the old filter on sandbox/alpha (worker 8b0ba704)? ghp_' + 'a'.repeat(36), 300).includes('w271'), false);
   assert.doesNotMatch(publicText('w271: keep sandbox/alpha? worker 8b0ba704', 300), /w271|sandbox\/alpha|8b0ba704/);
 });
@@ -796,7 +810,8 @@ test('w278: a fix up on a PR sends its summary once the PR is ready, once; a dra
   assert.equal(u.status, 'open');
   assert.deepEqual(u.pr, { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901' });
   assert.match(String(u.summary), /^Haulers ignored the cargo filter after a reload/);
-  assert.match(String(u.summary), /Waiting on review\. PR #901: https:\/\/github\.com\/Final-Factory\/FinalFactory\/pull\/901$/);
+  assert.match(String(u.summary), /Waiting on review\. PR #901\.$/);
+  assert.doesNotMatch(String(u.summary), /github|Final-Factory/i, 'w352: the summary names the PR by number only; the link rides in u.pr for FFBox to follow');
   assert.doesNotMatch(String(u.summary), /w\d+|sandbox\/|8b0ba704|Discord:/, 'no internal ids, no routing');
   const n = c.received.filter((m) => m.type === 'dev_update').length;
   pm().dev!.recheck();

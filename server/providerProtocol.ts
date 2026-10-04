@@ -725,8 +725,8 @@ export interface DevUpdate {
    */
   question?: string;
   /**
-   * open, while the request waits in the intake for a reviewer (w299): FFBox posts "Waiting on input from a developer."
-   * once in the conversation. Absent once a reviewer approves it.
+   * open, while the request waits in the intake for a reviewer (w299): FFBox records it and posts nothing (w352; it
+   * used to post "Waiting on input from a developer."). Absent once a reviewer approves it.
    */
   held?: boolean;
 }

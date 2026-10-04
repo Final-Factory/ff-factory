@@ -124,11 +124,10 @@ stop with a design question. The classification and its reason are on the reques
   for Discord threads, `intake.ffbox.autoApprove` for FFBox's escalations, requests and branches), within its
   `maxPerDay` (default 3), and when no strong overlap with work in flight exists; otherwise it waits too. A trusted
   person's request follows `intake.discord.autoApprove.requests`.
-- **The thread hears that it waits** (Lothsahn, w299: "When you raise it in the intake, you should respond back to
-  FFBox to have max post that it's waiting on input from a developer"). An escalation's answer says `approval:
-  pending`, and FFBox's Max posts "Waiting on input from a developer." in the thread instead of "Filed for the devs.";
-  any FFBox conversation a waiting request came from gets a `dev_update` with `held: true`, which FFBox posts the same
-  way, once per conversation. Approved later, the request goes on like any other (its PR summary, question, merge or
+- **A held request is recorded, not announced** (w299, changed by w352). An escalation's answer says `approval:
+  pending`, and any FFBox conversation a waiting request came from gets a `dev_update` with `held: true`. FFBox records
+  both (its board log, `fff_dev` state `held`) and posts nothing: Lothsahn, 2026-10-04, "Let's stop max from saying
+  'Waiting on input from a developer.' in discord", which w299 had him post. Approved later, the request goes on like any other (its PR summary, question, merge or
   reason reach the thread: docs/ffbox.md).
 - Caps, like the sentry's (`capProblem`, `reporterProblem`): at most `intake.discord.dailyCap` (default 10) Discord
   requests in 24 hours, at most `perReporterPerDay` (default 2) bug reports from one Discord author (the in-game

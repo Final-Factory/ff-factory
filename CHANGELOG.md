@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **No GitHub link in a public Discord thread** (w352, asked by Lothsahn: linking the PR "exposes which github we use.
+  I would like that to remain private."). FF Factory's PR-up summary ends "Waiting on review. PR #N." with no link, and
+  GitHub links, repo names and ffbox branch names in the PR's TL;DR or evidence line are taken out (`withoutRepo`).
+  FFBox (ffbox d8bd8b5) does the same to every public post, and its own agents post as before w351.
+  And Max no longer says "Waiting on input from a developer." anywhere on Discord (ffbox 054483b): a
+  request FF Factory holds (`held`, `approval: pending`) is recorded by FFBox and silent; FF Factory still sends
+  the flag for FFBox's record.
+
 - **"DESIGN-QUESTION: none" is not a question** (w355, asked by Lothsahn). w349's worker ended two turns with
   "DESIGN-QUESTION: none — waiting on CI for PR #1018", which made w349 a design question for Ben and Lothsahn and sent
   both an [intake question]. A marker whose text is empty, none, n/a, no, -, or starts with none, no question, nothing or
