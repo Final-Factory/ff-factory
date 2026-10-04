@@ -20,7 +20,7 @@ export const PROVIDER_PROTOCOL = 2;
  * intake settings: a board_check or request while the intake is off is answered error not_enabled, so a change of
  * settings never needs a new welcome.
  */
-export const PORTAL_ACCEPTS: readonly string[] = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater'];
+export const PORTAL_ACCEPTS: readonly string[] = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater', 'report_chunk', 'report_end'];
 
 /** A connector token: `ffpv1_` and 32 random bytes, base64url. The portal keeps only its SHA-256. */
 export const PROVIDER_TOKEN = /^ffpv1_[A-Za-z0-9_-]{43}$/;
@@ -226,7 +226,7 @@ export type ToConnector =
  * The queries the ffbox_activity tool offers. Not a gate: any name matching QUERY_NAME may be sent, and FFBox answers
  * error unsupported for one it does not know.
  */
-export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation', 'logs'] as const;
+export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation', 'logs', 'reports', 'report'] as const;
 export const QUERY_NAME = /^[a-z_]{1,32}$/;
 export type ProviderQuery = (typeof PROVIDER_QUERIES)[number];
 
@@ -239,7 +239,7 @@ export const QUERY_LIMITS = {
   inFlight: 8,
   /** conversation and logs are answered on FFBox's next pass (about 5 s; logs reads the journal for up to 6 s), and the
    * connector gives up at 12 s. */
-  timeoutMsByQuery: { conversation: 15_000, logs: 15_000 } as Record<string, number>,
+  timeoutMsByQuery: { conversation: 15_000, logs: 15_000, reports: 15_000, report: 15_000 } as Record<string, number>,
   /** Conversations whose last answer is kept for the fallback. */
   keptConversations: 20,
 } as const;
@@ -272,6 +272,44 @@ export const QueryResultSchema = z.object({
   detail: z.string().optional(),
 });
 export type QueryResult = z.infer<typeof QueryResultSchema>;
+
+/**
+ * Players' reports (FFBox w320): a `report` answer's `transfer` is followed by its bytes, as report_chunk frames in order
+ * and one report_end. The portal checks each offset, and the SHA-256 against the answer's and report_end's.
+ */
+export const REPORT_LIMITS = {
+  /** Raw bytes in one report_chunk: 60000 base64 characters, inside LIMITS.maxMessageBytes. */
+  maxChunkBytes: 45_000,
+  /** What one report may hand over (FFBox's fff_feed.REPORT_MAX_BYTES; ffintake takes 50 MB). */
+  maxBytes: 64 * 1024 * 1024,
+  /** A transfer that hears nothing for this long fails. */
+  idleMs: 60_000,
+} as const;
+
+/** connector → portal: bytes of the report a `report` query staged, from offset, base64, in order. */
+export const ReportChunkSchema = z.object({
+  type: z.literal('report_chunk'),
+  id: z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/),
+  offset: z.number().int().min(0),
+  data: z
+    .string()
+    .min(1)
+    .max(Math.ceil(REPORT_LIMITS.maxChunkBytes / 3) * 4)
+    .regex(/^[A-Za-z0-9+/]*={0,2}$/, 'base64'),
+});
+
+/** connector → portal: the end of a report's bytes: ok with their count and SHA-256, or ok false and why. */
+export const ReportEndSchema = z.object({
+  type: z.literal('report_end'),
+  id: z.string().regex(/^[A-Za-z0-9._:-]{1,80}$/),
+  ok: z.boolean(),
+  bytes: z.number().int().min(0).optional(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  error: z.string().regex(/^[a-z_]{1,32}$/).optional(),
+  detail: z.string().optional(),
+});
+export type ReportChunkMessage = z.infer<typeof ReportChunkSchema>;
+export type ReportEndMessage = z.infer<typeof ReportEndSchema>;
 
 // ---------------------------------------------------------------- work messages (phase 3, docs/ffbox-connector-contract.md)
 //
@@ -763,6 +801,8 @@ export const FromConnectorSchema = z.discriminatedUnion('type', [
   DevChunkSchema,
   DevMessageSchema,
   DevReceivedSchema,
+  ReportChunkSchema,
+  ReportEndSchema,
 ]);
 export type FromConnector = z.infer<typeof FromConnectorSchema>;
 /** Each connector→portal type's schema, by type: a type not here is answered error unsupported. */

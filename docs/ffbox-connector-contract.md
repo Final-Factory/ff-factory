@@ -108,7 +108,7 @@ FF Factory answers with `welcome`:
   "cursors": { "conversation": "2026-09-27T09:20:00Z#812", "intake": "20260927T090000Z-desync-3a9f01c2d4" },
   "limits": { "maxMessageBytes": 65536, "messagesPerSecond": 100, "burst": 1000, "helloTimeoutMs": 10000, "invalidPerMinute": 20 },
   "accepts": ["board_check", "board_summary", "request", "accepted", "refused", "result", "metrics",
-              "dev_request", "dev_chunk", "dev_message", "dev_received", "updater"] }
+              "dev_request", "dev_chunk", "dev_message", "dev_received", "updater", "report_chunk", "report_end"] }
 ```
 
 `protocol` echoes the hello's when it is `1` or `2`, and is `2` otherwise. `accepts` is the same static list on every
@@ -621,7 +621,7 @@ FF Factory can ask FFBox a fixed set of read-only questions on the open link. No
   characters kept. An answer is one frame, so the 64 KB frame limit is its cap, and a bigger frame closes the link.
 - **Limits.** The connector answers 30 queries a minute and refuses the next 30 with `rate_limited`. Past that it
   drops them unanswered. FF Factory sends at most 30 a minute and 8 at once, and waits 10 s for each answer (15 s for
-  `conversation`). When it cannot ask or gets no answer, it says why (`no answer from FFBox within 10 s` for a timeout)
+  `conversation`, `logs`, `reports` and `report`). When it cannot ask or gets no answer, it says why (`no answer from FFBox within 10 s` for a timeout)
   and shows the last good answer it kept, with that answer's time.
 - **What answers them.** FFBox's host, never a container or a model. `ffwatch` writes each answer in advance, cut
   down: the config through an allowlist, ids for the ledger log, fixed words and numbers for the status. It scans
@@ -634,7 +634,32 @@ FF Factory can ask FFBox a fixed set of read-only questions on the open link. No
 | `board_log` | `limit`, 1-50, default 20 | `{entries, total}`, newest first: `kind` (`board_check` or `escalate`), `at`, `conversation`, `ref`, `keys`, `verdict` (`clear`, `in_flight`, `done`, `asked`, `no_answer`, `not_asked` with `why`, `error`, or an escalation's `filed`, `pending`, `gave_up`, ...), `matches` (work ids), and for an escalation `state`, `attempts`, `version`, `answeredAt`. No ledger text |
 | `conversation` | `id` (required), `offset`, `limit` 1-20 turns (default 5), `text` 200-8000 characters per text | one conversation, answered on demand by `ffwatch` from its database: `conversation` (the `conversation` message's fields plus `kind`, `updatedAt`, `discordLink`, `reportIds`, `ledger`), `turns`, newest first (times, `requester` as a role, `runs` with state, cost, branch, PR and verification, `summary`, the `messages` it answered, the `replies` it posted), `page` (`offset`, `limit`, `total`) and `untrusted`, a label. Every text is redacted on FFBox (secrets taken out, not the answer dropped) and cut with a `[truncated: N more characters]` marker; players appear by display name only, never by id; a held reply shows its status and not its text. Errors also `not_found`, `timeout` (FFBox did not answer within its 12 s), `busy` (4 already waiting). FF Factory waits 15 s for it |
 | `logs` | `log` (required, one of `ffwatch`, `fffconnector`, `updater`, `ffintake`, `ffdiscord-listener`, `ffweb`, `modelproxy`, `egress`, `docker`, `githubrunners`), `since`, `until` (epoch seconds, 0 for the last hour up to now), `grep` (at most 200 printable characters), `regex` (at most 100, no quantified group, backreference or lookaround), `limit` 1-2000 lines (default 200), `offset` | that unit set's journal, answered on demand by `ffwatch` on the host (FFBox w268): `log`, `units`, `since`, `until` (ISO), `order` `newest_first`, `offset`, `lines` (each redacted before `grep`/`regex` matched it, cut at 1000 characters), `returned`, `next_offset` while there is more, `scanned`, `scan_capped`, `partial`, `withheld_lines` (lines a secret scan still flagged, left out), `note` (the journal could not be read) and `untrusted`, a label. Args are words as well as whole numbers since FFBox w268; FFBox checks each and answers `bad_args` naming what it wants. A page is at most 48 KB of lines. FF Factory waits 15 s for it |
+| `reports` | `id` (one report id), `since`, `until` (epoch seconds of the receive time, 0 leaves that end open), `kind` (`any`, `crash`, `desync`), `version` (exact), `platform` (any case), `signature` (a substring, any case, of the coarse signature or of a diagnosis's crash signature), `session` (a desync's session guid, group or correlation id), `limit` 1-200 (default 50), `offset` | players' crash and desync reports in ffintake's store, read by `ffwatch` on the host (FFBox w320), never written: `order` `newest_first`, `offset`, `reports` (each: `id`, `kind`, `received_at`, `game_version`, `platform`, `bytes`, `sha256`; for a desync `side` (host or client), `group`, `session`, `correlation_id`, `diverged_surfaces`, `paired`, `happened_at`, `why`; `signature` (`desync:<x.y.z>:<surfaces>` or `crash:<x.y.z>`), `crash_signature` and `conversation` when an FFBox diagnosis named them; `files` inside the zip, `name`, `bytes`, `packed`, at most 40 with `files_more`, or `files_note`; `withheld` instead when the view still tripped the secret scan), `returned`, `next_offset`, `keep_days`, `note` and `untrusted`, a label. Every text is redacted on FFBox; the sender's address hash never crosses. A page is at most 44 KB. FF Factory waits 15 s for it |
+| `report` | `id` (required), `file` (a name inside the zip exactly as `reports` lists it; empty for the whole zip) | one report (FFBox w320): `report` (as in `reports`, every file listed up to 24 KB), `manifest` (ffintake's, every string redacted, no address hash), `transfer` (`name`, `bytes` at most 64 MB, `sha256`, `chunk_bytes`, `member` for a file, `matches_manifest` for the zip) and `untrusted`; or `refused` (a fixed sentence, e.g. `no such file in the report`) with no `transfer`. The bytes follow the answer as `report_chunk`s and one `report_end` (below). Errors also `not_found` (no such report, or one reached through a symlink), `busy` (one report streams at a time; at most eight copies or 256 MB are staged, each for 5 minutes). FF Factory waits 15 s for the answer and 60 s between frames |
 | `status` | none | `box` (`state`, `config` ok or misconfigured, `killed`, `draining`, `dry_run`, `commit`, `since`), `services` (`ffwatch`, `ffweb`, `ffdiscord-listener`, `ffintake`, `fffconnector`, `ffbox-modelproxy`, `ffbox-docker`, `ffbox-egress`, `ffbox-update.timer`: `active`, `inactive`, `failed`, ...), `queue`, `classes` (name, network, model, tier, free, max), `holds`, `dev_requests` (`mode` prefer or off, `ok`, `window_hours`, the counts `handed`, `taken`, `fallback`, `skipped`, and `last_fallback` `{ at, conversation, turn, error }`: operators' ffdev turns of the last 24 hours, `ok` false while the newest decided one fell back and ran on FFBox; an FFBox from before 2026-10-03 sends none), `connector` (version, protocol, since) |
+
+### A report's bytes: `report_chunk` and `report_end` (FFBox w320)
+
+A `report` answer with a `transfer` is followed on the same link by the file it names, staged by `ffwatch` as a copy in
+the connector's feed (`<feed>/reports/<query id>/blob`, removed after 5 minutes), so the connector, which cannot read
+the report store, never needs to:
+
+```json
+{ "type": "report_chunk", "id": "q-mg1x2-3fa9c01b", "offset": 0, "data": "<base64 of up to 45000 bytes>" }
+{ "type": "report_end", "id": "q-mg1x2-3fa9c01b", "ok": true, "bytes": 2400000, "sha256": "<64 hex>" }
+{ "type": "report_end", "id": "q-mg1x2-3fa9c01b", "ok": false, "error": "changed", "detail": "the staged copy changed while it was sent" }
+```
+
+| type | fields |
+|---|---|
+| `report_chunk` | `id` (the query's), `offset`, `data`: the file's bytes from `offset`, base64, at most 45000 bytes raw a frame, in order |
+| `report_end` | `id`, `ok`; with `ok` true `bytes` and `sha256` of what was sent, else `error` and `detail` |
+
+FF Factory takes chunks only for a `report` it asked and whose answer it is still waiting on: each at the offset the
+transfer stands at, never past the size the answer said. It stores them as an attachment and checks three SHA-256s
+agree: the answer's `transfer.sha256`, `report_end.sha256` and its own of what it stored. Anything else (a gap, a
+mismatch, nothing for 60 s, the link dropping) drops what arrived and says why; nothing is kept half. The portal sends
+nothing back about a transfer: the only portal→connector message for reports is the `query`.
 
 ## `metrics` (protocol 2)
 
