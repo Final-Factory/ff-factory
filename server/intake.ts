@@ -38,6 +38,8 @@ import {
   bundleVersionOf,
   capProblem,
   classifyBug,
+  desyncTriage,
+  ffboxDesyncSignal,
   triageOf,
   cleanLine,
   ffboxReviewFrom,
@@ -419,11 +421,12 @@ export class IntakeManager {
     const draft = ffboxReviewFrom(c, s);
     if (!draft) return;
     const now = this.now();
+    const desync = this.desyncRoute({ key: c.key, title: c.title, opener: c.opener, source: c.source, agentClass: c.agentClass });
     const res = this.d.orchestrators.fileIntake({
       ...draft,
-      triage: triageOf(draft.source, c.opener === 'fff' ? 'system' : c.opener, { title: c.title, text: '' }),
+      triage: desync?.triage ?? triageOf(draft.source, c.opener === 'fff' ? 'system' : c.opener, { title: c.title, text: '' }),
       requestedBy: this.d.identity.systemPayer(),
-      autoApprove: s.autoApprove,
+      autoApprove: desync?.autoApprove ?? s.autoApprove,
       kinds: FFBOX_KINDS,
       lookbackDays: this.settings.lookbackDays,
       limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.dailyCap, now),
@@ -433,6 +436,18 @@ export class IntakeManager {
       this.outcome(draft.source.kind, draft.title, draft.source.url, res);
       if (!res.mergedInto) this.linkMaybe(c.id, res.item?.id);
     }
+  }
+
+  /**
+   * Lothsahn's desync PR policy (2026-10-04, w358): an FFBox desync diagnosis or its ffbox/* PR is approved at once into
+   * a review-and-merge request whose worker classifies it and follows the policy (intakeRules.ts DESYNC_PR_POLICY), at
+   * most intake.ffbox.desync.maxPerDay a day; the daily caps and the duplicate checks still apply. Undefined when it is
+   * not one, or the policy is switched off (then the usual triage applies).
+   */
+  private desyncRoute(x: Parameters<typeof ffboxDesyncSignal>[0]) {
+    const d = this.settings.ffbox.desync;
+    const why = d.enabled ? ffboxDesyncSignal(x) : undefined;
+    return why ? { triage: desyncTriage(why), autoApprove: { enabled: true, maxPerDay: d.maxPerDay } } : undefined;
   }
 
   /** FFBox filed a request (the connector's "request" message); undefined while that is off. */
@@ -464,15 +479,17 @@ export class IntakeManager {
     ].join('\n');
     const now = this.now();
     const title = cleanLine(`FFBox ${m.kind === 'review-branch' ? 'branch' : m.kind}: ${m.title}`, 120);
+    // A desync diagnosis's branch or escalation goes under the desync PR policy (w358); an operator's dev work stays theirs.
+    const desync = m.kind === 'dev' ? undefined : this.desyncRoute({ key: m.key, title: m.title, opener: m.opener });
     const res = this.d.orchestrators.fileIntake({
       title,
       brief,
       source,
       // An escalation is work FFBox cannot do (a GPU, the rig): a developer decides it. Anything else from a player is
       // their bug report, triaged by its words (w299).
-      triage: triageOf(source, operator ? 'operator' : m.opener, m.kind === 'escalate' ? undefined : { title: m.title, text: m.brief }),
+      triage: desync?.triage ?? triageOf(source, operator ? 'operator' : m.opener, m.kind === 'escalate' ? undefined : { title: m.title, text: m.brief }),
       requestedBy: operator ?? this.d.identity.systemPayer(),
-      autoApprove: s.autoApprove,
+      autoApprove: desync?.autoApprove ?? s.autoApprove,
       kinds: FFBOX_KINDS,
       lookbackDays: this.settings.lookbackDays,
       limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.dailyCap, now),
@@ -927,6 +944,7 @@ export class IntakeManager {
         sendWork: s.ffbox.sendWork,
         dailyCap: s.ffbox.dailyCap,
         autoApprove: s.ffbox.autoApprove,
+        desync: s.ffbox.desync,
       },
       release: { enabled: s.release.enabled, delayMinutes: s.release.delayMinutes, ...(this.data.lastVersion ? { lastVersion: this.data.lastVersion } : {}), ...(this.data.checkedAt ? { checkedAt: this.data.checkedAt } : {}) },
       nightly: { ...s.nightly, ...(this.data.nightly ? { last: this.data.nightly } : {}) },

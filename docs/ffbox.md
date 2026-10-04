@@ -107,6 +107,14 @@ Peers' reports of one desync are grouped. An operator starts a diagnosis from `/
 `ffdiagnose` and ends as a fix PR, `NEEDS-INFO` (the PR makes the next report collect more) or
 `ESCALATE` (a fork that needs three peers).
 
+**Its desync PRs follow Lothsahn's standing policy** (2026-10-04, w358; docs/intake.md, "FFBox desync PRs"). FF
+Factory approves a desync diagnosis or its `ffbox/*` PR at once into a review-and-merge request, and its worker
+classifies the change first: report generation only (test it is safe, merge); a desync fix in the game code (a test
+that fails first and a 2-peer built-player check, red on develop and green with the fix, then merge); or capture
+during play, the hash, the census, per-heartbeat or per-frame capture (tick and frame time on the biggest save before
+and after: under 1% merges with the numbers recorded, above stays open and goes back to the intake for a developer,
+`PERF-ESCALATION`). The daily caps and the duplicate checks still apply.
+
 ### Players' reports, read from FF Factory (w320)
 
 Lothsahn, 2026-10-03: FF Factory may read the reports on FFBox, and must not be able to modify them. Two read-only

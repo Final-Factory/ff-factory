@@ -1288,9 +1288,10 @@ export interface NightlyRelease {
  * obvious-bug: a player's report with a clear defect and no design ask (fixed-code rules, conservative); needs-human:
  * anything else from players or FFBox, which nobody works until a reviewer approves or answers; person: a reviewer or
  * operator asked for it themselves; follow-up: the server's own release follow-up; regression: a scripted oracle of
- * the team's own nightly e2e lab failed (no players' text).
+ * the team's own nightly e2e lab failed (no players' text); ffbox-desync: an FFBox desync diagnosis or its ffbox/* PR,
+ * reviewed and merged under the desync PR policy (server/intakeRules.ts DESYNC_PR_POLICY; Lothsahn, 2026-10-04).
  */
-export type WorkTriageClass = 'obvious-bug' | 'needs-human' | 'person' | 'follow-up' | 'regression';
+export type WorkTriageClass = 'obvious-bug' | 'needs-human' | 'person' | 'follow-up' | 'regression' | 'ffbox-desync';
 
 export interface WorkTriage {
   class: WorkTriageClass;
@@ -1385,6 +1386,8 @@ export interface IntakeSummary {
     sendWork: boolean;
     dailyCap: number;
     autoApprove: { enabled: boolean; maxPerDay: number };
+    /** The FFBox desync PR policy (w358): such PRs are approved at once, at most maxPerDay a day. Optional for an older page. */
+    desync?: { enabled: boolean; maxPerDay: number };
   };
   release: { enabled: boolean; delayMinutes: number; lastVersion?: string; checkedAt?: string };
   /** The nightly e2e lab's regressions (config intake.nightly); optional for a page from before it existed. */
@@ -1448,6 +1451,36 @@ export interface AppState {
   ledger?: LedgerCleanupState;
   config: { defaultModel: string; models: string[]; defaultBase: string; attachments: AttachmentSettings };
   settings: AppSettings;
+}
+
+/** An orchestrator's timer as its person sees it (server/timers.ts TimerView; docs/orchestrators.md "Timers"). */
+export interface TimerInfo {
+  id: string;
+  owner: string;
+  title: string;
+  note: string;
+  scheduleText: string;
+  state: 'active' | 'paused' | 'ended';
+  createdAt: string;
+  createdBy: string;
+  nextFireAt?: string;
+  lastFiredAt?: string;
+  lastDeliveredAt?: string;
+  fires: number;
+  /** Fires waiting to be delivered (after the current turn, or for the budget). */
+  pending?: number;
+  skipped?: number;
+  until?: string;
+  maxFires?: number;
+  endedAt?: string;
+  endReason?: 'fired' | 'until' | 'max_fires' | 'cancelled';
+}
+
+/** GET /api/timers/<orchestrator id>. */
+export interface TimersAnswer {
+  timers: TimerInfo[];
+  deliveredToday: number;
+  limits: { activePerOwner: number; deliveriesPerDay: number; minEveryMinutes: number };
 }
 
 /** Pushed over the WebSocket at /ws. */

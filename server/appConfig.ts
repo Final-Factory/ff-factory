@@ -70,7 +70,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
-const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove'];
+const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync'];
 const GITHUB_REPO = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 
 /** A value given as an object or its JSON text. */
@@ -188,21 +188,26 @@ export function checkFfboxIntake(value: unknown): NonNullable<IntakeConfig['ffbo
     }
     if (out.match.high !== undefined && out.match.medium !== undefined && out.match.medium > out.match.high) throw new Error('intake.ffbox.match.medium is at most match.high');
   }
-  if (r.autoApprove !== undefined) {
-    const a = r.autoApprove;
-    if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error('intake.ffbox.autoApprove is an object: { "enabled": false, "maxPerDay": 3 }');
-    const aa = a as Record<string, unknown>;
-    const bad = Object.keys(aa).filter((k) => k !== 'enabled' && k !== 'maxPerDay');
-    if (bad.length) throw new Error(`intake.ffbox.autoApprove: unknown key(s) ${bad.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}; known: enabled, maxPerDay`);
-    out.autoApprove = {};
-    if (aa.enabled !== undefined) {
-      if (typeof aa.enabled !== 'boolean') throw new Error('intake.ffbox.autoApprove.enabled is true or false');
-      out.autoApprove.enabled = aa.enabled;
-    }
-    if (aa.maxPerDay !== undefined) {
-      if (!Number.isInteger(aa.maxPerDay) || (aa.maxPerDay as number) < 0 || (aa.maxPerDay as number) > 100) throw new Error('intake.ffbox.autoApprove.maxPerDay is a whole number from 0 to 100');
-      out.autoApprove.maxPerDay = aa.maxPerDay as number;
-    }
+  if (r.autoApprove !== undefined) out.autoApprove = enabledPerDay('autoApprove', r.autoApprove, '{ "enabled": false, "maxPerDay": 3 }');
+  // The FFBox desync PR policy (w358): on unless switched off.
+  if (r.desync !== undefined) out.desync = enabledPerDay('desync', r.desync, '{ "enabled": true, "maxPerDay": 10 }');
+  return out;
+}
+
+/** An intake.ffbox sub-block of the form { enabled, maxPerDay } (autoApprove, desync), checked. */
+function enabledPerDay(name: string, a: unknown, example: string): { enabled?: boolean; maxPerDay?: number } {
+  if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error(`intake.ffbox.${name} is an object: ${example}`);
+  const aa = a as Record<string, unknown>;
+  const bad = Object.keys(aa).filter((k) => k !== 'enabled' && k !== 'maxPerDay');
+  if (bad.length) throw new Error(`intake.ffbox.${name}: unknown key(s) ${bad.map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}; known: enabled, maxPerDay`);
+  const out: { enabled?: boolean; maxPerDay?: number } = {};
+  if (aa.enabled !== undefined) {
+    if (typeof aa.enabled !== 'boolean') throw new Error(`intake.ffbox.${name}.enabled is true or false`);
+    out.enabled = aa.enabled;
+  }
+  if (aa.maxPerDay !== undefined) {
+    if (!Number.isInteger(aa.maxPerDay) || (aa.maxPerDay as number) < 0 || (aa.maxPerDay as number) > 100) throw new Error(`intake.ffbox.${name}.maxPerDay is a whole number from 0 to 100`);
+    out.maxPerDay = aa.maxPerDay as number;
   }
   return out;
 }

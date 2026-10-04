@@ -10,6 +10,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Added
+
+- **FFBox desync PRs follow Lothsahn's standing policy** (w358, docs/intake.md "FFBox desync PRs"). A desync diagnosis
+  or its `ffbox/*` PR is approved at once (triage `ffbox-desync`, `intake.ffbox.desync`, default on, 10 a day) into a
+  review-and-merge request whose worker classifies it first: report generation only (test, merge); a game desync fix (a
+  failing-first test and a 2-peer built-player check, merge); capture during play (tick and frame time before and after
+  on the biggest save: under 1% merges, above ends with `PERF-ESCALATION`, which puts the request back in the intake for
+  a developer with the PR left open). Caps and duplicate checks unchanged. The dispatcher's prompt carries the rule.
+
 ### Fixed
 
 - **The ledger cleanup's full pass runs** (w363, asked by Lothsahn). It never had: due 10 minutes after each start, it found
@@ -64,6 +73,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Ids are taken out of FFBox's text as whole words, never from inside a path ("specs/-discord-triage").
 
 ### Added
+
+- **Orchestrator timers** (w362, asked by Lothsahn: "give yourself the ability to set timers in the FF Factory harness
+  itself, so you don't have to keep reminding yourself to do things in the chat"). Personal orchestrators and the
+  dispatcher get `set_timer`, `list_timers`, `update_timer` and `cancel_timer`: standing jobs, once at a time, every N
+  minutes (at least 5) or daily at HH:MM in a time zone, with optional jitter, until, max_fires and skip_if_busy. Kept in
+  `data/timers.json` with the crash-safe writer, untouched by a person's message (unlike `wake_me`, which stays as it
+  was). A fire is delivered as `[timer <id> "<title>"] <note>` after the current turn, never dropped; fires that pile up,
+  and those missed while FF Factory was down, are coalesced into one message with the counts. Caps: 20 active timers per
+  orchestrator, and 96 timer messages per orchestrator a day (past that, fires wait). A timer's turn carries no one's
+  authority. Each chat's header has a Timers button (yours, and the dispatcher's for owners) with pause, resume and
+  cancel. [docs/orchestrators.md](docs/orchestrators.md#timers)
 
 - **publish_review: review media without ssh** (w309, asked by Lothsahn). Workers on any machine publish stills, clips and
   notes into `review.root/<topic>/` on the portal's computer (default `<sandboxRoot>/_review`, `F:\ffsb\_review` on

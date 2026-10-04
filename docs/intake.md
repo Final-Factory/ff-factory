@@ -31,7 +31,7 @@ threads by default, and the ledger check both ways (provider protocol 2) is buil
 |---|---|---|---|
 | a new thread in a bug channel (`intake.discord.bugChannels`, default none; never `bug_reports` or `dev_bug_reports`), the in-game reporter's or a player's | "Discord bug: <title>" | the system payer (Ben) | obvious bug, or needs a human |
 | a message in a request channel (`requestChannels`, default `dev_chat`) that mentions Max or replies to it, from a Discord id in `intake.discord.trusted` | "Discord request: <first line>" | that person | a person's own request |
-| an FFBox conversation that left an unreviewed `ffbox/*` branch (a fix, a diagnosis) | "Review and merge ffbox/…" | the system payer | needs a human (a person's own when an operator opened it) |
+| an FFBox conversation that left an unreviewed `ffbox/*` branch (a fix, a diagnosis) | "Review and merge ffbox/…" | the system payer | needs a human (a person's own when an operator opened it); a desync diagnosis or its PR is approved at once under the [desync PR policy](#ffbox-desync-prs) |
 | a `request` FFBox's connector files (review, escalation, an operator's dev work) | "FFBox …: <title>" | the operator, else the system payer | the same |
 | a release (a `bundleVersion` bump on the base branch) that carries landed fixes with threads | "Tell reporters their fixes are live in 0.50.0.X" | the system payer | follow-up |
 | the nightly e2e lab's report: a new regression, a scenario still failing, or one flaky `flakyNights` nights running | "Nightly e2e: <scenario> fails on develop <sha>" | the system payer | regression |
@@ -99,7 +99,8 @@ reports come in from a player and it's obviously a bug and doesn't need clarific
 fix the bug"): an escalated bug, a request FFBox files for a player (its title and brief), and a fix branch or
 diagnosis from a player's conversation (its title) go through `classifyBug` like a Discord thread, the version read
 from their words when no field carries it (`versionIn`). An escalated design question or developer decision, and a
-request for work FFBox cannot do (`escalate`), always need a human.
+request for work FFBox cannot do (`escalate`), always need a human, except an FFBox desync diagnosis or its PR, which
+goes under the [desync PR policy](#ffbox-desync-prs).
 
 Why fixed rules are enough here: the triage only decides who looks first. A report worded to look like a bug gets,
 at most, a worker that investigates a defect under rules that forbid design, balance and gameplay changes and make it
@@ -136,6 +137,44 @@ stop with a design question. The classification and its reason are on the reques
   report is logged on the Intake tab with why; the thread stays in Discord for people.
 - `humanAsked` is never set on an intake request, so the dispatcher's destructive and admin tools stay closed for it
   (docs/orchestrators.md, "Loops, limits and safety").
+
+## FFBox desync PRs
+
+Lothsahn's standing policy (2026-10-04, w358): "Please update your harness, FFFactory, and/or rules necessary to make
+sure you remember how to do this." It holds until he changes it; config can switch the routing off, never the policy.
+
+- **Which work.** An FFBox desync diagnosis or its `ffbox/*` PR, from any FFBox door: a finished conversation with a
+  branch (`onConversation`), a `review-branch` or `escalate` request (`onRequest`; an operator's `dev` work stays
+  theirs). `ffboxDesyncSignal` (`server/intakeRules.ts`) decides from FFBox's facts only: a board key that names a desync
+  (`desync:<x.y.z>:<surfaces>`, `report:`/`intake:<id>-desync-…`), or a title FFBox wrote (an `ffdiagnose` or intake
+  diagnosis, or a conversation no player opened). A player's own title saying "desync" never routes anything. Max's
+  thread escalations (below) keep the bug triage.
+- **Approved at once** (triage `ffbox-desync`, tagged "desync PR policy") into a review-and-merge request, at most
+  `intake.ffbox.desync.maxPerDay` a day (default 10, its own count, apart from `intake.ffbox.autoApprove`); past it, it
+  waits for a reviewer, still under the policy. The FFBox daily cap, `workLimits.intake`, the duplicate checks (the same
+  conversation or keys) and the strong-overlap hold apply as to any intake item. `intake.ffbox.desync.enabled: false`
+  gives it the usual triage again.
+- **The worker's brief** carries `DESYNC_PR_POLICY` (`workerRules`). The worker classifies the change first and writes
+  the class and the reason in its first report and the PR:
+  1. **Report generation only** (runs only while a desync report is written or uploaded, no effect on play): the tests
+     that show it is safe, then merge.
+  2. **A desync fix in the game code**: a test that fails on develop and passes with the fix, and a 2-peer built-player
+     check that reproduces the fork (red on develop, green with the fix), then merge.
+  3. **Capture during play** (the simulation hash or fingerprint, the census, per-heartbeat or per-frame capture,
+     anything that costs time while playing): tick time (heartbeat main-thread mean and p95) and frame time (heartbeat
+     frame wall median) on the biggest save, develop against the branch, interleaved runs, at least 3 of each, the method
+     stated. Under 1% on each number and resolved above the noise: validate as 1 or 2, record the numbers, merge.
+     Otherwise the PR stays open and the worker ends with `PERF-ESCALATION: PR #<n>: <change>; tick a -> b ms (+x%),
+     frame c -> d ms (+y%) on <save>`.
+  A change that spans classes takes the highest; 1 or 3 in doubt is 3. The commands and the checklist are in the
+  ff-agents `evidence-gate` skill, `checklists/ffbox-desync-pr.md`.
+- **The escalation.** `PERF-ESCALATION` on a desync request (`Orchestrators.intakeMarkers`) puts it back in the intake:
+  `approval: pending`, triage "needs a human: an FFBox desync PR (#n) … has a measured performance cost: <the line>",
+  status `new`, linked to its PR (`source.pr`), which stays open. The reviewers hear `[intake escalation]` in their own
+  orchestrator and get the intake notification. A reviewer's approval means merge it as it is; a decline closes the
+  request and leaves the PR to people. The marker on any other request changes nothing.
+- The dispatcher's prompt has the same rule (`server/agents.ts`): it never merges a class 3 PR with a measured cost and
+  never briefs a worker to skip the classification.
 
 ## Closed when it merged
 
@@ -404,7 +443,7 @@ setting under the same guard as `intake.ffbox`, and it applies at once, with no 
     "perReporterPerDay": 2,
     "autoApprove": { "enabled": false, "maxPerDay": 3, "bugs": true, "requests": true }
   },
-  "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "match": { "high": 0.7, "medium": 0.45 }, "repo": "Final-Factory/FinalFactory", "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 } },
+  "ffbox": { "enabled": false, "branches": true, "diagnoses": true, "requests": true, "boardCheck": false, "match": { "high": 0.7, "medium": 0.45 }, "repo": "Final-Factory/FinalFactory", "dailyCap": 10, "autoApprove": { "enabled": false, "maxPerDay": 3 }, "desync": { "enabled": true, "maxPerDay": 10 } },
   "release": { "enabled": false, "delayMinutes": 60 },
   "nightly": { "enabled": false, "autoApprove": { "enabled": false, "maxPerDay": 10 }, "dailyCap": 10, "flakyNights": 3, "batchOver": 4 },
   "reviewers": ["ben", "lothsahn"],

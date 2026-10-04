@@ -10,6 +10,7 @@ import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
 import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu } from './ui';
+import { TimersButton } from './Timers';
 
 type Tab = 'requests' | 'intake' | 'conversation';
 
@@ -46,6 +47,7 @@ export const triageLabel: Record<NonNullable<WorkItem['triage']>['class'], strin
   person: 'asked by a person',
   'follow-up': 'follow-up',
   regression: 'nightly regression',
+  'ffbox-desync': 'FFBox desync PR',
 };
 
 /** What a pending intake request waits for, as its status reads. */
@@ -113,6 +115,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
           <Dot tone={glance.tone} pulse={isBusy(session)} />
           <h2 className="ellipsis">Dispatcher</h2>
           <div className="spacer" />
+          {owner && session && <TimersButton sessionId={session.id} label="Dispatcher" />}
           {owner && session && (
             <Menu label="Dispatcher options">
               {(close) => (
@@ -290,6 +293,7 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
           <Chip tone={f.enabled ? 'green' : 'grey'}>FFBox {onOff(f.enabled)}</Chip>
           <span className="dim small">
             fix branches {onOff(f.branches)}, diagnoses {onOff(f.diagnoses)}, its own requests {onOff(f.requests)}, its ledger check {onOff(f.boardCheck)}, sending it work {onOff(f.sendWork)}; at most {f.dailyCap} a day; auto-approve {f.autoApprove.enabled ? `on, ${f.autoApprove.maxPerDay} a day` : 'off'}
+            {f.desync ? `; desync PRs ${f.desync.enabled ? `approved at once under the desync PR policy, ${f.desync.maxPerDay} a day` : 'off (the usual triage)'}` : ''}
           </span>
         </div>
         <div className="intake-source">
