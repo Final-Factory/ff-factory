@@ -608,6 +608,7 @@ test('w340: the two report keys the w343 detach wrongly took (w197, w313) come b
   assert.deepEqual(o.detachBorrowedSubjects(), []);
   assert.deepEqual(o.restoreDetachedSubjects(), []);
   assert.equal(o.boardCheck({ keys: ['report:20261003T192822Z-desync-fba8dd45e3'] }, 30).matches[0]?.id, 'w313');
+});
 
 // ---------------------------------------------------------------- w362: timers
 
