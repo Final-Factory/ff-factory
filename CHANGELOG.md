@@ -60,6 +60,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Orchestrator timers** (w362, asked by Lothsahn: "give yourself the ability to set timers in the FF Factory harness
+  itself, so you don't have to keep reminding yourself to do things in the chat"). Personal orchestrators and the
+  dispatcher get `set_timer`, `list_timers`, `update_timer` and `cancel_timer`: standing jobs, once at a time, every N
+  minutes (at least 5) or daily at HH:MM in a time zone, with optional jitter, until, max_fires and skip_if_busy. Kept in
+  `data/timers.json` with the crash-safe writer, untouched by a person's message (unlike `wake_me`, which stays as it
+  was). A fire is delivered as `[timer <id> "<title>"] <note>` after the current turn, never dropped; fires that pile up,
+  and those missed while FF Factory was down, are coalesced into one message with the counts. Caps: 20 active timers per
+  orchestrator, and 96 timer messages per orchestrator a day (past that, fires wait). A timer's turn carries no one's
+  authority. Each chat's header has a Timers button (yours, and the dispatcher's for owners) with pause, resume and
+  cancel. [docs/orchestrators.md](docs/orchestrators.md#timers)
+
 - **publish_review: review media without ssh** (w309, asked by Lothsahn). Workers on any machine publish stills, clips and
   notes into `review.root/<topic>/` on the portal's computer (default `<sandboxRoot>/_review`, `F:\ffsb\_review` on
   BEAST) with one tool call. A machine's daemon sends the files over HTTP with its own token, in resumable chunks
