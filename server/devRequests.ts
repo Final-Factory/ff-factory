@@ -195,6 +195,20 @@ export function publicText(s: string, max: number): string {
 }
 
 /**
+ * A public line with nothing that names where the code lives (w352): a GitHub pull request link becomes "PR #N", any
+ * other GitHub link goes, and so do "<org>/<repo>" names of GitHub repos and ffbox/ffbox-f branch names. FFBox's sender
+ * does the same to every public post (ffbox public_text); this keeps FF Factory's own text clean before it leaves.
+ */
+export function withoutRepo(s: string): string {
+  return s
+    .replace(/\[?(?:PR\s*#?\d+\]\(<?)?<?https?:\/\/(?:www\.)?github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)[^\s)>]*>?\)?/gi, 'PR #$1')
+    .replace(/<?https?:\/\/(?:www\.|api\.)?github(?:usercontent)?\.com\/\S*/gi, '')
+    .replace(/`?\bFinal-Factory\/[\w.-]+`?/gi, 'the game repo')
+    .replace(/`?\b(?:ffbox|ffbox-f)\/[\w./-]+`?/g, 'its branch')
+    .replace(/(PR #\d+)\s*(?:\(\1\)|[:\-–]\s*\1\b)/g, '$1');
+}
+
+/**
  * The thread's summary of a fix that is up on a PR (w278): the PR's TL;DR or first paragraph (what was wrong and what
  * changed), the first line of its evidence or test section (how it was verified), then what happens next and the link.
  * At most 1000 characters, nothing internal.
@@ -226,13 +240,13 @@ export function prSummary(v: Pick<PrView, 'title' | 'body' | 'url' | 'autoMerge'
   const at = lines.findIndex((l) => /^#+\s*(evidence|verif|test|how (it was )?tested)/i.test(l));
   const verified = at >= 0 ? lines.slice(at + 1).map(plain).find((l) => l && !/^```/.test(l)) : undefined;
   const next = v.autoMerge ? 'Merging when CI is green.' : 'Waiting on review.';
-  // THE PR BY NUMBER, beside its link (w351; Lothsahn: "When it posts about the PR is up for the fix or PR is merged,
-  // please include the PR number").
+  // THE PR BY NUMBER (w351; Lothsahn: "When it posts about the PR is up for the fix or PR is merged, please include the
+  // PR number"), NEVER ITS LINK (w352: a link "exposes which github we use. I would like that to remain private.").
   const number = /\/pull\/(\d+)\/?$/.exec(v.url)?.[1];
-  const tail = `${next} ${number ? `PR #${number}: ` : ''}${v.url}`;
+  const tail = `${next}${number ? ` PR #${number}.` : ''}`;
   const room = 1000 - tail.length - 2;
-  const verifiedText = verified ? publicText(`Verified: ${verified}`, Math.min(300, Math.floor(room / 3))) : '';
-  const leadText = publicText(lead, room - (verifiedText ? verifiedText.length + 1 : 0));
+  const verifiedText = verified ? publicText(withoutRepo(`Verified: ${verified}`), Math.min(300, Math.floor(room / 3))) : '';
+  const leadText = publicText(withoutRepo(lead), room - (verifiedText ? verifiedText.length + 1 : 0));
   return [leadText, verifiedText, tail].filter(Boolean).join('\n');
 }
 
@@ -759,8 +773,8 @@ export class DevRequests {
     for (const conversation of conversations) {
       if (facts.status !== 'open' && s.finals.includes(`${target.id}:${conversation}`)) continue;
       // A THREAD NO OPERATOR FILED (the request came from FFBox's own report or escalation, w278) has nobody FFBox may
-      // DM a question to, and a public thread never hears one (w351): it gets only "Waiting on input from a developer."
-      // (`held`), and the question stays with the request's people here (the [intake question] they were sent).
+      // DM a question to, and a public thread never hears one (w351): it gets `held`, which FFBox records and does not
+      // post (w352), and the question stays with the request's people here (the [intake question] they were sent).
       const operated = links.some((x) => x.link.conversation === conversation);
       const mine = !operated && facts.question ? (({ question: _q, ...rest }) => ({ ...rest, held: true }))(facts) : facts;
       const key = conversation;
