@@ -1732,6 +1732,19 @@ export class Orchestrators {
   }
 
   /** A line in a request's log about its FFBox conversations (a follow-up relayed, a reply sent). */
+  /**
+   * Files from an operator's follow-up on FFBox (w344) join the request: on it from now on, so every worker started for it
+   * gets them in its Inbox/. Answers the request, or undefined when it is gone.
+   */
+  addDevFiles(id: string, files: AttachmentRef[], line: string): WorkItem | undefined {
+    const w = this.devTarget(id);
+    if (!w) return undefined;
+    if (files.length) w.attachments = [...(w.attachments ?? []), ...files.filter((a) => !w.attachments?.some((b) => b.id === a.id))];
+    this.stamp(w, line);
+    this.store.putWork(w);
+    return w;
+  }
+
   noteDev(id: string, line: string) {
     const w = this.store.work.get(id);
     if (!w) return;

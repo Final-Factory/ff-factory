@@ -631,6 +631,8 @@ export const DevMessageSchema = z.object({
   operator: DevOperatorSchema,
   conversation: conversationId,
   text: z.string().min(1).max(DEV_LIMITS.message),
+  /** The conversation's files no earlier hand-over delivered (FFBox w344), streamed as dev_chunk after the ack. */
+  attachments: z.array(DevAttachmentSchema).max(64).optional(),
 });
 
 /** connector → portal: a dev_reply was written for ffwatch; the portal stops resending it. */

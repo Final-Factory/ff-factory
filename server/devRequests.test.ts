@@ -292,32 +292,32 @@ test('refused at once: an operator who is no login, dev requests off, a malforme
   assert.equal(work().length, 0);
 });
 
-test('the size caps: per file (200 MB, and attachments.maxMB), per request (500 MB) and the file count', async (t) => {
-  const { connect, work } = await setup(t, { attachmentsMB: 300 });
+test("w344: files over FF Factory's own caps are skipped and named, and the request is still filed", async (t) => {
+  // attachments.maxMB 1, two files a hand-over: the 2 MB file and the fourth are named in the request, the rest kept.
+  const { connect, work, files } = await setup(t, { attachmentsMB: 1, devRequests: { maxFiles: 2 } });
   const c = await connect();
-  const file = (n: number, mb: number) => ({ n, name: `f${n}.zip`, size: mb * 1024 * 1024, sha256: 'b'.repeat(64) });
-  c.send(devRequest('dev-big', { attachments: [file(0, 201)] }));
-  let ack = await c.next('dev_ack');
-  assert.equal(ack.error, 'too_large');
-  assert.match(String(ack.detail), /file 0 is 201 MB; FF Factory takes at most 200 MB a file/);
-  c.send(devRequest('dev-sum', { attachments: [file(0, 190), file(1, 190), file(2, 190)] }));
-  ack = await c.next('dev_ack');
-  assert.equal(ack.error, 'too_large');
-  assert.match(String(ack.detail), /570 MB together; FF Factory takes at most 500 MB/);
-  c.send(devRequest('dev-many', { attachments: Array.from({ length: 11 }, (_, n) => file(n, 1)) }));
-  ack = await c.next('dev_ack');
-  assert.equal(ack.error, 'too_large');
-  assert.match(String(ack.detail), /11 files; FF Factory takes at most 10/);
-  assert.equal(work().length, 0);
-});
-
-test('attachments.maxMB caps each file too', async (t) => {
-  const { connect } = await setup(t, { attachmentsMB: 1 });
-  const c = await connect();
-  c.send(devRequest('dev-cap', { attachments: [{ n: 0, name: 'a.zip', size: 2 * 1024 * 1024, sha256: 'c'.repeat(64) }] }));
+  const big = randomBytes(2 * 1024 * 1024);
+  const [a, b, d] = [randomBytes(10_000), randomBytes(12_000), randomBytes(14_000)];
+  const att = (n: number, name: string, data: Buffer) => ({ n, name, size: data.length, sha256: sha(data) });
+  c.send(devRequest('dev-caps', { attachments: [att(0, 'BugReport.zip', big), att(1, 'RuntimeLog.txt', a), att(2, 'Player.log', b), att(3, 'shot.png', d)] }));
   const ack = await c.next('dev_ack');
-  assert.equal(ack.error, 'too_large');
-  assert.match(String(ack.detail), /at most 1 MB a file/);
+  assert.equal(ack.ok, true, 'not refused for its files any more');
+  for (const [n, data] of [big, a, b, d].entries()) await sendBytes(c, 'dev-caps', n, data);
+  const filed = await c.next('dev_filed');
+  assert.equal(filed.ok, true);
+  const w = work().find((x) => x.id === filed.workId)!;
+  assert.deepEqual(
+    (w.attachments ?? []).map((x) => [x.name, x.sha256]),
+    [
+      ['RuntimeLog.txt', sha(a)],
+      ['Player.log', sha(b)],
+    ],
+    'the two that fit are on the request, hashes checked',
+  );
+  assert.deepEqual(fs.readFileSync(files.pathOf(w.attachments![0])), a);
+  assert.match(w.brief, /FFBox handed over files FF Factory did not keep/);
+  assert.match(w.brief, /- BugReport\.zip: 2 MB, over the 1 MB a file FF Factory keeps \(attachments\.maxMB\)/);
+  assert.match(w.brief, /- shot\.png: past the 2 files FF Factory keeps from one hand-over/);
 });
 
 test('a SHA-256 mismatch: dev_filed sha_mismatch, nothing filed; a gap in the chunks is bad_request', async (t) => {
@@ -540,6 +540,48 @@ test("an operator's follow-up reaches their own orchestrator and the busy worker
   assert.match(String(other.detail), /is lothsahn's dev request/);
   c.send({ type: 'dev_message', ref: 'msg-3', request: wid, operator: { name: 'lothsahn' }, conversation: 'c-nope', text: 'Hi' });
   assert.match(String((await c.next('dev_ack')).detail), /not linked to FFBox conversation c-nope/);
+});
+
+test("w344: a follow-up's files join its request and reach the busy worker's Inbox/; its text does not wait for them", async (t) => {
+  const { connect, store, chat, heard, call, dispatcher, work, alpha } = await setup(t);
+  const c = await connect();
+  const thread = newThread();
+  const req = devRequest('dev-files', { thread });
+  c.send(req);
+  await c.next('dev_ack');
+  const wid = String((await c.next('dev_filed')).workId);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Fix the haulers.', title: 'Haulers', work_id: wid });
+  const worker = /Started agent (\w+)/.exec(started.text)![1];
+  await until('the worker idles', () => store.sessions.get(worker)?.status === 'idle');
+  const h = store.sessions.get(worker)!;
+  h.status = 'running';
+  store.putSession(h);
+  const conv = (req.conversation as { id: string }).id;
+  const zip = randomBytes(60_000);
+  const log = Buffer.from('2026-10-04 01:10:49 haulers stop\n'.repeat(200));
+  c.send({
+    type: 'dev_message', ref: 'devm-1', request: wid, operator: { name: 'lothsahn' }, conversation: conv, text: 'Here is the Bug Bot report.',
+    attachments: [{ n: 0, name: 'FinalFactory_RuntimeLog_20261004_011049.txt', size: log.length, sha256: sha(log), kind: 'log' }, { n: 1, name: 'BugReport_20261004_011046.zip', size: zip.length, sha256: sha(zip), kind: 'other' }],
+  });
+  assert.equal((await c.next('dev_ack')).ok, true);
+  await until("the text, before any file", () => heard(chat(LOTH).info.id).some((e) => e.text.includes('Here is the Bug Bot report.')));
+  await sendBytes(c, 'devm-1', 0, log);
+  await sendBytes(c, 'devm-1', 1, zip);
+  await until('the files on the request', () => (work().find((x) => x.id === wid)?.attachments ?? []).length === 2);
+  const w = work().find((x) => x.id === wid)!;
+  assert.deepEqual(w.attachments!.map((x) => x.sha256), [sha(log), sha(zip)], 'hashes checked, in order');
+  await until("the worker's Inbox/", () => fs.existsSync(path.join(alpha, 'Inbox')) && fs.readdirSync(path.join(alpha, 'Inbox')).filter((f) => f.endsWith('.zip') || f.endsWith('.txt')).length === 2);
+  const inbox = fs.readdirSync(path.join(alpha, 'Inbox')).filter((f) => f.endsWith('.zip'));
+  assert.deepEqual(fs.readFileSync(path.join(alpha, 'Inbox', inbox[0])), zip);
+  assert.ok(heard(worker).some((e) => e.text.includes("follow-up on " + wid + " came with 2 file(s)")), 'the worker is told');
+  assert.ok(heard(chat(LOTH).info.id).some((e) => e.text.includes('came with 2 file(s)')), "and Lothsahn's orchestrator");
+  // A follow-up whose file does not match its SHA-256: dev_filed sha_mismatch, nothing added.
+  c.send({ type: 'dev_message', ref: 'devm-2', request: wid, operator: { name: 'lothsahn' }, conversation: conv, text: 'one more', attachments: [{ n: 0, name: 'x.zip', size: 1000, sha256: 'd'.repeat(64) }] });
+  assert.equal((await c.next('dev_ack')).ok, true);
+  await sendBytes(c, 'devm-2', 0, randomBytes(1000));
+  const bad = await c.next('dev_filed');
+  assert.deepEqual([bad.ref, bad.ok, bad.error], ['devm-2', false, 'sha_mismatch']);
+  assert.equal(work().find((x) => x.id === wid)!.attachments!.length, 2);
 });
 
 test('a repeated ref is answered with the same dev_filed, also after a portal restart, and never filed twice', async (t) => {
