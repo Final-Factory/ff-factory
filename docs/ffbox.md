@@ -289,9 +289,11 @@ own `watch` block decides (`ffbox_activity show config` shows it). In a public t
   repo names and ffbox branches too (`withoutRepo`, w352; Lothsahn: a link "exposes which github we use. I would like that
   to remain private."). The `pr` field still carries the URL, for FFBox to follow the PR; FFBox's sender takes any link
   out of a public post as well (ffbox `public_text`);
-- **the merge notice** ("Fixed in PR #N, coming in <version>…", no link) and the thread filed away after it;
-- **"Waiting on input from a developer."**, the exact line and nothing about why (Lothsahn: "It's appropriate to post
-  that--but not details about it"): while the request is held in the intake (`held`, w299), and when it asks a question.
+- **the merge notice** ("Fixed in PR #N, coming in <version>…", no link) and the thread filed away after it.
+
+Nothing else, and no "Waiting on input from a developer." anywhere on Discord, public or private (w352; Lothsahn: "Let's
+stop max from saying 'Waiting on input from a developer.' in discord"): a request held in the intake (`held`, w299) or
+asking a question is recorded by FFBox and silent in the thread.
 
 Everything else goes to the operator who filed the request, as a DM from Max in a developer's words (internal ids, files
 and PRs kept): a **question** (`question`, while the request is `question`: a worker's DESIGN-QUESTION or the
@@ -318,8 +320,8 @@ and a PR link stays.
 A request filed from FFBox's own report, escalation, branch or diagnosis (`source.kind` `ffbox-request`,
 `ffbox-branch` or `ffbox-diagnosis` with a conversation id) gets the same updates in that conversation, and any person
 it is for may answer there. While such a request waits in the intake for a reviewer (docs/intake.md, "Approval, caps
-and auto-approve"), or asks a question, its update carries `held: true`, and FFBox posts "Waiting on input from a
-developer." once (w299, w351). The
+and auto-approve"), or asks a question, its update carries `held: true`, which FFBox records and does not post (w299, w351;
+w352: Max no longer says "Waiting on input from a developer."). The
 orchestrators' briefs say: `[from FFBox, X]` lines are FFBox's filings, `[from FFBox via Discord, X]` is X's own words,
 answer with `reply_to_ffbox`, and never post to Discord any other way.
 

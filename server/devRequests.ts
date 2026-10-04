@@ -773,8 +773,8 @@ export class DevRequests {
     for (const conversation of conversations) {
       if (facts.status !== 'open' && s.finals.includes(`${target.id}:${conversation}`)) continue;
       // A THREAD NO OPERATOR FILED (the request came from FFBox's own report or escalation, w278) has nobody FFBox may
-      // DM a question to, and a public thread never hears one (w351): it gets only "Waiting on input from a developer."
-      // (`held`), and the question stays with the request's people here (the [intake question] they were sent).
+      // DM a question to, and a public thread never hears one (w351): it gets `held`, which FFBox records and does not
+      // post (w352), and the question stays with the request's people here (the [intake question] they were sent).
       const operated = links.some((x) => x.link.conversation === conversation);
       const mine = !operated && facts.question ? (({ question: _q, ...rest }) => ({ ...rest, held: true }))(facts) : facts;
       const key = conversation;
