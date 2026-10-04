@@ -102,8 +102,10 @@ is for another request is not this one's. Links made before these rules (no `via
 again, and an automatic close whose closing PR no longer qualifies is reopened by the next pass (active when a worker is on
 it, else new), with a line in its log and a note to its person (w340: w339 was closed on #988, an earlier request's PR), and a
 `ledger cleanup: reopened <id>` line in the server log; the first pass after a start also logs how many closes it checked
-(after the f4ce1cd deploy it reopened 42, w312 among them, and the log said nothing). A request reopened by hand loses its
-`autoClosed` mark and its "closed automatically" outcome. The PRs show on
+(after the f4ce1cd deploy it reopened 42, w312 among them, and the log said nothing). A request a person, the dispatcher, a worker's marker or the intake
+closes or reopens loses its `autoClosed` mark, its "closed automatically" outcome and any PR link made before the strict
+rules (`settleByHand`), and the re-check skips (and clears) a request whose log shows such a close after the cleanup's own:
+a person's close is final (w370: w50 was closed by hand at 06:33 and reopened by the re-check at 06:34). The PRs show on
 the request in the Requests tab and in `list_work`. The repos asked are the game repo's and this app's own (from their
 `origin`), or exactly `ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each, and
 `gh pr view` for a linked open PR older than that). When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.

@@ -399,3 +399,16 @@ export function ledgerOrder(a: WorkItem, b: WorkItem): number {
   if (isOpen(a)) return prio[a.priority] - prio[b.priority] || a.createdAt.localeCompare(b.createdAt);
   return b.updatedAt.localeCompare(a.updatedAt);
 }
+
+/**
+ * Someone other than the ledger cleanup closes or reopens a request (a person, the dispatcher, a worker's marker, the
+ * intake): any automatic-close mark goes, and with it the PR links made before the strict rules (no `via`), so the
+ * cleanup's re-check of its own closes never acts on it (w370).
+ */
+export function settleByHand(w: WorkItem) {
+  if (w.autoClosed) {
+    w.autoClosed = undefined;
+    if (w.outcome?.startsWith('closed automatically')) w.outcome = undefined;
+  }
+  if (w.prs?.some((p) => !p.via)) w.prs = w.prs.filter((p) => p.via);
+}

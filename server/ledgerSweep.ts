@@ -17,7 +17,7 @@ import { emit } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { run as runProc } from './proc.ts';
-import { isOpen } from './work.ts';
+import { isOpen, settleByHand } from './work.ts';
 import {
   STALL_AFTER_MS,
   REPORT_QUIET_MS,
@@ -312,6 +312,12 @@ export class LedgerSweep {
     let reopened = 0;
     for (const w of [...this.d.store.work.values()]) {
       if (w.status !== 'done' || w.autoClosed?.how !== 'prs' || !w.autoClosed.pr || Date.parse(w.autoClosed.at) < since) continue;
+      // ONLY ITS OWN CLOSE (w370): a request a person, the dispatcher or a worker closed or reopened after the cleanup
+      // closed it is theirs now, and a stale mark from before settleByHand existed (w50, w339) is dropped, not acted on.
+      if (handledAfterAutoClose(w.log)) {
+        this.d.orchestrators.ledgerEdit(w.id, 'the ledger cleanup dropped its old automatic-close mark: a person closed this request since', (x) => settleByHand(x), true);
+        continue;
+      }
       checked++;
       try {
         const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
@@ -525,6 +531,25 @@ function fromGh(repo: string, p: GhPr): PrRecord {
     ...(p.closedAt ? { closedAt: p.closedAt } : {}),
     ...(p.mergeCommit?.oid ? { sha: p.mergeCommit.oid } : {}),
   };
+}
+
+/**
+ * Whether a request's log shows someone other than the cleanup closing or reopening it after the cleanup's last automatic
+ * close: a person ("lothsahn: …; closed as done", "ben: reopened"), the dispatcher ("dispatcher: done: …"), or a worker's
+ * marker (FIX-LANDED, RESOLVED).
+ */
+export function handledAfterAutoClose(log: readonly string[]): boolean {
+  let at = -1;
+  log.forEach((l, i) => {
+    if (/^\d\d:\d\d closed automatically/.test(l)) at = i;
+  });
+  if (at < 0) return false;
+  return log.slice(at + 1).some((l) => {
+    const m = /^\d\d:\d\d (.*)$/.exec(l);
+    const t = m?.[1] ?? '';
+    if (/^(reopened by the ledger cleanup|closed automatically|linked PR|pull request states|PR #|the ledger cleanup|stalled by the ledger cleanup|ledger cleanup)/.test(t)) return false;
+    return /^dispatcher: (done|declined|rejected|cancelled|merged into)\b/.test(t) || /^worker \S+: (FIX-LANDED|RESOLVED)\b/.test(t) || /^[\w.-]+: (.*; )?(closed as done|cancelled|reopened)\b/.test(t) || /^[\w.-]+: note: .*; (closed as done|cancelled)$/.test(t);
+  });
 }
 
 export function summaryOf(acts: readonly { kind: Kind }[]): string {
