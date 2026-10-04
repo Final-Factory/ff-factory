@@ -409,6 +409,9 @@ export function identityKeys(s: WorkSource): string[] {
   if (s.conversation) keys.push(`ffbox:${s.conversation}`);
   if (s.branch) keys.push(`branch:${s.branch.toLowerCase()}`);
   if (s.pr) keys.push(`pr:${s.pr}`);
+  // An intake diagnosis is the work for its reports and their desync event (w361; w343: from the report, never its words).
+  for (const r of s.reports ?? []) keys.push(`report:${r}`);
+  if (s.desyncGroup) keys.push(`desync-group:${s.desyncGroup}`);
   if (s.release) keys.push(`release:${s.release.version}`);
   for (const sc of s.nightly?.scenarios ?? []) keys.push(`nightly:${sc.toLowerCase()}`);
   return keys;

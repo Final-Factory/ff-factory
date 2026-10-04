@@ -20,6 +20,7 @@ import { emit } from './store.ts';
 import type { Identity } from './identity.ts';
 import type { BoardAnswer, Orchestrators } from './orchestrators.ts';
 import { escalationBrief, escalationSource, escalationTitle, escalationTriage, type Escalation } from './escalationRules.ts';
+import { diagnosisBrief, diagnosisKeys, diagnosisMatch, diagnosisSource, diagnosisTitle, diagnosisTriage, fixCovers, type Diagnosis } from './diagnosisRules.ts';
 
 /** What FFBox gets back for an escalation (docs/intake.md, "Escalations from Max"). */
 export type EscalationAnswer =
@@ -28,6 +29,8 @@ export type EscalationAnswer =
   | { status: 'in_flight'; workId: string }
   | { status: 'done'; workId: string; version: string | null }
   | { status: 'skipped'; why: string }
+  /** An intake diagnosis (w361) filed and waiting for a reviewer; `filed` then means it is approved. */
+  | { status: 'held'; workId: string }
   | { status: 'off' };
 import type { BoardCheckMessage, ProviderRequestMessage, ResultMessage, WorkReply } from './providerProtocol.ts';
 import { run } from './proc.ts';
@@ -512,8 +515,29 @@ export class IntakeManager {
     if (!s.ffbox.enabled || !s.ffbox.escalations) return { status: 'off' };
     const seen = this.data.escalations?.[e.ref];
     if (seen) return seen.answer;
-    const answer = this.escalate(e);
-    const all = { ...this.data.escalations, [e.ref]: { answer, at: this.now() } };
+    return this.remember(e.ref, this.escalate(e));
+  }
+
+  /**
+   * FFBox's finished intake diagnosis (w361; POST /api/intake/ffbox with `source: "intake"`, docs/intake.md "Intake
+   * diagnoses from FFBox"): a player's desync or crash report diagnosed on FFBox, with or without a root cause or a fix.
+   * It joins ledger work only on an exact key (a report id already on it, the same desync event, FFBox's own PR or
+   * branch), among requests that came from a report; a shared signature is only a "maybe", noted on what it files.
+   * Otherwise it is filed: a desync with a PR or a found root cause under the desync PR policy (w358), anything else by
+   * the w299 triage. A resend of the same ref gets the same answer. `off` while intake.ffbox.escalations,
+   * intake.ffbox.diagnoses or intake.ffbox is off.
+   */
+  onDiagnosis(d: Diagnosis): EscalationAnswer {
+    const s = this.settings;
+    if (!s.ffbox.enabled || !s.ffbox.escalations || !s.ffbox.diagnoses) return { status: 'off' };
+    const seen = this.data.escalations?.[d.ref];
+    if (seen) return seen.answer;
+    return this.remember(d.ref, this.diagnosed(d));
+  }
+
+  /** An escalation's or diagnosis's answer, kept by its ref so a resend gets the same one. */
+  private remember(ref: string, answer: EscalationAnswer): EscalationAnswer {
+    const all = { ...this.data.escalations, [ref]: { answer, at: this.now() } };
     // The newest 500, and none older than 30 days.
     const keep = Object.entries(all)
       .filter(([, v]) => this.now() - v.at < 30 * 86_400_000)
@@ -522,6 +546,74 @@ export class IntakeManager {
     this.data.escalations = Object.fromEntries(keep);
     this.changed();
     return answer;
+  }
+
+  private diagnosed(d: Diagnosis): EscalationAnswer {
+    const s = this.settings;
+    const title = diagnosisTitle(d);
+    const now = this.now();
+    const o = this.d.orchestrators;
+    // The pool: requests open, or finished within the lookback (merged ones stand for what they merged into).
+    const recent = (w: WorkItem) => isOpen(w) || (w.status === 'done' && now - Date.parse(w.updatedAt) < s.lookbackDays * 86_400_000);
+    const seen = new Set<string>();
+    const exact: { w: WorkItem; why: string }[] = [];
+    const maybe: { w: WorkItem; why: string }[] = [];
+    for (let w of this.d.store.work.values()) {
+      if (w.status === 'merged' && w.mergedInto) w = this.d.store.work.get(w.mergedInto) ?? w;
+      if (seen.has(w.id) || !recent(w)) continue;
+      seen.add(w.id);
+      const m = diagnosisMatch(w, d);
+      if (m) (m.kind === 'exact' ? exact : maybe).push({ w, why: m.why });
+    }
+    const keys = diagnosisKeys(d);
+    const open = exact.find((x) => isOpen(x.w));
+    if (open) {
+      o.attachDiagnosis(open.w.id, { keys, source: diagnosisSource(d), line: `FFBox's diagnosis ${d.ref} joined it (${open.why}): root cause ${d.rootCause === 'found' ? 'found' : 'not found'}, verdict ${d.verdict}, reports ${d.report.reportIds.join(', ')}, ${d.link}` });
+      this.record({ source: 'ffbox-diagnosis', action: 'repeat', title, workId: open.w.id, why: open.why, url: d.link });
+      return { status: 'in_flight', workId: open.w.id };
+    }
+    // Finished work answers `done` only when a released fix can be this bug: released in a version newer than the
+    // report's game. A fix merged but not released yet is on its way (in flight); one the forked game already had is not it.
+    const older: string[] = [];
+    for (const x of exact) {
+      const f = o.boardFacts(x.w);
+      if (!f.mergedIn) continue;
+      const covers = fixCovers(f.version, d.report.gameVersion);
+      if (covers === 'covers') {
+        o.attachDiagnosis(x.w.id, { keys, line: `FFBox's diagnosis ${d.ref} of reports ${d.report.reportIds.join(', ')} (game ${d.report.gameVersion}) matched it (${x.why}): fixed in ${f.version}, answered done` });
+        this.record({ source: 'ffbox-diagnosis', action: 'repeat', title, workId: x.w.id, why: `fixed in ${f.version}`, url: d.link });
+        return { status: 'done', workId: x.w.id, version: f.version ?? null };
+      }
+      if (covers === 'unreleased') {
+        o.attachDiagnosis(x.w.id, { keys, line: `FFBox's diagnosis ${d.ref} of reports ${d.report.reportIds.join(', ')} matched it (${x.why}): merged (${f.mergedIn}), not released yet` });
+        this.record({ source: 'ffbox-diagnosis', action: 'repeat', title, workId: x.w.id, why: 'its fix is merged, not released yet', url: d.link });
+        return { status: 'in_flight', workId: x.w.id };
+      }
+      older.push(`${x.w.id} (fixed in ${f.version}, which game ${d.report.gameVersion} already had)`);
+    }
+    const source = diagnosisSource(d);
+    // A desync with a fix pushed or a root cause found is a desync PR (w358); anything else is a player's report (w299).
+    const desync = d.report.kind === 'desync' && (d.pr || d.rootCause === 'found') ? this.desyncRoute({ key: source.key, title: d.title, opener: 'system', source: 'intake', agentClass: 'ffdiagnose' }) : undefined;
+    const res = o.fileIntake({
+      title,
+      brief: diagnosisBrief(d),
+      source,
+      triage: desync?.triage ?? diagnosisTriage(d),
+      requestedBy: this.d.identity.systemPayer(),
+      autoApprove: desync?.autoApprove ?? s.ffbox.autoApprove,
+      kinds: FFBOX_KINDS,
+      lookbackDays: s.lookbackDays,
+      limit: () => capProblem(this.d.store.work.values(), FFBOX_KINDS, s.ffbox.dailyCap, now),
+    });
+    this.outcome('ffbox-diagnosis', title, d.link, res);
+    if (res.skipped) return { status: 'skipped', why: res.skipped };
+    const w = res.mergedInto ? this.d.store.work.get(res.mergedInto) : res.item;
+    if (!w) return { status: 'skipped', why: 'not filed' };
+    if (res.repeat || res.mergedInto) return { status: 'in_flight', workId: w.id };
+    if (maybe.length) o.noteIntake(w.id, `Possibly the same bug as ${maybe.map((x) => `${x.w.id} (${x.why})`).join(', ')}: a shared signature alone does not make it the same; merge it into one of them if so.`);
+    if (older.length) o.noteIntake(w.id, `Not the bug of ${older.join(', ')}: a different bug, or that fix regressed.`);
+    this.linkMaybe(d.conversation, w.id);
+    return w.approval?.state === 'pending' ? { status: 'held', workId: w.id } : { status: 'filed', workId: w.id, triage: w.triage?.class === 'obvious-bug' ? 'obvious-bug' : 'needs-human', approval: 'approved' };
   }
 
   private escalate(e: Escalation): EscalationAnswer {

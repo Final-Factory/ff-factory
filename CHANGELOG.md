@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox files its finished intake diagnoses into the ledger** (w361, docs/intake.md "Intake diagnoses from FFBox").
+  `POST /api/intake/ffbox` takes a Discord-less body with `source: "intake"` (report facts, root cause, verdict,
+  findings as untrusted data, the PR if one was pushed, up to 40 files with their fetch locators). It joins ledger work
+  only on an exact key (a report id, the desync group, FFBox's own PR or branch, among requests from reports); a shared
+  signature is only a maybe; `done` only for a fix released after the report's game version. A desync with a PR or a
+  found cause goes under the desync PR policy (w358), anything else by the w299 triage; answers `filed`, `held`,
+  `in_flight`, `done`, `skipped`. Caps, dedupe and idempotency as for Max's escalations.
+
 - **FFBox desync PRs follow Lothsahn's standing policy** (w358, docs/intake.md "FFBox desync PRs"). A desync diagnosis
   or its `ffbox/*` PR is approved at once (triage `ffbox-desync`, `intake.ffbox.desync`, default on, 10 a day) into a
   review-and-merge request whose worker classifies it first: report generation only (test, merge); a game desync fix (a

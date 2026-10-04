@@ -1181,7 +1181,8 @@ const server = http.createServer(async (req, res) => {
       if (who.scope !== 'ffbox') return send(res, 403, { error: 'an ffbox-scoped key is required (node server/apikey.ts <name> --scope ffbox)' });
       const parsed = parseEscalation(await readJson(req, 32 * 1024));
       if ('error' in parsed) return send(res, 400, { error: parsed.error });
-      return send(res, 200, intake.onEscalation(parsed.escalation));
+      // w361: a finished intake diagnosis (source "intake"), else Max's escalation (w94).
+      return send(res, 200, 'diagnosis' in parsed ? intake.onDiagnosis(parsed.diagnosis) : intake.onEscalation(parsed.escalation));
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
     // version of an open-source app is public anyway.

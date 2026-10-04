@@ -1252,12 +1252,30 @@ export interface WorkSource {
   pr?: number;
   verdict?: string;
   key?: string;
+  /** FFBox's intake diagnosis (w361): the player reports it is the work for (the lead first), and the desync event's group. */
+  reports?: string[];
+  desyncGroup?: string;
+  /** Whether FFBox's diagnosis found the root cause. */
+  rootCause?: 'found' | 'not_found';
+  /** The diagnosis's files, each with where to fetch it (fetch_ffbox_report, or FFBox's conversation). */
+  reportFiles?: WorkReportFile[];
   /** Other threads merged into this one (the same bug reported again): each gets the reply and the release follow-up. */
   alsoThreads?: { threadId: string; url?: string; reporter?: string }[];
   /** A release follow-up: the version and the requests it announces. */
   release?: { version: string; workIds: string[] };
   /** A nightly e2e regression: the scenarios, the develop commit tested and the release that carries it. */
   nightly?: WorkNightly;
+}
+
+/** One file of an FFBox diagnosis (w361): a report's zip or manifest (by report id) or the diagnosis summary (by conversation). */
+export interface WorkReportFile {
+  name: string;
+  kind: 'report_zip' | 'report_manifest' | 'diagnosis_summary';
+  bytes: number;
+  sha256: string;
+  reportId?: string;
+  file?: string;
+  conversation?: string;
 }
 
 /** What the nightly e2e lab reported about a regression request (docs/intake.md, "Nightly e2e regressions"). */

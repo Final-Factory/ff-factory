@@ -33,6 +33,7 @@ threads by default, and the ledger check both ways (provider protocol 2) is buil
 | a message in a request channel (`requestChannels`, default `dev_chat`) that mentions Max or replies to it, from a Discord id in `intake.discord.trusted` | "Discord request: <first line>" | that person | a person's own request |
 | an FFBox conversation that left an unreviewed `ffbox/*` branch (a fix, a diagnosis) | "Review and merge ffbox/…" | the system payer | needs a human (a person's own when an operator opened it); a desync diagnosis or its PR is approved at once under the [desync PR policy](#ffbox-desync-prs) |
 | a `request` FFBox's connector files (review, escalation, an operator's dev work) | "FFBox …: <title>" | the operator, else the system payer | the same |
+| a finished FFBox diagnosis of a player's desync or crash report (`POST /api/intake/ffbox`, `source: "intake"`) | "FFBox diagnosis (root cause …): <title>", or joined to the request it exactly matches | the system payer | the [desync PR policy](#ffbox-desync-prs) for a desync with a PR or a found cause, else the w299 triage ([below](#intake-diagnoses-from-ffbox)) |
 | a release (a `bundleVersion` bump on the base branch) that carries landed fixes with threads | "Tell reporters their fixes are live in 0.50.0.X" | the system payer | follow-up |
 | the nightly e2e lab's report: a new regression, a scenario still failing, or one flaky `flakyNights` nights running | "Nightly e2e: <scenario> fails on develop <sha>" | the system payer | regression |
 
@@ -292,6 +293,44 @@ here too.
 - Off unless `intake.ffbox.enabled` and `intake.ffbox.escalations` are on. The Intake tab lists these requests with the
   others.
 
+## Intake diagnoses from FFBox
+
+w361 (Lothsahn): when a player's game uploads a desync or crash report and a diagnosis of it finishes on FFBox
+(`ffdiagnose`), FFBox's host files it here, whether or not it found the root cause or opened a PR. Same endpoint, key,
+cap and answers as Max's escalations, with `source: "intake"` and no Discord fields (`server/diagnosisRules.ts`; the wire
+format in docs/ffbox-connector-contract.md, "Intake diagnoses"). Filed by `IntakeManager.onDiagnosis` while
+`intake.ffbox.enabled`, `escalations` and `diagnoses` are on.
+
+- **Idempotent.** A resend of the same `ref` gets the same answer (kept with the escalations' answers, 30 days, 500).
+- **Its keys come only from `report` and `pr`** (w343): `report:<id>` for each report, `desync-group:<group>`,
+  `branch:<ffbox/…>` and `pr:<n>`, plus `ffbox:<conversation>`. Never from the title or the findings.
+- **Matching, exact keys only** (the w312/w331 lesson; `diagnosisMatch`), over requests open or finished within
+  `lookbackDays` that came from a report (an FFBox diagnosis, or anything holding a `report:` or `desync-group:` key;
+  never feature or visual work):
+  - a report id already on it, or the same desync event (`group`): it joins that request;
+  - with `pr`: the FFBox review item for that PR or branch (any FFBox request) is the same work: it attaches there;
+  - a shared signature (`desync:<x.y.z>:<surfaces>`, a crash signature) alone is only a **maybe**: a new request is
+    filed with "Possibly the same bug as w…" in its log; a shared version counts for nothing.
+- **What a join does.** An open match takes the diagnosis's keys, its reports and its files (`attachDiagnosis`) and a log
+  line; the answer is `in_flight`. A finished match answers `done` with the release only when a fix **released in a
+  version newer than the report's `gameVersion`** covers it; merged but not released answers `in_flight`; a fix the
+  forked game already had is not this bug, so a new request is filed with "Not the bug of w… (fixed in X, which game Y
+  already had)". A match that finished without a merge does not answer for it.
+- **Routing a new request** (source `ffbox-diagnosis`, untrusted, for the system payer):
+  - a **desync with a PR, or with its root cause found**: the [desync PR policy](#ffbox-desync-prs) (w358), approved at
+    once; the worker classifies it 1, 2 or 3 and merges or escalates;
+  - **no PR, root cause not found** (and any crash): an investigation item, triaged by the w299 rules over its
+    fact-built title and game version (`diagnosisTriage`): held for a reviewer, or auto-approved when
+    `intake.ffbox.autoApprove` is on and it reads as an obvious bug.
+- **Caps**: `intake.ffbox.dailyCap` and `workLimits.intake` (answer `skipped` with why), the duplicate checks of every
+  intake item, and the desync policy's own daily count.
+- **The answer**: `filed` when approved, `held` while it waits for a reviewer, `in_flight`, `done` with `version`,
+  `skipped`, `off`.
+- **The brief** lists the reports, ffintake's facts, the files with their fetch locators (`fetch_ffbox_report` for a
+  report's zip or one file in it; FFBox's conversation for the diagnosis summary) and the first 5,000 characters of the
+  findings, fenced as untrusted (the whole text stays on FFBox's page). The files are stored on the request
+  (`source.reportFiles`).
+
 ## Nightly e2e regressions
 
 Ben, 2026-09-30: "stop this falling through the cracks." The nightly e2e lab (FinalFactory spec 075,
@@ -523,6 +562,6 @@ built in the ffbox repo (the "provider protocol 2" PR), off; the box steps are:
 
 - The triage reads the report's words only, not its logs or saves (those stay for the worker, as untrusted input).
 - A declined request closes; its thread gets no reply from the intake. A reviewer may tell the reporter by hand.
-- Crash and desync reports from `ffintake` still reach only the FFBox page's signature counts (docs/ffbox-integration.md,
-  phases 2 and 4).
+- A crash or desync report reaches the ledger only once FFBox has diagnosed it ([above](#intake-diagnoses-from-ffbox));
+  undiagnosed reports reach only the FFBox page's signature counts (docs/ffbox-integration.md, phases 2 and 4).
 - Pending delegation requests are still not ledger items until their worker starts (docs/standing-agents.md).

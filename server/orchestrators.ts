@@ -993,6 +993,26 @@ export class Orchestrators {
     this.store.putWork(w);
   }
 
+  /**
+   * An FFBox intake diagnosis joined this request (w361): its exact keys (report ids, the desync group, FFBox's PR and
+   * branch) and, on an FFBox request, its reports and files are added, with a log line.
+   */
+  attachDiagnosis(id: string, a: { keys: readonly string[]; source?: WorkSource; line: string }) {
+    const w = this.store.work.get(id);
+    if (!w) return;
+    for (const k of a.keys) if (!w.keys.includes(k)) w.keys.push(k);
+    const s = w.source;
+    if (s && a.source && s.kind.startsWith('ffbox')) {
+      s.reports = [...new Set([...(s.reports ?? []), ...(a.source.reports ?? [])])].slice(0, 60);
+      if (!s.desyncGroup && a.source.desyncGroup) s.desyncGroup = a.source.desyncGroup;
+      const files = [...(s.reportFiles ?? [])];
+      for (const f of a.source.reportFiles ?? []) if (!files.some((x) => x.sha256 === f.sha256 && x.kind === f.kind)) files.push(f);
+      if (files.length) s.reportFiles = files.slice(-60);
+    }
+    this.stamp(w, a.line);
+    this.store.putWork(w);
+  }
+
   /** An FFBox review request whose pull request merged or closed on FFBox's side needs nothing more. */
   closeIntake(id: string, outcome: string) {
     const w = this.requireWork(id);

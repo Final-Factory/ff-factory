@@ -526,6 +526,44 @@ it waits in the intake for a reviewer, which FFBox records and says nothing abou
 the rule, never the value), `413` too large. Retry network errors and 5xx, never 4xx. The ledger check and the filing
 happen in one step here, so there is no race between checking and filing.
 
+## Intake diagnoses (HTTP, w361)
+
+When a player's game uploads a desync or crash report and a diagnosis of it finishes on FFBox, FFBox's host files it on
+the same endpoint as Max's escalations, `POST /api/intake/ffbox`, with the same `ffbox`-scoped key, the same 32 KB cap
+(`413` past it) and the same answers, whether or not it found the root cause or pushed a fix. It carries **no Discord
+fields**: `source: "intake"` selects this body (`server/diagnosisRules.ts` `DiagnosisSchema`, strict); a body without
+it is read as an escalation, which refuses a `source` field and needs a thread. FFBox ships its side off
+(`fff.escalate.intake=false`) and turns it on once this is deployed. FF Factory files it only while
+`intake.ffbox.enabled`, `intake.ffbox.escalations` and `intake.ffbox.diagnoses` are on (`off` otherwise).
+
+| field | required | rule |
+|---|---|---|
+| `v` | yes | `1` |
+| `source` | yes | `intake` |
+| `ref` | yes | `intake-<conversation>-turn-<turn>` (at most 120), idempotent: the same ref gets the same answer and files nothing new |
+| `conversation` | yes | FFBox's conversation id, `^[A-Za-z0-9._:-]{1,80}$`; the ref names it |
+| `link` | yes | `https://…`, the diagnosis on FFBox's web page (300) |
+| `title` | yes | 1-200 characters, one line, built from the report's facts, never the agent's words |
+| `rootCause` | yes | `found` or `not_found` |
+| `verdict` | yes | `^[A-Z][A-Z-]{0,39}$` |
+| `findings` | yes | up to about 20,000 characters, cut with a marker (20,500 accepted). Untrusted: data only |
+| `report` | yes | strict: `kind` (`desync`, `crash`), `lead` and `reportIds` (1-20 ffintake report ids of that kind, the lead first), `gameVersion`, `platform` (`^[A-Za-z0-9._+-]{1,40}$`), `happenedAt` (ISO, optional). A desync may add `group` (hex, or null), `divergedSurfaces`, `heartbeat`, `role` (`host`/`client`), `paired`, `correlationId`, `signature` (`desync:<x.y.z>:<surfaces>`); a crash may add `crashSignature` (one line, 200). Never a session guid; a desync field on a crash (or the other way) is refused |
+| `pr` | only if a fix was pushed | strict: `branch` (`ffbox/…`), and when a PR was opened `number`, `url` (`https://github.com/<owner>/<repo>/pull/<n>`) and `base` |
+| `attachments` | no | up to 40, strict: `name`, `kind` (`report_zip`, `report_manifest`, `diagnosis_summary`), `bytes`, `sha256` (64 hex), and its fetch locator: `reportId` (and `file` for one file inside the zip) for a report's zip or manifest, fetched with `report {id}` / `{id, file}`; `conversation` for the diagnosis summary, fetched with `conversation {id}` |
+
+**The answer** is `200` with `{"status":"filed","workId",…}` (approved), `{"status":"held","workId"}` (filed, waiting
+in the intake for a reviewer), `{"status":"in_flight","workId"}`, `{"status":"done","workId","version"}`,
+`{"status":"skipped","why"}` or `{"status":"off"}`. FFBox reads only `status`, `workId` and `version`, each
+pattern-checked, and records `workId` on the conversation. `400` names the field and the rule, never the value. Retry
+network errors and 5xx with backoff; never a 4xx.
+
+**Matching** (the w312/w331 lesson; docs/intake.md, "Intake diagnoses from FFBox"): it joins ledger work only on an exact
+key, among requests that came from a report: a `report:<id>` already on it, the same desync `group`, or, when `pr` is
+present, the FFBox review item for that PR or branch (it attaches there rather than opening a second one). A shared
+signature or version is at most a "maybe", noted on what it files; the findings' wording never counts. `done` means a
+fix released in a version newer than the report's `gameVersion`; merged but unreleased answers `in_flight`; a fix the
+forked game already had is not this bug, and a new request is filed.
+
 ## Limits and close codes
 
 - Rate: a token bucket of 1000 messages refilled at 100 a second, which is enough for a catch-up of
