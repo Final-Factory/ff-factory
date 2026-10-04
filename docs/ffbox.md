@@ -284,9 +284,12 @@ me via DM's, but not to users in a thread." A conversation is public unless its 
 own `watch` block decides (`ffbox_activity show config` shows it). In a public thread FFBox posts only:
 - **the fix is up on a PR:** `summary` and `pr`, once the worker's PR is ready for review (not a draft; read with
   `gh pr view` at most once a minute): the PR's TL;DR or first paragraph, the first line of its evidence or test section,
-  "Waiting on review." or "Merging when CI is green." (auto-merge set), and "PR #N: <link>"; at most 1000 characters,
-  with work ids, sandbox branches and session ids taken out (`prSummary`, `publicText`);
-- **the merge notice** ("Fixed in PR #N, coming in <version>…") and the thread filed away after it;
+  "Waiting on review." or "Merging when CI is green." (auto-merge set), and "PR #N." by number only; at most 1000
+  characters, with work ids, sandbox branches and session ids taken out (`prSummary`, `publicText`), and GitHub links,
+  repo names and ffbox branches too (`withoutRepo`, w352; Lothsahn: a link "exposes which github we use. I would like that
+  to remain private."). The `pr` field still carries the URL, for FFBox to follow the PR; FFBox's sender takes any link
+  out of a public post as well (ffbox `public_text`);
+- **the merge notice** ("Fixed in PR #N, coming in <version>…", no link) and the thread filed away after it;
 - **"Waiting on input from a developer."**, the exact line and nothing about why (Lothsahn: "It's appropriate to post
   that--but not details about it"): while the request is held in the intake (`held`, w299), and when it asks a question.
 
