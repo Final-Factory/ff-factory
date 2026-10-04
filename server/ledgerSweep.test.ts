@@ -226,6 +226,34 @@ test('today’s automatic closes are checked again: a close whose PR no longer q
   assert.equal(get('w339').status, 'active', 'and it stays open');
 });
 
+test('w340: the w50 and w312 shapes are reopened at the first pass after a start, and the server log says so', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  const lines: string[] = [];
+  t.mock.method(console, 'log', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+  const closedBy = (number: number) => ({ at: ago(4), how: 'prs' as const, pr: number, sha: 'b'.repeat(40), text: `merged as #${number} (bbbbbbbbbbbb) on 2026-10-04` });
+  // w50: an old request, closed on a PR opened days after by someone else, with no Request: line.
+  request('w50', { status: 'done', createdAt: ago(24 * 5), updatedAt: ago(4), autoClosed: closedBy(1002), outcome: 'closed automatically: merged as #1002', prs: [{ repo: REPO, number: 1002, state: 'merged' }] });
+  // w312: a fetch request whose worker merged FFBox's PR #991 (an ffbox/ branch) but did not open it.
+  request('w312', { status: 'done', createdAt: ago(8), updatedAt: ago(4), sessionIds: ['s9'], autoClosed: closedBy(991), outcome: 'closed automatically: merged as #991', prs: [{ repo: REPO, number: 984, state: 'merged' }, { repo: REPO, number: 991, state: 'merged' }] });
+  worker('s9', { lastActivityAt: ago(5) });
+  world.prs = [
+    pr(1002, { head: 'ffbox-f/altd-desync', createdAt: ago(6), mergedAt: ago(5) }),
+    pr(984, { head: 'w297-desync-fix', createdAt: ago(7), mergedAt: ago(6) }),
+    pr(991, { head: 'ffbox/desync-report-hauler-departure-d627t1-7ecb12b4', createdAt: ago(7), mergedAt: ago(6) }),
+  ];
+  await sweep.checkPrs();
+  assert.deepEqual([get('w50').status, get('w312').status], ['new', 'active']);
+  assert.equal(get('w312').autoClosed, undefined);
+  assert.equal(get('w50').outcome, undefined);
+  assert.ok(lines.some((l) => /^ledger cleanup: reopened w312 \(active\): PR #991 is not this request's/.test(l)), lines.join('\n'));
+  assert.ok(lines.some((l) => /^ledger cleanup: reopened w50 \(new\): PR #1002/.test(l)), lines.join('\n'));
+  assert.ok(lines.some((l) => /^ledger cleanup: rechecked 2 automatic close\(s\) from the last 14 days; reopened 2$/.test(l)), lines.join('\n'));
+  // Later passes with nothing to reopen stay quiet.
+  const n = lines.length;
+  await sweep.checkPrs();
+  assert.equal(lines.filter((l) => l.startsWith('ledger cleanup:')).length, lines.slice(0, n).filter((l) => l.startsWith('ledger cleanup:')).length);
+});
+
 test('two PRs, one merged: the request stays open and the log says why, once', async (t) => {
   const { request, worker, pr, world, sweep, get, heard } = setup(t);
   request('w1', { sessionIds: ['s1'] });

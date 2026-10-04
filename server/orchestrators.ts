@@ -120,6 +120,12 @@ export function ownSubjectKeys(w: Pick<WorkItem, 'title' | 'subjects' | 'ffboxDe
   return out;
 }
 
+/** The w343 detach's two wrong removals (restoreDetachedSubjects). */
+const RESTORE_SUBJECTS: readonly [string, string][] = [
+  ['w197', 'report:20261002T043921Z-desync-1d460c8b98'],
+  ['w313', 'report:20261003T192822Z-desync-fba8dd45e3'],
+];
+
 /** Whether a title names this report by its whole id, its time stamp ("20261002T043752Z") or its hash ("3fad4b829b"). */
 export function titleNamesReport(title: string, id: string): boolean {
   const m = /^(\d{8}T\d{6}Z)-(?:crash|desync)-([0-9a-f]{6,32})$/.exec(id);
@@ -346,6 +352,7 @@ export class Orchestrators {
     if (m) this.store.putSettings({ heartbeat: { ...this.store.settings.heartbeat, [this.d.identity.owner().userId]: m }, heartbeatMinutes: null });
     this.relinkBroadDevLinks();
     this.detachBorrowedSubjects();
+    this.restoreDetachedSubjects();
   }
 
   /** A person's own orchestrator, if they have one yet. */
@@ -751,6 +758,11 @@ export class Orchestrators {
     if (input.reopen) {
       w.status = 'new';
       w.stalled = undefined;
+      // A wrong automatic close, reopened by hand (w340: w50 and w128 on 2026-10-04): it no longer says it was closed.
+      if (w.autoClosed) {
+        w.autoClosed = undefined;
+        if (w.outcome?.startsWith('closed automatically')) w.outcome = undefined;
+      }
       what.push('reopened');
     } else if (w.status === 'stalled' && !input.close) {
       w.status = 'new';
@@ -1738,6 +1750,27 @@ export class Orchestrators {
       console.log(`ledger: ${p.w.id}: detached ${p.keys.join(', ')} (w343; backup ${backup})`);
     }
     return plan.map((p) => ({ id: p.w.id, keys: p.keys }));
+  }
+
+  /**
+   * Report keys the w343 detach took that WERE the request's own subject (checked against each brief, w340): w197
+   * reproduces the desync whose two halves are f4f4952e62 and its "partner" 1d460c8b98; w313 reviewed and merged #983,
+   * FFBox's fix for fba8dd45e3. Given back at start-up as `subjects` (so the detach keeps them), once, and only where the
+   * detach's own log line shows it took them. w318's 0d4abe93c0 stays detached: #991 only added diagnostics for it.
+   */
+  restoreDetachedSubjects(): { id: string; key: string }[] {
+    const out: { id: string; key: string }[] = [];
+    for (const [id, key] of RESTORE_SUBJECTS) {
+      const w = this.store.work.get(id);
+      if (!w || w.keys.includes(key) || !w.log.some((l) => l.includes('keys detached at start-up (w343)') && l.includes(key))) continue;
+      w.keys = [...w.keys, key];
+      w.subjects = [...new Set([...(w.subjects ?? []), key])];
+      this.stamp(w, `key restored at start-up (w340): ${key}. The w343 detach took it, but this request is the work for that report.`);
+      this.store.putWork(w);
+      console.log(`ledger: ${id}: restored ${key} (w340: it is this request's own report)`);
+      out.push({ id, key });
+    }
+    return out;
   }
 
   /** Every request a dev link lives on now (devTarget of each request with ffboxDev links or an FFBox source conversation), once each. */

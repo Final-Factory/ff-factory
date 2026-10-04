@@ -89,6 +89,8 @@ export class LedgerSweep {
   private readonly timers: NodeJS.Timeout[] = [];
   private busy = false;
   private repoCache?: string[];
+  /** The first re-check of automatic closes since this server started has been logged (w340: say it ran). */
+  private recheckLogged = false;
   readonly now: () => number;
 
   constructor(d: LedgerSweepDeps) {
@@ -294,8 +296,11 @@ export class LedgerSweep {
    */
   private async recheckClosed(all: readonly PrRecord[], acts: Action[]) {
     const since = this.now() - 14 * 86_400_000;
+    let checked = 0;
+    let reopened = 0;
     for (const w of [...this.d.store.work.values()]) {
       if (w.status !== 'done' || w.autoClosed?.how !== 'prs' || !w.autoClosed.pr || Date.parse(w.autoClosed.at) < since) continue;
+      checked++;
       try {
         const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
         const listed = new Map(all.map((p) => [`${p.repo.toLowerCase()}#${p.number}`, p]));
@@ -321,9 +326,17 @@ export class LedgerSweep {
           x.prs = keep;
         });
         acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'note', text: `reopened: ${text}` });
+        reopened++;
+        // IN THE SERVER LOG TOO (w340: after the f4ce1cd deploy it reopened 42 requests, w312 among them, and the log
+        // said nothing, so it looked as if it had not run).
+        console.log(`ledger cleanup: reopened ${w.id} (${status}): ${text}`);
       } catch (e) {
         console.warn(`ledger cleanup: recheck ${w.id}: ${(e as Error).message}`);
       }
+    }
+    if (!this.recheckLogged || reopened) {
+      this.recheckLogged = true;
+      console.log(`ledger cleanup: rechecked ${checked} automatic close(s) from the last 14 days; reopened ${reopened}`);
     }
   }
 

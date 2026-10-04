@@ -574,3 +574,38 @@ test('w343: the start-up detach drops referenced report keys (backed up, logged,
   assert.equal(fs.readdirSync(dir).filter((f) => f.startsWith('ledger-detach-')).length, 1);
   for (const k of [`report:${R1}`, `report:${R2}`]) assert.notEqual(o.boardCheck({ keys: [k] }, 30).matches[0]?.id, 'w312');
 });
+
+test('w340: a wrongly auto-closed request reopened by hand no longer says it was closed automatically', async (t) => {
+  const { store, chat, call } = setup(t);
+  const now = new Date().toISOString();
+  store.putWork({
+    id: 'w50', title: 'Deconstruct frame rate', brief: 'x', priority: 'normal', keys: [], requestedBy: LOTH, requesters: [LOTH], humanAsked: true,
+    status: 'done', createdAt: now, updatedAt: now, sessionIds: [], overlaps: [], asks: 0, log: [],
+    outcome: 'closed automatically: merged as #1002 (a684e5257e6b) on 2026-10-04',
+    autoClosed: { at: now, how: 'prs', pr: 1002, sha: 'a'.repeat(40), text: 'merged as #1002 (a684e5257e6b) on 2026-10-04' },
+  });
+  const loth = chat(LOTH);
+  loth.lastFrom = 'human';
+  const r = await call(loth.info, 'update_work', { id: 'w50', reopen: true, note: 'Reopened: it was wrongly auto-closed as "merged as #1002".' });
+  assert.equal(r.isError, false, r.text);
+  const w = store.work.get('w50')!;
+  assert.deepEqual([w.status, w.autoClosed, w.outcome], ['new', undefined, undefined]);
+});
+
+test('w340: the two report keys the w343 detach wrongly took (w197, w313) come back once, as subjects; w318 stays', (t) => {
+  const { store, o } = setup(t);
+  const now = new Date().toISOString();
+  const base = { priority: 'normal' as const, requestedBy: LOTH, requesters: [LOTH], humanAsked: true, status: 'done' as const, createdAt: now, updatedAt: now, sessionIds: [], overlaps: [], asks: 0 };
+  const took = (key: string) => [`05:28 keys detached at start-up (w343): ${key}. Its brief only referenced them; a request is the work for a report its title or subjects name. Backup: ledger-detach-x.json`];
+  store.putWork({ ...base, id: 'w197', title: 'Reproduce desync 20261002T043752Z', brief: 'the partner is 20261002T043921Z-desync-1d460c8b98', keys: ['report:20261002T043752Z-desync-f4f4952e62'], log: took('report:20261002T043921Z-desync-1d460c8b98') });
+  store.putWork({ ...base, id: 'w313', title: 'Review, verify and merge FFBox PR #983', brief: 'desync session 20261003T192822Z-desync-fba8dd45e3', keys: ['pr:983'], log: took('report:20261003T192822Z-desync-fba8dd45e3') });
+  store.putWork({ ...base, id: 'w318', title: 'CRITICAL: merge FFBox PR #991', brief: 'desync session 20261003T211451Z-desync-0d4abe93c0', keys: ['pr:991'], log: took('report:20261003T211451Z-desync-0d4abe93c0') });
+  assert.deepEqual(o.restoreDetachedSubjects().map((r) => r.id), ['w197', 'w313']);
+  assert.ok(store.work.get('w197')!.keys.includes('report:20261002T043921Z-desync-1d460c8b98'));
+  assert.deepEqual(store.work.get('w313')!.subjects, ['report:20261003T192822Z-desync-fba8dd45e3']);
+  assert.deepEqual(store.work.get('w318')!.keys, ['pr:991']);
+  // The detach at the next start keeps them (they are subjects now), and the restore does nothing twice.
+  assert.deepEqual(o.detachBorrowedSubjects(), []);
+  assert.deepEqual(o.restoreDetachedSubjects(), []);
+  assert.equal(o.boardCheck({ keys: ['report:20261003T192822Z-desync-fba8dd45e3'] }, 30).matches[0]?.id, 'w313');
+});

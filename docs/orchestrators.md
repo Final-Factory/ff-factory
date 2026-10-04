@@ -99,7 +99,10 @@ It is **never** linked from related ids, from a PR number the brief or a worker'
 sandbox the request merely shares, and never when the PR merged before the request was filed. A PR whose description says it
 is for another request is not this one's. Links made before these rules (no `via`) are dropped unless the rules find them
 again, and an automatic close whose closing PR no longer qualifies is reopened by the next pass (active when a worker is on
-it, else new), with a line in its log and a note to its person (w340: w339 was closed on #988, an earlier request's PR). The PRs show on
+it, else new), with a line in its log and a note to its person (w340: w339 was closed on #988, an earlier request's PR), and a
+`ledger cleanup: reopened <id>` line in the server log; the first pass after a start also logs how many closes it checked
+(after the f4ce1cd deploy it reopened 42, w312 among them, and the log said nothing). A request reopened by hand loses its
+`autoClosed` mark and its "closed automatically" outcome. The PRs show on
 the request in the Requests tab and in `list_work`. The repos asked are the game repo's and this app's own (from their
 `origin`), or exactly `ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each, and
 `gh pr view` for a linked open PR older than that). When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
