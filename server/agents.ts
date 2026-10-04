@@ -686,16 +686,6 @@ export class Agents {
   }
 
   /** The branch a sandbox is on now, if it can be told (a machine's sandbox as its daemon last reported it). */
-  /** The branches a worker had checked out in its sandbox, for linking its pull requests (server/ledgerSweep.ts). */
-  workerBranches(info: SessionInfo): string[] {
-    try {
-      const sb = info.machineId && info.machineSandbox ? this.machines.requireSandbox(info.machineId, info.machineSandbox) : info.sandboxId ? this.sandboxes.get(info.sandboxId) : undefined;
-      return [sb?.git?.branch, sb?.branch].filter((b): b is string => !!b);
-    } catch {
-      return [];
-    }
-  }
-
   private sandboxBranchOf(t: { sandbox?: string; machine?: string; machineSandbox?: string }): string | undefined {
     try {
       if (t.machine && t.machineSandbox) return this.machines.requireSandbox(t.machine, t.machineSandbox).branch;

@@ -65,7 +65,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
   const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
   agents.boot();
   const o = agents.orchestrators;
-  const world = { prs: [] as PrRecord[] | undefined, heads: {} as Record<string, string[]>, clear: true as boolean | undefined, resumed: [] as { id: string; text: string }[] };
+  const world = { prs: [] as PrRecord[] | undefined, clear: true as boolean | undefined, resumed: [] as { id: string; text: string }[] };
   const sweep = new LedgerSweep({
     cfg,
     store,
@@ -73,7 +73,6 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
     repos: async () => [REPO],
     prs: async () => world.prs,
     viewPr: async () => undefined,
-    headsOf: (s) => world.heads[s.id] ?? [],
     resume: (id, text) => void world.resumed.push({ id, text }),
     limitsClear: () => world.clear,
     now: () => NOW,
@@ -127,9 +126,21 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
     sha: `${String(number).padStart(2, '0')}`.repeat(20),
     ...over,
   });
+  let seq = 1000;
+  /** A worker ran `gh pr create` at `at` and it printed this PR's URL. */
+  const opened = (sessionId: string, number: number, at: string) => {
+    const file = path.join(dir, 'transcripts', `${sessionId}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const id = `tu${seq}`;
+    const lines = [
+      { seq: seq++, t: at, kind: 'tool_use', toolUseId: id, name: 'Bash', input: { command: 'gh pr create --base develop --fill' } },
+      { seq: seq++, t: at, kind: 'tool_result', toolUseId: id, isError: false, text: `https://github.com/${REPO}/pull/${number}` },
+    ];
+    fs.appendFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  };
   const heard = (who: Requester = BEN) => store.readTranscript(o.personalFor(who).info.id).filter((e): e is Extract<TranscriptEvent, { kind: 'user' }> => e.kind === 'user' && e.from === 'system' && e.text.startsWith('[ledger cleanup]'));
   const get = (id: string) => o.requireWork(id);
-  return { dir, cfg, store, sessions, agents, o, sweep, world, request, worker, pr, heard, get };
+  return { dir, cfg, store, sessions, agents, o, sweep, world, request, worker, pr, opened, heard, get };
 }
 
 test('one linked PR merged closes the request, logs how, starts nothing, and its person hears one line', async (t) => {
@@ -150,21 +161,69 @@ test('one linked PR merged closes the request, logs how, starts nothing, and its
   assert.deepEqual(await sweep.checkPrs(), [], 'closed once');
 });
 
-test('a PR is linked by a worker’s branch opened after the request, or the URL its report carries, not by an older one', async (t) => {
-  const { request, worker, pr, world, sweep, get } = setup(t);
+test('a PR is linked when the request’s own worker opened it (its gh pr create) after the request was filed, not when a report merely mentions it', async (t) => {
+  const { request, worker, pr, world, sweep, get, opened } = setup(t);
   request('w1', { sessionIds: ['s1'] });
-  worker('s1');
-  world.heads.s1 = ['sandbox/alpha'];
-  world.prs = [pr(5, { head: 'sandbox/alpha', createdAt: ago(200), mergedAt: ago(190) }), pr(6, { head: 'sandbox/alpha', createdAt: ago(50) })];
+  worker('s1', { lastResult: `Related: https://github.com/${REPO}/pull/5 and the plan.` });
+  opened('s1', 6, ago(50));
+  world.prs = [pr(5, { head: 'sandbox/alpha', createdAt: ago(60), mergedAt: ago(55) }), pr(6, { head: 'sandbox/alpha', createdAt: ago(50) })];
   await sweep.checkPrs();
-  assert.deepEqual(get('w1').prs?.map((p) => p.number), [6]);
+  assert.deepEqual(get('w1').prs?.map((p) => [p.number, p.via]), [[6, 'worker']]);
   assert.equal(get('w1').status, 'done');
-  request('w2', { sessionIds: ['s2'] });
-  worker('s2', { lastResult: `Opened https://github.com/${REPO}/pull/9 for review.` });
-  world.prs = [pr(9, { head: 'somewhere/else' })];
+});
+
+test('related ids, a PR number in the brief and a merge from before the request was filed never link or close it (w339 and #988)', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  request('w339', { createdAt: ago(10), updatedAt: ago(1), sessionIds: ['s1'], relatedIds: ['PR 988', 'w292'], keys: ['pr:988'], brief: 'Follow-up to #988, the earlier bay tier.' });
+  worker('s1', { status: 'running', lastResult: `The earlier PR https://github.com/${REPO}/pull/988 is the base.` });
+  world.prs = [pr(988, { head: 'sandbox/bay', createdAt: ago(40), mergedAt: ago(30) })];
+  assert.deepEqual(await sweep.checkPrs(), []);
+  await sweep.run();
+  assert.equal(get('w339').status, 'active');
+  assert.equal(get('w339').prs, undefined);
+  // not running any more: still no link, so the PR rule closes nothing
+  worker('s1', { status: 'idle', lastActivityAt: ago(1), lastResult: 'Working on it.' });
+  assert.deepEqual(await sweep.checkPrs(), []);
+  assert.equal(get('w339').status, 'active');
+});
+
+test('a worker that does two requests in sequence: each PR goes to the request the worker was on, never the other', async (t) => {
+  const { request, worker, pr, world, sweep, get, opened } = setup(t);
+  request('w314', { createdAt: ago(60), updatedAt: ago(20), sessionIds: ['s1'] });
+  request('w324', { createdAt: ago(30), updatedAt: ago(1), sessionIds: ['s1'] });
+  worker('s1', { lastActivityAt: ago(1), lastResult: 'Now on the next request.' });
+  opened('s1', 985, ago(50));
+  opened('s1', 1005, ago(20));
+  world.prs = [pr(985, { head: 'sandbox/shared', createdAt: ago(50), mergedAt: ago(45) }), pr(1005, { head: 'sandbox/shared', createdAt: ago(20), mergedAt: ago(15) })];
   await sweep.checkPrs();
-  assert.deepEqual(get('w2').prs?.map((p) => p.number), [9]);
+  assert.deepEqual(get('w314').prs?.map((p) => p.number), [985]);
+  assert.deepEqual(get('w324').prs?.map((p) => p.number), [1005]);
+  assert.equal(get('w314').autoClosed?.pr, 985);
+  assert.equal(get('w324').autoClosed?.pr, 1005);
+});
+
+test('today’s automatic closes are checked again: a close whose PR no longer qualifies is reopened with its wrong link dropped, a sound one stays', async (t) => {
+  const { request, worker, pr, world, sweep, get, heard } = setup(t);
+  const closedBy = (number: number) => ({ at: ago(3), how: 'prs' as const, pr: number, sha: 'a'.repeat(40), text: `merged as #${number} (aaaaaaaaaaaa) on 2026-10-03` });
+  request('w339', { status: 'done', createdAt: ago(10), updatedAt: ago(3), sessionIds: ['s1'], autoClosed: closedBy(988), outcome: 'closed automatically: merged as #988', prs: [{ repo: REPO, number: 988, state: 'merged' }] });
+  worker('s1', { status: 'running', lastActivityAt: ago(1) });
+  request('w2', { status: 'done', createdAt: ago(40), updatedAt: ago(3), sessionIds: ['s2'], autoClosed: closedBy(50), outcome: 'closed automatically: merged as #50', prs: [{ repo: REPO, number: 50, state: 'merged' }] });
+  worker('s2', { lastActivityAt: ago(5) });
+  request('w3', { status: 'done', createdAt: ago(40), updatedAt: ago(3), autoClosed: closedBy(60), outcome: 'closed automatically: merged as #60', prs: [{ repo: REPO, number: 60, state: 'merged', via: 'line' }] });
+  world.prs = [pr(988, { createdAt: ago(40), mergedAt: ago(30) }), pr(50, { body: 'Request: w2', createdAt: ago(35), mergedAt: ago(30) }), pr(60, { body: 'Request: w3', createdAt: ago(35), mergedAt: ago(30) })];
+  await sweep.run();
+  const w = get('w339');
+  assert.equal(w.status, 'active', 'reopened, its worker is on it');
+  assert.equal(w.autoClosed, undefined);
+  assert.equal(w.outcome, undefined);
+  assert.deepEqual(w.prs, []);
+  assert.match(w.log.join('\n'), /reopened by the ledger cleanup: PR #988 is not this request's by the strict link rules/);
   assert.equal(get('w2').status, 'done');
+  assert.equal(get('w3').status, 'done');
+  await until('the person hears', () => heard().length >= 1);
+  assert.match(heard().map((e) => e.text).join('\n'), /w339 .*reopened: PR #988 is not this request's/);
+  await sweep.run();
+  assert.equal(get('w339').status, 'active', 'and it stays open');
 });
 
 test('two PRs, one merged: the request stays open and the log says why, once', async (t) => {

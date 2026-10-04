@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, isRelease, mergePrs, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, supersededBy, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, cleanupSettings, cutOffOf, isRelease, mergePrs, ownerAt, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, supersededBy, type PrRecord } from './ledgerRules.ts';
 import type { WorkItem } from '../shared/types.ts';
 
 const T = '2026-10-03T10:00:00.000Z';
@@ -15,22 +15,41 @@ test('settings: on every 4 hours by default, clamped, repos validated', () => {
   assert.equal(cleanupSettings({ ledger: { cleanup: { everyHours: 6 } } }).everyHours, 6);
 });
 
-test('a PR belongs to a request by its Request line, a worker-linked URL, a worker branch opened after it, or the request’s pr key', () => {
+test('a PR is a request’s only on strong evidence: its Request line, its own worker opened it after filing, or its head is the request’s branch (w340)', () => {
   assert.deepEqual(requestIdsIn('Fix\n\nRequest: w293\nrequest: W5 and more'), ['w293', 'w5']);
   assert.deepEqual(prUrlsIn('opened https://github.com/Final-Factory/ff-factory/pull/66 ok'), [{ repo: 'Final-Factory/ff-factory', number: 66 }]);
-  const w = item({ id: 'w10' });
-  const all = [pr({ number: 1, body: 'Request: w10' }), pr({ number: 2, body: 'Request: w11', head: 'sandbox/x' }), pr({ number: 3, head: 'sandbox/x' }), pr({ number: 4, head: 'sandbox/x', createdAt: '2026-10-01T00:00:00Z' }), pr({ number: 5, head: 'develop' }), pr({ number: 6, head: 'other' })];
-  const mine = prsOf(w, all, { heads: ['sandbox/x', 'develop'], linked: [] }).map((p) => p.number);
-  assert.deepEqual(mine, [1, 3], 'by line, and by branch after filing; not another request’s, not older, not develop');
-  assert.deepEqual(prsOf(w, all, { heads: [], linked: [{ repo: 'final-factory/finalfactory', number: 6 }] }).map((p) => p.number), [1, 6]);
-  assert.deepEqual(prsOf(item({ id: 'w10', keys: ['pr:6'] }), all, { heads: [], linked: [] }).map((p) => p.number), [1, 6]);
+  const w = item({ id: 'w10', createdAt: '2026-10-03T10:00:00Z' });
+  const none = { opened: [] };
+  const all = [pr({ number: 1, body: 'Request: w10' }), pr({ number: 2, body: 'Request: w11', head: 'sandbox/x' }), pr({ number: 3, head: 'sandbox/x' }), pr({ number: 6, head: 'other' })];
+  assert.deepEqual(prsOf(w, all, none).map((p) => [p.number, p.via]), [[1, 'line']], 'by line only; a shared branch, a worker’s sandbox or another request’s line do not link');
+  assert.deepEqual(prsOf(w, all, { opened: [{ repo: 'Final-Factory/FinalFactory', number: 6, at: '2026-10-03T11:30:00Z' }] }).map((p) => [p.number, p.via]), [[1, 'line'], [6, 'worker']]);
+  assert.deepEqual(prsOf(w, [pr({ number: 7, createdAt: '2026-10-03T09:00:00Z', mergedAt: undefined, state: 'open' })], { opened: [{ repo: 'Final-Factory/FinalFactory', number: 7, at: '2026-10-03T09:00:01Z' }] }), [], 'opened before the request was filed');
+  const intake = item({ id: 'w11', source: { kind: 'ffbox-branch', untrusted: false, branch: 'ffbox/x' } });
+  assert.deepEqual(prsOf(intake, [pr({ number: 8, head: 'ffbox/x' }), pr({ number: 9, head: 'develop' })], none).map((p) => [p.number, p.via]), [[8, 'branch']]);
+});
+
+test('never from related ids, a PR number in the brief or a report, or a merge from before the request was filed (w340)', () => {
+  const w = item({ id: 'w339', createdAt: '2026-10-03T18:00:00Z', keys: ['pr:988'], relatedIds: ['PR 988', 'w292'], brief: 'Follow-up to #988 (the earlier bay tier).' });
+  const early = pr({ number: 988, head: 'sandbox/bay', createdAt: '2026-10-03T12:00:00Z', mergedAt: '2026-10-03T14:00:00Z' });
+  assert.deepEqual(prsOf(w, [early], { opened: [] }), [], 'related, in the brief, and merged before filing');
+  assert.deepEqual(prsOf(w, [early], { opened: [{ repo: early.repo, number: 988, at: '2026-10-03T19:00:00Z' }] }), [], 'even if a worker’s report mentions it: it merged before the request was filed');
+  assert.deepEqual(prsOf(w, [{ ...early, body: 'Request: w339' }], { opened: [] }), [], 'nor does a Request line revive a merge from before filing');
+});
+
+test('a worker that does requests one after another opens each one’s PRs for the request it was on', () => {
+  const a = { id: 'w314', createdAt: '2026-10-03T10:00:00Z' };
+  const b = { id: 'w324', createdAt: '2026-10-03T16:00:00Z' };
+  assert.equal(ownerAt([a, b], '2026-10-03T12:00:00Z')?.id, 'w314');
+  assert.equal(ownerAt([a, b], '2026-10-03T17:00:00Z')?.id, 'w324');
+  assert.equal(ownerAt([a, b], '2026-10-03T09:00:00Z'), undefined, 'before either was filed');
 });
 
 test('stored PRs keep their note while the state holds, and take gh’s state when it moves', () => {
-  const stored = [{ repo: 'a/b', number: 7, state: 'open' as const, noted: 'x' }];
+  const stored = [{ repo: 'a/b', number: 7, state: 'open' as const, noted: 'x', via: 'line' as const }];
   assert.equal(mergePrs(stored, [pr({ repo: 'a/b', number: 7, state: 'open' })])[0].noted, 'x');
   const moved = mergePrs(stored, [pr({ repo: 'a/b', number: 7, state: 'merged', sha: 'c'.repeat(40) })])[0];
-  assert.deepEqual([moved.state, moved.noted, moved.sha], ['merged', undefined, 'c'.repeat(40)]);
+  assert.deepEqual([moved.state, moved.noted, moved.sha, moved.via], ['merged', undefined, 'c'.repeat(40), 'line']);
+  assert.deepEqual(mergePrs([{ repo: 'a/b', number: 8, state: 'merged' }], []), [], 'a link from before w340 has no evidence and goes');
 });
 
 test('what is left after a merge: a release, a check, several PRs, a worker saying more, a question', () => {

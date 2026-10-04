@@ -56,29 +56,51 @@ export function prUrlsIn(text: string): { repo: string; number: number }[] {
 
 const SHARED_BRANCH = /^(develop|master|main|release\/.*)$/;
 
+/** A PR a worker opened itself: its `gh pr create` printed the URL, at this time. */
+export interface OpenedPr {
+  repo: string;
+  number: number;
+  at: string;
+}
+
+export type LinkedPr = PrRecord & { via: NonNullable<WorkPr['via']> };
+
 /**
- * The pull requests that belong to a request: one whose description carries `Request: <id>`; one a worker's own report or
- * transcript links; one on a branch a worker of the request had checked out, opened after the request was filed (a
- * sandbox's branch is reused from request to request, so an older PR on it is not this request's); or one named by the
- * request's own `pr:` key. A PR that says it is for another request is never taken by branch or link.
+ * Which of several requests a worker's work at time `at` belongs to: the latest one filed by then. A worker that does
+ * requests one after another (w314, then w324) opens each one's PRs for the request it was on, never the earlier one's.
  */
-export function prsOf(w: WorkItem, all: readonly PrRecord[], ctx: { heads: readonly string[]; linked: readonly { repo: string; number: number }[] }): PrRecord[] {
+export function ownerAt<T extends Pick<WorkItem, 'id' | 'createdAt'>>(requests: readonly T[], at: string): T | undefined {
+  return requests.filter((r) => r.createdAt <= at).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id, 'en', { numeric: true }))[0];
+}
+
+/**
+ * The pull requests that belong to a request, on strong evidence only (w340): its description has `Request: <id>`; the
+ * request's own worker opened it while working on that request (`ctx.opened`, already limited to what this request owns),
+ * after the request was filed; or its head branch is the request's own branch (an intake request's `ffbox/...`).
+ * Never from related ids, from PR numbers a brief or a report mentions, from a worker or sandbox the request merely shares,
+ * or for a PR that merged before the request was filed. A PR that says it is for another request is not this one's.
+ */
+export function prsOf(w: WorkItem, all: readonly PrRecord[], ctx: { opened: readonly OpenedPr[] }): LinkedPr[] {
   const mine = new Set([w.id, ...(w.mergedInto ? [w.mergedInto] : [])]);
-  const keyed = new Set(w.keys.filter((k) => k.startsWith('pr:')).map((k) => Number(k.slice(3))));
-  const heads = new Set(ctx.heads.filter((h) => h && !SHARED_BRANCH.test(h)));
-  return all.filter((p) => {
+  const branch = w.source?.branch && !SHARED_BRANCH.test(w.source.branch) ? w.source.branch : undefined;
+  const out: LinkedPr[] = [];
+  for (const p of all) {
+    if (p.state === 'merged' && p.mergedAt && p.mergedAt < w.createdAt) continue;
     const says = requestIdsIn(p.body);
-    if (says.length) return says.some((id) => mine.has(id));
-    if (ctx.linked.some((l) => l.number === p.number && l.repo.toLowerCase() === p.repo.toLowerCase())) return true;
-    if (keyed.has(p.number) && w.source?.kind !== 'release') return true;
-    return heads.has(p.head) && p.createdAt >= w.createdAt;
-  });
+    let via: LinkedPr['via'] | undefined;
+    if (says.length) via = says.some((id) => mine.has(id)) ? 'line' : undefined;
+    else if (ctx.opened.some((o) => o.number === p.number && o.repo.toLowerCase() === p.repo.toLowerCase()) && p.createdAt >= w.createdAt) via = 'worker';
+    else if (branch && p.head === branch) via = 'branch';
+    if (via) out.push({ ...p, via });
+  }
+  return out;
 }
 
 /** Merge a request's stored PRs with what gh says now (gh wins on state; a stored PR gh no longer lists keeps its last state). */
-export function mergePrs(stored: readonly WorkPr[], found: readonly PrRecord[]): WorkPr[] {
+export function mergePrs(stored: readonly WorkPr[], found: readonly (PrRecord & { via?: WorkPr['via'] })[]): WorkPr[] {
   const out = new Map<string, WorkPr>();
-  for (const p of stored) out.set(`${p.repo.toLowerCase()}#${p.number}`, p);
+  // A link made before w340 carries no `via`: it only stays when the strict rules find it again.
+  for (const p of stored.filter((x) => x.via)) out.set(`${p.repo.toLowerCase()}#${p.number}`, p);
   for (const f of found) {
     const key = `${f.repo.toLowerCase()}#${f.number}`;
     const was = out.get(key);
@@ -89,6 +111,7 @@ export function mergePrs(stored: readonly WorkPr[], found: readonly PrRecord[]):
       title: f.title.slice(0, 200),
       head: f.head,
       state: f.state,
+      ...(f.via ? { via: f.via } : was?.via ? { via: was.via } : {}),
       ...(f.state === 'merged' ? { at: f.mergedAt, ...(f.sha ? { sha: f.sha } : {}) } : f.state === 'closed' ? { at: f.closedAt } : {}),
       ...(was?.noted && was.state === f.state ? { noted: was.noted } : {}),
     });
