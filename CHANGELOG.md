@@ -29,6 +29,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Every message to an agent names its sender** (w389, asked by Ben). A person typing in a worker's chat reached it
+  with no sender line, and the worker's prompt called the portal owner "the user", so a worker wrote "Release hold
+  lifted (Ben, …)" into PR #1024 for a message Lothsahn sent. Now every person's message reads `[from <name>]` in
+  every kind of session, an orchestrator's `[from the orchestrator, for <name>]`, an unknown sender says so, and the
+  resume after a restart names each unanswered message's sender. Prompts name the owner only as who runs the portal and
+  tell agents to attribute decisions only to a named sender ([docs/identity.md](docs/identity.md#every-message-names-its-sender-w389)).
+
 - **Idle workers no longer block new work** (w384, asked by Lothsahn). A follow-up to an idle worker was refused "already
   6 agents running (limits.maxSessions)" while six idle workers held every slot. The agent limits (`limits.maxSessions`,
   a machine's `max_agents`, `max_sandbox_agents`, `max_agents_per_sandbox`) now count agents mid-turn only; a message
