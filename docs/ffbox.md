@@ -215,8 +215,15 @@ request from an operator whose name is no login is refused (`unknown_operator`),
 
 `devRequests` (all optional): `enabled`
 (default true; false refuses every one `not_enabled`), `perHour` (default 20 a person), `maxFiles` (default and most
-10), `maxRequestMB` (default and most 500). Each file is also capped at 200 MB and at `attachments.maxMB`. An owner
-sets them with `set_app_config` (the whole `providers.ffbox.devRequests` block); it applies at once.
+10), `maxRequestMB` (default and most 500). Each file is also capped at 200 MB and at `attachments.maxMB`. A file past
+these is dropped and named in the request, never a reason to refuse it (w344). An owner sets them with
+`set_app_config` (the whole `providers.ffbox.devRequests` block); it applies at once.
+
+**Which files come (w344).** Every file FFBox holds for the conversation, not only the ones on the operator's own
+message: on 2026-10-04 conversation 637's request (w331) arrived without the Bug Bot report's runtime log and bug-report
+zip, because only the operator's turn's files went. FFBox chooses the newest first up to its caps and names the rest in
+the brief (name, Discord link, why). A follow-up (`dev_message`) carries the files no earlier hand-over delivered; they
+join the request and reach the person's orchestrator and every live worker on it, on any machine.
 
 **What happens to one.** Its files go into the attachment store ([attachments.md](attachments.md)) and each SHA-256 is
 checked: a mismatch files nothing. Then it is filed at once as that person's own request, with no approval step
