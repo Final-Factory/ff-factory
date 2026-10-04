@@ -226,7 +226,10 @@ export function prSummary(v: Pick<PrView, 'title' | 'body' | 'url' | 'autoMerge'
   const at = lines.findIndex((l) => /^#+\s*(evidence|verif|test|how (it was )?tested)/i.test(l));
   const verified = at >= 0 ? lines.slice(at + 1).map(plain).find((l) => l && !/^```/.test(l)) : undefined;
   const next = v.autoMerge ? 'Merging when CI is green.' : 'Waiting on review.';
-  const tail = `${next} ${v.url}`;
+  // THE PR BY NUMBER, beside its link (w351; Lothsahn: "When it posts about the PR is up for the fix or PR is merged,
+  // please include the PR number").
+  const number = /\/pull\/(\d+)\/?$/.exec(v.url)?.[1];
+  const tail = `${next} ${number ? `PR #${number}: ` : ''}${v.url}`;
   const room = 1000 - tail.length - 2;
   const verifiedText = verified ? publicText(`Verified: ${verified}`, Math.min(300, Math.floor(room / 3))) : '';
   const leadText = publicText(lead, room - (verifiedText ? verifiedText.length + 1 : 0));
@@ -239,8 +242,11 @@ export function devFacts(
   facts: { watch?: DevUpdate['watch']; version?: string | null; mergedIn?: string | null; branch?: string },
   extra: { summary?: string; prUrl?: string } = {},
 ): Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> {
+  // QUESTIONS AND RESULTS ARE FOR A DEVELOPER (w351): FFBox posts them only in a private channel, and from a public
+  // thread DMs them to the operator who filed the request, so they keep their internal detail (ids, files, PRs).
+  // Only the PR summary and the merge notice reach players, and those stay player-safe (prSummary, FFBox's own line).
   if (w.status === 'rejected' || w.status === 'cancelled') {
-    const reason = publicText(w.outcome ?? '', 300);
+    const reason = cleanLine(w.outcome ?? '', 300);
     return { status: w.status === 'rejected' ? 'declined' : 'cancelled', ...(reason ? { result: reason } : {}) };
   }
   // ONLY WITH A PR: a sandbox's own branch (sandbox/<name>) carries one task after another, and FFBox following it by
@@ -248,14 +254,14 @@ export function devFacts(
   if (w.status !== 'done') {
     const out: Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> = { status: 'open', ...(facts.watch?.pr ? { watch: facts.watch } : {}) };
     if (facts.watch?.pr && extra.summary && extra.prUrl) Object.assign(out, { summary: extra.summary, pr: { number: facts.watch.pr, url: extra.prUrl } });
-    const asked = w.status === 'question' ? publicText(w.flag?.text ?? w.question?.text ?? '', 1000) : '';
+    const asked = w.status === 'question' ? cleanBlock(w.flag?.text ?? w.question?.text ?? '', 1000) : '';
     if (asked) out.question = asked;
     // HELD IN THE INTAKE (w299): the thread hears that a developer has to look first; nothing else is said about it.
     if (w.approval?.state === 'pending') out.held = true;
     return out;
   }
   const out: Omit<DevUpdate, 'type' | 'id' | 'request' | 'conversation'> = { status: 'done', version: facts.version ?? null, mergedIn: facts.mergedIn ?? null, ...(facts.branch ? { branch: facts.branch } : {}) };
-  const result = publicText(w.outcome ?? '', 300);
+  const result = cleanLine(w.outcome ?? '', 300);
   if (!out.mergedIn && result) out.result = result;
   return out;
 }
@@ -752,10 +758,16 @@ export class DevRequests {
     let changed = false;
     for (const conversation of conversations) {
       if (facts.status !== 'open' && s.finals.includes(`${target.id}:${conversation}`)) continue;
+      // A THREAD NO OPERATOR FILED (the request came from FFBox's own report or escalation, w278) has nobody FFBox may
+      // DM a question to, and a public thread never hears one (w351): it gets only "Waiting on input from a developer."
+      // (`held`), and the question stays with the request's people here (the [intake question] they were sent).
+      const operated = links.some((x) => x.link.conversation === conversation);
+      const mine = !operated && facts.question ? (({ question: _q, ...rest }) => ({ ...rest, held: true }))(facts) : facts;
       const key = conversation;
-      if (s.sentUpdates[key] === `${target.id} ${digest}`) continue;
-      s.sentUpdates[key] = `${target.id} ${digest}`;
-      const msg: DevUpdate = { type: 'dev_update', id: `u-${target.id}-${this.now().toString(36)}-${randomBytes(3).toString('hex')}`, request: target.id, conversation, ...facts };
+      const sig = `${target.id} ${mine === facts ? digest : JSON.stringify(mine)}`;
+      if (s.sentUpdates[key] === sig) continue;
+      s.sentUpdates[key] = sig;
+      const msg: DevUpdate = { type: 'dev_update', id: `u-${target.id}-${this.now().toString(36)}-${randomBytes(3).toString('hex')}`, request: target.id, conversation, ...mine };
       s.updates = [...s.updates.filter((u) => u.conversation !== conversation), { ...msg, at: this.iso() }].slice(-KEEP_UPDATES);
       const person = links.find((x) => x.link.conversation === conversation)?.link.person.userId ?? target.requestedBy.userId;
       this.log({ ref: msg.id, kind: 'update', ...(person ? { person } : {}), outcome: updateWords(msg), workId: target.id });

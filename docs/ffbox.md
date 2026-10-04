@@ -272,24 +272,35 @@ FF Factory (`show: "dev_requests"`, the orchestrator's `[from FFBox, …]` lines
 `open` with `watch` (repo, branch, PR, target) once the worker's PR exists, then `done` with `mergedIn` and, once a
 release carries it, `version`; or `declined` / `cancelled`. Work events send it, and a check every minute catches a
 PR opening (which changes no work item). FFBox follows the PR like its own branches, posts its usual merge notice
-("Fixed, coming in <version> and later.") replying to the reporter, files the thread away by its usual rules, and posts
-a short result for a declined or cancelled one. Only the newest update per conversation waits, resent on every
-reconnect until FFBox confirms it. "Already fixed in <version> (PR #N)." at filing is a result and is still posted.
+("Fixed in PR #N, coming in <version> and later.", the PR as a link) replying to the reporter, files the thread away by
+its usual rules, and says a declined or cancelled one's result where results go (below). Only the newest update per
+conversation waits, resent on every reconnect until FFBox confirms it.
 
-**What the thread hears along the way (w278).** Lothsahn: "Is a summary posted when a fix is put up on a PR by
-FFFactory, or when FFFactory needs clarification on a fix, or it can't do a fix? I want FFFactory to respond back to
-FFBox when that happens." The same `dev_update` carries three results, each posted once by FFBox:
-- **A fix up on a PR.** Once the worker's PR is ready for review (not a draft; read with `gh pr view` at most once a
-  minute), `summary` and `pr`: the PR's TL;DR or first paragraph, the first line of its evidence or test section,
-  "Waiting on review." or "Merging when CI is green." (auto-merge set), and the link; at most 1000 characters, with
-  work ids, sandbox branches and session ids taken out (`publicText`).
-- **A question.** While the request is `question` (a worker's DESIGN-QUESTION, or the dispatcher's `decide_work`
-  ask, now kept as `question` on the request), `question`. FFBox posts it and marks the conversation waiting. The
-  operator's answer in the thread arrives as `dev_message` and answers the request (`Orchestrators.answerFromFfbox`): a
-  note, the request open again, and the dispatcher told to resume the work with it.
-- **Can't fix.** Declined or cancelled with the reason as `result`, or done with nothing merged and its outcome. FFBox
-  posts it and leaves the thread open (Lothsahn: "For can't fix, don't archive the conversation or close the thread.
-  Just leave the message there."); only a merged fix is archived.
+**What a public thread hears, and where the rest goes (w351).** Lothsahn: "Please don't ping public discord chats outside
+the following things: PR is up for the fix; PR merged (which is posted by FFBox)", and "These messages can go direct to
+me via DM's, but not to users in a thread." A conversation is public unless its channel's FFBox watch entry says
+`venue: private`, and a channel nobody classified is public (`venue_for`). Lothsahn's private developer channels are
+`dev_bug_reports`, `dev_chat` and `agent_testing`; `bug_reports`, feedback and the general chats are public. The box's
+own `watch` block decides (`ffbox_activity show config` shows it). In a public thread FFBox posts only:
+- **the fix is up on a PR:** `summary` and `pr`, once the worker's PR is ready for review (not a draft; read with
+  `gh pr view` at most once a minute): the PR's TL;DR or first paragraph, the first line of its evidence or test section,
+  "Waiting on review." or "Merging when CI is green." (auto-merge set), and "PR #N: <link>"; at most 1000 characters,
+  with work ids, sandbox branches and session ids taken out (`prSummary`, `publicText`);
+- **the merge notice** ("Fixed in PR #N, coming in <version>…") and the thread filed away after it;
+- **"Waiting on input from a developer."**, the exact line and nothing about why (Lothsahn: "It's appropriate to post
+  that--but not details about it"): while the request is held in the intake (`held`, w299), and when it asks a question.
+
+Everything else goes to the operator who filed the request, as a DM from Max in a developer's words (internal ids, files
+and PRs kept): a **question** (`question`, while the request is `question`: a worker's DESIGN-QUESTION or the
+dispatcher's `decide_work` ask), an orchestrator's `reply_to_ffbox` ("PR #1013 is green: merge now, or test first?"), and
+a **result** (declined or cancelled with the reason, done with nothing merged and its outcome, "Already fixed" at filing).
+The operator answers by replying to that DM; FFBox sends the reply as a `dev_message` on the request, naming the thread's
+conversation, and it answers the request (`Orchestrators.answerFromFfbox`: a note, the request open again, the
+dispatcher told to resume it). A thread no operator filed (a request from FFBox's own report or escalation) has nobody
+to DM: its update carries `held` instead of the question, and the question stays with the request's people in FF Factory
+(the `[intake question]` the design reviewers are sent). In a private channel FFBox posts all of it in the thread, as it
+did before. A can't-fix leaves the thread open (Lothsahn, w278: "For can't fix, don't archive the conversation or close
+the thread"); only a merged fix is archived.
 
 **A broad request speaks for no thread (w317).** A request whose scope is a window, a source or a channel, or names
 more than one thread (`isBroad`; a request whose scope is the one thread its brief named is that thread's own), sends
@@ -304,7 +315,8 @@ and a PR link stays.
 A request filed from FFBox's own report, escalation, branch or diagnosis (`source.kind` `ffbox-request`,
 `ffbox-branch` or `ffbox-diagnosis` with a conversation id) gets the same updates in that conversation, and any person
 it is for may answer there. While such a request waits in the intake for a reviewer (docs/intake.md, "Approval, caps
-and auto-approve"), its update carries `held: true`, and FFBox posts "Waiting on input from a developer." once (w299). The
+and auto-approve"), or asks a question, its update carries `held: true`, and FFBox posts "Waiting on input from a
+developer." once (w299, w351). The
 orchestrators' briefs say: `[from FFBox, X]` lines are FFBox's filings, `[from FFBox via Discord, X]` is X's own words,
 answer with `reply_to_ffbox`, and never post to Discord any other way.
 
