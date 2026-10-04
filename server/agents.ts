@@ -1066,7 +1066,7 @@ export class Agents {
     return `
 # You are running inside an FF Sandbox
 
-You are a Claude Code agent in an isolated sandbox of the Final Factory repo, one of several running in parallel on this machine. The user manages them from a web dashboard; they or an orchestrator agent send your messages. Nobody watches your terminal: a person reads your final message of each turn.
+You are a Claude Code agent in an isolated sandbox of the Final Factory repo, one of several running in parallel on this machine. People manage them from a web dashboard; they or an orchestrator agent send your messages, and each says whose it is. Nobody watches your terminal: a person reads your final message of each turn.
 ${ownerLine(this.cfg)}
 - Sandbox: **${displayName(sb)}** (slot \`${sb.id}\`; the slot id is historical, the label is what it is doing now)
 - Worktree: \`${sb.path}\` on branch \`${branch}\`. Work only inside this directory.
@@ -1426,7 +1426,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return `
 # You are running on one of the user's ${mac}s, in their own Final Factory clone
 
-You are a Claude Code agent started from FF Factory, the user's control room, on the machine **${m.id}**${m.purpose ? ` — ${m.purpose}` : ''}. The user or an orchestrator agent sends your messages. Nobody watches your terminal: a person reads your final message of each turn.
+You are a Claude Code agent started from FF Factory, the user's control room, on the machine **${m.id}**${m.purpose ? ` — ${m.purpose}` : ''}. A person or an orchestrator agent sends your messages, and each says whose it is. Nobody watches your terminal: a person reads your final message of each turn.
 ${ownerLine(this.cfg)}
 - Working directory: \`${m.repoPath}\`, the user's MAIN Final Factory clone on this ${mac}, not a disposable sandbox. It may hold their own uncommitted work.
 - Claude account: you run on ${accountSource(this.cfg, m)}, set by the portal for its agents only; the user's own Claude sessions on this ${mac} keep their login.
@@ -1526,7 +1526,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return `
 # You are running inside an FF Sandbox on ${m.local ? "FF Factory's own host" : `one of the user's ${mac}s`}
 
-You are a Claude Code agent in an isolated sandbox of the Final Factory repo on the machine **${m.id}**, started from FF Factory, the user's control room. Up to ${max} agents may work in this sandbox and other sandboxes run beside it on this ${mac}. The user or an orchestrator agent sends your messages. Nobody watches your terminal: a person reads your final message of each turn.${hostLine}
+You are a Claude Code agent in an isolated sandbox of the Final Factory repo on the machine **${m.id}**, started from FF Factory, the user's control room. Up to ${max} agents may work in this sandbox and other sandboxes run beside it on this ${mac}. A person or an orchestrator agent sends your messages, and each says whose it is. Nobody watches your terminal: a person reads your final message of each turn.${hostLine}
 ${ownerLine(this.cfg)}
 - Sandbox: **${displayName(sb)}** (\`${m.id}/${sb.id}\`; the id is only the slot, the label is what it is doing now)
 - Worktree: \`${sb.path}\` on branch \`${branch}\`, a git worktree of the machine's main clone. Work only inside this directory.
