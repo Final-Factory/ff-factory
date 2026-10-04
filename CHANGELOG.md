@@ -12,6 +12,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A request claims only the threads and reports it is the work for** (w343, asked by Lothsahn). FFBox's ledger check
+  held five new desync reports (conversations 640-644) on w331, a Steam lobby request, and answered "done" for the
+  ten reports w312 (a fetch request) had listed. w331 had no report keys: its title, "<@…> Please diagnose this", was
+  one concept, and the text match let the report's "diagnose" and "diagnosis" both count against it, scoring 1. The
+  matcher now pairs concepts one to one, folds near-duplicates and caps coverage, and diagnose/investigate say nothing
+  about which bug it is. w312's keys came from its brief: a filing now takes thread and report keys only from its title
+  and the new `request_work` `subjects` (and an explicit scope), never from its brief, related ids, notes or worker
+  reports. Every start detaches such report keys from people's requests, backed up and logged on each
+  ([docs/intake.md](docs/intake.md)).
+
 - **The cleanup links a PR to a request only on strong evidence** (w340, asked by Lothsahn: it closed w339 on #988, an
   earlier request's PR that merged before w339 existed, while w339's worker was still working). A PR is a request's
   only by its `Request: wNNN` line, because the request's own worker opened it (`gh pr create`) after the request was filed,

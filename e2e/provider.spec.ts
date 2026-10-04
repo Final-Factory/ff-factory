@@ -131,7 +131,9 @@ test('FFBox protocol 2: the handshake, a board_check by thread key, and an ffbox
   // A Discord thread id unique to this run, so a reused server's ledger cannot answer for it.
   const thread = String(1554582984567562253n + BigInt(Date.now() % 1_000_000) * 1000n + BigInt(Math.floor(Math.random() * 1000)));
   const me = await appState(page.request);
-  const filed = await useTool(page.request, me.orchestratorId, 'request_work', { title: `Lag when leading a fleet ${tag}`, brief: `Players report it in https://discord.com/channels/530867164866150410/${thread}` });
+  // The request is the work for that thread: its subjects say so (a brief's link alone is a reference, w343).
+  const link = `https://discord.com/channels/530867164866150410/${thread}`;
+  const filed = await useTool(page.request, me.orchestratorId, 'request_work', { title: `Lag when leading a fleet ${tag}`, brief: `Players report it in ${link}`, subjects: [link] });
   expect(filed).toMatch(/^Filed w\d+ with the dispatcher\./);
   const id = /^Filed (w\d+)/.exec(filed)![1];
 

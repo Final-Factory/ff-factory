@@ -89,6 +89,39 @@ export function textKeys(text: string, knownBranches: readonly string[] = [], no
   return [...keys];
 }
 
+/**
+ * Keys that say which Discord thread or player report a request is the work for. FFBox's board_check answers by them
+ * (in_flight, done), so a wrong one keeps FFBox from working that thread or report (w343).
+ */
+export const SUBJECT_KEY = /^(discord|report):/;
+
+/**
+ * A filing's keys (Orchestrators.file). Thread and report keys come only from what names its subject: its title, the
+ * `subjects` its filer gave and the threads of a scope it was given. A brief or its constraints only reference them
+ * (w343: w312's brief listed the ten reports it was to fetch, so FFBox's checks for them answered "done", and w343's own
+ * brief named the five reports it was about). Every other key (specs, PRs, branches, "#N") still comes from the whole text.
+ */
+export function filingKeys(
+  f: { title: string; rest: string; subjects?: readonly string[]; scopeThreads?: readonly string[] },
+  knownBranches: readonly string[] = [],
+  notThreads: ReadonlySet<string> = new Set(),
+): { keys: string[]; subjects: string[] } {
+  const keys = new Set<string>();
+  for (const k of textKeys(f.title, knownBranches, notThreads)) keys.add(k);
+  for (const k of textKeys(f.rest, knownBranches, notThreads)) if (!SUBJECT_KEY.test(k)) keys.add(k);
+  const subjects = new Set<string>();
+  for (const s of f.subjects ?? []) for (const k of subjectKeys(s, notThreads)) subjects.add(k);
+  for (const t of f.scopeThreads ?? []) if (/^\d{15,25}$/.test(t) && !notThreads.has(t)) subjects.add(`discord:${t}`);
+  for (const k of subjects) keys.add(k);
+  return { keys: [...keys], subjects: [...subjects] };
+}
+
+/** The thread or report keys one `subjects` entry names: a Discord link or thread id, a report id, or the key itself. */
+export function subjectKeys(s: string, notThreads: ReadonlySet<string> = new Set()): string[] {
+  const t = s.trim().replace(/^(discord|report):/, '');
+  return textKeys(t, [], notThreads).filter((k) => SUBJECT_KEY.test(k));
+}
+
 /** The ids a request names, resolved: "w12" is a work item, a session id a session, and so on; anything else is read as text. */
 export function relatedKeys(ids: readonly string[], known: { work: (id: string) => boolean; session: (id: string) => boolean; delegation: (id: string) => boolean; sandbox: (id: string) => boolean; machine: (id: string) => boolean }, knownBranches: readonly string[] = []): string[] {
   const keys = new Set<string>();

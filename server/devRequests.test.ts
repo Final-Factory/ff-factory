@@ -426,15 +426,20 @@ test('dedup: covered by an open batch request whose scope holds the channel and 
   assert.equal((await c.next('dev_filed')).outcome, 'filed');
 });
 
-test("dedup: a request's brief that lists threads records them as its scope; a dev request from one joins it", async (t) => {
+test("dedup: the threads a request is the work for (subjects) are its scope; a dev request from one joins it; a brief's mention is no claim (w343)", async (t) => {
   const { connect, call, chat, store } = await setup(t);
   const [a, b] = [newThread(), newThread()];
   const ben = chat(BEN);
   ben.lastFrom = 'human';
-  const r = await call(ben.info, 'request_work', { title: 'Fix the two convoy reports', brief: `Threads https://discord.com/channels/${GUILD}/${a} and ${b}: convoys stall at gates.` });
+  const mention = await call(ben.info, 'request_work', { title: 'Read the convoy logs', brief: `Evidence in https://discord.com/channels/${GUILD}/${a} and ${b}.` });
+  assert.equal(mention.isError, false, mention.text);
+  const m = [...store.work.values()][0];
+  assert.deepEqual([m.scope, m.keys.filter((k) => k.startsWith('discord:'))], [undefined, []], 'a brief only references its threads');
+  const r = await call(ben.info, 'request_work', { title: 'Fix the two convoy reports', brief: `Threads https://discord.com/channels/${GUILD}/${a} and ${b}: convoys stall at gates.`, subjects: [`https://discord.com/channels/${GUILD}/${a}`, b] });
   assert.equal(r.isError, false, r.text);
-  const w = [...store.work.values()][0];
+  const w = [...store.work.values()].find((x) => x.title === 'Fix the two convoy reports')!;
   assert.deepEqual(w.scope, { threads: [a, b] });
+  assert.deepEqual(w.subjects, [`discord:${a}`, `discord:${b}`]);
   const c = await connect();
   c.send(devRequest('dev-listed', { thread: b, keys: [], title: 'Gate problem', brief: 'Look at it.' }));
   await c.next('dev_ack');
@@ -900,7 +905,7 @@ test('w317: a thread joined to a scoped (broad) request hears nothing from it; a
   await new Promise((r) => setTimeout(r, 100));
   assert.ok(!c.received.some((m) => m.type === 'dev_update'), "a broad request's close is not the thread's result");
   // A narrower request for this thread: the link moves to it, and the thread hears it from there.
-  const narrow = await call(loth.info, 'request_work', { title: 'Ship location wrong after a portal', brief: `The ship is placed at the wrong spot after using a portal. See https://discord.com/channels/530867164866150410/${thread}` });
+  const narrow = await call(loth.info, 'request_work', { title: 'Ship location wrong after a portal', brief: `The ship is placed at the wrong spot after using a portal. See https://discord.com/channels/530867164866150410/${thread}`, subjects: [thread] });
   assert.equal(narrow.isError, false, narrow.text);
   const n = [...store.work.values()].find((w) => w.title === 'Ship location wrong after a portal')!;
   assert.ok(n.keys.includes(`discord:${thread}`));
