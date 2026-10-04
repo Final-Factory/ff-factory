@@ -29,6 +29,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **Idle workers no longer block new work** (w384, asked by Lothsahn). A follow-up to an idle worker was refused "already
+  6 agents running (limits.maxSessions)" while six idle workers held every slot. The agent limits (`limits.maxSessions`,
+  a machine's `max_agents`, `max_sandbox_agents`, `max_agents_per_sandbox`) now count agents mid-turn only; a message
+  that finds every slot busy is queued and delivered when one frees instead of refused. Idle processes past
+  `limits.maxSessions` + `limits.maxIdleAgents` (6) are stopped oldest first, and idle workers whose request closed or
+  moved on, or idle an hour, are stopped by a reaper; never one mid-turn, with a pending wake_me or a dirty sandbox, and
+  a message resumes any of them with their history ([docs/orchestrators.md](docs/orchestrators.md#agent-limits-and-idle-workers)).
+
 - **A person's close is final** (w370, asked by Lothsahn). The ledger cleanup's re-check reopened w50 a minute after
   Lothsahn closed it by hand: its old automatic-close mark from #1002 had survived a hand reopen made before #83 and the
   hand close. Any close or reopen not made by the cleanup (a person's, the dispatcher's, a worker's marker, the intake's)
