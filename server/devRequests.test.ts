@@ -759,12 +759,12 @@ test('w278: summaries and questions for a Discord thread carry results, never in
     s,
     'Haulers ignored the cargo filter after a reload, so they moved everything. The filter is now saved with the hauler and applied on load.\n' +
       'Verified: Reloaded a save with three filtered haulers: each moved only its filtered items (measured in the editor).\n' +
-      'Waiting on review. https://github.com/Final-Factory/FinalFactory/pull/901',
+      'Waiting on review. PR #901: https://github.com/Final-Factory/FinalFactory/pull/901',
   );
-  assert.match(prSummary({ title: 'T', body: '', url: 'https://x/pull/1', autoMerge: true }), /^T\nMerging when CI is green\. https:\/\/x\/pull\/1$/);
+  assert.match(prSummary({ title: 'T', body: '', url: 'https://x/pull/1', autoMerge: true }), /^T\nMerging when CI is green\. PR #1: https:\/\/x\/pull\/1$/, 'w351: the PR by number, beside its link');
   const long = prSummary({ title: 'T', body: 'word '.repeat(600), url: 'https://x/pull/1', autoMerge: false });
   assert.ok(long.length <= 1000, `at most 1000 characters (${long.length})`);
-  assert.ok(long.endsWith('Waiting on review. https://x/pull/1'), 'the link always survives the cut');
+  assert.ok(long.endsWith('Waiting on review. PR #1: https://x/pull/1'), 'the PR and its link always survive the cut');
   assert.equal(publicText('Should w271 keep the old filter on sandbox/alpha (worker 8b0ba704)? ghp_' + 'a'.repeat(36), 300).includes('w271'), false);
   assert.doesNotMatch(publicText('w271: keep sandbox/alpha? worker 8b0ba704', 300), /w271|sandbox\/alpha|8b0ba704/);
 });
@@ -796,7 +796,7 @@ test('w278: a fix up on a PR sends its summary once the PR is ready, once; a dra
   assert.equal(u.status, 'open');
   assert.deepEqual(u.pr, { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901' });
   assert.match(String(u.summary), /^Haulers ignored the cargo filter after a reload/);
-  assert.match(String(u.summary), /Waiting on review\. https:\/\/github\.com\/Final-Factory\/FinalFactory\/pull\/901$/);
+  assert.match(String(u.summary), /Waiting on review\. PR #901: https:\/\/github\.com\/Final-Factory\/FinalFactory\/pull\/901$/);
   assert.doesNotMatch(String(u.summary), /w\d+|sandbox\/|8b0ba704|Discord:/, 'no internal ids, no routing');
   const n = c.received.filter((m) => m.type === 'dev_update').length;
   pm().dev!.recheck();
@@ -805,7 +805,7 @@ test('w278: a fix up on a PR sends its summary once the PR is ready, once; a dra
   assert.equal(c.received.filter((m) => m.type === 'dev_update').length, n, 'one summary per PR: nothing more while nothing changes');
 });
 
-test('w278: a question for the requester goes to the thread; the operator\'s answer there answers the request and the dispatcher resumes it', async (t) => {
+test('w278, w351: a question for the requester goes to FFBox in a developer\'s words (FFBox DMs it from a public thread); the operator\'s answer answers the request and the dispatcher resumes it', async (t) => {
   const { connect, store, call, dispatcher, heard, chat } = await setup(t);
   const c = await connect();
   const req = devRequest('dev-ask');
@@ -818,7 +818,7 @@ test('w278: a question for the requester goes to the thread; the operator\'s ans
   assert.equal(asked.isError, false, asked.text);
   let u = await c.next('dev_update');
   assert.equal(u.status, 'open');
-  assert.equal(u.question, 'For: should the filter also apply to drones, or haulers only?'.replace('For: ', 'For '), 'the question, without the work id');
+  assert.equal(u.question, `For ${wid}: should the filter also apply to drones, or haulers only?`, 'the question as asked, internal ids kept: it goes to a developer');
   assert.equal(store.work.get(wid)!.question?.text.includes('drones'), true);
   // The operator answers in the thread: FFBox sends it as dev_message.
   c.send({ type: 'dev_message', ref: 'msg-ans', request: wid, operator: { name: 'lothsahn' }, conversation: conv, text: 'Haulers only for now.' });
@@ -833,7 +833,7 @@ test('w278: a question for the requester goes to the thread; the operator\'s ans
   assert.deepEqual([u.status, u.question], ['open', undefined], 'the question is gone from the thread\'s facts');
 });
 
-test('w278: a request filed from an FFBox escalation gets the same events in its own conversation, and its requester may answer there', async (t) => {
+test('w278, w351: a request filed from an FFBox escalation gets the same events in its own conversation, its question only as held, and its requester may answer there', async (t) => {
   const { connect, store, call, dispatcher } = await setup(t);
   const c = await connect();
   const w: WorkItem = {
@@ -845,7 +845,8 @@ test('w278: a request filed from an FFBox escalation gets the same events in its
   assert.deepEqual([u.conversation, u.request, u.status], ['612', 'w500', 'open']);
   assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w500', action: 'ask', note: 'Which save shows it?' })).isError, false);
   u = await c.next('dev_update');
-  assert.equal(u.question, 'Which save shows it?');
+  // NO OPERATOR FILED THIS THREAD (w351): nobody FFBox may DM, and a thread never hears a question; only that it waits.
+  assert.deepEqual([u.question, u.held], [undefined, true]);
   c.send({ type: 'dev_message', ref: 'msg-esc', request: 'w500', operator: { name: 'lothsahn' }, conversation: '612', text: 'The one attached to the thread.' });
   assert.deepEqual(await c.next('dev_ack'), { type: 'dev_ack', ref: 'msg-esc', ok: true });
   assert.equal(store.work.get('w500')!.status, 'new');
