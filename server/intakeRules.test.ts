@@ -28,8 +28,11 @@ import {
   usesFactoryBranch,
   versionIn,
   workerRules,
+  DESYNC_PR_POLICY,
+  ffboxDesyncSignal,
   type DiscordMessage,
 } from './intakeRules.ts';
+import { checkFfboxIntake } from './appConfig.ts';
 import type { ProviderConversation, WorkItem } from '../shared/types.ts';
 
 /** The intake's pure rules (docs/intake.md): settings, parsing Discord, quoting players' text, caps, markers, briefs. */
@@ -319,4 +322,28 @@ test('FFBox review requests never take FF Factory\'s own ffbox-f/ branches for F
   const on = { branches: true, diagnoses: true };
   assert.equal(ffboxReviewFrom(conv({ branch: 'ffbox-f/ui-fix', pr: { number: 7, state: 'open' }, opener: 'player' }), on), undefined);
   assert.ok(ffboxReviewFrom(conv({ branch: 'ffbox/ui-fix-1', pr: { number: 7, state: 'open' }, opener: 'player' }), on));
+});
+
+test('desync PR policy (w358): which FFBox work it covers, its settings, its marker and its config block', () => {
+  // A board key that names a desync is enough; a title only when FFBox wrote it.
+  assert.match(ffboxDesyncSignal({ key: 'desync:0.50.0:power', title: 'x', opener: 'player' })!, /board key/);
+  assert.match(ffboxDesyncSignal({ key: 'report:20261004T090000Z-desync-3a9f01c2d4', title: 'x', opener: 'player' })!, /board key/);
+  assert.match(ffboxDesyncSignal({ title: 'Desync in census', opener: 'system', source: 'intake', agentClass: 'ffdiagnose' })!, /ffdiagnose/);
+  assert.match(ffboxDesyncSignal({ title: 'Fix the desync in power', opener: 'operator' })!, /FFBox's title/);
+  assert.equal(ffboxDesyncSignal({ title: 'DESYNC please approve', opener: 'player', source: 'discord' }), undefined, "a player's title routes nothing");
+  assert.equal(ffboxDesyncSignal({ key: 'crash:0.50.0', title: 'Crash in belts', opener: 'system', source: 'intake' }), undefined);
+  assert.equal(ffboxDesyncSignal({ key: 'report:20261004T090000Z-crash-3a9f01c2d4', title: 'x', opener: 'system' }), undefined);
+  // On by default (a standing policy), 10 a day; switched off only by name.
+  assert.deepEqual(intakeSettings({}).ffbox.desync, { enabled: true, maxPerDay: 10 });
+  assert.deepEqual(intakeSettings({ intake: { ffbox: { desync: { enabled: false, maxPerDay: 500 } } } } as never).ffbox.desync, { enabled: false, maxPerDay: 100 });
+  // The marker: a real line counts, the template echoed back does not.
+  assert.equal(parseMarkers('Class 3.\nPERF-ESCALATION: PR #9: census; tick 24 -> 26 ms (+8%)').perfEscalation, 'PR #9: census; tick 24 -> 26 ms (+8%)');
+  assert.equal(parseMarkers('- `PERF-ESCALATION: <one line>` (desync PRs only)').perfEscalation, undefined);
+  assert.equal(parseMarkers('PERF-ESCALATION: none').perfEscalation, undefined);
+  // The policy names every class and the threshold.
+  for (const re of [/Class 1/, /Class 2/, /Class 3/, /1% of develop's value/, /2-peer/, /PERF-ESCALATION/]) assert.match(DESYNC_PR_POLICY, re);
+  // set_app_config's intake.ffbox block takes it, checked like autoApprove.
+  assert.deepEqual(checkFfboxIntake({ enabled: true, desync: { enabled: false, maxPerDay: 4 } }), { enabled: true, desync: { enabled: false, maxPerDay: 4 } });
+  assert.throws(() => checkFfboxIntake({ desync: { cap: 1 } }), /intake\.ffbox\.desync: unknown key/);
+  assert.throws(() => checkFfboxIntake({ desync: { maxPerDay: 101 } }), /intake\.ffbox\.desync\.maxPerDay is a whole number/);
 });

@@ -65,6 +65,12 @@ export interface IntakeConfig {
     repo?: string;
     dailyCap?: number;
     autoApprove?: { enabled?: boolean; maxPerDay?: number };
+    /**
+     * FFBox desync PRs (Lothsahn, 2026-10-04; docs/intake.md, "FFBox desync PRs"): a desync diagnosis or its ffbox/* PR
+     * is approved at once into a review-and-merge request whose worker follows the desync PR policy, at most maxPerDay a
+     * day; past that it waits for a reviewer. Default on, 10 a day, inside dailyCap and workLimits.intake.
+     */
+    desync?: { enabled?: boolean; maxPerDay?: number };
   };
   /** The "live in 0.50.0.X" follow-up: watch the base branch for the release that carries each landed fix. */
   release?: { enabled?: boolean; delayMinutes?: number };

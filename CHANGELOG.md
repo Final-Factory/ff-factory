@@ -10,6 +10,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Added
+
+- **FFBox desync PRs follow Lothsahn's standing policy** (w358, docs/intake.md "FFBox desync PRs"). A desync diagnosis
+  or its `ffbox/*` PR is approved at once (triage `ffbox-desync`, `intake.ffbox.desync`, default on, 10 a day) into a
+  review-and-merge request whose worker classifies it first: report generation only (test, merge); a game desync fix (a
+  failing-first test and a 2-peer built-player check, merge); capture during play (tick and frame time before and after
+  on the biggest save: under 1% merges, above ends with `PERF-ESCALATION`, which puts the request back in the intake for
+  a developer with the PR left open). Caps and duplicate checks unchanged. The dispatcher's prompt carries the rule.
+
 ### Fixed
 
 - **No GitHub link in a public Discord thread** (w352, asked by Lothsahn: linking the PR "exposes which github we use.
