@@ -276,12 +276,23 @@ is checked three ways:
    (its title's, its `subjects`; a brief's mentions are references, w343). A window
    needs a bound, so no request covers a whole channel forever.
 
-| what matched | outcome | `dev_filed` text (FF Factory's views; FFBox posts only "Already fixed", w272) |
+| what matched | outcome | `dev_filed` text (FF Factory's views; FFBox posts "Already fixed" as written and, for every other outcome, "Queued as <workId>", w417) |
 |---|---|---|
 | a high-band open request, or an open request whose scope covers it | `covered`: it joins that request (a log line with the conversation and the operator, the thread added to its keys and, on an intake request, to its threads, the person added to its people, the files added, and a busy worker gets the note and a copy of each file in its Inbox) | "Covered by w38 (in progress)." |
 | a high-band request that is done | `fixed`: nothing filed; the link is recorded on the done one | "Already fixed in 0.50.0.69 (PR #412)." |
 | medium-band candidates | `linked`: filed, the candidates named in its log for the dispatcher and the person to merge | "Filed as w124; it may repeat w38, w40." |
 | nothing | `filed` | "Filed as w123." |
+
+**What the thread hears, start to end (w417; Lothsahn, 2026-10-05).** FFBox puts 👀 on the operator's message and hands
+it over. When FF Factory answers `filed`, `covered` or `linked`, FFBox replies "Queued as w123" (the joined request's id
+for `covered`, which is the `workId` FF Factory already sends) and then takes the 👀 off, the removal held behind the
+line, once per hand-over across FFBox restarts. When the fix's PR is ready, the thread hears "PR is up for the fix #N"
+(the number only), and when it merges, the merge notice ("Fixed in PR #N, coming in version <build> and later."). Nothing
+else is said in the thread between them: questions and `reply_to_ffbox` answers go to the operator by DM from Max (below).
+"Already fixed" at filing is posted as FF Factory wrote it. Where FFBox can say no "Queued as" (a review on GitHub, a shell
+or ffweb prompt), the 👀 stays until an outcome arrives (w415): the PR up, the request done, declined or cancelled, or its
+fix merged. FF Factory's side needs nothing new for this: `dev_filed` already carries `workId` and `dev_update` the `pr`
+number.
 
 `force` (`!fff new` on FFBox) files it whatever matched, naming what did (`linked`). The person's own orchestrator gets
 one line per outcome, labelled `[from FFBox, <operator>]`, with the conversation's link and the files' ids (and the
@@ -295,12 +306,13 @@ ffweb for the other sources), their own words relayed, and a busy worker on the 
 the harness's message, never as a turn of the person: tools that need the person's own turn (approving, deleting,
 settings) and the chat's filing budget still need them to write in FF Factory. The orchestrator answers with
 **`reply_to_ffbox`** `{ request?, conversation?, text }` (a person's own orchestrator only, for that person's own
-linked conversations), which sends a `dev_reply` FFBox posts in the thread; it errors plainly, "FFBox's connector is
-offline; nothing was sent", while the link is down.
+linked conversations), which sends a `dev_reply` FFBox gives the operator by DM from Max (w417; in the thread only when
+it has nobody to DM); it errors plainly, "FFBox's connector is offline; nothing was sent", while the link is down.
 
 **Following it to the result (w272).** Lothsahn: "when that branch closes out, FFBox will close the associated
 discord thread and reply to the user", and "we should not reply on discord with where things are going--just
-results". So the thread hears no routing ("Filed as", "Covered by", "may repeat", "w123 is done"): those lines stay in
+results". So the thread hears no routing ("Filed as", "Covered by", "may repeat", "w123 is done"; since w417 the one
+exception is FFBox's own "Queued as w123" at filing, which Lothsahn asked for): those lines stay in
 FF Factory (`show: "dev_requests"`, the orchestrator's `[from FFBox, …]` lines). Instead FF Factory sends a
 `dev_update` with facts whenever they change, from the same facts a board answer carries (`Orchestrators.boardFacts`):
 `open` with `watch` (repo, branch, PR, target) once the worker's PR exists, then `done` with `mergedIn` and, once a
@@ -316,7 +328,10 @@ me via DM's, but not to users in a thread." A conversation is public unless its 
 `venue: private`, and a channel nobody classified is public (`venue_for`). Lothsahn's private developer channels are
 `dev_bug_reports`, `dev_chat` and `agent_testing`; `bug_reports`, feedback and the general chats are public. The box's
 own `watch` block decides (`ffbox_activity show config` shows it). In a public thread FFBox posts only:
-- **the fix is up on a PR:** `summary` and `pr`, once the worker's PR is ready for review (not a draft; read with
+- **"Queued as w123"** at filing (w417, above);
+- **the fix is up on a PR:** "PR is up for the fix #N" in a dev request's thread (w417), from `pr`; FFBox keeps the
+  `summary` in its record. A thread FF Factory linked from FFBox's own report or escalation still hears the summary.
+  `summary` and `pr` come once the worker's PR is ready for review (not a draft; read with
   `gh pr view` at most once a minute): the PR's TL;DR or first paragraph, the first line of its evidence or test section,
   "Waiting on review." or "Merging when CI is green." (auto-merge set), and "PR #N." by number only; at most 1000
   characters, with work ids, sandbox branches and session ids taken out (`prSummary`, `publicText`), and GitHub links,
@@ -337,8 +352,9 @@ The operator answers by replying to that DM; FFBox sends the reply as a `dev_mes
 conversation, and it answers the request (`Orchestrators.answerFromFfbox`: a note, the request open again, the
 dispatcher told to resume it). A thread no operator filed (a request from FFBox's own report or escalation) has nobody
 to DM: its update carries `held` instead of the question, and the question stays with the request's people in FF Factory
-(the `[intake question]` the design reviewers are sent). In a private channel FFBox posts all of it in the thread, as it
-did before. A can't-fix leaves the thread open (Lothsahn, w278: "For can't fix, don't archive the conversation or close
+(the `[intake question]` the design reviewers are sent). In a private channel a dev request's question and replies go
+to the operator by DM too (w417), and its result lines stay in the thread; with nobody to DM, all of it is posted in the
+thread, as before. A can't-fix leaves the thread open (Lothsahn, w278: "For can't fix, don't archive the conversation or close
 the thread"); only a merged fix is archived.
 
 **A broad request speaks for no thread (w317).** A request whose scope is a window, a source or a channel, or names
