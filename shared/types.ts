@@ -1388,6 +1388,12 @@ export interface WorkDelivery {
   /** FIX-LANDED <sha>: the commit the worker said carries the fix (checked against the base branch). */
   fixCommit?: string;
   fixAt?: string;
+  /**
+   * The pull request that merged the fix and its head branch (w480): from the merged PRs by fixCommit, an auto-close's
+   * PR, or the PR an "already fixed by #N" close names. FFBox's merge notice names it ("Fixed in PR #N").
+   */
+  fixPr?: number;
+  fixBranch?: string;
   /** Seen on the base branch (git merge-base --is-ancestor). */
   landedAt?: string;
   /** Max replied in, and closed, the thread (from the ffdiscord events file). */
