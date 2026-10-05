@@ -33,6 +33,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A hard reset cannot leave a sandbox half-moved, or make a daemon forget its sandboxes** (w424, asked by Lothsahn;
+  BEAST hard-resets on WHEA errors). A machine daemon's `sandboxes.json` was written in place without an fsync and read
+  as empty when damaged, so the portal would have dropped that machine's sandbox labels and agents; it is now written
+  and read like the portal's own files (`server/durable.ts`). `migrate_host_sandboxes` writes each sandbox's records to
+  disk at once, moves them back before the daemon releases the folder (a reset in between leaves it held by both, not
+  by neither), and a second run finishes a move a reset cut off in either direction, which before was refused both
+  ways ("already has a sandbox"). A release the daemon refuses puts the records back on the machine.
 - **`add_machine` local works on BEAST** (w424, asked by Lothsahn). The Windows probe died with "You cannot call a method
   on a null-valued expression" on the first git repo without an `origin` remote under the home folder or a drive's top:
   Windows PowerShell casts a pipeline with no output to `$null`, and `.Trim()` threw. It now reads git's and node's

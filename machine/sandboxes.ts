@@ -10,6 +10,7 @@ import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeInfo } from '../server/unityHang.ts';
 import { copyTree, lowerPriority, removeTree, run, type RunResult } from '../server/proc.ts';
+import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable.ts';
 import { armScriptReimport } from './scriptReimport.ts';
 import { MacUnity, MacUnityWatch, realDeps, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
@@ -212,22 +213,26 @@ export class SandboxPool {
   }
 
   private load() {
+    // A damaged file (a hard reset, BEAST's WHEA errors) falls back to its newest good version: read as empty, the pool
+    // would forget its sandboxes, and the portal their labels and agents with them (w424).
+    let rows: Rec[] | undefined;
     try {
-      const rows = JSON.parse(fs.readFileSync(this.o.stateFile, 'utf8')) as Rec[];
-      for (const r of rows) {
-        // A create or delete a daemon restart cut off: say so; delete_sandbox finishes it.
-        if (r.status === 'creating' || r.status === 'deleting') Object.assign(r, { status: 'error', statusDetail: `interrupted while ${r.status} (the daemon restarted); delete it and create it again` });
-        this.recs.set(r.id, r);
-      }
-    } catch {
-      // none yet
+      rows = readJsonDurable<Rec[]>(this.o.stateFile, { check: checkArray });
+    } catch (e) {
+      this.o.onEvent({ text: `could not read ${this.o.stateFile}: ${(e as Error).message}` });
+    }
+    for (const r of rows ?? []) {
+      // A create or delete a daemon restart cut off: say so; delete_sandbox finishes it.
+      if (r.status === 'creating' || r.status === 'deleting') Object.assign(r, { status: 'error', statusDetail: `interrupted while ${r.status} (the daemon restarted); delete it and create it again` });
+      this.recs.set(r.id, r);
     }
   }
 
   private save() {
     try {
       fs.mkdirSync(path.dirname(this.o.stateFile), { recursive: true });
-      fs.writeFileSync(this.o.stateFile, JSON.stringify([...this.recs.values()], null, 2));
+      // Fsynced, then renamed into place, with the last good versions kept beside it (server/durable.ts).
+      writeJsonDurable(this.o.stateFile, [...this.recs.values()], { indent: 2 });
     } catch (e) {
       this.o.onEvent({ text: `could not save ${this.o.stateFile}: ${(e as Error).message}` });
     }
