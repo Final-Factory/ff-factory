@@ -1254,7 +1254,7 @@ export class MachineManager {
         return;
       }
       case 'stats': {
-        const stats: MachineStats = { ...msg.stats, at: new Date().toISOString() };
+        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), at: new Date().toISOString() };
         this.stats.set(id, stats);
         emit({ type: 'machine_stats', id, stats });
         return;

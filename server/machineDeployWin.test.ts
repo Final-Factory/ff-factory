@@ -319,7 +319,7 @@ test('windows unity: the editor binary from the Hub (a custom install folder fir
   assert.equal(editorBinary(WREPO, hit('C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.1f1\\Editor\\Unity.exe'), read, 'C:\\Users\\L', 'win32', env), 'C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.1f1\\Editor\\Unity.exe');
   assert.throws(() => editorBinary(WREPO, () => false, read, 'C:\\Users\\L', 'win32', env), /Unity 6000\.3\.1f1 is not installed in E:\\Unity or C:\\Program Files/);
   assert.equal(editorLogPath('win32', env), 'C:\\Users\\L\\AppData\\Local\\Unity\\Editor\\Editor.log');
-  assert.deepEqual(parseWinProcs('{"pid":4,"ppid":0,"name":"System","cmd":""}'), [{ pid: 4, ppid: 0, cmd: 'System' }], 'ConvertTo-Json gives one object for one process');
+  assert.deepEqual(parseWinProcs('{"pid":4,"ppid":0,"name":"System","cmd":""}'), [{ pid: 4, ppid: 0, cmd: 'System', name: 'System' }], 'ConvertTo-Json gives one object for one process');
   assert.deepEqual(parseWinProcs('[{"pid":1,"ppid":0,"name":"a.exe","cmd":"a.exe -x"},{"pid":2,"ppid":1,"name":"b.exe","cmd":null}]').map((p) => p.cmd), ['a.exe -x', 'b.exe']);
   // A command line with raw control characters (U+0000-U+001F) among ~90 KB of processes: read, not a failed watch.
   const many = Array.from({ length: 600 }, (_, i) => `{"pid":${i + 10},"ppid":1,"name":"p${i}.exe","cmd":"C:\\\\Tools\\\\p${i}.exe --a-long-argument-list-to-reach-the-size-seen-on-LothDesktop ${'x'.repeat(80)}"}`);

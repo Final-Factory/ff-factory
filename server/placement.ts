@@ -26,9 +26,11 @@ export interface Computer {
   freeSandboxes: number;
   memUsedBytes?: number;
   memTotalBytes?: number;
-  /** Sandbox editors running, and how many may. */
+  /** Unity editors running (every Unity process its daemon counts, w469), and how many may. */
   editors?: number;
   maxEditors?: number;
+  /** What they are: "1 interactive, 3 batch; 2 waiting (...)" (shared/fleet.ts unitySlotsLine). */
+  editorsDetail?: string;
 }
 
 /** config placement (w428): computers to try first, in order, and computers to keep work off, with why. */
@@ -142,7 +144,7 @@ const loadPart = (p: Computer) => {
   const pct = memPct(p);
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
   if (p.mainClone) return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn) in its main clone${ram}`;
-  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}` : ''}`;
+  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}`;
 };
 
 /** How to place work on a computer: a sandbox there, or (a main clone) start_agent with the machine, and its rule. */

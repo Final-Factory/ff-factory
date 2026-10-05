@@ -1,7 +1,7 @@
 // Every computer and what it is working on, grouped for the sidebar and the Overview board: the host
 // (BEAST) first, then each machine, each with its sandboxes, the agents in them, and a machine's
 // main-clone agents. Pure, so the server's tests can check it and the browser can run it.
-import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, Sandbox, SandboxStatus, SessionInfo, UnityState } from './types.ts';
+import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, Sandbox, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
 
 /** Agents with a process: working, waiting on someone or idle. Stopped and failed ones are only counted. */
 export const isLiveAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'idle' || s.status === 'waiting_permission';
@@ -51,7 +51,7 @@ export interface FleetComputer {
   sandboxes: FleetSandbox[];
   /** max_sandboxes (machines) or limits.maxSandboxes (host), when known. */
   sandboxLimit?: number;
-  /** Sandbox editors running or starting (a machine's main-clone editor is not counted). */
+  /** Unity editors there: every one its daemon counts (w469), else the sandbox editors running or starting. */
   editors: number;
   editorLimit?: number;
   /** A machine's main-clone agents (its workers not in a sandbox; standing agents have their own list). */
@@ -125,7 +125,8 @@ export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines
       stats: app.system,
       sandboxes: inUseFirst([...hostSandboxes, ...daemonSandboxes]),
       sandboxLimit: local?.sandboxRoot ? (local.maxSandboxes ?? 3) : app.system?.limits.maxSandboxes,
-      editors: hostEditors + daemonSandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
+      // Every Unity process there, as its daemon counts them (w469), else the sandbox editors it reports.
+      editors: (local && app.machineStats?.[local.id]?.unity?.used) ?? hostEditors + daemonSandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
       editorLimit: local?.sandboxRoot ? (local.maxUnity ?? 2) : app.system?.limits.maxUnity,
     });
   };
@@ -162,7 +163,7 @@ export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines
       sandboxes: inUseFirst(sandboxes),
       // Pool defaults as the daemon applies them (docs/machines.md): 3 sandboxes, 2 editors once sandbox_root is set.
       sandboxLimit: m.sandboxRoot ? (m.maxSandboxes ?? 3) : undefined,
-      editors: sandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
+      editors: app.machineStats?.[m.id]?.unity?.used ?? sandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
       editorLimit: m.sandboxRoot ? (m.maxUnity ?? 2) : undefined,
       main: agentsIn(m.sessionIds, byId, (s) => !s.machineSandbox && s.kind !== 'standing'),
     });
@@ -177,4 +178,18 @@ export function capacityLine(c: FleetComputer): string {
   // "1/3 sandboxes" counts against the limit, so it stays plural; "1 sandbox" without one does not.
   const n = (count: number, limit: number | undefined, one: string, many: string) => (limit !== undefined ? `${count}/${limit} ${many}` : `${count} ${count === 1 ? one : many}`);
   return `${n(c.sandboxes.length, c.sandboxLimit, 'sandbox', 'sandboxes')} · ${n(c.editors, c.editorLimit, 'editor', 'editors')}`;
+}
+
+/**
+ * A machine's Unity editors as its daemon counts them (w469): "editors 4 of 3: 1 interactive, 3 batch", then what is
+ * over, waiting or held up by RAM, and the game players beside them (not counted).
+ */
+export function unitySlotsLine(r: UnitySlotsReport): string {
+  const reserved = r.used - r.interactive - r.batch;
+  const parts = [`editors ${r.used} of ${r.limit ?? 'no limit'}: ${r.interactive} interactive, ${r.batch} batch${reserved > 0 ? `, ${reserved} granted not started yet` : ''}`];
+  if (r.overLimit) parts.push('OVER LIMIT: nothing more starts until it drops');
+  if (r.waiting.length) parts.push(`${r.waiting.length} waiting (${r.waiting.slice(0, 3).map((w) => `"${w.label}" for ${w.count}`).join(', ')}${r.waiting.length > 3 ? ', ...' : ''})`);
+  if (r.ramPct !== undefined && r.ramPct >= r.ramLimitPct) parts.push(`RAM ${r.ramPct}%: new launches wait below ${r.ramLimitPct}%`);
+  if (r.players) parts.push(`${r.players} game player${r.players === 1 ? '' : 's'} (not counted)`);
+  return parts.join('; ');
 }

@@ -27,6 +27,7 @@ import { CATALOG } from './launch.ts';
 import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, pinnedWork, placementHint, type Computer } from './placement.ts';
+import { unitySlotsLine } from '../shared/fleet.ts';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import { HostMigrator, hostSandboxFrom } from './hostMigration.ts';
 import { WORK_OPEN, WORK_PRIORITIES, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
@@ -1608,7 +1609,7 @@ ${ownerLine(this.cfg)}
 - Protected: the machine's main clone \`${m.repoPath}\` (the user's own work) and the FF Factory daemon's folder. Never write there or run commands naming them; the harness blocks it.
 
 ## Unity
-Your sandbox has its own Unity editor, managed by the FF Factory daemon on this ${mac}. Use \`mcp__machine__unity\` to check its state, start, stop or restart it (force: true for a frozen one). Restart it whenever it is hung, crashed or misbehaving, without asking. Use the tool, never taskkill or kill: other sandboxes' editors share this ${mac}, so the harness refuses killing Unity by hand. A watch restarts a hung or crashed editor by itself and messages you. The first boot of a fresh sandbox can take many minutes (asset import); its log is \`Logs/sandbox-editor.log\` in the worktree (or the newest \`Logs/sandbox-editor-<time>.log\`). Your editor's MCP instance is named \`${sb.id}@<hash>\`: before ANY Unity MCP call, read \`mcpforunity://instances\` and \`set_active_instance\` with that full Name@hash. The harness refuses Unity MCP calls until you pin, and refuses any other instance.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like D:\\... (forward slashes work in Bash and in git).' : ''}
+Your sandbox has its own Unity editor, managed by the FF Factory daemon on this ${mac}. Use \`mcp__machine__unity\` to check its state, start, stop or restart it (force: true for a frozen one). Every Unity process on this ${mac} counts toward its limit of ${poolSettingsOf(m)?.maxUnity ?? 2} editors, whoever started it, and a start is refused while it is full or while launches wait ahead of yours (the refusal says who holds them; wake_me and try again). Run every other Unity launch (a -batchmode build or test run, a second editor for a peer run) under \`unity-slot run [--count N] [--label "<what>"] -- <command>\`: it waits its turn in this ${mac}'s queue, runs the command and frees the slot when it ends; a peer run asks for all its editors at once (\`--count 2\`). \`unity-slot status\` shows who holds and who waits. The game repo's own build and audit scripts take their slot themselves. Restart it whenever it is hung, crashed or misbehaving, without asking. Use the tool, never taskkill or kill: other sandboxes' editors share this ${mac}, so the harness refuses killing Unity by hand. A watch restarts a hung or crashed editor by itself and messages you. The first boot of a fresh sandbox can take many minutes (asset import); its log is \`Logs/sandbox-editor.log\` in the worktree (or the newest \`Logs/sandbox-editor-<time>.log\`). Your editor's MCP instance is named \`${sb.id}@<hash>\`: before ANY Unity MCP call, read \`mcpforunity://instances\` and \`set_active_instance\` with that full Name@hash. The harness refuses Unity MCP calls until you pin, and refuses any other instance.${m.platform === 'win32' ? ' This is Windows: the Bash tool is Git Bash; paths are like D:\\... (forward slashes work in Bash and in git).' : ''}
 
 ## Waiting
 Plain \`sleep\` in the shell and the Monitor tool do NOT bring you back once your turn ends. To come back later (an import, a build, a test run, CI), call \`mcp__machine__wake_me\` with minutes and a note, then end your turn. Do not poll in the foreground for more than a few minutes.
@@ -1650,7 +1651,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           { name: 'wake_me', description: 'Be messaged again after N minutes with your note, e.g. to check a long build or test run. Then end your turn: the message resumes you. One pending wake per session (a new one replaces it).' },
           {
             name: 'unity',
-            description: `This sandbox's own Unity editor (${sb.path}) on this ${platformNoun(m.platform)}. action: status | start | stop | restart. Restart it whenever it is hung, crashed or misbehaving: stop asks it to quit and kills it (and what it started) after 30 s; force: true kills at once. Starting returns once the process is up; the MCP bridge follows once the project has loaded (poll status until "running").`,
+            description: `This sandbox's own Unity editor (${sb.path}) on this ${platformNoun(m.platform)}. action: status | start | stop | restart. Restart it whenever it is hung, crashed or misbehaving: stop asks it to quit and kills it (and what it started) after 30 s; force: true kills at once. Starting returns once the process is up; the MCP bridge follows once the project has loaded (poll status until "running"). A start takes one of the machine's Unity slots: it is refused while every Unity process there fills max_unity or other launches wait ahead (the reason says which); a restart keeps its slot. status lists every Unity editor on the machine, who holds a slot and who waits.`,
           },
           {
             name: 'switch_branch',
@@ -1804,8 +1805,10 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         maxSandboxes: pool.maxSandboxes,
         freeSandboxes: sbs.filter((s) => this.free(s)).length,
         ...(used !== undefined && total ? { memUsedBytes: used, memTotalBytes: total } : {}),
-        editors: sbs.filter((s) => s.unity.state === 'running' || s.unity.state === 'starting').length,
+        // Every Unity process there, as its daemon counts them (w469); a daemon before that reports its sandbox editors only.
+        editors: st?.unity?.used ?? sbs.filter((s) => s.unity.state === 'running' || s.unity.state === 'starting').length,
         maxEditors: pool.maxUnity,
+        ...(st?.unity ? { editorsDetail: unitySlotsLine(st.unity).replace(/^editors \d+ of \S+: /, '') } : {}),
       });
     }
     return out;
@@ -1855,7 +1858,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       const sbs = m.sandboxes ?? [];
       const disk = this.machines.diskOf(m.id);
       const state = this.machines.isOnline(m.id) ? 'online' : 'OFFLINE (last known state)';
-      const limits = pool ? `${sbs.length}/${pool.maxSandboxes} sandboxes, ${sbs.filter((s) => this.free(s)).length} free, up to ${pool.maxAgentsPerSandbox} agents each, ${pool.maxUnity} editors at once, root ${pool.root}` : 'no sandbox_root any more';
+      const u = this.machines.statsOf(m.id)?.unity;
+      const editors = u ? `Unity ${unitySlotsLine(u)}` : `${pool?.maxUnity} editors at once`;
+      const limits = pool ? `${sbs.length}/${pool.maxSandboxes} sandboxes, ${sbs.filter((s) => this.free(s)).length} free, up to ${pool.maxAgentsPerSandbox} agents each, ${editors}, root ${pool.root}` : 'no sandbox_root any more';
       const diskPart = disk && disk.level !== 'ok' ? `; DISK ${disk.level.toUpperCase()} (${((disk.freeBytes ?? 0) / 2 ** 30).toFixed(0)} GB free)` : '';
       const noun = m.local ? `this host's own daemon; bare names like "${sbs[0]?.id ?? 'sb1'}" work too` : platformNoun(m.platform);
       const total = pool?.maxAgents !== undefined ? `, ${pool.maxAgents} agents in all` : '';

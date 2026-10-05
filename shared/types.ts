@@ -305,10 +305,36 @@ export interface SystemStats extends HostStats {
   limits: { maxUnity: number; maxSessions: number; maxSandboxes?: number };
 }
 
+/**
+ * Every Unity editor on a machine against its limit, as its daemon counts them (w469, machine/unitySlots.ts): all
+ * top-level Unity processes, whoever started them, and the launches waiting for a slot or holding one.
+ */
+export interface UnitySlotsReport {
+  /** max_unity; absent: no limit there (counted only). */
+  limit?: number;
+  /** Slots in use: running editors and batch runs, and slots granted whose Unity has not started yet. */
+  used: number;
+  interactive: number;
+  batch: number;
+  /** Of those, started outside the slot gate and not a sandbox's or the main clone's editor. */
+  outside: number;
+  /** Built game players running (not counted). */
+  players: number;
+  overLimit: boolean;
+  ramPct?: number;
+  /** New launches wait at or above this RAM use. */
+  ramLimitPct: number;
+  waiting: { label: string; count: number; holder: string; since: string; why: string }[];
+  granted: { label: string; count: number; holder: string; since: string }[];
+  at: string;
+}
+
 /** A machine's load, as its daemon last reported it (protocol 4+); not kept in state.json. */
 export interface MachineStats extends HostStats {
   /** When the portal received it. */
   at: string;
+  /** Its Unity editors against max_unity (w469); absent from a daemon before it. */
+  unity?: UnitySlotsReport;
 }
 
 // ---- machines (docs/machines.md) ----

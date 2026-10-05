@@ -19,6 +19,9 @@ import { agentPath, macReloadLines, nodeSupport, plist } from './machineDeploy.t
 import type { Config } from './config.ts';
 import type { HostStats, ImageInput, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
+// Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
+process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+
 /** Stands in for AgentSession on the daemon: answers every message with "echo <text>". */
 class FakeAgent implements SessionHandle {
   info: SessionInfo;

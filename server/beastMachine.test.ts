@@ -29,6 +29,9 @@ import { daemonRowsAfter, main as offlineMain, parseArgs, runningDaemons } from 
 import type { Config } from './config.ts';
 import type { ImageInput, Machine, PermissionMode, Sandbox, SandboxPoolSettings, SessionInfo, SystemStats } from '../shared/types.ts';
 
+// Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
+process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+
 const GB = 1024 ** 3;
 const T = '2026-09-29T10:00:00.000Z';
 
@@ -785,6 +788,26 @@ test('beast machine: a standing agent on it keeps the workers\' account; its dae
     assert.deepEqual((d as unknown as { cleanupSettings: unknown }).cleanupSettings, { everyMinutes: 0, softFreeGB: 0 });
     const other = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'm5', token: 't', repoPath: dir, appDir: path.join(dir, 'x'), maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
     assert.deepEqual((other as unknown as { cleanupSettings: unknown }).cleanupSettings, { everyMinutes: 60, softFreeGB: 80 }, 'other machines: the defaults, as before');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('w469: a daemon gives its agents the Unity slots mailbox, their holder and unity-slot first on their PATH', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-dslot-'));
+  try {
+    const slots = path.join(dir, 'slots');
+    const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: dir, maxEventsFile: null, unitySlotsDir: slots }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
+    assert.deepEqual(d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') }), { FF_UNITY_SLOTS: slots, FF_UNITY_HOLDER: 'sandbox:sb1' }, 'before start wrote the commands: no PATH change');
+    assert.equal(d.slotEnv({ cwd: path.join(dir, 'FinalFactory') }).FF_UNITY_HOLDER, 'main', "the main clone's agents hold for its editor");
+    assert.equal(d.slotEnv({ cwd: path.join(dir, 'agents', 'nightly') }).FF_UNITY_HOLDER, undefined, 'a standing agent holds for itself');
+    (d as unknown as { slotBin: string }).slotBin = path.join(slots, 'bin');
+    const env = d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') });
+    // Windows keeps the variable as "Path": the same key, so the agent does not get two.
+    const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH')!;
+    assert.deepEqual(Object.keys(env).filter((k) => k.toUpperCase() === 'PATH'), [key]);
+    assert.equal(env[key].split(path.delimiter)[0], path.join(slots, 'bin'));
+    assert.equal(d.slots.dir, slots);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -18,6 +18,7 @@ import { PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type From
 import { writeFileDurable } from '../server/durable.ts';
 import { MacUnity, MacUnityWatch, realDeps } from './unity.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
+import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
 import { MAIN_CLONE, McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { withBaseRepoLock } from '../server/sandboxes.ts';
 import { redactSecrets } from '../server/secrets.ts';
@@ -76,6 +77,8 @@ export interface DaemonConfig {
   relocatedAt?: string;
   /** The daemon.json this config was read from (set by the entry point, never written): where a relocate is kept. */
   configFile?: string;
+  /** The Unity slots mailbox (machine/unitySlots.ts); default slotsDir(), the one place scripts look for it. */
+  unitySlotsDir?: string;
 }
 
 /** How long a relocated daemon dials only its new URL (tests shorten it). */
@@ -179,6 +182,12 @@ export class Daemon {
   private maxTail?: FileTail;
   /** The machine's sandboxes (machine/sandboxes.ts): worktrees of the clone with their own editors. */
   readonly pool: SandboxPool;
+  /** Every Unity editor on the machine against max_unity, and the queue for launches (machine/unitySlots.ts, w469). */
+  readonly slots: UnitySlots;
+  /** Where the `unity-slot` commands are, once written (first on agents' PATH). */
+  private slotBin?: string;
+  private lastSlotTick = 0;
+  private lastStats?: { stats: HostStats; at: number };
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
   private cleanupSettings: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown } = { ...MACHINE_CLEANUP_DEFAULTS };
@@ -193,6 +202,27 @@ export class Daemon {
     const platform = process.platform === 'win32' ? 'win32' : 'darwin';
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     this.unity = new MacUnity(cfg.repoPath, realDeps(platform), undefined, platform, where);
+    // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
+    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line));
+    this.slots = new UnitySlots({
+      dir: cfg.unitySlotsDir ?? slotsDir(),
+      platform,
+      procs: () => pd.procs(),
+      alive: isAlive,
+      now: () => Date.now(),
+      limit: () => this.currentPool()?.maxUnity,
+      places: () => [
+        ...this.pool.list().map((sb) => ({ holder: `sandbox:${sb.id}`, path: sb.path, editorUp: this.pool.editorUp(sb.id), priority: this.pool.stoppedWithin(sb.id, 5 * 60_000) })),
+        { holder: 'main', path: cfg.repoPath, editorUp: !!this.unityWatch?.editorPid },
+      ],
+      ramPct: () => this.ramPct(),
+      machine: cfg.id,
+      log: (line) => log(line),
+      onEvent: (text) => {
+        log(`unity slots: ${text}`);
+        this.send({ type: 'sandbox_event', text: `Unity slots: ${text}` });
+      },
+    });
     this.pool = new SandboxPool(
       {
         repoPath: cfg.repoPath,
@@ -206,8 +236,10 @@ export class Daemon {
           if (e.unity) this.send({ type: 'unity_event', text: e.text, restarted: !!e.restarted, sandbox: e.sandbox });
           else this.send({ type: 'sandbox_event', text: e.text, sandbox: e.sandbox, checkpoint: e.checkpoint });
         },
+        editorSlot: (id) => this.slots.startRefusal(`sandbox:${id}`),
+        slotsStatus: () => this.slotsNow(),
       },
-      poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line)),
+      pd,
     );
     this.makeSession = makeSession;
     this.maxSessions = cfg.maxSessions ?? 3;
@@ -343,6 +375,14 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.unityWatch?.tick(), 30_000));
     // The sandboxes' editors (state, hang/crash watch), their git status, the disk guard and the idle-editor stop.
     this.timers.push(setInterval(() => void this.pool.tick(), 30_000));
+    // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
+    try {
+      this.slotBin = installShims(this.slots.dir);
+    } catch (e) {
+      log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
+    }
+    this.timers.push(setInterval(() => void this.slotTick(), 5_000));
+    void this.slotTick();
     // Each agent's Unity MCP server finds only its own place's editor (machine/unityMcp.ts).
     const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
     log(mcp.server ? `unity mcp: ${mcp.server.command} ${mcp.server.args.join(' ')} (from ${mcp.source})` : `unity mcp: none (${mcp.source}); agents here get no Unity MCP bridge`);
@@ -562,14 +602,61 @@ export class Daemon {
     else this.scheduleUsage();
   }
 
-  /** This Mac's CPU, RAM, GPU and disk (the disk holding the clone), for the portal's meters (protocol 4). */
+  /** This Mac's CPU, RAM, GPU and disk (the disk holding the clone), for the portal's meters (protocol 4), with its Unity editors (w469). */
   private async reportStats() {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.send({ type: 'stats', stats: await this.probes.stats(fs.existsSync(this.cfg.repoPath) ? this.cfg.repoPath : HOME) });
+      const stats = await this.probes.stats(fs.existsSync(this.cfg.repoPath) ? this.cfg.repoPath : HOME);
+      this.lastStats = { stats, at: Date.now() };
+      const unity = this.slots.report();
+      this.send({ type: 'stats', stats, ...(unity ? { unity } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
     }
+  }
+
+  /** RAM in use, %: the last stats (a Mac's counts file cache as free), else Windows' own numbers; undefined: unknown. */
+  private ramPct(): number | undefined {
+    const l = this.lastStats;
+    if (l && Date.now() - l.at < 60_000 && l.stats.memTotalBytes) return Math.round((100 * (l.stats.memUsedBytes ?? l.stats.memTotalBytes - l.stats.memFreeBytes)) / l.stats.memTotalBytes);
+    return process.platform === 'win32' ? Math.round((100 * (os.totalmem() - os.freemem())) / os.totalmem()) : undefined;
+  }
+
+  /** Every Unity editor here, counted now (unity status). */
+  private async slotsNow(): Promise<string> {
+    await this.slots.tick().catch(() => undefined);
+    return this.slots.describe();
+  }
+
+  /** A look at the Unity slots when due: every 15 s, or at once while a launch waits or holds one. */
+  private async slotTick() {
+    let pending = false;
+    try {
+      pending = fs.readdirSync(this.slots.dir).some((n) => n.startsWith('req-'));
+    } catch {
+      // not made yet: the look makes it
+    }
+    if (!pending && Date.now() - this.lastSlotTick < 15_000) return;
+    this.lastSlotTick = Date.now();
+    await this.slots.tick().catch((e) => log(`unity slots: look failed: ${(e as Error).message}`));
+  }
+
+  /**
+   * What an agent's processes need to take Unity slots (docs/unity-lifecycle.md, "Unity slots"): the mailbox, who they
+   * hold for (their sandbox, or the main clone, whose editor gives their launches priority), and `unity-slot` first on
+   * their PATH. Exported through the class for tests.
+   */
+  slotEnv(spec: Pick<LaunchSpec, 'sandbox' | 'cwd'>): Record<string, string> {
+    const env: Record<string, string> = { FF_UNITY_SLOTS: this.slots.dir };
+    const main = path.resolve(spec.cwd).toLowerCase() === path.resolve(this.cfg.repoPath).toLowerCase();
+    if (spec.sandbox) env.FF_UNITY_HOLDER = `sandbox:${spec.sandbox}`;
+    else if (main) env.FF_UNITY_HOLDER = 'main';
+    if (this.slotBin) {
+      // Windows keeps it as "Path": the same key, or the agent would get two.
+      const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+      env[key] = [this.slotBin, process.env[key]].filter(Boolean).join(path.delimiter);
+    }
+    return env;
   }
 
   private lastUsage = 0;
@@ -729,7 +816,7 @@ export class Daemon {
         const sandbox = spec.sandbox;
         // TMP, TEMP and TMPDIR: the session's own folder under temp_dir, removed once the session is gone.
         return buildOptions(
-          { ...spec, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}) } },
+          { ...spec, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...this.slotEnv(spec) } },
           this.handlers(info.id),
           process.env,
           sandbox ? () => this.pool.editorUp(sandbox) : undefined,
@@ -957,8 +1044,16 @@ export class Daemon {
           return;
         }
         const u = this.unity;
-        const status = async () => [await u.status(), this.unityWatch?.describe()].filter(Boolean).join('\n');
-        const act = msg.action === 'start' ? u.start() : msg.action === 'stop' ? u.stop({ force: msg.force }) : msg.action === 'restart' ? u.restart({ force: msg.force }) : status();
+        const status = async () => [await u.status(), this.unityWatch?.describe(), await this.slotsNow()].filter(Boolean).join('\n');
+        // The main clone's editor takes a Unity slot too (w469); one already up keeps its own (a restart is not queued).
+        const gated = async (go: () => Promise<string>) => {
+          if (!u.editors(await u.procsNow()).length) {
+            const why = await this.slots.startRefusal('main');
+            if (why) throw new Error(why);
+          }
+          return go();
+        };
+        const act = msg.action === 'start' ? gated(() => u.start()) : msg.action === 'stop' ? u.stop({ force: msg.force }) : msg.action === 'restart' ? gated(() => u.restart({ force: msg.force })) : status();
         if (msg.action === 'stop' || msg.action === 'restart') this.unityWatch?.expectExit();
         void act.then(
           (text) => this.send({ type: 'unity_result', id: msg.id, ok: true, text }),

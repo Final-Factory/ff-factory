@@ -16,6 +16,9 @@ import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { MachineSandbox, SessionInfo } from '../shared/types.ts';
 
+// Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
+process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+
 /**
  * The Unity MCP bridge for machine agents (docs/machines.md, "Unity MCP"): which server the daemon runs, each place's
  * own status folder, and the portal asking for it for main-clone and sandbox agents alike.

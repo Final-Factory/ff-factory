@@ -18,6 +18,9 @@ import { fetchAttachment, fetchAttachments } from '../machine/attachments.ts';
 import type { Config } from './config.ts';
 import type { AttachmentRef, DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo } from '../shared/types.ts';
 
+// Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
+process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+
 /**
  * Attachments on a machine (docs/attachments.md): the daemon fetches each file from the portal over HTTP with its
  * machine token, resuming a dropped download and checking its SHA-256, into the agent's Inbox, before the message goes
