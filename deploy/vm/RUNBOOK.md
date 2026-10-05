@@ -31,6 +31,8 @@ and the Macs within reach of FFBox's `ffdev` containers (design 1.4, rule 1).
 
    If the policy still has the default allow-all rule, the tagged node can reach every device on every port anyway.
    Whether to replace it is Ben's call (question 1 below).
+   Rollback: [tailnet-policy-before-2026-10-05.hujson](tailnet-policy-before-2026-10-05.hujson) is the policy as it
+   was before this change (copied out by Ben); paste this file back into the JSON editor and Save.
 2. **An auth key** (Settings, Keys, Generate auth key): **not** reusable, **not** ephemeral, **pre-approved**, tag
    `tag:fff-portal`, expiry 1 day. The key only has to work once; a tagged node's own key does not expire. Send it to
    Lothsahn privately (not in a chat the agents read).
