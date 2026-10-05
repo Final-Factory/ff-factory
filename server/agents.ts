@@ -2146,7 +2146,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           { session_id: z.string(), last: z.number().int().min(5).max(400).optional().describe('How many events (default 60).') },
           wrap(async ({ session_id, last }) => {
             const s = this.sessions.get(session_id);
-            const head = `${s.info.title} [${s.info.status}] turns=${s.info.turns} cost=$${s.info.costUsd.toFixed(2)}`;
+            const head = `${s.info.title} [${s.info.status}${s.info.statusDetail ? `: ${s.info.statusDetail}` : ''}] turns=${s.info.turns} cost=$${s.info.costUsd.toFixed(2)}`;
             return `${head}\n${this.condensed(this.store.readTranscript(session_id, last ?? 60))}`;
           }),
         ),
