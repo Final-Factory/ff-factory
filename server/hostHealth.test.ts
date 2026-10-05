@@ -44,7 +44,7 @@ test('idle editors: stopped only when nobody in the sandbox is busy and nothing 
 });
 
 /** A monitor over fake effects; `world` is what it sees. */
-function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere: boolean }> = {}) {
+function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere: boolean; cfg: Partial<Config> }> = {}) {
   const world = {
     now: Date.parse('2026-09-24T13:00:00Z'),
     driveThere: over.driveThere ?? true,
@@ -62,6 +62,7 @@ function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere
     limits: { minFreeRamGB: 10 },
     unity: { idleStopMinutes: 0 },
     hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', compactWhenReclaimGB: 0, cleanup: { everyMinutes: 60, softFreeGB: 0 } },
+    ...over.cfg,
   } as unknown as Config;
   const deps: HostDeps = {
     cfg,
@@ -253,4 +254,20 @@ test('continuous clean-up: a regular pass each hour, sooner below the soft thres
   await settle();
   assert.equal(cleaned.length, 4, 'at most every 15 minutes while low');
   assert.match(await m.cleanupNow(), /Removed 1 item\(s\), 3\.0 GB\. Biggest: C:\/Temp\/x 3\.0 GB\. Still below the soft threshold of 120 GB/);
+});
+
+test('portal-only (w464): no sandbox drive is watched or reattached, nothing blocks on it, and the data volume is measured', async () => {
+  // The VM has no F: drive; the data folder is on its own volume (here "D:").
+  const { world, log, m } = harness({ driveThere: false, cfg: { hostSandboxes: false, dataDir: 'D:\\fff\\data' } as Partial<Config> });
+  assert.equal(m.status.sandboxRoot, 'ok', 'not "missing" at start');
+  assert.equal(m.blockReason('agent'), undefined);
+  await m.tick();
+  assert.equal(m.status.sandboxRoot, 'ok');
+  assert.deepEqual(m.status.disks.map((d) => d.path), ['D:\\fff\\data', 'C:\\']);
+  assert.ok(!log.some((l) => l.startsWith('helper') || l.startsWith('report Sandbox drive')), log.join('; '));
+  assert.equal(m.blockReason('agent'), undefined);
+  // The data volume filling up still blocks, like any watched disk.
+  world.freeC = 10 * GB;
+  await m.tick();
+  assert.match(m.blockReason('agent') ?? '', /C:/);
 });

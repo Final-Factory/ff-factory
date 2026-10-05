@@ -57,6 +57,19 @@ test('loadConfig: required keys, and standing agents kept out of the app and its
   assert.throws(() => loadConfig(), /missing "sandboxRoot"/);
 });
 
+test('loadConfig: the portal-only mode (hostSandboxes false) needs only the base clone; the switch is a boolean (w464)', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  withConfig(t, { hostSandboxes: false, dataDir: path.join(dir, 'data'), repo: minimal(dir).repo, standingRoot: path.join(dir, 'agents') });
+  const cfg = loadConfig();
+  assert.equal(cfg.hostSandboxes, false);
+  assert.equal(cfg.sandboxRoot, path.join(dir, 'data', 'sandboxes'), 'a default no sandbox is ever made in');
+  withConfig(t, { hostSandboxes: false, dataDir: path.join(dir, 'data'), standingRoot: path.join(dir, 'agents') });
+  assert.throws(() => loadConfig(), /missing "repo"/, 'the orchestrators still read the base clone');
+  withConfig(t, { ...minimal(dir), hostSandboxes: 'no' });
+  assert.throws(() => loadConfig(), /config hostSandboxes is true or false/);
+});
+
 test('loadConfig: a standingRoot inside the app folder is refused', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

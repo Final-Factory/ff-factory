@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Config } from './config.ts';
+import { PORTAL_ONLY_WHY, portalOnly, type Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { CreateSandboxRequest, Sandbox, UnityBlocked, UnityDismissal } from '../shared/types.ts';
 import { agentAnswers, checkAgentAnswer, decide, describeDialog, findDialogs, isStalled, listWindows, mainWindow, modifiedSceneFiles, pressButton, type Dialog } from './watchdog.ts';
@@ -249,6 +249,7 @@ export class SandboxManager {
 
   /** Validates and records the sandbox immediately; the slow work (fetch, checkout, Library copy) continues in the background. */
   create(req: CreateSandboxRequest): Sandbox {
+    if (portalOnly(this.cfg)) throw new Error(`${PORTAL_ONLY_WHY}: create the sandbox on a machine (create_sandbox with machine, e.g. "lothdesktop"; list_machines shows them)`);
     const id = slugify(req.name);
     if (!SLUG.test(id)) throw new Error(`"${req.name}" does not make a usable sandbox name`);
     if (reservedSandboxIds(this.cfg.protectedPaths, this.cfg.repo.basePath).has(id)) {

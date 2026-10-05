@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Portal-only mode** (w464, asked by Lothsahn; part A of moving the portal into a VM on the FFBox host, w441). With
+  config `hostSandboxes: false` this host holds no sandboxes: it leaves capacity, placement and `list_sandboxes`,
+  `create_sandbox` here is refused with the reason, `sandboxRoot` and `unity` may be left out, the host guard watches
+  the data volume instead of a sandbox drive, `host_recovery` runs only `cleanup`, and no standing agent runs
+  (README, "Portal-only mode").
+
 - **Workers hand files to each other, on any computer** (w447, asked by Ben). A save made on BEAST had to reach three
   LothDesktop workers, and only a person with ssh could move it. A worker now calls `publish_attachment` with a file in
   its working folder or temp folder; it answers an `att_` id, which its orchestrator passes on with `attachments: [id]`
