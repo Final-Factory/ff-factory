@@ -10,9 +10,9 @@ VM_NAME=fff-portal
 VM_VCPUS=4
 VM_MEMORY_MB=12288
 VM_DISK_GB=120
-# Ubuntu cloud image release for the guest: noble (24.04 LTS, what FF Factory's CI runs on) or resolute (26.04 LTS).
-VM_OS_RELEASE=noble
-VM_OS_VERSION=24.04
+# Ubuntu cloud image release for the guest: resolute (26.04 LTS, decision D14; CI boots it) or noble (24.04 LTS).
+VM_OS_RELEASE=resolute
+VM_OS_VERSION=26.04
 # zvol: a ZFS volume <VM_ZVOL_PARENT>/disk0 (snapshots, zfs send, a fixed reservation). qcow2: a file in VM_IMAGE_DIR.
 VM_DISK_MODE=zvol
 VM_ZVOL_PARENT=

@@ -26,13 +26,13 @@ permissions:
 jobs:
   lint:
     name: Lint (shellcheck, units, dry runs)
-    # Pinned: the FFBox host and the guest run 24.04; ubuntu-latest moves to 26.04 in October 2026.
-    runs-on: ubuntu-24.04
+    # The guest's release (decision D14: 26.04), so the guest install's dry run meets its packages.
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - name: Tools
-        run: sudo apt-get install -y -q shellcheck nftables
+        run: sudo apt-get update -q && sudo apt-get install -y -q shellcheck nftables
       - name: Host install --dry-run changes nothing
         run: |
           printf 'VM_DISK_MODE=qcow2\n' | sudo tee /tmp/fff-vm.conf
@@ -51,14 +51,19 @@ jobs:
           sudo deploy/vm/test/lint.sh --units
 
   e2e:
-    name: End to end in a nested VM (${{ matrix.disk }})
+    name: End to end, a 26.04 guest in a nested VM (${{ matrix.disk }} on an ${{ matrix.host }} host)
     needs: lint
-    runs-on: ubuntu-24.04
+    # The guest is always the default release (26.04, D14). The FFBox host's release is not known here, so the host
+    # side runs on both LTS releases, with the zvol (D13) on both.
+    runs-on: ${{ matrix.host }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        disk: [qcow2, zvol]
+        include:
+          - { disk: zvol, host: ubuntu-24.04 }
+          - { disk: zvol, host: ubuntu-26.04 }
+          - { disk: qcow2, host: ubuntu-24.04 }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -85,6 +90,6 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: vm-logs-${{ matrix.disk }}
+          name: vm-logs-${{ matrix.disk }}-${{ matrix.host }}
           path: vm-logs/
           retention-days: 14

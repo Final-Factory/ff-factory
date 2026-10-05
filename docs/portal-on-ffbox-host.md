@@ -39,11 +39,20 @@ the host and guest scripts for real on a throwaway GitHub runner ([10.3](#103-wh
 Voice transcription on BEAST's GPU does not move: the FFBox host has no GPU *(sourced: [ffbox.md](ffbox.md), "Where")*.
 See [2.6](#26-voice).
 
-**Standing agents stay with the portal, in the VM.** They are host agents of the server (`server/standing.ts`), run
-one Claude process during a run, and read the base clone and `data/`. Moving them to a worker machine would need a
-daemon-side standing runner (code that does not exist). They read Discord text, so a prompt injection there runs
-inside the VM, which is a better place than BEAST is today (1.7). The read guard of change 7 matters more for them than
-for anything else here.
+**No standing agents run in the VM** (Lothsahn, [D16](#8-risks-and-open-decisions)): only the orchestrators and the
+dispatcher do, and other machines run every other agent. Today there is one standing agent, Ben's
+`nightly-regression-sentry` (as the orchestrator reported it: daily at 03:00, opus, `shell_read` and `delegate`, up
+to 75 minutes). Lothsahn chose to run it as an ordinary worker on a worker machine, started by a daily timer; that is
+built in a separate PR. In portal-only mode the VM refuses to start a standing agent of its own (change 19). Their
+definitions, schedules and history stay in `data/state.json`, which moves.
+
+An earlier version of this page said that running a standing agent on a worker machine needed new code. That was
+wrong. A standing agent can already be assigned to a machine (`update_standing_agent` with a machine,
+`server/standing.ts:241-245`). The portal keeps its cron, budget and run history. That machine's daemon runs the
+Claude process next to its main clone (`place()`, `server/standing.ts:817-834`; `createSession`, `:780`). The
+delegation tools are answered by the portal "wherever its process runs" (`handlers()`, `server/standing.ts:929`).
+What it does not do is choose a machine by the placement rules: it runs on the one machine it is assigned to. The
+move starts a fresh conversation there and a new `NOTES.md` (`:256-260`), so the notes are copied across by hand.
 
 ## 1. Isolation
 
@@ -108,6 +117,25 @@ Installed by `deploy/vm/host/install.sh` ([Installing](#10-installing)); nothing
   `nftables`, `jq`, `curl` (and `ubuntu-keyring` and `gpgv`, which Ubuntu already has). libvirtd runs as root, behind a
   root-only socket. Each VM's QEMU runs as `libvirt-qemu` with its own AppArmor profile *(measured in CI on Ubuntu
   24.04: user `libvirt-qemu`, profile `libvirt-<uuid> (enforce)`)*.
+- **Host releases: Ubuntu 24.04 today, 26.04 later** (Lothsahn: the FFBox host runs 24.04 and will be upgraded). The
+  scripts install the same package names on both and take no version-specific path. What differs *(measured:
+  packages.ubuntu.com, 2026-10-05)*:
+
+  | | 24.04 (noble) | 26.04 (resolute) |
+  |---|---|---|
+  | libvirt | 10.0.0 | 12.0.0 |
+  | QEMU | 8.2.2 | 10.2.1 |
+  | nftables | 1.0.9 | 1.1.6 |
+  | AppArmor | 4.0.0 | 5.0.0 |
+
+  - **libvirt's own firewall rules** use the iptables backend on both. 24.04's libvirt is older than 10.4.0, which
+    added the nftables backend. Ubuntu builds 26.04's with iptables first *(sourced: libvirt NEWS 10.4.0;
+    resolute's `debian/rules`, `-Dfirewall_backend_priority=iptables,nftables`)*. Either way the VM's own table is a
+    separate `inet fff_vm`, which both nft versions load.
+  - **The rest is the same on both:** the `default` network the package defines, the virtualization check (`vmx` or
+    `svm` in `/proc/cpuinfo`, then `/dev/kvm`), and QEMU's per-VM AppArmor profile.
+  - **CI runs the end-to-end test on both host releases, each booting the 26.04 guest** ([10.3](#103-what-ci-proves)),
+    and prints each host's versions.
 - **The VM** `fff-portal`: q35, `host-passthrough` CPU, virtio disk and network, a serial console logged to
   `/var/log/libvirt/qemu/fff-portal-serial.log`, the guest-agent channel, an `i6300esb` watchdog with `action='reset'`,
   a pvpanic device, `on_crash` restart, and autostart at boot ([2.1](#21-the-vm)).
@@ -283,9 +311,14 @@ Six rules:
 `deploy/vm/host/install.sh` makes it from Ubuntu's cloud image. The image is checked against `SHA256SUMS`, whose
 signature is checked with `/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg`. On noble that keyring comes from
 `ubuntu-keyring`; the `ubuntu-cloudimage-keyring` package is a dummy *(sourced: packages.ubuntu.com file lists)*. The
-guest is Ubuntu 24.04 LTS, the release FF Factory's CI runs the portal on (`ubuntu-latest` = 24.04 until October 2026
-*(sourced: GitHub changelog 2026-09-17)*). 26.04 LTS is a setting away (`VM_OS_RELEASE=resolute`,
-[D14](#8-risks-and-open-decisions)).
+guest is **Ubuntu 26.04 LTS** (Lothsahn, [D14](#8-risks-and-open-decisions); supported to 2031):
+`ubuntu-26.04-server-cloudimg-amd64.img` from `releases/resolute/release`, published since 2026-04-21 *(measured: the
+cloud-images.ubuntu.com listing)*. Every package the scripts install exists for resolute *(measured: packages.ubuntu.com,
+2026-10-05: qemu-guest-agent 10.2.1, linux-image-extra-virtual 7.0.0, cloud-init 26.1, nftables 1.1.6, unattended-upgrades
+2.12, git-lfs, age, jq, curl, openssh-server, util-linux; and for a 26.04 host libvirt 12.0, QEMU 10.2, zfsutils 2.4,
+cloud-image-utils)*. NodeSource's `nodistro`, GitHub CLI's `stable` and Tailscale's `resolute` repositories serve it
+*(measured: their Release files)*. CI boots this guest on every change ([10.3](#103-what-ci-proves)). 24.04 stays a
+setting away (`VM_OS_RELEASE=noble`, `VM_OS_VERSION=24.04`).
 
 cloud-init (a NoCloud seed ISO from `cloud-localds`, read at the first boot only) sets up:
 
@@ -294,8 +327,8 @@ cloud-init (a NoCloud seed ISO from `cloud-localds`, read at the first boot only
 - a static address, a default route through the host's bridge address, and public resolvers.
 - `qemu-guest-agent`, `unattended-upgrades` and `nftables`, plus `linux-image-extra-virtual`. The cloud image's kernel
   has no `i6300esb` module: it ships in `linux-modules-extra`, which the cloud image does not install *(sourced:
-  packages.ubuntu.com file lists for linux-modules-6.8.0-101-generic and linux-modules-extra-6.8.0-101-generic; the noble
-  cloud image manifest)*. `package_reboot_if_required` boots once into an upgraded kernel, so the module matches it.
+  packages.ubuntu.com file lists for noble's linux-modules-6.8.0-101-generic and linux-modules-extra-6.8.0-101-generic,
+  and its cloud image manifest; resolute splits its kernel the same way, and CI checks the device is armed)*. `package_reboot_if_required` boots once into an upgraded kernel, so the module matches it.
 - the watchdog: `RuntimeWatchdogSec=30s` makes PID 1 pet `/dev/watchdog0` *(sourced: systemd-system.conf(5))*.
   `RebootWatchdogSec=10min` covers a hung shutdown. `fff-watchdog-arm.service` re-executes PID 1 if the device appeared
   after it started *(measured in CI: `/sys/class/watchdog/watchdog0/state` is `active`)*.
@@ -336,7 +369,7 @@ account `fff` (locked password, no sudo), `0700`:
 | `home/` | `HOME` of `fff`: `.claude` (session histories, plugins; a `/login` only if D6's fallback is used), `.ssh`, `.config/gh`, `.config/ffbox`, `.local/bin/claude` | session histories: 0.82 GB for LothDesktop's own user *(measured: `~/.claude/projects`, 2026-10-05)*; guess 1-5 GB for the portal | yes, without caches |
 | `app/` | `repo.git` (a bare clone of ff-factory), `releases/<sha12>/` (a worktree each, with its own `node_modules` and web build), `current` and `previous` (symlinks) | per release: measured in CI ([9](#9-sizing)) | no, rebuilt from git |
 | `base/` | the game repo, cloned without LFS files, for orchestrators' reads (`fffctl base-clone`) | git objects 1.27 GiB *(measured by w439, the container design: `git count-objects -vH` in BEAST's base clone)*; working tree without LFS files: guess 3-5 GB | no, re-cloned |
-| `agents/` | standing agents' folders (`standingRoot`) | small | yes |
+| `agents/` | `standingRoot`: empty, since no standing agent runs in the VM (D16) | 0 | yes |
 | `review/` | `publish_review` media (`review.root`) | grows with clips | [D9](#8-risks-and-open-decisions) |
 | `sandboxes/` | empty: `sandboxRoot` is still required by the config (change 1) | 0 | no |
 | `secrets/` | Lothsahn's subscription token (`claude-oauth-token`, `0600`), and nothing in config.json or a unit | tiny | yes |
@@ -616,7 +649,7 @@ draws on his Max plan's 5-hour and weekly limits, with no per-token bill. Standi
 - Per role, FF Factory's own spend is in `data/spend.json` (`server/usage.ts:633`); each session records the account
   it started on.
 - **Before the cut-over,** measure a week of the orchestrators' and the dispatcher's use on BEAST. It is not measured
-  here *(guess: small next to the workers')*. Then watch the meters after the move ([D20](#8-risks-and-open-decisions)).
+  here *(guess: small next to the workers')*. Then watch the plan's meters after the move.
 
 ## 6. What changes in FF Factory's code
 
@@ -638,7 +671,8 @@ test, **M** is tens of lines plus tests, **L** moves or rewrites a module.
 | 5 | `server/agents.ts` `request_app_update`; `server/index.ts:1690-1695` | `request_app_update` refuses without a `supervise.ps1` process | **done on this branch**: under systemd (`FFSB_SUPERVISOR=systemd` plus systemd's `INVOCATION_ID`) it writes `data/update.wanted` for `fff-update`; the crash path's `update.request` is built and switched by `fff-update activate` unchanged | | S, done |
 | 6 | `server/agents.ts:3159` | the dispatcher runs on the system payer's own token when there is one | not on Lothsahn's account if Ben has a token in `userClaudeEnv` | `claudeAccounts.dispatcher`, taking `"tokenfile"` with change 18 (config check, `set_app_config` allowlist, test) | S |
 | 7 | `server/guard.ts`, `server/standingGuard.ts`, `server/orchestratorMemory.ts` | no rule keeps orchestrators or standing agents from reading `config.json`, `~/.ssh` or Claude's credentials | the same gap, in the VM | refuse Read, Grep and Glob under `/srv/fff/config`, `/srv/fff/home` and `/srv/fff/data`, except an orchestrator's own memory folder | S-M |
-| 8 | `server/standingGuard.ts:233-238` (spot-checked) | off-limits paths in a standing agent's shell command are recognised only with a drive letter | a POSIX path such as `/srv/fff/base` is never checked (the read-only command allowlist still applies) | match absolute POSIX paths too | S-M |
+| 8 | `server/standingGuard.ts:233-238` (spot-checked) | off-limits paths in a standing agent's shell command are recognised only with a drive letter | no standing agent runs in the VM (D16), so not needed for the move; a standing agent on a Mac has the same gap today | match absolute POSIX paths too (recommended, for Macs) | S-M |
+| 19 | `server/standing.ts` (create, update, run), with change 1's portal-only mode | a standing agent with no machine runs on the portal's host | the VM runs only the orchestrators and the dispatcher (D16) | in portal-only mode, refuse to create, run or schedule a standing agent with no machine, with a clear reason; one left from the migration is paused and named in `system_status` until it is moved | S |
 | 15 | `deploy/vm/` | | | **done on this branch**: host and guest scripts, units, `fffctl`, `fff-update`, `fff-health`, `fff-backup`, the firewall tables, `config.vm.example.json` (`config.example.json` uses `C:/` paths, and `path.resolve('C:/ffsb')` on Linux gives `<cwd>/C:/ffsb`) | M, done |
 | 16 | `.github/workflows/vm-scripts.yml` | | | **done on this branch**: lint, dry runs, and the host and guest scripts end to end in a nested VM, in both disk modes | S-M, done |
 | 18 | `server/config.ts:13` (`CLAUDE_ACCOUNTS`), `server/secrets.ts` (`hostProcessEnv`, `hostClaudeEnv`), `server/agents.ts:3224`, `server/standing.ts:842`, `server/usage.ts:663` (`tokens()`), `server/appConfig.ts` | an account is `"login"` or `"token"`, and `"token"` is config `claudeEnv`, which goes to every machine's workers | every orchestrator and the dispatcher must run on Lothsahn's subscription token, kept in a file, and no worker may ([D4](#8-risks-and-open-decisions)) | a `"tokenfile"` account for the orchestrator, dispatcher and standing roles (refused for workers), config `claudeTokenFile`, the token read at each session start into that process's `CLAUDE_CODE_OAUTH_TOKEN` with the other credentials removed and laid on after `claudeEnvFor`, the file's token in the usage poll, `set_app_config` taking `"tokenfile"` but never the token itself; tests ([5.2](#52-putting-the-orchestrators-and-the-dispatcher-on-lothsahns-account-his-subscription-token)). Redaction already covers `sk-ant-oat01-`. The VM's side is done: `fffctl claude-token` and the `secrets/` folder | S-M |
@@ -665,7 +699,7 @@ off Windows); `server/watchdog.ts:385` (no host editors to watch); `server/provi
 `hostGuard.reapBrowsersAfterHours: 0`, Linux values for `repo.basePath`, `sandboxRoot`, `standingRoot`, `review.root`,
 `protectedPaths` and `publicUrl`: all in `config.vm.example.json`.
 
-Rough effort for 1 to 4, 6 to 8 and 18: about two weeks of one worker's time *(guess)*.
+Rough effort for 1 to 4, 6, 7, 18 and 19: about two weeks of one worker's time *(guess)*.
 
 ## 7. Migration
 
@@ -819,14 +853,13 @@ it rests on.
 | D10 | Voice | Off at cut-over (browser engines); try Whisper on the CPU later | 2.6 | whoever uses voice | **Accepted** (Lothsahn, 2026-10-05) |
 | D11 | BEAST's Dev Drive self-recovery | Move it into BEAST's daemon before the cut-over (change 4); the VM runs none of it | the 2026-09-24 outage, when Windows dropped F: and nothing came back without an administrator ([self-recovery.md](self-recovery.md)) | Ben, Lothsahn | **Decided** (Lothsahn, 2026-10-05; Ben leaned the same way, as the orchestrator relayed): into BEAST's daemon, the F: watch, `ffsb-helper-mount` with its retries, editor restarts and agent resumes, the disk guard and the reaper; nothing of it in portal-only mode |
 | D12 | The VM's size, and what the host sets aside for it | 4 vCPUs, 12 GiB RAM (about 12.5 GiB of the host with QEMU and libvirt), a 120 GiB disk. Settings in `/etc/fff-vm/fff-vm.conf`; a change applies at the next nightly cold restart | 9: guesses built on measured pieces | Lothsahn | Pending: from w442's 24-hour measurement on BEAST (ends about 14:28 UTC on 2026-10-06) |
-| D13 | The VM's disk | A zvol on the host's pool (`VM_DISK_MODE=zvol`): reserved in full, snapshots, no double copy-on-write. qcow2 if no pool can hold 120 GiB plus snapshots | 2.2; both tested in CI | Lothsahn | Open |
-| D14 | The guest's OS | Ubuntu 24.04 LTS (CI's portal runs on it; support to 2029). 26.04 LTS (to 2031) is `VM_OS_RELEASE=resolute`, untested here | 2.1 | Lothsahn | Open |
-| D15 | The nightly restart | Every night (`NIGHTLY_MODE=always`) at 12:00 UTC, after the guest's upgrades at 11:00 and backup at 11:15. `if-required` restarts only when the guest or the host's QEMU needs it | 3, "Why 12:00 UTC": measured, the quietest hour in 30 days of commits | Lothsahn, Ben | Open |
-| D16 | Standing agents | They stay with the portal in the VM | "What moves": no daemon-side standing runner exists; the VM is a better place for prompt-injectable agents than BEAST | Ben, Lothsahn | Open (D5 keeps their account) |
-| D17 | The backup target | A Windows account on BEAST used for nothing else, reached by sftp over the tailnet with the VM's backup key; age keys held by Ben and Lothsahn, off the FFBox host | 2.2, 1.5 | Ben (BEAST), Lothsahn | Open |
-| D18 | Alerts | The host's VM alerts go to the ntfy topic of FF Factory's outside watch, so one subscription covers both | 3, "Hang detection" | Lothsahn | Open |
-| D19 | libvirt's `default` network | Stopped if this install put libvirt on the host and nothing uses it (`DEFAULT_NET_ACTION=auto`); `uninstall.sh` puts it back | 1.3; measured in CI: the package defines it with autostart on | Lothsahn | Open |
-| D20 | Watching the plan's limits | The orchestrators and the dispatcher now share Lothsahn's Max plan's 5-hour and weekly limits with his own use. Check the meters (the token's own and his login's) a week after the move; if they crowd his own use, move them back to the host token with one setting (`claudeAccounts.orchestrator`, `.dispatcher`) | 5.4: one account, account-wide limits | Lothsahn | Open |
+| D13 | The VM's disk | A zvol on the host's pool (`VM_DISK_MODE=zvol`, the default): reserved in full, snapshots, no double copy-on-write | 2.2; both modes tested in CI | Lothsahn | **Decided:** a zvol; the space is there (Lothsahn, 2026-10-05) |
+| D14 | The guest's OS | Ubuntu 26.04 LTS (support to 2031), now the default (`VM_OS_RELEASE=resolute`); 24.04 stays a setting away | 2.1: the image and every package measured as published for resolute; CI boots the 26.04 guest | Lothsahn | **Decided:** 26.04 (Lothsahn, 2026-10-05) |
+| D15 | The nightly restart | Every night (`NIGHTLY_MODE=always`) at 12:00 UTC, after the guest's upgrades at 11:00 and backup at 11:15. `if-required` restarts only when the guest or the host's QEMU needs it | 3, "Why 12:00 UTC": measured, the quietest hour in 30 days of commits | Lothsahn, Ben | **Accepted:** nightly at 12:00 UTC (Lothsahn, 2026-10-05) |
+| D16 | Standing agents | None in the VM: only the orchestrators and the dispatcher run there; the nightly-regression-sentry runs on a worker machine. Two ways: (a) as an ordinary worker started by a daily timer (code, a separate PR), or a standing agent assigned to a machine, which exists today (no code; one fixed machine, not the placement rules) | "What moves"; `server/standing.ts:241-245`, `:780`, `:817-834`, `:929`; `server/timers.ts:21-25` | Lothsahn; Ben (the sentry is his) | **Decided:** no standing agents in the VM, and (a) (Lothsahn, 2026-10-05); the no-code alternative was raised with him after this page had wrongly said it needed code. Ben asked about moving his sentry |
+| D17 | The backup target | A Windows account on BEAST used for nothing else, reached by sftp over the tailnet with the VM's backup key; age keys held by Ben and Lothsahn, off the FFBox host | 2.2, 1.5 | Ben (BEAST), Lothsahn | **Agreed** (Lothsahn, 2026-10-05) |
+| D18 | Alerts | The host's VM alerts go to the ntfy topic of FF Factory's outside watch, so one subscription covers both | 3, "Hang detection" | Lothsahn | **Agreed** (Lothsahn, 2026-10-05) |
+| D19 | libvirt's `default` network | Stopped if this install put libvirt on the host and nothing uses it (`DEFAULT_NET_ACTION=auto`); `uninstall.sh` puts it back | 1.3; measured in CI: the package defines it with autostart on | Lothsahn | **Agreed** (Lothsahn, 2026-10-05) |
 
 **Risks**
 
@@ -856,8 +889,8 @@ it rests on.
 
 ## 9. Sizing
 
-The VM runs the portal only: orchestrators, the dispatcher, standing agents, the ledger, the web UI and the connector
-endpoint. No workers, no Unity.
+The VM runs the portal only: orchestrators, the dispatcher, the ledger, the web UI and the connector endpoint. No
+workers, no standing agents (D16), no Unity.
 
 **BEAST's own footprint is not measured yet.** The measurement needs read access to BEAST's processes and data, and
 `ssh beast` from LothDesktop was refused on 2026-10-05: its key is not authorized there. So
@@ -878,7 +911,7 @@ for 24 hours. Until its numbers are in, the ones below are guesses built on what
 |---|---|---|
 | One Claude process (the CLI the SDK runs) | working set 328 MB typical, 364 MB peak; private 594 MB typical, 627 MB peak | measured: `measure-portal.ps1` on LothDesktop, a worker's `claude.exe` sampled every minute over the afternoon of 2026-10-05. A proxy: a worker on Windows, not an orchestrator on Linux. Its tools (the Unity MCP server, PowerShell) added about 0.2 GB that orchestrators do not run |
 | The node server | LothDesktop's daemon: working set 206 MB typical, 334 MB peak | measured, same run. A proxy: the portal holds far more state. `state.json` is 4.5 MB at 7,000 sessions *(sourced: `server/store.ts:43`)*; guess 0.5-1 GB for BEAST's portal |
-| Claude processes at once | guess up to 10: one per person chatting (3-5), the dispatcher, 0-3 standing runs | `limits.maxSessions` caps mid-turn agents at 6 by default *(sourced: `server/config.ts:415`)*; idle orchestrators keep their process (and memory) *(sourced: [machines.md](machines.md), "an idle agent's process holds its memory too")* |
+| Claude processes at once | guess up to 6: one per person chatting (3-5) and the dispatcher; no standing runs in the VM (D16) | `limits.maxSessions` caps mid-turn agents at 6 by default *(sourced: `server/config.ts:415`)*; idle orchestrators keep their process (and memory) *(sourced: [machines.md](machines.md), "an idle agent's process holds its memory too")* |
 | The guest with the portal idle, empty data | ⟨CI⟩ | measured in CI: `free -m` and the node server's RSS a minute after the guest install, in the 2-vCPU, 4 GiB test VM |
 | A release on disk (worktree, `node_modules`, web build) | ⟨CI⟩ | measured in CI: `du -sh` of `app/releases/<sha>` |
 | Install, and an update's build | ⟨CI⟩ | measured in CI, 2 vCPUs |
@@ -892,7 +925,7 @@ for 24 hours. Until its numbers are in, the ones below are guesses built on what
 | | Value | Reasoning | Label |
 |---|---|---|---|
 | vCPUs | **4** | Agents mostly wait on the API. CPU comes in bursts: `rg` and `git` over the base clone, the server's state saves, and an update's `npm ci` and web build, which now run beside the live portal. 2 vCPUs built and ran it in CI (⟨CI⟩); 4 keeps a build from slowing the portal. Not pinned: the vCPUs are host threads competing with FFBox's CI | guess, on measured CI timings |
-| RAM | **12 GiB** | 10 Claude processes × 0.63 GB (the measured private peak) = 6.3 GB, the server up to 1 GB, the OS, journald and tailscaled about 0.5 GB, and 3-4 GB of page cache so orchestrators' reads of the base clone do not hit the disk. About 11 GB, rounded up | guess, on measured per-process numbers |
+| RAM | **12 GiB** | 6 Claude processes × 0.65 GB (the measured private peak) = 3.9 GB, the server up to 1 GB, the OS, journald and tailscaled about 0.5 GB, and 3-4 GB of page cache so orchestrators' reads of the base clone do not hit the disk. About 9 GB, with room for more people chatting at once; w442's measurement may lower it (D12) | guess, on measured per-process numbers |
 | Disk | **120 GiB** | OS about ⟨CI⟩, 3 releases × ⟨CI⟩, the base clone 1.3 + 3-5 GB, `data/` up to 20 GB, session histories 1-5 GB, review media and backup staging, then doubled for growth and for a year of logs | guess |
 | Host set aside | **about 12.5 GiB RAM**, 4 threads, the zvol's 120 GiB reservation plus its snapshots | 12 GiB + QEMU about 85 MiB (50 + 4 × 8 + 3) + libvirt 65 MiB, with headroom; no memory ballooning down (`currentMemory` = `memory`) | sourced overhead, guess headroom |
 | Network | no sizing need | the portal's traffic is control messages, transcripts and attachments up to 200 MB *(sourced: `attachments.maxMB` default)*; Funnel's own limits apply either way | sourced |
@@ -932,11 +965,13 @@ throwaway one.
 ### 10.3 What CI proves
 
 [`vm-scripts.yml`](../.github/workflows/vm-scripts.yml) runs on every change to `deploy/vm/`, `server/restart.ts` or
-`server/agents.ts`, and weekly, on `ubuntu-24.04` runners, which have KVM *(sourced: GitHub changelog 2024-04-02)*.
+`server/agents.ts`, and weekly, on `ubuntu-24.04` and `ubuntu-26.04` runners, which have KVM *(sourced: GitHub
+changelog 2024-04-02)*.
 
 - **Lint:** shellcheck and `bash -n` on every script, `systemd-analyze verify` on every unit, the template's JSON and
   the PowerShell script's syntax. Then both installers' `--dry-run`, checking that nothing changed.
-- **End to end**, once with a zvol (on a file-backed pool) and once with qcow2, run by
+- **End to end**, three times, each booting the 26.04 guest: a zvol (on a file-backed pool) on a 24.04 host, a zvol on
+  a 26.04 host, and qcow2 on a 24.04 host. Each is run by
   [`ci-vm-e2e.sh`](../deploy/vm/test/ci-vm-e2e.sh):
   - the host install twice, the second a no-op that leaves the VM running;
   - cloud-init and the armed watchdog;

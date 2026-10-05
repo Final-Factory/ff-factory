@@ -148,7 +148,7 @@ PermitRootLogin no
 ${FFF_ADMIN_USER:+AllowUsers $FFF_ADMIN_USER}
 EOF
 )
-# Ubuntu 24.04 starts sshd from ssh.socket: reload it only if it runs (a new one reads the file anyway).
+# Ubuntu 24.04 and later start sshd from ssh.socket: reload it only if it runs (a new one reads the file anyway).
 if [ -n "$sshd" ]; then run_cmd sshd -t && run_cmd systemctl try-reload-or-restart ssh.service; fi
 
 log "6/9 scripts: fffctl, fff-update, fff-health, fff-backup, fff-base-refresh"

@@ -2,7 +2,7 @@
 # commands for the guest are single-quoted on purpose: they expand there
 # shellcheck disable=SC2016
 # End-to-end test of the portal VM's host and guest scripts, on a THROWAWAY Ubuntu machine with KVM (CI's
-# ubuntu-24.04 runner). Never on the FFBox host or any machine that matters: it installs libvirt, creates and
+# ubuntu-24.04 and ubuntu-26.04 runners). Never on the FFBox host or any machine that matters: it installs libvirt, creates and
 # destroys a VM, loads an nftables table and resets the VM on purpose.
 #
 #   sudo deploy/vm/test/ci-vm-e2e.sh qcow2|zvol      (from the repository root, as root)
@@ -71,6 +71,9 @@ nft list table inet fff_vm | grep -q 'fff-vm: FF Factory portal VM' || fail "fir
 ! pgrep -af dnsmasq | grep -q fff-isolated || fail "a dnsmasq serves the VM's network"
 default_before=$(virsh net-info default 2>/dev/null | awk '/^Autostart:/ {print $2}' || true)
 echo "MEASURE manifest: $(tr '\n' ' ' </var/lib/fff-vm/manifest)"
+# shellcheck disable=SC1091
+. /etc/os-release
+echo "MEASURE host: $PRETTY_NAME, kernel $(uname -r); $(virsh version --daemon 2>/dev/null | grep -E 'library|hypervisor' | tr -s ' ' | tr '\n' ';'); $(nft --version); AppArmor $(dpkg-query -W -f='${Version}' apparmor 2>/dev/null)"
 qpid=$(cat /run/libvirt/qemu/$VM.pid)
 echo "MEASURE qemu process: user $(ps -o user= -p "$qpid"), AppArmor $(cat "/proc/$qpid/attr/current" 2>/dev/null || echo none)"
 echo "libvirt default network autostart after install: ${default_before:-none}"
