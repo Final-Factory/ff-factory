@@ -353,6 +353,11 @@ const localRef = (id: string) => {
   const ref = local ? parseSandboxRef(id) : undefined;
   return ref && ref.machine === local!.id ? ref : undefined;
 };
+/** Whether this host's own daemon runs the host guard itself (w466, machine/hostGuard.ts): the sandbox drive is its then. */
+const localGuards = () => {
+  const local = machines.local();
+  return !!local && machines.guards(local.id);
+};
 /** This host's own daemon's sandboxes as host records named "<machine>/<id>" (the host guard's view). */
 const localSandboxView = () => {
   const local = machines.local();
@@ -403,9 +408,12 @@ const hostHealth = new HostHealthMonitor({
   exists: (p) => fs.existsSync(p),
   mem: () => ({ free: os.freemem(), total: os.totalmem() }),
   // Plus this host's own daemon's sandboxes as "<machine>/<id>" (docs/beast-machine.md): they are on this host's
-  // sandbox drive and disks, so the guard brings their editors and agents back after the drive, and gates them.
-  sandboxes: () => [...sandboxes.list(), ...localSandboxView()],
-  sessions: () => localSessionView(),
+  // sandbox drive and disks, so the guard brings their editors and agents back after the drive, and gates them. Not
+  // while that daemon runs the guard itself (w466): then they are its own.
+  sandboxes: () => [...sandboxes.list(), ...(localGuards() ? [] : localSandboxView())],
+  sessions: () => (localGuards() ? [...store.sessions.values()] : localSessionView()),
+  // The sandbox drive is the local daemon's to watch and remount while its guard runs (machine/hostGuard.ts).
+  watchDrive: () => !localGuards(),
   startEditor: async (id) => void (localRef(id) ? await machines.unity(localRef(id)!.machine, 'start', false, localRef(id)!.sandbox) : await sandboxes.startUnity(id)),
   stopEditor: async (id) => void (localRef(id) ? await machines.unity(localRef(id)!.machine, 'stop', false, localRef(id)!.sandbox) : await sandboxes.stopUnity(id)),
   interrupt: (id) => sessions.get(id).interrupt(),
@@ -449,13 +457,27 @@ const hostHealth = new HostHealthMonitor({
     staleAt: staleAtFile(cfg.dataDir),
     diskPaths: () => [cleanupEnv.home, cleanupEnv.tmp],
   },
-  reap: (hours) => reapBrowsers(hours),
+  // The local daemon's guard reaps this computer's leftover browsers while it runs (w466): one reaper, not two.
+  reap: (hours) => (localGuards() ? Promise.resolve([]) : reapBrowsers(hours)),
   changed: (h) => {
     host.health = h;
     broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
   },
   log: (line) => console.warn(line),
 });
+// A machine's own host guard (w466: BEAST's daemon, its drive, disks and reaper) reports like this host's.
+machines.hostReport = (id, title, body) => {
+  console.log(`host guard on ${id}: ${title}: ${body}`);
+  notifier.host(`${id}: ${title}`, body);
+  const orch = store.orchestratorId;
+  if (orch) {
+    try {
+      sessions.send(orch, `[host ${id}] ${title}. ${body}`, 'system');
+    } catch {
+      // the orchestrator is not there; the notification still went out
+    }
+  }
+};
 sandboxes.startGate = () => hostHealth.blockReason('editor');
 machines.localGate = (kind) => hostHealth.blockReason(kind);
 sessions.startGate = () => hostHealth.blockReason('agent');
