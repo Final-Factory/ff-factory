@@ -91,6 +91,8 @@ export interface HostDeps {
     stale?(): Promise<{ path: string; days: number }[]>;
     log(entry: object): void;
     diskPaths(): string[];
+    /** When the stale-output rules last had their turn, kept on disk (server/cleanup.ts staleAtFile). */
+    staleAt?: { load(): number | undefined; save(at: number): void };
   };
   /** Kill stale automation browsers (server/reaper.ts); one line per reaped tree. */
   reap?(maxAgeHours: number): Promise<string[]>;
@@ -142,6 +144,7 @@ export class HostHealthMonitor {
       consumers: () => deps.cleanup.consumers(),
       stale: deps.cleanup.stale && (() => deps.cleanup.stale!()),
       log: (e) => deps.cleanup.log(e),
+      staleAt: deps.cleanup.staleAt,
       done: (summary, notice) => {
         this.health.lastCleanup = summary;
         if (notice) this.d.report('Clean-up cannot free enough disk space', notice);

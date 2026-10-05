@@ -545,6 +545,29 @@ export function appendCleanupLog(dir: string, entry: object) {
   }
 }
 
+/** The stale-output rules' last turn, kept in `<dir>/cleanup-state.json` (CleanupRunnerDeps.staleAt). */
+export function staleAtFile(dir: string): { load(): number | undefined; save(at: number): void } {
+  const file = path.join(dir, 'cleanup-state.json');
+  return {
+    load: () => {
+      try {
+        const at = Date.parse(JSON.parse(fs.readFileSync(file, 'utf8')).staleAt);
+        return Number.isFinite(at) ? at : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    save: (at) => {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ staleAt: new Date(at).toISOString() }));
+      } catch {
+        // best-effort: the turn is then counted from this start
+      }
+    },
+  };
+}
+
 // ---------------------------------------------------------------- the runner
 
 const GB = 1024 ** 3;
@@ -576,6 +599,11 @@ export interface CleanupRunnerDeps {
   /** One pass: plan and remove (`low`: below the soft threshold); `opts.dryRun`: plan only. */
   pass(low: boolean, opts: PassOptions): Promise<CleanupRun>;
   consumers(): Promise<{ path: string; bytes: number }[]>;
+  /**
+   * When the stale-output rules last had their turn, kept on disk (readStaleAt/writeStaleAt): a computer whose app or
+   * daemon restarts more often than once a day still gets its daily turn. Absent: in memory only.
+   */
+  staleAt?: { load(): number | undefined; save(at: number): void };
   /** Unity Libraries worth reporting (staleUnityLibraries past the report age). */
   stale?(): Promise<{ path: string; days: number }[]>;
   /** The pass's full record, for the log file. */
@@ -598,7 +626,10 @@ export class CleanupRunner {
 
   constructor(deps: CleanupRunnerDeps) {
     this.d = deps;
-    this.lastStaleAt = this.now();
+    // Never right at a first start or a deploy: the first turn comes a full interval after the first start.
+    const kept = deps.staleAt?.load();
+    this.lastStaleAt = kept ?? this.now();
+    if (kept === undefined) deps.staleAt?.save(this.lastStaleAt);
   }
 
   private now() {
@@ -645,7 +676,10 @@ export class CleanupRunner {
       const withStale = !!st && st.mode !== 'off' && (dryRun || low || this.now() - this.lastStaleAt >= st.everyHours * 3_600_000);
       if (!dryRun) {
         this.lastPassAt = this.now();
-        if (withStale) this.lastStaleAt = this.now();
+        if (withStale) {
+          this.lastStaleAt = this.now();
+          this.d.staleAt?.save(this.lastStaleAt);
+        }
       }
       const r = await this.d.pass(low, { stale: withStale, dryRun });
       const after = await this.minFree();

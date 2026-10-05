@@ -293,8 +293,10 @@ deploy), on every pass while free space is below the soft threshold, and on ever
 clean-up's guard (`neverDelete`) applies to every entry, again right before it is removed. A request still open, or
 stalled (its person decides), keeps its output. Output it cannot attribute (a `Builds/perf` from nobody knows which
 request, a request the ledger does not know, a scratch clone) is **listed, never removed**: the dashboard's clean-up
-line counts it, its hover and `cleanup_log` name each with its size. (The older `buildsOlderThanDays` rule still
-removes a sandbox's `Builds/` entries untouched for 7 days.)
+line counts it, its hover and `cleanup_log` name each with its size. These rules replace the older
+`buildsOlderThanDays` rule for a sandbox's `Builds/` (any entry untouched for 7 days went, attributed or not); it
+applies again only with `mode` off. The daily turn is kept on disk (`cleanup-state.json` in the app's data folder or
+the daemon's folder), so a computer restarted or redeployed more often than daily still gets it.
 
 **The ledger's facts** reach each daemon over its link (`cleanup_context`: the open and closed request ids) at
 connect and every 10 minutes; facts older than 48 hours are not acted on, and request-named output is then listed.

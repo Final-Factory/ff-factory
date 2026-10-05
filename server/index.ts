@@ -43,7 +43,7 @@ import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideW
 import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
-import { appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
+import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { pruneEditorLogs, slugify } from './sandboxes.ts';
 import { agentAnswers } from './watchdog.ts';
@@ -427,11 +427,13 @@ const hostHealth = new HostHealthMonitor({
       const guard = hostCleanupGuard();
       const libraries = cfg.hostGuard.cleanup.libraryDeleteDays > 0 ? { roots: [cleanupEnv.home], deleteDays: cfg.hostGuard.cleanup.libraryDeleteDays } : undefined;
       const settings = staleOutputSettings(cfg.hostGuard.cleanup.staleOutput);
+      // A sandbox's Builds/ is the stale-output rules' (attributed, or listed): the old 7-day age rule only when they are off.
+      const env = settings.mode === 'off' ? cleanupEnv : { ...cleanupEnv, sandboxRoots: [] };
       const r = await cleanupPass({
         opts,
         guard,
         mode: settings.mode,
-        regular: () => planCleanup({ rules: cleanupRules(cleanupEnv, cfg.hostGuard.cleanup), guard, low, libraries }),
+        regular: () => planCleanup({ rules: cleanupRules(env, cfg.hostGuard.cleanup), guard, low, libraries }),
         stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, cleanupEnv.home), ctx: staleContextOf(store.work.values()), settings, guard }),
       });
       if (opts.dryRun) return r;
@@ -443,6 +445,7 @@ const hostHealth = new HostHealthMonitor({
     consumers: () => biggestConsumers(cleanupEnv, [cfg.hostGuard.devDriveVhdx].filter(Boolean)),
     stale: async () => (await staleUnityLibraries([cleanupEnv.home], cfg.hostGuard.cleanup.libraryReportDays)).filter((l) => !neverDelete(l.path, hostCleanupGuard())),
     log: (e) => appendCleanupLog(cfg.dataDir, e),
+    staleAt: staleAtFile(cfg.dataDir),
     diskPaths: () => [cleanupEnv.home, cleanupEnv.tmp],
   },
   reap: (hours) => reapBrowsers(hours),

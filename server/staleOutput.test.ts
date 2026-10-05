@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { normalizeSetting } from './appConfig.ts';
-import { CleanupRunner, runCleanup, type CleanupGuard, type CleanupRun, type PassOptions } from './cleanup.ts';
+import { CleanupRunner, runCleanup, staleAtFile, type CleanupGuard, type CleanupRun, type PassOptions } from './cleanup.ts';
 import { STALE_OUTPUT_DEFAULTS, cleanupPass, planStaleOutput, requestIdsIn, staleContextOf, staleOutputSettings, type StaleContext, type StalePlace } from './staleOutput.ts';
 
 /**
@@ -267,6 +267,37 @@ test('stale output: its own daily turn (never right at start), sooner when space
   now += 16 * 60_000;
   await r.tick();
   assert.equal(calls.pop()!.stale, true, 'low space: every pass includes it');
+});
+
+test('stale output: the daily turn survives restarts (kept on disk), and the first one comes a full day after the first start', async (t) => {
+  const dir = tmp(t);
+  const file = staleAtFile(dir);
+  let now = NOW;
+  const calls: PassOptions[] = [];
+  const runner = () =>
+    new CleanupRunner({
+      settings: () => ({ everyMinutes: 60, softFreeGB: 0, staleOutput: STALE_OUTPUT_DEFAULTS }),
+      diskPaths: () => [],
+      statfs: async () => undefined,
+      pass: async (_low, opts) => {
+        calls.push(opts);
+        return { removed: [], failed: [], bytes: 0 };
+      },
+      consumers: async () => [],
+      log: () => {},
+      done: () => {},
+      staleAt: file,
+      now: () => now,
+    });
+  runner();
+  assert.equal(file.load(), NOW, 'the first start is recorded');
+  now += 20 * H;
+  await runner().run('hourly');
+  assert.equal(calls.pop()!.stale, false, 'a restart 20 h later does not reset the clock: 4 h to go');
+  now += 5 * H;
+  await runner().run('hourly');
+  assert.equal(calls.pop()!.stale, true, 'another restart, past the day: its turn');
+  assert.equal(file.load(), now);
 });
 
 test('stale output: request ids in names, the ledger facts (stalled counts as open), and the settings', () => {

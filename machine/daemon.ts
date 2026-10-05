@@ -29,7 +29,7 @@ import { switchBranch } from '../server/switchBranch.ts';
 import { publishFromMachine } from './review.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, type CleanupGuard } from '../server/cleanup.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, type CleanupGuard } from '../server/cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
@@ -199,8 +199,9 @@ export class Daemon {
       pass: async (low, opts) => {
         const guard = this.cleanupGuard();
         const root = this.sandboxRoot();
-        const rules = cleanupRules({ ...env, sandboxRoots: root ? [root] : [] }, DEFAULT_CLEANUP);
         const settings = staleOutputSettings(this.cleanupSettings.staleOutput);
+        // A sandbox's Builds/ is the stale-output rules' (attributed, or listed): the old 7-day age rule only when they are off.
+        const rules = cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [] }, DEFAULT_CLEANUP);
         return cleanupPass({
           opts,
           guard,
@@ -210,6 +211,7 @@ export class Daemon {
         });
       },
       consumers: () => biggestConsumers(env),
+      staleAt: staleAtFile(appDirOfConfig(cfg)),
       stale: async () => (await staleUnityLibraries([HOME], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
       log: (e) => {
         appendCleanupLog(appDirOfConfig(cfg), e);
