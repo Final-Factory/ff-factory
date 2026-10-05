@@ -12,6 +12,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Pick several request states at once** (w418 follow-up, asked by Lothsahn). The state chips on the Dispatcher's
+  Requests tab, and now on the Intake tab's ledger list, toggle independently (e.g. Stalled and Merged, follow-up
+  pending), with "All" and "Clear", and the choice survives a reload. `list_work` takes `state` as one state or a list.
+
 - **`DONE: wNNN`, a wrap-up on switching, and a follow-up on merged requests** (w419, asked by Lothsahn). A worker ends
   its report with `DONE: w342` when every step of a request is finished, post-merge steps included, and the ledger closes
   it with the report as the note; it is refused back to the worker, saying what is missing, while a PR is open or a

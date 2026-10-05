@@ -396,6 +396,8 @@ test('list_work: open requests by default, one in full with its log', async (t) 
   assert.match(all.text, /\nNow: 1 queued\.$/,'the counts per live state close the list (w418)');
   assert.match((await call(dispatcher().info, 'list_work', { state: 'queued' })).text, /^- w1 /);
   assert.equal((await call(dispatcher().info, 'list_work', { state: 'working' })).text, 'No requests working.');
+  assert.match((await call(dispatcher().info, 'list_work', { state: ['working', 'queued'] })).text, /^- w1 /, 'several states at once');
+  assert.equal((await call(dispatcher().info, 'list_work', { state: ['working', 'waiting'] })).text, 'No requests working or waiting on input.');
   const one = await call(chat(LOTH).info, 'list_work', { id: 'w1' });
   assert.match(one.text, /Fix the dead links in docs\/\./);
   assert.match(one.text, /Log:\n {2}\d\d:\d\d filed by Ben/);

@@ -85,10 +85,31 @@ test('the Requests tab shows what each request is doing now, with counts per sta
   await expect(panel.getByTestId(`live-why-${stalled}`)).toContainText('Stalled: no worker was ever started for it');
   await panel.screenshot({ path: test.info().outputPath('ledger-states.png') });
 
+  // Several states at once (Lothsahn: "select multiple types"), kept across a reload.
   await states.getByTestId('ledger-state-stalled').click();
+  await states.getByTestId('ledger-state-followup').click();
+  await expect(states.getByTestId('ledger-state-stalled')).toHaveAttribute('aria-pressed', 'true');
+  await expect(states.getByTestId('ledger-state-followup')).toHaveAttribute('aria-pressed', 'true');
   const picked = panel.getByTestId('ledger-picked');
   await expect(picked.getByTestId(`work-${stalled}`)).toBeVisible();
+  await expect(picked.getByTestId(`work-${followup}`)).toBeVisible();
   await expect(picked.getByTestId(`work-${queued}`)).toHaveCount(0);
-  await states.getByRole('button', { name: /^All/ }).click();
-  await expect(panel.getByTestId(`work-${queued}`)).toBeVisible();
+  await expect(picked.getByTestId(`work-${waiting}`)).toHaveCount(0);
+  await panel.screenshot({ path: test.info().outputPath('ledger-states-multi.png') });
+  await page.reload();
+  await go(page, '#/dispatcher');
+  const again = page.locator('.dispatcher-panel');
+  await expect(again.getByTestId('ledger-state-stalled')).toHaveAttribute('aria-pressed', 'true');
+  await expect(again.getByTestId('ledger-state-followup')).toHaveAttribute('aria-pressed', 'true');
+  await expect(again.getByTestId('ledger-picked').getByTestId(`work-${queued}`)).toHaveCount(0);
+  // One off leaves the other; Clear (or All) shows everything again.
+  await again.getByTestId('ledger-state-stalled').click();
+  await expect(again.getByTestId('ledger-picked').getByTestId(`work-${stalled}`)).toHaveCount(0);
+  await expect(again.getByTestId('ledger-picked').getByTestId(`work-${followup}`)).toBeVisible();
+  await again.getByTestId('ledger-state-clear').click();
+  await expect(again.getByTestId('ledger-state-all')).toHaveAttribute('aria-pressed', 'true');
+  await expect(again.getByTestId(`work-${queued}`)).toBeVisible();
+  await page.reload();
+  await go(page, '#/dispatcher');
+  await expect(page.locator('.dispatcher-panel').getByTestId('ledger-state-all')).toHaveAttribute('aria-pressed', 'true');
 });
