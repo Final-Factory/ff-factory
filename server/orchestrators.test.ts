@@ -900,6 +900,19 @@ test('w428: with placement.prefer and avoid set, the next goes to LothDesktop, t
   await until('the worker answered', () => [...sessions.sessions.values()].filter((s) => s.info.kind === 'worker' && !s.info.machineId).every((s) => s.info.status === 'idle'));
 });
 
+test('w464 change 6: claudeAccounts.dispatcher runs the dispatcher on that account, not the system payer\'s own token; people\'s orchestrators keep theirs', (t) => {
+  const { cfg, agents, dispatcher, chat } = setup(t);
+  const HOST = 'sk-ant-oat01-host-token-9AAA';
+  const BENS = 'sk-ant-oat01-bens-own-token-BBBB';
+  cfg.claudeEnv = { CLAUDE_CODE_OAUTH_TOKEN: HOST };
+  cfg.userClaudeEnv = { ben: { CLAUDE_CODE_OAUTH_TOKEN: BENS } };
+  const tokenOf = (info: SessionInfo) => (agents.orchestratorOptions(info) as { env: Record<string, string | undefined> }).env.CLAUDE_CODE_OAUTH_TOKEN;
+  assert.equal(tokenOf(dispatcher().info), BENS, 'unset: the system payer (Ben, the owner) and his own token, as before');
+  cfg.claudeAccounts = { dispatcher: 'token' };
+  assert.equal(tokenOf(dispatcher().info), HOST, "set: the host token, whoever the system payer is");
+  assert.equal(tokenOf(chat(BEN).info), BENS, "Ben's own orchestrator still runs on his token");
+});
+
 // ---------------------------------------------------------------- w467: no secrets for orchestrators
 
 test("w467: an orchestrator's hooks refuse config.json, data/ and ~/.ssh, and let its own memory and other folders through", async (t) => {

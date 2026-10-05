@@ -34,7 +34,7 @@ import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, typ
 import { REVIEW_DEFAULTS, publishedText, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
 import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
-import { accountSource, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
+import { accountSource, dispatcherOwnAccount, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
 import { Identity, claudeEnvFor, forLine } from './identity.ts';
 import { FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, Orchestrators, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
@@ -3282,9 +3282,10 @@ ${this.worldBrief(false)}
       // files from; and Write and Edit only in its memory folder.
       hooks: { PreToolUse: [{ hooks: [secretReadGuard(this.orchestratorSecrets(memory), cwd), memoryGuard(memory, () => this.personTurn(info.id))] }] },
       // Who pays (docs/orchestrators.md, docs/accounts.md): a person's own orchestrator runs on their own Claude account
-      // when they have one here (config userClaudeEnv); the dispatcher on the system payer's. Without one, what config
+      // when they have one here (config userClaudeEnv); the dispatcher on config claudeAccounts.dispatcher when it is set
+      // (w464: Lothsahn's account, whoever the system payer is), else on the system payer's. Without one, what config
       // claudeAccounts.orchestrator picks: the host token, or this host's stored claude.ai login.
-      env: claudeEnvFor(this.cfg, owner ?? this.identity.systemPayer(), hostProcessEnv(this.cfg, 'orchestrator')),
+      env: !owner && dispatcherOwnAccount(this.cfg) ? hostProcessEnv(this.cfg, 'dispatcher') : claudeEnvFor(this.cfg, owner ?? this.identity.systemPayer(), hostProcessEnv(this.cfg, 'orchestrator')),
       systemPrompt: { type: 'preset', preset: 'claude_code', append: `${owner ? this.personalBrief(owner) : this.dispatcherBrief()}\n\n${memoryBrief(memory, owner?.displayName)}` },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };
