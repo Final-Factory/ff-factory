@@ -602,3 +602,96 @@ test('w370: a stale auto-close mark under a later hand close (from before the fi
   assert.equal(handledAfterAutoClose(['02:29 closed automatically by the ledger cleanup: x', '05:29 ben: reopened']), true);
   assert.equal(handledAfterAutoClose(['02:29 closed automatically by the ledger cleanup: x', '05:31 worker ab12cd34: FIX-LANDED 1a2b3c4d']), true);
 });
+
+// ---------------------------------------------------------------- w419: DONE markers, the wrap-up and the follow-up
+
+const told = (store: Store, o: Agents['orchestrators'], who: Requester, prefix: string) =>
+  store.readTranscript(o.personalFor(who).info.id).filter((e) => e.kind === 'user' && e.text.startsWith(prefix));
+
+test('w419: DONE: wNNN from its own worker closes the request with the report as the note; a mention in a sentence does not', async (t) => {
+  const { request, worker, o, get, store } = setup(t);
+  request('w1', { sessionIds: ['s1'], prs: [{ repo: REPO, number: 11, state: 'merged', at: ago(5), via: 'line' }] });
+  request('w2', { sessionIds: ['s1'] });
+  const s1 = worker('s1');
+  o.workerTurnEnded(s1, 'Started on it. Reply DONE: w2 when you are sure, the brief says.');
+  assert.equal(get('w2').status, 'active', 'DONE inside a sentence is not a marker');
+  o.workerTurnEnded(s1, 'TL;DR: #11 merged and the check ran clean.\n\n**DONE: w1**');
+  const w = get('w1');
+  assert.equal(w.status, 'done');
+  assert.equal(w.outcome, 'TL;DR: #11 merged and the check ran clean.');
+  assert.match(w.log.at(-1)!, /closed as done: worker s1 said DONE: w1\. Its report: TL;DR: #11 merged/);
+  await until('its person hears', () => told(store, o, BEN, '[ledger] w1').length === 1);
+  assert.equal(get('w2').status, 'active', 'the other request of the same worker stays open');
+});
+
+test('w419: a DONE is refused back to the worker while a PR is open, a step after the merge is not covered, or it is not its worker; a hand close stays', async (t) => {
+  const { request, worker, o, get } = setup(t);
+  request('w1', { sessionIds: ['s1'], prs: [{ repo: REPO, number: 11, state: 'merged', at: ago(5), via: 'line' }, { repo: REPO, number: 12, state: 'open', via: 'line' }] });
+  request('w2', { sessionIds: ['s1'], brief: 'Fix it, then run the paired determinism audit after the merge.', prs: [{ repo: REPO, number: 13, state: 'merged', at: ago(5), via: 'line' }] });
+  request('w3', { sessionIds: ['s9'] });
+  request('w4', { sessionIds: ['s1'], status: 'cancelled' });
+  const s1 = worker('s1');
+  o.workerTurnEnded(s1, 'Merged.\nDONE: w1\nDONE: w2\nDONE: w3\nDONE: w4');
+  assert.equal(get('w1').status, 'active');
+  assert.match(get('w1').log.join('\n'), /said DONE, refused: PR #12 is still open: merge or close it first/);
+  assert.equal(get('w2').status, 'active');
+  assert.match(get('w2').log.join('\n'), /refused: its brief asks for a step after the merge .*say in the report what it showed/);
+  assert.equal(get('w3').status, 'active', 'not its worker');
+  assert.equal(get('w4').status, 'cancelled', 'a request closed by hand stays closed (w370)');
+  // The report covers the step: now it closes.
+  o.workerTurnEnded(s1, 'The paired audit after the merge passed: no divergence on 544 heartbeats.\nDONE: w2');
+  assert.equal(get('w2').status, 'done');
+});
+
+test('w419: sent to another request, a worker is asked first to wrap up the one it was on; its answer goes to that request’s log', async (t) => {
+  const { request, worker, o, get } = setup(t);
+  request('w1', { sessionIds: ['s1'], links: { s1: { at: ago(30), how: 'sent' } } });
+  request('w2', { status: 'new', createdAt: ago(1) });
+  const s1 = worker('s1');
+  assert.equal(o.wrapUpBefore('s1', 'w1'), '', 'the request it is on: no wrap-up');
+  const pre = o.wrapUpBefore('s1', 'w2');
+  assert.match(pre, /^\[wrap-up\] Before the new work below: you were on w1 "Fix w1"\. .*`DONE: <id>`.*`<id>: still open: <what>`\. Then carry on with the new work/);
+  assert.match(get('w1').log.at(-1)!, /worker s1 was sent w2: asked to wrap w1 up first/);
+  o.linkWorker('w2', s1, 'sent to worker s1');
+  o.workerTurnEnded(s1, 'Started w2: reading the save.\n\nw1: still open: the 2-peer check after the merge.');
+  assert.equal(get('w1').status, 'active');
+  assert.match(get('w1').log.at(-1)!, /wrap-up from worker s1: w1: still open: the 2-peer check after the merge\./);
+  assert.equal(get('w1').outcome, 'w1: still open: the 2-peer check after the merge.');
+  assert.equal(get('w2').outcome, 'Started w2: reading the save.');
+  // A DONE in the wrap-up closes it like any DONE.
+  request('w3', { status: 'new', createdAt: ago(0.5) });
+  o.wrapUpBefore('s1', 'w3');
+  o.linkWorker('w3', s1, 'sent to worker s1');
+  o.workerTurnEnded(s1, 'On w3 now.\nDONE: w2');
+  assert.equal(get('w2').status, 'done');
+});
+
+test('w419: merged and open for a step after the merge, quiet 6 hours: its worker is asked once a day, also while busy on another request; gone, it stalls', async (t) => {
+  const { request, worker, pr, world, sweep, get, store } = setup(t);
+  const brief = 'Fix it, then run the paired audit after the merge.';
+  request('w1', { brief, sessionIds: ['s1'] });
+  worker('s1', { lastActivityAt: ago(10) });
+  // w2's worker moved on to w5 (newer) and is running there: the PR pass skips w2, so its PR is linked as an earlier pass left it.
+  request('w2', { brief, sessionIds: ['s2'], createdAt: ago(72), prs: [{ repo: REPO, number: 22, state: 'merged', at: ago(8), via: 'line' }], log: ['04:00 PR #22 merged; still open: its brief asks for a step after the merge (a check, an audit, a verification)'] });
+  request('w5', { sessionIds: ['s2'], createdAt: ago(3) });
+  worker('s2', { status: 'running', lastActivityAt: ago(0.1) });
+  request('w3', { brief, sessionIds: ['gone'] });
+  request('w4', { brief, sessionIds: ['s4'] });
+  worker('s4', { lastActivityAt: ago(2) });
+  world.prs = [pr(21, { body: 'Request: w1', mergedAt: ago(8) }), pr(23, { body: 'Request: w3', mergedAt: ago(8) }), pr(24, { body: 'Request: w4', mergedAt: ago(8) })];
+  const summary = await sweep.run();
+  assert.match(summary, /asked 2 whether done/);
+  assert.deepEqual(world.resumed.map((r) => r.id).sort(), ['s1', 's2']);
+  const ask = world.resumed.find((r) => r.id === 's1')!.text;
+  assert.match(ask, /^\[ledger cleanup\] Is w1 "Fix w1" done\? PR #21 merged \(2026-10-03 04:00 UTC\) and it stayed open: its brief asks for a step after the merge.*a line `DONE: w1`/);
+  assert.equal(get('w1').followUp?.sessionId, 's1');
+  assert.match(get('w1').log.join('\n'), /ledger cleanup asked worker s1 whether it is done \(no word for 8 h since PR #21 merged/);
+  assert.equal(get('w3').status, 'stalled');
+  assert.match(get('w3').stalled!.reason, /^follow-up unconfirmed: its brief asks for a step after the merge .*no worker is left to ask/);
+  assert.equal(get('w4').followUp, undefined, 'word 2 hours ago: not asked yet');
+  assert.equal(get('w5').followUp, undefined);
+  // Once a day: the next pass asks nobody again.
+  await sweep.run();
+  assert.equal(world.resumed.length, 2);
+  assert.ok(store);
+});

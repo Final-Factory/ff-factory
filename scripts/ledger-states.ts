@@ -22,7 +22,7 @@ export function ledgerStates(dir: string, now = Date.now()) {
   const held = Array.isArray(queue) ? queue : (queue.queue ?? []);
   const byId = new Map(sessions.map((s) => [s.id, s]));
   const live = workLiveAll(work, { session: (id) => byId.get(id), queuedSend: (id) => held.find((q) => q.id === id)?.why, now });
-  return { work, live };
+  return { work, sessions, live };
 }
 
 if (import.meta.url === `file:///${process.argv[1]?.replace(/\\/g, '/').replace(/^\//, '')}`) {

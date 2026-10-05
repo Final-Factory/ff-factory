@@ -16,6 +16,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Requests tab, and now on the Intake tab's ledger list, toggle independently (e.g. Stalled and Merged, follow-up
   pending), with "All" and "Clear", and the choice survives a reload. `list_work` takes `state` as one state or a list.
 
+- **`DONE: wNNN`, a wrap-up on switching, and a follow-up on merged requests** (w419, asked by Lothsahn). A worker ends
+  its report with `DONE: w342` when every step of a request is finished, post-merge steps included, and the ledger closes
+  it with the report as the note; it is refused back to the worker, saying what is missing, while a PR is open or a
+  step after the merge is not covered. The dispatcher's message moving a worker to another request first asks it to
+  wrap up the ones it was on. The cleanup asks a merged request's worker "Is it done?" after 6 quiet hours, at most once
+  a day, and stalls it as follow-up unconfirmed when no worker is left ([docs/orchestrators.md](docs/orchestrators.md),
+  "Ledger cleanup"). `scripts/ledger-dry-run.ts` shows what it would do on a copy of `data/`.
+
 - **What each request is doing now** (w418, asked by Lothsahn). Beside its status, every open or stalled request shows a
   live state derived from its workers: Working, Waiting on input (and on whom), Queued, Merged with a follow-up pending
   (which step), or Stalled (and why), as soon as it is true. A worker on several requests counts only on the one it was
