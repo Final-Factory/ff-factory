@@ -65,7 +65,7 @@ test('w416: with one busier, the other is picked, and placing on the busier one 
   assert.equal(preferLine([beast, loth]), `Next new game-repo work: lothdesktop (${p.why}).`);
   const hint = placementHint('beast', [beast, loth]);
   assert.match(hint ?? '', /^ Note: beast has \d+% room; the next new game-repo work goes to lothdesktop \(most room/);
-  assert.match(hint ?? '', /Unless this work needs beast \(FF Factory's own repo or its deploys, F:\\ffsb\\_review, ssh to the M5 from BEAST, a brief that pins it, Max posting, which only LothDesktop has, or a worker going on in its own sandbox\), put it there\.$/);
+  assert.match(hint ?? '', /Unless this work needs beast \(FF Factory's own repo or its deploys, the review folder, ssh to the M5 from a computer that has its key, a brief that pins it, Max posting, which only LothDesktop has, or a worker going on in its own sandbox\), put it there\.$/);
   assert.equal(placementHint('lothdesktop', [beast, loth]), undefined, 'placing on the next one says nothing');
   // And the other way round: LothDesktop busier, BEAST picked.
   assert.equal(pickComputer([idle('beast', 6), { ...loth, live: 4, freeSandboxes: 0, sandboxes: 5, memUsedBytes: 50 * GB }])!.pick.id, 'beast');
@@ -155,4 +155,11 @@ test('w428: without a preference, main clones come after the sandbox computers; 
   assert.equal(pickComputer([roomy[0], { ...roomy[1], live: 5 }, roomy[2]], undefined, avoidOnly)!.pick.id, 'm5');
   // "host" names this host's own pool.
   assert.equal(pickComputer([idle('this host', 6), idle('lothdesktop', 5)], undefined, { prefer: ['host'] })!.pick.id, 'this host');
+});
+
+test('w467: the note names the review folder where the portal runs, not BEAST\'s path', () => {
+  const beast = { ...idle('beast', 6), live: 4, freeSandboxes: 0, sandboxes: 4, memUsedBytes: 44 * GB, editors: 2 };
+  const hint = placementHint('beast', [beast, idle('lothdesktop', 5)], undefined, {}, '/srv/fff/review') ?? '';
+  assert.match(hint, /the review folder \(\/srv\/fff\/review\), ssh to the M5 from a computer that has its key/);
+  assert.doesNotMatch(hint, /F:\\ffsb|from BEAST/);
 });

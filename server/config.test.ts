@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROOT, SENDER_RULE, VOICE_DEFAULTS, loadConfig, ownerLine } from './config.ts';
+import { ROOT, SENDER_RULE, VOICE_DEFAULTS, loadConfig, ownerLine, windowsPathsOffWindows } from './config.ts';
 import { gitIsClean, gitRemotes } from './guard.ts';
 import { appVersion, formatVersion, readSha, readVersion } from './version.ts';
 
@@ -136,4 +136,12 @@ test('guard git lookups: a clean tree, a dirty one, not a repo; push remotes', (
       ['origin', 'git@example.test:game.git'],
     ],
   );
+});
+
+test('w467: Windows paths in config are refused off Windows (path.resolve("C:/ffsb") on Linux is <cwd>/C:/ffsb)', () => {
+  const vm = { sandboxRoot: '/srv/fff/sandboxes', dataDir: '/srv/fff/data', standingRoot: '/srv/fff/agents', repo: { url: 'x', basePath: '/srv/fff/base' }, review: { root: '/srv/fff/review' }, protectedPaths: [], hostDiskPaths: ['/srv/fff'] };
+  assert.deepEqual(windowsPathsOffWindows(vm, 'linux'), []);
+  const beast = { ...vm, sandboxRoot: 'F:/ffsb', repo: { url: 'x', basePath: 'C:\\ffsb\\_base' }, review: { root: 'F:/ffsb/_review' }, protectedPaths: ['/srv/x', 'C:/Users/rydin/nevergames'], hostDiskPaths: ['F:'] };
+  assert.deepEqual(windowsPathsOffWindows(beast, 'linux'), ['sandboxRoot "F:/ffsb"', 'repo.basePath "C:\\ffsb\\_base"', 'review.root "F:/ffsb/_review"', 'protectedPaths[1] "C:/Users/rydin/nevergames"', 'hostDiskPaths[0] "F:"']);
+  assert.deepEqual(windowsPathsOffWindows(beast, 'win32'), [], 'on Windows they are right');
 });
