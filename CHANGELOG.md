@@ -16,6 +16,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   account (`"token"` or `"login"`, set with `set_app_config`). Once set, the dispatcher runs on it instead of the system
   payer's own token; unset, nothing changes. system_status names it apart only when set ([docs/accounts.md](docs/accounts.md)).
 
+- **Workers keep running through a portal restart or update** (w424, asked by Lothsahn: "Can't we make it restart while
+  the workers are going?"). BEAST's sandboxes moved to its own machine daemon, and `machines.keepAgentsOnRestart` is
+  on. A restart drains and stops only the portal's own agents (orchestrators, standing agents). Workers on BEAST and
+  the other machines go on, and their events while the portal is down are replayed when their daemon reconnects.
+  Tested on BEAST before it went on (docs/restart.md, "Agents on machines"). Until a daemon reconnects, its agents show
+  "was running when the portal stopped; not heard from its daemon since (it may still be running there)" rather than a
+  bare `stopped`. A machine without load numbers yet is no longer said to run a daemon from before protocol 4 unless
+  it does.
 - **Workers hand files to each other, on any computer** (w447, asked by Ben). A save made on BEAST had to reach three
   LothDesktop workers, and only a person with ssh could move it. A worker now calls `publish_attachment` with a file in
   its working folder or temp folder; it answers an `att_` id, which its orchestrator passes on with `attachments: [id]`

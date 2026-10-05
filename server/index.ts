@@ -1564,7 +1564,7 @@ agents.usagePollChanged = () => {
   usage.reschedule();
   machines.pushUsageConfig();
 };
-agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id)));
+agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
   return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines()];
