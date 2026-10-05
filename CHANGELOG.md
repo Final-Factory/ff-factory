@@ -18,6 +18,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   FFBox page, read through the connector's `conversation` query: its turns, the messages each answered, the agent's
   last words and FFBox's replies, checked and cleaned on the server and shown as plain text. FFBox's own page stays
   as the second link, "on Loth's network" ([docs/ffbox.md](docs/ffbox.md)).
+
 - **A recorded placement preference** (w428, asked by Ben). Config `placement.prefer` (computers in order, e.g.
   `["lothdesktop", "m5", "m3"]`) and `placement.avoid` (computer to reason, e.g. `{ "beast": "BEAST unstable,
   2026-10-05" }`), both settable with `set_app_config` and cleared with null. The Capacity block's "Next new game-repo
