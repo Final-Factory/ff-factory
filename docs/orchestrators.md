@@ -107,6 +107,38 @@ reopens another person's request").
 The ledger is `data/work.json`: every open request and the newest 300 closed ones (stalled ones are kept like open
 ones). The page gets the open ones, the stalled ones and those closed in the last 3 days.
 
+### What a request is doing now
+
+`active` only says a worker was given the request once. Beside its status, every open or stalled request shows what it
+is doing **now** (w418, asked by Lothsahn: "show stalled requests as Stalled instead of active, so we can see what
+workers are working on vs which are waiting on input"). It is derived live from its workers and its own fields
+(`shared/workState.ts` `workLive`), never stored, and changes nothing: the first that applies wins.
+
+| state | when | the line says |
+|---|---|---|
+| **Working** | a worker it serves is `running` or `starting` (in a long command too), or FFBox runs it (`ffbox` sent or accepted) | which worker, and the tool it has been in since when |
+| **Waiting on input** | an intake approval is pending, the dispatcher's question or a design question is open, a worker it serves waits for a permission, or a worker it serves stopped asking for a decision (its last report ends asking a person to decide, or with a question) | what, and on whom: "a reviewer", the requester, the design question's people, the worker's person |
+| **Queued** | not dispatched yet (`new`), queued by the dispatcher (`queued`), or a message to its worker waits for a free agent slot (the send queue; list_work only, the page does not have the queue) | which |
+| **Merged, follow-up pending** | its PRs merged, none is open, and it is still open | the cleanup's own reason ("still open: its brief asks for a step after the merge"), or that the cleanup has not looked yet |
+| **Stalled** | anything else: nothing works on it and nothing waits on a person, as soon as that is true | why: the cleanup's stall reason, an open PR nobody is on, its worker moved on to another request, finished its turn or stopped (and when), or no worker was ever started |
+
+**A worker on several requests works only on the one it was last given** (and those linked to it since). Each request
+records when each worker was last given it (`links`: `sent` by `start_agent`/`message_agent` with its `work_id`,
+`linked` by `decide_work link`). A worker's current turn serves the request it was last *sent*, plus any *linked* to it
+after that (small reports sharing one worker). For links made before w418, the request's creation time stands in, so a
+worker that moved on to a newer request (w342's worker on w414) no longer makes the old one look worked on.
+
+**The cleanup still decides; this only shows.** The stored status, and the cleanup's own `stalled` with its reason and
+its 24 hours ([Ledger cleanup](#ledger-cleanup)), are unchanged and still decide what is closed, resumed or stalled.
+The live state can say Stalled for a request whose status is `active` (a day before the cleanup would stall it), and
+Working for one the cleanup stalled whose worker picked it up again.
+
+Where it shows: `list_work` puts it after the status (`- w12 [active] Stalled (ab12 stopped 3 d ago,
+nothing waits on a person): "…"`), closes the list with the counts (`Now: 3 working, 2 waiting on input, 4 stalled.`),
+and takes `state` (working, waiting, queued, followup, stalled) to list only those. The Dispatcher page's Requests tab
+has one button per state with its count above the list; a click shows only those, and each row's state and reason
+follow its workers live.
+
 ## Pull requests
 
 Each request is linked to the pull requests its workers open (`WorkItem.prs`: repo, number, state, merge commit, and
@@ -149,6 +181,10 @@ when no other PR is open. Intake requests that wait for a reviewer are never clo
 [intake.md](intake.md), "Closed when it merged").
 
 ## Ledger cleanup
+
+What the page and `list_work` show as a request's live state ([What a request is doing now](#what-a-request-is-doing-now))
+is read from the same facts but never feeds the cleanup: a request can show Stalled at once and still be stalled by the
+cleanup only after its 24 quiet hours.
 
 Every `ledger.cleanup.everyHours` hours (config.json; default 4, 1 to 168; `enabled` defaults to true) and on demand
 (the owner's **Clean up now** on the Requests tab, `POST /api/ledger/cleanup`), `LedgerSweep.run` goes through every

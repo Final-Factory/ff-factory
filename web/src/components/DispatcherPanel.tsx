@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { AppState, IntakeSummary, WorkItem, WorkSource } from '../../../shared/types';
 import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../../../shared/workState';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
-import { dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, navigate, useNow, workLabel, workTone } from '../util';
+import { dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, navigate, useNow, workLabel, workTone, type Tone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
 import { accountOf } from './SystemMeters';
@@ -155,7 +156,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
         </button>
       </nav>
 
-      {current === 'requests' && <Requests app={app} open={open} stalled={stalled} closed={closed} focus={focus} now={now} />}
+      {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} />}
       {current === 'intake' && app.intake && <IntakeTab app={app} intake={app.intake} work={work} now={now} />}
       {current === 'conversation' &&
         (session ? (
@@ -182,7 +183,23 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   );
 }
 
-function Requests({ app, open, stalled, closed, focus, now }: { app: AppState; open: WorkItem[]; stalled: WorkItem[]; closed: WorkItem[]; focus?: string; now: number }) {
+/** A live state's tone: working blue, waiting amber, queued grey, merged with a follow-up green, stalled red. */
+const LIVE_TONE: Record<WorkLiveState, Tone> = { working: 'blue', waiting: 'amber', queued: 'grey', followup: 'green', stalled: 'red' };
+
+/**
+ * What each open or stalled request is doing now (shared/workState.ts, w418), from the page's own sessions: it follows
+ * them live. The server's send queue is not on the page, so a message held for a free slot shows only in list_work.
+ */
+export function useWorkLive(app: AppState, work: readonly WorkItem[], now: number): Map<string, WorkLive> {
+  return useMemo(() => {
+    const byId = new Map(app.sessions.map((s) => [s.id, s]));
+    return workLiveAll(work, { session: (id) => byId.get(id), now });
+  }, [app.sessions, work, now]);
+}
+
+function Requests({ app, work, open, stalled, closed, focus, now }: { app: AppState; work: WorkItem[]; open: WorkItem[]; stalled: WorkItem[]; closed: WorkItem[]; focus?: string; now: number }) {
+  const live = useWorkLive(app, work, now);
+  const [only, setOnly] = useState<WorkLiveState | null>(null);
   const [expanded, setExpanded] = useState<string | null>(focus ?? null);
   const [showClosed, setShowClosed] = useState(() => !!focus && closed.some((w) => w.id === focus));
   const [showStalled, setShowStalled] = useState(() => !!focus && stalled.some((w) => w.id === focus));
@@ -206,14 +223,35 @@ function Requests({ app, open, stalled, closed, focus, now }: { app: AppState; o
       </div>
     );
   }
-  const row = (w: WorkItem) => <WorkRow key={w.id} app={app} w={w} open={expanded === w.id} onToggle={() => setExpanded(expanded === w.id ? null : w.id)} now={now} />;
+  const row = (w: WorkItem) => <WorkRow key={w.id} app={app} w={w} live={live.get(w.id)} open={expanded === w.id} onToggle={() => setExpanded(expanded === w.id ? null : w.id)} now={now} />;
+  const n = liveCounts(live.values());
+  // A state picked: every open and stalled request in it, whatever its stored status.
+  const picked = only ? [...open, ...stalled].filter((w) => live.get(w.id)?.state === only) : [];
   return (
     <div className="sa-scroll">
-      {open.length ? <div className="run-list">{open.map(row)}</div> : <p className="dim small ledger-none">Nothing open.</p>}
-      {stalled.length > 0 && (
+      {live.size > 0 && (
+        <div className="ledger-states" role="toolbar" aria-label="Show requests by what they are doing now" data-testid="ledger-states">
+          <button className={`ledger-state${only === null ? ' on' : ''}`} aria-pressed={only === null} onClick={() => setOnly(null)}>
+            All <span className="mono">{live.size}</span>
+          </button>
+          {WORK_LIVE_STATES.filter((s) => n[s] || only === s).map((s) => (
+            <button key={s} className={`ledger-state${only === s ? ' on' : ''}`} aria-pressed={only === s} onClick={() => setOnly(only === s ? null : s)} data-testid={`ledger-state-${s}`}>
+              <Dot tone={LIVE_TONE[s]} /> {WORK_LIVE_LABEL[s]} <span className="mono">{n[s]}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {only ? (
+        picked.length ? <div className="run-list" data-testid="ledger-picked">{picked.map(row)}</div> : <p className="dim small ledger-none">None {WORK_LIVE_LABEL[only].toLowerCase()} now.</p>
+      ) : open.length ? (
+        <div className="run-list">{open.map(row)}</div>
+      ) : (
+        <p className="dim small ledger-none">Nothing open.</p>
+      )}
+      {!only && stalled.length > 0 && (
         <>
           <button className="link-btn small ledger-closed" data-testid="stalled-filter" onClick={() => setShowStalled(!showStalled)} aria-expanded={showStalled}>
-            {showStalled ? 'Hide stalled' : `${stalled.length} stalled`}
+            {showStalled ? 'Hide stalled by the cleanup' : `${stalled.length} stalled by the cleanup`}
           </button>
           {showStalled && (
             <>
@@ -223,7 +261,7 @@ function Requests({ app, open, stalled, closed, focus, now }: { app: AppState; o
           )}
         </>
       )}
-      {closed.length > 0 && (
+      {!only && closed.length > 0 && (
         <>
           <button className="link-btn small ledger-closed" onClick={() => setShowClosed(!showClosed)} aria-expanded={showClosed}>
             {showClosed ? 'Hide closed' : `${closed.length} closed`}
@@ -275,7 +313,8 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
     await attempt(f());
     setBusy(null);
   };
-  const row = (w: WorkItem) => <WorkRow key={w.id} app={app} w={w} open={expanded === w.id} onToggle={() => setExpanded(expanded === w.id ? null : w.id)} now={now} />;
+  const live = useWorkLive(app, work, now);
+  const row = (w: WorkItem) => <WorkRow key={w.id} app={app} w={w} live={live.get(w.id)} open={expanded === w.id} onToggle={() => setExpanded(expanded === w.id ? null : w.id)} now={now} />;
   const d = s.discord;
   const f = s.ffbox;
   const n = s.nightly;
@@ -391,20 +430,27 @@ function deliveryLine(w: WorkItem): string {
   return [d.fixCommit && `fix ${d.fixCommit.slice(0, 10)}`, d.landedAt && 'on develop', d.repliedAt && 'replied in Discord', d.closedAt && 'thread closed', d.releasedIn && `live in ${d.releasedIn}`, d.announcedBy && `follow-up ${d.announcedBy}`].filter(Boolean).join(' · ');
 }
 
-function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; open: boolean; onToggle: () => void; now: number }) {
+function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: WorkItem; live?: WorkLive; open: boolean; onToggle: () => void; now: number }) {
   const workers = sessionsByIds(app.sessions, w.sessionIds);
-  const working = workers.some(isBusy);
-  const tone = w.approval?.state === 'pending' && isOpenWork(w) ? 'amber' : workTone(w.status);
+  const tone = live ? LIVE_TONE[live.state] : w.approval?.state === 'pending' && isOpenWork(w) ? 'amber' : workTone(w.status);
   const s = w.source;
   const delivery = deliveryLine(w);
   return (
     <div id={`work-${w.id}`} className={`run-row work-row${open ? ' open' : ''}`} data-testid={`work-${w.id}`}>
       <button className="run-row-top" onClick={onToggle} aria-expanded={open}>
-        <Dot tone={tone} pulse={w.status === 'active' && working} title={workLabel[w.status]} />
+        <Dot tone={tone} pulse={live?.state === 'working'} title={live ? WORK_LIVE_LABEL[live.state] : workLabel[w.status]} />
         <span className="work-main">
           <span className="work-title">{w.title}</span>
           <span className="work-sub">
-            <span className={`tone-${tone}`}>{statusText(w)}</span>
+            {live ? (
+              <span className={`tone-${tone}`} title={live.why} data-testid={`live-${w.id}`}>
+                {WORK_LIVE_LABEL[live.state]}
+                {live.waitsOn?.length ? ` on ${live.waitsOn.join(', ')}` : ''}
+                <span className="dim"> · {statusText(w)}</span>
+              </span>
+            ) : (
+              <span className={`tone-${tone}`}>{statusText(w)}</span>
+            )}
             {w.mergedInto ? ` into ${w.mergedInto}` : ''} · <span className="mono">{w.id}</span> · {s ? sourceLabel(s) : names(w)}
             {isMine(w, app.me?.userId) ? <span className="tone-blue" data-testid="work-yours"> · yours</span> : null}
             {w.triage && w.triage.class !== 'needs-human' ? <span> · {triageLabel[w.triage.class]}</span> : null}
@@ -435,6 +481,12 @@ function WorkRow({ app, w, open, onToggle, now }: { app: AppState; w: WorkItem; 
               {s.alsoThreads?.length ? ` · also reported ${s.alsoThreads.length} more time(s)` : ''}
               {' · for '}
               {names(w)}
+            </p>
+          )}
+          {live && (
+            <p className={`small tone-${tone}`} data-testid={`live-why-${w.id}`}>
+              {WORK_LIVE_LABEL[live.state]}
+              {live.waitsOn?.length ? ` on ${live.waitsOn.join(', ')}` : ''}: {live.why}
             </p>
           )}
           {w.triage && (

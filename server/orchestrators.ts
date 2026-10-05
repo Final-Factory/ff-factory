@@ -870,6 +870,8 @@ export class Orchestrators {
         if (!s || s.kind !== 'worker') throw new Error(`no worker "${sid}"`);
       }
       w.sessionIds = [...new Set([...w.sessionIds, ...ids])];
+      const at = this.now().toISOString();
+      w.links = { ...w.links, ...Object.fromEntries(ids.map((sid) => [sid, { at, how: 'linked' as const }])) };
       what = `linked to ${ids.map((sid) => this.workerLine(sid)).join(', ')}, already on it`;
     } else if (input.action === 'ask') {
       w.asks++;
@@ -920,6 +922,7 @@ export class Orchestrators {
     const problem = startProblem(w);
     if (problem) throw new Error(problem);
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
+    w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'sent' } };
     w.status = 'active';
     this.stamp(w, `dispatcher: ${what}`);
     this.store.putWork(w);
@@ -957,6 +960,7 @@ export class Orchestrators {
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       sessionIds: [s.id],
+      links: { [s.id]: { at: now.toISOString(), how: 'sent' } },
       overlaps: [],
       asks: 0,
       log: [],

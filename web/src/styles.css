@@ -3408,6 +3408,37 @@ select.input {
   justify-self: stretch;
 }
 
+/* What the open requests are doing now (w418): one button per live state with its count; a click shows only those. */
+.ledger-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  padding: var(--s-2) 2px;
+}
+
+.ledger-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ledger-state:hover {
+  color: var(--text);
+}
+
+.ledger-state.on {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 .ledger-closed {
   align-self: flex-start;
   padding: var(--s-1) 2px;
