@@ -376,3 +376,17 @@ test('delegation: needs the tool group, notifies the orchestrator, and approval 
   assert.equal(st.rejectDelegation(d.id, 'not now').status, 'rejected');
   assert.throws(() => st.rejectDelegation(d.id), /already rejected/);
 });
+
+test('portal-only (w464, D16): no standing run starts here; a manual run is refused and a scheduled one is skipped with why', (t) => {
+  const { st, port, advance, cleanup } = setup();
+  t.after(cleanup);
+  const a = st.create(def);
+  (st as unknown as { cfg: Config }).cfg.hostSandboxes = false;
+  assert.throws(() => st.runNow(a.id), /standing agents do not run on this portal \(this portal holds no sandboxes of its own \(config hostSandboxes: false/);
+  advance(30);
+  st.tick();
+  assert.equal(port.get(a.sessionId).live, false, 'nothing started');
+  const last = st.require(a.id).runs.at(-1)!;
+  assert.equal(last.outcome, 'skipped');
+  assert.match(last.summary ?? '', /^standing agents do not run on this portal/);
+});

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hostSoftFreeGB, type Config, type HostGuardConfig } from './config.ts';
+import { hostSoftFreeGB, portalOnly, type Config, type HostGuardConfig } from './config.ts';
 import { CleanupRunner, describeCleanupItems, type CleanupRun, type PassOptions } from './cleanup.ts';
 import { staleOutputSettings } from './staleOutput.ts';
 import type { HelperAction, HelperResult } from './privileged.ts';
@@ -174,9 +174,12 @@ export class HostHealthMonitor {
     return blockReason(h, kind, { freeGB: this.d.mem().free / GB, minFreeRamGB: this.d.cfg.limits.minFreeRamGB });
   }
 
-  /** The guard runs (hostGuard.pollSeconds > 0): only then is a missing sandbox drive reattached, so only then does it block. */
+  /**
+   * The guard runs (hostGuard.pollSeconds > 0): only then is a missing sandbox drive reattached, so only then does it
+   * block. The portal-only mode (w464) has no sandbox drive to watch.
+   */
   private watchesDrive() {
-    return this.d.cfg.hostGuard.pollSeconds > 0 && (this.d.watchDrive?.() ?? true);
+    return this.d.cfg.hostGuard.pollSeconds > 0 && !portalOnly(this.d.cfg) && (this.d.watchDrive?.() ?? true);
   }
 
   private g() {
@@ -207,7 +210,8 @@ export class HostHealthMonitor {
 
   private async measure() {
     const cfg = this.d.cfg;
-    const paths = [...new Map([cfg.sandboxRoot, ...cfg.hostDiskPaths].map((p) => [volumeOf(p), p])).values()];
+    // The portal-only mode (w464) holds no sandboxes: the data volume (state, transcripts, attachments) is what fills up.
+    const paths = [...new Map([portalOnly(cfg) ? cfg.dataDir : cfg.sandboxRoot, ...cfg.hostDiskPaths].map((p) => [volumeOf(p), p])).values()];
     const disks: HostHealth['disks'] = [];
     for (const p of paths) {
       const st = this.d.exists(p) ? await this.d.statfs(p) : undefined;
@@ -242,6 +246,7 @@ export class HostHealthMonitor {
   // ------------------------------------------------------------ the sandbox drive
 
   private async sandboxDrive() {
+    if (portalOnly(this.d.cfg)) return;
     if (!this.watchesDrive()) {
       // Handed to the daemon's guard: an outage this guard was handling is the daemon's now (it finds it at its first look).
       this.recovery = undefined;

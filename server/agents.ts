@@ -13,7 +13,7 @@ import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLi
 
 /** A live state as list_work takes it (shared/workState.ts). */
 const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
-import { ROOT, configPath, ownerLine, publicIdentityLine, publicIdentityOf, type Config } from './config.ts';
+import { PORTAL_ONLY_WHY, ROOT, configPath, ownerLine, portalOnly, publicIdentityLine, publicIdentityOf, type Config } from './config.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock, type SandboxManager } from './sandboxes.ts';
@@ -34,7 +34,7 @@ import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, typ
 import { REVIEW_DEFAULTS, publishedText, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
 import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
-import { accountSource, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
+import { accountSource, dispatcherOwnAccount, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
 import { Identity, claudeEnvFor, forLine } from './identity.ts';
 import { FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, Orchestrators, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
@@ -1748,7 +1748,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const host = this.sandboxes.list();
     const local = this.machines.local();
     const mem = this.hostMem();
-    if (!local || host.length) {
+    // The portal-only mode (w464): this host is no place for work, whatever its old pool held.
+    if (!portalOnly(this.cfg) && (!local || host.length)) {
       const here = all.filter((s) => !s.info.machineId);
       out.push({
         id: 'this host',
@@ -1847,7 +1848,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const host = this.sandboxes.list();
     const local = this.machines.local();
     // Once this host's own daemon holds its sandboxes, the host's old pool is shown only while it still has some.
-    const parts = local && !host.length ? [] : [`## this host (${host.length}/${this.cfg.limits.maxSandboxes} sandboxes, ${host.filter((s) => this.free(s)).length} free)`, ...host.map((s) => this.describeSandbox(s))];
+    const parts = portalOnly(this.cfg) ? [`## this host: no sandboxes (${PORTAL_ONLY_WHY}); work goes to the machines below`] : local && !host.length ? [] : [`## this host (${host.length}/${this.cfg.limits.maxSandboxes} sandboxes, ${host.filter((s) => this.free(s)).length} free)`, ...host.map((s) => this.describeSandbox(s))];
     for (const m of this.machines.list()) {
       const pool = poolSettingsOf(m);
       if (!pool && !m.sandboxes?.length) continue;
@@ -2305,6 +2306,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           wrap(async ({ action, confirm_reboot, dry_run }) => {
             const h = this.hostHealth;
             if (!h) throw new Error('the host guard is not running (hostGuard.pollSeconds 0?)');
+            // The portal-only mode (w464) has no sandbox drive and no Windows helper tasks: only the clean-up applies.
+            if (portalOnly(this.cfg) && action !== 'cleanup') throw new Error(`${action} is for a host with a sandbox drive and the Windows helper tasks; ${PORTAL_ONLY_WHY}. Only cleanup applies here.`);
             if (action === 'remount') return h.remountNow();
             if (action === 'selftest') return h.selftest();
             if (action === 'cleanup') return h.cleanupNow({ dryRun: !!dry_run });
@@ -3279,9 +3282,10 @@ ${this.worldBrief(false)}
       // files from; and Write and Edit only in its memory folder.
       hooks: { PreToolUse: [{ hooks: [secretReadGuard(this.orchestratorSecrets(memory), cwd), memoryGuard(memory, () => this.personTurn(info.id))] }] },
       // Who pays (docs/orchestrators.md, docs/accounts.md): a person's own orchestrator runs on their own Claude account
-      // when they have one here (config userClaudeEnv); the dispatcher on the system payer's. Without one, what config
+      // when they have one here (config userClaudeEnv); the dispatcher on config claudeAccounts.dispatcher when it is set
+      // (w464: Lothsahn's account, whoever the system payer is), else on the system payer's. Without one, what config
       // claudeAccounts.orchestrator picks: the host token, or this host's stored claude.ai login.
-      env: claudeEnvFor(this.cfg, owner ?? this.identity.systemPayer(), hostProcessEnv(this.cfg, 'orchestrator')),
+      env: !owner && dispatcherOwnAccount(this.cfg) ? hostProcessEnv(this.cfg, 'dispatcher') : claudeEnvFor(this.cfg, owner ?? this.identity.systemPayer(), hostProcessEnv(this.cfg, 'orchestrator')),
       systemPrompt: { type: 'preset', preset: 'claude_code', append: `${owner ? this.personalBrief(owner) : this.dispatcherBrief()}\n\n${memoryBrief(memory, owner?.displayName)}` },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };
