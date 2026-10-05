@@ -4,7 +4,7 @@ What FFBox is, how it works, and how workers change it (straight to its master, 
 
 Status: **approved by Ben and Lothsahn 2026-09-27. Phase 1, FF Factory's side, is built**: `/provider`,
 the FFBox card and page, and `ffbox_activity` (`server/providers.ts`). The page groups intake reports by
-coarse signature with the step 4 counts (`shared/intake.ts`), before phase 4 acts on them. The connector it talks to is
+coarse signature (`shared/intake.ts`). The connector it talks to is
 specified in [ffbox-connector-contract.md](ffbox-connector-contract.md). Every later phase is a
 separate, reviewable change.
 
@@ -466,6 +466,12 @@ A list in FF Factory's state, beside sandboxes and standing agents:
   conversation cannot file one.
 
 ## 6. Automatic desync and crash intake
+
+**Superseded on FFBox's side (2026-10-04, w412).** FFBox built automatic diagnosis itself: every report is diagnosed
+as it arrives, after `intake.auto.settle_minutes`, under `intake.auto.max_per_day`, a desync with its play session
+([ffbox.md](ffbox.md), "Crash and desync intake"). FF Factory's trigger below (the trust bar, 3 an hour and 20 a day,
+the storm breaker) was never built and is not what runs; read it as the original proposal. What FFBox does is FFBox's
+live config: `ffbox_activity show signatures`.
 
 Today players' games upload desync and crash reports to `ffintake` on FFBox. The `/intake` page
 lists them, and a person clicks a report to hand it to a diagnosis agent. Lothsahn's agents work on

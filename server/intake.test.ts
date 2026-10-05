@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AUTO_PER_DAY, groupIntake, signatureOf, versionLine } from '../shared/intake.ts';
+import { groupIntake, signatureOf, versionLine } from '../shared/intake.ts';
 import type { ProviderIntakeEvent } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-09-28T12:00:00Z');
@@ -39,7 +39,7 @@ test('intake: one item per signature across builds; trusted with 2 senders or a 
     { ...desync({ min: 1 }), kind: 'crash' as const, desync: undefined, sender: 'd' },
     { ...desync({ min: 2 }), kind: 'crash' as const, desync: undefined, sender: 'e' },
   ];
-  const g = groupIntake(events, NOW);
+  const g = groupIntake(events);
   assert.equal(g.reports, 8);
   const by = Object.fromEntries(g.signatures.map((s) => [s.signature, s]));
   assert.deepEqual(Object.keys(by), ['crash:0.50.0', 'desync:0.50.0:power', 'desync:0.50.0:fleets', 'desync:0.50.0:minerBots+census'], 'newest item first');
@@ -48,26 +48,8 @@ test('intake: one item per signature across builds; trusted with 2 senders or a 
   assert.deepEqual([by['desync:0.50.0:power'].events, by['desync:0.50.0:power'].pair, by['desync:0.50.0:power'].trusted], [1, true, true]);
   assert.equal(by['crash:0.50.0'].trusted, false, 'crashes wait for their real signature (phase 6)');
   assert.equal(by['crash:0.50.0'].surfaces, undefined);
-
-  assert.deepEqual(g.budget, {
-    live: false,
-    perDay: AUTO_PER_DAY,
-    perHour: 3,
-    newToday: 4,
-    newLastHour: 4,
-    trustedToday: 2,
-    wouldStartToday: 2,
-    stormBreaker: { threshold: 5, tripped: false },
-  });
 });
 
-test('intake: the daily cap and the storm breaker', () => {
-  const many = Array.from({ length: 30 }, (_, i) => [desync({ surfaces: `s${i}`, sender: 'a', min: 5 }), desync({ surfaces: `s${i}`, sender: 'b', min: 5 })]).flat();
-  const old = desync({ surfaces: 'old', sender: 'a', min: 60 * 30 });
-  const g = groupIntake([...many, old], NOW);
-  assert.equal(g.budget.newToday, 30, 'a signature first seen yesterday is not new today');
-  assert.equal(g.budget.trustedToday, 30);
-  assert.equal(g.budget.wouldStartToday, 20, 'capped at 20 a day');
-  assert.equal(g.budget.stormBreaker.tripped, true, 'more than 5 new signatures in an hour');
-  assert.equal(groupIntake([], NOW).signatures.length, 0);
+test('intake: no reports, no signatures', () => {
+  assert.equal(groupIntake([]).signatures.length, 0);
 });

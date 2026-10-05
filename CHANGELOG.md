@@ -10,6 +10,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ffbox_activity show signatures` says what FFBox really does with reports** (w412). It said automatic
+  investigations were "not built yet (phase 4)" and counted how many "would start" under FF Factory's own 20-a-day
+  plan, while FFBox has diagnosed every crash and desync report by itself since 2026-10-04. It now asks FFBox live: its
+  `intake.auto` (on or off, settle time, daily cap, who pays) and `intake.fff_handoff` from `config`, the intake
+  conversations of the last 24 h, and each report of the last 24 h with the conversation that diagnosed it from
+  `reports`; when FFBox cannot answer it says unknown instead of asserting. The unbuilt budget (`IntakeBudget`, the
+  "would start today" meter) is gone from `/api/providers/ffbox/signatures` and the FFBox page, which now says FFBox
+  diagnoses the reports. The orchestrators' FFBox guidance and `fetch_ffbox_report` say so too
+  ([docs/ffbox.md](docs/ffbox.md), "Crash and desync intake").
+
 ### Added
 
 - **Owners close each other's requests when asked** (w402, asked by Lothsahn). A person with the owner role can have

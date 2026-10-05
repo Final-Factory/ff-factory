@@ -72,12 +72,13 @@ test('FFBox: the card follows the connector, and its page lists capacity, conver
     await expect(intake).toContainText('crash');
     await expectNoHorizontalOverflow(page);
 
-    // Grouped the way automatic investigations will group them, with the day's numbers against the cap of 20.
+    // Grouped by coarse signature; FFBox, not this page, diagnoses them (w412).
     await panel.getByRole('tab', { name: /Signatures/ }).click();
     await expect(page).toHaveURL(/#\/provider\/ffbox\/signatures$/);
     const budget = panel.getByTestId('provider-budget');
-    await expect(budget).toContainText('not live yet');
-    await expect(budget).toContainText(/would start today 0 of 20/);
+    await expect(budget).toContainText('Automatic diagnosis');
+    await expect(budget).toContainText('FF Factory starts none of them');
+    await expect(budget).not.toContainText('not live yet');
     const sigs = panel.getByTestId('provider-signatures').locator('.run-row');
     await expect(sigs).toHaveCount(2);
     await expect(sigs.first()).toContainText('minerBots+census');
@@ -87,7 +88,7 @@ test('FFBox: the card follows the connector, and its page lists capacity, conver
     await expect(panel).toHaveScreenshot('ffbox-signatures.png');
     const groups = await (await page.request.get('/api/providers/ffbox/signatures')).json();
     expect(groups.signatures.map((g: { signature: string }) => g.signature)).toEqual(['desync:0.50.0:minerBots+census', 'crash:0.50.0']);
-    expect(groups.budget.perDay).toBe(20);
+    expect(groups.budget).toBeUndefined();
     await panel.getByRole('tab', { name: /Intake reports/ }).click();
 
     const listed = await page.request.get('/api/providers/ffbox/intake');

@@ -649,7 +649,7 @@ export interface IntakeSignature {
   senders: number;
   /** A host and a client report of one event. */
   pair: boolean;
-  /** Clears the trust bar for an automatic investigation: 2+ distinct senders, or a host and client pair. Never for crashes yet. */
+  /** Clears the trust bar: 2+ distinct senders, or a host and client pair. Never for crashes yet. */
   trusted: boolean;
   firstAt: string;
   lastAt: string;
@@ -659,26 +659,8 @@ export interface IntakeSignature {
   reportIds: string[];
 }
 
-/** The numbers automatic investigations will be bounded by (docs/ffbox-integration.md, step 4). */
-export interface IntakeBudget {
-  /** Phase 4 (automatic investigations) is not built yet: these are what it would use. */
-  live: false;
-  perDay: number;
-  perHour: number;
-  /** Signatures first seen in the last 24 h / hour. */
-  newToday: number;
-  newLastHour: number;
-  /** New today and past the trust bar: what would be started, before the caps. */
-  trustedToday: number;
-  /** min(trustedToday, perDay). */
-  wouldStartToday: number;
-  /** More than 5 new signatures in an hour stops automatic starts. */
-  stormBreaker: { threshold: number; tripped: boolean };
-}
-
 export interface IntakeGroups {
   signatures: IntakeSignature[];
-  budget: IntakeBudget;
   /** How many reports were grouped (the portal keeps the newest 2000). */
   reports: number;
 }

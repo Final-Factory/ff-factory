@@ -238,36 +238,20 @@ function Setup({ p }: { p: Provider }) {
   );
 }
 
-/** Intake reports grouped by coarse signature, and the numbers automatic investigations will be capped by. */
+/** Intake reports grouped by coarse signature. FFBox diagnoses them itself (its intake.auto); this page starts nothing. */
 function Signatures({ groups, now }: { groups?: IntakeGroups; now: number }) {
   if (!groups) return <p className="dim small">Loading…</p>;
-  const b = groups.budget;
   return (
     <>
       <div className="pv-budget" data-testid="provider-budget">
         <div className="pv-budget-top">
-          <span className="pv-budget-title">Automatic investigations</span>
-          <Chip tone="grey">not live yet</Chip>
-        </div>
-        <div className="pv-meter" aria-label={`${b.wouldStartToday} of ${b.perDay} a day`}>
-          <i style={{ width: `${Math.min(100, (b.wouldStartToday / b.perDay) * 100)}%` }} />
-        </div>
-        <div className="pv-budget-cells small">
-          <span>
-            would start today <b className="mono">{b.wouldStartToday}</b> of {b.perDay}
-          </span>
-          <span>
-            new signatures 24 h <b className="mono">{b.newToday}</b>
-          </span>
-          <span>
-            past the trust bar <b className="mono">{b.trustedToday}</b>
-          </span>
-          <span className={b.stormBreaker.tripped ? 'tone-red' : ''}>
-            last hour <b className="mono">{b.newLastHour}</b> new{b.stormBreaker.tripped ? ' · storm breaker tripped' : ` (breaker above ${b.stormBreaker.threshold})`}
-          </span>
+          <span className="pv-budget-title">Automatic diagnosis</span>
+          <Chip tone="grey">on FFBox</Chip>
         </div>
         <p className="small dim">
-          One investigation per signature once it has 2+ senders or a host and client pair; at most {b.perHour} an hour and {b.perDay} a day. Phase 4 builds them; these are the numbers it will use.
+          FFBox diagnoses crash and desync reports by itself when its <span className="mono">intake.auto</span> is on: a short wait after a report
+          arrives, then an <span className="mono">ffdiagnose</span> conversation, under its own daily cap. FF Factory starts none of them. Its live
+          setting and each recent report's conversation: <span className="mono">ffbox_activity show signatures</span>.
         </p>
       </div>
       {!groups.signatures.length ? (
@@ -280,7 +264,7 @@ function Signatures({ groups, now }: { groups?: IntakeGroups; now: number }) {
                 <Dot tone={g.kind === 'desync' ? 'amber' : 'red'} title={g.kind} />
                 <span className="small">{g.kind}</span>
                 <span className="mono small">{g.versionLine}</span>
-                {g.trusted ? <Chip tone="green">trusted</Chip> : <Chip tone="grey">{g.kind === 'crash' ? 'no signature yet' : 'waiting for a 2nd sender'}</Chip>}
+                {g.trusted ? <Chip tone="green">trusted</Chip> : <Chip tone="grey">{g.kind === 'crash' ? 'no signature yet' : 'one sender'}</Chip>}
                 <span className="dim small">last {fmtRelative(g.lastAt, now)}</span>
               </div>
               <div className="pv-title mono">{g.surfaces ?? 'crash (signatures come in phase 6)'}</div>
