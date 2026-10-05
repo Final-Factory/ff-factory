@@ -82,5 +82,6 @@ tell_dispatcher() {
 
 health_json() { curl -fsS -m 10 "http://127.0.0.1:$FFF_PORT/api/health"; }
 # As fff: root running git in fff's repository trips git's safe.directory check.
-release_sha() { [ -n "$1" ] && as_fff git -C "$1" rev-parse HEAD 2>/dev/null; }
+# Empty (and status 0) when there is no such release, so an assignment from it never stops a set -e script.
+release_sha() { if [ -n "$1" ]; then as_fff git -C "$1" rev-parse HEAD 2>/dev/null || true; fi; }
 portal_active() { systemctl is-active --quiet fff-portal.service; }

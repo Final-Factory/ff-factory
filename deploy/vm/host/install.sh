@@ -103,7 +103,7 @@ elif [ -e "$(vm_disk_path)" ] && [ "$(manifest_get disk_created)" != "$(vm_disk_
 fi
 # Accounts that could reach the VM's disk or control libvirt: root only, unless Lothsahn says otherwise.
 for g in libvirt disk; do
-  members=$(getent group "$g" | cut -d: -f4)
+  members=$(getent group "$g" | cut -d: -f4 || true)
   [ -z "$members" ] || warn "group $g has members ($members): they can $([ "$g" = libvirt ] && echo 'control every VM through libvirt' || echo 'read raw disks such as the VM volume'). No FFBox account may be in it"
 done
 
@@ -157,7 +157,23 @@ fi
 log "5/10 firewall (table inet fff_vm, before the network starts)"
 # Connected networks of the host (its LAN included, whatever its addresses), blocked for the VM as well as the
 # private ranges: a LAN on public addresses is still Lothsahn's LAN.
-connected=$(ip -4 route show scope link | awk -v br="$NET_BRIDGE" '$0 !~ ("dev " br " ") && $1 ~ /\// {print $1}' | sort -u | paste -sd, - || true)
+# Those already inside a private range are left out, so the set holds no overlapping intervals.
+is_private4() {
+  local a b
+  IFS=. read -r a b _ <<<"${1%%/*}"
+  case $a in
+    0 | 10 | 127) return 0 ;;
+    169) [ "$b" = 254 ] ;;
+    172) [ "$b" -ge 16 ] && [ "$b" -le 31 ] ;;
+    192) [ "$b" = 168 ] ;;
+    100) [ "$b" -ge 64 ] && [ "$b" -le 127 ] ;;
+    *) return 1 ;;
+  esac
+}
+connected=""
+for n in $(ip -4 route show scope link | awk -v br="$NET_BRIDGE" '$0 !~ ("dev " br " ") && $1 ~ /\// {print $1}' | sort -u); do
+  if ! is_private4 "$n"; then connected+="${connected:+, }$n"; fi
+done
 blocked="0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4${connected:+, $connected}${NET_EXTRA_BLOCK:+, $NET_EXTRA_BLOCK}"
 run_cmd install -d -m 0755 "$FFF_VM_ETC"
 nft_text=$(cat <<EOF
@@ -278,7 +294,11 @@ log "8/10 disk ($VM_DISK_MODE, $VM_DISK_GB GiB) from the Ubuntu $VM_OS_VERSION c
 disk=$(vm_disk_path)
 run_cmd install -d -m 0711 "$VM_IMAGE_DIR"
 disk_exists=no
-if [ "$VM_DISK_MODE" = zvol ]; then zfs list -H "$VM_ZVOL_PARENT/disk0" >/dev/null 2>&1 && disk_exists=yes; else [ -e "$disk" ] && disk_exists=yes; fi
+if [ "$VM_DISK_MODE" = zvol ]; then
+  if zfs list -H "$VM_ZVOL_PARENT/disk0" >/dev/null 2>&1; then disk_exists=yes; fi
+elif [ -e "$disk" ]; then
+  disk_exists=yes
+fi
 if [ "$disk_exists" = yes ]; then
   log "the disk exists ($disk): left as it is (never overwritten; grow it by hand)"
 else
