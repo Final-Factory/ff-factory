@@ -760,3 +760,66 @@ test("w402: a member cannot close or reopen another person's request, even in th
   assert.equal(store.work.get('w1')!.status, 'new');
   assert.equal(store.work.get('w1')!.log.some((l) => /Lothsahn/.test(l)), false, 'nothing logged');
 });
+
+
+// ---------------------------------------------------------------- w416: placing work where there is room
+
+test('w416: list_sandboxes leads with each computer\'s room; start_agent on a busy host while LothDesktop has room says so', async (t) => {
+  const { cfg, store, sessions, agents, dispatcher, call } = setup(t);
+  const GB = 1024 ** 3;
+  const machines = (agents as unknown as { machines: MachineManager }).machines;
+  store.putMachine({
+    id: 'lothdesktop',
+    host: 'lothdesktop',
+    purpose: 'unused',
+    status: 'ready',
+    online: true,
+    repoPath: 'D:\\work\\FinalFactory',
+    home: 'C:\\Users\\loth',
+    portalUrl: 'http://x',
+    maxSessions: 3,
+    sessionIds: [],
+    createdAt: T0,
+    platform: 'win32',
+    sandboxRoot: 'D:\\work\\ffsb',
+    maxSandboxes: 5,
+    maxSandboxAgents: 5,
+    sandboxes: [
+      { id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', path: 'D:\\work\\ffsb\\sb1', purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] },
+      { id: 'sb2', branch: 'sandbox/sb2', base: 'origin/develop', path: 'D:\\work\\ffsb\\sb2', purpose: 'w300: nightly lab', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] },
+    ],
+  } as never);
+  Object.assign(machines, {
+    isOnline: () => true,
+    statsOf: (id: string) => (id === 'lothdesktop' ? { hostname: 'LothDesktop', platform: 'win32', cpuModel: 'x', cpuCount: 16, loadPct: 9, memTotalBytes: 64 * GB, memFreeBytes: 34 * GB, at: T0 } : undefined),
+  });
+  store.putSandbox({ id: 'beta', name: 'beta', branch: 'sandbox/beta', base: 'origin/develop', path: path.join(cfg.sandboxRoot, 'beta'), purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
+  store.putSandbox({ id: 'gamma', name: 'gamma', branch: 'sandbox/gamma', base: 'origin/develop', path: path.join(cfg.sandboxRoot, 'gamma'), purpose: 'w399: belt splitter fix', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
+  // This host at 55 of 64 GB, as BEAST was at 05:22 UTC on 2026-10-05.
+  agents.hostMem = () => ({ free: 9 * GB, total: 64 * GB });
+
+  const list = (await call(dispatcher().info, 'list_sandboxes', {})).text;
+  assert.match(list, /^## Capacity/);
+  assert.match(list, /\n- this host: BUSY \(RAM 86% used\): 0 live agents of 30/);
+  assert.match(list, /\n- lothdesktop: ROOM: 0 live agents of 5 \(0 mid-turn\); 1 of 5 sandboxes free \(3 more can be made\); RAM 47% used\n/);
+  assert.match(list, /\nPrefer lothdesktop for new game-repo work: this host is busy\.\n/);
+  assert.match(list, /\n## lothdesktop /, 'the sandbox list follows');
+
+  const start = beltFor('remote', agents.toolSpecs('human', agents.fixedActor(LOTH), { role: 'remote', owner: LOTH })).find((x) => x.name === 'start_agent')!;
+  const text = async (a: Record<string, unknown>) => (await start.handler(a)).content.map((c) => c.text).join('');
+  const busy = await text({ sandbox: 'alpha', prompt: 'Profile the belts', title: 'Belt profile' });
+  assert.match(busy, /^Started agent /);
+  assert.match(busy, /Note: this host is busy \(RAM 86% used\) while lothdesktop has room \(0 live agents of 5 .*put new game-repo work on lothdesktop\.$/);
+  // A worker going on in a sandbox its work already holds (labelled, not free) gets no note.
+  assert.doesNotMatch(await text({ sandbox: 'gamma', prompt: 'Carry on with the splitter', title: 'Splitter' }), /Note:/);
+  // The host's agent limit alone makes it busy, too.
+  agents.hostMem = () => ({ free: 34 * GB, total: 64 * GB });
+  cfg.limits.maxSessions = 2;
+  assert.match(await text({ sandbox: 'beta', prompt: 'Look at the tutorial', title: 'Tutorial' }), /Note: this host is busy \(2 live agents of 2\) while lothdesktop has room/);
+  // With room here again, no note.
+  cfg.limits.maxSessions = 30;
+  store.putSandbox({ id: 'delta', name: 'delta', branch: 'sandbox/delta', base: 'origin/develop', path: path.join(cfg.sandboxRoot, 'delta'), purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
+  assert.doesNotMatch(await text({ sandbox: 'delta', prompt: 'Read the docs', title: 'Docs' }), /Note:/);
+  // Their first turns end before the test does (on Windows a late transcript write outlived the temp folder).
+  await until('the workers answered', () => [...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').every((s) => s.info.status === 'idle'));
+});

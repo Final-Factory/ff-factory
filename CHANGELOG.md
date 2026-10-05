@@ -24,6 +24,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Work goes where there is room** (w416, asked by Lothsahn). `list_sandboxes` and `system_status` start with a
+  Capacity block: each computer's live agents against its limit, free sandboxes and RAM, BUSY or ROOM, and which to
+  prefer; `start_agent` and `create_sandbox` add a note when they put new work on a busy computer while another has
+  room. The dispatcher's prompt sends game-repo work to the computer with room (LothDesktop when BEAST is full) and keeps
+  on BEAST only what needs it ([docs/machines.md](docs/machines.md), "Placing work").
+
 - **Owners close each other's requests when asked** (w402, asked by Lothsahn). A person with the owner role can have
   their orchestrator close or reopen another person's request (`update_work`), only in a turn they started with their
   own message and with a note saying why; the log names who and whose, and the request's people are told. Members keep

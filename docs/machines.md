@@ -375,8 +375,8 @@ sandbox agents in all), `max_unity: 2`.
   `unity {sandbox: "lothdesktop/sb1", action}` (status, start, stop, restart, log), `start_agent {sandbox:
   "lothdesktop/sb1", prompt, ...}`, `switch_branch {sandbox: "lothdesktop/sb1", branch}` (refused while its editor
   runs: stop it first, or Unity stops on "The open scene(s) have been modified externally").
-- `list_sandboxes` shows this host's sandboxes and then each machine's, grouped, with each group's limits and free
-  count, one line per sandbox (a **FREE** flag when it is ready, labelled unused and has no live agent) and only
+- `list_sandboxes` starts with the **Capacity** block (below, "Placing work"), then shows this host's sandboxes and
+  then each machine's, grouped, with each group's limits and free count, one line per sandbox (a **FREE** flag when it is ready, labelled unused and has no live agent) and only
   its live agents. An offline machine's sandboxes show as last reported.
 
 **Agents in a machine sandbox** get their own brief (the worktree, their editor's instance name) and the `machine`
@@ -437,6 +437,31 @@ running at the daemon's first look, any age). The daemon logs the command it fou
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
 portal never sends it one: it says the daemon is being redeployed.
+
+### Placing work
+
+The dispatcher picks the computer for each request itself (`start_agent` with a sandbox id; there is no automatic
+placement), so FF Factory shows it each computer's room where it decides, and says so when it places work on a busy
+one (w416, Lothsahn on 2026-10-05: "make sure jobs are getting scheduled on LothDesktop", after five requests in a
+row went to BEAST at 7 live agents of 6 and 55 of 64 GB while LothDesktop sat at 2 of 5 and 30 GB).
+
+- **Capacity block** (`server/placement.ts`, `capacityLines`), first in `list_sandboxes` and in `system_status`: one
+  line per computer that holds sandboxes (this host's own pool while it has one, then each machine's, BEAST's own
+  daemon included) with its live agents against its limit (and how many are mid-turn), free sandboxes and how many
+  more can be made, and RAM used. A computer is **BUSY** when it is offline, has as many live agents as its limit
+  (`limits.maxSessions` here, `max_sandbox_agents` or `max_sandboxes` × `max_agents_per_sandbox` on a machine),
+  uses `RAM_BUSY_PCT` (85%) of its RAM or more, or has no free sandbox and no room to make one; otherwise **ROOM**.
+  When one is busy and another has room, a last line says which to prefer. Live agents count, not only mid-turn
+  ones, because an idle agent's process holds its memory too (docs/orchestrators.md, "Agent limits and idle
+  workers"). The 85% line is a judgment from those numbers: one more Unity editor takes 8-12 GB, about 15% of 64 GB.
+- **The hint**: `create_sandbox` on a busy computer, and `start_agent` into a FREE sandbox (new work) on one, end
+  with a note naming the computer with room and its load, while another has room. It never refuses or moves
+  anything. A `start_agent` into a sandbox whose label holds its work (a worker going on where it was) gets none.
+- **The rule** (the dispatcher's prompt): game-repo work, Unity and built players included, and Discord posting as Max
+  (only LothDesktop has the ffdiscord config), goes where there is room, LothDesktop included, and to the computer
+  with room when another is busy, even if a sandbox on the busy one is free. It stays on BEAST only when it needs
+  BEAST: FF Factory's own repo or its deploys, ssh to the M5 when LothDesktop cannot reach it, a brief that pins it,
+  or a worker going on in its own sandbox. Running workers are never moved.
 
 ## The portal's own host as a machine
 
