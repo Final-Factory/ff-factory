@@ -115,6 +115,40 @@ export function localMachineDefaults(cfg: Pick<Config, 'port' | 'repo' | 'sandbo
   };
 }
 
+/**
+ * A machine's record turned from the portal's own host (`local`) into one reached over ssh, or back (convert_machine,
+ * w466; docs/portal-on-ffbox-host.md change 3). Only how it is reached changes: its id, token, sandboxes, agents,
+ * limits, pool settings and protected paths stay, so nothing on the machine moves. To ssh: `sshHost` and a portal URL
+ * it can reach (not a loopback one) are needed, and `extras` (the daemon.json settings a local deploy took from the
+ * portal's config) are kept for its redeploys. Back to local: this portal's loopback address unless given. Exported for
+ * tests and the migration script, which rewrites a copy of state.json the same way.
+ */
+export function convertMachineRecord(m: Machine, to: 'ssh' | 'local', o: { sshHost?: string; portalUrl?: string; port: number; publicUrl?: string; extras?: DaemonExtras }): Machine {
+  const next: Machine = { ...m };
+  if (to === 'ssh') {
+    if (!m.local) throw new Error(`${m.id} is reached over ssh already`);
+    const host = o.sshHost?.trim();
+    if (!host || /\s/.test(host)) throw new Error('ssh_host is required: the ssh host alias this portal reaches the machine by (e.g. "beast")');
+    const url = (o.portalUrl ?? o.publicUrl ?? '').trim().replace(/\/+$/, '');
+    if (!/^https?:\/\/[^/\s?#]+$/.test(url)) throw new Error('portal_url is required: the address the machine reaches this portal at, e.g. https://<host>.<tailnet>.ts.net');
+    if (/^https?:\/\/(localhost|127\.[\d.]+|\[::1\])(:\d+)?$/i.test(url)) throw new Error(`${url} is a loopback address: a machine reached over ssh reaches the portal by its network address`);
+    delete next.local;
+    next.host = host;
+    next.portalUrl = url;
+    const keep = { ...(o.extras?.unityMcpServer ? { unityMcpServer: o.extras.unityMcpServer } : {}), ...(o.extras?.sandboxIdleStopMinutes !== undefined ? { sandboxIdleStopMinutes: o.extras.sandboxIdleStopMinutes } : {}) };
+    if (Object.keys(keep).length) next.daemonExtras = keep;
+    return next;
+  }
+  if (m.local) throw new Error(`${m.id} is the portal's own host already`);
+  const url = (o.portalUrl ?? `http://127.0.0.1:${o.port}`).trim().replace(/\/+$/, '');
+  if (!/^https?:\/\/[^/\s?#]+$/.test(url)) throw new Error(`portal_url ${url} is not a base URL`);
+  next.local = true;
+  next.host = 'localhost';
+  next.portalUrl = url;
+  delete next.daemonExtras;
+  return next;
+}
+
 /** The limits a deploy stores: each given one checked, an unset one kept from the previous deploy. Exported for tests. */
 export function limitOptions(opts: SandboxLimits, prev: SandboxLimits | undefined): SandboxLimits {
   const pick = (k: keyof SandboxLimits, min: number, max: number) => {
@@ -694,6 +728,8 @@ export class MachineManager {
       platform: prev?.platform,
       name: typed !== id ? typed : prev?.name,
       sandboxes: prev?.sandboxes,
+      // Kept from when it was the portal's own host (convert_machine, w466): what its ssh redeploys write.
+      ...(!local && prev?.daemonExtras ? { daemonExtras: prev.daemonExtras } : {}),
       ...dirs,
       ...limits,
     });
@@ -709,6 +745,37 @@ export class MachineManager {
   /** The portal's own host as a machine (docs/beast-machine.md), if one is set up. */
   local(): Machine | undefined {
     return this.list().find((m) => m.local);
+  }
+
+  /**
+   * Turn the portal's own host as a machine into one reached over ssh, or back (convert_machine, w466): the record only
+   * (convertMachineRecord). Its daemon stays connected as it is, its agents run on, its token and sandboxes stay; it is
+   * how BEAST stays the same machine when the portal moves to the VM, and comes back when it returns. A redeploy (asked
+   * for, refused while agents run there) writes the new way into its daemon.json, with a new token.
+   */
+  convertMachine(id: string, to: 'ssh' | 'local', o: { sshHost?: string; portalUrl?: string; redeploy?: boolean } = {}): string {
+    const m = this.require(id);
+    if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
+    // Checked before anything changes: a redeploy restarts its daemon, which stops its agents.
+    if (o.redeploy && this.liveCount(m.id) > 0) throw new Error(`${m.id} has ${this.liveCount(m.id)} agent(s) running; a redeploy would stop them. Convert without redeploy (its daemon stays connected), or stop them first`);
+    if (to === 'local') {
+      const other = this.list().find((x) => x.local && x.id !== m.id);
+      if (other) throw new Error(`${other.id} is already the portal's own host as a machine; there can be only one`);
+      if (process.platform !== 'win32' && !this.allowLocalAnywhere) throw new Error("a local machine (the portal's own host) is only supported on a Windows host so far");
+      // The portal's own computer must hold the machine's clone: a machine that is another computer cannot become it.
+      if (!m.repoPath || !fs.existsSync(m.repoPath)) throw new Error(`${m.repoPath || 'its main clone'} is not on this computer: ${m.id} cannot be the portal's own host here`);
+    }
+    const next = convertMachineRecord(m, to, { ...o, port: this.cfg.port, publicUrl: this.cfg.publicUrl, extras: to === 'ssh' ? this.localExtras() : undefined });
+    this.store.putMachine(next);
+    const kept = `${(next.sandboxes ?? []).length} sandbox(es), ${next.sessionIds.length} agent record(s), its token and limits kept`;
+    const how = to === 'ssh' ? `reached over ssh as "${next.host}", portal_url ${next.portalUrl}` : `the portal's own host again (no ssh), portal_url ${next.portalUrl}`;
+    const link = this.isOnline(next.id) ? 'Its daemon stays connected as it is, its agents running on' : 'Its daemon is offline now; it dials the URL in its daemon.json (relocate_machines changes that for a connected one)';
+    let text = `${next.id} is ${how}; ${kept}. ${link}.`;
+    if (o.redeploy) {
+      this.deployMachine({ id: next.id });
+      text += ` Redeploying it ${to === 'ssh' ? `over ssh to ${next.host}` : 'here, without ssh'}; list_machines shows progress.`;
+    } else text += ` Its daemon.json still has the way it was deployed: a redeploy (add_machine, or convert_machine with redeploy) writes this one.`;
+    return text;
   }
 
   /** The install over ssh (server/machineDeploy.ts); replaced by tests. */
@@ -739,7 +806,7 @@ export class MachineManager {
         if (s === 'installing') installAt = Date.now();
         this.update(m.id, { statusDetail: s });
       };
-      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : {}) });
+      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : m.daemonExtras ? { extra: m.daemonExtras } : {}) });
       const connected = () => this.deployedDaemonConnected(m.id, installAt, r.version);
       this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
       if (r.started === false && !connected()) {

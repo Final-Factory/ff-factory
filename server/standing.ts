@@ -6,7 +6,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { ROOT, configPath, ownerLine, publicIdentityOf, type Config } from './config.ts';
+import { PORTAL_ONLY_WHY, ROOT, configPath, ownerLine, portalOnly, publicIdentityOf, type Config } from './config.ts';
 import { portalSecretRules, secretFilesOf, type SecretRules } from './secretGuard.ts';
 import { buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from './launch.ts';
 import type { Store } from './store.ts';
@@ -47,6 +47,12 @@ import type {
   StandingToolGroup,
 } from '../shared/types.ts';
 import { appDirOf } from '../shared/types.ts';
+
+/**
+ * D16 (w464, docs/portal-on-ffbox-host.md): the portal-only mode runs no standing agent, here or on a machine. Their
+ * jobs move to ordinary workers that timers wake.
+ */
+export const STANDING_PORTAL_ONLY = `standing agents do not run on this portal (${PORTAL_ONLY_WHY}); their jobs run as workers that timers start`;
 
 /** What a standing agent needs from a session: SessionManager and AgentSession satisfy it; tests fake it. */
 export interface SessionLike {
@@ -303,6 +309,7 @@ export class StandingAgents {
    */
   runNow(id: string, trigger: 'manual' | 'message' = 'manual', text?: string, requestedBy?: Requester): string {
     const a = this.require(id);
+    if (portalOnly(this.cfg)) throw new Error(STANDING_PORTAL_ONLY);
     if (this.active.has(a.id)) {
       if (trigger === 'message' && text) {
         this.sessions.send(a.sessionId, text, 'human', undefined, { requestedBy });
@@ -394,6 +401,15 @@ export class StandingAgents {
 
   private tryStart(a: StandingAgent): string {
     const p = a.pending!;
+    if (portalOnly(this.cfg)) {
+      // D16 (w464): a scheduled run is recorded as skipped, with why, and nothing starts.
+      a.pending = undefined;
+      this.recordSkip(a, p.trigger, p.dueAt, STANDING_PORTAL_ONLY);
+      a.state = a.enabled ? 'asleep' : 'paused';
+      a.stateDetail = STANDING_PORTAL_ONLY;
+      this.store.putStanding(a);
+      return `Skipped: ${STANDING_PORTAL_ONLY}.`;
+    }
     const m = a.machineId ? this.deps.machines?.get(a.machineId) : undefined;
     const online = !!m && !!this.deps.machines?.isOnline(m.id);
     const verdict = admit({

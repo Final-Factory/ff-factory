@@ -228,6 +228,17 @@ git gets an `includeIf "hasconfig:remote.*.url:..."` through `GIT_CONFIG_COUNT` 
 every public repo of their owners, the game repo's owner and the gh account (git 2.36+; nobody's gitconfig
 changes). Without a configured `name`/`email` that identity is the gh account's login and noreply address.
 
+**Portal-only mode** (`hostSandboxes: false`, w464; [docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md),
+section 6, changes 1 and 2, D16). For a host that runs the portal and nothing else (the VM on the FFBox host):
+- "this host" is no place for work: it leaves the capacity block, placement and `list_sandboxes`, and
+  `create_sandbox` without a machine is refused with that reason. Work goes to the machines.
+- `sandboxRoot` and `unity` may be left out; only `repo` (the base clone the orchestrators read) is required.
+- The host guard watches no sandbox drive (nothing blocks on one, no `ffsb-helper-mount`) and measures the data
+  volume (`dataDir`) with `hostDiskPaths` instead. `host_recovery` runs only `cleanup`; the sandbox-drive and Windows
+  helper actions are refused with the reason.
+- No standing agent runs, here or on a machine: a manual run is refused and a scheduled one is recorded as
+  skipped, with why. Their jobs move to workers that timers start.
+
 ## Development
 
 ```bash
