@@ -220,7 +220,8 @@ function head(dirs: { appDir?: string; previous?: string } = {}): string {
 /**
  * Probe a Windows PC: its user (SID for the task), home, OS, the newest node (PATH and the usual installers:
  * nodejs.org, nvm-windows, Volta, fnm, Scoop), Claude Code, git and the clones of `slug` under the home folder
- * and near the top of each fixed drive. One `key=value` per line, as the Mac probe prints.
+ * and near the top of each fixed drive (no `slug`: no search, for a deploy that already knows its clone). One
+ * `key=value` per line, as the Mac probe prints.
  */
 export function probeScript(slug: string): string {
   if (slug && !/^[\w.-]+\/[\w.-]+$/.test(slug)) throw new Error(`"${slug}" is not an owner/name repo slug`);
@@ -256,7 +257,8 @@ foreach ($g in $globs) { if ($g) { foreach ($p in @(Resolve-Path $g -ErrorAction
 $best = ''; $bestv = [version]'0.0'
 foreach ($n in @($cands | Select-Object -Unique)) {
   if (-not $n -or -not (Test-Path -LiteralPath $n)) { continue }
-  $v = [string](& $n -p 'process.versions.node' 2>$null | Select-Object -First 1)
+  # "$(...)", not [string](...): Windows PowerShell casts a pipeline with no output to $null, and .Trim() on it throws.
+  $v = "$(& $n -p 'process.versions.node' 2>$null | Select-Object -First 1)"
   $pv = $null
   if ([version]::TryParse($v.Trim(), [ref]$pv) -and $pv -gt $bestv) { $best = $n; $bestv = $pv }
 }
@@ -285,7 +287,8 @@ if ($git -and $slug) {
       $repo = $g.Parent.FullName
       if ($seen.ContainsKey($repo) -or $repo.StartsWith($appData, [StringComparison]::OrdinalIgnoreCase)) { continue }
       $seen[$repo] = $true
-      $u = [string](& $git -C $repo remote get-url origin 2>$null | Select-Object -First 1)
+      # A repo without an origin prints nothing: "$(...)" keeps that an empty string (BEAST, w424: the probe died on one).
+      $u = "$(& $git -C $repo remote get-url origin 2>$null | Select-Object -First 1)"
       if ($u.Trim() -match $want) { Emit 'repo' $repo }
     }
   }

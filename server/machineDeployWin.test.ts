@@ -7,7 +7,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
 import * as win from './machineDeployWin.ts';
-import { bundle, daemonConfig, macControlScript, parseWinProbe, pickRepo, platformOfUname } from './machineDeploy.ts';
+import { bundle, daemonConfig, macControlScript, parseWinProbe, pickRepo, platformOfUname, probeSlug } from './machineDeploy.ts';
 import { SSH_REACHABLE_ARGS, daemonLogPath, machineForPath } from './machines.ts';
 import { backupRecipe, checkShell } from './guard.ts';
 import { keepAwakeCommand } from '../machine/daemon.ts';
@@ -157,6 +157,40 @@ test('windows: the probe output is parsed (CRLF too), and the shortest clone win
   assert.equal(pickRepo('E:\\ff', p.repos), 'E:\\ff');
   assert.equal(pickRepo(undefined, []), undefined);
   assert.equal(parseWinProbe('loggedOn=False\n').loggedOn, false);
+});
+
+test('windows: a deploy that knows its clone does not search for one; the probe never calls a method on an empty pipeline (w424)', () => {
+  // The portal's own host passes its base clone: no walk of the home folder and every drive (which on BEAST also
+  // finds the live game's checkout).
+  assert.equal(probeSlug({ repoPath: 'C:\\ffsb\\_base', repoSlug: 'Some-Org/SomeGame' }), '');
+  assert.equal(probeSlug({ repoSlug: 'Some-Org/SomeGame' }), 'Some-Org/SomeGame');
+  assert.equal(probeSlug({}), '');
+  assert.match(win.probeScript(''), /\$slug = ''\nif \(\$git -and \$slug\)/, 'no slug: the search is skipped');
+  // Windows PowerShell casts a pipeline with no output to $null, not '': `[string](& git ... | Select-Object -First
+  // 1)` then .Trim() threw on BEAST for a repo without an origin, and the whole probe failed (2026-10-05).
+  assert.doesNotMatch(win.probeScript('Some-Org/SomeGame'), /=\s*\[string\]\(&/);
+});
+
+test('windows (real PowerShell): the probe survives a repo without an origin, and without a slug it searches nothing', { skip: process.platform !== 'win32' && 'Windows only' }, async (t) => {
+  // Read-only, so it runs on any Windows box, not only CI: a throwaway home with the clone and a repo that has no
+  // origin (as BEAST has), searched as the home folder; the drives' own repos may show up too and are ignored.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-probe-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const clone = path.join(home, 'games', 'SomeGame');
+  const bare = path.join(home, 'scratch', 'no-origin');
+  for (const d of [clone, bare]) execFileSync('git', ['init', '-q', d]);
+  execFileSync('git', ['-C', clone, 'remote', 'add', 'origin', 'https://github.com/Some-Org/SomeGame.git']);
+  const real = (x: string) => fs.realpathSync.native(x).toLowerCase();
+  const probed = await runPs(win.probeScript('Some-Org/SomeGame'), { env: { USERPROFILE: home }, timeoutMs: 3 * 60_000 });
+  assert.equal(probed.code, 0, probed.stderr);
+  const p = parseWinProbe(probed.stdout);
+  assert.ok(p.sid && p.node, probed.stdout);
+  assert.ok(p.repos.map(real).includes(real(clone)), `the clone is found: ${p.repos.join(', ')}`);
+  assert.ok(!p.repos.map(real).includes(real(bare)), 'the repo without an origin is skipped, not fatal');
+  const known = await runPs(win.probeScript(''), { env: { USERPROFILE: home }, timeoutMs: 60_000 });
+  assert.equal(known.code, 0, known.stderr);
+  assert.deepEqual(parseWinProbe(known.stdout).repos, []);
+  assert.ok(parseWinProbe(known.stdout).sid);
 });
 
 test('platform: uname tells a Mac; a Windows PC fails it, or answers MINGW/MSYS when Git\'s tools are on its PATH', () => {

@@ -106,7 +106,12 @@ try {
         $s = Get-Supervisor
         $started = $s.State -eq 'ours' -and "$($s.Id)" -ne "$prevSup".Trim()
       }
-      if (!$started) { Write-AppLog "the $TaskName task did not start a supervisor within 60 s" }
+      if (!$started) {
+        Write-AppLog "the $TaskName task did not start a supervisor within 60 s"
+        if (!(Test-DesktopSignedIn)) {
+          Write-AppLog "  nobody is signed in to this computer's desktop: the $TaskName task runs only in its user's desktop session. Sign in to the desktop, then run scripts\restart.cmd again (as administrator if the app is running elevated)."
+        }
+      }
     }
   } else {
     Write-AppLog "WARNING: no Limited $TaskName task. Run scripts\install-autostart.ps1 once so the app is always started non-elevated in the desktop session."

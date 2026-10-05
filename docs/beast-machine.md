@@ -29,7 +29,11 @@ Machine.local`; at most one, Windows hosts only). A local machine:
 - **Deploys without ssh.** The same PowerShell scripts as a Windows PC (`server/machineDeployWin.ts`) run through
   `powershell.exe` on this computer (`scriptCommand(LOCAL)`); the code bundle is written into the user's home instead
   of `scp` (`server/machineDeploy.ts localBundle`). `machine_daemon` and `remove_machine` use the same local route, and
-  the offline redeploy does not wait for ssh (`MachineManager.watchOffline`).
+  the offline redeploy does not wait for ssh (`MachineManager.watchOffline`). Its probe does not search the drives for
+  a clone: the base clone is given (`probeSlug`). The first try on BEAST (2026-10-05) died in that search, on a repo
+  without an `origin` (fixed in w424).
+- **Starts only with its user signed in.** Its task, like `ffsb-server`, runs in the desktop session: after a reboot
+  the daemon and its agents are back once the user signs in (BEAST signs in automatically).
 - **Runs as the portal's user, non-elevated,** in its own `FFFactoryDaemon` scheduled task at logon (the same task XML,
   `LeastPrivilege`), so it survives portal restarts and never inherits the portal's process tree. If Windows refuses a
   non-elevated registration, the deploy writes `daemon-task.xml` into the daemon's folder and names the one

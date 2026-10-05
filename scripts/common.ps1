@@ -19,6 +19,18 @@ function Test-Elevated {
   return [bool](whoami.exe /groups | Select-String -Quiet 'S-1-16-(12288|16384)\b')
 }
 
+# Whether this user is signed in to the desktop: an explorer.exe of theirs runs. The ffsb-server task
+# runs only in that session (LogonType Interactive), so after an unattended reboot nothing starts it
+# until someone signs in (BEAST, 2026-10-05).
+function Test-DesktopSignedIn {
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'")) {
+    $o = Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+    if ($o -and $o.Sid -eq $me) { return $true }
+  }
+  return $false
+}
+
 # The ffsb-server task, only if it exists and runs at RunLevel Limited (a task at Highest would start
 # the app elevated again, and handing off to it would loop).
 function Get-LimitedTask {

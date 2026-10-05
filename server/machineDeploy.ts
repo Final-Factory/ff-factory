@@ -475,11 +475,18 @@ async function localBundle(root: string): Promise<string> {
   return file;
 }
 
+/**
+ * The repo the Windows probe searches the home folder and every drive for: none when the clone is known (given, or the
+ * portal's own host's base clone), so a deploy there does not walk every drive and run git in each repo it finds (w424).
+ * Exported for tests.
+ */
+export const probeSlug = (o: Pick<DeployOptions, 'repoPath' | 'repoSlug'>): string => (o.repoPath ? '' : (o.repoSlug ?? ''));
+
 async function deployWindows(opts: DeployOptions): Promise<DeployResult> {
   const step = opts.step ?? (() => undefined);
   const host: win.Target = opts.local ? win.LOCAL : opts.host;
   step('probing');
-  const p = parseWinProbe(await mustPs(host, 'probe', win.probeScript(opts.repoSlug ?? ''), { timeoutMs: 3 * 60_000 }));
+  const p = parseWinProbe(await mustPs(host, 'probe', win.probeScript(probeSlug(opts)), { timeoutMs: 3 * 60_000 }));
   if (!p.home || !p.sid) throw new Error(`could not read the user and home folder on ${opts.host}`);
   const support = nodeSupport(p.nodeVersion);
   if (!p.node || !support.ok) throw new Error(`${opts.host} needs Node ${MIN_NODE.join('.')}+ (found ${p.nodeVersion ?? 'none'} at ${p.node ?? '-'})`);
