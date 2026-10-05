@@ -70,6 +70,7 @@ deploy/vm/host/install.sh --wait
 nft list table inet fff_vm | grep -q 'fff-vm: FF Factory portal VM' || fail "firewall table"
 ! pgrep -af dnsmasq | grep -q fff-isolated || fail "a dnsmasq serves the VM's network"
 default_before=$(virsh net-info default 2>/dev/null | awk '/^Autostart:/ {print $2}' || true)
+echo "MEASURE manifest: $(tr '\n' ' ' </var/lib/fff-vm/manifest)"
 qpid=$(cat /run/libvirt/qemu/$VM.pid)
 echo "MEASURE qemu process: user $(ps -o user= -p "$qpid"), AppArmor $(cat "/proc/$qpid/attr/current" 2>/dev/null || echo none)"
 echo "libvirt default network autostart after install: ${default_before:-none}"
@@ -169,6 +170,15 @@ pid=$(g 'systemctl show -p MainPID --value fff-portal')
 g "sudo kill -STOP $pid"
 wait_for 600 "a new server process" bash -c "[ \"\$(/usr/local/sbin/fff-vm ssh 'systemctl show -p MainPID --value fff-portal')\" != $pid ]"
 wait_for 300 "the portal answers again" health
+
+step "prepare-shutdown holds the portal (ExecCondition), fffctl start brings it back"
+g 'sudo fffctl prepare-shutdown --drain-minutes 0'
+sleep 20
+st=$(g 'systemctl is-active fff-portal' || true)
+[ "$st" = inactive ] || fail "the held portal is '$st', not inactive (Restart=always started it again?)"
+echo "MEASURE held portal: $st; $(g 'systemctl show -p Result -p NRestarts fff-portal | tr "\n" " "')"
+g 'sudo fffctl start'
+wait_for 120 "the portal answers after fffctl start" health
 
 step "nightly: drain, cold restart, snapshot"
 b1=$(boot_id)
