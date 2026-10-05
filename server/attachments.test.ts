@@ -295,7 +295,7 @@ test('publishableFile: only a file inside the given folders, links followed; nev
   fs.writeFileSync(secret, '{"token":"x"}');
   fs.writeFileSync(path.join(work, 'empty.txt'), '');
   const roots = [work, temp];
-  assert.deepEqual(await publishableFile(work, 'Saves/a.zip', roots), { path: fs.realpathSync(path.join(work, 'Saves', 'a.zip')), size: 4 });
+  assert.deepEqual(await publishableFile(work, 'Saves/a.zip', roots), { path: fs.realpathSync.native(path.join(work, 'Saves', 'a.zip')), size: 4 });
   assert.equal((await publishableFile(work, path.join(temp, 'b.log'), roots)).size, 3);
   await assert.rejects(publishableFile(work, secret, roots), (e: AttachmentError) => e.status === 403 && /working folder or your own temp folder/.test(e.message));
   await assert.rejects(publishableFile(work, '../data/secrets.json', roots), (e: AttachmentError) => e.status === 403);

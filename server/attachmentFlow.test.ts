@@ -225,9 +225,12 @@ test("agents' files: a host worker publishes one, the orchestrators attach a rev
   assert.match(out2.content[0].text, /only files in your working folder or your own temp folder/);
 
   // The orchestrators turn a review-folder file into an attachment, and only those.
+  // The configured root names the folder through a link, as a short (8.3) Windows name does: the checks still hold.
+  const realReview = path.join(path.dirname(alpha), '_review-real');
   const reviewRoot = path.join(path.dirname(alpha), '_review');
+  fs.mkdirSync(path.join(realReview, 'w446-save'), { recursive: true });
+  fs.symlinkSync(realReview, reviewRoot, 'junction');
   agents.review = new ReviewStore(() => ({ ...REVIEW_DEFAULTS, root: reviewRoot }));
-  fs.mkdirSync(path.join(reviewRoot, 'w446-save'), { recursive: true });
   fs.writeFileSync(path.join(reviewRoot, 'w446-save', 'retLandingZoneSave.zip'), save);
   const att = await call(dispatcher().info, 'attach_review_file', { path: 'w446-save/retLandingZoneSave.zip' });
   assert.equal(att.isError, false, att.text);
@@ -238,6 +241,9 @@ test("agents' files: a host worker publishes one, the orchestrators attach a rev
   const mine = await call(loth, 'attach_review_file', { path: path.join(reviewRoot, 'w446-save', 'retLandingZoneSave.zip') });
   assert.equal(mine.isError, false, mine.text);
   assert.equal(files.get(/(att_[a-z0-9]{12})/.exec(mine.text)![1])!.uploadedBy, 'lothsahn');
+  fs.mkdirSync(path.join(reviewRoot, '.uploads'));
+  fs.writeFileSync(path.join(reviewRoot, '.uploads', 'rv_x.part'), 'half');
+  assert.match((await call(dispatcher().info, 'attach_review_file', { path: '.uploads/rv_x.part' })).text, /^ERROR: .*not the folder's uploads in progress/);
   const escape = await call(dispatcher().info, 'attach_review_file', { path: '../secret.txt' });
   assert.match(escape.text, /^ERROR: .*only files in the review folder/);
 

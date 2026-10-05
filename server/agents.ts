@@ -512,9 +512,11 @@ export class Agents {
     const root = review.root;
     const raw = String(file ?? '').trim();
     const f = await publishableFile(root, raw, [root], `only files in the review folder (${root}) may be attached`);
-    if (!review.contains(f.path)) throw new Error(`${raw}: only published review files may be attached (not the folder's uploads in progress)`);
+    // Both sides real paths: the root may be a short (8.3) or linked name of the same folder.
+    const rel = path.relative(await fs.promises.realpath(root), f.path);
+    if (rel.split(path.sep)[0] === '.uploads') throw new Error(`${raw}: only published review files may be attached (not the folder's uploads in progress)`);
     const by = ctx.owner ? `${ctx.owner.displayName}'s orchestrator` : ctx.role === 'dispatcher' ? 'the dispatcher' : 'an /mcp client';
-    const a = await this.attachments.addFile(f.path, { ...(ctx.owner ? { uploadedBy: ctx.owner.userId } : {}), source: `the review folder (${path.relative(root, f.path)}), by ${by}` });
+    const a = await this.attachments.addFile(f.path, { ...(ctx.owner ? { uploadedBy: ctx.owner.userId } : {}), source: `the review folder (${rel}), by ${by}` });
     console.log(`attachments: ${by} attached review file ${f.path} as ${a.id}`);
     return publishedAttachmentText(publicRef(a), 'orchestrator');
   }
