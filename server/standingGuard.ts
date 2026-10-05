@@ -1,6 +1,8 @@
+import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import type { StandingToolGroup } from '../shared/types.ts';
+import { homeSecrets, readProblem, readTargets, realReadFs, type ReadCtx, type SecretRules } from './secretGuard.ts';
 
 /**
  * The second PreToolUse hook on a standing agent (the first is the workers' sandboxGuard, whose rules
@@ -13,27 +15,40 @@ import type { StandingToolGroup } from '../shared/types.ts';
  *     substitution, heredocs or output redirection (they would smuggle in commands or writes the
  *     allowlist cannot see), and no paths into other sandboxes or the base clone.
  */
-export function standingGuard(opts: { folder: string; groups: StandingToolGroup[]; offLimits: string[] }): HookCallback {
+export function standingGuard(opts: { folder: string; groups: StandingToolGroup[]; offLimits: string[]; secrets?: SecretRules }): HookCallback {
   const deny = (reason: string) => ({
     hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: reason },
   });
   const own = normPath(opts.folder);
+  // FF Factory's secrets (w467): the portal's (opts.secrets, from where it runs) and this computer's home secrets.
+  const secrets = withHomeSecrets(opts.secrets);
+  const ctx: ReadCtx = { platform: process.platform, home: os.homedir(), cwd: opts.folder, fsx: realReadFs };
   return async (input) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
     const tool = input.tool_name;
     const args = (input.tool_input ?? {}) as Record<string, unknown>;
+    for (const t of readTargets(tool, args)) {
+      const why = readProblem(t.path, t.kind, secrets, ctx);
+      if (why) return deny(why);
+    }
     if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit') {
       const target = String(args.file_path ?? args.notebook_path ?? '');
       const t = normPath(path.isAbsolute(target) || /^[a-zA-Z]:[\\/]/.test(target) ? target : path.join(opts.folder, target));
       if (t !== own && !t.startsWith(own + '/')) return deny(`A standing agent writes only inside its own folder (${opts.folder}); ${target} is outside it.`);
     }
     if (tool === 'Bash' || tool === 'PowerShell') {
-      const reason = checkStandingShell(String(args.command ?? ''), { groups: opts.groups, folder: opts.folder, offLimits: opts.offLimits });
+      const reason = checkStandingShell(String(args.command ?? ''), { groups: opts.groups, folder: opts.folder, offLimits: opts.offLimits, secrets, read: ctx });
       if (reason) return deny(reason);
     }
     return {};
   };
 }
+
+/** The rules plus this computer's home secrets (~/.ssh, Claude's and gh's credentials), expanded where the agent runs. */
+export const withHomeSecrets = (r: SecretRules | undefined, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): SecretRules => ({
+  deny: [...(r?.deny ?? []), ...homeSecrets(env, platform)],
+  allow: [...(r?.allow ?? [])],
+});
 
 /** Lower-case, forward slashes, `..` resolved, no trailing slash; drive-letter paths kept as text so any host OS agrees. */
 const normPath = (p: string) =>
@@ -221,7 +236,7 @@ function checkGh(w: string[], groups: StandingToolGroup[]): string | undefined {
 }
 
 /** Why a shell command is refused for a standing agent, or undefined. Exported for tests. */
-export function checkStandingShell(cmd: string, ctx: { groups: StandingToolGroup[]; folder: string; offLimits: string[] }): string | undefined {
+export function checkStandingShell(cmd: string, ctx: { groups: StandingToolGroup[]; folder: string; offLimits: string[]; secrets?: SecretRules; read?: ReadCtx }): string | undefined {
   if (!ctx.groups.includes('shell_read') && !ctx.groups.includes('github_comment')) {
     return 'This standing agent has no shell tool group; use Read, Glob and Grep.';
   }
@@ -231,7 +246,8 @@ export function checkStandingShell(cmd: string, ctx: { groups: StandingToolGroup
   const off = ctx.offLimits.map(normPath);
   // Paths are judged on the raw text, so C:\x, C:/x and Git Bash's /c/x all count whatever the shell's escaping.
   const flat = cmd.replace(/\\/g, '/').replace(/(^|[\s'"=])\/([a-zA-Z])\//g, '$1$2:/');
-  for (const m of flat.matchAll(/[a-zA-Z]:\/[^\s'"`;|&<>]*/g)) {
+  // Drive-letter paths, and absolute POSIX paths (w467, change 8: /srv/fff/base in the portal VM was never checked).
+  for (const m of flat.matchAll(/[a-zA-Z]:\/[^\s'"`;|&<>]*|(?<=^|[\s'"=(])\/[^\s'"`;|&<>]+/g)) {
     const p = normPath(m[0]);
     if (p === own || p.startsWith(own + '/')) continue;
     if (off.some((o) => p === o || p.startsWith(o + '/'))) return `${m[0]} is another sandbox or the base clone; a standing agent's shell stays out of them (Read and Grep them instead).`;
@@ -243,6 +259,15 @@ export function checkStandingShell(cmd: string, ctx: { groups: StandingToolGroup
     const words = w.slice(k);
     if (!words.length) continue;
     const exe = words[0].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.exe$/, '');
+    // FF Factory's secrets (w467): no word of the command may name one, nor start a recursive read above one.
+    if (ctx.secrets && ctx.read) {
+      const recursive = ['find', 'tree', 'du', 'rg'].includes(exe) || (['grep', 'egrep', 'fgrep', 'ls'].includes(exe) && words.some((x) => /^-[a-zA-Z]*[rR]/.test(x) || x === '--recursive'));
+      for (const x of words.slice(1)) {
+        if (/^-/.test(x) || !/[\\/~]|^\.\.?$/.test(x)) continue;
+        const why = readProblem(x, recursive ? 'search' : 'file', ctx.secrets, ctx.read);
+        if (why) return why;
+      }
+    }
     if (exe === 'git') {
       const r = checkGit(words);
       if (r) return r;

@@ -347,6 +347,11 @@ export interface Machine {
    * w466): the MCP-for-Unity server and the idle-editor stop it had from the portal's config.
    */
   daemonExtras?: { unityMcpServer?: { command: string; args: string[]; env?: Record<string, string> }; sandboxIdleStopMinutes?: number };
+  /**
+   * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
+   * away (that would pull it back). Cleared when it says hello here again.
+   */
+  relocatedTo?: { url: string; at: string };
   /** The machine's main Final Factory clone: where its agents work. */
   repoPath: string;
   home: string;
