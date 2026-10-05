@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The "tokenfile" account** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 18). `claudeAccounts`
+  `.orchestrator`, `.dispatcher` and `.standing` take `"tokenfile"`: those roles run on the OAuth token in the file config
+  `claudeTokenFile` names, read at each session start into that process alone with every other Claude credential
+  removed, over any person's own token. Refused for workers; never in `claudeEnv`, never sent to a machine, never shown.
+  The meters poll it as its own account ([docs/accounts.md](docs/accounts.md), "The token file").
+
 - **`claudeAccounts.dispatcher`** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 6). The dispatcher's own
   account (`"token"` or `"login"`, set with `set_app_config`). Once set, the dispatcher runs on it instead of the system
   payer's own token; unset, nothing changes. system_status names it apart only when set ([docs/accounts.md](docs/accounts.md)).

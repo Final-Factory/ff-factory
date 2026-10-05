@@ -839,8 +839,10 @@ export class StandingAgents {
       gameRepos: [this.cfg.repo.url, this.cfg.repo.basePath],
       // Config claudeAccounts.standing: the host token or this host's stored login (docs/accounts.md); the run's
       // person's own token when they have one.
-      env: claudeEnvFor(this.cfg, this.currentRequester(a), hostClaudeEnv(this.cfg, 'standing')),
-      login: hostAccount(this.cfg, 'standing') === 'login',
+      // On the token file (w464): that token alone, read at this run's start, whoever the run is for; the process starts
+      // with no credential of the server's own (login true strips them) and gets the file's.
+      env: hostAccount(this.cfg, 'standing') === 'tokenfile' ? hostClaudeEnv(this.cfg, 'standing') : claudeEnvFor(this.cfg, this.currentRequester(a), hostClaudeEnv(this.cfg, 'standing')),
+      login: hostAccount(this.cfg, 'standing') !== 'token',
       claudeExecutable: this.cfg.claudeExecutable,
     };
   }

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { checkAccountConfig, type Config } from './config.ts';
-import { accountSetupLines, hostAccount, hostClaudeEnv, hostLoginProblem, hostProcessEnv, hostRole, hostRoleOf, machineUsesLogin } from './secrets.ts';
+import { accountSetupLines, hostAccount, hostClaudeEnv, hostClaudeEnvFor, hostLoginProblem, hostProcessEnv, hostRole, hostRoleOf, machineUsesLogin, readTokenFile, redactSecrets, tokenFileToken } from './secrets.ts';
 import { nextPerMachine, setAppConfig } from './appConfig.ts';
 import { claudeEnvFor } from './identity.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
@@ -303,4 +303,122 @@ test('accounts: a stopped dispatcher with an account of its own is counted there
   assert.equal(hostRoleOf(cfg, dispatcher), 'dispatcher');
   assert.equal(hostRoleOf(split(), dispatcher), 'orchestrator', 'unset: an orchestrator like any other');
   assert.equal(hostRoleOf(cfg, { kind: 'orchestrator', orchestratorRole: 'personal' }), 'orchestrator');
+});
+
+// ---------------------------------------------------------------- the token file (w464, change 18)
+
+const FILE_TOKEN = 'sk-ant-oat01-lothsahns-file-token-for-the-portal-FFFF';
+const FILE_TOKEN_2 = 'sk-ant-oat01-lothsahns-new-file-token-for-the-portal-2222';
+function tokenFile(t: { after: (fn: () => void) => void }, content = `${FILE_TOKEN}\n`) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-tokenfile-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'claude-oauth-token');
+  fs.writeFileSync(file, content);
+  return file;
+}
+
+test('token file: only the orchestrator, dispatcher and standing roles may run on it, and only with a file named', () => {
+  checkAccountConfig({ claudeAccounts: { orchestrator: 'tokenfile', dispatcher: 'tokenfile', standing: 'tokenfile' }, claudeTokenFile: '/srv/fff/secrets/claude-oauth-token' } as never);
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { workers: 'tokenfile' }, claudeTokenFile: '/x' } as never), /claudeAccounts\.workers cannot be "tokenfile": only orchestrator, dispatcher, standing/);
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { orchestrator: 'tokenfile' } } as never), /is "tokenfile" but config claudeTokenFile names no file/);
+  // A hand-edited "tokenfile" on workers never reaches them.
+  assert.equal(hostAccount({ claudeAccounts: { workers: 'tokenfile' } } as never, 'workers'), 'token');
+});
+
+test('token file: read at each session start into that process alone, every other Claude credential removed', (t) => {
+  const file = tokenFile(t);
+  const cfg = split({ claudeAccounts: { orchestrator: 'tokenfile' }, claudeTokenFile: file });
+  const env = hostProcessEnv(cfg, 'orchestrator', SERVER_ENV);
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, FILE_TOKEN);
+  assert.equal(env.ANTHROPIC_API_KEY, undefined, "the server's API key is removed");
+  assert.equal(env.CLAUDE_CONFIG_DIR, '/cfg', 'the rest of claudeEnv stays');
+  assert.equal(env.PATH, '/bin');
+  // The dispatcher follows the orchestrator while it has no account of its own; workers keep the host token.
+  assert.equal(hostProcessEnv(cfg, 'dispatcher', SERVER_ENV).CLAUDE_CODE_OAUTH_TOKEN, FILE_TOKEN);
+  assert.equal(hostProcessEnv(cfg, 'workers', SERVER_ENV).CLAUDE_CODE_OAUTH_TOKEN, HOST_TOKEN);
+  // A new token applies to the next session, with no restart.
+  fs.writeFileSync(file, FILE_TOKEN_2);
+  assert.equal(hostProcessEnv(cfg, 'orchestrator', SERVER_ENV).CLAUDE_CODE_OAUTH_TOKEN, FILE_TOKEN_2);
+  // Never in config claudeEnv, so never sent to a machine.
+  assert.equal(cfg.claudeEnv?.CLAUDE_CODE_OAUTH_TOKEN, HOST_TOKEN);
+  for (const m of ['m3', { id: 'beast', local: true }] as const) assert.notEqual(hostClaudeEnvFor(cfg, m as never).CLAUDE_CODE_OAUTH_TOKEN, FILE_TOKEN_2);
+});
+
+test('token file: an unreadable or malformed file stops the session start, and the error never shows what is in it', (t) => {
+  const bad = tokenFile(t, 'sk-ant-api03-not-an-oauth-token-SECRETSECRETSECRET');
+  assert.throws(
+    () => hostProcessEnv(split({ claudeAccounts: { orchestrator: 'tokenfile' }, claudeTokenFile: bad }), 'orchestrator', SERVER_ENV),
+    (e: Error) => /does not hold one Claude OAuth token .* its content is not shown/.test(e.message) && !e.message.includes('SECRET'),
+  );
+  assert.throws(() => readTokenFile({ claudeTokenFile: path.join(path.dirname(bad), 'missing') }), /cannot read config claudeTokenFile .*missing: ENOENT/);
+  assert.equal(tokenFileToken(split({ claudeAccounts: { orchestrator: 'tokenfile' }, claudeTokenFile: bad })), undefined, 'the meters: unknown, not a throw');
+});
+
+test('token file: a person orchestrator and a standing run on it ignore their person\'s own token; system_status names it', (t) => {
+  const file = tokenFile(t);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-accounts-'));
+  let store: Store | undefined;
+  t.after(() => {
+    store?.flush();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const cfg = {
+    ...split({ claudeAccounts: { standing: 'tokenfile' }, claudeTokenFile: file }),
+    dataDir: path.join(tmp, 'data'),
+    sandboxRoot: path.join(tmp, 'sb'),
+    standingRoot: path.join(tmp, 'sb', '_agents'),
+    protectedPaths: [],
+    repo: { url: 'x', basePath: path.join(tmp, 'sb', '_base') },
+    limits: { maxSessions: 6 },
+    models: ['opus'],
+    defaultModel: 'opus',
+    worker: { permissionMode: 'bypassPermissions', effort: 'high' },
+  } as unknown as Config;
+  store = new Store(cfg.dataDir);
+  // The run is Lothsahn's, who has a token of his own: the file still wins.
+  const st = new StandingAgents({ cfg, store, sessions: new Port(), systemPayer: () => LOTH, notify: () => undefined, sandboxes: { list: () => [], setPurpose: () => ({}) as never }, startWorker: () => ({ info: {} as SessionInfo }), now: () => new Date('2026-09-28T10:00:00') });
+  const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 } });
+  const saved = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-server-env';
+  t.after(() => (saved === undefined ? delete process.env.ANTHROPIC_API_KEY : (process.env.ANTHROPIC_API_KEY = saved)));
+  const env = st.options({ id: 'x', kind: 'standing', standingId: a.id } as SessionInfo).env!;
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, FILE_TOKEN);
+  assert.equal(env.ANTHROPIC_API_KEY, undefined, "no credential of the server's own");
+  assert.match(accountSetupLines(cfg, 'FFVM', HOST_TOKEN, [])[0], /standing agents here: token file …FFFF/);
+  assert.match(accountSetupLines({ ...cfg, claudeTokenFile: path.join(tmp, 'gone') }, 'FFVM', HOST_TOKEN, [])[0], /standing agents here: token file \(UNREADABLE: its sessions will not start\)/);
+});
+
+test('token file: set_app_config takes "tokenfile" and claudeTokenFile, checks the file, refuses it for workers, never echoes the token', (t) => {
+  const file = tokenFile(t);
+  const { file: cfgFile } = configFile(t, {});
+  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST_TOKEN } } as unknown as Config;
+  assert.throws(() => setAppConfig(cfgFile, cfg, 'claudeAccounts.orchestrator', 'tokenfile'), /claudeTokenFile names no file/);
+  assert.throws(() => setAppConfig(cfgFile, cfg, 'claudeTokenFile', 'relative/path'), /absolute path/);
+  const bad = tokenFile(t, 'not a token at all SECRETSECRET');
+  assert.throws(() => setAppConfig(cfgFile, cfg, 'claudeTokenFile', bad), (e: Error) => /does not hold one Claude OAuth token/.test(e.message) && !e.message.includes('SECRET'));
+  const r = setAppConfig(cfgFile, cfg, 'claudeTokenFile', file);
+  assert.equal(r.after, file);
+  assert.ok(!JSON.stringify(r).includes(FILE_TOKEN), 'the answer carries the path, not the token');
+  assert.deepEqual(setAppConfig(cfgFile, cfg, 'claudeAccounts.dispatcher', 'tokenfile'), { before: undefined, after: 'tokenfile' });
+  assert.throws(() => setAppConfig(cfgFile, cfg, 'claudeAccounts.workers', 'tokenfile'), /claudeAccounts\.workers cannot be "tokenfile"/);
+  assert.throws(() => setAppConfig(cfgFile, cfg, 'claudeTokenFile', null), /cannot be cleared while claudeAccounts\.dispatcher is "tokenfile"/);
+  assert.ok(!fs.readFileSync(cfgFile, 'utf8').includes(FILE_TOKEN), 'config.json holds the path only');
+});
+
+test('token file: the meters show it as its own account, named by the roles on it; redaction masks its token', () => {
+  const key = tokenKey(FILE_TOKEN);
+  const accounts = buildAccounts(new Map(), {
+    hostName: 'FFVM',
+    token: { key: tokenKey(HOST_TOKEN), label: tokenLabel(HOST_TOKEN) },
+    machines: [{ id: 'lothdesktop', usesToken: true }],
+    roles: ['orchestrator', 'dispatcher', 'workers', 'standing'],
+    tokenFile: { key, label: 'token file …FFFF', roles: ['orchestrator', 'dispatcher'] },
+    sessions: [{ id: 'o1', source: key, live: true }],
+  });
+  const file = accounts.find((a) => a.sources.includes(key))!;
+  assert.deepEqual([file.label, file.where, file.sessionIds], ['token file …FFFF', ["FFVM's token file (the orchestrator, the dispatcher)"], ['o1']]);
+  const host = accounts.find((a) => a.sources.includes(tokenKey(HOST_TOKEN)))!;
+  assert.match(host.where[0], /the agents' token on FFVM \(workers, standing agents\), lothdesktop/);
+  const text = `env: CLAUDE_CODE_OAUTH_TOKEN=${FILE_TOKEN}`;
+  assert.equal(redactSecrets(text), 'env: CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-[redacted …FFFF]');
 });
