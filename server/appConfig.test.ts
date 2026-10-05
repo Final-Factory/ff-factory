@@ -159,3 +159,19 @@ test('set_app_config: intake.reviewers is written under intake and applied live'
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).intake, { reviewers: ['lothsahn'] });
   assert.throws(() => setAppConfig(file, cfg, 'intake.reviewers', ['ghost'], { users: ['ben'] }), /no login "ghost"/);
 });
+
+test('set_app_config: placement.prefer and placement.avoid (w428), live, cleared with null', (t) => {
+  const { file, cfg } = setup(t);
+  assert.deepEqual(setAppConfig(file, cfg, 'placement.prefer', 'lothdesktop, M5 ,m3,m5'), { before: undefined, after: ['lothdesktop', 'm5', 'm3'] });
+  assert.deepEqual(cfg.placement?.prefer, ['lothdesktop', 'm5', 'm3']);
+  assert.deepEqual(setAppConfig(file, cfg, 'placement.avoid', { BEAST: 'BEAST unstable, 2026-10-05' }).after, { beast: 'BEAST unstable, 2026-10-05' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')).placement, { prefer: ['lothdesktop', 'm5', 'm3'], avoid: { beast: 'BEAST unstable, 2026-10-05' } });
+  assert.deepEqual(setAppConfig(file, cfg, 'placement.prefer', ['host', 'lothdesktop']).after, ['this host', 'lothdesktop'], '"host" is this host');
+  assert.throws(() => setAppConfig(file, cfg, 'placement.prefer', ['loth desktop']), /not a machine id/);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.avoid', { beast: '' }), /say why/);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.avoid', ['beast']), /is an object/);
+  // Once BEAST is fixed: null clears, and the rest of the block stays.
+  setAppConfig(file, cfg, 'placement.avoid', null);
+  assert.deepEqual(cfg.placement, { prefer: ['this host', 'lothdesktop'] });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { prefer: ['this host', 'lothdesktop'] });
+});
