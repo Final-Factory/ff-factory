@@ -99,6 +99,13 @@ export const CATALOG = {
   fetch_attachment: {
     id: z.string().describe('The attachment id, e.g. "att_k2m9x0q7p3a1" (from an [attachments] list).'),
   },
+  /**
+   * docs/attachments.md, "Agents' files". On a machine the daemon sends the file itself: the portal checks the size and
+   * opens an upload bound to that machine, the daemon sends the bytes, the portal checks the SHA-256 and makes the id.
+   */
+  publish_attachment: {
+    file: z.string().describe('The file to hand on (a save, a log, a zip, any file): its path on this computer, absolute or relative to your working folder. It must be in your working folder or your own temp folder (TMP).'),
+  },
   /** docs/ffbox.md, "Players' reports". On a machine the portal fetches the report from FFBox and the daemon the files. */
   fetch_ffbox_report: {
     id: z.string().max(64).describe('The FFBox report id, e.g. "20261003T101500Z-desync-3a9f01c2d4".'),

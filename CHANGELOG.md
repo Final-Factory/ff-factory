@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Workers hand files to each other, on any computer** (w447, asked by Ben). A save made on BEAST had to reach three
+  LothDesktop workers, and only a person with ssh could move it. A worker now calls `publish_attachment` with a file in
+  its working folder or temp folder; it answers an `att_` id, which its orchestrator passes on with `attachments: [id]`
+  like a person's file. On a machine the daemon sends the bytes over its own machine token (`PUT
+  /machine/attachments/uploads/<id>`, resumable, SHA-256 checked), so no new keys are needed between machines. Orchestrators
+  and the dispatcher make an id of a review-folder file with `attach_review_file`. The size cap is `attachments.maxMB`;
+  the uploader is recorded ([docs/attachments.md](docs/attachments.md), "Agents' files").
+
 - **FFBox conversations open in FF Factory** (w426, asked by Ben). FFBox's links (the FFBox page's conversations,
   the ledger's "on FFBox", the intake brief) went to its address on Lothsahn's home network
   (https://192.168.51.10:8787/conversation/684), which opens nowhere else. A conversation now opens on FF Factory's

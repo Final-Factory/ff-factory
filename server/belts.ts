@@ -34,6 +34,8 @@ export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
   'cancel_timer',
   // follow-ups to its person's own workers (scoped in the handler)
   'message_agent',
+  // a review-folder file as an attachment to pass on (only that folder; docs/attachments.md "Agents' files")
+  'attach_review_file',
   // the ledger
   'request_work',
   'list_work',

@@ -11,7 +11,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, type SessionHandle, type SessionSink } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { AttachmentStore, attachmentForMachine, machineAttachment, publicRef } from './attachments.ts';
+import { AttachmentStore, attachmentForMachine, machineAttachment, machineUploadHttp, publicRef, uploadForMachine } from './attachments.ts';
 import { parseRange } from './images.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { fetchAttachment, fetchAttachments } from '../machine/attachments.ts';
@@ -228,4 +228,105 @@ test('portal to machine: a message with attachments reaches the agent after its 
   // A daemon too old to fetch them gets no attachments at all: the send is refused, saying why.
   (mm as unknown as { hellos: Map<string, { protocol: number }> }).hellos.set('pc', { protocol: 6 });
   assert.throws(() => sessions.send(s.info.id, 'again', 'orchestrator', undefined, { attachments: [publicRef(a)] }), /speaks protocol 6 and cannot fetch attachments/);
+});
+
+// ---------------------------------------------------------------- a worker hands a file to a worker on another machine
+
+test('publish_attachment, end to end: a worker on a Mac publishes a save; a worker on LothDesktop gets it by attachments: [id]', async (t) => {
+  FakeAgent.got = [];
+  const root = tmp(t);
+  const cfg = { dataDir: path.join(root, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' }, defaultBase: 'origin/develop' } as unknown as Config;
+  fs.mkdirSync(cfg.dataDir, { recursive: true });
+  const store = new Store(cfg.dataDir);
+  const sessions = new SessionManager(cfg, store);
+  const mm = new MachineManager(cfg, store, sessions);
+  const files = new AttachmentStore(cfg.dataDir);
+  mm.attachments = files;
+  const clones: Record<string, string> = { mac: path.join(root, 'mac', 'FinalFactory'), lothdesktop: path.join(root, 'ld', 'FinalFactory') };
+  for (const c of Object.values(clones)) fs.mkdirSync(c, { recursive: true });
+  mm.hooks = {
+    specFor: (_info, m) => ({ cwd: clones[m.id], settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: clones[m.id], protectedPaths: [], gameRepos: [] } }),
+    // As agents.ts answers them for a machine agent.
+    handlersFor: (info, m) => ({
+      fetch_attachment: async (a) => attachmentForMachine(files, m.id, a.id),
+      publish_attachment: async (a) => uploadForMachine(files, m.id, a, { uploadedBy: info.requestedBy?.userId, source: `worker "${info.title}" (${info.id} on ${m.id})` }),
+    }),
+  };
+  // The portal's doors a daemon uses, as index.ts routes them: the WebSocket, the fetch and the upload.
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://x');
+    const id = mm.authenticate(req.headers.authorization);
+    const machine = id && store.machines.has(id) ? id : undefined;
+    const up = /^\/machine\/attachments\/uploads\/([a-f0-9]{32})$/.exec(url.pathname);
+    if (up) return void machineUploadHttp(files, machine, req, res, up[1], Number(url.searchParams.get('offset') ?? 0));
+    const m = /^\/machine\/attachments\/(att_[a-z0-9]{12})$/.exec(url.pathname);
+    const r = m ? machineAttachment(files, machine, m[1]) : { status: 404 as const, error: 'no' };
+    if ('error' in r) return void res.writeHead(r.status).end(r.error);
+    res.writeHead(200, { 'content-length': String(r.record.size) });
+    fs.createReadStream(r.file).pipe(res);
+  });
+  server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const daemons: Record<string, Daemon> = {};
+  const tokens: Record<string, string> = {};
+  for (const [id, clone] of Object.entries(clones)) {
+    const { token } = mm.register({ id, host: id, purpose: 'unused', status: 'ready', repoPath: clone, home: path.dirname(clone), portalUrl: url, maxSessions: 2 });
+    tokens[id] = token;
+    daemons[id] = new Daemon(
+      { portalUrl: url, id, token, repoPath: clone, appDir: path.join(path.dirname(clone), 'app'), tempDir: path.join(path.dirname(clone), 'tmp'), claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null },
+      (i, s, o, e) => new FakeAgent(i, s, o, e),
+      PROBES,
+    );
+  }
+  t.after(async () => {
+    for (const d of Object.values(daemons)) d.shutdown();
+    server.close();
+    await new Promise((r) => setTimeout(r, 200));
+    store.flush();
+  });
+  for (const d of Object.values(daemons)) d.start();
+  await until('both online', () => Object.keys(clones).every((id) => mm.isOnline(id) && mm.protocolOf(id) !== undefined));
+
+  // The Mac's worker made a save (9 MB: more than one 8 MB chunk) in its working folder.
+  const ben: Requester = { userId: 'ben', displayName: 'Ben' };
+  const macWorker = mm.createSession('mac', { kind: 'worker', title: 'Make the landing-zone save', permissionMode: 'default', requestedBy: ben });
+  sessions.send(macWorker.info.id, 'Make the save.', 'orchestrator');
+  await until('the Mac worker runs', () => FakeAgent.got.length === 1);
+  const save = randomBytes(9 * 1024 * 1024 + 4321);
+  fs.mkdirSync(path.join(clones.mac, 'Saves'));
+  fs.writeFileSync(path.join(clones.mac, 'Saves', 'retLandingZoneSave.zip'), save);
+  const macTools = (daemons.mac as unknown as { handlers(id: string): Record<string, (a: Record<string, unknown>) => Promise<string>> }).handlers(macWorker.info.id);
+  const answer = await macTools.publish_attachment({ file: 'Saves/retLandingZoneSave.zip' });
+  const id = /^Published as attachment (att_[a-z0-9]{12}):/.exec(answer)?.[1];
+  assert.ok(id, answer);
+  assert.ok(answer.includes(`sha256 ${sha(save)}`), answer);
+  assert.match(answer, /attachments: \["att_[a-z0-9]{12}"\]/);
+  const rec = files.get(id)!;
+  assert.equal(rec.sha256, sha(save));
+  assert.equal(rec.uploadedBy, 'ben', 'the person the worker works for');
+  assert.equal(rec.source, `worker "Make the landing-zone save" (${macWorker.info.id} on mac)`);
+  // A file outside the worker's folders is refused before anything is sent.
+  const outside = path.join(root, 'secret.txt');
+  fs.writeFileSync(outside, 'not to share');
+  await assert.rejects(macTools.publish_attachment({ file: outside }), /only files in your working folder or your own temp folder/);
+  assert.equal(files.usage().files, 1);
+
+  // The orchestrator passes the id on (message_agent / start_agent attachments: [id]): LothDesktop's daemon fetches it.
+  const ldWorker = mm.createSession('lothdesktop', { kind: 'worker', title: 'Repro on the landing-zone save', permissionMode: 'default' });
+  sessions.send(ldWorker.info.id, 'Load the attached save.', 'orchestrator', undefined, { attachments: files.resolve([id]).map(publicRef) });
+  await until('the LothDesktop worker got it', () => FakeAgent.got.length === 2);
+  const got = FakeAgent.got[1];
+  const dest = path.join(clones.lothdesktop, 'Inbox', `${id}-retLandingZoneSave.zip`);
+  assert.deepEqual(got.attachments.map((x) => [x.id, x.path, x.error]), [[id, dest, undefined]]);
+  assert.equal(sha(fs.readFileSync(dest)), sha(save));
+  assert.match(fs.readFileSync(path.join(clones.lothdesktop, 'Inbox', '.gitignore'), 'utf8'), /^\*$/m);
+
+  // Another machine's token cannot send into the Mac's upload, nor anyone without one.
+  const plan = JSON.parse(uploadForMachine(files, 'mac', { name: 'x.zip', size: 4, sha256: sha(Buffer.from('abcd')) }, {}));
+  const put = (token?: string) =>
+    fetch(`${url}/machine/attachments/uploads/${plan.uploadId}?offset=0`, { method: 'PUT', headers: { 'content-type': 'application/octet-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: Buffer.from('abcd') });
+  assert.equal((await put(tokens.lothdesktop)).status, 404);
+  assert.equal((await put()).status, 401);
+  assert.equal((await put(tokens.mac)).status, 200);
 });
