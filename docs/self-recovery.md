@@ -177,9 +177,12 @@ the watching machine's daemon when it connects and whenever it changes (protocol
 the portal is down. Other machines are told they do not watch (their copy is removed).
 
 Config (`config.json`, all optional): `"outsideWatch": { "machine": "m5", "healthUrl": "...", "host":
-"...", "ntfyServer": "https://ntfy.sh", "enabled": true }`. Without `publicUrl` (and no `healthUrl`)
-there is nothing to watch. The Macs get the watch with the daemon: they redeploy themselves when idle after
-an update.
+"...", "ntfyServer": "https://ntfy.sh", "enabled": true }`. Without `publicUrl` the watch takes the address the
+other machines reach the portal at (their `portal_url`, `watchedPortalUrl`), never the portal's own host as a machine
+(`beast`, local), whose daemon uses `http://127.0.0.1:<port>`; that machine is never the default watcher either, since
+it goes down with the portal (w424: after `add_machine beast local` the m5 checked `http://127.0.0.1:8790/api/health`
+and pinged itself). Without any of them (and no `healthUrl`) there is nothing to watch. The Macs get the watch with
+the daemon: they redeploy themselves when idle after an update.
 
 ## 5. Continuous clean-up
 

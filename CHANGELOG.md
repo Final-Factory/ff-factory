@@ -47,6 +47,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The outside watchdog watches BEAST's tailnet URL again** (w424, asked by Lothsahn). With no `publicUrl` in
+  config.json, the watch took the first machine's `portal_url`; since `add_machine beast local` that is BEAST's own
+  daemon, at `http://127.0.0.1:8790`, so the m5 checked its own loopback and pinged itself. It now skips the local machine
+  and any loopback address (`watchedPortalUrl`), and the local machine is never the default watcher.
 - **A request with several workers closes on the last one's DONE** (w434, asked by Ben). One worker's `DONE: w428`
   (after only its hardware read) closed the request while another worker's PR was unpushed. Each DONE now records that
   worker's part; the request closes once every worker on it has said DONE, ended, or moved on to newer work, and the
