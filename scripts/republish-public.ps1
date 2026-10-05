@@ -128,17 +128,26 @@ try {
   X $gl @('git', $scan, '--log-opts', "$sha -1", '--redact', '--no-banner', '--exit-code', '1') | Out-Null
   X $gl @('dir', $scan, '--redact', '--no-banner', '--exit-code', '1') | Out-Null
   # This machine's own names must not be in it: user, host, git identity, Funnel host, tailnet name, ssh key files.
-  $tokens = @($env:USERNAME, $env:COMPUTERNAME, $myEmail) + ((TryX git @('config', '--global', 'user.name')) -split '\s+')
-  try {
-    $cfgJson = Get-Content (Join-Path $AppRoot 'config.json') -Raw | ConvertFrom-Json
-    if ($cfgJson.publicUrl) { $h = ([uri]$cfgJson.publicUrl).Host; $tokens += $h; $tokens += $h.Split('.') }
-  } catch { }
-  $ts = Get-Command tailscale -ErrorAction SilentlyContinue
-  if ($ts) { $dns = TryX $ts.Source @('status', '--json'); if ($dns) { try { $n = ($dns | ConvertFrom-Json).Self.DNSName.TrimEnd('.'); $tokens += $n; $tokens += $n.Split('.') } catch { } } }
-  $sshDir = Join-Path $env:USERPROFILE '.ssh'
-  if (Test-Path $sshDir) { $tokens += Get-ChildItem $sshDir -File | ForEach-Object { $_.BaseName } | Where-Object { $_ -notmatch '^(id_(rsa|ed25519|ecdsa|dsa)|config|known_hosts.*|authorized_keys|environment)$' } }
+  # FFSB_REPUBLISH_LOCAL_NAMES (tests only: republish.test.ts) replaces what this machine says, so the test does not
+  # depend on the host it runs on (w434: it failed on BEAST, whose name is in the tree on purpose).
+  if ($env:FFSB_REPUBLISH_LOCAL_NAMES) { $tokens = @($env:FFSB_REPUBLISH_LOCAL_NAMES -split ',') } else {
+    $tokens = @($env:USERNAME, $env:COMPUTERNAME, $myEmail) + ((TryX git @('config', '--global', 'user.name')) -split '\s+')
+    try {
+      $cfgJson = Get-Content (Join-Path $AppRoot 'config.json') -Raw | ConvertFrom-Json
+      if ($cfgJson.publicUrl) { $h = ([uri]$cfgJson.publicUrl).Host; $tokens += $h; $tokens += $h.Split('.') }
+    } catch { }
+    $ts = Get-Command tailscale -ErrorAction SilentlyContinue
+    if ($ts) { $dns = TryX $ts.Source @('status', '--json'); if ($dns) { try { $n = ($dns | ConvertFrom-Json).Self.DNSName.TrimEnd('.'); $tokens += $n; $tokens += $n.Split('.') } catch { } } }
+    $sshDir = Join-Path $env:USERPROFILE '.ssh'
+    if (Test-Path $sshDir) { $tokens += Get-ChildItem $sshDir -File | ForEach-Object { $_.BaseName } | Where-Object { $_ -notmatch '^(id_(rsa|ed25519|ecdsa|dsa)|config|known_hosts.*|authorized_keys|environment)$' } }
+  }
   $generic = 'ts', 'net', 'com', 'github', 'users', 'noreply', 'final', 'factory', 'desktop', 'admin', 'user'
-  $tokens = $tokens | Where-Object { $_ -and $_.Length -ge 4 -and $generic -notcontains $_.ToLower() } | Sort-Object -Unique
+  # The portal's machine ids are public on purpose: the docs, the prompts and the dashboard name BEAST, LothDesktop and
+  # the Macs (w434: 69 files name BEAST, so this host's own name stopped every republish from it). Its other names (the
+  # user, the tailnet, the Funnel host, ssh keys) are still checked.
+  $public = @()
+  try { $public = @((Get-Content (Join-Path $DataDir 'state.json') -Raw | ConvertFrom-Json).machines | ForEach-Object { "$($_.id)".ToLower() }) } catch { }
+  $tokens = $tokens | Where-Object { $_ -and $_.Length -ge 4 -and $generic -notcontains $_.ToLower() -and $public -notcontains $_.ToLower() } | Sort-Object -Unique
   $hits = foreach ($t in $tokens) { $f = TryX git @('-C', $scan, 'grep', '-I', '-i', '-w', '-F', '-l', '-e', $t); if ($f) { "'$t' in $($f -replace "`r?`n", ', ')" } }
   if ($hits) { Fail "the squashed tree names this machine: $($hits -join '; ')" }
   Log "preflight ok: gitleaks clean (history and tree), none of $($tokens.Count) local names found, author $author"

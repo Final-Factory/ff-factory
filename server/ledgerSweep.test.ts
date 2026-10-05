@@ -695,3 +695,54 @@ test('w419: merged and open for a step after the merge, quiet 6 hours: its worke
   assert.equal(world.resumed.length, 2);
   assert.ok(store);
 });
+
+// ---------------------------------------------------------------- w434: a request with several workers
+
+test('w434: with two workers on a request, the first one\'s DONE records its part and keeps it open; the last one\'s closes it', async (t) => {
+  const { request, worker, o, get, store } = setup(t);
+  // w428 on 2026-10-05: worker 2092b20c's DONE after its hardware read closed the request while the placement work was unpushed.
+  request('w1', { sessionIds: ['s1', 's2'], links: { s1: { at: ago(3), how: 'sent' }, s2: { at: ago(2), how: 'sent' } } });
+  const s1 = worker('s1');
+  worker('s2', { status: 'running' });
+  o.workerTurnEnded(s1, 'BEAST hardware read: the CPU throttles at 95 °C.\nDONE: w1');
+  assert.equal(get('w1').status, 'active', "one worker's DONE does not close it");
+  assert.deepEqual(Object.keys(get('w1').done ?? {}), ['s1']);
+  assert.match(get('w1').log.join('\n'), /worker s1 said DONE for its part; still on it: s2$/m);
+  // The last worker's DONE closes it, on its report.
+  o.workerTurnEnded(worker('s2'), 'Placement preference merged as #104.\nDONE: w1');
+  assert.equal(get('w1').status, 'done');
+  assert.equal(get('w1').outcome, 'Placement preference merged as #104.');
+  assert.match(get('w1').log.join('\n'), /closed as done: worker s2 said DONE: w1 \(its workers s1, s2 each said DONE\)/);
+  await until('its person hears', () => told(store, o, BEN, '[ledger] w1').length === 1);
+});
+
+test('w434: the last worker ending (or moving on) closes a request its other workers said DONE for; a missing step still holds it', async (t) => {
+  const { request, worker, o, get } = setup(t);
+  request('w1', { sessionIds: ['s1', 's2'] });
+  const s1 = worker('s1');
+  const s2 = worker('s2', { status: 'running' });
+  o.workerTurnEnded(s1, 'My part is in.\nDONE: w1');
+  assert.equal(get('w1').status, 'active');
+  // s2 stops (the idle reaper, a stop by hand): nobody is left on it, so s1's DONE closes it.
+  store(s2, 'stopped');
+  o.workerEnded(s2);
+  assert.equal(get('w1').status, 'done');
+  assert.match(get('w1').log.at(-1)!, /closed as done: its last worker still on it, s2, ended, and worker s1 had said DONE/);
+  // A worker sent newer work has moved on: it no longer holds the request open.
+  request('w2', { sessionIds: ['s3', 's4'], links: { s3: { at: ago(5), how: 'sent' }, s4: { at: ago(5), how: 'sent' } } });
+  request('w3', { sessionIds: ['s4'], links: { s4: { at: ago(1), how: 'sent' } } });
+  worker('s4', { status: 'running' });
+  o.workerTurnEnded(worker('s3'), 'Done here.\nDONE: w2');
+  assert.equal(get('w2').status, 'done', 's4 moved on to w3');
+  // A step after the merge the report does not cover keeps it open even when the last worker ends.
+  request('w5', { sessionIds: ['s5', 's6'], brief: 'Fix it, then run the paired determinism audit after the merge.' });
+  o.workerTurnEnded(worker('s5'), 'Fixed.\nDONE: w5');
+  const s6 = worker('s6', { status: 'stopped' });
+  o.workerEnded(s6);
+  assert.equal(get('w5').status, 'active');
+  assert.match(get('w5').log.at(-1)!, /worker s6 ended; its other workers said DONE, but it stays open: its brief asks for a step after the merge/);
+
+  function store(s: SessionInfo, status: SessionInfo['status']) {
+    worker(s.id, { ...s, status });
+  }
+});
