@@ -14,9 +14,13 @@ import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts'
 export type ClaudeAccount = 'login' | 'token';
 export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token'];
 /** The roles config claudeAccounts picks an account for, on this host. */
-export type HostRole = 'orchestrator' | 'workers' | 'standing';
-export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'workers', 'standing'];
-const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator', workers: 'workers', standing: 'standing agents' };
+/**
+ * The roles config claudeAccounts sets an account for. `dispatcher` (w464, docs/portal-on-ffbox-host.md change 6): when
+ * set, the dispatcher runs on it, and not on the system payer's own token; unset, it follows `orchestrator` as before.
+ */
+export type HostRole = 'orchestrator' | 'dispatcher' | 'workers' | 'standing';
+export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'dispatcher', 'workers', 'standing'];
+const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator', dispatcher: 'the dispatcher', workers: 'workers', standing: 'standing agents' };
 /** Roles as people read them: "the orchestrator, standing agents". */
 export const roleNames = (roles: readonly HostRole[]) => roles.map((r) => ROLE_NAMES[r]).join(', ');
 
@@ -218,7 +222,15 @@ export interface Config {
   max?: { eventsFile?: string; ffboxConfigDir?: string; inbound?: { enabled?: boolean; channels?: string[]; pollMinutes?: number }; discordApi?: string };
   /** Where state.json and transcripts live. */
   dataDir: string;
-  /** Every sandbox worktree is created as <sandboxRoot>/<id>. */
+  /**
+   * Whether this host holds sandboxes of its own (default true). false is the portal-only mode (w464,
+   * docs/portal-on-ffbox-host.md section 6, changes 1 and 2, D16): "this host" is no place for work (capacity,
+   * placement, list_sandboxes), create_sandbox here is refused, `sandboxRoot` and `unity` may be left out, the host
+   * guard watches the data volume instead of a sandbox drive, host_recovery runs only `cleanup`, and no standing agent
+   * runs. Work goes to the machines.
+   */
+  hostSandboxes?: boolean;
+  /** Every sandbox worktree is created as <sandboxRoot>/<id>. Optional in the portal-only mode (default <dataDir>/sandboxes, never used). */
   sandboxRoot: string;
   /**
    * Standing agents' working folders are <standingRoot>/<id> (docs/standing-agents.md). Default
@@ -232,6 +244,11 @@ export interface Config {
     basePath: string;
     /** Optional existing local clone whose object store the base borrows (git --reference). */
     referenceRepo?: string;
+    /**
+     * Every how many minutes the base clone, which the orchestrators read, is fetched and moved to defaultBase
+     * (server/baseRefresh.ts, w467). Default 15; 0 turns it off (the portal VM's fff-base-refresh.timer may do it).
+     */
+    refreshMinutes?: number;
   };
   /** Base ref for new sandbox branches. */
   defaultBase: string;
@@ -568,12 +585,16 @@ export function loadConfig(): Config {
     hostGuard: { ...HOST_GUARD_DEFAULTS, ...raw.hostGuard, cleanup: { ...DEFAULT_CLEANUP, ...raw.hostGuard?.cleanup } },
     voice: { ...VOICE_DEFAULTS, toolsDir: '', ...raw.voice },
   };
-  for (const key of ['sandboxRoot', 'repo', 'unity'] as const) {
+  if (raw.hostSandboxes !== undefined && typeof raw.hostSandboxes !== 'boolean') throw new Error('config hostSandboxes is true or false');
+  // The portal-only mode (w464) keeps no sandboxes here: only the base clone the orchestrators read is required.
+  for (const key of portalOnly(cfg) ? (['repo'] as const) : (['sandboxRoot', 'repo', 'unity'] as const)) {
     if (!cfg[key]) throw new Error(`config.json is missing "${key}"`);
   }
+  const windowsOnly = windowsPathsOffWindows(cfg);
+  if (windowsOnly.length) throw new Error(`config.json names Windows paths on ${process.platform}: ${windowsOnly.join(', ')}. Use this computer's paths (the portal VM's template is deploy/vm/guest/config.vm.example.json).`);
   checkAccountConfig(cfg);
   cfg.dataDir = path.resolve(ROOT, cfg.dataDir);
-  cfg.sandboxRoot = path.resolve(cfg.sandboxRoot);
+  cfg.sandboxRoot = path.resolve(cfg.sandboxRoot || path.join(cfg.dataDir, 'sandboxes'));
   cfg.standingRoot = path.resolve(raw.standingRoot ?? path.join(cfg.sandboxRoot, '_agents'));
   for (const guarded of [ROOT, cfg.dataDir]) {
     const rel = path.relative(guarded, cfg.standingRoot);
@@ -583,6 +604,34 @@ export function loadConfig(): Config {
   cfg.voice.toolsDir = cfg.voice.toolsDir ? path.resolve(ROOT, cfg.voice.toolsDir) : path.join(cfg.dataDir, 'tools', 'whisper');
   cfg.protectedPaths = cfg.protectedPaths.map((p) => path.resolve(p));
   return cfg;
+}
+
+/** The portal-only mode (config hostSandboxes: false, w464): this host runs the portal and holds no sandboxes. */
+export const portalOnly = (cfg: Pick<Config, 'hostSandboxes'>) => cfg.hostSandboxes === false;
+
+/** Why something needs this host's own sandboxes in the portal-only mode, for refusals. */
+export const PORTAL_ONLY_WHY = 'this portal holds no sandboxes of its own (config hostSandboxes: false, the portal-only mode)';
+
+/**
+ * The config paths that are Windows paths ("C:/ffsb", "F:\\ffsb") on a computer that is not Windows (w467): there
+ * path.resolve('C:/ffsb') is "<cwd>/C:/ffsb", so the portal would quietly make and use folders inside its own. Their
+ * key and value each.
+ */
+export function windowsPathsOffWindows(cfg: Pick<Config, 'sandboxRoot' | 'dataDir' | 'repo' | 'protectedPaths'> & { standingRoot?: string; review?: { root?: string }; hostDiskPaths?: string[] }, platform: NodeJS.Platform = process.platform): string[] {
+  if (platform === 'win32') return [];
+  const drive = (v: unknown) => typeof v === 'string' && /^[a-zA-Z]:([\\/]|$)/.test(v);
+  const out: string[] = [];
+  const one = (key: string, v: unknown) => {
+    if (drive(v)) out.push(`${key} "${v}"`);
+  };
+  one('sandboxRoot', cfg.sandboxRoot);
+  one('dataDir', cfg.dataDir);
+  one('standingRoot', cfg.standingRoot);
+  one('repo.basePath', cfg.repo?.basePath);
+  one('review.root', cfg.review?.root);
+  (cfg.protectedPaths ?? []).forEach((p, i) => one(`protectedPaths[${i}]`, p));
+  (cfg.hostDiskPaths ?? []).forEach((p, i) => one(`hostDiskPaths[${i}]`, p));
+  return out;
 }
 
 /**

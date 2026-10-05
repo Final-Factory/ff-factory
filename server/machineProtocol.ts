@@ -21,8 +21,10 @@ import type { AttachmentRef, CleanupSummary, HostStats, ImageFile, ImageInput, M
  * 7: attachments (docs/attachments.md): `attachments` on `send`, which the daemon fetches into the place's Inbox
  * (GET /machine/attachments/<id> with its token) before the message goes to the agent, and the `fetch_attachment` tool.
  * A protocol-6 daemon would drop them, so the portal never sends it any.
+ * 8: `relocate` (w466, docs/machines.md "Moving the portal"): a connected daemon is told the portal's new URL, keeps it
+ * in its daemon.json and dials it, its agents running on; it falls back to the URL before if the new one never answers.
  */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 /** The oldest protocol that understands machine sandboxes. */
 export const SANDBOX_PROTOCOL = 5;
@@ -32,6 +34,23 @@ export const ADOPT_PROTOCOL = 6;
 
 /** The oldest protocol that fetches attachments (docs/attachments.md). */
 export const ATTACHMENT_PROTOCOL = 7;
+
+/** The oldest protocol that follows the portal to a new URL without a redeploy (`relocate`, w466). */
+export const RELOCATE_PROTOCOL = 8;
+
+/** How long a relocated daemon dials only its new URL before it tries the one before too, every other time. */
+export const RELOCATE_FALLBACK_MINUTES = 10;
+
+/** Why `url` cannot be a portal URL a daemon dials (a base URL: http(s), a host, no path), or undefined. */
+export function relocateProblem(url: string): string | undefined {
+  if (!/^https?:\/\/[^/\s?#]+$/.test(url)) return `"${url}" is not a portal base URL (http:// or https://, a host and port, no path), e.g. https://<host>.<tailnet>.ts.net`;
+  try {
+    new URL(url);
+  } catch {
+    return `"${url}" is not a URL`;
+  }
+  return undefined;
+}
 
 /** What the daemon reports of a sandbox; the portal adds purpose and sessionIds (MachineSandbox). */
 export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
@@ -89,6 +108,8 @@ export type ToDaemon =
    * carrying the pass's summary; `dryRun`: plan only, nothing removed (older daemons ignore both and run a real pass).
    */
   | { type: 'cleanup_now'; id?: string; dryRun?: boolean }
+  /** Dial the portal at this base URL from now on (protocol 8, w466); answered by relocate_result, then the link closes. */
+  | { type: 'relocate'; id: string; url: string }
   /** How often the daemon polls its Mac's own Claude login's plan usage (config usagePollMinutes), at connect and when it changes. */
   | { type: 'usage_config'; config: { everyMinutes: number } }
   /** Poll that usage now (the usage meters' Refresh); answered by a `usage` report. A daemon before these ignores both. */
@@ -111,6 +132,8 @@ export type FromDaemon =
   /** An image a session produced (a tool result), stored by the portal under this id before the event naming it. */
   | { type: 'image'; sessionId: string; id: string; mediaType: string; data: string }
   | { type: 'switch_result'; id: string; ok: boolean; error?: string; from?: string; to?: string; notes?: string[] }
+  /** The daemon took the new portal URL (kept in its daemon.json) and is about to dial it, or why not (protocol 8). */
+  | { type: 'relocate_result'; id: string; ok: boolean; error?: string }
   | { type: 'fs_result'; id: string; ok: boolean; error?: string; mediaType?: string; data?: string; files?: ImageFile[] }
   | { type: 'unity_result'; id: string; ok: boolean; text: string }
   /** The daemon's own Unity watch: a hang or crash noticed, an automatic restart, the budget spent. */

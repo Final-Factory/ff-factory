@@ -402,6 +402,30 @@ orchestrator keeps a one-line pointer, files a request, a worker adds the rule t
 `ff-agents` `publish-skills` skill; working rules go under `evidence-gate/lessons`), and the person approves. The brief
 says so (`memoryBrief`).
 
+## What orchestrators and standing agents may not read
+
+They read the repo, their own memory or folder, and what they are handed; never FF Factory's own secrets or data (w467,
+change 7 of [portal-on-ffbox-host.md](portal-on-ffbox-host.md)). A prompt injection relayed into one (a worker's report,
+a Discord thread) could otherwise read a token and pass it on in a tool call. A PreToolUse hook (`secretReadGuard`,
+`server/secretGuard.ts`; for standing agents inside `standingGuard`) refuses `Read`, `NotebookRead`, `LS`, `Grep` and
+`Glob` calls, and a standing agent's shell words, that reach:
+
+- `config.json` and its saved versions (`config.json.prev`, `.1`…), where `FFSB_CONFIG` puts it and beside the app;
+- `data/`, apart from an orchestrator's **own** memory folder and `data/attachments` (the files people attached, which
+  orchestrators are handed and read); other orchestrators' memory, transcripts, the ledger and state stay closed;
+- the secrets folder (`<app>/secrets`, and the portal VM's `/srv/fff/secrets` beside its config folder) and the files
+  config `claudeTokenFile` and `anthropicApiKeyFile` name (their whole folder when it is called `secrets`);
+- FFBox's ffdiscord config and secrets (`FFBOX_CONFIG_DIR`, `FFBOX_SECRETS`);
+- the home secrets of the computer the agent runs on: `~/.ssh`, `~/.claude` and `~/.claude.json` (Claude's
+  credentials), `CLAUDE_CONFIG_DIR`, `~/.config/gh` and `%APPDATA%\GitHub CLI` (gh's token), `~/.git-credentials`. A
+  standing agent on a machine has its daemon's `daemon.json` and `secrets` added.
+
+A search may not start above one of them either: `Grep` of the app folder, the home folder or a drive root would read
+them, so it is refused with the reason; the repo and the agent's own folders search as before. Paths follow the
+platform the agent runs on: on Windows without case, with `/c/x` (Git Bash) read as `c:/x`, and UNC and `\\?\` paths
+refused; on Linux as they are. Where a path really leads counts too (a link in the repo to `config.json` is refused).
+Writes stay `memoryGuard`'s (orchestrators) and `standingGuard`'s (standing agents).
+
 ## Timers
 
 Lothsahn (w362): "give yourself the ability to set timers in the FF Factory harness itself, so you don't have to keep

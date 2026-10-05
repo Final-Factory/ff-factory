@@ -513,6 +513,45 @@ it). Its settings default to the portal's config. Protocol 6 adds the `adopt`/`r
 total agent cap, Library seed, below-normal editors and protected paths. Everything about it, with the migration,
 rollback and deploy steps: [beast-machine.md](beast-machine.md).
 
+## Moving the portal
+
+A daemon dials the URL written into its `daemon.json` at deploy (`portalUrl`). When the portal moves (to the VM on
+the FFBox host, [portal-on-ffbox-host.md](portal-on-ffbox-host.md), and back for a rollback), `relocate_machines {url,
+machines?}` (protocol 8, w466) sends every connected daemon the new base URL. No redeploy, and no ssh.
+
+- **What the daemon does:** it checks the URL (http or https, a host, no path) and keeps it in `daemon.json` before
+  answering. That file is fsynced and renamed into place, with the versions before kept beside it. The URL it had is
+  kept as `previousPortalUrl`. It answers `relocate_result`, then drops the link and dials the new URL.
+- **Agents run on:** nothing about them depends on the link. Their events wait in the daemon's outbox and are sent on
+  reconnect. Its token is unchanged.
+- **The fallback:** until a portal answers, the daemon dials only the new URL for 10 minutes
+  (`RELOCATE_FALLBACK_MINUTES`). After that it dials the new one and the old one in turn, so a move that never comes up,
+  or is rolled back, does not strand it. The first portal that answers settles it: that URL stays in `daemon.json` and
+  the fallback goes. A daemon restarted meanwhile (a reboot) reads the same fields and carries on the same way.
+- **The portal that sent it:** it marks the machine `relocatedTo` and treats the drop as intended, so nothing is resumed
+  there. Its offline watch does not redeploy the machine while it is away, which would pull it back. The mark goes when
+  the daemon says hello there again. The record's `portal_url` stays that portal's own address, the one its redeploys
+  write; use `add_machine portal_url` to change it.
+- **Old daemons:** one from before protocol 8 is refused with "let it be redeployed first". It cannot be relocated, only
+  redeployed with a new `portal_url`.
+
+**The portal's own host as a machine** (BEAST, `local`) is reached without ssh and dials the portal at loopback. When
+the portal leaves it, `convert_machine {machine, to: "ssh", ssh_host, portal_url}` (w466, docs/portal-on-ffbox-host.md
+change 3) makes it a machine reached over ssh. `to: "local"` turns it back, on the portal's own Windows computer, which
+must hold its main clone.
+
+- **What changes:** the record only (`convertMachineRecord`): `local`, its host and its `portal_url`. Its id, token,
+  sandboxes, agents, limits, pool settings and protected paths stay.
+- **Nothing else moves:** its daemon stays connected as it is, and its agents run on. `relocate_machines` is what points
+  a connected daemon at another portal.
+- **Kept for later redeploys:** to ssh, it keeps the Unity MCP server and the idle-editor stop it had from the portal's
+  config (`daemonExtras`), so its ssh redeploys write them. It drops "no Max file" and "no clean-up of its own", which
+  only made sense with the portal on the same computer.
+- **`redeploy: true`:** writes the new way into its `daemon.json` at once, with a new token. It is refused, before
+  anything changes, while agents run there.
+- **One local machine at most.** A machine whose clone is not on this computer cannot become it.
+- **The migration script** rewrites a copy of `state.json` with the same function (portal-on-ffbox-host.md 7.3, step 5).
+
 ## Not in v1
 
 Machines other than Macs and Windows PCs.

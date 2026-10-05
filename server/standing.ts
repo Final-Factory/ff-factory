@@ -6,7 +6,8 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { ROOT, ownerLine, publicIdentityOf, type Config } from './config.ts';
+import { PORTAL_ONLY_WHY, ROOT, configPath, ownerLine, portalOnly, publicIdentityOf, type Config } from './config.ts';
+import { portalSecretRules, secretFilesOf, type SecretRules } from './secretGuard.ts';
 import { buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from './launch.ts';
 import type { Store } from './store.ts';
 import type { OptionsFactory } from './sessions.ts';
@@ -46,6 +47,12 @@ import type {
   StandingToolGroup,
 } from '../shared/types.ts';
 import { appDirOf } from '../shared/types.ts';
+
+/**
+ * D16 (w464, docs/portal-on-ffbox-host.md): the portal-only mode runs no standing agent, here or on a machine. Their
+ * jobs move to ordinary workers that timers wake.
+ */
+export const STANDING_PORTAL_ONLY = `standing agents do not run on this portal (${PORTAL_ONLY_WHY}); their jobs run as workers that timers start`;
 
 /** What a standing agent needs from a session: SessionManager and AgentSession satisfy it; tests fake it. */
 export interface SessionLike {
@@ -304,6 +311,7 @@ export class StandingAgents {
    */
   runNow(id: string, trigger: 'manual' | 'message' = 'manual', text?: string, requestedBy?: Requester): string {
     const a = this.require(id);
+    if (portalOnly(this.cfg)) throw new Error(STANDING_PORTAL_ONLY);
     if (this.active.has(a.id)) {
       if (trigger === 'message' && text) {
         this.sessions.send(a.sessionId, text, 'human', undefined, { requestedBy });
@@ -395,6 +403,15 @@ export class StandingAgents {
 
   private tryStart(a: StandingAgent): string {
     const p = a.pending!;
+    if (portalOnly(this.cfg)) {
+      // D16 (w464): a scheduled run is recorded as skipped, with why, and nothing starts.
+      a.pending = undefined;
+      this.recordSkip(a, p.trigger, p.dueAt, STANDING_PORTAL_ONLY);
+      a.state = a.enabled ? 'asleep' : 'paused';
+      a.stateDetail = STANDING_PORTAL_ONLY;
+      this.store.putStanding(a);
+      return `Skipped: ${STANDING_PORTAL_ONLY}.`;
+    }
     const m = a.machineId ? this.deps.machines?.get(a.machineId) : undefined;
     const online = !!m && !!this.deps.machines?.isOnline(m.id);
     const verdict = admit({
@@ -831,6 +848,8 @@ export class StandingAgents {
         repoNote: m ? `The user's main Final Factory clone on this machine is \`${m.repoPath}\`. Read it with Read/Grep; never change it.` : '',
         protectedPaths: [`${dir}/app`, `${dir}/daemon.json`],
         offLimits: [`${dir}/app`],
+        // The daemon's token and secrets (w467); the machine's home secrets are added there, by standingGuard.
+        secrets: { deny: [`${dir}/daemon.json*`, `${dir}/secrets`], allow: [] } as SecretRules,
         gameRepos: [this.cfg.repo.url],
         // The host's Claude account (config machines.useHostClaudeEnv), for this agent only; the run's person's own
         // when they have one (config userClaudeEnv, docs/identity.md).
@@ -844,6 +863,8 @@ export class StandingAgents {
       repoNote: `The game repo's base clone is at \`${this.cfg.repo.basePath}\` (it may lag origin). Read it with Read/Grep; do not run commands in it or in any sandbox under \`${this.cfg.sandboxRoot}\`.`,
       protectedPaths: [...this.cfg.protectedPaths, ROOT, this.cfg.dataDir],
       offLimits: [this.cfg.sandboxRoot, this.cfg.repo.basePath],
+      // FF Factory's config, secrets and data/ (w467): not read, not searched.
+      secrets: portalSecretRules({ configFile: configPath(), appRoot: ROOT, dataDir: this.cfg.dataDir, secretFiles: secretFilesOf(this.cfg) }),
       gameRepos: [this.cfg.repo.url, this.cfg.repo.basePath],
       // Config claudeAccounts.standing: the host token or this host's stored login (docs/accounts.md); the run's
       // person's own token when they have one.
@@ -924,7 +945,7 @@ ${a.charter}
         protectedPaths: place.protectedPaths,
         gameRepos: place.gameRepos,
         publicIdentity: publicIdentityOf(this.cfg),
-        standing: { folder: a.folder, groups: a.tools, offLimits: place.offLimits },
+        standing: { folder: a.folder, groups: a.tools, offLimits: place.offLimits, secrets: place.secrets },
       },
       // What the agent does as Max is tagged with its session (docs/max.md); a machine's daemon sets its own FF_MAX_EVENTS.
       env: { ...place.env, FF_STANDING_AGENT: a.id, ...(a.machineId ? { FF_SESSION_ID: a.sessionId } : maxEnv(this.cfg, a.sessionId)) },

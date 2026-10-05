@@ -9,7 +9,7 @@ import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
-import { ADOPT_PROTOCOL, ATTACHMENT_PROTOCOL, PROTOCOL_VERSION, SANDBOX_PROTOCOL, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ADOPT_PROTOCOL, ATTACHMENT_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -113,6 +113,40 @@ export function localMachineDefaults(cfg: Pick<Config, 'port' | 'repo' | 'sandbo
     librarySeedGB: cfg.librarySeedCopy === 'clone' ? 10 : cfg.librarySeedGB,
     unityBelowNormal: true,
   };
+}
+
+/**
+ * A machine's record turned from the portal's own host (`local`) into one reached over ssh, or back (convert_machine,
+ * w466; docs/portal-on-ffbox-host.md change 3). Only how it is reached changes: its id, token, sandboxes, agents,
+ * limits, pool settings and protected paths stay, so nothing on the machine moves. To ssh: `sshHost` and a portal URL
+ * it can reach (not a loopback one) are needed, and `extras` (the daemon.json settings a local deploy took from the
+ * portal's config) are kept for its redeploys. Back to local: this portal's loopback address unless given. Exported for
+ * tests and the migration script, which rewrites a copy of state.json the same way.
+ */
+export function convertMachineRecord(m: Machine, to: 'ssh' | 'local', o: { sshHost?: string; portalUrl?: string; port: number; publicUrl?: string; extras?: DaemonExtras }): Machine {
+  const next: Machine = { ...m };
+  if (to === 'ssh') {
+    if (!m.local) throw new Error(`${m.id} is reached over ssh already`);
+    const host = o.sshHost?.trim();
+    if (!host || /\s/.test(host)) throw new Error('ssh_host is required: the ssh host alias this portal reaches the machine by (e.g. "beast")');
+    const url = (o.portalUrl ?? o.publicUrl ?? '').trim().replace(/\/+$/, '');
+    if (!/^https?:\/\/[^/\s?#]+$/.test(url)) throw new Error('portal_url is required: the address the machine reaches this portal at, e.g. https://<host>.<tailnet>.ts.net');
+    if (/^https?:\/\/(localhost|127\.[\d.]+|\[::1\])(:\d+)?$/i.test(url)) throw new Error(`${url} is a loopback address: a machine reached over ssh reaches the portal by its network address`);
+    delete next.local;
+    next.host = host;
+    next.portalUrl = url;
+    const keep = { ...(o.extras?.unityMcpServer ? { unityMcpServer: o.extras.unityMcpServer } : {}), ...(o.extras?.sandboxIdleStopMinutes !== undefined ? { sandboxIdleStopMinutes: o.extras.sandboxIdleStopMinutes } : {}) };
+    if (Object.keys(keep).length) next.daemonExtras = keep;
+    return next;
+  }
+  if (m.local) throw new Error(`${m.id} is the portal's own host already`);
+  const url = (o.portalUrl ?? `http://127.0.0.1:${o.port}`).trim().replace(/\/+$/, '');
+  if (!/^https?:\/\/[^/\s?#]+$/.test(url)) throw new Error(`portal_url ${url} is not a base URL`);
+  next.local = true;
+  next.host = 'localhost';
+  next.portalUrl = url;
+  delete next.daemonExtras;
+  return next;
 }
 
 /** The limits a deploy stores: each given one checked, an unset one kept from the previous deploy. Exported for tests. */
@@ -430,6 +464,7 @@ export class MachineManager {
       }
       if (!this.offlineSince.has(m.id)) this.offlineSince.set(m.id, now);
       if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
+      if (m.relocatedTo) continue; // sent to another portal (relocate): a redeploy from here would pull it back
       const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
       if (!why) continue;
       // The portal's own host needs no ssh: it is always there when this code runs.
@@ -709,6 +744,8 @@ export class MachineManager {
       platform: prev?.platform,
       name: typed !== id ? typed : prev?.name,
       sandboxes: prev?.sandboxes,
+      // Kept from when it was the portal's own host (convert_machine, w466): what its ssh redeploys write.
+      ...(!local && prev?.daemonExtras ? { daemonExtras: prev.daemonExtras } : {}),
       ...dirs,
       ...limits,
     });
@@ -724,6 +761,37 @@ export class MachineManager {
   /** The portal's own host as a machine (docs/beast-machine.md), if one is set up. */
   local(): Machine | undefined {
     return this.list().find((m) => m.local);
+  }
+
+  /**
+   * Turn the portal's own host as a machine into one reached over ssh, or back (convert_machine, w466): the record only
+   * (convertMachineRecord). Its daemon stays connected as it is, its agents run on, its token and sandboxes stay; it is
+   * how BEAST stays the same machine when the portal moves to the VM, and comes back when it returns. A redeploy (asked
+   * for, refused while agents run there) writes the new way into its daemon.json, with a new token.
+   */
+  convertMachine(id: string, to: 'ssh' | 'local', o: { sshHost?: string; portalUrl?: string; redeploy?: boolean } = {}): string {
+    const m = this.require(id);
+    if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
+    // Checked before anything changes: a redeploy restarts its daemon, which stops its agents.
+    if (o.redeploy && this.liveCount(m.id) > 0) throw new Error(`${m.id} has ${this.liveCount(m.id)} agent(s) running; a redeploy would stop them. Convert without redeploy (its daemon stays connected), or stop them first`);
+    if (to === 'local') {
+      const other = this.list().find((x) => x.local && x.id !== m.id);
+      if (other) throw new Error(`${other.id} is already the portal's own host as a machine; there can be only one`);
+      if (process.platform !== 'win32' && !this.allowLocalAnywhere) throw new Error("a local machine (the portal's own host) is only supported on a Windows host so far");
+      // The portal's own computer must hold the machine's clone: a machine that is another computer cannot become it.
+      if (!m.repoPath || !fs.existsSync(m.repoPath)) throw new Error(`${m.repoPath || 'its main clone'} is not on this computer: ${m.id} cannot be the portal's own host here`);
+    }
+    const next = convertMachineRecord(m, to, { ...o, port: this.cfg.port, publicUrl: this.cfg.publicUrl, extras: to === 'ssh' ? this.localExtras() : undefined });
+    this.store.putMachine(next);
+    const kept = `${(next.sandboxes ?? []).length} sandbox(es), ${next.sessionIds.length} agent record(s), its token and limits kept`;
+    const how = to === 'ssh' ? `reached over ssh as "${next.host}", portal_url ${next.portalUrl}` : `the portal's own host again (no ssh), portal_url ${next.portalUrl}`;
+    const link = this.isOnline(next.id) ? 'Its daemon stays connected as it is, its agents running on' : 'Its daemon is offline now; it dials the URL in its daemon.json (relocate_machines changes that for a connected one)';
+    let text = `${next.id} is ${how}; ${kept}. ${link}.`;
+    if (o.redeploy) {
+      this.deployMachine({ id: next.id });
+      text += ` Redeploying it ${to === 'ssh' ? `over ssh to ${next.host}` : 'here, without ssh'}; list_machines shows progress.`;
+    } else text += ` Its daemon.json still has the way it was deployed: a redeploy (add_machine, or convert_machine with redeploy) writes this one.`;
+    return text;
   }
 
   /** The install over ssh (server/machineDeploy.ts); replaced by tests. */
@@ -754,7 +822,7 @@ export class MachineManager {
         if (s === 'installing') installAt = Date.now();
         this.update(m.id, { statusDetail: s });
       };
-      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : {}) });
+      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : m.daemonExtras ? { extra: m.daemonExtras } : {}) });
       const connected = () => this.deployedDaemonConnected(m.id, installAt, r.version);
       this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
       if (r.started === false && !connected()) {
@@ -1067,7 +1135,7 @@ export class MachineManager {
         const why = daemonMismatch(this.hellos.get(id)!, this.portalHead);
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
         else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
-        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined });
+        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined, relocatedTo: undefined });
         this.store.putMachine(m);
         const live = new Set(msg.live);
         for (const sid of m.sessionIds) {
@@ -1175,6 +1243,15 @@ export class MachineManager {
       case 'sandbox_event':
         this.sandboxEvent?.(id, msg.text, { sandbox: msg.sandbox, checkpoint: !!msg.checkpoint });
         return;
+      case 'relocate_result': {
+        const p = this.relocateCalls.get(msg.id);
+        if (!p) return;
+        this.relocateCalls.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.ok) p.resolve();
+        else p.reject(new Error(msg.error ?? 'refused'));
+        return;
+      }
       case 'switch_result': {
         const p = this.switchCalls.get(msg.id);
         if (!p) return;
@@ -1421,6 +1498,43 @@ export class MachineManager {
         reject(e as Error);
       }
     });
+  }
+
+  private readonly relocateCalls = new Map<string, { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+
+  /**
+   * Send a connected daemon to the portal at `url` (w466, docs/machines.md "Moving the portal"): it keeps the URL in its
+   * daemon.json, drops this link and dials the new one, its agents running on (with machines.keepAgentsOnRestart their
+   * runs are not this portal's to stop). The drop is on purpose: nothing is resumed here, and the offline watch leaves
+   * it alone until it says hello here again (`relocatedTo`). Its record's portal_url stays this portal's address.
+   */
+  async relocate(machineId: string, rawUrl: string, timeoutMs = 20_000): Promise<string> {
+    const m = this.require(machineId);
+    const url = rawUrl.trim().replace(/\/+$/, '');
+    const bad = relocateProblem(url);
+    if (bad) throw new Error(bad);
+    if (!this.isOnline(m.id)) throw new Error(`${m.id} is offline: only a connected daemon can be relocated (or redeploy it with portal_url ${url})`);
+    const p = this.protocolOf(m.id) ?? 0;
+    if (p < RELOCATE_PROTOCOL) throw new Error(`${m.id}'s daemon speaks protocol ${p} and cannot relocate (needs ${RELOCATE_PROTOCOL}): let it be redeployed first`);
+    await new Promise<void>((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.relocateCalls.delete(id);
+        reject(new Error(`${m.id} did not answer the relocate within ${Math.round(timeoutMs / 1000)} s`));
+      }, timeoutMs);
+      this.relocateCalls.set(id, { resolve, reject, timer });
+      try {
+        this.post(m.id, { type: 'relocate', id, url });
+      } catch (e) {
+        clearTimeout(timer);
+        this.relocateCalls.delete(id);
+        reject(e as Error);
+      }
+    });
+    // Its link drops in a moment, on purpose: no resume of what it runs, no redeploy while it is away.
+    this.expectDrop(m.id, false);
+    this.update(m.id, { relocatedTo: { url, at: new Date().toISOString() } });
+    return `${m.id} took ${url} and is dialling it now; its agents run on. It falls back to this portal's URL too if ${url} has not answered after ${RELOCATE_FALLBACK_MINUTES} minutes.`;
   }
 
   private readonly switchCalls = new Map<string, { resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROOT, SENDER_RULE, VOICE_DEFAULTS, loadConfig, ownerLine } from './config.ts';
+import { ROOT, SENDER_RULE, VOICE_DEFAULTS, loadConfig, ownerLine, windowsPathsOffWindows } from './config.ts';
 import { gitIsClean, gitRemotes } from './guard.ts';
 import { appVersion, formatVersion, readSha, readVersion } from './version.ts';
 
@@ -55,6 +55,19 @@ test('loadConfig: required keys, and standing agents kept out of the app and its
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   withConfig(t, { repo: minimal(dir).repo, unity: minimal(dir).unity });
   assert.throws(() => loadConfig(), /missing "sandboxRoot"/);
+});
+
+test('loadConfig: the portal-only mode (hostSandboxes false) needs only the base clone; the switch is a boolean (w464)', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  withConfig(t, { hostSandboxes: false, dataDir: path.join(dir, 'data'), repo: minimal(dir).repo, standingRoot: path.join(dir, 'agents') });
+  const cfg = loadConfig();
+  assert.equal(cfg.hostSandboxes, false);
+  assert.equal(cfg.sandboxRoot, path.join(dir, 'data', 'sandboxes'), 'a default no sandbox is ever made in');
+  withConfig(t, { hostSandboxes: false, dataDir: path.join(dir, 'data'), standingRoot: path.join(dir, 'agents') });
+  assert.throws(() => loadConfig(), /missing "repo"/, 'the orchestrators still read the base clone');
+  withConfig(t, { ...minimal(dir), hostSandboxes: 'no' });
+  assert.throws(() => loadConfig(), /config hostSandboxes is true or false/);
 });
 
 test('loadConfig: a standingRoot inside the app folder is refused', (t) => {
@@ -123,4 +136,12 @@ test('guard git lookups: a clean tree, a dirty one, not a repo; push remotes', (
       ['origin', 'git@example.test:game.git'],
     ],
   );
+});
+
+test('w467: Windows paths in config are refused off Windows (path.resolve("C:/ffsb") on Linux is <cwd>/C:/ffsb)', () => {
+  const vm = { sandboxRoot: '/srv/fff/sandboxes', dataDir: '/srv/fff/data', standingRoot: '/srv/fff/agents', repo: { url: 'x', basePath: '/srv/fff/base' }, review: { root: '/srv/fff/review' }, protectedPaths: [], hostDiskPaths: ['/srv/fff'] };
+  assert.deepEqual(windowsPathsOffWindows(vm, 'linux'), []);
+  const beast = { ...vm, sandboxRoot: 'F:/ffsb', repo: { url: 'x', basePath: 'C:\\ffsb\\_base' }, review: { root: 'F:/ffsb/_review' }, protectedPaths: ['/srv/x', 'C:/Users/rydin/nevergames'], hostDiskPaths: ['F:'] };
+  assert.deepEqual(windowsPathsOffWindows(beast, 'linux'), ['sandboxRoot "F:/ffsb"', 'repo.basePath "C:\\ffsb\\_base"', 'review.root "F:/ffsb/_review"', 'protectedPaths[1] "C:/Users/rydin/nevergames"', 'hostDiskPaths[0] "F:"']);
+  assert.deepEqual(windowsPathsOffWindows(beast, 'win32'), [], 'on Windows they are right');
 });

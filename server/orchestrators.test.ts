@@ -11,7 +11,8 @@ import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
 import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
-import type { Config } from './config.ts';
+import { configPath, type Config } from './config.ts';
+import { memoryDirFor } from './orchestratorMemory.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 
@@ -958,4 +959,40 @@ test('w477: a machine with max_agents 0 takes agents in its sandboxes only: star
   const s = machines.createSession('lothdesktop', { kind: 'worker', title: 'old', model: 'opus', permissionMode: 'bypassPermissions' });
   assert.equal(machines.placeFull(s), undefined, 'not queued');
   assert.throws(() => machines.dispatchSend(s as never, 'hi', 'orchestrator', 'u1'), /sandboxes only \(max_agents 0\)/);
+});
+
+test('w464 change 6: claudeAccounts.dispatcher runs the dispatcher on that account, not the system payer\'s own token; people\'s orchestrators keep theirs', (t) => {
+  const { cfg, agents, dispatcher, chat } = setup(t);
+  const HOST = 'sk-ant-oat01-host-token-9AAA';
+  const BENS = 'sk-ant-oat01-bens-own-token-BBBB';
+  cfg.claudeEnv = { CLAUDE_CODE_OAUTH_TOKEN: HOST };
+  cfg.userClaudeEnv = { ben: { CLAUDE_CODE_OAUTH_TOKEN: BENS } };
+  const tokenOf = (info: SessionInfo) => (agents.orchestratorOptions(info) as { env: Record<string, string | undefined> }).env.CLAUDE_CODE_OAUTH_TOKEN;
+  assert.equal(tokenOf(dispatcher().info), BENS, 'unset: the system payer (Ben, the owner) and his own token, as before');
+  cfg.claudeAccounts = { dispatcher: 'token' };
+  assert.equal(tokenOf(dispatcher().info), HOST, "set: the host token, whoever the system payer is");
+  assert.equal(tokenOf(chat(BEN).info), BENS, "Ben's own orchestrator still runs on his token");
+});
+
+// ---------------------------------------------------------------- w467: no secrets for orchestrators
+
+test("w467: an orchestrator's hooks refuse config.json, data/ and ~/.ssh, and let its own memory and other folders through", async (t) => {
+  const { cfg, agents, chat } = setup(t);
+  const info = chat(BEN).info;
+  const hooks = agents.orchestratorOptions(info).hooks!.PreToolUse![0].hooks;
+  const run = async (tool: string, input: Record<string, unknown>) => {
+    for (const h of hooks) {
+      const r = (await h({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input } as never, undefined, { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } };
+      if (r.hookSpecificOutput?.permissionDecision === 'deny') return 'deny';
+    }
+    return 'pass';
+  };
+  assert.equal(await run('Read', { file_path: configPath() }), 'deny');
+  assert.equal(await run('Read', { file_path: path.join(cfg.dataDir, 'work.json') }), 'deny');
+  assert.equal(await run('Read', { file_path: path.join(os.homedir(), '.ssh', 'id_ed25519') }), 'deny');
+  assert.equal(await run('Grep', { pattern: 'sk-ant', path: cfg.dataDir }), 'deny');
+  const memory = memoryDirFor(cfg, info);
+  assert.equal(await run('Read', { file_path: path.join(memory, 'MEMORY.md') }), 'pass', 'its own memory folder');
+  assert.equal(await run('Read', { file_path: path.join(cfg.dataDir, 'attachments', 'att_1-Player.log') }), 'pass', 'files people attached');
+  assert.equal(await run('Read', { file_path: path.join(os.tmpdir(), 'some-repo', 'README.md') }), 'pass');
 });
