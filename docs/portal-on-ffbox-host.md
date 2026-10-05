@@ -106,7 +106,8 @@ Installed by `deploy/vm/host/install.sh` ([Installing](#10-installing)); nothing
 
 - **Packages:** `qemu-system-x86`, `qemu-utils`, `libvirt-daemon-system`, `libvirt-clients`, `cloud-image-utils`,
   `nftables`, `jq`, `curl` (and `ubuntu-keyring` and `gpgv`, which Ubuntu already has). libvirtd runs as root, behind a
-  root-only socket. Each VM's QEMU runs as `libvirt-qemu` with its own AppArmor profile *(measured in CI)*.
+  root-only socket. Each VM's QEMU runs as `libvirt-qemu` with its own AppArmor profile *(measured in CI on Ubuntu
+  24.04: user `libvirt-qemu`, profile `libvirt-<uuid> (enforce)`)*.
 - **The VM** `fff-portal`: q35, `host-passthrough` CPU, virtio disk and network, a serial console logged to
   `/var/log/libvirt/qemu/fff-portal-serial.log`, the guest-agent channel, an `i6300esb` watchdog with `action='reset'`,
   a pvpanic device, `on_crash` restart, and autostart at boot ([2.1](#21-the-vm)).
@@ -120,8 +121,9 @@ Installed by `deploy/vm/host/install.sh` ([Installing](#10-installing)); nothing
   `fff-vm-firewall.service`.
 - **The disk:** a zvol `<pool>/fff-vm/disk0`, not sparse, so its full size is reserved in the pool and neither side can
   fill the other's disk. Or a qcow2 file in `/var/lib/libvirt/images/fff-vm/` ([2.2](#22-the-disk-and-its-backups)).
-- **libvirt's `default` network** (virbr0, 192.168.122.0/24, with a dnsmasq) that Ubuntu's package makes and starts
-  *(sourced: libvirt-daemon-system's postinst)*. If this install put libvirt on the host and no domain uses it, the
+- **libvirt's `default` network** (virbr0, 192.168.122.0/24, with a dnsmasq) that Ubuntu's package defines with
+  autostart on *(measured in CI: right after the package install it was defined, autostart on)*, so it starts at the
+  next boot. If this install put libvirt on the host and no domain uses it, the
   network is stopped and its autostart turned off (`DEFAULT_NET_ACTION=auto`); otherwise it is left alone, and
   `uninstall.sh` puts it back.
 - **Settings and records:** `/etc/fff-vm/` (root, `0600` files: the config, the generated table, the domain XML, the
@@ -191,9 +193,12 @@ Six rules:
 4. **Nothing on the host but root reaches the VM.** `output` accepts packets to the VM only from sockets of uid 0, and
    only to its ssh (22) and the portal (8790): the health check and `fff-vm ssh`. FFBox's containers run on a rootless
    daemon, so their traffic leaves through sockets of FFBox's own uids in the host's namespace (`ffdev`'s "host LAN"
-   path included) and is dropped. A container on a bridge is forwarded, and `forward` drops it. *(measured in CI: a
-   non-root account on the host, a non-root container on the host's network, and a bridged container all fail to
-   connect; the counters move.)* A rootful container would run as root and pass. FFBox has none, and adding one would
+   path included) and is dropped. A container on a bridge is forwarded, and `forward` drops it. *(measured in CI, in
+   both disk modes: a non-root account on the host, a non-root container on the host's network, and a bridged
+   container all fail to connect to the VM's ssh. From inside the VM, the host's bridge address, its LAN address and
+   its LAN gateway fail too, while the internet works. All four drop rules counted packets: 10 from the VM to the
+   host, 11 forwarded toward the VM, 10 from the VM to private addresses, 18 from host processes other than root's.)*
+   A rootful container would run as root and pass. FFBox has none, and adding one would
    break its own security model *(sourced: ffbox docker-security-model)*.
 5. **The guest has its own firewall** (`inet fff_guest`, `deploy/vm/guest`), which drops by default. It accepts the
    host's address on 22 and 8790, `tailscale0` on 443 (Funnel and tailnet HTTPS), and Tailscale's UDP port.
