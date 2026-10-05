@@ -2055,13 +2055,30 @@ export class Orchestrators {
   // ---------------------------------------------------------------- follow-ups (personal message_agent)
 
   /**
-   * Whether a personal orchestrator may send this worker a follow-up: it must work for its person (who started it,
-   * or one of its requests is theirs), within FOLLOW_UPS_PER_MESSAGE since the person last wrote. Counts it.
+   * The person's requests this worker is on, for a follow-up (w431): linked to it (started or sent with the request's
+   * work_id, or decide_work link) and open, stalled, or closed in the last 7 days (the reopen window). A stalled or
+   * just-finished request is still the person's to ask about: w426 was stalled and w427/w428/w430 done when Ben's
+   * orchestrator was refused. The ones the worker is on now first, then the newest.
    */
-  followUp(chat: SessionInfo, worker: SessionInfo) {
+  followUpItems(workerId: string, userId: string): WorkItem[] {
+    const since = this.now().getTime() - 7 * 86_400_000;
+    const all = [...this.store.work.values()];
+    const serving = servedBy(workerId, all);
+    return all
+      .filter((w) => w.sessionIds.includes(workerId) && isFor(w, userId) && (isOpen(w) || w.status === 'stalled' || Date.parse(w.updatedAt) >= since))
+      .sort((a, b) => Number(serving.has(b.id)) - Number(serving.has(a.id)) || Number(isOpen(b)) - Number(isOpen(a)) || b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /**
+   * Whether a personal orchestrator may send this worker a follow-up: it must work for its person (who started it, or
+   * one of their requests is on it: followUpItems), within FOLLOW_UPS_PER_MESSAGE since the person last wrote. Counts
+   * it, and returns the person's requests it is about (for the message's `[about …]` line), newest first.
+   */
+  followUp(chat: SessionInfo, worker: SessionInfo): WorkItem[] {
     const owner = this.ownerOf(chat);
-    if (!owner) return;
-    const theirs = (worker.requestedBy && same(worker.requestedBy.userId, owner.userId)) || this.itemsOf(worker.id).some((w) => isFor(w, owner.userId));
+    if (!owner) return [];
+    const about = this.followUpItems(worker.id, owner.userId);
+    const theirs = (worker.requestedBy && same(worker.requestedBy.userId, owner.userId)) || about.length > 0;
     if (!theirs) {
       const whose = worker.requestedBy ? `${worker.requestedBy.displayName}'s` : 'not yours';
       throw new Error(`${worker.id} "${worker.title}" is ${whose} work: follow up only on ${owner.displayName}'s own workers; for anything else, request_work`);
@@ -2074,6 +2091,7 @@ export class Orchestrators {
       this.stamp(w, `${owner.displayName}'s orchestrator followed up with ${worker.id}`);
       this.store.putWork(w);
     }
+    return about;
   }
 
   /**

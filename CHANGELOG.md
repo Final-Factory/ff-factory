@@ -47,6 +47,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A person's orchestrator follows up on any worker their request is on** (w431, asked by Ben). `message_agent` from a
+  personal orchestrator was refused for a worker someone else started once the person's linked request was stalled
+  (w426) or done (w427, w428, w430). It now counts every request of the person the worker is on that is open, stalled
+  or closed in the last 7 days, and the message says which on an `[about w426 "title"]` line. Workers with no request
+  of the person stay refused; the 3-per-worker limit is unchanged.
+
 - **The ledger cleanup reads the end of a worker's report, and a PR can be one step of a request** (w424, asked by
   Lothsahn after w424 was closed twice, on #99 and #100, while its worker's reports ended "w424: still open: …"). A
   worker's `lastResult` kept only the first 1200 characters of a long report, so the cleanup's "more is coming" check
