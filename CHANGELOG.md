@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Daemons follow the portal to a new URL without a redeploy** (w466, asked by Lothsahn; change 9 of
+  docs/portal-on-ffbox-host.md). `relocate_machines {url, machines?}` sends connected daemons the portal's new base
+  URL. Each keeps it in its `daemon.json`, drops the link and dials it, with its agents running on and its token
+  unchanged. If the new URL has not answered after 10 minutes, it tries the old one too, every other time, so a move
+  that never comes up does not strand it. The sending portal does not redeploy a machine that is away. Protocol 8: older
+  daemons are redeployed once idle, as after any update (docs/machines.md, "Moving the portal").
+
 - **Stale build and run output is cleaned up by itself on every computer** (w459, asked by Ben). Until now a person
   asked for each clean-up of player builds (w451 freed 42 GB on LothDesktop after its D: hit the guard). The
   continuous clean-up, on this host's guard and on every machine's daemon, now also removes, once a day and whenever
