@@ -133,6 +133,12 @@ Layers that keep the app non-elevated:
   banner and in the logs.
 - A non-elevated shell cannot stop an elevated app, because it cannot even read its command line.
   `restart.ps1` detects that and says what to do: run `restart.cmd` once as administrator.
+- **Nobody signed in.** The task runs only in its user's desktop session (LogonType Interactive), so after an
+  unattended reboot (a crash, a power cut) it starts nothing until that user signs in, and an app started by hand
+  from an administrator shell (ssh) is elevated. The server sees no `explorer.exe` of its user
+  (`desktopSignedIn`), does not try a hand-off that cannot work, and its banner says: sign in to the desktop, then
+  right-click `restart.cmd` > Run as administrator. `restart.ps1` logs the same when the task does not start. BEAST
+  signs in by itself since 2026-10-05 (Windows automatic sign-in), so a reboot brings the task back.
 
 Editors started while the app was elevated stay elevated until they are stopped and started again.
 A non-elevated server recognises them by their window title, and the card says they run with

@@ -91,11 +91,25 @@ export interface HandoffFacts {
   supervisorPid?: number;
   lastAttemptMs?: number;
   nowMs: number;
+  /**
+   * Whether this user is signed in to the desktop (an explorer.exe of theirs runs), or undefined when it cannot be
+   * told. The task runs only in that session (LogonType Interactive), so without one it cannot start anything.
+   */
+  desktop?: boolean;
 }
+
+/**
+ * Why the app stays elevated when nobody is signed in, and the fix: after an unattended reboot (a crash, a power cut)
+ * the task cannot run until its user signs in to the desktop, and an app started by hand from an administrator shell
+ * (over ssh, say) is elevated (BEAST, 2026-10-05, w424).
+ */
+export const NO_DESKTOP_WHY = `nobody is signed in to this computer's desktop, so the ${TASK_NAME} task (it runs only in its user's desktop session) cannot start the app non-elevated. Fix: sign in to this computer's desktop as the app's user, then right-click scripts\\restart.cmd > Run as administrator (a shell without admin rights cannot stop an elevated app)`;
 
 /** What an elevated server should do at startup: hand itself to the Limited task, or stay and warn. */
 export function planHandoff(f: HandoffFacts): { handoff: true } | { handoff: false; why?: string } {
   if (!f.elevated) return { handoff: false };
+  // The task would not start, and the restart would cut off every agent for nothing.
+  if (f.desktop === false) return { handoff: false, why: NO_DESKTOP_WHY };
   if (f.optedOut) return { handoff: false, why: `${NO_HANDOFF_ENV} is set (a hand-off to the ${TASK_NAME} task already failed or was declined)` };
   if (!f.taskRunLevel) return { handoff: false, why: `there is no ${TASK_NAME} scheduled task; run scripts/install-autostart.ps1 once, then scripts/restart.ps1` };
   if (f.taskRunLevel.toLowerCase() !== 'limited') {
@@ -117,6 +131,31 @@ export async function taskRunLevel(): Promise<string | undefined> {
     { timeoutMs: 30_000 },
   );
   return r.stdout.trim() || undefined;
+}
+
+/**
+ * Whether this user is signed in to the desktop: an explorer.exe they own runs (the same test as the machine deploy's
+ * Test-FFLoggedOn). Undefined off Windows or when PowerShell cannot tell.
+ */
+export async function desktopSignedIn(): Promise<boolean | undefined> {
+  if (!isWindows) return undefined;
+  const r = await run(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $n = 0; foreach ($p in @(Get-CimInstance Win32_Process -Filter \"Name='explorer.exe'\")) { $o = Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid -ErrorAction SilentlyContinue; if ($o -and $o.Sid -eq $me) { $n++ } }; 'explorer=' + $n",
+    ],
+    { timeoutMs: 30_000 },
+  );
+  return parseDesktopProbe(r.stdout);
+}
+
+/** desktopSignedIn's output, `explorer=<n>`, as signed in or not; undefined for anything else. Exported for tests. */
+export function parseDesktopProbe(out: string): boolean | undefined {
+  const m = /explorer=(\d+)/.exec(out);
+  return m ? Number(m[1]) > 0 : undefined;
 }
 
 async function supervisorPid(dataDir: string): Promise<number | undefined> {
@@ -158,6 +197,7 @@ export async function checkElevation(dataDir: string): Promise<ElevationStatus |
     supervisorPid: sup,
     lastAttemptMs,
     nowMs: Date.now(),
+    desktop: await desktopSignedIn(),
   });
   if (!plan.handoff) return { elevated: true, why: plan.why };
 

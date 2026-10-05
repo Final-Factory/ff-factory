@@ -74,7 +74,9 @@ const host: HostStatus = { elevated: elevation.elevated, elevatedWhy: elevation.
 if (host.elevated) {
   console.error(
     `\n!!!!!!!! FF Factory is running WITH ADMINISTRATOR RIGHTS. It will not start Unity editors (they would stop on Unity's administrator dialog), ` +
-      `and every agent shell inherits admin rights. ${host.elevatedWhy ?? ''} Fix: run scripts/restart.ps1 (from any shell).\n`,
+      `and every agent shell inherits admin rights. ${host.elevatedWhy ?? ''}` +
+      // From a shell without admin rights restart.ps1 cannot stop an elevated app (docs/restart.md, "Never elevated").
+      `${host.elevatedWhy?.includes('Fix:') ? '' : ' Fix: right-click scripts\\restart.cmd > Run as administrator (or run scripts\\restart.ps1 from an administrator shell).'}\n`,
   );
 }
 

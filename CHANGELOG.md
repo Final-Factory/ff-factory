@@ -33,6 +33,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **`add_machine` local works on BEAST** (w424, asked by Lothsahn). The Windows probe died with "You cannot call a method
+  on a null-valued expression" on the first git repo without an `origin` remote under the home folder or a drive's top:
+  Windows PowerShell casts a pipeline with no output to `$null`, and `.Trim()` threw. It now reads git's and node's
+  answers as `"$(...)"`, and a deploy that knows its clone (BEAST's base clone, or `repo_path`) searches for none.
+- **An elevated app says when nobody is signed in** (w424). After an unattended reboot the `ffsb-server` task cannot run
+  until its user signs in to the desktop, so an app started by hand from an administrator shell (ssh) stayed elevated
+  with a banner that said "run scripts/restart.ps1 (from any shell)", which cannot work then. The server no longer
+  hands off to a task that cannot start (that restart cut off every agent for nothing), the banner says to sign in and
+  then run `restart.cmd` as administrator, and `restart.ps1` logs the same when the task does not start.
 - **A worker in a machine sandbox can switch its own branch again** (w422, asked by Lothsahn). `switch_branch` from
   a worker on LothDesktop or BEAST was refused with "1 agent(s) are mid-turn in sandbox …" when that worker was the
   only agent there (w421 five times, w401 six times on 2026-10-05): the portal left the caller out of its check, but

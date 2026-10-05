@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HANDOFF_RETRY_MS, parseWhoamiGroups, planHandoff, tokenIsElevated } from './elevation.ts';
+import { HANDOFF_RETRY_MS, NO_DESKTOP_WHY, desktopSignedIn, parseDesktopProbe, parseWhoamiGroups, planHandoff, tokenIsElevated } from './elevation.ts';
 
 // `whoami /groups /fo csv` from an elevated shell on this host (trimmed).
 const ELEVATED = `"Group Name","Type","SID","Attributes"
@@ -65,4 +65,28 @@ test('hand-off: never when not elevated, and every refusal says why', () => {
     assert.ok(!p.handoff && p.why, JSON.stringify(f));
   }
   assert.deepEqual(planHandoff({ ...base, lastAttemptMs: base.nowMs - HANDOFF_RETRY_MS }), { handoff: true });
+});
+
+test('hand-off: not while nobody is signed in to the desktop, and the banner says to sign in (BEAST after a crash, w424)', () => {
+  // The task runs only in its user's desktop session: a hand-off would restart the app (cutting off every agent) for a
+  // task that cannot start, and the reason beats "FFSB_NO_DEELEVATE is set", which restart.ps1 sets after that failure.
+  for (const f of [{ ...base, desktop: false }, { ...base, desktop: false, optedOut: true }]) {
+    const p = planHandoff(f);
+    assert.deepEqual(p, { handoff: false, why: NO_DESKTOP_WHY });
+  }
+  assert.match(NO_DESKTOP_WHY, /nobody is signed in/);
+  assert.match(NO_DESKTOP_WHY, /Fix: sign in .* then right-click scripts\\restart\.cmd > Run as administrator/);
+  // Unknown (not Windows, or PowerShell could not tell): as before.
+  assert.deepEqual(planHandoff({ ...base, desktop: undefined }), { handoff: true });
+  assert.deepEqual(planHandoff({ ...base, desktop: true }), { handoff: true });
+  assert.deepEqual(planHandoff({ ...base, elevated: false, desktop: false }), { handoff: false });
+});
+
+test('desktop sign-in: explorer=<n> means signed in when n > 0; anything else is unknown', async () => {
+  assert.equal(parseDesktopProbe('explorer=1\r\n'), true);
+  assert.equal(parseDesktopProbe('explorer=0'), false);
+  assert.equal(parseDesktopProbe(''), undefined);
+  assert.equal(parseDesktopProbe('Get-CimInstance : Access denied'), undefined);
+  const live = await desktopSignedIn();
+  assert.equal(typeof live, process.platform === 'win32' ? 'boolean' : 'undefined');
 });
