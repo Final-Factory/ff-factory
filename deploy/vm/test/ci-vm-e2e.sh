@@ -20,6 +20,9 @@ ROOT=$PWD
 
 step() { printf '\n==== %s %s\n' "$(date -u +%T)" "$*"; }
 fail() { echo "FAIL: $*"; exit 1; }
+# matches ARGS...: grep that reads all of its input. "grep -q" stops at the first match, and the writer of a pipe into it
+# then dies of SIGPIPE, which pipefail turns into a failure (nft 1.1 on Ubuntu 26.04 hit it).
+matches() { grep "$@" >/dev/null; }
 VM=fff-portal
 IP=10.213.41.10
 HOSTIP=10.213.41.1
@@ -66,8 +69,8 @@ echo "ok: the dry run changed nothing"
 step "host install"
 deploy/vm/host/install.sh --wait
 /usr/local/sbin/fff-vm status
-nft list table inet fff_vm | grep -q 'fff-vm: FF Factory portal VM' || fail "firewall table"
-! pgrep -af dnsmasq | grep -q fff-isolated || fail "a dnsmasq serves the VM's network"
+nft list table inet fff_vm | matches 'fff-vm: FF Factory portal VM' || fail "firewall table"
+! pgrep -af dnsmasq | matches fff-isolated || fail "a dnsmasq serves the VM's network"
 default_before=$(virsh net-info default 2>/dev/null | awk '/^Autostart:/ {print $2}' || true)
 echo "MEASURE manifest: $(tr '\n' ' ' </var/lib/fff-vm/manifest)"
 # shellcheck disable=SC1091
@@ -137,7 +140,7 @@ g 'sudo nft list table inet fff_guest' >/dev/null || fail "the guest's firewall 
 # The subscription token's store (decision D4), with a dummy token: 0600, fff's, and never printed whole.
 out=$(g 'printf "sk-ant-oat01-ci-dummy-WXYZ\n" >/tmp/k && sudo fffctl claude-token --file /tmp/k; rm -f /tmp/k')
 echo "$out"
-if printf '%s' "$out" | grep -q 'ci-dummy'; then fail "fffctl claude-token printed the token"; fi
+if printf '%s' "$out" | matches 'ci-dummy'; then fail "fffctl claude-token printed the token"; fi
 [ "$(g 'sudo stat -c "%a %U" /srv/fff/secrets/claude-oauth-token')" = "600 fff" ] || fail "the token file is not 0600 fff"
 echo "ok: the token is stored 0600, owned by fff, shown only as its last four characters"
 
@@ -204,7 +207,7 @@ pid1=$(cat /run/libvirt/qemu/$VM.pid)
 /usr/local/sbin/fff-vm nightly --now
 [ "$(cat /run/libvirt/qemu/$VM.pid)" != "$pid1" ] || fail "the nightly did not cold-start QEMU"
 [ "$(boot_id)" != "$b1" ] || fail "the guest did not boot again"
-/usr/local/sbin/fff-vm snapshots | grep -q '^fff-nightly-' || fail "no nightly snapshot"
+/usr/local/sbin/fff-vm snapshots | matches '^fff-nightly-' || fail "no nightly snapshot"
 wait_for 300 "the portal answers after the nightly" health
 journalctl -u fff-vm-nightly --no-pager -n 0 >/dev/null 2>&1 || true
 echo "ok: nightly ($(/usr/local/sbin/fff-vm snapshots | tr '\n' ' '))"

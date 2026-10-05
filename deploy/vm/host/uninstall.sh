@@ -89,7 +89,7 @@ fi
 log "5/6 firewall table, units and files"
 if systemctl cat fff-vm-firewall.service >/dev/null 2>&1; then run_cmd systemctl disable --now fff-vm-firewall.service; fi
 if nft list table inet fff_vm >/dev/null 2>&1; then
-  nft list table inet fff_vm | grep -qF "$FFF_VM_MARK" || refuse "the table inet fff_vm is not fff-vm's"
+  nft list table inet fff_vm | matches -F "$FFF_VM_MARK" || refuse "the table inet fff_vm is not fff-vm's"
   run_cmd nft delete table inet fff_vm
 fi
 for f in /etc/systemd/system/fff-vm-firewall.service /etc/systemd/system/fff-vm-watch.service /etc/systemd/system/fff-vm-watch.timer \

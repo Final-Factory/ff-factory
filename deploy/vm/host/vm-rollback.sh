@@ -37,7 +37,7 @@ list() {
   else qemu-img snapshot -l "$disk" | awk 'NR > 2 {print $2, $4, $5}'; fi
 }
 if [ "$LIST" = 1 ] || [ -z "$SNAP" ]; then list; exit 0; fi
-list | awk '{print $1}' | grep -qxF "$SNAP" || die "no snapshot $SNAP (--list)"
+list | awk '{print $1}' | matches -xF "$SNAP" || die "no snapshot $SNAP (--list)"
 [ "$DRY_RUN" = 1 ] || [ "$YES" = 1 ] || die "this puts the VM back to $SNAP; everything after it is set aside. Add --yes (or --dry-run)"
 stamp=$(date -u +%Y%m%d-%H%M)
 mkdir -p "$FFF_VM_RUN"

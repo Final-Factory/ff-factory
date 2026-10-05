@@ -9,6 +9,9 @@ DRY_RUN=${DRY_RUN:-0}
 log() { printf '%s fff: %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
 warn() { log "WARNING: $*"; }
 die() { log "ERROR: $*"; exit 1; }
+# matches ARGS...: grep that reads all of its input. "grep -q" stops at the first match, and the writer of a pipe into it
+# then dies of SIGPIPE, which pipefail turns into a failure (nft 1.1 on Ubuntu 26.04 hit it).
+matches() { grep "$@" >/dev/null; }
 need_root() { [ "$(id -u)" -eq 0 ] || die "run as root (sudo $0 ...)"; }
 
 run_cmd() {

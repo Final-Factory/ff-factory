@@ -43,7 +43,7 @@ ssh_guest() {
   ssh -i "$FFF_VM_ETC/ssh/id_ed25519" -o UserKnownHostsFile="$FFF_VM_ETC/ssh/known_hosts" -o StrictHostKeyChecking=accept-new \
     -o ConnectTimeout=10 -o BatchMode=yes "$VM_ADMIN_USER@$NET_VM_IP" "$@"
 }
-firewall_ok() { nft list table inet fff_vm 2>/dev/null | grep -qF "$FFF_VM_MARK"; }
+firewall_ok() { nft list table inet fff_vm 2>/dev/null | matches -F "$FFF_VM_MARK"; }
 
 # The firewall table must be there whenever the VM runs (a reload of nftables.service with "flush ruleset" drops it).
 ensure_firewall() {
@@ -88,7 +88,7 @@ cmd_watch() {
   case "$st" in
     running) ;;
     "shut off")
-      if v dominfo "$VM_NAME" | grep -q '^Autostart: *enable'; then
+      if v dominfo "$VM_NAME" | matches '^Autostart: *enable'; then
         log "$VM_NAME is shut off outside maintenance; starting it"
         v start "$VM_NAME" && notify "fff-vm: VM started" "$VM_NAME on $(hostname -s) was off outside the nightly window and was started again."
       fi
@@ -180,7 +180,7 @@ cmd_nightly() {
     [ -z "$out" ] || reason="the guest needs a reboot (/run/reboot-required)"
     pid=$(cat "/run/libvirt/qemu/$VM_NAME.pid" 2>/dev/null || true)
     # An upgrade replaced the QEMU binary the VM still runs.
-    if [ -n "$pid" ] && readlink "/proc/$pid/exe" 2>/dev/null | grep -q '(deleted)'; then
+    if [ -n "$pid" ] && readlink "/proc/$pid/exe" 2>/dev/null | matches '(deleted)'; then
       reason="${reason:+$reason; }the host's QEMU was updated"
     fi
     [ -n "$reason" ] || { log "if-required: no reboot needed tonight"; return 0; }

@@ -43,8 +43,8 @@ See [2.6](#26-voice).
 **No standing agents run in the VM** (Lothsahn, [D16](#8-risks-and-open-decisions)): only the orchestrators and the
 dispatcher do, and other machines run every other agent. Today there is one standing agent, Ben's
 `nightly-regression-sentry` (as the orchestrator reported it: daily at 03:00, opus, `shell_read` and `delegate`, up
-to 75 minutes). Lothsahn chose to run it as an ordinary worker on a worker machine, started by a daily timer; that is
-built in a separate PR. In portal-only mode the VM refuses to start a standing agent of its own (change 19). Their
+to 75 minutes). It moves to a worker machine with the machine assignment described below, under a separate request
+(Lothsahn). In portal-only mode the VM refuses to start a standing agent of its own (change 19). Their
 definitions, schedules and history stay in `data/state.json`, which moves.
 
 An earlier version of this page said that running a standing agent on a worker machine needed new code. That was
@@ -52,8 +52,10 @@ wrong. A standing agent can already be assigned to a machine (`update_standing_a
 `server/standing.ts:241-245`). The portal keeps its cron, budget and run history. That machine's daemon runs the
 Claude process next to its main clone (`place()`, `server/standing.ts:817-834`; `createSession`, `:780`). The
 delegation tools are answered by the portal "wherever its process runs" (`handlers()`, `server/standing.ts:929`).
-What it does not do is choose a machine by the placement rules: it runs on the one machine it is assigned to. The
-move starts a fresh conversation there and a new `NOTES.md` (`:256-260`), so the notes are copied across by hand.
+It runs on the one machine it is assigned to, rather than one the placement rules pick. The move starts a fresh
+conversation there and a new `NOTES.md` (`:256-260`), so the notes are copied across by hand. A cron trigger is read
+in the portal's local time, so the VM's time zone (`VM_TIMEZONE`, UTC by default) moves a 03:00 schedule unless the
+trigger is rewritten or the zone is set to BEAST's.
 
 ## 1. Isolation
 
@@ -857,7 +859,7 @@ it rests on.
 | D13 | The VM's disk | A zvol on the host's pool (`VM_DISK_MODE=zvol`, the default): reserved in full, snapshots, no double copy-on-write | 2.2; both modes tested in CI | Lothsahn | **Decided:** a zvol; the space is there (Lothsahn, 2026-10-05) |
 | D14 | The guest's OS | Ubuntu 26.04 LTS (support to 2031), now the default (`VM_OS_RELEASE=resolute`); 24.04 stays a setting away | 2.1: the image and every package measured as published for resolute; CI boots the 26.04 guest | Lothsahn | **Decided:** 26.04 (Lothsahn, 2026-10-05) |
 | D15 | The nightly restart | Every night (`NIGHTLY_MODE=always`) at 12:00 UTC, after the guest's upgrades at 11:00 and backup at 11:15. `if-required` restarts only when the guest or the host's QEMU needs it | 3, "Why 12:00 UTC": measured, the quietest hour in 30 days of commits | Lothsahn, Ben | **Accepted:** nightly at 12:00 UTC (Lothsahn, 2026-10-05) |
-| D16 | Standing agents | None in the VM: only the orchestrators and the dispatcher run there; the nightly-regression-sentry runs on a worker machine. Two ways: (a) as an ordinary worker started by a daily timer (code, a separate PR), or a standing agent assigned to a machine, which exists today (no code; one fixed machine, not the placement rules) | "What moves"; `server/standing.ts:241-245`, `:780`, `:817-834`, `:929`; `server/timers.ts:21-25` | Lothsahn; Ben (the sentry is his) | **Decided:** no standing agents in the VM, and (a) (Lothsahn, 2026-10-05); the no-code alternative was raised with him after this page had wrongly said it needed code. Ben asked about moving his sentry |
+| D16 | Standing agents | None in the VM: only the orchestrators and the dispatcher run there. The nightly-regression-sentry moves to a worker machine with the machine assignment that exists today (`update_standing_agent` with a machine): the portal keeps its schedule, budget and history, and that machine's daemon runs it, with its delegations still answered and approved by the portal. Its `NOTES.md` is copied across by hand | "What moves"; `server/standing.ts:241-260`, `:780`, `:817-834`, `:929` | Lothsahn; Ben (the sentry is his) | **Decided:** no standing agents in the VM, and the sentry moves with the existing machine assignment, under a separate request (Lothsahn, 2026-10-05). The timer-based worker route is dropped |
 | D17 | The backup target | A Windows account on BEAST used for nothing else, reached by sftp over the tailnet with the VM's backup key; age keys held by Ben and Lothsahn, off the FFBox host | 2.2, 1.5 | Ben (BEAST), Lothsahn | **Agreed** (Lothsahn, 2026-10-05) |
 | D18 | Alerts | The host's VM alerts go to the ntfy topic of FF Factory's outside watch, so one subscription covers both | 3, "Hang detection" | Lothsahn | **Agreed** (Lothsahn, 2026-10-05) |
 | D19 | libvirt's `default` network | Stopped if this install put libvirt on the host and nothing uses it (`DEFAULT_NET_ACTION=auto`); `uninstall.sh` puts it back | 1.3; measured in CI: the package defines it with autostart on | Lothsahn | **Agreed** (Lothsahn, 2026-10-05) |

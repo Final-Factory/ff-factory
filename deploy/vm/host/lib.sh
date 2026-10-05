@@ -17,6 +17,9 @@ DRY_RUN=${DRY_RUN:-0}
 log() { printf '%s fff-vm: %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
 warn() { log "WARNING: $*"; }
 die() { log "ERROR: $*"; exit 1; }
+# matches ARGS...: grep that reads all of its input. "grep -q" stops at the first match, and the writer of a pipe into it
+# then dies of SIGPIPE, which pipefail turns into a failure (nft 1.1 on Ubuntu 26.04 hit it).
+matches() { grep "$@" >/dev/null; }
 # A refusal: something on the host is not ours where we would put ours. Nothing is overridden.
 refuse() { log "REFUSED: $*"; exit 3; }
 
@@ -99,9 +102,9 @@ v() { virsh --connect qemu:///system "$@"; }
 
 dom_exists() { v dominfo "$VM_NAME" >/dev/null 2>&1; }
 dom_state() { v domstate "$VM_NAME" 2>/dev/null | head -n 1 || echo missing; }
-dom_is_ours() { v dumpxml "$VM_NAME" 2>/dev/null | grep -qF "$FFF_VM_MARK"; }
+dom_is_ours() { v dumpxml "$VM_NAME" 2>/dev/null | matches -F "$FFF_VM_MARK"; }
 net_exists() { v net-info "$NET_NAME" >/dev/null 2>&1; }
-net_is_ours() { v net-dumpxml "$NET_NAME" 2>/dev/null | grep -qF "<bridge name='$NET_BRIDGE'" && v net-dumpxml "$NET_NAME" | grep -qF "address='$NET_HOST_IP'"; }
+net_is_ours() { v net-dumpxml "$NET_NAME" 2>/dev/null | matches -F "<bridge name='$NET_BRIDGE'" && v net-dumpxml "$NET_NAME" | matches -F "address='$NET_HOST_IP'"; }
 
 # guest_agent JSON: a guest agent command; prints its "return" (jq), fails when the agent does not answer.
 guest_agent() { v qemu-agent-command "$VM_NAME" "$1" --timeout "${2:-10}" 2>/dev/null | jq -c '.return'; }

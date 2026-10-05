@@ -71,7 +71,7 @@ EOF
 log "3/9 packages"
 pkgs=(nodejs git git-lfs gh openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades)
 missing=()
-for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || missing+=("$p"); done
+for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | matches 'install ok installed' || missing+=("$p"); done
 if [ -n "$c" ] || [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q; fi
 if [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${missing[@]}"; fi
 if [ "$DRY_RUN" != 1 ]; then
@@ -95,7 +95,7 @@ run_cmd install -d -m 0755 /etc/fff
 # Settings for the FF Factory portal in this VM. Defaults and what each means: /usr/local/lib/fff/fff.conf.example.
 EOF
 # --repo is remembered: the updater reads it from here later.
-if [ -n "$REPO_URL" ] && ! grep -qxF "FFF_REPO_URL=$REPO_URL" "$FFF_CONF" 2>/dev/null; then
+if [ -n "$REPO_URL" ] && ! matches -xF "FFF_REPO_URL=$REPO_URL" "$FFF_CONF" 2>/dev/null; then
   if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would set FFF_REPO_URL=$REPO_URL in $FFF_CONF"; else
     sed -i '/^FFF_REPO_URL=/d' "$FFF_CONF"
     echo "FFF_REPO_URL=$REPO_URL" >>"$FFF_CONF"

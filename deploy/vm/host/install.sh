@@ -46,7 +46,7 @@ log "1/10 preflight"
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] || die "Ubuntu only (this is ${PRETTY_NAME:-unknown})"
 log "host: $PRETTY_NAME, kernel $(uname -r), $(nproc) CPUs, $(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo) RAM"
-grep -Eqw 'vmx|svm' /proc/cpuinfo || die "the CPU shows no hardware virtualization (vmx/svm): turn on VT-x/AMD-V in the firmware"
+matches -Ew 'vmx|svm' /proc/cpuinfo || die "the CPU shows no hardware virtualization (vmx/svm): turn on VT-x/AMD-V in the firmware"
 command -v systemctl >/dev/null || die "systemd is required"
 mem_free_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
 if [ "$mem_free_mb" -lt $((VM_MEMORY_MB + 2048)) ] && ! dom_exists 2>/dev/null; then
@@ -56,23 +56,23 @@ fi
 # ---------------------------------------------------------------- 2. conflicts that need no libvirt
 log "2/10 conflicts on the host (refuse rather than override)"
 if command -v nft >/dev/null; then
-  if nft list table inet fff_vm >/dev/null 2>&1 && ! nft list table inet fff_vm | grep -qF "$FFF_VM_MARK"; then
+  if nft list table inet fff_vm >/dev/null 2>&1 && ! nft list table inet fff_vm | matches -F "$FFF_VM_MARK"; then
     refuse "an nftables table 'inet fff_vm' exists and is not this installer's"
   fi
   log "nftables tables now: $(nft list tables 2>/dev/null | tr '\n' ';' || true)"
-  if nft list ruleset 2>/dev/null | grep -Eq 'hook forward .*policy drop'; then
+  if nft list ruleset 2>/dev/null | matches -E 'hook forward .*policy drop'; then
     warn "a forward chain on this host drops by default; libvirt adds its own accept rules for the VM's NAT, check that the VM reaches the internet (the dry run of the guest install does)"
   fi
 fi
-if systemctl is-enabled nftables.service >/dev/null 2>&1 && grep -q 'flush ruleset' /etc/nftables.conf 2>/dev/null; then
+if systemctl is-enabled nftables.service >/dev/null 2>&1 && matches 'flush ruleset' /etc/nftables.conf 2>/dev/null; then
   warn "nftables.service is enabled and /etc/nftables.conf flushes the whole ruleset: a reload of it also drops the VM's isolation table. fff-vm watch puts it back within a minute and alerts; nothing here edits /etc/nftables.conf"
 fi
 # The subnet must be free: no address or route of the host in it, unless it is our bridge's.
 subnet="${NET_HOST_IP%.*}.0/$NET_PREFIX"
-if ip -4 -o addr show | grep -v " $NET_BRIDGE " | grep -qF " ${NET_HOST_IP%.*}."; then
+if ip -4 -o addr show | grep -v " $NET_BRIDGE " | matches -F " ${NET_HOST_IP%.*}."; then
   refuse "an interface other than $NET_BRIDGE already has an address in ${NET_HOST_IP%.*}.0/$NET_PREFIX; pick another NET_HOST_IP/NET_VM_IP"
 fi
-if ip -4 route show | grep -v "dev $NET_BRIDGE" | grep -qE "^${NET_HOST_IP%.*}\.0/"; then
+if ip -4 route show | grep -v "dev $NET_BRIDGE" | matches -E "^${NET_HOST_IP%.*}\.0/"; then
   refuse "a route for $subnet exists on another interface"
 fi
 # A wider route that covers the subnet (a VPN's 10.0.0.0/8, say) is shadowed by the bridge's own /24 for the VM's
@@ -112,9 +112,9 @@ log "3/10 packages"
 # ubuntu-keyring holds /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg (ubuntu-cloudimage-keyring is a dummy since noble).
 pkgs=(qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients cloud-image-utils ubuntu-keyring gpgv nftables jq curl)
 missing=()
-for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || missing+=("$p"); done
+for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | matches 'install ok installed' || missing+=("$p"); done
 libvirt_was_installed=yes
-dpkg-query -W -f='${Status}' libvirt-daemon-system 2>/dev/null | grep -q 'install ok installed' || libvirt_was_installed=no
+dpkg-query -W -f='${Status}' libvirt-daemon-system 2>/dev/null | matches 'install ok installed' || libvirt_was_installed=no
 [ -n "$(manifest_get libvirt_preinstalled)" ] || manifest_set libvirt_preinstalled "$libvirt_was_installed"
 if [ ${#missing[@]} -gt 0 ]; then
   log "installing: ${missing[*]}"
@@ -137,16 +137,16 @@ if command -v virsh >/dev/null && v version >/dev/null 2>&1; then
   if dom_exists && ! dom_is_ours; then refuse "a libvirt domain named $VM_NAME exists and is not this installer's"; fi
   other=$(v net-list --all --name | grep -v -e '^$' -e "^$NET_NAME\$" || true)
   for n in $other; do
-    if v net-dumpxml "$n" | grep -qE "address='${NET_HOST_IP%.*}\.[0-9]+'"; then refuse "libvirt network $n uses ${NET_HOST_IP%.*}.0/$NET_PREFIX"; fi
+    if v net-dumpxml "$n" | matches -E "address='${NET_HOST_IP%.*}\.[0-9]+'"; then refuse "libvirt network $n uses ${NET_HOST_IP%.*}.0/$NET_PREFIX"; fi
   done
   # Ports: libvirt's remote access (16509 plain, 16514 TLS) would let anyone who reaches the host, ffdev included,
   # try to control the VM. This install opens no port of its own and needs none.
-  if ss -Hltn '( sport = :16509 or sport = :16514 )' 2>/dev/null | grep -q .; then
+  if ss -Hltn '( sport = :16509 or sport = :16514 )' 2>/dev/null | matches .; then
     refuse "libvirtd listens on TCP (16509/16514): turn its remote access off (libvirtd-tcp.socket, libvirtd-tls.socket) first"
   fi
   log "libvirt networks: $(v net-list --all --name | grep -v '^$' | tr '\n' ' ')"
   log "libvirt domains: $(v list --all --name | grep -v '^$' | tr '\n' ' ')"
-  if v dominfo "$VM_NAME" >/dev/null 2>&1; then :; elif v list --all --name | grep -v '^$' | grep -q .; then
+  if v dominfo "$VM_NAME" >/dev/null 2>&1; then :; elif v list --all --name | grep -v '^$' | matches .; then
     warn "other libvirt domains exist on this host; the VM's firewall table applies to $NET_BRIDGE only"
   fi
 else
@@ -240,7 +240,7 @@ run_cmd systemctl enable fff-vm-firewall.service
 if [ -n "$nft_changed$unit_changed" ] || ! nft list table inet fff_vm >/dev/null 2>&1; then
   run_cmd systemctl reload-or-restart fff-vm-firewall.service
 fi
-[ "$DRY_RUN" = 1 ] || nft list table inet fff_vm | grep -qF "$FFF_VM_MARK" || die "the firewall table did not load"
+[ "$DRY_RUN" = 1 ] || nft list table inet fff_vm | matches -F "$FFF_VM_MARK" || die "the firewall table did not load"
 
 # ---------------------------------------------------------------- 6. the isolated network
 log "6/10 network $NET_NAME ($NET_BRIDGE, ${NET_HOST_IP%.*}.0/$NET_PREFIX, NAT, no DHCP, no DNS)"
@@ -265,12 +265,12 @@ run_cmd virsh --connect qemu:///system net-autostart "$NET_NAME"
 if [ "$DRY_RUN" = 1 ] || [ "$(v net-info "$NET_NAME" | awk '/^Active:/ {print $2}')" != yes ]; then
   run_cmd virsh --connect qemu:///system net-start "$NET_NAME"
 fi
-if [ "$DRY_RUN" != 1 ] && pgrep -af dnsmasq | grep -q "$NET_NAME"; then warn "a dnsmasq runs for $NET_NAME although DHCP and DNS are off"; fi
+if [ "$DRY_RUN" != 1 ] && pgrep -af dnsmasq | matches "$NET_NAME"; then warn "a dnsmasq runs for $NET_NAME although DHCP and DNS are off"; fi
 
 # ---------------------------------------------------------------- 7. libvirt's default network
 log "7/10 libvirt's default network (DEFAULT_NET_ACTION=$DEFAULT_NET_ACTION)"
 if command -v virsh >/dev/null && v net-info default >/dev/null 2>&1; then
-  users=$(for d in $(v list --all --name); do v dumpxml "$d" | grep -q "<source network='default'" && echo "$d"; done || true)
+  users=$(for d in $(v list --all --name); do v dumpxml "$d" | matches "<source network='default'" && echo "$d"; done || true)
   act=$DEFAULT_NET_ACTION
   if [ "$act" = auto ]; then
     if [ "$(manifest_get libvirt_preinstalled)" = no ] && [ -z "$users" ]; then act=disable; else act=leave; fi
