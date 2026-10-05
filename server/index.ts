@@ -52,6 +52,7 @@ import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, p
 import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, sessionSource, tokenKey, tokenLabel } from './usage.ts';
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
+import { startBaseRefresh } from './baseRefresh.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AppState, CreateSandboxRequest, HostStatus, Machine, PermissionDecisionRequest, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 
@@ -453,6 +454,8 @@ const ledgerSweep = new LedgerSweep({
   limitsClear: (s) => limitsClearFor(s),
   intakeMerged: () => intake.checkMerged(false),
 }).start();
+// The orchestrators' base clone, kept on origin's newest code (w467, server/baseRefresh.ts; config repo.refreshMinutes).
+startBaseRefresh(cfg);
 max.onEvent = (ev) => intake.onMaxEvent(ev);
 providers.onConversation = (c) => intake.onConversation(c);
 providers.onRequest = (m) => intake.onRequest(m);

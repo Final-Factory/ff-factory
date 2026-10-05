@@ -63,7 +63,11 @@ except its own. Permission mode is `bypassPermissions`, bounded by two `PreToolU
    server's code and data).
 2. `standingGuard`: Write/Edit only in its own folder; shell commands must be on an allowlist
    that depends on the groups, and may not name another sandbox, the base clone, or use command
-   substitution, heredocs or output redirection (write files with the Write tool instead).
+   substitution, heredocs or output redirection (write files with the Write tool instead). Paths are
+   recognised with a drive letter and, since w467 (change 8), as absolute POSIX paths (`/srv/fff/base`
+   in the portal VM). It also keeps Read, Glob, Grep and the shell off FF Factory's secrets and data
+   (config.json, data/, the secrets folder, ~/.ssh, Claude's and gh's credentials, a machine daemon's
+   daemon.json): [orchestrators.md](orchestrators.md#what-orchestrators-and-standing-agents-may-not-read).
 
 Tool groups (none by default, so the default is read-only on files only):
 

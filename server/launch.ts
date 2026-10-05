@@ -7,6 +7,7 @@ import { standingGuard } from './standingGuard.ts';
 import { publicIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
 import type { StandingToolGroup } from '../shared/types.ts';
+import type { SecretRules } from './secretGuard.ts';
 
 /** A stdio MCP server the agent process starts (on a machine: the daemon's Unity MCP server, machine/unityMcp.ts). */
 export interface StdioServer {
@@ -52,7 +53,8 @@ export interface LaunchSpec {
     gameRepos: string[];
     ownCheckout?: boolean;
     denyToolPrefixes?: string[];
-    standing?: { folder: string; groups: StandingToolGroup[]; offLimits: string[] };
+    /** `secrets`: what it may not read (server/secretGuard.ts); the home secrets are added where it runs. */
+    standing?: { folder: string; groups: StandingToolGroup[]; offLimits: string[]; secrets?: SecretRules };
     /** Public repos and their commit identity (config publicGitIdentity). */
     publicIdentity?: { repos: string[]; name?: string; email?: string };
   };
