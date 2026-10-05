@@ -29,13 +29,16 @@ and the Macs within reach of FFBox's `ffdev` containers (design 1.4, rule 1).
    "nodeAttrs": [ { "target": ["tag:fff-portal"], "attr": ["funnel"] } ]
    ```
 
-   If the policy still has the default allow-all rule, the tagged node can reach every device on every port anyway.
-   Whether to replace it is Ben's call (question 1 below).
+   **Done (Ben, 2026-10-05):** the tailnet now runs these explicit rules in place of the default allow-all. Ben
+   checked them: BEAST's ssh to the machines, the daemons to the portal on 443, Funnel and pings all pass. The policy
+   before the change is kept as [`tailnet-policy-before-2026-10-05.hujson`](tailnet-policy-before-2026-10-05.hujson),
+   to paste back if something breaks. It is Tailscale's default allow-all, whose sample emails and IP are
+   placeholders.
    Rollback: [tailnet-policy-before-2026-10-05.hujson](tailnet-policy-before-2026-10-05.hujson) is the policy as it
    was before this change (copied out by Ben); paste this file back into the JSON editor and Save.
 2. **An auth key** (Settings, Keys, Generate auth key): **not** reusable, **not** ephemeral, **pre-approved**, tag
-   `tag:fff-portal`, expiry 1 day. The key only has to work once; a tagged node's own key does not expire. Send it to
-   Lothsahn privately (not in a chat the agents read).
+   `tag:fff-portal`, expiry 1 day. The key only has to work once; a tagged node's own key does not expire. Ben makes it
+   when Lothsahn reaches section 3 and sends it to him privately, not in a chat the agents read.
 
 ## 2. Lothsahn, on the FFBox host (as root)
 
@@ -54,7 +57,7 @@ sudo install -d -m 0755 /etc/fff-vm
 sudo cp deploy/vm/host/fff-vm.conf.example /etc/fff-vm/fff-vm.conf
 sudoedit /etc/fff-vm/fff-vm.conf
 #   VM_ZVOL_PARENT=<pool>/fff-vm        a new dataset on a pool from `zpool list` with 130 GB free (D13)
-#   VM_TIMEZONE=America/Denver          BEAST's zone, so the portal's cron schedules keep their times (question 3)
+#   VM_TIMEZONE=America/Denver          BEAST's zone (Ben confirmed), so the portal's cron schedules keep their times
 
 # 2.4 Your ssh key for the VM's admin account, and the alerts' ntfy URL
 cat ~/.ssh/id_ed25519.pub | sudo tee /etc/fff-vm/admin_authorized_keys
@@ -127,16 +130,14 @@ what the install added.
 | Choice | Value | Reason |
 |---|---|---|
 | Node name | `fff` | D3: neutral, will not need to change; the Funnel URL is `https://fff.<tailnet>.ts.net` |
-| VM time zone | BEAST's (America/Denver, assumed) | Cron triggers and daily budgets are read in the portal's local time, so the move keeps their times. The guest's update, backup and nightly restart times are set in UTC either way. BEAST's commit and log timestamps are at -06:00 |
+| VM time zone | America/Denver, BEAST's own (Ben confirmed, 2026-10-05) | Cron triggers and daily budgets are read in the portal's local time, so the move keeps their times. The guest's update, backup and nightly restart times are set in UTC either way |
 | Private network | 10.213.41.0/24 (host .1, VM .10) | Unlikely to collide with a home LAN or Docker's ranges; the installer refuses if it does |
 | Guest resolvers | 1.1.1.1, 9.9.9.9 | The VM uses no DNS service on the host (design 1.3) |
 | Funnel on the first join | on | Logins exist only once `node server/user.ts` runs in the VM, so an empty portal behind Funnel cannot be signed in to |
 
-## Questions for Ben (through the orchestrator)
+## Questions for Ben: answered (2026-10-05, relayed by the orchestrator)
 
-1. **Is the tailnet policy still the default allow-all?** If so, the VM's tagged node can reach every device on every
-   port. Recommendation: replace allow-all with explicit rules (the grants above, plus whatever people's devices
-   already need) before the portal holds real data. Tonight's empty VM is fine either way.
-2. **The auth key (section 1.2):** please send one to Lothsahn before he starts section 3.
-3. **BEAST's time zone:** is it America/Denver (`tzutil /g` on BEAST)? The VM copies it so the portal's schedules keep
-   their times.
+1. **The tailnet policy:** the default allow-all is replaced by the explicit rules in section 1, checked by Ben; the
+   old policy is kept as the rollback file.
+2. **The auth key:** Ben makes it when Lothsahn reaches section 3 and sends it privately.
+3. **BEAST's time zone:** America/Denver, confirmed, so `VM_TIMEZONE=America/Denver`.
