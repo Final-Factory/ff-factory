@@ -1,0 +1,12 @@
+﻿280 samples from 2026-10-05T14:27:48 to 2026-10-05T16:51:27 (2.4 h); memory MB summed per role (processes and their tools); CPU % of one core; n = processes of the role at once
+role                                                 WS med   WS p95   WS max  priv med  priv max  CPU avg  CPU p95  CPU max  n med  n max  IO GB/day
+claude (session not matched: new, or not resumed)         0        0      203         0       472      0.0      0.0      0.0      0      1       0.00
+dispatcher                                              139      225      417       467       559      0.5      3.3      6.7      1      1       0.47
+orchestrator                                            244      456      556       994     1,246      0.6      3.3     10.0      2      2       2.34
+portal (node server)                                    150      206      459       213       434      4.8     10.0     43.3      1      1     313.90
+ALL                                                     522      855    1,066     1,674     1,977      5.8     13.3     50.0
+claude processes under the portal at once: median 3, max 3; one claude.exe's own working set: median 115 MB, max 342 MB
+distinct claude sessions seen: 3
+host network adapters (the whole host, not only the portal): received 2.32 GB/day, sent 10.73 GB/day
+this script: working set median 71 MB, CPU 0.27% of one core, sample median 223 ms
+server pids seen: 42608 -> 0 -> 50812 -> 49668

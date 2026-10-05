@@ -1,0 +1,8 @@
+﻿FF Factory portal footprint, measured on BEAST from 2026-10-05T14:27:47 for 1440 min every 30 s
+app ; data ; base clone ; standing agents 
+host: 32 logical CPUs, 63.8 GB RAM
+no state.json read ()
+2026-10-05T16:36:29 RESTART? the server process 42608 ended; looking for a new one on port 8790
+2026-10-05T16:37:31 RESTART: new server process 50812 (listening on 8790)
+2026-10-05T16:45:37 RESTART? the server process 50812 ended; looking for a new one on port 8790
+2026-10-05T16:46:40 RESTART: new server process 49668 (listening on 8790)
