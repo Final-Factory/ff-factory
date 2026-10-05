@@ -466,10 +466,33 @@ LothDesktop and Beast, not just when BEAST is full").
   work on a computer other than the next one, naming it, why, and its load. It never refuses or moves anything. A
   `start_agent` into a sandbox whose label holds its work (a worker going on where it was) gets none, and does not count
   as a placement.
+- **A recorded preference** (w428, Ben on 2026-10-05: "favor using lothdesktop and the m5 and m3 because beast is
+  having issues with its processor and keeps crashing"): config `placement`, set with `set_app_config` and kept across
+  restarts, so the routing does not rest on the dispatcher remembering it.
+
+  ```json
+  "placement": {
+    "prefer": ["lothdesktop", "m5", "m3"],
+    "avoid": { "beast": "BEAST unstable, 2026-10-05" }
+  }
+  ```
+
+  `placement.prefer` names computers in order (machine ids, or `this host` / `host` for this host's own pool):
+  the next new work goes to the first of them with room. `placement.avoid` keeps a computer off unless nothing else
+  has room, with the reason shown beside it. The rest come between them, spread by room as above, sandbox computers
+  before main clones. `null` clears either (`set_app_config placement.avoid null` once BEAST is fixed). The Capacity
+  block tags each computer `[preferred #n]`, `[avoided: <why>]` or `[main clone]`, and its last line says why the next
+  one was picked ("first with room in placement.prefer (lothdesktop > m5 > m3)", "only avoided computers have room").
+  The dispatcher's prompt shows the setting in force.
+- **Main-clone machines** (no `sandbox_root`: the m5, the m3) are candidates too, for work that can run in a main
+  clone: `start_agent` with `machine` alone. Their line counts live agents in the main clone against the machine's
+  `max_agents` and its RAM. A worker there runs next to its owner's own uncommitted work and backs it up to
+  `ff-local-backups` before it sets any aside (the harness enforces the backup). This host's own daemon is never one:
+  its main clone is the base its sandboxes are worktrees of.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max goes to
-  LothDesktop (only it has the ffdiscord config). BEAST keeps only what needs it: FF Factory's own repo or its deploys,
-  ssh to the M5 when LothDesktop cannot reach it, a brief that pins BEAST. A worker going on in its own sandbox stays
+  LothDesktop (only it has the ffdiscord config). A computer that is avoided or not next keeps only what needs it: FF
+  Factory's own repo or its deploys, `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it. A worker going on in its own sandbox stays
   there, and running workers are never moved.
 - **The numbers are judgments**: 85% RAM (BEAST at 86% was overloaded, LothDesktop at 47% had room; one more editor
   takes 8-12 GB, about 15% of 64 GB) and the 10-point margin (one agent of ten slots, or about 6 GB of 64). Live agents

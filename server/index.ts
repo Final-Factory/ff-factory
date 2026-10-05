@@ -12,7 +12,7 @@ import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, machineForPath, parseSandboxRef } from './machines.ts';
 import { hostSandboxFrom } from './hostMigration.ts';
-import { ProviderManager } from './providers.ts';
+import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationView } from './providers.ts';
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
@@ -563,6 +563,13 @@ route('GET', '/api/me', async (req) => {
 // ---- providers (docs/ffbox-integration.md): what FFBox's connector reported, newest first
 route('GET', '/api/providers/ffbox/conversations', async (_r, _m, url) => providers.conversations(Number(url.searchParams.get('limit')) || 100));
 route('GET', '/api/providers/ffbox/intake', async (_r, _m, url) => providers.intake(Number(url.searchParams.get('limit')) || 200));
+// One conversation, read through the connector (w426): FFBox's own page is on Lothsahn's network only.
+route('GET', '/api/providers/ffbox/conversation/([A-Za-z0-9._:-]{1,80})', async (_r, [id], url) => {
+  const offset = Math.max(0, Math.min(Number(url.searchParams.get('offset')) || 0, 100000));
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 10, 20));
+  const summary = providers.conversations(KEEP_CONVERSATIONS).find((c) => c.id === id);
+  return conversationView(id, await providers.query('conversation', { id: conversationQueryId(id), offset, limit }), summary);
+});
 // Grouped by coarse signature, with the numbers automatic investigations will be capped by (shared/intake.ts).
 route('GET', '/api/providers/ffbox/signatures', async () => groupIntake(providers.intake(2000)));
 

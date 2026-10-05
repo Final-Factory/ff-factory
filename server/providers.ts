@@ -39,7 +39,7 @@ import {
   type ReportChunkMessage,
   type ReportEndMessage,
 } from './providerProtocol.ts';
-import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderIntakeEvent, ProviderMetrics, ProviderUpdater, ProviderDevRequests } from '../shared/types.ts';
+import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderConversationView, ProviderIntakeEvent, ProviderMetrics, ProviderTurn, ProviderUpdater, ProviderDevRequests } from '../shared/types.ts';
 import { metricsLine } from '../shared/providerMetrics.ts';
 import { updaterHealth } from '../shared/updaterHealth.ts';
 import { devRequestsHealth } from '../shared/devRequestsHealth.ts';
@@ -49,7 +49,7 @@ import { emptyDevState, type DevLink, type DevRequests, type DevState } from './
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
 /** How many of each list are kept (newest). */
-const KEEP_CONVERSATIONS = 500;
+export const KEEP_CONVERSATIONS = 500;
 const KEEP_INTAKE = 2000;
 const DAY_MS = 24 * 3600_000;
 /** FFBox's status is asked this often while connected (its dev_requests block), and first this soon after hello. */
@@ -236,6 +236,96 @@ interface PendingTransfer {
 
 /** Answers never kept for the "last known" fallback: a page of logs or reports, or one report, would answer another question. */
 const NOT_KEPT = new Set(['logs', 'reports', 'report']);
+
+/** FFBox's conversation id (docs/ffbox-connector-contract.md, `conversation`). */
+export const CONVERSATION_ID = /^[A-Za-z0-9._:-]{1,80}$/;
+
+/** The `conversation` query's id: FFBox's ids are whole numbers, and it checks them as such. */
+export const conversationQueryId = (id: string): number | string => (/^\d{1,13}$/.test(id) ? Number(id) : id);
+
+// The conversation page (w426): FFBox's `conversation` answer, every field checked and every text cleaned here, since
+// the web UI shows it to people as it stands. Unknown or ill-typed fields are dropped, never passed through.
+const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+const word = (v: unknown, max = 40) => (typeof v === 'string' && v.trim() ? cleanText(v, max) : undefined);
+const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
+const iso = (v: unknown) => (typeof v === 'string' && !isNaN(Date.parse(v)) ? v.slice(0, 40) : undefined);
+const oneOf = <T extends string>(v: unknown, of: readonly T[]) => (of.includes(v as T) ? (v as T) : undefined);
+/** Several lines of FFBox's text (a message, a reply, a summary): secrets redacted, control characters but newlines out. */
+const block = (v: unknown, max = 8000) =>
+  typeof v === 'string' && v.trim()
+    ? redactSecrets(v)
+        .replace(/\r\n?/g, '\n')
+        .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g, '')
+        .trim()
+        .slice(0, max)
+    : undefined;
+const compact = <T extends Record<string, unknown>>(o: T) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
+const list = (v: unknown, max: number) => (Array.isArray(v) ? v.slice(0, max).map(obj) : []);
+
+/** One conversation for FF Factory's own page, from a `conversation` answer (live or kept) and its list entry. */
+export function conversationView(id: string, a: QueryAnswer, summary?: ProviderConversation): ProviderConversationView {
+  const d = a.data ? obj(a.data) : undefined;
+  const c = obj(d?.conversation);
+  const discord = typeof c.discordLink === 'string' && /^https:\/\/discord\.com\/channels\/[\d/]+$/.test(c.discordLink) ? c.discordLink : undefined;
+  const page = obj(d?.page);
+  return compact({
+    id,
+    live: a.live && a.ok,
+    at: iso(a.at),
+    receivedAt: iso(a.receivedAt),
+    error: d ? undefined : word(a.error ?? 'no_answer', 40),
+    reason: d ? undefined : word(a.reason ?? a.detail, 300),
+    summary,
+    conversation: d
+      ? compact({
+          title: word(c.title, 300),
+          state: word(c.state),
+          kind: word(c.kind),
+          agentClass: word(c.agentClass),
+          branch: word(c.branch, 200),
+          verdict: word(c.verdict),
+          costUsd: num(c.costUsd),
+          discordLink: discord,
+          reportIds: Array.isArray(c.reportIds) ? c.reportIds.filter((r): r is string => typeof r === 'string').slice(0, 20).map((r) => cleanText(r, 80)) : undefined,
+          ledger: typeof c.ledger === 'string' && /^w\d{1,6}$/.test(c.ledger) ? c.ledger : undefined,
+          updatedAt: iso(c.updatedAt),
+        })
+      : undefined,
+    turns: list(d?.turns, 50).map((t): ProviderTurn =>
+      compact({
+        id: num(t.id),
+        seq: num(t.seq),
+        trigger: word(t.trigger),
+        status: word(t.status),
+        requester: oneOf(t.requester, ['operator', 'player'] as const),
+        venue: oneOf(t.venue, ['public', 'private'] as const),
+        queuedAt: iso(t.queuedAt),
+        startedAt: iso(t.startedAt),
+        endedAt: iso(t.endedAt),
+        error: word(t.error, 300),
+        summary: block(t.summary),
+        runs: list(t.runs, 20).map((r) => {
+          const v = obj(r.verification);
+          return compact({
+            state: word(r.state),
+            costUsd: num(r.costUsd),
+            numTurns: num(r.numTurns),
+            agentSecs: num(r.agentSecs),
+            branch: word(r.branch, 200),
+            pushed: bool(r.pushed),
+            pr: num(r.pr),
+            noBranchReason: word(r.noBranchReason, 300),
+            verification: compact({ ran: bool(v.ran), compiled: bool(v.compiled), testsRun: num(v.testsRun), testsPassed: num(v.testsPassed), testsFailed: num(v.testsFailed) }),
+          });
+        }),
+        messages: list(t.messages, 20).map((m) => compact({ at: iso(m.at), from: oneOf(m.from, ['operator', 'player', 'bot'] as const), name: word(m.name, 60), text: block(m.text) })),
+        replies: list(t.replies, 10).map((r) => compact({ at: iso(r.at), status: word(r.status), text: block(r.text) })),
+      }),
+    ),
+    page: d && num(page.total) !== undefined ? { offset: num(page.offset) ?? 0, limit: num(page.limit) ?? 0, total: num(page.total)! } : undefined,
+  });
+}
 
 /** A query's answer as the orchestrator's tool shows it: data, labelled live or last known, redacted again. */
 export function describeQuery(a: QueryAnswer): string {

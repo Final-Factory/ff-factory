@@ -291,6 +291,12 @@ export interface Config {
    * caps `maxFileMB` (200), `maxCallMB` (500), `maxFiles` (40).
    */
   review?: Partial<ReviewConfig>;
+  /**
+   * Where new game-repo work goes first (w428, docs/machines.md "Placing work"): `prefer`, computers in order (machine
+   * ids, or "this host"), and `avoid`, computers kept off unless nothing else has room, each with why. Set with
+   * set_app_config placement.prefer / placement.avoid; null clears.
+   */
+  placement?: { prefer?: string[]; avoid?: Record<string, string> };
   /** Paths no sandbox agent may write to or mention in a shell command (e.g. the live co-op checkout). */
   protectedPaths: string[];
   limits: {

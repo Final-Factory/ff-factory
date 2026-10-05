@@ -6,6 +6,7 @@ import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret } from './secret
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
+import { placeId } from './placement.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 
 /**
@@ -63,6 +64,9 @@ export const SETTABLE_KEYS = [
   'intake.ffbox',
   // Who may approve or decline intake requests (docs/intake.md): login names known to identity. The owner's only.
   'intake.reviewers',
+  // Where new game-repo work goes first, and which computers it stays off (w428, docs/machines.md "Placing work").
+  'placement.prefer',
+  'placement.avoid',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
@@ -358,6 +362,27 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return checkDevRequests(value);
     case 'intake.reviewers':
       return checkReviewers(value, users ?? []);
+    case 'placement.prefer': {
+      const list = typeof value === 'string' ? value.split(',') : value;
+      if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) throw new Error('placement.prefer is a list of computers, first choice first: machine ids such as "lothdesktop", or "this host" (or one comma-separated string)');
+      const ids = [...new Set(list.map((x) => placeId(x as string)).filter(Boolean))];
+      const bad = ids.find((x) => x !== 'this host' && !MACHINE_KEY.test(x));
+      if (bad) throw new Error(`placement.prefer: "${bad.slice(0, 40)}" is not a machine id (letters, digits, dashes) or "this host"`);
+      if (ids.length > 12) throw new Error('placement.prefer names at most 12 computers');
+      return ids.length ? ids : undefined;
+    }
+    case 'placement.avoid': {
+      if (typeof value !== 'object' || Array.isArray(value)) throw new Error('placement.avoid is an object: computer id to why, e.g. { "beast": "BEAST unstable, 2026-10-05" }');
+      const out: Record<string, string> = {};
+      for (const [k, why] of Object.entries(value as Record<string, unknown>)) {
+        const id = placeId(k);
+        if (id !== 'this host' && !MACHINE_KEY.test(id)) throw new Error(`placement.avoid: "${k.slice(0, 40)}" is not a machine id or "this host"`);
+        if (typeof why !== 'string' || !oneLine(why) || oneLine(why).length > 200) throw new Error(`placement.avoid.${id}: say why in one line of at most 200 characters`);
+        out[id] = oneLine(why);
+      }
+      if (Object.keys(out).length > 12) throw new Error('placement.avoid names at most 12 computers');
+      return Object.keys(out).length ? out : undefined;
+    }
     case 'voice.ttsVoice': {
       if (typeof value !== 'string' || !/^[a-z]{2}_[a-z]+$/.test(value.trim())) throw new Error('voice.ttsVoice is a Kokoro voice name such as "af_heart" or "bm_george"');
       return value.trim();
@@ -473,6 +498,15 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   }
   else if (key === 'intake.ffbox') cfg.intake = { ...cfg.intake, ffbox: v as IntakeConfig['ffbox'] };
   else if (key === 'intake.reviewers') cfg.intake = { ...cfg.intake, reviewers: v as string[] | undefined };
+  else if (key === 'placement.prefer' || key === 'placement.avoid') {
+    const p = { ...cfg.placement };
+    if (key === 'placement.prefer') {
+      if (v === undefined) delete p.prefer;
+      else p.prefer = v as string[];
+    } else if (v === undefined) delete p.avoid;
+    else p.avoid = v as Record<string, string>;
+    cfg.placement = p;
+  }
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;

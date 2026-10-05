@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ProviderManager, describeLogs, describeQuery, devRequestsFrom, ffboxLogsArgs } from './providers.ts';
+import { ProviderManager, conversationQueryId, conversationView, describeLogs, describeQuery, devRequestsFrom, ffboxLogsArgs } from './providers.ts';
+import { ffboxConversationHref, isFfboxConversationId } from '../shared/ffboxLinks.ts';
 import { devRequestsHealth } from '../shared/devRequestsHealth.ts';
 import { cpuPct, metricsLine, metricsStale, METRICS_STALE_MS } from '../shared/providerMetrics.ts';
 import { updaterHealth, UPDATER_STALE_INTERVALS } from '../shared/updaterHealth.ts';
@@ -13,7 +14,7 @@ import type { ProviderUpdater } from '../shared/types.ts';
 import { CLOSE, LIMITS, PROVIDER_PROTOCOL, PROVIDER_TOKEN, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
 import { normalizeSetting, setAppConfig } from './appConfig.ts';
 import { redactSecrets } from './secrets.ts';
-import { MockConnector, SAMPLE_CLASSES, SAMPLE_CONVERSATIONS, SAMPLE_INTAKE } from '../e2e/mockConnector.ts';
+import { MockConnector, SAMPLE_CLASSES, SAMPLE_CONVERSATION_ANSWER, SAMPLE_CONVERSATIONS, SAMPLE_INTAKE } from '../e2e/mockConnector.ts';
 import type { Config } from './config.ts';
 
 const until = async (what: string, cond: () => boolean, ms = 5000) => {
@@ -867,4 +868,76 @@ test('logs: the page is shown as FFBox data, every line redacted again here, and
   await until('the link drops', () => !pm.online);
   const off = describeLogs(await pm.query('logs', a.args));
   assert.match(off, /could not answer "logs": offline\. Nothing is kept from an earlier answer\./);
+});
+
+// ---------------------------------------------------------------- the conversation page (w426)
+
+test("conversation page: FFBox's conversation answer, checked and cleaned for the web UI; the LAN link only from the list entry", async (t) => {
+  const { connect, pm } = await setup(t);
+  const c = connect();
+  await c.hello({ protocol: 2, accepts: ['query'] });
+  c.sendSamples();
+  const listed = SAMPLE_CONVERSATIONS[0];
+  await until('812 listed', () => pm.conversations().some((x) => x.id === '812'));
+  const asked: unknown[] = [];
+  let reply: Record<string, unknown> | undefined = { ok: true, at: '2026-09-27T09:20:05Z', data: SAMPLE_CONVERSATION_ANSWER };
+  t.after(
+    c.answerQueries((what, args) => {
+      asked.push({ what, args });
+      return reply;
+    }),
+  );
+  const summary = pm.conversations().find((x) => x.id === '812');
+  const v = conversationView('812', await pm.query('conversation', { id: conversationQueryId('812'), offset: 0, limit: 10 }), summary);
+  assert.deepEqual(asked, [{ what: 'conversation', args: { id: 812, offset: 0, limit: 10 } }], 'a whole-number id goes as a number, as FFBox checks it');
+  assert.equal(v.live, true);
+  assert.equal(v.at, '2026-09-27T09:20:05Z');
+  assert.equal(v.summary?.title, listed.title);
+  assert.equal(v.conversation?.discordLink, 'https://discord.com/channels/530867164866150410/1555000000000000001');
+  assert.equal(v.conversation?.ledger, 'w361');
+  assert.equal((v.conversation as Record<string, unknown>).url, undefined, "the answer's own fields only: no url passes through");
+  assert.equal(v.turns.length, 2);
+  const [t2, t1] = v.turns;
+  assert.equal(t2.seq, 2);
+  assert.equal(t2.requester, 'player');
+  assert.deepEqual(t2.runs[0], { state: 'done', costUsd: 1.2, numTurns: 31, agentSecs: 480, branch: 'ffbox/miner-census-812', pushed: true, pr: 640, verification: { ran: true, compiled: true, testsRun: 41, testsPassed: 40, testsFailed: 1 } });
+  assert.equal(t2.messages[0].text, 'still desyncs <img src=x onerror="document.title=1">\nsecond line', 'newlines kept; the page renders it as text');
+  assert.equal(t2.messages[0].name, 'lifeasweare');
+  assert.deepEqual(t2.replies, [{ at: '2026-09-27T09:19:00Z', status: 'sent', text: 'Found it: a fix is up for review.' }, { at: '2026-09-27T09:19:30Z', status: 'held' }]);
+  assert.equal(t1.runs[0].noBranchReason, 'diagnosis only');
+  assert.deepEqual(v.page, { offset: 0, limit: 10, total: 2 });
+
+  // Untrusted data: a secret in a message is redacted, control characters go, ill-typed fields and odd links are dropped.
+  const token = ['sk-ant-oat01', 'A'.repeat(48)].join('-');
+  const odd = conversationView('9', {
+    what: 'conversation', live: true, ok: true,
+    data: {
+      conversation: { title: 'x\u0007y', discordLink: 'https://evil.example/', ledger: 'not-a-request', costUsd: 'lots' },
+      turns: [{ seq: '3', requester: 'admin', messages: [{ from: 'god', text: `key ${token}‮` }], runs: 'none', replies: [{ status: 'sent', text: 42 }] }, 'junk'],
+    },
+  });
+  assert.deepEqual(odd.conversation, { title: 'x y' });
+  assert.deepEqual(odd.turns[0], { runs: [], messages: [{ text: odd.turns[0].messages[0].text }], replies: [{ status: 'sent' }] });
+  assert.doesNotMatch(odd.turns[0].messages[0].text!, /A{48}/);
+  assert.doesNotMatch(odd.turns[0].messages[0].text!, /‮/);
+  assert.deepEqual(odd.turns[1], { runs: [], messages: [], replies: [] });
+
+  // No answer: the last one kept for this conversation, labelled; none for another, with FFBox's reason.
+  reply = undefined;
+  const kept = conversationView('812', await pm.query('conversation', { id: 812, offset: 0, limit: 10 }, 100), summary);
+  assert.equal(kept.live, false);
+  assert.ok(kept.receivedAt);
+  assert.equal(kept.turns.length, 2);
+  reply = { ok: false, error: 'not_found', reason: 'no such conversation' };
+  const none = conversationView('77', await pm.query('conversation', { id: 77, offset: 0, limit: 10 }));
+  assert.deepEqual({ live: none.live, error: none.error, reason: none.reason, turns: none.turns }, { live: false, error: 'not_found', reason: 'no such conversation', turns: [] });
+});
+
+test('FFBox links: FF Factory\'s own conversation page, with or without the portal\'s address; real conversation ids only', () => {
+  assert.equal(ffboxConversationHref('812'), '#/provider/ffbox/conversation/812');
+  assert.equal(ffboxConversationHref('812', 'https://ff.example.ts.net/'), 'https://ff.example.ts.net/#/provider/ffbox/conversation/812');
+  assert.equal(isFfboxConversationId('812'), true);
+  assert.equal(isFfboxConversationId('request-abc'), false, 'a stand-in for a request filed without a conversation');
+  assert.equal(isFfboxConversationId('../x'), false);
+  assert.equal(isFfboxConversationId(undefined), false);
 });

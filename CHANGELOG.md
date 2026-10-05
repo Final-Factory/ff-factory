@@ -12,6 +12,20 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox conversations open in FF Factory** (w426, asked by Ben). FFBox's links (the FFBox page's conversations,
+  the ledger's "on FFBox", the intake brief) went to its address on Lothsahn's home network
+  (https://192.168.51.10:8787/conversation/684), which opens nowhere else. A conversation now opens on FF Factory's
+  FFBox page, read through the connector's `conversation` query: its turns, the messages each answered, the agent's
+  last words and FFBox's replies, checked and cleaned on the server and shown as plain text. FFBox's own page stays
+  as the second link, "on Loth's network" ([docs/ffbox.md](docs/ffbox.md)).
+
+- **A recorded placement preference** (w428, asked by Ben). Config `placement.prefer` (computers in order, e.g.
+  `["lothdesktop", "m5", "m3"]`) and `placement.avoid` (computer to reason, e.g. `{ "beast": "BEAST unstable,
+  2026-10-05" }`), both settable with `set_app_config` and cleared with null. The Capacity block's "Next new game-repo
+  work" line follows them: the first preferred computer with room, then the rest by room, an avoided one only when
+  nothing else has room. Main-clone machines (the m5, the m3) are candidates now, with their backup rule named
+  ([docs/machines.md](docs/machines.md), "Placing work").
+
 - **Pick several request states at once** (w418 follow-up, asked by Lothsahn). The state chips on the Dispatcher's
   Requests tab, and now on the Intake tab's ledger list, toggle independently (e.g. Stalled and Merged, follow-up
   pending), with "All" and "Clear", and the choice survives a reload. `list_work` takes `state` as one state or a list.
@@ -39,6 +53,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   or closed in the last 7 days, and the message says which on an `[about w426 "title"]` line. Workers with no request
   of the person stay refused; the 3-per-worker limit is unchanged.
 
+- **The ledger cleanup reads the end of a worker's report, and a PR can be one step of a request** (w424, asked by
+  Lothsahn after w424 was closed twice, on #99 and #100, while its worker's reports ended "w424: still open: …"). A
+  worker's `lastResult` kept only the first 1200 characters of a long report, so the cleanup's "more is coming" check
+  never saw the line workers end with; it now keeps the first 400 and the last 800 (`reportClip`). A PR whose
+  description says `Part of: w424` is linked like `Request: w424`, but its merge leaves the request open until a
+  `Request:` PR merges or the worker reports `DONE: w424`; workers' briefs say when to use it.
 - **A hard reset cannot leave a sandbox half-moved, or make a daemon forget its sandboxes** (w424, asked by Lothsahn;
   BEAST hard-resets on WHEA errors). A machine daemon's `sandboxes.json` was written in place without an fsync and read
   as empty when damaged, so the portal would have dropped that machine's sandbox labels and agents; it is now written

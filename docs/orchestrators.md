@@ -152,7 +152,7 @@ Each request is linked to the pull requests its workers open (`WorkItem.prs`: re
 `via`, the evidence). A PR belongs to a request only on strong evidence (`prsOf`, `server/ledgerRules.ts`):
 
 - its description has a line `Request: w293` (the brief of every worker started with a `work_id` asks for it:
-  `requestLineRule`, `server/work.ts`); or
+  `requestLineRule`, `server/work.ts`), or `Part of: w293` for a PR that is one step of the request (below); or
 - the request's own worker opened it: a `gh pr create` in the worker's transcript printed its URL, after the request was
   filed, while the worker was on this request (a worker that did several requests in a row owns each PR for the latest
   request filed by the time it ran the command, `ownerAt`); or
@@ -182,6 +182,13 @@ closes as done, logging "merged as #N (sha) on date", when all of this holds:
   when the build is live and the patch notes are posted, which the worker's final report must say with the notes link); a
   brief that asks for a step after the merge (a 2-peer check, an audit, "after the merge, verify"); a brief that plans
   several PRs ("PR1 data, PR2 presentation"); a worker's last report that says more is coming; or an open question.
+- the last PR to merge does not say `Part of: <id>` (`partOfReason`, w424). A worker marks a PR that is only one step of
+  its request that way (a fix the real work needs first); the request stays open ("#N is one step of it … more
+  follows") until a `Request:` PR of it merges, its worker reports `DONE: <id>`, or the follow-up below asks.
+
+A worker's last report counts by its end, where workers write `<id>: still open: …` or `DONE: <id>`: `lastResult` keeps
+a long report's first 400 and last 800 characters (`reportClip`, `server/sessions.ts`). It used to keep only the first
+1200, so on 2026-10-05 w424 was closed twice, on #99 and #100, while its worker's reports ended "w424: still open".
 
 A PR **closed without merging** never closes the request: the log says so once, and its person's orchestrator hears it
 when no other PR is open. Intake requests that wait for a reviewer are never closed here (the intake's own rule is in

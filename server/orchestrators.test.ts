@@ -842,25 +842,59 @@ test('w416: list_sandboxes leads with each computer\'s room and the next; start_
   assert.match(list, /^## Capacity/);
   assert.match(list, /\n- this host: BUSY \(RAM 86% used\): 0 live agents of 30/);
   assert.match(list, /\n- lothdesktop: ROOM \d+%: 0 live agents of 5 \(0 mid-turn\); 1 of 5 sandboxes free \(3 more can be made\); RAM 47% used; editors 0 of 2\n/);
-  assert.match(list, /\nNext new game-repo work: lothdesktop \(the only computer with room \(this host is busy\)\)\.\n/);
+  assert.match(list, /\nNext new game-repo work: lothdesktop \(the only one with room; this host is busy\)\.\n/);
   assert.match(list, /\n## lothdesktop /, 'the sandbox list follows');
 
   const start = beltFor('remote', agents.toolSpecs('human', agents.fixedActor(LOTH), { role: 'remote', owner: LOTH })).find((x) => x.name === 'start_agent')!;
   const text = async (a: Record<string, unknown>) => (await start.handler(a)).content.map((c) => c.text).join('');
   const busy = await text({ sandbox: 'alpha', prompt: 'Profile the belts', title: 'Belt profile' });
   assert.match(busy, /^Started agent /);
-  assert.match(busy, /Note: this host is busy \(RAM 86% used\); to spread game-repo work, the next goes to lothdesktop \(the only computer with room .*put new game-repo work on lothdesktop\.$/);
+  assert.match(busy, /Note: this host is busy \(RAM 86% used\); the next new game-repo work goes to lothdesktop \(the only one with room.*put it there\.$/);
   // A worker going on in a sandbox its work already holds (labelled, not free) gets no note.
   assert.doesNotMatch(await text({ sandbox: 'gamma', prompt: 'Carry on with the splitter', title: 'Splitter' }), /Note:/);
   // The host's agent limit alone makes it busy, too.
   agents.hostMem = () => ({ free: 34 * GB, total: 64 * GB });
   cfg.limits.maxSessions = 2;
-  assert.match(await text({ sandbox: 'beta', prompt: 'Look at the tutorial', title: 'Tutorial' }), /Note: this host is busy \(2 live agents of 2\); to spread game-repo work, the next goes to lothdesktop/);
+  assert.match(await text({ sandbox: 'beta', prompt: 'Look at the tutorial', title: 'Tutorial' }), /Note: this host is busy \(2 live agents of 2\); the next new game-repo work goes to lothdesktop/);
   // Not busy any more, but with three agents here and none there, the next still goes to LothDesktop: spread, not overflow.
   cfg.limits.maxSessions = 30;
   store.putSandbox({ id: 'delta', name: 'delta', branch: 'sandbox/delta', base: 'origin/develop', path: path.join(cfg.sandboxRoot, 'delta'), purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
-  assert.match(await text({ sandbox: 'delta', prompt: 'Read the docs', title: 'Docs' }), /Note: this host has \d+% room; to spread game-repo work, the next goes to lothdesktop \((most room|room about even .*fewer live agents \(0 vs \d+\))/);
+  assert.match(await text({ sandbox: 'delta', prompt: 'Read the docs', title: 'Docs' }), /Note: this host has \d+% room; the next new game-repo work goes to lothdesktop \((most room|room about even .*fewer live agents \(0 vs \d+\))/);
   assert.match((await call(dispatcher().info, 'list_sandboxes', {})).text, /\nNext new game-repo work: lothdesktop \(/);
   // Their first turns end before the test does (on Windows a late transcript write outlived the temp folder).
   await until('the workers answered', () => [...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').every((s) => s.info.status === 'idle'));
+});
+
+test('w428: with placement.prefer and avoid set, the next goes to LothDesktop, then the m5\'s main clone, never the avoided host while they have room', async (t) => {
+  const { cfg, store, sessions, agents, dispatcher, call } = setup(t);
+  const GB = 1024 ** 3;
+  const machines = (agents as unknown as { machines: MachineManager }).machines;
+  const machine = (id: string, extra: Record<string, unknown>) =>
+    store.putMachine({ id, host: id, purpose: 'unused', status: 'ready', online: true, repoPath: `/w/${id}`, home: '/h', portalUrl: 'http://x', maxSessions: 2, sessionIds: [], createdAt: T0, ...extra } as never);
+  machine('lothdesktop', { platform: 'win32', sandboxRoot: 'D:\\work\\ffsb', maxSandboxes: 2, maxSandboxAgents: 2, sandboxes: [{ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', path: 'D:\\work\\ffsb\\sb1', purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] }] });
+  machine('m5', { platform: 'darwin' });
+  Object.assign(machines, { isOnline: () => true, statsOf: () => ({ hostname: 'x', platform: 'x', cpuModel: 'x', cpuCount: 8, loadPct: 5, memTotalBytes: 64 * GB, memFreeBytes: 40 * GB, at: T0 }) });
+  agents.hostMem = () => ({ free: 50 * GB, total: 64 * GB });
+  cfg.placement = { prefer: ['lothdesktop', 'm5', 'm3'], avoid: { 'this host': 'BEAST unstable, 2026-10-05' } };
+
+  const list = (await call(dispatcher().info, 'list_sandboxes', {})).text;
+  assert.match(list, /\n- this host \[avoided: BEAST unstable, 2026-10-05\]: ROOM \d+%/);
+  assert.match(list, /\n- m5 \[main clone; preferred #2\]: ROOM \d+%: 0 live agents of 2 \(0 mid-turn\) in its main clone; RAM 38% used\n/);
+  assert.match(list, /\nNext new game-repo work: lothdesktop \(first with room in placement\.prefer \(lothdesktop > m5 > m3\)\)\.\n/);
+
+  const start = beltFor('remote', agents.toolSpecs('human', agents.fixedActor(LOTH), { role: 'remote', owner: LOTH })).find((x) => x.name === 'start_agent')!;
+  const text = async (a: Record<string, unknown>) => (await start.handler(a)).content.map((c) => c.text).join('');
+  // New work on the avoided host while LothDesktop has room: the note says so.
+  assert.match(await text({ sandbox: 'alpha', prompt: 'Profile the belts', title: 'Belt profile' }), /Note: this host is avoided \(BEAST unstable, 2026-10-05\); the next new game-repo work goes to lothdesktop \(first with room in placement\.prefer/);
+  // LothDesktop full (its 2 agents): the m5's main clone is next, with its backup rule.
+  for (const id of ['lw1', 'lw2']) {
+    const w = sessions.create({ kind: 'worker', title: id, model: 'opus', permissionMode: 'bypassPermissions', options: () => ({ model: 'opus' }), id, requestedBy: LOTH });
+    Object.assign(w.info, { machineId: 'lothdesktop', machineSandbox: 'sb1' });
+    Object.defineProperty(w, 'live', { get: () => true });
+  }
+  assert.match((await call(dispatcher().info, 'list_sandboxes', {})).text, /\nNext new game-repo work: m5's main clone: start_agent with machine "m5"; its worker backs up the owner's uncommitted work \(ff-local-backups\) before it sets any aside \(first with room in placement\.prefer .*lothdesktop is busy\)\.\n/);
+  // Cleared once BEAST is fixed: back to the spread, this host first again as it has the most room.
+  cfg.placement = undefined;
+  assert.doesNotMatch((await call(dispatcher().info, 'list_sandboxes', {})).text, /avoided|preferred/);
+  await until('the worker answered', () => [...sessions.sessions.values()].filter((s) => s.info.kind === 'worker' && !s.info.machineId).every((s) => s.info.status === 'idle'));
 });
