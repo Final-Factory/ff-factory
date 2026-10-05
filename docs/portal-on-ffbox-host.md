@@ -82,15 +82,16 @@ What the portal holds, which is what such an attacker would want:
 
 ### 1.2 The options
 
-Lothsahn chose the VM (w441). The table keeps w439's comparison, with the verdicts updated.
+Lothsahn chose the VM (w441, this revision). The table keeps the comparison from w439 (the container design), with
+the verdicts updated.
 
 | Option | From an FFBox container (E0) | As FFBox's daemon account (E1) | As host root (E2) | Cost | Verdict |
 |---|---|---|---|---|---|
-| **1. A KVM/QEMU VM managed by libvirt** | Nothing: the VM's network admits nothing it did not start, and the host's `inet fff_vm` table drops every packet from a host process other than root's to the VM (1.4) | Nothing: the libvirt socket is root's (and group `libvirt`'s, which no FFBox account may be in), the disk is a root-owned zvol (or a qcow2 file of `libvirt-qemu`, `0600`), and QEMU runs as `libvirt-qemu` under its own AppArmor profile *(measured in CI: [10.3](#103-what-ci-proves))* | Everything: guest RAM through `/proc/<qemu pid>/mem` or `virsh dump`, the disk, and commands through the guest agent's `guest-exec`, which Ubuntu does not block *(sourced: noble's `qemu-guest-agent.service` runs `qemu-ga` with no `--block-rpcs`)* | A fixed RAM reservation, a second OS to patch (automated: unattended-upgrades plus the nightly cold restart), libvirt as root on the host | **Chosen** (Lothsahn, w441) |
-| 2. Rootless Podman under a dedicated `fff` account | Nothing (no published port, its own network namespace) | Nothing (`0700` files, another uid, no daemon socket) | Everything | Podman 5, Ubuntu 24.04's AppArmor rule against unprivileged user namespaces *(sourced: containers/podman#25905)*, Quadlet units | w439's recommendation; the fallback if a VM's RAM cannot be spared |
+| **1. A KVM/QEMU VM managed by libvirt** | Nothing: the VM's network admits nothing it did not start, and the host's `inet fff_vm` table drops every packet from a host process other than root's to the VM (1.4) | Nothing: the libvirt socket is root's (and group `libvirt`'s, which no FFBox account may be in), the disk is a root-owned zvol (or a qcow2 file of `libvirt-qemu`, `0600`), and QEMU runs as `libvirt-qemu` under its own AppArmor profile *(measured in CI: [10.3](#103-what-ci-proves))* | Everything: guest RAM through `/proc/<qemu pid>/mem` or `virsh dump`, the disk, and commands through the guest agent's `guest-exec`, which Ubuntu does not block *(sourced: noble's `qemu-guest-agent.service` runs `qemu-ga` with no `--block-rpcs`)* | A fixed RAM reservation, a second OS to patch (automated: unattended-upgrades plus the nightly cold restart), libvirt as root on the host | **Chosen** (Lothsahn, w441: this revision) |
+| 2. Rootless Podman under a dedicated `fff` account | Nothing (no published port, its own network namespace) | Nothing (`0700` files, another uid, no daemon socket) | Everything | Podman 5, Ubuntu 24.04's AppArmor rule against unprivileged user namespaces *(sourced: containers/podman#25905)*, Quadlet units | The recommendation of w439 (the container design); the fallback if a VM's RAM cannot be spared |
 | 3. Rootless Docker under `fff` | As 2 | As 2 | Everything | A second `dockerd`, two `docker` CLIs whose target depends on `DOCKER_HOST` | Fallback of the fallback |
 | 4. A container on FFBox's own Docker daemon | Shares FFBox's networks unless configured otherwise | **Full control** through the daemon's socket | Everything | none | **Ruled out**: the sharing Lothsahn excluded |
-| 5. gVisor, 6. Kata Containers | | | Everything | need a root runtime; Kata does not support Podman *(sourced: kata-containers `docs/Limitations.md`)* | No (w439) |
+| 5. gVisor, 6. Kata Containers | | | Everything | need a root runtime; Kata does not support Podman *(sourced: kata-containers `docs/Limitations.md`)* | No (w439, the container design) |
 
 Against E2 nothing on a shared host helps, short of confidential-VM memory encryption (SEV-SNP, TDX) with
 attestation, which is out of scope. So root on the FFBox host is the trust boundary: Lothsahn, and anyone with general
@@ -130,8 +131,9 @@ Installed by `deploy/vm/host/install.sh` ([Installing](#10-installing)); nothing
 **What it refuses rather than overrides** (exit 3, nothing changed): an nftables table `inet fff_vm` that is not its
 own, an interface named `virbr-fff` that is not its network's bridge, any address or route of the host in
 10.213.41.0/24, a libvirt network `fff-isolated` or a domain `fff-portal` that is not its own (each carries a
-`<description>` marker), another libvirt network using that subnet, a `disk0` zvol or qcow2 file it did not make, and
-a zvol parent dataset holding other datasets. It warns, without refusing, about members of the `libvirt` and `disk`
+`<description>` marker), another libvirt network using that subnet, a `disk0` zvol or qcow2 file it did not make, a
+zvol parent dataset holding other datasets, and libvirtd listening on TCP (16509 or 16514), which would let anything
+that reaches the host try to control the VM. The install itself opens no port on the host. It warns, without refusing, about members of the `libvirt` and `disk`
 groups. It also warns about a forward chain that drops by default (libvirt adds its own accept rules for the NAT).
 Finally it warns when `nftables.service` would flush the whole ruleset on a reload. That would drop the VM's table
 too, and `fff-vm watch` loads it again within a minute and alerts; nothing edits `/etc/nftables.conf`. FFBox's
@@ -246,10 +248,10 @@ Six rules:
 
 - **A second boundary in the other direction.** A compromised portal (a prompt-injected standing agent that got a
   shell) has to escape KVM and an AppArmor-confined QEMU to reach the host and FFBox. In the container it stood on
-  the host's kernel behind a Unix account. That is the gain w439 listed as "revisit if the portal ever runs untrusted
+  the host's kernel behind a Unix account. That is the gain w439 (the container design) listed as "revisit if the portal ever runs untrusted
   code"; standing agents read Discord text today.
 - **No user namespaces on the host for the portal.** Rootless Podman needed a way around Ubuntu 24.04's AppArmor rule
-  against unprivileged user namespaces and a TUN device in a rootless pod, both guesses in w439. The VM needs neither:
+  against unprivileged user namespaces and a TUN device in a rootless pod, both guesses in w439 (the container design). The VM needs neither:
   Tailscale runs in kernel mode in the guest, and the guest is an ordinary Ubuntu machine.
 - **Isolation enforced per machine, at the bridge.** The host's table filters one interface. The container design
   filtered by the uid of pasta's sockets (`meta skuid`), which was a guess.
@@ -324,10 +326,10 @@ account `fff` (locked password, no sudo), `0700`:
 | Folder | Holds | Size | Backed up |
 |---|---|---|---|
 | `config/` | `config.json` (from [`config.vm.example.json`](../deploy/vm/guest/config.vm.example.json), never overwritten) and `.prev` | under 1 MB | yes |
-| `data/` | everything of today's `data/`, plus the updater's hand-off files (3) | data on BEAST not measured yet ([9](#9-sizing)); 479 transcripts *(measured by w439, 2026-10-05)* | yes |
+| `data/` | everything of today's `data/`, plus the updater's hand-off files (3) | data on BEAST not measured yet ([9](#9-sizing)); 479 transcripts *(measured by w439, the container design, 2026-10-05)* | yes |
 | `home/` | `HOME` of `fff`: `.claude` (Lothsahn's login, session histories, plugins), `.ssh`, `.config/gh`, `.config/ffbox`, `.local/bin/claude` | session histories: 0.82 GB for LothDesktop's own user *(measured: `~/.claude/projects`, 2026-10-05)*; guess 1-5 GB for the portal | yes, without caches |
 | `app/` | `repo.git` (a bare clone of ff-factory), `releases/<sha12>/` (a worktree each, with its own `node_modules` and web build), `current` and `previous` (symlinks) | per release: measured in CI ([9](#9-sizing)) | no, rebuilt from git |
-| `base/` | the game repo, cloned without LFS files, for orchestrators' reads (`fffctl base-clone`) | git objects 1.27 GiB *(measured by w439: `git count-objects -vH` in BEAST's base clone)*; working tree without LFS files: guess 3-5 GB | no, re-cloned |
+| `base/` | the game repo, cloned without LFS files, for orchestrators' reads (`fffctl base-clone`) | git objects 1.27 GiB *(measured by w439, the container design: `git count-objects -vH` in BEAST's base clone)*; working tree without LFS files: guess 3-5 GB | no, re-cloned |
 | `agents/` | standing agents' folders (`standingRoot`) | small | yes |
 | `review/` | `publish_review` media (`review.root`) | grows with clips | [D9](#8-risks-and-open-decisions) |
 | `sandboxes/` | empty: `sandboxRoot` is still required by the config (change 1) | 0 | no |
@@ -359,7 +361,7 @@ in [`fff.conf.example`](../deploy/vm/guest/fff.conf.example).
   reports, [restart.md](restart.md)) still applies. `index.ts` dates the boot from `os.uptime()`, which in a VM is the
   guest's: a VM reset reads as "went down", a server crash as "only the server stopped".
 - **Logs** go to the guest's journal (`fffctl logs`; `journalctl -u fff-portal`). The VM has no other user to keep
-  out, so w439's log file is not needed. The text naming `data/supervisor.log` changes with change 13.
+  out, so the log file of w439 (the container design) is not needed. The text naming `data/supervisor.log` changes with change 13.
 
 ### 2.6 Voice
 
@@ -772,7 +774,7 @@ it rests on.
 
 | # | Decision | Recommendation | Basis | Whose |
 |---|---|---|---|---|
-| D1 | Isolation runtime | **Decided: a KVM/QEMU VM managed by libvirt** (Lothsahn, w441). Rootless Podman (w439's design) stays the fallback if the RAM cannot be spared | 1.2, 1.7 | Lothsahn (decided) |
+| D1 | Isolation runtime | **Decided: a KVM/QEMU VM managed by libvirt** (Lothsahn, w441: this revision). Rootless Podman (w439, the container design) stays the fallback if the RAM cannot be spared | 1.2, 1.7 | Lothsahn (decided) |
 | D2 | Root on the FFBox host can read the portal's secrets: the VM's memory and disk, and commands through its guest agent. That includes the ssh key to Ben's machines and the host token | Accept, with `from=`-restricted keys, a tailnet policy that allows only port 22, `sudo` on that box kept narrow, and no FFBox account in `libvirt` or `disk` | 1.2: nothing on a shared host stops root | Ben (his machines and tokens), Lothsahn |
 | D3 | Tailnet and name | The VM's node in Ben's tailnet, where the daemons and BEAST are ([machines.md](machines.md)), tagged `tag:fff-portal` from a pre-approved, non-ephemeral auth key, Funnel for that tag only; name `fff` or another neutral name that will not change again | 4.1, 1.4 rule 6 | Ben |
 | D4 | Ben's orchestrator's account | Measure a week of orchestration first. If it is small next to Lothsahn's plan, put it on his login (no code); otherwise give Ben's chat its own credential (code, S-M) | 5.2, 5.4 | Ben and Lothsahn |
@@ -845,8 +847,8 @@ what was measured elsewhere.
 | A release on disk (worktree, `node_modules`, web build) | ⟨CI⟩ | measured in CI: `du -sh` of `app/releases/<sha>` |
 | Install, and an update's build | ⟨CI⟩ | measured in CI, 2 vCPUs |
 | An update's downtime | ⟨CI⟩ | measured in CI: `/api/health` unanswered during `fffctl update --drain-minutes 0` |
-| Base clone | git objects 1.27 GiB; working tree without LFS files guess 3-5 GB | measured by w439 on BEAST; guess |
-| `data/` | guess under 20 GB, growth not measured | w439's guess; `measure-portal.ps1` reports both |
+| Base clone | git objects 1.27 GiB; working tree without LFS files guess 3-5 GB | measured by w439 (the container design) on BEAST; guess |
+| `data/` | guess under 20 GB, growth not measured | the guess of w439 (the container design); `measure-portal.ps1` reports both |
 | QEMU and libvirt on the host | about 50 MiB for QEMU, 8 MiB per vCPU, page tables 1 bit per 512 bytes of guest RAM (3 MiB for 12 GiB), about 65 MiB for libvirt's daemons | sourced: KubeVirt's measured RSS budgets (`pkg/hypervisor/kvm/hypervisorbackend.go`); not a Red Hat or libvirt figure |
 
 **The VM:**

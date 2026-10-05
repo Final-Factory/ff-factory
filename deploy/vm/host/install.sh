@@ -139,6 +139,11 @@ if command -v virsh >/dev/null && v version >/dev/null 2>&1; then
   for n in $other; do
     if v net-dumpxml "$n" | grep -qE "address='${NET_HOST_IP%.*}\.[0-9]+'"; then refuse "libvirt network $n uses ${NET_HOST_IP%.*}.0/$NET_PREFIX"; fi
   done
+  # Ports: libvirt's remote access (16509 plain, 16514 TLS) would let anyone who reaches the host, ffdev included,
+  # try to control the VM. This install opens no port of its own and needs none.
+  if ss -Hltn '( sport = :16509 or sport = :16514 )' 2>/dev/null | grep -q .; then
+    refuse "libvirtd listens on TCP (16509/16514): turn its remote access off (libvirtd-tcp.socket, libvirtd-tls.socket) first"
+  fi
   log "libvirt networks: $(v net-list --all --name | grep -v '^$' | tr '\n' ' ')"
   log "libvirt domains: $(v list --all --name | grep -v '^$' | tr '\n' ' ')"
   if v dominfo "$VM_NAME" >/dev/null 2>&1; then :; elif v list --all --name | grep -v '^$' | grep -q .; then
