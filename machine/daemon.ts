@@ -29,7 +29,8 @@ import { switchBranch } from '../server/switchBranch.ts';
 import { publishFromMachine } from './review.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, type CleanupGuard } from '../server/cleanup.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, type CleanupGuard } from '../server/cleanup.ts';
+import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -65,7 +66,7 @@ export interface DaemonConfig {
    */
   unityMcpServer?: StdioServer;
   /** Clean-up settings until the portal sends its own (the portal's own host: 0/0, it never cleans by itself). */
-  cleanup?: { everyMinutes: number; softFreeGB: number };
+  cleanup?: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown };
 }
 
 const BUSY = new Set(['running', 'starting', 'waiting_permission']);
@@ -77,6 +78,13 @@ export const appDirOfConfig = (cfg: Pick<DaemonConfig, 'appDir'>, home = HOME) =
 export const agentTempRoot = (tempDir: string | undefined) => tempDir || os.tmpdir();
 
 /** The clean-up settings the portal last sent, kept in the daemon's folder so they hold while it is down. */
+/** A clean-up log entry for the portal: its item lists cut to 300 each, so one frame stays small. */
+export function trimLogEntry(e: object): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(e as Record<string, unknown>) };
+  for (const k of ['removedAll', 'failedAll', 'plannedAll', 'listedAll', 'planned', 'listed']) if (Array.isArray(out[k])) out[k] = (out[k] as unknown[]).slice(0, 300);
+  return out;
+}
+
 export const cleanupConfigFile = (appDir: string) => path.join(appDir, 'cleanup.json');
 
 /** How the daemon measures its Mac and reads its login's plan usage; tests pass fakes (no CLI, no tools). */
@@ -135,7 +143,9 @@ export class Daemon {
   readonly pool: SandboxPool;
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
-  private cleanupSettings = { ...MACHINE_CLEANUP_DEFAULTS };
+  private cleanupSettings: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown } = { ...MACHINE_CLEANUP_DEFAULTS };
+  /** The ledger's facts for the stale-output rules (w459), as the portal last sent them; kept in memory only. */
+  private staleCtx?: StaleContext;
   /** Each place's Unity MCP status folder, kept holding only its own editor (machine/unityMcp.ts). */
   private readonly mcpScopes = new McpScopes();
 
@@ -180,26 +190,48 @@ export class Daemon {
     }
     const env = hostCleanupEnv(cfg.tempDir);
     this.cleaner = new CleanupRunner({
-      settings: () => this.cleanupSettings,
-      diskPaths: () => [HOME, env.tmp, cfg.repoPath],
+      settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
+      diskPaths: () => [HOME, env.tmp, cfg.repoPath, ...(this.sandboxRoot() && fs.existsSync(this.sandboxRoot()!) ? [this.sandboxRoot()!] : [])],
       statfs: async (p) => {
         const st = await fs.promises.statfs(p).catch(() => undefined);
         return st && { free: st.bavail * st.bsize, total: st.blocks * st.bsize };
       },
-      pass: async (low) => {
+      pass: async (low, opts) => {
         const guard = this.cleanupGuard();
         const root = this.sandboxRoot();
-        const rules = cleanupRules({ ...env, sandboxRoots: root ? [root] : [] }, DEFAULT_CLEANUP);
-        return runCleanup(await planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }), guard);
+        const settings = staleOutputSettings(this.cleanupSettings.staleOutput);
+        // A sandbox's Builds/ is the stale-output rules' (attributed, or listed): the old 7-day age rule only when they are off.
+        const rules = cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [] }, DEFAULT_CLEANUP);
+        return cleanupPass({
+          opts,
+          guard,
+          mode: settings.mode,
+          regular: () => planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
+          stale: () => planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, HOME), ctx: this.staleCtx, settings, guard }),
+        });
       },
       consumers: () => biggestConsumers(env),
+      staleAt: staleAtFile(appDirOfConfig(cfg)),
       stale: async () => (await staleUnityLibraries([HOME], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
-      log: (e) => appendCleanupLog(appDirOfConfig(cfg), e),
+      log: (e) => {
+        appendCleanupLog(appDirOfConfig(cfg), e);
+        // The portal keeps every pass too (w459): what went, why, and what was listed, where people can see it.
+        this.out({ type: 'cleanup_log', entry: trimLogEntry(e) });
+      },
       done: (summary, notice) => {
         log(`clean-up (${summary.trigger}): ${summary.removed} item(s), ${((summary.freedBytes ?? 0) / 2 ** 30).toFixed(1)} GB${notice ? `; ${notice}` : ''}`);
         this.out({ type: 'cleanup', summary, notice });
       },
     });
+  }
+
+  /** Where agents work here, for the stale-output rules: every ready sandbox (its editor's state) and the main clone. */
+  private stalePlaces(): StalePlace[] {
+    const sbs = this.pool.list().filter((s) => s.status === 'ready');
+    return [
+      ...sbs.map((s) => ({ id: s.id, path: s.path, kind: 'sandbox' as const, editorRunning: this.pool.editorKnownStopped(s.id) ? false : true })),
+      { id: 'main clone', path: this.cfg.repoPath, kind: 'clone' as const },
+    ];
   }
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
@@ -713,8 +745,19 @@ export class Daemon {
       case 'usage_now':
         void this.reportUsage();
         return;
+      case 'cleanup_context':
+        this.staleCtx = msg.context;
+        return;
       case 'cleanup_now':
-        void this.cleaner.run('asked').catch((e) => log(`clean-up failed: ${(e as Error).message}`));
+        void this.cleaner.run('asked', { dryRun: !!msg.dryRun }).then(
+          (summary) => {
+            if (msg.id) this.send({ type: 'cleanup_result', id: msg.id, ok: !!summary, ...(summary ? { summary } : { error: 'a clean-up pass is already running; try again in a few minutes' }) });
+          },
+          (e) => {
+            log(`clean-up failed: ${(e as Error).message}`);
+            if (msg.id) this.send({ type: 'cleanup_result', id: msg.id, ok: false, error: (e as Error).message });
+          },
+        );
         return;
       case 'welcome': {
         this.maxSessions = msg.maxSessions;

@@ -3,6 +3,7 @@
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
+import type { StaleContext } from './staleOutput.ts';
 import type { AttachmentRef, CleanupSummary, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 /**
@@ -80,9 +81,14 @@ export type ToDaemon =
   /** Watch this portal's host from outside (machine/outsideWatch.ts); null: this machine does not watch. Kept on the Mac. */
   | { type: 'outside_watch'; config: OutsideWatchConfig | null }
   /** The daemon's clean-up settings (server/cleanup.ts), at connect and when they change. Kept on the machine. */
-  | { type: 'cleanup_config'; config: { everyMinutes: number; softFreeGB: number } }
-  /** A clean-up pass now (the orchestrator asked); answered by a `cleanup` report. */
-  | { type: 'cleanup_now' }
+  | { type: 'cleanup_config'; config: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown } }
+  /** The ledger's facts for the stale-output rules (w459): which requests are open and closed. At connect and every few minutes. */
+  | { type: 'cleanup_context'; context: StaleContext }
+  /**
+   * A clean-up pass now (the orchestrator asked); answered by a `cleanup` report. With `id`, also by a `cleanup_result`
+   * carrying the pass's summary; `dryRun`: plan only, nothing removed (older daemons ignore both and run a real pass).
+   */
+  | { type: 'cleanup_now'; id?: string; dryRun?: boolean }
   /** How often the daemon polls its Mac's own Claude login's plan usage (config usagePollMinutes), at connect and when it changes. */
   | { type: 'usage_config'; config: { everyMinutes: number } }
   /** Poll that usage now (the usage meters' Refresh); answered by a `usage` report. A daemon before these ignores both. */
@@ -120,5 +126,9 @@ export type FromDaemon =
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
   /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */
   | { type: 'cleanup'; summary: CleanupSummary; notice?: string }
+  /** A clean-up pass in full, as the daemon logged it (w459): kept on the portal too, where people can see it. */
+  | { type: 'cleanup_log'; entry: Record<string, unknown> }
+  /** The answer to a `cleanup_now` with an id (w459). */
+  | { type: 'cleanup_result'; id: string; ok: boolean; summary?: CleanupSummary; error?: string }
   /** A line the ffdiscord CLI appended to the Mac's Max events file (docs/max.md), forwarded as is; the portal validates it. */
   | { type: 'max_event'; line: string };

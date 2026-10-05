@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { STALE_OUTPUT_DEFAULTS } from './staleOutput.ts';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -325,10 +326,11 @@ test('runner: hourly, every 15 minutes below the soft threshold, one notice a da
 test('thresholds: host soft default, per-machine settings, and what set_app_config accepts', (t) => {
   assert.equal(hostSoftFreeGB({ warnFreeGB: 80, cleanup: { ...DEFAULT_CLEANUP } }), 120);
   assert.equal(hostSoftFreeGB({ warnFreeGB: 80, cleanup: { ...DEFAULT_CLEANUP, softFreeGB: 150 } }), 150);
-  assert.deepEqual(machineCleanupSettings({}, 'm3'), { everyMinutes: 60, softFreeGB: 80 });
+  assert.deepEqual(machineCleanupSettings({}, 'm3'), { everyMinutes: 60, softFreeGB: 80, staleOutput: STALE_OUTPUT_DEFAULTS });
   const machines = { cleanup: { softFreeGB: { '*': 70, m3: 40 }, everyMinutes: 30 } };
-  assert.deepEqual(machineCleanupSettings({ machines }, 'm3'), { everyMinutes: 30, softFreeGB: 40 });
-  assert.deepEqual(machineCleanupSettings({ machines }, 'lothdesktop'), { everyMinutes: 30, softFreeGB: 70 });
+  assert.deepEqual(machineCleanupSettings({ machines }, 'm3'), { everyMinutes: 30, softFreeGB: 40, staleOutput: STALE_OUTPUT_DEFAULTS });
+  assert.deepEqual(machineCleanupSettings({ machines }, 'lothdesktop'), { everyMinutes: 30, softFreeGB: 70, staleOutput: STALE_OUTPUT_DEFAULTS });
+  assert.equal(machineCleanupSettings({ machines: { cleanup: { staleOutput: { mode: 'dry-run', shaBuildDays: 5 } } } }, 'm5').staleOutput.mode, 'dry-run', 'machines.cleanup.staleOutput reaches every daemon');
 
   const cfg = { hostGuard: { warnFreeGB: 80, cleanup: { ...DEFAULT_CLEANUP } } } as unknown as Config;
   assert.throws(() => normalizeSetting('hostGuard.cleanup.softFreeGB', 60, cfg), /from 81 to 2000/);
