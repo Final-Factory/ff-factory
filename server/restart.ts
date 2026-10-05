@@ -184,7 +184,7 @@ export function restartSummary(f: ResumeFile, outcomes: ResumeOutcome[], update:
   const version = versionLine(f.appVersion, now.version);
   if (version) parts.push(version);
   if (f.update) {
-    if (!update) parts.push('Update result: unknown (no data/update.result.json; see data/supervisor.log).');
+    if (!update) parts.push(`Update result: unknown (no data/update.result.json; see ${updateLogHint()}).`);
     else if (!update.ok) parts.push(`Update FAILED: ${clip(update.error ?? 'unknown error', 400)}; the server runs whatever code is on disk.`);
     else parts.push(`Update OK${update.headBefore && update.headAfter ? ` (${update.headBefore.slice(0, 9)} → ${update.headAfter.slice(0, 9)})` : ''}.`);
   } else if (f.head && head && f.head !== head) {
@@ -518,4 +518,12 @@ export function describeUncleanStop(o: { lastAliveAt?: number; bootAt: number; h
   }
   if (o.lastAliveAt !== undefined) return `the FF Factory server stopped without a clean stop (a crash or a forced kill) after ${t(o.lastAliveAt)}; ${o.host} itself kept running`;
   return 'the FF Factory server stopped without a clean stop (a crash, a forced kill or a power cut)';
+}
+
+/**
+ * Where the update's own log is (w467, change 13): the portal VM's updater logs to the journal (deploy/vm/guest,
+ * FFSB_SUPERVISOR=systemd in fff-portal.service); scripts/supervise.ps1 on Windows to data/supervisor.log.
+ */
+export function updateLogHint(env: NodeJS.ProcessEnv = process.env): string {
+  return env.FFSB_SUPERVISOR === 'systemd' ? 'journalctl -u fff-update in the VM (or fffctl logs)' : 'data/supervisor.log';
 }
