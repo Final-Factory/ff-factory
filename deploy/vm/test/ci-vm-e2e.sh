@@ -70,6 +70,8 @@ deploy/vm/host/install.sh --wait
 nft list table inet fff_vm | grep -q 'fff-vm: FF Factory portal VM' || fail "firewall table"
 ! pgrep -af dnsmasq | grep -q fff-isolated || fail "a dnsmasq serves the VM's network"
 default_before=$(virsh net-info default 2>/dev/null | awk '/^Autostart:/ {print $2}' || true)
+qpid=$(cat /run/libvirt/qemu/$VM.pid)
+echo "MEASURE qemu process: user $(ps -o user= -p "$qpid"), AppArmor $(cat "/proc/$qpid/attr/current" 2>/dev/null || echo none)"
 echo "libvirt default network autostart after install: ${default_before:-none}"
 
 step "host install again: idempotent, the VM keeps running"
@@ -113,12 +115,16 @@ git -C "$ROOT" bundle create /tmp/ff.bundle main
 g 'cat > /tmp/ff.bundle' </tmp/ff.bundle
 g 'chmod 644 /tmp/ff.bundle && rm -rf /tmp/ff-factory && git clone -q /tmp/ff.bundle /tmp/ff-factory'
 g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --dry-run'
+t0=$(date +%s)
 g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --repo /tmp/ff.bundle'
+echo "MEASURE guest install (packages, npm ci, web build, start) in a $(g nproc)-vCPU VM: $(($(date +%s) - t0)) s"
 g 'printf "UPDATE_VERIFY_MIN=2\nBASE_REPO_URL=https://github.com/Final-Factory/ff-factory.git\nBASE_BRANCH=main\n" | sudo tee -a /etc/fff/fff.conf'
 wait_for 120 "the portal answers the host" health
 health
 [ "$(sha_of)" = "$(git -C "$ROOT" rev-parse --short=7 HEAD)" ] || fail "the portal runs $(sha_of), not HEAD"
 g 'sudo fffctl status'
+sleep 60
+g 'echo "MEASURE guest memory (MiB), portal idle with empty data:"; free -m; echo "MEASURE node server RSS (KiB): $(ps -o rss= -p $(systemctl show -p MainPID --value fff-portal))"; echo "MEASURE release on disk: $(sudo du -sh /srv/fff/app/releases/* | head -n 1)"; echo "MEASURE bare repo: $(sudo du -sh /srv/fff/app/repo.git | cut -f1)"; echo "MEASURE root filesystem:"; df -h /'
 g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --repo /tmp/ff.bundle' | tail -n 3
 echo "ok: the guest install ran twice"
 g 'sudo fffctl base-clone' && g 'sudo systemctl start fff-base-refresh.service && sudo journalctl -u fff-base-refresh -n 3 --no-pager'
@@ -132,7 +138,14 @@ git -C "$ROOT" bundle create /tmp/ff.bundle main
 g 'cat > /tmp/ff.bundle.new && mv /tmp/ff.bundle.new /tmp/ff.bundle && chmod 644 /tmp/ff.bundle' </tmp/ff.bundle
 want=$(git -C "$ROOT" rev-parse --short=7 HEAD)
 g 'sudo fffctl update --drain-minutes 0'
-wait_for 900 "the portal runs $want" bash -c "[ \"\$(curl -fsS -m 10 http://$IP:8790/api/health | jq -r .sha)\" = $want ]"
+t0=$(date +%s)
+down=0
+until [ "$(health 2>/dev/null | jq -r .sha 2>/dev/null)" = "$want" ]; do
+  health >/dev/null 2>&1 || down=$((down + 2))
+  [ $(($(date +%s) - t0)) -lt 900 ] || fail "the portal does not run $want after 900 s"
+  sleep 2
+done
+echo "MEASURE update: $(($(date +%s) - t0)) s from fffctl update to the new version answering; health unanswered for about $down s of it"
 g 'sudo cat /srv/fff/data/update.result.json' | jq -e '.ok == true' || fail "update.result.json is not ok"
 wait_for 300 "the update verified" g 'test ! -e /srv/fff/data/update.verifying.json'
 echo "ok: $before -> $want"

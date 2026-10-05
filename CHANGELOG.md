@@ -12,6 +12,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The portal in its own VM on the FFBox host: design and install scripts** (w441, Lothsahn's request to make w439's
+  design a VM). The portal moves into a KVM/QEMU VM that libvirt manages. It has its own isolated network: NAT out to
+  the internet only, with an nftables table that keeps it away from the host, FFBox's containers and the LAN, and
+  everything on the host but root away from it. Tailscale and Funnel run inside it. `deploy/vm/host` installs it
+  (idempotent, `--dry-run`, refusing anything not its own) with hang detection, a watchdog device, and a nightly drain,
+  cold restart and snapshot. `deploy/vm/guest` sets up the portal inside, with `fffctl`. An updater (`fff-update`)
+  builds the new code beside the running server, switches at the drain's restart and rolls back by itself, so
+  `request_app_update` works under systemd: `server/restart.ts` `systemdSupervised` and `writeUpdateWanted`. There is
+  also a read-only footprint measurement for BEAST (`deploy/vm/measure`) and sizing with its basis. CI
+  (`vm-scripts.yml`) lints the scripts and runs them end to end in a nested VM, with qcow2 and with a zvol
+  ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md)).
 - **Design: the portal in its own container on the FFBox host** (w439, the request for this design, asked by
   Lothsahn). Design only, nothing deployed: a rootless Podman pod under its own Unix account on FFBox's Linux host,
   Tailscale inside the pod and nothing published on the host, so FFBox and FF Factory share no account, file, daemon,

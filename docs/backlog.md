@@ -28,8 +28,10 @@ no drain and no stop for daemon agents, and a same-protocol daemon from another 
 idle and redeployed. Left: prove on BEAST that a restart leaves the daemon's agents running and replays their events,
 then turn it on.
 
-## 3. The portal in its own container on the FFBox host (designed, not agreed)
+## 3. The portal in its own VM on the FFBox host (designed, scripts written, not deployed)
 
-After steps 1 and 2: the portal leaves BEAST for a rootless Podman pod under its own account on the FFBox host, so
-BEAST only runs workers. Designed in [portal-on-ffbox-host.md](portal-on-ffbox-host.md) (w439, Lothsahn's request
-for the design); its section 8 lists the decisions Lothsahn and Ben make before any code is written.
+After steps 1 and 2: the portal leaves BEAST for a KVM/QEMU VM on the FFBox host, so BEAST only runs workers.
+Designed in [portal-on-ffbox-host.md](portal-on-ffbox-host.md): w439 designed it as a container, and w441 made it a VM
+at Lothsahn's request. The host and guest install scripts are in `deploy/vm/`, tested end to end in CI. Section 6 lists
+the code changes still needed before the cut-over, section 8 the decisions for Lothsahn and Ben, and section 9 the
+measurement of BEAST's portal still to run.
