@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { Readable } from 'node:stream';
-import { AttachmentError, AttachmentStore, attachmentForMachine, downloadDisposition, machineAttachment, prepareInbox, publicRef } from './attachments.ts';
+import { AttachmentError, AttachmentStore, attachmentForMachine, downloadDisposition, machineAttachment, prepareInbox, publicRef, publishableFile, uploadForMachine } from './attachments.ts';
 import { attachmentBlock, attachmentKind, attachmentName, fmtBytes, inboxName } from '../shared/attachments.ts';
 
 /**
@@ -233,4 +233,85 @@ test("the agent's block: each file's id, name, size, type and SHA-256, where it 
   assert.match(worker, /fetch_attachment/);
   assert.equal(attachmentBlock([], 'worker'), '');
   assert.equal(downloadDisposition('Sauvegarde été.zip'), `attachment; filename="Sauvegarde _t_.zip"; filename*=UTF-8''Sauvegarde%20%C3%A9t%C3%A9.zip`);
+});
+
+// ---------------------------------------------------------------- agents' files (publish_attachment)
+
+test("a machine's upload: bound to that machine, its SHA-256 checked at the end, the uploader recorded", async (t) => {
+  const { store } = setup(t);
+  const data = randomBytes(20_000);
+  const plan = JSON.parse(uploadForMachine(store, 'mac', { name: 'retLandingZoneSave.zip', size: data.length, sha256: sha(data) }, { uploadedBy: 'ben', source: 'worker "w446" (s1 on mac/sb1)' }));
+  assert.match(plan.uploadId, /^[a-f0-9]{32}$/);
+  // Another machine, or an upload a person started in the page, is not this machine's.
+  assert.throws(() => store.machineUpload('lothdesktop', plan.uploadId), (e: AttachmentError) => e.status === 404);
+  const page = store.begin({ name: 'x.txt', size: 3 });
+  assert.throws(() => store.machineUpload('mac', page.uploadId), (e: AttachmentError) => e.status === 404);
+  store.machineUpload('mac', plan.uploadId);
+  await store.append(plan.uploadId, 0, Readable.from([data.subarray(0, 8000)]));
+  const r = await store.append(plan.uploadId, 8000, Readable.from([data.subarray(8000)]));
+  assert.equal(r.attachment?.sha256, sha(data));
+  assert.equal(r.attachment?.uploadedBy, 'ben');
+  assert.equal(r.attachment?.source, 'worker "w446" (s1 on mac/sb1)');
+  assert.deepEqual(publicRef(r.attachment!), publicRef(store.get(r.attachment!.id)!), 'what agents see has no uploader');
+  assert.equal('source' in publicRef(r.attachment!), false);
+
+  // Bytes that do not match the announced hash are thrown away, and no record is made.
+  const other = randomBytes(5000);
+  const bad = JSON.parse(uploadForMachine(store, 'mac', { name: 'damaged.zip', size: other.length, sha256: sha(data) }, { source: 'w' }));
+  await assert.rejects(store.append(bad.uploadId, 0, Readable.from([other])), (e: AttachmentError) => e.status === 422 && /arrived damaged/.test(e.message));
+  assert.throws(() => store.status(bad.uploadId), (e: AttachmentError) => e.status === 404);
+  assert.equal(store.usage().files, 1);
+  // The daemon must say the hash, and a size past the cap is refused before a byte moves.
+  assert.throws(() => uploadForMachine(store, 'mac', { name: 'a.zip', size: 10 }, {}), (e: AttachmentError) => e.status === 400);
+  assert.throws(() => uploadForMachine(store, 'mac', { name: 'a.zip', size: 10, sha256: 'nothex' }, {}), (e: AttachmentError) => e.status === 400);
+  assert.throws(() => uploadForMachine(store, 'mac', { name: 'a.zip', size: 500 * 1024 * 1024, sha256: sha(data) }, {}), (e: AttachmentError) => e.status === 413 && /attachments\.maxMB/.test(e.message));
+});
+
+test('addFile: a file of this computer becomes an attachment, under the same cap', async (t) => {
+  const { dir, store } = setup(t, { maxMB: 0.01 });
+  const data = randomBytes(9000);
+  const file = path.join(dir, 'save.zip');
+  fs.writeFileSync(file, data);
+  const a = await store.addFile(file, { uploadedBy: 'ben', source: 'the review folder (w446/save.zip), by the dispatcher' });
+  assert.equal(a.name, 'save.zip');
+  assert.equal(a.sha256, sha(data));
+  assert.equal(a.source, 'the review folder (w446/save.zip), by the dispatcher');
+  assert.deepEqual(fs.readFileSync(store.pathOf(a)), data);
+  fs.writeFileSync(file, randomBytes(20_000));
+  await assert.rejects(store.addFile(file), (e: AttachmentError) => e.status === 413);
+  await assert.rejects(store.addFile(path.join(dir, 'nope.zip')), (e: AttachmentError) => e.status === 404);
+});
+
+test('publishableFile: only a file inside the given folders, links followed; never an empty one', async (t) => {
+  const { dir } = setup(t);
+  const work = path.join(dir, 'sandbox');
+  const temp = path.join(dir, 'tmp', 'ffa-s1');
+  const secret = path.join(dir, 'data', 'secrets.json');
+  fs.mkdirSync(path.join(work, 'Saves'), { recursive: true });
+  fs.mkdirSync(temp, { recursive: true });
+  fs.mkdirSync(path.dirname(secret), { recursive: true });
+  fs.writeFileSync(path.join(work, 'Saves', 'a.zip'), 'save');
+  fs.writeFileSync(path.join(temp, 'b.log'), 'log');
+  fs.writeFileSync(secret, '{"token":"x"}');
+  fs.writeFileSync(path.join(work, 'empty.txt'), '');
+  const roots = [work, temp];
+  assert.deepEqual(await publishableFile(work, 'Saves/a.zip', roots), { path: fs.realpathSync.native(path.join(work, 'Saves', 'a.zip')), size: 4 });
+  assert.equal((await publishableFile(work, path.join(temp, 'b.log'), roots)).size, 3);
+  await assert.rejects(publishableFile(work, secret, roots), (e: AttachmentError) => e.status === 403 && /working folder or your own temp folder/.test(e.message));
+  await assert.rejects(publishableFile(work, '../data/secrets.json', roots), (e: AttachmentError) => e.status === 403);
+  // A folder whose name starts like a root is not inside it.
+  fs.mkdirSync(`${work}2`);
+  fs.writeFileSync(path.join(`${work}2`, 'c.txt'), 'c');
+  await assert.rejects(publishableFile(work, path.join(`${work}2`, 'c.txt'), roots), (e: AttachmentError) => e.status === 403);
+  await assert.rejects(publishableFile(work, 'empty.txt', roots), (e: AttachmentError) => e.status === 400);
+  await assert.rejects(publishableFile(work, 'missing.zip', roots), (e: AttachmentError) => e.status === 404);
+  await assert.rejects(publishableFile(work, 'Saves', roots), (e: AttachmentError) => e.status === 404, 'a folder is not a file');
+  await assert.rejects(publishableFile(work, '', roots), (e: AttachmentError) => e.status === 400);
+  // A link inside the folder that points out of it is refused (where the OS lets a test make one).
+  try {
+    fs.symlinkSync(secret, path.join(work, 'link.json'), 'file');
+  } catch {
+    return t.diagnostic('no symlinks here (Windows without developer mode): the link case is not run');
+  }
+  await assert.rejects(publishableFile(work, 'link.json', roots), (e: AttachmentError) => e.status === 403);
 });

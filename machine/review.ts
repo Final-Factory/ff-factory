@@ -47,27 +47,32 @@ export async function publishFromMachine(
   if (p.uploads.length !== local.length) throw new Error('the portal answered a plan for other files');
   const done: { path: string; size: number; sha256: string }[] = [];
   for (const [i, u] of p.uploads.entries()) {
-    const where = await sendFile(portalUrl, token, local[i].path, u, o);
-    done.push({ path: where, size: u.size, sha256: local[i].sha256 });
+    const url = `${portalUrl.replace(/\/+$/, '')}/machine/review/${encodeURIComponent(u.uploadId)}`;
+    const body = await sendChunks(url, token, local[i].path, u.size, u.chunkBytes, o, (b) => typeof b.path === 'string');
+    done.push({ path: String(body.path), size: u.size, sha256: local[i].sha256 });
   }
   return publishedText(p.host, done, p.note);
 }
 
-/** Send one file to PUT <portal>/machine/review/<uploadId>?offset=N; returns where the portal put it. */
-async function sendFile(portalUrl: string, token: string, file: string, u: Plan['uploads'][number], o: PublishOptions): Promise<string> {
-  const url = `${portalUrl.replace(/\/+$/, '')}/machine/review/${encodeURIComponent(u.uploadId)}`;
+/**
+ * Send one file of `size` bytes to PUT <url>?offset=N in chunks, with the machine's token, resuming from where the
+ * portal says it stands after a dropped link (GET <url>). Used for review media (PUT /machine/review/<id>) and for
+ * attachments agents publish (PUT /machine/attachments/uploads/<id>). Returns the portal's answer to the chunk that
+ * finished the file: the one `finished` accepts.
+ */
+export async function sendChunks(url: string, token: string, file: string, size: number, chunkBytes: number | undefined, o: PublishOptions, finished: (body: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> {
   const doFetch = o.fetch ?? fetch;
   const auth = { authorization: `Bearer ${token}` };
-  const chunk = Math.min(u.chunkBytes ?? REVIEW_CHUNK, REVIEW_CHUNK);
+  const chunk = Math.min(chunkBytes ?? REVIEW_CHUNK, REVIEW_CHUNK);
   const fd = await fs.promises.open(file, 'r');
   try {
     let offset = 0;
     let failures = 0;
     for (;;) {
-      const n = Math.min(chunk, u.size - offset);
+      const n = Math.min(chunk, size - offset);
       const buf = Buffer.alloc(n);
       await fd.read(buf, 0, n, offset);
-      let body: { received?: number; path?: string; error?: string } = {};
+      let body: Record<string, unknown> & { received?: number; error?: string } = {};
       let status = 0;
       try {
         const res = await doFetch(`${url}?offset=${offset}`, { method: 'PUT', headers: { ...auth, 'content-type': 'application/octet-stream' }, body: buf });
@@ -77,7 +82,7 @@ async function sendFile(portalUrl: string, token: string, file: string, u: Plan[
         body = { error: (e as Error).message };
       }
       if (status === 200) {
-        if (body.path) return body.path;
+        if (finished(body)) return body;
         offset = body.received ?? offset + n;
         failures = 0;
         continue;

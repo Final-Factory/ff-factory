@@ -58,3 +58,7 @@ The page serves any file under the review root as an image or video for every se
 Another machine's token, or none, gets 404 or 401. An upload left unfinished for a day is dropped; uploads in progress
 do not survive a portal restart (the daemon gets 404 and the worker publishes again). A worker on this host gets a
 plain copy (`ReviewStore.publishLocal`).
+
+A file in the review folder can go on to a worker as an attachment: an orchestrator or the dispatcher calls
+`attach_review_file` with its path and passes the id it answers with `attachments: [id]`
+([attachments.md](attachments.md#agents-files)).

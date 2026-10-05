@@ -31,7 +31,7 @@ import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, type CleanupGuard } from '../server/cleanup.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
-import { fetchAttachment, fetchAttachments } from './attachments.ts';
+import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import type { AttachmentRef, HostStats, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
@@ -582,6 +582,14 @@ export class Daemon {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
       return publishFromMachine(this.cfg.portalUrl, this.cfg.token, folder, args, call('publish_review'));
+    };
+    // publish_attachment (docs/attachments.md, "Agents' files"): the portal opens an upload for this machine; the file
+    // goes from here over HTTP with this machine's token and comes back as an attachment id.
+    all.publish_attachment = async (args) => {
+      const folder = this.entries.get(sessionId)?.spec?.cwd;
+      if (!folder) throw new Error('this session has no working folder on this machine yet');
+      const roots = [folder, sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId)];
+      return publishAttachmentFromMachine(this.cfg.portalUrl, this.cfg.token, folder, roots, args, call('publish_attachment'));
     };
     return all;
   }

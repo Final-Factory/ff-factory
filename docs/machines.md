@@ -383,7 +383,8 @@ sandbox agents in all), `max_unity: 2`.
   its live agents. An offline machine's sandboxes show as last reported.
 
 **Agents in a machine sandbox** get their own brief (the worktree, their editor's instance name) and the `machine`
-tools `set_label` (the sandbox's label), `wake_me`, `unity` (their sandbox's editor), `switch_branch`, `fetch_attachment` and `publish_review` (review media to the
+tools `set_label` (the sandbox's label), `wake_me`, `unity` (their sandbox's editor), `switch_branch`, `fetch_attachment`, `publish_attachment` (a file of theirs as an attachment id another worker
+gets, [attachments.md](attachments.md#agents-files)) and `publish_review` (review media to the
 portal's computer over the daemon's link, [review.md](review.md)). Their guard
 is the sandbox one, not the main clone's backup rules: their worktree is theirs, the main clone and the daemon's
 folder are protected, killing Unity by hand is refused (other sandboxes' editors share the machine), and a raw

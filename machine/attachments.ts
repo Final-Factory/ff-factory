@@ -1,11 +1,15 @@
 // Attachments on a machine (docs/attachments.md): the daemon fetches each file a message brings from the portal, over
-// HTTP with its own machine token, into the agent's Inbox, and checks its SHA-256 before the message goes on.
+// HTTP with its own machine token, into the agent's Inbox, and checks its SHA-256 before the message goes on. And the
+// other way (publish_attachment): an agent's file goes up to the portal's store the same way, and comes back as an id.
 import fs from 'node:fs';
+import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
-import { prepareInbox, sha256File } from '../server/attachments.ts';
+import { prepareInbox, publishableFile, sha256File } from '../server/attachments.ts';
+import { publishedAttachmentText } from '../shared/attachments.ts';
 import type { AttachmentRef, DeliveredAttachment } from '../shared/types.ts';
+import { sendChunks, type PublishOptions } from './review.ts';
 
 export interface FetchOptions {
   /** Attempts in all, each resuming where the last stopped (a dropped link over Tailscale). Default 4. */
@@ -101,4 +105,30 @@ export async function fetchAttachments(portalUrl: string, token: string, folder:
     }
   }
   return out;
+}
+
+/**
+ * publish_attachment on a machine (docs/attachments.md, "Agents' files"): read the agent's file here (it must be in
+ * `roots`: its working folder or its own temp folder), ask the portal for an upload (`plan`, the rpc: it checks the size
+ * cap and records who sends it), then send the bytes over HTTP with this machine's token, in chunks that resume after a
+ * dropped link. The portal checks the SHA-256 and answers the new attachment. Returns the tool's answer.
+ */
+export async function publishAttachmentFromMachine(
+  portalUrl: string,
+  token: string,
+  cwd: string,
+  roots: string[],
+  args: { file?: unknown },
+  plan: (a: Record<string, unknown>) => Promise<string>,
+  o: PublishOptions = {},
+): Promise<string> {
+  const f = await publishableFile(cwd, args.file, roots);
+  const sha256 = await sha256File(f.path);
+  const u = JSON.parse(await plan({ name: path.basename(f.path), size: f.size, sha256 })) as { uploadId: string; size: number; chunkBytes?: number };
+  if (u.size !== f.size) throw new Error('the portal answered an upload of another size');
+  const url = `${portalUrl.replace(/\/+$/, '')}/machine/attachments/uploads/${encodeURIComponent(u.uploadId)}`;
+  const body = await sendChunks(url, token, f.path, f.size, u.chunkBytes, o, (b) => !!b.attachment);
+  const ref = body.attachment as AttachmentRef;
+  if (ref.sha256 !== sha256) throw new Error(`${path.basename(f.path)}: the portal stored other bytes (sha256 ${String(ref.sha256).slice(0, 12)}…); publish it again`);
+  return publishedAttachmentText(ref, 'worker');
 }

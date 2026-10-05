@@ -30,6 +30,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   restarts and updates with rollback, reachability, the Claude account for the orchestrators and the dispatcher, the
   code changes with file:line and size, the migration with a dry run, cut-over and rollback, and the decisions left
   for Lothsahn and Ben ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md)).
+- **Workers hand files to each other, on any computer** (w447, asked by Ben). A save made on BEAST had to reach three
+  LothDesktop workers, and only a person with ssh could move it. A worker now calls `publish_attachment` with a file in
+  its working folder or temp folder; it answers an `att_` id, which its orchestrator passes on with `attachments: [id]`
+  like a person's file. On a machine the daemon sends the bytes over its own machine token (`PUT
+  /machine/attachments/uploads/<id>`, resumable, SHA-256 checked), so no new keys are needed between machines. Orchestrators
+  and the dispatcher make an id of a review-folder file with `attach_review_file`. The size cap is `attachments.maxMB`;
+  the uploader is recorded ([docs/attachments.md](docs/attachments.md), "Agents' files").
 
 - **FFBox conversations open in FF Factory** (w426, asked by Ben). FFBox's links (the FFBox page's conversations,
   the ledger's "on FFBox", the intake brief) went to its address on Lothsahn's home network
@@ -66,6 +73,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The outside watchdog watches BEAST's tailnet URL again** (w424, asked by Lothsahn). With no `publicUrl` in
+  config.json, the watch took the first machine's `portal_url`; since `add_machine beast local` that is BEAST's own
+  daemon, at `http://127.0.0.1:8790`, so the m5 checked its own loopback and pinged itself. It now skips the local machine
+  and any loopback address (`watchedPortalUrl`), and the local machine is never the default watcher.
 - **A request with several workers closes on the last one's DONE** (w434, asked by Ben). One worker's `DONE: w428`
   (after only its hardware read) closed the request while another worker's PR was unpushed. Each DONE now records that
   worker's part; the request closes once every worker on it has said DONE, ended, or moved on to newer work, and the

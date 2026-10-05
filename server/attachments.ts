@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ATTACHMENT_ID, CHUNK_BYTES, INBOX_DIR, MAX_ATTACHMENTS, MAX_CHUNK_BYTES, attachmentKind, attachmentName, fmtBytes, inboxName } from '../shared/attachments.ts';
 import type { AttachmentRef, AttachmentSettings, DeliveredAttachment } from '../shared/types.ts';
 import { isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
@@ -25,8 +26,13 @@ export function attachmentSettings(c: Partial<AttachmentConfig> | undefined): At
 
 /** A stored attachment: what agents and the page see, and who sent it when. */
 export interface AttachmentRecord extends AttachmentRef {
-  /** The login that uploaded it. */
+  /** The login that uploaded it; for a file an agent published, the person that agent works for. */
   uploadedBy?: string;
+  /**
+   * Who sent the bytes when it was not a person in the page (docs/attachments.md, "Agents' files"): the agent and where
+   * it runs, e.g. `"Fix belts" (3f2a… on lothdesktop/pr-fix)`, or the review folder and the orchestrator that took it.
+   */
+  source?: string;
   createdAt: string;
   /** Uploaded, sent with a message or handed to an agent: retention counts from the last of these. */
   lastUsedAt: string;
@@ -38,7 +44,22 @@ interface PartialMeta {
   name: string;
   size: number;
   uploadedBy?: string;
+  source?: string;
+  /** A machine's upload (publish_attachment): only that machine's token may send its chunks. */
+  machineId?: string;
+  /** The SHA-256 the sender announced: the finished file must match it, or it is dropped. */
+  sha256?: string;
   createdAt: string;
+}
+
+/** Who and what an upload is for, beyond its name and size. */
+export interface UploadOrigin {
+  uploadedBy?: string;
+  source?: string;
+  /** Bind the upload to this machine: its chunks come over PUT /machine/attachments/uploads/<id> with its token. */
+  machineId?: string;
+  /** The SHA-256 the sender computed; checked when the last byte arrives. */
+  sha256?: unknown;
 }
 
 /** A refusal with the HTTP status it maps to; `received` tells a client where to resume. */
@@ -99,17 +120,33 @@ export class AttachmentStore {
   // ---------------------------------------------------------------- uploading
 
   /** Start an upload of `size` bytes named `name`. Refused past the size cap. */
-  begin(input: { name: unknown; size: unknown; uploadedBy?: string }): { uploadId: string; name: string; size: number; received: number; chunkBytes: number } {
+  begin(input: { name: unknown; size: unknown } & UploadOrigin): { uploadId: string; name: string; size: number; received: number; chunkBytes: number } {
     const size = Number(input.size);
     if (!Number.isSafeInteger(size) || size <= 0) throw new AttachmentError(400, 'size: the file is empty, or its size is not a whole number of bytes');
     const max = this.settings.maxBytes;
     if (size > max) throw new AttachmentError(413, `the file is ${fmtBytes(size)}; the limit is ${fmtBytes(max)} (config attachments.maxMB)`);
+    const sha256 = input.sha256 === undefined ? undefined : String(input.sha256).toLowerCase();
+    if (sha256 !== undefined && !SHA256.test(sha256)) throw new AttachmentError(400, 'sha256: 64 hex digits');
     const name = attachmentName(input.name);
     const uploadId = randomBytes(16).toString('hex');
-    const meta: PartialMeta = { uploadId, name, size, ...(input.uploadedBy ? { uploadedBy: input.uploadedBy } : {}), createdAt: new Date(this.now()).toISOString() };
+    const meta: PartialMeta = {
+      uploadId,
+      name,
+      size,
+      ...(input.uploadedBy ? { uploadedBy: input.uploadedBy } : {}),
+      ...(input.source ? { source: input.source } : {}),
+      ...(input.machineId ? { machineId: input.machineId } : {}),
+      ...(sha256 ? { sha256 } : {}),
+      createdAt: new Date(this.now()).toISOString(),
+    };
     fs.writeFileSync(this.partialPath(uploadId), '');
     fs.writeFileSync(this.metaPath(uploadId), JSON.stringify(meta));
     return { uploadId, name, size, received: 0, chunkBytes: CHUNK_BYTES };
+  }
+
+  /** A machine's upload (begin with machineId): 404 for any other machine, or an upload a person started in the page. */
+  machineUpload(machineId: string, uploadId: string): void {
+    if (this.meta(uploadId).machineId !== machineId) throw new AttachmentError(404, 'no such upload for this machine (finished, or left for a day and deleted: publish again)');
   }
 
   /** How far an upload got: where a client resumes after a dropped connection. */
@@ -169,6 +206,28 @@ export class AttachmentStore {
     return { received, size: meta.size, attachment: await this.finish(meta) };
   }
 
+  /**
+   * Store a file of this computer as an attachment (publish_attachment from a host sandbox, attach_review_file): the
+   * same path as an upload, so the same size cap, hashing and record. The caller decides which files may be read.
+   */
+  async addFile(file: string, origin: Pick<UploadOrigin, 'uploadedBy' | 'source'> = {}): Promise<AttachmentRecord> {
+    const st = await fs.promises.stat(file).catch(() => undefined);
+    if (!st?.isFile()) throw new AttachmentError(404, `${file}: no such file`);
+    const u = this.begin({ name: path.basename(file), size: st.size, ...origin });
+    try {
+      const r = await this.append(u.uploadId, 0, fs.createReadStream(file, { end: st.size - 1 }), st.size);
+      if (!r.attachment) throw new AttachmentError(409, `${file} changed while it was read (${r.received} of ${st.size} bytes); try again`);
+      return r.attachment;
+    } catch (e) {
+      try {
+        this.cancel(u.uploadId);
+      } catch {
+        // finished, or already dropped
+      }
+      throw e;
+    }
+  }
+
   /** Drop an upload in progress (the person removed it from the composer). */
   cancel(uploadId: string) {
     this.meta(uploadId);
@@ -179,6 +238,10 @@ export class AttachmentStore {
   private async finish(meta: PartialMeta): Promise<AttachmentRecord> {
     const file = this.partialPath(meta.uploadId);
     const sha256 = await sha256File(file);
+    if (meta.sha256 && sha256 !== meta.sha256) {
+      this.cancel(meta.uploadId);
+      throw new AttachmentError(422, `${meta.name} arrived damaged (sha256 ${sha256.slice(0, 12)}…, expected ${meta.sha256.slice(0, 12)}…); publish it again`);
+    }
     const blob = this.blobPath(sha256);
     fs.mkdirSync(path.dirname(blob), { recursive: true });
     if (fs.existsSync(blob) && fs.statSync(blob).size === meta.size) fs.rmSync(file, { force: true });
@@ -186,7 +249,7 @@ export class AttachmentStore {
     fs.rmSync(this.metaPath(meta.uploadId), { force: true });
     const now = new Date(this.now()).toISOString();
     const { kind, mediaType } = attachmentKind(meta.name);
-    const rec: AttachmentRecord = { id: this.newId(), name: meta.name, size: meta.size, sha256, kind, mediaType, ...(meta.uploadedBy ? { uploadedBy: meta.uploadedBy } : {}), createdAt: now, lastUsedAt: now };
+    const rec: AttachmentRecord = { id: this.newId(), name: meta.name, size: meta.size, sha256, kind, mediaType, ...(meta.uploadedBy ? { uploadedBy: meta.uploadedBy } : {}), ...(meta.source ? { source: meta.source } : {}), createdAt: now, lastUsedAt: now };
     this.records.set(rec.id, rec);
     this.save();
     return rec;
@@ -383,6 +446,42 @@ export function attachmentForMachine(store: AttachmentStore, machineId: string, 
   return JSON.stringify(publicRef(a));
 }
 
+/**
+ * publish_attachment from an agent on a machine (docs/attachments.md, "Agents' files"): open an upload of the file its
+ * daemon announced (name, size, SHA-256), bound to that machine, and answer what the daemon sends it by, as JSON.
+ */
+export function uploadForMachine(store: AttachmentStore, machineId: string, a: Record<string, unknown>, origin: Pick<UploadOrigin, 'uploadedBy' | 'source'>): string {
+  if (typeof a.sha256 !== 'string') throw new AttachmentError(400, "sha256: the daemon sends the file's SHA-256");
+  const u = store.begin({ name: a.name, size: a.size, sha256: a.sha256, machineId, ...origin });
+  return JSON.stringify({ uploadId: u.uploadId, name: u.name, size: u.size, chunkBytes: u.chunkBytes });
+}
+
+/**
+ * PUT /machine/attachments/uploads/<uploadId>?offset=N (a chunk) and GET (where to resume), for a machine's daemon
+ * sending a file its agent published (publish_attachment, docs/attachments.md "Agents' files"), with its own token.
+ * `machineId`: the machine the token proved, or undefined; only that machine's uploads answer. JSON; the last chunk
+ * answers the attachment's public record.
+ */
+export async function machineUploadHttp(store: AttachmentStore, machineId: string | undefined, req: IncomingMessage, res: ServerResponse, uploadId: string, offset: number) {
+  const reply = (status: number, body: unknown) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(body));
+  };
+  try {
+    if (!machineId) return reply(401, { error: 'a machine token is required' });
+    store.machineUpload(machineId, uploadId);
+    if (req.method === 'GET') return reply(200, store.status(uploadId));
+    if (req.method !== 'PUT') return reply(405, { error: 'GET or PUT' });
+    const len = Number(req.headers['content-length']);
+    const r = await store.append(uploadId, offset, req, MAX_CHUNK_BYTES, Number.isFinite(len) ? len : undefined);
+    return reply(200, { received: r.received, size: r.size, ...(r.attachment ? { attachment: publicRef(r.attachment) } : {}) });
+  } catch (e) {
+    const r = e instanceof AttachmentError ? e : new AttachmentError(500, (e as Error).message);
+    if (req.method === 'PUT' && !req.readableEnded) req.resume();
+    return reply(r.status, { error: r.message, ...(r.received === undefined ? {} : { received: r.received }) });
+  }
+}
+
 /** What agents and the page get of a record: no uploader or dates. */
 export function publicRef(r: AttachmentRef): AttachmentRef {
   return { id: r.id, name: r.name, size: r.size, sha256: r.sha256, kind: r.kind, mediaType: r.mediaType };
@@ -400,6 +499,35 @@ export async function prepareInbox(folder: string, ref: { id: string; name: stri
   const ignore = path.join(dir, '.gitignore');
   if (!fs.existsSync(ignore)) await fs.promises.writeFile(ignore, '# Files people attached in FF Factory (docs/attachments.md): never committed.\n*\n');
   return path.join(dir, inboxName({ id: ref.id, name: attachmentName(ref.name) }));
+}
+
+/**
+ * The file an agent may publish as an attachment (publish_attachment): `file` (absolute, or relative to `cwd`) must be a
+ * non-empty file inside one of `roots` (its working folder, its own temp folder), after links are followed, so an agent
+ * cannot make FF Factory read a file it may not (the portal's data, another sandbox, a protected path) and hand it out.
+ */
+export async function publishableFile(
+  cwd: string,
+  file: unknown,
+  roots: string[],
+  outside = "only files in your working folder or your own temp folder (TMP) may be published; copy it there first (a save from the game's saves folder too)",
+): Promise<{ path: string; size: number }> {
+  const raw = String(file ?? '').trim();
+  if (!raw) throw new AttachmentError(400, 'file: give the path of the file to publish');
+  const want = path.resolve(cwd, raw);
+  const real = await fs.promises.realpath(want).catch(() => undefined);
+  const st = real ? await fs.promises.stat(real).catch(() => undefined) : undefined;
+  if (!real || !st?.isFile()) throw new AttachmentError(404, `${raw}: no such file on this computer`);
+  if (st.size <= 0) throw new AttachmentError(400, `${raw}: the file is empty`);
+  const fold = (p: string) => (process.platform === 'win32' || process.platform === 'darwin' ? p.toLowerCase() : p);
+  const inside = await Promise.all(
+    roots.map(async (r) => {
+      const root = await fs.promises.realpath(r).catch(() => undefined);
+      return !!root && fold(real).startsWith(fold(root.endsWith(path.sep) ? root : root + path.sep));
+    }),
+  );
+  if (!inside.some(Boolean)) throw new AttachmentError(403, `${raw}: ${outside}`);
+  return { path: real, size: st.size };
 }
 
 /** A file's SHA-256, read as a stream. */

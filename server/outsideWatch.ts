@@ -86,8 +86,32 @@ export function outsideWatchConfig(
   return { name: o.name, host, healthUrl, ntfyTopic: s.topic, ...(o.ntfyServer ? { ntfyServer: o.ntfyServer } : {}), ...(s.mac ? { mac: s.mac } : {}), ...(s.broadcast ? { broadcast: s.broadcast } : {}) };
 }
 
-/** Which machine watches: the configured one, else "m5" if there is one, else the first. */
-export function watcherOf(configured: string | undefined, machines: string[]): string | undefined {
+/**
+ * Which machine watches: the configured one, else "m5" if there is one, else the first that is not in `inside` (the
+ * portal's own host as a machine: it goes down with the portal, so it cannot watch it from outside, w424).
+ */
+export function watcherOf(configured: string | undefined, machines: string[], inside: readonly string[] = []): string | undefined {
   if (configured) return machines.includes(configured) ? configured : undefined;
-  return machines.includes('m5') ? 'm5' : machines[0];
+  return machines.includes('m5') ? 'm5' : machines.find((m) => !inside.includes(m));
+}
+
+/** A URL whose host is this computer (localhost, 127.x.x.x, ::1). */
+export function isLoopbackUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return h === 'localhost' || h === '::1' || /^127\./.test(h);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The portal address the outside watch checks: config publicUrl, else the one the other machines were deployed with
+ * (add_machine's portal_url: the same portal). Never the portal's own host as a machine, which reaches it at a loopback
+ * address the watching Mac would read as itself (w424: after add_machine beast local, the m5 checked
+ * http://127.0.0.1:8790/api/health and pinged 127.0.0.1 instead of BEAST's tailnet name).
+ */
+export function watchedPortalUrl(publicUrl: string | undefined, machines: readonly { local?: boolean; portalUrl?: string }[]): string | undefined {
+  if (publicUrl) return publicUrl;
+  return machines.find((m) => !m.local && /^https?:\/\//.test(m.portalUrl ?? '') && !isLoopbackUrl(m.portalUrl!))?.portalUrl;
 }

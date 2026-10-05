@@ -31,7 +31,7 @@ import { handleMcp } from './mcp.ts';
 import { IMAGE_TYPES, SOCKET_PING_MS, type ImageInput, type NotifyPrefs, type SendMessageRequest } from '../shared/types.ts';
 import { listImages, MEDIA_TYPE, openVideo, parseRange, readImage, VIDEO_FILE } from './images.ts';
 import { keepMessageImages } from './inlineImages.ts';
-import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, publicRef } from './attachments.ts';
+import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, machineUploadHttp, publicRef } from './attachments.ts';
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
@@ -39,7 +39,7 @@ import { DispatcherChatRefused } from './orchestrators.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
-import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
+import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
@@ -219,9 +219,17 @@ machines.cleanupNotice = (machineId, text) => {
 };
 // The outside watchdog (docs/self-recovery.md): a Mac watches this host and alerts the user's phone through ntfy.
 const outside = loadOutsideWatchState(cfg.dataDir);
-const watcher = () => (cfg.outsideWatch?.enabled === false ? undefined : watcherOf(cfg.outsideWatch?.machine, machines.list().map((m) => m.id)));
-// Without publicUrl, the address the machines were deployed with (add_machine's portal_url) is the same portal.
-const portalUrl = () => cfg.publicUrl ?? machines.list().find((m) => /^https?:\/\//.test(m.portalUrl ?? ''))?.portalUrl;
+const watcher = () =>
+  cfg.outsideWatch?.enabled === false
+    ? undefined
+    : watcherOf(
+        cfg.outsideWatch?.machine,
+        machines.list().map((m) => m.id),
+        machines.list().filter((m) => m.local).map((m) => m.id),
+      );
+// Without publicUrl, the address the other machines were deployed with (add_machine's portal_url) is the same portal; the
+// local machine's loopback address is not (w424).
+const portalUrl = () => watchedPortalUrl(cfg.publicUrl, machines.list());
 const watchConfig = () => outsideWatchConfig({ ...cfg.outsideWatch, publicUrl: portalUrl(), name: os.hostname() }, outside);
 machines.outsideWatchFor = (id) => (id === watcher() ? (watchConfig() ?? null) : null);
 const learnNetwork = () =>
@@ -1198,6 +1206,13 @@ const server = http.createServer(async (req, res) => {
       const r = machineAttachment(attachments, machineId && store.machines.has(machineId) ? machineId : undefined, machineFile[1]);
       if ('error' in r) return send(res, r.status, { error: r.error });
       return sendStream(req, res, new StreamReply('application/octet-stream', r.file, r.record.size, downloadDisposition(r.record.name)));
+    }
+    // A machine's daemon sending a file its agent published as an attachment (docs/attachments.md, "Agents' files"): its
+    // own token, only an upload the portal opened for that machine, chunks that resume, the SHA-256 checked at the end.
+    const attachmentUpload = /^\/machine\/attachments\/uploads\/([a-f0-9]{32})$/.exec(url.pathname);
+    if (attachmentUpload) {
+      const machineId = machines.authenticate(req.headers.authorization);
+      return await machineUploadHttp(attachments, machineId && store.machines.has(machineId) ? machineId : undefined, req, res, attachmentUpload[1], Number(url.searchParams.get('offset') ?? 0));
     }
     // A machine's daemon sending review media its agent published (docs/review.md): its own token, chunks that resume.
     const reviewUpload = /^\/machine\/review\/(rv_[a-f0-9]{24})$/.exec(url.pathname);
