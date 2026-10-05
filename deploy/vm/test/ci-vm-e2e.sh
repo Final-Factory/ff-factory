@@ -104,18 +104,19 @@ echo "ok: a non-root account on the host does not reach the VM"
 if command -v docker >/dev/null; then
   # FFBox's Docker is rootless: its containers' processes are FFBox's own uids on the host, never root. The runner's
   # Docker is rootful, so a non-root --user stands in for that; a bridged container is forwarded through the host.
-  docker run --rm --network host --user 1000:1000 bash:5 timeout 5 bash -c "</dev/tcp/$IP/22" &&
+  # busybox nc -w bounds the connect itself (a shell's /dev/tcp waited out the kernel's 2-minute connect timeout).
+  docker run --rm --network host --user 1000:1000 busybox:stable nc -w 3 "$IP" 22 </dev/null &&
     fail "a non-root container on the host's network reached the VM"
-  docker run --rm bash:5 timeout 5 bash -c "</dev/tcp/$IP/22" && fail "a bridged container reached the VM"
+  docker run --rm busybox:stable nc -w 3 "$IP" 22 </dev/null && fail "a bridged container reached the VM"
   echo "ok: containers (non-root on the host's network, and bridged) do not reach the VM"
 fi
 nft list table inet fff_vm | grep -E 'counter packets [1-9]' || true
 
 step "guest install"
 git -C "$ROOT" branch -f main HEAD
-git -C "$ROOT" bundle create /tmp/ff.bundle main
+git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 g 'cat > /tmp/ff.bundle' </tmp/ff.bundle
-g 'chmod 644 /tmp/ff.bundle && rm -rf /tmp/ff-factory && git clone -q /tmp/ff.bundle /tmp/ff-factory'
+g 'chmod 644 /tmp/ff.bundle && rm -rf /tmp/ff-factory && git clone -q -b main /tmp/ff.bundle /tmp/ff-factory'
 g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --dry-run'
 t0=$(date +%s)
 g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --repo /tmp/ff.bundle'
@@ -136,7 +137,7 @@ step "update: build beside the running portal, drain, switch, verify"
 before=$(sha_of)
 git -C "$ROOT" -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q --allow-empty -m "ci: an update to install"
 git -C "$ROOT" branch -f main HEAD
-git -C "$ROOT" bundle create /tmp/ff.bundle main
+git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 g 'cat > /tmp/ff.bundle.new && mv /tmp/ff.bundle.new /tmp/ff.bundle && chmod 644 /tmp/ff.bundle' </tmp/ff.bundle
 want=$(git -C "$ROOT" rev-parse --short=7 HEAD)
 g 'sudo fffctl update --drain-minutes 0'
@@ -157,7 +158,7 @@ good=$want
 sed -i '1i throw new Error("ci: broken on purpose");' "$ROOT/server/index.ts"
 git -C "$ROOT" -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q -am "ci: a broken update"
 git -C "$ROOT" branch -f main HEAD
-git -C "$ROOT" bundle create /tmp/ff.bundle main
+git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 g 'cat > /tmp/ff.bundle.new && mv /tmp/ff.bundle.new /tmp/ff.bundle && chmod 644 /tmp/ff.bundle' </tmp/ff.bundle
 g 'sudo fffctl update --drain-minutes 0'
 wait_for 900 "rolled back to $good" bash -c "g() { /usr/local/sbin/fff-vm ssh \"\$@\"; }; g 'sudo cat /srv/fff/data/update.result.json' | jq -e '.ok == false and (.error | test(\"rolled back\"))'"

@@ -240,7 +240,8 @@ cmd_status() {
   echo "  portal http://$NET_VM_IP:$PORTAL_PORT/api/health: $(curl -fsS -m 10 "http://$NET_VM_IP:$PORTAL_PORT/api/health" 2>/dev/null || echo 'no answer')"
   echo "  firewall table inet fff_vm: $(firewall_ok && echo loaded || echo MISSING)"
   echo "  network $NET_NAME: $(v net-info "$NET_NAME" 2>/dev/null | awk '/^Active:/ {print "active " $2}')"
-  echo "  watch state: $(tr '\n' ' ' <"$WATCH_STATE" 2>/dev/null || echo none)"
+  ws=$(paste -sd' ' "$WATCH_STATE" 2>/dev/null || true)
+  echo "  watch state: ${ws:-none}"
   echo "  maintenance: $(in_maintenance && echo yes || echo no)"
   systemctl list-timers --no-pager fff-vm-watch.timer fff-vm-nightly.timer 2>/dev/null | sed 's/^/  /' | head -n 4
   echo "  snapshots: $(snapshot_list | tr '\n' ' ')"
