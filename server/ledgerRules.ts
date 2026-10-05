@@ -245,6 +245,17 @@ export const FOLLOW_UP_EVERY_MS = 24 * 3_600_000;
 export type FollowUp = { kind: 'ask'; worker: SessionInfo; why: string; quietHours: number } | { kind: 'stall'; why: string };
 
 /**
+ * When the cleanup may next ask about this merged request: 6 hours after the last word about it (its merge, a report
+ * from a worker still on it, the last question), and a day after the last question.
+ */
+export function followUpDue(w: Pick<WorkItem, 'prs' | 'followUp'>, workers: readonly SessionInfo[], serving: (s: SessionInfo) => boolean): number {
+  const asked = w.followUp ? Date.parse(w.followUp.at) || 0 : 0;
+  const mergedAt = Math.max(0, ...(w.prs ?? []).filter((p) => p.state === 'merged').map((p) => Date.parse(p.at ?? '') || 0));
+  const word = Math.max(mergedAt, asked, ...workers.filter(serving).map((s) => Date.parse(s.lastActivityAt) || 0));
+  return Math.max(word + FOLLOW_UP_QUIET_MS, asked ? asked + FOLLOW_UP_EVERY_MS : 0);
+}
+
+/**
  * What the cleanup does about a request whose pull requests merged but which stays open for a step after the merge
  * (`reason`, afterMergeReason's): nothing while there was word about it in the last 6 hours (a report from a worker still
  * on it, the merge itself, or the last question) or it was asked in the last day; else ask its most recent worker
@@ -262,11 +273,10 @@ export function followUpDecision(
   const prs = w.prs ?? [];
   const merged = prs.filter((p) => p.state === 'merged');
   if (!merged.length || prs.some((p) => p.state === 'open')) return undefined;
+  if (now < followUpDue(w, workers, serving)) return undefined;
   const asked = w.followUp ? Date.parse(w.followUp.at) || 0 : 0;
-  if (asked && now - asked < FOLLOW_UP_EVERY_MS) return undefined;
   const mergedAt = Math.max(0, ...merged.map((p) => Date.parse(p.at ?? '') || 0));
   const word = Math.max(mergedAt, asked, ...workers.filter(serving).map((s) => Date.parse(s.lastActivityAt) || 0));
-  if (now - word < FOLLOW_UP_QUIET_MS) return undefined;
   const quietHours = Math.floor((now - word) / 3_600_000);
   const worker = [...workers].filter((s) => s.status !== 'error').sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
   if (!worker || !canResume) return { kind: 'stall', why: `follow-up unconfirmed: ${reason}, no word for ${quietHours} h, and ${worker ? 'this server cannot resume its worker' : 'no worker is left to ask'}` };

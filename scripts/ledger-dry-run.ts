@@ -5,9 +5,11 @@
  * follow-up unconfirmed. It uses the PR states the copy has stored (no gh), the same rules as server/ledgerSweep.ts and
  * its skip for a worker running on the request.
  *
- *   node scripts/ledger-dry-run.ts <data dir> [w342,w10]
+ *   node scripts/ledger-dry-run.ts <data dir> [w342,w10] [at=2026-10-05T08:00Z]
+ *
+ * at= runs the rules as of that time instead of now (the copy's sessions and PRs stay as they were).
  */
-import { afterMergeReason, followUpDecision } from '../server/ledgerRules.ts';
+import { afterMergeReason, followUpDecision, followUpDue } from '../server/ledgerRules.ts';
 import { servedBy } from '../shared/workState.ts';
 import { ledgerStates } from './ledger-states.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
@@ -43,7 +45,8 @@ export function dryRun(work: readonly WorkItem[], session: (id: string) => Sessi
     if (w.question || w.flag) continue;
     const d = followUpDecision(w, workers, reason, now, (s) => servedBy(s.id, work).has(w.id), canResume);
     if (!d) {
-      out.push({ id: w.id, does: 'wait', why: `still open: ${reason}; word about it within 6 h, or asked in the last day` });
+      const due = followUpDue(w, workers, (s) => servedBy(s.id, work).has(w.id));
+      out.push({ id: w.id, does: 'wait', why: `still open: ${reason}; the cleanup asks from ${new Date(due).toISOString().slice(0, 16).replace('T', ' ')} UTC (6 h after the last word about it)` });
       continue;
     }
     out.push(d.kind === 'ask' ? { id: w.id, does: 'ask', why: `worker ${d.worker.id} (${d.worker.status}), no word for ${d.quietHours} h; still open: ${d.why}` } : { id: w.id, does: 'stall', why: d.why });
@@ -52,14 +55,18 @@ export function dryRun(work: readonly WorkItem[], session: (id: string) => Sessi
 }
 
 if (import.meta.url === `file:///${process.argv[1]?.replace(/\\/g, '/').replace(/^\//, '')}`) {
-  const [dir, check] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const at = args.find((a) => a.startsWith('at='));
+  const [dir, check] = args.filter((a) => !a.startsWith('at='));
+  const now = at ? Date.parse(at.slice(3)) : Date.now();
   if (!dir) {
     console.error('usage: node scripts/ledger-dry-run.ts <copy of a data dir> [w342,w10]');
     process.exit(2);
   }
   const { work, sessions } = ledgerStates(dir);
   const byId = new Map(sessions.map((s) => [s.id, s]));
-  const lines = dryRun(work, (id) => byId.get(id), Date.now());
+  console.log(`As of ${new Date(now).toISOString().slice(0, 16).replace('T', ' ')} UTC.`);
+  const lines = dryRun(work, (id) => byId.get(id), now);
   for (const does of ['close', 'ask', 'stall', 'wait'] as const) {
     const rows = lines.filter((l) => l.does === does);
     console.log(`\nWould ${does} (${rows.length}):`);

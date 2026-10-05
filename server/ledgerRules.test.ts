@@ -102,3 +102,20 @@ test('stalling: waiting requests are not candidates; a newer finished release or
   assert.equal(supersededBy(plain, [covers], [{ ref: 'w8' }])?.id, 'w8');
   assert.equal(supersededBy(plain, [covers], []), undefined);
 });
+
+test('w419: DONE lines, what a DONE still misses, and when the follow-up is due', async () => {
+  const { doneIdsIn, doneProblem, followUpDue, FOLLOW_UP_QUIET_MS, FOLLOW_UP_EVERY_MS } = await import('./ledgerRules.ts');
+  assert.deepEqual(doneIdsIn('Merged.\n\nDONE: w342\n- **DONE: W12**\n> DONE w7.'), ['w342', 'w12', 'w7']);
+  assert.deepEqual(doneIdsIn('Reply DONE: w342 when sure.\nDONE: w342 and more text\nDONE: wNNN'), [], 'only a line of its own counts');
+  const base = { title: 'Fix it', brief: 'Make it work.', prs: [{ repo: 'r/r', number: 1, state: 'merged' as const }] };
+  assert.equal(doneProblem(base, 'Done.'), undefined);
+  assert.match(doneProblem({ ...base, prs: [...base.prs, { repo: 'r/r', number: 2, state: 'open' as const }] }, 'Done.')!, /PR #2 is still open/);
+  assert.match(doneProblem({ ...base, title: 'Release 0.50.0.77' }, 'It is live.')!, /link the posted notes/);
+  assert.equal(doneProblem({ ...base, title: 'Release 0.50.0.77' }, 'Live on development. Notes: https://discord.com/channels/1/2/3'), undefined);
+  assert.match(doneProblem({ ...base, brief: 'Plan: PR1 data, PR2 presentation.' }, 'Merged.')!, /plans more than one PR/);
+  assert.equal(doneProblem({ ...base, brief: 'Plan: PR1 data, PR2 presentation.' }, 'Both PRs merged.'), undefined);
+  const T = Date.parse('2026-10-05T01:43:00Z');
+  const merged = { prs: [{ repo: 'r/r', number: 1024, state: 'merged' as const, at: new Date(T).toISOString() }] };
+  assert.equal(followUpDue(merged, [], () => false), T + FOLLOW_UP_QUIET_MS);
+  assert.equal(followUpDue({ ...merged, followUp: { at: new Date(T + 7 * 3_600_000).toISOString(), sessionId: 's' } }, [], () => false), T + 7 * 3_600_000 + FOLLOW_UP_EVERY_MS, 'once a day after a question');
+});
