@@ -98,6 +98,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A thread Max escalated hears when its fix merges** (w480, asked by Lothsahn). FFBox watches board ref
+  `conv-<conversation>` after an escalation, but the ledger left a conversation's own request out of that
+  conversation's check, so the answer was always `clear` and no merge notice ever came: w436 (#ask-assistant, range
+  rings darkening the screen) closed as already fixed by #1076 in Build 78, and the player was never told. The intake
+  now follows the escalated request itself and pushes FFBox its standing, and a done answer names the PR that merged the
+  fix and its release ("Fixed in PR #1076, coming in version 78"), looked up for an auto-closed or "already fixed by
+  #N" request too. Board watches are kept in `data/intake.json` across restarts. Once, at the first start, escalated
+  requests closed done in the last 14 days are followed again (`node scripts/escalation-catchup.ts <data copy>` lists
+  them). Workers put the report's own Discord link in a fix PR, a message's link for a message in a channel, and write
+  `RESOLVED: already fixed by PR #N`. The `maybe` candidates of a board check, saved but never read back at start,
+  are read back too.
+
 - **Orchestrators and standing agents no longer read FF Factory's secrets** (w467, part C of the portal VM). Read,
   Glob, Grep and a standing agent's shell are refused for config.json, data/ (an orchestrator's own memory and the
   attachment store excepted), the secrets folder and token files, ~/.ssh, Claude's and gh's credentials, on Windows and

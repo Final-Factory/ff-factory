@@ -396,7 +396,7 @@ match's title into a container that runs player text. Protocol 2 adds, per match
 
 | field | on | what |
 |---|---|---|
-| `watch` | an open match, when FF Factory knows the branch | `{ "repo", "branch", "pr"?, "target" }`: the branch the fix is being made on (the worker's PR head branch, with `pr` once a PR is open, else its sandbox branch such as `sandbox/lag-lead`), the repo (`Final-Factory/FinalFactory`, config `intake.ffbox.repo` or the game repo's URL) and the branch it lands on (`develop`). FFBox watches it for the merge, read-only |
+| `watch` | an open match, when FF Factory knows the branch; a done match, when it knows the PR that merged the fix (w480) | `{ "repo", "branch", "pr"?, "target" }`: on an open match, the branch the fix is being made on (the worker's PR head branch, with `pr` once a PR is open, else its sandbox branch such as `sandbox/lag-lead`), the repo (`Final-Factory/FinalFactory`, config `intake.ffbox.repo` or the game repo's URL) and the branch it lands on (`develop`); FFBox watches it for the merge, read-only. On a done match, the merged PR (its head branch and `pr`, always present), for the merge notice's "Fixed in PR #N"; FFBox follows no branch of a done match |
 | `version` | a done match | the first release (`FFVersion.cs` bump on the base branch) that contains the fix, e.g. `0.50.0.51`; `null` while it is merged but not yet released ("coming in the next beta build") |
 | `mergedIn` | a done match | `<target>@<sha>`, e.g. `develop@abc1234`, when the fix commit is known; else `null` |
 | `branch` | a done match | the branch the work was on, when known |
@@ -404,8 +404,17 @@ match's title into a container that runs player text. Protocol 2 adds, per match
 **Updates** (protocol 2): while the link is up, FF Factory re-checks every answer it gave `in_flight` (or `done` with
 `version: null`) each minute, for up to 30 days, and sends the `board` again with the same `ref` and `"update": true`
 when what FFBox acts on changed: the verdict, a match's status, `watch` (a PR opened, a branch renamed), `version`,
-`mergedIn`, whatever the hello listed. FF Factory forgets these on a restart, so the connector
-re-sends `board_check` for everything it still follows after every (re)connect.
+`mergedIn`, whatever the hello listed. FF Factory keeps these across restarts (w480, `data/intake.json`), and the
+connector also re-sends `board_check` for everything it still follows after every (re)connect.
+
+**An escalated thread** (w480): after an escalation answered `filed` or `in_flight`, FFBox writes board ref
+`conv-<conversation>` with `discord:<thread id>` and watches it (ffwatch `fff_escalation_link`). FF Factory answers and
+updates that ref with the escalated request's own standing (the one in the escalation's answer, or the one it was merged
+into), never with a match search: the search would leave it out, since its source is that conversation. `in_flight`
+while it is open, `done` once it is (with `version`, `mergedIn` and the merged PR as `watch` when known), `clear` with no
+matches if it ends any other way. These are followed whether or not FF Factory's ledger check is on. A one-time catch-up
+pushes `done` to the escalated threads whose requests closed in the 14 days before this existed; FFBox's once-only
+merge-notice guards make a repeat harmless.
 
 **FFBox MUST** (its host code, never a container):
 

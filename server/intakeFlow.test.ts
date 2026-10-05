@@ -11,6 +11,7 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { IntakeManager, type DiscordReader } from './intake.ts';
+import type { BoardAnswer } from './orchestrators.ts';
 import { beltFor } from './belts.ts';
 import { limitProblem } from './work.ts';
 import { UNTRUSTED_HEADER, parseBugThread, type DiscordMessage, type DiscordThread } from './intakeRules.ts';
@@ -979,4 +980,139 @@ test('intake diagnoses: the FFBox daily cap and the intake cap skip, with why', 
   const capped = intake.onDiagnosis(diag(2));
   assert.equal(capped.status, 'skipped');
   assert.match((capped as { why: string }).why, /daily cap/);
+});
+
+// ---------------------------------------------------------------- w480: escalated threads followed to their result
+
+type Pushed = [string, BoardAnswer];
+/** The intake's injectable deps, for the board pushes, the PR look-up and the merged PRs. */
+const depsOf = (intake: IntakeManager) => (intake as unknown as { d: { pushBoard?: (ref: string, a: BoardAnswer) => boolean; prInfo?: (n: number) => Promise<unknown>; mergedPrs?: () => Promise<unknown> } }).d;
+const pushTo = (intake: IntakeManager, into: Pushed[]) => {
+  depsOf(intake).pushBoard = (ref, a) => {
+    into.push([ref, a]);
+    return true;
+  };
+};
+const REPO = 'Final-Factory/FinalFactory';
+const ESC_REF = `conv-${ESCALATION.conversation}`;
+const askAbout = (conversation = ESCALATION.conversation, ref = `conv-${conversation}`) => ({ type: 'board_check' as const, ref, keys: [`discord:${ESCALATION.threadId}`], conversation });
+
+test('w480: an escalated thread is followed: FFBox\'s own check hears its request, and done goes with the fixing PR and release', async (t) => {
+  const { intake, o } = setup(t, { ffbox: { enabled: true, escalations: true, repo: REPO } });
+  const pushed: Pushed[] = [];
+  pushTo(intake, pushed);
+  const filed = intake.onEscalation(ESCALATION) as { status: 'filed'; workId: string };
+  assert.equal(filed.status, 'filed');
+  const w = o.requireWork(filed.workId);
+  // Before w480 the ledger left a conversation's own request out of its check, so FFBox's watch only ever heard clear.
+  assert.equal(o.boardCheck({ keys: [`discord:${ESCALATION.threadId}`], conversation: ESCALATION.conversation }, 30).verdict, 'clear');
+  // FFBox links conv-412 and its connector asks about it: the escalated request, in flight, even with the ledger check off.
+  const asked = intake.onBoardCheck(askAbout())!;
+  assert.deepEqual([asked.verdict, asked.matches.map((m) => m.id)], ['in_flight', [w.id]]);
+  assert.equal(intake.onBoardCheck(askAbout('999')), undefined, 'any other ref still needs the ledger check on');
+  assert.equal(intake.recheckBoards(), 0, 'nothing changed since FFBox was answered');
+
+  // Closed done with its fix's PR and release known: pushed at once, the PR as watch.pr for FFBox's "Fixed in PR #N".
+  w.status = 'done';
+  w.delivery = { fixCommit: 'c'.repeat(40), fixPr: 1076, fixBranch: 'fix/range-rings', releasedIn: '0.50.0.78' };
+  assert.equal(intake.recheckBoards(), 1);
+  const [ref, a] = pushed.at(-1)!;
+  assert.equal(ref, ESC_REF);
+  assert.equal(a.verdict, 'done');
+  const { id, status, version, mergedIn, watch } = a.matches[0];
+  assert.deepEqual({ id, status, version, mergedIn, watch }, { id: w.id, status: 'done', version: '0.50.0.78', mergedIn: `develop@${'c'.repeat(40)}`, watch: { repo: REPO, branch: 'fix/range-rings', pr: 1076, target: 'develop' } });
+  assert.equal(intake.recheckBoards(), 0, 'released: nothing more to follow');
+  assert.equal(intake.onBoardCheck(askAbout()), undefined, 'the watch is gone once it said the release');
+});
+
+test('w480: board watches survive a restart: an escalated thread\'s and a board_check\'s, each keeping its start', async (t) => {
+  const { intake, o, cfg, store, agents } = setup(t, { ffbox: { enabled: true, escalations: true, boardCheck: true, repo: REPO } });
+  const filed = intake.onEscalation(ESCALATION) as { workId: string };
+  const w = o.requireWork(filed.workId);
+  // Another FFBox conversation asking about the same thread: in flight, a watch of its own.
+  assert.equal(intake.onBoardCheck(askAbout('900'))!.verdict, 'in_flight');
+  const before = (intake as unknown as { boards: Map<string, { at: number; follow?: string }> }).boards;
+  assert.deepEqual([...before.keys()].sort(), ['conv-412', 'conv-900']);
+  const starts = Object.fromEntries([...before].map(([k, b]) => [k, b.at]));
+  intake.close();
+
+  const pushed: Pushed[] = [];
+  const again = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, pushBoard: (ref, a) => (pushed.push([ref, a]), true) });
+  t.after(() => again.close());
+  const after = (again as unknown as { boards: Map<string, { at: number; follow?: string }> }).boards;
+  assert.deepEqual(Object.fromEntries([...after].map(([k, b]) => [k, b.at])), starts, 'the same watches, the same follow windows');
+  assert.equal(after.get('conv-412')!.follow, w.id);
+  w.status = 'done';
+  w.delivery = { fixCommit: 'd'.repeat(40), fixPr: 1080, fixBranch: 'fix/x', releasedIn: '0.50.0.79' };
+  assert.equal(again.recheckBoards(), 2);
+  assert.deepEqual(pushed.map(([ref, a]) => [ref, a.verdict, a.matches[0]?.id]).sort(), [['conv-412', 'done', w.id], ['conv-900', 'done', w.id]]);
+});
+
+test('w480: closed "already fixed by #1076": the PR is looked up, its release found, and only then does done go', async (t) => {
+  const { intake, o, dir } = setup(t, { ffbox: { enabled: true, escalations: true, repo: REPO } });
+  const repo = path.join(dir, 'base');
+  fs.mkdirSync(path.join(repo, 'ProjectSettings'), { recursive: true });
+  const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@users.noreply.github.com', ...a], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_COMMITTER_DATE: new Date(Date.now() - 3 * 3_600_000).toISOString() } }).trim();
+  const version = (v: string) => fs.writeFileSync(path.join(repo, 'ProjectSettings', 'ProjectSettings.asset'), `PlayerSettings:\n  bundleVersion: ${v}\n`);
+  git('init', '-q', '-b', 'develop');
+  version('0.50.0.77');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'v77');
+  fs.writeFileSync(path.join(repo, 'rings.txt'), 'fixed');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'Range rings no longer darken the screen (#1076)');
+  const fix = git('rev-parse', 'HEAD');
+  version('0.50.0.78');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'v78');
+
+  const pushed: Pushed[] = [];
+  pushTo(intake, pushed);
+  const looked: number[] = [];
+  depsOf(intake).prInfo = async (n) => (looked.push(n), n === 1076 ? { sha: fix, at: new Date().toISOString(), number: 1076, head: 'fix/range-rings', text: 'Range rings' } : undefined);
+  depsOf(intake).mergedPrs = async () => [];
+  const w = o.requireWork((intake.onEscalation(ESCALATION) as { workId: string }).workId);
+  intake.onBoardCheck(askAbout());
+  // Its worker closes it: already fixed by another request's PR (w436 and #1076, Build 78).
+  w.status = 'done';
+  w.outcome = 'Already fixed by #1076 (Build 78): the rings use the new material.';
+  assert.equal(intake.recheckBoards(), 0, 'done waits for the look for its fix');
+  assert.deepEqual(await intake.resolveFixes(), [w.id]);
+  assert.deepEqual(looked, [1076]);
+  assert.deepEqual([w.delivery?.fixCommit, w.delivery?.fixPr, w.delivery?.fixBranch, w.delivery?.releasedIn], [fix, 1076, 'fix/range-rings', '0.50.0.78']);
+  assert.match(w.log.at(-1)!, /for FFBox's merge notice: already fixed by PR #1076 .*shipped in 0\.50\.0\.78/);
+  assert.equal(intake.recheckBoards(), 1);
+  const m = pushed.at(-1)![1].matches[0];
+  assert.deepEqual([pushed.at(-1)![1].verdict, m.version, m.mergedIn, m.watch?.pr], ['done', '0.50.0.78', `develop@${fix}`, 1076]);
+  assert.deepEqual(await intake.resolveFixes(), [], 'nothing left to learn');
+
+  // A close naming no PR goes after one look, as plain "Fixed".
+  const other = o.requireWork((intake.onEscalation({ ...ESCALATION, ref: 'conv-413-turn-1', conversation: '413', threadId: '1554888928090263888', url: 'https://discord.com/channels/530867164866150410/1554888928090263888' }) as { workId: string }).workId);
+  other.status = 'done';
+  other.outcome = 'Not reproducible on 0.50.0.78.';
+  assert.equal(intake.recheckBoards(), 1, 'nothing to learn: done goes at once');
+  assert.deepEqual([pushed.at(-1)![0], pushed.at(-1)![1].matches[0].watch], ['conv-413', undefined]);
+});
+
+test('w480: the one-time catch-up follows escalated requests closed done in the last 14 days, once', async (t) => {
+  const { intake, o, cfg } = setup(t, { ffbox: { enabled: true, escalations: true, repo: REPO } });
+  const recent = o.requireWork((intake.onEscalation(ESCALATION) as { workId: string }).workId);
+  const old = o.requireWork((intake.onEscalation({ ...ESCALATION, ref: 'conv-414-turn-1', conversation: '414', threadId: '1554888928090263777', url: 'https://discord.com/channels/530867164866150410/1554888928090263777' }) as { workId: string }).workId);
+  // Followed already since they were escalated; the catch-up is for requests closed before FF Factory followed any.
+  (intake as unknown as { boards: Map<string, unknown> }).boards.clear();
+  recent.status = 'done';
+  recent.updatedAt = new Date(Date.now() - 2 * 86_400_000).toISOString();
+  recent.delivery = { fixCommit: 'e'.repeat(40), fixPr: 1076, fixBranch: 'fix/range-rings', releasedIn: '0.50.0.78' };
+  old.status = 'done';
+  old.updatedAt = new Date(Date.now() - 20 * 86_400_000).toISOString();
+  cfg.intake = { ffbox: { enabled: false } };
+  assert.deepEqual(intake.catchUpEscalations(), [], 'not while the FFBox intake is off');
+  cfg.intake = { ffbox: { enabled: true, escalations: true, repo: REPO } };
+  const lines = intake.catchUpEscalations();
+  assert.deepEqual(lines.map((l) => [l.ref, l.workId]), [[ESC_REF, recent.id]]);
+  assert.deepEqual(intake.catchUpEscalations(), [], 'once');
+  const pushed: Pushed[] = [];
+  pushTo(intake, pushed);
+  assert.equal(intake.recheckBoards(), 1);
+  assert.deepEqual([pushed[0][0], pushed[0][1].verdict, pushed[0][1].matches[0].watch?.pr, pushed[0][1].matches[0].version], [ESC_REF, 'done', 1076, '0.50.0.78']);
 });
