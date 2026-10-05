@@ -39,7 +39,7 @@ import { DispatcherChatRefused } from './orchestrators.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
-import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watcherOf } from './outsideWatch.ts';
+import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
@@ -219,9 +219,17 @@ machines.cleanupNotice = (machineId, text) => {
 };
 // The outside watchdog (docs/self-recovery.md): a Mac watches this host and alerts the user's phone through ntfy.
 const outside = loadOutsideWatchState(cfg.dataDir);
-const watcher = () => (cfg.outsideWatch?.enabled === false ? undefined : watcherOf(cfg.outsideWatch?.machine, machines.list().map((m) => m.id)));
-// Without publicUrl, the address the machines were deployed with (add_machine's portal_url) is the same portal.
-const portalUrl = () => cfg.publicUrl ?? machines.list().find((m) => /^https?:\/\//.test(m.portalUrl ?? ''))?.portalUrl;
+const watcher = () =>
+  cfg.outsideWatch?.enabled === false
+    ? undefined
+    : watcherOf(
+        cfg.outsideWatch?.machine,
+        machines.list().map((m) => m.id),
+        machines.list().filter((m) => m.local).map((m) => m.id),
+      );
+// Without publicUrl, the address the other machines were deployed with (add_machine's portal_url) is the same portal; the
+// local machine's loopback address is not (w424).
+const portalUrl = () => watchedPortalUrl(cfg.publicUrl, machines.list());
 const watchConfig = () => outsideWatchConfig({ ...cfg.outsideWatch, publicUrl: portalUrl(), name: os.hostname() }, outside);
 machines.outsideWatchFor = (id) => (id === watcher() ? (watchConfig() ?? null) : null);
 const learnNetwork = () =>

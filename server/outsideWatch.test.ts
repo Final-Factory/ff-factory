@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { OutsideWatch, magicPacket, readOutsideWatch, type OutsideWatchConfig } from '../machine/outsideWatch.ts';
-import { broadcastAddress, loadOutsideWatchState, normMac, outsideWatchConfig, watcherOf } from './outsideWatch.ts';
+import { broadcastAddress, isLoopbackUrl, loadOutsideWatchState, normMac, outsideWatchConfig, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 
 const CFG: OutsideWatchConfig = { name: 'BEAST', host: 'beast.example.ts.net', healthUrl: 'https://beast.example.ts.net/api/health', ntfyTopic: 'ffsb-test', mac: '60:45:2e:43:75:0b', broadcast: '10.0.0.255' };
 
@@ -100,6 +100,25 @@ test('outside watch: without a MAC there is no Wake-on-LAN; the magic packet is 
   assert.throws(() => magicPacket('60:45:2e'), /not a MAC/);
 });
 
+test("outside watch (portal side): it watches the portal's tailnet URL, never the local machine's loopback one (w424)", () => {
+  // BEAST's machines after add_machine beast local (state.json, 2026-10-05): beast first, at 127.0.0.1.
+  const machines = [
+    { id: 'beast', local: true, portalUrl: 'http://127.0.0.1:8790' },
+    { id: 'lothdesktop', portalUrl: 'https://beast.tailedfcad.ts.net' },
+    { id: 'm5', portalUrl: 'https://beast.tailedfcad.ts.net' },
+  ];
+  const url = watchedPortalUrl(undefined, machines);
+  assert.equal(url, 'https://beast.tailedfcad.ts.net');
+  const s = { topic: 'ffsb-xxxxxxxxxxxxxxxx' };
+  assert.deepEqual([outsideWatchConfig({ publicUrl: url, name: 'BEAST' }, s)?.healthUrl, outsideWatchConfig({ publicUrl: url, name: 'BEAST' }, s)?.host], ['https://beast.tailedfcad.ts.net/api/health', 'beast.tailedfcad.ts.net']);
+  // Before the fix: the first machine with a portal URL, the local one.
+  assert.equal(machines.find((m) => /^https?:\/\//.test(m.portalUrl))?.portalUrl, 'http://127.0.0.1:8790');
+  assert.equal(watchedPortalUrl('https://portal.example.ts.net', machines), 'https://portal.example.ts.net', 'config publicUrl wins');
+  assert.equal(watchedPortalUrl(undefined, [{ portalUrl: 'http://localhost:8790' }, { portalUrl: 'http://[::1]:8790' }, { portalUrl: 'http://127.0.0.2:1' }]), undefined, 'loopback is never watched from outside');
+  assert.equal(watchedPortalUrl(undefined, [machines[0]]), undefined, 'only the local machine: nothing to watch');
+  assert.deepEqual(['http://127.0.0.1:8790', 'http://localhost', 'http://[::1]:1', 'https://beast.tailedfcad.ts.net', 'not a url'].map(isLoopbackUrl), [true, true, true, false, false]);
+});
+
 test('outside watch (portal side): topic made once, network, config and who watches', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'outside-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -116,6 +135,10 @@ test('outside watch (portal side): topic made once, network, config and who watc
   assert.equal(watcherOf(undefined, ['m3']), 'm3');
   assert.equal(watcherOf('m3', ['m3', 'm5']), 'm3');
   assert.equal(watcherOf('mx', ['m3', 'm5']), undefined);
+  // The portal's own host as a machine goes down with the portal: never the default watcher (w424).
+  assert.equal(watcherOf(undefined, ['beast', 'lothdesktop'], ['beast']), 'lothdesktop');
+  assert.equal(watcherOf(undefined, ['beast'], ['beast']), undefined);
+  assert.equal(watcherOf('beast', ['beast'], ['beast']), 'beast', 'configured by hand: as asked');
   // What the Mac keeps between runs.
   const f = path.join(dir, 'ow.json');
   fs.writeFileSync(f, JSON.stringify(c));
