@@ -312,7 +312,7 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
     // FFBox is listed only while switched on or set up; its page (with what it needs) opens either way.
     const p = app.providers?.find((x) => x.id === route.providerId) ?? (app.ffbox?.id === route.providerId ? app.ffbox : undefined);
     if (!p) return { node: <Missing what="provider" />, layout: 'single', title: 'Not found' };
-    const panel = <ProviderPanel provider={p} tab={route.tab} onClose={() => navigate({ view: 'home' })} />;
+    const panel = <ProviderPanel provider={p} tab={route.tab} item={route.item} onClose={() => navigate({ view: 'home' })} />;
     if (wide) {
       return {
         layout: 'split',

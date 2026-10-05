@@ -519,6 +519,17 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
   // Creating a branch is the same call, with create_from.
   assert.match(await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/new', createFrom: 'origin/develop', callerSessionId: a1.info.id }), /→ feature\/new/);
 
+  // Another agent there that only waits (w426): its turn over, a wake_me pending and a background task still running.
+  // Idle is not mid-turn, on the portal or on the daemon, so it does not hold the switch up, the orchestrator's included.
+  agents.waker.schedule(a2.info.id, 30, 'check the build');
+  assert.ok(agents.waker.pending(a2.info.id));
+  for (const info of [a2.info, onDaemon(a2.info.id)]) Object.assign(info, { status: 'idle', backgroundTasks: 1, statusDetail: '1 background task(s)' });
+  assert.match(await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/waits', callerSessionId: a1.info.id }), /→ feature\/waits/);
+  midTurn(a1, 'idle');
+  assert.match(await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/new' }), /→ feature\/new/);
+  midTurn(a1, 'running');
+  agents.waker.cancel(a2.info.id);
+
   // Another agent mid-turn there blocks it, by its title: on the portal...
   midTurn(a2, 'running');
   await assert.rejects(agents.switchBranch({ sandbox: 'pc/sb1', branch: 'feature/w', callerSessionId: a1.info.id }), /agent\(s\) "other worker" is mid-turn in pc\/sb1/);

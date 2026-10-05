@@ -414,7 +414,8 @@ export type Route =
   | { view: 'msandbox'; machineId: string; sandboxId: string; sessionId?: string }
   /** Every computer and what it is working on, as a board. */
   | { view: 'overview' }
-  | { view: 'provider'; providerId: string; tab?: string }
+  /** item: the tab's one thing, e.g. #/provider/ffbox/conversation/812 (w426). */
+  | { view: 'provider'; providerId: string; tab?: string; item?: string }
   | { view: 'max'; tab?: string }
   | { view: 'search'; q?: string };
 
@@ -429,7 +430,7 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === 'machine' && parts[1]) return { view: 'machine', machineId: parts[1], sessionId: parts[2] };
   if (parts[0] === 'overview') return { view: 'overview' };
   if (parts[0] === 'agent' && parts[1]) return { view: 'agent', agentId: parts[1], tab: parts[2] };
-  if (parts[0] === 'provider' && parts[1]) return { view: 'provider', providerId: parts[1], tab: parts[2] };
+  if (parts[0] === 'provider' && parts[1]) return { view: 'provider', providerId: parts[1], tab: parts[2], item: parts[2] ? parts[3] : undefined };
   if (parts[0] === 'max') return { view: 'max', tab: parts[1] };
   return { view: 'home' };
 }
@@ -457,7 +458,7 @@ export function href(r: Route): string {
     case 'agent':
       return `#/agent/${encodeURIComponent(r.agentId)}${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
     case 'provider':
-      return `#/provider/${encodeURIComponent(r.providerId)}${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
+      return `#/provider/${encodeURIComponent(r.providerId)}${r.tab ? '/' + encodeURIComponent(r.tab) + (r.item ? '/' + encodeURIComponent(r.item) : '') : ''}`;
     case 'max':
       return `#/max${r.tab ? '/' + encodeURIComponent(r.tab) : ''}`;
   }

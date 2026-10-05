@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { APIRequestContext } from '@playwright/test';
 import { appState, expect, expectNoHorizontalOverflow, go, openSidebar, sendMessage, test, uniq } from './fixtures.ts';
 import type { TranscriptEvent } from '../shared/types.ts';
-import { E2E_PROVIDER_TOKEN, MockConnector, SAMPLE_CLASSES, SAMPLE_CONVERSATIONS, SAMPLE_INTAKE } from './mockConnector.ts';
+import { E2E_PROVIDER_TOKEN, MockConnector, SAMPLE_CLASSES, SAMPLE_CONVERSATION_ANSWER, SAMPLE_CONVERSATIONS, SAMPLE_INTAKE } from './mockConnector.ts';
 
 test('FFBox: the card follows the connector, and its page lists capacity, conversations and intake reports', async ({ authed: page, request }) => {
   const base = test.info().project.use.baseURL!;
@@ -376,6 +376,61 @@ test("FFBox in the sidebar's load panel: mini bars, then a row with CPU over 100
     await page.screenshot({ path: test.info().outputPath('load-panel-ffbox-stale.png') });
     await test.info().attach('load panel with FFBox, stale', { path: test.info().outputPath('load-panel-ffbox-stale.png'), contentType: 'image/png' });
   } finally {
+    c.close();
+  }
+});
+
+test("FFBox's conversations open in FF Factory (w426): FFBox's own page is the second link, on Loth's network", async ({ authed: page }) => {
+  const base = test.info().project.use.baseURL!;
+  const c = new MockConnector(base, E2E_PROVIDER_TOKEN);
+  const id = String(700000 + (Date.now() % 100000));
+  const lan = `https://192.168.51.10:8787/conversation/${id}`;
+  const asked: unknown[] = [];
+  const stop = c.answerQueries((what, args) => {
+    if (what !== 'conversation') return { ok: false, error: 'unsupported' };
+    asked.push(args);
+    return { ok: true, at: new Date().toISOString(), data: { ...SAMPLE_CONVERSATION_ANSWER, conversation: { ...SAMPLE_CONVERSATION_ANSWER.conversation, id } } };
+  });
+  try {
+    await c.hello({ protocol: 2, version: 'e2e-conversation' });
+    c.conversation({ ...SAMPLE_CONVERSATIONS[0], id, title: `Conversation page ${id}`, url: lan, updatedAt: new Date().toISOString() });
+    await go(page, '#/provider/ffbox');
+    const panel = page.getByTestId('provider-panel');
+    const row = panel.getByTestId('provider-conversations').locator('.run-row', { hasText: `Conversation page ${id}` });
+    // The title opens FF Factory's own page; FFBox's page is the small second link, named for where it works.
+    await expect(row.getByTestId(`provider-conversation-link-${id}`)).toHaveAttribute('href', `#/provider/ffbox/conversation/${id}`);
+    await expect(row.getByRole('link', { name: "on Loth's network" })).toHaveAttribute('href', lan);
+    await row.getByTestId(`provider-conversation-link-${id}`).click();
+
+    await expect(page).toHaveURL(new RegExp(`#/provider/ffbox/conversation/${id}$`));
+    const view = panel.getByTestId('provider-conversation');
+    await expect(view.locator('h3')).toHaveText('Desync minerBots+census at heartbeat 7240');
+    await expect(view.getByTestId('provider-conversation-freshness')).toContainText('Live from FFBox');
+    await expect(view.getByTestId('provider-conversation-lan')).toHaveAttribute('href', lan);
+    await expect(view.getByRole('link', { name: 'Discord thread' })).toHaveAttribute('href', /^https:\/\/discord\.com\/channels\//);
+    const turns = view.getByTestId('provider-turn');
+    await expect(turns).toHaveCount(2);
+    await expect(turns.first()).toContainText('turn 2');
+    await expect(turns.first()).toContainText('PR #640');
+    await expect(turns.first()).toContainText('tests 40/41, 1 failed');
+    await expect(turns.first()).toContainText('lifeasweare');
+    // A player's words are text, never markup.
+    await expect(turns.first()).toContainText('still desyncs <img src=x onerror="document.title=1">');
+    await expect(view.locator('img')).toHaveCount(0);
+    await expect(turns.first()).toContainText('Found it: a fix is up for review.');
+    await expect(turns.first()).toContainText('Not shown: this reply was not sent.');
+    await expect(turns.nth(1)).toContainText('no branch: diagnosis only');
+    expect(asked[0]).toEqual({ id: Number(id), offset: 0, limit: 10 });
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: test.info().outputPath('conversation.png') });
+    await test.info().attach('an FFBox conversation in FF Factory', { path: test.info().outputPath('conversation.png'), contentType: 'image/png' });
+
+    // Back to the list.
+    await view.getByRole('link', { name: '← All conversations' }).click();
+    await expect(page).toHaveURL(/#\/provider\/ffbox$/);
+    await expect(panel.getByTestId('provider-conversations')).toBeVisible();
+  } finally {
+    stop();
     c.close();
   }
 });

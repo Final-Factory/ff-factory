@@ -14,6 +14,7 @@ import type {
   MaxInboundChannel,
   MaxInboundItem,
   ProviderConversation,
+  ProviderConversationView,
   ProviderIntakeEvent,
   PermissionMode,
   Sandbox,
@@ -91,6 +92,7 @@ export const api = {
   // FFBox, as its connector reported it (docs/ffbox-integration.md): newest first.
   providerConversations: (limit = 100) => request<ProviderConversation[]>('GET', `/api/providers/ffbox/conversations?limit=${limit}`),
   providerIntake: (limit = 200) => request<ProviderIntakeEvent[]>('GET', `/api/providers/ffbox/intake?limit=${limit}`),
+  providerConversation: (id: string, offset = 0) => request<ProviderConversationView>('GET', `/api/providers/ffbox/conversation/${encodeURIComponent(id)}?offset=${offset}&limit=10`),
   providerSignatures: () => request<IntakeGroups>('GET', '/api/providers/ffbox/signatures'),
   // Max, the Discord bot (docs/max.md): what agents did as Max, and a read-only look at a few channels.
   maxActivity: (limit = 200) => request<MaxEvent[]>('GET', `/api/max/activity?limit=${limit}`),
