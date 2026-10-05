@@ -75,6 +75,11 @@ The dispatcher then does one of these for each request:
 | ask | `decide_work ask`, at most 3 questions per request | `question` |
 | reject it, or close it | `decide_work reject` / `done`, saying why | `rejected` / `done` |
 
+Where it runs is the dispatcher's choice: `list_sandboxes` starts with each computer's room (BUSY or ROOM n%, live
+agents, free sandboxes, RAM, editors) and names the computer the next new game-repo work goes to, and `start_agent` or
+`create_sandbox` that place it elsewhere say so (w416; docs/machines.md, "Placing work"). Game-repo work is spread
+between BEAST and LothDesktop by room; BEAST keeps only what needs it.
+
 `start_agent` refuses a request with a strong overlap still in flight (a commit only informs), or one that already has a
 live worker, unless `override_duplicate` says what is different. `work_id` is the dispatcher's alone. A worker started
 for a request runs for the person who filed it, on their account. The requester's orchestrator can add a note (which
