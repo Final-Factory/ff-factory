@@ -834,6 +834,7 @@ export class Daemon {
     // The sandbox drive gone or disk space low on this machine (its host guard, w466): nothing new starts in a sandbox.
     const gate = spec.sandbox ? this.guard?.blockReason('agent') : undefined;
     if (gate) return gate;
+    if (!spec.sandbox && this.maxSessions <= 0) return "this machine takes agents in its sandboxes only (max_agents 0): start it in one of this machine's sandboxes";
     if (!spec.sandbox) return this.runningIn(undefined) >= this.maxSessions ? `already ${this.maxSessions} agents mid-turn in this machine's main clone` : undefined;
     const sb = this.pool.list().find((s) => s.id === spec.sandbox);
     if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;

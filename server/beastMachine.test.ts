@@ -789,3 +789,18 @@ test('beast machine: a standing agent on it keeps the workers\' account; its dae
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('w477: a daemon with max_agents 0 refuses an agent outside its sandboxes, whatever the portal sent', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-d0-'));
+  try {
+    const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: dir, appDir: dir, maxSessions: 0, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
+    const refusal = (spec: Record<string, unknown>) => (d as unknown as { startRefusal(s: unknown): string | undefined }).startRefusal({ cwd: dir, ...spec });
+    assert.match(refusal({})!, /takes agents in its sandboxes only \(max_agents 0\)/);
+    // A sandbox agent is judged by the sandbox rules (here: no such sandbox), not by max_agents.
+    assert.match(refusal({ sandbox: 'sb1' })!, /no sandbox "sb1" on this machine/);
+    const three = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'm5', token: 't', repoPath: dir, appDir: path.join(dir, 'x'), maxSessions: 3, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
+    assert.equal((three as unknown as { startRefusal(s: unknown): string | undefined }).startRefusal({ cwd: dir }), undefined, 'a main clone with room takes it');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

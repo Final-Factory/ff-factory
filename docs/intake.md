@@ -243,7 +243,7 @@ The worker ends its final message with one line (`parseMarkers`):
 | marker | the server does |
 |---|---|
 | `FIX-LANDED: <sha>` | closes the request as done, records the commit (`WorkItem.delivery.fixCommit`). Before that, the worker replied in the thread ("fixed, it ships with the next build") and closed it |
-| `RESOLVED: <one line>` | closes it as done (not a bug, already fixed, a duplicate, needs info the worker asked for) |
+| `RESOLVED: <one line>` | closes it as done (not a bug, already fixed, a duplicate, needs info the worker asked for). Already fixed by a merged PR is written `RESOLVED: already fixed by PR #<number>` (w480): an escalated thread's merge notice then names that PR and its release (`fixedByPr`, below) |
 | `DESIGN-QUESTION: <one line>` | turns it into a question: the reviewers join the request, their orchestrators get an `[intake question]`, they get a notification. Their answer (`update_work` note) reopens it for the dispatcher. A line that asks nothing is ignored (w355: "DESIGN-QUESTION: none — waiting on CI for PR #1018"): empty, none, n/a, no, -, or text starting with none, no question, nothing or waiting on (`noQuestion`) |
 
 Max's replies and closes in an intake thread are read back from the ffdiscord events file (docs/max.md) onto the
@@ -290,6 +290,34 @@ here too.
   puts `Discord: <thread url>` in the PR (`discordPrLine`).
 - **What Max says** comes from FFBox's host, never from the model: "Filed for the devs." only on `filed` or
   `in_flight`; "Already fixed, it's in 0.50.0.51." on `done`; nothing about filing otherwise.
+- **Followed to the result (w480).** On `filed` or `in_flight`, FFBox links the conversation and watches board ref
+  `conv-<conversation>` with the thread's key (`fff_escalation_link`); its merge notice ("Fixed in PR #1076, coming in
+  version 78 and later.") comes only when FF Factory pushes that ref a `done` answer. Until w480 none came: the ledger
+  leaves a conversation's own requests out of that conversation's check (`rankBoard`, "FFBox's own conversation never
+  matches itself"), and an escalated request's source is that conversation, so FFBox's check answered `clear` and
+  nothing was followed (w436, conversation 692, closed as already fixed by #1076 in Build 78, never told). Now
+  `onEscalation` registers the watch itself, naming the request it follows (`BoardWatch.follow`,
+  `server/boardFollow.ts`), and that ref is answered with the request's own standing (`followAnswer`): open is
+  `in_flight` (its branch and PR to watch), done is `done`, anything else `clear`. `recheckBoards` pushes it as it moves,
+  whether or not `intake.ffbox.boardCheck` is on.
+- **A done answer names the fix.** A finished request's match carries the PR that merged its fix as `watch` (repo, the
+  PR's head branch, `pr`, target): FFBox keeps only `watch`, `version`, `mergedIn` and `branch` of a match, and takes
+  the number from `watch.pr`. Before the answer goes (at most 15 minutes), `IntakeManager.resolveFixes` (every 2
+  minutes, for followed requests only) learns the fix: an auto-close's merge (`autoClosed.sha`, `pr`), a linked done
+  request's fix, the merged PR whose merge commit is the `FIX-LANDED` commit, or the PR an "already fixed by #N" close
+  names (`fixedByPr`; `gh pr view`), and the first release that carries it (the release check's rule, whether or not
+  `intake.release` is on). It is recorded on the request (`delivery.fixCommit`, `fixPr`, `fixBranch`, `releasedIn`)
+  with a log line. A close that names no PR goes as plain "Fixed".
+- **Kept across restarts.** Every board watch, a `board_check`'s and an escalated thread's, is in `data/intake.json`
+  (`boards`, durable writes), with its start, so the 30-day follow window and the 500 cap hold across restarts; FFBox
+  also asks its checks again on every new link.
+- **The one-time catch-up** (w480, `catchUpEscalations`, 30 seconds after the first start with this version): every
+  escalated request (`ffbox-request` with a thread and a conversation) closed done in the last 14 days is followed as if
+  it had just been escalated, so its thread gets its done answer. FF Factory cannot know which threads FFBox told;
+  FFBox's own once-only guards (`fff-fixed:<conversation>`, `pr-merged:*`) keep a thread that was told from hearing it
+  twice. It runs once per data folder (`intake.json` `catchUp`, the refs it followed). `node
+  scripts/escalation-catchup.ts <copy of a data dir>` lists the same selection and what each answer can say, changing
+  nothing. FFBox keeps a watched board entry 30 days; an older one's answer is dropped there.
 - Off unless `intake.ffbox.enabled` and `intake.ffbox.escalations` are on. The Intake tab lists these requests with the
   others.
 
@@ -401,7 +429,9 @@ FFBox's `fff.board_check` switch; submitting work (phase 3) is not built there y
   a log line on each request). A match in flight carries
   `watch` (the worker's PR head branch and PR, or its sandbox branch, the repo and `develop`); a done one `version`
   (the release that carries it, or null while merged but not released) and `mergedIn` (`develop@<sha>`). FF Factory
-  re-checks those answers each minute and pushes the ones that change. FFBox's own conversation never matches itself.
+  re-checks those answers each minute and pushes the ones that change. FFBox's own conversation never matches itself,
+  except an escalated thread's watch, which follows its request by id ("Escalations from Max", w480). A done match also
+  names the PR that merged its fix as `watch` (w480).
   FFBox fails open, starts no turn on `in_flight` (it watches the branch and reports the merge on the thread) and
   answers `done` with its merged notice. Off until `intake.ffbox.boardCheck` here and `fff.board_check.enabled` there;
   FFBox asking while this is off (answered `not_enabled`) shows as "LEDGER CHECK OFF HERE: FFBox asked N time(s) in 24 h"
