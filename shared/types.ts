@@ -1072,6 +1072,11 @@ export interface WorkItem {
   mergedInto?: string;
   /** The workers started, messaged or linked for it. */
   sessionIds: string[];
+  /**
+   * When each worker was last given it (w418), by session id: `sent` by a start or a message with its work_id, `linked` by
+   * decide_work link. Which request a worker on several is working on now is read from these (shared/workState.ts).
+   */
+  links?: Record<string, { at: string; how: 'sent' | 'linked' }>;
   /** Files its person attached (request_work attachments): every worker started for it gets a copy. */
   attachments?: AttachmentRef[];
   /** What it may repeat, found when it was filed; strongest first. */

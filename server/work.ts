@@ -1,6 +1,7 @@
 // The work ledger's rules (docs/orchestrators.md): the dedupe keys of a request, which work in flight or recently done
 // it may repeat, the status changes allowed, the automated sources' filing limits, and the lines orchestrators read. Pure: the
 // items live in the Store (data/work.json); server/orchestrators.ts does the wiring.
+import { WORK_LIVE_LABEL, type WorkLive } from '../shared/workState.ts';
 import { sourceTag } from './intakeRules.ts';
 import { WORK_OPEN, type AttachmentRef, type Requester, type WorkItem, type WorkOverlap, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { fmtBytes } from '../shared/attachments.ts';
@@ -304,14 +305,15 @@ export const names = (rs: readonly Requester[]) => (rs.length <= 2 ? rs.map((r) 
 export const logLine = (now: Date, text: string) => `${now.toISOString().slice(11, 16)} ${clip(oneLine(text), 300)}`;
 
 /** One line per item for list_work: id, status, priority, title, whose, workers, outcome. */
-export function describeItem(w: WorkItem, workerLine: (id: string) => string): string {
+export function describeItem(w: WorkItem, workerLine: (id: string) => string, now?: WorkLive): string {
   const who = names(w.requesters);
   const workers = w.sessionIds.length ? ` workers: ${w.sessionIds.map(workerLine).join(', ')}.` : '';
   const merged = w.mergedInto ? ` → ${w.mergedInto}` : '';
   const tag = sourceTag(w) || (w.recorded ? 'recorded: started outside the ledger' : '');
   const stalled = w.stalled ? ` Stalled (${w.stalled.kind}): ${clip(oneLine(w.stalled.reason), 200)}.` : '';
   const prs = w.prs?.length ? ` PRs: ${w.prs.map((p) => `#${p.number} ${p.state}`).join(', ')}.` : '';
-  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}] "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${workers}${prs}${stalled}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
+  const state = now ? ` ${WORK_LIVE_LABEL[now.state]}${now.waitsOn?.length ? ` on ${now.waitsOn.join(', ')}` : ''} (${clip(oneLine(now.why), 200)}):` : '';
+  return `- ${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}${tag ? `; ${tag}` : ''}]${state} "${w.title}" for ${who}, ${w.createdAt.slice(0, 16).replace('T', ' ')}.${workers}${prs}${stalled}${w.outcome ? ` Latest: ${clip(oneLine(w.outcome), 200)}` : ''}`;
 }
 
 /**

@@ -56,3 +56,39 @@ test('a quiet request stalls on "Clean up now", shows under Stalled with its rea
   await expect.poll(async () => (await find())?.status).toBe('new');
   await expect(panel.getByTestId('stalled-list').getByTestId(`work-${id}`)).toHaveCount(0);
 });
+
+test('the Requests tab shows what each request is doing now, with counts per state and a filter (w418)', async ({ authed: page }) => {
+  const tag = uniq('states');
+  const me = await appState(page.request);
+  const file = async (title: string) => (await useTool(page.request, me.orchestratorId, 'request_work', { title: `${title} ${tag}`, brief: `For the live states ${tag}.` })).match(/Filed (w\d+)/)![1];
+  const queued = await file('Queued one');
+  const stalled = await file('Stalled one');
+  const waiting = await file('Waiting one');
+  const followup = await file('Follow-up one');
+  await patchWork(page.request, stalled, { status: 'active' });
+  await patchWork(page.request, waiting, { status: 'question', question: { text: `Which save? ${tag}`, at: new Date().toISOString() } });
+  await patchWork(page.request, followup, {
+    status: 'active',
+    prs: [{ repo: 'Final-Factory/FinalFactory', number: 1024, state: 'merged', at: new Date().toISOString() }],
+    log: ['01:50 PR #1024 merged; still open: its brief asks for a step after the merge (a check, an audit, a verification)'],
+  });
+
+  await go(page, '#/dispatcher');
+  const panel = page.locator('.dispatcher-panel');
+  const states = panel.getByTestId('ledger-states');
+  for (const s of ['queued', 'waiting', 'followup', 'stalled']) await expect(states.getByTestId(`ledger-state-${s}`)).toBeVisible();
+  await expect(panel.getByTestId(`live-${queued}`)).toContainText('Queued');
+  await expect(panel.getByTestId(`live-${stalled}`)).toContainText('Stalled');
+  await expect(panel.getByTestId(`live-${waiting}`)).toContainText('Waiting on input on');
+  await expect(panel.getByTestId(`live-${followup}`)).toContainText('Merged, follow-up pending');
+  await panel.getByTestId(`work-${stalled}`).getByRole('button', { name: new RegExp(`Stalled one ${tag}`) }).click();
+  await expect(panel.getByTestId(`live-why-${stalled}`)).toContainText('Stalled: no worker was ever started for it');
+  await panel.screenshot({ path: test.info().outputPath('ledger-states.png') });
+
+  await states.getByTestId('ledger-state-stalled').click();
+  const picked = panel.getByTestId('ledger-picked');
+  await expect(picked.getByTestId(`work-${stalled}`)).toBeVisible();
+  await expect(picked.getByTestId(`work-${queued}`)).toHaveCount(0);
+  await states.getByRole('button', { name: /^All/ }).click();
+  await expect(panel.getByTestId(`work-${queued}`)).toBeVisible();
+});

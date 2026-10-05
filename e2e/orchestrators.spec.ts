@@ -171,7 +171,7 @@ test('the ledger dedupes: the overlap is found at once, a repeat is the same req
     // The dispatcher page lists them: the merged one under the closed ones.
     await page.goto('/#/dispatcher');
     const panel = page.locator('.dispatcher-panel');
-    await expect(panel.getByTestId(`work-${a.id}`)).toContainText(`New · ${a.id} · tester, Team Mate`);
+    await expect(panel.getByTestId(`work-${a.id}`)).toContainText(`Queued · New · ${a.id} · tester, Team Mate`);
     await expect(panel.getByTestId(`work-${b.id}`)).toHaveCount(0);
     await panel.getByRole('button', { name: /closed$/ }).click();
     await expect(panel.getByTestId(`work-${b.id}`)).toContainText(`Merged into ${a.id}`);

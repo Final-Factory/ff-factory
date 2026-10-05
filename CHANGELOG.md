@@ -10,6 +10,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Added
+
+- **What each request is doing now** (w418, asked by Lothsahn). Beside its status, every open or stalled request shows a
+  live state derived from its workers: Working, Waiting on input (and on whom), Queued, Merged with a follow-up pending
+  (which step), or Stalled (and why), as soon as it is true. A worker on several requests counts only on the one it was
+  last given (requests now record `links`). `list_work` shows it on each line, ends with the counts and takes `state`;
+  the Dispatcher page has a button per state with its count. The cleanup and the stored status are unchanged
+  ([docs/orchestrators.md](docs/orchestrators.md), "What a request is doing now").
+
 ### Fixed
 
 - **`ffbox_activity show signatures` says what FFBox really does with reports** (w412). It said automatic
