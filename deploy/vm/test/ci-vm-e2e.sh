@@ -160,7 +160,7 @@ until [ "$(health 2>/dev/null | jq -r .sha 2>/dev/null)" = "$want" ]; do
   sleep 2
 done
 echo "MEASURE update: $(($(date +%s) - t0)) s from fffctl update to the new version answering; health unanswered for about $down s of it"
-g 'sudo cat /srv/fff/data/update.result.json' | jq -e '.ok == true' || fail "update.result.json is not ok"
+g 'sudo cat /srv/fff/data/update.result.json' | jq -e --arg w "$want" '.ok == true and (.headAfter | startswith($w)) and (.headBefore | length) > 0' || fail "update.result.json does not record the switch to $want"
 wait_for 300 "the update verified" g 'test ! -e /srv/fff/data/update.verifying.json'
 echo "ok: $before -> $want"
 

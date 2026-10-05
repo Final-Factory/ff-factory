@@ -2,6 +2,9 @@
 # Shared by the portal VM's guest scripts (deploy/vm/guest; installed in /usr/local/lib/fff). Sourced, never run.
 set -o errexit -o nounset -o pipefail
 
+# A root PATH of its own: fff-update also runs as fff-portal.service's ExecStartPre, which inherits that unit's PATH
+# (no sbin), and runuser is in /usr/sbin.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 FFF_LIB=${FFF_LIB:-/usr/local/lib/fff}
 FFF_CONF=${FFF_CONF:-/etc/fff/fff.conf}
 DRY_RUN=${DRY_RUN:-0}

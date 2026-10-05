@@ -912,8 +912,12 @@ read `data/` or the base clone (a protected path for that worker), so those two 
 | Everything under the portal | 522 MB working set, 1.67 GB private; 5.8% of one core | 1,066 MB, 1.98 GB private; 50% of one core | measured on BEAST, 2.4 h |
 | Claude processes at once | 3 (the dispatcher and 2 orchestrators) | 3 | measured on BEAST, 2.4 h; no standing agent or worker ran under the portal |
 | One Claude process elsewhere, for scale | 308 MB working set, 567 MB private | 371 MB, 650 MB private | measured on LothDesktop's own daemon (workers), 68 min |
-| Building a release in the VM (`npm ci` twice, the web build) | 19 s | | measured in CI, a 2-vCPU, 4 GiB test VM |
+| Building a release in the VM (`npm ci` twice, the web build) | 11-19 s | | measured in CI, 2 vCPUs |
 | The host install, the first boot included | 1 min 39 s to 2 min 4 s | | measured in CI, two runs |
+| The guest at the decided size (2 vCPUs, 8 GiB, Ubuntu 26.04.1), portal idle with empty data | 832 MiB used, 7,103 MiB available; the node server 175 MiB resident | | measured in CI (`free -m`, `ps`) |
+| A release on disk (worktree, `node_modules`, web build) | 891 MB, plus a 301 MB npm cache shared by releases | | measured in CI |
+| The guest's root filesystem after the install, one release | 6.0 GB used | | measured in CI (`df`) |
+| The guest install; an update | 42-46 s on 2 vCPUs; 23-25 s from `fffctl update` to the new version answering, with `/api/health` unanswered for about 4 s | | measured in CI |
 | `data/` | not measured | | guess: under 20 GB (w439, the container design) |
 | Base clone | git objects 1.27 GiB; working tree without LFS files 3-5 GB | | measured by w439 on BEAST; working tree a guess |
 | QEMU and libvirt on the host | about 50 MiB for QEMU, 8 MiB per vCPU, page tables 1 bit per 512 bytes of guest RAM, about 65 MiB for libvirt's daemons | | sourced: KubeVirt's measured RSS budgets (`pkg/hypervisor/kvm/hypervisorbackend.go`); not a Red Hat or libvirt figure |
