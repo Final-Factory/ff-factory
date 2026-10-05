@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Portal-only mode** (w464, asked by Lothsahn; part A of moving the portal into a VM on the FFBox host, w441). With
+  config `hostSandboxes: false` this host holds no sandboxes: it leaves capacity, placement and `list_sandboxes`,
+  `create_sandbox` here is refused with the reason, `sandboxRoot` and `unity` may be left out, the host guard watches
+  the data volume instead of a sandbox drive, `host_recovery` runs only `cleanup`, and no standing agent runs
+  (README, "Portal-only mode").
+
 - **BEAST stays the same machine when the portal leaves it** (w466, asked by Lothsahn; change 3 of
   docs/portal-on-ffbox-host.md). `convert_machine {machine, to: "ssh" | "local", ssh_host, portal_url, redeploy?}`
   turns the portal's own host as a machine into one reached over ssh, or back. Only the record changes: its token,

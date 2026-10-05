@@ -218,7 +218,15 @@ export interface Config {
   max?: { eventsFile?: string; ffboxConfigDir?: string; inbound?: { enabled?: boolean; channels?: string[]; pollMinutes?: number }; discordApi?: string };
   /** Where state.json and transcripts live. */
   dataDir: string;
-  /** Every sandbox worktree is created as <sandboxRoot>/<id>. */
+  /**
+   * Whether this host holds sandboxes of its own (default true). false is the portal-only mode (w464,
+   * docs/portal-on-ffbox-host.md section 6, changes 1 and 2, D16): "this host" is no place for work (capacity,
+   * placement, list_sandboxes), create_sandbox here is refused, `sandboxRoot` and `unity` may be left out, the host
+   * guard watches the data volume instead of a sandbox drive, host_recovery runs only `cleanup`, and no standing agent
+   * runs. Work goes to the machines.
+   */
+  hostSandboxes?: boolean;
+  /** Every sandbox worktree is created as <sandboxRoot>/<id>. Optional in the portal-only mode (default <dataDir>/sandboxes, never used). */
   sandboxRoot: string;
   /**
    * Standing agents' working folders are <standingRoot>/<id> (docs/standing-agents.md). Default
@@ -573,14 +581,16 @@ export function loadConfig(): Config {
     hostGuard: { ...HOST_GUARD_DEFAULTS, ...raw.hostGuard, cleanup: { ...DEFAULT_CLEANUP, ...raw.hostGuard?.cleanup } },
     voice: { ...VOICE_DEFAULTS, toolsDir: '', ...raw.voice },
   };
-  for (const key of ['sandboxRoot', 'repo', 'unity'] as const) {
+  if (raw.hostSandboxes !== undefined && typeof raw.hostSandboxes !== 'boolean') throw new Error('config hostSandboxes is true or false');
+  // The portal-only mode (w464) keeps no sandboxes here: only the base clone the orchestrators read is required.
+  for (const key of portalOnly(cfg) ? (['repo'] as const) : (['sandboxRoot', 'repo', 'unity'] as const)) {
     if (!cfg[key]) throw new Error(`config.json is missing "${key}"`);
   }
   const windowsOnly = windowsPathsOffWindows(cfg);
   if (windowsOnly.length) throw new Error(`config.json names Windows paths on ${process.platform}: ${windowsOnly.join(', ')}. Use this computer's paths (the portal VM's template is deploy/vm/guest/config.vm.example.json).`);
   checkAccountConfig(cfg);
   cfg.dataDir = path.resolve(ROOT, cfg.dataDir);
-  cfg.sandboxRoot = path.resolve(cfg.sandboxRoot);
+  cfg.sandboxRoot = path.resolve(cfg.sandboxRoot || path.join(cfg.dataDir, 'sandboxes'));
   cfg.standingRoot = path.resolve(raw.standingRoot ?? path.join(cfg.sandboxRoot, '_agents'));
   for (const guarded of [ROOT, cfg.dataDir]) {
     const rel = path.relative(guarded, cfg.standingRoot);
@@ -591,6 +601,12 @@ export function loadConfig(): Config {
   cfg.protectedPaths = cfg.protectedPaths.map((p) => path.resolve(p));
   return cfg;
 }
+
+/** The portal-only mode (config hostSandboxes: false, w464): this host runs the portal and holds no sandboxes. */
+export const portalOnly = (cfg: Pick<Config, 'hostSandboxes'>) => cfg.hostSandboxes === false;
+
+/** Why something needs this host's own sandboxes in the portal-only mode, for refusals. */
+export const PORTAL_ONLY_WHY = 'this portal holds no sandboxes of its own (config hostSandboxes: false, the portal-only mode)';
 
 /**
  * The config paths that are Windows paths ("C:/ffsb", "F:\\ffsb") on a computer that is not Windows (w467): there
