@@ -86,7 +86,7 @@ if ! id "$FFF_USER" >/dev/null 2>&1; then
   run_cmd useradd --system --user-group --home-dir "$FFF_ROOT/home" --no-create-home --shell /bin/bash --comment 'FF Factory portal' "$FFF_USER"
 fi
 run_cmd passwd -l "$FFF_USER" >/dev/null
-for d in "" /home /config /data /app /agents /review /sandboxes; do
+for d in "" /home /config /data /app /agents /review /sandboxes /secrets; do
   run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT$d"
 done
 run_cmd install -d -m 0700 -o root -g root "$FFF_ROOT/backup"
@@ -217,7 +217,7 @@ fi
 cat >&2 <<EOF
 
 Installed. Still to do, by a person (docs/portal-on-ffbox-host.md, "Installing"):
-  1. sudo fffctl claude-login                                     Lothsahn's claude.ai login (/login)
+  1. sudo fffctl api-key --file /root/claude.key                 Lothsahn's Console API key (D4; or claude-login)
   2. sudo fffctl tailscale-join --authkey-file /root/ts.key       tagged node, Funnel to the portal
   3. sudo fffctl gh-login --token-file /root/gh.token             the portal's GitHub token (D7)
   4. sudo fffctl base-clone                                       the game repo for orchestrators' reads

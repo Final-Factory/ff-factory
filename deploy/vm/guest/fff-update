@@ -24,7 +24,7 @@ set -o errexit -o nounset -o pipefail
 need_root
 load_conf
 
-current_dir() { readlink -f "$CURRENT" 2>/dev/null || true; }
+current_dir() { readlink -e "$CURRENT" 2>/dev/null || true; }
 
 prepare() {
   local ref=${1:-origin/$FFF_BRANCH} sha dir
@@ -55,7 +55,7 @@ prepare() {
 # Keep current, previous, the prepared one and RELEASES_KEEP_EXTRA more (newest first).
 prune() {
   local keep cur prev prepared d n=0
-  cur=$(current_dir); prev=$(readlink -f "$PREVIOUS" 2>/dev/null || true)
+  cur=$(current_dir); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
   prepared=$(jq -r '.dir // empty' "$DATA/update.prepared.json" 2>/dev/null || true)
   keep=" $cur $prev $prepared "
   for d in $(find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p
@@ -141,7 +141,7 @@ cmd_activate() {
 
 cmd_rollback() {
   local why=${1:-asked for by hand} cur prev cur_sha prev_sha
-  cur=$(current_dir); prev=$(readlink -f "$PREVIOUS" 2>/dev/null || true)
+  cur=$(current_dir); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
   if [ -z "$prev" ] || [ ! -f "$prev.ready" ]; then die "no previous release to go back to"; fi
   cur_sha=$(release_sha "$cur"); prev_sha=$(release_sha "$prev")
   ln -sfn "$prev" "$CURRENT.new" && mv -Tf "$CURRENT.new" "$CURRENT"

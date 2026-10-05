@@ -132,6 +132,12 @@ g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --repo /tmp/ff.bundle' | tail
 echo "ok: the guest install ran twice"
 g 'sudo fffctl base-clone' && g 'sudo systemctl start fff-base-refresh.service && sudo journalctl -u fff-base-refresh -n 3 --no-pager'
 g 'sudo nft list table inet fff_guest' >/dev/null || fail "the guest's firewall table"
+# The API key's store (decision D4), with a dummy key: 0600, fff's, and never printed whole.
+out=$(g 'printf "sk-ant-api03-ci-dummy-not-a-real-key-WXYZ\n" >/tmp/k && sudo fffctl api-key --file /tmp/k; rm -f /tmp/k')
+echo "$out"
+if printf '%s' "$out" | grep -q 'ci-dummy'; then fail "fffctl api-key printed the key"; fi
+[ "$(g 'sudo stat -c "%a %U" /srv/fff/secrets/anthropic-api-key')" = "600 fff" ] || fail "the key file is not 0600 fff"
+echo "ok: the API key is stored 0600, owned by fff, shown only as its last four characters"
 
 step "update: build beside the running portal, drain, switch, verify"
 before=$(sha_of)
