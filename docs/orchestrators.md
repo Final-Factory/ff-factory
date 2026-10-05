@@ -135,9 +135,11 @@ Working for one the cleanup stalled whose worker picked it up again.
 
 Where it shows: `list_work` puts it after the status (`- w12 [active] Stalled (ab12 stopped 3 d ago,
 nothing waits on a person): "…"`), closes the list with the counts (`Now: 3 working, 2 waiting on input, 4 stalled.`),
-and takes `state` (working, waiting, queued, followup, stalled) to list only those. The Dispatcher page's Requests tab
-has one button per state with its count above the list; a click shows only those, and each row's state and reason
-follow its workers live.
+and takes `state`, one of working, waiting, queued, followup or stalled or a list of them (`["working", "waiting"]`), to
+list only those. The Dispatcher page's Requests tab, and the Intake tab's "In the ledger" list, have a toggle chip per
+state with its count above the list: any number can be on at once, and the list shows the requests in any of them;
+"All" or "Clear" turns them off. Each list's choice is kept in the browser (localStorage) across reloads (Lothsahn: "I'd
+like to be able to select multiple types"). Each row's state and reason follow its workers live.
 
 ## Pull requests
 

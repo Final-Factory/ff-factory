@@ -6,7 +6,7 @@ import { isMine, ledgerOrder } from '../../../shared/workOrder';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../../../shared/workState';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
-import { dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, navigate, useNow, workLabel, workTone, type Tone } from '../util';
+import { dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, useNow, workLabel, workTone, type Tone } from '../util';
 import { Markdown } from './Markdown';
 import { SessionView } from './SessionView';
 import { accountOf } from './SystemMeters';
@@ -197,9 +197,54 @@ export function useWorkLive(app: AppState, work: readonly WorkItem[], now: numbe
   }, [app.sessions, work, now]);
 }
 
+/** The live states picked on one list, kept in this browser across reloads (w418, Lothsahn: "select multiple types"). */
+function usePickedStates(key: string): [ReadonlySet<WorkLiveState>, (next: ReadonlySet<WorkLiveState>) => void] {
+  const storage = `ffsb.ledgerStates.${key}`;
+  const [picked, setPicked] = useState<ReadonlySet<WorkLiveState>>(() => new Set((lsGet(storage) ?? '').split(',').filter((s): s is WorkLiveState => (WORK_LIVE_STATES as readonly string[]).includes(s))));
+  const set = (next: ReadonlySet<WorkLiveState>) => {
+    setPicked(next);
+    lsSet(storage, WORK_LIVE_STATES.filter((s) => next.has(s)).join(','));
+  };
+  return [picked, set];
+}
+
+/**
+ * One toggle chip per live state with its count; several can be on at once. "All" (or "Clear") turns them all off,
+ * which shows the usual list. A picked state with no request now stays shown, so it can be turned off.
+ */
+function StateFilter({ live, picked, onChange, testId }: { live: ReadonlyMap<string, WorkLive>; picked: ReadonlySet<WorkLiveState>; onChange: (next: ReadonlySet<WorkLiveState>) => void; testId: string }) {
+  const n = liveCounts(live.values());
+  const toggle = (s: WorkLiveState) => {
+    const next = new Set(picked);
+    if (next.has(s)) next.delete(s);
+    else next.add(s);
+    onChange(next);
+  };
+  return (
+    <div className="ledger-states" role="toolbar" aria-label="Show requests by what they are doing now (pick several)" data-testid={testId}>
+      <button className={`ledger-state${picked.size === 0 ? ' on' : ''}`} aria-pressed={picked.size === 0} onClick={() => onChange(new Set())} data-testid="ledger-state-all">
+        All <span className="mono">{live.size}</span>
+      </button>
+      {WORK_LIVE_STATES.filter((s) => n[s] || picked.has(s)).map((s) => (
+        <button key={s} className={`ledger-state${picked.has(s) ? ' on' : ''}`} aria-pressed={picked.has(s)} onClick={() => toggle(s)} data-testid={`ledger-state-${s}`}>
+          <Dot tone={LIVE_TONE[s]} /> {WORK_LIVE_LABEL[s]} <span className="mono">{n[s]}</span>
+        </button>
+      ))}
+      {picked.size > 0 && (
+        <button className="link-btn small" onClick={() => onChange(new Set())} data-testid="ledger-state-clear">
+          Clear
+        </button>
+      )}
+    </div>
+  );
+}
+
+const pickedLabel = (picked: ReadonlySet<WorkLiveState>) => WORK_LIVE_STATES.filter((s) => picked.has(s)).map((s) => WORK_LIVE_LABEL[s].toLowerCase()).join(' or ');
+
 function Requests({ app, work, open, stalled, closed, focus, now }: { app: AppState; work: WorkItem[]; open: WorkItem[]; stalled: WorkItem[]; closed: WorkItem[]; focus?: string; now: number }) {
   const live = useWorkLive(app, work, now);
-  const [only, setOnly] = useState<WorkLiveState | null>(null);
+  const [picked, setPicked] = usePickedStates('requests');
+  const only = picked.size > 0;
   const [expanded, setExpanded] = useState<string | null>(focus ?? null);
   const [showClosed, setShowClosed] = useState(() => !!focus && closed.some((w) => w.id === focus));
   const [showStalled, setShowStalled] = useState(() => !!focus && stalled.some((w) => w.id === focus));
@@ -224,25 +269,13 @@ function Requests({ app, work, open, stalled, closed, focus, now }: { app: AppSt
     );
   }
   const row = (w: WorkItem) => <WorkRow key={w.id} app={app} w={w} live={live.get(w.id)} open={expanded === w.id} onToggle={() => setExpanded(expanded === w.id ? null : w.id)} now={now} />;
-  const n = liveCounts(live.values());
-  // A state picked: every open and stalled request in it, whatever its stored status.
-  const picked = only ? [...open, ...stalled].filter((w) => live.get(w.id)?.state === only) : [];
+  // States picked: every open and stalled request in one of them, whatever its stored status.
+  const shown = only ? [...open, ...stalled].filter((w) => picked.has(live.get(w.id)?.state as WorkLiveState)) : [];
   return (
     <div className="sa-scroll">
-      {live.size > 0 && (
-        <div className="ledger-states" role="toolbar" aria-label="Show requests by what they are doing now" data-testid="ledger-states">
-          <button className={`ledger-state${only === null ? ' on' : ''}`} aria-pressed={only === null} onClick={() => setOnly(null)}>
-            All <span className="mono">{live.size}</span>
-          </button>
-          {WORK_LIVE_STATES.filter((s) => n[s] || only === s).map((s) => (
-            <button key={s} className={`ledger-state${only === s ? ' on' : ''}`} aria-pressed={only === s} onClick={() => setOnly(only === s ? null : s)} data-testid={`ledger-state-${s}`}>
-              <Dot tone={LIVE_TONE[s]} /> {WORK_LIVE_LABEL[s]} <span className="mono">{n[s]}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      {live.size > 0 && <StateFilter live={live} picked={picked} onChange={setPicked} testId="ledger-states" />}
       {only ? (
-        picked.length ? <div className="run-list" data-testid="ledger-picked">{picked.map(row)}</div> : <p className="dim small ledger-none">None {WORK_LIVE_LABEL[only].toLowerCase()} now.</p>
+        shown.length ? <div className="run-list" data-testid="ledger-picked">{shown.map(row)}</div> : <p className="dim small ledger-none">None {pickedLabel(picked)} now.</p>
       ) : open.length ? (
         <div className="run-list">{open.map(row)}</div>
       ) : (
@@ -314,6 +347,10 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
     setBusy(null);
   };
   const live = useWorkLive(app, work, now);
+  const [picked, setPicked] = usePickedStates('intake');
+  // The ledger list's filter counts only its own (intake) requests.
+  const restLive = new Map([...live].filter(([id]) => rest.some((w) => w.id === id)));
+  const restShown = picked.size ? rest.filter((w) => picked.has(live.get(w.id)?.state as WorkLiveState)) : rest;
   const row = (w: WorkItem) => <WorkRow key={w.id} app={app} w={w} live={live.get(w.id)} open={expanded === w.id} onToggle={() => setExpanded(expanded === w.id ? null : w.id)} now={now} />;
   const d = s.discord;
   const f = s.ffbox;
@@ -403,7 +440,12 @@ function IntakeTab({ app, intake: s, work, now }: { app: AppState; intake: Intak
       )}
 
       <h3 className="intake-h">In the ledger</h3>
-      {rest.length ? <div className="run-list">{rest.map(row)}</div> : <p className="dim small ledger-none">No Discord or FFBox requests yet.</p>}
+      {restLive.size > 0 && <StateFilter live={restLive} picked={picked} onChange={setPicked} testId="intake-states" />}
+      {restShown.length ? (
+        <div className="run-list" data-testid="intake-ledger">{restShown.map(row)}</div>
+      ) : (
+        <p className="dim small ledger-none">{picked.size ? `None ${pickedLabel(picked)} now.` : 'No Discord or FFBox requests yet.'}</p>
+      )}
 
       {s.recent.length > 0 && (
         <details className="deleg-log intake-recent">

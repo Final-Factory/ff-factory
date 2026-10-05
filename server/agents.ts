@@ -10,6 +10,9 @@ import { eventsFileOf, maxEnv } from './maxEvents.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+
+/** A live state as list_work takes it (shared/workState.ts). */
+const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
 import { ROOT, configPath, ownerLine, publicIdentityLine, publicIdentityOf, type Config } from './config.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
@@ -2836,9 +2839,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           mine: z.boolean().optional().describe("Only your person's requests (a personal orchestrator)."),
           source: z.enum(['people', 'intake', 'discord', 'ffbox', 'nightly']).optional().describe("people: filed by people's orchestrators; intake: from Discord, FFBox and the nightly e2e lab; discord, ffbox or nightly: one of them."),
           state: z
-            .enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]])
+            .union([LIVE_STATE, z.array(LIVE_STATE).min(1).max(5)])
             .optional()
-            .describe("Only the requests in this live state: working, waiting (on input), queued, followup (merged, follow-up pending) or stalled (nothing works on it and nothing waits on a person; the cleanup's stalled ones too). Looks at every open and stalled request, whatever their status."),
+            .describe("Only the requests in these live states, one or several (e.g. [\"working\", \"waiting\"]): working, waiting (on input), queued, followup (merged, follow-up pending) or stalled (nothing works on it and nothing waits on a person; the cleanup's stalled ones too). Looks at every open and stalled request, whatever their status."),
         },
         wrap(async (a) => this.listWork(a, ctx)),
       ),
@@ -2944,7 +2947,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     });
   }
 
-  private listWork(a: { id?: string; status?: string; mine?: boolean; source?: 'people' | 'intake' | 'discord' | 'ffbox' | 'nightly'; state?: WorkLiveState }, ctx: BeltCtx): string {
+  private listWork(a: { id?: string; status?: string; mine?: boolean; source?: 'people' | 'intake' | 'discord' | 'ffbox' | 'nightly'; state?: WorkLiveState | WorkLiveState[] }, ctx: BeltCtx): string {
+    const states = a.state === undefined ? undefined : new Set(Array.isArray(a.state) ? a.state : [a.state]);
     const o = this.orchestrators;
     const live = this.workLive();
     if (a.id) {
@@ -2971,14 +2975,14 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const owner = ctx.owner;
     const byStatus = (w: WorkItem) => status === 'all' || (status === 'needs_human' ? WORK_OPEN.includes(w.status) && w.approval?.state === 'pending' : status === 'open' ? WORK_OPEN.includes(w.status) : w.status === (status as WorkStatus));
     // A live state looks at every open and stalled request (stalled is not "open"), narrowed only by a specific status.
-    const byState = (w: WorkItem) => live.get(w.id)?.state === a.state && (status === 'open' || status === 'all' || byStatus(w));
+    const byState = (w: WorkItem) => !!states && states.has(live.get(w.id)?.state as WorkLiveState) && (status === 'open' || status === 'all' || byStatus(w));
     const matching = [...this.store.work.values()]
-      .filter(a.state ? byState : byStatus)
+      .filter(states ? byState : byStatus)
       .filter((w) => !a.mine || !owner || isFor(w, owner.userId))
       .filter((w) => sourceMatches(w, a.source))
       .sort(ledgerOrder);
     const items = matching.slice(0, 60);
-    if (!items.length) return a.state ? `No requests ${WORK_LIVE_LABEL[a.state].toLowerCase()}.` : status === 'open' ? 'No open requests.' : status === 'needs_human' ? 'Nothing needs a human.' : 'No requests.';
+    if (!items.length) return states ? `No requests ${WORK_LIVE_STATES.filter((s) => states.has(s)).map((s) => WORK_LIVE_LABEL[s].toLowerCase()).join(' or ')}.` : status === 'open' ? 'No open requests.' : status === 'needs_human' ? 'Nothing needs a human.' : 'No requests.';
     const n = liveCounts(matching.flatMap((w) => live.get(w.id) ?? []));
     const counts = WORK_LIVE_STATES.filter((s) => n[s]).map((s) => `${n[s]} ${WORK_LIVE_LABEL[s].toLowerCase()}`);
     const tail = counts.length ? [`Now: ${counts.join(', ')}${matching.length > items.length ? ` (${items.length} of ${matching.length} shown)` : ''}.`] : [];

@@ -12,6 +12,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Pick several request states at once** (w418 follow-up, asked by Lothsahn). The state chips on the Dispatcher's
+  Requests tab, and now on the Intake tab's ledger list, toggle independently (e.g. Stalled and Merged, follow-up
+  pending), with "All" and "Clear", and the choice survives a reload. `list_work` takes `state` as one state or a list.
+
 - **What each request is doing now** (w418, asked by Lothsahn). Beside its status, every open or stalled request shows a
   live state derived from its workers: Working, Waiting on input (and on whom), Queued, Merged with a follow-up pending
   (which step), or Stalled (and why), as soon as it is true. A worker on several requests counts only on the one it was
