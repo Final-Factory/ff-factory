@@ -253,7 +253,7 @@ test('continuous clean-up: a regular pass each hour, sooner below the soft thres
   await m.tick();
   await settle();
   assert.equal(cleaned.length, 4, 'at most every 15 minutes while low');
-  assert.match(await m.cleanupNow(), /Removed 1 item\(s\), 3\.0 GB\. Biggest: C:\/Temp\/x 3\.0 GB\. Still below the soft threshold of 120 GB/);
+  assert.match(await m.cleanupNow(), /\(asked, with stale output\): 1 item\(s\), 3\.0 GB, 100\.0 GB free \(below the soft 120 GB\)\.\nRemoved \(biggest first\):\n- C:\/Temp\/x  3\.0 GB  \(temp-old\)\nStill below the soft threshold of 120 GB/);
 });
 
 test('portal-only (w464): no sandbox drive is watched or reattached, nothing blocks on it, and the data volume is measured', async () => {

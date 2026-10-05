@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { hostSoftFreeGB, portalOnly, type Config, type HostGuardConfig } from './config.ts';
-import { CleanupRunner, type CleanupRun } from './cleanup.ts';
+import { CleanupRunner, describeCleanupItems, type CleanupRun, type PassOptions } from './cleanup.ts';
+import { staleOutputSettings } from './staleOutput.ts';
 import type { HelperAction, HelperResult } from './privileged.ts';
 import type { DiskLevel, HostHealth, Sandbox, SessionInfo } from '../shared/types.ts';
 
@@ -85,11 +86,13 @@ export interface HostDeps {
   runHelper(action: HelperAction): Promise<HelperResult>;
   /** The continuous clean-up (server/cleanup.ts): one pass, the biggest consumers, the log, the volumes it frees. */
   cleanup: {
-    pass(low: boolean): Promise<CleanupRun>;
+    pass(low: boolean, opts: PassOptions): Promise<CleanupRun>;
     consumers(): Promise<{ path: string; bytes: number }[]>;
     stale?(): Promise<{ path: string; days: number }[]>;
     log(entry: object): void;
     diskPaths(): string[];
+    /** When the stale-output rules last had their turn, kept on disk (server/cleanup.ts staleAtFile). */
+    staleAt?: { load(): number | undefined; save(at: number): void };
   };
   /** Kill stale automation browsers (server/reaper.ts); one line per reaped tree. */
   reap?(maxAgeHours: number): Promise<string[]>;
@@ -134,13 +137,14 @@ export class HostHealthMonitor {
     this.health = { checkedAt: new Date(0).toISOString(), disks: [], level: 'ok', sandboxRoot: drive, memFreeBytes: m.free, memTotalBytes: m.total };
     this.bootMissing = drive === 'missing';
     this.cleaner = new CleanupRunner({
-      settings: () => ({ everyMinutes: this.g().cleanup.everyMinutes, softFreeGB: hostSoftFreeGB(this.g()) }),
+      settings: () => ({ everyMinutes: this.g().cleanup.everyMinutes, softFreeGB: hostSoftFreeGB(this.g()), staleOutput: staleOutputSettings(this.g().cleanup.staleOutput) }),
       diskPaths: () => [...deps.cleanup.diskPaths(), ...deps.cfg.hostDiskPaths],
       statfs: (p) => deps.statfs(p),
-      pass: (low) => deps.cleanup.pass(low),
+      pass: (low, opts) => deps.cleanup.pass(low, opts),
       consumers: () => deps.cleanup.consumers(),
       stale: deps.cleanup.stale && (() => deps.cleanup.stale!()),
       log: (e) => deps.cleanup.log(e),
+      staleAt: deps.cleanup.staleAt,
       done: (summary, notice) => {
         this.health.lastCleanup = summary;
         if (notice) this.d.report('Clean-up cannot free enough disk space', notice);
@@ -490,13 +494,16 @@ export class HostHealthMonitor {
     }
   }
 
-  /** host_recovery "cleanup". */
-  async cleanupNow(): Promise<string> {
+  /** host_recovery "cleanup": a pass now, stale output included; `dryRun`: what it would remove, nothing removed (w459). */
+  async cleanupNow(opts: { dryRun?: boolean } = {}): Promise<string> {
+    if (opts.dryRun) {
+      const s = await this.cleaner.run('asked', { dryRun: true });
+      return s ? describeCleanupItems(s) : 'A clean-up pass is already running; try again in a few minutes.';
+    }
     await this.cleanup('asked');
     const c = this.health.lastCleanup;
     if (!c) return 'Nothing removed (a pass is already running).';
-    const top = c.top?.length ? ` Biggest: ${c.top.map((t) => `${t.path} ${(t.bytes / GB).toFixed(1)} GB`).join(', ')}.` : '';
-    const low = c.belowSoft ? ` Still below the soft threshold of ${c.softFreeGB} GB${c.consumers?.length ? `; biggest remaining: ${c.consumers.map((x) => `${x.path} ${(x.bytes / GB).toFixed(1)} GB`).join(', ')}` : ''}.` : '';
-    return `Removed ${c.removed} item(s), ${((c.freedBytes ?? 0) / GB).toFixed(1)} GB${c.failed ? ` (${c.failed} skipped: in use or refused)` : ''}.${top}${low}`;
+    const low = c.belowSoft ? `\nStill below the soft threshold of ${c.softFreeGB} GB${c.consumers?.length ? `; biggest remaining: ${c.consumers.map((x) => `${x.path} ${(x.bytes / GB).toFixed(1)} GB`).join(', ')}` : ''}.` : '';
+    return `${describeCleanupItems(c)}${low}`;
   }
 }

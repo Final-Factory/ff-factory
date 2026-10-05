@@ -48,7 +48,7 @@ import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { runHelper } from './privileged.ts';
-import { describeCleanup, sessionTempDir, sessionTempEnv } from './cleanup.ts';
+import { describeCleanup, describeCleanupItems, describeCleanupLog, sessionTempDir, sessionTempEnv } from './cleanup.ts';
 import type { HostHealth } from '../shared/types.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
@@ -2296,19 +2296,20 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ...this.workToolSpecs(tool, ctx),
         tool(
           'host_recovery',
-          "Recovery actions for this host (docs/self-recovery.md). The host guard does these by itself when needed; use this to retry or to act early. remount: reattach the sandbox drive now (also after the guard gave up). cleanup: a clean-up pass now, with the rules for low disk space included (the guard runs one every hour by itself, and every 15 minutes below the soft threshold): old temp entries and agent scratch, finished agents' temp folders, clean agent temp clones, Claude Code task output of idle sessions, Actions runner job folders, crash dumps, old logs, the Unity GI cache, superseded Playwright browsers, rotated editor logs, whole package caches, Unity Libraries of projects not opened for months, and the configured age rules; it answers with what went and, if still low, the biggest remaining consumers. trim: hand free space inside the sandbox drive back to its VHDX. compact: trim, then detach, compact and reattach the VHDX (refused while any editor is up or any agent on this host is busy; the drive is briefly offline). Nothing detaches the drive automatically. selftest: the end-to-end recovery test: with no editor up and no agent busy on this host, it detaches the sandbox drive (as Windows did when C: filled up), lets the guard notice it and reattach it, checks every sandbox folder is back, and reports the timings (about a minute; the drive is gone meanwhile). reboot: a controlled reboot in 2 minutes, only as a last resort when remounting keeps failing; it stops every agent and editor, and is refused unless automatic logon is set up. Each privileged action runs a fixed SYSTEM task installed by scripts/install-privileged-helpers.ps1.",
+          "Recovery actions for this host (docs/self-recovery.md). The host guard does these by itself when needed; use this to retry or to act early. remount: reattach the sandbox drive now (also after the guard gave up). cleanup: a clean-up pass now, with the rules for low disk space included (the guard runs one every hour by itself, and every 15 minutes below the soft threshold; dry_run: true lists what it would remove and what it keeps for a person, removing nothing): stale build and run output in this host's sandboxes (w459: builds and runs of closed requests, commit builds and e2e runs past their age, a stopped editor's Temp and old logs; what it cannot attribute is listed, never removed), old temp entries and agent scratch, finished agents' temp folders, clean agent temp clones, Claude Code task output of idle sessions, Actions runner job folders, crash dumps, old logs, the Unity GI cache, superseded Playwright browsers, rotated editor logs, whole package caches, Unity Libraries of projects not opened for months, and the configured age rules; it answers with what went and, if still low, the biggest remaining consumers. trim: hand free space inside the sandbox drive back to its VHDX. compact: trim, then detach, compact and reattach the VHDX (refused while any editor is up or any agent on this host is busy; the drive is briefly offline). Nothing detaches the drive automatically. selftest: the end-to-end recovery test: with no editor up and no agent busy on this host, it detaches the sandbox drive (as Windows did when C: filled up), lets the guard notice it and reattach it, checks every sandbox folder is back, and reports the timings (about a minute; the drive is gone meanwhile). reboot: a controlled reboot in 2 minutes, only as a last resort when remounting keeps failing; it stops every agent and editor, and is refused unless automatic logon is set up. Each privileged action runs a fixed SYSTEM task installed by scripts/install-privileged-helpers.ps1.",
           {
             action: z.enum(['remount', 'cleanup', 'trim', 'compact', 'selftest', 'reboot']),
             confirm_reboot: z.literal(true).optional().describe('Required for reboot: remounting failed and nothing else works.'),
+            dry_run: z.boolean().optional().describe('For cleanup: list what the pass would remove (stale build and run output included) and what it would keep for a person, removing nothing.'),
           },
-          wrap(async ({ action, confirm_reboot }) => {
+          wrap(async ({ action, confirm_reboot, dry_run }) => {
             const h = this.hostHealth;
             if (!h) throw new Error('the host guard is not running (hostGuard.pollSeconds 0?)');
             // The portal-only mode (w464) has no sandbox drive and no Windows helper tasks: only the clean-up applies.
             if (portalOnly(this.cfg) && action !== 'cleanup') throw new Error(`${action} is for a host with a sandbox drive and the Windows helper tasks; ${PORTAL_ONLY_WHY}. Only cleanup applies here.`);
             if (action === 'remount') return h.remountNow();
             if (action === 'selftest') return h.selftest();
-            if (action === 'cleanup') return h.cleanupNow();
+            if (action === 'cleanup') return h.cleanupNow({ dryRun: !!dry_run });
             if (action === 'compact') {
               const up = this.sandboxes.list().filter((s) => ['running', 'starting', 'blocked'].includes(s.unity.state)).map((s) => s.id);
               if (up.length) throw new Error(`editors are up (${up.join(', ')}): stop them first`);
@@ -2623,9 +2624,26 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       ),
       tool(
         'machine_cleanup',
-        "Run a clean-up pass on a machine now (its daemon's continuous clean-up, docs/self-recovery.md): old temp and agent scratch, finished agents' temp folders, crash dumps, old logs, Xcode DerivedData, superseded Playwright browsers, and, when free space is below its soft threshold, whole package caches. It never touches repos, the clone, ~/.claude, secrets, backups or installs. The daemon also does this every hour by itself; use it to act early.",
-        { machine: z.string() },
-        wrap(async ({ machine }) => mm.cleanupNow(machine)),
+        "Run a clean-up pass on a machine now (its daemon's continuous clean-up, docs/self-recovery.md), and get its result in full: old temp and agent scratch, finished agents' temp folders, crash dumps, old logs, Xcode DerivedData, superseded Playwright browsers, whole package caches, and stale build and run output (w459: builds and runs of closed requests, commit builds and e2e runs past their age, a stopped editor's Temp and old logs). Output it cannot attribute is listed, never removed. It never touches repos, the clone's own files, Library, Inbox, ~/.claude, secrets, backups or installs. The daemon also does this every hour (stale output once a day) by itself; use it to act early, or with dry_run to see what it would remove first.",
+        {
+          machine: z.string(),
+          dry_run: z.boolean().optional().describe('List what the pass would remove and what it would keep for a person, with sizes and why, removing nothing.'),
+        },
+        wrap(async ({ machine, dry_run }) => describeCleanupItems(await mm.cleanupNow(machine, { dryRun: !!dry_run }))),
+      ),
+      tool(
+        'cleanup_log',
+        "The clean-up passes of a computer (this host, or a machine's daemon), newest first, in full: every entry removed with its size and why (stale build and run output included, w459), what a dry run would remove, and what it kept because it could not attribute it. Each daemon reports its passes here; this host logs its own.",
+        {
+          computer: z.string().optional().describe('A machine id ("lothdesktop", "m5"); absent: this host.'),
+          passes: z.number().int().min(1).max(20).optional().describe('How many of the newest passes (default 3).'),
+          only_removals: z.boolean().optional().describe('Only passes that removed something (default false).'),
+        },
+        wrap(async ({ computer, passes, only_removals }) => {
+          const local = computer ? mm.require(computer).local : true;
+          const file = local ? path.join(this.cfg.dataDir, 'cleanup-log.jsonl') : path.join(this.cfg.dataDir, 'cleanup', mm.require(computer!).id, 'cleanup-log.jsonl');
+          return describeCleanupLog(file, { passes: passes ?? 3, onlyRemovals: !!only_removals });
+        }),
       ),
       tool(
         'remove_machine',
