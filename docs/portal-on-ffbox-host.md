@@ -1,18 +1,19 @@
 # The portal in its own VM on the FFBox host (design and install scripts)
 
-**TL;DR:** Run the portal (orchestrators, dispatcher, standing agents, ledger and `data/`, web UI, `/machine` and
-`/provider`, machine control) in a KVM/QEMU virtual machine on the FFBox host, managed by libvirt. The VM has its own
-Ubuntu, its own Tailscale node with Funnel, and its own isolated virtual network: NAT out to the internet, nothing in.
-An nftables table on the host keeps the VM away from the host's services, FFBox's containers and Lothsahn's LAN. The
-same table keeps everything on the host except root away from the VM. FFBox and FF Factory share the hardware and the
-internet line, and nothing else: no account, file, Docker, network or secret. FFBox reaches the portal through its
-public Funnel URL, as it reaches BEAST today. The host watches the VM: a guest-agent ping and the portal's health
-every minute, a reset after three failed checks, and a watchdog device as a second layer. Every night it drains the
-portal, cold-restarts the VM for its security updates and snapshots the disk. Scripts for all of it are in
-[`deploy/vm/`](../deploy/vm): for the host (run by Lothsahn as root) and for the guest. CI builds the whole thing in
-a nested VM on every change to them. Sizing: 4 vCPUs, 12 GiB RAM, a 120 GiB disk. These are guesses built on
-measured pieces; BEAST's own numbers are still to be measured ([Sizing](#9-sizing)). One limit no design on a shared
-host removes: root on the FFBox host can read the VM's memory and disk, including the ssh key to Ben's machines.
+**TL;DR:** Run the portal (orchestrators, dispatcher, ledger and `data/`, web UI, `/machine` and `/provider`, machine
+control; no standing agents or workers) in a KVM/QEMU virtual machine on the FFBox host, managed by libvirt. The VM
+has its own Ubuntu, its own Tailscale node with Funnel, and its own isolated virtual network: NAT out to the internet,
+nothing in. An nftables table on the host keeps the VM away from the host's services, FFBox's containers and
+Lothsahn's LAN. The same table keeps everything on the host except root away from the VM. FFBox and FF Factory share
+the hardware and the internet line, and nothing else: no account, file, Docker, network or secret. FFBox reaches the
+portal through its public Funnel URL, as it reaches BEAST today. The host watches the VM: a guest-agent ping and the
+portal's health every minute, a reset after three failed checks, and a watchdog device as a second layer. Every night
+it drains the portal, cold-restarts the VM for its security updates and snapshots the disk. Scripts for all of it are
+in [`deploy/vm/`](../deploy/vm): for the host (run by Lothsahn as root) and for the guest. CI builds the whole thing
+in a nested VM on every change to them. Sizing: 2 vCPUs, 8 GiB RAM, a 120 GiB disk, from BEAST's portal measured over
+2.4 hours (peak 2.0 GB private and half a core) with headroom; the 24-hour run refines it ([Sizing](#9-sizing)). One
+limit no design on a shared host removes: root on the FFBox host can read the VM's memory and disk, including the ssh
+key to Ben's machines.
 
 Status: design and scripts, for w441 (Lothsahn: "Revise it to be a VM"). It revises w439's container design: the code
 changes, the migration, the Claude account section and the decisions carry over. Nothing is deployed. The
@@ -301,7 +302,7 @@ Six rules:
   agent. Same as the container, and as Ben on BEAST today.
 - **Protect against FF Factory's own agents** reading the portal's secrets inside the guest (change 7).
 - **Separate failure domains.** An FFBox host outage still takes the portal down with it.
-- **Come free.** It reserves about 12.5 GiB of the host's RAM ([9](#9-sizing)) and adds a second OS. It also adds
+- **Come free.** It reserves about 8.3 GiB of the host's RAM ([9](#9-sizing)) and adds a second OS. It also adds
   libvirtd, more root code on the box. Its QEMU runs unprivileged and confined, and its socket is root-only.
 
 ## 2. The VM and the guest
@@ -852,7 +853,7 @@ it rests on.
 | D9 | Where `publish_review` media lives | On the portal, seen through the dashboard (no code), left out of the daily backup. Routing it to BEAST so Ben can open it in Explorer is a code change (M) | [review.md](review.md): the folder is on "the portal's computer" | Ben | **Accepted** (Lothsahn, 2026-10-05) |
 | D10 | Voice | Off at cut-over (browser engines); try Whisper on the CPU later | 2.6 | whoever uses voice | **Accepted** (Lothsahn, 2026-10-05) |
 | D11 | BEAST's Dev Drive self-recovery | Move it into BEAST's daemon before the cut-over (change 4); the VM runs none of it | the 2026-09-24 outage, when Windows dropped F: and nothing came back without an administrator ([self-recovery.md](self-recovery.md)) | Ben, Lothsahn | **Decided** (Lothsahn, 2026-10-05; Ben leaned the same way, as the orchestrator relayed): into BEAST's daemon, the F: watch, `ffsb-helper-mount` with its retries, editor restarts and agent resumes, the disk guard and the reaper; nothing of it in portal-only mode |
-| D12 | The VM's size, and what the host sets aside for it | 4 vCPUs, 12 GiB RAM (about 12.5 GiB of the host with QEMU and libvirt), a 120 GiB disk. Settings in `/etc/fff-vm/fff-vm.conf`; a change applies at the next nightly cold restart | 9: guesses built on measured pieces | Lothsahn | Pending: from w442's 24-hour measurement on BEAST (ends about 14:28 UTC on 2026-10-06) |
+| D12 | The VM's size, and what the host sets aside for it | 2 vCPUs, 8 GiB RAM (about 8.3 GiB of the host with QEMU and libvirt), a 120 GiB disk. One setting each in `/etc/fff-vm/fff-vm.conf`; a change applies at the next nightly cold restart | 9: measured on BEAST over 2.4 h (the portal peaked at 2.0 GB private and half a core), with headroom for three times today's orchestrators; the disk is a guess (`data/` not measured) | Lothsahn | **Decided:** 2 vCPUs and 8 GiB, from w442's measured numbers (Lothsahn, 2026-10-05); the disk stays 120 GiB until `data/` and the base clone are measured; the 24-hour run (ends about 14:28 UTC on 2026-10-06) can still move any of them |
 | D13 | The VM's disk | A zvol on the host's pool (`VM_DISK_MODE=zvol`, the default): reserved in full, snapshots, no double copy-on-write | 2.2; both modes tested in CI | Lothsahn | **Decided:** a zvol; the space is there (Lothsahn, 2026-10-05) |
 | D14 | The guest's OS | Ubuntu 26.04 LTS (support to 2031), now the default (`VM_OS_RELEASE=resolute`); 24.04 stays a setting away | 2.1: the image and every package measured as published for resolute; CI boots the 26.04 guest | Lothsahn | **Decided:** 26.04 (Lothsahn, 2026-10-05) |
 | D15 | The nightly restart | Every night (`NIGHTLY_MODE=always`) at 12:00 UTC, after the guest's upgrades at 11:00 and backup at 11:15. `if-required` restarts only when the guest or the host's QEMU needs it | 3, "Why 12:00 UTC": measured, the quietest hour in 30 days of commits | Lothsahn, Ben | **Accepted:** nightly at 12:00 UTC (Lothsahn, 2026-10-05) |
@@ -865,7 +866,7 @@ it rests on.
 
 - **One host for both.** An FFBox host outage also takes down the portal; today they fail separately. The M5's watch
   alerts, nightly backups sit on BEAST, and a node re-made elsewhere with the same hostname keeps the URL.
-- **RAM on the shared host.** 12.5 GiB is fixed for the VM. If FFBox's Unity CI and the VM together exceed the host's
+- **RAM on the shared host.** About 8.3 GiB is fixed for the VM. If FFBox's Unity CI and the VM together exceed the host's
   RAM, the host swaps or kills. Check `free -g` and FFBox's peak before the install; the installer warns when less is
   available than the VM needs.
 - **Funnel's limits and the hairpin.** FFBox's connector reaches a VM on its own host through Tailscale's relays, and
@@ -892,43 +893,43 @@ it rests on.
 The VM runs the portal only: orchestrators, the dispatcher, the ledger, the web UI and the connector endpoint. No
 workers, no standing agents (D16), no Unity.
 
-**BEAST's own footprint is not measured yet.** The measurement needs read access to BEAST's processes and data, and
-`ssh beast` from LothDesktop was refused on 2026-10-05: its key is not authorized there. So
-[`deploy/vm/measure/measure-portal.ps1`](../deploy/vm/measure/measure-portal.ps1) does it on BEAST itself, read-only.
-It walks the portal's process tree every 30 s for the period given. It gives each Claude process its role
-(dispatcher, orchestrator, standing, worker) from its orchestrator-memory folder or its `--resume` session id in
-`state.json`. It reports the working set and private bytes (median as typical, max as peak), CPU, how many of each role
-run at once, and I/O per role. It also reports `data/` by folder and what was written per day over 14 days, the base
-clone, `~/.claude/projects` and the host's network bytes. With `-PortalPort 8790` it finds the server again after a
-restart, and it keeps counting Claude processes that outlive one. The period should be **at least 24 hours, across a
-weekday**: orchestrators idle at night and pile up when several people chat, and only a full day sees both, plus the
-scheduled standing runs. Run it as
-`powershell -File deploy\vm\measure\measure-portal.ps1 -AppRoot C:\ff-sandboxes -PortalPort 8790 -Minutes 1440`.
-It was tested on LothDesktop against its own daemon's tree. w442 (the request to run it on BEAST) is running it there
-for 24 hours. Until its numbers are in, the ones below are guesses built on what was measured elsewhere.
+**BEAST's portal, measured** by w442 (the request to measure it on BEAST) with
+[`deploy/vm/measure/measure-portal.ps1`](../deploy/vm/measure/measure-portal.ps1). The script reads the portal's
+process tree every 30 s, giving each Claude process its role from its orchestrator-memory folder or its session id.
+These numbers are the first 2.4 hours of a 24-hour run: 280 samples, 14:27 to 16:51 local time on 2026-10-05,
+including two portal restarts
+([`results/partial-20261005`](../deploy/vm/measure/results/partial-20261005/summary-partial.txt)). The full run ends
+about 14:28 UTC on 2026-10-06 and refines them ([D12](#8-risks-and-open-decisions)). It is read-only and does not
+read `data/` or the base clone (a protected path for that worker), so those two sizes are still not measured.
 
-| What | Number | Basis |
-|---|---|---|
-| One Claude process (the CLI the SDK runs) | working set 328 MB typical, 364 MB peak; private 594 MB typical, 627 MB peak | measured: `measure-portal.ps1` on LothDesktop, a worker's `claude.exe` sampled every minute over the afternoon of 2026-10-05. A proxy: a worker on Windows, not an orchestrator on Linux. Its tools (the Unity MCP server, PowerShell) added about 0.2 GB that orchestrators do not run |
-| The node server | LothDesktop's daemon: working set 206 MB typical, 334 MB peak | measured, same run. A proxy: the portal holds far more state. `state.json` is 4.5 MB at 7,000 sessions *(sourced: `server/store.ts:43`)*; guess 0.5-1 GB for BEAST's portal |
-| Claude processes at once | guess up to 6: one per person chatting (3-5) and the dispatcher; no standing runs in the VM (D16) | `limits.maxSessions` caps mid-turn agents at 6 by default *(sourced: `server/config.ts:415`)*; idle orchestrators keep their process (and memory) *(sourced: [machines.md](machines.md), "an idle agent's process holds its memory too")* |
-| The guest with the portal idle, empty data | ⟨CI⟩ | measured in CI: `free -m` and the node server's RSS a minute after the guest install, in the 2-vCPU, 4 GiB test VM |
-| A release on disk (worktree, `node_modules`, web build) | ⟨CI⟩ | measured in CI: `du -sh` of `app/releases/<sha>` |
-| Install, and an update's build | ⟨CI⟩ | measured in CI, 2 vCPUs |
-| An update's downtime | ⟨CI⟩ | measured in CI: `/api/health` unanswered during `fffctl update --drain-minutes 0` |
-| Base clone | git objects 1.27 GiB; working tree without LFS files guess 3-5 GB | measured by w439 (the container design) on BEAST; guess |
-| `data/` | guess under 20 GB, growth not measured | the guess of w439 (the container design); `measure-portal.ps1` reports both |
-| QEMU and libvirt on the host | about 50 MiB for QEMU, 8 MiB per vCPU, page tables 1 bit per 512 bytes of guest RAM (3 MiB for 12 GiB), about 65 MiB for libvirt's daemons | sourced: KubeVirt's measured RSS budgets (`pkg/hypervisor/kvm/hypervisorbackend.go`); not a Red Hat or libvirt figure |
+| What | Typical (median) | Peak | Basis |
+|---|---|---|---|
+| The node server | 150 MB working set, 213 MB private; 4.8% of one core | 459 MB working set, 434 MB private; 43% of one core | measured on BEAST, 2.4 h |
+| The dispatcher's Claude process | 139 MB working set, 467 MB private | 417 MB, 559 MB private | measured on BEAST, 2.4 h |
+| The orchestrators' Claude processes (2 at once) | 244 MB working set together, 994 MB private | 556 MB, 1,246 MB private | measured on BEAST, 2.4 h |
+| Everything under the portal | 522 MB working set, 1.67 GB private; 5.8% of one core | 1,066 MB, 1.98 GB private; 50% of one core | measured on BEAST, 2.4 h |
+| Claude processes at once | 3 (the dispatcher and 2 orchestrators) | 3 | measured on BEAST, 2.4 h; no standing agent or worker ran under the portal |
+| One Claude process elsewhere, for scale | 308 MB working set, 567 MB private | 371 MB, 650 MB private | measured on LothDesktop's own daemon (workers), 68 min |
+| Building a release in the VM (`npm ci` twice, the web build) | 19 s | | measured in CI, a 2-vCPU, 4 GiB test VM |
+| The host install, the first boot included | 1 min 39 s to 2 min 4 s | | measured in CI, two runs |
+| `data/` | not measured | | guess: under 20 GB (w439, the container design) |
+| Base clone | git objects 1.27 GiB; working tree without LFS files 3-5 GB | | measured by w439 on BEAST; working tree a guess |
+| QEMU and libvirt on the host | about 50 MiB for QEMU, 8 MiB per vCPU, page tables 1 bit per 512 bytes of guest RAM, about 65 MiB for libvirt's daemons | | sourced: KubeVirt's measured RSS budgets (`pkg/hypervisor/kvm/hypervisorbackend.go`); not a Red Hat or libvirt figure |
+
+The private bytes are Windows' committed memory, an upper bound for what the same processes keep resident on Linux.
 
 **The VM:**
 
 | | Value | Reasoning | Label |
 |---|---|---|---|
-| vCPUs | **4** | Agents mostly wait on the API. CPU comes in bursts: `rg` and `git` over the base clone, the server's state saves, and an update's `npm ci` and web build, which now run beside the live portal. 2 vCPUs built and ran it in CI (⟨CI⟩); 4 keeps a build from slowing the portal. Not pinned: the vCPUs are host threads competing with FFBox's CI | guess, on measured CI timings |
-| RAM | **12 GiB** | 6 Claude processes × 0.65 GB (the measured private peak) = 3.9 GB, the server up to 1 GB, the OS, journald and tailscaled about 0.5 GB, and 3-4 GB of page cache so orchestrators' reads of the base clone do not hit the disk. About 9 GB, with room for more people chatting at once; w442's measurement may lower it (D12) | guess, on measured per-process numbers |
-| Disk | **120 GiB** | OS about ⟨CI⟩, 3 releases × ⟨CI⟩, the base clone 1.3 + 3-5 GB, `data/` up to 20 GB, session histories 1-5 GB, review media and backup staging, then doubled for growth and for a year of logs | guess |
-| Host set aside | **about 12.5 GiB RAM**, 4 threads, the zvol's 120 GiB reservation plus its snapshots | 12 GiB + QEMU about 85 MiB (50 + 4 × 8 + 3) + libvirt 65 MiB, with headroom; no memory ballooning down (`currentMemory` = `memory`) | sourced overhead, guess headroom |
-| Network | no sizing need | the portal's traffic is control messages, transcripts and attachments up to 200 MB *(sourced: `attachments.maxMB` default)*; Funnel's own limits apply either way | sourced |
+| vCPUs | **2** | The whole portal peaked at half a core and averaged 6% of one. An update's build, which now runs beside the live portal, took 19 s on 2 vCPUs. Not pinned: the vCPUs are host threads that compete with FFBox's CI | measured, with headroom |
+| RAM | **8 GiB** | The measured private peak was 2.0 GB for the server and 3 Claude processes, about 0.6 GB a Claude process. Room for 9 at once (8 people chatting and the dispatcher, 3 times today's) is about 6 GB. Add about 0.5 GB for the OS, journald and tailscaled, and some page cache for orchestrators' reads of the base clone | measured per process; the headroom is a guess |
+| Disk | **120 GiB** | The OS, 3 releases, the base clone (1.3 GiB of objects and 3-5 GB of files), `data/` up to 20 GB, session histories and backup staging, doubled for growth | guess: `data/` is not measured |
+| Host set aside | **about 8.3 GiB RAM**, 2 threads, the zvol's 120 GiB reservation plus its snapshots | 8 GiB, plus QEMU about 70 MiB (50 + 2 × 8 + 2) and libvirt 65 MiB; no memory ballooning down (`currentMemory` = `memory`) | sourced overhead |
+| Network | no sizing need | the portal's traffic is control messages, transcripts and attachments up to 200 MB *(sourced: `attachments.maxMB` default)*. BEAST's adapters moved 2.3 GB in and 10.7 GB out a day, but that is the whole host, workers included *(measured on BEAST, an upper bound)* | sourced; measured upper bound |
+
+The sizes are one setting each in `/etc/fff-vm/fff-vm.conf` (`VM_VCPUS`, `VM_MEMORY_MB`). A changed size applies at
+the next nightly cold restart, so the 24-hour numbers can move them without a reinstall.
 
 ## 10. Installing
 

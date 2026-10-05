@@ -43,8 +43,7 @@ mkdir -p /etc/fff-vm
 cat >/etc/fff-vm/fff-vm.conf <<EOF
 VM_DISK_MODE=$MODE
 VM_ZVOL_PARENT=fffci/fff-vm
-VM_VCPUS=2
-VM_MEMORY_MB=4096
+# The sizes are the defaults (D12: 2 vCPUs, 8 GiB), so CI boots the size the FFBox host runs; only the disk is small.
 VM_DISK_GB=16
 WATCH_INTERVAL_SEC=20
 WATCH_FAILS_BEFORE_RESET=2
@@ -130,7 +129,7 @@ health
 [ "$(sha_of)" = "$(git -C "$ROOT" rev-parse --short=7 HEAD)" ] || fail "the portal runs $(sha_of), not HEAD"
 g 'sudo fffctl status'
 sleep 60
-g 'echo "MEASURE guest memory (MiB), portal idle with empty data:"; free -m; echo "MEASURE node server RSS (KiB): $(ps -o rss= -p $(systemctl show -p MainPID --value fff-portal))"; echo "MEASURE release on disk: $(sudo du -sh /srv/fff/app/releases/* | head -n 1)"; echo "MEASURE bare repo: $(sudo du -sh /srv/fff/app/repo.git | cut -f1)"; echo "MEASURE root filesystem:"; df -h /'
+g 'echo "MEASURE guest memory (MiB), portal idle with empty data:"; free -m; echo "MEASURE node server RSS (KiB): $(ps -o rss= -p $(systemctl show -p MainPID --value fff-portal))"; echo "MEASURE release on disk: $(sudo sh -c "du -sh /srv/fff/app/releases/*/" | head -n 1)"; echo "MEASURE npm cache: $(sudo du -sh /srv/fff/home/.npm | cut -f1)"; echo "MEASURE bare repo: $(sudo du -sh /srv/fff/app/repo.git | cut -f1)"; echo "MEASURE root filesystem:"; df -h /'
 g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --repo /tmp/ff.bundle' | tail -n 3
 echo "ok: the guest install ran twice"
 g 'sudo fffctl base-clone' && g 'sudo systemctl start fff-base-refresh.service && sudo journalctl -u fff-base-refresh -n 3 --no-pager'
@@ -170,7 +169,16 @@ git -C "$ROOT" branch -f main HEAD
 git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 g 'cat > /tmp/ff.bundle.new && mv /tmp/ff.bundle.new /tmp/ff.bundle && chmod 644 /tmp/ff.bundle' </tmp/ff.bundle
 g 'sudo fffctl update --drain-minutes 0'
-wait_for 900 "rolled back to $good" bash -c "g() { /usr/local/sbin/fff-vm ssh \"\$@\"; }; g 'sudo cat /srv/fff/data/update.result.json' | jq -e '.ok == false and (.error | test(\"rolled back\"))'"
+# Expected within about 3 minutes (UPDATE_VERIFY_MIN=2, fff-health every 30 s); on a timeout, say why before failing.
+t0=$(date +%s)
+until g 'sudo cat /srv/fff/data/update.result.json' 2>/dev/null | jq -e '.ok == false and (.error | test("rolled back"))' >/dev/null 2>&1; do
+  if [ $(($(date +%s) - t0)) -ge 480 ]; then
+    g 'sudo fffctl status; sudo cat /srv/fff/data/update.result.json /srv/fff/data/update.verifying.json; sudo ls -la /srv/fff/app /srv/fff/data; sudo journalctl --no-pager -n 60 -u fff-update -u fff-health -u fff-portal' || true
+    fail "no rollback within 480 s"
+  fi
+  sleep 5
+done
+echo "ok: rolled back to $good ($(($(date +%s) - t0)) s)"
 wait_for 300 "the portal runs $good again" bash -c "[ \"\$(curl -fsS -m 10 http://$IP:8790/api/health | jq -r .sha)\" = $good ]"
 g 'ls /srv/fff/data/orchestrator-inbox/ 2>/dev/null | tail -n 3; sudo sh -c "cat /srv/fff/data/orchestrator-inbox/*.txt 2>/dev/null | tail -n 5"' || true
 git -C "$ROOT" reset -q --hard HEAD~1
