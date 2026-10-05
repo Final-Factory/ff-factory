@@ -88,6 +88,41 @@ shares that folder, the live game's too, so a worker copies the save there under
 `<id>-<name>` is one), never overwrites or deletes a save already there, and removes its copy when done. The ff-agents
 drive-game skill loads a save by name.
 
+## Agents' files
+
+(w447, asked by Ben: a save made on BEAST had to reach three LothDesktop workers, and only a person with ssh could
+move it.) A worker hands a file to another worker, on any computer, with no person and no ssh between machines:
+
+1. The worker calls **`publish_attachment {file}`** (`mcp__sandbox__publish_attachment` on this host,
+   `mcp__machine__publish_attachment` on a machine and in a machine's sandbox). It answers an `att_` id, the size and
+   the SHA-256.
+2. It puts the id in its report. Its orchestrator, or the dispatcher, passes it on like a person's file: `attachments:
+   [id]` on `message_agent`, `start_agent` or `request_work`.
+3. The other worker gets its own copy in `Inbox/`, fetched by its machine's daemon as above.
+
+An orchestrator or the dispatcher can also make an id of a file in the review folder (what workers published with
+`publish_review`, [review.md](review.md)): **`attach_review_file {path}`**, path absolute or relative to `review.root`.
+Only files in that folder; the uploads in progress there (`.uploads/`) are refused.
+
+| rule | where |
+|---|---|
+| A worker's file must be in its working folder or its own temp folder (`TMP`), after links are followed, and not empty. Anything else is refused (403), so no agent can have FF Factory read and hand out a file it may not (the portal's data, another sandbox, a protected path). A save from the game's saves folder is copied into the working folder first. | `publishableFile` |
+| The size cap is config `attachments.maxMB`, as for a person's file, checked before a byte moves (413). | `AttachmentStore.begin` |
+| The SHA-256 is recorded. On a machine the daemon computes it first, and the portal drops the upload when the bytes that arrive do not match (422). | `AttachmentStore.finish` |
+| The uploader is recorded: `uploadedBy` is the person the agent works for, `source` the agent and where it runs (`worker "Fix belts" (3f2a1b0c on lothdesktop/pr-fix)`, or `the review folder (w446/save.zip), by the dispatcher`). Agents never see either. | `index.json` |
+| Retention is the same as for any attachment: 30 days after it was last used. | |
+
+**How a machine's file travels.** The same way as review media: the daemon (`machine/attachments.ts`
+`publishAttachmentFromMachine`) reads the file and its SHA-256 and calls the portal's `publish_attachment` rpc with the
+name, size and hash only. The portal (`uploadForMachine`) checks the cap and opens an upload bound to that machine.
+The daemon sends the bytes to `PUT /machine/attachments/uploads/<uploadId>?offset=N` with its own machine token, in 8 MB
+chunks that resume after a dropped link (`GET` the same URL says where). The last chunk answers the attachment. Another
+machine's token gets 404, none 401. The daemon already holds its machine token, so no new keys are needed between
+machines.
+
+A daemon deployed before this has no `publish_attachment` in its catalog, so its agents do not see the tool until it is
+redeployed (outdated daemons are redeployed once idle, as after any update). The protocol number is unchanged.
+
 ## Untrusted content
 
 An attachment is data from a person, possibly forwarded from a player. Every agent is told so in its brief and in the
@@ -145,6 +180,7 @@ Both are settable with `set_app_config` and apply at once.
 | `GET /api/attachments/<id>/download` | the file, with HTTP Range |
 | `POST /api/sessions/<id>/message` `{ text, images?, attachments?: [ids] }` | send a message with files uploaded first |
 | `GET /machine/attachments/<id>` | a machine daemon's fetch, with its token |
+| `PUT /machine/attachments/uploads/<uploadId>?offset=N`, `GET` the same | a machine daemon's upload of a file its agent published, with its token; only an upload the portal opened for that machine |
 
 ## Machines
 
@@ -160,9 +196,9 @@ are redeployed as after any update.
 | file | what |
 |---|---|
 | `shared/attachments.ts` | ids, names, kinds, the agent's block |
-| `server/attachments.ts` | the store: uploads, hashing, retention, Inbox copies, machine grants |
+| `server/attachments.ts` | the store: uploads, hashing, retention, Inbox copies, machine grants, machines' uploads (`uploadForMachine`, `machineUploadHttp`), `publishableFile` |
 | `server/index.ts` | the routes and the CSRF exception for chunks |
-| `server/agents.ts` | `sendWithAttachments`, the tools' `attachments`, `fetch_attachment`, the briefs |
-| `machine/attachments.ts`, `machine/daemon.ts` | the daemon's fetch |
+| `server/agents.ts` | `sendWithAttachments`, the tools' `attachments`, `fetch_attachment`, `publish_attachment`, `attach_review_file`, the briefs |
+| `machine/attachments.ts`, `machine/daemon.ts` | the daemon's fetch and its `publish_attachment` upload (chunks sent by `machine/review.ts` `sendChunks`) |
 | `web/src/upload.ts`, `web/src/components/Composer.tsx`, `Attachments.tsx` | the uploader, the composer's chips, the transcript's chips |
 | tests | `server/attachments.test.ts`, `server/machineAttachments.test.ts`, `server/attachmentFlow.test.ts`, `e2e/attachments.spec.ts` |

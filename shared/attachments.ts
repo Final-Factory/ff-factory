@@ -3,7 +3,7 @@
  * stores them by their SHA-256 and never opens them; agents get a copy in an Inbox folder of their working folder.
  * Shared by the server, the machine daemon (which writes the copies there) and the page.
  */
-import type { DeliveredAttachment } from './types.ts';
+import type { AttachmentRef, DeliveredAttachment } from './types.ts';
 
 /** An attachment id: "att_" and 12 lowercase letters or digits. What orchestrators pass on (attachments: [id]). */
 export const ATTACHMENT_ID = /^att_[a-z0-9]{12}$/;
@@ -79,6 +79,17 @@ export function attachmentLine(a: DeliveredAttachment): string {
   const head = `- ${a.id} "${a.name}": ${a.kind}, ${fmtBytes(a.size)} (${a.size.toLocaleString('en-US')} bytes), ${a.mediaType}, sha256 ${a.sha256}`;
   if (a.error) return `${head}\n  NOT delivered: ${a.error}`;
   return a.path ? `${head}\n  at ${a.path}` : head;
+}
+
+/**
+ * What publish_attachment and attach_review_file answer (docs/attachments.md, "Agents' files"): the new attachment and
+ * how it travels on. `who`: a worker (its orchestrator passes the id on) or an orchestrator (it hands it on itself).
+ */
+export function publishedAttachmentText(a: AttachmentRef, who: 'worker' | 'orchestrator'): string {
+  const pass = who === 'worker'
+    ? `Pass it on by its id: put ${a.id} in your report (or answer), and your orchestrator or the dispatcher hands it to another worker with attachments: ["${a.id}"] (message_agent, start_agent or request_work). That worker gets its own copy in ${INBOX_DIR}/, on this computer or any machine. Never copy files between machines yourself (ssh, scp, shares).`
+    : `Hand it to a worker with attachments: ["${a.id}"] on message_agent, start_agent or request_work: it gets its own copy in ${INBOX_DIR}/, on this host or any machine.`;
+  return `Published as attachment ${a.id}:\n${attachmentLine(a)}\n${pass}`;
 }
 
 /**
