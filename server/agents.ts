@@ -22,6 +22,7 @@ import { openUnity, unityMcpServerFor, type SceneState, type UnityBridge } from 
 import { CATALOG } from './launch.ts';
 import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
+import { RAM_BUSY_PCT, capacityLines, placementHint, type Computer } from './placement.ts';
 import { AgentSession, isMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import { HostMigrator, hostSandboxFrom } from './hostMigration.ts';
 import { WORK_OPEN, WORK_PRIORITIES, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
@@ -1659,6 +1660,79 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   }
 
   /** list_sandboxes: this host's sandboxes, then each machine's, compactly (live agents only). */
+  /** This host's memory, for the capacity lines (w416); replaced by tests. */
+  hostMem: () => { free: number; total: number } = () => ({ free: os.freemem(), total: os.totalmem() });
+
+  /**
+   * Each computer that holds sandboxes, with its load (w416): this host's own pool (while it has one), then each
+   * machine's (BEAST's own daemon, LothDesktop, the Macs). What list_sandboxes, system_status and the placement hint read.
+   */
+  places(): Computer[] {
+    const out: Computer[] = [];
+    const all = [...this.sessions.sessions.values()].filter((s) => s.info.kind !== 'orchestrator');
+    const host = this.sandboxes.list();
+    const local = this.machines.local();
+    const mem = this.hostMem();
+    if (!local || host.length) {
+      const here = all.filter((s) => !s.info.machineId);
+      out.push({
+        id: 'this host',
+        online: true,
+        live: here.filter((s) => s.live).length,
+        midTurn: here.filter((s) => isMidTurn(s.info)).length,
+        maxAgents: this.cfg.limits.maxSessions,
+        sandboxes: host.length,
+        maxSandboxes: this.cfg.limits.maxSandboxes,
+        freeSandboxes: host.filter((s) => this.free(s)).length,
+        memUsedBytes: mem.total - mem.free,
+        memTotalBytes: mem.total,
+      });
+    }
+    for (const m of this.machines.list()) {
+      const pool = poolSettingsOf(m);
+      if (!pool) continue;
+      const sbs = m.sandboxes ?? [];
+      const mine = all.filter((s) => s.info.machineId === m.id && s.info.machineSandbox);
+      // Its daemon reports its load; this host's own daemon's is this host's.
+      const st = this.machines.statsOf(m.id);
+      const used = st ? (st.memUsedBytes ?? st.memTotalBytes - st.memFreeBytes) : m.local ? mem.total - mem.free : undefined;
+      const total = st ? st.memTotalBytes : m.local ? mem.total : undefined;
+      out.push({
+        id: m.id,
+        online: this.machines.isOnline(m.id),
+        live: mine.filter((s) => s.live).length,
+        midTurn: mine.filter((s) => isMidTurn(s.info)).length,
+        maxAgents: pool.maxAgents ?? pool.maxSandboxes * pool.maxAgentsPerSandbox,
+        sandboxes: sbs.length,
+        maxSandboxes: pool.maxSandboxes,
+        freeSandboxes: sbs.filter((s) => this.free(s)).length,
+        ...(used !== undefined && total ? { memUsedBytes: used, memTotalBytes: total } : {}),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * start_agent's placement note (w416): when the sandbox it starts in is a free one (new work, not a worker going on
+   * in its own sandbox) on a busy computer while another has room. Undefined on a machine's main clone.
+   */
+  private startHint(sandbox: string | undefined, machine: string | undefined): string | undefined {
+    try {
+      const t = this.target(sandbox, machine);
+      if (t.machine && t.machineSandbox) {
+        const sb = this.store.machines.get(t.machine)?.sandboxes?.find((x) => x.id === t.machineSandbox);
+        if (sb && !this.free(sb)) return undefined;
+        return placementHint(t.machine, this.places());
+      }
+      if (!t.sandbox) return undefined;
+      const sb = this.sandboxes.get(t.sandbox);
+      if (sb && !this.free(sb)) return undefined;
+      return placementHint('this host', this.places());
+    } catch {
+      return undefined;
+    }
+  }
+
   describeAllSandboxes(): string {
     const host = this.sandboxes.list();
     const local = this.machines.local();
@@ -1676,7 +1750,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       const total = pool?.maxAgents !== undefined ? `, ${pool.maxAgents} agents in all` : '';
       parts.push('', `## ${m.id} (${noun}, ${state}; ${limits}${total}${diskPart})`, ...(sbs.length ? sbs.map((s) => this.describeMachineSandbox(m, s)) : ['(none yet)']));
     }
-    return parts.join('\n').replace(/^\n+/, '');
+    const cap = capacityLines(this.places());
+    return [...cap, ...(cap.length ? [''] : []), ...parts].join('\n').replace(/^\n+/, '');
   }
 
   private condensed(events: TranscriptEvent[]) {
@@ -1722,7 +1797,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return [
         tool(
           'list_sandboxes',
-          'List every sandbox, grouped by computer: this host\'s, then each machine\'s (the user\'s Macs and Windows PCs with a sandbox_root), with each group\'s limits and free count. One line per sandbox: its id (address it by this in other tools: "spec-098" on this host, "lothdesktop/sb1" on a machine), FREE when it is ready, labelled unused and has no live agent, its label (what it is doing now), status, git state (branch checked out now, uncommitted files, ahead/behind, open PR) and Unity; then its live agents only (the count of stopped earlier ones; their history is in agent_transcript and search_transcripts). Call this before deciding whether to reuse a sandbox or make a new one.',
+          'List every sandbox, grouped by computer: this host\'s, then each machine\'s (the user\'s Macs and Windows PCs with a sandbox_root), with each group\'s limits and free count, after a Capacity block: each computer\'s live agents against its limit, free sandboxes and RAM used, BUSY or ROOM, and which one to prefer for new game-repo work. One line per sandbox: its id (address it by this in other tools: "spec-098" on this host, "lothdesktop/sb1" on a machine), FREE when it is ready, labelled unused and has no live agent, its label (what it is doing now), status, git state (branch checked out now, uncommitted files, ahead/behind, open PR) and Unity; then its live agents only (the count of stopped earlier ones; their history is in agent_transcript and search_transcripts). Call this before deciding whether to reuse a sandbox or make a new one.',
           {},
           wrap(async () => this.describeAllSandboxes()),
         ),
@@ -1744,9 +1819,11 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             const w = a.work_id ? this.orchestrators.requireWork(a.work_id) : undefined;
             const branch = sandboxBranchFor(w?.source, a.name, a.branch);
             const on = a.machine ?? this.defaultSandboxMachine();
-            if (on) return this.machines.createSandbox(on, { name: a.name, purpose: a.purpose, branch, base: a.base, startUnity: a.start_unity, seedLibrary: a.seed_library });
+            // Read before it is made: the new sandbox would count as in use (w416).
+            const hint = placementHint(on?.toLowerCase() ?? 'this host', this.places()) ?? '';
+            if (on) return `${await this.machines.createSandbox(on, { name: a.name, purpose: a.purpose, branch, base: a.base, startUnity: a.start_unity, seedLibrary: a.seed_library })}${hint}`;
             const s = this.sandboxes.create({ name: a.name, purpose: a.purpose, branch, base: a.base, startUnity: a.start_unity, seedLibrary: a.seed_library });
-            return `Creating sandbox ${s.id} on branch ${s.branch} from ${s.base} at ${s.path}.`;
+            return `Creating sandbox ${s.id} on branch ${s.branch} from ${s.base} at ${s.path}.${hint}`;
           }),
         ),
         tool(
@@ -1864,6 +1941,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             // An intake request always carries its rules (untrusted text, posting limits, the markers), whatever the brief says.
             const prompt = `${w?.source ? `${a.prompt}${workerRules(w, this.sandboxBranchOf(this.target(a.sandbox, a.machine)))}` : a.prompt}${w ? requestLineRule(w) : ''}`;
             const files = this.attachmentsFor(a.attachments, w);
+            const hint = this.startHint(a.sandbox, a.machine) ?? '';
             const s = this.startWorker({ sandbox: a.sandbox, machine: a.machine, prompt, title: a.title, model: a.model, effort: a.effort, permissionMode: a.permission_mode, from, requestedBy, attachments: files });
             const where = s.info.machineSandbox ? `in sandbox ${s.info.machineId}/${s.info.machineSandbox}` : s.info.machineId ? `on machine ${s.info.machineId}` : `in ${a.sandbox}`;
             if (s.info.status === 'error') return `Created agent ${s.info.id} ${where}, but it did not start: ${s.info.statusDetail}`;
@@ -1878,7 +1956,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
               item = `; recorded in the ledger as ${this.orchestrators.recordStart(s.info, a.prompt, requestedBy, `started over /mcp for ${requestedBy.displayName}: worker ${s.info.id} ${where}`, from === 'human')}`;
             }
             const withFiles = files.length ? ` It gets ${files.length === 1 ? 'the attachment' : `${files.length} attachments`} (${files.map((f) => f.id).join(', ')}) in ${INBOX_DIR}/.` : '';
-            return `Started agent ${s.info.id} "${s.info.title}" ${where}, requested by ${requestedBy.displayName}${item}.${withFiles}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}`;
+            return `Started agent ${s.info.id} "${s.info.title}" ${where}, requested by ${requestedBy.displayName}${item}.${withFiles}${Agents.goneLine(files)}${this.queuedLine(s.info.id)}${hint}`;
           }),
         ),
         ...this.machineToolSpecs(tool, from),
@@ -2079,6 +2157,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
               `FF Factory ${formatVersion(appVersion())}`,
               `${statsLine(s.hostname, s)} (this host)`,
               ...(this.machineStatusLines?.() ?? []),
+              ...capacityLines(this.places()),
               `Unity editors running ${this.sandboxes.runningUnityCount()}/${s.limits.maxUnity}; live agents ${this.sessions.liveAgents()}/${s.limits.maxSessions} (workers and running standing agents)`,
               ...(this.usageLines?.() ?? []),
               ...hostHealthLines(this.hostHealth?.status),
@@ -2912,7 +2991,8 @@ ${this.worldBrief(true)}
 - Worker updates, standing agents' delegation requests and \`[auto-delegation]\` news go to the orchestrators of the people concerned, not to you; list_work shows each request's latest outcome. People message each other directly, orchestrator to orchestrator (message_person): you neither relay nor see those messages.
 - Placement: prefer one sandbox per independent stream of work, named for the work ("spec-098", "tutorial-playtest", "discord-triage"). For spec work, use list_branches to find the spec's existing branch and check it out if there is one; otherwise create \`NNN-short-name\` from ${this.cfg.defaultBase}. Reuse an existing idle sandbox when the request refers to it or the work continues there. Work that never opens Unity (Discord reading, docs, planning) still needs a sandbox as its working directory; create it with seed_library=false, or reuse an idle one.
 - Labels: a sandbox's purpose line is its label. A sandbox labelled \`unused\` with no running agent is idle; prefer those when reusing one, and never repurpose a sandbox whose label reserves it for something. When you give a sandbox new work, set_sandbox_label it to a short description of the task (workers relabel their own sandbox with \`set_label\`, and set it back to \`unused\` when done).
-- Machines: use one when the request asks for it or the work belongs there, prefer a sandbox otherwise. Machine workers may set aside or discard local changes to update the clone only after backing them up to a timestamped folder in ff-local-backups beside the clone; the harness enforces the backup. Unity on a machine is its owner's; its daemon restarts a hung or crashed editor, and the unity tool starts, stops and restarts it.
+- Where new work runs (w416, Lothsahn: "make sure jobs are getting scheduled on LothDesktop"): read the Capacity block at the top of list_sandboxes (also in system_status): each computer's live agents against its limit, free sandboxes and RAM, BUSY or ROOM. Game-repo work (code, tests, Unity, built players, Discord as Max, which only LothDesktop can post) runs on any computer with sandboxes. Put it where there is ROOM; when a computer is BUSY (at or over its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no free sandbox) and another has ROOM, use the one with room, even when a sandbox on the busy one is free. Keep work on BEAST (this host) only when it needs BEAST: FF Factory's own repo or its deploys, ssh to the M5 when LothDesktop cannot reach it, a brief that pins it, or a worker going on in its own sandbox (message_agent). Never move a running worker. start_agent and create_sandbox add a note when you place new work on a busy computer while another has room: follow it unless one of those reasons holds, and say which.
+- Machines' main clones: use one when the request asks for it or the work belongs there, prefer a sandbox otherwise. Machine workers may set aside or discard local changes to update the clone only after backing them up to a timestamped folder in ff-local-backups beside the clone; the harness enforces the backup. Unity on a machine is its owner's; its daemon restarts a hung or crashed editor, and the unity tool starts, stops and restarts it.
 - Never delete a sandbox, a machine or a standing agent unless a person explicitly asked for it.
 - Nobody reads this chat by default: do not write status reports for people. Act, and let the tools record it. When the owner writes here, answer like this: a one-line plain-language TL;DR, then detail only if useful, with request, sandbox and session ids. Your messages render as Markdown: \`![what it shows](<absolute path>)\` shows an image from a sandbox or a machine inline, and a \`\`\`mermaid block renders as a diagram.
 `.trim();
