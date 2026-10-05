@@ -19,6 +19,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   last words and FFBox's replies, checked and cleaned on the server and shown as plain text. FFBox's own page stays
   as the second link, "on Loth's network" ([docs/ffbox.md](docs/ffbox.md)).
 
+- **A recorded placement preference** (w428, asked by Ben). Config `placement.prefer` (computers in order, e.g.
+  `["lothdesktop", "m5", "m3"]`) and `placement.avoid` (computer to reason, e.g. `{ "beast": "BEAST unstable,
+  2026-10-05" }`), both settable with `set_app_config` and cleared with null. The Capacity block's "Next new game-repo
+  work" line follows them: the first preferred computer with room, then the rest by room, an avoided one only when
+  nothing else has room. Main-clone machines (the m5, the m3) are candidates now, with their backup rule named
+  ([docs/machines.md](docs/machines.md), "Placing work").
+
 - **Pick several request states at once** (w418 follow-up, asked by Lothsahn). The state chips on the Dispatcher's
   Requests tab, and now on the Intake tab's ledger list, toggle independently (e.g. Stalled and Merged, follow-up
   pending), with "All" and "Clear", and the choice survives a reload. `list_work` takes `state` as one state or a list.
