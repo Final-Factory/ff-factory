@@ -236,6 +236,11 @@ export interface Config {
     basePath: string;
     /** Optional existing local clone whose object store the base borrows (git --reference). */
     referenceRepo?: string;
+    /**
+     * Every how many minutes the base clone, which the orchestrators read, is fetched and moved to defaultBase
+     * (server/baseRefresh.ts, w467). Default 15; 0 turns it off (the portal VM's fff-base-refresh.timer may do it).
+     */
+    refreshMinutes?: number;
   };
   /** Base ref for new sandbox branches. */
   defaultBase: string;
@@ -575,6 +580,8 @@ export function loadConfig(): Config {
   for (const key of ['sandboxRoot', 'repo', 'unity'] as const) {
     if (!cfg[key]) throw new Error(`config.json is missing "${key}"`);
   }
+  const windowsOnly = windowsPathsOffWindows(cfg);
+  if (windowsOnly.length) throw new Error(`config.json names Windows paths on ${process.platform}: ${windowsOnly.join(', ')}. Use this computer's paths (the portal VM's template is deploy/vm/guest/config.vm.example.json).`);
   checkAccountConfig(cfg);
   cfg.dataDir = path.resolve(ROOT, cfg.dataDir);
   cfg.sandboxRoot = path.resolve(cfg.sandboxRoot);
@@ -587,6 +594,28 @@ export function loadConfig(): Config {
   cfg.voice.toolsDir = cfg.voice.toolsDir ? path.resolve(ROOT, cfg.voice.toolsDir) : path.join(cfg.dataDir, 'tools', 'whisper');
   cfg.protectedPaths = cfg.protectedPaths.map((p) => path.resolve(p));
   return cfg;
+}
+
+/**
+ * The config paths that are Windows paths ("C:/ffsb", "F:\\ffsb") on a computer that is not Windows (w467): there
+ * path.resolve('C:/ffsb') is "<cwd>/C:/ffsb", so the portal would quietly make and use folders inside its own. Their
+ * key and value each.
+ */
+export function windowsPathsOffWindows(cfg: Pick<Config, 'sandboxRoot' | 'dataDir' | 'repo' | 'protectedPaths'> & { standingRoot?: string; review?: { root?: string }; hostDiskPaths?: string[] }, platform: NodeJS.Platform = process.platform): string[] {
+  if (platform === 'win32') return [];
+  const drive = (v: unknown) => typeof v === 'string' && /^[a-zA-Z]:([\\/]|$)/.test(v);
+  const out: string[] = [];
+  const one = (key: string, v: unknown) => {
+    if (drive(v)) out.push(`${key} "${v}"`);
+  };
+  one('sandboxRoot', cfg.sandboxRoot);
+  one('dataDir', cfg.dataDir);
+  one('standingRoot', cfg.standingRoot);
+  one('repo.basePath', cfg.repo?.basePath);
+  one('review.root', cfg.review?.root);
+  (cfg.protectedPaths ?? []).forEach((p, i) => one(`protectedPaths[${i}]`, p));
+  (cfg.hostDiskPaths ?? []).forEach((p, i) => one(`hostDiskPaths[${i}]`, p));
+  return out;
 }
 
 /**

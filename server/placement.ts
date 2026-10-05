@@ -173,12 +173,18 @@ export function capacityLines(places: readonly Computer[], last?: string, prefs:
 }
 
 /**
- * A note for start_agent or create_sandbox when the computer it places new work on is not the one pickComputer names,
- * or undefined. A soft hint: the work may need this computer (FF Factory's own repo or its deploys, F:\ffsb\_review,
- * ssh to the M5 from BEAST, a brief that pins it, Max posting on LothDesktop), and a worker going on in its own sandbox
- * stays there.
+ * What may keep new work on a computer that is not the next one (w467, change 13: no longer BEAST's own paths, which
+ * the portal VM does not have). `reviewRoot`: the review folder where the portal runs.
  */
-export function placementHint(target: string, places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
+export const pinnedWork = (reviewRoot?: string) =>
+  `FF Factory's own repo or its deploys, the review folder${reviewRoot ? ` (${reviewRoot})` : ''}, ssh to the M5 from a computer that has its key, a brief that pins it`;
+
+/**
+ * A note for start_agent or create_sandbox when the computer it places new work on is not the one pickComputer names,
+ * or undefined. A soft hint: the work may need this computer (pinnedWork, Max posting on LothDesktop), and a worker
+ * going on in its own sandbox stays there.
+ */
+export function placementHint(target: string, places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}, reviewRoot?: string): string | undefined {
   const here = places.find((p) => p.id === target);
   if (!here) return undefined;
   const p = pickComputer(places, last, prefs);
@@ -186,5 +192,5 @@ export function placementHint(target: string, places: readonly Computer[], last?
   const avoided = avoidOf(prefs).get(target);
   const busy = busyReasons(here).filter((w) => w !== 'offline');
   const state = avoided ? `${target} is avoided (${avoided})` : busy.length ? `${target} is busy (${busy.join('; ')})` : `${target} has ${pctOf(roomOf(here))} room`;
-  return ` Note: ${state}; the next new game-repo work goes to ${howTo(p.pick)} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (FF Factory's own repo or its deploys, F:\\ffsb\\_review, ssh to the M5 from BEAST, a brief that pins it, Max posting, which only LothDesktop has, or a worker going on in its own sandbox), put it there.`;
+  return ` Note: ${state}; the next new game-repo work goes to ${howTo(p.pick)} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, Max posting, which only LothDesktop has, or a worker going on in its own sandbox), put it there.`;
 }

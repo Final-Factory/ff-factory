@@ -16,6 +16,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   account (`"token"` or `"login"`, set with `set_app_config`). Once set, the dispatcher runs on it instead of the system
   payer's own token; unset, nothing changes. system_status names it apart only when set ([docs/accounts.md](docs/accounts.md)).
 
+- **Daemons follow the portal to a new URL without a redeploy** (w466, asked by Lothsahn; change 9 of
+  docs/portal-on-ffbox-host.md). `relocate_machines {url, machines?}` sends connected daemons the portal's new base
+  URL. Each keeps it in its `daemon.json`, drops the link and dials it, with its agents running on and its token
+  unchanged. If the new URL has not answered after 10 minutes, it tries the old one too, every other time, so a move
+  that never comes up does not strand it. The sending portal does not redeploy a machine that is away. Protocol 8: older
+  daemons are redeployed once idle, as after any update (docs/machines.md, "Moving the portal").
+
 - **Stale build and run output is cleaned up by itself on every computer** (w459, asked by Ben). Until now a person
   asked for each clean-up of player builds (w451 freed 42 GB on LothDesktop after its D: hit the guard). The
   continuous clean-up, on this host's guard and on every machine's daemon, now also removes, once a day and whenever
@@ -78,6 +85,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   ([docs/orchestrators.md](docs/orchestrators.md), "What a request is doing now").
 
 ### Fixed
+
+- **Orchestrators and standing agents no longer read FF Factory's secrets** (w467, part C of the portal VM). Read,
+  Glob, Grep and a standing agent's shell are refused for config.json, data/ (an orchestrator's own memory and the
+  attachment store excepted), the secrets folder and token files, ~/.ssh, Claude's and gh's credentials, on Windows and
+  POSIX paths alike, and a search may not start above them ([docs/orchestrators.md](docs/orchestrators.md)). A
+  standing agent's shell now also recognises absolute POSIX paths into the base clone and the sandboxes.
+- **The base clone the orchestrators read follows origin/develop** (w467): fetched and moved every 15 minutes under
+  the base-repo lock (config `repo.refreshMinutes`, 0 off), so they no longer read old code.
+- **A config with Windows paths is refused off Windows** (w467): on Linux `path.resolve("C:/ffsb")` is a folder
+  inside the app, which the portal would have used quietly.
+- **Placement notes name the review folder where the portal runs** (w467), not `F:\ffsb\_review` and "ssh to the M5
+  from BEAST", which also showed up garbled in the dispatcher's prompt (`\f` read as a form feed); the restart
+  summary names the VM's update log (`journalctl -u fff-update`) under systemd.
 
 - **The outside watchdog watches BEAST's tailnet URL again** (w424, asked by Lothsahn). With no `publicUrl` in
   config.json, the watch took the first machine's `portal_url`; since `add_machine beast local` that is BEAST's own
