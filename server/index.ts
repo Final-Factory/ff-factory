@@ -562,7 +562,7 @@ route('GET', '/api/me', async (req) => {
 route('GET', '/api/providers/ffbox/conversations', async (_r, _m, url) => providers.conversations(Number(url.searchParams.get('limit')) || 100));
 route('GET', '/api/providers/ffbox/intake', async (_r, _m, url) => providers.intake(Number(url.searchParams.get('limit')) || 200));
 // Grouped by coarse signature, with the numbers automatic investigations will be capped by (shared/intake.ts).
-route('GET', '/api/providers/ffbox/signatures', async () => groupIntake(providers.intake(2000), Date.now()));
+route('GET', '/api/providers/ffbox/signatures', async () => groupIntake(providers.intake(2000)));
 
 // ---- Max (docs/max.md): what agents did as Max, the token's health, and a read-only look at a few channels
 route('GET', '/api/max/activity', async (_r, _m, url) => max.activity(Number(url.searchParams.get('limit')) || 100));

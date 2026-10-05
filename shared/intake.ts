@@ -1,17 +1,8 @@
-// FFBox's intake reports grouped the way automatic investigations will group them (docs/ffbox-integration.md,
-// section 6, steps 2 and 4): one item per coarse signature, the trust bar per item, and the day's numbers the
-// caps apply to. Fixed code, no model: it reads only fields the connector pattern-checked. Phase 4 (automatic
-// investigations) is not built yet, so nothing here starts anything; the page and ffbox_activity show the counts.
-import type { IntakeBudget, IntakeGroups, IntakeSignature, ProviderIntakeEvent } from './types.ts';
-
-/** Ben, 2026-09-27: at most 20 automatic investigations a day and 3 an hour. */
-export const AUTO_PER_DAY = 20;
-export const AUTO_PER_HOUR = 3;
-/** More than this many new signatures in an hour trips the storm breaker. */
-export const STORM_NEW_PER_HOUR = 5;
-
-const HOUR = 3600_000;
-const DAY = 24 * HOUR;
+// FFBox's intake reports grouped by coarse signature for reading (docs/ffbox-integration.md, section 6, step 2): one
+// item per signature and the trust bar per item. Fixed code, no model: it reads only fields the connector
+// pattern-checked, and starts nothing. FFBox diagnoses the reports itself, per report and per play session (its
+// intake.auto, since 2026-10-04); what it did is ffbox_activity show "signatures" (server/ffboxAutoIntake.ts).
+import type { IntakeGroups, IntakeSignature, ProviderIntakeEvent } from './types.ts';
 
 /** "0.50.0.46" -> "0.50.0": the major.minor.patch series, so one fork across a day of builds stays one item. */
 export function versionLine(v: string): string {
@@ -26,8 +17,8 @@ export function signatureOf(e: ProviderIntakeEvent): string {
   return `desync:${line}:${e.desync?.divergedSurfaces?.trim() || 'unknown'}`;
 }
 
-/** Group reports by signature, newest item first, and count what the caps will apply to at `now`. */
-export function groupIntake(events: ProviderIntakeEvent[], now: number): IntakeGroups {
+/** Group reports by signature, newest item first. */
+export function groupIntake(events: ProviderIntakeEvent[]): IntakeGroups {
   const by = new Map<string, ProviderIntakeEvent[]>();
   for (const e of events) {
     const k = signatureOf(e);
@@ -67,22 +58,5 @@ export function groupIntake(events: ProviderIntakeEvent[], now: number): IntakeG
     });
   }
   signatures.sort((a, b) => Date.parse(b.lastAt) - Date.parse(a.lastAt));
-  return { signatures, budget: budgetOf(signatures, now), reports: events.length };
-}
-
-export function budgetOf(signatures: IntakeSignature[], now: number): IntakeBudget {
-  const since = (iso: string, ms: number) => now - Date.parse(iso) < ms;
-  const newToday = signatures.filter((s) => since(s.firstAt, DAY));
-  const newLastHour = signatures.filter((s) => since(s.firstAt, HOUR)).length;
-  const trustedToday = newToday.filter((s) => s.trusted).length;
-  return {
-    live: false,
-    perDay: AUTO_PER_DAY,
-    perHour: AUTO_PER_HOUR,
-    newToday: newToday.length,
-    newLastHour,
-    trustedToday,
-    wouldStartToday: Math.min(trustedToday, AUTO_PER_DAY),
-    stormBreaker: { threshold: STORM_NEW_PER_HOUR, tripped: newLastHour > STORM_NEW_PER_HOUR },
-  };
+  return { signatures, reports: events.length };
 }
