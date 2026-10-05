@@ -727,7 +727,7 @@ test('beast machine: add_machine local takes its settings from the config, deplo
   assert.throws(() => mm.deployMachine({ id: 'beast2', local: true }), /beast is already the portal's own host/);
   mm.register({ id: 'm5', host: 'm5', purpose: 'unused', status: 'ready', repoPath: '/r', home: '/h', portalUrl: 'https://p', maxSessions: 3 });
   assert.throws(() => mm.deployMachine({ id: 'm5', local: true }), /a machine reached over ssh; remove it first/);
-  assert.throws(() => mm.cleanupNow('beast'), /cleaned by this host's guard/);
+  await assert.rejects(mm.cleanupNow('beast'), /cleaned by this host's guard/);
 
   const json = JSON.parse(daemonConfig({ portalUrl: 'http://127.0.0.1:8790', id: 'beast', token: 't', repoPath: 'C:\\ffsb\\_base', maxSessions: 3, extra: o.extra }));
   assert.deepEqual([json.maxEventsFile, json.unityMcpServer.command, json.sandboxIdleStopMinutes], [null, 'uvx.exe', 120]);

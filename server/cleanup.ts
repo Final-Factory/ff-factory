@@ -666,7 +666,7 @@ export class CleanupRunner {
         ...(r.listed?.length ? { listed: r.listed.slice(0, 50) } : {}),
       };
       if (dryRun) {
-        this.d.log({ ...summary, freeBeforeBytes: before });
+        this.d.log({ ...summary, freeBeforeBytes: before, plannedAll: r.planned, listedAll: r.listed });
         return summary;
       }
       const stale = await this.d.stale?.().catch(() => []);

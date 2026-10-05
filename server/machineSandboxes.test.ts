@@ -14,6 +14,7 @@ import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { MachineManager, limitOptions, machineForPath, mergeSandboxes, parseSandboxRef, poolSettingsOf } from './machines.ts';
 import { daemonConfig } from './machineDeploy.ts';
+import { describeCleanupItems } from './cleanup.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { SandboxPool, deletable, idleSandboxEditors, librarySource, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { copyTree, removeTree, run } from './proc.ts';
@@ -550,4 +551,68 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
   midTurn(a1, 'idle');
   a1.stop();
   await until('a1 stopped', () => !a1.live);
+});
+
+// ---------------------------------------------------------------- stale build output through the daemon (w459)
+
+test('stale output on a machine: the portal sends the ledger facts, a dry run comes back in full and removes nothing, and the pass is logged on the portal', async (t) => {
+  const r = repos();
+  const cfg = { dataDir: path.join(r.root, 'data'), limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' }, defaultBase: 'origin/develop' } as unknown as Config;
+  fs.mkdirSync(cfg.dataDir, { recursive: true });
+  const store = new Store(cfg.dataDir);
+  const sessions = new SessionManager(cfg, store);
+  const mm = new MachineManager(cfg, store, sessions);
+  mm.hooks = { specFor: () => ({ cwd: r.main, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: r.main, protectedPaths: [], gameRepos: [] } }), handlersFor: () => ({}) };
+  // No pass of its own during the test (everyMinutes 0, softFreeGB 0), and no nightly lab of this computer's.
+  mm.cleanupFor = () => ({ everyMinutes: 0, softFreeGB: 0, staleOutput: { nightlyRoots: [] } });
+  mm.cleanupContext = () => ({ at: new Date().toISOString(), open: ['w393'], closed: ['w95'] });
+  const logged: { machine: string; entry: Record<string, unknown> }[] = [];
+  mm.cleanupLog = (machine, entry) => logged.push({ machine, entry });
+  const server = http.createServer();
+  server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
+  await new Promise<void>((res) => server.listen(0, '127.0.0.1', res));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, maxSessions: 1, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 1, maxUnity: 1 });
+  const { d: poolDeps } = deps(r.main);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  t.after(async () => {
+    daemon.shutdown();
+    server.close();
+    await new Promise((res) => setTimeout(res, 300));
+    store.flush();
+    r.cleanup();
+  });
+  daemon.start();
+  await until('online with hello', () => mm.isOnline('pc') && !!store.machines.get('pc')?.info);
+  await mm.createSandbox('pc', { name: 'sb1' });
+  await until('sb1 ready', () => store.machines.get('pc')?.sandboxes?.find((s) => s.id === 'sb1')?.status === 'ready');
+  const sb = mm.requireSandbox('pc', 'sb1').path;
+  const old = (Date.now() - 5 * 86_400_000) / 1000;
+  const make = (rel: string) => {
+    const p = path.join(sb, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, 'x'.repeat(1000));
+    for (let q = p; q !== sb; q = path.dirname(q)) fs.utimesSync(q, old, old);
+    return path.join(sb, rel.split('/').slice(0, 2).join('/'));
+  };
+  const closed = make('Builds/w95/player/finalfactory.exe');
+  const open = make('Builds/w393-facing/player.exe');
+  const perf = make('Builds/perf/log.txt');
+
+  const dry = await mm.cleanupNow('pc', { dryRun: true });
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.removed, 0);
+  const planned = dry.planned!.find((p) => path.resolve(p.path) === path.resolve(closed));
+  assert.ok(planned, `w95's build is planned: ${JSON.stringify(dry.planned?.map((p) => p.path))}`);
+  assert.match(planned.why, /closed in the ledger/);
+  assert.ok(planned.bytes >= 1000);
+  assert.ok(!dry.planned!.some((p) => path.resolve(p.path) === path.resolve(open)), "an open request's build is kept");
+  assert.match(dry.listed!.find((l) => path.resolve(l.path) === path.resolve(perf))!.why, /not attributable/);
+  assert.ok(fs.existsSync(closed), 'a dry run removes nothing');
+  assert.match(describeCleanupItems(dry), /dry run.*\nWould remove \(biggest first\):\n- .*w95/s);
+  assert.equal(store.machines.get('pc')!.lastCleanup, undefined, "a dry run is not the machine's last clean-up");
+  await until('the pass logged on the portal', () => logged.some((l) => l.entry.dryRun === true));
+  assert.equal(logged[0].machine, 'pc');
+  assert.ok((logged.find((l) => l.entry.dryRun)!.entry.plannedAll as unknown[]).length >= 1);
+  await assert.rejects(mm.cleanupNow('nosuch'), /no machine|unknown|not found/i);
 });
