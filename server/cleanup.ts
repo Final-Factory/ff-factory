@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import type { CleanupPolicy } from './config.ts';
 import type { CleanupSummary } from '../shared/types.ts';
+import type { StaleOutputSettings } from './staleOutput.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
 
@@ -84,9 +85,13 @@ export interface CleanupItem {
 }
 
 export interface CleanupRun {
-  removed: { path: string; bytes: number; rule: string }[];
+  removed: { path: string; bytes: number; rule: string; why?: string }[];
   failed: { path: string; why: string }[];
   bytes: number;
+  /** A dry run (or stale output in dry-run mode): what would go, measured, nothing removed. */
+  planned?: { path: string; bytes: number; rule: string; why: string }[];
+  /** Stale output it could not attribute: kept, for a person to look at (w459). */
+  listed?: { path: string; bytes: number; why: string }[];
 }
 
 // Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths and "/x" as POSIX paths on any OS (CI runs
@@ -472,7 +477,7 @@ export async function runCleanup(items: CleanupItem[], guard: CleanupGuard): Pro
     }
     try {
       await fs.promises.rm(doomed, { recursive: true, force: true, maxRetries: 2 });
-      out.removed.push({ path: it.path, bytes, rule: it.rule });
+      out.removed.push({ path: it.path, bytes, rule: it.rule, why: it.why });
       out.bytes += bytes;
     } catch (e) {
       out.failed.push({ path: it.path, why: `partly removed (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the rest next pass` });
@@ -519,6 +524,13 @@ export async function biggestConsumers(env: CleanupEnv, extra: string[] = [], op
   return out.sort((a, b) => b.bytes - a.bytes).slice(0, opts.top ?? 8);
 }
 
+/** What a plan would remove, measured, removing nothing: a dry run's answer. */
+export async function sizePlan(items: CleanupItem[]): Promise<{ path: string; bytes: number; rule: string; why: string }[]> {
+  const out: { path: string; bytes: number; rule: string; why: string }[] = [];
+  for (const it of items) out.push({ path: it.path, bytes: await sizeOf(it.path), rule: it.rule, why: it.why });
+  return out.sort((a, b) => b.bytes - a.bytes);
+}
+
 // ---------------------------------------------------------------- the log
 
 /** Append one pass to `<dir>/cleanup-log.jsonl` (kept under ~5 MB: the older half moves to .1). */
@@ -546,6 +558,14 @@ export interface CleanupSettings {
   everyMinutes: number;
   /** Below this much free space on any watched volume: a pass every LOW_PASS_MINUTES, and the 'low' rules. */
   softFreeGB: number;
+  /** Stale build and run output (server/staleOutput.ts, w459): its own schedule; absent: never looked at. */
+  staleOutput?: StaleOutputSettings;
+}
+
+/** What one pass covers: the stale-output rules too (their daily turn, low space, asked), and whether it only plans. */
+export interface PassOptions {
+  stale: boolean;
+  dryRun: boolean;
 }
 
 export interface CleanupRunnerDeps {
@@ -553,8 +573,8 @@ export interface CleanupRunnerDeps {
   /** The volumes clean-up can help (home, temp, and whatever else is watched). */
   diskPaths(): string[];
   statfs(p: string): Promise<{ free: number; total: number } | undefined>;
-  /** One pass: plan and remove (`low`: below the soft threshold). */
-  pass(low: boolean): Promise<CleanupRun>;
+  /** One pass: plan and remove (`low`: below the soft threshold); `opts.dryRun`: plan only. */
+  pass(low: boolean, opts: PassOptions): Promise<CleanupRun>;
   consumers(): Promise<{ path: string; bytes: number }[]>;
   /** Unity Libraries worth reporting (staleUnityLibraries past the report age). */
   stale?(): Promise<{ path: string; days: number }[]>;
@@ -568,6 +588,8 @@ export interface CleanupRunnerDeps {
 /** When to run a pass, and what to say about it. Shared by the host guard and the machine daemons. */
 export class CleanupRunner {
   private lastPassAt = 0;
+  /** The stale-output rules' last turn: their first comes a full interval after start, never right at a deploy. */
+  private lastStaleAt: number;
   private noticeAt = 0;
   private running = false;
   last?: CleanupSummary;
@@ -576,6 +598,7 @@ export class CleanupRunner {
 
   constructor(deps: CleanupRunnerDeps) {
     this.d = deps;
+    this.lastStaleAt = this.now();
   }
 
   private now() {
@@ -606,16 +629,25 @@ export class CleanupRunner {
     return trigger ? this.run(trigger) : undefined;
   }
 
-  /** A pass now, whatever the timers say (critical disk, asked for). */
-  async run(trigger: CleanupSummary['trigger']): Promise<CleanupSummary | undefined> {
+  /**
+   * A pass now, whatever the timers say (critical disk, asked for). `dryRun`: plan everything, stale output
+   * included, remove nothing; its summary is returned and logged, and not reported as the last pass.
+   */
+  async run(trigger: CleanupSummary['trigger'], opts: { dryRun?: boolean } = {}): Promise<CleanupSummary | undefined> {
     if (this.running) return undefined;
     this.running = true;
     try {
       const s = this.d.settings();
+      const dryRun = !!opts.dryRun;
       const before = await this.minFree();
       const low = trigger === 'critical' || trigger === 'asked' || (before !== undefined && before < s.softFreeGB * GB);
-      this.lastPassAt = this.now();
-      const r = await this.d.pass(low);
+      const st = s.staleOutput;
+      const withStale = !!st && st.mode !== 'off' && (dryRun || low || this.now() - this.lastStaleAt >= st.everyHours * 3_600_000);
+      if (!dryRun) {
+        this.lastPassAt = this.now();
+        if (withStale) this.lastStaleAt = this.now();
+      }
+      const r = await this.d.pass(low, { stale: withStale, dryRun });
       const after = await this.minFree();
       const belowSoft = after !== undefined && after < s.softFreeGB * GB;
       const summary: CleanupSummary = {
@@ -628,7 +660,15 @@ export class CleanupRunner {
         softFreeGB: s.softFreeGB,
         belowSoft,
         top: [...r.removed].sort((a, b) => b.bytes - a.bytes).slice(0, 5),
+        ...(withStale ? { stale: true } : {}),
+        ...(dryRun ? { dryRun: true } : {}),
+        ...(r.planned?.length ? { planned: r.planned.slice(0, 200), plannedBytes: r.planned.reduce((n, x) => n + x.bytes, 0) } : {}),
+        ...(r.listed?.length ? { listed: r.listed.slice(0, 50) } : {}),
       };
+      if (dryRun) {
+        this.d.log({ ...summary, freeBeforeBytes: before });
+        return summary;
+      }
       const stale = await this.d.stale?.().catch(() => []);
       if (stale?.length) summary.staleLibraries = stale.sort((a, b) => b.days - a.days).slice(0, 10);
       let notice: string | undefined;
@@ -638,7 +678,7 @@ export class CleanupRunner {
         summary.consumers = await this.d.consumers().catch(() => []);
         notice = describeShortfall(summary);
       }
-      this.d.log({ ...summary, freeBeforeBytes: before, removedAll: r.removed, failedAll: r.failed.slice(0, 50) });
+      this.d.log({ ...summary, freeBeforeBytes: before, removedAll: r.removed, failedAll: r.failed.slice(0, 50), plannedAll: r.planned, listedAll: r.listed });
       this.last = summary;
       this.d.done(summary, notice);
       return summary;
@@ -666,7 +706,42 @@ function staleLine(s: CleanupSummary): string {
 /** One line about a summary, for system_status and the dashboard. */
 export function describeCleanup(s: CleanupSummary): string {
   const free = s.freeBytes === undefined ? '' : `, ${gb(s.freeBytes)} free${s.belowSoft ? ` (below the soft ${s.softFreeGB} GB)` : ''}`;
-  return `${s.at.slice(0, 16).replace('T', ' ')} (${s.trigger}): ${s.removed} item(s), ${gb(s.freedBytes ?? 0)}${s.failed ? `, ${s.failed} skipped` : ''}${free}.${staleLine(s)}`;
+  const planned = s.planned?.length ? ` ${s.dryRun ? 'Would remove' : 'Stale output in dry-run mode, would remove'} ${s.planned.length} item(s), ${gb(s.plannedBytes ?? 0)}.` : '';
+  const listed = s.listed?.length ? ` ${s.listed.length} stale-looking item(s) it could not attribute, kept for a person.` : '';
+  return `${s.at.slice(0, 16).replace('T', ' ')} (${s.trigger}${s.dryRun ? ', dry run' : ''}${s.stale ? ', with stale output' : ''}): ${s.removed} item(s), ${gb(s.freedBytes ?? 0)}${s.failed ? `, ${s.failed} skipped` : ''}${free}.${planned}${listed}${staleLine(s)}`;
+}
+
+/** The newest passes of a cleanup-log.jsonl (appendCleanupLog), in full, for the cleanup_log tool. */
+export function describeCleanupLog(file: string, o: { passes: number; onlyRemovals?: boolean }): string {
+  let lines: string[] = [];
+  try {
+    lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  } catch {
+    return `No clean-up log yet (${file}).`;
+  }
+  const out: string[] = [];
+  for (const l of lines.reverse()) {
+    if (out.length >= o.passes) break;
+    let e: CleanupSummary & { removedAll?: { path: string; bytes: number; rule: string; why?: string }[] };
+    try {
+      e = JSON.parse(l);
+    } catch {
+      continue;
+    }
+    if (typeof e?.at !== 'string' || (o.onlyRemovals && !e.removed)) continue;
+    out.push(describeCleanupItems(e, [...(e.removedAll ?? e.top ?? [])].sort((a, b) => b.bytes - a.bytes)));
+  }
+  return out.length ? out.join('\n\n') : 'No matching clean-up pass in the log.';
+}
+
+/** A pass in full: every item it removed (or would remove) and every item it listed, with sizes and why. */
+export function describeCleanupItems(s: CleanupSummary, removed: { path: string; bytes: number; why?: string; rule: string }[] = s.top ?? []): string {
+  const line = (x: { path: string; bytes: number; why?: string; rule?: string }) => `- ${x.path}  ${gb(x.bytes)}  (${x.why ?? x.rule})`;
+  const parts = [describeCleanup(s)];
+  if (!s.dryRun && removed.length) parts.push(`Removed (biggest first):`, ...removed.map(line));
+  if (s.planned?.length) parts.push(`${s.dryRun ? 'Would remove' : 'Would remove (dry-run mode)'} (biggest first):`, ...s.planned.map(line));
+  if (s.listed?.length) parts.push('Kept, could not attribute (look at these):', ...s.listed.map((x) => `- ${x.path}  ${gb(x.bytes)}  (${x.why})`));
+  return parts.join('\n');
 }
 
 /** The per-session temp folder: TMP, TEMP and TMPDIR of one agent's process, removed after its session ends. */

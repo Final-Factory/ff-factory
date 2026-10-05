@@ -48,7 +48,7 @@ import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
 import { runHelper } from './privileged.ts';
-import { describeCleanup, sessionTempDir, sessionTempEnv } from './cleanup.ts';
+import { describeCleanup, describeCleanupItems, describeCleanupLog, sessionTempDir, sessionTempEnv } from './cleanup.ts';
 import type { HostHealth } from '../shared/types.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';
@@ -2299,13 +2299,14 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           {
             action: z.enum(['remount', 'cleanup', 'trim', 'compact', 'selftest', 'reboot']),
             confirm_reboot: z.literal(true).optional().describe('Required for reboot: remounting failed and nothing else works.'),
+            dry_run: z.boolean().optional().describe('For cleanup: list what the pass would remove (stale build and run output included) and what it would keep for a person, removing nothing.'),
           },
-          wrap(async ({ action, confirm_reboot }) => {
+          wrap(async ({ action, confirm_reboot, dry_run }) => {
             const h = this.hostHealth;
             if (!h) throw new Error('the host guard is not running (hostGuard.pollSeconds 0?)');
             if (action === 'remount') return h.remountNow();
             if (action === 'selftest') return h.selftest();
-            if (action === 'cleanup') return h.cleanupNow();
+            if (action === 'cleanup') return h.cleanupNow({ dryRun: !!dry_run });
             if (action === 'compact') {
               const up = this.sandboxes.list().filter((s) => ['running', 'starting', 'blocked'].includes(s.unity.state)).map((s) => s.id);
               if (up.length) throw new Error(`editors are up (${up.join(', ')}): stop them first`);
@@ -2621,8 +2622,25 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       tool(
         'machine_cleanup',
         "Run a clean-up pass on a machine now (its daemon's continuous clean-up, docs/self-recovery.md): old temp and agent scratch, finished agents' temp folders, crash dumps, old logs, Xcode DerivedData, superseded Playwright browsers, and, when free space is below its soft threshold, whole package caches. It never touches repos, the clone, ~/.claude, secrets, backups or installs. The daemon also does this every hour by itself; use it to act early.",
-        { machine: z.string() },
-        wrap(async ({ machine }) => mm.cleanupNow(machine)),
+        {
+          machine: z.string(),
+          dry_run: z.boolean().optional().describe('List what the pass would remove and what it would keep for a person, with sizes and why, removing nothing.'),
+        },
+        wrap(async ({ machine, dry_run }) => describeCleanupItems(await mm.cleanupNow(machine, { dryRun: !!dry_run }))),
+      ),
+      tool(
+        'cleanup_log',
+        "The clean-up passes of a computer (this host, or a machine's daemon), newest first, in full: every entry removed with its size and why (stale build and run output included, w459), what a dry run would remove, and what it kept because it could not attribute it. Each daemon reports its passes here; this host logs its own.",
+        {
+          computer: z.string().optional().describe('A machine id ("lothdesktop", "m5"); absent: this host.'),
+          passes: z.number().int().min(1).max(20).optional().describe('How many of the newest passes (default 3).'),
+          only_removals: z.boolean().optional().describe('Only passes that removed something (default false).'),
+        },
+        wrap(async ({ computer, passes, only_removals }) => {
+          const local = computer ? mm.require(computer).local : true;
+          const file = local ? path.join(this.cfg.dataDir, 'cleanup-log.jsonl') : path.join(this.cfg.dataDir, 'cleanup', mm.require(computer!).id, 'cleanup-log.jsonl');
+          return describeCleanupLog(file, { passes: passes ?? 3, onlyRemovals: !!only_removals });
+        }),
       ),
       tool(
         'remove_machine',

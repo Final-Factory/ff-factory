@@ -43,7 +43,8 @@ import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideW
 import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
-import { appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
+import { appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
+import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { pruneEditorLogs, slugify } from './sandboxes.ts';
 import { agentAnswers } from './watchdog.ts';
 import { reapBrowsers } from './reaper.ts';
@@ -213,6 +214,11 @@ machines.report = (text) => {
 // The portal's own host as a machine (docs/beast-machine.md) cleans nothing itself: this host's guard already cleans
 // this computer, with its own rules, and counts that daemon's running agents' temp folders as in use.
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
+// The stale-output rules (w459) attribute build and run output to the ledger's requests: each daemon gets its facts
+// at connect and every 10 minutes, and its every pass is kept here too (data/cleanup/<machine>/cleanup-log.jsonl).
+machines.cleanupContext = () => staleContextOf(store.work.values());
+machines.cleanupLog = (machineId, entry) => appendCleanupLog(path.join(cfg.dataDir, 'cleanup', machineId.replace(/[^\w.-]/g, '_')), { machine: machineId, ...entry });
+setInterval(() => machines.pushCleanupContext(), 10 * 60_000).unref();
 machines.cleanupNotice = (machineId, text) => {
   notifier.host(`Disk space on ${machineId}`, text);
   machines.report?.(`[machine ${machineId}] Clean-up cannot free enough disk space. ${text}`);
@@ -370,6 +376,19 @@ const hostCleanupGuard = () => ({
   inUse: [...sessions.sessions.values()].filter((s) => s.live && (!s.info.machineId || store.machines.get(s.info.machineId)?.local)).map((s) => sessionTempDir(os.tmpdir(), s.info.id)),
   home: cleanupEnv.home,
 });
+/**
+ * Where agents work on this host, for the stale-output rules (w459): its own sandboxes and its own daemon's (both on
+ * this host's sandbox drive), each with whether its editor is known to be stopped, and the base clone.
+ */
+const hostStalePlaces = (): StalePlace[] => {
+  const stopped = (state: string) => state === 'stopped' || state === 'crashed';
+  const local = machines.local();
+  return [
+    ...sandboxes.list().filter((s) => s.status === 'ready').map((s) => ({ id: s.id, path: s.path, kind: 'sandbox' as const, editorRunning: !stopped(s.unity.state) })),
+    ...(local?.sandboxes ?? []).filter((s) => s.status === 'ready').map((s) => ({ id: `${local!.id}/${s.id}`, path: s.path, kind: 'sandbox' as const, editorRunning: !stopped(s.unity.state) })),
+    { id: 'base clone', path: cfg.repo.basePath, kind: 'clone' as const },
+  ];
+};
 const hostHealth = new HostHealthMonitor({
   cfg,
   statfs: async (p) => {
@@ -404,10 +423,18 @@ const hostHealth = new HostHealthMonitor({
   },
   runHelper: (a) => runHelper(a),
   cleanup: {
-    pass: async (low) => {
+    pass: async (low, opts) => {
       const guard = hostCleanupGuard();
       const libraries = cfg.hostGuard.cleanup.libraryDeleteDays > 0 ? { roots: [cleanupEnv.home], deleteDays: cfg.hostGuard.cleanup.libraryDeleteDays } : undefined;
-      const r = await runCleanup(await planCleanup({ rules: cleanupRules(cleanupEnv, cfg.hostGuard.cleanup), guard, low, libraries }), guard);
+      const settings = staleOutputSettings(cfg.hostGuard.cleanup.staleOutput);
+      const r = await cleanupPass({
+        opts,
+        guard,
+        mode: settings.mode,
+        regular: () => planCleanup({ rules: cleanupRules(cleanupEnv, cfg.hostGuard.cleanup), guard, low, libraries }),
+        stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, cleanupEnv.home), ctx: staleContextOf(store.work.values()), settings, guard }),
+      });
+      if (opts.dryRun) return r;
       for (const s of sandboxes.list().filter((x) => x.unity.logPath)) {
         for (const p of pruneEditorLogs(path.dirname(s.unity.logPath!), s.unity.logPath!)) r.removed.push({ path: p, bytes: 0, rule: 'editor-logs' });
       }

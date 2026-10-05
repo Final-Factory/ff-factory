@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hasLocalWork, neverDelete, touchedSince, type CleanupGuard, type CleanupItem } from './cleanup.ts';
+import { hasLocalWork, neverDelete, runCleanup, sizeOf, sizePlan, touchedSince, type CleanupGuard, type CleanupItem, type CleanupRun, type PassOptions } from './cleanup.ts';
 
 /**
  * Stale, rebuildable output in the places agents work (w459, docs/self-recovery.md "Stale build output"): player builds
@@ -258,6 +258,29 @@ export async function planStaleOutput(opts: {
   }
   for (const p of items.keys()) listed.delete(p);
   return { items: [...items.values()], listed: [...listed].map(([p, why]) => ({ path: p, why })) };
+}
+
+/**
+ * One clean-up pass with the stale-output rules (the host guard's and every daemon's): the regular plan, plus the
+ * stale plan when it is their turn. A dry run measures both and removes nothing; stale output in dry-run mode is
+ * measured and reported while the regular rules still remove. What could not be attributed is listed with its size.
+ */
+export async function cleanupPass(o: {
+  opts: PassOptions;
+  guard: CleanupGuard;
+  mode: StaleOutputSettings['mode'];
+  regular: () => Promise<CleanupItem[]>;
+  stale: () => Promise<StalePlan>;
+}): Promise<CleanupRun> {
+  const regular = await o.regular();
+  const plan = o.opts.stale && o.mode !== 'off' ? await o.stale() : { items: [], listed: [] };
+  const listed: NonNullable<CleanupRun['listed']> = [];
+  for (const l of plan.listed) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
+  listed.sort((a, b) => b.bytes - a.bytes);
+  if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items]), listed };
+  const live = o.mode === 'on' ? plan.items : [];
+  const r = await runCleanup([...regular, ...live], o.guard);
+  return { ...r, ...(o.mode === 'dry-run' && plan.items.length ? { planned: await sizePlan(plan.items) } : {}), listed };
 }
 
 const norm = (p: string) => path.resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
