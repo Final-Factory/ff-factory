@@ -5,7 +5,9 @@
 // - Every `ledger.cleanup.everyHours` hours, and on demand (run): that, plus the intake's merged requests (server/intake.ts
 //   checkMerged), requests whose worker reported them delivered, workers a usage limit or a restart cut off (resumed
 //   once, else stalled), requests another finished one probably covers, and requests nothing has touched for 24 hours,
-//   which become `stalled` for their person to close or reopen (w306).
+//   which become `stalled` for their person to close or reopen (w306). A request whose PRs merged but which stays open
+//   for a step after the merge, with no word about it for 6 hours, gets one "Is it done?" to its worker a day; a
+//   `DONE: wNNN` reply closes it (server/orchestrators.ts), and with no worker left to ask it stalls (w419).
 //
 // A request with a running worker is never touched, and nothing here closes a request waiting on a person. Rules:
 // server/ledgerRules.ts. Every action is logged on its request; each person's orchestrator hears one line per pass.
@@ -23,6 +25,7 @@ import {
   REPORT_QUIET_MS,
   afterMergeReason,
   cleanupSettings,
+  followUpDecision,
   cutOffOf,
   isRelease,
   mergePrs,
@@ -37,6 +40,7 @@ import {
   type PrRecord,
 } from './ledgerRules.ts';
 import type { LedgerCleanupState, Requester, SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
+import { servedBy } from '../shared/workState.ts';
 
 const CHECK_EVERY_MS = 5 * 60_000;
 /** How long a full pass waits for a running pass to end before giving up this turn. */
@@ -71,8 +75,8 @@ interface Persisted {
   backfilledAt?: string;
 }
 
-/** closed, resumed and stalled are what a pass did; open: a merged request that stayed open, and why (told on the first pass only); note: a PR was closed without merging (always told, once). */
-type Kind = 'closed' | 'resumed' | 'stalled' | 'open' | 'note';
+/** closed, resumed, asked and stalled are what a pass did; open: a merged request that stayed open, and why (told on the first pass only); note: a PR was closed without merging (always told, once). */
+type Kind = 'closed' | 'resumed' | 'asked' | 'stalled' | 'open' | 'note';
 interface Action {
   id: string;
   title: string;
@@ -192,12 +196,19 @@ export class LedgerSweep {
         if (!live || !(isOpen(live) || live.status === 'stalled')) continue;
         if (live.approval?.state === 'pending') continue;
         const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
-        if (workers.some((s) => BUSY.has(s.status))) continue;
+        const busy = workers.filter((s) => BUSY.has(s.status));
+        if (busy.length) {
+          // A worker busy on ANOTHER request (it moved on, w418) can still be asked about this one (w419): the question
+          // waits until its turn ends. Nothing else touches a request with a running worker.
+          if (full && !busy.some((s) => servedBy(s.id, work).has(live.id))) this.followUpStep(live, workers, acts);
+          continue;
+        }
         try {
           if (prs && (await this.prStep(live, workers, prs, acts))) continue;
           if (!full) continue;
           if (this.deliveredStep(live, workers, acts)) continue;
           if (this.cutOffStep(live, workers, acts)) continue;
+          if (this.followUpStep(live, workers, acts)) continue;
           this.stallStep(live, workers, acts);
         } catch (e) {
           console.warn(`ledger cleanup: ${live.id}: ${(e as Error).message}`);
@@ -205,7 +216,7 @@ export class LedgerSweep {
       }
       const notable = acts.filter((a) => a.kind !== 'open' || backfill);
       // Each change in the server log too (w363), with whose request it is.
-      for (const a of acts) if (a.kind === 'closed' || a.kind === 'stalled' || a.kind === 'resumed') console.log(`ledger cleanup: ${a.kind} ${a.id} (${a.who.map((r) => r.userId).join(', ')}): ${clip(oneLine(a.text), 200)}`);
+      for (const a of acts) if (a.kind === 'closed' || a.kind === 'stalled' || a.kind === 'resumed' || a.kind === 'asked') console.log(`ledger cleanup: ${a.kind} ${a.id} (${a.who.map((r) => r.userId).join(', ')}): ${clip(oneLine(a.text), 200)}`);
       this.tell(notable);
       if (full) {
         this.data.lastRunAt = new Date(this.now()).toISOString();
@@ -235,7 +246,7 @@ export class LedgerSweep {
         const list = mine.filter((a) => a.kind === kind);
         return list.length ? [`${label} ${list.length}: ${list.map((a) => `${a.id} "${clip(a.title, 60)}" (${a.text})`).join('; ')}`] : [];
       };
-      const text = [...part('closed', 'closed as done'), ...part('resumed', 'resumed'), ...part('stalled', 'stalled, for you to close or reopen'), ...part('note', 'for your attention'), ...part('open', 'stayed open')].join('. ');
+      const text = [...part('closed', 'closed as done'), ...part('resumed', 'resumed'), ...part('asked', 'asked its worker whether it is done'), ...part('stalled', 'stalled, for you to close or reopen'), ...part('note', 'for your attention'), ...part('open', 'stayed open')].join('. ');
       this.d.orchestrators.toPeople([who], `[ledger cleanup] ${text}.`);
     }
   }
@@ -481,6 +492,35 @@ export class LedgerSweep {
     acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'stalled', text: clip(reason, 160) });
   }
 
+  /**
+   * Merged, but open for a step after the merge (w419): with no word about it for 6 hours and no question in the last
+   * day, ask its most recent worker once "Is it done?" (a `DONE: <id>` reply closes it), or stall it as follow-up
+   * unconfirmed when no worker is left to ask. Returns whether it acted.
+   */
+  private followUpStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]): boolean {
+    if (!isOpen(w) || w.question || w.flag) return false;
+    const prs = w.prs ?? [];
+    if (!prs.some((p) => p.state === 'merged') || prs.some((p) => p.state === 'open')) return false;
+    const reason = afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
+    if (!reason) return false;
+    const all = [...this.d.store.work.values()];
+    const d = followUpDecision(w, workers, reason, this.now(), (s) => servedBy(s.id, all).has(w.id), !!this.d.resume);
+    if (!d) return false;
+    if (d.kind === 'stall') {
+      this.stall(w, 'unsure', d.why, acts);
+      return true;
+    }
+    const last = [...prs].filter((p) => p.state === 'merged').sort((a, b) => (a.at ?? '').localeCompare(b.at ?? '')).at(-1)!;
+    const at = new Date(this.now()).toISOString();
+    this.d.orchestrators.ledgerEdit(w.id, `ledger cleanup asked worker ${d.worker.id} whether it is done (no word for ${d.quietHours} h since PR #${last.number} merged; still open: ${d.why})`, (x) => void (x.followUp = { at, sessionId: d.worker.id }));
+    this.d.resume!(
+      d.worker.id,
+      `[ledger cleanup] Is ${w.id} "${clip(w.title, 100)}" done? PR #${last.number} merged${last.at ? ` (${last.at.slice(0, 16).replace('T', ' ')} UTC)` : ''} and it stayed open: ${d.why}. If every step is finished, reply with a line \`DONE: ${w.id}\` and say how the step after the merge went. Otherwise say in one line what is left. If you are on other work now, answer this in one line and carry on with it.`,
+    );
+    acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'asked', text: `worker ${d.worker.id}, no word for ${d.quietHours} h` });
+    return true;
+  }
+
   /** Nothing running and nothing touched for 24 hours: covered by newer finished work, or simply stalled. Never closed. */
   private stallStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]) {
     if (!stallCandidate(w)) return;
@@ -554,6 +594,6 @@ export function handledAfterAutoClose(log: readonly string[]): boolean {
 
 export function summaryOf(acts: readonly { kind: Kind }[]): string {
   const n = (k: Kind) => acts.filter((a) => a.kind === k).length;
-  const parts = [n('closed') && `closed ${n('closed')}`, n('resumed') && `resumed ${n('resumed')}`, n('stalled') && `stalled ${n('stalled')}`, n('open') && `${n('open')} left open with a reason`].filter(Boolean);
+  const parts = [n('closed') && `closed ${n('closed')}`, n('resumed') && `resumed ${n('resumed')}`, n('asked') && `asked ${n('asked')} whether done`, n('stalled') && `stalled ${n('stalled')}`, n('open') && `${n('open')} left open with a reason`].filter(Boolean);
   return parts.length ? parts.join(', ') : 'nothing to do';
 }

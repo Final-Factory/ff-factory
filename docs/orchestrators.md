@@ -207,11 +207,42 @@ stalled. Ben's requests are included. In this order, the first that fits applies
    and never resumed. A limit or restart is resumed once (a message to the worker, recorded in `resumedBy`): a limit only
    when the account it ran on has room again (no plan meter at 90% or more; unknown counts as no). A refused tool, a
    limit that has not reset, and a worker cut off again after its one resume make the request **stalled** with the reason.
-4. **Superseded.** A request nothing has touched for 24 hours whose work a finished request covers (a newer finished
+4. **Merged, asked.** A request whose PRs all merged but which stays open for a step after the merge (rule 1's reason:
+   a check or audit its brief asks for, a release's notes, a plan of PRs, a worker saying more is coming), with no word
+   about it for **6 hours** (a report from a worker still on it, the merge, or the last question) gets one message to its
+   most recent worker: "Is wNNN done? Reply `DONE: wNNN`, or say what's left" (w419). At most one a day per request
+   (`WorkItem.followUp`). Its reply's `DONE: wNNN` closes it (below); any other reply stays as its latest line. A worker
+   now running on **another** request is still asked (the message waits until its turn ends); nothing else touches a
+   request with a running worker. With no worker left to ask, the request is **stalled** as "follow-up unconfirmed".
+   Six hours: the pass runs every 4, and the steps that follow a merge (a paired audit, the first hour of a release, a
+   nightly comparison) ran up to about 2.5 hours each in w342, so a request still quiet after 6 is asked at most about 10
+   hours after its merge, and one whose worker is still busy on its step is not.
+5. **Superseded.** A request nothing has touched for 24 hours whose work a finished request covers (a newer finished
    release, or a finished request that overlaps it strongly) is stalled with "probably superseded by w…".
-5. **Stalled.** A new, queued or active request with no running worker and no activity for 24 hours (its last update, and
+6. **Stalled.** A new, queued or active request with no running worker and no activity for 24 hours (its last update, and
    its workers' last activity) is stalled with the reason: no worker ever started, or its last worker ended and its report
    is not clear.
+
+**`DONE: wNNN`, the worker's word that a request is finished** (w419, asked by Lothsahn after w342 stayed open with its
+work done). Every worker brief for a request ends with the rule (`doneRule`, `server/work.ts`): when every step of a
+request is finished, the steps after the merge included, the worker ends its report with a line `DONE: wNNN` (one line
+per request, several allowed; a mention inside a sentence is not one). At the end of that turn the ledger closes the
+request as done with the report's first line as its note, logs it, and tells its people (`[ledger] w342 … closed as
+done`). It counts only from one of the request's own workers, and it is refused, with the reason sent back to the
+worker (once per reason in 6 hours) and logged, while a PR of the request is still open, for a release whose report
+does not say it is live and link the posted notes, for a brief that asks for a step after the merge when the report
+does not say how it went (an audit, a check, a 2-peer run, a nightly…), or for a brief that plans several PRs when fewer
+than two merged and the report does not say they all did (`doneProblem`, `server/ledgerRules.ts`). A request already
+closed by hand stays closed (w370), and an owner's close of someone else's request (w402) is untouched.
+
+**The wrap-up** (w419). When the dispatcher sends a worker work for a request (`message_agent` with `work_id`) and the
+worker's current turn is on other requests (`servedBy`, [What a request is doing now](#what-a-request-is-doing-now)),
+the message starts with `[wrap-up]`: for each request it was on, end the reply with `DONE: <id>`, or one line
+`<id>: still open: <what>`, then carry on with the new work. Those requests' logs say so; the worker's next report closes
+them on a DONE, or its line naming the request becomes that request's log entry and latest line. Nothing waits on it.
+
+`scripts/ledger-dry-run.ts <copy of data>` prints what rules 1 and 4 would do now (close, ask, stall, or wait), changing
+nothing.
 
 **Stalled** is a status of its own (`WorkItem.stalled`: kind, reason, when): out of the open lists, behind the "N stalled"
 filter on the Requests tab and `list_work status stalled`, kept like an open request. The cleanup never closes one: its
@@ -219,7 +250,7 @@ person closes it (`update_work close`), or reopens it, or writes a note on it, w
 whose PRs later merge is closed by rule 1.
 
 Each action is logged on its request. Each person's orchestrator gets one `[ledger cleanup]` line per pass listing what
-closed, resumed and stalled for them, and nothing when nothing changed. The first pass also lists the requests with a
+closed, resumed, was asked about and stalled for them, and nothing when nothing changed. The first pass also lists the requests with a
 merged PR that stayed open and why. The Requests tab shows when it last ran and what it did. Limits of the rules, all
 fixed code and no model: a worker's report is read by patterns, so an unclear one never closes anything, it only stalls
 the request after a day; a PR is linked only by the ways above, so an old request whose PRs carry no `Request:` line and

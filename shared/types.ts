@@ -1112,6 +1112,8 @@ export interface WorkItem {
   prs?: WorkPr[];
   /** Why the cleanup stalled it (status `stalled`). */
   stalled?: WorkStalled;
+  /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
+  followUp?: { at: string; sessionId: string };
   /** Workers the cleanup already resumed once after they were cut off, by session id: never a second time. */
   resumedBy?: Record<string, string>;
   /** Set when the intake closed it as done because its work already merged (docs/intake.md, "Closed when it merged"). */
