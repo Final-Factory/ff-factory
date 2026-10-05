@@ -176,6 +176,17 @@ export function promptText(_kind: SessionKind, text: string, from: 'human' | 'or
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + `\n… (${s.length - n} more chars)` : s);
 
 /**
+ * A finished turn's text as `lastResult` keeps it: whole up to `n` characters, else its start and its last `tail`. The
+ * ledger cleanup reads a report's end (the `<id>: still open: …` or `DONE: <id>` line workers end with); keeping only
+ * the start cut that off, so a long report saying more was coming let a merge close its request (w424, twice on
+ * 2026-10-05). Exported for tests.
+ */
+export function reportClip(s: string, n = 1200, tail = 800): string {
+  if (s.length <= n) return s;
+  return `${s.slice(0, n - tail)}\n… (${s.length - n} chars left out) …\n${s.slice(-tail)}`;
+}
+
+/**
  * One Claude Code conversation, driven through the Agent SDK in streaming-input mode so a person
  * (or the orchestrator) can keep talking to it, interrupt it and answer its permission prompts.
  * The process is started lazily on the first message and resumed from the SDK session id after
@@ -375,7 +386,7 @@ export class AgentSession implements SessionHandle {
           answers: m.user_message_uuids ?? (m.user_message_uuid ? [m.user_message_uuid] : undefined),
         });
         this.lastTurnText = text;
-        this.update({ turns: this.info.turns + 1, costUsd: this.costBase + total, lastResult: clip(text, 1200) });
+        this.update({ turns: this.info.turns + 1, costUsd: this.costBase + total, lastResult: reportClip(text) });
         this.events.emit('result', this, m.subtype);
         if (!this.stateEvents) {
           // Older CLI without state events: best effort from the result itself.
