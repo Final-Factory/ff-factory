@@ -21,6 +21,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A worker in a machine sandbox can switch its own branch again** (w422, asked by Lothsahn). `switch_branch` from
+  a worker on LothDesktop or BEAST was refused with "1 agent(s) are mid-turn in sandbox …" when that worker was the
+  only agent there (w421 five times, w401 six times on 2026-10-05): the portal left the caller out of its check, but
+  the daemon's second check counted every live agent not idle, the caller included. The daemon now gets the caller's
+  session id and leaves it out too; other agents mid-turn still refuse the switch, named by title on both sides; and
+  a "running" left by an agent whose process is gone no longer counts, and the portal sets it back to stopped
+  ([docs/machines.md](docs/machines.md)). Reaches each machine at its next daemon deploy.
 - **`ffbox_activity show signatures` says what FFBox really does with reports** (w412). It said automatic
   investigations were "not built yet (phase 4)" and counted how many "would start" under FF Factory's own 20-a-day
   plan, while FFBox has diagnosed every crash and desync report by itself since 2026-10-04. It now asks FFBox live: its
