@@ -98,7 +98,12 @@ before redeploying by hand.
   orchestrator's and this host's workers': [accounts.md](accounts.md).
 - **Limits.** Machine agents run on the Mac, so they do not count toward this host's
   `limits.maxSessions`; each machine has its own limit for its main clone and standing agents (`max_agents`,
-  default 3), and each of its sandboxes its own (`max_agents_per_sandbox`, below). Like the host's, they count agents
+  default 3), and each of its sandboxes its own (`max_agents_per_sandbox`, below). **`max_agents: 0` means sandboxes
+  only** (w477, Lothsahn on 2026-10-05, for BEAST and LothDesktop): no worker in its main clone (`start_agent` with the
+  machine alone is refused, naming its sandboxes), no standing agent assigned to it, no delegated worker sent to its
+  main clone, and the Capacity block never lists or suggests its main clone (`mainCloneRefusal` in
+  `server/machines.ts`; the daemon refuses such an agent too). This host's own daemon's main clone takes no workers
+  whatever its `max_agents` ([beast-machine.md](beast-machine.md)). Like the host's, they count agents
   mid-turn only, and a message that finds them full waits in the portal's queue instead of being refused; the daemon's
   own start check counts the same way, and idle finished workers are stopped by the portal's reaper
   ([orchestrators.md](orchestrators.md#agent-limits-and-idle-workers), w384).
@@ -487,7 +492,7 @@ LothDesktop and Beast, not just when BEAST is full").
   one was picked ("first with room in placement.prefer (lothdesktop > m5 > m3)", "only avoided computers have room").
   The dispatcher's prompt shows the setting in force.
 - **Main-clone machines** (no `sandbox_root`: the m5, the m3) are candidates too, for work that can run in a main
-  clone: `start_agent` with `machine` alone. Their line counts live agents in the main clone against the machine's
+  clone: `start_agent` with `machine` alone (never one with `max_agents: 0`, which takes agents in its sandboxes only). Their line counts live agents in the main clone against the machine's
   `max_agents` and its RAM. A worker there runs next to its owner's own uncommitted work and backs it up to
   `ff-local-backups` before it sets any aside (the harness enforces the backup). This host's own daemon is never one:
   its main clone is the base its sandboxes are worktrees of.

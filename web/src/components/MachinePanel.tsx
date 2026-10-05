@@ -146,7 +146,7 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
           <div className="unity-bar">
             <Chip tone={machineTone(m)}>{machineLabel(m)}</Chip>
             <span className="dim small ellipsis">
-              {m.online ? `${live}/${m.maxSessions} agents running` : m.lastSeen ? `last seen ${fmtRelative(m.lastSeen, now)}` : 'never connected'}
+              {m.online ? (m.maxSessions === 0 ? `${live} agents running (sandboxes only)` : `${live}/${m.maxSessions} agents running`) : m.lastSeen ? `last seen ${fmtRelative(m.lastSeen, now)}` : 'never connected'}
               {m.statusDetail && m.status === 'ready' ? ` · ${m.statusDetail}` : ''}
             </span>
           </div>
@@ -310,7 +310,8 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
         host: host.trim() || undefined,
         portalUrl: portalUrl.trim().replace(/\/+$/, ''),
         repoPath: repoPath.trim() || undefined,
-        maxSessions: Number(max) || 3,
+        // 0: sandboxes only (w477); empty: the default 3.
+        maxSessions: max.trim() === '' || !Number.isFinite(Number(max)) ? 3 : Number(max),
         appDir: appDir.trim() || undefined,
         // A path to the executable itself (Unity.exe, .../MacOS/Unity) is unity_path; a folder of versions is unity_editor_root.
         ...(/(Unity\.exe|\/MacOS\/Unity)$/i.test(unityRoot.trim()) ? { unityPath: unityRoot.trim() } : { unityEditorRoot: unityRoot.trim() || undefined }),
@@ -371,7 +372,7 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
           </label>
           <label className="field">
             <span>Max agents at once</span>
-            <input className="input mono" type="number" min={1} max={8} value={max} onChange={(e) => setMax(e.target.value)} />
+            <input className="input mono" type="number" min={0} max={8} value={max} onChange={(e) => setMax(e.target.value)} />
           </label>
         </div>
         <div className="field-row">

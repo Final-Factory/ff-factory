@@ -25,6 +25,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   `system_status`, the dashboard and `unity status` say "editors 4 of 3: 1 interactive, 3 batch"
   ([docs/unity-lifecycle.md](docs/unity-lifecycle.md), "Unity slots").
 
+- **A machine can take agents in its sandboxes only** (w477, asked by Lothsahn). `add_machine` takes `max_agents: 0`
+  (the Add machine form too). Such a machine never runs an agent in its main clone: `start_agent` with the machine
+  alone is refused before any record is made, naming its sandboxes; a standing agent cannot be assigned to it; a
+  standing agent's delegated worker never goes to its main clone; and the Capacity block and "Next new game-repo work"
+  never suggest it. Its daemon refuses such an agent too. Meant for BEAST and LothDesktop, whose main clones are
+  their owners' own ([docs/machines.md](docs/machines.md), "Limits").
+
 - **`claudeAccounts.dispatcher`** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 6). The dispatcher's own
   account (`"token"` or `"login"`, set with `set_app_config`). Once set, the dispatcher runs on it instead of the system
   payer's own token; unset, nothing changes. system_status names it apart only when set ([docs/accounts.md](docs/accounts.md)).
@@ -110,6 +117,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   ([docs/orchestrators.md](docs/orchestrators.md), "What a request is doing now").
 
 ### Fixed
+
+- **A thread Max escalated hears when its fix merges** (w480, asked by Lothsahn). FFBox watches board ref
+  `conv-<conversation>` after an escalation, but the ledger left a conversation's own request out of that
+  conversation's check, so the answer was always `clear` and no merge notice ever came: w436 (#ask-assistant, range
+  rings darkening the screen) closed as already fixed by #1076 in Build 78, and the player was never told. The intake
+  now follows the escalated request itself and pushes FFBox its standing, and a done answer names the PR that merged the
+  fix and its release ("Fixed in PR #1076, coming in version 78"), looked up for an auto-closed or "already fixed by
+  #N" request too. Board watches are kept in `data/intake.json` across restarts. Once, at the first start, escalated
+  requests closed done in the last 14 days are followed again (`node scripts/escalation-catchup.ts <data copy>` lists
+  them). Workers put the report's own Discord link in a fix PR, a message's link for a message in a channel, and write
+  `RESOLVED: already fixed by PR #N`. The `maybe` candidates of a board check, saved but never read back at start,
+  are read back too.
 
 - **Orchestrators and standing agents no longer read FF Factory's secrets** (w467, part C of the portal VM). Read,
   Glob, Grep and a standing agent's shell are refused for config.json, data/ (an orchestrator's own memory and the
