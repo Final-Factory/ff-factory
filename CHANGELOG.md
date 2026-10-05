@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The "tokenfile" account** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 18). `claudeAccounts`
+  `.orchestrator`, `.dispatcher` and `.standing` take `"tokenfile"`: those roles run on the OAuth token in the file config
+  `claudeTokenFile` names, read at each session start into that process alone with every other Claude credential
+  removed, over any person's own token. Refused for workers; never in `claudeEnv`, never sent to a machine, never shown.
+  The meters poll it as its own account ([docs/accounts.md](docs/accounts.md), "The token file").
+
 - **A machine can take agents in its sandboxes only** (w477, asked by Lothsahn). `add_machine` takes `max_agents: 0`
   (the Add machine form too). Such a machine never runs an agent in its main clone: `start_agent` with the machine
   alone is refused before any record is made, naming its sandboxes; a standing agent cannot be assigned to it; a
