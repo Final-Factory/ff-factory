@@ -62,11 +62,14 @@ const NEEDS_PERSON =
 /** Whether a worker's last report ends asking a person to decide (its tail, as the cleanup reads reports). */
 export const asksAPerson = (report: string | undefined) => !!report && NEEDS_PERSON.test(report.trim().slice(-600));
 
-/** "PR #12 merged; still open: <why>", the cleanup's own line (server/ledgerSweep.ts), newest first. */
+/**
+ * "PR #12 merged; still open: <why>", the cleanup's own line (server/ledgerSweep.ts), newest first. A line that says
+ * another PR is open is out of date once no PR is (w74's "PR #1002 is open" after #1002 merged): it is passed over.
+ */
 function followUpReason(w: WorkItem): string | undefined {
   for (let i = w.log.length - 1; i >= 0; i--) {
     const m = /PR #\d+ merged; still open: (.+)$/.exec(w.log[i]);
-    if (m) return m[1];
+    if (m && !/^PR #\d+ is open\b/.test(m[1])) return m[1];
   }
   return undefined;
 }
@@ -112,6 +115,9 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   if (w.status === 'new') return { state: 'queued', why: 'waiting for the dispatcher to decide it' };
   if (w.status === 'queued') return { state: 'queued', why: 'the dispatcher queued it for capacity' };
 
+  // The cleanup stalled it: its own reason, which says more than anything derived here (w418: kept as it is).
+  if (w.stalled) return { state: 'stalled', why: `${w.stalled.kind}: ${w.stalled.reason}` };
+
   // Merged, follow-up pending: its pull requests merged, none is open, and the request is still open.
   const prs = w.prs ?? [];
   if (prs.some((p) => p.state === 'merged') && !prs.some((p) => p.state === 'open')) {
@@ -119,9 +125,9 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   }
 
   // Stalled: nothing works on it and nothing waits on a person.
-  if (w.stalled) return { state: 'stalled', why: `${w.stalled.kind}: ${w.stalled.reason}` };
   const open = prs.find((p) => p.state === 'open');
-  if (open) return { state: 'stalled', why: `PR #${open.number} is open and no worker is on it` };
+  const pr = open ? `; PR #${open.number} is open` : '';
+  if (open && !mine.length) return { state: 'stalled', why: `PR #${open.number} is open and no worker is on it${others.length ? ` (its worker ${others[0].id} moved on${[...serves(others[0].id)][0] ? ` to ${[...serves(others[0].id)][0]}` : ''})` : ''}` };
   if (!workers.length && !w.sessionIds.length) return { state: 'stalled', why: 'no worker was ever started for it' };
   if (!mine.length && others.length) {
     const s = others[0];
@@ -130,7 +136,7 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   }
   if (!workers.length) return { state: 'stalled', why: 'its workers are gone' };
   const last = [...mine].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
-  return { state: 'stalled', why: `${last.id} ${last.status === 'error' ? 'failed' : last.status === 'idle' ? 'finished its turn' : 'stopped'} ${ago(last.lastActivityAt, f.now)}, nothing waits on a person` };
+  return { state: 'stalled', why: `${last.id} ${last.status === 'error' ? 'failed' : last.status === 'idle' ? 'finished its turn' : 'stopped'} ${ago(last.lastActivityAt, f.now)}${pr}, nothing waits on a person` };
 }
 
 /** Every open (or stalled) request's live state, by id. */

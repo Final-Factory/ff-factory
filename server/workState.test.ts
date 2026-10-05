@@ -103,6 +103,8 @@ test('workState: merged, follow-up pending, with the cleanup\'s reason', () => {
   const f = one(w, [session('a')]);
   assert.deepEqual([f?.state, f?.why], ['followup', 'its brief asks for a step after the merge (a check, an audit, a verification)']);
   assert.match(one({ ...w, log: [] })!.why, /has not said yet/);
+  assert.match(one({ ...w, log: ['01:00 PR #1024 merged; still open: PR #1030 is open'] })!.why, /has not said yet/, 'a reason naming a PR as open is out of date once none is');
+  assert.equal(one({ ...w, status: 'stalled', stalled: { at: ago(1), kind: 'unsure', reason: 'follow-up unconfirmed' } })?.why, 'unsure: follow-up unconfirmed', "the cleanup's stall wins over the follow-up");
   assert.equal(one({ ...w, prs: [pr, { ...pr, number: 1030, state: 'open' }] })?.state, 'stalled', 'an open PR is not a follow-up');
 });
 
@@ -115,6 +117,7 @@ test('workState: stalled at once when nothing works on it and nothing waits on a
   assert.equal(one(item('w12', { sessionIds: ['gone'] }))?.why, 'its workers are gone');
   assert.equal(one(item('w13', { stalled: { at: ago(1), kind: 'cut-off', reason: 'a usage limit' }, status: 'stalled' }))?.why, 'cut-off: a usage limit');
   assert.equal(one(item('w14', { prs: [{ repo: 'r/r', number: 7, state: 'open' }] }))?.why, 'PR #7 is open and no worker is on it');
+  assert.equal(one(item('w14', { sessionIds: ['a'], prs: [{ repo: 'r/r', number: 7, state: 'open' }] }), [session('a', { lastActivityAt: ago(1) })])?.why, 'a finished its turn 1 h ago; PR #7 is open, nothing waits on a person', 'its worker is on it, idle');
   const moved = workLiveAll([item('w15', { sessionIds: ['a'], createdAt: ago(10) }), item('w16', { sessionIds: ['a'], createdAt: ago(1) })], { session: () => session('a', { status: 'running' }), now: NOW });
   assert.equal(moved.get('w15')?.why, 'its worker a moved on to w16');
 });
