@@ -71,7 +71,7 @@ What the portal holds, which is what such an attacker would want:
 | Secret or power | On BEAST today | In the VM |
 |---|---|---|
 | The host Claude token and people's own tokens | `config.json` `claudeEnv`, `userClaudeEnv` | moved as is, `/srv/fff/config/config.json` |
-| Lothsahn's Claude Console API key (new, [D4](#8-risks-and-open-decisions)) | none | `/srv/fff/secrets/anthropic-api-key`, `0600` (`fffctl api-key`) |
+| Lothsahn's subscription token (new, [D4](#8-risks-and-open-decisions)): `claude setup-token`, `sk-ant-oat01-…` | none | `/srv/fff/secrets/claude-oauth-token`, `0600` (`fffctl claude-token`) |
 | GitHub credential (`gh` PR queries, the memory repo push) | BEAST's `gh` login | a new fine-grained token ([D7](#8-risks-and-open-decisions)), `fffctl gh-login` |
 | The ssh key that deploys daemons to BEAST, LothDesktop, M3 and M5 | BEAST's `~/.ssh` *(sourced: [machines.md](machines.md), "Requirements")* | a new key made in the VM, `/srv/fff/home/.ssh/id_ed25519` |
 | Max's Discord token | the ffdiscord config and `secrets.env` under `~/.config/ffbox` *(sourced: `server/discordConfig.ts`)* | its own copy in `/srv/fff/home/.config/ffbox` |
@@ -217,7 +217,7 @@ Six rules:
   unit sets, a command line or a log. `fffctl tailscale-join` reads the auth key with `--auth-key=file:`, and
   `fffctl gh-login` reads the token from a file, so neither shows in a process list.
 - **New where possible:** a new ssh key made in the VM, a new GitHub token, a new Tailscale node, a new backup key,
-  and Lothsahn's Console API key (`fffctl api-key`, [5.2](#52-putting-the-orchestrators-and-the-dispatcher-on-lothsahns-account-a-console-api-key)).
+  and Lothsahn's subscription token (`fffctl claude-token`, [5.2](#52-putting-the-orchestrators-and-the-dispatcher-on-lothsahns-account-his-subscription-token)).
   **Moved as they are:** `config.json` (Claude tokens; FFBox's connector token is kept only as its SHA-256 *(sourced:
   [connector contract](ffbox-connector-contract.md), "Auth")*) and `data/`. **Copied:** Max's Discord token, from
   BEAST's ffdiscord config into `/srv/fff/home/.config/ffbox`, which `server/discordConfig.ts` reads as
@@ -339,7 +339,7 @@ account `fff` (locked password, no sudo), `0700`:
 | `agents/` | standing agents' folders (`standingRoot`) | small | yes |
 | `review/` | `publish_review` media (`review.root`) | grows with clips | [D9](#8-risks-and-open-decisions) |
 | `sandboxes/` | empty: `sandboxRoot` is still required by the config (change 1) | 0 | no |
-| `secrets/` | the Claude Console API key (`anthropic-api-key`, `0600`), and nothing in config.json or a unit | tiny | yes |
+| `secrets/` | Lothsahn's subscription token (`claude-oauth-token`, `0600`), and nothing in config.json or a unit | tiny | yes |
 | `backup/` | root's staging for the encrypted archive, emptied after each upload | | |
 
 The guest's settings (repository, branch, backup target, thresholds) are in `/etc/fff/fff.conf`, whose defaults are
@@ -541,44 +541,48 @@ What the code does today:
   system payer's.
 - Workers: their machine's setting, unchanged by this move.
 
-### 5.2 Putting the orchestrators and the dispatcher on Lothsahn's account: a Console API key
+### 5.2 Putting the orchestrators and the dispatcher on Lothsahn's account: his subscription token
 
 **Decided** (Lothsahn, [D4](#8-risks-and-open-decisions)): every orchestrator and the dispatcher run on Lothsahn's
-account, with a Claude Console API key (`sk-ant-api…`) rather than a claude.ai `/login`. Standing agents stay as they
-are ([D5](#8-risks-and-open-decisions)), and workers never get the key.
+account, with his subscription's long-lived token: the `sk-ant-oat01-…` that `claude setup-token` prints, which
+"authenticates with your Claude subscription" *(sourced: Claude Code authentication docs, "Generate a long-lived
+token")*. In Lothsahn's words: "I have a sk-ant- token for my subscription and it doesn't do API billing." So it
+draws on his Max plan's 5-hour and weekly limits, with no per-token bill. Standing agents stay as they are
+([D5](#8-risks-and-open-decisions)), and workers never get the token.
 
-- **Billing.** A Console key is billed per token to Lothsahn's Console organization, not against a Pro or Max plan's
-  5-hour and weekly limits *(sourced: Claude Code authentication docs: `ANTHROPIC_API_KEY` is "for direct Anthropic API
-  access with a key from the Claude Console", and the Console is "for organizations that prefer API-based
-  billing")*. So the sidebar's plan meters do not show it. The per-session cost the SDK reports, kept in
-  `data/spend.json` (`server/usage.ts:633`), becomes money actually spent. A spend limit on the key's Console workspace
-  caps it ([D20](#8-risks-and-open-decisions)).
-- **Where it is stored.** `/srv/fff/secrets/anthropic-api-key`, `0600`, owned by `fff`, in a `0700` folder, put there
-  by `sudo fffctl api-key --file F`. That reads the key from a file, so it never appears on a command line, and only
-  its last four characters are ever printed. It is never in `config.json`, a unit's `Environment=`, the cloud-init seed
-  or a log. It is in the encrypted daily backup (2.2), so a restore brings it back.
-- **How FF Factory passes it** (code change 18). `claudeAccounts.orchestrator`, `.dispatcher` (change 6) and `.standing`
-  accept a third value, `"apikey"`; `workers` refuses it. A new config key `anthropicApiKeyFile` names the file. When it
-  starts a Claude process of an `"apikey"` role, the server reads the file and gives that process
-  `ANTHROPIC_API_KEY`, with every other Claude credential removed (`usageEnv`, `server/usage.ts:174`). The server's own
-  environment never holds the key, and a new key applies to the next session without a restart. The sites:
-  - orchestrators and the dispatcher: `server/agents.ts:3224` (`hostProcessEnv(cfg, 'orchestrator')`);
-  - standing agents on this host: `server/standing.ts:842`, unchanged while `.standing` stays `"token"`.
+- **Where it is stored.** `/srv/fff/secrets/claude-oauth-token`, `0600`, owned by `fff`, in a `0700` folder, put there
+  by `sudo fffctl claude-token --file F`. That reads the token from a file, so it never appears on a command line,
+  checks its `sk-ant-oat01-` shape, and only ever prints its last four characters. It is never in `config.json`, a
+  unit's `Environment=`, the cloud-init seed or a log. It is in the encrypted daily backup (2.2), so a restore
+  brings it back. `claude setup-token` makes a one-year token *(sourced: same docs)*, so it is renewed once a year
+  with the same command.
+- **How FF Factory passes it** (code change 18). `claudeAccounts.orchestrator`, `.dispatcher` (change 6) and, if
+  chosen, `.standing` accept a third value, `"tokenfile"`; `workers` refuses it. A new config key `claudeTokenFile`
+  names the file. When it starts a Claude process of a `"tokenfile"` role, the server reads the file and gives that
+  process `CLAUDE_CODE_OAUTH_TOKEN`, with every other Claude credential removed first (`usageEnv`,
+  `server/usage.ts:174`). The server's own environment never holds the token, and a renewed token applies to the next
+  session without a restart. The sites:
+  - orchestrators and the dispatcher: `server/agents.ts:3224` (`hostProcessEnv(cfg, 'orchestrator')`, through
+    `claudeEnvFor`);
+  - standing agents on this host: `server/standing.ts:842`, unchanged while `.standing` stays `"token"` (D5).
+  - The file's token is laid on after `claudeEnvFor`, so a person's own `userClaudeEnv` token cannot take their
+    orchestrator off Lothsahn's account, as decided. Their workers keep their own tokens.
   - Workers cannot get it. Machines' workers get only config `claudeEnv` through `hostClaudeEnvFor`
     (`server/agents.ts:1585`, `:1678`; standing runs on a machine, `server/standing.ts:829`). The VM runs no host
-    workers, and `"apikey"` is refused for that role anyway (`server/agents.ts:1342`).
+    workers, and `"tokenfile"` is refused for that role anyway (`server/agents.ts:1342`).
 - **Why it needs code, and why config `claudeEnv` will not do.** `"login"` and `"token"` are the only account kinds
-  (`CLAUDE_ACCOUNTS`, `server/config.ts:13`). And `claudeEnv` is sent whole to every machine whose agents use the
-  host's account, which is the default (`usesHostClaudeEnv`, `hostClaudeEnvFor`, `server/secrets.ts`). A key there
-  would run every worker on Lothsahn's key: the opposite of the decision.
-- **Precedence.** `ANTHROPIC_API_KEY` ranks above `CLAUDE_CODE_OAUTH_TOKEN` and the `/login` credentials, and in
-  non-interactive use (`-p`, the SDK) "the key is always used when present" *(sourced: Claude Code authentication docs,
-  "Authentication precedence")*. So a person's own token in `userClaudeEnv` no longer decides which account their
-  orchestrator runs on: all of them run on the key, as decided. Their workers still run on their own tokens.
-- **Redaction.** `server/secrets.ts:19-52` redacts only OAuth tokens (`sk-ant-oat01-`). Change 18 adds the API-key
-  shape, so a key that ever reaches a transcript is masked like a token.
-- **The /login it replaces.** `fffctl claude-login` stays as the fallback (D6): a `/login` in the VM, with
-  `claudeAccounts.orchestrator: "login"`, which needs no code. With the key in use, D6 is moot.
+  (`CLAUDE_ACCOUNTS`, `server/config.ts:13`). `"token"` means config `claudeEnv`, and that is sent whole to every
+  machine whose agents use the host's account, which is the default (`usesHostClaudeEnv`, `hostClaudeEnvFor`,
+  `server/secrets.ts`). Lothsahn's token there would put every such worker on his plan: the opposite of the
+  decision. And the token would sit in `config.json`, which the decision rules out.
+- **Redaction** already covers this shape: `sk-ant-oat01-` tokens are masked wherever they would be shown or written
+  (`OAUTH_TOKEN_ANYWHERE`, `redactSecrets`, `server/secrets.ts:19-52`).
+- **Precedence.** `CLAUDE_CODE_OAUTH_TOKEN` ranks above the `/login` credentials, below an `ANTHROPIC_API_KEY`
+  *(sourced: Claude Code authentication docs, "Authentication precedence")*. Removing every other credential before
+  setting it, as above, keeps any stray variable from outranking it.
+- **The alternatives.** An interactive `/login` in the VM (`fffctl claude-login`, `claudeAccounts.orchestrator:
+  "login"`, no code) works too but can lapse on an always-on box (README); it is not the decided route
+  ([D6](#8-risks-and-open-decisions)).
 
 ### 5.3 Workers stay as they are
 
@@ -595,18 +599,24 @@ are ([D5](#8-risks-and-open-decisions)), and workers never get the key.
 
 ### 5.4 Usage visibility
 
-- **The API key has no plan meters.** It draws on no 5-hour or weekly limit, and the sidebar's claude.ai meters do not
-  show it. Its cost shows in the Console (usage and billing for the key's workspace) and, per session and role, in
-  FF Factory's `data/spend.json` (`server/usage.ts:633`), which now counts money actually spent.
-  `system_status`'s account section starts with one line naming every role's account *(sourced:
-  [accounts.md](accounts.md), "Attribution")*; with change 18 the orchestrator and dispatcher roles read
-  "API key …abcd (Console, per token)".
-- **Lothsahn's plan is untouched by the orchestrators.** His own Claude Code use, his workers on LothDesktop if they run
-  on his login, and his FFBox operator turns (FFBox bills them to the operator's own credential *(sourced:
-  [ffbox.md](ffbox.md), "Models and who pays")*) keep drawing on his plan's limits, and the orchestrators no longer do.
-- **Before the cut-over,** measure a week of the orchestrators' and the dispatcher's spend from `data/spend.json` on
-  BEAST. It is not measured here *(guess: small next to the workers')*. It sets the Console spend limit
-  ([D20](#8-risks-and-open-decisions)).
+- **The token shows on the plan meters.** The usage poll already reads tokens directly: it sends each one to
+  `GET /api/oauth/usage` as that request's only credential (`fetchTokenUsage`, `server/usage.ts:478`). When the
+  endpoint refuses a `setup-token` token (it carries only `user:inference`) or rate-limits it, the poll falls back to
+  the rate-limit headers of one Haiku request with one output token, made with the same token. The meter then says
+  "from rate-limit headers" *(sourced: README, "Credentials for the usage meter"; `server/usage.ts:10-30`)*.
+  Change 18 adds the file's token to the poll's list (`tokens()`, `server/usage.ts:663`), labelled
+  "Lothsahn's token …abcd". Equal tokens are one account there (`tokenKey`), so the same token in `userClaudeEnv`
+  is not counted twice. `system_status`'s account line for the orchestrator and dispatcher roles names it too
+  *(sourced: [accounts.md](accounts.md), "Attribution")*.
+- **What the meters cannot split.** The plan's numbers are account-wide (README). The orchestrators and the
+  dispatcher now draw on the same 5-hour and weekly limits as Lothsahn's own Claude Code use, his workers on
+  LothDesktop if they run on his login, and his FFBox operator turns, which FFBox bills to the operator's own
+  credential *(sourced: [ffbox.md](ffbox.md), "Models and who pays")*. A login and a token of one account appear as
+  two meters, with the same limits behind them.
+- Per role, FF Factory's own spend is in `data/spend.json` (`server/usage.ts:633`); each session records the account
+  it started on.
+- **Before the cut-over,** measure a week of the orchestrators' and the dispatcher's use on BEAST. It is not measured
+  here *(guess: small next to the workers')*. Then watch the meters after the move ([D20](#8-risks-and-open-decisions)).
 
 ## 6. What changes in FF Factory's code
 
@@ -626,12 +636,12 @@ test, **M** is tens of lines plus tests, **L** moves or rewrites a module.
 | 3 | `server/machines.ts:621` and `:756` (spot-checked), `:98`, `:625` | A machine cannot go from `local` to ssh ("remove it first"), and a local machine holding sandboxes cannot be removed | BEAST is stuck as the portal's own host, which a Linux portal refuses to deploy (`:625`) | `convert_machine {id, to: "ssh" or "local", ssh_host, portal_url}`: keeps the sandbox records, agents and token, redeploys over ssh. Both ways, for the rollback. The Linux-to-Windows deploy path (`server/machineDeployWin.ts`: ssh, scp, an encoded PowerShell bootstrap) has not been run from Linux | M |
 | 4 | `server/hostHealth.ts`, `server/privileged.ts`, `server/reaper.ts:93-109` | BEAST's Dev Drive remount, the other helper actions, the disk-level guard and the browser reaper run in the portal | they would leave BEAST with the portal | **decided** ([D11](#8-risks-and-open-decisions)): move them into the Windows branch of `machine/daemon.ts`: the F: watch, `ffsb-helper-mount` with its retries, then restart that machine's editors and resume its interrupted agents; the disk-level guard and the browser reaper for BEAST too. The portal-only mode (change 1) runs none of it: the VM has no Dev Drive | M-L |
 | 5 | `server/agents.ts` `request_app_update`; `server/index.ts:1690-1695` | `request_app_update` refuses without a `supervise.ps1` process | **done on this branch**: under systemd (`FFSB_SUPERVISOR=systemd` plus systemd's `INVOCATION_ID`) it writes `data/update.wanted` for `fff-update`; the crash path's `update.request` is built and switched by `fff-update activate` unchanged | | S, done |
-| 6 | `server/agents.ts:3159` | the dispatcher runs on the system payer's own token when there is one | not on Lothsahn's account if Ben has a token in `userClaudeEnv` | `claudeAccounts.dispatcher`, taking `"apikey"` with change 18 (config check, `set_app_config` allowlist, test) | S |
+| 6 | `server/agents.ts:3159` | the dispatcher runs on the system payer's own token when there is one | not on Lothsahn's account if Ben has a token in `userClaudeEnv` | `claudeAccounts.dispatcher`, taking `"tokenfile"` with change 18 (config check, `set_app_config` allowlist, test) | S |
 | 7 | `server/guard.ts`, `server/standingGuard.ts`, `server/orchestratorMemory.ts` | no rule keeps orchestrators or standing agents from reading `config.json`, `~/.ssh` or Claude's credentials | the same gap, in the VM | refuse Read, Grep and Glob under `/srv/fff/config`, `/srv/fff/home` and `/srv/fff/data`, except an orchestrator's own memory folder | S-M |
 | 8 | `server/standingGuard.ts:233-238` (spot-checked) | off-limits paths in a standing agent's shell command are recognised only with a drive letter | a POSIX path such as `/srv/fff/base` is never checked (the read-only command allowlist still applies) | match absolute POSIX paths too | S-M |
 | 15 | `deploy/vm/` | | | **done on this branch**: host and guest scripts, units, `fffctl`, `fff-update`, `fff-health`, `fff-backup`, the firewall tables, `config.vm.example.json` (`config.example.json` uses `C:/` paths, and `path.resolve('C:/ffsb')` on Linux gives `<cwd>/C:/ffsb`) | M, done |
 | 16 | `.github/workflows/vm-scripts.yml` | | | **done on this branch**: lint, dry runs, and the host and guest scripts end to end in a nested VM, in both disk modes | S-M, done |
-| 18 | `server/config.ts:13` (`CLAUDE_ACCOUNTS`), `server/secrets.ts` (`hostProcessEnv`, `hostClaudeEnv`, redaction), `server/agents.ts:3224`, `server/standing.ts:842`, `server/appConfig.ts` | an account is `"login"` or `"token"`; config `claudeEnv` would carry a key to every machine's workers | the orchestrators and the dispatcher must run on Lothsahn's Console API key, and no worker may ([D4](#8-risks-and-open-decisions)) | `"apikey"` for the orchestrator, dispatcher and standing roles (refused for workers), `anthropicApiKeyFile`, the key read at each session start into that process's `ANTHROPIC_API_KEY` with the other credentials removed, the key shape redacted, the account line "API key …abcd (Console, per token)", `set_app_config` taking `"apikey"` but never the key itself; tests ([5.2](#52-putting-the-orchestrators-and-the-dispatcher-on-lothsahns-account-a-console-api-key)). The VM's side is done: `fffctl api-key` and the `secrets/` folder | S-M |
+| 18 | `server/config.ts:13` (`CLAUDE_ACCOUNTS`), `server/secrets.ts` (`hostProcessEnv`, `hostClaudeEnv`), `server/agents.ts:3224`, `server/standing.ts:842`, `server/usage.ts:663` (`tokens()`), `server/appConfig.ts` | an account is `"login"` or `"token"`, and `"token"` is config `claudeEnv`, which goes to every machine's workers | every orchestrator and the dispatcher must run on Lothsahn's subscription token, kept in a file, and no worker may ([D4](#8-risks-and-open-decisions)) | a `"tokenfile"` account for the orchestrator, dispatcher and standing roles (refused for workers), config `claudeTokenFile`, the token read at each session start into that process's `CLAUDE_CODE_OAUTH_TOKEN` with the other credentials removed and laid on after `claudeEnvFor`, the file's token in the usage poll, `set_app_config` taking `"tokenfile"` but never the token itself; tests ([5.2](#52-putting-the-orchestrators-and-the-dispatcher-on-lothsahns-account-his-subscription-token)). Redaction already covers `sk-ant-oat01-`. The VM's side is done: `fffctl claude-token` and the `secrets/` folder | S-M |
 
 **Recommended**
 
@@ -689,7 +699,7 @@ and the copy must not act on the world.
    1. It starts and loads the state with no "restored" note; session, work-item and transcript counts equal BEAST's.
    2. Sign-in over the dry-run URL from a phone and a desktop; transcripts render; an attachment downloads with the
       right SHA-256.
-   3. One orchestrator conversation resumes after the session-history copy, with one message on Lothsahn's API key.
+   3. One orchestrator conversation resumes after the session-history copy, with one message on Lothsahn's token.
    4. `e2e/mockConnector.ts` connects through Funnel with a test token, once from outside and once from the FFBox host
       itself as an ordinary user (the hairpin path).
    5. `ssh m3 exit 0` from the VM with the new key and the `from=` option.
@@ -750,8 +760,8 @@ In the first hour, then again after a day:
 - The FFBox card is connected, capacity arrives, a `board_check` is answered, and the next escalation or diagnosis
   `POST` is accepted.
 - The Max page's token check passes; intake reads Discord.
-- `system_status`'s first account line puts the orchestrators and the dispatcher on the API key, and the Console shows
-  their spend.
+- `system_status`'s first account line puts the orchestrators and the dispatcher on Lothsahn's token, and its meter
+  shows numbers.
 - The outside watch: hold the portal for 4 minutes at a quiet moment (`fffctl prepare-shutdown`, then `fffctl start`).
   The M5's ntfy alert says the machine is up and the portal down, then that it is back.
 - The first nightly restart: the portal is back, the dispatcher got its `[app restarted]` summary, and a snapshot exists.
@@ -798,11 +808,11 @@ it rests on.
 | # | Decision | Recommendation | Basis | Whose | Status |
 |---|---|---|---|---|---|
 | D1 | Isolation runtime | A KVM/QEMU VM managed by libvirt. Rootless Podman (w439, the container design) stays the fallback if the RAM cannot be spared | 1.2, 1.7; measured in CI: QEMU as `libvirt-qemu` under an enforcing AppArmor profile, every isolation check passed | Lothsahn | **Decided**: a VM (Lothsahn, w441: this revision) |
-| D2 | Root on the FFBox host can read the portal's secrets: the VM's memory and disk, and commands through its guest agent. That includes the ssh key to Ben's machines, the host token and the API key | Accept, with `from=`-restricted keys, a tailnet policy that allows only port 22, `sudo` on that box kept narrow, and no FFBox account in `libvirt` or `disk` | 1.2: nothing on a shared host stops root | Ben (his machines and tokens), Lothsahn | **Accepted** with those mitigations (Lothsahn, 2026-10-05) |
+| D2 | Root on the FFBox host can read the portal's secrets: the VM's memory and disk, and commands through its guest agent. That includes the ssh key to Ben's machines, the host token and Lothsahn's subscription token | Accept, with `from=`-restricted keys, a tailnet policy that allows only port 22, `sudo` on that box kept narrow, and no FFBox account in `libvirt` or `disk` | 1.2: nothing on a shared host stops root | Ben (his machines and tokens), Lothsahn | **Accepted** with those mitigations (Lothsahn, 2026-10-05) |
 | D3 | Tailnet and name | The VM's node in Ben's tailnet, where the daemons and BEAST are ([machines.md](machines.md)), tagged `tag:fff-portal` from a pre-approved, non-ephemeral auth key, Funnel for that tag only; name `fff` or another neutral name that will not change again | 4.1, 1.4 rule 6 | Ben | **Accepted**: Ben's tailnet, a tagged node (Lothsahn, 2026-10-05) |
-| D4 | Which account the orchestrators and the dispatcher run on | Lothsahn's Claude Console API key, passed to those sessions only (code change 18) | 5.2; Claude Code authentication docs (precedence, Console billing) | Lothsahn | **Decided**: every orchestrator and the dispatcher on Lothsahn's account, with an API key billed per token (Lothsahn, 2026-10-05) |
+| D4 | Which account the orchestrators and the dispatcher run on | Lothsahn's subscription token (`claude setup-token`, `sk-ant-oat01-…`), kept in `/srv/fff/secrets/claude-oauth-token` and passed to those sessions only as `CLAUDE_CODE_OAUTH_TOKEN` (code change 18) | 5.2; Claude Code authentication docs; `server/secrets.ts` (`hostClaudeEnvFor`) | Lothsahn | **Decided**: every orchestrator and the dispatcher on Lothsahn's subscription token, billed against his Max plan, not per token (Lothsahn, 2026-10-05) |
 | D5 | Standing agents' account | Keep them as they are (the host token), so their billing does not change with the move | 5.3 | Ben (the system payer), Lothsahn | **Decided**: as now (Lothsahn, 2026-10-05) |
-| D6 | Lothsahn's claude.ai `/login` or a long-lived token | Moot with D4's API key. The fallback, if the key is ever dropped, is the interactive `/login` (`fffctl claude-login`, no code) | README, [accounts.md](accounts.md) | Lothsahn | Pending; likely moot |
+| D6 | Lothsahn's claude.ai `/login` or a long-lived token | The long-lived token (`claude setup-token`), renewed yearly; `/login` (`fffctl claude-login`) stays as a fallback that needs no code | README, [accounts.md](accounts.md) | Lothsahn | **Decided by D4**: the long-lived token |
 | D7 | The portal's GitHub credential | A fine-grained token on a machine user (not a person's account), read access to the repos the portal queries, write only on the orchestrator-memory repo (`fffctl gh-login`) | 1.1; the `gh` calls in `server/gitStatus.ts:48`, `server/intake.ts:914`, `server/ledgerSweep.ts:273`, `server/publicGit.ts:35` | Ben | **Agreed**: a bot token (Lothsahn, 2026-10-05) |
 | D8 | Max's Discord token | The VM keeps its own copy now. Later, a separate bot for FF Factory, so the two systems share no credential at all | 1.5; the "nothing shared" rule | Lothsahn | **Accepted** (Lothsahn, 2026-10-05) |
 | D9 | Where `publish_review` media lives | On the portal, seen through the dashboard (no code), left out of the daily backup. Routing it to BEAST so Ben can open it in Explorer is a code change (M) | [review.md](review.md): the folder is on "the portal's computer" | Ben | **Accepted** (Lothsahn, 2026-10-05) |
@@ -816,7 +826,7 @@ it rests on.
 | D17 | The backup target | A Windows account on BEAST used for nothing else, reached by sftp over the tailnet with the VM's backup key; age keys held by Ben and Lothsahn, off the FFBox host | 2.2, 1.5 | Ben (BEAST), Lothsahn | Open |
 | D18 | Alerts | The host's VM alerts go to the ntfy topic of FF Factory's outside watch, so one subscription covers both | 3, "Hang detection" | Lothsahn | Open |
 | D19 | libvirt's `default` network | Stopped if this install put libvirt on the host and nothing uses it (`DEFAULT_NET_ACTION=auto`); `uninstall.sh` puts it back | 1.3; measured in CI: the package defines it with autostart on | Lothsahn | Open |
-| D20 | A spend limit for the API key | Set a monthly limit on the Console workspace the key belongs to, at a level Lothsahn picks from a week of the orchestrators' spend (`data/spend.json`) | 5.2: the key is billed per token, and orchestrators run unattended | Lothsahn (money) | Open |
+| D20 | Watching the plan's limits | The orchestrators and the dispatcher now share Lothsahn's Max plan's 5-hour and weekly limits with his own use. Check the meters (the token's own and his login's) a week after the move; if they crowd his own use, move them back to the host token with one setting (`claudeAccounts.orchestrator`, `.dispatcher`) | 5.4: one account, account-wide limits | Lothsahn | Open |
 
 **Risks**
 
@@ -908,8 +918,8 @@ throwaway one.
 1. `sudo fff-vm ssh`, then `git clone https://github.com/Final-Factory/ff-factory.git`.
 2. `sudo ff-factory/deploy/vm/guest/install.sh --dry-run`, then without `--dry-run`. At the end the portal answers on
    `http://127.0.0.1:8790/api/health` with the template config.
-3. The steps that need a person, each an `fffctl` command (`sudo fffctl help`): `api-key --file F` (D4; or
-   `claude-login`),
+3. The steps that need a person, each an `fffctl` command (`sudo fffctl help`): `claude-token --file F` (D4: the
+   token from `claude setup-token`),
    `tailscale-join --authkey-file F`, `gh-login --token-file F`, `base-clone`; `ownerName`, `publicUrl` and
    `claudeAccounts` in `/srv/fff/config/config.json`, then `fffctl restart`; the backup: age public keys in
    `/etc/fff/backup-recipients.txt`, `BACKUP_SSH_TARGET` in `/etc/fff/fff.conf`, `/etc/fff/backup_ed25519.pub`
@@ -944,5 +954,5 @@ throwaway one.
   - the watchdog device resetting a guest that stops petting it;
   - the uninstall's dry run, then the uninstall.
 - **What it cannot prove:** anything about the real FFBox host (its Ubuntu release, ZFS pool, FFBox's rootless Docker,
-  the RAM it has to spare), Tailscale and Funnel (no auth key in CI), Lothsahn's API key, and the backup's upload.
+  the RAM it has to spare), Tailscale and Funnel (no auth key in CI), Lothsahn's token, and the backup's upload.
   Those are the dry run's checks ([7.2](#72-dry-run-in-the-vm)).

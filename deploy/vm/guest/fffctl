@@ -12,9 +12,10 @@
 #                                       drain, stop the portal and keep it stopped until the next boot (the host's
 #                                       nightly restart runs this through the guest agent first)
 #   fffctl start                        start the portal again after prepare-shutdown, without a reboot
-#   fffctl api-key --file FILE          Lothsahn's Claude Console API key for the orchestrators and the dispatcher
-#                                       (decision D4): stored in $FFF_ROOT/secrets, never in config.json or a unit
-#   fffctl claude-login                 a claude.ai login instead (the fallback; decision D6)
+#   fffctl claude-token --file FILE     Lothsahn's subscription token ("claude setup-token", sk-ant-oat01-...) for the
+#                                       orchestrators and the dispatcher (decision D4): stored in $FFF_ROOT/secrets,
+#                                       never in config.json or a unit
+#   fffctl claude-login                 an interactive claude.ai login instead (not the decided route)
 #   fffctl tailscale-join --authkey-file FILE [--hostname fff] [--tag tag:fff-portal]
 #                                       join the tailnet as a tagged node and open the Funnel to the portal
 #   fffctl gh-login --token-file FILE   the portal's GitHub token (a fine-grained token on a machine user)
@@ -118,21 +119,21 @@ EOF
   if [ -s "$FFF_ROOT/home/.claude/.credentials.json" ]; then echo "login stored"; else echo "no login stored"; exit 1; fi
 }
 
-cmd_api_key() {
-  local f="" key dest=$FFF_ROOT/secrets/anthropic-api-key tmp
+cmd_claude_token() {
+  local f="" token dest=$FFF_ROOT/secrets/claude-oauth-token tmp
   while [ $# -gt 0 ]; do case "$1" in --file) f=$2; shift ;; *) die "unknown option $1" ;; esac; shift; done
-  if [ -z "$f" ] || [ ! -r "$f" ]; then die "--file FILE: the Claude Console API key (sk-ant-api...), alone in a file (chmod 600)"; fi
-  key=$(head -n 1 "$f" | tr -d '[:space:]')
-  case "$key" in sk-ant-api*) ;; *) die "that is not a Claude Console API key (they start sk-ant-api)" ;; esac
+  if [ -z "$f" ] || [ ! -r "$f" ]; then die "--file FILE: the subscription token from 'claude setup-token' (sk-ant-oat01-...), alone in a file (chmod 600)"; fi
+  token=$(head -n 1 "$f" | tr -d '[:space:]')
+  case "$token" in sk-ant-oat01-*) ;; *) die "that is not a 'claude setup-token' token (they start sk-ant-oat01-)" ;; esac
   install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT/secrets"
-  tmp=$(mktemp "$FFF_ROOT/secrets/.key.XXXXXX")
-  printf '%s\n' "$key" >"$tmp"
+  tmp=$(mktemp "$FFF_ROOT/secrets/.token.XXXXXX")
+  printf '%s\n' "$token" >"$tmp"
   chown "$FFF_USER:$FFF_USER" "$tmp"
   chmod 0600 "$tmp"
   mv -f "$tmp" "$dest"
   # Only its last four characters are ever shown.
-  echo "stored in $dest (0600, $FFF_USER), ending ...${key: -4}. Delete $f now."
-  echo "The portal uses it for the roles config claudeAccounts sets to \"apikey\" (code change 18; docs, 5.2), never for workers."
+  echo "stored in $dest (0600, $FFF_USER), ending ...${token: -4}. Delete $f now."
+  echo "The portal uses it for the roles config claudeAccounts sets to \"tokenfile\" (code change 18; docs, 5.2), never for workers."
 }
 
 cmd_tailscale_join() {
@@ -181,12 +182,12 @@ case "${1:-status}" in
   rollback) exec "$FFF_LIB/fff-update" rollback "asked for by hand (fffctl rollback)" ;;
   prepare-shutdown) shift; cmd_prepare_shutdown "$@" ;;
   start) rm -f "$HOLD"; systemctl start fff-portal.service; wait_healthy 180 && echo "portal up" ;;
-  api-key) shift; cmd_api_key "$@" ;;
+  claude-token) shift; cmd_claude_token "$@" ;;
   claude-login) cmd_claude_login ;;
   tailscale-join) shift; cmd_tailscale_join "$@" ;;
   gh-login) shift; cmd_gh_login "$@" ;;
   base-clone) cmd_base_clone ;;
   backup) exec systemctl start --wait fff-backup.service ;;
-  -h | --help | help) sed -n '2,26p' "$0" ;;
+  -h | --help | help) sed -n '2,23p' "$0" ;;
   *) die "unknown command $1 (fffctl help)" ;;
 esac

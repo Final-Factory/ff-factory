@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fff-backup: the portal's encrypted backup, off the FFBox host (fff-backup.timer, daily; root).
 #
-# config, data, agents, home (ssh keys, gh and ffdiscord settings) and secrets (the API key), optionally review media, as
+# config, data, agents, home (ssh keys, gh and ffdiscord settings) and secrets (the subscription token), optionally review media, as
 # one tar.gz encrypted with age to BACKUP_RECIPIENTS_FILE's public keys, whose private keys are kept off the FFBox
 # host: neither the host nor this VM can open a backup. Sent with sftp to BACKUP_SSH_TARGET (e.g. an account on BEAST
 # over the tailnet) with its own key, BACKUP_KEEP newest kept there.

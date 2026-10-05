@@ -217,7 +217,7 @@ fi
 cat >&2 <<EOF
 
 Installed. Still to do, by a person (docs/portal-on-ffbox-host.md, "Installing"):
-  1. sudo fffctl api-key --file /root/claude.key                 Lothsahn's Console API key (D4; or claude-login)
+  1. sudo fffctl claude-token --file /root/claude.token          Lothsahn's subscription token (D4, 'claude setup-token')
   2. sudo fffctl tailscale-join --authkey-file /root/ts.key       tagged node, Funnel to the portal
   3. sudo fffctl gh-login --token-file /root/gh.token             the portal's GitHub token (D7)
   4. sudo fffctl base-clone                                       the game repo for orchestrators' reads

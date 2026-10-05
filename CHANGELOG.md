@@ -20,11 +20,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   nightly drain, cold restart and snapshot. `deploy/vm/guest` sets up the portal inside, with `fffctl`. An updater
   (`fff-update`) builds the new code beside the running server, switches at the drain's restart and rolls back by
   itself, so `request_app_update` works under systemd: `server/restart.ts` `systemdSupervised` and
-  `writeUpdateWanted`. Lothsahn's decisions so far are in the doc's table: his Console API key for the orchestrators
-  and the dispatcher, stored in the VM's `secrets/` (`fffctl api-key`), which FF Factory passes to those sessions only
-  once code change 18 is in; BEAST's Dev Drive recovery moves into BEAST's daemon. There is also a read-only footprint
-  measurement for BEAST (`deploy/vm/measure`) and sizing with its basis. CI (`vm-scripts.yml`) lints the scripts and
-  runs them end to end in a nested VM, with qcow2 and with a zvol
+  `writeUpdateWanted`. Lothsahn's decisions so far are in the doc's table: his subscription token (`claude
+  setup-token`) for the orchestrators and the dispatcher, stored in the VM's `secrets/` (`fffctl claude-token`), which
+  FF Factory passes to those sessions only once code change 18 is in; BEAST's Dev Drive recovery moves into BEAST's
+  daemon. There is also a read-only footprint measurement for BEAST (`deploy/vm/measure`) and sizing with its basis.
+  CI (`vm-scripts.yml`) lints the scripts and runs them end to end in a nested VM, with qcow2 and with a zvol
   ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md)).
 - **Design: the portal in its own container on the FFBox host** (w439, the request for this design, asked by
   Lothsahn). Design only, nothing deployed: a rootless Podman pod under its own Unix account on FFBox's Linux host,
