@@ -97,6 +97,23 @@ on the daemon at the next message). Pick a quiet moment; the daemon's first depl
 4. Check: `list_sandboxes` shows `## beast (this host's own daemon…)` with the five sandboxes and their labels; the
    sidebar shows them under BEAST; `unity {sandbox: "mp-r2", action: "status"}` reports the editor.
 
+**A reboot in the middle** (BEAST hard-resets on WHEA errors; w424). Each sandbox moves in two writes, ordered so a reset
+between them leaves it held by both sides, never by neither, and running the same call again finishes it:
+
+- **To the machine:** the daemon adopts the folder (its `sandboxes.json`), then the portal moves the records and writes
+  `state.json` to disk at once. Cut off in between: the dry run says "x is on beast's daemon already … this finishes
+  it", and the run moves only the records (no second adopt).
+- **Back:** the portal writes the host record first, then the daemon releases the folder. Cut off in between: the dry
+  run says "x is this host's already … this only releases it there". A release the daemon refuses (an agent process
+  started there meanwhile) puts the records back on the machine.
+- Both files are fsynced before the rename that makes them current, with the last good versions kept beside them; a
+  file a reset damaged loads from the newest good version (`server/durable.ts`; the daemon's `sandboxes.json` since
+  w424, which before could come back empty and make the portal forget the machine's sandboxes).
+
+After a reboot during a migration: run the same call with `dry_run` and then without, until it reports nothing half-moved;
+each sandbox is under `## beast` or this host in `list_sandboxes`, never both; the folders, branches and uncommitted files
+are as before (the move never touches them).
+
 ## Rollback
 
 - **Live** (the new portal runs): `migrate_host_sandboxes {direction: "back", user_asked: true}` releases each sandbox

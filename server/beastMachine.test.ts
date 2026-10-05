@@ -12,7 +12,7 @@ import type { EventEmitter } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, type SessionHandle, type SessionSink } from './sessions.ts';
-import { MachineManager, RemoteSession, localMachineDefaults, poolSettingsOf } from './machines.ts';
+import { MachineManager, RemoteSession, localMachineDefaults, mergeSandboxes, poolSettingsOf } from './machines.ts';
 import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { daemonConfig, type DeployOptions } from './machineDeploy.ts';
 import { LOCAL, installScript, scriptCommand } from './machineDeployWin.ts';
@@ -144,6 +144,13 @@ test('beast machine: the pool adopts worktrees as they are and releases them wit
   await assert.rejects(p.adopt({ id: 'foreign', path: path.join(r.sbRoot, 'foreign'), branch: 'o', base: 'b', createdAt: T }), /not of this machine's main clone/);
   await p.adopt({ id: 'slot-5', path: path.join(r.sbRoot, 'slot-5'), branch: 'e2e-r2-chaos', base: 'origin/develop', createdAt: T });
   await assert.rejects(p.adopt({ id: 'another', path: path.join(r.sbRoot, 'another'), branch: 'x', base: 'b', createdAt: T }), /max_sandboxes 2/);
+  // A hard reset (BEAST's WHEA errors) can leave a freshly written file full of zero bytes: the pool falls back to the
+  // version before, not to an empty pool that would make the portal forget the sandboxes' labels and agents (w424).
+  assert.ok(fs.existsSync(`${stateFile}.1`), 'the previous version is kept beside it');
+  fs.writeFileSync(stateFile, Buffer.alloc(512));
+  const recovered = make().list().map((s) => s.id);
+  assert.ok(recovered.includes('mp-r2'), `the sandboxes come back from the previous version: ${recovered.join(', ')}`);
+  assert.ok(fs.readdirSync(path.dirname(stateFile)).some((f) => f.startsWith('sandboxes.json.damaged-')), 'the damaged file is kept aside');
 
   assert.match(p.release('mp-r2'), /Released sandbox mp-r2/);
   assert.deepEqual(p.list().map((s) => s.id), ['slot-5']);
@@ -303,20 +310,25 @@ test('beast machine: what stands in the way of a migration, both ways', () => {
     host: [hostSb('x', { sessionIds: ['a'] }), hostSb('y', { sessionIds: ['b'], status: 'error', statusDetail: 'interrupted' }), hostSb('dup', { sessionIds: [] })],
     sessions,
     busy: () => false,
-    machine: beastMachine({ sandboxRoot: 'D:\\other', repoPath: 'C:\\elsewhere', sandboxes: [machineSandboxFrom(hostSb('dup'))], maxSandboxes: 3 }),
+    machine: beastMachine({ sandboxRoot: 'D:\\other', repoPath: 'C:\\elsewhere', sandboxes: [machineSandboxFrom(hostSb('dup', { path: 'D:\\other\\dup' }))], maxSandboxes: 3 }),
     online: true,
     protocol: 5,
     outdated: undefined,
     cfg,
   }).join('\n');
-  for (const re of [/protocol 5; it needs 6/, /sandbox_root D:\\other is not this host's sandboxRoot/, /main clone C:\\elsewhere is not this host's base clone/, /agent a in x is mid-turn/, /agent b in y waits on a permission answer/, /sandbox y is error \(interrupted\)/, /beast already has a sandbox "dup"/, /may hold 3 sandboxes/]) assert.match(bad, re);
+  for (const re of [/protocol 5; it needs 6/, /sandbox_root D:\\other is not this host's sandboxRoot/, /main clone C:\\elsewhere is not this host's base clone/, /agent a in x is mid-turn/, /agent b in y waits on a permission answer/, /sandbox y is error \(interrupted\)/, /beast already has a different sandbox "dup" \(D:\\other\\dup\)/, /may hold 3 sandboxes/]) assert.match(bad, re);
+  // The same folder on both sides is a move a reboot cut off after its adopt: not in the way, and not counted twice (w424).
+  const half = beastMachine({ sandboxes: [machineSandboxFrom(hostSb('x'))], maxSandboxes: 2 });
+  assert.deepEqual(toMachineProblems({ ...ok, host: [hostSb('x', { sessionIds: [] }), hostSb('y', { sessionIds: [] })], machine: half }), []);
   assert.match(toMachineProblems({ ...ok, host: [hostSb('x', { sessionIds: [] })], machine: beastMachine(), online: false })[0], /not connected/);
   assert.match(toMachineProblems({ ...ok, host: [hostSb('x', { sessionIds: [] })], machine: beastMachine(), outdated: 'it runs abc' })[0], /outdated/);
 
   const m = beastMachine({ sandboxes: [machineSandboxFrom(hostSb('x', { sessionIds: ['a'] }))] });
-  assert.deepEqual(backProblems({ machine: m, online: true, protocol: 6, hostIds: new Set(), sessions, live: () => false }), []);
-  const b = backProblems({ machine: m, online: false, protocol: undefined, hostIds: new Set(['x']), sessions, live: (id) => id === 'a' }).join('\n');
-  for (const re of [/offline|not connected/, /already has a sandbox "x"/, /agent a in beast\/x still has a process/]) assert.match(b, re);
+  assert.deepEqual(backProblems({ machine: m, online: true, protocol: 6, hostPaths: new Map(), sessions, live: () => false }), []);
+  // This host holding the same folder is a move back a reboot cut off before the release: running it again finishes it.
+  assert.deepEqual(backProblems({ machine: m, online: true, protocol: 6, hostPaths: new Map([['x', 'f:/ffsb/x']]), sessions, live: () => false }), []);
+  const b = backProblems({ machine: m, online: false, protocol: undefined, hostPaths: new Map([['x', 'E:\\elsewhere\\x']]), sessions, live: (id) => id === 'a' }).join('\n');
+  for (const re of [/offline|not connected/, /already has a different sandbox "x" \(E:\\elsewhere\\x\)/, /agent a in beast\/x still has a process/]) assert.match(b, re);
 });
 
 // ---------------------------------------------------------------- the live migration, through a real daemon
@@ -487,6 +499,105 @@ test('beast machine: migrate_host_sandboxes moves live records to the daemon and
   await until("the daemon's pool is empty", () => daemon.pool.list().length === 0);
   assert.match(r.git(r.base, 'worktree', 'list'), /mp-r2[\s\S]*slot-5/, 'both still worktrees of the base clone');
   assert.equal(fs.readFileSync(path.join(r.sbRoot, 'slot-5', 'Library', 'warm.bin'), 'utf8'), 'library of slot-5');
+});
+
+test('beast machine: a migration a hard reset cut off finishes when run again, both ways; a release the daemon refuses keeps the records there (w424)', async (t) => {
+  const r = hostRepos();
+  const cfg = { dataDir: path.join(r.root, 'data'), sandboxRoot: r.sbRoot, limits: { maxSessions: 6 }, repo: { url: 'x', basePath: r.base }, worker: { effort: 'high' }, defaultBase: 'origin/develop' } as unknown as Config;
+  fs.mkdirSync(cfg.dataDir, { recursive: true });
+  const store = new Store(cfg.dataDir);
+  for (const id of ['mp-r2', 'slot-5']) {
+    store.putSandbox({ ...hostSb(id), path: path.join(r.sbRoot, id), branch: id === 'mp-r2' ? 'e2e-r2-matrix' : 'e2e-r2-chaos', git: undefined, unity: { state: 'stopped' }, sessionIds: id === 'mp-r2' ? ['w1'] : ['w3'] });
+  }
+  store.putSession(info('w1', { sandboxId: 'mp-r2' }));
+  store.putSession(info('w3', { sandboxId: 'slot-5' }));
+  const sessions = new SessionManager(cfg, store);
+  const hostSession = (i: SessionInfo) => new FakeAgent(i, store as unknown as SessionSink, undefined, sessions.events);
+  for (const id of ['w1', 'w3']) sessions.sessions.set(id, hostSession(store.sessions.get(id)!));
+  const mm = new MachineManager(cfg, store, sessions);
+  mm.hooks = { specFor: () => ({ cwd: r.root, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: r.root, protectedPaths: [], gameRepos: [] } }), handlersFor: () => ({}) };
+  const server = http.createServer();
+  server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
+  await new Promise<void>((res) => server.listen(0, '127.0.0.1', res));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const { token } = mm.register({ ...beastMachine({ repoPath: r.base, sandboxRoot: r.sbRoot, portalUrl: url, home: r.root, platform: undefined }), sessionIds: [] });
+  const daemon = new Daemon({ portalUrl: url, id: 'beast', token, repoPath: r.base, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 3, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps(r.base).d);
+  t.after(async () => {
+    daemon.shutdown();
+    server.close();
+    await new Promise((res) => setTimeout(res, 300));
+    store.flush();
+    r.cleanup();
+  });
+  daemon.start();
+  await until('the daemon online', () => mm.isOnline('beast') && mm.protocolOf('beast') === PROTOCOL_VERSION);
+  const onDisk = () => JSON.parse(fs.readFileSync(path.join(cfg.dataDir, 'state.json'), 'utf8')) as StateFile;
+  /** A HostMigrator whose daemon calls can be held up or refused, as a reset or a busy daemon would. */
+  const migrator = (o: { release?: (sb: string) => Promise<string> | undefined } = {}) =>
+    new HostMigrator({
+      cfg,
+      store,
+      sessions,
+      hostSession,
+      stopWaitMs: 2000,
+      machines: {
+        local: () => mm.local(),
+        isOnline: (id) => mm.isOnline(id),
+        protocolOf: (id) => mm.protocolOf(id),
+        outdated: (id) => mm.outdated(id),
+        restore: (i) => mm.restore(i),
+        adoptSandbox: (id, req) => mm.adoptSandbox(id, req),
+        releaseSandbox: (id, sb) => o.release?.(sb) ?? mm.releaseSandbox(id, sb),
+      },
+    });
+
+  // A reset right after the daemon adopted mp-r2, before the portal moved its records: held by both.
+  await mm.adoptSandbox('beast', { id: 'mp-r2', path: path.join(r.sbRoot, 'mp-r2'), branch: 'e2e-r2-matrix', base: 'origin/develop', createdAt: T, purpose: 'work in mp-r2' });
+  await until("beast's record has mp-r2", () => !!store.machines.get('beast')!.sandboxes?.some((x) => x.id === 'mp-r2'));
+  assert.ok(store.sandboxes.has('mp-r2'), 'this host still has it too');
+  assert.match(await migrator().toMachine(true), /mp-r2 is on beast's daemon already \(a move cut off, e\.g\. by a reboot, before the records moved\): this finishes it/);
+  const text = await migrator().toMachine();
+  assert.match(text, /Moved 2 sandbox\(es\) to beast: beast\/mp-r2, beast\/slot-5/);
+  assert.match(text, /Of those, mp-r2 was on beast's daemon already \(a move cut off before\): finished/);
+  assert.deepEqual(daemon.pool.list().map((s) => s.id), ['mp-r2', 'slot-5'], 'adopted once each');
+  assert.deepEqual(store.machines.get('beast')!.sandboxes!.map((s) => [s.id, s.purpose, s.sessionIds.join()]), [
+    ['mp-r2', 'work in mp-r2', 'w1'],
+    ['slot-5', 'work in slot-5', 'w3'],
+  ]);
+  // On disk at once, not up to a second later: a reset now finds them moved.
+  assert.deepEqual([onDisk().sandboxes.length, onDisk().machines!.find((m) => m.id === 'beast')!.sandboxes!.length], [0, 2]);
+
+  // Back: a reset after slot-5's records came here, before its daemon let go (its release never answers).
+  void migrator({ release: (sb) => (sb === 'slot-5' ? new Promise<string>(() => undefined) : undefined) }).back();
+  await until('slot-5 recorded here first', () => store.sandboxes.has('slot-5'));
+  assert.ok(onDisk().sandboxes.some((s) => s.id === 'slot-5'), "slot-5's host record is on disk before the release");
+  assert.deepEqual([onDisk().sessions.find((s) => s.id === 'w3')!.sandboxId, onDisk().sessions.find((s) => s.id === 'w3')!.machineId], ['slot-5', undefined]);
+  assert.ok(daemon.pool.list().some((s) => s.id === 'slot-5'), 'the daemon still holds it');
+  await until('mp-r2 moved back', () => store.sandboxes.has('mp-r2'));
+  // After the reset the daemon reconnects, and its hello's snapshot lists slot-5 again: held by both.
+  const bm = store.machines.get('beast')!;
+  bm.sandboxes = mergeSandboxes(bm.sandboxes, daemon.pool.list());
+  store.putMachine(bm);
+  assert.ok(bm.sandboxes.some((x) => x.id === 'slot-5'));
+  assert.match(await migrator().back(true), /slot-5 is this host's already \(a move back cut off, e\.g\. by a reboot, before beast let go\): this only releases it there/);
+  const backText = await migrator().back();
+  assert.match(backText, /Moved 1 sandbox\(es\) back from beast to this host: slot-5.*Of those, slot-5 was this host's already/);
+  await until("the daemon's pool is empty", () => daemon.pool.list().length === 0);
+  assert.deepEqual(store.machines.get('beast')!.sandboxes, []);
+  assert.deepEqual([...store.sandboxes.keys()].sort(), ['mp-r2', 'slot-5']);
+  assert.equal(store.sandboxes.get('slot-5')!.purpose, 'work in slot-5');
+  assert.deepEqual(store.sandboxes.get('slot-5')!.sessionIds, ['w3']);
+
+  // A release the daemon refuses (an agent process started there meanwhile): the records go back to the machine.
+  await migrator().toMachine();
+  const refusing = await migrator({ release: (sb) => (sb === 'mp-r2' ? Promise.reject(new Error('1 agent(s) still run in sandbox mp-r2; stop them first')) : undefined) }).back();
+  assert.match(refusing, /NOT moved \(still on beast\): mp-r2: 1 agent\(s\) still run in sandbox mp-r2/);
+  assert.ok(!store.sandboxes.has('mp-r2'), 'not this host’s');
+  const back = store.machines.get('beast')!.sandboxes!.find((s) => s.id === 'mp-r2')!;
+  assert.deepEqual([back.purpose, back.sessionIds.join(), store.sessions.get('w1')!.machineSandbox], ['work in mp-r2', 'w1', 'mp-r2']);
+  assert.ok(sessions.sessions.get('w1') instanceof RemoteSession, "w1's handle is the daemon's again");
+  assert.ok(store.sandboxes.has('slot-5'), 'slot-5 came back as usual');
+  assert.match(r.git(r.base, 'worktree', 'list'), /mp-r2[\s\S]*slot-5/, 'nothing on disk touched');
 });
 
 // ---------------------------------------------------------------- the offline script

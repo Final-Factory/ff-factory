@@ -219,7 +219,9 @@ export function toMachineProblems(o: {
   if (!o.host.length) out.push('this host has no sandboxes to move');
   for (const sb of o.host) {
     if (sb.status !== 'ready') out.push(`sandbox ${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}: delete or fix it first`);
-    if ((m.sandboxes ?? []).some((x) => x.id === sb.id)) out.push(`${m.id} already has a sandbox "${sb.id}"`);
+    // The same folder already on the machine is a move a hard reset cut off after its adopt: running it again finishes it.
+    const held = (m.sandboxes ?? []).find((x) => x.id === sb.id);
+    if (held && !samePlace(held.path, sb.path)) out.push(`${m.id} already has a different sandbox "${sb.id}" (${held.path})`);
     for (const sid of sb.sessionIds) {
       const s = o.sessions.get(sid);
       if (!s) continue;
@@ -227,12 +229,16 @@ export function toMachineProblems(o: {
       else if (s.pendingPermissions.length) out.push(`agent ${sid} in ${sb.id} waits on a permission answer`);
     }
   }
-  if (pool && (m.sandboxes ?? []).length + o.host.length > pool.maxSandboxes) out.push(`${m.id} may hold ${pool.maxSandboxes} sandboxes (max_sandboxes); it has ${(m.sandboxes ?? []).length} and this host ${o.host.length}`);
+  const coming = o.host.filter((sb) => !halfMovedTo(m, sb)).length;
+  if (pool && (m.sandboxes ?? []).length + coming > pool.maxSandboxes) out.push(`${m.id} may hold ${pool.maxSandboxes} sandboxes (max_sandboxes); it has ${(m.sandboxes ?? []).length} and this host ${coming} more`);
   return out;
 }
 
+/** A host sandbox the machine already holds at the same folder: a move to it that a hard reset cut off before the records moved. */
+export const halfMovedTo = (m: Pick<Machine, 'sandboxes'>, sb: Pick<Sandbox, 'id' | 'path'>) => (m.sandboxes ?? []).some((x) => x.id === sb.id && samePlace(x.path, sb.path));
+
 /** Why the local machine's sandboxes cannot move back to this host now, or an empty list. Exported for tests. */
-export function backProblems(o: { machine: Machine | undefined; online: boolean; protocol: number | undefined; hostIds: Set<string>; sessions: Map<string, SessionInfo>; live: (id: string) => boolean }): string[] {
+export function backProblems(o: { machine: Machine | undefined; online: boolean; protocol: number | undefined; hostPaths: Map<string, string>; sessions: Map<string, SessionInfo>; live: (id: string) => boolean }): string[] {
   const m = o.machine;
   if (!m) return ["no machine is this host's own daemon (add_machine local): nothing to move back"];
   const out: string[] = [];
@@ -241,7 +247,9 @@ export function backProblems(o: { machine: Machine | undefined; online: boolean;
   if (!(m.sandboxes ?? []).length) out.push(`${m.id} has no sandboxes to move back`);
   for (const sb of m.sandboxes ?? []) {
     if (sb.status !== 'ready') out.push(`sandbox ${m.id}/${sb.id} is ${sb.status}: wait until it is ready, or delete it`);
-    if (o.hostIds.has(sb.id)) out.push(`this host already has a sandbox "${sb.id}"`);
+    // The same folder already here is a move back a hard reset cut off before the release: running it again finishes it.
+    const here = o.hostPaths.get(sb.id);
+    if (here !== undefined && !samePlace(here, sb.path)) out.push(`this host already has a different sandbox "${sb.id}" (${here})`);
     for (const sid of sb.sessionIds) if (o.live(sid)) out.push(`agent ${sid} in ${m.id}/${sb.id} still has a process: stop it first`);
   }
   return out;
@@ -322,7 +330,9 @@ export class HostMigrator {
     const sessionIds = host.flatMap((s) => s.sessionIds).filter((id) => st.sessions.has(id));
     const idle = sessionIds.filter((id) => this.d.sessions.sessions.get(id)?.live);
     const summary = host.map((s) => `${s.id} (${s.path}, ${s.sessionIds.length} agent record(s), editor ${s.unity.state})`).join('; ');
-    if (dryRun) return `Would move ${host.length} sandbox(es) to ${machine.id}: ${summary}.${idle.length ? ` It would first stop the idle agent processes of ${idle.join(', ')}.` : ''} Folders, branches, Libraries and running editors stay as they are.`;
+    const half = host.filter((s) => halfMovedTo(machine, s)).map((s) => s.id);
+    const halfNote = half.length ? ` ${half.join(', ')} ${half.length === 1 ? 'is' : 'are'} on ${machine.id}'s daemon already (a move cut off, e.g. by a reboot, before the records moved): this finishes ${half.length === 1 ? 'it' : 'them'}.` : '';
+    if (dryRun) return `Would move ${host.length} sandbox(es) to ${machine.id}: ${summary}.${idle.length ? ` It would first stop the idle agent processes of ${idle.join(', ')}.` : ''}${halfNote} Folders, branches, Libraries and running editors stay as they are.`;
     this.running = true;
     try {
       const backup = this.backup();
@@ -330,6 +340,7 @@ export class HostMigrator {
       const moved: string[] = [];
       const movedSessions: string[] = [];
       const failures: string[] = [];
+      const finished: string[] = [];
       for (const sb of host) {
         // A wake, a resume or a message can start one of its agents here while earlier sandboxes move: then it stays.
         const liveNow = () => sb.sessionIds.filter((id) => this.d.sessions.sessions.get(id)?.live);
@@ -337,45 +348,34 @@ export class HostMigrator {
           failures.push(`${sb.id}: agent(s) ${liveNow().join(', ')} started again meanwhile`);
           continue;
         }
-        try {
-          const msb = machineSandboxFrom(sb);
-          await this.d.machines.adoptSandbox(machine.id, { id: sb.id, path: sb.path, branch: msb.branch, base: sb.base, createdAt: sb.createdAt, logPath: sb.unity.logPath, purpose: sb.purpose });
-        } catch (e) {
-          // It may have been taken all the same (an answer that came too late): give it back, so only this host owns it.
-          failures.push(`${sb.id}: ${(e as Error).message}${await this.undoAdopt(machine.id, sb.id)}`);
-          continue;
-        }
-        const late = liveNow();
-        if (late.length) {
-          failures.push(`${sb.id}: agent(s) ${late.join(', ')} started while it was being moved, so it stays here${await this.undoAdopt(machine.id, sb.id)}`);
-          continue;
+        // Held by the daemon already (a move a hard reset cut off after the adopt): only the records are left to move.
+        const finishing = halfMovedTo(st.machines.get(machine.id) ?? {}, sb);
+        if (!finishing) {
+          try {
+            const msb = machineSandboxFrom(sb);
+            await this.d.machines.adoptSandbox(machine.id, { id: sb.id, path: sb.path, branch: msb.branch, base: sb.base, createdAt: sb.createdAt, logPath: sb.unity.logPath, purpose: sb.purpose });
+          } catch (e) {
+            // It may have been taken all the same (an answer that came too late): give it back, so only this host owns it.
+            failures.push(`${sb.id}: ${(e as Error).message}${await this.undoAdopt(machine.id, sb.id)}`);
+            continue;
+          }
+          const late = liveNow();
+          if (late.length) {
+            failures.push(`${sb.id}: agent(s) ${late.join(', ')} started while it was being moved, so it stays here${await this.undoAdopt(machine.id, sb.id)}`);
+            continue;
+          }
         }
         // From here to the end of the pass nothing awaits: no agent can start between the check above and the move.
-        // The daemon's snapshot (sent before its answer) made the machine's record; the records move in one go.
-        const state = this.plainState();
-        const mm = state.machines!.find((x) => x.id === machine.id)!;
-        const adopted = (mm.sandboxes ?? []).find((x) => x.id === sb.id);
-        mm.sandboxes = (mm.sandboxes ?? []).filter((x) => x.id !== sb.id);
-        const r = moveStateToMachine(state, machine.id, [sb.id]);
-        // Keep the daemon's own facts (editor, git) over the host's copy.
-        if (adopted) mm.sandboxes = mm.sandboxes!.map((x) => (x.id === sb.id ? { ...adopted, purpose: sb.purpose, sessionIds: [...sb.sessionIds] } : x));
-        for (const sid of r.sessions) {
-          const info = st.sessions.get(sid)!;
-          st.putSession(info);
-          const h = this.d.machines.restore(info);
-          if (h) this.d.sessions.sessions.set(sid, h);
-        }
-        for (const did of r.delegations) st.putDelegation(st.delegations.get(did)!);
-        st.putMachine(mm);
-        st.removeSandbox(sb.id);
-        fs.rmSync(statusDirFor(this.d.cfg.dataDir, sb.id), { recursive: true, force: true });
+        const r = this.recordsToMachine(machine.id, sb);
         moved.push(sb.id);
         movedSessions.push(...r.sessions);
+        if (finishing) finished.push(sb.id);
       }
       this.record({ at: this.now().toISOString(), direction: 'to_machine', machine: machine.id, sandboxes: moved, sessions: movedSessions, backup });
       const refs = moved.map((id) => `${machine.id}/${id}`).join(', ');
       return [
         moved.length ? `Moved ${moved.length} sandbox(es) to ${machine.id}: ${refs} (bare names keep working). ${movedSessions.length} agent record(s) moved with them; their history and session ids are unchanged, and a message to one starts it on ${machine.id}'s daemon.` : 'Moved nothing.',
+        finished.length ? `Of those, ${finished.join(', ')} ${finished.length === 1 ? 'was' : 'were'} on ${machine.id}'s daemon already (a move cut off before): finished.` : '',
         idle.length ? `Stopped the idle agent processes of ${idle.join(', ')} first.` : '',
         failures.length ? `NOT moved (still this host's): ${failures.join('; ')}.` : '',
         `A copy of state.json from before is ${backup}.`,
@@ -385,6 +385,59 @@ export class HostMigrator {
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * The records of host sandbox `sb` and its agents onto the machine, whose daemon holds the folder already, written to
+   * disk at once (w424: BEAST hard-resets): a reset right after leaves it moved, not held by both. `facts`: the machine's
+   * own record to keep when its daemon's snapshot has not brought one (a release it refused, below).
+   */
+  private recordsToMachine(machineId: string, sb: Sandbox, facts?: MachineSandbox): MoveResult {
+    const st = this.d.store;
+    const state = this.plainState();
+    const mm = state.machines!.find((x) => x.id === machineId)!;
+    // The daemon's snapshot (sent before its answer) made the machine's record; the records move in one go.
+    const adopted = (mm.sandboxes ?? []).find((x) => x.id === sb.id) ?? facts;
+    mm.sandboxes = (mm.sandboxes ?? []).filter((x) => x.id !== sb.id);
+    const r = moveStateToMachine(state, machineId, [sb.id]);
+    // Keep the daemon's own facts (editor, git) over the host's copy.
+    if (adopted) mm.sandboxes = mm.sandboxes!.map((x) => (x.id === sb.id ? { ...adopted, purpose: sb.purpose, sessionIds: [...sb.sessionIds] } : x));
+    for (const sid of r.sessions) {
+      const info = st.sessions.get(sid)!;
+      st.putSession(info);
+      const h = this.d.machines.restore(info);
+      if (h) this.d.sessions.sessions.set(sid, h);
+    }
+    for (const did of r.delegations) st.putDelegation(st.delegations.get(did)!);
+    st.putMachine(mm);
+    st.removeSandbox(sb.id);
+    fs.rmSync(statusDirFor(this.d.cfg.dataDir, sb.id), { recursive: true, force: true });
+    st.flush();
+    return r;
+  }
+
+  /**
+   * The records of machine sandbox `msb` and its agents back to this host, written to disk before its daemon lets go of
+   * the folder: a hard reset in between leaves it held by both (running back again only releases it), never by neither,
+   * which would lose its label and agents (w424).
+   */
+  private recordsToHost(machineId: string, msb: MachineSandbox): MoveResult {
+    const st = this.d.store;
+    const state = this.plainState();
+    const mm = state.machines!.find((x) => x.id === machineId)!;
+    mm.sandboxes = [...(mm.sandboxes ?? []).filter((x) => x.id !== msb.id), msb];
+    const r = moveStateToHost(state, machineId, [msb.id]);
+    const hostRec = state.sandboxes.find((x) => x.id === msb.id)!;
+    for (const sid of r.sessions) {
+      const info = st.sessions.get(sid)!;
+      st.putSession(info);
+      this.d.sessions.sessions.set(sid, this.d.hostSession(info));
+    }
+    for (const did of r.delegations) st.putDelegation(st.delegations.get(did)!);
+    st.putMachine(mm);
+    st.putSandbox(hostRec);
+    st.flush();
+    return r;
   }
 
   /** A failed or overtaken adopt: make sure the daemon does not keep the sandbox too. Returns a note for the report. */
@@ -399,43 +452,27 @@ export class HostMigrator {
     }
   }
 
-  /** A failed release: make sure the daemon still has it and the portal's record keeps its label and agents. */
-  private async undoRelease(machineId: string, msb: MachineSandbox): Promise<string> {
-    const m = this.d.store.machines.get(machineId);
-    const restore = () => {
-      const mm = this.d.store.machines.get(machineId);
-      if (!mm) return;
-      mm.sandboxes = [...(mm.sandboxes ?? []).filter((x) => x.id !== msb.id), { ...(mm.sandboxes ?? []).find((x) => x.id === msb.id), ...msb, purpose: msb.purpose, sessionIds: msb.sessionIds }];
-      this.d.store.putMachine(mm);
-    };
-    if (m?.sandboxes?.some((x) => x.id === msb.id)) return '';
-    try {
-      await this.d.machines.adoptSandbox(machineId, { id: msb.id, path: msb.path, branch: msb.branch, base: msb.base, createdAt: msb.createdAt, logPath: msb.unity.logPath, purpose: msb.purpose });
-      restore();
-      return `; ${machineId} had released it, so it was taken back there`;
-    } catch (e) {
-      restore();
-      return `; CHECK ${machineId}: it may no longer hold ${msb.id} (${(e as Error).message})`;
-    }
-  }
-
   /** Move the local machine's sandboxes back to this host's own pool (the rollback). */
   async back(dryRun = false): Promise<string> {
     if (this.running) throw new Error('a migration is already running');
     const st = this.d.store;
     const m = this.d.machines.local();
     const live = (id: string) => !!this.d.sessions.sessions.get(id)?.live;
-    const problems = backProblems({ machine: m, online: !!m && this.d.machines.isOnline(m.id), protocol: m && this.d.machines.protocolOf(m.id), hostIds: new Set(st.sandboxes.keys()), sessions: st.sessions, live });
+    const hostPaths = new Map([...st.sandboxes.values()].map((s) => [s.id, s.path]));
+    const problems = backProblems({ machine: m, online: !!m && this.d.machines.isOnline(m.id), protocol: m && this.d.machines.protocolOf(m.id), hostPaths, sessions: st.sessions, live });
     if (problems.length) throw new Error(`cannot move ${m?.id ?? 'the local machine'}'s sandboxes back now: ${problems.join('; ')}`);
     const machine = m!;
     const list = [...(machine.sandboxes ?? [])];
-    if (dryRun) return `Would move ${list.length} sandbox(es) back from ${machine.id} to this host: ${list.map((s) => `${s.id} (${s.path})`).join(', ')}. Folders, branches, Libraries and running editors stay as they are; this host's own watch takes the editors over.`;
+    const half = list.filter((s) => hostPaths.has(s.id)).map((s) => s.id);
+    const halfNote = half.length ? ` ${half.join(', ')} ${half.length === 1 ? 'is' : 'are'} this host's already (a move back cut off, e.g. by a reboot, before ${machine.id} let go): this only releases ${half.length === 1 ? 'it' : 'them'} there.` : '';
+    if (dryRun) return `Would move ${list.length} sandbox(es) back from ${machine.id} to this host: ${list.map((s) => `${s.id} (${s.path})`).join(', ')}.${halfNote} Folders, branches, Libraries and running editors stay as they are; this host's own watch takes the editors over.`;
     this.running = true;
     try {
       const backup = this.backup();
       const moved: string[] = [];
       const movedSessions: string[] = [];
       const failures: string[] = [];
+      const finished: string[] = [];
       for (const { id } of list) {
         // The record as it is now: an agent record made in this sandbox while earlier ones moved belongs to it too.
         const msb = st.machines.get(machine.id)?.sandboxes?.find((x) => x.id === id);
@@ -444,33 +481,38 @@ export class HostMigrator {
           continue;
         }
         const keep = { ...msb, sessionIds: [...msb.sessionIds] };
+        // This host's already (a move back a hard reset cut off before the release): only the release is left.
+        const finishing = st.sandboxes.has(id);
+        // The records first, on disk before the daemon lets go (recordsToHost).
+        const r: MoveResult = finishing ? { sandboxes: [id], sessions: [], delegations: [] } : this.recordsToHost(machine.id, keep);
         try {
           // The daemon refuses while an agent process runs there.
-          await this.d.machines.releaseSandbox(machine.id, msb.id);
+          await this.d.machines.releaseSandbox(machine.id, id);
         } catch (e) {
-          failures.push(`${msb.id}: ${(e as Error).message}${await this.undoRelease(machine.id, keep)}`);
-          continue;
+          const msg = (e as Error).message;
+          // Gone from the daemon already: released before a reset cut the rest off. Anything else: it keeps the folder.
+          if (!/no sandbox/i.test(msg)) {
+            const sb = finishing ? undefined : st.sandboxes.get(id);
+            if (sb) this.recordsToMachine(machine.id, sb, keep);
+            failures.push(`${id}: ${msg}`);
+            continue;
+          }
         }
-        const state = this.plainState();
-        const mm = state.machines!.find((x) => x.id === machine.id)!;
-        // releaseSandbox dropped it from the record already; put this copy back so the move finds it.
-        mm.sandboxes = [...(mm.sandboxes ?? []).filter((x) => x.id !== msb.id), msb];
-        const r = moveStateToHost(state, machine.id, [msb.id]);
-        const hostRec = state.sandboxes.find((x) => x.id === msb.id)!;
-        for (const sid of r.sessions) {
-          const info = st.sessions.get(sid)!;
-          st.putSession(info);
-          this.d.sessions.sessions.set(sid, this.d.hostSession(info));
+        // releaseSandbox drops it from the machine's record; one a reset left there too. Saved before the next.
+        const mm = st.machines.get(machine.id);
+        if (mm?.sandboxes?.some((x) => x.id === id)) {
+          mm.sandboxes = mm.sandboxes.filter((x) => x.id !== id);
+          st.putMachine(mm);
         }
-        for (const did of r.delegations) st.putDelegation(st.delegations.get(did)!);
-        st.putMachine(mm);
-        st.putSandbox(hostRec);
-        moved.push(msb.id);
+        st.flush();
+        moved.push(id);
         movedSessions.push(...r.sessions);
+        if (finishing) finished.push(id);
       }
       this.record({ at: this.now().toISOString(), direction: 'back', machine: machine.id, sandboxes: moved, sessions: movedSessions, backup });
       return [
         moved.length ? `Moved ${moved.length} sandbox(es) back from ${machine.id} to this host: ${moved.join(', ')}, with ${movedSessions.length} agent record(s).` : 'Moved nothing.',
+        finished.length ? `Of those, ${finished.join(', ')} ${finished.length === 1 ? 'was' : 'were'} this host's already (a move back cut off before): released on ${machine.id}.` : '',
         failures.length ? `NOT moved (still on ${machine.id}): ${failures.join('; ')}.` : '',
         `New sandboxes go to ${machine.id} while it has a sandbox_root: remove_machine ${machine.id} (it has no sandboxes now) to stop that, and its daemon with it.`,
         `A copy of state.json from before is ${backup}.`,
