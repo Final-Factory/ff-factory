@@ -228,6 +228,41 @@ test("follow-ups: a person's orchestrator messages only its person's own workers
   assert.equal((await call(loth, 'message_agent', { session_id: v.info.id, text: 'after they wrote' })).isError, false);
 });
 
+test("w431: a worker another person started, linked to Ben's request, takes Ben's follow-ups, says which request; an unlinked one still refuses", async (t) => {
+  const { store, o, agents, dispatcher, chat, call } = setup(t);
+  const ben = chat(BEN).info;
+  const v = agents.startWorker({ sandbox: 'alpha', prompt: 'Look at the inventory UI', title: 'Inventory look', from: 'human', requestedBy: LOTH });
+  const other = agents.startWorker({ sandbox: 'alpha', prompt: 'Something else', title: 'Unlinked', from: 'human', requestedBy: LOTH });
+  await call(ben, 'request_work', { title: 'Fix switch_branch refusals', brief: 'The caller is counted as mid-turn.' });
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: v.info.id, text: 'Take w1 too.', work_id: 'w1' });
+  assert.equal(sent.isError, false, sent.text);
+  const said = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text);
+  // Linked by the dispatcher's work_id: Ben's orchestrator may follow up, and the worker reads which request it is about.
+  const r = await call(ben, 'message_agent', { session_id: v.info.id, text: 'Push it now, GitHub works again.' });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(said(v.info.id).at(-1), '[about w1 "Fix switch_branch refusals"]\nPush it now, GitHub works again.');
+  // A stalled request is still Ben's to ask about (w426), and so is one closed in the last 7 days (w427/w428/w430).
+  const w = store.work.get('w1')!;
+  w.status = 'stalled';
+  store.putWork(w);
+  o.personWrote(ben.id);
+  assert.equal((await call(ben, 'message_agent', { session_id: v.info.id, text: 'Still there?' })).isError, false);
+  w.status = 'done';
+  store.putWork(w);
+  assert.equal((await call(ben, 'message_agent', { session_id: v.info.id, text: 'One question about it' })).isError, false);
+  assert.equal(said(v.info.id).at(-1), '[about w1 "Fix switch_branch refusals" (done)]\nOne question about it');
+  // The limit still holds: three since Ben last wrote.
+  assert.equal((await call(ben, 'message_agent', { session_id: v.info.id, text: 'a third' })).isError, false);
+  assert.match((await call(ben, 'message_agent', { session_id: v.info.id, text: 'a fourth' })).text, /3 follow-ups to .* since Ben last wrote/);
+  // Closed more than 7 days ago: no longer his to follow up on.
+  o.personWrote(ben.id);
+  w.updatedAt = new Date(Date.now() - 8 * 86_400_000).toISOString();
+  store.putWork(w);
+  assert.match((await call(ben, 'message_agent', { session_id: v.info.id, text: 'late' })).text, /is Lothsahn's work: follow up only on Ben's own workers/);
+  // A worker with no request of Ben's on it: refused, as before.
+  assert.match((await call(ben, 'message_agent', { session_id: other.info.id, text: 'hi' })).text, /^ERROR: \w+ "Unlinked" is Lothsahn's work: follow up only on Ben's own workers; for anything else, request_work$/);
+});
+
 test('the dispatcher acts for the request it serves, and runs destructive tools only for a person who asked', async (t) => {
   const { store, sessions, o, dispatcher, chat, call } = setup(t);
   const d = dispatcher();
