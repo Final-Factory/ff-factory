@@ -566,7 +566,11 @@ export class Agents {
   /** An agent's process ended: if another agent there still works, put its last label back. */
   private onAgentEnded(h: SessionHandle) {
     const i = h.info;
-    if (i.kind === 'worker') this.orchestrators.capacityMayHaveFreed(`worker ${i.id} "${i.title}" stopped`);
+    if (i.kind === 'worker') {
+      this.orchestrators.capacityMayHaveFreed(`worker ${i.id} "${i.title}" stopped`);
+      // Its requests whose other workers all said DONE close now (w434).
+      this.orchestrators.workerEnded(i);
+    }
     if (i.kind === 'orchestrator' || (!i.sandboxId && !i.machineId)) return;
     const where: Where = i.sandboxId ? { sandboxId: i.sandboxId } : { machineId: i.machineId, machineSandbox: i.machineSandbox };
     const current = this.placeLabel(where);

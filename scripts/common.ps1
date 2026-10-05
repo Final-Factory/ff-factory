@@ -21,7 +21,7 @@ function Test-Elevated {
 
 # Whether this user is signed in to the desktop: an explorer.exe of theirs runs. The ffsb-server task
 # runs only in that session (LogonType Interactive), so after an unattended reboot nothing starts it
-# until someone signs in (BEAST, 2026-10-05).
+# until someone signs in (seen 2026-10-05).
 function Test-DesktopSignedIn {
   $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'")) {

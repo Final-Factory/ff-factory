@@ -1120,6 +1120,11 @@ export interface WorkItem {
    * decide_work link. Which request a worker on several is working on now is read from these (shared/workState.ts).
    */
   links?: Record<string, { at: string; how: 'sent' | 'linked' }>;
+  /**
+   * Its workers that said `DONE: <id>` for their part, by session id, with when and the report's first line (w434): the
+   * request closes once none of its workers is still on it (each said DONE, ended, or moved on to newer work).
+   */
+  done?: Record<string, { at: string; report: string }>;
   /** Files its person attached (request_work attachments): every worker started for it gets a copy. */
   attachments?: AttachmentRef[];
   /** What it may repeat, found when it was filed; strongest first. */

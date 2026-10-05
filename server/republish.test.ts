@@ -82,6 +82,8 @@ test('republish: the dry run changes nothing; the real run publishes, moves the 
     GIT_CONFIG_VALUE_0: 'https://github.com/',
     FFSB_REPUBLISH_POLL_SECONDS: '1',
     FFSB_TASK_NAME: 'ffsb-test-never-run',
+    // This machine's names, injected (w434): the test passes or fails the same on any runner, BEAST included.
+    FFSB_REPUBLISH_LOCAL_NAMES: 'ffsbtesthost,ffsbtestuser',
   };
   const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, env, encoding: 'utf8' }).trim();
   const bareOf = (slug: string) => path.join(hub, ...slug.split('/')) + '.git';
@@ -114,10 +116,12 @@ test('republish: the dry run changes nothing; the real run publishes, moves the 
   git(app, 'remote', 'add', 'origin', 'https://github.com/Final-Factory/ff-factory.git');
   git(app, 'push', '-q', '-u', 'origin', 'main');
   git(app, 'push', '-q', 'origin', `${stale}:refs/heads/public-main`, `${stale}:refs/heads/public-main-old`);
-  const privateMain = git(app, 'rev-parse', 'HEAD');
-  const mainTree = git(app, 'rev-parse', 'HEAD^{tree}');
+  let privateMain = git(app, 'rev-parse', 'HEAD');
+  let mainTree = git(app, 'rev-parse', 'HEAD^{tree}');
   fs.mkdirSync(path.join(app, 'data'));
-  fs.writeFileSync(path.join(app, 'data', 'state.json'), '{"keep":true}');
+  // The host is one of the portal's machines (as BEAST is): its id is public on purpose.
+  const STATE = '{"keep":true,"machines":[{"id":"ffsbtesthost"}]}';
+  fs.writeFileSync(path.join(app, 'data', 'state.json'), STATE);
   fs.writeFileSync(path.join(app, 'config.json'), '{}');
 
   const inbox = () => {
@@ -130,6 +134,21 @@ test('republish: the dry run changes nothing; the real run publishes, moves the 
       children.push(p);
       p.on('exit', (code) => resolve(code ?? -1));
     });
+
+  // The guard: a private name of this machine in the tree stops it; its machine id (public on purpose) does not.
+  const commit = (text: string, msg: string) => {
+    fs.writeFileSync(path.join(app, 'README.md'), text);
+    git(app, 'add', '-A');
+    git(app, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', msg);
+    git(app, 'push', '-q', 'origin', 'main');
+  };
+  commit('A portal, served from ffsbtesthost by ffsbtestuser.\n', 'three');
+  assert.equal(await run('-DryRun'), 1);
+  assert.match(inbox().at(-1)!, /names this machine: 'ffsbtestuser' in README\.md/, JSON.stringify(inbox().at(-1)));
+  assert.doesNotMatch(inbox().at(-1)!, /'ffsbtesthost'/, 'a machine id is public');
+  commit('A portal, served from ffsbtesthost.\n', 'four');
+  privateMain = git(app, 'rev-parse', 'HEAD');
+  mainTree = git(app, 'rev-parse', 'HEAD^{tree}');
 
   // Dry run: nothing changes on the fake GitHub, and nothing is left behind for the real run to pick up.
   assert.equal(await run('-DryRun'), 0, inbox().join('\n'));
@@ -188,7 +207,7 @@ test('republish: the dry run changes nothing; the real run publishes, moves the 
   // This checkout: on the public history, the old HEAD kept, ignored state untouched.
   assert.equal(git(app, 'rev-parse', 'HEAD'), pubMain);
   assert.equal(git(app, 'rev-parse', git(app, 'branch', '--list', 'pre-republish-*', '--format=%(refname:short)')), privateMain);
-  assert.equal(fs.readFileSync(path.join(app, 'data', 'state.json'), 'utf8'), '{"keep":true}');
+  assert.equal(fs.readFileSync(path.join(app, 'data', 'state.json'), 'utf8'), STATE);
 
   // A rerun finds everything done: no second update, no new branch, same main.
   assert.equal(await run(), 0, inbox().join('\n'));

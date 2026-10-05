@@ -1009,14 +1009,60 @@ export class Orchestrators {
   private readonly wrapUps = new Map<string, Set<string>>();
 
   /**
-   * A worker's `DONE: wNNN` lines (docs/orchestrators.md, "Ledger cleanup"): each closes that request as done, with the
-   * report as its note, when the worker is one of its workers and nothing is missing (server/ledgerRules.ts doneProblem);
-   * else the worker is told what is missing. A request already closed stays as it is (a close by hand is final, w370).
+   * The workers still on a request, apart from `except` (w434): linked to it, still serving it (servedBy: not moved on to
+   * newer work), alive (not stopped, errored or gone), and not done with their part (WorkItem.done).
+   */
+  private stillOn(w: WorkItem, except?: string): string[] {
+    const all = [...this.store.work.values()];
+    return w.sessionIds.filter((id) => {
+      if (id === except || w.done?.[id]) return false;
+      const s = this.store.sessions.get(id);
+      if (!s || s.status === 'stopped' || s.status === 'error') return false;
+      return servedBy(id, all).has(w.id);
+    });
+  }
+
+  /** Close a request as done on its workers' DONE (doneMarkers, workerEnded), with the last report as its note. */
+  private closeOnDone(w: WorkItem, sid: string, report: string, how: string) {
+    settleByHand(w);
+    w.status = 'done';
+    w.stalled = undefined;
+    w.outcome = report || `done (its worker ${sid} said DONE)`;
+    const parts = Object.keys(w.done ?? {}).length > 1 ? ` (its workers ${Object.keys(w.done!).join(', ')} each said DONE)` : '';
+    this.stamp(w, `closed as done: ${how}${parts}. Its report: ${report}`);
+    this.store.putWork(w);
+    this.toPeople(w.requesters, `[ledger] ${w.id} "${clip(w.title, 100)}" closed as done: ${how}. Its report: "${clip(report, 200)}"`);
+  }
+
+  /**
+   * A worker of open requests ended (its process stopped, w434): a request whose other workers all said DONE closes now,
+   * on the last DONE's report, unless doneProblem finds something missing (then it waits for the cleanup or a person).
+   */
+  workerEnded(s: Pick<SessionInfo, 'id'>) {
+    for (const w of [...this.store.work.values()]) {
+      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !w.done || w.done[s.id] || this.stillOn(w).length) continue;
+      const [sid, last] = Object.entries(w.done).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
+      const problem = doneProblem(w, last.report);
+      if (problem) {
+        this.stamp(w, `worker ${s.id} ended; its other workers said DONE, but it stays open: ${problem}`);
+        this.store.putWork(w);
+        continue;
+      }
+      this.closeOnDone(w, sid, last.report, `its last worker still on it, ${s.id}, ended, and worker ${sid} had said DONE`);
+    }
+  }
+
+  /**
+   * A worker's `DONE: wNNN` lines (docs/orchestrators.md, "Ledger cleanup"): each records that worker's part as done
+   * (w434), and closes the request as done, with the report as its note, once no other worker is still on it (stillOn)
+   * and nothing is missing (server/ledgerRules.ts doneProblem); else the worker is told what is missing, or who is still
+   * on it. A request already closed stays as it is (a close by hand is final, w370).
    */
   private doneMarkers(s: SessionInfo, text: string) {
     const ids = doneIdsIn(text);
     if (!ids.length) return;
     const refused: string[] = [];
+    const parts: string[] = [];
     const report = clip(firstLine(text), 300);
     for (const id of ids) {
       const w = this.store.work.get(id);
@@ -1029,6 +1075,16 @@ export class Orchestrators {
         refused.push(`${id}: you are not one of its workers, so your DONE does not close it (tell the dispatcher in your report instead)`);
         continue;
       }
+      // Its part is done, whatever else is left (w434: one worker's DONE closed w428 while another was still on it).
+      w.done = { ...w.done, [s.id]: { at: this.now().toISOString(), report } };
+      const others = this.stillOn(w, s.id);
+      if (others.length) {
+        const who = others.map((id) => this.workerLine(id)).join(', ');
+        parts.push(`${id}: your part is recorded as done; ${id} stays open while ${who} ${others.length > 1 ? 'are' : 'is'} still on it, and closes once each has said DONE or ended`);
+        this.stamp(w, `worker ${s.id} said DONE for its part; still on it: ${others.join(', ')}`);
+        this.store.putWork(w);
+        continue;
+      }
       const problem = doneProblem(w, text);
       if (problem) {
         refused.push(`${id}: ${problem}`);
@@ -1036,13 +1092,14 @@ export class Orchestrators {
         this.store.putWork(w);
         continue;
       }
-      settleByHand(w);
-      w.status = 'done';
-      w.stalled = undefined;
-      w.outcome = report || `done (its worker ${s.id} said DONE)`;
-      this.stamp(w, `closed as done: worker ${s.id} said DONE: ${w.id}. Its report: ${report}`);
-      this.store.putWork(w);
-      this.toPeople(w.requesters, `[ledger] ${w.id} "${clip(w.title, 100)}" closed as done: its worker ${s.id} said DONE. Its report: "${clip(report, 200)}"`);
+      this.closeOnDone(w, s.id, report, `worker ${s.id} said DONE: ${w.id}`);
+    }
+    if (parts.length) {
+      try {
+        this.sessions.send(s.id, `[ledger] ${parts.map((r) => `- ${r}`).join('\n')}`, 'system', undefined, { requestedBy: s.requestedBy });
+      } catch {
+        // it is at a limit: the requests' logs have it
+      }
     }
     if (!refused.length) return;
     const now = this.now().getTime();

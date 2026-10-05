@@ -47,6 +47,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A request with several workers closes on the last one's DONE** (w434, asked by Ben). One worker's `DONE: w428`
+  (after only its hardware read) closed the request while another worker's PR was unpushed. Each DONE now records that
+  worker's part; the request closes once every worker on it has said DONE, ended, or moved on to newer work, and the
+  last one ending closes it on the latest DONE's report ([docs/orchestrators.md](docs/orchestrators.md)).
+- **`republish_public` works from BEAST** (w434). Its scan for this machine's own names stopped on "BEAST", which 69
+  files name on purpose; the portal's machine ids are now public names, its other names (user, tailnet, Funnel host, ssh
+  keys) are still checked. A comment naming BEAST in `scripts/common.ps1` is gone, and `server/republish.test.ts` injects
+  the machine's names, so it no longer depends on the runner's hostname, and checks that the guard stops a private name.
+
 - **The ledger cleanup reads the end of a worker's report, and a PR can be one step of a request** (w424, asked by
   Lothsahn after w424 was closed twice, on #99 and #100, while its worker's reports ended "w424: still open: …"). A
   worker's `lastResult` kept only the first 1200 characters of a long report, so the cleanup's "more is coming" check

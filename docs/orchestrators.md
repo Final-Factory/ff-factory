@@ -244,6 +244,18 @@ does not say how it went (an audit, a check, a 2-peer run, a nightly…), or for
 than two merged and the report does not say they all did (`doneProblem`, `server/ledgerRules.ts`). A request already
 closed by hand stays closed (w370), and an owner's close of someone else's request (w402) is untouched.
 
+**A request with several workers closes on the last one's DONE** (w434, after w428 on 2026-10-05: worker 2092b20c's DONE,
+after only its hardware read, closed the request while the placement work it was for was still unpushed). Each DONE
+records that worker's part (`WorkItem.done`: session id, when, the report's first line), and the request closes only
+once no other worker is still on it (`stillOn`, `server/orchestrators.ts`): every worker linked to it has said DONE,
+ended (stopped, errored or gone), or moved on to newer work (it no longer serves the request, `servedBy`). Until then
+the worker is told its part is recorded and who is still on it, and the log says so. When the last worker still on it
+ends without a DONE (`workerEnded`, called as its process stops), the request closes on the latest DONE's report, unless
+`doneProblem` finds something missing in it; then it stays open and the log says why. The other choice, only the
+request's first ("main") worker may close it, was not taken: at w428 the worker that closed it may well have been the
+first one started, and a request handed from worker to worker has no single main one, while who is still on it is
+already in the ledger (links, `servedBy`, session state).
+
 **The wrap-up** (w419). When the dispatcher sends a worker work for a request (`message_agent` with `work_id`) and the
 worker's current turn is on other requests (`servedBy`, [What a request is doing now](#what-a-request-is-doing-now)),
 the message starts with `[wrap-up]`: for each request it was on, end the reply with `DONE: <id>`, or one line
