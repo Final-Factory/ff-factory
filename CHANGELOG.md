@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Design: the portal in its own container on the FFBox host** (w439, the request for this design, asked by
+  Lothsahn). Design only, nothing deployed: a rootless Podman pod under its own Unix account on FFBox's Linux host,
+  Tailscale inside the pod and nothing published on the host, so FFBox and FF Factory share no account, file, daemon,
+  network or secret; the isolation options compared, the image, volumes, secrets and backups, container-native
+  restarts and updates with rollback, reachability, the Claude account for the orchestrators and the dispatcher, the
+  code changes with file:line and size, the migration with a dry run, cut-over and rollback, and the decisions left
+  for Lothsahn and Ben ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md)).
+
 - **FFBox conversations open in FF Factory** (w426, asked by Ben). FFBox's links (the FFBox page's conversations,
   the ledger's "on FFBox", the intake brief) went to its address on Lothsahn's home network
   (https://192.168.51.10:8787/conversation/684), which opens nowhere else. A conversation now opens on FF Factory's

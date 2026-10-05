@@ -27,3 +27,9 @@ Prepared behind config `machines.keepAgentsOnRestart` (default off; [beast-machi
 no drain and no stop for daemon agents, and a same-protocol daemon from another commit keeps taking agents until it is
 idle and redeployed. Left: prove on BEAST that a restart leaves the daemon's agents running and replays their events,
 then turn it on.
+
+## 3. The portal in its own container on the FFBox host (designed, not agreed)
+
+After steps 1 and 2: the portal leaves BEAST for a rootless Podman pod under its own account on the FFBox host, so
+BEAST only runs workers. Designed in [portal-on-ffbox-host.md](portal-on-ffbox-host.md) (w439, Lothsahn's request
+for the design); its section 8 lists the decisions Lothsahn and Ben make before any code is written.
