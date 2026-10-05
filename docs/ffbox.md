@@ -221,6 +221,15 @@ something is fixed.
   ([sidebar](images/ffbox-sidebar-mobile.png)).
 - **Its page** lists the newest 100 conversations and intake reports, with "Show 100 more"; the header and the lists
   scroll as one ([desktop](images/ffbox-scrolled-desktop.png), [phone](images/ffbox-scrolled-mobile.png)).
+- **A conversation opens in FF Factory** (w426). FFBox's own page (a conversation's `url`, the hello's `web`) is on
+  Lothsahn's home network only, so a conversation's title opens `#/provider/ffbox/conversation/<id>`, rendered from
+  the `conversation` query (below, "Asking FFBox") through `GET /api/providers/ffbox/conversation/<id>`: its facts,
+  its turns newest first (each run's outcome, cost, PR, branch and tests, the messages it answered, the agent's last
+  words, FFBox's replies; a held reply without its text), ten at a time. Every field is type-checked and every text
+  cleaned and redacted on the server (`conversationView`, server/providers.ts) and shown as plain text; when FFBox
+  cannot answer, the last answer kept is shown with its time. FFBox's page stays as the second link, "on Loth's
+  network", there, in the list and on the ledger's FFBox requests. FFBox's address is never exposed past FF Factory's
+  login: the page reads only what the connector answers.
   `send_to_ffbox` hands a ledger request to FFBox once `providers.ffbox.sendWork` is on and the
   connector takes submits.
 - **Dev requests.** An operator's ffdev turn comes to FF Factory instead of a container on FFBox, with its files, and

@@ -499,6 +499,49 @@ export interface ProviderConversation {
   updatedAt: string;
 }
 
+/**
+ * One FFBox conversation as FF Factory shows it (w426): FFBox's own page is on Lothsahn's network only, so the web UI
+ * renders the connector's `conversation` answer (docs/ffbox-connector-contract.md, "Read-only queries"). Every field is
+ * checked and every text cleaned on the server; all of it is FFBox data, players' words included, shown as plain text.
+ */
+export interface ProviderConversationView {
+  id: string;
+  /** Answered by FFBox just now; false: the last answer kept for this conversation (`receivedAt`), or none (`error`). */
+  live: boolean;
+  /** When FFBox wrote the answer, and when FF Factory got it. */
+  at?: string;
+  receivedAt?: string;
+  /** Why there is no live answer (FFBox's error code), with its own words when it gave them. */
+  error?: string;
+  reason?: string;
+  /** What the conversation list holds for it (title, state, PR, and `url`, FFBox's page on Lothsahn's network). */
+  summary?: ProviderConversation;
+  conversation?: { title?: string; state?: string; kind?: string; agentClass?: string; branch?: string; verdict?: string; costUsd?: number; discordLink?: string; reportIds?: string[]; ledger?: string; updatedAt?: string };
+  /** Newest first. */
+  turns: ProviderTurn[];
+  page?: { offset: number; limit: number; total: number };
+}
+
+export interface ProviderTurn {
+  id?: number;
+  seq?: number;
+  trigger?: string;
+  status?: string;
+  requester?: 'operator' | 'player';
+  venue?: 'public' | 'private';
+  queuedAt?: string;
+  startedAt?: string;
+  endedAt?: string;
+  error?: string;
+  /** The turn's own last words. */
+  summary?: string;
+  runs: { state?: string; costUsd?: number; numTurns?: number; agentSecs?: number; branch?: string; pushed?: boolean; pr?: number; noBranchReason?: string; verification?: { ran?: boolean; compiled?: boolean; testsRun?: number; testsPassed?: number; testsFailed?: number } }[];
+  /** The messages it answered: who as a role (a player's display name at most), never an id. */
+  messages: { at?: string; from?: 'operator' | 'player' | 'bot'; name?: string; text?: string }[];
+  /** What FFBox posted; a held or refused reply has a status and no text. */
+  replies: { at?: string; status?: string; text?: string }[];
+}
+
 /** One report ffintake filed: only the facts ffintake computed or pattern-checked; never the report's own text. */
 export interface ProviderIntakeEvent {
   reportId: string;

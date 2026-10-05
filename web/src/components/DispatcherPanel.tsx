@@ -4,6 +4,7 @@ import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../../../shared/workState';
+import { FFBOX_LAN_LABEL, ffboxConversationHref, isFfboxConversationId } from '../../../shared/ffboxLinks';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
 import { dispatcherGlance, fmtCost, fmtRelative, href, isBusy, isOpenWork, lsGet, lsSet, navigate, useNow, workLabel, workTone, type Tone } from '../util';
@@ -512,12 +513,26 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
               {s.untrusted ? <span className="tone-amber"> · players’ text, untrusted</span> : null}
               {s.version ? ` · version ${s.version}` : ''}
               {s.reporter ? ` · reported by ${s.reporter}` : ''}
+              {s.kind.startsWith('ffbox') && isFfboxConversationId(s.conversation) ? (
+                <>
+                  {' · '}
+                  <a href={ffboxConversationHref(s.conversation)} data-testid={`work-ffbox-conversation-${w.id}`}>
+                    FFBox conversation
+                  </a>
+                </>
+              ) : null}
               {s.url ? (
                 <>
                   {' · '}
-                  <a href={s.url} target="_blank" rel="noreferrer noopener">
-                    {s.url.startsWith('https://discord.com/') ? 'Discord thread' : 'on FFBox'}
-                  </a>
+                  {s.url.startsWith('https://discord.com/') ? (
+                    <a href={s.url} target="_blank" rel="noreferrer noopener">
+                      Discord thread
+                    </a>
+                  ) : (
+                    <a href={s.url} target="_blank" rel="noreferrer noopener" title="FFBox's own page: it opens only on Lothsahn's home network">
+                      FFBox {FFBOX_LAN_LABEL}
+                    </a>
+                  )}
                 </>
               ) : null}
               {s.alsoThreads?.length ? ` · also reported ${s.alsoThreads.length} more time(s)` : ''}

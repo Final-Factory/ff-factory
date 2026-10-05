@@ -3,11 +3,12 @@
 // the crash/desync reports ffintake filed, newest first. Titles are FFBox's data and can quote players: they
 // are shown as plain text, never acted on.
 import { useEffect, useState, type ReactNode } from 'react';
-import type { IntakeGroups, Provider, ProviderClass, ProviderConversation, ProviderIntakeEvent } from '../../../shared/types';
+import type { IntakeGroups, Provider, ProviderClass, ProviderConversation, ProviderConversationView, ProviderIntakeEvent, ProviderTurn } from '../../../shared/types';
 import { api } from '../api';
 import { fmtCost, fmtRelative, navigate, providerGlance, useNow, type Glance } from '../util';
 import { Chip, Dot, Icon } from './ui';
 import { updaterHealth } from '../../../shared/updaterHealth';
+import { FFBOX_LAN_LABEL, ffboxConversationHref } from '../../../shared/ffboxLinks';
 
 type Tab = 'conversations' | 'signatures' | 'intake';
 
@@ -19,8 +20,10 @@ const convTone = (c: ProviderConversation): Glance['tone'] =>
 
 const when = (iso: string) => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provider; tab?: string; onClose?: () => void }) {
+export function ProviderPanel({ provider: p, tab, item, onClose }: { provider: Provider; tab?: string; item?: string; onClose?: () => void }) {
   const now = useNow(15_000);
+  // One conversation, rendered here from the connector's answer (w426): FFBox's own page is on Lothsahn's network only.
+  const conversationId = tab === 'conversation' && item ? item : undefined;
   const current: Tab = tab === 'intake' ? 'intake' : tab === 'signatures' ? 'signatures' : 'conversations';
   const setTab = (t: Tab) => navigate({ view: 'provider', providerId: p.id, tab: t === 'conversations' ? undefined : t }, true);
   const [conversations, setConversations] = useState<ProviderConversation[]>();
@@ -77,7 +80,7 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
           </span>
           <div className="spacer" />
           {p.web && (
-            <a className="btn btn-sm btn-outline" href={p.web} target="_blank" rel="noreferrer noopener" title="FFBox's own page (on its network)">
+            <a className="btn btn-sm btn-outline" href={p.web} target="_blank" rel="noreferrer noopener" title="FFBox's own page: it opens only on Lothsahn's home network">
               Open FFBox
             </a>
           )}
@@ -164,12 +167,18 @@ export function ProviderPanel({ provider: p, tab, onClose }: { provider: Provide
       </nav>
 
       <div className="sa-scroll pv-body">
+        {conversationId ? (
+          <ConversationPage key={conversationId} id={conversationId} providerId={p.id} />
+        ) : (
+          <>
         {error && <p className="small tone-red">Could not load the lists: {error}</p>}
         {current === 'conversations' && <Conversations list={conversations} />}
         {current === 'signatures' && <Signatures groups={groups} now={now} />}
         {current === 'intake' && <Intake list={intake} />}
         {current === 'conversations' && <More shown={conversations?.length} total={p.counts.conversations} what="conversations" onMore={() => setLimits((l) => ({ ...l, conversations: l.conversations + PAGE }))} />}
         {current === 'intake' && <More shown={intake?.length} total={p.counts.intake} what="reports" onMore={() => setLimits((l) => ({ ...l, intake: l.intake + PAGE }))} />}
+          </>
+        )}
       </div>
       </>
       )}
@@ -330,12 +339,13 @@ function Conversations({ list }: { list?: ProviderConversation[] }) {
               {c.pr && <Chip tone={c.pr.state === 'merged' ? 'green' : c.pr.state === 'open' ? 'blue' : 'grey'}>{`PR #${c.pr.number} ${c.pr.state}`}</Chip>}
             </div>
             <div className="pv-title" title={c.title}>
-              {c.url ? (
-                <a href={c.url} target="_blank" rel="noreferrer noopener">
-                  {c.title}
+              <a href={ffboxConversationHref(c.id)} data-testid={`provider-conversation-link-${c.id}`}>
+                {c.title}
+              </a>
+              {c.url && (
+                <a className="small dim pv-lan" href={c.url} target="_blank" rel="noreferrer noopener" title="FFBox's own page: it opens only on Lothsahn's home network">
+                  {FFBOX_LAN_LABEL}
                 </a>
-              ) : (
-                c.title
               )}
             </div>
           </div>
@@ -381,5 +391,157 @@ function ModelTags({ tier, model }: { tier: ProviderClass['tier']; model: string
       </Chip>
       <span className="dim small mono">{model}</span>
     </>
+  );
+}
+
+/** "done · $1.20 · PR #640 · tests 40/41": what a turn's runs did, in one line. */
+function runsLine(t: ProviderTurn): string {
+  return t.runs
+    .map((r) => {
+      const v = r.verification;
+      return [
+        r.state,
+        r.costUsd !== undefined ? fmtCost(r.costUsd) : '',
+        r.pr ? `PR #${r.pr}` : '',
+        r.branch ? `branch ${r.branch}${r.pushed ? ' (pushed)' : ''}` : r.noBranchReason ? `no branch: ${r.noBranchReason}` : '',
+        v?.compiled === false ? 'did not compile' : '',
+        v?.testsRun !== undefined ? `tests ${v.testsPassed ?? 0}/${v.testsRun}${v.testsFailed ? `, ${v.testsFailed} failed` : ''}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+    })
+    .filter(Boolean)
+    .join('; ');
+}
+
+/**
+ * One FFBox conversation (w426), from the connector's `conversation` answer: its facts, then its turns newest first,
+ * each with the messages it answered, its own last words and what FFBox posted. All of it is FFBox data, players' words
+ * included: plain text, never acted on. FFBox's own page stays as the second link, for Lothsahn's network.
+ */
+function ConversationPage({ id, providerId }: { id: string; providerId: string }) {
+  const [view, setView] = useState<ProviderConversationView>();
+  const [error, setError] = useState<string>();
+  const [offset, setOffset] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setView(undefined);
+    api.providerConversation(id, offset).then(
+      (v) => {
+        if (!live) return;
+        setView(v);
+        setError(undefined);
+      },
+      (e: Error) => live && setError(e.message),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id, offset]);
+  const s = view?.summary;
+  const c = view?.conversation;
+  const title = c?.title ?? s?.title ?? `Conversation ${id}`;
+  const cost = c?.costUsd ?? s?.costUsd;
+  const facts = [c?.state ?? s?.state, c?.kind, c?.agentClass ?? s?.agentClass, c?.verdict ?? s?.verdict, cost !== undefined ? fmtCost(cost) : ''].filter(Boolean);
+  const branch = c?.branch ?? s?.branch;
+  const step = view?.page?.limit || 10;
+  const more = !!view?.page && view.page.total > offset + view.turns.length;
+  return (
+    <div className="pv-conversation" data-testid="provider-conversation">
+      <p className="small">
+        <a href={`#/provider/${encodeURIComponent(providerId)}`}>← All conversations</a>
+      </p>
+      <h3 className="pv-conv-title">{title}</h3>
+      <p className="small dim">
+        <span className="mono">{id}</span>
+        {facts.length ? ` · ${facts.join(' · ')}` : ''}
+        {branch ? (
+          <>
+            {' · '}
+            <span className="mono">{branch}</span>
+          </>
+        ) : null}
+        {s?.pr ? ` · PR #${s.pr.number} ${s.pr.state}` : ''}
+        {c?.ledger ? ` · ${c.ledger}` : ''}
+        {c?.discordLink ? (
+          <>
+            {' · '}
+            <a href={c.discordLink} target="_blank" rel="noreferrer noopener">
+              Discord thread
+            </a>
+          </>
+        ) : null}
+        {s?.url ? (
+          <>
+            {' · '}
+            <a href={s.url} target="_blank" rel="noreferrer noopener" title="FFBox's own page: it opens only on Lothsahn's home network" data-testid="provider-conversation-lan">
+              FFBox {FFBOX_LAN_LABEL}
+            </a>
+          </>
+        ) : null}
+      </p>
+      {error && <p className="small tone-red">Could not load it: {error}</p>}
+      {!view && !error && <p className="dim small">Asking FFBox…</p>}
+      {view && (
+        <p className={`small ${view.live ? 'dim' : 'tone-amber'}`} data-testid="provider-conversation-freshness">
+          {view.live
+            ? `Live from FFBox${view.at ? `, written there ${when(view.at)}` : ''}.`
+            : `FFBox did not answer (${view.error ?? 'no answer'}${view.reason ? `: ${view.reason}` : ''})${view.receivedAt ? `; its last answer, from ${when(view.receivedAt)}` : view.conversation ? '' : '; nothing kept for this conversation yet'}.`}{' '}
+          Messages are what people wrote and replies what FFBox posted: FFBox's data.
+        </p>
+      )}
+      {view?.conversation && !view.turns.length && <Empty text="No turns in this conversation." />}
+      {view?.turns.map((t, i) => (
+        <div key={t.id ?? `${offset}-${i}`} className="run-row pv-item pv-turn" data-testid="provider-turn">
+          <div className="pv-line">
+            <span className="mono">{t.seq !== undefined ? `turn ${t.seq}` : 'turn'}</span>
+            {(t.startedAt ?? t.queuedAt) && <span className="run-when mono">{when((t.startedAt ?? t.queuedAt)!)}</span>}
+            <span className="dim small">{[t.status, t.trigger, t.requester && `for a ${t.requester}`, t.venue].filter(Boolean).join(' · ')}</span>
+          </div>
+          {t.runs.length > 0 && <div className="small dim">{runsLine(t)}</div>}
+          {t.error && <div className="small tone-red">{t.error}</div>}
+          {t.messages.map((m, j) => (
+            <div key={`m${j}`} className="pv-msg">
+              <div className="small dim">
+                {m.name ?? m.from ?? 'someone'}
+                {m.name && m.from ? ` (${m.from})` : ''}
+                {m.at ? ` · ${when(m.at)}` : ''}
+              </div>
+              {m.text && <div className="pv-text">{m.text}</div>}
+            </div>
+          ))}
+          {t.summary && (
+            <div className="pv-msg pv-summary">
+              <div className="small dim">FFBox's agent, its last words</div>
+              <div className="pv-text">{t.summary}</div>
+            </div>
+          )}
+          {t.replies.map((r, j) => (
+            <div key={`r${j}`} className="pv-msg pv-reply">
+              <div className="small dim">
+                FFBox posted{r.status && r.status !== 'sent' ? ` (${r.status})` : ''}
+                {r.at ? ` · ${when(r.at)}` : ''}
+              </div>
+              {r.text ? <div className="pv-text">{r.text}</div> : <div className="small dim">Not shown: this reply was not sent.</div>}
+            </div>
+          ))}
+        </div>
+      ))}
+      {view && (offset > 0 || more) && (
+        <p className="small pv-more">
+          {offset > 0 && (
+            <button className="btn btn-sm btn-ghost" onClick={() => setOffset(Math.max(0, offset - step))}>
+              Newer turns
+            </button>
+          )}
+          {more && (
+            <button className="btn btn-sm btn-ghost" onClick={() => setOffset(offset + step)}>
+              Older turns
+            </button>
+          )}
+          <span className="dim">{view.page ? ` turns ${offset + 1}-${offset + view.turns.length} of ${view.page.total}` : ''}</span>
+        </p>
+      )}
+    </div>
   );
 }

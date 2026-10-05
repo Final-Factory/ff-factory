@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox conversations open in FF Factory** (w426, asked by Ben). FFBox's links (the FFBox page's conversations,
+  the ledger's "on FFBox", the intake brief) went to its address on Lothsahn's home network
+  (https://192.168.51.10:8787/conversation/684), which opens nowhere else. A conversation now opens on FF Factory's
+  FFBox page, read through the connector's `conversation` query: its turns, the messages each answered, the agent's
+  last words and FFBox's replies, checked and cleaned on the server and shown as plain text. FFBox's own page stays
+  as the second link, "on Loth's network" ([docs/ffbox.md](docs/ffbox.md)).
+
 - **Pick several request states at once** (w418 follow-up, asked by Lothsahn). The state chips on the Dispatcher's
   Requests tab, and now on the Intake tab's ledger list, toggle independently (e.g. Stalled and Merged, follow-up
   pending), with "All" and "Clear", and the choice survives a reload. `list_work` takes `state` as one state or a list.
