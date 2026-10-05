@@ -217,7 +217,7 @@ deploy/vm/host/uninstall.sh --delete-disk
 ! virsh dominfo $VM >/dev/null 2>&1 || fail "the domain is still defined"
 ! virsh net-info fff-isolated >/dev/null 2>&1 || fail "the network is still defined"
 ! nft list table inet fff_vm >/dev/null 2>&1 || fail "the firewall table is still loaded"
-[ ! -e /usr/local/sbin/fff-vm ] && [ ! -e /etc/systemd/system/fff-vm-watch.timer ] || fail "files left"
+if [ -e /usr/local/sbin/fff-vm ] || [ -e /etc/systemd/system/fff-vm-watch.timer ]; then fail "files left"; fi
 echo "libvirt default network autostart after uninstall: $(virsh net-info default 2>/dev/null | awk '/^Autostart:/ {print $2}')"
 echo
 echo "ALL PASSED ($MODE)"

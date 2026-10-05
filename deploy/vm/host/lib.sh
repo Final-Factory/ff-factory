@@ -76,7 +76,7 @@ vm_disk_path() {
 }
 
 # Manifest: what install changed, so uninstall undoes exactly that. One "key=value" per line, last one wins.
-manifest_get() { [ -f "$FFF_VM_MANIFEST" ] && grep -E "^$1=" "$FFF_VM_MANIFEST" | tail -n 1 | cut -d= -f2- || true; }
+manifest_get() { if [ -f "$FFF_VM_MANIFEST" ]; then grep -E "^$1=" "$FFF_VM_MANIFEST" | tail -n 1 | cut -d= -f2- || true; fi; }
 manifest_set() {
   if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would record $1=$2 in $FFF_VM_MANIFEST"; return 0; fi
   mkdir -p "$(dirname "$FFF_VM_MANIFEST")"

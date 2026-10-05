@@ -38,7 +38,10 @@ tar -C "$FFF_ROOT" --warning=no-file-changed --exclude=home/.cache --exclude=hom
 codes=("${PIPESTATUS[@]}")
 set -o pipefail
 # GNU tar exits 1 when a file changed while it was read (a live server's data): still a usable backup.
-[ "${codes[0]}" -le 1 ] && [ "${codes[1]}" -eq 0 ] || { rm -f "$out"; fail "tar exited ${codes[0]}, age ${codes[1]}"; }
+if [ "${codes[0]}" -gt 1 ] || [ "${codes[1]}" -ne 0 ]; then
+  rm -f "$out"
+  fail "tar exited ${codes[0]}, age ${codes[1]}"
+fi
 size=$(du -h "$out" | cut -f1)
 
 sftp_b() { sftp -q -b - -i "$BACKUP_SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/fff/backup_known_hosts "$BACKUP_SSH_TARGET"; }

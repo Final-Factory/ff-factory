@@ -20,11 +20,14 @@ WATCH_STATE=$FFF_VM_STATE/watch.state
 MAINT=$FFF_VM_RUN/maintenance
 
 # ---------------------------------------------------------------- small helpers
-state_get() { [ -f "$WATCH_STATE" ] && grep -E "^$1=" "$WATCH_STATE" | tail -n 1 | cut -d= -f2- || true; }
+state_get() { if [ -f "$WATCH_STATE" ]; then grep -E "^$1=" "$WATCH_STATE" | tail -n 1 | cut -d= -f2- || true; fi; }
 state_set() {
   local tmp
   tmp=$(mktemp "$FFF_VM_STATE/.watch.XXXXXX")
-  { [ -f "$WATCH_STATE" ] && grep -vE "^$1=" "$WATCH_STATE" || true; echo "$1=$2"; } >"$tmp"
+  {
+    if [ -f "$WATCH_STATE" ]; then grep -vE "^$1=" "$WATCH_STATE" || true; fi
+    echo "$1=$2"
+  } >"$tmp"
   mv "$tmp" "$WATCH_STATE"
 }
 now() { date +%s; }

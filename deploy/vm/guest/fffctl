@@ -122,7 +122,9 @@ cmd_tailscale_join() {
     case "$1" in --authkey-file) keyfile=$2; shift ;; --hostname) host=$2; shift ;; --tag) tag=$2; shift ;; *) die "unknown option $1" ;; esac
     shift
   done
-  [ -n "$keyfile" ] && [ -r "$keyfile" ] || die "--authkey-file FILE: a tagged ($tag), pre-approved, non-ephemeral auth key from the tailnet's admin console, in a file (chmod 600); it is read from the file, never from the command line"
+  if [ -z "$keyfile" ] || [ ! -r "$keyfile" ]; then
+    die "--authkey-file FILE: a tagged ($tag), pre-approved, non-ephemeral auth key from the tailnet's admin console, in a file (chmod 600); it is read from the file, never from the command line"
+  fi
   # file: keeps the key off the command line, where any process could read it.
   tailscale up --auth-key="file:$keyfile" --hostname="$host" --advertise-tags="$tag"
   tailscale set --auto-update
@@ -135,7 +137,7 @@ cmd_tailscale_join() {
 cmd_gh_login() {
   local tf=""
   while [ $# -gt 0 ]; do case "$1" in --token-file) tf=$2; shift ;; *) die "unknown option $1" ;; esac; shift; done
-  [ -n "$tf" ] && [ -r "$tf" ] || die "--token-file FILE: the portal's fine-grained GitHub token (decision D7), in a file"
+  if [ -z "$tf" ] || [ ! -r "$tf" ]; then die "--token-file FILE: the portal's fine-grained GitHub token (decision D7), in a file"; fi
   as_fff gh auth login --hostname github.com --with-token <"$tf"
   as_fff gh auth setup-git --hostname github.com
   as_fff gh auth status --hostname github.com 2>&1 | grep -v -i token || true
