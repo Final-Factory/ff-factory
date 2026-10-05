@@ -51,10 +51,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   (after only its hardware read) closed the request while another worker's PR was unpushed. Each DONE now records that
   worker's part; the request closes once every worker on it has said DONE, ended, or moved on to newer work, and the
   last one ending closes it on the latest DONE's report ([docs/orchestrators.md](docs/orchestrators.md)).
+
 - **`republish_public` works from BEAST** (w434). Its scan for this machine's own names stopped on "BEAST", which 69
   files name on purpose; the portal's machine ids are now public names, its other names (user, tailnet, Funnel host, ssh
   keys) are still checked. A comment naming BEAST in `scripts/common.ps1` is gone, and `server/republish.test.ts` injects
   the machine's names, so it no longer depends on the runner's hostname, and checks that the guard stops a private name.
+
+- **A person's orchestrator follows up on any worker their request is on** (w431, asked by Ben). `message_agent` from a
+  personal orchestrator was refused for a worker someone else started once the person's linked request was stalled
+  (w426) or done (w427, w428, w430). It now counts every request of the person the worker is on that is open, stalled
+  or closed in the last 7 days, and the message says which on an `[about w426 "title"]` line. Workers with no request
+  of the person stay refused; the 3-per-worker limit is unchanged.
 
 - **The ledger cleanup reads the end of a worker's report, and a PR can be one step of a request** (w424, asked by
   Lothsahn after w424 was closed twice, on #99 and #100, while its worker's reports ended "w424: still open: …"). A

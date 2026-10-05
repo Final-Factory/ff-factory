@@ -16,7 +16,12 @@ person. It runs on their own Claude token when config `userClaudeEnv` has one, o
   `system_status`, `ffbox_activity`, `max_activity`, `list_standing_agents`, `list_delegation_requests`;
 - its own `wake_me`, its own timers (`set_timer`, `list_timers`, `update_timer`, `cancel_timer`; [Timers](#timers)), and
   its person's heartbeat (`set_heartbeat`);
-- `message_agent`, only to its person's own workers (they started it, or one of their requests is on it);
+- `message_agent`, only to its person's own workers: one they started, or one any of their requests is on (the
+  dispatcher started it for the request, sent it the request with `work_id`, or linked it), whoever started it, while
+  that request is open, stalled or closed in the last 7 days (w431: a worker Lothsahn started and the dispatcher then
+  sent Ben's w426 was refused to Ben, because w426 was stalled; one on Ben's finished w427/w428/w430, because they were
+  done). The message carries `[about w426 "title"]` under the sender line, so the worker knows which of the person's
+  requests it is about; at most 3 per worker until the person writes again;
 - the ledger: `request_work`, `list_work`, `update_work`;
 - `message_person`, to another person's own orchestrator ([People to people](#people-to-people)).
 

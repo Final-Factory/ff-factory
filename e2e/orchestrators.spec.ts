@@ -207,7 +207,9 @@ test("worker updates go to the chats of the people the work is for, never to the
     expect(r.ok(), await r.text()).toBeTruthy();
     const v = (await r.json()) as { id: string };
     expect(await useTool(mateCtx.request, mate.orchestratorId, 'message_agent', { session_id: v.id, text: `also the tooltips ${tag}` })).toBe('Sent, for Team Mate.');
-    await expect.poll(async () => (await heard(page.request, mate.orchestratorId, '[worker update]', `Echo: also the tooltips ${tag}`)).length).toBe(1);
+    // The ledger recorded the teammate's start as their request, so the follow-up names it on an [about …] line (w431).
+    await expect.poll(async () => (await heard(page.request, mate.orchestratorId, '[worker update]', `also the tooltips ${tag}`)).length).toBe(1);
+    expect((await heard(page.request, mate.orchestratorId, '[worker update]', `also the tooltips ${tag}`))[0]).toMatch(/Echo: \[about w\d+ "Inventory /);
     expect(await heard(page.request, me.orchestratorId, '[worker update]', `Inventory ${tag}`)).toEqual([]);
     // And the owner's orchestrator may not follow up on the teammate's worker.
     expect(await useTool(page.request, me.orchestratorId, 'message_agent', { session_id: v.id, text: 'mine now' })).toBe(`ERROR: ${v.id} "Inventory ${tag}" is Team Mate's work: follow up only on tester's own workers; for anything else, request_work`);
