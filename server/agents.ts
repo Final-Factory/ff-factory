@@ -1904,7 +1904,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             const linked = !!item?.sessionIds.includes(w.info.id);
             // A worker newly given a request gets its attachments too; one already on it has them.
             const files = this.attachmentsFor(attachments, linked ? undefined : item);
-            await this.sendWithAttachments(session_id, `${item?.source && !linked ? `${text}${workerRules(item, this.sandboxBranchOf({ sandbox: w.info.sandboxId, machine: w.info.machineId, machineSandbox: w.info.machineSandbox }))}` : text}${item && !linked ? requestLineRule(item) : ''}`, from, { requestedBy, attachments: files });
+            // A worker moved to another request first wraps up the ones it was on (w419): DONE, or what is still open.
+            const wrap = work_id ? this.orchestrators.wrapUpBefore(w.info.id, work_id) : '';
+            await this.sendWithAttachments(session_id, `${wrap}${item?.source && !linked ? `${text}${workerRules(item, this.sandboxBranchOf({ sandbox: w.info.sandboxId, machine: w.info.machineId, machineSandbox: w.info.machineSandbox }))}` : text}${item && !linked ? requestLineRule(item) : ''}`, from, { requestedBy, attachments: files });
             if (work_id) this.orchestrators.linkWorker(work_id, w.info, `sent to ${this.orchestrators.workerLine(w.info.id)}, already on it`);
             return `Sent, for ${requestedBy.displayName}${work_id ? ` (${work_id})` : ''}${sent(files.length)}.${Agents.goneLine(files)}${this.queuedLine(session_id)}`;
           }),

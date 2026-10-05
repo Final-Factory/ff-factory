@@ -203,6 +203,76 @@ export function cutOffOf(s: Pick<SessionInfo, 'status' | 'statusDetail' | 'turnO
   return undefined;
 }
 
+// ---------------------------------------------------------------- DONE: wNNN (w419)
+
+/**
+ * The requests a worker's report says are finished: lines that are only `DONE: w342` (markdown around it allowed), one
+ * request per line, several lines allowed. A mention inside a sentence ("reply DONE: w342") is not one.
+ */
+export function doneIdsIn(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*DONE:?\s+(w\d+)[\s.`*_]*$/gim)) out.add(m[1].toLowerCase());
+  return [...out];
+}
+
+/** Words that say how a step after the merge went: a report that says DONE must cover it. */
+const STEP_REPORTED = /\b(audit(ed)?|2-peer|two-peer|paired|verif(y|ied|ication)|checked|nightly|soak|no desyncs?|first[- ]hour|re-?ran|ran|passed|green|confirmed)\b/i;
+
+/**
+ * Why a worker's `DONE: <id>` cannot close this request yet, or undefined when it can: a pull request of it is still
+ * open, a release whose report does not link the posted patch notes and say it is live, a step after the merge the
+ * brief asks for that the report does not cover, or a brief that plans several PRs when fewer than two merged and the
+ * report does not say they all did.
+ */
+export function doneProblem(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'prs'>, report: string): string | undefined {
+  const open = (w.prs ?? []).find((p) => p.state === 'open');
+  if (open) return `PR #${open.number} is still open: merge or close it first`;
+  const brief = `${w.title}\n${w.brief}\n${w.constraints ?? ''}`;
+  if (isRelease(w) && !(NOTES_POSTED.test(report) && /\b(live|landed)\b/i.test(report))) return 'a release is done when its build is live and its patch notes are posted: say it is live and link the posted notes';
+  if (PEER_CHECK.test(brief) && !STEP_REPORTED.test(report)) return 'its brief asks for a step after the merge (a check, an audit, a verification): say in the report what it showed';
+  const merged = (w.prs ?? []).filter((p) => p.state === 'merged').length;
+  if (PLAN.test(brief) && merged < 2 && !/\b(all|both|every|the last|final) (of the )?(prs?|pull requests|parts|phases|steps|stages)\b/i.test(report)) return 'its brief plans more than one PR: say they have all merged';
+  return undefined;
+}
+
+// ---------------------------------------------------------------- asking about a merged request (w419)
+
+/** No word about a merged request this long, and the cleanup asks its worker whether it is done (see followUpDecision). */
+export const FOLLOW_UP_QUIET_MS = 6 * 3_600_000;
+/** At most one such question per request a day. */
+export const FOLLOW_UP_EVERY_MS = 24 * 3_600_000;
+
+export type FollowUp = { kind: 'ask'; worker: SessionInfo; why: string; quietHours: number } | { kind: 'stall'; why: string };
+
+/**
+ * What the cleanup does about a request whose pull requests merged but which stays open for a step after the merge
+ * (`reason`, afterMergeReason's): nothing while there was word about it in the last 6 hours (a report from a worker still
+ * on it, the merge itself, or the last question) or it was asked in the last day; else ask its most recent worker
+ * "Is it done?", or, when no worker is left to ask, stall it as follow-up unconfirmed. `serving` says whether a worker's
+ * current turn is on this request (shared/workState.ts servedBy): a worker that moved on brings no word about it.
+ */
+export function followUpDecision(
+  w: Pick<WorkItem, 'prs' | 'followUp'>,
+  workers: readonly SessionInfo[],
+  reason: string,
+  now: number,
+  serving: (s: SessionInfo) => boolean,
+  canResume: boolean,
+): FollowUp | undefined {
+  const prs = w.prs ?? [];
+  const merged = prs.filter((p) => p.state === 'merged');
+  if (!merged.length || prs.some((p) => p.state === 'open')) return undefined;
+  const asked = w.followUp ? Date.parse(w.followUp.at) || 0 : 0;
+  if (asked && now - asked < FOLLOW_UP_EVERY_MS) return undefined;
+  const mergedAt = Math.max(0, ...merged.map((p) => Date.parse(p.at ?? '') || 0));
+  const word = Math.max(mergedAt, asked, ...workers.filter(serving).map((s) => Date.parse(s.lastActivityAt) || 0));
+  if (now - word < FOLLOW_UP_QUIET_MS) return undefined;
+  const quietHours = Math.floor((now - word) / 3_600_000);
+  const worker = [...workers].filter((s) => s.status !== 'error').sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))[0];
+  if (!worker || !canResume) return { kind: 'stall', why: `follow-up unconfirmed: ${reason}, no word for ${quietHours} h, and ${worker ? 'this server cannot resume its worker' : 'no worker is left to ask'}` };
+  return { kind: 'ask', worker, why: reason, quietHours };
+}
+
 // ---------------------------------------------------------------- gone quiet, and covered by newer work
 
 /** A request nothing is working on: new, queued or active, with no one's question, approval or design call pending. */

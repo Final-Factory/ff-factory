@@ -40,6 +40,8 @@ import {
 } from './work.ts';
 import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, parseMarkers, quoteUntrusted, sourceTag } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
+import { doneIdsIn, doneProblem } from './ledgerRules.ts';
+import { servedBy } from '../shared/workState.ts';
 import { displayName } from '../shared/labels.ts';
 import type { AttachmentRef, Machine, WorkAutoClosed, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
@@ -987,14 +989,115 @@ export class Orchestrators {
   /** A worker finished a turn: the requests it works on record its last word. */
   workerTurnEnded(s: SessionInfo, text: string) {
     this.intakeMarkers(s, text);
+    this.doneMarkers(s, text);
+    const wrapped = this.wrapUpAnswers(s, text);
     const line = clip(firstLine(text), 300);
     for (const w of this.itemsOf(s.id)) {
-      if (!line) continue;
+      if (!line || wrapped.has(w.id)) continue;
       w.outcome = line;
       this.stamp(w, `worker ${s.id}: ${line}`);
       this.store.putWork(w);
     }
     this.capacityMayHaveFreed(`worker ${s.id} "${clip(s.title, 60)}" finished a turn`);
+  }
+
+  // ---------------------------------------------------------------- DONE: wNNN and the wrap-up (w419)
+
+  /** The refusals already sent, by "<session>:<request>:<why>", so a worker that repeats a refused DONE is told once in 6 hours. */
+  private readonly doneRefused = new Map<string, number>();
+  /** Workers asked to wrap up their requests before new work (wrapUpBefore), by session id: the request ids asked about. */
+  private readonly wrapUps = new Map<string, Set<string>>();
+
+  /**
+   * A worker's `DONE: wNNN` lines (docs/orchestrators.md, "Ledger cleanup"): each closes that request as done, with the
+   * report as its note, when the worker is one of its workers and nothing is missing (server/ledgerRules.ts doneProblem);
+   * else the worker is told what is missing. A request already closed stays as it is (a close by hand is final, w370).
+   */
+  private doneMarkers(s: SessionInfo, text: string) {
+    const ids = doneIdsIn(text);
+    if (!ids.length) return;
+    const refused: string[] = [];
+    const report = clip(firstLine(text), 300);
+    for (const id of ids) {
+      const w = this.store.work.get(id);
+      if (!w) {
+        refused.push(`${id}: there is no such request`);
+        continue;
+      }
+      if (!(isOpen(w) || w.status === 'stalled')) continue;
+      if (!w.sessionIds.includes(s.id)) {
+        refused.push(`${id}: you are not one of its workers, so your DONE does not close it (tell the dispatcher in your report instead)`);
+        continue;
+      }
+      const problem = doneProblem(w, text);
+      if (problem) {
+        refused.push(`${id}: ${problem}`);
+        this.stamp(w, `worker ${s.id} said DONE, refused: ${problem}`);
+        this.store.putWork(w);
+        continue;
+      }
+      settleByHand(w);
+      w.status = 'done';
+      w.stalled = undefined;
+      w.outcome = report || `done (its worker ${s.id} said DONE)`;
+      this.stamp(w, `closed as done: worker ${s.id} said DONE: ${w.id}. Its report: ${report}`);
+      this.store.putWork(w);
+      this.toPeople(w.requesters, `[ledger] ${w.id} "${clip(w.title, 100)}" closed as done: its worker ${s.id} said DONE. Its report: "${clip(report, 200)}"`);
+    }
+    if (!refused.length) return;
+    const now = this.now().getTime();
+    const fresh = refused.filter((r) => {
+      const key = `${s.id}:${r}`;
+      const last = this.doneRefused.get(key);
+      if (last !== undefined && now - last < 6 * 3_600_000) return false;
+      this.doneRefused.set(key, now);
+      return true;
+    });
+    if (!fresh.length) return;
+    try {
+      this.sessions.send(s.id, `[ledger] Your DONE was not accepted:\n${fresh.map((r) => `- ${r}`).join('\n')}\nFinish what is missing and end a later report with the DONE line again, or say in one line what is still open.`, 'system', undefined, { requestedBy: s.requestedBy });
+    } catch {
+      // it is at a limit: the requests' logs have the refusal
+    }
+  }
+
+  /**
+   * The dispatcher is about to send worker `sessionId` work for `workId`: when its current turn is on other requests
+   * (shared/workState.ts servedBy), the text to put first, asking it to close each with DONE or say what is still open.
+   * Each of those requests' logs says so, and the worker's next report is recorded on them (wrapUpAnswers). Empty when
+   * it is no switch.
+   */
+  wrapUpBefore(sessionId: string, workId: string): string {
+    const serving = servedBy(sessionId, [...this.store.work.values()]);
+    if (serving.has(workId)) return '';
+    const old = [...serving].map((id) => this.store.work.get(id)).filter((w): w is WorkItem => !!w && isOpen(w));
+    if (!old.length) return '';
+    for (const w of old) {
+      this.stamp(w, `worker ${sessionId} was sent ${workId}: asked to wrap ${w.id} up first (DONE or what is still open)`);
+      this.store.putWork(w);
+    }
+    this.wrapUps.set(sessionId, new Set(old.map((w) => w.id)));
+    const list = old.map((w) => `${w.id} "${clip(w.title, 80)}"`).join(', ');
+    return `[wrap-up] Before the new work below: you were on ${list}. For each, end your reply with a line \`DONE: <id>\` if every step of it is finished (the steps after the merge included), or one line \`<id>: still open: <what>\`. Then carry on with the new work; don't wait for an answer.\n\n`;
+  }
+
+  /** A worker's report after a wrap-up request: each asked-about request gets the line that names it (its DONE is doneMarkers'). */
+  private wrapUpAnswers(s: SessionInfo, text: string): Set<string> {
+    const asked = this.wrapUps.get(s.id);
+    if (!asked) return new Set();
+    this.wrapUps.delete(s.id);
+    const done = new Set(doneIdsIn(text));
+    const recorded = new Set<string>();
+    for (const id of asked) {
+      const w = this.store.work.get(id);
+      if (!w || done.has(id) || !isOpen(w)) continue;
+      const line = text.split('\n').map((l) => l.trim()).find((l) => new RegExp(`\\b${id}\\b`, 'i').test(l));
+      if (line) w.outcome = clip(line.replace(/^[\s*_>`-]+/, ''), 300);
+      this.stamp(w, line ? `wrap-up from worker ${s.id}: ${clip(line, 280)}` : `worker ${s.id} did not say how ${id} stands in its wrap-up`);
+      this.store.putWork(w);
+      recorded.add(id);
+    }
+    return recorded;
   }
 
   // ---------------------------------------------------------------- the intake (docs/intake.md)

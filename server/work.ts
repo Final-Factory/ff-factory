@@ -321,7 +321,14 @@ export function describeItem(w: WorkItem, workerLine: (id: string) => string, no
  * closes itself when they merge (docs/orchestrators.md, "Pull requests"), so a step that follows the merge belongs in the brief.
  */
 export const requestLineRule = (w: Pick<WorkItem, 'id'>) =>
-  `\n\nWhen you open a pull request for this request, put a line \`Request: ${w.id}\` in its description. The ledger links the PR to the request by it, and closes the request when the PR merges and nothing is left; if more work follows the merge, say so in your last report.`;
+  `\n\nWhen you open a pull request for this request, put a line \`Request: ${w.id}\` in its description. The ledger links the PR to the request by it, and closes the request when the PR merges and nothing is left; if more work follows the merge, say so in your last report.${doneRule(w)}`;
+
+/**
+ * The DONE marker (w419): how a worker closes its request itself once every step is finished, post-merge steps included.
+ * The ledger refuses one while a PR is open or a step after the merge is not covered (server/ledgerRules.ts doneProblem).
+ */
+export const doneRule = (w: Pick<WorkItem, 'id'>) =>
+  ` When every step of ${w.id} is finished, the steps after the merge included (a check, an audit, a release's notes), end your report with a line \`DONE: ${w.id}\` (one line per request, several allowed). The ledger closes it on that line, with your report as the note, and tells you what is missing instead while a PR of it is open or the report does not say how a step after the merge went. Never write it while something is left: say what is left instead.`;
 
 /** The message the dispatcher gets for a new request. */
 export function requestNotice(w: WorkItem): string {
