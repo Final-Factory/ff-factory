@@ -563,7 +563,9 @@ export class UnitySlots {
     const line = countsLine(a);
     if (a.overLimit && !this.overSince) {
       this.overSince = now;
-      const what = a.outside.map((u) => `${u.kind} ${u.project ? path.basename(u.project.replace(/[\\/]+$/, '')) : `pid ${u.pid}`}`);
+      // The machine's own path rules: a Windows project path read on any host.
+      const base = (p: string) => (this.d.platform === 'win32' ? path.win32 : path.posix).basename(p.replace(/[\\/]+$/, ''));
+      const what = a.outside.map((u) => `${u.kind} ${u.project ? base(u.project) : `pid ${u.pid}`}`);
       this.d.onEvent?.(`Unity ${line} on this machine: over its limit. Nothing more is granted (unity start and queued launches wait) until it drops; nothing is stopped.${what.length ? ` Started outside the slot gate: ${what.join(', ')}.` : ''}`);
     } else if (!a.overLimit && this.overSince) {
       this.overSince = 0;
