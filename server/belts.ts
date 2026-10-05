@@ -69,6 +69,7 @@ export const USER_ASKED_TOOLS: ReadonlySet<string> = new Set([
   'remove_machine',
   'migrate_host_sandboxes',
   'relocate_machines',
+  'convert_machine',
   'create_standing_agent',
   'update_standing_agent',
   'delete_standing_agent',

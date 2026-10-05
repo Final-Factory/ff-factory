@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **BEAST stays the same machine when the portal leaves it** (w466, asked by Lothsahn; change 3 of
+  docs/portal-on-ffbox-host.md). `convert_machine {machine, to: "ssh" | "local", ssh_host, portal_url, redeploy?}`
+  turns the portal's own host as a machine into one reached over ssh, or back. Only the record changes: its token,
+  sandboxes, agents and pool settings stay, its daemon stays connected, and its agents run on. Its later ssh
+  redeploys keep the Unity MCP server and idle stop it had from the portal's config. A test runs the whole Windows
+  deploy over ssh from a Linux portal against a fake ssh and scp (docs/machines.md, "Moving the portal").
 - **Daemons follow the portal to a new URL without a redeploy** (w466, asked by Lothsahn; change 9 of
   docs/portal-on-ffbox-host.md). `relocate_machines {url, machines?}` sends connected daemons the portal's new base
   URL. Each keeps it in its `daemon.json`, drops the link and dials it, with its agents running on and its token

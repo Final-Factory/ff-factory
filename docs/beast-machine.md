@@ -170,6 +170,17 @@ and is redeployed once idle; after the restart, workers still running are report
 interrupted)" and the rest are resumed as today. The daemons already queue events while the portal is down (up to 20 000)
 and replay them on reconnect.
 
+## When the portal leaves BEAST
+
+The portal is moving to a VM on the FFBox host ([portal-on-ffbox-host.md](portal-on-ffbox-host.md)). BEAST stays the
+same machine with the same sandboxes:
+
+- `relocate_machines` points its daemon (and the others) at the new URL.
+- `convert_machine beast to: "ssh"` makes its record an ssh machine. It keeps its id, token, sandboxes and agents.
+- Rolling back is the same two calls the other way: relocate to `http://127.0.0.1:<port>`, then convert to `"local"`.
+
+Details in [machines.md](machines.md), "Moving the portal".
+
 ## BEAST-specific things left in place
 
 - The host guard, the Dev Drive remount helpers and the portal's own clean-up rules stay host-side (they are about the

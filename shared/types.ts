@@ -343,6 +343,11 @@ export interface Machine {
   /** The daemon was stopped on purpose (machine_daemon stop): not redeployed while offline until started again. */
   daemonStopped?: boolean;
   /**
+   * daemon.json settings its redeploys over ssh write, kept from when it was the portal's own host (convert_machine,
+   * w466): the MCP-for-Unity server and the idle-editor stop it had from the portal's config.
+   */
+  daemonExtras?: { unityMcpServer?: { command: string; args: string[]; env?: Record<string, string> }; sandboxIdleStopMinutes?: number };
+  /**
    * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
    * away (that would pull it back). Cleared when it says hello here again.
    */

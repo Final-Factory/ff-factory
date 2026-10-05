@@ -530,6 +530,23 @@ machines?}` (protocol 8, w466) sends every connected daemon the new base URL. No
 - **Old daemons:** one from before protocol 8 is refused with "let it be redeployed first". It cannot be relocated, only
   redeployed with a new `portal_url`.
 
+**The portal's own host as a machine** (BEAST, `local`) is reached without ssh and dials the portal at loopback. When
+the portal leaves it, `convert_machine {machine, to: "ssh", ssh_host, portal_url}` (w466, docs/portal-on-ffbox-host.md
+change 3) makes it a machine reached over ssh. `to: "local"` turns it back, on the portal's own Windows computer, which
+must hold its main clone.
+
+- **What changes:** the record only (`convertMachineRecord`): `local`, its host and its `portal_url`. Its id, token,
+  sandboxes, agents, limits, pool settings and protected paths stay.
+- **Nothing else moves:** its daemon stays connected as it is, and its agents run on. `relocate_machines` is what points
+  a connected daemon at another portal.
+- **Kept for later redeploys:** to ssh, it keeps the Unity MCP server and the idle-editor stop it had from the portal's
+  config (`daemonExtras`), so its ssh redeploys write them. It drops "no Max file" and "no clean-up of its own", which
+  only made sense with the portal on the same computer.
+- **`redeploy: true`:** writes the new way into its `daemon.json` at once, with a new token. It is refused, before
+  anything changes, while agents run there.
+- **One local machine at most.** A machine whose clone is not on this computer cannot become it.
+- **The migration script** rewrites a copy of `state.json` with the same function (portal-on-ffbox-host.md 7.3, step 5).
+
 ## Not in v1
 
 Machines other than Macs and Windows PCs.
