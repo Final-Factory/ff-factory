@@ -1149,6 +1149,8 @@ export interface WorkPr {
   sha?: string;
   /** The strong evidence that linked it (server/ledgerRules.ts prsOf): its Request line, its own worker opened it, or its head branch is the request's. Absent on links made before w340, which are checked again. */
   via?: 'line' | 'worker' | 'branch';
+  /** Its description says `Part of: <id>` (w424): one step of the request, whose merge leaves it open for what follows. */
+  partOf?: boolean;
   /** What the log already said about it, so a sweep notes a state once ("merged:release", "closed"). */
   noted?: string;
 }

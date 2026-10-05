@@ -44,9 +44,27 @@ export interface PrRecord {
   sha?: string;
 }
 
-/** The `Request: w293` lines of a PR description: the ledger requests it says it is for. */
+const idsOn = (text: string, re: RegExp) => [...new Set([...text.matchAll(re)].map((m) => m[1].toLowerCase()))];
+
+/** The `Request: w293` and `Part of: w293` lines of a PR description: the ledger requests it says it is for. */
 export function requestIdsIn(text: string): string[] {
-  return [...new Set([...text.matchAll(/^\s*Request:\s*(w\d+)\b/gim)].map((m) => m[1].toLowerCase()))];
+  return idsOn(text, /^\s*(?:Request|Part of):\s*(w\d+)\b/gim);
+}
+
+/**
+ * The requests a PR says it is one step of, with a `Part of: w424` line (w424): linked like a `Request:` line, but its
+ * merge leaves them open for what follows (another PR, a deploy, a check), until a `Request:` PR of theirs merges or
+ * their worker reports `DONE: <id>`. A `Request:` line for the same request wins.
+ */
+export function partOfIdsIn(text: string): string[] {
+  const full = new Set(idsOn(text, /^\s*Request:\s*(w\d+)\b/gim));
+  return idsOn(text, /^\s*Part of:\s*(w\d+)\b/gim).filter((id) => !full.has(id));
+}
+
+/** Why a request stays open after a merge because its last merged PR said `Part of: <id>`, or undefined. */
+export function partOfReason(id: string, prs: readonly WorkPr[]): string | undefined {
+  const last = prs.filter((p) => p.state === 'merged').sort((a, b) => (a.at ?? '').localeCompare(b.at ?? '')).at(-1);
+  return last?.partOf ? `PR #${last.number} is one step of it (its description says Part of: ${id}); more follows` : undefined;
 }
 
 /** `https://github.com/<owner>/<name>/pull/<n>` links in text a worker wrote. */
@@ -63,7 +81,7 @@ export interface OpenedPr {
   at: string;
 }
 
-export type LinkedPr = PrRecord & { via: NonNullable<WorkPr['via']> };
+export type LinkedPr = PrRecord & { via: NonNullable<WorkPr['via']>; partOf: boolean };
 
 /**
  * Which of several requests a worker's work at time `at` belongs to: the latest one filed by then. A worker that does
@@ -91,13 +109,13 @@ export function prsOf(w: WorkItem, all: readonly PrRecord[], ctx: { opened: read
     if (says.length) via = says.some((id) => mine.has(id)) ? 'line' : undefined;
     else if (ctx.opened.some((o) => o.number === p.number && o.repo.toLowerCase() === p.repo.toLowerCase()) && p.createdAt >= w.createdAt) via = 'worker';
     else if (branch && p.head === branch) via = 'branch';
-    if (via) out.push({ ...p, via });
+    if (via) out.push({ ...p, via, partOf: via === 'line' && partOfIdsIn(p.body).some((id) => mine.has(id)) });
   }
   return out;
 }
 
 /** Merge a request's stored PRs with what gh says now (gh wins on state; a stored PR gh no longer lists keeps its last state). */
-export function mergePrs(stored: readonly WorkPr[], found: readonly (PrRecord & { via?: WorkPr['via'] })[]): WorkPr[] {
+export function mergePrs(stored: readonly WorkPr[], found: readonly (PrRecord & { via?: WorkPr['via']; partOf?: boolean })[]): WorkPr[] {
   const out = new Map<string, WorkPr>();
   // A link made before w340 carries no `via`: it only stays when the strict rules find it again.
   for (const p of stored.filter((x) => x.via)) out.set(`${p.repo.toLowerCase()}#${p.number}`, p);
@@ -112,6 +130,8 @@ export function mergePrs(stored: readonly WorkPr[], found: readonly (PrRecord & 
       head: f.head,
       state: f.state,
       ...(f.via ? { via: f.via } : was?.via ? { via: was.via } : {}),
+      // A link found now says whether it is `Part of:`; a PR only looked up by number keeps what its link said.
+      ...((f.via ? f.partOf : was?.partOf) ? { partOf: true } : {}),
       ...(f.state === 'merged' ? { at: f.mergedAt, ...(f.sha ? { sha: f.sha } : {}) } : f.state === 'closed' ? { at: f.closedAt } : {}),
       ...(was?.noted && was.state === f.state ? { noted: was.noted } : {}),
     });

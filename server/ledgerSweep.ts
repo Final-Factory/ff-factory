@@ -24,6 +24,7 @@ import {
   STALL_AFTER_MS,
   REPORT_QUIET_MS,
   afterMergeReason,
+  partOfReason,
   cleanupSettings,
   followUpDecision,
   cutOffOf,
@@ -410,7 +411,7 @@ export class LedgerSweep {
       acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `PR #${last.number} merged, PR #${open[0].number} is still open` });
       return false;
     }
-    const reason = afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
+    const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
     if (reason) {
       note(last, `merged:${reason.slice(0, 40)}`, `PR #${last.number} merged; still open: ${reason}`);
       acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `PR #${last.number} merged; ${reason}` });
@@ -501,7 +502,7 @@ export class LedgerSweep {
     if (!isOpen(w) || w.question || w.flag) return false;
     const prs = w.prs ?? [];
     if (!prs.some((p) => p.state === 'merged') || prs.some((p) => p.state === 'open')) return false;
-    const reason = afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
+    const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
     if (!reason) return false;
     const all = [...this.d.store.work.values()];
     const d = followUpDecision(w, workers, reason, this.now(), (s) => servedBy(s.id, all).has(w.id), !!this.d.resume);

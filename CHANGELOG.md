@@ -33,6 +33,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The ledger cleanup reads the end of a worker's report, and a PR can be one step of a request** (w424, asked by
+  Lothsahn after w424 was closed twice, on #99 and #100, while its worker's reports ended "w424: still open: …"). A
+  worker's `lastResult` kept only the first 1200 characters of a long report, so the cleanup's "more is coming" check
+  never saw the line workers end with; it now keeps the first 400 and the last 800 (`reportClip`). A PR whose
+  description says `Part of: w424` is linked like `Request: w424`, but its merge leaves the request open until a
+  `Request:` PR merges or the worker reports `DONE: w424`; workers' briefs say when to use it.
 - **A hard reset cannot leave a sandbox half-moved, or make a daemon forget its sandboxes** (w424, asked by Lothsahn;
   BEAST hard-resets on WHEA errors). A machine daemon's `sandboxes.json` was written in place without an fsync and read
   as empty when damaged, so the portal would have dropped that machine's sandbox labels and agents; it is now written

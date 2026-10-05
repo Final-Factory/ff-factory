@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, isRelease, mergePrs, ownerAt, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, supersededBy, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, cleanupSettings, cutOffOf, isRelease, mergePrs, ownerAt, partOfIdsIn, partOfReason, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, supersededBy, type PrRecord } from './ledgerRules.ts';
+import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
 const T = '2026-10-03T10:00:00.000Z';
@@ -50,6 +51,37 @@ test('stored PRs keep their note while the state holds, and take gh’s state wh
   const moved = mergePrs(stored, [pr({ repo: 'a/b', number: 7, state: 'merged', sha: 'c'.repeat(40) })])[0];
   assert.deepEqual([moved.state, moved.noted, moved.sha, moved.via], ['merged', undefined, 'c'.repeat(40), 'line']);
   assert.deepEqual(mergePrs([{ repo: 'a/b', number: 8, state: 'merged' }], []), [], 'a link from before w340 has no evidence and goes');
+});
+
+test('a PR that says Part of: wNNN is linked, but its merge leaves the request open; a Request line wins (w424)', () => {
+  const w = item({ id: 'w424', createdAt: '2026-10-03T10:00:00Z' });
+  assert.deepEqual(requestIdsIn('Fix\n\nPart of: w424\nRequest: w9'), ['w424', 'w9']);
+  assert.deepEqual(partOfIdsIn('Fix\n\npart of: W424\n'), ['w424']);
+  assert.deepEqual(partOfIdsIn('Part of: w424\nRequest: w424'), [], 'a Request line for the same request wins');
+  const linked = prsOf(w, [pr({ number: 99, body: 'Part of: w424' }), pr({ number: 100, body: 'Request: w424' })], { opened: [] });
+  assert.deepEqual(linked.map((p) => [p.number, p.via, p.partOf]), [[99, 'line', true], [100, 'line', false]]);
+  // Stored: the flag stays while a later lookup by number (no link evidence of its own) refreshes the PR's state.
+  const stored = mergePrs([], linked.slice(0, 1));
+  assert.equal(stored[0].partOf, true);
+  assert.equal(mergePrs(stored, [pr({ number: 99, state: 'merged' })])[0].partOf, true);
+  assert.equal(mergePrs(stored, [{ ...pr({ number: 99, body: 'Request: w424' }), via: 'line', partOf: false }])[0].partOf, undefined, 'its description now says Request');
+  assert.match(partOfReason('w424', stored)!, /PR #99 is one step of it \(its description says Part of: w424\); more follows/);
+  assert.equal(partOfReason('w424', mergePrs([], linked)), undefined, 'the last to merge (#100, same time, higher number last) is a Request PR');
+  const later = mergePrs([], [{ ...linked[1], mergedAt: '2026-10-03T11:00:00Z' }, { ...linked[0], mergedAt: '2026-10-03T13:00:00Z' }]);
+  assert.match(partOfReason('w424', later)!, /PR #99/, 'a Part of PR that merged last keeps it open');
+});
+
+test('a long final report is kept by its start and its end, so "still open" at the end is seen (w424, closed twice)', () => {
+  // w424's worker ended long reports with "w424: still open: …"; lastResult kept only the first 1200 characters.
+  const report = `**TL;DR:** The crash-safety fix is merged: PR #100. ${'Details of the change and the tests. '.repeat(60)}\n\nw424: still open: lothsahn's deploy, then add_machine, the migration and the restart test`;
+  const oldClip = report.slice(0, 1200) + `\n… (${report.length - 1200} more chars)`;
+  const base = { title: 'FF Factory: workers keep running through portal restarts', brief: 'Migrate the sandboxes.' };
+  assert.equal(afterMergeReason(base, [oldClip]), undefined, 'the old clip lost the line: the merge closed the request');
+  const kept = reportClip(report);
+  assert.ok(kept.length < report.length && kept.startsWith('**TL;DR:** The crash-safety fix is merged'));
+  assert.ok(kept.endsWith('the migration and the restart test'));
+  assert.match(afterMergeReason(base, [kept])!, /more is coming.*still open/);
+  assert.equal(reportClip('short'), 'short');
 });
 
 test('what is left after a merge: a release, a check, several PRs, a worker saying more, a question', () => {
