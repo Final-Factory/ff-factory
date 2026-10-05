@@ -45,6 +45,8 @@ export const SETTABLE_KEYS = [
   // Which account this host's agents run on, per role: "token" (claudeEnv's) or "login" (this host's stored
   // claude.ai login), and whether a Mac's agents take the host token (optional `machine`). docs/accounts.md.
   'claudeAccounts.orchestrator',
+  // The dispatcher's own (w464); unset, it follows the orchestrator's (and the system payer's own token).
+  'claudeAccounts.dispatcher',
   'claudeAccounts.workers',
   'claudeAccounts.standing',
   'machines.useHostClaudeEnv',
@@ -278,6 +280,7 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return value.trim();
     }
     case 'claudeAccounts.orchestrator':
+    case 'claudeAccounts.dispatcher':
     case 'claudeAccounts.workers':
     case 'claudeAccounts.standing': {
       const v = typeof value === 'string' ? value.trim() : value;
@@ -481,7 +484,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (Object.keys(env).length) all[opts.user!] = env;
     else delete all[opts.user!];
     cfg.userClaudeEnv = all;
-  } else if (key === 'claudeAccounts.orchestrator' || key === 'claudeAccounts.workers' || key === 'claudeAccounts.standing') {
+  } else if (key === 'claudeAccounts.orchestrator' || key === 'claudeAccounts.dispatcher' || key === 'claudeAccounts.workers' || key === 'claudeAccounts.standing') {
     const accounts = { ...cfg.claudeAccounts };
     const role = key.slice('claudeAccounts.'.length) as HostRole;
     if (v === undefined) delete accounts[role];

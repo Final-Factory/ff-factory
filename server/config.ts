@@ -12,9 +12,13 @@ import { checkObject, dataRecoveries, readJsonDurable } from './durable.ts';
 export type ClaudeAccount = 'login' | 'token';
 export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token'];
 /** The roles config claudeAccounts picks an account for, on this host. */
-export type HostRole = 'orchestrator' | 'workers' | 'standing';
-export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'workers', 'standing'];
-const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator', workers: 'workers', standing: 'standing agents' };
+/**
+ * The roles config claudeAccounts sets an account for. `dispatcher` (w464, docs/portal-on-ffbox-host.md change 6): when
+ * set, the dispatcher runs on it, and not on the system payer's own token; unset, it follows `orchestrator` as before.
+ */
+export type HostRole = 'orchestrator' | 'dispatcher' | 'workers' | 'standing';
+export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'dispatcher', 'workers', 'standing'];
+const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator', dispatcher: 'the dispatcher', workers: 'workers', standing: 'standing agents' };
 /** Roles as people read them: "the orchestrator, standing agents". */
 export const roleNames = (roles: readonly HostRole[]) => roles.map((r) => ROLE_NAMES[r]).join(', ');
 

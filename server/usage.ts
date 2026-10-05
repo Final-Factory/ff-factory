@@ -338,6 +338,8 @@ export interface AccountContext {
   machines: { id: string; usesToken: boolean }[];
   /** This host's roles config claudeAccounts sets to its stored login (docs/accounts.md); the others take the token. */
   hostLoginRoles?: HostRole[];
+  /** The roles to name apart (secrets.ts shownRoles): the dispatcher only when it has an account of its own. Default: all but the dispatcher. */
+  roles?: HostRole[];
   /** People's own tokens (config userClaudeEnv): key, label ("Lothsahn's token …abcd") and whose. */
   people?: { key: string; label: string; displayName: string }[];
   /** Every session with its source key (sessionSource); `live`: running now (for the order). */
@@ -373,8 +375,9 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
   for (const s of ctx.sessions) if (!sources.has(s.source) && s.source.startsWith('login:') && machineIds.has(s.source.slice(6))) sources.set(s.source, { kind: 'login' });
 
   // Which of this host's agents are on the token and which on its login, named only when they are split.
-  const onLogin = HOST_ROLES.filter((r) => ctx.hostLoginRoles?.includes(r));
-  const onToken = HOST_ROLES.filter((r) => !onLogin.includes(r));
+  const roles = ctx.roles ?? HOST_ROLES.filter((r) => r !== 'dispatcher');
+  const onLogin = roles.filter((r) => ctx.hostLoginRoles?.includes(r));
+  const onToken = roles.filter((r) => !onLogin.includes(r));
   const split = onLogin.length > 0 && onToken.length > 0;
   const hostOnToken = onToken.length ? [split ? `${ctx.hostName} (${roleNames(onToken)})` : ctx.hostName] : [];
   const hostLoginWhere = `${ctx.hostName} login${ctx.token && onLogin.length ? ` (${roleNames(onLogin)})` : ''}`;

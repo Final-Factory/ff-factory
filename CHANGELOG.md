@@ -12,6 +12,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **`claudeAccounts.dispatcher`** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 6). The dispatcher's own
+  account (`"token"` or `"login"`, set with `set_app_config`). Once set, the dispatcher runs on it instead of the system
+  payer's own token; unset, nothing changes. system_status names it apart only when set ([docs/accounts.md](docs/accounts.md)).
+
 - **Workers hand files to each other, on any computer** (w447, asked by Ben). A save made on BEAST had to reach three
   LothDesktop workers, and only a person with ssh could move it. A worker now calls `publish_attachment` with a file in
   its working folder or temp folder; it answers an `att_` id, which its orchestrator passes on with `attachments: [id]`

@@ -38,7 +38,7 @@ import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
@@ -1483,11 +1483,19 @@ function personTokens() {
     .map(({ u, token }) => ({ token, displayName: u.displayName, label: `${u.displayName}'s token …${token.slice(-4)}` }));
 }
 usage.personTokens = personTokens;
+/**
+ * The account a session ran on, for the meters. The dispatcher with an account of its own (claudeAccounts.dispatcher,
+ * w464) runs on it, never on its person's own token, so its stopped session is counted there too.
+ */
+function sourceOf(s: SessionInfo, token: string | undefined, toMachine: (id: string) => string | undefined) {
+  const role = hostRoleOf(cfg, s);
+  const login = () => hostAccount(cfg, role) === 'login';
+  if (role === 'dispatcher') return sessionSource({ ...s, requestedBy: undefined }, token, toMachine, () => undefined, login);
+  return sessionSource(s, token, toMachine, (id) => userToken(cfg, id), (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login');
+}
 function accountSourceOf(s: SessionInfo) {
-  const token = hostToken(cfg);
   const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));
-  const hostLogin = (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login';
-  return sessionSource(s, token, toMachine, (id) => userToken(cfg, id), hostLogin);
+  return sourceOf(s, hostToken(cfg), toMachine);
 }
 /** Whether the Claude account a session ran on has room again (no meter at 90% or more), or undefined when unknown (the ledger cleanup, before it resumes a worker a limit cut off). */
 function limitsClearFor(s: SessionInfo): boolean | undefined {
@@ -1499,17 +1507,17 @@ function limitsClearFor(s: SessionInfo): boolean | undefined {
 function accountsNow() {
   const token = hostToken(cfg);
   const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));
-  const hostLogin = (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login';
   return buildAccounts(usage.entries, {
     hostName: os.hostname(),
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
-    hostLoginRoles: HOST_ROLES.filter((r) => hostAccount(cfg, r) === 'login'),
+    hostLoginRoles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login'),
+    roles: shownRoles(cfg),
     people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
     machines: machines.list().map((m) => {
       const t = toMachine(m.id);
       return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token) };
     }),
-    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, toMachine, (id) => userToken(cfg, id), hostLogin), live: s.status !== 'stopped' && s.status !== 'error' })),
+    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sourceOf(s, token, toMachine), live: s.status !== 'stopped' && s.status !== 'error' })),
   });
 }
 // Which agents are on which account, and how many run now (the order), change with sessions and machines.
