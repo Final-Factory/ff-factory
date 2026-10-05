@@ -828,15 +828,17 @@ endpoint. No workers, no Unity.
 **BEAST's own footprint is not measured yet.** The measurement needs read access to BEAST's processes and data, and
 `ssh beast` from LothDesktop was refused on 2026-10-05: its key is not authorized there. So
 [`deploy/vm/measure/measure-portal.ps1`](../deploy/vm/measure/measure-portal.ps1) does it on BEAST itself, read-only.
-It walks the portal's process tree from `data\server.pid` every 30 s for the period given, and gives each Claude
-process its role (dispatcher, orchestrator, standing, worker) through its `--resume` session id in `state.json`. It
-reports the working set and private bytes (median as typical, max as peak), CPU, how many of each role run at once,
-`data/` by folder and what was written per day over 14 days, the base clone, `~/.claude/projects` and the server's I/O.
-The period should be **at least 24 hours, across a weekday**: orchestrators idle at night and pile up when several
-people chat, and only a full day sees both, plus the scheduled standing runs. Run it as
-`powershell -File deploy\vm\measure\measure-portal.ps1 -AppRoot C:\ff-sandboxes -Minutes 1440`.
-It was tested on LothDesktop against its own daemon's tree. Until it has run, the numbers below are guesses built on
-what was measured elsewhere.
+It walks the portal's process tree every 30 s for the period given. It gives each Claude process its role
+(dispatcher, orchestrator, standing, worker) from its orchestrator-memory folder or its `--resume` session id in
+`state.json`. It reports the working set and private bytes (median as typical, max as peak), CPU, how many of each role
+run at once, and I/O per role. It also reports `data/` by folder and what was written per day over 14 days, the base
+clone, `~/.claude/projects` and the host's network bytes. With `-PortalPort 8790` it finds the server again after a
+restart, and it keeps counting Claude processes that outlive one. The period should be **at least 24 hours, across a
+weekday**: orchestrators idle at night and pile up when several people chat, and only a full day sees both, plus the
+scheduled standing runs. Run it as
+`powershell -File deploy\vm\measure\measure-portal.ps1 -AppRoot C:\ff-sandboxes -PortalPort 8790 -Minutes 1440`.
+It was tested on LothDesktop against its own daemon's tree. w442 (the request to run it on BEAST) is running it there
+for 24 hours. Until its numbers are in, the ones below are guesses built on what was measured elsewhere.
 
 | What | Number | Basis |
 |---|---|---|
