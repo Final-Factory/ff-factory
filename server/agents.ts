@@ -34,7 +34,7 @@ import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, typ
 import { REVIEW_DEFAULTS, publishedText, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
 import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
-import { accountSource, dispatcherOwnAccount, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
+import { accountSource, dispatcherOwnAccount, hostAccount, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
 import { Identity, claudeEnvFor, forLine } from './identity.ts';
 import { FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, Orchestrators, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
@@ -3257,6 +3257,18 @@ ${this.worldBrief(false)}
   }
 
   /**
+   * The environment an orchestrator's process starts with (docs/accounts.md): the dispatcher on its own account when
+   * it has one (claudeAccounts.dispatcher), a person's orchestrator on their own token when they have one, else the
+   * orchestrator role's account. A role on the token file (w464) reads it now and takes nobody's own token.
+   */
+  orchestratorEnv(owner: Requester | undefined): Record<string, string | undefined> {
+    const role = !owner && dispatcherOwnAccount(this.cfg) ? 'dispatcher' : 'orchestrator';
+    const base = hostProcessEnv(this.cfg, role);
+    if (role === 'dispatcher' || hostAccount(this.cfg, role) === 'tokenfile') return base;
+    return claudeEnvFor(this.cfg, owner ?? this.identity.systemPayer(), base);
+  }
+
+  /**
    * What an orchestrator may not read (w467, server/secretGuard.ts): config.json, the secrets folder and token files,
    * data/ (its own memory folder and the attachment store excepted), ~/.ssh and Claude's and gh's credentials.
    */
@@ -3290,7 +3302,8 @@ ${this.worldBrief(false)}
       // when they have one here (config userClaudeEnv); the dispatcher on config claudeAccounts.dispatcher when it is set
       // (w464: Lothsahn's account, whoever the system payer is), else on the system payer's. Without one, what config
       // claudeAccounts.orchestrator picks: the host token, or this host's stored claude.ai login.
-      env: !owner && dispatcherOwnAccount(this.cfg) ? hostProcessEnv(this.cfg, 'dispatcher') : claudeEnvFor(this.cfg, owner ?? this.identity.systemPayer(), hostProcessEnv(this.cfg, 'orchestrator')),
+      // A role on the token file (w464, change 18) runs on it alone: a person's own token does not override it.
+      env: this.orchestratorEnv(owner),
       systemPrompt: { type: 'preset', preset: 'claude_code', append: `${owner ? this.personalBrief(owner) : this.dispatcherBrief()}\n\n${memoryBrief(memory, owner?.displayName)}` },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };

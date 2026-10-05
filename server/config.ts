@@ -11,8 +11,15 @@ import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts'
 
 
 /** What a portal-run agent runs on (docs/accounts.md): the computer's stored claude.ai login, or config claudeEnv's token. */
-export type ClaudeAccount = 'login' | 'token';
-export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token'];
+/**
+ * Which Claude account this host's agents of a role run on: config claudeEnv's token, this host's stored login, or
+ * (w464, docs/portal-on-ffbox-host.md change 18) the OAuth token in config claudeTokenFile, read at each session start
+ * and given to that process alone. "tokenfile" is for the orchestrator, dispatcher and standing roles, never workers.
+ */
+export type ClaudeAccount = 'login' | 'token' | 'tokenfile';
+export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token', 'tokenfile'];
+/** The roles that may run on the token file (TOKEN_FILE): never workers, which run on machines and other people's work. */
+export const TOKEN_FILE_ROLES: readonly string[] = ['orchestrator', 'dispatcher', 'standing'];
 /** The roles config claudeAccounts picks an account for, on this host. */
 /**
  * The roles config claudeAccounts sets an account for. `dispatcher` (w464, docs/portal-on-ffbox-host.md change 6): when
@@ -180,6 +187,12 @@ export interface Config {
    * machines.useHostClaudeEnv instead, and a person's own token (userClaudeEnv) wins for work they asked for.
    */
   claudeAccounts?: Partial<Record<HostRole, ClaudeAccount>>;
+  /**
+   * The file holding the long-lived Claude OAuth token (sk-ant-oat01-…, from `claude setup-token`) the roles set to
+   * "tokenfile" run on (w464): read at each session start into that process's CLAUDE_CODE_OAUTH_TOKEN, with every other
+   * Claude credential removed. Never in claudeEnv, never sent to a machine, never shown (only its last four characters).
+   */
+  claudeTokenFile?: string;
   /**
    * Providers (docs/ffbox-integration.md): FFBox, whose connector dials out to /provider. `enabled` (default
    * false) lets it connect; `tokenSha256` is the SHA-256 of its connector token (ffpv1_…), set with
@@ -601,6 +614,10 @@ export function loadConfig(): Config {
     if (!rel.startsWith('..') && !path.isAbsolute(rel)) throw new Error(`standingRoot (${cfg.standingRoot}) must not be inside ${guarded}`);
   }
   cfg.repo.basePath = path.resolve(cfg.repo.basePath);
+  if (cfg.claudeTokenFile !== undefined) {
+    if (typeof cfg.claudeTokenFile !== 'string' || !cfg.claudeTokenFile.trim()) throw new Error('config claudeTokenFile is the path of a file');
+    cfg.claudeTokenFile = path.resolve(cfg.claudeTokenFile);
+  }
   cfg.voice.toolsDir = cfg.voice.toolsDir ? path.resolve(ROOT, cfg.voice.toolsDir) : path.join(cfg.dataDir, 'tools', 'whisper');
   cfg.protectedPaths = cfg.protectedPaths.map((p) => path.resolve(p));
   return cfg;
@@ -638,13 +655,15 @@ export function windowsPathsOffWindows(cfg: Pick<Config, 'sandboxRoot' | 'dataDi
  * Throws when config claudeAccounts or machines.useHostClaudeEnv is malformed: a typo there would otherwise
  * quietly run agents on another account than the one meant.
  */
-export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machines'>) {
+export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machines'> & Partial<Pick<Config, 'claudeTokenFile'>>) {
   const a: unknown = cfg.claudeAccounts;
   if (a !== undefined) {
     if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error('config claudeAccounts is an object, e.g. { "orchestrator": "login" }');
     for (const [role, v] of Object.entries(a)) {
       if (!HOST_ROLES.includes(role as HostRole)) throw new Error(`config claudeAccounts.${role}: no such role (${HOST_ROLES.join(', ')})`);
-      if (!CLAUDE_ACCOUNTS.includes(v as ClaudeAccount)) throw new Error(`config claudeAccounts.${role} is "login" or "token"`);
+      if (!CLAUDE_ACCOUNTS.includes(v as ClaudeAccount)) throw new Error(`config claudeAccounts.${role} is "login" or "token" (or "tokenfile" for ${TOKEN_FILE_ROLES.join(', ')})`);
+      if (v === 'tokenfile' && !TOKEN_FILE_ROLES.includes(role)) throw new Error(`config claudeAccounts.${role} cannot be "tokenfile": only ${TOKEN_FILE_ROLES.join(', ')} run on the token file`);
+      if (v === 'tokenfile' && !(cfg as Partial<Pick<Config, 'claudeTokenFile'>>).claudeTokenFile) throw new Error(`config claudeAccounts.${role} is "tokenfile" but config claudeTokenFile names no file`);
     }
   }
   const u: unknown = cfg.machines?.useHostClaudeEnv;
