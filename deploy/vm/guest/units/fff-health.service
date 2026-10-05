@@ -1,0 +1,7 @@
+[Unit]
+Description=FF Factory portal: health check, update verification (fff-health)
+After=fff-portal.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/fff/fff-health

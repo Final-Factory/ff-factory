@@ -1,0 +1,10 @@
+[Unit]
+Description=FF Factory portal: health check every 30 s
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=30s
+AccuracySec=2s
+
+[Install]
+WantedBy=timers.target

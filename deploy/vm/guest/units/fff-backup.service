@@ -1,0 +1,11 @@
+[Unit]
+Description=FF Factory portal: encrypted backup off the host (fff-backup)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/fff/fff-backup
+TimeoutStartSec=2h
+Nice=10
+IOSchedulingClass=idle

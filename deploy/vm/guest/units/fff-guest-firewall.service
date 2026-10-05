@@ -1,0 +1,17 @@
+[Unit]
+Description=FF Factory portal VM: its own nftables table (inet fff_guest only)
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target fff-portal.service tailscaled.service shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/fff/guest.nft
+ExecReload=/usr/sbin/nft -f /etc/fff/guest.nft
+ExecStop=-/usr/sbin/nft delete table inet fff_guest
+
+[Install]
+WantedBy=multi-user.target

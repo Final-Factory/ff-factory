@@ -1,0 +1,41 @@
+[Unit]
+Description=FF Factory portal (deploy/vm/guest)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/portal-on-ffbox-host.md
+After=network-online.target fff-guest-firewall.service
+Wants=network-online.target
+# Never give up: a server that keeps exiting is restarted every RestartSec, as supervise.ps1 did.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=fff
+Group=fff
+UMask=0077
+Environment=FFSB_SUPERVISOR=systemd
+Environment=FFSB_CONFIG=/srv/fff/config/config.json
+Environment=NODE_ENV=production
+Environment=HOME=/srv/fff/home
+Environment=PATH=/srv/fff/home/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/srv/fff/app/current
+# fffctl prepare-shutdown (the host's nightly restart): stay stopped until the next boot.
+ExecCondition=/bin/sh -c '! test -e /run/fff/portal.hold'
+# As root ("+"): switch to the release fff-update prepared when the server left data/update.request.
+ExecStartPre=+/usr/local/lib/fff/fff-update activate
+ExecStart=/usr/bin/node server/index.ts
+Restart=always
+RestartSec=3
+# Covers an update built at start (one a crash cut off) and the server's own startup.
+TimeoutStartSec=20min
+# SIGTERM to the server only: it records what to resume and stops its agents itself (server/index.ts stopServer);
+# whatever is left after TimeoutStopSec is killed.
+KillMode=mixed
+TimeoutStopSec=75
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

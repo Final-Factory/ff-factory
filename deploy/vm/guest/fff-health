@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# fff-health: one health check of the portal inside its VM (fff-health.timer, every 30 s; root). Replaces what
+# supervise.ps1 did beyond restarting a crashed server (systemd's Restart=always does that): a server that runs but
+# no longer answers is restarted after HEALTH_FAILS_BEFORE_RESTART checks in a row, and an update being verified is
+# confirmed or rolled back (fff-update verify).
+set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
+need_root
+load_conf
+state=/run/fff/health.fails
+install -d -m 0755 /run/fff
+
+[ -e /run/fff/portal.hold ] && exit 0
+portal_active || { rm -f "$state"; exit 0; }
+"$FFF_LIB/fff-update" verify || warn "fff-update verify failed"
+# Seconds since the server process started (systemd's monotonic clock, as /proc/uptime counts it).
+started_us=$(systemctl show -p ExecMainStartTimestampMonotonic --value fff-portal.service)
+up_s=$(cut -d. -f1 /proc/uptime)
+age=$((up_s - started_us / 1000000))
+[ "$age" -ge "$HEALTH_START_GRACE_SEC" ] || exit 0
+if health_json >/dev/null 2>&1; then
+  rm -f "$state"
+  exit 0
+fi
+fails=$(($(cat "$state" 2>/dev/null || echo 0) + 1))
+echo "$fails" >"$state"
+log "/api/health did not answer ($fails of $HEALTH_FAILS_BEFORE_RESTART)"
+if [ "$fails" -ge "$HEALTH_FAILS_BEFORE_RESTART" ]; then
+  rm -f "$state"
+  log "restarting the portal: it runs ($age s) but has not answered /api/health for $fails checks"
+  # SIGTERM first: a server that still handles signals records what to resume; TimeoutStopSec then kills it.
+  systemctl restart fff-portal.service
+fi
