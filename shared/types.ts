@@ -957,7 +957,16 @@ export interface CleanupSummary {
   /** Still below the soft threshold after the pass. */
   belowSoft?: boolean;
   /** The biggest entries it removed. */
-  top?: { path: string; bytes: number; rule: string }[];
+  top?: { path: string; bytes: number; rule: string; why?: string }[];
+  /** It covered the stale build and run output (w459): its daily turn, low space, or asked. */
+  stale?: boolean;
+  /** Only planned, nothing removed (a dry run asked for by hand). */
+  dryRun?: boolean;
+  /** What it would remove (a dry run, or stale output in dry-run mode), biggest first, with why. */
+  planned?: { path: string; bytes: number; rule: string; why: string }[];
+  plannedBytes?: number;
+  /** Stale-looking output it could not attribute to a closed request or a commit: kept, for a person. */
+  listed?: { path: string; bytes: number; why: string }[];
   /** When it could not get above the soft threshold: the biggest remaining consumers. */
   consumers?: { path: string; bytes: number }[];
   /** Unity Libraries of projects not opened for a long time: reported, removed only past a longer age. */
