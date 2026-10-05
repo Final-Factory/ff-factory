@@ -14,16 +14,17 @@ scripts\restart.ps1 -DrainMinutes 3
 
 ## What happens
 
-1. **Drain.** The script writes a JSON `data\restart.request`. The server sends every busy worker a
-   `[app restart pending]` message: commit and push your work (a WIP commit is fine) and end your
-   turn. It waits until no worker is mid-turn, or until `-DrainMinutes` (default 10) passes. With
+1. **Drain.** The script writes a JSON `data\restart.request`. The server sends every busy worker of this
+   host a `[app restart pending]` message: commit and push your work (a WIP commit is fine) and end your
+   turn. Workers on machines (BEAST's own sandboxes included, since 2026-10-05) are not drained: they keep
+   running ("Agents on machines" below). It waits until no worker is mid-turn, or until `-DrainMinutes` (default 10) passes. With
    nobody busy it goes straight on. The orchestrator and standing agents are not waited for. The
    dashboard shows a "Restart pending" banner meanwhile. The supervisor keeps running during the
    drain; if the script is interrupted, the server gives up after 5 more minutes, tells the drained
    workers to carry on, and nothing is lost.
 2. **Stop.** The script stops the supervisor, then asks the server to stop. The server writes
-   `data\resume.json` (below), stops the agent processes, saves state and exits. Unity editors keep
-   running.
+   `data\resume.json` (below), stops this host's agent processes (the orchestrators and standing agents), saves state
+   and exits. Machine daemons, their agents and all Unity editors keep running.
 3. **Update** (with `-Update`). The script leaves `data\update.request`. The next supervisor runs
    `update-steps.ps1` before starting node, and writes the outcome to `data\update.result.json`.
    It fast-forwards. If the upstream has a new, unrelated history (republished) or was rewritten
@@ -50,10 +51,24 @@ The script logs to `data\supervisor.log` and waits for the new server (3 min, or
 `-Update`). It is safe to run twice: a second run while one is in progress exits at once, and a run
 with nothing running just starts the app.
 
-**Agents on machines** (a Mac, a Windows PC, this host's own daemon) are drained and stopped like this host's today.
-Config `machines.keepAgentsOnRestart: true` (backlog step 2, off until the host's own daemon has proven itself) leaves
-them running instead: no drain message, no stop, and after the restart the ones still running are reported as such
-([beast-machine.md](beast-machine.md#backlog-step-2-prepared-off)).
+**Agents on machines** (a Mac, a Windows PC, BEAST's own daemon with its sandboxes) keep running through a restart or
+an update: config `machines.keepAgentsOnRestart: true`, on since 2026-10-05 (w424; lothsahn: "Can't we make it restart
+while the workers are going?"). Their daemons are not part of the portal's process tree. The restart sends them no
+drain message and stops nothing. While the portal is down the daemons queue their agents' transcript events (up to
+20 000) and replay them when they reconnect. Afterwards the `[machines] <id>'s daemon is current` line lists them as
+"Still running there (not interrupted)" ([beast-machine.md](beast-machine.md#backlog-step-2-on)).
+
+- **Measured on the first run** (restart B, 2026-10-05 22:45:33 UTC, the portal down 84 s): a test worker on
+  `beast/shader-blackhole` and one on `lothdesktop/ghosts-fly` were mid-turn. Their 30-second calls went on every 30 s
+  through the downtime. BEAST's daemon and all five of its agent processes kept their pids. Both transcripts hold the
+  events from the downtime with no gap in their sequence numbers. The portal reported all nine machine agents as still running.
+- **An update leaves a daemon running the old code** until it has no live agent. It is then redeployed, and that
+  redeploy stops its agents (`Stop-FFDaemon`), so it waits for them (`MachineManager.checkOutdated`). Meanwhile it still
+  takes new agents if it speaks the portal's protocol (`incompatible`). After a protocol change it takes none until it
+  is redeployed.
+- **Until a daemon reconnects** after the restart, its agents show `stopped` with "was running when the portal stopped;
+  not heard from its daemon since (it may still be running there)" (`SessionManager.restore`). Its first report puts
+  their real state back. Off (`false`), machine agents are drained and stopped like this host's, and resumed after.
 
 ## Who is resumed
 
