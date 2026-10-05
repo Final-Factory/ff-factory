@@ -12,8 +12,9 @@ state=/run/fff/health.fails
 install -d -m 0755 /run/fff
 
 [ -e /run/fff/portal.hold ] && exit 0
-portal_active || { rm -f "$state"; exit 0; }
+# Before the "is it running" check: a new release that crash-loops is rarely "active" when this looks.
 "$FFF_LIB/fff-update" verify || warn "fff-update verify failed"
+portal_active || { rm -f "$state"; exit 0; }
 # Seconds since the server process started (systemd's monotonic clock, as /proc/uptime counts it).
 started_us=$(systemctl show -p ExecMainStartTimestampMonotonic --value fff-portal.service)
 up_s=$(cut -d. -f1 /proc/uptime)

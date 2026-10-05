@@ -81,7 +81,8 @@ deploy/vm/host/install.sh 2>&1 | tee /tmp/second-install.log
 
 step "first boot: cloud-init, the watchdog"
 wait_for 900 "ssh as the admin user" g true
-wait_for 900 "cloud-init done" g cloud-init status --wait
+# 0 done, 2 done with recoverable warnings, 1 failed.
+wait_for 900 "cloud-init done" g 'cloud-init status --wait >/dev/null; test $? -ne 1'
 g cloud-init status --long || true
 wait_for 300 "watchdog0 armed by PID 1" g 'test "$(cat /sys/class/watchdog/watchdog0/state)" = active'
 g 'cat /sys/class/watchdog/watchdog0/identity /sys/class/watchdog/watchdog0/timeout'
@@ -190,13 +191,12 @@ wait_for 300 "the portal answers after the reset" health
 step "watchdog device: a guest that stops petting it is reset"
 b1=$(boot_id)
 wait_for 300 "watchdog0 armed again" g 'test "$(cat /sys/class/watchdog/watchdog0/state)" = active'
-g 'sudo systemctl stop fff-vm-watch.timer' 2>/dev/null || true
 systemctl stop fff-vm-watch.timer
 # PID 1 lets go of the device cleanly, then a process opens it and dies without the magic close: nobody pets it.
 g 'printf "[Manager]\nRuntimeWatchdogSec=off\n" | sudo tee /etc/systemd/system.conf.d/99-ci.conf >/dev/null && sudo systemctl daemon-reexec'
 g "sudo sh -c 'exec 3>/dev/watchdog; echo x >&3; kill -9 \$\$'" || true
 wait_for 300 "the watchdog reset the VM" bash -c "[ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" != '' ] && [ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id)\" != $b1 ]"
-journalctl -u fff-vm-events --no-pager | grep -m1 -i watchdog || fail "fff-vm events did not see the watchdog"
+journalctl -u fff-vm-events --no-pager | grep -m1 'watchdog fired' || fail "fff-vm events did not see the watchdog"
 g 'sudo rm -f /etc/systemd/system.conf.d/99-ci.conf'
 systemctl start fff-vm-watch.timer
 

@@ -75,6 +75,11 @@ fi
 if ip -4 route show | grep -v "dev $NET_BRIDGE" | grep -qE "^${NET_HOST_IP%.*}\.0/"; then
   refuse "a route for $subnet exists on another interface"
 fi
+# A wider route that covers the subnet (a VPN's 10.0.0.0/8, say) is shadowed by the bridge's own /24 for the VM's
+# addresses: say so, the network behind it loses those 256 addresses on this host.
+via=$(ip -4 route get "$NET_VM_IP" 2>/dev/null | head -n 1 || true)
+default_dev=$(ip -4 route show default | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+case "$via" in *" dev $NET_BRIDGE "* | *" dev $default_dev "*) ;; *) warn "the host routes $NET_VM_IP through '$via', not its default route: a route covers $subnet" ;; esac
 if ip link show "$NET_BRIDGE" >/dev/null 2>&1 && ! { command -v virsh >/dev/null && net_exists && net_is_ours; }; then
   refuse "an interface named $NET_BRIDGE exists and is not the bridge of this installer's libvirt network $NET_NAME"
 fi
@@ -317,7 +322,10 @@ run_cmd install -d -m 0700 "$FFF_VM_ETC/ssh"
 if [ ! -f "$FFF_VM_ETC/ssh/id_ed25519" ]; then
   run_cmd ssh-keygen -q -t ed25519 -N '' -C "root@$(hostname -s) fff-vm" -f "$FFF_VM_ETC/ssh/id_ed25519"
 fi
-keys=$( { cat "$FFF_VM_ETC/ssh/id_ed25519.pub" 2>/dev/null || echo "ssh-ed25519 AAAA-dry-run-key root@host"; [ -f "$VM_ADMIN_KEYS_FILE" ] && grep -E '^(ssh-|ecdsa-|sk-)' "$VM_ADMIN_KEYS_FILE"; } | sed 's/^/      - /')
+keys=$( {
+  cat "$FFF_VM_ETC/ssh/id_ed25519.pub" 2>/dev/null || echo "ssh-ed25519 AAAA-dry-run-key root@host"
+  if [ -f "$VM_ADMIN_KEYS_FILE" ]; then grep -E '^(ssh-|ecdsa-|sk-)' "$VM_ADMIN_KEYS_FILE" || true; fi
+} | sed 's/^/      - /')
 instance_id=$(manifest_get instance_id)
 if [ -z "$instance_id" ]; then instance_id="$VM_NAME-$(date -u +%Y%m%d%H%M%S)"; manifest_set instance_id "$instance_id"; fi
 # The guest's apt timers run before the nightly reboot (UPGRADE_LEAD_MIN), in the reboot's time zone.
@@ -527,9 +535,9 @@ if [ "$START" = 1 ]; then
   [ -z "$changed" ] || run_cmd systemctl try-restart fff-vm-events.service
 fi
 if [ "$WAIT" = 1 ] && [ "$DRY_RUN" != 1 ] && [ "$START" = 1 ]; then
-  log "waiting for the guest agent (first boot: cloud-init installs it, a few minutes)"
-  for _ in $(seq 120); do guest_agent '{"execute":"guest-ping"}' >/dev/null && break; sleep 5; done
-  guest_agent '{"execute":"guest-ping"}' >/dev/null || die "the guest agent did not answer within 10 minutes; look at 'virsh console $VM_NAME'"
+  log "waiting for the guest agent (first boot: cloud-init upgrades, installs it and may reboot once; minutes)"
+  for _ in $(seq 240); do guest_agent '{"execute":"guest-ping"}' >/dev/null && break; sleep 5; done
+  guest_agent '{"execute":"guest-ping"}' >/dev/null || die "the guest agent did not answer within 20 minutes; look at /var/log/libvirt/qemu/$VM_NAME-serial.log"
   log "the guest agent answers"
 fi
 

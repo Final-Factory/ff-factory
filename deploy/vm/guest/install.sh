@@ -82,10 +82,11 @@ fi
 
 log "4/9 the fff account and $FFF_ROOT"
 if ! id "$FFF_USER" >/dev/null 2>&1; then
-  run_cmd useradd --system --user-group --home-dir "$FFF_ROOT/home" --create-home --shell /bin/bash --comment 'FF Factory portal' "$FFF_USER"
+  # Its home is made below, inside $FFF_ROOT, which does not exist yet.
+  run_cmd useradd --system --user-group --home-dir "$FFF_ROOT/home" --no-create-home --shell /bin/bash --comment 'FF Factory portal' "$FFF_USER"
 fi
 run_cmd passwd -l "$FFF_USER" >/dev/null
-for d in "" /home /config /data /app /agents /review /sandboxes /backup; do
+for d in "" /home /config /data /app /agents /review /sandboxes; do
   run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT$d"
 done
 run_cmd install -d -m 0700 -o root -g root "$FFF_ROOT/backup"
@@ -147,7 +148,8 @@ PermitRootLogin no
 ${FFF_ADMIN_USER:+AllowUsers $FFF_ADMIN_USER}
 EOF
 )
-if [ -n "$sshd" ]; then run_cmd sshd -t && run_cmd systemctl reload ssh.service; fi
+# Ubuntu 24.04 starts sshd from ssh.socket: reload it only if it runs (a new one reads the file anyway).
+if [ -n "$sshd" ]; then run_cmd sshd -t && run_cmd systemctl try-reload-or-restart ssh.service; fi
 
 log "6/9 scripts: fffctl, fff-update, fff-health, fff-backup, fff-base-refresh"
 run_cmd install -d -m 0755 /usr/local/lib/fff
