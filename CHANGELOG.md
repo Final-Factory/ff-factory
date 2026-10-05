@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **A machine can take agents in its sandboxes only** (w477, asked by Lothsahn). `add_machine` takes `max_agents: 0`
+  (the Add machine form too). Such a machine never runs an agent in its main clone: `start_agent` with the machine
+  alone is refused before any record is made, naming its sandboxes; a standing agent cannot be assigned to it; a
+  standing agent's delegated worker never goes to its main clone; and the Capacity block and "Next new game-repo work"
+  never suggest it. Its daemon refuses such an agent too. Meant for BEAST and LothDesktop, whose main clones are
+  their owners' own ([docs/machines.md](docs/machines.md), "Limits").
+
 - **`claudeAccounts.dispatcher`** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 6). The dispatcher's own
   account (`"token"` or `"login"`, set with `set_app_config`). Once set, the dispatcher runs on it instead of the system
   payer's own token; unset, nothing changes. system_status names it apart only when set ([docs/accounts.md](docs/accounts.md)).

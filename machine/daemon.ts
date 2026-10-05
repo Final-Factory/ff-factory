@@ -768,6 +768,7 @@ export class Daemon {
    * sandbox maxAgentsPerSandbox, and a sandbox agent needs its sandbox ready at the folder the spec names.
    */
   private startRefusal(spec: LaunchSpec): string | undefined {
+    if (!spec.sandbox && this.maxSessions <= 0) return "this machine takes agents in its sandboxes only (max_agents 0): start it in one of this machine's sandboxes";
     if (!spec.sandbox) return this.runningIn(undefined) >= this.maxSessions ? `already ${this.maxSessions} agents mid-turn in this machine's main clone` : undefined;
     const sb = this.pool.list().find((s) => s.id === spec.sandbox);
     if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;
