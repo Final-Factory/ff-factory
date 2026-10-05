@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Daemons follow the portal to a new URL without a redeploy** (w466, asked by Lothsahn; change 9 of
+  docs/portal-on-ffbox-host.md). `relocate_machines {url, machines?}` sends connected daemons the portal's new base
+  URL. Each keeps it in its `daemon.json`, drops the link and dials it, with its agents running on and its token
+  unchanged. If the new URL has not answered after 10 minutes, it tries the old one too, every other time, so a move
+  that never comes up does not strand it. The sending portal does not redeploy a machine that is away. Protocol 8: older
+  daemons are redeployed once idle, as after any update (docs/machines.md, "Moving the portal").
 - **Workers keep running through a portal restart or update** (w424, asked by Lothsahn: "Can't we make it restart while
   the workers are going?"). BEAST's sandboxes moved to its own machine daemon, and `machines.keepAgentsOnRestart` is
   on. A restart drains and stops only the portal's own agents (orchestrators, standing agents). Workers on BEAST and

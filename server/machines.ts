@@ -9,7 +9,7 @@ import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
-import { ADOPT_PROTOCOL, ATTACHMENT_PROTOCOL, PROTOCOL_VERSION, SANDBOX_PROTOCOL, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ADOPT_PROTOCOL, ATTACHMENT_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -398,6 +398,7 @@ export class MachineManager {
       }
       if (!this.offlineSince.has(m.id)) this.offlineSince.set(m.id, now);
       if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
+      if (m.relocatedTo) continue; // sent to another portal (relocate): a redeploy from here would pull it back
       const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
       if (!why) continue;
       // The portal's own host needs no ssh: it is always there when this code runs.
@@ -1016,7 +1017,7 @@ export class MachineManager {
         const why = daemonMismatch(this.hellos.get(id)!, this.portalHead);
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
         else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
-        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined });
+        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined, relocatedTo: undefined });
         this.store.putMachine(m);
         const live = new Set(msg.live);
         for (const sid of m.sessionIds) {
@@ -1124,6 +1125,15 @@ export class MachineManager {
       case 'sandbox_event':
         this.sandboxEvent?.(id, msg.text, { sandbox: msg.sandbox, checkpoint: !!msg.checkpoint });
         return;
+      case 'relocate_result': {
+        const p = this.relocateCalls.get(msg.id);
+        if (!p) return;
+        this.relocateCalls.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.ok) p.resolve();
+        else p.reject(new Error(msg.error ?? 'refused'));
+        return;
+      }
       case 'switch_result': {
         const p = this.switchCalls.get(msg.id);
         if (!p) return;
@@ -1358,6 +1368,43 @@ export class MachineManager {
         reject(e as Error);
       }
     });
+  }
+
+  private readonly relocateCalls = new Map<string, { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+
+  /**
+   * Send a connected daemon to the portal at `url` (w466, docs/machines.md "Moving the portal"): it keeps the URL in its
+   * daemon.json, drops this link and dials the new one, its agents running on (with machines.keepAgentsOnRestart their
+   * runs are not this portal's to stop). The drop is on purpose: nothing is resumed here, and the offline watch leaves
+   * it alone until it says hello here again (`relocatedTo`). Its record's portal_url stays this portal's address.
+   */
+  async relocate(machineId: string, rawUrl: string, timeoutMs = 20_000): Promise<string> {
+    const m = this.require(machineId);
+    const url = rawUrl.trim().replace(/\/+$/, '');
+    const bad = relocateProblem(url);
+    if (bad) throw new Error(bad);
+    if (!this.isOnline(m.id)) throw new Error(`${m.id} is offline: only a connected daemon can be relocated (or redeploy it with portal_url ${url})`);
+    const p = this.protocolOf(m.id) ?? 0;
+    if (p < RELOCATE_PROTOCOL) throw new Error(`${m.id}'s daemon speaks protocol ${p} and cannot relocate (needs ${RELOCATE_PROTOCOL}): let it be redeployed first`);
+    await new Promise<void>((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.relocateCalls.delete(id);
+        reject(new Error(`${m.id} did not answer the relocate within ${Math.round(timeoutMs / 1000)} s`));
+      }, timeoutMs);
+      this.relocateCalls.set(id, { resolve, reject, timer });
+      try {
+        this.post(m.id, { type: 'relocate', id, url });
+      } catch (e) {
+        clearTimeout(timer);
+        this.relocateCalls.delete(id);
+        reject(e as Error);
+      }
+    });
+    // Its link drops in a moment, on purpose: no resume of what it runs, no redeploy while it is away.
+    this.expectDrop(m.id, false);
+    this.update(m.id, { relocatedTo: { url, at: new Date().toISOString() } });
+    return `${m.id} took ${url} and is dialling it now; its agents run on. It falls back to this portal's URL too if ${url} has not answered after ${RELOCATE_FALLBACK_MINUTES} minutes.`;
   }
 
   private readonly switchCalls = new Map<string, { resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();

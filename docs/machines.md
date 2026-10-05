@@ -508,6 +508,28 @@ it). Its settings default to the portal's config. Protocol 6 adds the `adopt`/`r
 total agent cap, Library seed, below-normal editors and protected paths. Everything about it, with the migration,
 rollback and deploy steps: [beast-machine.md](beast-machine.md).
 
+## Moving the portal
+
+A daemon dials the URL written into its `daemon.json` at deploy (`portalUrl`). When the portal moves (to the VM on
+the FFBox host, [portal-on-ffbox-host.md](portal-on-ffbox-host.md), and back for a rollback), `relocate_machines {url,
+machines?}` (protocol 8, w466) sends every connected daemon the new base URL. No redeploy, and no ssh.
+
+- **What the daemon does:** it checks the URL (http or https, a host, no path) and keeps it in `daemon.json` before
+  answering. That file is fsynced and renamed into place, with the versions before kept beside it. The URL it had is
+  kept as `previousPortalUrl`. It answers `relocate_result`, then drops the link and dials the new URL.
+- **Agents run on:** nothing about them depends on the link. Their events wait in the daemon's outbox and are sent on
+  reconnect. Its token is unchanged.
+- **The fallback:** until a portal answers, the daemon dials only the new URL for 10 minutes
+  (`RELOCATE_FALLBACK_MINUTES`). After that it dials the new one and the old one in turn, so a move that never comes up,
+  or is rolled back, does not strand it. The first portal that answers settles it: that URL stays in `daemon.json` and
+  the fallback goes. A daemon restarted meanwhile (a reboot) reads the same fields and carries on the same way.
+- **The portal that sent it:** it marks the machine `relocatedTo` and treats the drop as intended, so nothing is resumed
+  there. Its offline watch does not redeploy the machine while it is away, which would pull it back. The mark goes when
+  the daemon says hello there again. The record's `portal_url` stays that portal's own address, the one its redeploys
+  write; use `add_machine portal_url` to change it.
+- **Old daemons:** one from before protocol 8 is refused with "let it be redeployed first". It cannot be relocated, only
+  redeployed with a new `portal_url`.
+
 ## Not in v1
 
 Machines other than Macs and Windows PCs.
