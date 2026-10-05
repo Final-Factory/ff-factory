@@ -52,6 +52,10 @@ Prefer to leave it off and fix what makes reboots necessary.
 
 ## 2. The host guard (`server/hostHealth.ts`)
 
+In the portal-only mode (config `hostSandboxes: false`, w464) there is no sandbox drive: the guard measures the data
+volume and `hostDiskPaths`, never blocks on or reattaches a drive, and `host_recovery` takes only `cleanup` (see the
+README, "Portal-only mode").
+
 Every `hostGuard.pollSeconds` (30) it measures the sandbox root's volume and each of
 `hostDiskPaths` (put `"C:/"` there when the Dev Drive's VHDX lives on C:), free RAM, and whether the
 sandbox root exists.
