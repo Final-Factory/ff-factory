@@ -584,7 +584,12 @@ export class SessionManager {
         if (!h) continue;
         // Busy on a Mac when this server stopped: its process may well still run there (the daemon reports it
         // live when it reconnects); resumeAfterRestart checks before resuming it.
-        if (info.status === 'running' || info.status === 'starting' || info.status === 'waiting_permission') cutOff.push({ ...info });
+        if (info.status === 'running' || info.status === 'starting' || info.status === 'waiting_permission') {
+          cutOff.push({ ...info });
+          // Shown stopped until its daemon reports (it clears this): with machines.keepAgentsOnRestart it usually still
+          // runs, and a bare "stopped" read as if the restart had ended it (w424).
+          info.statusDetail = `was ${info.status} when the portal stopped; not heard from its daemon since (it may still be running there)`;
+        }
         info.pendingPermissions = [];
         if (info.status !== 'stopped') info.status = 'stopped';
         this.sessions.set(info.id, h);

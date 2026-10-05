@@ -17,13 +17,13 @@ The orchestrators are ready for it: the dispatcher addresses a sandbox the same 
 session and place, not by which process runs the worker. BEAST's sandboxes become `beast/<name>`, and bare names keep
 working.
 
-## 2. Portal restarts that leave daemon agents running (prepared, off)
+## 2. Portal restarts that leave daemon agents running (done, 2026-10-05)
 
 After the BEAST daemon split is fully working: a portal update or restart no longer drains or stops daemon-hosted
 agents, on BEAST or on machines. The portal restarts, the daemons keep their agents running, and they reconnect and
 replay missed events. Only a daemon update itself would need a drain.
 
-Prepared behind config `machines.keepAgentsOnRestart` (default off; [beast-machine.md](beast-machine.md#backlog-step-2-prepared-off)):
+Behind config `machines.keepAgentsOnRestart`, on on BEAST since 2026-10-05 (w424; [beast-machine.md](beast-machine.md#backlog-step-2-on)):
 no drain and no stop for daemon agents, and a same-protocol daemon from another commit keeps taking agents until it is
-idle and redeployed. Left: prove on BEAST that a restart leaves the daemon's agents running and replays their events,
-then turn it on.
+idle and redeployed. Proven on BEAST before it went on. Agents mid-turn on BEAST's daemon and on LothDesktop ran through
+an 84-second portal restart, with their events replayed ([restart.md](restart.md), "Agents on machines").
