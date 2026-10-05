@@ -66,6 +66,7 @@ import { mentionsScenario, nightlyAgainLine, nightlyDraft, nightlyKey, nightlySk
 import { isOpen } from './work.ts';
 import { linkedClosed, linkedDone, mergeCandidates, mergedBy, mergedText, parseLog, prNumberOf, type MergeRecord } from './mergedIntake.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { escalationCatchUp, escalationRef, fixLearnable, fixedByPr, followed, type BoardWatch, type CatchUpLine } from './boardFollow.ts';
 import type { IntakeEntry, IntakeSummary, MaxEvent, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 import { ffboxConversationHref } from '../shared/ffboxLinks.ts';
 
@@ -86,6 +87,13 @@ const boardDigest = (a: BoardAnswer) => JSON.stringify([a.verdict, a.matches.map
 const BOARD_RECHECK_MS = 60_000;
 const BOARD_FOLLOW_MS = 30 * 86_400_000;
 const BOARD_MAX = 500;
+/** A followed request's fix (its PR, its release) is looked for this often, and again this long after a try that left it short. */
+const FIX_EVERY_MS = 2 * 60_000;
+const FIX_RETRY_MS = 30 * 60_000;
+/** A done answer waits this long at most for that look, so FFBox's notice can name the PR and the version. */
+const FIX_HOLD_MS = 15 * 60_000;
+/** The one-time catch-up (w480): escalated requests closed done this many days back. */
+const CATCH_UP_DAYS = 14;
 const VERSION_FILE = 'ProjectSettings/ProjectSettings.asset';
 
 /** What server/max.ts gives the intake: reads only, the token stays there. */
@@ -115,6 +123,8 @@ export interface IntakeDeps {
   mergedPrs?: () => Promise<MergeRecord[] | undefined>;
   /** git in the base clone; the default runs it there. */
   git?: (args: string[]) => Promise<{ code: number; stdout: string }>;
+  /** One pull request of the repo, if it merged (gh pr view); the default asks gh. */
+  prInfo?: (n: number) => Promise<MergeRecord | undefined>;
   now?: () => number;
 }
 
@@ -135,6 +145,12 @@ interface Persisted {
   maybes?: Record<string, { ids: string[]; scores: number[]; at: number }>;
   /** The last nightly report and what it came to (the Intake tab). */
   nightly?: NonNullable<IntakeSummary['nightly']>['last'];
+  /** Board answers FFBox follows, by ref (w480: kept across restarts, escalated threads' watches among them). */
+  boards?: Record<string, BoardWatch>;
+  /** When the resolver last looked for a followed request's fix (its PR, its release), by request. */
+  fixTried?: Record<string, number>;
+  /** The one-time catch-up of escalated threads (w480): when it ran and the refs it followed. */
+  catchUp?: { at: string; refs: string[] };
   polledAt?: string;
   error?: string;
 }
@@ -153,6 +169,7 @@ export class IntakeManager {
   private readonly timers: NodeJS.Timeout[] = [];
   private polling = false;
   private checking = false;
+  private resolving = false;
   private closing = false;
   private saveTimer?: NodeJS.Timeout;
   private emitTimer?: NodeJS.Timeout;
@@ -163,6 +180,10 @@ export class IntakeManager {
     this.now = d.now ?? Date.now;
     this.file = path.join(d.cfg.dataDir, 'intake.json');
     this.data = this.load();
+    // Oldest first, so the cap drops the oldest (watchBoard).
+    for (const [ref, b] of Object.entries(this.data.boards ?? {}).sort((x, y) => x[1].at - y[1].at)) {
+      if (b && Array.isArray(b.q?.keys) && typeof b.at === 'number') this.boards.set(ref, { q: b.q, last: typeof b.last === 'string' ? b.last : '', at: b.at, ...(typeof b.follow === 'string' ? { follow: b.follow } : {}) });
+    }
   }
 
   get settings(): IntakeSettings {
@@ -185,6 +206,12 @@ export class IntakeManager {
     every(MERGED_EVERY_MS, () => void this.checkMerged(), 90_000);
     // Board answers FFBox still follows are re-checked every minute; a change goes to it at once (docs/intake.md).
     every(BOARD_RECHECK_MS, () => this.recheckBoards(), BOARD_RECHECK_MS);
+    // A followed request's fix: the PR that merged it and the release that carries it, for FFBox's notice (w480).
+    every(FIX_EVERY_MS, () => void this.resolveFixes(), 45_000);
+    // Once: escalated threads whose request closed done before FF Factory followed them (w480).
+    const once = setTimeout(() => this.catchUpEscalations(), 30_000);
+    once.unref();
+    this.timers.push(once);
     return this;
   }
 
@@ -200,7 +227,7 @@ export class IntakeManager {
     try {
       const d = readJsonDurable<Partial<Persisted>>(this.file, { check: checkObject });
       if (!d) throw new Error('none yet');
-      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, escalations: d.escalations };
+      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, escalations: d.escalations, maybes: d.maybes, boards: d.boards, fixTried: d.fixTried, catchUp: d.catchUp };
     } catch {
       return { cursors: {}, recent: [], versions: {} };
     }
@@ -517,8 +544,25 @@ export class IntakeManager {
     const s = this.settings;
     if (!s.ffbox.enabled || !s.ffbox.escalations) return { status: 'off' };
     const seen = this.data.escalations?.[e.ref];
-    if (seen) return seen.answer;
-    return this.remember(e.ref, this.escalate(e));
+    const answer = seen ? seen.answer : this.remember(e.ref, this.escalate(e));
+    if ((answer.status === 'filed' || answer.status === 'in_flight') && s.ffbox.enabled) this.followEscalation(e.conversation, e.threadId, answer.workId);
+    return answer;
+  }
+
+  /**
+   * Follow an escalated thread's request for FFBox (w480): the board ref FFBox watches after it links the conversation
+   * (conv-<conversation>, discord:<thread>; ffwatch fff_escalation_link), answered with THAT request's standing, which
+   * FFBox's own board_check cannot find (followAnswer). recheckBoards pushes it as it moves: in flight with its branch and
+   * PR, then done with its PR and release, which FFBox says as its merge notice.
+   */
+  private followEscalation(conversation: string, threadId: string, workId: string) {
+    const ref = escalationRef(conversation);
+    const was = this.boards.get(ref);
+    if (was?.follow === workId) return;
+    this.boards.set(ref, { q: { keys: [`discord:${threadId}`], conversation }, last: '', at: this.now(), follow: workId });
+    console.log(`intake: following ${workId} for FFBox's escalated conversation ${conversation} (board ${ref})`);
+    this.capBoards();
+    this.saveBoards();
   }
 
   /**
@@ -659,6 +703,14 @@ export class IntakeManager {
   /** FFBox asks the ledger before it works a report; undefined while the check is off. */
   onBoardCheck(m: BoardCheckMessage): BoardAnswer | undefined {
     const s = this.settings;
+    // An escalated thread's watch (w480): FFBox asks about the ref it links, and hears the request it was escalated to.
+    const kept = this.boards.get(m.ref);
+    if (kept?.follow && s.ffbox.enabled) {
+      const answer = this.followAnswer(kept);
+      this.watchBoard(m.ref, kept.q, answer, kept);
+      console.log(`intake: board_check ${m.ref} (FFBox conversation ${m.conversation ?? kept.q.conversation}): ${answer.verdict}, following ${kept.follow}`);
+      return answer;
+    }
     if (!s.ffbox.enabled || !s.ffbox.boardCheck) return undefined;
     // FFBox's board keys in the ledger's spelling: "pr#412" is PR 412, "spec-098" spec 098, "issue#7" a #7 reference.
     const keys = m.keys.flatMap((k) => {
@@ -702,43 +754,189 @@ export class IntakeManager {
 
   // ---------------------------------------------------------------- board answers FFBox follows
 
-  /** Per board_check ref: what was asked and the last answer sent. In memory: FFBox asks again after a reconnect. */
-  private readonly boards = new Map<string, { q: { keys: string[]; title?: string; summary?: string; conversation?: string }; last: string; at: number }>();
+  /**
+   * Per board ref: what was asked, the last answer sent, and for an escalated thread the request it follows. Kept in
+   * intake.json (w480), so a restart loses no watch and keeps its follow window; FFBox also asks its checks again after
+   * a reconnect.
+   */
+  private boards = new Map<string, BoardWatch>();
+  /** When a followed request was first seen done, by request: its done answer waits for the fix look (FIX_HOLD_MS). */
+  private readonly doneSeen = new Map<string, number>();
+
+  private saveBoards() {
+    this.data.boards = Object.fromEntries(this.boards);
+    this.changed();
+  }
+
+  /** Oldest first out, past the cap. */
+  private capBoards() {
+    while (this.boards.size > BOARD_MAX) this.boards.delete(this.boards.keys().next().value!);
+  }
 
   /**
    * Remember a board answer FFBox will follow: one in flight (until it is done), or done but not yet released (until the
-   * version is known). A clear answer, or a released fix, needs no follow-up.
+   * version is known). A clear answer, or a released fix, needs no follow-up. `was`: the watch it updates, whose start
+   * and followed request it keeps.
    */
-  private watchBoard(ref: string, q: { keys: string[]; title?: string; summary?: string; conversation?: string }, answer: BoardAnswer) {
+  private watchBoard(ref: string, q: BoardWatch['q'], answer: BoardAnswer, was?: BoardWatch) {
     const follow = answer.verdict === 'in_flight' || (answer.verdict === 'done' && answer.matches.some((m) => m.status === 'done' && !m.version));
     if (!follow) {
-      this.boards.delete(ref);
+      if (this.boards.delete(ref)) this.saveBoards();
       return;
     }
-    this.boards.set(ref, { q, last: boardDigest(answer), at: this.now() });
-    // Oldest first out, past the cap.
-    while (this.boards.size > BOARD_MAX) this.boards.delete(this.boards.keys().next().value!);
+    this.boards.set(ref, { q, last: boardDigest(answer), at: was?.at ?? this.now(), ...(was?.follow ? { follow: was.follow } : {}) });
+    this.capBoards();
+    this.saveBoards();
+  }
+
+  /**
+   * An escalated thread's answer (w480): the standing of the request it was escalated to, through a merge into another.
+   * Open is in_flight (its branch and PR to watch), done is done (its PR, merge and release), anything else is clear
+   * (FFBox says nothing about a request that will not be fixed in a thread it escalated).
+   */
+  private followAnswer(b: BoardWatch): BoardAnswer {
+    const w = followed(b.follow!, this.d.store.work);
+    if (!w) return { verdict: 'clear', matches: [], confidence: 0 };
+    const verdict = isOpen(w) ? 'in_flight' : w.status === 'done' ? 'done' : 'clear';
+    if (verdict === 'clear') return { verdict, matches: [], confidence: 0 };
+    return { verdict, matches: [this.d.orchestrators.boardMatch(w, 1, 'the request this thread was escalated to')], confidence: 1 };
+  }
+
+  /** A followed request just done waits for the look for its fix (resolveFixes), at most FIX_HOLD_MS. */
+  private holding(b: BoardWatch): boolean {
+    if (!b.follow) return false;
+    const w = followed(b.follow, this.d.store.work);
+    if (!w || w.status !== 'done') return false;
+    if (!this.doneSeen.has(w.id)) this.doneSeen.set(w.id, this.now());
+    if (!fixLearnable(w) || this.data.fixTried?.[w.id]) return false;
+    return this.now() - this.doneSeen.get(w.id)! < FIX_HOLD_MS;
   }
 
   /** Recompute every followed answer; push the ones that changed (a PR opened, a merge, a release). Returns how many went. */
   recheckBoards(): number {
     const s = this.settings;
-    if (!s.ffbox.enabled || !s.ffbox.boardCheck || !this.d.pushBoard) return 0;
+    if (!s.ffbox.enabled || !this.d.pushBoard) return 0;
     let sent = 0;
     for (const [ref, b] of [...this.boards]) {
+      // An escalated thread's watch is followed whenever the FFBox intake is on; a board_check's while the check is.
+      if (!b.follow && !s.ffbox.boardCheck) continue;
       if (this.now() - b.at > BOARD_FOLLOW_MS) {
         this.boards.delete(ref);
+        this.saveBoards();
         continue;
       }
-      const answer = this.d.orchestrators.boardCheck(b.q, s.lookbackDays, { thresholds: s.ffbox.match, maybe: this.d.takesMaybe?.() === true });
-      if (boardDigest(answer) === b.last) continue;
+      const answer = b.follow ? this.followAnswer(b) : this.d.orchestrators.boardCheck(b.q, s.lookbackDays, { thresholds: s.ffbox.match, maybe: this.d.takesMaybe?.() === true });
+      if (boardDigest(answer) === b.last || this.holding(b)) continue;
       if (!this.d.pushBoard(ref, answer)) continue;
       sent++;
-      this.watchBoard(ref, b.q, answer);
-      const kept = this.boards.get(ref);
-      if (kept) kept.at = b.at;
+      this.watchBoard(ref, b.q, answer, b);
     }
     return sent;
+  }
+
+  /**
+   * Learn each followed, finished request's fix (w480): the commit and PR (an auto-close's, a linked request's, the PR an
+   * "already fixed by #N" close names, or the merged PR whose merge commit is the FIX-LANDED one) and the first release
+   * that carries it, so the done answer says "Fixed in PR #1076, coming in version 78". Recorded on the request
+   * (delivery), where boardFacts reads it. Each request is looked at again at most every FIX_RETRY_MS. Never throws.
+   */
+  async resolveFixes(): Promise<string[]> {
+    const s = this.settings;
+    if (!s.ffbox.enabled || this.resolving) return [];
+    const now = this.now();
+    const tried = this.data.fixTried ?? {};
+    const targets = new Map<string, WorkItem>();
+    for (const b of this.boards.values()) {
+      const w = b.follow ? followed(b.follow, this.d.store.work) : undefined;
+      if (w && fixLearnable(w) && !(tried[w.id] && now - tried[w.id] < FIX_RETRY_MS)) targets.set(w.id, w);
+    }
+    if (!targets.size) return [];
+    this.resolving = true;
+    const changed: string[] = [];
+    try {
+      let records: MergeRecord[] | undefined;
+      let bumps: { sha: string; at: number }[] | undefined;
+      for (const w of targets.values()) {
+        const d = { ...w.delivery };
+        const said: string[] = [];
+        if (!d.fixCommit) {
+          const linked = w.autoClosed?.by ? this.d.store.work.get(w.autoClosed.by) : undefined;
+          const named = fixedByPr(w.outcome);
+          if (linked?.delivery?.fixCommit) {
+            const l = linked.delivery;
+            Object.assign(d, { fixCommit: l.fixCommit }, l.fixPr ? { fixPr: l.fixPr } : {}, l.fixBranch ? { fixBranch: l.fixBranch } : {}, l.releasedIn ? { releasedIn: l.releasedIn, releasedAt: l.releasedAt } : {});
+            said.push(`its fix is ${linked.id}'s (${l.fixCommit!.slice(0, 12)})`);
+          } else if (w.autoClosed?.sha) {
+            Object.assign(d, { fixCommit: w.autoClosed.sha }, w.autoClosed.pr ? { fixPr: w.autoClosed.pr } : {});
+            said.push(`its fix is the merge it was closed by (${w.autoClosed.sha.slice(0, 12)})`);
+          } else if (named) {
+            const pr = await this.prInfo(named).catch(() => undefined);
+            if (pr?.sha) {
+              Object.assign(d, { fixCommit: pr.sha, fixPr: named }, pr.head ? { fixBranch: pr.head } : {});
+              said.push(`already fixed by PR #${named} (${pr.sha.slice(0, 12)})`);
+            }
+          }
+        }
+        if (d.fixCommit && !d.fixPr) {
+          records ??= (await this.mergedPrs().catch(() => undefined)) ?? [];
+          const r = records.find((x) => x.number && x.sha === d.fixCommit);
+          if (r) {
+            Object.assign(d, { fixPr: r.number }, r.head ? { fixBranch: r.head } : {});
+            said.push(`merged as PR #${r.number}`);
+          }
+        }
+        if (d.fixPr && !d.fixBranch) {
+          const pr = await this.prInfo(d.fixPr).catch(() => undefined);
+          if (pr?.head) d.fixBranch = pr.head;
+        }
+        if (d.fixCommit && !d.releasedIn) {
+          bumps ??= await this.releaseBumps().catch(() => []);
+          const rel = await this.releaseOf(d.fixCommit, bumps, s.release.delayMinutes * 60_000);
+          if (rel) {
+            Object.assign(d, { releasedIn: rel.version, releasedAt: new Date(rel.at).toISOString() });
+            said.push(`shipped in ${rel.version}`);
+          }
+        }
+        this.data.fixTried = { ...this.data.fixTried, [w.id]: now };
+        const patch = Object.fromEntries(Object.entries(d).filter(([k, v]) => v !== undefined && (w.delivery as Record<string, unknown> | undefined)?.[k] !== v));
+        if (Object.keys(patch).length) {
+          this.d.orchestrators.noteRelease(w.id, patch, `for FFBox's merge notice: ${said.join('; ') || 'its fix'}${d.fixPr ? `, PR #${d.fixPr}` : ''}`);
+          changed.push(w.id);
+        }
+      }
+      // Forget the looks at requests nobody follows any more.
+      const followedIds = new Set([...this.boards.values()].map((b) => (b.follow ? followed(b.follow, this.d.store.work)?.id : undefined)).filter(Boolean));
+      this.data.fixTried = Object.fromEntries(Object.entries(this.data.fixTried ?? {}).filter(([id]) => followedIds.has(id)));
+    } catch (e) {
+      this.data.error = `fix look: ${cleanLine((e as Error).message, 200)}`;
+    } finally {
+      this.resolving = false;
+      this.changed();
+    }
+    return changed;
+  }
+
+  /**
+   * The one-time catch-up (w480): escalated requests closed done in the last CATCH_UP_DAYS days are followed as if FFBox
+   * had just escalated them, so recheckBoards pushes each thread its done answer (after the fix look). Once per data
+   * folder (intake.json `catchUp`); FFBox's once-only guards keep a thread that already heard from hearing it twice.
+   * scripts/escalation-catchup.ts lists the same selection from a copy of the data folder, changing nothing.
+   */
+  catchUpEscalations(): CatchUpLine[] {
+    const s = this.settings;
+    if (!s.ffbox.enabled || !s.ffbox.escalations || this.data.catchUp) return [];
+    const now = this.now();
+    const lines = escalationCatchUp(this.d.store.work, now, CATCH_UP_DAYS);
+    for (const l of lines) {
+      if (this.boards.get(l.ref)?.follow) continue;
+      this.boards.delete(l.ref);
+      this.boards.set(l.ref, { q: { keys: [`discord:${l.threadId}`], conversation: l.conversation }, last: '', at: now, follow: l.workId });
+    }
+    this.capBoards();
+    this.data.catchUp = { at: new Date(now).toISOString(), refs: lines.map((l) => l.ref) };
+    console.log(`intake: catch-up (w480): following ${lines.length} escalated thread(s) closed done in the last ${CATCH_UP_DAYS} days: ${lines.map((l) => `${l.ref} ${l.followId}`).join(', ') || 'none'}`);
+    this.saveBoards();
+    return lines;
   }
 
   /** FFBox accepted or refused a submit. */
@@ -836,6 +1034,37 @@ export class IntakeManager {
     return (await this.git(['merge-base', '--is-ancestor', a, b])).code === 0;
   }
 
+  /** The base branch's version bumps, oldest first (fetched first), each one's bundleVersion remembered in `versions`. */
+  private async releaseBumps(): Promise<{ sha: string; at: number }[]> {
+    const base = this.d.cfg.defaultBase;
+    const slash = base.indexOf('/');
+    if (slash > 0) await this.git(['fetch', '--quiet', base.slice(0, slash), base.slice(slash + 1)]);
+    const log = await this.git(['log', base, '--first-parent', '--format=%H %cI', '-n', '40', '-G', 'bundleVersion:', '--', VERSION_FILE]);
+    const bumps = log.stdout
+      .split('\n')
+      .map((l) => l.trim().split(' '))
+      .filter((p) => /^[0-9a-f]{40}$/.test(p[0] ?? ''))
+      .map(([sha, at]) => ({ sha, at: Date.parse(at) }))
+      .reverse();
+    for (const b of bumps) {
+      if (this.data.versions[b.sha]) continue;
+      const v = bundleVersionOf((await this.git(['show', `${b.sha}:${VERSION_FILE}`])).stdout);
+      if (v) this.data.versions[b.sha] = v;
+    }
+    if (bumps.length) this.data.lastVersion = this.data.versions[bumps.at(-1)!.sha] ?? this.data.lastVersion;
+    return bumps;
+  }
+
+  /** The first release that carries `fix`, once it is `delayMs` old; undefined when none does yet. */
+  private async releaseOf(fix: string, bumps: readonly { sha: string; at: number }[], delayMs: number): Promise<{ version: string; at: number } | undefined> {
+    for (const b of bumps) {
+      const version = this.data.versions[b.sha];
+      if (!version || !(await this.isAncestor(fix, b.sha))) continue;
+      return this.now() - b.at < delayMs ? undefined : { version, at: b.at };
+    }
+    return undefined;
+  }
+
   /**
    * Where each landed fix is: on the base branch, and in which release (the first bundleVersion bump on the base branch
    * that contains it, once it is delayMinutes old). A version's newly shipped fixes with a Discord thread get one
@@ -849,21 +1078,7 @@ export class IntakeManager {
     this.checking = true;
     try {
       const base = this.d.cfg.defaultBase;
-      const slash = base.indexOf('/');
-      if (slash > 0) await this.git(['fetch', '--quiet', base.slice(0, slash), base.slice(slash + 1)]);
-      const log = await this.git(['log', base, '--first-parent', '--format=%H %cI', '-n', '40', '-G', 'bundleVersion:', '--', VERSION_FILE]);
-      const bumps = log.stdout
-        .split('\n')
-        .map((l) => l.trim().split(' '))
-        .filter((p) => /^[0-9a-f]{40}$/.test(p[0] ?? ''))
-        .map(([sha, at]) => ({ sha, at: Date.parse(at) }))
-        .reverse();
-      for (const b of bumps) {
-        if (this.data.versions[b.sha]) continue;
-        const v = bundleVersionOf((await this.git(['show', `${b.sha}:${VERSION_FILE}`])).stdout);
-        if (v) this.data.versions[b.sha] = v;
-      }
-      if (bumps.length) this.data.lastVersion = this.data.versions[bumps.at(-1)!.sha] ?? this.data.lastVersion;
+      const bumps = await this.releaseBumps();
       const shipped = new Map<string, WorkItem[]>();
       for (const w of waiting) {
         const fix = w.delivery!.fixCommit!;
@@ -906,10 +1121,30 @@ export class IntakeManager {
 
   // ---------------------------------------------------------------- merged work
 
+  private async originSlug(): Promise<string | undefined> {
+    const origin = (await run('git', ['-C', this.d.cfg.repo.basePath, 'remote', 'get-url', 'origin'], { timeoutMs: 10_000 })).stdout.trim();
+    return /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(origin)?.[1];
+  }
+
+  /** Pull request `n` of the game repo if it merged: its merge commit and head branch (gh pr view). */
+  private async prInfo(n: number): Promise<MergeRecord | undefined> {
+    if (this.d.prInfo) return this.d.prInfo(n);
+    const slug = await this.originSlug();
+    if (!slug) return undefined;
+    const r = await run('gh', ['pr', 'view', String(n), '-R', slug, '--json', 'number,title,headRefName,state,mergedAt,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+    if (r.code !== 0) return undefined;
+    try {
+      const p = JSON.parse(r.stdout) as { number: number; title: string; headRefName: string; state: string; mergedAt?: string; mergeCommit?: { oid?: string } };
+      if (p.state !== 'MERGED' || !p.mergeCommit?.oid) return undefined;
+      return { sha: p.mergeCommit.oid, at: p.mergedAt ?? '', number: p.number, head: p.headRefName, text: p.title };
+    } catch {
+      return undefined;
+    }
+  }
+
   private async mergedPrs(): Promise<MergeRecord[] | undefined> {
     if (this.d.mergedPrs) return this.d.mergedPrs();
-    const origin = (await run('git', ['-C', this.d.cfg.repo.basePath, 'remote', 'get-url', 'origin'], { timeoutMs: 10_000 })).stdout.trim();
-    const slug = /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(origin)?.[1];
+    const slug = await this.originSlug();
     if (!slug) return undefined;
     const r = await run('gh', ['pr', 'list', '-R', slug, '--state', 'merged', '--limit', String(MERGED_PRS), '--json', 'number,title,body,headRefName,baseRefName,mergedAt,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
     if (r.code !== 0) return undefined;

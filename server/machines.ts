@@ -9,7 +9,7 @@ import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
-import { ADOPT_PROTOCOL, ATTACHMENT_PROTOCOL, PROTOCOL_VERSION, SANDBOX_PROTOCOL, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ADOPT_PROTOCOL, ATTACHMENT_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -18,7 +18,8 @@ import { openPr } from './gitStatus.ts';
 import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
+import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 const PING_MS = 20_000;
@@ -112,6 +113,40 @@ export function localMachineDefaults(cfg: Pick<Config, 'port' | 'repo' | 'sandbo
     librarySeedGB: cfg.librarySeedCopy === 'clone' ? 10 : cfg.librarySeedGB,
     unityBelowNormal: true,
   };
+}
+
+/**
+ * A machine's record turned from the portal's own host (`local`) into one reached over ssh, or back (convert_machine,
+ * w466; docs/portal-on-ffbox-host.md change 3). Only how it is reached changes: its id, token, sandboxes, agents,
+ * limits, pool settings and protected paths stay, so nothing on the machine moves. To ssh: `sshHost` and a portal URL
+ * it can reach (not a loopback one) are needed, and `extras` (the daemon.json settings a local deploy took from the
+ * portal's config) are kept for its redeploys. Back to local: this portal's loopback address unless given. Exported for
+ * tests and the migration script, which rewrites a copy of state.json the same way.
+ */
+export function convertMachineRecord(m: Machine, to: 'ssh' | 'local', o: { sshHost?: string; portalUrl?: string; port: number; publicUrl?: string; extras?: DaemonExtras }): Machine {
+  const next: Machine = { ...m };
+  if (to === 'ssh') {
+    if (!m.local) throw new Error(`${m.id} is reached over ssh already`);
+    const host = o.sshHost?.trim();
+    if (!host || /\s/.test(host)) throw new Error('ssh_host is required: the ssh host alias this portal reaches the machine by (e.g. "beast")');
+    const url = (o.portalUrl ?? o.publicUrl ?? '').trim().replace(/\/+$/, '');
+    if (!/^https?:\/\/[^/\s?#]+$/.test(url)) throw new Error('portal_url is required: the address the machine reaches this portal at, e.g. https://<host>.<tailnet>.ts.net');
+    if (/^https?:\/\/(localhost|127\.[\d.]+|\[::1\])(:\d+)?$/i.test(url)) throw new Error(`${url} is a loopback address: a machine reached over ssh reaches the portal by its network address`);
+    delete next.local;
+    next.host = host;
+    next.portalUrl = url;
+    const keep = { ...(o.extras?.unityMcpServer ? { unityMcpServer: o.extras.unityMcpServer } : {}), ...(o.extras?.sandboxIdleStopMinutes !== undefined ? { sandboxIdleStopMinutes: o.extras.sandboxIdleStopMinutes } : {}) };
+    if (Object.keys(keep).length) next.daemonExtras = keep;
+    return next;
+  }
+  if (m.local) throw new Error(`${m.id} is the portal's own host already`);
+  const url = (o.portalUrl ?? `http://127.0.0.1:${o.port}`).trim().replace(/\/+$/, '');
+  if (!/^https?:\/\/[^/\s?#]+$/.test(url)) throw new Error(`portal_url ${url} is not a base URL`);
+  next.local = true;
+  next.host = 'localhost';
+  next.portalUrl = url;
+  delete next.daemonExtras;
+  return next;
 }
 
 /** The limits a deploy stores: each given one checked, an unset one kept from the previous deploy. Exported for tests. */
@@ -352,7 +387,12 @@ export class MachineManager {
   }
 
   /** A machine's clean-up settings (config machines.cleanup; wired by index.ts). */
-  cleanupFor?: (machineId: string) => { everyMinutes: number; softFreeGB: number };
+  cleanupFor?: (machineId: string) => { everyMinutes: number; softFreeGB: number; staleOutput?: unknown };
+  /** The ledger's facts for the stale-output rules (w459; wired by index.ts): sent at connect, every few minutes and before a pass asked for. */
+  cleanupContext?: () => StaleContext;
+  /** A machine's clean-up pass, in full (what it removed, planned and listed, with why): kept on the portal (wired by index.ts). */
+  cleanupLog?: (machineId: string, entry: Record<string, unknown>) => void;
+  private readonly cleanupCalls = new Map<string, { resolve: (s: CleanupSummary) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   /** A machine's clean-up could not get above its soft threshold (wired by index.ts: the orchestrator and a push). */
   cleanupNotice?: (machineId: string, text: string) => void;
 
@@ -362,6 +402,13 @@ export class MachineManager {
       const c = this.cleanupFor?.(id);
       if (c) this.post(id, { type: 'cleanup_config', config: c }, false);
     }
+  }
+
+  /** Send every connected daemon the ledger's facts for the stale-output rules (w459). */
+  pushCleanupContext() {
+    const ctx = this.cleanupContext?.();
+    if (!ctx) return;
+    for (const id of this.links.keys()) if (!this.store.machines.get(id)?.local) this.post(id, { type: 'cleanup_context', context: ctx }, false);
   }
 
   /** Send every connected daemon the usage poll interval (config usagePollMinutes, after it changed). */
@@ -376,13 +423,32 @@ export class MachineManager {
     return ids.length;
   }
 
-  /** A clean-up pass on the machine now; its result arrives as the machine's lastCleanup. */
-  cleanupNow(machineId: string): string {
+  /**
+   * A clean-up pass on the machine now, stale output included, and its result in full: what went (or, `dryRun`, what
+   * would go: nothing is removed) and what it kept because it could not attribute it. A daemon from before w459 runs
+   * a real pass and never answers: then this says so after `timeoutMs`.
+   */
+  async cleanupNow(machineId: string, opts: { dryRun?: boolean; timeoutMs?: number } = {}): Promise<CleanupSummary> {
     const m = this.require(machineId);
     if (m.local) throw new Error(`${m.id} is this host: its disk is cleaned by this host's guard (host_recovery "cleanup"), not by its daemon`);
     if (!this.links.has(m.id)) throw new Error(`machine ${m.id} is offline`);
-    this.post(m.id, { type: 'cleanup_now' });
-    return `Asked ${m.id} for a clean-up pass; list_machines shows its result (last clean-up) in a minute or two.`;
+    const ctx = this.cleanupContext?.();
+    if (ctx) this.post(m.id, { type: 'cleanup_context', context: ctx });
+    const id = randomUUID();
+    return new Promise<CleanupSummary>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.cleanupCalls.delete(id);
+        reject(new Error(`${m.id} did not answer within ${Math.round((opts.timeoutMs ?? 15 * 60_000) / 60_000)} min (a daemon from before w459 runs a real pass and does not answer; list_machines shows its last clean-up)`));
+      }, opts.timeoutMs ?? 15 * 60_000);
+      this.cleanupCalls.set(id, { resolve, reject, timer });
+      try {
+        this.post(m.id, { type: 'cleanup_now', id, ...(opts.dryRun ? { dryRun: true } : {}) });
+      } catch (e) {
+        clearTimeout(timer);
+        this.cleanupCalls.delete(id);
+        reject(e as Error);
+      }
+    });
   }
 
   /**
@@ -398,6 +464,7 @@ export class MachineManager {
       }
       if (!this.offlineSince.has(m.id)) this.offlineSince.set(m.id, now);
       if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
+      if (m.relocatedTo) continue; // sent to another portal (relocate): a redeploy from here would pull it back
       const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
       if (!why) continue;
       // The portal's own host needs no ssh: it is always there when this code runs.
@@ -518,6 +585,20 @@ export class MachineManager {
     return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && (sandbox === '*' ? !!s.info.machineSandbox : s.info.machineSandbox === sandbox) && isMidTurn(s.info)).length;
   }
 
+  /**
+   * Why an agent of this kind may never start outside a sandbox on `m`, or undefined: this host's own daemon's main clone
+   * is the base its sandboxes are worktrees of (workers only), and a machine with max_agents 0 takes agents in its
+   * sandboxes only (w477, Lothsahn on 2026-10-05), neither main-clone workers nor standing agents. Names its sandboxes.
+   */
+  mainCloneRefusal(m: Machine, kind?: SessionInfo['kind']): string | undefined {
+    const sbs = (m.sandboxes ?? []).map((s) => `${m.id}/${s.id}`);
+    const use = sbs.length ? `one of its sandboxes (${sbs.join(', ')})` : `a sandbox there (it has none yet: create_sandbox with machine "${m.id}")`;
+    if (m.local && kind === 'worker') return `${m.id}'s main clone (${m.repoPath}) is the base its sandboxes are worktrees of: start agents in ${use}`;
+    if (m.maxSessions !== 0) return undefined;
+    if (kind === 'standing') return `${m.id} takes agents in its sandboxes only (max_agents 0): a standing agent needs a computer with max_agents 1 or more; assign it elsewhere`;
+    return `${m.id} takes agents in its sandboxes only (max_agents 0): start this one in ${use}`;
+  }
+
   /** Why a message to this machine session must wait for a free running slot, or undefined (SessionManager.placeFull). */
   placeFull(s: SessionHandle): string | undefined {
     const m = this.store.machines.get(s.info.machineId ?? '');
@@ -532,7 +613,7 @@ export class MachineManager {
       if (pool?.maxAgents !== undefined && all >= pool.maxAgents) return `${all} agents mid-turn in ${m.id}'s sandboxes (max_sandbox_agents ${pool.maxAgents})`;
       return undefined;
     }
-    if (s.info.kind === 'worker' && m.local) return undefined; // refused outright by dispatchSend: no queue for it
+    if (this.mainCloneRefusal(m, s.info.kind)) return undefined; // refused outright by dispatchSend: no queue for it
     const main = this.runningIn(m.id, undefined);
     return main >= m.maxSessions ? `${main} agents mid-turn in ${m.id}'s main clone (max_agents ${m.maxSessions})` : undefined;
   }
@@ -615,6 +696,8 @@ export class MachineManager {
     const typed = opts.id.trim();
     const id = typed.toLowerCase();
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
+    // 0: sandboxes only (w477), no agents in its main clone.
+    if (opts.maxSessions !== undefined && (!Number.isInteger(opts.maxSessions) || opts.maxSessions < 0 || opts.maxSessions > 8)) throw new Error('max_agents is a whole number from 0 (sandboxes only) to 8');
     if (this.deploying.has(id)) throw new Error(`${id} is already being deployed`);
     const prev = this.store.machines.get(id);
     const local = opts.local ?? prev?.local ?? false;
@@ -661,6 +744,8 @@ export class MachineManager {
       platform: prev?.platform,
       name: typed !== id ? typed : prev?.name,
       sandboxes: prev?.sandboxes,
+      // Kept from when it was the portal's own host (convert_machine, w466): what its ssh redeploys write.
+      ...(!local && prev?.daemonExtras ? { daemonExtras: prev.daemonExtras } : {}),
       ...dirs,
       ...limits,
     });
@@ -676,6 +761,37 @@ export class MachineManager {
   /** The portal's own host as a machine (docs/beast-machine.md), if one is set up. */
   local(): Machine | undefined {
     return this.list().find((m) => m.local);
+  }
+
+  /**
+   * Turn the portal's own host as a machine into one reached over ssh, or back (convert_machine, w466): the record only
+   * (convertMachineRecord). Its daemon stays connected as it is, its agents run on, its token and sandboxes stay; it is
+   * how BEAST stays the same machine when the portal moves to the VM, and comes back when it returns. A redeploy (asked
+   * for, refused while agents run there) writes the new way into its daemon.json, with a new token.
+   */
+  convertMachine(id: string, to: 'ssh' | 'local', o: { sshHost?: string; portalUrl?: string; redeploy?: boolean } = {}): string {
+    const m = this.require(id);
+    if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
+    // Checked before anything changes: a redeploy restarts its daemon, which stops its agents.
+    if (o.redeploy && this.liveCount(m.id) > 0) throw new Error(`${m.id} has ${this.liveCount(m.id)} agent(s) running; a redeploy would stop them. Convert without redeploy (its daemon stays connected), or stop them first`);
+    if (to === 'local') {
+      const other = this.list().find((x) => x.local && x.id !== m.id);
+      if (other) throw new Error(`${other.id} is already the portal's own host as a machine; there can be only one`);
+      if (process.platform !== 'win32' && !this.allowLocalAnywhere) throw new Error("a local machine (the portal's own host) is only supported on a Windows host so far");
+      // The portal's own computer must hold the machine's clone: a machine that is another computer cannot become it.
+      if (!m.repoPath || !fs.existsSync(m.repoPath)) throw new Error(`${m.repoPath || 'its main clone'} is not on this computer: ${m.id} cannot be the portal's own host here`);
+    }
+    const next = convertMachineRecord(m, to, { ...o, port: this.cfg.port, publicUrl: this.cfg.publicUrl, extras: to === 'ssh' ? this.localExtras() : undefined });
+    this.store.putMachine(next);
+    const kept = `${(next.sandboxes ?? []).length} sandbox(es), ${next.sessionIds.length} agent record(s), its token and limits kept`;
+    const how = to === 'ssh' ? `reached over ssh as "${next.host}", portal_url ${next.portalUrl}` : `the portal's own host again (no ssh), portal_url ${next.portalUrl}`;
+    const link = this.isOnline(next.id) ? 'Its daemon stays connected as it is, its agents running on' : 'Its daemon is offline now; it dials the URL in its daemon.json (relocate_machines changes that for a connected one)';
+    let text = `${next.id} is ${how}; ${kept}. ${link}.`;
+    if (o.redeploy) {
+      this.deployMachine({ id: next.id });
+      text += ` Redeploying it ${to === 'ssh' ? `over ssh to ${next.host}` : 'here, without ssh'}; list_machines shows progress.`;
+    } else text += ` Its daemon.json still has the way it was deployed: a redeploy (add_machine, or convert_machine with redeploy) writes this one.`;
+    return text;
   }
 
   /** The install over ssh (server/machineDeploy.ts); replaced by tests. */
@@ -706,7 +822,7 @@ export class MachineManager {
         if (s === 'installing') installAt = Date.now();
         this.update(m.id, { statusDetail: s });
       };
-      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : {}) });
+      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : m.daemonExtras ? { extra: m.daemonExtras } : {}) });
       const connected = () => this.deployedDaemonConnected(m.id, installAt, r.version);
       this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
       if (r.started === false && !connected()) {
@@ -831,8 +947,9 @@ export class MachineManager {
       if (sb.status !== 'ready') throw new Error(`sandbox ${m.id}/${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`);
       // The agent limits count mid-turn agents only and are waited for, not refused: SessionManager queues a message
       // until placeFull says a slot is free (w384).
-    } else if (!s.live && m.local && s.info.kind === 'worker') {
-      throw new Error(`${m.id}'s main clone (${m.repoPath}) is the base its sandboxes are worktrees of: start agents in one of its sandboxes`);
+    } else if (!s.live && !sbId) {
+      const why = this.mainCloneRefusal(m, s.info.kind);
+      if (why) throw new Error(why);
     }
     // The portal's own host: its guard's gate (disk space, the sandbox drive, RAM) holds new agent processes there too.
     const gate = !s.live && m.local && from !== 'system' ? this.localGate?.('agent') : undefined;
@@ -944,6 +1061,8 @@ export class MachineManager {
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
     const cleanup = this.cleanupFor?.(id);
     if (cleanup) ws.send(JSON.stringify({ type: 'cleanup_config', config: cleanup } satisfies ToDaemon));
+    const ctx = m.local ? undefined : this.cleanupContext?.();
+    if (ctx) ws.send(JSON.stringify({ type: 'cleanup_context', context: ctx } satisfies ToDaemon));
     ws.send(JSON.stringify({ type: 'usage_config', config: { everyMinutes: this.cfg.usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES } } satisfies ToDaemon));
     console.log(`machine ${id} connected`);
   }
@@ -1016,7 +1135,7 @@ export class MachineManager {
         const why = daemonMismatch(this.hellos.get(id)!, this.portalHead);
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
         else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
-        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined });
+        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined, relocatedTo: undefined });
         this.store.putMachine(m);
         const live = new Set(msg.live);
         for (const sid of m.sessionIds) {
@@ -1124,6 +1243,15 @@ export class MachineManager {
       case 'sandbox_event':
         this.sandboxEvent?.(id, msg.text, { sandbox: msg.sandbox, checkpoint: !!msg.checkpoint });
         return;
+      case 'relocate_result': {
+        const p = this.relocateCalls.get(msg.id);
+        if (!p) return;
+        this.relocateCalls.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.ok) p.resolve();
+        else p.reject(new Error(msg.error ?? 'refused'));
+        return;
+      }
       case 'switch_result': {
         const p = this.switchCalls.get(msg.id);
         if (!p) return;
@@ -1157,6 +1285,18 @@ export class MachineManager {
         this.store.putMachine(m);
         if (msg.notice) this.cleanupNotice?.(id, msg.notice);
         return;
+      case 'cleanup_log':
+        if (msg.entry && typeof msg.entry === 'object') this.cleanupLog?.(id, msg.entry);
+        return;
+      case 'cleanup_result': {
+        const call = this.cleanupCalls.get(msg.id);
+        if (!call) return;
+        clearTimeout(call.timer);
+        this.cleanupCalls.delete(msg.id);
+        if (msg.ok && msg.summary) call.resolve(msg.summary);
+        else call.reject(new Error(msg.error ?? `${id}: the clean-up pass failed`));
+        return;
+      }
       case 'max_event':
         if (typeof msg.line === 'string' && msg.line.length <= 8192) this.maxEvent?.(id, msg.line);
         return;
@@ -1358,6 +1498,43 @@ export class MachineManager {
         reject(e as Error);
       }
     });
+  }
+
+  private readonly relocateCalls = new Map<string, { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+
+  /**
+   * Send a connected daemon to the portal at `url` (w466, docs/machines.md "Moving the portal"): it keeps the URL in its
+   * daemon.json, drops this link and dials the new one, its agents running on (with machines.keepAgentsOnRestart their
+   * runs are not this portal's to stop). The drop is on purpose: nothing is resumed here, and the offline watch leaves
+   * it alone until it says hello here again (`relocatedTo`). Its record's portal_url stays this portal's address.
+   */
+  async relocate(machineId: string, rawUrl: string, timeoutMs = 20_000): Promise<string> {
+    const m = this.require(machineId);
+    const url = rawUrl.trim().replace(/\/+$/, '');
+    const bad = relocateProblem(url);
+    if (bad) throw new Error(bad);
+    if (!this.isOnline(m.id)) throw new Error(`${m.id} is offline: only a connected daemon can be relocated (or redeploy it with portal_url ${url})`);
+    const p = this.protocolOf(m.id) ?? 0;
+    if (p < RELOCATE_PROTOCOL) throw new Error(`${m.id}'s daemon speaks protocol ${p} and cannot relocate (needs ${RELOCATE_PROTOCOL}): let it be redeployed first`);
+    await new Promise<void>((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.relocateCalls.delete(id);
+        reject(new Error(`${m.id} did not answer the relocate within ${Math.round(timeoutMs / 1000)} s`));
+      }, timeoutMs);
+      this.relocateCalls.set(id, { resolve, reject, timer });
+      try {
+        this.post(m.id, { type: 'relocate', id, url });
+      } catch (e) {
+        clearTimeout(timer);
+        this.relocateCalls.delete(id);
+        reject(e as Error);
+      }
+    });
+    // Its link drops in a moment, on purpose: no resume of what it runs, no redeploy while it is away.
+    this.expectDrop(m.id, false);
+    this.update(m.id, { relocatedTo: { url, at: new Date().toISOString() } });
+    return `${m.id} took ${url} and is dialling it now; its agents run on. It falls back to this portal's URL too if ${url} has not answered after ${RELOCATE_FALLBACK_MINUTES} minutes.`;
   }
 
   private readonly switchCalls = new Map<string, { resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();

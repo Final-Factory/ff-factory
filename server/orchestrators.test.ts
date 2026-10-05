@@ -11,7 +11,8 @@ import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
 import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
-import type { Config } from './config.ts';
+import { configPath, type Config } from './config.ts';
+import { memoryDirFor } from './orchestratorMemory.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 
@@ -897,4 +898,101 @@ test('w428: with placement.prefer and avoid set, the next goes to LothDesktop, t
   cfg.placement = undefined;
   assert.doesNotMatch((await call(dispatcher().info, 'list_sandboxes', {})).text, /avoided|preferred/);
   await until('the worker answered', () => [...sessions.sessions.values()].filter((s) => s.info.kind === 'worker' && !s.info.machineId).every((s) => s.info.status === 'idle'));
+});
+
+test('w477: a machine with max_agents 0 takes agents in its sandboxes only: start_agent with it alone is refused naming its sandboxes, placement never suggests its main clone, standing agents stay off it', async (t) => {
+  const { store, agents, dispatcher, call } = setup(t);
+  const GB = 1024 ** 3;
+  const machines = (agents as unknown as { machines: MachineManager }).machines;
+  const machine = (id: string, extra: Record<string, unknown>) =>
+    store.putMachine({ id, host: id, purpose: 'unused', status: 'ready', online: true, repoPath: `/w/${id}`, home: '/h', portalUrl: 'http://x', sessionIds: [], createdAt: T0, ...extra } as never);
+  const sb = (id: string) => ({ id, branch: `sandbox/${id}`, base: 'origin/develop', path: `D:\work\ffsb\${id}`, purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
+  machine('lothdesktop', { platform: 'win32', maxSessions: 0, sandboxRoot: 'D:\work\ffsb', maxSandboxes: 3, maxSandboxAgents: 6, sandboxes: [sb('sb1'), sb('sb2')] });
+  // A main-clone machine set to 0 has no place for work at all.
+  machine('m5', { platform: 'darwin', maxSessions: 0 });
+  machine('m3', { platform: 'darwin', maxSessions: 2 });
+  Object.assign(machines, { isOnline: () => true, statsOf: () => ({ hostname: 'x', platform: 'x', cpuModel: 'x', cpuCount: 8, loadPct: 5, memTotalBytes: 64 * GB, memFreeBytes: 40 * GB, at: T0 }) });
+  agents.hostMem = () => ({ free: 50 * GB, total: 64 * GB });
+
+  // add_machine takes 0; the record and the HTTP route are validated the same way.
+  const add = agents.toolSpecs().find((x) => x.name === 'add_machine')!;
+  const { z } = await import('zod');
+  assert.equal(z.object(add.schema).safeParse({ id: 'lothdesktop', max_agents: 0 }).success, true);
+  assert.equal(z.object(add.schema).safeParse({ id: 'lothdesktop', max_agents: -1 }).success, false);
+  assert.throws(() => machines.deployMachine({ id: 'lothdesktop', maxSessions: -1 }), /max_agents is a whole number from 0 \(sandboxes only\) to 8/);
+  assert.throws(() => machines.deployMachine({ id: 'lothdesktop', maxSessions: 2.5 }), /from 0 \(sandboxes only\) to 8/);
+
+  // The capacity block lists LothDesktop's sandboxes and the m3, never a main clone with max_agents 0.
+  const list = (await call(dispatcher().info, 'list_sandboxes', {})).text;
+  assert.match(list, /\n- lothdesktop: ROOM \d+%/);
+  assert.match(list, /\n- m3 \[main clone\]: ROOM/);
+  assert.doesNotMatch(list, /- m5\b|m5's main clone/);
+  for (const prefer of [['m5', 'lothdesktop'], ['lothdesktop']]) {
+    (agents as unknown as { cfg: Config }).cfg.placement = { prefer };
+    assert.doesNotMatch((await call(dispatcher().info, 'list_sandboxes', {})).text, /Next new game-repo work: (m5|lothdesktop)'s main clone/);
+  }
+  assert.match((await call(dispatcher().info, 'list_machines', {})).text, /sandboxes only \(max_agents 0: no agents in its main clone\)/);
+
+  // start_agent with the machine alone: refused before any record is made, naming its sandboxes.
+  const before = store.sessions.size;
+  const start = beltFor('remote', agents.toolSpecs('human', agents.fixedActor(LOTH), { role: 'remote', owner: LOTH })).find((x) => x.name === 'start_agent')!;
+  const run = async (a: Record<string, unknown>) => {
+    const r = await start.handler(a);
+    return { text: r.content.map((c) => c.text).join(''), isError: !!r.isError };
+  };
+  const r = await run({ machine: 'lothdesktop', prompt: 'Profile the belts', title: 'Belt profile' });
+  assert.equal(r.isError, true);
+  assert.match(r.text, /lothdesktop takes agents in its sandboxes only \(max_agents 0\): start this one in one of its sandboxes \(lothdesktop\/sb1, lothdesktop\/sb2\)/);
+  const none = await run({ machine: 'm5', prompt: 'x', title: 'x' });
+  assert.match(none.text, /m5 takes agents in its sandboxes only \(max_agents 0\): start this one in a sandbox there \(it has none yet: create_sandbox with machine "m5"\)/);
+  assert.equal(store.sessions.size, before, 'no agent record left behind');
+
+  // A standing agent cannot be assigned there, a delegated worker never goes to its main clone, and a session already
+  // there (assigned before the change) is refused outright rather than queued for a slot that never comes.
+  const m = machines.require('lothdesktop');
+  assert.match(machines.mainCloneRefusal(m, 'standing')!, /lothdesktop takes agents in its sandboxes only \(max_agents 0\): a standing agent needs a computer with max_agents 1 or more/);
+  assert.equal(machines.mainCloneRefusal(machines.require('m3'), 'worker'), undefined);
+  assert.throws(() => agents.standing.create({ name: 'Nightly reader', charter: 'Read the nightly report.', trigger: { kind: 'manual' }, machineId: 'lothdesktop' } as never), /sandboxes only \(max_agents 0\)/);
+  store.putMachine({ ...machines.require('m3'), purpose: 'unused', git: { branch: 'develop', dirty: 0 } } as never);
+  store.putMachine({ ...machines.require('m5'), purpose: 'unused', git: { branch: 'develop', dirty: 0 } } as never);
+  assert.deepEqual(agents.standing.pickTarget('machines', []), { machine: 'm3' });
+  const s = machines.createSession('lothdesktop', { kind: 'worker', title: 'old', model: 'opus', permissionMode: 'bypassPermissions' });
+  assert.equal(machines.placeFull(s), undefined, 'not queued');
+  assert.throws(() => machines.dispatchSend(s as never, 'hi', 'orchestrator', 'u1'), /sandboxes only \(max_agents 0\)/);
+});
+
+test('w464 change 6: claudeAccounts.dispatcher runs the dispatcher on that account, not the system payer\'s own token; people\'s orchestrators keep theirs', (t) => {
+  const { cfg, agents, dispatcher, chat } = setup(t);
+  const HOST = 'sk-ant-oat01-host-token-9AAA';
+  const BENS = 'sk-ant-oat01-bens-own-token-BBBB';
+  cfg.claudeEnv = { CLAUDE_CODE_OAUTH_TOKEN: HOST };
+  cfg.userClaudeEnv = { ben: { CLAUDE_CODE_OAUTH_TOKEN: BENS } };
+  const tokenOf = (info: SessionInfo) => (agents.orchestratorOptions(info) as { env: Record<string, string | undefined> }).env.CLAUDE_CODE_OAUTH_TOKEN;
+  assert.equal(tokenOf(dispatcher().info), BENS, 'unset: the system payer (Ben, the owner) and his own token, as before');
+  cfg.claudeAccounts = { dispatcher: 'token' };
+  assert.equal(tokenOf(dispatcher().info), HOST, "set: the host token, whoever the system payer is");
+  assert.equal(tokenOf(chat(BEN).info), BENS, "Ben's own orchestrator still runs on his token");
+});
+
+// ---------------------------------------------------------------- w467: no secrets for orchestrators
+
+test("w467: an orchestrator's hooks refuse config.json, data/ and ~/.ssh, and let its own memory and other folders through", async (t) => {
+  const { cfg, agents, chat } = setup(t);
+  const info = chat(BEN).info;
+  const hooks = agents.orchestratorOptions(info).hooks!.PreToolUse![0].hooks;
+  const run = async (tool: string, input: Record<string, unknown>) => {
+    for (const h of hooks) {
+      const r = (await h({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input } as never, undefined, { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } };
+      if (r.hookSpecificOutput?.permissionDecision === 'deny') return 'deny';
+    }
+    return 'pass';
+  };
+  assert.equal(await run('Read', { file_path: configPath() }), 'deny');
+  assert.equal(await run('Read', { file_path: path.join(cfg.dataDir, 'work.json') }), 'deny');
+  assert.equal(await run('Read', { file_path: path.join(os.homedir(), '.ssh', 'id_ed25519') }), 'deny');
+  assert.equal(await run('Grep', { pattern: 'sk-ant', path: cfg.dataDir }), 'deny');
+  const memory = memoryDirFor(cfg, info);
+  assert.equal(await run('Read', { file_path: path.join(memory, 'MEMORY.md') }), 'pass', 'its own memory folder');
+  assert.equal(await run('Read', { file_path: path.join(cfg.dataDir, 'attachments', 'att_1-Player.log') }), 'pass', 'files people attached');
+  assert.equal(await run('Read', { file_path: path.join(os.tmpdir(), 'some-repo', 'README.md') }), 'pass');
 });

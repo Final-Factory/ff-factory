@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { HOST_ROLES, roleNames, type ClaudeAccount, type Config, type HostRole } from './config.ts';
-import type { SessionKind } from '../shared/types.ts';
+import type { SessionInfo, SessionKind } from '../shared/types.ts';
 import { credentialsFile, loginUnusable, readStoredLogin, usageEnv } from './usage.ts';
 import { writeFileDurable } from './durable.ts';
 
@@ -114,9 +114,21 @@ export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'> & Partial<Pick<C
 /** The role config claudeAccounts knows a session of `kind` on this host by. */
 export const hostRole = (kind: SessionKind): HostRole => (kind === 'orchestrator' ? 'orchestrator' : kind === 'standing' ? 'standing' : 'workers');
 
-/** The account this host's agents of `role` run on (config claudeAccounts; default the token). */
+/** The account this host's agents of `role` run on (config claudeAccounts; default the token; the dispatcher, unset: the orchestrator's). */
 export function hostAccount(cfg: Pick<Config, 'claudeAccounts'>, role: HostRole): ClaudeAccount {
-  return cfg.claudeAccounts?.[role] === 'login' ? 'login' : 'token';
+  const v = cfg.claudeAccounts?.[role] ?? (role === 'dispatcher' ? cfg.claudeAccounts?.orchestrator : undefined);
+  return v === 'login' ? 'login' : 'token';
+}
+
+/** Whether the dispatcher has an account of its own (config claudeAccounts.dispatcher, w464): it then ignores the system payer's own token. */
+export const dispatcherOwnAccount = (cfg: Pick<Config, 'claudeAccounts'>) => cfg.claudeAccounts?.dispatcher !== undefined;
+
+/** The roles worth naming apart: the dispatcher only when it has an account of its own (else it is the orchestrator's). */
+export const shownRoles = (cfg: Pick<Config, 'claudeAccounts'>): HostRole[] => HOST_ROLES.filter((r) => r !== 'dispatcher' || dispatcherOwnAccount(cfg));
+
+/** The role a session on this host runs as (claudeAccounts): the dispatcher's own when it has one, else by its kind. */
+export function hostRoleOf(cfg: Pick<Config, 'claudeAccounts'>, info: Pick<SessionInfo, 'kind'> & Partial<Pick<SessionInfo, 'orchestratorRole'>>): HostRole {
+  return info.kind === 'orchestrator' && info.orchestratorRole === 'dispatcher' && dispatcherOwnAccount(cfg) ? 'dispatcher' : hostRole(info.kind);
 }
 
 /**
@@ -177,10 +189,10 @@ export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'> & Part
  */
 export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv' | 'machines'>, hostName: string, hostToken: string | undefined, machineIds: MachineRef[], people: string[] = []): string[] {
   const here = (role: HostRole) => (hostAccount(cfg, role) === 'login' || !hostToken ? `${hostName} login` : `host token …${hostToken.slice(-4)}`);
-  const logins = HOST_ROLES.filter((r) => hostAccount(cfg, r) === 'login');
+  const logins = shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login');
   const problem = logins.length ? hostLoginProblem(cfg) : undefined;
   return [
-    `Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): ${HOST_ROLES.map((r) => `${roleNames([r])} here: ${here(r)}`).join('; ')}${machineIds.length ? `; ${machineIds.map((m) => `agents on ${refId(m)}: ${accountSource(cfg, m).replace(/ \(.*\)$/, '')}`).join('; ')}` : ''}${people.length ? `; work asked for by ${people.join(', ')}: their own token` : ''}`,
+    `Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): ${shownRoles(cfg).map((r) => `${roleNames([r])} here: ${here(r)}`).join('; ')}${machineIds.length ? `; ${machineIds.map((m) => `agents on ${refId(m)}: ${accountSource(cfg, m).replace(/ \(.*\)$/, '')}`).join('; ')}` : ''}${people.length ? `; work asked for by ${people.join(', ')}: their own token` : ''}`,
     ...(problem ? [`WARNING: set to the ${hostName} login (${roleNames(logins)}), which cannot run agents: ${problem}`] : []),
   ];
 }

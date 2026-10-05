@@ -38,12 +38,13 @@ import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, hostAccount, hostRole, scrubTranscripts, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
-import { appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
+import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
+import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { pruneEditorLogs, slugify } from './sandboxes.ts';
 import { agentAnswers } from './watchdog.ts';
 import { reapBrowsers } from './reaper.ts';
@@ -52,6 +53,7 @@ import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, p
 import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, sessionSource, tokenKey, tokenLabel } from './usage.ts';
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
+import { startBaseRefresh } from './baseRefresh.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AppState, CreateSandboxRequest, HostStatus, Machine, PermissionDecisionRequest, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 
@@ -213,6 +215,11 @@ machines.report = (text) => {
 // The portal's own host as a machine (docs/beast-machine.md) cleans nothing itself: this host's guard already cleans
 // this computer, with its own rules, and counts that daemon's running agents' temp folders as in use.
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
+// The stale-output rules (w459) attribute build and run output to the ledger's requests: each daemon gets its facts
+// at connect and every 10 minutes, and its every pass is kept here too (data/cleanup/<machine>/cleanup-log.jsonl).
+machines.cleanupContext = () => staleContextOf(store.work.values());
+machines.cleanupLog = (machineId, entry) => appendCleanupLog(path.join(cfg.dataDir, 'cleanup', machineId.replace(/[^\w.-]/g, '_')), { machine: machineId, ...entry });
+setInterval(() => machines.pushCleanupContext(), 10 * 60_000).unref();
 machines.cleanupNotice = (machineId, text) => {
   notifier.host(`Disk space on ${machineId}`, text);
   machines.report?.(`[machine ${machineId}] Clean-up cannot free enough disk space. ${text}`);
@@ -370,6 +377,19 @@ const hostCleanupGuard = () => ({
   inUse: [...sessions.sessions.values()].filter((s) => s.live && (!s.info.machineId || store.machines.get(s.info.machineId)?.local)).map((s) => sessionTempDir(os.tmpdir(), s.info.id)),
   home: cleanupEnv.home,
 });
+/**
+ * Where agents work on this host, for the stale-output rules (w459): its own sandboxes and its own daemon's (both on
+ * this host's sandbox drive), each with whether its editor is known to be stopped, and the base clone.
+ */
+const hostStalePlaces = (): StalePlace[] => {
+  const stopped = (state: string) => state === 'stopped' || state === 'crashed';
+  const local = machines.local();
+  return [
+    ...sandboxes.list().filter((s) => s.status === 'ready').map((s) => ({ id: s.id, path: s.path, kind: 'sandbox' as const, editorRunning: !stopped(s.unity.state) })),
+    ...(local?.sandboxes ?? []).filter((s) => s.status === 'ready').map((s) => ({ id: `${local!.id}/${s.id}`, path: s.path, kind: 'sandbox' as const, editorRunning: !stopped(s.unity.state) })),
+    { id: 'base clone', path: cfg.repo.basePath, kind: 'clone' as const },
+  ];
+};
 const hostHealth = new HostHealthMonitor({
   cfg,
   statfs: async (p) => {
@@ -404,10 +424,20 @@ const hostHealth = new HostHealthMonitor({
   },
   runHelper: (a) => runHelper(a),
   cleanup: {
-    pass: async (low) => {
+    pass: async (low, opts) => {
       const guard = hostCleanupGuard();
       const libraries = cfg.hostGuard.cleanup.libraryDeleteDays > 0 ? { roots: [cleanupEnv.home], deleteDays: cfg.hostGuard.cleanup.libraryDeleteDays } : undefined;
-      const r = await runCleanup(await planCleanup({ rules: cleanupRules(cleanupEnv, cfg.hostGuard.cleanup), guard, low, libraries }), guard);
+      const settings = staleOutputSettings(cfg.hostGuard.cleanup.staleOutput);
+      // A sandbox's Builds/ is the stale-output rules' (attributed, or listed): the old 7-day age rule only when they are off.
+      const env = settings.mode === 'off' ? cleanupEnv : { ...cleanupEnv, sandboxRoots: [] };
+      const r = await cleanupPass({
+        opts,
+        guard,
+        mode: settings.mode,
+        regular: () => planCleanup({ rules: cleanupRules(env, cfg.hostGuard.cleanup), guard, low, libraries }),
+        stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, cleanupEnv.home), ctx: staleContextOf(store.work.values()), settings, guard }),
+      });
+      if (opts.dryRun) return r;
       for (const s of sandboxes.list().filter((x) => x.unity.logPath)) {
         for (const p of pruneEditorLogs(path.dirname(s.unity.logPath!), s.unity.logPath!)) r.removed.push({ path: p, bytes: 0, rule: 'editor-logs' });
       }
@@ -416,6 +446,7 @@ const hostHealth = new HostHealthMonitor({
     consumers: () => biggestConsumers(cleanupEnv, [cfg.hostGuard.devDriveVhdx].filter(Boolean)),
     stale: async () => (await staleUnityLibraries([cleanupEnv.home], cfg.hostGuard.cleanup.libraryReportDays)).filter((l) => !neverDelete(l.path, hostCleanupGuard())),
     log: (e) => appendCleanupLog(cfg.dataDir, e),
+    staleAt: staleAtFile(cfg.dataDir),
     diskPaths: () => [cleanupEnv.home, cleanupEnv.tmp],
   },
   reap: (hours) => reapBrowsers(hours),
@@ -453,6 +484,8 @@ const ledgerSweep = new LedgerSweep({
   limitsClear: (s) => limitsClearFor(s),
   intakeMerged: () => intake.checkMerged(false),
 }).start();
+// The orchestrators' base clone, kept on origin's newest code (w467, server/baseRefresh.ts; config repo.refreshMinutes).
+startBaseRefresh(cfg);
 max.onEvent = (ev) => intake.onMaxEvent(ev);
 providers.onConversation = (c) => intake.onConversation(c);
 providers.onRequest = (m) => intake.onRequest(m);
@@ -1483,11 +1516,19 @@ function personTokens() {
     .map(({ u, token }) => ({ token, displayName: u.displayName, label: `${u.displayName}'s token …${token.slice(-4)}` }));
 }
 usage.personTokens = personTokens;
+/**
+ * The account a session ran on, for the meters. The dispatcher with an account of its own (claudeAccounts.dispatcher,
+ * w464) runs on it, never on its person's own token, so its stopped session is counted there too.
+ */
+function sourceOf(s: SessionInfo, token: string | undefined, toMachine: (id: string) => string | undefined) {
+  const role = hostRoleOf(cfg, s);
+  const login = () => hostAccount(cfg, role) === 'login';
+  if (role === 'dispatcher') return sessionSource({ ...s, requestedBy: undefined }, token, toMachine, () => undefined, login);
+  return sessionSource(s, token, toMachine, (id) => userToken(cfg, id), (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login');
+}
 function accountSourceOf(s: SessionInfo) {
-  const token = hostToken(cfg);
   const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));
-  const hostLogin = (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login';
-  return sessionSource(s, token, toMachine, (id) => userToken(cfg, id), hostLogin);
+  return sourceOf(s, hostToken(cfg), toMachine);
 }
 /** Whether the Claude account a session ran on has room again (no meter at 90% or more), or undefined when unknown (the ledger cleanup, before it resumes a worker a limit cut off). */
 function limitsClearFor(s: SessionInfo): boolean | undefined {
@@ -1499,17 +1540,17 @@ function limitsClearFor(s: SessionInfo): boolean | undefined {
 function accountsNow() {
   const token = hostToken(cfg);
   const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));
-  const hostLogin = (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login';
   return buildAccounts(usage.entries, {
     hostName: os.hostname(),
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
-    hostLoginRoles: HOST_ROLES.filter((r) => hostAccount(cfg, r) === 'login'),
+    hostLoginRoles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login'),
+    roles: shownRoles(cfg),
     people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
     machines: machines.list().map((m) => {
       const t = toMachine(m.id);
       return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token) };
     }),
-    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sessionSource(s, token, toMachine, (id) => userToken(cfg, id), hostLogin), live: s.status !== 'stopped' && s.status !== 'error' })),
+    sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sourceOf(s, token, toMachine), live: s.status !== 'stopped' && s.status !== 'error' })),
   });
 }
 // Which agents are on which account, and how many run now (the order), change with sessions and machines.
@@ -1556,7 +1597,7 @@ agents.usagePollChanged = () => {
   usage.reschedule();
   machines.pushUsageConfig();
 };
-agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id)));
+agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
   return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines()];

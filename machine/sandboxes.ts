@@ -267,6 +267,12 @@ export class SandboxPool {
     return [...this.recs.values()].map((r) => r.path);
   }
 
+  /** The editor is known to be stopped or crashed (polled at least once): only then may its Temp and logs go (w459). */
+  editorKnownStopped(id: string): boolean {
+    const s = this.unityState.get(id)?.state;
+    return s === 'stopped' || s === 'crashed';
+  }
+
   editorUp(id: string): boolean {
     const s = this.unityState.get(id)?.state;
     return s === 'starting' || s === 'running';

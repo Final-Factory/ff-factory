@@ -342,6 +342,16 @@ export interface Machine {
   platform?: MachinePlatform;
   /** The daemon was stopped on purpose (machine_daemon stop): not redeployed while offline until started again. */
   daemonStopped?: boolean;
+  /**
+   * daemon.json settings its redeploys over ssh write, kept from when it was the portal's own host (convert_machine,
+   * w466): the MCP-for-Unity server and the idle-editor stop it had from the portal's config.
+   */
+  daemonExtras?: { unityMcpServer?: { command: string; args: string[]; env?: Record<string, string> }; sandboxIdleStopMinutes?: number };
+  /**
+   * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
+   * away (that would pull it back). Cleared when it says hello here again.
+   */
+  relocatedTo?: { url: string; at: string };
   /** The machine's main Final Factory clone: where its agents work. */
   repoPath: string;
   home: string;
@@ -952,7 +962,16 @@ export interface CleanupSummary {
   /** Still below the soft threshold after the pass. */
   belowSoft?: boolean;
   /** The biggest entries it removed. */
-  top?: { path: string; bytes: number; rule: string }[];
+  top?: { path: string; bytes: number; rule: string; why?: string }[];
+  /** It covered the stale build and run output (w459): its daily turn, low space, or asked. */
+  stale?: boolean;
+  /** Only planned, nothing removed (a dry run asked for by hand). */
+  dryRun?: boolean;
+  /** What it would remove (a dry run, or stale output in dry-run mode), biggest first, with why. */
+  planned?: { path: string; bytes: number; rule: string; why: string }[];
+  plannedBytes?: number;
+  /** Stale-looking output it could not attribute to a closed request or a commit: kept, for a person. */
+  listed?: { path: string; bytes: number; why: string }[];
   /** When it could not get above the soft threshold: the biggest remaining consumers. */
   consumers?: { path: string; bytes: number }[];
   /** Unity Libraries of projects not opened for a long time: reported, removed only past a longer age. */
@@ -1369,6 +1388,12 @@ export interface WorkDelivery {
   /** FIX-LANDED <sha>: the commit the worker said carries the fix (checked against the base branch). */
   fixCommit?: string;
   fixAt?: string;
+  /**
+   * The pull request that merged the fix and its head branch (w480): from the merged PRs by fixCommit, an auto-close's
+   * PR, or the PR an "already fixed by #N" close names. FFBox's merge notice names it ("Fixed in PR #N").
+   */
+  fixPr?: number;
+  fixBranch?: string;
   /** Seen on the base branch (git merge-base --is-ancestor). */
   landedAt?: string;
   /** Max replied in, and closed, the thread (from the ffdiscord events file). */

@@ -229,8 +229,11 @@ export function statsLine(name: string, s: HostStats): string {
 }
 
 /** A machine's system_status line: its load, or why there is none. */
-export function machineLoadLine(m: { id: string; lastSeen?: string }, stats: HostStats | undefined, online: boolean): string {
+export function machineLoadLine(m: { id: string; lastSeen?: string }, stats: HostStats | undefined, online: boolean, protocol?: number): string {
   if (stats) return statsLine(m.id, stats);
-  if (online) return `${m.id}: online, no load numbers yet (a daemon from before protocol 4 sends none; the portal redeploys it once no agent runs there)`;
+  // A current daemon sends its first numbers a few seconds after it connects (after every portal restart, w424); only one
+  // from before protocol 4 never does.
+  if (online && protocol !== undefined && protocol < 4) return `${m.id}: online, no load numbers (a daemon from before protocol 4 sends none; the portal redeploys it once no agent runs there)`;
+  if (online) return `${m.id}: online, no load numbers yet (its daemon sends them within a minute of connecting)`;
   return `${m.id}: offline${m.lastSeen ? ` since ${m.lastSeen.slice(0, 16).replace('T', ' ')} UTC` : ''}`;
 }

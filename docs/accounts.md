@@ -15,6 +15,7 @@ Every agent the portal starts runs on one of three kinds of Claude credential:
 | Agents | Config | Values | Default |
 |---|---|---|---|
 | The orchestrator | `claudeAccounts.orchestrator` | `"token"` or `"login"` (this host's) | `"token"` |
+| The dispatcher (w464) | `claudeAccounts.dispatcher` | same; once set it also overrides the system payer's own token in `userClaudeEnv` | unset: the system payer's own token if any, else `claudeAccounts.orchestrator`'s |
 | Sandbox workers on this host | `claudeAccounts.workers` | same | `"token"` |
 | Standing agents on this host | `claudeAccounts.standing` | same | `"token"` |
 | Workers and standing agents on a Mac | `machines.useHostClaudeEnv` | `true` (host token) or `false` (the Mac's login); global, or per machine | `true` |

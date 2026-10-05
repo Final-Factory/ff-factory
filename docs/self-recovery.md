@@ -52,6 +52,10 @@ Prefer to leave it off and fix what makes reboots necessary.
 
 ## 2. The host guard (`server/hostHealth.ts`)
 
+In the portal-only mode (config `hostSandboxes: false`, w464) there is no sandbox drive: the guard measures the data
+volume and `hostDiskPaths`, never blocks on or reattaches a drive, and `host_recovery` takes only `cleanup` (see the
+README, "Portal-only mode").
+
 Every `hostGuard.pollSeconds` (30) it measures the sandbox root's volume and each of
 `hostDiskPaths` (put `"C:/"` there when the Dev Drive's VHDX lives on C:), free RAM, and whether the
 sandbox root exists.
@@ -266,6 +270,51 @@ machine (`{ "*": 80, "m3": 40 }` in config.json). The ages are in `hostGuard.cle
 (`tempAnyOlderThanDays`, `sessionTempHours`, `claudeTempDays`, `runnerWorkDays`, `buildsOlderThanDays`,
 `playtestDays`, `libraryReportDays`, `libraryDeleteDays`, `cloneOlderThanDays`). The machines use the
 defaults.
+
+### Stale build and run output (w459)
+
+Until 2026-10-05 a person asked for every clean-up of build output: w451 freed 42 GB of stale player builds on
+LothDesktop after its D: fell to the 50 GB guard and blocked new editors, and BEAST's sandboxes held about 39 GB in
+their `Builds/` folders. The same pass now removes that output by itself (`server/staleOutput.ts`), on this host's
+guard (its sandboxes, its own daemon's, and the base clone) and on every machine's daemon (its sandboxes and its
+main clone): once a day (`everyHours`, the first turn a full day after the clean-up started, never right at a
+deploy), on every pass while free space is below the soft threshold, and on every pass asked for.
+
+**What goes**, and only these (an allowlist of folders in each place, then an attribution):
+
+| Where | Goes when |
+|---|---|
+| `Builds/<entry>` (any case) and `.nightly-builds/<entry>` named after requests (`w95`, `w393-facing`) | every request it names is merged, done, rejected or cancelled in the ledger, and nothing in it changed for `untouchedHours` (24) |
+| `Builds/<sha>[-win\|-mac]`, `.nightly-builds/<sha>-<platform>` | a player build of one commit (rebuildable), untouched for `shaBuildDays` (2) |
+| `.nightly-builds/runs/<run>` | named after closed requests as above, else untouched for `runRetentionDays` (14) |
+| the nightly lab (`D:/work/ff-nightly`, `~/nevergames/ff-nightly`, or `nightlyRoots`) | `builds/` beyond the newest `nightlyKeep` (2), `runs/` and `logs/` past `runRetentionDays` |
+| a sandbox's `Temp/` | its editor is known to be stopped, no `Temp/UnityLockfile`, untouched for `tempHours` (6) |
+| a sandbox's `Logs/<file>` | its editor is known to be stopped, untouched for `logRetentionDays` (14) |
+
+**Never**: anything changed within `untouchedHours`, anything in use by a running agent, anything holding a git repo
+(listed instead, with whether it has uncommitted or unpushed work), and every folder of a place not in the table:
+`Library`, `Assets`, `Inbox`, `.git`, saves, backups (`ff-local-backups`, `~/ff-backups`), people's own files. The
+clean-up's guard (`neverDelete`) applies to every entry, again right before it is removed. A request still open, or
+stalled (its person decides), keeps its output. Output it cannot attribute (a `Builds/perf` from nobody knows which
+request, a request the ledger does not know, a scratch clone) is **listed, never removed**: the dashboard's clean-up
+line counts it, its hover and `cleanup_log` name each with its size. These rules replace the older
+`buildsOlderThanDays` rule for a sandbox's `Builds/` (any entry untouched for 7 days went, attributed or not); it
+applies again only with `mode` off. The daily turn is kept on disk (`cleanup-state.json` in the app's data folder or
+the daemon's folder), so a computer restarted or redeployed more often than daily still gets it.
+
+**The ledger's facts** reach each daemon over its link (`cleanup_context`: the open and closed request ids) at
+connect and every 10 minutes; facts older than 48 hours are not acted on, and request-named output is then listed.
+
+**Dry runs and the log.** `host_recovery` "cleanup" and `machine_cleanup` take `dry_run: true`: the full list of what
+the pass would remove (stale output included) with sizes and why, and what it would keep for a person, removing
+nothing. Every pass is logged in full (path, size, why) on the computer (`cleanup-log.jsonl`) and, for a machine, on
+the portal too (`data/cleanup/<machine>/cleanup-log.jsonl`); `cleanup_log` shows a computer's newest passes.
+
+**Settings**: `hostGuard.cleanup.staleOutput` (this host) and `machines.cleanup.staleOutput` (every machine), with
+`set_app_config`, applied at once: `mode` (`on` default, `dry-run`: measured and reported, nothing removed, or
+`off`), `everyHours` (24), `untouchedHours` (24), `shaBuildDays` (2), `runRetentionDays` (14), `logRetentionDays`
+(14), `tempHours` (6), `nightlyKeep` (2), `nightlyRoots`. Tests: `server/staleOutput.test.ts` (each keep and delete
+rule), `server/machineSandboxes.test.ts` (a dry run through a daemon).
 
 What clean-up cannot fix is reported, not removed: user data (OneDrive, Videos, Downloads), the audit
 artifacts, and on BEAST the Dev Drive VHDX, which grows but never shrinks by itself (634 GB for 334 GB used

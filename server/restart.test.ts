@@ -16,6 +16,7 @@ import {
   resumeMessage,
   systemdSupervised,
   takeResumeFile,
+  updateLogHint,
   writeResumeFile,
   writeUpdateWanted,
   type RestartRequest,
@@ -276,4 +277,9 @@ test('drain: -NoDrain restarts at once even with busy agents (they are resumed a
   t.mock.timers.tick(5000);
   assert.equal(h.stops.length, 1);
   assert.match(drainMessage(REQ, new Date()), /commit your work/);
+});
+
+test('w467: the update log is named where it is: the journal in the portal VM, data/supervisor.log on Windows', () => {
+  assert.equal(updateLogHint({ FFSB_SUPERVISOR: 'systemd' }), 'journalctl -u fff-update in the VM (or fffctl logs)');
+  assert.equal(updateLogHint({}), 'data/supervisor.log');
 });

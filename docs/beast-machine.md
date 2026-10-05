@@ -4,8 +4,9 @@
 same `machine/daemon.ts` the M3, the M5 and LothDesktop run. The portal becomes orchestrator only. BEAST shows up as
 machine `beast` with its sandboxes named `beast/<name>` (bare names keep working). The move re-homes the records only:
 folders, branches, Libraries and running editors stay where they are. One tool call does it
-(`migrate_host_sandboxes`), and the same tool with `back` undoes it. Backlog step 2 (portal restarts that leave the
-daemons' agents running) is built in and off (`machines.keepAgentsOnRestart`).
+(`migrate_host_sandboxes`), and the same tool with `back` undoes it. Done on 2026-10-05 (w424, w440): BEAST's five
+sandboxes run on its daemon. Backlog step 2 (portal restarts that leave the daemons' agents running) is on since the
+same day (`machines.keepAgentsOnRestart`).
 
 ## What changes
 
@@ -142,18 +143,43 @@ rollback needs it. Deleting it (and the host-only branches in `agents.ts`/`index
 3. Migration steps 1-4 above.
 4. Watch for an hour: `list_machines` (beast online, current), a worker started in a `beast/<name>` sandbox, an editor
    start/stop, the daemon log in `C:\Users\rydin\.ff-factory\logs\daemon.log`.
-5. Later, once trusted: backlog step 2 (`set_app_config machines.keepAgentsOnRestart true` is not in the allowlist on
-   purpose; edit `config.json` and restart).
+5. Backlog step 2 (`set_app_config machines.keepAgentsOnRestart true` is not in the allowlist on purpose; edit
+   `config.json` and restart). Done on 2026-10-05, below.
 
-## Backlog step 2 (prepared, off)
+How it went (2026-10-05, w424):
+- **Before:** two hard-reset risks found before the move were fixed first (#100, crash-safe migration and daemon
+  `sandboxes.json`). So was the probe that failed on a repo without an origin (#99).
+- **Deploy:** 3648774, then `add_machine beast local`. Its first try was on a portal started from an elevated ssh
+  shell with nobody signed in; the elevation fix is in #99 and auto sign-in on BEAST.
+- **The move:** at 19:31 UTC, all five sandboxes in one call, 7391 agent records. Each sandbox's branch, HEAD,
+  uncommitted files and Library were the same afterwards.
+- **Fixed after:** the outside watchdog, which had started watching the local machine's loopback (#106).
+
+## Backlog step 2 (on)
+
+On since 2026-10-05 (w424). It was tested on BEAST before being turned on: restart B, 22:45:33 UTC, with the portal
+down 84 s. A test worker mid-turn on `beast/shader-blackhole` and one on `lothdesktop/ghosts-fly` went on through the
+downtime; BEAST's daemon and its five agent processes kept their pids; the events from the downtime were replayed into
+their transcripts; nine agents were reported "Still running there (not interrupted)". Details in
+[restart.md](restart.md), "Agents on machines". Restore `config.json.prev-w424` and restart to turn it off.
 
 `machines.keepAgentsOnRestart: true` (config.json): a portal restart or update no longer asks daemon-hosted workers to
 wrap up (`Drainer` snapshot) and no longer stops them (`stopServer` → `sessions.stopAll` skips `RemoteSession`s). A
 daemon from another commit that speaks the portal's protocol still takes new agents (`MachineManager.incompatible`)
 and is redeployed once idle; after the restart, workers still running are reported as "Still running there (not
 interrupted)" and the rest are resumed as today. The daemons already queue events while the portal is down (up to 20 000)
-and replay them on reconnect. Before turning it on: confirm on BEAST that a portal restart leaves `FFFactoryDaemon`'s
-agents running and the reconnect replays their transcripts.
+and replay them on reconnect.
+
+## When the portal leaves BEAST
+
+The portal is moving to a VM on the FFBox host ([portal-on-ffbox-host.md](portal-on-ffbox-host.md)). BEAST stays the
+same machine with the same sandboxes:
+
+- `relocate_machines` points its daemon (and the others) at the new URL.
+- `convert_machine beast to: "ssh"` makes its record an ssh machine. It keeps its id, token, sandboxes and agents.
+- Rolling back is the same two calls the other way: relocate to `http://127.0.0.1:<port>`, then convert to `"local"`.
+
+Details in [machines.md](machines.md), "Moving the portal".
 
 ## BEAST-specific things left in place
 

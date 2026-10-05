@@ -663,6 +663,11 @@ portal's host also hosts sandboxes. It was found by reading `server/`, `machine/
 1938d50; the line numbers marked spot-checked were re-read for this page. Sizes: **S** is config or a few lines plus a
 test, **M** is tens of lines plus tests, **L** moves or rewrites a module.
 
+**Already on `main`** (2026-10-05, after this design was written; w464 is the request that carries them):
+change 1 as #112 ("w464 (1/3): portal-only mode (hostSandboxes: false)"), and change 6 as #113 ("w464 (2/3):
+claudeAccounts.dispatcher (change 6)"). The rows below are kept as designed. Check each against `main` before
+starting it.
+
 **Needed before the cut-over**
 
 | # | Where | Today | In the VM | Change | Size |

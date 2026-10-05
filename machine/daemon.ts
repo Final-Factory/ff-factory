@@ -14,7 +14,8 @@ import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
-import { PROTOCOL_VERSION, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
+import { PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
+import { writeFileDurable } from '../server/durable.ts';
 import { MacUnity, MacUnityWatch, realDeps } from './unity.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { MAIN_CLONE, McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
@@ -29,7 +30,8 @@ import { switchBranch } from '../server/switchBranch.ts';
 import { publishFromMachine } from './review.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, type CleanupGuard } from '../server/cleanup.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, type CleanupGuard } from '../server/cleanup.ts';
+import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -65,7 +67,44 @@ export interface DaemonConfig {
    */
   unityMcpServer?: StdioServer;
   /** Clean-up settings until the portal sends its own (the portal's own host: 0/0, it never cleans by itself). */
-  cleanup?: { everyMinutes: number; softFreeGB: number };
+  cleanup?: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown };
+  /**
+   * After a `relocate` (w466) until a portal answered: the URL before, and when it moved. Past
+   * RELOCATE_FALLBACK_MINUTES without an answer from the new URL, the daemon dials this one every other time.
+   */
+  previousPortalUrl?: string;
+  relocatedAt?: string;
+  /** The daemon.json this config was read from (set by the entry point, never written): where a relocate is kept. */
+  configFile?: string;
+}
+
+/** How long a relocated daemon dials only its new URL (tests shorten it). */
+export const RELOCATE_FALLBACK_MS = { value: RELOCATE_FALLBACK_MINUTES * 60_000 };
+
+/**
+ * The portal URL to dial on attempt `n` (from 0, since the last connection): the configured one; once a relocation
+ * (w466) has gone unanswered for `fallbackMs`, every other attempt the URL before it, so a cut-over that never comes up,
+ * or is rolled back, does not strand the daemon. Exported for tests.
+ */
+export function dialUrl(cfg: Pick<DaemonConfig, 'portalUrl' | 'previousPortalUrl' | 'relocatedAt'>, n: number, now: number, fallbackMs: number): string {
+  if (!cfg.previousPortalUrl) return cfg.portalUrl;
+  const at = Date.parse(cfg.relocatedAt ?? '');
+  if (!(now - at >= fallbackMs)) return cfg.portalUrl;
+  return n % 2 === 1 ? cfg.previousPortalUrl : cfg.portalUrl;
+}
+
+/**
+ * Keep these fields in the daemon.json at `file`, everything else as it is (undefined removes one): fsynced, renamed
+ * into place, the last versions kept beside it (server/durable.ts). Exported for tests.
+ */
+export function patchDaemonConfig(file: string, fields: Partial<Pick<DaemonConfig, 'portalUrl' | 'previousPortalUrl' | 'relocatedAt'>>) {
+  const text = fs.readFileSync(file, 'utf8');
+  const cfg = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined) delete cfg[k];
+    else cfg[k] = v;
+  }
+  writeFileDurable(file, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
 const BUSY = new Set(['running', 'starting', 'waiting_permission']);
@@ -77,6 +116,13 @@ export const appDirOfConfig = (cfg: Pick<DaemonConfig, 'appDir'>, home = HOME) =
 export const agentTempRoot = (tempDir: string | undefined) => tempDir || os.tmpdir();
 
 /** The clean-up settings the portal last sent, kept in the daemon's folder so they hold while it is down. */
+/** A clean-up log entry for the portal: its item lists cut to 300 each, so one frame stays small. */
+export function trimLogEntry(e: object): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(e as Record<string, unknown>) };
+  for (const k of ['removedAll', 'failedAll', 'plannedAll', 'listedAll', 'planned', 'listed']) if (Array.isArray(out[k])) out[k] = (out[k] as unknown[]).slice(0, 300);
+  return out;
+}
+
 export const cleanupConfigFile = (appDir: string) => path.join(appDir, 'cleanup.json');
 
 /** How the daemon measures its Mac and reads its login's plan usage; tests pass fakes (no CLI, no tools). */
@@ -135,7 +181,9 @@ export class Daemon {
   readonly pool: SandboxPool;
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
-  private cleanupSettings = { ...MACHINE_CLEANUP_DEFAULTS };
+  private cleanupSettings: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown } = { ...MACHINE_CLEANUP_DEFAULTS };
+  /** The ledger's facts for the stale-output rules (w459), as the portal last sent them; kept in memory only. */
+  private staleCtx?: StaleContext;
   /** Each place's Unity MCP status folder, kept holding only its own editor (machine/unityMcp.ts). */
   private readonly mcpScopes = new McpScopes();
 
@@ -180,26 +228,48 @@ export class Daemon {
     }
     const env = hostCleanupEnv(cfg.tempDir);
     this.cleaner = new CleanupRunner({
-      settings: () => this.cleanupSettings,
-      diskPaths: () => [HOME, env.tmp, cfg.repoPath],
+      settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
+      diskPaths: () => [HOME, env.tmp, cfg.repoPath, ...(this.sandboxRoot() && fs.existsSync(this.sandboxRoot()!) ? [this.sandboxRoot()!] : [])],
       statfs: async (p) => {
         const st = await fs.promises.statfs(p).catch(() => undefined);
         return st && { free: st.bavail * st.bsize, total: st.blocks * st.bsize };
       },
-      pass: async (low) => {
+      pass: async (low, opts) => {
         const guard = this.cleanupGuard();
         const root = this.sandboxRoot();
-        const rules = cleanupRules({ ...env, sandboxRoots: root ? [root] : [] }, DEFAULT_CLEANUP);
-        return runCleanup(await planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }), guard);
+        const settings = staleOutputSettings(this.cleanupSettings.staleOutput);
+        // A sandbox's Builds/ is the stale-output rules' (attributed, or listed): the old 7-day age rule only when they are off.
+        const rules = cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [] }, DEFAULT_CLEANUP);
+        return cleanupPass({
+          opts,
+          guard,
+          mode: settings.mode,
+          regular: () => planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
+          stale: () => planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, HOME), ctx: this.staleCtx, settings, guard }),
+        });
       },
       consumers: () => biggestConsumers(env),
+      staleAt: staleAtFile(appDirOfConfig(cfg)),
       stale: async () => (await staleUnityLibraries([HOME], DEFAULT_CLEANUP.libraryReportDays)).filter((l) => !neverDelete(l.path, this.cleanupGuard())),
-      log: (e) => appendCleanupLog(appDirOfConfig(cfg), e),
+      log: (e) => {
+        appendCleanupLog(appDirOfConfig(cfg), e);
+        // The portal keeps every pass too (w459): what went, why, and what was listed, where people can see it.
+        this.out({ type: 'cleanup_log', entry: trimLogEntry(e) });
+      },
       done: (summary, notice) => {
         log(`clean-up (${summary.trigger}): ${summary.removed} item(s), ${((summary.freedBytes ?? 0) / 2 ** 30).toFixed(1)} GB${notice ? `; ${notice}` : ''}`);
         this.out({ type: 'cleanup', summary, notice });
       },
     });
+  }
+
+  /** Where agents work here, for the stale-output rules: every ready sandbox (its editor's state) and the main clone. */
+  private stalePlaces(): StalePlace[] {
+    const sbs = this.pool.list().filter((s) => s.status === 'ready');
+    return [
+      ...sbs.map((s) => ({ id: s.id, path: s.path, kind: 'sandbox' as const, editorRunning: this.pool.editorKnownStopped(s.id) ? false : true })),
+      { id: 'main clone', path: this.cfg.repoPath, kind: 'clone' as const },
+    ];
   }
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
@@ -332,16 +402,69 @@ export class Daemon {
   /** When the connection was last lost (0 while connected), for the reconnect pace. */
   private downSince = 0;
 
+  /** Connection attempts since the last success, unbounded (the relocate fallback alternates on it). */
+  private dials = 0;
+
+  /**
+   * The portal moved (w466): keep its new URL in daemon.json, answer, then drop this link and dial the new one. Agents
+   * run on: nothing about them depends on the link, and their events wait in the outbox. The URL before is kept as the
+   * fallback until a portal answers (dialUrl).
+   */
+  private relocate(id: string, raw: string) {
+    const url = String(raw ?? '').trim().replace(/\/+$/, '');
+    const bad = relocateProblem(url);
+    if (bad) return this.send({ type: 'relocate_result', id, ok: false, error: bad });
+    const before = this.cfg.portalUrl.replace(/\/+$/, '');
+    if (url === before) return this.send({ type: 'relocate_result', id, ok: true });
+    const fields = { portalUrl: url, previousPortalUrl: before, relocatedAt: new Date().toISOString() };
+    try {
+      // Kept first: a daemon restart (a reboot) after the answer must dial the new URL too.
+      if (this.cfg.configFile) patchDaemonConfig(this.cfg.configFile, fields);
+    } catch (e) {
+      return this.send({ type: 'relocate_result', id, ok: false, error: `could not keep the new URL in ${this.cfg.configFile}: ${(e as Error).message}` });
+    }
+    Object.assign(this.cfg, fields);
+    this.send({ type: 'relocate_result', id, ok: true });
+    log(`relocated: portal ${before} -> ${url}${this.cfg.configFile ? '' : ' (not kept: no daemon.json path)'}; back to ${before} too if ${url} has not answered after ${Math.round(RELOCATE_FALLBACK_MS.value / 60_000)} min`);
+    // The answer goes out first; the close then reconnects at once, at the fast pace, to the new URL.
+    const ws = this.ws;
+    setTimeout(() => {
+      this.attempt = 0;
+      this.dials = 0;
+      this.downSince = Date.now();
+      ws?.close(1000, 'relocated');
+    }, 250);
+  }
+
+  /** A portal answered at `url` after a relocation: that URL is the one from now on, and the fallback goes. */
+  private settleRelocation(url: string) {
+    const was = this.cfg.portalUrl;
+    const fields = { portalUrl: url.replace(/\/+$/, ''), previousPortalUrl: undefined, relocatedAt: undefined };
+    try {
+      if (this.cfg.configFile) patchDaemonConfig(this.cfg.configFile, fields);
+    } catch (e) {
+      log(`relocation: could not keep ${url} in ${this.cfg.configFile}: ${(e as Error).message}`);
+    }
+    Object.assign(this.cfg, { portalUrl: fields.portalUrl });
+    delete this.cfg.previousPortalUrl;
+    delete this.cfg.relocatedAt;
+    log(fields.portalUrl === was ? `relocation settled: ${was} answered` : `relocation fell back: ${was} never answered, ${fields.portalUrl} did; it is the portal again`);
+  }
+
   private connect() {
     if (this.stopped) return;
-    const url = this.cfg.portalUrl.replace(/^http/, 'ws').replace(/\/+$/, '') + '/machine';
+    const base = dialUrl(this.cfg, this.dials++, Date.now(), RELOCATE_FALLBACK_MS.value);
+    const url = base.replace(/^http/, 'ws').replace(/\/+$/, '') + '/machine';
     const ws = new WebSocket(url, { headers: { authorization: `Bearer ${this.cfg.token}` }, handshakeTimeout: 8_000 });
     this.ws = ws;
     ws.on('open', () => {
       this.attempt = 0;
+      this.dials = 0;
       this.downSince = 0;
       this.lastPong = Date.now();
       log(`connected to ${url}`);
+      // A relocation is settled by the first portal that answers: the new URL, or the one before after the fallback.
+      if (this.cfg.previousPortalUrl) this.settleRelocation(base);
       void this.hello();
     });
     ws.on('pong', () => (this.lastPong = Date.now()));
@@ -645,6 +768,7 @@ export class Daemon {
    * sandbox maxAgentsPerSandbox, and a sandbox agent needs its sandbox ready at the folder the spec names.
    */
   private startRefusal(spec: LaunchSpec): string | undefined {
+    if (!spec.sandbox && this.maxSessions <= 0) return "this machine takes agents in its sandboxes only (max_agents 0): start it in one of this machine's sandboxes";
     if (!spec.sandbox) return this.runningIn(undefined) >= this.maxSessions ? `already ${this.maxSessions} agents mid-turn in this machine's main clone` : undefined;
     const sb = this.pool.list().find((s) => s.id === spec.sandbox);
     if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;
@@ -713,8 +837,19 @@ export class Daemon {
       case 'usage_now':
         void this.reportUsage();
         return;
+      case 'cleanup_context':
+        this.staleCtx = msg.context;
+        return;
       case 'cleanup_now':
-        void this.cleaner.run('asked').catch((e) => log(`clean-up failed: ${(e as Error).message}`));
+        void this.cleaner.run('asked', { dryRun: !!msg.dryRun }).then(
+          (summary) => {
+            if (msg.id) this.send({ type: 'cleanup_result', id: msg.id, ok: !!summary, ...(summary ? { summary } : { error: 'a clean-up pass is already running; try again in a few minutes' }) });
+          },
+          (e) => {
+            log(`clean-up failed: ${(e as Error).message}`);
+            if (msg.id) this.send({ type: 'cleanup_result', id: msg.id, ok: false, error: (e as Error).message });
+          },
+        );
         return;
       case 'welcome': {
         this.maxSessions = msg.maxSessions;
@@ -765,6 +900,10 @@ export class Daemon {
         void job.finally(() => {
           if (this.sending.get(id) === job) this.sending.delete(id);
         });
+        return;
+      }
+      case 'relocate': {
+        this.relocate(msg.id, msg.url);
         return;
       }
       case 'switch': {
@@ -927,7 +1066,9 @@ function readVersion() {
 // Run when started directly (not when imported by the tests).
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
   const file = process.argv[2] ?? path.join(HOME, '.ff-factory', 'daemon.json');
-  const cfg: DaemonConfig = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const text = fs.readFileSync(file, 'utf8');
+  // configFile: where a relocate keeps the portal's new URL (w466). A BOM (an editor's) is not JSON.
+  const cfg: DaemonConfig = { ...JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text), configFile: file };
   // server/launch.ts keeps the public identity's gitconfig in the daemon's folder.
   process.env.FF_APP_DIR = appDirOfConfig(cfg);
   const d = new Daemon(cfg);

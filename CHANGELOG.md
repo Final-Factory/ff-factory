@@ -34,6 +34,56 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   restarts and updates with rollback, reachability, the Claude account for the orchestrators and the dispatcher, the
   code changes with file:line and size, the migration with a dry run, cut-over and rollback, and the decisions left
   for Lothsahn and Ben ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md)).
+- **A machine can take agents in its sandboxes only** (w477, asked by Lothsahn). `add_machine` takes `max_agents: 0`
+  (the Add machine form too). Such a machine never runs an agent in its main clone: `start_agent` with the machine
+  alone is refused before any record is made, naming its sandboxes; a standing agent cannot be assigned to it; a
+  standing agent's delegated worker never goes to its main clone; and the Capacity block and "Next new game-repo work"
+  never suggest it. Its daemon refuses such an agent too. Meant for BEAST and LothDesktop, whose main clones are
+  their owners' own ([docs/machines.md](docs/machines.md), "Limits").
+
+- **`claudeAccounts.dispatcher`** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 6). The dispatcher's own
+  account (`"token"` or `"login"`, set with `set_app_config`). Once set, the dispatcher runs on it instead of the system
+  payer's own token; unset, nothing changes. system_status names it apart only when set ([docs/accounts.md](docs/accounts.md)).
+
+- **Portal-only mode** (w464, asked by Lothsahn; part A of moving the portal into a VM on the FFBox host, w441). With
+  config `hostSandboxes: false` this host holds no sandboxes: it leaves capacity, placement and `list_sandboxes`,
+  `create_sandbox` here is refused with the reason, `sandboxRoot` and `unity` may be left out, the host guard watches
+  the data volume instead of a sandbox drive, `host_recovery` runs only `cleanup`, and no standing agent runs
+  (README, "Portal-only mode").
+
+- **BEAST stays the same machine when the portal leaves it** (w466, asked by Lothsahn; change 3 of
+  docs/portal-on-ffbox-host.md). `convert_machine {machine, to: "ssh" | "local", ssh_host, portal_url, redeploy?}`
+  turns the portal's own host as a machine into one reached over ssh, or back. Only the record changes: its token,
+  sandboxes, agents and pool settings stay, its daemon stays connected, and its agents run on. Its later ssh
+  redeploys keep the Unity MCP server and idle stop it had from the portal's config. A test runs the whole Windows
+  deploy over ssh from a Linux portal against a fake ssh and scp (docs/machines.md, "Moving the portal").
+- **Daemons follow the portal to a new URL without a redeploy** (w466, asked by Lothsahn; change 9 of
+  docs/portal-on-ffbox-host.md). `relocate_machines {url, machines?}` sends connected daemons the portal's new base
+  URL. Each keeps it in its `daemon.json`, drops the link and dials it, with its agents running on and its token
+  unchanged. If the new URL has not answered after 10 minutes, it tries the old one too, every other time, so a move
+  that never comes up does not strand it. The sending portal does not redeploy a machine that is away. Protocol 8: older
+  daemons are redeployed once idle, as after any update (docs/machines.md, "Moving the portal").
+
+- **Stale build and run output is cleaned up by itself on every computer** (w459, asked by Ben). Until now a person
+  asked for each clean-up of player builds (w451 freed 42 GB on LothDesktop after its D: hit the guard). The
+  continuous clean-up, on this host's guard and on every machine's daemon, now also removes, once a day and whenever
+  space is low: builds and e2e runs named after requests that are closed in the ledger, player builds of one commit
+  past 2 days, e2e runs past 14 days, the nightly lab's builds beyond its newest two, and a stopped editor's Temp and
+  old logs. Only these folders of a sandbox or a clone are looked at, nothing changed within a day goes, nothing
+  holding a git repo goes, and what it cannot attribute is listed for a person, never removed. `machine_cleanup` and
+  `host_recovery` "cleanup" take `dry_run`; `cleanup_log` shows each computer's passes in full (every removal with its
+  size and why); the dashboard's clean-up line counts what was kept for a person. Settings:
+  `hostGuard.cleanup.staleOutput`, `machines.cleanup.staleOutput` (mode on, dry-run or off, and the ages)
+  ([docs/self-recovery.md](docs/self-recovery.md), "Stale build and run output").
+
+- **Workers keep running through a portal restart or update** (w424, asked by Lothsahn: "Can't we make it restart while
+  the workers are going?"). BEAST's sandboxes moved to its own machine daemon, and `machines.keepAgentsOnRestart` is
+  on. A restart drains and stops only the portal's own agents (orchestrators, standing agents). Workers on BEAST and
+  the other machines go on, and their events while the portal is down are replayed when their daemon reconnects.
+  Tested on BEAST before it went on (docs/restart.md, "Agents on machines"). Until a daemon reconnects, its agents show
+  "was running when the portal stopped; not heard from its daemon since (it may still be running there)" rather than a
+  bare `stopped`. A machine without load numbers yet is no longer said to run a daemon from before protocol 4 unless
+  it does.
 - **Workers hand files to each other, on any computer** (w447, asked by Ben). A save made on BEAST had to reach three
   LothDesktop workers, and only a person with ssh could move it. A worker now calls `publish_attachment` with a file in
   its working folder or temp folder; it answers an `att_` id, which its orchestrator passes on with `attachments: [id]`
@@ -76,6 +126,31 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   ([docs/orchestrators.md](docs/orchestrators.md), "What a request is doing now").
 
 ### Fixed
+
+- **A thread Max escalated hears when its fix merges** (w480, asked by Lothsahn). FFBox watches board ref
+  `conv-<conversation>` after an escalation, but the ledger left a conversation's own request out of that
+  conversation's check, so the answer was always `clear` and no merge notice ever came: w436 (#ask-assistant, range
+  rings darkening the screen) closed as already fixed by #1076 in Build 78, and the player was never told. The intake
+  now follows the escalated request itself and pushes FFBox its standing, and a done answer names the PR that merged the
+  fix and its release ("Fixed in PR #1076, coming in version 78"), looked up for an auto-closed or "already fixed by
+  #N" request too. Board watches are kept in `data/intake.json` across restarts. Once, at the first start, escalated
+  requests closed done in the last 14 days are followed again (`node scripts/escalation-catchup.ts <data copy>` lists
+  them). Workers put the report's own Discord link in a fix PR, a message's link for a message in a channel, and write
+  `RESOLVED: already fixed by PR #N`. The `maybe` candidates of a board check, saved but never read back at start,
+  are read back too.
+
+- **Orchestrators and standing agents no longer read FF Factory's secrets** (w467, part C of the portal VM). Read,
+  Glob, Grep and a standing agent's shell are refused for config.json, data/ (an orchestrator's own memory and the
+  attachment store excepted), the secrets folder and token files, ~/.ssh, Claude's and gh's credentials, on Windows and
+  POSIX paths alike, and a search may not start above them ([docs/orchestrators.md](docs/orchestrators.md)). A
+  standing agent's shell now also recognises absolute POSIX paths into the base clone and the sandboxes.
+- **The base clone the orchestrators read follows origin/develop** (w467): fetched and moved every 15 minutes under
+  the base-repo lock (config `repo.refreshMinutes`, 0 off), so they no longer read old code.
+- **A config with Windows paths is refused off Windows** (w467): on Linux `path.resolve("C:/ffsb")` is a folder
+  inside the app, which the portal would have used quietly.
+- **Placement notes name the review folder where the portal runs** (w467), not `F:\ffsb\_review` and "ssh to the M5
+  from BEAST", which also showed up garbled in the dispatcher's prompt (`\f` read as a form feed); the restart
+  summary names the VM's update log (`journalctl -u fff-update`) under systemd.
 
 - **The outside watchdog watches BEAST's tailnet URL again** (w424, asked by Lothsahn). With no `publicUrl` in
   config.json, the watch took the first machine's `portal_url`; since `add_machine beast local` that is BEAST's own

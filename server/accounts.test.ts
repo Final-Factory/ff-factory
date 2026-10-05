@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { checkAccountConfig, type Config } from './config.ts';
-import { accountSetupLines, hostAccount, hostClaudeEnv, hostLoginProblem, hostProcessEnv, hostRole, machineUsesLogin } from './secrets.ts';
+import { accountSetupLines, hostAccount, hostClaudeEnv, hostLoginProblem, hostProcessEnv, hostRole, hostRoleOf, machineUsesLogin } from './secrets.ts';
 import { nextPerMachine, setAppConfig } from './appConfig.ts';
 import { claudeEnvFor } from './identity.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
@@ -275,4 +275,32 @@ test("accounts: system_status names each kind of agent's account", (t) => {
   assert.deepEqual(rest, [], 'the login is usable: no warning');
   login(dir, Date.now() - 60_000);
   assert.match(accountSetupLines(cfg, 'BEAST', HOST_TOKEN, [])[1], /^WARNING: set to the BEAST login \(the orchestrator\), which cannot run agents: the stored claude\.ai login expired/);
+});
+
+test('accounts: claudeAccounts.dispatcher (w464): checked, set by set_app_config, follows the orchestrator while unset, named only when set', (t) => {
+  checkAccountConfig({ claudeAccounts: { dispatcher: 'token', orchestrator: 'login' } });
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'apikey' } } as never), /claudeAccounts\.dispatcher is "login" or "token"/);
+  // Unset, the dispatcher follows the orchestrator's account; set, its own.
+  assert.equal(hostAccount(split(), 'dispatcher'), 'login');
+  assert.equal(hostAccount(split({ claudeAccounts: { orchestrator: 'login', dispatcher: 'token' } }), 'dispatcher'), 'token');
+  assert.equal(hostAccount({}, 'dispatcher'), 'token');
+  // system_status names the dispatcher apart only when it has an account of its own.
+  const { dir, file } = configFile(t, { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST_TOKEN } });
+  login(dir, Date.now() + 3_600_000);
+  const cfg = split({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST_TOKEN, CLAUDE_CONFIG_DIR: dir } });
+  assert.doesNotMatch(accountSetupLines(cfg, 'BEAST', HOST_TOKEN, [])[0], /dispatcher/);
+  assert.deepEqual(setAppConfig(file, cfg, 'claudeAccounts.dispatcher', 'token'), { before: undefined, after: 'token' });
+  assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'login', dispatcher: 'token' });
+  assert.match(accountSetupLines(cfg, 'BEAST', HOST_TOKEN, [])[0], /the orchestrator here: BEAST login; the dispatcher here: host token …9AAA; workers here/);
+  assert.throws(() => setAppConfig(file, cfg, 'claudeAccounts.dispatcher', 'keychain'), /"login" .* or "token"/);
+  setAppConfig(file, cfg, 'claudeAccounts.dispatcher', null);
+  assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'login' });
+});
+
+test('accounts: a stopped dispatcher with an account of its own is counted there, not on the system payer\'s token (w464)', () => {
+  const dispatcher = { kind: 'orchestrator', orchestratorRole: 'dispatcher', requestedBy: LOTH } as SessionInfo;
+  const cfg = split({ claudeAccounts: { orchestrator: 'login', dispatcher: 'token' } });
+  assert.equal(hostRoleOf(cfg, dispatcher), 'dispatcher');
+  assert.equal(hostRoleOf(split(), dispatcher), 'orchestrator', 'unset: an orchestrator like any other');
+  assert.equal(hostRoleOf(cfg, { kind: 'orchestrator', orchestratorRole: 'personal' }), 'orchestrator');
 });

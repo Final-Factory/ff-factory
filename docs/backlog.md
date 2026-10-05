@@ -17,21 +17,21 @@ The orchestrators are ready for it: the dispatcher addresses a sandbox the same 
 session and place, not by which process runs the worker. BEAST's sandboxes become `beast/<name>`, and bare names keep
 working.
 
-## 2. Portal restarts that leave daemon agents running (prepared, off)
+## 2. Portal restarts that leave daemon agents running (done, 2026-10-05)
 
 After the BEAST daemon split is fully working: a portal update or restart no longer drains or stops daemon-hosted
 agents, on BEAST or on machines. The portal restarts, the daemons keep their agents running, and they reconnect and
 replay missed events. Only a daemon update itself would need a drain.
 
-Prepared behind config `machines.keepAgentsOnRestart` (default off; [beast-machine.md](beast-machine.md#backlog-step-2-prepared-off)):
+Behind config `machines.keepAgentsOnRestart`, on on BEAST since 2026-10-05 (w424; [beast-machine.md](beast-machine.md#backlog-step-2-on)):
 no drain and no stop for daemon agents, and a same-protocol daemon from another commit keeps taking agents until it is
-idle and redeployed. Left: prove on BEAST that a restart leaves the daemon's agents running and replays their events,
-then turn it on.
+idle and redeployed. Proven on BEAST before it went on. Agents mid-turn on BEAST's daemon and on LothDesktop ran through
+an 84-second portal restart, with their events replayed ([restart.md](restart.md), "Agents on machines").
 
 ## 3. The portal in its own VM on the FFBox host (designed, scripts written, not deployed)
 
 After steps 1 and 2: the portal leaves BEAST for a KVM/QEMU VM on the FFBox host, so BEAST only runs workers.
 Designed in [portal-on-ffbox-host.md](portal-on-ffbox-host.md): w439 designed it as a container, and w441 made it a VM
 at Lothsahn's request. The host and guest install scripts are in `deploy/vm/`, tested end to end in CI. Section 6 lists
-the code changes still needed before the cut-over, section 8 the decisions for Lothsahn and Ben, and section 9 the
-measurement of BEAST's portal still to run.
+the code changes still needed before the cut-over, section 8 Lothsahn's decisions, and section 9 the sizing
+measured on BEAST. The install steps are in `deploy/vm/RUNBOOK.md`.
