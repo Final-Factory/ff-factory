@@ -88,6 +88,8 @@ export interface StandingDeps {
     get(id: string): Machine | undefined;
     isOnline(id: string): boolean;
     liveCount(id: string): number;
+    /** Why no agent of this kind may run outside its sandboxes there (w477: max_agents 0), or undefined. */
+    mainCloneRefusal?(m: Machine, kind?: SessionInfo['kind']): string | undefined;
     createSession(machineId: string, opts: { kind: 'standing'; title: string; model?: string; permissionMode: PermissionMode; standingId?: string }): SessionLike;
   };
   now?: () => Date;
@@ -419,7 +421,7 @@ export class StandingAgents {
       liveAgents: m ? this.deps.machines!.liveCount(m.id) : this.sessions.liveAgents(),
       maxAgents: m ? m.maxSessions : this.cfg.limits.maxSessions,
       deadline: new Date(p.deadline),
-      unavailable: a.machineId && !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : a.machineId ? undefined : this.hostGate?.(),
+      unavailable: a.machineId && !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : m ? this.deps.machines?.mainCloneRefusal?.(m, 'standing') : a.machineId ? undefined : this.hostGate?.(),
     });
     if (verdict.action === 'wait') {
       a.state = 'waiting';
@@ -625,6 +627,9 @@ export class StandingAgents {
           (m) =>
             m.status === 'ready' &&
             this.deps.machines!.isOnline(m.id) &&
+            // A delegated worker runs in the main clone: never this host's own daemon's base clone, nor a sandboxes-only machine (w477).
+            !m.local &&
+            m.maxSessions > 0 &&
             unused(m.purpose) &&
             !skip.has(m.id) &&
             this.deps.machines!.liveCount(m.id) === 0 &&
@@ -803,7 +808,10 @@ export class StandingAgents {
   private machineOf(id: string | undefined): string | undefined {
     const m = id?.trim().toLowerCase();
     if (!m) return undefined;
-    if (!this.deps.machines?.get(m)) throw new Error(`no machine "${m}"`);
+    const machine = this.deps.machines?.get(m);
+    if (!machine) throw new Error(`no machine "${m}"`);
+    const why = this.deps.machines?.mainCloneRefusal?.(machine, 'standing');
+    if (why) throw new Error(why);
     return m;
   }
 

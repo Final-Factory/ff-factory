@@ -585,6 +585,20 @@ export class MachineManager {
     return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && (sandbox === '*' ? !!s.info.machineSandbox : s.info.machineSandbox === sandbox) && isMidTurn(s.info)).length;
   }
 
+  /**
+   * Why an agent of this kind may never start outside a sandbox on `m`, or undefined: this host's own daemon's main clone
+   * is the base its sandboxes are worktrees of (workers only), and a machine with max_agents 0 takes agents in its
+   * sandboxes only (w477, Lothsahn on 2026-10-05), neither main-clone workers nor standing agents. Names its sandboxes.
+   */
+  mainCloneRefusal(m: Machine, kind?: SessionInfo['kind']): string | undefined {
+    const sbs = (m.sandboxes ?? []).map((s) => `${m.id}/${s.id}`);
+    const use = sbs.length ? `one of its sandboxes (${sbs.join(', ')})` : `a sandbox there (it has none yet: create_sandbox with machine "${m.id}")`;
+    if (m.local && kind === 'worker') return `${m.id}'s main clone (${m.repoPath}) is the base its sandboxes are worktrees of: start agents in ${use}`;
+    if (m.maxSessions !== 0) return undefined;
+    if (kind === 'standing') return `${m.id} takes agents in its sandboxes only (max_agents 0): a standing agent needs a computer with max_agents 1 or more; assign it elsewhere`;
+    return `${m.id} takes agents in its sandboxes only (max_agents 0): start this one in ${use}`;
+  }
+
   /** Why a message to this machine session must wait for a free running slot, or undefined (SessionManager.placeFull). */
   placeFull(s: SessionHandle): string | undefined {
     const m = this.store.machines.get(s.info.machineId ?? '');
@@ -599,7 +613,7 @@ export class MachineManager {
       if (pool?.maxAgents !== undefined && all >= pool.maxAgents) return `${all} agents mid-turn in ${m.id}'s sandboxes (max_sandbox_agents ${pool.maxAgents})`;
       return undefined;
     }
-    if (s.info.kind === 'worker' && m.local) return undefined; // refused outright by dispatchSend: no queue for it
+    if (this.mainCloneRefusal(m, s.info.kind)) return undefined; // refused outright by dispatchSend: no queue for it
     const main = this.runningIn(m.id, undefined);
     return main >= m.maxSessions ? `${main} agents mid-turn in ${m.id}'s main clone (max_agents ${m.maxSessions})` : undefined;
   }
@@ -682,6 +696,8 @@ export class MachineManager {
     const typed = opts.id.trim();
     const id = typed.toLowerCase();
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
+    // 0: sandboxes only (w477), no agents in its main clone.
+    if (opts.maxSessions !== undefined && (!Number.isInteger(opts.maxSessions) || opts.maxSessions < 0 || opts.maxSessions > 8)) throw new Error('max_agents is a whole number from 0 (sandboxes only) to 8');
     if (this.deploying.has(id)) throw new Error(`${id} is already being deployed`);
     const prev = this.store.machines.get(id);
     const local = opts.local ?? prev?.local ?? false;
@@ -931,8 +947,9 @@ export class MachineManager {
       if (sb.status !== 'ready') throw new Error(`sandbox ${m.id}/${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`);
       // The agent limits count mid-turn agents only and are waited for, not refused: SessionManager queues a message
       // until placeFull says a slot is free (w384).
-    } else if (!s.live && m.local && s.info.kind === 'worker') {
-      throw new Error(`${m.id}'s main clone (${m.repoPath}) is the base its sandboxes are worktrees of: start agents in one of its sandboxes`);
+    } else if (!s.live && !sbId) {
+      const why = this.mainCloneRefusal(m, s.info.kind);
+      if (why) throw new Error(why);
     }
     // The portal's own host: its guard's gate (disk space, the sandbox drive, RAM) holds new agent processes there too.
     const gate = !s.live && m.local && from !== 'system' ? this.localGate?.('agent') : undefined;

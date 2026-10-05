@@ -1541,7 +1541,7 @@ export class Orchestrators {
     opts: { thresholds?: MatchThresholds; maybe?: boolean } = {},
   ): BoardAnswer {
     const ranked = this.rankBoard(q, lookbackDays, opts.thresholds ?? DEFAULT_THRESHOLDS);
-    const matches: BoardMatch[] = ranked.map((x) => ({ id: x.w.id, status: x.w.status, title: clip(x.w.title, 120), score: x.score, why: x.why, updatedAt: x.w.updatedAt, ...this.boardFacts(x.w) }));
+    const matches: BoardMatch[] = ranked.map((x) => this.boardMatch(x.w, x.score, x.why));
     const high = ranked.filter((x) => x.band === 'high');
     const medium = ranked.filter((x) => x.band === 'medium' && (isOpen(x.w) || x.w.status === 'done'));
     const verdict = high.some((x) => isOpen(x.w)) ? 'in_flight' : high.some((x) => x.w.status === 'done') ? 'done' : medium.length && opts.maybe ? 'maybe' : 'clear';
@@ -1590,6 +1590,29 @@ export class Orchestrators {
     if (set && /^[\w.-]+\/[\w.-]+$/.test(set)) return set;
     const m = /github\.com[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(this.d.cfg.repo.url ?? '');
     return m ? `${m[1]}/${m[2]}` : undefined;
+  }
+
+  /**
+   * One request as a board match. A finished one also names the pull request that merged its fix, as `watch` (w480):
+   * FFBox's connector keeps only a match's ids, status, watch, version, mergedIn and branch, and its merge notice takes
+   * the PR number from `watch.pr` ("Fixed in PR #1076, coming in version 78"). FFBox follows no branch of a done match.
+   */
+  boardMatch(w: WorkItem, score: number, why: string): BoardMatch {
+    const facts = this.boardFacts(w);
+    const repo = this.repoSlug();
+    const pr = w.status === 'done' ? (w.delivery?.fixPr ?? w.autoClosed?.pr) : undefined;
+    const branch = w.delivery?.fixBranch ?? facts.branch;
+    const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'develop';
+    return {
+      id: w.id,
+      status: w.status,
+      title: clip(w.title, 120),
+      score,
+      why,
+      updatedAt: w.updatedAt,
+      ...facts,
+      ...(pr && branch && repo ? { watch: { repo, branch, pr, target } } : {}),
+    };
   }
 
   /** What FFBox needs to follow a match (BoardMatch): the branch to watch while it is open, the release once it is done. */
