@@ -942,6 +942,9 @@ the next nightly cold restart, so the 24-hour numbers can move them without a re
 All of it is run by Lothsahn, as root, on the FFBox host and then in the VM. **Never** on another machine except a
 throwaway one.
 
+**The step-by-step commands for tonight's install, with Ben's Tailscale steps, the choices made for it and the open
+questions, are in [`deploy/vm/RUNBOOK.md`](../deploy/vm/RUNBOOK.md).** The steps below are the overview.
+
 ### 10.1 On the host
 
 1. Read [`deploy/vm/host/fff-vm.conf.example`](../deploy/vm/host/fff-vm.conf.example). Copy it to
