@@ -404,6 +404,16 @@ ${disksHint(m)}`} /> : <span className="mt-note">n/a</span>}
   );
 }
 
+/** A pass's hover: what it removed and why, what it would remove in dry-run mode, and what it kept for a person (w459). */
+function cleanupTitle(x: CleanupSummary): string {
+  const item = (t: { path: string; bytes: number; why?: string; rule?: string }) => `${t.path}: ${fmtBytes(t.bytes)}${t.why ? ` (${t.why})` : ''}`;
+  return [
+    ...(x.top ?? []).map(item),
+    ...(x.planned?.length ? ['Would remove (dry-run mode):', ...x.planned.slice(0, 10).map(item)] : []),
+    ...(x.listed?.length ? ['Kept, could not attribute (cleanup_log has them all):', ...x.listed.slice(0, 10).map(item)] : []),
+  ].join('\n');
+}
+
 /** Each computer's last clean-up pass: when, what it freed, and whether free space is still below its soft threshold. */
 function CleanupLines({ computers }: { computers: Computer[] }) {
   const now = useNow(60_000);
@@ -414,9 +424,11 @@ function CleanupLines({ computers }: { computers: Computer[] }) {
       {withCleanup.map((c) => {
         const x = c.cleanup!;
         return (
-          <div key={c.name} className={`plan-asof${x.belowSoft ? ' lvl-warn' : ''}`} title={x.top?.map((t) => `${t.path}: ${fmtBytes(t.bytes)}`).join('\n') || undefined}>
+          <div key={c.name} className={`plan-asof${x.belowSoft ? ' lvl-warn' : ''}`} title={cleanupTitle(x) || undefined}>
             Clean-up {c.name}: {fmtRelative(x.at, now)}, {fmtBytes(x.freedBytes ?? 0)} freed
             {x.belowSoft && x.freeBytes !== undefined ? ` · only ${fmtBytes(x.freeBytes)} free (soft ${x.softFreeGB} GB)` : ''}
+            {x.planned?.length ? ` · ${fmtBytes(x.plannedBytes ?? 0)} stale output in dry-run mode` : ''}
+            {x.listed?.length ? <span data-testid="cleanup-listed">{` · ${x.listed.length} stale-looking item(s) kept for a person`}</span> : null}
           </div>
         );
       })}

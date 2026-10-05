@@ -12,6 +12,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Stale build and run output is cleaned up by itself on every computer** (w459, asked by Ben). Until now a person
+  asked for each clean-up of player builds (w451 freed 42 GB on LothDesktop after its D: hit the guard). The
+  continuous clean-up, on this host's guard and on every machine's daemon, now also removes, once a day and whenever
+  space is low: builds and e2e runs named after requests that are closed in the ledger, player builds of one commit
+  past 2 days, e2e runs past 14 days, the nightly lab's builds beyond its newest two, and a stopped editor's Temp and
+  old logs. Only these folders of a sandbox or a clone are looked at, nothing changed within a day goes, nothing
+  holding a git repo goes, and what it cannot attribute is listed for a person, never removed. `machine_cleanup` and
+  `host_recovery` "cleanup" take `dry_run`; `cleanup_log` shows each computer's passes in full (every removal with its
+  size and why); the dashboard's clean-up line counts what was kept for a person. Settings:
+  `hostGuard.cleanup.staleOutput`, `machines.cleanup.staleOutput` (mode on, dry-run or off, and the ages)
+  ([docs/self-recovery.md](docs/self-recovery.md), "Stale build and run output").
+
 - **Workers keep running through a portal restart or update** (w424, asked by Lothsahn: "Can't we make it restart while
   the workers are going?"). BEAST's sandboxes moved to its own machine daemon, and `machines.keepAgentsOnRestart` is
   on. A restart drains and stops only the portal's own agents (orchestrators, standing agents). Workers on BEAST and
