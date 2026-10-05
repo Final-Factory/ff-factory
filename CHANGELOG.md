@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Owners close each other's requests when asked** (w402, asked by Lothsahn). A person with the owner role can have
+  their orchestrator close or reopen another person's request (`update_work`), only in a turn they started with their
+  own message and with a note saying why; the log names who and whose, and the request's people are told. Members keep
+  their own requests only; notes and priorities on someone else's request stay its people's
+  ([docs/orchestrators.md](docs/orchestrators.md)).
+
 - **FFBox files its finished intake diagnoses into the ledger** (w361, docs/intake.md "Intake diagnoses from FFBox").
   `POST /api/intake/ffbox` takes a Discord-less body with `source: "intake"` (report facts, root cause, verdict,
   findings as untrusted data, the PR if one was pushed, up to 40 files with their fetch locators). It joins ledger work
