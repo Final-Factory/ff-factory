@@ -18,7 +18,8 @@ import { openPr } from './gitStatus.ts';
 import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
+import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 const PING_MS = 20_000;
@@ -352,7 +353,12 @@ export class MachineManager {
   }
 
   /** A machine's clean-up settings (config machines.cleanup; wired by index.ts). */
-  cleanupFor?: (machineId: string) => { everyMinutes: number; softFreeGB: number };
+  cleanupFor?: (machineId: string) => { everyMinutes: number; softFreeGB: number; staleOutput?: unknown };
+  /** The ledger's facts for the stale-output rules (w459; wired by index.ts): sent at connect, every few minutes and before a pass asked for. */
+  cleanupContext?: () => StaleContext;
+  /** A machine's clean-up pass, in full (what it removed, planned and listed, with why): kept on the portal (wired by index.ts). */
+  cleanupLog?: (machineId: string, entry: Record<string, unknown>) => void;
+  private readonly cleanupCalls = new Map<string, { resolve: (s: CleanupSummary) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   /** A machine's clean-up could not get above its soft threshold (wired by index.ts: the orchestrator and a push). */
   cleanupNotice?: (machineId: string, text: string) => void;
 
@@ -362,6 +368,13 @@ export class MachineManager {
       const c = this.cleanupFor?.(id);
       if (c) this.post(id, { type: 'cleanup_config', config: c }, false);
     }
+  }
+
+  /** Send every connected daemon the ledger's facts for the stale-output rules (w459). */
+  pushCleanupContext() {
+    const ctx = this.cleanupContext?.();
+    if (!ctx) return;
+    for (const id of this.links.keys()) if (!this.store.machines.get(id)?.local) this.post(id, { type: 'cleanup_context', context: ctx }, false);
   }
 
   /** Send every connected daemon the usage poll interval (config usagePollMinutes, after it changed). */
@@ -376,13 +389,32 @@ export class MachineManager {
     return ids.length;
   }
 
-  /** A clean-up pass on the machine now; its result arrives as the machine's lastCleanup. */
-  cleanupNow(machineId: string): string {
+  /**
+   * A clean-up pass on the machine now, stale output included, and its result in full: what went (or, `dryRun`, what
+   * would go: nothing is removed) and what it kept because it could not attribute it. A daemon from before w459 runs
+   * a real pass and never answers: then this says so after `timeoutMs`.
+   */
+  async cleanupNow(machineId: string, opts: { dryRun?: boolean; timeoutMs?: number } = {}): Promise<CleanupSummary> {
     const m = this.require(machineId);
     if (m.local) throw new Error(`${m.id} is this host: its disk is cleaned by this host's guard (host_recovery "cleanup"), not by its daemon`);
     if (!this.links.has(m.id)) throw new Error(`machine ${m.id} is offline`);
-    this.post(m.id, { type: 'cleanup_now' });
-    return `Asked ${m.id} for a clean-up pass; list_machines shows its result (last clean-up) in a minute or two.`;
+    const ctx = this.cleanupContext?.();
+    if (ctx) this.post(m.id, { type: 'cleanup_context', context: ctx });
+    const id = randomUUID();
+    return new Promise<CleanupSummary>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.cleanupCalls.delete(id);
+        reject(new Error(`${m.id} did not answer within ${Math.round((opts.timeoutMs ?? 15 * 60_000) / 60_000)} min (a daemon from before w459 runs a real pass and does not answer; list_machines shows its last clean-up)`));
+      }, opts.timeoutMs ?? 15 * 60_000);
+      this.cleanupCalls.set(id, { resolve, reject, timer });
+      try {
+        this.post(m.id, { type: 'cleanup_now', id, ...(opts.dryRun ? { dryRun: true } : {}) });
+      } catch (e) {
+        clearTimeout(timer);
+        this.cleanupCalls.delete(id);
+        reject(e as Error);
+      }
+    });
   }
 
   /**
@@ -944,6 +976,8 @@ export class MachineManager {
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
     const cleanup = this.cleanupFor?.(id);
     if (cleanup) ws.send(JSON.stringify({ type: 'cleanup_config', config: cleanup } satisfies ToDaemon));
+    const ctx = m.local ? undefined : this.cleanupContext?.();
+    if (ctx) ws.send(JSON.stringify({ type: 'cleanup_context', context: ctx } satisfies ToDaemon));
     ws.send(JSON.stringify({ type: 'usage_config', config: { everyMinutes: this.cfg.usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES } } satisfies ToDaemon));
     console.log(`machine ${id} connected`);
   }
@@ -1157,6 +1191,18 @@ export class MachineManager {
         this.store.putMachine(m);
         if (msg.notice) this.cleanupNotice?.(id, msg.notice);
         return;
+      case 'cleanup_log':
+        if (msg.entry && typeof msg.entry === 'object') this.cleanupLog?.(id, msg.entry);
+        return;
+      case 'cleanup_result': {
+        const call = this.cleanupCalls.get(msg.id);
+        if (!call) return;
+        clearTimeout(call.timer);
+        this.cleanupCalls.delete(msg.id);
+        if (msg.ok && msg.summary) call.resolve(msg.summary);
+        else call.reject(new Error(msg.error ?? `${id}: the clean-up pass failed`));
+        return;
+      }
       case 'max_event':
         if (typeof msg.line === 'string' && msg.line.length <= 8192) this.maxEvent?.(id, msg.line);
         return;

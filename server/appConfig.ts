@@ -8,6 +8,7 @@ import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
 import { placeId } from './placement.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
+import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
 
 /**
  * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
@@ -29,6 +30,9 @@ export const SETTABLE_KEYS = [
   'hostGuard.cleanup.softFreeGB',
   'machines.cleanup.everyMinutes',
   'machines.cleanup.softFreeGB',
+  // The stale build and run output rules (w459, server/staleOutput.ts): this host's, and every machine's.
+  'hostGuard.cleanup.staleOutput',
+  'machines.cleanup.staleOutput',
   // How often every Claude account's plan usage is polled, here and by the machines' daemons (the endpoint rate-limits).
   'usagePollMinutes',
   // How many Unity editors may run at once on this host (each takes ~8-12 GB of RAM).
@@ -342,6 +346,9 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!Number.isInteger(n) || (n !== 0 && (n < 15 || n > 1440))) throw new Error(`${key} is 0 (only when disk space is low) or a whole number of minutes from 15 to 1440`);
       return n;
     }
+    case 'hostGuard.cleanup.staleOutput':
+    case 'machines.cleanup.staleOutput':
+      return checkStaleOutput(key, value);
     case 'hostGuard.cleanup.softFreeGB':
     case 'machines.cleanup.softFreeGB': {
       const n = Number(value);
@@ -394,6 +401,29 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
 }
 
 /** Keys stored under another name than the one set: the connector token is kept only as its hash. */
+/**
+ * The stale-output block (server/staleOutput.ts): only its known keys, each in range, e.g. { "mode": "dry-run" } or
+ * { "shaBuildDays": 3, "runRetentionDays": 30 }; what is left out keeps its default.
+ */
+function checkStaleOutput(key: string, value: unknown): Partial<StaleOutputSettings> {
+  const v = typeof value === 'string' ? (() => {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  })() : value;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`${key} is an object such as { "mode": "dry-run" } (mode on, dry-run or off; everyHours, untouchedHours, shaBuildDays, runRetentionDays, logRetentionDays, tempHours, nightlyKeep, nightlyRoots)`);
+  const out: Record<string, unknown> = {};
+  const normal = staleOutputSettings(v) as unknown as Record<string, unknown>;
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (!(k in STALE_OUTPUT_DEFAULTS) && k !== 'nightlyRoots') throw new Error(`${key}: unknown key "${k}"; known: ${[...Object.keys(STALE_OUTPUT_DEFAULTS), 'nightlyRoots'].join(', ')}`);
+    if (JSON.stringify(normal[k]) !== JSON.stringify(x)) throw new Error(`${key}.${k}: ${JSON.stringify(x)} is not allowed (mode is on, dry-run or off; numbers in range: everyHours 1-336, untouchedHours 6-720, shaBuildDays, runRetentionDays and logRetentionDays 1-365, tempHours 1-720, nightlyKeep 1-20; nightlyRoots a list of folders)`);
+    out[k] = x;
+  }
+  return out as Partial<StaleOutputSettings>;
+}
+
 const STORED_AS: Partial<Record<SettableKey, string>> = { 'providers.ffbox.token': 'providers.ffbox.tokenSha256' };
 
 /** Set (or with `undefined`, remove) a dotted key in a plain object. */
@@ -444,7 +474,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   const perUser = key.startsWith('userClaudeEnv.');
   // The user id becomes a key path segment: no dots (edit config.json by hand for such a login).
   if (perUser && !(opts.user && USER_ID.test(opts.user) && !opts.user.includes('.'))) throw new Error(`${key} needs user: the user id (login name, without dots) whose account it is`);
-  const perMachine = key === 'machines.useHostClaudeEnv' || key.startsWith('machines.cleanup.');
+  const perMachine = key === 'machines.useHostClaudeEnv' || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
   if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.useHostClaudeEnv and machines.cleanup.*, and is a machine id such as "m5"`);
   const v = normalizeSetting(key, value, cfg, opts.users);
   const text = fs.readFileSync(file, 'utf8');
@@ -510,6 +540,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else p.avoid = v as Record<string, string>;
     cfg.placement = p;
   }
+  else if (key === 'hostGuard.cleanup.staleOutput') cfg.hostGuard.cleanup.staleOutput = v as Partial<StaleOutputSettings> | undefined;
+  else if (key === 'machines.cleanup.staleOutput') cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, staleOutput: v as Partial<StaleOutputSettings> | undefined } };
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;

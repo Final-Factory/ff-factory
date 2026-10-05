@@ -7,6 +7,8 @@ import path from 'node:path';
 import type { PermissionMode } from '../shared/types.ts';
 import { DEFAULT_HANG, type HangThresholds } from './unityHang.ts';
 import { checkObject, dataRecoveries, readJsonDurable } from './durable.ts';
+import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
+
 
 /** What a portal-run agent runs on (docs/accounts.md): the computer's stored claude.ai login, or config claudeEnv's token. */
 export type ClaudeAccount = 'login' | 'token';
@@ -157,7 +159,12 @@ export interface Config {
      * Each machine daemon's own clean-up (docs/self-recovery.md): a pass every `everyMinutes` (default 60) and
      * sooner below `softFreeGB` (default 80). A number for every machine, or per machine with "*" for the rest.
      */
-    cleanup?: { everyMinutes?: number | Record<string, number>; softFreeGB?: number | Record<string, number> };
+    cleanup?: {
+      everyMinutes?: number | Record<string, number>;
+      softFreeGB?: number | Record<string, number>;
+      /** The stale build and run output rules on every machine (server/staleOutput.ts, w459); absent: their defaults (on). */
+      staleOutput?: Partial<StaleOutputSettings>;
+    };
     /**
      * Backlog step 2 (docs/beast-machine.md), off by default: a portal restart or update leaves the agents daemons run
      * running (no drain, no stop), and a daemon from another commit that speaks this portal's protocol still takes new
@@ -457,6 +464,8 @@ export interface CleanupPolicy {
   clonePatterns: string[];
   /** Explicit rules: entries directly inside `path` older than `olderThanDays` go (e.g. old build outputs). */
   ageRules: { path: string; olderThanDays: number }[];
+  /** The stale build and run output rules on this host (server/staleOutput.ts, w459); absent: their defaults (on). */
+  staleOutput?: Partial<StaleOutputSettings>;
 }
 
 export const DEFAULT_CLEANUP: CleanupPolicy = {
@@ -488,11 +497,12 @@ export const MACHINE_CLEANUP_DEFAULTS = { everyMinutes: 60, softFreeGB: 80 };
 const perMachine = (v: number | Record<string, number> | undefined, id: string): number | undefined => (typeof v === 'number' ? v : v ? (v[id] ?? v['*']) : undefined);
 
 /** What machine `id`'s daemon runs its clean-up with (config machines.cleanup, else the defaults). */
-export function machineCleanupSettings(cfg: Pick<Config, 'machines'>, id: string): { everyMinutes: number; softFreeGB: number } {
+export function machineCleanupSettings(cfg: Pick<Config, 'machines'>, id: string): { everyMinutes: number; softFreeGB: number; staleOutput: StaleOutputSettings } {
   const c = cfg.machines?.cleanup;
   return {
     everyMinutes: perMachine(c?.everyMinutes, id) ?? MACHINE_CLEANUP_DEFAULTS.everyMinutes,
     softFreeGB: perMachine(c?.softFreeGB, id) ?? MACHINE_CLEANUP_DEFAULTS.softFreeGB,
+    staleOutput: staleOutputSettings(c?.staleOutput),
   };
 }
 
