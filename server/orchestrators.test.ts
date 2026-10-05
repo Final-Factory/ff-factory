@@ -765,7 +765,7 @@ test("w402: a member cannot close or reopen another person's request, even in th
 // ---------------------------------------------------------------- w416: placing work where there is room
 
 test('w416: list_sandboxes leads with each computer\'s room; start_agent on a busy host while LothDesktop has room says so', async (t) => {
-  const { cfg, store, agents, dispatcher, call } = setup(t);
+  const { cfg, store, sessions, agents, dispatcher, call } = setup(t);
   const GB = 1024 ** 3;
   const machines = (agents as unknown as { machines: MachineManager }).machines;
   store.putMachine({
@@ -820,4 +820,6 @@ test('w416: list_sandboxes leads with each computer\'s room; start_agent on a bu
   cfg.limits.maxSessions = 30;
   store.putSandbox({ id: 'delta', name: 'delta', branch: 'sandbox/delta', base: 'origin/develop', path: path.join(cfg.sandboxRoot, 'delta'), purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
   assert.doesNotMatch(await text({ sandbox: 'delta', prompt: 'Read the docs', title: 'Docs' }), /Note:/);
+  // Their first turns end before the test does (on Windows a late transcript write outlived the temp folder).
+  await until('the workers answered', () => [...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').every((s) => s.info.status === 'idle'));
 });
