@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The portal VM's end-to-end jobs wait less, and pass on main** (w505, part 1, asked by Lothsahn). The test now sets its
+  own short health, update-verify, stop and watch timers (`CI_TIMING=fast`, the default; `production` runs the shipped
+  defaults), so the rollback, health-restart and hang scenarios take seconds instead of minutes; the shipped defaults
+  are unchanged (`UPDATE_VERIFY_SEC`, new, is empty). The runs on main, which had failed since #108 because the
+  checkout is main and `git branch -f main` refused, now pass.
+
 - **`fffctl migrate`: the portal moves from BEAST into its VM with one command run in the VM** (w499, asked by Lothsahn:
   "I'd ideally like the new orchestrator to be able to connect to beast and just download everything directly"). It
   pulls BEAST's `config.json`, `data\` (without `data\tools` and the supervisor's files) and the conversations the
