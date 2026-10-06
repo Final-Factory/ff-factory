@@ -12,6 +12,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The cut-over prints the exact FFBox commands that move its connector to the new portal** (w537). After the first
+  cut-over FFBox stayed offline: its connector still dialled BEAST's old URL (answering 502), because `fff.url` is
+  rendered into its unit by root on the FFBox host and the step was one line among others. `fffctl migrate --cut-over`
+  now ends with the `sed` of the old URL to the new, the `06-services.sh --check` that must name only
+  `fffconnector.service`, the `--install` and the check, each with what it should print; RUNBOOK section 5 has the same.
 - **The portal VM reaches its machines over ssh again** (w537). The cut-over left the VM without the machines' ssh
   aliases and host keys, so every daemon redeploy failed on "Host key verification failed". `deploy/vm/guest/machines.ssh`
   lists the machines (alias, MagicDNS name, ssh user) with each ed25519 host key pinned (checked on two paths from

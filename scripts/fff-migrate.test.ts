@@ -562,7 +562,11 @@ test('fffctl migrate --cut-over: BEAST\'s portal drains, sends its daemon here a
   assert.match(report, /relocated: beast/);
   assert.match(report, /BEAST portal: stopped/);
   assert.match(report, /connected here: beast/);
-  assert.match(report, /set FFBox's fff\.url to http/);
+  // FFBox's link (w537): the exact commands, from BEAST's URL (its config.json's publicUrl) to this portal's.
+  assert.ok(report.includes(`its connector still dials http://127.0.0.1:`), report);
+  assert.ok(report.includes(`|"url": "${w.publicUrl}"|' ~/.config/ffbox/config.json`), report);
+  assert.match(report, /sh scripts\/06-services\.sh --check +# units differ \.\.\.: fffconnector\.service, and no other/);
+  assert.match(report, /sudo sh scripts\/06-services\.sh --install/);
   assert.match(report, /sign in, add the phone app again/);
   assert.deepEqual(fs.readFileSync(path.join(w.base, 'schtasks.log'), 'utf8').trim().split('\n'), ['/Change /TN ffsb-server /DISABLE']);
   assert.ok(!w.beastPortal.child, "BEAST's portal stopped");
