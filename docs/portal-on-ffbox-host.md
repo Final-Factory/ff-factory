@@ -392,6 +392,12 @@ account `fff` (locked password, no sudo), `0700`:
 The guest's settings (repository, branch, backup target, thresholds) are in `/etc/fff/fff.conf`, whose defaults are
 in [`fff.conf.example`](../deploy/vm/guest/fff.conf.example).
 
+`/tmp` is on the root disk (w537). Ubuntu 26.04 mounts it as a tmpfs by default *(sourced: its release notes)*, half
+the RAM in systemd's `tmp.mount` (`size=50%`): 1.9 GiB in the 4 GiB VM, which has no swap. The agents' temp folders
+(`TMPDIR=/tmp/ffa-<session>`) would take the portal's memory there, and the portal's clean-up, which counts the smaller
+of the home folder's and the temp folder's free space (`server/cleanup.ts`), reported 1.9 GB free on the first day.
+The guest install masks `tmp.mount`, systemd's documented way back to the disk; it applies from the next boot.
+
 ### 2.4 Units in the guest
 
 | Unit | Does | Replaces on BEAST |
