@@ -67,7 +67,7 @@ import { isOpen } from './work.ts';
 import { linkedClosed, linkedDone, mergeCandidates, mergedBy, mergedText, parseLog, prNumberOf, type MergeRecord } from './mergedIntake.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
-import { escalationCatchUp, escalationRef, fixLearnable, fixedByPr, followed, type BoardWatch, type CatchUpLine } from './boardFollow.ts';
+import { escalationCatchUp, escalationRef, fixLearnable, fixedByPr, followed, reportFixesOf, reportIdsOf, reportLines, reportSweep, type BoardWatch, type CatchUpLine, type ReportFix, type ReportSweep } from './boardFollow.ts';
 import type { IntakeEntry, IntakeSummary, MaxEvent, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 import { ffboxConversationHref } from '../shared/ffboxLinks.ts';
 
@@ -95,6 +95,8 @@ const FIX_RETRY_MS = 30 * 60_000;
 const FIX_HOLD_MS = 15 * 60_000;
 /** The one-time catch-up (w480): escalated requests closed done this many days back. */
 const CATCH_UP_DAYS = 14;
+/** Reports a finished request fixed (w502): told to FFBox for requests that changed this many days back. */
+const REPORT_FIX_DAYS = 30;
 const VERSION_FILE = 'ProjectSettings/ProjectSettings.asset';
 
 /** What server/max.ts gives the intake: reads only, the token stays there. */
@@ -126,6 +128,8 @@ export interface IntakeDeps {
   git?: (args: string[]) => Promise<{ code: number; stdout: string }>;
   /** One pull request of the repo, if it merged (gh pr view); the default asks gh. */
   prInfo?: (n: number) => Promise<MergeRecord | undefined>;
+  /** Tell FFBox a player's report is fixed (server/providers.ts pushReportFixed); false when it could not go. */
+  pushReportFixed?: (fix: ReportFix) => boolean;
   now?: () => number;
 }
 
@@ -152,6 +156,10 @@ interface Persisted {
   fixTried?: Record<string, number>;
   /** The one-time catch-up of escalated threads (w480): when it ran and the refs it followed. */
   catchUp?: { at: string; refs: string[] };
+  /** Players' reports a finished request fixed (w502), by report id: what FFBox is told, again on every link. */
+  reportFixes?: Record<string, ReportFix & { at: string }>;
+  /** w502's one-time sweep: when it ran, and what it found. */
+  reportSweep?: { at: string; certain: number; uncertain: string[] };
   polledAt?: string;
   error?: string;
 }
@@ -209,10 +217,17 @@ export class IntakeManager {
     every(MERGED_EVERY_MS, () => void this.checkMerged(), 90_000);
     // Board answers FFBox still follows are re-checked every minute; a change goes to it at once (docs/intake.md).
     every(BOARD_RECHECK_MS, () => this.recheckBoards(), BOARD_RECHECK_MS);
+    // Players' reports a finished request fixed go to FFBox, recorded there and never posted (w502).
+    every(BOARD_RECHECK_MS, () => this.pushReportFixes(), BOARD_RECHECK_MS);
+    // A merged PR's `Report: <id>` lines make its request the work for those reports (w502).
+    every(MERGED_EVERY_MS, () => void this.linkReportsFromPrs(), 120_000);
     // A followed request's fix: the PR that merged it and the release that carries it, for FFBox's notice (w480).
     every(FIX_EVERY_MS, () => void this.resolveFixes(), 45_000);
     // Once: escalated threads whose request closed done before FF Factory followed them (w480).
-    const once = setTimeout(() => this.catchUpEscalations(), 30_000);
+    const once = setTimeout(() => {
+      this.catchUpEscalations();
+      this.sweepReports();
+    }, 30_000);
     once.unref();
     this.timers.push(once);
     return this;
@@ -230,7 +245,7 @@ export class IntakeManager {
     try {
       const d = readJsonDurable<Partial<Persisted>>(this.file, { check: checkObject });
       if (!d) throw new Error('none yet');
-      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, escalations: d.escalations, maybes: d.maybes, boards: d.boards, fixTried: d.fixTried, catchUp: d.catchUp };
+      return { cursors: d.cursors ?? {}, recent: d.recent ?? [], versions: d.versions ?? {}, lastVersion: d.lastVersion, checkedAt: d.checkedAt, polledAt: d.polledAt, error: d.error, nightly: d.nightly, escalations: d.escalations, maybes: d.maybes, boards: d.boards, fixTried: d.fixTried, catchUp: d.catchUp, reportFixes: d.reportFixes, reportSweep: d.reportSweep };
     } catch {
       return { cursors: {}, recent: [], versions: {} };
     }
@@ -849,10 +864,13 @@ export class IntakeManager {
     const now = this.now();
     const tried = this.data.fixTried ?? {};
     const targets = new Map<string, WorkItem>();
+    const due = (w: WorkItem | undefined) => !!w && fixLearnable(w) && !(tried[w.id] && now - tried[w.id] < FIX_RETRY_MS);
     for (const b of this.boards.values()) {
       const w = b.follow ? followed(b.follow, this.d.store.work) : undefined;
-      if (w && fixLearnable(w) && !(tried[w.id] && now - tried[w.id] < FIX_RETRY_MS)) targets.set(w.id, w);
+      if (due(w)) targets.set(w!.id, w!);
     }
+    // And every finished request that claims player reports (w502): FFBox is told they are fixed once the fix ships.
+    for (const w of this.reportClaimants(now)) if (due(w)) targets.set(w.id, w);
     if (!targets.size) return [];
     this.resolving = true;
     const changed: string[] = [];
@@ -872,17 +890,21 @@ export class IntakeManager {
           } else if (w.autoClosed?.sha) {
             Object.assign(d, { fixCommit: w.autoClosed.sha }, w.autoClosed.pr ? { fixPr: w.autoClosed.pr } : {});
             said.push(`its fix is the merge it was closed by (${w.autoClosed.sha.slice(0, 12)})`);
-          } else if (named) {
-            const pr = await this.prInfo(named).catch(() => undefined);
+          } else if (named || d.fixPr) {
+            // "Already fixed by #N" (w480), or a PR a confirmed link named (w502): its merge commit is the fix.
+            const n = named ?? d.fixPr!;
+            const pr = await this.prInfo(n).catch(() => undefined);
             if (pr?.sha) {
-              Object.assign(d, { fixCommit: pr.sha, fixPr: named }, pr.head ? { fixBranch: pr.head } : {});
-              said.push(`already fixed by PR #${named} (${pr.sha.slice(0, 12)})`);
+              Object.assign(d, { fixCommit: pr.sha, fixPr: n }, pr.head ? { fixBranch: pr.head } : {});
+              said.push(`${named ? 'already fixed by' : 'fixed by'} PR #${n} (${pr.sha.slice(0, 12)})`);
             }
           }
         }
         if (d.fixCommit && !d.fixPr) {
           records ??= (await this.mergedPrs().catch(() => undefined)) ?? [];
-          const r = records.find((x) => x.number && x.sha === d.fixCommit);
+          // A FIX-LANDED commit may be abbreviated ("ede697a08").
+          const fix = d.fixCommit.toLowerCase();
+          const r = records.find((x) => x.number && x.sha && (x.sha.startsWith(fix) || fix.startsWith(x.sha)));
           if (r) {
             Object.assign(d, { fixPr: r.number }, r.head ? { fixBranch: r.head } : {});
             said.push(`merged as PR #${r.number}`);
@@ -909,6 +931,7 @@ export class IntakeManager {
       }
       // Forget the looks at requests nobody follows any more.
       const followedIds = new Set([...this.boards.values()].map((b) => (b.follow ? followed(b.follow, this.d.store.work)?.id : undefined)).filter(Boolean));
+      for (const w of this.reportClaimants(now)) followedIds.add(w.id);
       this.data.fixTried = Object.fromEntries(Object.entries(this.data.fixTried ?? {}).filter(([id]) => followedIds.has(id)));
     } catch (e) {
       this.data.error = `fix look: ${cleanLine((e as Error).message, 200)}`;
@@ -917,6 +940,104 @@ export class IntakeManager {
       this.changed();
     }
     return changed;
+  }
+
+  // ---------------------------------------------------------------- players' reports a request fixed (w502)
+
+  /** The finished requests (as they continue, through a merge) that claim player reports and changed recently. */
+  private reportClaimants(now = this.now()): WorkItem[] {
+    const out = new Map<string, WorkItem>();
+    for (const w of this.d.store.work.values()) {
+      if (!reportIdsOf(w).length) continue;
+      const f = followed(w.id, this.d.store.work);
+      if (f?.status === 'done' && now - Date.parse(f.updatedAt) <= REPORT_FIX_DAYS * 86_400_000) out.set(f.id, f);
+    }
+    return [...out.values()];
+  }
+
+  /**
+   * Tell FFBox each player report a finished request fixed (w502): every report the request claims (its subjects, or an
+   * intake diagnosis that joined it), once its fix is merged and a release carries it, with the PR and the version.
+   * Kept in intake.json and sent on every link (providers.pushReportFixed sends each once per link). FFBox records it
+   * on the report and its diagnosis and posts nothing. Returns how many went now.
+   */
+  pushReportFixes(): number {
+    const s = this.settings;
+    if (!s.ffbox.enabled) return 0;
+    const now = this.now();
+    const target = this.d.cfg.defaultBase.replace(/^origin\//, '') || 'develop';
+    const known = { ...this.data.reportFixes };
+    let changed = false;
+    for (const f of reportFixesOf(this.d.store.work, target, now, REPORT_FIX_DAYS)) {
+      const was = known[f.reportId];
+      if (was && was.workId === f.workId && was.pr === f.pr && was.version === f.version && was.mergedIn === f.mergedIn) continue;
+      known[f.reportId] = { ...f, at: new Date(now).toISOString() };
+      changed = true;
+      console.log(`intake: report ${f.reportId} fixed by ${f.workId}${f.pr ? ` (PR #${f.pr})` : ''}, in ${f.version}: FFBox is told (w502)`);
+    }
+    for (const [id, f] of Object.entries(known)) if (now - Date.parse(f.at) > REPORT_FIX_DAYS * 86_400_000) (delete known[id], (changed = true));
+    if (changed) {
+      this.data.reportFixes = known;
+      this.changed();
+    }
+    if (!this.d.pushReportFixed) return 0;
+    let sent = 0;
+    for (const f of Object.values(known)) {
+      const { at: _at, ...fix } = f;
+      if (this.d.pushReportFixed(fix)) sent++;
+    }
+    return sent;
+  }
+
+  /**
+   * A merged PR's `Report: <id>` lines (w502): the request the PR belongs to (its PR, its fix's PR, the PR it was closed
+   * by, FFBox's PR for it) becomes the work for those reports. Reads the merged PRs gh lists. Returns the requests changed.
+   */
+  async linkReportsFromPrs(): Promise<string[]> {
+    const s = this.settings;
+    if (!s.ffbox.enabled) return [];
+    const records = (await this.mergedPrs().catch(() => undefined)) ?? [];
+    const changed: string[] = [];
+    for (const r of records) {
+      const ids = r.number ? reportLines(r.text) : [];
+      if (!ids.length) continue;
+      const w = [...this.d.store.work.values()].find((x) => x.status !== 'merged' && (x.delivery?.fixPr === r.number || x.autoClosed?.pr === r.number || x.ffbox?.pr === r.number || x.source?.pr === r.number || x.prs?.some((p) => p.number === r.number)));
+      if (!w) continue;
+      const keys = ids.map((id) => `report:${id}`).filter((k) => !w.keys.includes(k));
+      if (!keys.length) continue;
+      this.d.orchestrators.addSubjects(w.id, keys, `PR #${r.number}'s Report: lines`);
+      if (!w.delivery?.fixPr && w.status === 'done') this.d.orchestrators.noteRelease(w.id, { fixPr: r.number, ...(r.sha ? { fixCommit: r.sha } : {}), ...(r.head ? { fixBranch: r.head } : {}) }, `its fix is PR #${r.number}, which names its reports`);
+      changed.push(w.id);
+    }
+    return changed;
+  }
+
+  /**
+   * w502's one-time sweep, at the first start with it: the finished requests that claim reports (marked fixed on FFBox
+   * once their fix ships, by pushReportFixes) and the ones that only mention report ids. Those are never marked: they
+   * go to Lothsahn (the reviewers, on a portal without his login) in one message, to add as subjects (update_work) where the
+   * request did fix them. Once per data folder (intake.json `reportSweep`).
+   */
+  sweepReports(): ReportSweep | undefined {
+    const s = this.settings;
+    if (!s.ffbox.enabled || this.data.reportSweep) return undefined;
+    const now = this.now();
+    const sweep = reportSweep(this.d.store.work, now, REPORT_FIX_DAYS);
+    this.data.reportSweep = { at: new Date(now).toISOString(), certain: sweep.certain.length, uncertain: sweep.uncertain.map((u) => u.workId) };
+    this.changed();
+    console.log(`intake: report sweep (w502): ${sweep.certain.length} finished request(s) claim reports (${sweep.certain.map((c) => `${c.workId}${c.released ? '' : ' (not released yet)'}`).join(', ') || 'none'}); ${sweep.uncertain.length} only mention some (${sweep.uncertain.map((u) => u.workId).join(', ') || 'none'})`);
+    if (sweep.uncertain.length) {
+      // Lothsahn asked for the list (w502); the reviewers get it on a portal without his login.
+      const loth = this.d.identity.get('lothsahn');
+      const to = loth ? [{ userId: loth.userId, displayName: loth.displayName }] : [];
+      const reviewers = this.d.orchestrators.reviewers();
+      const lines = sweep.uncertain.map((u) => `${u.workId} "${cleanLine(u.title, 80)}" mentions ${u.reportIds.join(', ')}`);
+      this.d.orchestrators.toPeople(
+        to.length ? to : reviewers,
+        `[intake reports] w502's sweep: these finished requests mention player reports they do not claim, so FFBox still shows those reports open. Where a request did fix a report, add it with update_work {id, subjects: [<report id>]} and FFBox shows it fixed once the fix ships; leave the rest. ${lines.join('; ')}`,
+      );
+    }
+    return sweep;
   }
 
   /**
@@ -1134,12 +1255,12 @@ export class IntakeManager {
     if (this.d.prInfo) return this.d.prInfo(n);
     const slug = await this.originSlug();
     if (!slug) return undefined;
-    const r = await run('gh', ['pr', 'view', String(n), '-R', slug, '--json', 'number,title,headRefName,state,mergedAt,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+    const r = await run('gh', ['pr', 'view', String(n), '-R', slug, '--json', 'number,title,body,headRefName,state,mergedAt,mergeCommit'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
     if (r.code !== 0) return undefined;
     try {
-      const p = JSON.parse(r.stdout) as { number: number; title: string; headRefName: string; state: string; mergedAt?: string; mergeCommit?: { oid?: string } };
+      const p = JSON.parse(r.stdout) as { number: number; title: string; body?: string; headRefName: string; state: string; mergedAt?: string; mergeCommit?: { oid?: string } };
       if (p.state !== 'MERGED' || !p.mergeCommit?.oid) return undefined;
-      return { sha: p.mergeCommit.oid, at: p.mergedAt ?? '', number: p.number, head: p.headRefName, text: p.title };
+      return { sha: p.mergeCommit.oid, at: p.mergedAt ?? '', number: p.number, head: p.headRefName, text: `${p.title}\n${p.body ?? ''}` };
     } catch {
       return undefined;
     }

@@ -1116,3 +1116,133 @@ test('w480: the one-time catch-up follows escalated requests closed done in the 
   assert.equal(intake.recheckBoards(), 1);
   assert.deepEqual([pushed[0][0], pushed[0][1].verdict, pushed[0][1].matches[0].watch?.pr, pushed[0][1].matches[0].version], [ESC_REF, 'done', 1076, '0.50.0.78']);
 });
+
+// ---------------------------------------------------------------- w502: players' reports a finished request fixed
+
+const R1 = '20261005T035612Z-crash-6102d405dc';
+const R2 = '20261005T035747Z-crash-1216e47e7d';
+type ReportPush = { reportId: string; workId: string; pr?: number; version?: string; mergedIn?: string };
+const reportPushesTo = (intake: IntakeManager, into: ReportPush[]) => {
+  (intake as unknown as { d: { pushReportFixed?: (f: ReportPush) => boolean } }).d.pushReportFixed = (f) => (into.push(f), true);
+};
+/** A base clone with v77, a fix commit, then v78's bump three hours ago: (repo dir, the fix's sha). */
+function releasedFix(dir: string) {
+  const repo = path.join(dir, 'base');
+  fs.mkdirSync(path.join(repo, 'ProjectSettings'), { recursive: true });
+  const git = (...a: string[]) => execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@users.noreply.github.com', ...a], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_COMMITTER_DATE: new Date(Date.now() - 3 * 3_600_000).toISOString() } }).trim();
+  const version = (v: string) => fs.writeFileSync(path.join(repo, 'ProjectSettings', 'ProjectSettings.asset'), `PlayerSettings:\n  bundleVersion: ${v}\n`);
+  git('init', '-q', '-b', 'develop');
+  version('0.50.0.76');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'v76');
+  fs.writeFileSync(path.join(repo, 'crash.txt'), 'fixed');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'Fix the Build 76 crash on load (#1064)');
+  const fix = git('rev-parse', 'HEAD');
+  version('0.50.0.77');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'v77');
+  return fix;
+}
+
+test('w502: a finished request\'s reports go to FFBox with its PR and release once it ships, and again after a restart', async (t) => {
+  const { intake, o, call, cfg, store, agents } = setup(t, { ffbox: { enabled: true } });
+  const ben = o.personalFor(BEN);
+  ben.lastFrom = 'human';
+  await call(ben.info, 'request_work', { title: 'Fix the crash on load', brief: 'Crashes in Build 76.', subjects: [R1] });
+  const w = [...store.work.values()].find((x) => x.title === 'Fix the crash on load')!;
+  assert.ok(w.keys.includes(`report:${R1}`));
+  const pushed: ReportPush[] = [];
+  reportPushesTo(intake, pushed);
+  assert.equal(intake.pushReportFixes(), 0, 'open: nothing');
+  w.status = 'done';
+  w.delivery = { fixCommit: 'ede697a08', fixPr: 1064 };
+  assert.equal(intake.pushReportFixes(), 0, 'merged but in no release yet: nothing');
+  w.delivery = { ...w.delivery, releasedIn: '0.50.0.77' };
+  assert.equal(intake.pushReportFixes(), 1);
+  assert.deepEqual(pushed, [{ reportId: R1, workId: w.id, pr: 1064, version: '0.50.0.77', mergedIn: 'develop@ede697a08' }]);
+  // update_work adds a report it turned out to fix, closed or not.
+  const r = await call(ben.info, 'update_work', { id: w.id, subjects: [R2] });
+  assert.match(r.text, new RegExp(`${w.id} is now the work for report:${R2}`));
+  intake.pushReportFixes();
+  assert.deepEqual(pushed.map((p) => p.reportId).sort(), [R1, R1, R2].sort(), 'every link hears them all; the provider sends each once per link');
+  intake.close();
+
+  const again: ReportPush[] = [];
+  const restarted = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, pushReportFixed: (f) => (again.push(f), true) });
+  t.after(() => restarted.close());
+  w.status = 'cancelled'; // kept in intake.json: told again whatever the ledger says now
+  assert.equal(restarted.pushReportFixes(), 2);
+  assert.deepEqual(again.map((p) => p.reportId).sort(), [R1, R2]);
+});
+
+test('w502: the backfill links w414 to the two Build 76 crash reports and its PR; the PR and release are learnt, then FFBox is told', async (t) => {
+  const { intake, o, store, dir, call } = setup(t, { ffbox: { enabled: true } });
+  const fix = releasedFix(dir);
+  store.workSeq = 413;
+  const ben = o.personalFor(BEN);
+  ben.lastFrom = 'human';
+  await call(ben.info, 'request_work', { title: 'Fix the crash on load in Build 76', brief: `Crash reports ${R1} and ${R2} reference this.` });
+  const w = o.requireWork('w414');
+  assert.ok(!w.keys.includes(`report:${R1}`), 'a brief only references its reports');
+  w.status = 'done';
+  w.outcome = 'Fixed the crash on load.';
+  assert.deepEqual(o.confirmReportSubjects(), ['w414']);
+  assert.deepEqual(o.confirmReportSubjects(), [], 'once');
+  assert.ok(w.keys.includes(`report:${R1}`) && w.keys.includes(`report:${R2}`) && w.subjects?.includes(`report:${R2}`));
+  assert.equal(w.delivery?.fixPr, 1064);
+  const deps = depsOf(intake);
+  deps.prInfo = async (n) => (n === 1064 ? { sha: fix, at: new Date().toISOString(), number: 1064, head: 'fix/crash-on-load', text: 'Fix the crash' } : undefined);
+  deps.mergedPrs = async () => [];
+  const pushed: ReportPush[] = [];
+  reportPushesTo(intake, pushed);
+  assert.equal(intake.pushReportFixes(), 0, 'no commit or release known yet');
+  assert.deepEqual(await intake.resolveFixes(), ['w414']);
+  assert.deepEqual([w.delivery?.fixCommit, w.delivery?.fixPr, w.delivery?.releasedIn], [fix, 1064, '0.50.0.77']);
+  assert.equal(intake.pushReportFixes(), 2);
+  assert.deepEqual(pushed.map((p) => [p.reportId, p.workId, p.pr, p.version]).sort(), [[R1, 'w414', 1064, '0.50.0.77'], [R2, 'w414', 1064, '0.50.0.77']]);
+});
+
+test('w502: a merged PR\'s Report: lines make its request the work for those reports; an "already fixed by #N" close is learnt the same way', async (t) => {
+  const { intake, o, store, dir, call } = setup(t, { ffbox: { enabled: true } });
+  const fix = releasedFix(dir);
+  const ben = o.personalFor(BEN);
+  ben.lastFrom = 'human';
+  await call(ben.info, 'request_work', { title: 'Crash on load', brief: 'Players crash loading a save.' });
+  const w = [...store.work.values()].at(-1)!;
+  w.status = 'done';
+  w.delivery = { fixPr: 1064 };
+  const deps = depsOf(intake);
+  deps.mergedPrs = async () => [{ sha: fix, at: new Date().toISOString(), number: 1064, head: 'fix/crash-on-load', text: `Fix the crash on load\n\nReport: ${R1}\n- Report: \`${R2}\`\nSee also 20261005T000000Z-crash-0000000000 for context.` }];
+  assert.deepEqual(await intake.linkReportsFromPrs(), [w.id]);
+  assert.deepEqual(w.keys.filter((k) => k.startsWith('report:')).sort(), [`report:${R1}`, `report:${R2}`], 'a report mentioned mid-sentence is not claimed');
+  assert.deepEqual(await intake.linkReportsFromPrs(), [], 'once');
+
+  // "Already fixed by #1064" on a request that claims a report: the PR is looked up, then FFBox is told.
+  await call(ben.info, 'request_work', { title: `Crash ${R1}`, brief: 'Again.' });
+  const again = [...store.work.values()].at(-1)!;
+  assert.ok(again.keys.includes(`report:${R1}`), 'its title names the report');
+  again.status = 'done';
+  again.outcome = 'Already fixed by #1064 (Build 77).';
+  deps.prInfo = async (n) => (n === 1064 ? { sha: fix, at: '', number: 1064, head: 'fix/crash-on-load', text: '' } : undefined);
+  assert.ok((await intake.resolveFixes()).includes(again.id));
+  assert.deepEqual([again.delivery?.fixPr, again.delivery?.releasedIn], [1064, '0.50.0.77']);
+});
+
+test('w502: the one-time sweep: requests that claim reports are marked, ones that only mention reports go to Lothsahn, once', async (t) => {
+  const { intake, o, store, heard, call } = setup(t, { ffbox: { enabled: true } });
+  const ben = o.personalFor(BEN);
+  ben.lastFrom = 'human';
+  await call(ben.info, 'request_work', { title: `Crash ${R1}`, brief: 'Fix it.' });
+  const claims = [...store.work.values()].at(-1)!;
+  await call(ben.info, 'request_work', { title: 'Crash on load', brief: `Seen in ${R2}.` });
+  const mentions = [...store.work.values()].at(-1)!;
+  for (const w of [claims, mentions]) w.status = 'done';
+  const sweep = intake.sweepReports()!;
+  assert.deepEqual(sweep.certain.map((c) => [c.workId, c.reportIds]), [[claims.id, [R1]]]);
+  assert.deepEqual(sweep.uncertain.map((u) => [u.workId, u.reportIds]), [[mentions.id, [R2]]]);
+  assert.equal(intake.sweepReports(), undefined, 'once');
+  await until('Lothsahn hears the uncertain ones', () => heard(o.personalFor(LOTH).info.id, '[intake reports]').length === 1);
+  assert.match(heard(o.personalFor(LOTH).info.id, '[intake reports]')[0].text, new RegExp(`${mentions.id} "Crash on load" mentions ${R2}`));
+  assert.ok(!mentions.keys.includes(`report:${R2}`), 'never marked on a guess');
+});

@@ -503,6 +503,7 @@ const intake = new IntakeManager({
   orchestrators: agents.orchestrators,
   discord: max,
   pushBoard: (ref, answer) => providers.pushBoard(ref, answer),
+  pushReportFixed: (fix) => providers.pushReportFixed(fix),
   // FFBox runs ffbox master, which takes maybe: no offer list gates it (docs/ffbox-connector-contract.md, "No negotiation").
   takesMaybe: () => true,
 }).start();
