@@ -573,7 +573,10 @@ host)*.
   `~/.ssh/authorized_keys` on the Macs and, for a Windows account in Administrators,
   `C:\ProgramData\ssh\administrators_authorized_keys` *(sourced: [machines.md](machines.md), "Setting up a Windows PC",
   step 3)*. *(Guess: deploys work with those options; the dry run's check 5 tests one.)*
-- `~/.ssh/config` names the machines by the aliases the portal deploys to (`m3`, `m5`, `Loth2800`, and `beast` for
+- A machine installed with the worker installer from w568 on sets the portal's ssh up itself: the portal's key into
+  its `authorized_keys`, and its host keys to the portal, pinned in the portal's data and its `~/.ssh/known_hosts2`
+  ([worker-install.md](worker-install.md), "The portal's ssh"). Nothing on the host, nothing by hand in the VM.
+- For the machines from before that: `~/.ssh/config` names the machines by the aliases the portal deploys to (`m3`, `m5`, `Loth2800`, and `beast` for
   `rydin@beast`), each with its MagicDNS name and ssh user, under `StrictHostKeyChecking yes`; `known_hosts` holds each
   one's ed25519 host key, pinned, never accepted on first use. Both come from
   [`deploy/vm/guest/machines.ssh`](../deploy/vm/guest/machines.ssh), whose keys were checked on two paths (w537:

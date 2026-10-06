@@ -10,6 +10,23 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Added
+
+- **The worker installer sets up the portal's ssh itself** (w568, lothsahn: "Yes, we need the installer to be able to
+  do that"). Adding a machine is running its installer there, with nothing done by hand on the portal's host or in its
+  VM.
+  - **The portal's key:** `GET /machine/ssh`, with the machine's own credential, gives the portal's key line, restricted
+    to the portal's tailnet address. The installer puts it where that account's sshd reads keys. On Windows, an admin
+    account's goes in `administrators_authorized_keys`, in the install's one administrator step with the firewall rules
+    (ACL Administrators and SYSTEM). Anyone else's goes in `~/.ssh/authorized_keys`. Re-runs change nothing, and the
+    uninstall removes exactly that line.
+  - **The host keys:** `POST /machine/ssh` sends the machine's host keys, read from its own sshd over loopback, with its
+    ssh user and tailnet name. The portal keeps them on the record (its data, so a rebuilt VM keeps them), pins them in
+    its own `~/.ssh/known_hosts2`, and says at once whether its ssh gets in.
+  - **What it's for:** the ssh behind `machine_daemon start|stop|restart` and `remove_machine` for installed machines.
+  - **`deploy/vm/host/machine-ssh.sh`** stays as the repair and check tool for the machines from before; it keeps
+    nothing on the FFBox host.
+
 ### Fixed
 
 - **A redeploy whose ssh step fails no longer locks the machine out** (w568, found in w513). `register` replaced the

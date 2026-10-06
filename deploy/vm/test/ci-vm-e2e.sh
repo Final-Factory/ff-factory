@@ -180,6 +180,12 @@ done
 [ "$(g 'sudo stat -c "%a %U" /srv/fff/home/.ssh/config /srv/fff/home/.ssh/known_hosts' | sort -u)" = "600 fff" ] || fail "the portal's ssh config or known_hosts is not 0600 fff"
 if printf '%s' "$out" | matches 'PRIVATE KEY'; then fail "fff-machine-ssh printed a private key"; fi
 echo "ok: the portal's ssh aliases and pinned host keys for the machines"
+# An installed machine's host keys are pinned in the portal's own ~/.ssh/known_hosts2 (w568, server/machineSsh.ts): the
+# guest's ssh must read it by default, beside known_hosts.
+ukh=$(g 'sudo -H -u fff ssh -G no-such-machine.invalid' | awk '$1 == "userknownhostsfile"')
+echo "MEASURE the portal account's ssh known_hosts files: $ukh"
+printf '%s
+' "$ukh" | matches '/srv/fff/home/.ssh/known_hosts2' || fail "the guest's ssh does not read ~/.ssh/known_hosts2"
 [ "$MODE" != zvol ] || [ "$(zfs get -H -o value mountpoint fffci/fff-vm)" = /fffci/fff-vm ] || fail "the dataset's mountpoint is not the stored answer"
 g 'printf "BASE_REPO_URL=https://github.com/Final-Factory/ff-factory.git\nBASE_BRANCH=main\n" | sudo tee -a /etc/fff/fff.conf'
 if [ "$TIMING" = fast ]; then

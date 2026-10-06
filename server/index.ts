@@ -48,7 +48,9 @@ import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, ses
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { startBaseRefresh } from './baseRefresh.ts';
-import { DRY_RUN_BANNER, defuseConfig, dryRun } from './dryRun.ts';
+import { DRY_RUN_BANNER, DRY_RUN_WHY, defuseConfig, dryRun } from './dryRun.ts';
+import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
+import { machineSshHttp } from './machineSshHttp.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AppState, CreateSandboxRequest, HostStatus, Machine, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -140,6 +142,8 @@ setTimeout(() => {
 }, 5000);
 const sessions = new SessionManager(cfg, store);
 const machines = new MachineManager(cfg, store, sessions);
+// The machines' host keys, pinned from their records (w568): a rebuilt or moved portal writes them again.
+if (!dryRun()) machines.pinHostKeys();
 // Files people attach to messages (docs/attachments.md): stored by SHA-256, never opened; old ones go by retention.
 const attachments = new AttachmentStore(cfg.dataDir, () => cfg.attachments);
 machines.attachments = attachments;
@@ -1268,6 +1272,24 @@ const server = http.createServer(async (req, res) => {
     if (reviewUpload) {
       const machineId = machines.authenticate(req.headers.authorization);
       return await reviewHttp(review, machineId && store.machines.has(machineId) ? machineId : undefined, req, res, reviewUpload[1], Number(url.searchParams.get('offset') ?? 0));
+    }
+    // A worker install setting up the portal's ssh (w568, server/machineSshHttp.ts): its own token, nothing else.
+    if (url.pathname === '/machine/ssh') {
+      const { run } = await import('./proc.ts');
+      return await machineSshHttp(
+        {
+          machineOf: (h) => {
+            const id = machines.authenticate(h);
+            return id && store.machines.has(id) ? id : undefined;
+          },
+          publicKey: () => portalPublicKey(),
+          tailnetAddress: () => tailnetAddress(run),
+          register: (id, ssh) => machines.registerSsh(id, ssh),
+          refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
+        },
+        req,
+        res,
+      );
     }
     // A worker install asking about itself, or leaving (w513, docs/worker-install.md): its own token, nothing else.
     if (url.pathname === '/machine/whoami' || url.pathname === '/machine/unenroll' || url.pathname === '/machine/stopping') {

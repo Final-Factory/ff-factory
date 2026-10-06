@@ -392,8 +392,13 @@ export interface Machine {
   id: string;
   /** The id as it was typed when it has capitals, e.g. "LothDesktop" for lothdesktop: shown in its place. */
   name?: string;
-  /** ssh host alias this host deploys to. */
+  /** ssh host alias this host deploys to (user@host once its worker installer registered its ssh, w568). */
   host: string;
+  /**
+   * What its worker installer registered for the portal's ssh (w568, server/machineSsh.ts): the user and name the
+   * portal reaches it by, and its sshd's host keys, pinned in the portal's known_hosts2.
+   */
+  ssh?: { user: string; host: string; hostKeys: string[]; at: string };
   /** The label, like a sandbox's purpose line. */
   purpose: string;
   /** Deployment state; `online` says whether the daemon is connected right now. */

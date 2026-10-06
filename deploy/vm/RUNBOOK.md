@@ -345,9 +345,14 @@ sudo fff-vm ssh 'findmnt /tmp || echo "/tmp is on the root disk"; df -h /tmp'
 
 ## 9. The portal's ssh to the machines
 
-The portal deploys its machines' daemons over ssh as its own account, to the aliases in
-[`guest/machines.ssh`](guest/machines.ssh) (`m3`, `m5`, `Loth2800`, `beast`), with each host key pinned there. A VM
-installed or updated (`fffctl update`) after w537 writes them by itself. A VM from before, or any time, from the host:
+A machine installed with the worker installer from w568 on sets this up itself. It puts the portal's key into its
+`authorized_keys`, and sends its host keys to the portal, which pins them in its data and its `~/.ssh/known_hosts2`
+([docs/worker-install.md](../../docs/worker-install.md), "The portal's ssh"). Nothing is done on this host or in the VM.
+
+For the machines from before that (`m3`, `m5`, `Loth2800`, `beast`, until each runs the new installer), the portal
+uses the aliases and pinned keys in [`guest/machines.ssh`](guest/machines.ssh). A VM installed or updated
+(`fffctl update`) after w537 writes them by itself. To repair or check them from the host, which writes into the VM
+over `fff-vm ssh` and keeps nothing here:
 
 ```bash
 git -C ~/ff-factory pull --ff-only
