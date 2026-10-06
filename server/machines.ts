@@ -28,7 +28,7 @@ const DEAD_MS = 45_000;
 /** Statuses of an agent in the middle of a turn. */
 const MID_TURN = new Set(['running', 'starting', 'waiting_permission']);
 /** Run-state fields the daemon clears (absent from its JSON report once cleared). */
-const CLEARABLE = ['turnOpenSince', 'backgroundTasks', 'statusDetail'] as const;
+const CLEARABLE = ['turnOpenSince', 'backgroundTasks', 'backgroundJobs', 'statusDetail'] as const;
 
 /**
  * Whether a machine worker counts as cut off mid-turn when its link drops: its daemon reported its process live on
@@ -375,6 +375,7 @@ export class MachineManager {
     s.info.stoppedOnPurpose = true;
     delete s.info.turnOpenSince;
     delete s.info.backgroundTasks;
+    delete s.info.backgroundJobs;
     // No process to report back (the daemon lost it, or the link is down): it is not running.
     if (!s.live && MID_TURN.has(s.info.status)) Object.assign(s.info, { status: 'stopped', pendingPermissions: [] });
     for (const c of this.cutOff.values()) c.sessions = c.sessions.filter((sid) => sid !== s.info.id);

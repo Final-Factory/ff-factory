@@ -39,6 +39,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
     - in CI, the fake BEAST now gives tar no stdin, as BEAST does, and caps PowerShell's at 64 KB. A new test cuts
       streams (retried; then always, stopped with BEAST's message and resumed) and covers a name tar cannot take, an
       unreadable file and a vanished one.
+### Changed
+
+- **Waiting says on what, and only means alive with something pending** (w509, asked by Lothsahn: "aren't waiting jobs
+  waiting on tests or other things to run?"). A Waiting agent shows its running job by the description it gave it
+  ("Waiting: CI on PR #1098 · check-in 06:10"), a queued message, or its check-in with its note's first words, and a job
+  is told apart from a timer alone. A stopped agent is never Waiting ("Stopped (resumes at check-in tomorrow 00:08)"),
+  an overdue check-in does not count, and times carry their day. Sandboxes are listed by status (Working, Waiting, Idle,
+  then none live) on the Overview, the sidebar and in `list_sandboxes` ([docs/orchestrators.md](docs/orchestrators.md),
+  "Agent states").
 
 ### Added
 

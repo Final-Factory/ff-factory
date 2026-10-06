@@ -32,6 +32,8 @@ function agentState(s: SessionInfo): { word: string; tone: Tone; detail?: string
   if (s.status === 'starting') return { word: 'starting', tone: 'blue' };
   const v = agentView(s);
   if (v.waitsOn) return { word: 'waiting', tone: 'violet', detail: v.waitsOn };
+  // Stopped, but its check-in or a queued message will resume it (w509): listed, not Waiting.
+  if (s.status === 'stopped') return { word: 'stopped', tone: 'grey', detail: v.text.replace(/^Stopped \(|\)$/g, '') };
   return { word: 'idle', tone: 'grey' };
 }
 
@@ -162,6 +164,11 @@ function AgentLine({ s, now, active, variant, onOpen }: { s: SessionInfo; now: n
       <span className="fl-agent-title">{s.title}</span>
       {variant === 'board' && s.requestedBy && <span className="fl-agent-for">{s.requestedBy.displayName}</span>}
       <span className={`fl-agent-state tone-${st.tone}`}>{st.word}</span>
+      {variant === 'board' && st.detail && (
+        <span className="fl-agent-why" data-testid="fl-agent-why">
+          {st.detail}
+        </span>
+      )}
       <span className="fl-agent-age">{ago(s.lastActivityAt, now)}</span>
     </button>
   );
