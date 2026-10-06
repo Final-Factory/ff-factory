@@ -1,6 +1,5 @@
 import { run } from './proc.ts';
 import type { GitStatus } from '../shared/types.ts';
-import type { Store } from './store.ts';
 
 const ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GH_PROMPT_DISABLED: '1' };
 
@@ -78,27 +77,6 @@ export async function prView(repo: string, number: number): Promise<PrView | und
     return { number: p.number, url: p.url, title: p.title, body: p.body ?? '', draft: p.isDraft, autoMerge: !!p.autoMergeRequest };
   } catch {
     return undefined;
-  }
-}
-
-const gitBusy = new Set<string>();
-
-/** Read a sandbox's git state (and PR) into its record; emits only when something changed. */
-export async function refreshSandboxGit(store: Store, id: string) {
-  const sb = store.sandboxes.get(id);
-  if (!sb || sb.status !== 'ready' || gitBusy.has(id)) return;
-  gitBusy.add(id);
-  try {
-    const g = await readGitStatus(sb.path);
-    if (!g) return;
-    g.pr = await openPr({ cwd: sb.path }, g.branch);
-    const cur = store.sandboxes.get(id);
-    if (!cur) return;
-    const same = cur.git && JSON.stringify({ ...cur.git, at: '' }) === JSON.stringify({ ...g, at: '' });
-    cur.git = g;
-    if (!same) store.putSandbox(cur);
-  } finally {
-    gitBusy.delete(id);
   }
 }
 

@@ -182,30 +182,3 @@ export function activityLine(s: Pick<SessionInfo, 'lastActivityAt' | 'activeTool
   if (busy && s.activeTool && now - Date.parse(s.activeTool.since) >= 60_000) return `in a long command: ${s.activeTool.name} (${mins(s.activeTool.since)} min)`;
   return `last activity ${mins(s.lastActivityAt)} min ago`;
 }
-
-/**
- * Unity log markers for wait_for_unity. Unity 6 prints one of the "done" lines after every script
- * compile and domain reload, and the "failed" ones when the compile has errors.
- */
-export const COMPILE_DONE = /Reloading assemblies after (?:successful|finishing) script compilation|Domain Reload Profiling|\*\*\* Tundra build success/;
-export const COMPILE_FAILED = /error CS\d{4}|Scripts have compiler errors|\*\*\* Tundra build failed/;
-
-/** Log text appended to `file` since byte `offset` (bounded to the last 2 MB). */
-export function readSince(file: string, offset: number): { text: string; size: number } {
-  let size = 0;
-  try {
-    size = fs.statSync(file).size;
-  } catch {
-    return { text: '', size: 0 };
-  }
-  if (size < offset) offset = 0; // the log was rotated (editor restarted)
-  const start = Math.max(offset, size - 2 * 1024 * 1024);
-  const fd = fs.openSync(file, 'r');
-  try {
-    const buf = Buffer.alloc(size - start);
-    fs.readSync(fd, buf, 0, buf.length, start);
-    return { text: buf.toString('utf8'), size };
-  } finally {
-    fs.closeSync(fd);
-  }
-}

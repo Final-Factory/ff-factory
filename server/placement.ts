@@ -8,9 +8,9 @@
  * anything.
  */
 
-/** One computer that can take a worker: a pool of sandboxes (this host's, BEAST's own daemon's, LothDesktop's), or a machine's main clone (the m5, the m3). */
+/** One computer that can take a worker: a machine's pool of sandboxes (BEAST's own daemon's, LothDesktop's), or a machine's main clone (the m5, the m3). */
 export interface Computer {
-  /** "this host", or the machine id ("beast", "lothdesktop", "m5"). */
+  /** The machine id ("beast", "lothdesktop", "m5"). */
   id: string;
   online: boolean;
   /** A machine without a sandbox root: work runs in its main clone, next to its owner's own uncommitted work. */
@@ -35,9 +35,9 @@ export interface Computer {
 
 /** config placement (w428): computers to try first, in order, and computers to keep work off, with why. */
 export interface PlacementPrefs {
-  /** Machine ids, or "this host" ("host"), first choice first. Those not named come after, spread by room. */
+  /** Machine ids, first choice first. Those not named come after, spread by room. */
   prefer?: string[];
-  /** Machine id (or "this host") to the reason: used only when no other computer has room. */
+  /** Machine id to the reason: used only when no other computer has room. */
   avoid?: Record<string, string>;
 }
 
@@ -54,11 +54,8 @@ export const RAM_BUSY_PCT = 85;
  */
 export const EVEN_MARGIN = 0.1;
 
-/** "host" and "this host" name this host's own pool; machine ids are lower-case. */
-export const placeId = (id: string) => {
-  const v = id.trim().toLowerCase();
-  return v === 'host' ? 'this host' : v;
-};
+/** A computer's id as placement compares it: machine ids are lower-case. */
+export const placeId = (id: string) => id.trim().toLowerCase();
 
 export const memPct = (p: Pick<Computer, 'memUsedBytes' | 'memTotalBytes'>): number | undefined =>
   p.memTotalBytes && p.memUsedBytes !== undefined ? Math.round((100 * p.memUsedBytes) / p.memTotalBytes) : undefined;

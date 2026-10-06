@@ -112,7 +112,7 @@ export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'> & Partial<Pick<C
 // ---------------------------------------------------------------- this host's agents (docs/accounts.md)
 
 /** The role config claudeAccounts knows a session of `kind` on this host by. */
-export const hostRole = (kind: SessionKind): HostRole => (kind === 'orchestrator' ? 'orchestrator' : kind === 'standing' ? 'standing' : 'workers');
+export const hostRole = (kind: SessionKind): HostRole => (kind === 'orchestrator' ? 'orchestrator' : 'workers');
 
 /**
  * The account this host's agents of `role` run on (config claudeAccounts; default the token; the dispatcher, unset:

@@ -311,10 +311,8 @@ export interface HostStats {
   gpu?: { name: string; memTotalMiB: number; memUsedMiB: number; utilPct: number; unified?: boolean };
 }
 
-export interface SystemStats extends HostStats {
-  /** The host's config limits; maxSandboxes is absent from a server older than the fleet view. */
-  limits: { maxUnity: number; maxSessions: number; maxSandboxes?: number };
-}
+/** The portal's own host's load (its limits went with its own sandbox pool, w510). */
+export type SystemStats = HostStats;
 
 /**
  * Every Unity editor on a machine against its limit, as its daemon counts them (w469, machine/unitySlots.ts): all
@@ -1569,7 +1567,6 @@ export interface AppVersion {
 export interface AppState {
   /** The running server's version; absent from a server older than 0.1.0. */
   app?: AppVersion;
-  sandboxes: Sandbox[];
   sessions: SessionInfo[];
   standingAgents: StandingAgent[];
   delegations: DelegationRequest[];
@@ -1636,8 +1633,6 @@ export interface TimersAnswer {
 /** Pushed over the WebSocket at /ws. */
 export type ServerEvent =
   | { type: 'state'; state: AppState }
-  | { type: 'sandbox'; sandbox: Sandbox }
-  | { type: 'sandbox_removed'; id: string }
   | { type: 'session'; session: SessionInfo }
   | { type: 'session_removed'; id: string }
   | { type: 'standing'; agent: StandingAgent }

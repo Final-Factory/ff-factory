@@ -6,10 +6,10 @@ import { commandLine, isAlive, isWindows, launchIndependent, run, sleep } from '
 /**
  * Whether this server runs with administrator rights, and what to do about it.
  *
- * Everything the server starts inherits its token: agents' shells, and every Unity editor. An
- * elevated Unity editor stops at startup on a modal "Unity is running as administrator." dialog
- * (Unity.dll, 6000.3) and sits in "starting" until someone clicks it. The app is meant to run from
- * the Limited "ffsb-server" task (scripts/install-autostart.ps1); an elevated server only happens
+ * Everything the server starts inherits its token: the orchestrators' and the dispatcher's shells. (It started
+ * Unity editors too until w510, and an elevated editor stops at startup on a modal "Unity is running as
+ * administrator." dialog; editors are machine daemons' now, each daemon in its own LeastPrivilege task.) The app is
+ * meant to run from the Limited "ffsb-server" task (scripts/install-autostart.ps1); an elevated server only happens
  * when someone starts it by hand from an admin shell.
  */
 
