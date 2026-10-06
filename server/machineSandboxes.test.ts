@@ -16,11 +16,15 @@ import { MachineManager, limitOptions, machineForPath, mergeSandboxes, parseSand
 import { daemonConfig } from './machineDeploy.ts';
 import { describeCleanupItems } from './cleanup.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
+import { UnitySlots } from '../machine/unitySlots.ts';
 import { SandboxPool, deletable, idleSandboxEditors, librarySource, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
 import type { Config } from './config.ts';
 import type { ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
+
+// Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
+process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
 
 const GB = 1024 ** 3;
 
@@ -85,7 +89,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined } = {}) {
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   const { d, running } = deps(r.main, o);
   const p = new SandboxPool(
@@ -98,6 +102,7 @@ function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined;
       onEvent: (e) => events.push(e),
       idleStopMinutes: o.idle,
       librarySeedGB: 1,
+      ...(o.slots ? { editorSlot: (id: string) => o.slots!().startRefusal(`sandbox:${id}`), slotsStatus: async () => (await o.slots!().tick(), o.slots!().describe()) } : {}),
     },
     d,
   );
@@ -615,4 +620,29 @@ test('stale output on a machine: the portal sends the ledger facts, a dry run co
   assert.equal(logged[0].machine, 'pc');
   assert.ok((logged.find((l) => l.entry.dryRun)!.entry.plannedAll as unknown[]).length >= 1);
   await assert.rejects(mm.cleanupNow('nosuch'), /no machine|unknown|not found/i);
+});
+
+test('machine sandboxes: an editor start takes a Unity slot: batch builds started outside the gate count, a restart keeps its slot (w469)', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-slots-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const HUB = 'C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.19f1\\Editor\\Unity.exe';
+  const build = (pid: number, project: string) => ({ pid, ppid: 77, name: 'Unity.exe', cmd: `"${HUB}" -batchmode -quit -projectPath ${project} -executeMethod BuildScript.Build` });
+  let procs = [build(501, 'D:\\work\\ffsb\\pr-fix'), build(502, 'D:\\work\\ffsb\\ui-fix')];
+  let slots: UnitySlots | undefined;
+  const { p } = pool(r, { settings: { maxUnity: 2 }, slots: () => slots! });
+  slots = new UnitySlots({ dir, platform: 'win32', procs: async () => procs, alive: () => true, now: () => Date.now(), limit: () => 2, places: () => p.list().map((s) => ({ holder: `sandbox:${s.id}`, path: s.path, editorUp: p.editorUp(s.id) })), ramPct: () => undefined });
+  for (const id of ['a', 'b']) await p.create({ id, branch: `sandbox/${id}`, base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'a');
+  await ready(p, 'b');
+  // Two command-line builds hold both slots (LothDesktop on 2026-10-05: its limit counted only the interactive editor).
+  await assert.rejects(p.unity('a', 'start'), /^Error: not started: needs 1, 0 free \(2 of 2 in use\); editors 2 of 2: 0 interactive, 2 batch\. Try again once one ends/);
+  procs = [build(501, 'D:\\work\\ffsb\\pr-fix')];
+  assert.match(await p.unity('a', 'start'), /Started \(fake\)/);
+  await assert.rejects(p.unity('b', 'start'), /not started: needs 1, 0 free \(2 of 2 in use\)/, "a's editor holds its slot while it starts");
+  // The second build comes back meanwhile: a restart of a's editor is not queued behind it.
+  procs = [build(501, 'D:\\work\\ffsb\\pr-fix'), build(502, 'D:\\work\\ffsb\\ui-fix')];
+  assert.match(await p.unity('a', 'restart'), /Stopped \(fake\)\. Started \(fake\)/);
+  assert.match(await p.unity('a', 'status'), /\nUnity on this machine: editors 3 of 2: 0 interactive, 2 batch, 1 granted not started yet; OVER LIMIT: nothing more starts until it drops/);
 });

@@ -12,6 +12,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Every Unity process counts toward a machine's editor limit, and launches wait in a queue for a slot** (w469, asked
+  by Lothsahn: "Can we just account for every unity editor process that's running?"). LothDesktop reached 63 of 64 GB
+  with one interactive editor and three `-batchmode` builds while its limit of 3 counted one. `max_unity` now counts
+  every top-level Unity process on the machine (sandbox editors, the owner's own, batch builds and test runs, peer-run
+  editors, editors scripts start), not AssetImportWorkers, bcl.exe, the ILPP runner or game players. `unity start`
+  takes a slot by the same rule (a restart keeps its own). Every other launch goes through `unity-slot run [--count N]
+  -- <command>` (on every daemon agent's PATH; the game repo's scripts use `scripts/unity_slot.py`): all its slots at
+  once or it waits; holders first, then oldest first; no two runs ever deadlock; a crashed or silent holder's slots are
+  freed within 90 s; nothing is granted above 85% RAM. Unity started outside the gate still counts, and the
+  orchestrator hears when a machine goes over and comes back; nothing is ever stopped. `list_sandboxes`,
+  `system_status`, the dashboard and `unity status` say "editors 4 of 3: 1 interactive, 3 batch"
+  ([docs/unity-lifecycle.md](docs/unity-lifecycle.md), "Unity slots").
+
 - **Agents show Working, Waiting, Idle or Stopped** (w475, asked by Lothsahn). Waiting: between turns but due back, on a
   `wake_me` check-in, a background task or a message queued for it, shown in violet with what it waits on and when
   ("Waiting: check-in at 23:12"). Idle means available. Agents are listed Working, Waiting, Idle, Stopped, the most recent

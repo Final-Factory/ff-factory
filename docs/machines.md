@@ -361,7 +361,7 @@ change applies on the next reconnect; omitted on a redeploy: kept):
 | `sandbox_root` | Absolute folder for the sandboxes, e.g. `D:\work\ffsb`; unset: no sandboxes. Moving it is refused while sandboxes exist. | none |
 | `max_sandboxes` | Sandboxes that may exist at once | 3 |
 | `max_agents_per_sandbox` | Agents that may be mid-turn at once in one sandbox (apart from `max_agents`, the main clone's); idle ones take no slot, and a message past it is queued | 2 |
-| `max_unity` | Sandbox editors that may run at once (the main clone's editor is not counted) | 2 |
+| `max_unity` | Unity editors that may run at once on the machine: every top-level Unity process there counts, sandbox editors, the main clone's or its owner's own, `-batchmode` builds and test runs, peer-run editors, editors scripts start (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)); launches other than `unity start` wait in a queue for their slot (`unity-slot run`) | 2 |
 | `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors | 50 |
 | `disk_critical_gb` | Below this: idle sandbox editors stop, and agents mid-turn in sandboxes are asked to commit, push and end their turn | 20 |
 
@@ -465,7 +465,8 @@ LothDesktop and Beast, not just when BEAST is full").
 - **Capacity block** (`server/placement.ts`, `capacityLines`), first in `list_sandboxes` and in `system_status`: one
   line per computer that holds sandboxes (this host's own pool while it has one, then each machine's, BEAST's own
   daemon included) with its live agents against its limit (and how many are mid-turn), free sandboxes and how many
-  more can be made, RAM used and sandbox editors against `max_unity`. Each is **BUSY** (offline; as many live agents
+  more can be made, RAM used and its Unity editors against `max_unity` (every Unity process there, "editors 4 of 3: 1
+  interactive, 3 batch", w469). Each is **BUSY** (offline; as many live agents
   as its limit, `limits.maxSessions` here or `max_sandbox_agents` / `max_sandboxes` × `max_agents_per_sandbox` on a
   machine; `RAM_BUSY_PCT` (85%) of its RAM or more; or no free sandbox and no room to make one) or **ROOM n%**: the
   mean of its free shares of agent slots, sandboxes (free plus those it may still make), RAM and editors, each
