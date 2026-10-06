@@ -25,6 +25,7 @@ import { LABEL, MIN_NODE, bundle, macControlScript, macProbeScript, macReloadLin
 import * as win from '../../server/machineDeployWin.ts';
 import type { SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
+import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
 export const LAYOUT_VERSION = 1;
 export const DEFAULT_REPO = 'https://github.com/Final-Factory/FinalFactory.git';
@@ -77,9 +78,12 @@ export function layoutOf(root: string): Layout {
 
 /** What the uninstall removes besides the root, recorded as the install makes it. */
 export interface OutsideItem {
-  kind: 'task' | 'launchagent' | 'firewall-group' | 'file';
+  kind: 'task' | 'launchagent' | 'firewall-group' | 'file' | 'authorized-key';
   name: string;
+  /** authorized-key: the key's base64 (the lines the uninstall removes). */
   note?: string;
+  /** authorized-key: the line was there before this install, so the uninstall leaves it (w568). */
+  existed?: boolean;
 }
 
 /** <root>/root.json. */
@@ -173,6 +177,12 @@ export interface InstallOptions {
   absoluteWorktrees?: boolean;
   unityEditorRoot?: string;
   unityPath?: string;
+  /** The portal's ssh (w568, scripts/worker/portalSsh.ts): false skips it (--no-ssh). */
+  ssh?: boolean;
+  /** The name the portal reaches this machine by (default: its tailnet name, else its computer name). */
+  sshHost?: string;
+  /** The ssh user the portal's key is authorized for (default: the account running the install). */
+  sshUser?: string;
 }
 
 /** A parsed command line: `--key value` options and `--flag`s. Exported for tests. */
@@ -590,20 +600,109 @@ async function giveRoot(l: Layout, owner: string) {
 }
 
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */
-async function firewall(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): Promise<string> {
+/** firewall.ps1's arguments (the elevated step adds -LogFile). */
+function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): string[] {
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
-  const log = path.join(os.tmpdir(), `ff-worker-firewall-${process.pid}.log`);
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Count', String(slots), '-LogFile', log, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
-  say(`Windows Firewall: ${action === 'add' ? 'adding' : 'removing'} the rules (one administrator prompt)...`);
-  // Start-Process -Verb RunAs takes one argument string; it reaches PowerShell through the environment, unquoted by no shell.
-  const line = args.map((a) => (/[\s;]/.test(a) ? `"${a}"` : a)).join(' ');
-  const r = elevated()
-    ? await exec('powershell.exe', args)
-    : await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList $env:FFW_FIREWALL_ARGS; exit $p.ExitCode'], { env: { ...process.env, FFW_FIREWALL_ARGS: line } });
-  const text = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
-  fs.rmSync(log, { force: true });
-  if (r.code !== 0) throw new Error(`the firewall step failed or was declined (${r.code}): ${(text || r.stderr || r.stdout).trim().slice(-600)}`);
-  return text.trim();
+  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Count', String(slots), ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
+}
+
+/**
+ * What needs administrator rights on Windows, done in ONE elevated step (one UAC prompt): the firewall rules, and the
+ * portal's key in C:\ProgramData\ssh\administrators_authorized_keys for an admin account (w568), which a non-elevated
+ * admin cannot even read.
+ */
+export type ElevatedStep = { kind: 'firewall'; args: string[] } | { kind: 'authorize-key'; file: string; line: string } | { kind: 'revoke-key'; file: string; blob: string };
+
+/** Run the steps in this process when it is elevated, else in an elevated copy of this script (one prompt). Returns its log. */
+async function elevatedSteps(steps: ElevatedStep[]): Promise<string> {
+  if (!steps.length) return '';
+  const tag = `${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+  const log = path.join(os.tmpdir(), `ff-worker-elevated-${tag}.log`);
+  const file = path.join(os.tmpdir(), `ff-worker-elevated-${tag}.json`);
+  fs.writeFileSync(file, JSON.stringify(steps));
+  try {
+    let code = 0;
+    let out = '';
+    if (elevated()) code = await runElevatedSteps(steps, log);
+    else {
+      // Start-Process -Verb RunAs takes one argument string; it reaches PowerShell through the environment, unquoted by no shell.
+      const args = [...process.execArgv, path.join(SRC, 'scripts', 'worker', 'worker.ts'), 'elevated', '--steps', file, '--log', log];
+      const line = args.map((a) => (/[\s;]/.test(a) ? `"${a}"` : a)).join(' ');
+      const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$p = Start-Process $env:FFW_NODE -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList $env:FFW_ARGS; exit $p.ExitCode'], { env: { ...process.env, FFW_NODE: process.execPath, FFW_ARGS: line } });
+      code = r.code ?? 1;
+      out = `${r.stderr}${r.stdout}`;
+    }
+    const text = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+    if (code !== 0) throw new Error(`the administrator step failed or was declined (${code}): ${(text || out).trim().slice(-600)}`);
+    return text.trim();
+  } finally {
+    fs.rmSync(file, { force: true });
+    fs.rmSync(log, { force: true });
+  }
+}
+
+/** The elevated half (`worker.ts elevated`): each step in order, its words appended to `log`. Returns an exit code. */
+export async function runElevatedSteps(steps: ElevatedStep[], log: string): Promise<number> {
+  const note = (line: string) => fs.appendFileSync(log, `${line}\n`);
+  try {
+    for (const s of steps) {
+      if (s.kind === 'firewall') {
+        const r = await exec('powershell.exe', [...s.args, '-LogFile', log]);
+        if (r.code !== 0) throw new Error(`firewall.ps1 exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(-400)}`);
+      } else if (s.kind === 'authorize-key') {
+        const r = authorizeIn(s.file, s.line);
+        const acl = await exec('icacls', aclArgs(s.file, true));
+        if (acl.code !== 0) throw new Error(`icacls ${s.file} exited ${acl.code}: ${(acl.stderr || acl.stdout).trim().slice(-300)}`);
+        note(`The portal's ssh key: ${r.changed ? (r.existed ? 'updated in' : 'added to') : 'already in'} ${s.file} (Administrators and SYSTEM only).`);
+        note(`key-existed=${r.existed}`);
+      } else {
+        note(`The portal's ssh key: removed ${revokeIn(s.file, s.blob)} line(s) from ${s.file}.`);
+      }
+    }
+    return 0;
+  } catch (e) {
+    note(`FAILED: ${(e as Error).message}`);
+    return 1;
+  }
+}
+
+/** The portal's key line for this machine and where it goes (w568), or why not (the step is skipped, never fatal). */
+async function portalKeyPlan(o: InstallOptions, home: string): Promise<{ file: string; line: string; admin: boolean } | { skip: string }> {
+  if (o.ssh === false) return { skip: 'skipped (--no-ssh)' };
+  const k = await fetchPortalKey(o.portalUrl, o.token);
+  if (!k.ok) return { skip: k.error };
+  const admin = isWin && !o.sshUser && adminFromProbe(await ps('checking whether this account is an administrator', ADMIN_PROBE_PS));
+  return { file: authorizedKeysFile(process.platform, home, admin), line: k.key.authorizedKey, admin };
+}
+
+/** This computer's tailnet name (Tailscale's CLI), or undefined. */
+async function tailnetName(): Promise<string | undefined> {
+  for (const bin of tailscaleCandidates()) {
+    const r = await exec(bin, ['status', '--json'], { timeoutMs: 15_000 }).catch(() => undefined);
+    const name = r?.code === 0 ? tailnetNameOf(r.stdout) : undefined;
+    if (name) return name;
+  }
+  return undefined;
+}
+
+/**
+ * The portal's ssh, its second half (w568): this machine's host keys from its own sshd (loopback, no network in
+ * between), with its ssh user and the name the portal reaches it by, to POST /machine/ssh; the portal pins them and
+ * answers whether its ssh gets in. Never fatal: ssh is the portal's way to start, stop or unload this daemon from afar.
+ */
+async function registerPortalSsh(o: InstallOptions) {
+  const scan = await exec(isWin ? 'ssh-keyscan.exe' : 'ssh-keyscan', ['-T', '5', '-t', 'ed25519,ecdsa,rsa', '127.0.0.1'], { timeoutMs: 30_000 }).catch(() => undefined);
+  const hostKeys = parseKeyscan(scan?.stdout ?? '');
+  if (!hostKeys.length) {
+    say(`The portal's ssh: no sshd answers on this computer (${isWin ? 'the OpenSSH Server service' : 'Remote Login, in System Settings > General > Sharing'}), so the portal cannot start, stop or unload this daemon from afar. Turn it on and run this installer again.`);
+    return;
+  }
+  const host = (o.sshHost ?? (await tailnetName()) ?? hostnameFallback()).toLowerCase();
+  const user = o.sshUser ?? os.userInfo().username;
+  const r = await registerSsh(o.portalUrl, o.token, { user, host, hostKeys });
+  if (!r.ok) say(`The portal's ssh: could not register this machine's host keys (${r.error}).`);
+  else if (r.reachable) say(`The portal's ssh: it reaches this machine as ${r.host}, its host key pinned there.`);
+  else say(`The portal's ssh: registered as ${r.host} (host key pinned), but its ssh does not get in yet: ${r.detail}`);
 }
 
 /** Ask a yes/no question on the terminal; `yes` answers it. */
@@ -680,7 +779,21 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   // machine/unitySlots.ts slotsDir). One mailbox, so they can never disagree. The uninstall still removes a pointer
   // into its root (an install from before this), and slotsDir still honours one a person writes.
 
-  // 5. Windows Firewall: the fixed slot paths and the Unity editors, once.
+  // 5. The portal's key (w568): fetched with this machine's credential; on Windows an admin account's goes in the shared
+  //    administrators_authorized_keys, in the one administrator step below, any other account's in its own file now.
+  const key = await portalKeyPlan(o, f.probe.home);
+  const steps: ElevatedStep[] = [];
+  let keyExisted: boolean | undefined;
+  if ('skip' in key) say(`The portal's ssh key: not added (${key.skip}).`);
+  else if (isWin && key.admin) steps.push({ kind: 'authorize-key', file: key.file, line: key.line });
+  else {
+    const r = authorizeIn(key.file, key.line);
+    if (isWin) await must('setting the rights of authorized_keys', 'icacls', aclArgs(key.file, false, f.probe.sid ? `*${f.probe.sid}` : undefined));
+    keyExisted = r.existed;
+    say(`The portal's ssh key: ${r.changed ? (r.existed ? 'updated in' : 'added to') : 'already in'} ${key.file}.`);
+  }
+
+  // Windows Firewall: the fixed slot paths and the Unity editors, once; with the admin key, in the same prompt.
   if (isWin && o.firewall) {
     const editors = unityEditors(f.probe.home);
     const sfx = o.firewallSuffix ? ` ${o.firewallSuffix}` : '';
@@ -688,8 +801,20 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP + sfx, note: editors.join('; ') });
     if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
-    say(await firewall('add', l, o.slots, editors, o.firewallSuffix));
+    steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.slots, editors, o.firewallSuffix) });
   } else if (isWin) say('Skipped the firewall rules (--no-firewall): players will prompt on first start.');
+  if (steps.length) {
+    say(`${steps.map((s) => (s.kind === 'firewall' ? 'Windows Firewall: adding the rules' : "the portal's ssh key into administrators_authorized_keys")).join(', and ')} (one administrator prompt)...`);
+    const text = await elevatedSteps(steps);
+    const existed = /^key-existed=(true|false)$/m.exec(text)?.[1];
+    if (existed) keyExisted = existed === 'true';
+    say(text.replace(/^key-existed=.*\n?/m, '').trim());
+  }
+  if (!('skip' in key) && keyExisted !== undefined) {
+    const blob = keyBlob(key.line)!;
+    if (!m.outside.some((x) => x.kind === 'authorized-key' && x.name.toLowerCase() === key.file.toLowerCase())) m.outside.push({ kind: 'authorized-key', name: key.file, note: blob, ...(keyExisted ? { existed: true } : {}) });
+    writeManifest(l.root, m);
+  }
   else {
     // A Mac has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
     const cfg = macSlotConfig();
@@ -700,6 +825,9 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   }
 
   if (o.owner) await giveRoot(l, o.owner);
+
+  // The portal's ssh, its second half (w568): this machine's host keys pinned there, and its ssh tried.
+  if (o.ssh !== false) await registerPortalSsh(o);
 
   // 6. The portal sees it.
   const p = new Progress();
@@ -855,8 +983,14 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
   say(`Removed the ${m.service} ${isWin ? 'task' : 'LaunchAgent'}.`);
   say(`Stopped ${await stopRootProcesses(l.root)} process(es) still running from the root.`);
 
-  // 4. Firewall rules and the slot config (Windows).
-  if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) say(await firewall('remove', l, m.slots, [], m.firewallSuffix));
+  // 4. Firewall rules, the portal's ssh key (w568: exactly its lines, unless they were there before) and the slot config.
+  const steps: ElevatedStep[] = [];
+  if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) steps.push({ kind: 'firewall', args: firewallArgs('remove', l, m.slots, [], m.firewallSuffix) });
+  for (const k of m.outside.filter((x) => x.kind === 'authorized-key' && !x.existed && x.note)) {
+    if (isWin && /administrators_authorized_keys$/i.test(k.name)) steps.push({ kind: 'revoke-key', file: k.name, blob: k.note! });
+    else say(`The portal's ssh key: removed ${revokeIn(k.name, k.note!)} line(s) from ${k.name}.`);
+  }
+  if (steps.length) say(await elevatedSteps(steps));
   if (!isWin && slotConfigRoot(macSlotConfig())?.startsWith(l.root)) {
     fs.rmSync(macSlotConfig(), { force: true });
     say(`Removed ${macSlotConfig()}.`);
@@ -945,6 +1079,18 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
       slotsPointerItem(l.root),
     );
   }
+  // The portal's ssh key (w568): its lines, unless they were there before the install. Windows' admin file cannot be
+  // read without administrator rights: the uninstall's elevated step said what it removed.
+  for (const k of m?.outside.filter((x) => x.kind === 'authorized-key' && !x.existed && x.note) ?? []) {
+    if (isWin && /administrators_authorized_keys$/i.test(k.name) && !elevated()) continue;
+    let text = '';
+    try {
+      text = fs.readFileSync(k.name, 'utf8');
+    } catch {
+      // gone with its folder
+    }
+    items.push({ what: `the portal's ssh key in ${k.name}`, present: text.split(/\r?\n/).some((line) => keyBlob(line) === k.note) });
+  }
   return items;
 }
 
@@ -1025,6 +1171,7 @@ const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <f
             [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
             [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
             [--unity-editor-root <dir>] [--unity-path <exe>]
+            [--no-ssh] [--ssh-host <name the portal reaches it by>] [--ssh-user <user>] (the portal's ssh, w568)
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
   migrate   [--from <old daemon folder>] [--from-service <its task or label>] [--old-slots <dir>]
@@ -1055,7 +1202,14 @@ export async function main(argv = process.argv.slice(2)) {
       firewallSuffix: opts['firewall-suffix'],
       unityEditorRoot: opts['unity-editor-root'],
       unityPath: opts['unity-path'],
+      ssh: !flags.has('no-ssh'),
+      sshHost: opts['ssh-host'],
+      sshUser: opts['ssh-user'],
     });
+  } else if (cmd === 'elevated') {
+    // The install's one administrator step (elevatedSteps): run by an elevated copy of this script.
+    if (!opts.steps || !opts.log) throw new Error(USAGE);
+    process.exitCode = await runElevatedSteps(JSON.parse(fs.readFileSync(opts.steps, 'utf8')) as ElevatedStep[], opts.log);
   } else if (cmd === 'uninstall') {
     if (!opts.root) throw new Error(USAGE);
     await uninstall({ root: opts.root, yes: flags.has('yes'), force: flags.has('force'), keepRegistration: flags.has('keep-registration') });
@@ -1086,6 +1240,9 @@ export async function main(argv = process.argv.slice(2)) {
           owner: opts.owner,
           firewallSuffix: opts['firewall-suffix'],
           unitySlotsDir: opts['unity-slots-dir'],
+          ssh: !flags.has('no-ssh'),
+          sshHost: opts['ssh-host'],
+          sshUser: opts['ssh-user'],
         },
       });
   } else if (cmd === 'check') {

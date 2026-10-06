@@ -845,6 +845,29 @@ test('machine: a daemon that connects during its own install counts as connected
   assert.match(store.machines.get('mx')!.statusDetail ?? '', /^the last redeploy failed, so the previous daemon is still the one running: install on mx failed/);
 });
 
+test('machine: a worker installer\'s ssh registration pins its host keys in the portal\'s known_hosts2 and becomes its ssh host; its removal takes the pin away (w568)', async (t) => {
+  const { store, mm, cleanup, tmp } = await setup();
+  t.after(cleanup);
+  mm.sshHome = tmp;
+  const tried: string[] = [];
+  mm.sshCheck = async (host) => (tried.push(host), { reachable: true, detail: 'ok' });
+  const ED = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJPzhFYZX4GtbGkBP2Fl8RqwkZaXjQ9fUWN9P+p+/OX3';
+  const r = await mm.registerSsh('mx', { user: 'benryding', host: 'm3', hostKeys: [ED], at: '2026-10-06T21:00:00.000Z' });
+  assert.deepEqual(r, { host: 'benryding@m3', reachable: true, detail: 'ok' });
+  assert.deepEqual(tried, ['benryding@m3'], 'the portal tries its ssh at once');
+  assert.equal(store.machines.get('mx')!.host, 'benryding@m3');
+  assert.deepEqual(store.machines.get('mx')!.ssh?.hostKeys, [ED]);
+  const file = path.join(tmp, '.ssh', 'known_hosts2');
+  assert.ok(fs.readFileSync(file, 'utf8').includes(`m3 ${ED} mx`));
+  // A rebuilt or moved portal (its data restored, no ~/.ssh): the pins come back from the record at start.
+  fs.rmSync(file);
+  mm.pinHostKeys();
+  assert.ok(fs.readFileSync(file, 'utf8').includes(`m3 ${ED} mx`));
+  // Its record goes (remove_machine, or the uninstaller's unenroll): so does its pin.
+  mm.remove('mx');
+  assert.equal(fs.existsSync(file), false);
+});
+
 test('machine: a deploy cut short by a portal restart is not left "deploying" (the offline watch would skip it forever)', async (t) => {
   const { store, sessions, mm, daemon, cleanup, tmp } = await setup();
   t.after(cleanup);

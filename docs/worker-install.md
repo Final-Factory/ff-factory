@@ -47,6 +47,7 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
 | The Unity slots mailbox (`~/.ff-factory/unity-slots`, its standard place: no pointer is written, so the daemon, its agents and the nightly harness all use the same one, w469) | `%USERPROFILE%\.ff-factory\unity-slots` | `~/.ff-factory/unity-slots` |
 | The portal's record | removed through `POST /machine/unenroll` | the same |
+| The portal's ssh key (w568) | its line in `C:\ProgramData\ssh\administrators_authorized_keys` (a member of Administrators) or `%USERPROFILE%\.ssh\authorized_keys`; removed unless it was there before | its line in `~/.ssh/authorized_keys`; the same |
 
 ## Install
 
@@ -88,6 +89,48 @@ it to the installer with `-CredentialFile` / `--credential-file` (deleted by han
 prompt. Everything else a worker needs (the Claude token, the GitHub token) comes from the vault with each run, so the
 installer asks for no other secret. A migration needs none: it keeps the token the old daemon already has.
 
+### The portal's ssh (w568)
+
+The portal updates an installed machine by having its installer run again there, never over ssh. It still uses ssh
+for `machine_daemon start`, `stop` and `restart`, and for `remove_machine`'s unload (`server/machines.ts`
+`controlDaemon`, `removeMachine`). `start` is the only way back for a daemon that is not running. So the installer
+sets that ssh up itself, and nothing is done by hand on the portal's host or in its VM:
+
+1. **The portal's key onto this machine.** `GET /machine/ssh`, with this machine's own credential (never from an
+   unauthenticated source), gives the line
+   `from="<the portal's tailnet address>",no-agent-forwarding,no-port-forwarding,no-X11-forwarding ssh-ed25519 ...`.
+   It goes where this account's sshd reads keys:
+   - on Windows, for a member of Administrators, `C:\ProgramData\ssh\administrators_authorized_keys`, which is
+     Windows' default `Match Group administrators`. It is written in the install's one administrator step, with the
+     firewall rules, and its ACL is Administrators and SYSTEM only;
+   - otherwise `~/.ssh/authorized_keys`: the account and SYSTEM only on Windows, 0600 in a 0700 folder on a Mac.
+
+   A line for the same key, pasted by hand earlier, is replaced in place. A re-run changes nothing. `root.json`
+   records the line, and the uninstall removes exactly the lines for that key, unless it was there before the
+   install.
+2. **This machine's host keys into the portal.** The installer reads them from this machine's own sshd over loopback
+   (`ssh-keyscan 127.0.0.1`: no network in between). It sends them to `POST /machine/ssh`, with this account's user
+   name and the name the portal reaches it by: its tailnet MagicDNS name, or `--ssh-host` / `-SshHost`.
+   - The portal keeps them on the machine's record, in its data, so a migration moves them and the backups keep
+     them.
+   - It writes them, pinned, into its own account's `~/.ssh/known_hosts2`, which ssh reads by default beside
+     `known_hosts` (`server/machineSsh.ts`), and makes the record's ssh host `user@name`.
+   - It tries its ssh at once. The installer prints `it reaches this machine as ...`, or why not.
+   - A key is never accepted on first use.
+
+No sshd running here (the Windows OpenSSH Server service, a Mac's Remote Login) is said, not fatal: the daemon works,
+only those four actions cannot reach it. `--no-ssh` / `-NoSsh` skips both steps.
+
+**Where each key lives, and why:**
+
+| Key or pin | Where | Why |
+|---|---|---|
+| The portal's private key | the portal's VM only: `/srv/fff/home/.ssh/id_ed25519` (and the encrypted backups) | the portal opens the ssh connections |
+| The portal's public key line | each machine, in the file above | that machine's sshd lets the portal in, from the portal's address only |
+| The machines' host keys | the portal's data in the VM: each machine's record (`state.json`), written into `/srv/fff/home/.ssh/known_hosts2` at start and on each change | the portal checks it reaches the real machine; data, so a rebuilt VM keeps them |
+| Machines from before the installer did this | `deploy/vm/guest/machines.ssh` in git, written into the VM's `~/.ssh/config` and `known_hosts` by `fff-machine-ssh` (guest install, `fffctl update`) or the host's `deploy/vm/host/machine-ssh.sh` | kept as the repair and check tool until every machine runs an installer from w568 on |
+| The FFBox host (Loth2400) | nothing about the machines: only its own key to the VM's admin account (`/etc/fff-vm/ssh/`) | `machine-ssh.sh` ran there, but wrote into the VM over `fff-vm ssh` |
+
 ## Uninstall
 
 ```powershell
@@ -105,7 +148,8 @@ bash <root>/daemon/src/scripts/worker/uninstall.sh --root <root>
    `-KeepRegistration` leaves the record (no portal, or a rolled-back migration whose record is the old daemon's).
 4. Removes the task or LaunchAgent (waiting until launchd has let the daemon go), then stops whatever still runs from the
    root (sandbox editors, slot players, agents' shells; never Unity Hub, never itself).
-5. Removes the firewall groups and the slot config (if it points into the root).
+5. Removes the firewall groups, the portal's ssh key line (unless it was there before; the admin file in the same
+   administrator step) and the slot config (if it points into the root).
 6. Deletes the root (`rmdir /s` and `rm -rf` never follow a junction or symlink), then runs the check below and lists
    what it left on purpose.
 

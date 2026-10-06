@@ -23,6 +23,7 @@ import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuar
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
+import { writeKnownHosts, type MachineSsh } from './machineSsh.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -295,6 +296,42 @@ export class MachineManager {
       store.putMachine(m);
     }
     setInterval(() => this.heartbeat(), PING_MS).unref();
+  }
+
+  /** Whose ~/.ssh holds the pinned host keys: the portal account's home (tests point it at a folder of their own). */
+  sshHome?: string;
+
+  /**
+   * The portal's ~/.ssh/known_hosts2 from its machines' registered host keys (server/machineSsh.ts, w568). The pins
+   * live in the records (state.json), so the server writes the file again at start (index.ts): a rebuilt or moved
+   * portal keeps them.
+   */
+  pinHostKeys(home = this.sshHome) {
+    try {
+      const r = writeKnownHosts(this.list(), home);
+      if (r === 'not ours') console.warn("machines: ~/.ssh/known_hosts2 is not the portal's (no FF Factory header); the machines' host keys are not pinned there");
+    } catch (e) {
+      console.warn(`machines: could not write ~/.ssh/known_hosts2: ${(e as Error).message}`);
+    }
+  }
+
+  /** How the portal checks it gets in over ssh (tests replace it). */
+  sshCheck: (host: string) => Promise<{ reachable: boolean; detail: string }> = sshCheck;
+
+  /**
+   * A worker installer's ssh registration (POST /machine/ssh, w568): the user and name the portal reaches the machine
+   * by, and its sshd's host keys. Kept on the record, pinned in known_hosts2, and the record's ssh host becomes
+   * user@host; then a check that ssh gets in with the key the installer authorized there.
+   */
+  async registerSsh(id: string, ssh: MachineSsh): Promise<{ host: string; reachable: boolean; detail: string }> {
+    refuseInDryRun(`registering ${id}'s ssh`);
+    const m = this.require(id);
+    const host = `${ssh.user}@${ssh.host}`;
+    this.update(m.id, { ssh, host });
+    this.pinHostKeys();
+    const r = await this.sshCheck(host);
+    console.log(`machine ${m.id}: ssh registered as ${host} (${ssh.hostKeys.length} host key(s) pinned); ${r.reachable ? 'the portal gets in' : `the portal does not get in yet: ${r.detail}`}`);
+    return { host, ...r };
   }
 
   list() {
@@ -737,6 +774,7 @@ export class MachineManager {
     revokeMachineToken(this.cfg.dataDir, m.id);
     this.links.get(m.id)?.ws.close(4001, 'machine removed');
     this.store.removeMachine(m.id);
+    if (m.ssh) this.pinHostKeys(); // its pinned host keys go with it (w568)
   }
 
   private tokens(): Record<string, string> {
@@ -1694,6 +1732,14 @@ export async function sshReachable(host: string): Promise<boolean> {
 }
 
 export const SSH_REACHABLE_ARGS = (host: string) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, 'exit', '0'];
+
+/** sshReachable with ssh's reason when it does not get in (its last line: host key, permission, timeout). */
+export async function sshCheck(host: string): Promise<{ reachable: boolean; detail: string }> {
+  const { run } = await import('./proc.ts');
+  const r = await run('ssh', SSH_REACHABLE_ARGS(host), { timeoutMs: 20_000 });
+  const last = `${r.stderr}`.trim().split(/\r?\n/).filter(Boolean).pop() ?? '';
+  return r.code === 0 ? { reachable: true, detail: 'ok' } : { reachable: false, detail: last || `ssh exited ${r.code}` };
+}
 
 /** Where a machine's daemon log is, for messages. */
 export function daemonLogPath(platform: MachinePlatform | undefined, appDir?: string): string {

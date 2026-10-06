@@ -14,6 +14,8 @@ import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, type OldLayout } from './worker/migrate.ts';
 import { cloneRepo, credentialId, daemonJson, gitVersion, layoutOf, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
+import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
+import { runElevatedSteps } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', slots: 8, maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -266,6 +268,99 @@ test('worker install: the Unity slots pointer leads scripts outside the daemon t
     assert.equal(removeSlotsPointer(root, home), true);
     assert.equal(fs.existsSync(file), false);
     assert.equal(removeSlotsPointer(root, home), false, 'none left: nothing to do');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- the portal's ssh (w568, scripts/worker/portalSsh.ts)
+
+const PORTAL_PUB = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGgE0GjCLsOOdLNBCR5KKXguNoZCX0Mh7C3tZbQzCDQx fff-portal@fff-portal';
+const PORTAL_LINE = `from="100.124.172.97",no-agent-forwarding,no-port-forwarding,no-X11-forwarding ${PORTAL_PUB}`;
+const BLOB = 'AAAAC3NzaC1lZDI1NTE5AAAAIGgE0GjCLsOOdLNBCR5KKXguNoZCX0Mh7C3tZbQzCDQx';
+const OTHER = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJPzhFYZX4GtbGkBP2Fl8RqwkZaXjQ9fUWN9P+p+/OX3 ben@laptop';
+const OTHER_KEY = OTHER.split(' ').slice(0, 2).join(' ');
+
+test('worker install: the portal\'s key line goes in once, replaces an earlier line for the same key in place, and comes out alone (w568)', () => {
+  assert.equal(keyBlob(PORTAL_LINE), BLOB, 'after the options');
+  assert.equal(keyBlob(OTHER), 'AAAAC3NzaC1lZDI1NTE5AAAAIJPzhFYZX4GtbGkBP2Fl8RqwkZaXjQ9fUWN9P+p+/OX3');
+  assert.equal(keyBlob('# a comment'), undefined);
+  // Into an empty file, and into one with a person's key: added at the end, theirs kept.
+  assert.deepEqual(withAuthorizedKey('', PORTAL_LINE), { text: `${PORTAL_LINE}\n`, changed: true, existed: false });
+  const two = withAuthorizedKey(`# keys\r\n${OTHER}\r\n`, PORTAL_LINE);
+  assert.equal(two.text, `# keys\n${OTHER}\n${PORTAL_LINE}\n`);
+  // Again: nothing changes. A line pasted by hand earlier (no from=): replaced in place, and remembered as existing.
+  assert.deepEqual(withAuthorizedKey(two.text, PORTAL_LINE), { text: two.text, changed: false, existed: true });
+  assert.deepEqual(withAuthorizedKey(`${PORTAL_PUB}\n${OTHER}\n`, PORTAL_LINE), { text: `${PORTAL_LINE}\n${OTHER}\n`, changed: true, existed: true });
+  // Out: exactly the lines for that key; the person's key and the comment stay.
+  assert.deepEqual(withoutAuthorizedKey(two.text, BLOB), { text: `# keys\n${OTHER}\n`, removed: 1 });
+  assert.deepEqual(withoutAuthorizedKey(`${OTHER}\n`, BLOB), { text: `${OTHER}\n`, removed: 0 });
+  assert.throws(() => withAuthorizedKey('', 'not a key'), /not an authorized_keys line/);
+});
+
+test('worker install: where this account\'s sshd reads its keys: Windows\' admin file for a member of Administrators, else its own (w568)', () => {
+  assert.equal(authorizedKeysFile('win32', 'C:\\Users\\Loth', true, 'C:\\ProgramData'), 'C:\\ProgramData\\ssh\\administrators_authorized_keys');
+  assert.equal(authorizedKeysFile('win32', 'C:\\Users\\Loth', false, 'C:\\ProgramData'), 'C:\\Users\\Loth\\.ssh\\authorized_keys');
+  assert.equal(authorizedKeysFile('darwin', '/Users/benryding', true), '/Users/benryding/.ssh/authorized_keys', 'a Mac has no admin file');
+  // whoami /groups /fo csv for an admin in a non-elevated shell: the group is there, deny-only.
+  assert.equal(inAdministrators('"BUILTIN\\Administrators","Alias","S-1-5-32-544","Group used for deny only"\r\n'), true);
+  assert.equal(inAdministrators('"BUILTIN\\Users","Alias","S-1-5-32-545","Mandatory group, Enabled by default, Enabled group"\r\n'), false);
+  assert.equal(adminFromProbe('admin=True\r\n'), true);
+  assert.equal(adminFromProbe('admin=False\r\n'), false);
+  assert.equal(adminFromProbe(''), false, 'no answer: not an admin, so its own file');
+});
+
+test('worker install: this machine\'s host keys come from its own sshd (a loopback ssh-keyscan), ed25519 first; its tailnet name from Tailscale (w568)', () => {
+  const scan = [
+    '# 127.0.0.1:22 SSH-2.0-OpenSSH_for_Windows_9.5',
+    '127.0.0.1 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7',
+    `127.0.0.1 ${OTHER_KEY}`,
+    '127.0.0.1 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY=',
+    '127.0.0.1 ssh-dss AAAAB3NzaC1kc3M',
+    '',
+  ].join('\n');
+  assert.deepEqual(parseKeyscan(scan), [OTHER_KEY, 'ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY=', 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7']);
+  assert.deepEqual(parseKeyscan(''), [], 'no sshd answers');
+  assert.equal(tailnetNameOf(JSON.stringify({ Self: { DNSName: 'M3.tailedfcad.ts.net.', HostName: 'Bens-MacBook' } })), 'm3');
+  assert.equal(tailnetNameOf(JSON.stringify({ Self: { DNSName: '', HostName: 'Loth2800' } })), 'loth2800');
+  assert.equal(tailnetNameOf('not json'), undefined);
+});
+
+test('worker install: the portal\'s key comes from GET /machine/ssh with this machine\'s own credential; the host keys go back with POST (w568)', async () => {
+  const seen: { url: string; auth?: string; method?: string; body?: string }[] = [];
+  const fake = (status: number, body: unknown) =>
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(url), auth: (init?.headers as Record<string, string> | undefined)?.authorization, method: init?.method, body: init?.body as string | undefined });
+      return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+  const k = await fetchPortalKey('https://portal.example', TOKEN, fake(200, { publicKey: PORTAL_PUB, from: '100.124.172.97', authorizedKey: PORTAL_LINE }));
+  assert.deepEqual(k, { ok: true, key: { publicKey: PORTAL_PUB, authorizedKey: PORTAL_LINE, from: '100.124.172.97' } });
+  assert.deepEqual([seen[0].url, seen[0].auth], ['https://portal.example/machine/ssh', `Bearer ${TOKEN}`]);
+  assert.deepEqual(await fetchPortalKey('https://portal.example', TOKEN, fake(401, { error: 'a valid machine token is required' })), { ok: false, error: 'a valid machine token is required' });
+  assert.deepEqual(await fetchPortalKey('https://portal.example', TOKEN, fake(200, { authorizedKey: 'rm -rf /' })), { ok: false, error: 'the portal sent no usable key line' });
+  const r = await registerSsh('https://portal.example', TOKEN, { user: 'benryding', host: 'm3', hostKeys: [OTHER_KEY] }, fake(200, { host: 'benryding@m3', reachable: false, detail: 'Permission denied (publickey).' }));
+  assert.deepEqual(r, { ok: true, host: 'benryding@m3', reachable: false, detail: 'Permission denied (publickey).' });
+  assert.equal(seen.at(-1)!.method, 'POST');
+  assert.deepEqual(JSON.parse(seen.at(-1)!.body!), { user: 'benryding', host: 'm3', hostKeys: [OTHER_KEY] });
+});
+
+test('worker install: the key file itself: made with its folder, the key in once, then out (w568)', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-ssh-'));
+  try {
+    const file = path.join(home, '.ssh', 'authorized_keys');
+    assert.deepEqual(authorizeIn(file, PORTAL_LINE), { changed: true, existed: false });
+    assert.deepEqual(authorizeIn(file, PORTAL_LINE), { changed: false, existed: true });
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+      assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
+    }
+    fs.appendFileSync(file, `${OTHER}\n`);
+    // The uninstall's removal, as its elevated step runs it on Windows' admin file (any file here: no icacls needed).
+    const log = path.join(home, 'elevated.log');
+    assert.equal(await runElevatedSteps([{ kind: 'revoke-key', file, blob: BLOB }], log), 0);
+    assert.equal(fs.readFileSync(file, 'utf8'), `${OTHER}\n`);
+    assert.match(fs.readFileSync(log, 'utf8'), /removed 1 line\(s\) from /);
+    assert.equal(revokeIn(path.join(home, 'none'), BLOB), 0);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
