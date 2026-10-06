@@ -150,6 +150,26 @@ export function convertMachineRecord(m: Machine, to: 'ssh' | 'local', o: { sshHo
   return next;
 }
 
+/**
+ * daemon.json extras for the portal's own host (MachineManager.localExtras), from this server's config: the MCP-for-Unity
+ * server its workers had, no Max events file of its own, the idle-editor stop, no clean-up of its own, and the host
+ * guard (w466). The migration to the VM (server/vmMigration.ts, w499) keeps the ssh-relevant ones when BEAST stops being
+ * the portal's host.
+ */
+export function localDaemonExtras(cfg: Pick<Config, 'unity' | 'hostGuard' | 'hostDiskPaths' | 'limits'>): DaemonExtras {
+  const u = cfg.unity;
+  return {
+    ...(u.mcpServer ? { unityMcpServer: { command: u.mcpServer.command, args: u.mcpServer.args, ...(u.mcpServer.env ? { env: u.mcpServer.env } : {}) } } : {}),
+    maxEventsFile: null,
+    sandboxIdleStopMinutes: u.idleStopMinutes,
+    // No clean-up of its own even before the portal's first welcome: this host's guard cleans this computer.
+    cleanup: { everyMinutes: 0, softFreeGB: 0 },
+    // The drive watch and remount, its disks and the reaper run in its daemon (w466, D11): the portal hands them over
+    // as soon as the daemon's hello says its guard runs, and they stay with BEAST when the portal moves to its VM.
+    ...((cfg.hostGuard?.pollSeconds ?? 0) > 0 ? { hostGuard: guardSettingsOf(cfg) } : {}),
+  };
+}
+
 /** The host guard settings the portal's own host's daemon gets (w466): this server's own guard's, for the same computer. Exported for tests. */
 export function guardSettingsOf(cfg: Pick<Config, 'hostGuard' | 'hostDiskPaths' | 'limits'>): MachineGuardSettings {
   const g = cfg.hostGuard;
@@ -876,17 +896,7 @@ export class MachineManager {
    * host's idle-editor stop (config unity.idleStopMinutes).
    */
   private localExtras(): DaemonExtras {
-    const u = this.cfg.unity;
-    return {
-      ...(u.mcpServer ? { unityMcpServer: { command: u.mcpServer.command, args: u.mcpServer.args, ...(u.mcpServer.env ? { env: u.mcpServer.env } : {}) } } : {}),
-      maxEventsFile: null,
-      sandboxIdleStopMinutes: u.idleStopMinutes,
-      // No clean-up of its own even before the portal's first welcome: this host's guard cleans this computer.
-      cleanup: { everyMinutes: 0, softFreeGB: 0 },
-      // The drive watch and remount, its disks and the reaper run in its daemon (w466, D11): the portal hands them over
-      // as soon as the daemon's hello says its guard runs, and they stay with BEAST when the portal moves to its VM.
-      ...((this.cfg.hostGuard?.pollSeconds ?? 0) > 0 ? { hostGuard: guardSettingsOf(this.cfg) } : {}),
-    };
+    return localDaemonExtras(this.cfg);
   }
 
   /** Stop and unload the daemon on the machine (best effort), then forget the machine here. */

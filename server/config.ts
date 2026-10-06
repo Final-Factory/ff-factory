@@ -574,14 +574,12 @@ export function configPath(): string {
   return process.env.FFSB_CONFIG ?? path.join(ROOT, 'config.json');
 }
 
-export function loadConfig(): Config {
-  const file = configPath();
-  // Damaged by a crash: the newest good version (config.json.1.., or the .prev setAppConfig keeps) takes its place.
-  const raw = readJsonDurable<any>(file, { check: checkObject, extra: [`${file}.prev`] });
-  if (!raw) {
-    throw new Error(fs.existsSync(file) || dataRecoveries.some((r) => r.file === file) ? `${file} is damaged and no good earlier version is left; restore it by hand.` : `No config at ${file}. Copy config.example.json to config.json and edit it.`);
-  }
-  const cfg: Config = {
+/**
+ * A config file's object with the defaults filled in, unchecked and with its paths as written (loadConfig checks and
+ * resolves them). Also for reading another computer's config.json (the migration to the VM, server/vmMigration.ts).
+ */
+export function withDefaults(raw: any): Config {
+  return {
     ...DEFAULTS,
     ...raw,
     limits: { ...DEFAULTS.limits, ...raw.limits },
@@ -598,6 +596,16 @@ export function loadConfig(): Config {
     hostGuard: { ...HOST_GUARD_DEFAULTS, ...raw.hostGuard, cleanup: { ...DEFAULT_CLEANUP, ...raw.hostGuard?.cleanup } },
     voice: { ...VOICE_DEFAULTS, toolsDir: '', ...raw.voice },
   };
+}
+
+export function loadConfig(): Config {
+  const file = configPath();
+  // Damaged by a crash: the newest good version (config.json.1.., or the .prev setAppConfig keeps) takes its place.
+  const raw = readJsonDurable<any>(file, { check: checkObject, extra: [`${file}.prev`] });
+  if (!raw) {
+    throw new Error(fs.existsSync(file) || dataRecoveries.some((r) => r.file === file) ? `${file} is damaged and no good earlier version is left; restore it by hand.` : `No config at ${file}. Copy config.example.json to config.json and edit it.`);
+  }
+  const cfg = withDefaults(raw);
   if (raw.hostSandboxes !== undefined && typeof raw.hostSandboxes !== 'boolean') throw new Error('config hostSandboxes is true or false');
   // The portal-only mode (w464) keeps no sandboxes here: only the base clone the orchestrators read is required.
   for (const key of portalOnly(cfg) ? (['repo'] as const) : (['sandboxRoot', 'repo', 'unity'] as const)) {
