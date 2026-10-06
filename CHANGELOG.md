@@ -12,8 +12,8 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
-- **CI's Windows unit tests run on two runners** (w521, asked by Lothsahn). The same test files, split by
-  `node --test --test-shard`; the typecheck, the web build and the named machine-sandbox step run in the first.
+- **CI's Windows unit tests run on two runners** (w521, asked by Lothsahn). The same test files: the three slowest on
+  one (with the typecheck, the web build and the named machine-sandbox step), every other file on the other.
 - **No claude.ai connectors for the orchestrators and the dispatcher** (w516, Lothsahn: "Please do an update to disable
   the gmail, drive, and calendar tools", then "Disable claude docs"). Their 58 tools (Gmail 30, Google Drive 11, Google
   Calendar 9, Claude Docs 8) were about 41,300 input tokens in every orchestrator and dispatcher turn (measured: a
