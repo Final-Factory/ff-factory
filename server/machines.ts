@@ -693,6 +693,37 @@ export class MachineManager {
     return this.update(id, { purpose: normalizePurpose(purpose) });
   }
 
+  /**
+   * What a machine may know about itself, asked with its own token (GET /machine/whoami, w513): the worker installer
+   * checks its credential with it, and the uninstaller which agents still run there before it removes anything.
+   */
+  selfStatus(id: string) {
+    const m = this.require(id);
+    const agents = [...this.sessions.sessions.values()]
+      .filter((s) => s.info.machineId === id && s.live)
+      .map((s) => ({ id: s.info.id, title: s.info.title, sandbox: s.info.machineSandbox, midTurn: isMidTurn(s.info) }));
+    return { id: m.id, online: this.isOnline(id), root: m.root, agents, sandboxes: (m.sandboxes ?? []).map((sb) => sb.id) };
+  }
+
+  /**
+   * A machine leaving on its own (POST /machine/unenroll, w513: the worker uninstaller): its record and token go, as
+   * remove_machine does, without touching the computer (the uninstaller stops its own daemon). Refused while an agent
+   * there is mid-turn, unless forced; then the agents are stopped on purpose first, so nothing resumes them.
+   */
+  unenroll(id: string, force = false): { ok: true } | { ok: false; error: string; agents: { id: string; title: string; sandbox?: string }[] } {
+    refuseInDryRun(`unenrolling ${id}`);
+    const busy = this.selfStatus(id).agents.filter((a) => a.midTurn);
+    if (busy.length && !force) return { ok: false, error: `${busy.length} agent(s) are mid-turn on ${id}`, agents: busy };
+    for (const sid of this.require(id).sessionIds) {
+      const s = this.handle(sid);
+      if (s?.live) s.stop();
+    }
+    this.expectDrop(id, false);
+    this.remove(id);
+    this.report?.(`[machines] ${id} unenrolled itself (its worker install was uninstalled there); its record and token are gone.`);
+    return { ok: true };
+  }
+
   /** Forget a machine: its token stops working and its sessions are removed. */
   remove(id: string) {
     const m = this.require(id);
@@ -1100,7 +1131,9 @@ export class MachineManager {
     Object.assign(m, { online: true, lastSeen: new Date().toISOString() });
     this.store.putMachine(m);
     const sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }));
-    ws.send(JSON.stringify({ type: 'welcome', machineId: id, maxSessions: m.maxSessions, sessions, sandboxes: poolSettingsOf(m) } satisfies ToDaemon));
+    // A worker root install (w513) whose record has no pool of its own yet keeps daemon.json's until its hello says it.
+    const pool = m.sandboxRoot || !m.root ? poolSettingsOf(m) : undefined;
+    ws.send(JSON.stringify({ type: 'welcome', machineId: id, maxSessions: m.maxSessions, sessions, sandboxes: pool } satisfies ToDaemon));
     const watch = this.outsideWatchFor?.(id);
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
     const cleanup = this.cleanupFor?.(id);
@@ -1181,6 +1214,7 @@ export class MachineManager {
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
         else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
         Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined, relocatedTo: undefined });
+        if (msg.layout) adoptLayout(m, msg.layout);
         this.store.putMachine(m);
         const live = new Set(msg.live);
         for (const sid of m.sessionIds) {
@@ -1696,9 +1730,35 @@ export function machineDir(p: string | undefined, what: string): string | undefi
  * The folder options a deploy stores (add_machine): each given one checked and normalised (machineDir), "" back to the
  * default, an unset one kept from the previous deploy. Exported for tests.
  */
+/**
+ * What a worker root install's hello says about its folders (w513), onto its record: the root, and the daemon's
+ * folder, clone, temp folder and sandbox pool where the record has none yet (a record an enrollment made, never
+ * deployed from here). What the record already holds wins: add_machine and set_app_config stay in charge.
+ * Exported for tests.
+ */
+export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, { type: 'hello' }>['layout']>) {
+  m.root = layout.root;
+  m.appDir ||= layout.appDir;
+  if (!m.repoPath) m.repoPath = layout.repoPath;
+  if (!m.tempDir && layout.tempDir) m.tempDir = layout.tempDir;
+  const pool = layout.sandboxes;
+  if (!m.sandboxRoot && pool) {
+    Object.assign(m, {
+      sandboxRoot: pool.root,
+      maxSandboxes: m.maxSandboxes ?? pool.maxSandboxes,
+      maxAgentsPerSandbox: m.maxAgentsPerSandbox ?? pool.maxAgentsPerSandbox,
+      maxUnity: m.maxUnity ?? pool.maxUnity,
+      diskWarnGB: m.diskWarnGB ?? pool.diskWarnGB,
+      diskCriticalGB: m.diskCriticalGB ?? pool.diskCriticalGB,
+      ...(m.maxSandboxAgents === undefined && pool.maxAgents !== undefined ? { maxSandboxAgents: pool.maxAgents } : {}),
+      ...(!m.librarySeed && pool.librarySeed ? { librarySeed: pool.librarySeed } : {}),
+    });
+  }
+}
+
 export function dirOptions(opts: MachineDirs, prev: MachineDirs | undefined): MachineDirs {
   const pick = (k: keyof MachineDirs, what: string) => (opts[k] === undefined ? prev?.[k] : machineDir(opts[k], what));
-  return { appDir: pick('appDir', 'app_dir'), unityEditorRoot: pick('unityEditorRoot', 'unity_editor_root'), unityPath: pick('unityPath', 'unity_path'), tempDir: pick('tempDir', 'temp_dir'), sandboxRoot: pick('sandboxRoot', 'sandbox_root') };
+  return { root: pick('root', 'root'), appDir: pick('appDir', 'app_dir'), unityEditorRoot: pick('unityEditorRoot', 'unity_editor_root'), unityPath: pick('unityPath', 'unity_path'), tempDir: pick('tempDir', 'temp_dir'), sandboxRoot: pick('sandboxRoot', 'sandbox_root') };
 }
 
 /**

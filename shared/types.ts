@@ -394,6 +394,11 @@ export interface Machine {
   /** The machine's main Final Factory clone: where its agents work. */
   repoPath: string;
   home: string;
+  /**
+   * The worker root it was installed in (w513, scripts/worker; docs/worker-install.md): one folder holding its daemon,
+   * clone, sandboxes, player slots, nightly lab and temp. Reported in the daemon's hello; a redeploy keeps it.
+   */
+  root?: string;
   /** The daemon's folder (code, logs, agents, daemon.json) when not the default <home>/.ff-factory (add_machine app_dir). */
   appDir?: string;
   /** A folder holding Unity editor versions (<root>/<version>/...), searched before Unity Hub's defaults. */

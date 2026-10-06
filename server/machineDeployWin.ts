@@ -21,6 +21,23 @@ import { spawn } from 'node:child_process';
  */
 
 export const TASK_NAME = 'FFFactoryDaemon';
+
+/**
+ * Which daemon install a script acts on (w513): its scheduled task's name (default TASK_NAME), and `only`: stop daemons
+ * running from its own folder alone. A worker root install (scripts/worker) sets both, so a second install on the same
+ * PC (a test root) never stops or replaces the machine's other daemon, which runs from the default folder.
+ */
+export interface WinService {
+  task?: string;
+  only?: boolean;
+}
+
+/** The task name of `service`, checked: it is spliced into PowerShell and task XML. Exported for tests. */
+export function taskName(service?: WinService): string {
+  const t = service?.task ?? TASK_NAME;
+  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/.test(t)) throw new Error(`"${t}" is not a usable scheduled task name`);
+  return t;
+}
 /** A script run over ssh: its exit code (-1 when it could not start or was killed), output, and whether the timeout killed it. */
 export interface RemoteResult {
   code: number;
@@ -158,9 +175,9 @@ function Invoke-Native([string]$Exe, [string[]]$Argv) {
  * their shells), except a Unity editor or Unity Hub and what those started: the editor is the user's and outlives
  * a daemon restart, as on a Mac. The task is disabled meanwhile so its restart-on-failure does not bring it back.
  */
-const STOP = `
+const stopFns = (task: string) => `
 function Stop-FFDaemon {
-  $task = Get-ScheduledTask -TaskName '${TASK_NAME}' -ErrorAction SilentlyContinue
+  $task = Get-ScheduledTask -TaskName '${task}' -ErrorAction SilentlyContinue
   if ($task) { $null = $task | Disable-ScheduledTask -ErrorAction SilentlyContinue; $task | Stop-ScheduledTask -ErrorAction SilentlyContinue }
   $marks = @()
   foreach ($d in $FFDirs) { $marks += (Join-Path $d 'app\\machine\\daemon.ts'); $marks += (Join-Path $d 'run-daemon.ps1') }
@@ -187,7 +204,7 @@ function Stop-FFDaemon {
 }
 
 function Start-FFDaemon {
-  Start-ScheduledTask -TaskName '${TASK_NAME}'
+  Start-ScheduledTask -TaskName '${task}'
 }
 
 function Test-FFLoggedOn {
@@ -212,9 +229,10 @@ export function appDirExpr(appDir?: string): string {
  * a daemon of ours may run from, for Stop-FFDaemon: $F, the default one, and the previous deploy's, so a deploy
  * that moves the folder still stops the old daemon).
  */
-function head(dirs: { appDir?: string; previous?: string } = {}): string {
+function head(dirs: { appDir?: string; previous?: string; service?: WinService } = {}): string {
   const prev = dirs.previous && dirs.previous !== dirs.appDir ? `, ${appDirExpr(dirs.previous)}` : '';
-  return `$ErrorActionPreference = 'Stop'\n${NATIVE}\n${STOP}\n$F = ${appDirExpr(dirs.appDir)}\n$FFDirs = @(@($F, ${appDirExpr()}${prev}) | Select-Object -Unique)\n`;
+  const others = dirs.service?.only ? '' : `, ${appDirExpr()}${prev}`;
+  return `$ErrorActionPreference = 'Stop'\n${NATIVE}\n${stopFns(taskName(dirs.service))}\n$F = ${appDirExpr(dirs.appDir)}\n$FFDirs = @(@($F${others}) | Select-Object -Unique)\n`;
 }
 
 /**
@@ -340,9 +358,9 @@ if ($r.Code -ne 0) { throw "npm ci failed ($($r.Code)): $($r.Out)" }
  * keeps dying quickly, like the portal's own scripts/supervise.ps1. The daemon's output goes to
  * logs\daemon.log and daemon.err.log (the previous run's kept as *.prev).
  */
-export function supervisorScript(node: string, flag: boolean): string {
+export function supervisorScript(node: string, flag: boolean, service?: WinService): string {
   const flags = [...(flag ? ['--experimental-strip-types'] : []), '--disable-warning=ExperimentalWarning'].join(' ');
-  return `# FF Factory machine daemon supervisor (docs/machines.md), started at logon by the ${TASK_NAME} task.
+  return `# FF Factory machine daemon supervisor (docs/machines.md), started at logon by the ${taskName(service)} task.
 # Written by the portal's deploy into the daemon's folder (its own folder here); a redeploy replaces it.
 $ErrorActionPreference = 'Continue'
 $F = $PSScriptRoot
@@ -449,8 +467,9 @@ const b64 = (s: string, enc: 'utf8' | 'utf8bom') => (enc === 'utf8bom' ? Buffer.
  * PowerShell reads a non-ASCII path right), register the task and run it.
  * Prints `started=True` or `started=False` (nobody is logged on: it starts at the next logon).
  */
-export function installScript(o: { sid: string; home: string; config: string; node: string; flag: boolean; appDir?: string; previousAppDir?: string }): string {
-  return `${head({ appDir: o.appDir, previous: o.previousAppDir })}
+export function installScript(o: { sid: string; home: string; config: string; node: string; flag: boolean; appDir?: string; previousAppDir?: string; service?: WinService }): string {
+  const TASK = taskName(o.service);
+  return `${head({ appDir: o.appDir, previous: o.previousAppDir, service: o.service })}
 $app = Join-Path $F 'app'; $old = Join-Path $F 'app.old'; $new = Join-Path $F 'app.new'
 if (-not (Test-Path -LiteralPath $new)) { throw 'the new code is missing (app.new)' }
 $null = Stop-FFDaemon
@@ -467,16 +486,16 @@ Move-Retry $new $app
 New-Item -ItemType Directory -Force (Join-Path $F 'agents'), (Join-Path $F 'logs') | Out-Null
 function Write-B64($name, $data) { [IO.File]::WriteAllBytes((Join-Path $F $name), [Convert]::FromBase64String($data)) }
 Write-B64 'daemon.json' '${b64(o.config, 'utf8')}'
-Write-B64 'run-daemon.ps1' '${b64(supervisorScript(o.node, o.flag), 'utf8bom')}'
+Write-B64 'run-daemon.ps1' '${b64(supervisorScript(o.node, o.flag, o.service), 'utf8bom')}'
 $xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(taskXml(o.sid, o.home, o.appDir), 'utf8')}'))
-try { $null = Register-ScheduledTask -TaskName '${TASK_NAME}' -Xml $xml -Force } catch {
+try { $null = Register-ScheduledTask -TaskName '${TASK}' -Xml $xml -Force } catch {
   # Not elevated (the portal's own host deploys as the server's non-elevated user): a task an administrator registered
   # once keeps working, since its action runs this folder's run-daemon.ps1. Without one, say exactly what to run once.
   $why = $_.Exception.Message
   $x = Join-Path $F 'daemon-task.xml'
   [IO.File]::WriteAllText($x, $xml, [Text.Encoding]::Unicode)
-  if (-not (Get-ScheduledTask -TaskName '${TASK_NAME}' -ErrorAction SilentlyContinue)) {
-    throw "registering the ${TASK_NAME} task failed ($why). Register it once from an administrator PowerShell: Register-ScheduledTask -TaskName ${TASK_NAME} -Xml (Get-Content -Raw '$x'); then redeploy"
+  if (-not (Get-ScheduledTask -TaskName '${TASK}' -ErrorAction SilentlyContinue)) {
+    throw "registering the ${TASK} task failed ($why). Register it once from an administrator PowerShell: Register-ScheduledTask -TaskName '${TASK}' -Xml (Get-Content -Raw '$x'); then redeploy"
   }
   'registered=kept'
 }
@@ -485,17 +504,17 @@ if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }
 }
 
 /** Start, stop or restart the daemon (its task and processes). Prints `stopped=<n>` and/or `started=True|False`. */
-export function controlScript(action: 'start' | 'stop' | 'restart', appDir?: string): string {
-  return `${head({ appDir })}
+export function controlScript(action: 'start' | 'stop' | 'restart', appDir?: string, service?: WinService): string {
+  return `${head({ appDir, service })}
 ${action !== 'start' ? "'stopped=' + (Stop-FFDaemon)" : ''}
 ${action !== 'stop' ? "if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }" : ''}
 `;
 }
 
 /** Stop the daemon and delete its task; its files stay in its folder. */
-export function uninstallScript(appDir?: string): string {
-  return `${head({ appDir })}
+export function uninstallScript(appDir?: string, service?: WinService): string {
+  return `${head({ appDir, service })}
 $null = Stop-FFDaemon
-Unregister-ScheduledTask -TaskName '${TASK_NAME}' -Confirm:$false -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName '${taskName(service)}' -Confirm:$false -ErrorAction SilentlyContinue
 `;
 }
