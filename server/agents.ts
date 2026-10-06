@@ -1141,11 +1141,13 @@ export class Agents {
     );
   }
 
-  private onWorkerPermission(s: SessionHandle, p: { toolName: string; input: unknown }) {
+  private onWorkerPermission(s: SessionHandle, arg: { toolName: string; input: unknown } | undefined) {
     if (s.info.kind !== 'worker' || s.lastFrom !== 'orchestrator') return;
+    // A machine's daemon sends the signal without the request (machine/daemon.ts): it is the session's newest pending one.
+    const p = arg ?? s.info.pendingPermissions.at(-1) ?? { toolName: 'a tool', input: undefined };
     this.notifyPeople(
       this.orchestrators.audienceOf(s.info),
-      `[worker update] ${this.label(s)} is waiting for permission to use ${p.toolName} with ${JSON.stringify(p.input).slice(0, 600)}. ` +
+      `[worker update] ${this.label(s)} is waiting for permission to use ${p.toolName} with ${JSON.stringify(p.input ?? null).slice(0, 600)}. ` +
         `You cannot approve it; tell the user it needs them (the approval card is in that sandbox's panel).`,
     );
   }

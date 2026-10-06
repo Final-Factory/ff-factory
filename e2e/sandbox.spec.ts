@@ -1,9 +1,9 @@
-import { expect, isMobile, openSandbox, openSidebar, sendMessage, startWorker, test, uniq } from './fixtures.ts';
+import { ALPHA, GALLERY, expect, isMobile, openSandbox, openSidebar, sendMessage, startWorker, test, uniq } from './fixtures.ts';
 
 test('sandbox page: a worker agent’s prompt and reply', async ({ authed: page }) => {
   const tag = uniq('hello');
   const s = await startWorker(page.request, `hello ${tag}`, { title: `Worker ${tag}` });
-  const panel = await openSandbox(page, 'alpha', s.id);
+  const panel = await openSandbox(page, ALPHA, s.id);
 
   await expect(panel.locator('.ph-name')).toHaveText('E2E playground');
   await expect(panel.locator('.msg-user', { hasText: `hello ${tag}` })).toBeVisible();
@@ -17,7 +17,7 @@ test('sandbox page: a worker agent’s prompt and reply', async ({ authed: page 
 test('sandbox page: scrolled up, new content shows Jump to latest, which goes to the end', async ({ authed: page }) => {
   const tag = uniq('long');
   const s = await startWorker(page.request, `#long ${tag}`, { title: `Long ${tag}` });
-  const panel = await openSandbox(page, 'alpha', s.id);
+  const panel = await openSandbox(page, ALPHA, s.id);
   const ends = panel.locator('.msg-assistant', { hasText: 'The end of the long answer.' });
 
   // A new page starts at the bottom.
@@ -46,7 +46,7 @@ test('permission prompt: Allow lets the tool run, Deny stops it', async ({ authe
   for (const choice of ['Allow', 'Deny'] as const) {
     const tag = uniq('perm');
     const s = await startWorker(page.request, `#perm ${tag}`, { title: `Perm ${tag}`, permissionMode: 'default' });
-    const panel = await openSandbox(page, 'alpha', s.id);
+    const panel = await openSandbox(page, ALPHA, s.id);
 
     // Decide once the transcript has loaded: a snapshot landing after the decision would hide it
     // (store.ts merges a stale /events answer over the live amended row; reported, not fixed here).
@@ -99,7 +99,7 @@ test('Unity blocked: the sidebar row says so, the page explains the dialog', asy
 });
 
 test('details sheet: opens with the sandbox, Unity and agent facts, and closes', async ({ authed: page }) => {
-  const panel = await openSandbox(page, 'gallery');
+  const panel = await openSandbox(page, GALLERY);
   const toggle = panel.getByRole('button', { name: 'Details' });
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await toggle.click();
@@ -109,9 +109,9 @@ test('details sheet: opens with the sandbox, Unity and agent facts, and closes',
   await expect(sheet).toBeVisible();
   // The name is the page's header; the sheet adds the slot, the folder and git.
   await expect(panel.locator('.ph-name')).toHaveText('Visual baseline');
-  await expect(sheet).toContainText('Slot gallery');
+  await expect(sheet).toContainText('Slot pc/gallery');
   await expect(sheet.locator('.git-branch')).toHaveText('sandbox/gallery');
-  await expect(sheet.locator('.sb-facts')).toContainText(/sandboxes[\\/]gallery/);
+  await expect(sheet.locator('.sb-facts')).toContainText(/ffsb[\\/]gallery/);
   await expect(sheet.locator('.unity-bar .chip')).toHaveText('Unity off');
   await expect(sheet.getByRole('button', { name: 'Start Unity' })).toBeVisible();
   await expect(sheet.locator('.session-title')).toContainText('Seeded worker');

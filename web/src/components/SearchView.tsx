@@ -20,6 +20,10 @@ function placeOf(h: SearchHit, app: AppState): { route: Route; label: string } {
     return { route: { view: 'sandbox', sandboxId: h.sandboxId, sessionId: h.sessionId }, label: sb ? displayName(sb) : h.sandboxId };
   }
   if (h.standingId) return { route: { view: 'agent', agentId: h.standingId, tab: 'conversation' }, label: 'Standing agent' };
+  if (h.machineId && h.machineSandbox) {
+    const sb = app.machines.find((x) => x.id === h.machineId)?.sandboxes?.find((x) => x.id === h.machineSandbox);
+    return { route: { view: 'msandbox', machineId: h.machineId, sandboxId: h.machineSandbox, sessionId: h.sessionId }, label: sb ? displayName(sb) : `${h.machineId}/${h.machineSandbox}` };
+  }
   if (h.machineId) {
     const m = app.machines.find((x) => x.id === h.machineId);
     return { route: { view: 'machine', machineId: h.machineId, sessionId: h.sessionId }, label: m ? `${displayName(m)} (${m.id})` : h.machineId };

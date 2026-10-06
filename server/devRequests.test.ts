@@ -21,8 +21,9 @@ import { SETTABLE_KEYS, checkDevRequests } from './appConfig.ts';
 import { LEDGER } from './boardMatch.fixtures.ts';
 import { MockConnector } from '../e2e/mockConnector.ts';
 import type { Config } from './config.ts';
-import type { Requester, ServerEvent, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
+import type { Machine, Requester, ServerEvent, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { startTestMachine, type TestMachine } from './testMachine.ts';
 
 /**
  * FFBox dev requests (docs/ffbox.md, "Dev requests"), end to end through a real ProviderManager socket, Agents with the
@@ -55,7 +56,7 @@ async function until(what: string, cond: () => boolean, ms = 8000) {
   }
 }
 
-async function setup(t: { after: (fn: () => void | Promise<void>) => void }, extra: { devRequests?: Record<string, unknown>; attachmentsMB?: number } = {}) {
+async function setup(t: { after: (fn: () => void | Promise<void>) => void }, extra: { devRequests?: Record<string, unknown>; attachmentsMB?: number; onMachine?: boolean } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-devreq-'));
   const token = mintProviderToken();
   const cfg = {
@@ -83,10 +84,18 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
   agents.attachments = files;
   machines.attachments = files;
   Object.defineProperty(agents, 'workerOptions', { value: () => ({ model: 'opus' }) });
-  const alpha = path.join(dir, 'alpha');
-  fs.mkdirSync(alpha);
-  store.putSandbox({ id: 'alpha', name: 'alpha', branch: 'sandbox/alpha', base: 'origin/develop', path: alpha, purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
+  let alpha = path.join(dir, 'alpha');
+  if (!extra.onMachine) {
+    fs.mkdirSync(alpha);
+    store.putSandbox({ id: 'alpha', name: 'alpha', branch: 'sandbox/alpha', base: 'origin/develop', path: alpha, purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
+  }
   agents.boot();
+  // onMachine: sandbox alpha is on a machine instead (pc/alpha, a worktree on its in-process daemon).
+  let pc: TestMachine | undefined;
+  if (extra.onMachine) {
+    pc = await startTestMachine(machines, { sandboxes: ['alpha'] });
+    alpha = pc.path('alpha');
+  }
   const o = agents.orchestrators;
   let pm = new ProviderManager(cfg);
   // A 100 MB hand-over is ~2300 frames: the tests send them as fast as the socket takes them.
@@ -134,6 +143,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
     return pm;
   };
   t.after(async () => {
+    await pc?.stop();
     bus.off('event', onWork);
     for (const c of conns) c.close();
     pm.close();
@@ -153,7 +163,16 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
   const heard = (id: string) => store.readTranscript(id).filter((e): e is UserEv => e.kind === 'user' && e.from === 'system');
   const chat = (r: Requester) => o.personalFor(r);
   const work = () => [...store.work.values()];
-  return { dir, cfg, store, sessions, agents, o, files, alpha, prs, pm: () => pm, connect, restart, call, heard, chat, work, dispatcher: () => sessions.get(agents.dispatcherId) };
+  return { dir, cfg, store, sessions, machines, agents, o, files, alpha, prs, pm: () => pm, connect, restart, call, heard, chat, work, dispatcher: () => sessions.get(agents.dispatcherId) };
+}
+
+const setupOnMachine = (t: { after: (fn: () => void | Promise<void>) => void }, extra: Parameters<typeof setup>[1] = {}) => setup(t, { ...extra, onMachine: true });
+
+/** A machine sandbox's PR, as its daemon's next git look would report it. */
+function setMachinePr(store: Store, sandbox: string, git: NonNullable<NonNullable<Machine['sandboxes']>[number]['git']>) {
+  const m = store.machines.get('pc')!;
+  m.sandboxes!.find((x) => x.id === sandbox)!.git = git;
+  store.putMachine(m);
 }
 
 /** A dev_request's body, with what a test changes. */
@@ -372,7 +391,7 @@ test('rate limit: providers.ffbox.devRequests.perHour per person', async (t) => 
 });
 
 test('dedup: covered by an open batch request whose scope holds the channel and window; the worker gets the note and the files', async (t) => {
-  const { connect, call, chat, store, alpha, dispatcher, heard } = await setup(t);
+  const { connect, call, chat, store, alpha, dispatcher, heard } = await setupOnMachine(t);
   const ben = chat(BEN);
   ben.lastFrom = 'human';
   const r = await call(ben.info, 'request_work', {
@@ -383,7 +402,7 @@ test('dedup: covered by an open batch request whose scope holds the channel and 
   assert.equal(r.isError, false, r.text);
   const batch = [...store.work.values()][0];
   assert.deepEqual(batch.scope, { source: 'discord', channel: 'bug_reports', since: '2026-10-01T00:00:00Z' });
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Triage them.', title: 'Triage', work_id: batch.id });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Triage them.', title: 'Triage', work_id: batch.id });
   assert.equal(started.isError, false, started.text);
   const worker = /Started agent (\w+)/.exec(started.text)![1];
   await until('the worker idles', () => store.sessions.get(worker)?.status === 'idle');
@@ -508,7 +527,7 @@ test('dedup: already fixed is answered with the release and PR; force files it a
 });
 
 test("an operator's follow-up reaches their own orchestrator and the busy worker, as their words relayed; another operator's is refused", async (t) => {
-  const { connect, store, chat, heard, call, dispatcher } = await setup(t);
+  const { connect, store, chat, heard, call, dispatcher } = await setupOnMachine(t);
   const c = await connect();
   const thread = newThread();
   const req = devRequest('dev-two', { thread });
@@ -516,7 +535,7 @@ test("an operator's follow-up reaches their own orchestrator and the busy worker
   await c.next('dev_ack');
   const filed = await c.next('dev_filed');
   const wid = String(filed.workId);
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
   const worker = /Started agent (\w+)/.exec(started.text)![1];
   await until('the worker idles', () => store.sessions.get(worker)?.status === 'idle');
   const h = store.sessions.get(worker)!;
@@ -548,14 +567,14 @@ test("an operator's follow-up reaches their own orchestrator and the busy worker
 });
 
 test("w344: a follow-up's files join its request and reach the busy worker's Inbox/; its text does not wait for them", async (t) => {
-  const { connect, store, chat, heard, call, dispatcher, work, alpha } = await setup(t);
+  const { connect, store, chat, heard, call, dispatcher, work, alpha } = await setupOnMachine(t);
   const c = await connect();
   const thread = newThread();
   const req = devRequest('dev-files', { thread });
   c.send(req);
   await c.next('dev_ack');
   const wid = String((await c.next('dev_filed')).workId);
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Fix the haulers.', title: 'Haulers', work_id: wid });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the haulers.', title: 'Haulers', work_id: wid });
   const worker = /Started agent (\w+)/.exec(started.text)![1];
   await until('the worker idles', () => store.sessions.get(worker)?.status === 'idle');
   const h = store.sessions.get(worker)!;
@@ -660,7 +679,7 @@ async function settleWorker(store: Store, started: string, wid: string) {
 }
 
 test('w272: the request is followed to its result with dev_updates (branch and PR, merge, release), never a routing line, resent until dev_received', async (t) => {
-  const { connect, chat, call, pm, store, o, dispatcher } = await setup(t);
+  const { connect, chat, call, pm, store, o, dispatcher } = await setupOnMachine(t);
   const c = await connect();
   const req = devRequest('dev-done');
   const conversation = (req.conversation as { id: string }).id;
@@ -671,11 +690,10 @@ test('w272: the request is followed to its result with dev_updates (branch and P
   let u = await c.next('dev_update');
   assert.deepEqual([u.request, u.conversation, u.status, u.watch, 'text' in u], [wid, conversation, 'open', undefined, false]);
   // A worker opens PR 901 from its sandbox: no work event, so the minute's recheck sends it.
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
   assert.equal(started.isError, false, started.text);
   await settleWorker(store, started.text, wid);
-  const sb = store.sandboxes.get('alpha')!;
-  store.putSandbox({ ...sb, git: { branch: 'sandbox/filter', dirty: 0, untracked: 0, pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: false }, at: T0 } });
+  setMachinePr(store, 'alpha', { branch: 'sandbox/filter', dirty: 0, untracked: 0, pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: false }, at: T0 });
   pm().dev!.recheck();
   u = await nextUpdate(c, (x) => (x.watch as { pr?: number } | undefined)?.pr === 901 && !x.question);
   assert.equal(u.status, 'open');
@@ -785,17 +803,16 @@ test('w278: summaries and questions for a Discord thread carry results, never in
 });
 
 test('w278: a fix up on a PR sends its summary once the PR is ready, once; a draft sends nothing', async (t) => {
-  const { connect, store, prs, pm, call, dispatcher } = await setup(t);
+  const { connect, store, prs, pm, call, dispatcher } = await setupOnMachine(t);
   const c = await connect();
   c.send(devRequest('dev-pr'));
   await c.next('dev_ack');
   const wid = String((await c.next('dev_filed')).workId);
   await c.next('dev_update');
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
   assert.equal(started.isError, false, started.text);
   await settleWorker(store, started.text, wid);
-  const sb = store.sandboxes.get('alpha')!;
-  store.putSandbox({ ...sb, git: { branch: 'sandbox/filter', dirty: 0, untracked: 0, pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: true }, at: T0 } });
+  setMachinePr(store, 'alpha', { branch: 'sandbox/filter', dirty: 0, untracked: 0, pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: true }, at: T0 });
   // A draft: the PR is followed, nothing to say yet.
   prs.set(901, { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter fix', body: PR_BODY, draft: true, autoMerge: false });
   pm().dev!.recheck();
@@ -990,33 +1007,32 @@ test('ffbox_activity show dev_requests lists them; config: its settings are chec
 });
 
 test('a dev request names its branch ffbox-f/: the sandbox default and the worker rules; other work keeps sandbox/', async (t) => {
-  const { connect, store, chat, call, dispatcher, agents } = await setup(t);
+  const { connect, store, chat, call, dispatcher, machines } = await setupOnMachine(t);
   const c = await connect();
   c.send(devRequest('dev-branch', { thread: newThread() }));
   await c.next('dev_ack');
   const wid = String((await c.next('dev_filed')).workId);
 
   const made: { name: string; branch?: string }[] = [];
-  const sandboxes = (agents as unknown as { sandboxes: { create: (r: { name: string; branch?: string }) => unknown } }).sandboxes;
-  sandboxes.create = (r) => {
+  machines.createSandbox = async (_m, r) => {
     made.push(r);
-    return { id: r.name, branch: r.branch ?? `sandbox/${r.name}`, base: 'origin/develop', path: '' };
+    return `Creating sandbox ${r.name}.`;
   };
   const d = dispatcher().info;
-  assert.equal((await call(d, 'create_sandbox', { name: 'ui-fix', purpose: 'FFBox dev request', work_id: wid })).isError, false);
+  assert.equal((await call(d, 'create_sandbox', { name: 'ui-fix', purpose: 'FFBox dev request', work_id: wid, machine: 'pc' })).isError, false);
   assert.equal(made[0].branch, 'ffbox-f/ui-fix', 'FFBox work: ffbox-f/<name>');
-  await call(d, 'create_sandbox', { name: 'ui-two', purpose: 'x', work_id: wid, branch: '098-foo' });
+  await call(d, 'create_sandbox', { name: 'ui-two', purpose: 'x', work_id: wid, branch: '098-foo', machine: 'pc' });
   assert.equal(made[1].branch, '098-foo', 'an explicit branch wins');
-  await call(d, 'create_sandbox', { name: 'plain', purpose: 'x' });
+  await call(d, 'create_sandbox', { name: 'plain', purpose: 'x', machine: 'pc' });
   assert.equal(made[2].branch, undefined, 'no request: git\'s own sandbox/<name> default');
   const ben = chat(BEN);
   ben.lastFrom = 'human';
   await call(ben.info, 'request_work', { title: 'A person asked', brief: 'Something else.' });
   const own = [...store.work.values()].find((w) => w.title === 'A person asked')!;
-  await call(d, 'create_sandbox', { name: 'own', purpose: 'x', work_id: own.id });
+  await call(d, 'create_sandbox', { name: 'own', purpose: 'x', work_id: own.id, machine: 'pc' });
   assert.equal(made[3].branch, undefined, "a person's own request keeps sandbox/<name>");
 
-  const started = await call(d, 'start_agent', { sandbox: 'alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
+  const started = await call(d, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
   const worker = /Started agent (\w+)/.exec(started.text)![1];
   await until('the worker idles', () => store.sessions.get(worker)?.status === 'idle');
   const first = store.readTranscript(worker).filter((e): e is UserEv => e.kind === 'user').map((e) => e.text).join('\n');

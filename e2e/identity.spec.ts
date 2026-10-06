@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { request as pwRequest, type APIRequestContext } from '@playwright/test';
-import { appState, expect, isMobile, openSandbox, sendMessage, test, uniq } from './fixtures.ts';
+import { ALPHA, appState, expect, isMobile, openSandbox, sendMessage, test, uniq } from './fixtures.ts';
 import type { SessionInfo, StandingAgent, TranscriptEvent } from '../shared/types.ts';
 
 /**
@@ -78,13 +78,13 @@ test("each person's message goes to their own orchestrator, recorded with its au
 test('a worker the teammate starts is requested by them; the owner writing to it is named in its chat', async ({ authed: page }) => {
   const tag = uniq('mateworker');
   const mate = await asMate();
-  const r = await mate.post('/api/sessions', { data: { sandboxId: 'alpha', prompt: `hello ${tag}`, title: `Mate ${tag}` } });
+  const r = await mate.post('/api/sessions', { data: { sandboxId: ALPHA, prompt: `hello ${tag}`, title: `Mate ${tag}` } });
   expect(r.ok(), await r.text()).toBeTruthy();
   const s = (await r.json()) as SessionInfo;
   expect(s.requestedBy).toEqual(MATE);
   await sendMessage(page.request, s.id, `owner here ${tag}`);
 
-  const panel = await openSandbox(page, 'alpha', s.id);
+  const panel = await openSandbox(page, ALPHA, s.id);
   // The card says whom it works for: the tab on desktop, the agent switcher on a phone.
   if (isMobile(page)) await expect(panel.getByRole('combobox', { name: 'Agent' }).locator(`option[value="${s.id}"]`)).toContainText('for Team Mate');
   else await expect(panel.getByRole('tab', { name: `Mate ${tag}` }).getByTestId('tab-requested-by')).toHaveText('Team Mate');
@@ -102,7 +102,7 @@ test('a worker the teammate starts is requested by them; the owner writing to it
 
 test('an /mcp key bound to the teammate: the workers and messages its tools start are requested by them', async ({ authed: page }) => {
   const tag = uniq('mcp');
-  const started = await mcpCall(page.request, 'start_agent', { sandbox: 'alpha', prompt: `via mcp ${tag}`, title: `MCP ${tag}` });
+  const started = await mcpCall(page.request, 'start_agent', { sandbox: ALPHA, prompt: `via mcp ${tag}`, title: `MCP ${tag}` });
   expect(started.isError, started.text).toBe(false);
   expect(started.text).toMatch(/requested by Team Mate/);
   const id = /Started agent (\w+)/.exec(started.text)![1];
@@ -111,8 +111,8 @@ test('an /mcp key bound to the teammate: the workers and messages its tools star
 
   const sent = await mcpCall(page.request, 'message_agent', { session_id: id, text: `follow-up ${tag}` });
   expect(sent.text).toBe('Sent, for Team Mate.');
-  const events = await transcript(page.request, id);
-  expect(events.find((e) => e.kind === 'user' && e.text === `follow-up ${tag}`)).toMatchObject({ requestedBy: MATE });
+  // A worker on a machine: the message reaches its transcript once its daemon has it.
+  await expect.poll(async () => (await transcript(page.request, id)).find((e) => e.kind === 'user' && e.text === `follow-up ${tag}`)).toMatchObject({ requestedBy: MATE });
   // A key acts for its own person only.
   const other = await mcpCall(page.request, 'message_agent', { session_id: id, text: 'x', for_user: 'tester' });
   expect(other.isError).toBe(true);
