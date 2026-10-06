@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { COMPILE_DONE, COMPILE_FAILED, readSince, Waker } from './wake.ts';
+import { Waker } from './wake.ts';
 import { collectResume, waitingOnWakeLine, type SessionSnapshot } from './restart.ts';
 import { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
@@ -94,21 +94,6 @@ test('heartbeat: only while a worker is busy, every N minutes, never over a busy
   advance(30 * 60_000);
   beat(null);
   assert.equal(sent.length, 2, 'off');
-});
-
-test('wait_for_unity: compile markers and reading only what the log gained', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-log-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const log = path.join(dir, 'Editor.log');
-  fs.writeFileSync(log, 'old stuff\nReloading assemblies after finishing script compilation.\n');
-  const start = readSince(log, 0).size;
-  fs.appendFileSync(log, 'Assets/Scripts/Belt.cs(12,5): error CS1002: ; expected\n');
-  const r = readSince(log, start);
-  assert.ok(COMPILE_FAILED.test(r.text));
-  assert.ok(!COMPILE_DONE.test(r.text), 'the earlier reload is not in the new part');
-  assert.ok(COMPILE_DONE.test('Domain Reload Profiling: 1234ms'));
-  assert.equal(readSince(path.join(dir, 'missing.log'), 0).size, 0);
-  assert.equal(readSince(log, 10_000_000).text.length > 0, true, 'a shorter log (editor restarted) is read from the start');
 });
 
 test('wake_me: pending wakes survive a restart; one that came due while the server was down fires at once', (t) => {

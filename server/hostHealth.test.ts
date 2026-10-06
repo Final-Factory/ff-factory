@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HostHealthMonitor, blockReason, diskLevel, idleEditors, remountDelayMs, type HostDeps } from './hostHealth.ts';
+import { HostHealthMonitor, blockReason, diskLevel, remountDelayMs, type HostDeps } from './hostHealth.ts';
 import type { Config } from './config.ts';
 import type { HelperResult } from './privileged.ts';
 import type { Sandbox, SessionInfo } from '../shared/types.ts';
@@ -33,18 +33,13 @@ const sb = (id: string, state: string, startedAt = '2026-09-24T10:00:00Z') => ({
 const sess = (id: string, sandboxId: string | undefined, status: string, lastActivityAt = '2026-09-24T10:00:00Z') =>
   ({ id, sandboxId, status, lastActivityAt, kind: 'worker' }) as unknown as SessionInfo;
 
-test('idle editors: stopped only when nobody in the sandbox is busy and nothing happened for N minutes', () => {
-  const now = Date.parse('2026-09-24T12:30:00Z');
-  const sbs = [sb('a', 'running'), sb('b', 'running'), sb('c', 'running', '2026-09-24T12:00:00Z'), sb('d', 'stopped')];
-  const ss = [sess('s1', 'b', 'running'), sess('s2', 'a', 'idle', '2026-09-24T10:30:00Z')];
-  assert.deepEqual(idleEditors(sbs, ss, now, 90), ['a']);
-  assert.deepEqual(idleEditors(sbs, ss, now, 0), []);
+test('remount delays: at once, then 2, 5, 10 and 30 minutes', () => {
   assert.equal(remountDelayMs(1), 0);
   assert.equal(remountDelayMs(3), 5 * 60_000);
 });
 
 /** A monitor over fake effects; `world` is what it sees. */
-function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere: boolean; cfg: Partial<Config> }> = {}) {
+function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere: boolean; cfg: Partial<Config>; watchDrive: boolean }> = {}) {
   const world = {
     now: Date.parse('2026-09-24T13:00:00Z'),
     driveThere: over.driveThere ?? true,
@@ -66,6 +61,7 @@ function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere
   } as unknown as Config;
   const deps: HostDeps = {
     cfg,
+    ...(over.watchDrive !== undefined ? { watchDrive: () => over.watchDrive! } : {}),
     statfs: async (p) => (p.startsWith('C') ? { free: world.freeC, total: 1800 * GB } : { free: 700 * GB, total: 900 * GB }),
     exists: (p) => (p.startsWith('F') ? world.driveThere : true),
     mem: () => ({ free: 30 * GB, total: 64 * GB }),
@@ -181,41 +177,6 @@ test('disk critical: busy agents asked to checkpoint once, idle editors stopped,
   assert.ok(log.includes('report Disk space is fine again'));
 });
 
-test('recovery self-test: detach through the helper, the guard notices and reattaches, sandboxes are back', async () => {
-  const { world, log, m } = harness();
-  world.sandboxes = world.sandboxes.map((s) => ({ ...s, status: 'ready', path: `F:\ffsb\${s.id}`, unity: { ...s.unity, state: 'stopped' } })) as Sandbox[];
-  world.sessions = [];
-  await m.tick();
-  // The fake helper: "detach" makes F: vanish; "mount" brings it back.
-  const deps = (m as unknown as { d: HostDeps }).d;
-  deps.runHelper = async (a) => {
-    log.push(`helper ${a}`);
-    world.now += 3000;
-    world.driveThere = a !== 'detach';
-    return { action: a, ok: true, at: '', detail: a };
-  };
-  const sleep = async (ms: number) => void (world.now += ms);
-  const out = await m.selftest({ pollMs: 1000, sleep });
-  assert.match(out, /^Self-test passed: detach helper: 3\.0 s \(detach\); F:\\ffsb gone after 3\.0 s; noticed by the guard after 0\.0 s; reattached by ffsb-helper-mount 3\.0 s later \(1 attempt\(s\)\); all 3 sandbox folder\(s\) back; total 6\.0 s\.$/);
-  assert.deepEqual(log.filter((l) => l.startsWith('helper')), ['helper detach', 'helper mount']);
-  assert.equal(m.status.sandboxRoot, 'ok');
-  // Refused while an editor is up or an agent is busy in a sandbox.
-  world.sandboxes = [{ ...world.sandboxes[0], unity: { state: 'running' } } as Sandbox];
-  await assert.rejects(m.selftest({ sleep }), /editors are up/);
-  world.sandboxes = [];
-  world.sessions = [sess('w9', 'blackhole', 'running')];
-  await assert.rejects(m.selftest({ sleep }), /mid-turn/);
-  // Compacting takes the drive away too: refused the same way, and the helper is never started.
-  log.length = 0;
-  const r = await m.compact('asked for');
-  assert.equal(r.ok, false);
-  assert.match(r.detail, /^refused: agents on this host are mid-turn \(w9\)/);
-  world.sessions = [];
-  world.sandboxes = [{ ...world.sandboxes[0], unity: { state: 'starting' } } as Sandbox];
-  assert.match((await m.compact('asked for')).detail, /^refused: editors are up/);
-  assert.deepEqual(log.filter((l) => l.startsWith('helper')), []);
-});
-
 test('continuous clean-up: a regular pass each hour, sooner below the soft threshold, a notice only when it cannot get above', async () => {
   const { world, log, cleaned, m } = harness();
   await m.tick();
@@ -256,9 +217,9 @@ test('continuous clean-up: a regular pass each hour, sooner below the soft thres
   assert.match(await m.cleanupNow(), /\(asked, with stale output\): 1 item\(s\), 3\.0 GB, 100\.0 GB free \(below the soft 120 GB\)\.\nRemoved \(biggest first\):\n- C:\/Temp\/x  3\.0 GB  \(temp-old\)\nStill below the soft threshold of 120 GB/);
 });
 
-test('portal-only (w464): no sandbox drive is watched or reattached, nothing blocks on it, and the data volume is measured', async () => {
-  // The VM has no F: drive; the data folder is on its own volume (here "D:").
-  const { world, log, m } = harness({ driveThere: false, cfg: { hostSandboxes: false, dataDir: 'D:\\fff\\data' } as Partial<Config> });
+test('the portal (w510): no sandbox drive is watched or reattached, nothing blocks on it, and the data volume is measured', async () => {
+  // The portal owns no drive (watchDrive false; a machine daemon's guard does); its data folder is on its own volume (here "D:").
+  const { world, log, m } = harness({ driveThere: false, watchDrive: false, cfg: { dataDir: 'D:\\fff\\data' } as Partial<Config> });
   assert.equal(m.status.sandboxRoot, 'ok', 'not "missing" at start');
   assert.equal(m.blockReason('agent'), undefined);
   await m.tick();

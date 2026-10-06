@@ -13,15 +13,8 @@
     "basePath": "/srv/fff/base"
   },
   "defaultBase": "origin/develop",
-  "unity": {
-    "editorPath": "/nonexistent/no-unity-in-the-portal-vm"
-  },
   "protectedPaths": [],
   "limits": {
-    "maxUnity": 1,
-    "maxSessions": 6,
-    "maxSandboxes": 1,
-    "minFreeGB": 10,
     "minFreeRamGB": 0
   },
   "models": ["opus", "sonnet", "haiku", "fable"],

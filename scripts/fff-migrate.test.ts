@@ -240,7 +240,7 @@ async function world(t: { after: (fn: () => unknown) => void }): Promise<World> 
     JSON.stringify({ sandboxes: [], orchestratorId: 'disp', sessions: [session('disp', 'orchestrator', { orchestratorRole: 'dispatcher', title: 'Dispatcher', sdkSessionId: 'sdk-disp-1' }), session('w1', 'worker', { machineId: 'beast' })], settings: { heartbeatMinutes: null } }, null, 2),
   );
   const store = new Store(beastData);
-  const mm = new MachineManager({ dataDir: beastData, limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config, store, new SessionManager({ limits: { maxSessions: 6 } } as Config, store));
+  const mm = new MachineManager({ dataDir: beastData, limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config, store, new SessionManager({} as Config, store));
   const { token: machineToken } = mm.register({ id: 'beast', host: 'localhost', local: true, purpose: 'unused', status: 'ready', repoPath: beastBase, home: path.join(base, 'beast'), portalUrl: `http://127.0.0.1:${beastPort}`, maxSessions: 2 });
   store.flush();
   const item = (id: string, title: string) => ({ id, title, brief: title, priority: 'normal', keys: [], requestedBy: { userId: 'ben', displayName: 'Ben' }, requesters: [{ userId: 'ben', displayName: 'Ben' }], humanAsked: true, status: 'open', createdAt: at, updatedAt: at, sessionIds: [], overlaps: [] });
@@ -423,7 +423,7 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   assert.equal(h.dryRun, true);
   const cfg = JSON.parse(fs.readFileSync(w.vmCfgFile, 'utf8'));
   assert.equal(cfg.publicUrl, w.publicUrl);
-  assert.equal(cfg.hostSandboxes, false);
+  assert.equal(cfg.hostSandboxes, undefined, 'w510: no portal-only switch any more');
   assert.equal(cfg.ownerName, 'Ben');
   assert.equal(cfg.claudeEnv.CLAUDE_CODE_OAUTH_TOKEN, BEAST_TOKEN, 'copied (ignored by the dry run)');
   assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'tokenfile', dispatcher: 'tokenfile' });

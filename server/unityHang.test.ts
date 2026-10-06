@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { bridgeInfo, bridgePing, crashLeftoversFor, crashReportersFor, editorVerdict, restartAllowed, type EditorObservation } from './unityHang.ts';
+import { bridgeInfo, bridgePing, editorVerdict, restartAllowed, type EditorObservation } from './unityHang.ts';
 
 const NOW = Date.parse('2026-09-24T16:00:00Z');
 const min = 60_000;
@@ -79,17 +79,4 @@ test('unity bridge: status files by project, and a ping answered on the main thr
   const deadPort = (dead.address() as net.AddressInfo).port;
   dead.close();
   assert.equal(await bridgePing(deadPort, 3000), false);
-});
-
-test('unity crash evidence: the bug reporter counts; the crash handler beside every editor does not', () => {
-  const procs = [
-    { pid: 1, name: 'UnityCrashHandler64.exe', cmd: '"C:/Program Files/Unity/Editor/UnityCrashHandler64.exe" --attach 500 "F:/ffsb/sb1"' },
-    { pid: 2, name: 'UnityCrashHandler64.exe', cmd: '"C:/Program Files/Unity/Editor/UnityCrashHandler64.exe" --attach 700' },
-    { pid: 3, name: 'UnityBugReporter.exe', cmd: 'UnityBugReporter.exe --unity_project "F:/ffsb/sb1" --editor_mode' },
-    { pid: 4, name: 'UnityBugReporter.exe', cmd: 'UnityBugReporter.exe --unity_project "F:/ffsb/other"' },
-  ];
-  assert.deepEqual(crashReportersFor(procs, 'F:/ffsb/sb1').map((p) => p.pid), [3]);
-  assert.deepEqual(crashReportersFor(procs.slice(0, 2), 'F:/ffsb/sb1'), []);
-  assert.deepEqual(crashLeftoversFor(procs, 'F:/ffsb/sb1', 700).map((p) => p.pid), [1, 2, 3]);
-  assert.deepEqual(crashLeftoversFor(procs, 'F:/ffsb/sb1').map((p) => p.pid), [1, 3]);
 });

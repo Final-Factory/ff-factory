@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, windowsPathsOffWindows } from './config.ts';
+import { ROOT, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
 import {
   batchPlan,
   claudeProjectFolder,
@@ -77,16 +77,18 @@ test('vmMigration: BEAST\'s config with the VM\'s paths and server settings, por
   const c = r.config as ReturnType<typeof beastConfig> & Record<string, unknown>;
   const vm = vmConfig();
   for (const k of ['port', 'host', 'trustProxy', 'dataDir', 'sandboxRoot', 'standingRoot', 'unity', 'protectedPaths', 'hostDiskPaths', 'review', 'voice', 'hostGuard'] as const) {
-    assert.deepEqual(c[k], vm[k], k);
+    assert.deepEqual(c[k], withoutRetiredKeys(vm)[k], k);
   }
   assert.equal(c.publicUrl, 'https://fff.tailedfcad.ts.net');
-  assert.equal(c.hostSandboxes, false, 'the portal-only mode');
+  // w510: no portal-only switch any more, nor any key of the portal's own sandbox pool (config RETIRED_CONFIG_KEYS).
+  for (const k of ['hostSandboxes', 'librarySeed', 'librarySeedGB', 'librarySeedCopy']) assert.equal(c[k], undefined, k);
+  assert.ok(r.notes.some((n) => /left out, as nothing reads them any more \(w510\): .*claudeAccounts\.standing/.test(n)), r.notes.join('; '));
   assert.deepEqual(c.repo, { url: 'https://github.com/Final-Factory/FinalFactory.git', basePath: '/srv/fff/base' }, 'no host-sandbox seeding');
   assert.equal(c.ownerName, 'Ben', "BEAST's");
-  assert.deepEqual(c.limits, { maxSessions: 8, maxSandboxes: 1, maxUnity: 1, minFreeGB: 10, minFreeRamGB: 0 });
+  assert.deepEqual(c.limits, { minFreeRamGB: 0 }, "the VM's own; the pool's limits are gone (w510)");
   assert.equal(c.claudeEnv?.CLAUDE_CODE_OAUTH_TOKEN, FAKE_TOKEN, "workers' token moves with it (design 5.3)");
   assert.equal(c.claudeTokenFile, '/srv/fff/secrets/claude-oauth-token');
-  assert.deepEqual(c.claudeAccounts, { workers: 'token', standing: 'token', orchestrator: 'tokenfile', dispatcher: 'tokenfile' });
+  assert.deepEqual(c.claudeAccounts, { workers: 'token', orchestrator: 'tokenfile', dispatcher: 'tokenfile' }, 'no standing account (w510)');
   assert.deepEqual(c.providers, beast.providers);
   assert.deepEqual(c.intake, beast.intake);
   assert.deepEqual(c.machines, { keepAgentsOnRestart: true, cleanup: { everyMinutes: 60 }, useHostClaudeEnv: { beast: true } }, "BEAST's workers kept on this token");
@@ -99,14 +101,13 @@ test('vmMigration: BEAST\'s config with the VM\'s paths and server settings, por
   assert.ok(!JSON.stringify(r.notes).includes(FAKE_TOKEN), 'no secret in the notes');
 });
 
-test('vmMigration: BEAST\'s workers keep their account however it was set (design 5.3), and a D5 note', () => {
+test('vmMigration: BEAST\'s workers keep their account however it was set (design 5.3)', () => {
   const run = (over: Record<string, unknown>) => rewriteConfig(beastConfig(over), vmConfig(), { publicUrl: 'https://fff.x.ts.net', beastId: 'beast' });
   assert.deepEqual((run({ claudeAccounts: { workers: 'login' } }).config.machines as Record<string, unknown>).useHostClaudeEnv, { beast: false }, 'login: its own stored login');
   assert.deepEqual((run({ machines: { useHostClaudeEnv: false } }).config.machines as Record<string, unknown>).useHostClaudeEnv, { '*': false, beast: true }, 'the others keep false; BEAST as before (token)');
   assert.deepEqual((run({ machines: { useHostClaudeEnv: { beast: false, m5: true } } }).config.machines as Record<string, unknown>).useHostClaudeEnv, { beast: false, m5: true }, 'named already: left alone');
-  assert.ok(run({ claudeAccounts: { standing: 'login' } }).notes.some((n) => /D5/.test(n)));
   const noToken = rewriteConfig(beastConfig(), { ...vmConfig(), claudeTokenFile: undefined }, { publicUrl: 'https://fff.x.ts.net', beastId: 'beast' });
-  assert.deepEqual(noToken.config.claudeAccounts, { workers: 'token', standing: 'token' });
+  assert.deepEqual(noToken.config.claudeAccounts, { workers: 'token' });
   assert.ok(noToken.notes.some((n) => /no claudeTokenFile/.test(n)));
   const odd = rewriteConfig(beastConfig({ someNewKey: 'D:/x' }), vmConfig(), { publicUrl: 'https://fff.x.ts.net', beastId: 'beast' });
   assert.deepEqual(odd.windowsPaths, [{ key: 'someNewKey', value: 'D:/x' }], 'reported, for the report');

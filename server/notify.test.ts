@@ -8,7 +8,7 @@ import { Notifier, sessionRoute } from './notify.ts';
 import { Store, bus } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import type { Config } from './config.ts';
-import type { Sandbox, ServerEvent, SessionInfo, StandingAgent, StandingRun } from '../shared/types.ts';
+import type { ServerEvent, SessionInfo, StandingAgent, StandingRun } from '../shared/types.ts';
 
 const info = (over: Partial<SessionInfo>): SessionInfo => ({
   id: 's1',
@@ -27,7 +27,7 @@ const info = (over: Partial<SessionInfo>): SessionInfo => ({
 function setup(t: { after: (fn: () => void) => void }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-notify-'));
   const store = new Store(dir);
-  const sessions = new SessionManager({ limits: { maxSessions: 6 } } as Config, store);
+  const sessions = new SessionManager({} as Config, store);
   const n = new Notifier(dir, store, sessions);
   const sent: { endpoint: string; payload: { kind: string; title: string; url: string } }[] = [];
   const real = webpush.sendNotification;
@@ -91,24 +91,13 @@ test('notify: click targets', () => {
   assert.equal(sessionRoute(info({ kind: 'orchestrator' })), '#/');
 });
 
-test('notify: a stuck Unity editor, and devices that subscribed before the kind existed get it', async (t) => {
-  const { n, sent, notices } = setup(t);
-  n.subscribe('alice', sub('phone'), {}, 'x');
-  n.subscribe('alice', sub('quiet'), { unity: false }, 'y');
-  n.unityBlocked({ id: 'sb1', purpose: 'Black hole shader' } as Sandbox, { reason: 'dialog', title: 'Enter Safe Mode?', text: 'The project you are opening\ncontains compilation errors.', since: '', resumeState: 'starting' });
-  await flush();
-  assert.deepEqual(notices, ['unity:Unity in Black hole shader (slot sb1) is stuck']);
-  assert.deepEqual(sent.map((s) => [s.endpoint.split('/').pop(), s.payload.url]), [['phone', '#/sandbox/sb1']]);
-  assert.match((sent[0].payload as { body?: string }).body ?? '', /^"Enter Safe Mode\?": The project you are opening contains/);
-});
-
 test('notify: saved subscriptions without a newer kind start at its default', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-notify-old-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const old = { ...sub('old'), user: 'alice', prefs: { permission: true, turnEnd: false, error: true, standing: true, delegation: true }, createdAt: '', device: 'x' };
   fs.writeFileSync(path.join(dir, 'push-subscriptions.json'), JSON.stringify([old]));
   const store = new Store(dir);
-  const n = new Notifier(dir, store, new SessionManager({ limits: { maxSessions: 6 } } as Config, store));
+  const n = new Notifier(dir, store, new SessionManager({} as Config, store));
   assert.deepEqual(n.list('alice')[0].prefs, { ...old.prefs, person: true, unity: true, host: true });
   store.flush();
 });

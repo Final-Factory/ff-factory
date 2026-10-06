@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { branchProblem, commandLineHasPath, normalizePurpose, reservedSandboxIds, withBaseRepoLock } from './sandboxes.ts';
+import { branchProblem, normalizePurpose, withBaseRepoLock } from './sandboxes.ts';
 
 test('branch: master, main and develop are refused in every spelling', () => {
   for (const b of [
@@ -28,31 +28,6 @@ test('branch: own branches are allowed, leading dash and empty are refused', () 
   assert.ok(branchProblem('-b'));
   assert.ok(branchProblem('--force'));
   assert.ok(branchProblem(''));
-});
-
-test('reserved ids: the live checkout, the base clone and _base/_seed', () => {
-  const r = reservedSandboxIds(['C:/Users/dev/games/MyGame', 'D:\\Games\\Final Factory\\'], 'C:/ffsb/_base');
-  assert.ok(r.has('mygame'));
-  assert.ok(r.has('final factory'));
-  assert.ok(r.has('final-factory'));
-  assert.ok(r.has('_base'));
-  assert.ok(r.has('_seed'));
-  assert.ok(!r.has('sb1'));
-  assert.ok(!r.has('ffsb'));
-});
-
-test('path match: whole path only, either slash, any case', () => {
-  const dir = 'C:\\ffsb\\sb1';
-  assert.ok(commandLineHasPath('"C:\\Program Files\\Unity.exe" -projectPath "C:\\ffsb\\sb1" -logFile x', dir));
-  assert.ok(commandLineHasPath('Unity.exe -projectPath c:/ffsb/sb1 -logFile c:/ffsb/sb1/Logs/a.log', dir));
-  assert.ok(commandLineHasPath('Unity.exe -projectPath C:/FFSB/SB1', dir));
-  assert.ok(commandLineHasPath("Unity -projectPath 'c:/ffsb/sb1'", dir));
-  assert.ok(commandLineHasPath('Unity -logFile C:\\ffsb\\sb1\\Logs\\x.log', dir));
-  assert.ok(commandLineHasPath('Unity -projectPath C:/ffsb/sb1', 'C:/ffsb/sb1/'));
-  assert.ok(!commandLineHasPath('Unity.exe -projectPath "C:\\ffsb\\sb10"', dir));
-  assert.ok(!commandLineHasPath('Unity.exe -projectPath C:/ffsb/sb1-old', dir));
-  assert.ok(!commandLineHasPath('Unity.exe -projectPath C:/ffsb/sb10 -logFile C:/ffsb/sb1x/a', dir));
-  assert.ok(!commandLineHasPath('anything', ''));
 });
 
 test('purpose label: one line, whitespace collapsed, empty and over-long refused', () => {

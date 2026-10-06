@@ -376,7 +376,7 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       const list = typeof value === 'string' ? value.split(',') : value;
       if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) throw new Error('placement.prefer is a list of computers, first choice first: machine ids such as "lothdesktop" (or one comma-separated string)');
       const ids = [...new Set(list.map((x) => placeId(x as string)).filter(Boolean))];
-      const bad = ids.find((x) => !MACHINE_KEY.test(x));
+      const bad = ids.find((x) => !MACHINE_KEY.test(x) || x === 'host');
       if (bad) throw new Error(`placement.prefer: "${bad.slice(0, 40)}" is not a machine id (letters, digits, dashes)${NO_HOST}`);
       if (ids.length > 12) throw new Error('placement.prefer names at most 12 computers');
       return ids.length ? ids : undefined;
@@ -386,7 +386,7 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       const out: Record<string, string> = {};
       for (const [k, why] of Object.entries(value as Record<string, unknown>)) {
         const id = placeId(k);
-        if (!MACHINE_KEY.test(id)) throw new Error(`placement.avoid: "${k.slice(0, 40)}" is not a machine id${NO_HOST}`);
+        if (!MACHINE_KEY.test(id) || id === 'host') throw new Error(`placement.avoid: "${k.slice(0, 40)}" is not a machine id${NO_HOST}`);
         if (typeof why !== 'string' || !oneLine(why) || oneLine(why).length > 200) throw new Error(`placement.avoid.${id}: say why in one line of at most 200 characters`);
         out[id] = oneLine(why);
       }

@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DISMISS_LIMIT, KNOWN_DIALOGS, decide, describeDialog, escapeControlInStrings, findDialogs, isStalled, parsePsJson, type EditorWindow } from './watchdog.ts';
-import { editorTitleNames } from './sandboxes.ts';
+import { DISMISS_LIMIT, KNOWN_DIALOGS, decide, describeDialog, escapeControlInStrings, findDialogs, parsePsJson, type EditorWindow } from './watchdog.ts';
 
 const win = (w: Partial<EditorWindow>): EditorWindow => ({ hwnd: 1, pid: 100, class: '#32770', title: '', enabled: true, owned: true, text: [], buttons: [], ...w });
 
@@ -11,6 +10,12 @@ const LIVE = [
   win({ hwnd: 1054540, pid: 37072, title: 'Connection Lost', text: ['The connection with the Unity Licensing Client has been lost.'], buttons: ['Retry'] }),
   win({ hwnd: 2951788, pid: 37072, class: 'UnityContainerWndClass', title: 'agent-mcp - main - Windows, Mac, Linux - Unity 6.3 LTS (6000.3.19f1) <DX11>', enabled: false, owned: false }),
 ];
+
+test('describeDialog', () => {
+  const [d] = findDialogs(LIVE);
+  assert.equal(describeDialog(d), 'Connection Lost: The connection with the Unity Licensing Client has been lost.');
+  assert.equal(describeDialog({ ...d, text: 'x'.repeat(1000) }, 50).length, 50);
+});
 
 test('findDialogs: picks the modal dialog, not the main window, and knows it', () => {
   const d = findDialogs(LIVE);
@@ -107,23 +112,6 @@ test('licensing "Connection Lost": Retry every time, and a fresh editor once it 
   assert.deepEqual(decide(d, { autoDismiss: true, recent: [at(20), at(40), at(60), at(80)], nowMs: now }), { click: 'Retry' });
   // With auto-dismiss off nothing is pressed or restarted.
   assert.deepEqual(decide(d, { autoDismiss: false, recent: [at(2), at(5), at(9)], nowMs: now }), { report: true });
-});
-
-test('describeDialog and isStalled', () => {
-  const [d] = findDialogs(LIVE);
-  assert.equal(describeDialog(d), 'Connection Lost: The connection with the Unity Licensing Client has been lost.');
-  assert.equal(describeDialog({ ...d, text: 'x'.repeat(1000) }, 50).length, 50);
-  assert.equal(isStalled(0, 14 * 60_000, 15), false);
-  assert.equal(isStalled(0, 15 * 60_000, 15), true);
-  assert.equal(isStalled(0, 999 * 60_000, 0), false, '0 turns the stall check off');
-});
-
-test('editorTitleNames: the main window title names the project, elevated or not', () => {
-  const t = 'blackhole-master - main - Windows, Mac, Linux - Unity 6.3 LTS (6000.3.19f1) <DX11>';
-  assert.equal(editorTitleNames(t, 'blackhole-master'), true);
-  assert.equal(editorTitleNames(`Administrator: ${t}`, 'blackhole-master'), true);
-  assert.equal(editorTitleNames(t, 'blackhole'), false);
-  assert.equal(editorTitleNames('blackhole-master - notes.txt - Notepad', 'blackhole-master'), false);
 });
 
 // Unity.dll 6000.3 (EditorSceneManager.cpp): the dialog a branch switch raises with a scene open.

@@ -189,7 +189,7 @@ test('w389: a worker reads who sent each message, typed in its chat, from an orc
     store.flush();
   });
   const store = new Store(dir);
-  const sessions = new SessionManager({ limits: { maxSessions: 1 } } as Config, store);
+  const sessions = new SessionManager({} as Config, store);
   const make = () => sessions.create({ kind: 'worker', title: 'w', permissionMode: 'bypassPermissions', options: () => ({}), requestedBy: r(BEN) });
   const said = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'assistant').map((e) => (e as { text?: string }).text ?? JSON.stringify(e)).join('\n');
   const until = async (what: string, ok: () => boolean) => {
@@ -204,8 +204,10 @@ test('w389: a worker reads who sent each message, typed in its chat, from an orc
   await until('answered', () => /Sender: \[from Lothsahn\]/.test(said(w.info.id)));
   sessions.send(w.info.id, 'status? #whoami', 'orchestrator', undefined, { requestedBy: r(LOTH) });
   await until('answered', () => /Sender: \[from the orchestrator, for Lothsahn\]/.test(said(w.info.id)));
-  // Queued while the only slot is busy (w384's send queue), then delivered: the sender rides along.
+  // Queued while the only slot of their machine is busy (w384's send queue), then delivered: the sender rides along.
   const busy = make();
+  for (const s of [w, busy]) s.info.machineId = 'm1';
+  sessions.placeFull = (s) => (s !== busy && ['running', 'starting'].includes(busy.info.status) ? '1 of 1 agents on m1 are mid-turn' : undefined);
   sessions.send(busy.info.id, '#slow busy', 'human', undefined, { requestedBy: r(BEN) });
   const uuid = sessions.send(w.info.id, 'hold it #whoami', 'human', undefined, { requestedBy: r(LOTH) });
   assert.equal(sessions.isQueued(uuid), true, 'queued');
@@ -222,7 +224,7 @@ test('sessions: each message records its person; a person (not the harness) sets
     store.flush();
   });
   const store = new Store(dir);
-  const sessions = new SessionManager({ limits: { maxSessions: 6 } } as Config, store);
+  const sessions = new SessionManager({} as Config, store);
   const w = sessions.create({ kind: 'worker', title: 'w', permissionMode: 'bypassPermissions', options: () => ({}), requestedBy: r(LOTH) });
   assert.deepEqual(w.info.requestedBy, r(LOTH), 'created for Lothsahn');
   sessions.send(w.info.id, 'hello', 'human', undefined, { requestedBy: r(BEN) });

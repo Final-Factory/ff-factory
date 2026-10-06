@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { capacityLine, fleetOf } from '../shared/fleet.ts';
-import type { Machine, MachineSandbox, Sandbox, SessionInfo, SessionStatus, SystemStats } from '../shared/types.ts';
+import type { Machine, MachineSandbox, SessionInfo, SessionStatus, SystemStats } from '../shared/types.ts';
 
 const T = '2026-09-29T10:00:00.000Z';
 
@@ -17,19 +17,6 @@ const session = (id: string, status: SessionStatus, where: Partial<SessionInfo> 
   costUsd: 0,
   pendingPermissions: [],
   ...where,
-});
-
-const hostSandbox = (id: string, purpose: string, sessionIds: string[] = [], unity: Sandbox['unity']['state'] = 'stopped'): Sandbox => ({
-  id,
-  name: id,
-  branch: `sandbox/${id}`,
-  base: 'develop',
-  path: `D:/ffsb/${id}`,
-  purpose,
-  status: 'ready',
-  createdAt: T,
-  unity: { state: unity },
-  sessionIds,
 });
 
 const machineSandbox = (id: string, purpose: string, sessionIds: string[] = [], unity: MachineSandbox['unity']['state'] = 'stopped'): MachineSandbox => ({
@@ -60,12 +47,10 @@ const machine = (id: string, extra: Partial<Machine> = {}): Machine => ({
   ...extra,
 });
 
-const system = { hostname: 'BEAST', platform: 'win32 10.0.26100', limits: { maxUnity: 4, maxSessions: 8, maxSandboxes: 10 } } as SystemStats;
+const system = { hostname: 'BEAST', platform: 'win32 10.0.26100' } as SystemStats;
 
 test('fleet: the host first, then each machine, with sandboxes, live agents and the main clone', () => {
   const sessions = [
-    session('busy', 'running', { sandboxId: 'alpha' }),
-    session('old', 'stopped', { sandboxId: 'alpha' }),
     session('ask', 'waiting_permission', { machineId: 'lothdesktop', machineSandbox: 'sb1', pendingPermissions: [{ requestId: 'r', toolName: 'Bash', input: {}, createdAt: T }] }),
     session('main', 'idle', { machineId: 'lothdesktop' }),
     session('duty', 'running', { machineId: 'lothdesktop', kind: 'standing', standingId: 'st' }),
@@ -74,7 +59,6 @@ test('fleet: the host first, then each machine, with sandboxes, live agents and 
   const fleet = fleetOf({
     system,
     sessions,
-    sandboxes: [hostSandbox('free1', 'unused'), hostSandbox('alpha', 'Belt splitter', ['busy', 'old'], 'running')],
     machines: [
       machine('lothdesktop', {
         name: 'LothDesktop',
@@ -98,15 +82,12 @@ test('fleet: the host first, then each machine, with sandboxes, live agents and 
   );
 
   const [host, loth, m3] = fleet;
-  // In-use sandboxes first; a stopped agent is only counted.
-  assert.deepEqual(host.sandboxes.map((s) => [s.key, s.free]), [['alpha', false], ['free1', true]]);
-  assert.deepEqual(host.sandboxes[0].agents.live.map((s) => s.id), ['busy']);
-  assert.equal(host.sandboxes[0].agents.stopped, 1);
-  assert.equal(host.editors, 1);
-  assert.equal(capacityLine(host), '2/10 sandboxes · 1/4 editors');
-  assert.deepEqual([host.live, host.busy, host.attention], [1, 1, 0]);
+  // The portal's own host, with no daemon of its own: it holds no sandboxes (w510).
+  assert.deepEqual(host.sandboxes, []);
+  assert.equal(capacityLine(host), 'orchestrators only');
+  assert.deepEqual([host.live, host.busy, host.attention], [0, 0, 0]);
 
-  // A machine sandbox is keyed "<machine>/<id>" and shows the branch git reports.
+  // A machine sandbox is keyed "<machine>/<id>" and shows the branch git reports; in-use sandboxes first.
   assert.deepEqual(loth.sandboxes.map((s) => [s.key, s.branch, s.free]), [['lothdesktop/sb1', 'feature/sb1', false], ['lothdesktop/sb2', 'feature/sb2', true]]);
   assert.equal(loth.sandboxes[0].attention, 1);
   // The main clone: its own workers, not the sandbox's agents nor the standing agent; the failed one is counted.
@@ -123,16 +104,20 @@ test('fleet: the host first, then each machine, with sandboxes, live agents and 
 test('fleet: a labelled sandbox, or one with a live agent, is never free', () => {
   const fleet = fleetOf({
     system,
-    sessions: [session('idle', 'idle', { sandboxId: 'spare' })],
-    sandboxes: [hostSandbox('spare', 'unused', ['idle']), hostSandbox('named', 'Shader work'), hostSandbox('empty', '')],
-    machines: [],
+    sessions: [session('idle', 'idle', { machineId: 'lothdesktop', machineSandbox: 'spare' })],
+    machines: [
+      machine('lothdesktop', {
+        sandboxRoot: 'D:/work/ffsb',
+        sessionIds: ['idle'],
+        sandboxes: [machineSandbox('spare', 'unused', ['idle']), machineSandbox('named', 'Shader work'), machineSandbox('empty', '')],
+      }),
+    ],
   });
-  assert.deepEqual(fleet[0].sandboxes.map((s) => [s.key, s.free]), [['spare', false], ['named', false], ['empty', true]]);
+  assert.deepEqual(fleet[1].sandboxes.map((s) => [s.key, s.free]), [['lothdesktop/spare', false], ['lothdesktop/named', false], ['lothdesktop/empty', true]]);
 });
 
-test('fleet: counts without a known limit read naturally (a server from before maxSandboxes)', () => {
-  const old = { ...system, limits: { maxUnity: 2, maxSessions: 4 } } as SystemStats;
-  const fleet = fleetOf({ system: old, sessions: [], sandboxes: [hostSandbox('a', 'x')], machines: [] });
-  assert.equal(capacityLine(fleet[0]), '1 sandbox · 0/2 editors');
-  assert.equal(fleetOf({ sessions: [], sandboxes: [], machines: [] })[0].name, 'This host');
+test('fleet: the portal with no daemon of its own and no stats is "This host", running the orchestrators only (w510)', () => {
+  const [host] = fleetOf({ sessions: [], machines: [] });
+  assert.equal(host.name, 'This host');
+  assert.equal(capacityLine(host), 'orchestrators only');
 });
