@@ -24,7 +24,6 @@ import { fileURLToPath } from 'node:url';
 import { LABEL, MIN_NODE, bundle, macControlScript, macProbeScript, macReloadLines, nodeSupport, parseMacProbe, parseWinProbe, plist } from '../../server/machineDeploy.ts';
 import * as win from '../../server/machineDeployWin.ts';
 import type { SandboxPoolSettings } from '../../shared/types.ts';
-import { slotsPointer } from '../../machine/unitySlots.ts';
 
 export const LAYOUT_VERSION = 1;
 export const DEFAULT_REPO = 'https://github.com/Final-Factory/FinalFactory.git';
@@ -616,11 +615,6 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   writeManifest(l.root, m);
   const d = isWin ? await installDaemonWin(o, l, id, f.probe) : await installDaemonMac(o, l, id, f.probe);
   say(`Daemon ${d.version} installed as ${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`}${d.started ? ' and started' : ' (it starts at the next logon)'}.`);
-  // The Unity slots mailbox is under the root: scripts outside the daemon (the nightly harness, a build by hand) find it
-  // through this pointer, or they would run without a slot (w469, docs/unity-lifecycle.md "Unity slots").
-  const slots = writeSlotsPointer(l);
-  noteOutside(m, { kind: 'file', name: slots, note: 'the Unity slots mailbox for scripts outside the daemon' });
-  writeManifest(l.root, m);
 
   // 5. Windows Firewall: the fixed slot paths and the Unity editors, once.
   if (isWin && o.firewall) {
@@ -800,7 +794,6 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
     fs.rmSync(macSlotConfig(), { force: true });
     say(`Removed ${macSlotConfig()}.`);
   }
-  if (removeSlotsPointer(l.root)) say(`Removed ${slotsPointer()}.`);
 
   // 5. The root itself: rmdir /s and rm -rf unlink junctions and symlinks, they never follow them.
   process.chdir(os.tmpdir());
@@ -858,7 +851,6 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
       group(UNITY_GROUP, get('unityRules')),
       { what: `firewall rules naming a path in the root`, present: Number(get('rootRules')) > 0, detail: `${get('rootRules')} rule(s)` },
       { what: 'slot config %ProgramData%\\FinalFactory\\player-slots.json pointing into the root', present: !!cfgRoot && cfgRoot.toLowerCase().startsWith(l.root.toLowerCase()), detail: cfgRoot || 'none' },
-      slotsPointerItem(l.root),
       { what: 'processes whose command line names the root', present: Number(get('procs')) > 0, detail: get('procs') },
       { what: 'HKCU Run entries naming the root', present: Number(get('runKeys')) > 0, detail: get('runKeys') },
     );
@@ -872,46 +864,10 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
       { what: `LaunchAgent ${service} loaded`, present: loaded },
       { what: 'processes whose command line names the root', present: procs > 0, detail: String(procs) },
       { what: `slot config ${macSlotConfig()} pointing into the root`, present: !!slotConfigRoot(macSlotConfig())?.startsWith(l.root), detail: slotConfigRoot(macSlotConfig()) ?? 'none' },
-      slotsPointerItem(l.root),
     );
   }
   return items;
 }
-
-/** The Unity slots pointer for scripts outside the daemon (machine/unitySlots.ts slotsPointer): `{ "dir": <root>/daemon/unity-slots }`. Exported for tests. */
-export function writeSlotsPointer(l: Pick<Layout, 'daemon'>, home = os.homedir()): string {
-  const file = slotsPointer(home);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ dir: path.join(l.daemon, 'unity-slots') }, null, 2) + '\n');
-  return file;
-}
-
-/** Remove the Unity slots pointer when it points into `root` (another install's is left). Returns whether it did. Exported for tests. */
-export function removeSlotsPointer(root: string, home = os.homedir()): boolean {
-  const dir = slotsPointerDir(home);
-  if (!dir || !pathKey(dir).startsWith(pathKey(root))) return false;
-  fs.rmSync(slotsPointer(home), { force: true });
-  return true;
-}
-
-/** The folder the Unity slots pointer names, if there is one. */
-function slotsPointerDir(home = os.homedir()): string | undefined {
-  try {
-    const dir = (JSON.parse(fs.readFileSync(slotsPointer(home), 'utf8')) as { dir?: unknown }).dir;
-    return typeof dir === 'string' ? dir : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** The leftover check's line for the Unity slots pointer (w469). */
-function slotsPointerItem(root: string) {
-  const dir = slotsPointerDir();
-  return { what: `Unity slots pointer ${slotsPointer()} pointing into the root`, present: !!dir && pathKey(dir).startsWith(pathKey(root)), detail: dir ?? 'none' };
-}
-
-/** A path as compared on this OS: case and either slash on Windows. */
-const pathKey = (p: string) => (process.platform === 'win32' ? p.replace(/\\/g, '/').toLowerCase() : p);
 
 /** Where scripts/nightly/player_slots.py reads a Mac's slot root (its config_path()). */
 export const macSlotConfig = (home = os.homedir()) => path.join(home, '.config', 'finalfactory', 'player-slots.json');

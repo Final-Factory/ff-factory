@@ -44,7 +44,6 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 | The service | scheduled task `FFFactoryDaemon` (at logon, the user's interactive session, not elevated) | LaunchAgent `com.fffactory.daemon` (`~/Library/LaunchAgents`) |
 | Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile) and group "Final Factory Unity editors" (each Unity editor the Hub has) | none |
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
-| The Unity slots pointer for scripts outside the daemon: `{ "dir": "<root>\daemon\unity-slots" }`, read by `unity-slot` and the game's `scripts/unity_slot.py` when `FF_UNITY_SLOTS` is not set, so the nightly harness or a build by hand waits its turn instead of running ungated (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)) | `%USERPROFILE%\.config\finalfactory\unity-slots.json` | `~/.config/finalfactory/unity-slots.json` |
 | The portal's record | removed through `POST /machine/unenroll` | the same |
 
 ## Install

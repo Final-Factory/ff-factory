@@ -12,8 +12,7 @@ import { installScript, taskName, uninstallScript } from '../server/machineDeplo
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { claudeSlug, plan, rehome, sameVolume, type OldLayout } from './worker/migrate.ts';
-import { credentialId, daemonJson, gitVersion, layoutOf, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
-import { slotsPointer } from '../machine/unitySlots.ts';
+import { credentialId, daemonJson, gitVersion, layoutOf, noteOutside, parseArgs, preflightProblems, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', slots: 8, maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -218,22 +217,5 @@ test('worker migration: a sandbox moves to the root\'s clone with its commits, s
     assert.equal(git(l.repo, 'log', '--oneline', 'sandbox/sb1').split('\n').filter(Boolean).length, 2, 'the unpushed commit came along');
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test('worker install: the Unity slots pointer leads scripts outside the daemon to the root\'s mailbox; uninstall removes only its own (w469)', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-wslots-'));
-  try {
-    const root = path.join(home, 'ff-worker');
-    const file = writeSlotsPointer({ daemon: path.join(root, 'daemon') }, home);
-    assert.equal(file, slotsPointer(home));
-    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { dir: path.join(root, 'daemon', 'unity-slots') });
-    assert.equal(removeSlotsPointer(path.join(home, 'other-root'), home), false, "another install's root: left");
-    assert.ok(fs.existsSync(file));
-    assert.equal(removeSlotsPointer(root, home), true);
-    assert.equal(fs.existsSync(file), false);
-    assert.equal(removeSlotsPointer(root, home), false, 'none left: nothing to do');
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
   }
 });

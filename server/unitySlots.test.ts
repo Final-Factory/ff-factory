@@ -19,7 +19,6 @@ import {
   reqFile,
   shimScripts,
   slotsDir,
-  slotsPointer,
   splitArgs,
   unityProcesses,
   type ArbiterDeps,
@@ -396,18 +395,6 @@ test('unity slots: CLI arguments, the shims and the mailbox folder', () => {
   assert.match(s.cmd, /^@echo off\r\n.*\r\n"C:\\Program Files\\nodejs\\node\.exe" "C:\\Users\\x\\\.ff-factory\\app\\machine\\unitySlots\.ts" %\*\r\n$/s);
   assert.equal(slotsDir({}, '/home/u'), path.join('/home/u', '.ff-factory', 'unity-slots'));
   assert.equal(slotsDir({ FF_UNITY_SLOTS: '/tmp/s' }, '/home/u'), '/tmp/s');
-});
-
-test('unity slots: a worker-root install\'s mailbox is found through its pointer by scripts outside the daemon', (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slothome-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const rootSlots = path.join(home, 'ff-worker', 'daemon', 'unity-slots');
-  fs.mkdirSync(path.dirname(slotsPointer(home)), { recursive: true });
-  fs.writeFileSync(slotsPointer(home), JSON.stringify({ dir: rootSlots }));
-  assert.equal(slotsDir({}, home), path.join(home, '.ff-factory', 'unity-slots'), 'a pointer to a folder that is gone (an uninstalled root) is ignored');
-  fs.mkdirSync(rootSlots, { recursive: true });
-  assert.equal(slotsDir({}, home), rootSlots, 'the nightly harness and a build by hand find the root\'s mailbox');
-  assert.equal(slotsDir({ FF_UNITY_SLOTS: '/tmp/s' }, home), '/tmp/s', "an agent's own FF_UNITY_SLOTS wins");
 });
 
 test('unity slots: system_status, the Capacity block and the dashboard say "editors 4 of 3: 1 interactive, 3 batch"', () => {
