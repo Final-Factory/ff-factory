@@ -35,7 +35,10 @@ on:
         options: [representative, full, nightly]
 
 concurrency:
-  group: vm-${{ github.event.pull_request.number || github.ref }}
+  # A newer run replaces an older one of the same kind (a PR's, or the default branch's after merges in a row), but the
+  # nightly and a run by hand have groups of their own: a merge during the nightly cancelled it (run 37437444656), and
+  # with it the one production-timing job.
+  group: vm-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
