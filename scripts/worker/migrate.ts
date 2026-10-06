@@ -292,7 +292,9 @@ async function snapshot(dir: string) {
  */
 export async function rehome(dir: string, id: string, l: Layout, before: Awaited<ReturnType<typeof snapshot>>, oldGitFile: string) {
   const ref = before.branch || `refs/ffw/${id}`;
-  // An entry a cut-off earlier run left (its folder gone) would hold the branch, or push this one's name to "<id>1".
+  // An entry an earlier, rolled-back run left in the root's clone would hold the branch, or push this one's name to
+  // "<id>1": this sandbox's own entry is made again below, so any old one goes first (only in the root's clone).
+  fs.rmSync(path.join(l.repo, 'worktrees', id), { recursive: true, force: true });
   await git(l.repo, ['worktree', 'prune']);
   await git(l.repo, ['fetch', '--no-tags', '--quiet', dir, `+${before.head}:refs/heads/${ref.replace(/^refs\/heads\//, '')}`]);
   const tmp = path.join(l.sandboxes, '.ffw-rehome', id);
