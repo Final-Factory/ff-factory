@@ -783,6 +783,7 @@ export async function check(root: string, m?: Manifest): Promise<CheckItem[]> {
       `$ErrorActionPreference = 'Continue'
 $t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
 "task=$([bool]$t)"
+"taskKey=$(Test-Path ('HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache\\Tree\\' + ${win.psq(service)}))"
 "slotRules=$(@(Get-NetFirewallRule -Group ${win.psq(SLOT_GROUP)} -ErrorAction SilentlyContinue).Count)"
 "unityRules=$(@(Get-NetFirewallRule -Group ${win.psq(UNITY_GROUP)} -ErrorAction SilentlyContinue).Count)"
 $root = ${win.psq(l.root)}
@@ -804,6 +805,7 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     const group = (g: string, n: string) => ({ what: `firewall group "${g}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
+      { what: `the task's registry entry (HKLM\\...\\Schedule\\TaskCache\\Tree\\${service})`, present: get('taskKey') === 'True' },
       group(SLOT_GROUP, get('slotRules')),
       group(UNITY_GROUP, get('unityRules')),
       { what: `firewall rules naming a path in the root`, present: Number(get('rootRules')) > 0, detail: `${get('rootRules')} rule(s)` },
@@ -856,7 +858,7 @@ const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <f
             [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup]
             [--unity-editor-root <dir>] [--unity-path <exe>]
   uninstall [--yes] [--force] [--keep-registration]
-  check     (lists what of the install exists on this computer)
+  check     [--service <task or label>] (lists what of the install exists on this computer)
 The OS wrappers (scripts/worker/install.ps1, install.sh) ask for these and pipe the credential.`;
 
 export async function main(argv = process.argv.slice(2)) {
@@ -885,7 +887,9 @@ export async function main(argv = process.argv.slice(2)) {
   } else if (cmd === 'check') {
     if (!opts.root) throw new Error(USAGE);
     const root = path.resolve(opts.root);
-    report(await check(root, readManifest(root)), readManifest(root));
+    // After an uninstall the manifest is gone: --service names what to look for.
+    const m = readManifest(root) ?? (opts.service ? ({ service: opts.service, outside: [] } as unknown as Manifest) : undefined);
+    report(await check(root, m), m);
   } else {
     say(USAGE);
   }
