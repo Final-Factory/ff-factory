@@ -12,7 +12,7 @@
 # --max-unity N --slots N --service LABEL --source CHECKOUT --ref BRANCH --credential-file FILE (unattended tests)
 set -euo pipefail
 
-ROOT="" PORTAL="" MAXSB="" MAXAG="" MAXU="" SLOTS=8 SERVICE=com.fffactory.daemon SOURCE="" REF=main CREDFILE="" REPO=https://github.com/Final-Factory/FinalFactory.git
+ROOT="" PORTAL="" MAXSB="" MAXAG="" MAXU="" SLOTS=8 SERVICE=com.fffactory.daemon SOURCE="" REF=main CREDFILE="" EXTRA="" REPO=https://github.com/Final-Factory/FinalFactory.git
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT=$2; shift 2 ;;
@@ -25,6 +25,7 @@ while [ $# -gt 0 ]; do
     --source) SOURCE=$2; shift 2 ;;
     --ref) REF=$2; shift 2 ;;
     --repo-url) REPO=$2; shift 2 ;;
+    --absolute-worktrees) EXTRA=--absolute-worktrees; shift ;;
     --credential-file) CREDFILE=$2; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -70,4 +71,4 @@ trap '[ -n "$TEMP" ] && rm -rf "$TEMP"' EXIT
 FLAGS=(--disable-warning=ExperimentalWarning)
 [ "$BEST" -ge 23006 ] || FLAGS=(--experimental-strip-types "${FLAGS[@]}")
 printf '%s\n' "$CRED" | "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" install --root "$ROOT" --portal-url "$PORTAL" \
-  --max-sandboxes "$MAXSB" --max-agents-per-sandbox "$MAXAG" --max-unity "$MAXU" --slots "$SLOTS" --service "$SERVICE" --repo-url "$REPO" --credential-stdin
+  --max-sandboxes "$MAXSB" --max-agents-per-sandbox "$MAXAG" --max-unity "$MAXU" --slots "$SLOTS" --service "$SERVICE" --repo-url "$REPO" --credential-stdin ${EXTRA:+"$EXTRA"}

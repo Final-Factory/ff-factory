@@ -150,6 +150,12 @@ export interface InstallOptions {
   carry?: Record<string, unknown>;
   /** A migration replaces the old daemon's service on purpose (worker.ts migrate). */
   replacesService?: boolean;
+  /**
+   * Worktrees with absolute paths (git's default) instead of relative ones. Relative paths let the root move, but git
+   * then marks the clone extensions.relativeWorktrees, which every git older than 2.48 refuses to open: a computer
+   * whose daemon or tools still use an older git needs this (a test install beside a live daemon, say).
+   */
+  absoluteWorktrees?: boolean;
   unityEditorRoot?: string;
   unityPath?: string;
 }
@@ -436,15 +442,15 @@ async function lockDown(dir: string, sid?: string) {
   }
 }
 
-async function cloneRepo(l: Layout, url: string) {
+async function cloneRepo(l: Layout, url: string, relative = true) {
   if (!fs.existsSync(path.join(l.repo, 'HEAD'))) {
     say(`Cloning ${url} into ${l.repo} (bare; about 1.3 GB of history, git's progress below)...`);
     await must('git clone', 'git', ['clone', '--bare', '--progress', url, l.repo], { live: true });
   }
   // A bare clone has no fetch refspec: sandboxes' branches stay local, origin's go to refs/remotes/origin (docs/worker-root.md 2.3).
   await must('git config', 'git', ['-C', l.repo, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
-  // Worktrees record relative paths (git 2.48+), so the root can be moved or renamed.
-  await must('git config', 'git', ['-C', l.repo, 'config', 'worktree.useRelativePaths', 'true']);
+  // Worktrees record relative paths (git 2.48+), so the root can be moved or renamed (absoluteWorktrees: git's default).
+  await must('git config', 'git', ['-C', l.repo, 'config', 'worktree.useRelativePaths', relative ? 'true' : 'false']);
   await must('git lfs install', 'git', ['-C', l.repo, 'lfs', 'install', '--local']);
   say('Fetching origin...');
   await must('git fetch', 'git', ['-C', l.repo, 'fetch', '--prune', '--progress', 'origin'], { live: true });
@@ -594,7 +600,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   await lockDown(l.secrets, f.probe.sid);
 
   // 3. The game repo, bare, and the installer's own checkout.
-  await cloneRepo(l, o.repoUrl);
+  await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees);
   await syncSource(l, from);
 
   if (phase === 'prepare') return true;
@@ -871,7 +877,7 @@ async function readCredential(): Promise<string> {
 
 const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
-            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup]
+            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees]
             [--unity-editor-root <dir>] [--unity-path <exe>]
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
@@ -897,6 +903,7 @@ export async function main(argv = process.argv.slice(2)) {
       service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
       firewall: !flags.has('no-firewall'),
       noCleanup: flags.has('no-cleanup'),
+      absoluteWorktrees: flags.has('absolute-worktrees'),
       unityEditorRoot: opts['unity-editor-root'],
       unityPath: opts['unity-path'],
     });
@@ -926,6 +933,7 @@ export async function main(argv = process.argv.slice(2)) {
           service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
           firewall: !flags.has('no-firewall'),
           noCleanup: flags.has('no-cleanup'),
+          absoluteWorktrees: flags.has('absolute-worktrees'),
         },
       });
   } else if (cmd === 'check') {

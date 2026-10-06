@@ -29,7 +29,8 @@ param(
     [string]$RepoUrl = 'https://github.com/Final-Factory/FinalFactory.git',
     [string]$CredentialFile = '',
     [switch]$NoFirewall,
-    [switch]$NoCleanup
+    [switch]$NoCleanup,
+    [switch]$AbsoluteWorktrees
 )
 $ErrorActionPreference = 'Stop'
 
@@ -111,6 +112,7 @@ $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'install', '-
     '--slots', $Slots, '--service', $Service, '--repo-url', $RepoUrl, '--credential-stdin')
 if ($NoFirewall) { $argv += '--no-firewall' }
 if ($NoCleanup) { $argv += '--no-cleanup' }
+if ($AbsoluteWorktrees) { $argv += '--absolute-worktrees' }
 try {
     $credential | & $node.Path @argv
     $code = $LASTEXITCODE

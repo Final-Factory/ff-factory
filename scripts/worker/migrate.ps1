@@ -26,7 +26,8 @@ param(
     [switch]$Cleanup,
     [switch]$Legacy,
     [switch]$NoFirewall,
-    [switch]$NoCleanup
+    [switch]$NoCleanup,
+    [switch]$AbsoluteWorktrees
 )
 $ErrorActionPreference = 'Stop'
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -49,7 +50,7 @@ if ($FromService) { $argv += @('--from-service', $FromService) }
 if ($OldSlots) { $argv += @('--old-slots', $OldSlots) }
 if ($Nightly.Count) { $argv += @('--nightly', ($Nightly -join ';')) }
 if ($PortalUrl) { $argv += @('--portal-url', $PortalUrl) }
-foreach ($s in @(@('DryRun', 'dry-run'), @('Rollback', 'rollback'), @('Cleanup', 'cleanup'), @('Legacy', 'legacy'), @('NoFirewall', 'no-firewall'), @('NoCleanup', 'no-cleanup'))) {
+foreach ($s in @(@('DryRun', 'dry-run'), @('Rollback', 'rollback'), @('Cleanup', 'cleanup'), @('Legacy', 'legacy'), @('NoFirewall', 'no-firewall'), @('NoCleanup', 'no-cleanup'), @('AbsoluteWorktrees', 'absolute-worktrees'))) {
     if ((Get-Variable -Name $s[0] -ValueOnly).IsPresent) { $argv += "--$($s[1])" }
 }
 & $node @argv
