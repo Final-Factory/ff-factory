@@ -81,28 +81,6 @@ export function editorVerdict(o: EditorObservation, now: number, t: HangThreshol
   return { kind: 'ok' };
 }
 
-type ProcLike = { pid: number; name: string; cmd: string };
-
-/**
- * Unity's bug reporter open for a project (it starts after a crash with --unity_project "<path>"): crash
- * evidence. UnityCrashHandler64 is not: on Windows it runs beside every healthy editor.
- */
-export function crashReportersFor(procs: ProcLike[], project: string): ProcLike[] {
-  const want = normProject(project);
-  return procs.filter((p) => /UnityBugReporter|Unity Bug Reporter/i.test(`${p.name} ${p.cmd}`) && p.cmd.replace(/\\/g, '/').toLowerCase().includes(want));
-}
-
-/** What a dead or killed editor leaves behind: its bug reporter, and crash handlers attached to it (--attach <pid>) or naming the project. */
-export function crashLeftoversFor(procs: ProcLike[], project: string, editorPid?: number): ProcLike[] {
-  const want = normProject(project);
-  return procs.filter((p) => {
-    const text = `${p.name} ${p.cmd}`;
-    if (!/UnityBugReporter|Unity Bug Reporter|UnityCrashHandler/i.test(text)) return false;
-    if (p.cmd.replace(/\\/g, '/').toLowerCase().includes(want)) return true;
-    return editorPid !== undefined && new RegExp(`--attach\\s+${editorPid}\\b`).test(p.cmd);
-  });
-}
-
 /** At most `max` automatic restarts within `windowMinutes`; returns whether one more is allowed now. */
 export function restartAllowed(recent: { at: string; auto?: boolean }[], now: number, max: number, windowMinutes: number): boolean {
   return recent.filter((r) => r.auto !== false && now - Date.parse(r.at) < windowMinutes * 60_000).length < max;

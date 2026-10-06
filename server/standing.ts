@@ -63,7 +63,6 @@ export interface SessionPort {
   create(opts: { kind: SessionKind; title: string; standingId?: string; model?: string; permissionMode: PermissionMode; options: OptionsFactory }): SessionLike;
   get(id: string): SessionLike;
   send(id: string, text: string, from: 'human' | 'orchestrator' | 'system', images?: undefined, opts?: { requestedBy?: Requester }): string;
-  liveAgents(): number;
   remove(id: string): void;
 }
 

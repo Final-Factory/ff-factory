@@ -78,11 +78,9 @@ export interface ResumeFile {
   orchestratorBusy: boolean;
   /**
    * Set when the stop was NOT clean (a power cut, a crash, a kill): what happened, in words. The file is then
-   * made by the next server from what the last one left (the cut-off sessions, the editors that were up).
+   * made by the next server from what the last one left (the cut-off sessions).
    */
   cause?: string;
-  /** Sandboxes whose editors were up and died with the stop: started again before their agents resume. */
-  editors?: string[];
 }
 
 export const DRAIN_TAG = '[app restart pending]';
@@ -119,16 +117,12 @@ export function orchestratorWasBusy(sessions: SessionSnapshot[]): boolean {
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
 /** The message a resumed worker gets. */
-export function resumeMessage(e: ResumeEntry, f: Pick<ResumeFile, 'reason' | 'at' | 'cause' | 'editors'>): string {
+export function resumeMessage(e: ResumeEntry, f: Pick<ResumeFile, 'reason' | 'at' | 'cause'>): string {
   const when = new Date(f.at).toLocaleString();
-  const editorRestarted = !!e.sandboxId && !!f.editors?.includes(e.sandboxId);
-  // Sessions on a machine (one of the user's Macs) have a clone of their own and no managed Unity editor.
+  // A worker is on a machine (its daemon kept its working tree and its editor); the portal runs only orchestrators (w510).
+  const tree = e.machineId ? 'your working tree and your history are intact' : 'your history is intact';
   const lines = [
-    f.cause
-      ? `${f.cause}. The app is back and resumes you now. Your process was stopped; ${e.machineId ? 'your working tree' : 'the worktree'} and your history are intact${editorRestarted ? ', and your Unity editor is being started again: wait for it (mcp__sandbox__wait_for_unity, until "ready") before any Unity call' : e.machineId ? '' : '; your Unity editor was not running'}.`
-      : e.machineId
-        ? `The app restarted (${f.reason} at ${when}). Your process was stopped; your working tree and your history are intact.`
-        : `The app restarted (${f.reason} at ${when}). Your process was stopped; the worktree, the Unity editor and your history are intact.`,
+    f.cause ? `${f.cause}. The app is back and resumes you now. Your process was stopped; ${tree}.` : `The app restarted (${f.reason} at ${when}). Your process was stopped; ${tree}.`,
     e.why === 'drained'
       ? 'You were asked to pause for the restart; pick the task up again.'
       : e.why === 'background'
@@ -197,7 +191,6 @@ export function restartSummary(f: ResumeFile, outcomes: ResumeOutcome[], update:
   if (ok.length) parts.push(`Resumed automatically: ${ok.map(name).join(', ')}.`);
   else parts.push('No worker sessions needed resuming.');
   if (bad.length) parts.push(`Could not resume: ${bad.map((o) => `${name(o)}: ${o.error}`).join('; ')}.`);
-  if (f.editors?.length) parts.push(`Unity editors that were up: ${f.editors.join(', ')} (started again before their agents resumed).`);
   if (f.orchestratorBusy) parts.push('You were mid-turn yourself when it stopped; check what you were doing.');
   parts.push(...notes);
   parts.push('Tell the user in a line if anything needs them; otherwise carry on.');

@@ -317,30 +317,6 @@ export function decide(
   return { click: button };
 }
 
-/**
- * Who resolves a stuck editor the watchdog did not answer itself: its agents, through the unity tool (answer_dialog
- * with one of `buttons`, or a restart), unless the dialog is one only a person can resolve (`person`). A startup stall
- * is the agents' too: a restart is the answer. Only the automatic restart limit, an elevated editor and the `person`
- * dialogs need someone at the desktop.
- */
-export function agentAnswers(b: { reason: string; dialogId?: string; buttons?: string[] }): { person: boolean; buttons: string[] } {
-  if (b.reason === 'stalled') return { person: false, buttons: [] };
-  if (b.reason !== 'dialog') return { person: true, buttons: [] };
-  const known = KNOWN_DIALOGS.find((k) => k.id === b.dialogId);
-  if (known?.person) return { person: true, buttons: [] };
-  return { person: false, buttons: (b.buttons ?? []).filter((x) => !known?.never?.button.test(norm(x))) };
-}
-
-/** Why an agent may not press `button` in this dialog through answer_dialog, or undefined when it may. */
-export function checkAgentAnswer(d: Pick<Dialog, 'title' | 'buttons' | 'known'>, button: string): string | undefined {
-  const name = `"${d.title || 'the dialog'}"`;
-  const real = d.buttons.find((b) => norm(b) === norm(button));
-  if (!real) return `${name} has no "${button}" button (its buttons: ${d.buttons.map((b) => `"${norm(b)}"`).join(', ') || 'none'})`;
-  if (d.known?.person) return `${name} needs a person: ${d.known.advice}`;
-  if (d.known?.never?.button.test(norm(real))) return `"${norm(real)}" is never pressed in ${name}: ${d.known.never.why}`;
-  return undefined;
-}
-
 /** Unity's main window among an editor's windows: its own UnityContainerWndClass window whose title names Unity, else its first one. */
 export function mainWindow(windows: EditorWindow[], pid: number): EditorWindow | undefined {
   const own = windows.filter((w) => w.pid === pid && w.class === 'UnityContainerWndClass');
@@ -365,11 +341,6 @@ export function describeDialog(d: Dialog, max = 400): string {
   const text = d.text.replace(/\s+/g, ' ').trim();
   const s = text ? `${d.title || '(untitled dialog)'}: ${text}` : d.title || '(untitled dialog)';
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
-}
-
-/** Whether a starting editor's log has been silent for too long. */
-export function isStalled(lastGrowthMs: number, nowMs: number, stallMinutes: number): boolean {
-  return stallMinutes > 0 && nowMs - lastGrowthMs >= stallMinutes * 60_000;
 }
 
 // ---------------------------------------------------------------- Windows side

@@ -37,9 +37,4 @@ const branch = cfg.defaultBase.replace(/^origin\//, '');
 await run('git', ['-C', base, 'checkout', '--detach', `origin/${branch}`]);
 console.log(`base clone at origin/${branch}`);
 
-if (cfg.librarySeed && !fs.existsSync(cfg.librarySeed)) {
-  console.warn(`WARNING: librarySeed ${cfg.librarySeed} does not exist; new sandboxes will import Unity from cold (30-60 min).`);
-}
-const unity = cfg.unity.editorPath.includes('{version}') ? path.dirname(path.dirname(cfg.unity.editorPath.split('{version}')[0])) : cfg.unity.editorPath;
-if (!fs.existsSync(unity)) console.warn(`WARNING: Unity editor path ${unity} not found.`);
 console.log('setup done.');

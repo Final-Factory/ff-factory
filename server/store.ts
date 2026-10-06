@@ -12,6 +12,10 @@ bus.setMaxListeners(100);
 export const emit = (e: ServerEvent) => bus.emit('event', e);
 
 interface Persisted {
+  /**
+   * Sandboxes the portal held itself before w510. None is made any more: the list stays in the file (an older build
+   * needs it to read the file, and records are kept, not deleted) and is named once at startup if it is not empty.
+   */
   sandboxes: Sandbox[];
   sessions: SessionInfo[];
   /** The dispatcher (docs/orchestrators.md); before per-person orchestrators, the one shared orchestrator. */
@@ -51,7 +55,8 @@ const WORK_SAVE = { delayMs: 300, intervalMs: 1000 };
  * damaged one replaced by the newest good version at load.
  */
 export class Store {
-  readonly sandboxes = new Map<string, Sandbox>();
+  /** Sandboxes the portal held itself before w510 (Persisted.sandboxes): kept as they were, never used. */
+  readonly leftoverSandboxes: Sandbox[] = [];
   readonly sessions = new Map<string, SessionInfo>();
   readonly standing = new Map<string, StandingAgent>();
   readonly delegations = new Map<string, DelegationRequest>();
@@ -81,7 +86,7 @@ export class Store {
     this.workFile = new SnapshotFile(workFile, () => JSON.stringify({ seq: this.workSeq, items: [...this.work.values()] }, null, 2), { ...WORK_SAVE, label: 'work ledger' });
     const p = readJsonDurable<Persisted>(file, { check: checkState });
     if (p) {
-      for (const s of p.sandboxes) this.sandboxes.set(s.id, s);
+      this.leftoverSandboxes.push(...p.sandboxes);
       for (const s of p.sessions) this.sessions.set(s.id, s);
       this.orchestratorId = p.orchestratorId;
       for (const a of p.standingAgents ?? []) this.standing.set(a.id, a);
@@ -96,18 +101,6 @@ export class Store {
       const restored = dataRecoveries.some((r) => r.file === workFile && r.from);
       this.workSeq = (w.seq ?? 0) + (restored ? 100 : 0);
     }
-  }
-
-  putSandbox(s: Sandbox) {
-    this.sandboxes.set(s.id, s);
-    this.save();
-    emit({ type: 'sandbox', sandbox: s });
-  }
-
-  removeSandbox(id: string) {
-    this.sandboxes.delete(id);
-    this.save();
-    emit({ type: 'sandbox_removed', id });
   }
 
   putSession(s: SessionInfo) {
@@ -339,7 +332,7 @@ export class Store {
 
   private persisted(): Persisted {
     return {
-      sandboxes: [...this.sandboxes.values()],
+      sandboxes: this.leftoverSandboxes,
       sessions: [...this.sessions.values()],
       orchestratorId: this.orchestratorId,
       standingAgents: [...this.standing.values()],
