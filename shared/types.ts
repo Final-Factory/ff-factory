@@ -399,6 +399,8 @@ export interface Machine {
    * clone, sandboxes, player slots, nightly lab and temp. Reported in the daemon's hello; a redeploy keeps it.
    */
   root?: string;
+  /** Its folders before it moved into a root (w513 migration), restored if its daemon comes back without one (a rollback). */
+  preRoot?: { appDir?: string; repoPath: string; tempDir?: string; sandboxRoot?: string; librarySeed?: string };
   /** The daemon's folder (code, logs, agents, daemon.json) when not the default <home>/.ff-factory (add_machine app_dir). */
   appDir?: string;
   /** A folder holding Unity editor versions (<root>/<version>/...), searched before Unity Hub's defaults. */

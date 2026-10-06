@@ -1229,7 +1229,7 @@ export class MachineManager {
         else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
         Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined, relocatedTo: undefined });
         // A worker root install (w513): its folders; a pool folder that changed goes back to it at once.
-        const repool = msg.layout ? adoptLayout(m, msg.layout) : false;
+        const repool = msg.layout ? adoptLayout(m, msg.layout) : leaveRoot(m);
         this.store.putMachine(m);
         if (repool) this.links.get(id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
         const live = new Set(msg.live);
@@ -1756,6 +1756,8 @@ export function machineDir(p: string | undefined, what: string): string | undefi
 export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, { type: 'hello' }>['layout']>): boolean {
   const moved = m.root !== layout.root;
   const before = m.sandboxRoot;
+  // Moving from today's layout into a root (a migration): keep where it was, for a rollback.
+  if (moved && !m.root) m.preRoot = { appDir: m.appDir, repoPath: m.repoPath, tempDir: m.tempDir, sandboxRoot: m.sandboxRoot, librarySeed: m.librarySeed };
   m.root = layout.root;
   if (moved || !m.appDir) m.appDir = layout.appDir;
   if (moved || !m.repoPath) m.repoPath = layout.repoPath;
@@ -1773,6 +1775,21 @@ export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, 
       ...(pool.librarySeed && (moved || !m.librarySeed) ? { librarySeed: pool.librarySeed } : {}),
     });
   }
+  return m.sandboxRoot !== before;
+}
+
+/**
+ * A daemon without a root said hello to a record that has one: the migration into the root was rolled back, and the
+ * old daemon runs again from its old folders. The record gets those back (kept by adoptLayout). Returns whether the
+ * pool's folder changed. Exported for tests.
+ */
+export function leaveRoot(m: Machine): boolean {
+  if (!m.root) return false;
+  const before = m.sandboxRoot;
+  const p = m.preRoot;
+  delete m.root;
+  delete m.preRoot;
+  if (p) Object.assign(m, { appDir: p.appDir, repoPath: p.repoPath, tempDir: p.tempDir, sandboxRoot: p.sandboxRoot, librarySeed: p.librarySeed });
   return m.sandboxRoot !== before;
 }
 

@@ -248,7 +248,7 @@ export interface Journal {
   startedAt: string;
   state: 'prepared' | 'switched' | 'cleaned' | 'rolled-back';
   /** Sandboxes moved: their old path, the new one, and the old .git file kept beside it. */
-  moved: { id: string; from: string; to: string; method: 'rename' | 'copy' }[];
+  moved: { id: string; from: string; to: string; method: 'rename' | 'copy'; armedReimport?: boolean }[];
   renamed: { from: string; to: string }[];
   oldService?: { kind: 'task' | 'launchagent'; name: string; saved: string };
 }
@@ -321,7 +321,9 @@ export async function rehome(dir: string, id: string, l: Layout, before: Awaited
   const same = after.head === before.head && after.branch === before.branch && after.staged === before.staged && after.unstaged === before.unstaged && after.status.join('\n') === before.status.join('\n');
   if (!same) throw new Error(`sandbox ${id}: after the move its git state differs (status ${before.status.length} -> ${after.status.length} lines); rolled back`);
   // The project moved: its Library's script mappings name the old path. The first editor start reimports the scripts.
+  const armed = !fs.existsSync(path.join(dir, 'Assets', '__FFFactoryReimport'));
   armScriptReimport(dir, l.repo);
+  return armed;
 }
 
 // ---------------------------------------------------------------- the old service
@@ -426,7 +428,8 @@ export async function migrate(o: MigrateOptions) {
       else await copyTree(sb.path, to, `sandbox ${sb.id}`, p);
       j.moved.push({ id: sb.id, from: sb.path, to, method: item.method === 'rehome' ? 'rename' : 'copy' });
       writeJournal(l, j);
-      await rehome(to, sb.id, l, before, path.join(to, '.git'));
+      j.moved[j.moved.length - 1].armedReimport = await rehome(to, sb.id, l, before, path.join(to, '.git'));
+      writeJournal(l, j);
       say(`Sandbox ${sb.id}: moved, git now in the root's clone (${before.status.length} changed file(s) kept).`);
     }
     for (const i of items.filter((x) => (x.what === 'Library seed' || x.what === 'nightly lab') && x.to)) {
@@ -470,6 +473,8 @@ export async function rollback(root: string) {
   const m = readManifest(l.root);
   if (m && isWin) await win.psScript(win.LOCAL, win.uninstallScript(l.daemon, { task: m.service, only: true }), { timeoutMs: 3 * 60_000 });
   for (const mv of [...j.moved].reverse()) {
+    // The one-time script reimport the move armed is not the old place's: it goes (the old clone does not exclude it).
+    if (mv.armedReimport) fs.rmSync(path.join(mv.to, 'Assets', '__FFFactoryReimport'), { recursive: true, force: true });
     const pre = path.join(mv.to, '.git.pre-ffw');
     if (fs.existsSync(pre)) {
       fs.rmSync(path.join(mv.to, '.git'), { force: true });
