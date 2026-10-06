@@ -295,6 +295,8 @@ export async function rehome(dir: string, id: string, l: Layout, before: Awaited
   await git(l.repo, ['fetch', '--no-tags', '--quiet', dir, `+${before.head}:refs/heads/${ref.replace(/^refs\/heads\//, '')}`]);
   const tmp = path.join(l.sandboxes, '.ffw-rehome', id);
   fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
+  // An entry a cut-off earlier run left (its folder gone) would push this one's name to "<id>1".
+  await git(l.repo, ['worktree', 'prune']);
   fs.mkdirSync(path.dirname(tmp), { recursive: true });
   await git(l.repo, ['worktree', 'add', '--no-checkout', '--force', tmp, before.branch || before.head]);
   const newGit = fs.readFileSync(path.join(tmp, '.git'), 'utf8');
