@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { failureDetail, psCommand, psq, stdinOf } from '../server/machineDeployWin.ts';
 import {
@@ -79,6 +79,8 @@ export interface Options {
   progressSeconds: number;
   /** How BEAST's files are held still while they are copied (w508): a VSS shadow copy, else a staged copy ("auto"). */
   snapshot: 'auto' | 'vss' | 'copy';
+  /** The stream's compression (w517): zstd level 3, else gzip, else bzip2, else none ("auto"); a named one goes first. */
+  compress: 'auto' | 'zstd' | 'gzip' | 'bzip2' | 'none';
 }
 
 export const DEFAULTS: Omit<Options, 'mode'> = {
@@ -104,6 +106,7 @@ export const DEFAULTS: Omit<Options, 'mode'> = {
   stallSeconds: 120,
   progressSeconds: 5,
   snapshot: 'auto',
+  compress: 'auto',
 };
 
 /** What differs between the VM and a test: the portal's service, its log, the Funnel, the backups, a typed answer. */
@@ -124,6 +127,8 @@ export interface System {
   /** One line typed by a person. */
   ask(prompt: string): Promise<string>;
   out(line: string): void;
+  /** A progress line (w517): on a terminal redrawn in place; elsewhere a plain line now and then. Absent: out(). */
+  live?(line: string): void;
 }
 
 // ---------------------------------------------------------------- running things
@@ -165,6 +170,32 @@ export function run(cmd: string, args: string[], o: { input?: string | Buffer; e
  * its files by line numbers and BEAST writes its own list files: nothing large ever goes to BEAST on stdin.
  */
 export const MAX_STDIN_BYTES = 32 * 1024;
+
+/**
+ * How a stream is compressed (w517, Lothsahn: "use zstd level 3 ... Don't error. Fallback to gzip or bz2 or finally
+ * send uncompressed"). BEAST's tar.exe (bsdtar 3.8.8, built with libzstd, zlib and bz2lib) packs with `remote`; tar
+ * here unpacks with `local`, which needs the program `needs`.
+ */
+export interface Codec {
+  name: 'zstd' | 'gzip' | 'bzip2' | 'none';
+  label: string;
+  remote: string[];
+  local: string[];
+  needs?: string;
+}
+
+export const CODECS: Codec[] = [
+  { name: 'zstd', label: 'zstd level 3', remote: ['--zstd', '--options', 'zstd:compression-level=3'], local: ['--zstd'], needs: 'zstd' },
+  { name: 'gzip', label: 'gzip', remote: ['-z'], local: ['-z'], needs: 'gzip' },
+  { name: 'bzip2', label: 'bzip2', remote: ['-j'], local: ['-j'], needs: 'bzip2' },
+  { name: 'none', label: 'none', remote: [], local: [] },
+];
+
+/** The codecs to try, best first: a named one, then the rest in order; "none" always last. */
+export function codecOrder(want: Options['compress']): Codec[] {
+  const first = want === 'auto' ? [] : CODECS.filter((c) => c.name === want);
+  return [...first, ...CODECS.filter((c) => !first.includes(c))].filter((c, i, a) => a.indexOf(c) === i);
+}
 
 /** One tar stream from BEAST: what came, how it ended. */
 export interface StreamResult {
@@ -261,12 +292,12 @@ export class Beast {
    * (-n): tar on BEAST reads nothing from it. BEAST's sshd runs commands under cmd.exe (no DefaultShell set), which
    * passes tar's bytes through untouched. A stream with no byte for stallSeconds is ended and reported as stalled.
    */
-  stream(root: string, listPath: string, dest: string, onBytes: (n: number) => void, onStart?: (unpacked: Set<string>) => void): Promise<StreamResult> {
+  stream(root: string, listPath: string, dest: string, onBytes: (n: number) => void, onStart?: (unpacked: Set<string>) => void, codec: Codec = CODECS[CODECS.length - 1]): Promise<StreamResult> {
     fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
     const q = (a: string) => (/\s/.test(a) ? `"${a}"` : a);
-    const ssh = this.spawnSsh(['tar', '-C', q(root), '-cvf', '-', '-T', q(listPath)], true);
+    const ssh = this.spawnSsh(['tar', ...codec.remote, '-C', q(root), '-cvf', '-', '-T', q(listPath)], true);
     // Forward slashes for tar where this runs on Windows (a test against BEAST's own sshd); a no-op in the VM.
-    const untar = spawn('tar', ['-C', process.platform === 'win32' ? dest.replace(/\\/g, '/') : dest, '-xvf', '-', '--no-same-owner', '--no-same-permissions'], { cwd: '/' });
+    const untar = spawn('tar', [...codec.local, '-C', process.platform === 'win32' ? dest.replace(/\\/g, '/') : dest, '-xvf', '-', '--no-same-owner', '--no-same-permissions'], { cwd: '/' });
     const r: StreamResult = { sshCode: -1, untarCode: -1, remoteErr: '', localErr: '', bytes: 0, unpacked: new Set(), stalled: false };
     onStart?.(r.unpacked);
     let last = Date.now();
@@ -739,6 +770,59 @@ export class Migration {
     }
   }
 
+  /** The compression this run uses, chosen at its first copy (w517). */
+  private codec?: Codec;
+
+  /**
+   * zstd level 3, else gzip, else bzip2, else none: the first both sides take, tried on one small file of the copy
+   * (a stream of its own, unpacked aside). Never an error: "none" always works. Says which, and why not the better ones.
+   */
+  private async chooseCodec(root: string, dir: string, all: string, probe: ManifestEntry): Promise<Codec> {
+    if (this.codec) return this.codec;
+    const why: string[] = [];
+    for (const c of codecOrder(this.o.compress)) {
+      if (c.needs && spawnSync(c.needs, ['--version'], { stdio: 'ignore' }).status !== 0) {
+        why.push(`${c.name}: no ${c.needs} here`);
+        continue;
+      }
+      if (c.name === 'none') {
+        this.codec = c;
+        break;
+      }
+      const lr = await this.beast.ps(BATCH_PS, JSON.stringify({ dir, all, out: 'probe.list', spec: indexSpec([probe.index!]) }), 120_000);
+      const listPath = /^list\t(.+)$/m.exec(lr.stdout)?.[1]?.trim();
+      const aside = path.join(this.dir, 'probe');
+      let refused = '';
+      for (let attempt = 1; attempt <= this.o.attempts; attempt++) {
+        fs.rmSync(aside, { recursive: true, force: true });
+        const r = listPath ? await this.beast.stream(root, listPath, aside, () => undefined, undefined, c) : undefined;
+        fs.rmSync(aside, { recursive: true, force: true });
+        if (r && r.untarCode === 0 && [0, 1, 2].includes(r.sshCode) && r.unpacked.has(probe.path)) {
+          this.codec = c;
+          break;
+        }
+        // A broken connection says nothing about the compression: try again; still broken, keep it (the copy's own
+        // retries deal with the connection).
+        if (r && (r.sshCode === 255 || r.stalled)) {
+          if (attempt < this.o.attempts) {
+            this.say(`  compression check (${c.name}): the stream broke off (${tarVerbose(r.remoteErr).errors.slice(-1)[0] ?? `ssh exit ${r.sshCode}`}); trying again`);
+            await sleep(2000);
+            continue;
+          }
+          this.codec = c;
+          break;
+        }
+        refused = r ? (tarVerbose(r.remoteErr).errors.slice(-1)[0] ?? r.localErr.trim().split('\n').slice(-1)[0] ?? `exit ${r.sshCode}`) : 'no probe list';
+        break;
+      }
+      if (this.codec) break;
+      why.push(`${c.name}: ${refused}`);
+    }
+    this.codec ??= CODECS[CODECS.length - 1];
+    this.say(`compression: ${this.codec.label}${why.length ? ` (not: ${why.join('; ')})` : ''}`);
+    return this.codec;
+  }
+
   /** Runs whose snapshot is still on BEAST: dropped at the end, on a failure, and on Ctrl+C (main). */
   readonly runs = new Set<string>();
 
@@ -783,7 +867,7 @@ export class Migration {
 
   /** A progress line every progressSeconds while `what` runs (the listing, a copy): it reads well over plain ssh. */
   private ticker(line: () => string) {
-    const t = setInterval(() => this.sys.out(line()), this.o.progressSeconds * 1000);
+    const t = setInterval(() => (this.sys.live ? this.sys.live(line()) : this.sys.out(line())), this.o.progressSeconds * 1000);
     t.unref?.();
     return () => clearInterval(t);
   }
@@ -851,6 +935,7 @@ export class Migration {
     const gone: string[] = [];
     try {
       const batches = batchPlan(fetch, { maxFiles: this.o.batchFiles, maxBytes: this.o.batchMB * 1024 * 1024 });
+      const codec = batches.length ? await this.chooseCodec(root, dir, `${name}.all`, [...fetch].sort((a, b) => a.size - b.size)[0]) : CODECS[CODECS.length - 1];
       for (const [bi, batch] of batches.entries()) {
         let res: StreamResult | undefined;
         // The batch as it is streamed: a file tar on BEAST stops at is taken out of it (and sent one by one below).
@@ -865,7 +950,7 @@ export class Migration {
         await writeList();
         let taken = 0;
         for (let attempt = 1; ; ) {
-          res = await this.beast.stream(root, listPath, dest, (n) => (bytes += n), (u) => (current = u));
+          res = await this.beast.stream(root, listPath, dest, (n) => (bytes += n), (u) => (current = u), codec);
           current = undefined;
           // Whole: tar here read the archive to its end, and tar on BEAST finished (0; 1 or 2 when some files could not
           // be read, which are dealt with below). 255 is ssh's own failure (the connection), anything else a crash.
@@ -922,7 +1007,10 @@ export class Migration {
       stopCopy();
       void this.beast.ps(CLEAN_PS, dir, 60_000).catch(() => undefined);
     }
-    if (fetch.length) this.say(`${label}: copied ${count(done)} of ${count(fetch.length)} files, ${size(bytes)} in ${secs(Date.now() - tc)} (${mb(bytes / Math.max((Date.now() - tc) / 1000, 0.001))}/s)`);
+    if (fetch.length) {
+      const t = Math.max((Date.now() - tc) / 1000, 0.001);
+      this.say(`${label}: copied ${count(done)} of ${count(fetch.length)} files, ${size(doneBytes)} of files in ${size(bytes)} over the wire (${this.codec?.label ?? 'none'}${bytes > 0 && doneBytes > 0 ? `, ${(doneBytes / bytes).toFixed(1)}x` : ''}), in ${secs(t * 1000)}: ${mb(doneBytes / t)}/s of files, ${mb(bytes / t)}/s on the wire`);
+    }
     const show = (xs: string[]) => `${xs.slice(0, 10).join(', ')}${xs.length > 10 ? `, and ${xs.length - 10} more` : ''}`;
     if (gone.length) this.say(`  ${label}: ${count(gone.length)} file(s) went on BEAST during the copy: ${show(gone)}`);
     if (locked.length) this.say(`  ${label}: ${count(locked.length)} file(s) could not be read on BEAST (open elsewhere, or no access), left out and tried again by the next run: ${show(locked.map((l) => `${l.path} (${l.why})`))}`);
@@ -1418,7 +1506,33 @@ export function vmSystem(o: Options): System {
           resolve(a);
         });
       }),
-    out: (line) => console.log(line),
+    ...liveOut(),
+  };
+}
+
+/**
+ * Lines for a person (w517, Lothsahn: "overwrite the first line on every update so it doesn't keep scrolling"): on a
+ * terminal the progress line is redrawn in place (\r and ESC[K only, no cursor movement: PuTTY's defaults), without
+ * the indent, and the next lasting line takes its place; elsewhere (a log, CI) a progress line at most every 30 s.
+ */
+export function liveOut(stream: NodeJS.WriteStream = process.stdout, now = () => Date.now()): Pick<System, 'out' | 'live'> {
+  let pending = false;
+  let last = 0;
+  return {
+    out: (line) => {
+      if (pending) stream.write('\r\x1b[K');
+      pending = false;
+      stream.write(`${line}\n`);
+    },
+    live: (line) => {
+      if (stream.isTTY) {
+        stream.write(`\r\x1b[K${line.trimStart()}`);
+        pending = true;
+      } else if (now() - last >= 30_000) {
+        last = now();
+        stream.write(`${line.trimStart()}\n`);
+      }
+    },
   };
 }
 
@@ -1429,6 +1543,7 @@ export const USAGE = `fffctl migrate --key | --dry-run-copy | --rollback-dry-run
            --beast-root DIR (${DEFAULTS.beastRoot})  --beast-claude-dir DIR (${DEFAULTS.beastClaudeDir})  --beast-task NAME (${DEFAULTS.beastTask})
            --public-url URL (default config.json publicUrl)  --drain-minutes N (${DEFAULTS.drainMinutes})  --no-resume-check
            --snapshot auto|vss|copy (how BEAST's files are held still while copied: a VSS shadow copy, else a staged copy)
+           --compress auto|zstd|gzip|bzip2|none (zstd level 3 by default, falling back to the next one either side lacks)
   (docs/portal-on-ffbox-host.md 7.2, 7.3; deploy/vm/RUNBOOK.md "Dry run" and "Cut-over")`;
 
 export function parseArgs(argv: string[], base: Omit<Options, 'mode'> = DEFAULTS): Options {
@@ -1465,6 +1580,12 @@ export function parseArgs(argv: string[], base: Omit<Options, 'mode'> = DEFAULTS
       case '--no-resume-check': o.resumeCheck = false; break;
       case '--keep-stage': o.keepStage = true; break;
       case '--no-tailscale': o.tailscale = false; break;
+      case '--compress': {
+        const v = need(i++);
+        if (!['auto', 'zstd', 'gzip', 'bzip2', 'none'].includes(v)) throw new Error(`--compress is auto, zstd, gzip, bzip2 or none\n${USAGE}`);
+        o.compress = v as Options['compress'];
+        break;
+      }
       case '--snapshot': {
         const v = need(i++);
         if (v !== 'auto' && v !== 'vss' && v !== 'copy') throw new Error(`--snapshot is auto, vss or copy\n${USAGE}`);
