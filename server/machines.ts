@@ -18,7 +18,7 @@ import { openPr } from './gitStatus.ts';
 import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 
@@ -135,7 +135,7 @@ export function convertMachineRecord(m: Machine, to: 'ssh' | 'local', o: { sshHo
     delete next.local;
     next.host = host;
     next.portalUrl = url;
-    const keep = { ...(o.extras?.unityMcpServer ? { unityMcpServer: o.extras.unityMcpServer } : {}), ...(o.extras?.sandboxIdleStopMinutes !== undefined ? { sandboxIdleStopMinutes: o.extras.sandboxIdleStopMinutes } : {}) };
+    const keep = { ...(o.extras?.unityMcpServer ? { unityMcpServer: o.extras.unityMcpServer } : {}), ...(o.extras?.sandboxIdleStopMinutes !== undefined ? { sandboxIdleStopMinutes: o.extras.sandboxIdleStopMinutes } : {}), ...(o.extras?.hostGuard ? { hostGuard: o.extras.hostGuard } : {}) };
     if (Object.keys(keep).length) next.daemonExtras = keep;
     return next;
   }
@@ -147,6 +147,12 @@ export function convertMachineRecord(m: Machine, to: 'ssh' | 'local', o: { sshHo
   next.portalUrl = url;
   delete next.daemonExtras;
   return next;
+}
+
+/** The host guard settings the portal's own host's daemon gets (w466): this server's own guard's, for the same computer. Exported for tests. */
+export function guardSettingsOf(cfg: Pick<Config, 'hostGuard' | 'hostDiskPaths' | 'limits'>): MachineGuardSettings {
+  const g = cfg.hostGuard;
+  return { pollSeconds: g.pollSeconds, warnFreeGB: g.warnFreeGB, criticalFreeGB: g.criticalFreeGB, hysteresisGB: g.hysteresisGB, remountMinFreeGB: g.remountMinFreeGB, hostDiskPaths: [...cfg.hostDiskPaths], reapBrowsersAfterHours: g.reapBrowsersAfterHours, reapEveryMinutes: g.reapEveryMinutes, minFreeRamGB: cfg.limits.minFreeRamGB };
 }
 
 /** The limits a deploy stores: each given one checked, an unset one kept from the previous deploy. Exported for tests. */
@@ -484,7 +490,15 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; daemon?: string; catalog?: string[] }>();
+  private readonly hellos = new Map<string, { protocol: number; daemon?: string; catalog?: string[]; guard?: boolean }>();
+
+  /** Whether a connected machine's daemon runs the host guard (w466): its hello said so. */
+  guards(id: string): boolean {
+    return this.isOnline(id) && !!this.hellos.get(id)?.guard;
+  }
+
+  /** A machine's host guard has news for people (wired by index.ts: as the portal's own guard reports). */
+  hostReport?: (machineId: string, title: string, body: string) => void;
   /** The commit this portal runs (a deploy stamps the daemon with the same), for the version check. */
   portalHead: string | undefined = gitHead(ROOT);
   private readonly reportedOutdated = new Map<string, string>();
@@ -585,6 +599,20 @@ export class MachineManager {
     return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && (sandbox === '*' ? !!s.info.machineSandbox : s.info.machineSandbox === sandbox) && isMidTurn(s.info)).length;
   }
 
+  /**
+   * Why an agent of this kind may never start outside a sandbox on `m`, or undefined: this host's own daemon's main clone
+   * is the base its sandboxes are worktrees of (workers only), and a machine with max_agents 0 takes agents in its
+   * sandboxes only (w477, Lothsahn on 2026-10-05), neither main-clone workers nor standing agents. Names its sandboxes.
+   */
+  mainCloneRefusal(m: Machine, kind?: SessionInfo['kind']): string | undefined {
+    const sbs = (m.sandboxes ?? []).map((s) => `${m.id}/${s.id}`);
+    const use = sbs.length ? `one of its sandboxes (${sbs.join(', ')})` : `a sandbox there (it has none yet: create_sandbox with machine "${m.id}")`;
+    if (m.local && kind === 'worker') return `${m.id}'s main clone (${m.repoPath}) is the base its sandboxes are worktrees of: start agents in ${use}`;
+    if (m.maxSessions !== 0) return undefined;
+    if (kind === 'standing') return `${m.id} takes agents in its sandboxes only (max_agents 0): a standing agent needs a computer with max_agents 1 or more; assign it elsewhere`;
+    return `${m.id} takes agents in its sandboxes only (max_agents 0): start this one in ${use}`;
+  }
+
   /** Why a message to this machine session must wait for a free running slot, or undefined (SessionManager.placeFull). */
   placeFull(s: SessionHandle): string | undefined {
     const m = this.store.machines.get(s.info.machineId ?? '');
@@ -599,7 +627,7 @@ export class MachineManager {
       if (pool?.maxAgents !== undefined && all >= pool.maxAgents) return `${all} agents mid-turn in ${m.id}'s sandboxes (max_sandbox_agents ${pool.maxAgents})`;
       return undefined;
     }
-    if (s.info.kind === 'worker' && m.local) return undefined; // refused outright by dispatchSend: no queue for it
+    if (this.mainCloneRefusal(m, s.info.kind)) return undefined; // refused outright by dispatchSend: no queue for it
     const main = this.runningIn(m.id, undefined);
     return main >= m.maxSessions ? `${main} agents mid-turn in ${m.id}'s main clone (max_agents ${m.maxSessions})` : undefined;
   }
@@ -682,6 +710,8 @@ export class MachineManager {
     const typed = opts.id.trim();
     const id = typed.toLowerCase();
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
+    // 0: sandboxes only (w477), no agents in its main clone.
+    if (opts.maxSessions !== undefined && (!Number.isInteger(opts.maxSessions) || opts.maxSessions < 0 || opts.maxSessions > 8)) throw new Error('max_agents is a whole number from 0 (sandboxes only) to 8');
     if (this.deploying.has(id)) throw new Error(`${id} is already being deployed`);
     const prev = this.store.machines.get(id);
     const local = opts.local ?? prev?.local ?? false;
@@ -847,6 +877,9 @@ export class MachineManager {
       sandboxIdleStopMinutes: u.idleStopMinutes,
       // No clean-up of its own even before the portal's first welcome: this host's guard cleans this computer.
       cleanup: { everyMinutes: 0, softFreeGB: 0 },
+      // The drive watch and remount, its disks and the reaper run in its daemon (w466, D11): the portal hands them over
+      // as soon as the daemon's hello says its guard runs, and they stay with BEAST when the portal moves to its VM.
+      ...((this.cfg.hostGuard?.pollSeconds ?? 0) > 0 ? { hostGuard: guardSettingsOf(this.cfg) } : {}),
     };
   }
 
@@ -931,8 +964,9 @@ export class MachineManager {
       if (sb.status !== 'ready') throw new Error(`sandbox ${m.id}/${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`);
       // The agent limits count mid-turn agents only and are waited for, not refused: SessionManager queues a message
       // until placeFull says a slot is free (w384).
-    } else if (!s.live && m.local && s.info.kind === 'worker') {
-      throw new Error(`${m.id}'s main clone (${m.repoPath}) is the base its sandboxes are worktrees of: start agents in one of its sandboxes`);
+    } else if (!s.live && !sbId) {
+      const why = this.mainCloneRefusal(m, s.info.kind);
+      if (why) throw new Error(why);
     }
     // The portal's own host: its guard's gate (disk space, the sandbox drive, RAM) holds new agent processes there too.
     const gate = !s.live && m.local && from !== 'system' ? this.localGate?.('agent') : undefined;
@@ -1111,7 +1145,8 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, daemon: msg.info?.daemon, catalog: msg.catalog });
+        this.hellos.set(id, { protocol: msg.protocol, daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}) });
+        if (!msg.guard) delete m.guard;
         // Its daemon runs and reached us: an install or connection error from before is over (a deploy in progress
         // settles the status itself). A 'deploying' left by a portal restart mid-deploy is over too.
         if (m.status === 'error' || (m.status === 'deploying' && !this.deploying.has(id))) Object.assign(m, { status: 'ready', statusDetail: undefined });
@@ -1235,6 +1270,12 @@ export class MachineManager {
         else p.reject(new Error(msg.error ?? 'refused'));
         return;
       }
+      case 'host_report':
+        this.hostReport?.(id, String(msg.title ?? ''), String(msg.body ?? ''));
+        return;
+      case 'host_health':
+        if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });
+        return;
       case 'switch_result': {
         const p = this.switchCalls.get(msg.id);
         if (!p) return;

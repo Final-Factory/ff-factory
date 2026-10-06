@@ -35,7 +35,7 @@ import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, typ
 import { REVIEW_DEFAULTS, publishedText, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
 import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
-import { accountSource, dispatcherOwnAccount, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
+import { accountSource, dispatcherOwnAccount, hostAccount, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
 import { Identity, claudeEnvFor, forLine } from './identity.ts';
 import { FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, Orchestrators, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
@@ -341,6 +341,7 @@ export class Agents {
         get: (id) => store.machines.get(id),
         isOnline: (id) => machines.isOnline(id),
         liveCount: (id) => machines.liveCount(id),
+        mainCloneRefusal: (m, kind) => machines.mainCloneRefusal(m, kind),
         createSession: (id, opts) => machines.createSession(id, opts),
       },
     });
@@ -933,6 +934,10 @@ export class Agents {
       if (t.machineSandbox) {
         const sb = this.machines.requireSandbox(m.id, t.machineSandbox);
         if (sb.status === 'error' || sb.status === 'deleting') throw new Error(`sandbox ${m.id}/${sb.id} is ${sb.status}${sb.statusDetail ? `: ${sb.statusDetail}` : ''}`);
+      } else {
+        // Refused before a record is made (w477): a machine with max_agents 0, or this host's own daemon's base clone.
+        const why = this.machines.mainCloneRefusal(m, 'worker');
+        if (why) throw new Error(why);
       }
       const s = this.machines.createSession(m.id, {
         kind: 'worker',
@@ -1798,8 +1803,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       const pool = poolSettingsOf(m);
       if (!pool) {
         // A machine without a sandbox root takes work in its main clone (w428: the m5, the m3); this host's own daemon
-        // never does (its main clone is the base its sandboxes are worktrees of).
-        if (m.local) continue;
+        // never does (its main clone is the base its sandboxes are worktrees of), nor one with max_agents 0 (w477).
+        if (m.local || m.maxSessions === 0) continue;
         const here = all.filter((s) => s.info.machineId === m.id && !s.info.machineSandbox);
         const st = this.machines.statsOf(m.id);
         out.push({
@@ -2470,7 +2475,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const main = m.sessionIds.filter((id) => !this.store.sessions.get(id)?.machineSandbox);
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${platformNoun(m.platform)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
-      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; up to ${m.maxSessions} agents in the main clone; Claude account of its agents: ${accountSource(this.cfg, m)}`,
+      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${m.maxSessions === 0 ? 'sandboxes only (max_agents 0: no agents in its main clone)' : `up to ${m.maxSessions} agents in the main clone`}; Claude account of its agents: ${accountSource(this.cfg, m)}`,
       `  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`,
       sandboxes,
       `  ${describeGit(g)}`,
@@ -2580,7 +2585,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           ssh_host: z.string().optional().describe('ssh host alias this host uses (default: the id).'),
           portal_url: z.string().optional().describe("The URL the machine reaches this portal at, e.g. the Funnel URL https://<host>.<tailnet>.ts.net. Default: config publicUrl, or the machine's previous one."),
           repo_path: z.string().optional().describe('Its main Final Factory clone (default: found automatically).'),
-          max_agents: z.number().int().min(1).max(8).optional().describe("Agents that may run at once in its main clone (default 3; its sandboxes' agents count separately)."),
+          max_agents: z.number().int().min(0).max(8).optional().describe("Agents that may run at once in its main clone (default 3; its sandboxes' agents count separately). 0: sandboxes only: no worker in its main clone and no standing agent there, and the capacity block never suggests its main clone."),
           app_dir: z.string().optional().describe('Absolute folder on the machine for the daemon (its code, logs, agents, daemon.json), e.g. "D:\\work\\.ff-factory". Default ~/.ff-factory (%USERPROFILE%\\.ff-factory). Omitted on a redeploy: kept; "": back to the default.'),
           unity_editor_root: z.string().optional().describe("Absolute folder holding Unity editor versions (<root>/<version>/Editor/Unity.exe on Windows, <root>/<version>/Unity.app on a Mac), searched before Unity Hub's folders. Omitted: kept; \"\": cleared."),
           unity_path: z.string().optional().describe('The Unity editor executable itself (e.g. "E:\\Unity\\6000.3.2f1\\Editor\\Unity.exe"): used whatever the project\'s version. Omitted: kept; "": cleared.'),
@@ -3226,7 +3231,7 @@ ${this.worldBrief(true)}
 - Worker updates, standing agents' delegation requests and \`[auto-delegation]\` news go to the orchestrators of the people concerned, not to you; list_work shows each request's latest outcome. People message each other directly, orchestrator to orchestrator (message_person): you neither relay nor see those messages.
 - Placement: prefer one sandbox per independent stream of work, on whichever computer has room: a machine's sandboxes ("lothdesktop/<name>") are sandboxes like this host's, and its sandbox_root is sandbox capacity like this host's (see "Where new work runs" below). Name each for the work ("spec-098", "tutorial-playtest", "discord-triage"). For spec work, use list_branches to find the spec's existing branch and check it out if there is one; otherwise create \`NNN-short-name\` from ${this.cfg.defaultBase}. Reuse an existing idle sandbox when the request refers to it or the work continues there. Work that never opens Unity (Discord reading, docs, planning) still needs a sandbox as its working directory; create it with seed_library=false, or reuse an idle one.
 - Labels: a sandbox's purpose line is its label. A sandbox labelled \`unused\` with no running agent is idle; prefer those when reusing one, and never repurpose a sandbox whose label reserves it for something. When you give a sandbox new work, set_sandbox_label it to a short description of the task (workers relabel their own sandbox with \`set_label\`, and set it back to \`unused\` when done).
-- Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the last line of the Capacity block at the top of list_sandboxes (also in system_status) says: "Next new game-repo work: <computer> (why)". That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, sandbox computers before main clones, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Put the work there, even when a sandbox elsewhere is free. A main-clone machine (the m5, the m3: no sandbox_root) takes work that can run in its owner's main clone, with start_agent machine: its worker backs up the owner's uncommitted work before setting any aside. Discord posting as Max goes to LothDesktop (only it has the ffdiscord config). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. start_agent and create_sandbox add a note when new work goes to a computer other than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / placement.avoid (null clears, e.g. once BEAST is fixed).
+- Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the last line of the Capacity block at the top of list_sandboxes (also in system_status) says: "Next new game-repo work: <computer> (why)". That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, sandbox computers before main clones, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Put the work there, even when a sandbox elsewhere is free. A main-clone machine (the m5, the m3: no sandbox_root) takes work that can run in its owner's main clone, with start_agent machine: its worker backs up the owner's uncommitted work before setting any aside; a machine with max_agents 0 takes agents in its sandboxes only (start_agent with machine alone is refused there). Discord posting as Max goes to LothDesktop (only it has the ffdiscord config). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. start_agent and create_sandbox add a note when new work goes to a computer other than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / placement.avoid (null clears, e.g. once BEAST is fixed).
 - Machines' main clones: use one when the request asks for it or the work belongs there, prefer a sandbox otherwise. Machine workers may set aside or discard local changes to update the clone only after backing them up to a timestamped folder in ff-local-backups beside the clone; the harness enforces the backup. Unity on a machine is its owner's; its daemon restarts a hung or crashed editor, and the unity tool starts, stops and restarts it.
 - Never delete a sandbox, a machine or a standing agent unless a person explicitly asked for it.
 - Nobody reads this chat by default: do not write status reports for people. Act, and let the tools record it. When the owner writes here, answer like this: a one-line plain-language TL;DR, then detail only if useful, with request, sandbox and session ids. Your messages render as Markdown: \`![what it shows](<absolute path>)\` shows an image from a sandbox or a machine inline, and a \`\`\`mermaid block renders as a diagram.
@@ -3281,6 +3286,18 @@ ${this.worldBrief(false)}
   }
 
   /**
+   * The environment an orchestrator's process starts with (docs/accounts.md): the dispatcher on its own account when
+   * it has one (claudeAccounts.dispatcher), a person's orchestrator on their own token when they have one, else the
+   * orchestrator role's account. A role on the token file (w464) reads it now and takes nobody's own token.
+   */
+  orchestratorEnv(owner: Requester | undefined): Record<string, string | undefined> {
+    const role = !owner && dispatcherOwnAccount(this.cfg) ? 'dispatcher' : 'orchestrator';
+    const base = hostProcessEnv(this.cfg, role);
+    if (role === 'dispatcher' || hostAccount(this.cfg, role) === 'tokenfile') return base;
+    return claudeEnvFor(this.cfg, owner ?? this.identity.systemPayer(), base);
+  }
+
+  /**
    * What an orchestrator may not read (w467, server/secretGuard.ts): config.json, the secrets folder and token files,
    * data/ (its own memory folder and the attachment store excepted), ~/.ssh and Claude's and gh's credentials.
    */
@@ -3314,7 +3331,8 @@ ${this.worldBrief(false)}
       // when they have one here (config userClaudeEnv); the dispatcher on config claudeAccounts.dispatcher when it is set
       // (w464: Lothsahn's account, whoever the system payer is), else on the system payer's. Without one, what config
       // claudeAccounts.orchestrator picks: the host token, or this host's stored claude.ai login.
-      env: !owner && dispatcherOwnAccount(this.cfg) ? hostProcessEnv(this.cfg, 'dispatcher') : claudeEnvFor(this.cfg, owner ?? this.identity.systemPayer(), hostProcessEnv(this.cfg, 'orchestrator')),
+      // A role on the token file (w464, change 18) runs on it alone: a person's own token does not override it.
+      env: this.orchestratorEnv(owner),
       systemPrompt: { type: 'preset', preset: 'claude_code', append: `${owner ? this.personalBrief(owner) : this.dispatcherBrief()}\n\n${memoryBrief(memory, owner?.displayName)}` },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };

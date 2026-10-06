@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, ROOT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
-import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret } from './secrets.ts';
+import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, ROOT, TOKEN_FILE_ROLES, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
+import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret, readTokenFile } from './secrets.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
@@ -53,6 +53,8 @@ export const SETTABLE_KEYS = [
   'claudeAccounts.dispatcher',
   'claudeAccounts.workers',
   'claudeAccounts.standing',
+  // The file holding the token the "tokenfile" roles run on (w464): a path, checked by reading it; its content is never shown.
+  'claudeTokenFile',
   'machines.useHostClaudeEnv',
   // Who automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to.
   'systemPayer',
@@ -288,7 +290,14 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     case 'claudeAccounts.workers':
     case 'claudeAccounts.standing': {
       const v = typeof value === 'string' ? value.trim() : value;
-      if (v !== 'login' && v !== 'token') throw new Error(`${key} is "login" (this host's stored claude.ai login) or "token" (config claudeEnv's)`);
+      const role = key.slice('claudeAccounts.'.length);
+      if (v === 'tokenfile') {
+        // w464, change 18: never for workers; only once the file reads as a token (never shown).
+        if (!TOKEN_FILE_ROLES.includes(role)) throw new Error(`${key} cannot be "tokenfile": only ${TOKEN_FILE_ROLES.join(', ')} run on the token file`);
+        if (cfg) readTokenFile(cfg);
+        return v;
+      }
+      if (v !== 'login' && v !== 'token') throw new Error(`${key} is "login" (this host's stored claude.ai login) or "token" (config claudeEnv's)${TOKEN_FILE_ROLES.includes(role) ? ', or "tokenfile" (config claudeTokenFile\'s)' : ''}`);
       // Refuse a switch that would leave the role unable to start: the stored login must be there and alive.
       const problem = v === 'login' && cfg ? hostLoginProblem(cfg) : undefined;
       if (problem) throw new Error(`${key} cannot be "login": ${problem}`);
@@ -298,6 +307,12 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === true || value === 'true') return true;
       if (value === false || value === 'false') return false;
       throw new Error('machines.useHostClaudeEnv is true (the host token) or false (the Mac\'s own login)');
+    }
+    case 'claudeTokenFile': {
+      // A path, checked by reading it as a token (w464); the content is never echoed, the path is.
+      if (typeof value !== 'string' || !value.trim() || !path.isAbsolute(value.trim())) throw new Error('claudeTokenFile is the absolute path of a file holding one Claude OAuth token');
+      readTokenFile({ claudeTokenFile: value.trim() });
+      return value.trim();
     }
     case 'systemPayer': {
       if (typeof value !== 'string' || !USER_ID.test(value.trim())) throw new Error('systemPayer is a user id (a login name, e.g. "ben")');
@@ -477,6 +492,10 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   const perMachine = key === 'machines.useHostClaudeEnv' || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
   if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.useHostClaudeEnv and machines.cleanup.*, and is a machine id such as "m5"`);
   const v = normalizeSetting(key, value, cfg, opts.users);
+  if (key === 'claudeTokenFile' && v === undefined) {
+    const on = Object.entries(cfg.claudeAccounts ?? {}).filter(([, x]) => x === 'tokenfile').map(([r]) => r);
+    if (on.length) throw new Error(`claudeTokenFile cannot be cleared while claudeAccounts.${on.join(', claudeAccounts.')} ${on.length > 1 ? 'are' : 'is'} "tokenfile"`);
+  }
   const text = fs.readFileSync(file, 'utf8');
   const raw = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
   const stored = perUser ? `userClaudeEnv.${opts.user}.${key.slice('userClaudeEnv.'.length)}` : (STORED_AS[key] ?? key);
@@ -494,6 +513,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'limits.maxSandboxes') cfg.limits.maxSandboxes = (v as number | undefined) ?? 4;
   else if (key === 'limits.maxSessions') cfg.limits.maxSessions = (v as number | undefined) ?? 6;
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
+  else if (key === 'claudeTokenFile') cfg.claudeTokenFile = v as string | undefined;
   else if (key === 'attachments.maxMB' || key === 'attachments.retentionDays') {
     const field = key === 'attachments.maxMB' ? 'maxMB' : 'retentionDays';
     const a = { ...cfg.attachments };

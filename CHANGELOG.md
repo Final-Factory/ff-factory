@@ -19,6 +19,27 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   sandbox is not free, the dispatcher gives it no new work but its own, its request shows Waiting instead of Stalled,
   and the ledger cleanup leaves it alone ([docs/orchestrators.md](docs/orchestrators.md), "Agent states").
 
+- **BEAST's daemon guards BEAST's sandbox drive itself** (w466, asked by Lothsahn; change 4 of
+  docs/portal-on-ffbox-host.md, decided as D11). The Dev Drive watch, the remount through `ffsb-helper-mount` with its
+  retries, then the editors restarted and the interrupted agents resumed, the disk levels and the headless-browser
+  reaper run in the portal's own host's daemon (`machine/hostGuard.ts`, the same `HostHealthMonitor`). So they stay
+  with BEAST when the portal moves to its VM. While the daemon's hello says its guard runs, the portal's own guard
+  leaves the drive to it. Its reports reach the dispatcher as `[host beast] …`, and new sandbox agents and editors on
+  BEAST wait with the reason while the drive is gone (docs/self-recovery.md, "On BEAST's daemon").
+
+- **The "tokenfile" account** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 18). `claudeAccounts`
+  `.orchestrator`, `.dispatcher` and `.standing` take `"tokenfile"`: those roles run on the OAuth token in the file config
+  `claudeTokenFile` names, read at each session start into that process alone with every other Claude credential
+  removed, over any person's own token. Refused for workers; never in `claudeEnv`, never sent to a machine, never shown.
+  The meters poll it as its own account ([docs/accounts.md](docs/accounts.md), "The token file").
+
+- **A machine can take agents in its sandboxes only** (w477, asked by Lothsahn). `add_machine` takes `max_agents: 0`
+  (the Add machine form too). Such a machine never runs an agent in its main clone: `start_agent` with the machine
+  alone is refused before any record is made, naming its sandboxes; a standing agent cannot be assigned to it; a
+  standing agent's delegated worker never goes to its main clone; and the Capacity block and "Next new game-repo work"
+  never suggest it. Its daemon refuses such an agent too. Meant for BEAST and LothDesktop, whose main clones are
+  their owners' own ([docs/machines.md](docs/machines.md), "Limits").
+
 - **`claudeAccounts.dispatcher`** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 6). The dispatcher's own
   account (`"token"` or `"login"`, set with `set_app_config`). Once set, the dispatcher runs on it instead of the system
   payer's own token; unset, nothing changes. system_status names it apart only when set ([docs/accounts.md](docs/accounts.md)).

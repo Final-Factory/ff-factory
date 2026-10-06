@@ -350,7 +350,9 @@ export interface Machine {
    * daemon.json settings its redeploys over ssh write, kept from when it was the portal's own host (convert_machine,
    * w466): the MCP-for-Unity server and the idle-editor stop it had from the portal's config.
    */
-  daemonExtras?: { unityMcpServer?: { command: string; args: string[]; env?: Record<string, string> }; sandboxIdleStopMinutes?: number };
+  daemonExtras?: { unityMcpServer?: { command: string; args: string[]; env?: Record<string, string> }; sandboxIdleStopMinutes?: number; hostGuard?: MachineGuardSettings };
+  /** Its daemon runs the host guard (w466, machine/hostGuard.ts) and this is its last state: the sandbox drive, disk levels, what waits. */
+  guard?: Pick<HostHealth, 'checkedAt' | 'sandboxRoot' | 'level' | 'detail' | 'blocked'>;
   /**
    * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
    * away (that would pull it back). Cleared when it says hello here again.
@@ -949,6 +951,27 @@ export interface HostHealth {
   unityRestarts?: { sandbox: string; at: string; reason: string }[];
   /** The orphan headless-browser reaper's last pass that found something (server/reaper.ts). */
   lastReap?: { at: string; killed: number; lines: string[] };
+}
+
+/**
+ * The host guard a machine's daemon runs (w466, machine/hostGuard.ts): the portal's config hostGuard, hostDiskPaths and
+ * limits.minFreeRamGB, written into the daemon.json of the portal's own host at deploy.
+ */
+export interface MachineGuardSettings {
+  /** How often it looks (seconds); 0: off. */
+  pollSeconds: number;
+  warnFreeGB: number;
+  criticalFreeGB: number;
+  hysteresisGB: number;
+  /** The drive is reattached only with this much free on the volumes that hold its VHDX. */
+  remountMinFreeGB: number;
+  /** The volumes that hold the Dev Drive's VHDX (config hostDiskPaths, e.g. ["C:/"]). */
+  hostDiskPaths: string[];
+  /** Automation browsers older than this, and orphans, are ended (hours; 0: never), every reapEveryMinutes. */
+  reapBrowsersAfterHours: number;
+  reapEveryMinutes: number;
+  /** An editor waits below this much free RAM (limits.minFreeRamGB; 0: no check). */
+  minFreeRamGB?: number;
 }
 
 /** One clean-up pass on a computer (server/cleanup.ts): the host guard's or a machine daemon's. */

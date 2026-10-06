@@ -117,6 +117,34 @@ The orchestrator can set `hostGuard.devDriveVhdx` and the clean-up settings (bel
 meters show the guard: one disk meter per watched volume in its guard colour, and a banner while
 the drive is offline or disk space is low.
 
+### On BEAST's daemon (w466)
+
+BEAST's sandboxes run on its own machine daemon ([beast-machine.md](beast-machine.md)), and the portal is moving to a
+VM on the FFBox host ([portal-on-ffbox-host.md](portal-on-ffbox-host.md)). So the parts of this guard that are about
+BEAST's sandbox drive run in that daemon (`machine/hostGuard.ts`, decided as D11). They use the same decisions
+(`HostHealthMonitor`), against the daemon's own pool, agents and link:
+
+- **The drive:** the watch on the sandbox root (F:), and the remount through `ffsb-helper-mount` (at once, then 2, 5,
+  10 and 30 minutes, six attempts, with `remountMinFreeGB` on the VHDX's volume). Then the editors that were up are
+  started again, and the agents that were mid-turn in sandboxes are told to resume.
+- **Gating:** while the drive is gone or disk space is low, the daemon refuses new sandbox agents and editors with the
+  reason.
+- **The disk levels** over the sandbox root and `hostDiskPaths`, and **the headless-browser reaper**.
+- **Its reports** reach the portal (`host_report`, queued while the link is down) and go to the dispatcher and the
+  push notifications as `[host beast] …`. Its state is on the machine's record (`host_health`).
+
+The daemon gets these settings in its `daemon.json` at deploy (`hostGuard`, from this config's `hostGuard`,
+`hostDiskPaths` and `limits.minFreeRamGB`), only as the portal's own host. It keeps them when `convert_machine` makes
+it an ssh machine. The helpers are Windows-only, so elsewhere the guard does not start.
+
+**One guard per drive:** while that daemon's hello says its guard runs, the portal's own guard leaves the drive alone
+(`watchDrive`). It does not watch or remount it, does not bring that daemon's sandboxes back, and does not reap.
+The portal still measures its own disks. If the daemon goes away, the portal's guard watches the drive again from
+its next look. A daemon from before this change has no guard, so the portal goes on as before. What the daemon does
+not run is the clean-up: that is its own (`machines.cleanup`), as on the other machines. Nor the idle-editor stop,
+which is its pool's. `host_recovery` (remount by hand, compact, selftest, trim, reboot) is still the portal's own: it
+reaches BEAST's helpers only while the portal runs on BEAST.
+
 ## 3. The VHDX policy
 
 A dynamically expanding VHDX grows as its volume is written and never shrinks by itself. On
