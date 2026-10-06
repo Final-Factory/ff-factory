@@ -326,6 +326,27 @@ sudo fff-vm ssh 'findmnt /tmp || echo "/tmp is on the root disk"; df -h /tmp'
                               # after that boot: "/tmp is on the root disk", and /dev/vda1 about 118G
 ```
 
+## 9. The portal's ssh to the machines
+
+The portal deploys its machines' daemons over ssh as its own account, to the aliases in
+[`guest/machines.ssh`](guest/machines.ssh) (`m3`, `m5`, `Loth2800`, `beast`), with each host key pinned there. A VM
+installed or updated (`fffctl update`) after w537 writes them by itself. A VM from before, or any time, from the host:
+
+```bash
+git -C ~/ff-factory pull --ff-only
+sudo ~/ff-factory/deploy/vm/host/machine-ssh.sh --check   # read only: one line per machine
+sudo ~/ff-factory/deploy/vm/host/machine-ssh.sh --fix     # write the aliases and pinned keys, then the same lines
+```
+
+After `--fix`, each line should read `<alias>: alias ok; known_hosts: pinned; tailnet: SHA256:... = pinned; ssh: ok`.
+`tailnet: ... DIFFERS` (and `REFUSED` from `--fix`): the machine shows another key than the pinned one; nothing is
+written for it: check the key on the machine itself (`ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub`, on Windows
+`C:\ProgramData\ssh\ssh_host_ed25519_key.pub`) and change `machines.ssh`. `ssh: ... Permission denied (publickey)`:
+that machine does not have the portal's key yet; the output ends with the `from="..."` line to add to that ssh user's
+`~/.ssh/authorized_keys` (a Windows admin account: `C:\ProgramData\ssh\administrators_authorized_keys`). Then
+redeploy one machine's daemon from the portal (an orchestrator: `machine_daemon` redeploy, the m3 first) and check it
+connects.
+
 ## If it must come off again
 
 ```bash

@@ -572,8 +572,15 @@ host)*.
   `~/.ssh/authorized_keys` on the Macs and, for a Windows account in Administrators,
   `C:\ProgramData\ssh\administrators_authorized_keys` *(sourced: [machines.md](machines.md), "Setting up a Windows PC",
   step 3)*. *(Guess: deploys work with those options; the dry run's check 5 tests one.)*
-- `~/.ssh/config` names `beast`, `lothdesktop`, `m3` and `m5` by their MagicDNS names, with `StrictHostKeyChecking
-  yes`. `known_hosts` is seeded from BEAST's entries for those hosts and checked against `ssh-keyscan` over the tailnet.
+- `~/.ssh/config` names the machines by the aliases the portal deploys to (`m3`, `m5`, `Loth2800`, and `beast` for
+  `rydin@beast`), each with its MagicDNS name and ssh user, under `StrictHostKeyChecking yes`; `known_hosts` holds each
+  one's ed25519 host key, pinned, never accepted on first use. Both come from
+  [`deploy/vm/guest/machines.ssh`](../deploy/vm/guest/machines.ssh), whose keys were checked on two paths (w537:
+  BEAST's long-trusted entries, and BEAST's own sshd over loopback, each equal to a fresh `ssh-keyscan` over the
+  tailnet). `fff-machine-ssh --fix` writes them as the portal's account: the guest install runs it, `fffctl update`
+  runs it when `machines.ssh` changes, and the host's `deploy/vm/host/machine-ssh.sh --fix` streams it into a VM whose
+  copy is older. A machine whose key over the tailnet differs from the pinned one is refused. The cut-over had left
+  none of this in the VM, and the first daemon redeploy failed on "Host key verification failed" (2026-10-06).
 - The tailnet policy allows the tag only port 22 on those four (1.4, rule 6).
 - A separate backup key (`/etc/fff/backup_ed25519`, root's in the guest) goes only to the backup account
   ([D17](#8-risks-and-open-decisions)), so the portal's agents never hold it.
