@@ -25,7 +25,7 @@
  *                      start, so only what a test posts is new. Off everywhere else.
  */
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,6 +57,7 @@ const dataDir = path.join(base, 'data');
 const sandboxRoot = path.join(base, 'sandboxes');
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(sandboxRoot, { recursive: true });
+fs.writeFileSync(path.join(base, 'vault.key'), randomBytes(32).toString('base64'), { mode: 0o600 });
 
 // A tiny git repo stands in for the game repo: the base clone and each sandbox folder.
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore', windowsHide: true });
@@ -98,6 +99,8 @@ fs.writeFileSync(
       ledger: { cleanup: { repos: [] } },
       dataDir,
       sandboxRoot,
+      // The token vault (docs/vault.md, e2e/vault.spec.ts): its key outside data/, readable by its owner only.
+      vault: { keyFile: path.join(base, 'vault.key') },
       repo: { url: path.join(base, 'base'), basePath: path.join(base, 'base') },
       defaultBase: 'develop',
       models: ['opus', 'sonnet'],

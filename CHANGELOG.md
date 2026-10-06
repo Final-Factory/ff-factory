@@ -61,6 +61,24 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
     [unity-dialogs.md](docs/unity-dialogs.md) and the README follow it; `docs/backlog.md` item 1 is done. Tests:
     `server/portalOnly.test.ts` and `server/unityBlocked.test.ts` are deleted with their code; the others follow the removal.
 
+### Added
+
+- **The token vault** (w512, [docs/vault.md](docs/vault.md); lothsahn: "store a list of claude tokens and any other
+  tokens the workers need so that it can pass it out securely to the workers in the cluster at runtime").
+  - The portal keeps Claude subscription tokens, a GitHub token and named secrets in `data/vault.json`, each value
+    sealed with AES-256-GCM under a key outside the data folder (in the VM `/etc/fff/vault.key`, root only, handed to
+    the portal as a systemd credential). A value is never shown back: listings give a fingerprint and its last four
+    characters.
+  - Owners add, rotate, grant and remove entries in Settings → Token vault, or with `sudo fffctl vault` (a value from a
+    file or stdin, never the command line). Members get 403; no agent tool reaches it.
+  - Each machine run gets what it is granted as environment in its launch spec: one Claude token, picked by plan
+    headroom (the person's own first, nothing at 95% or more while another has room, sticky per session) on machines
+    config `machines.claudeFromVault` names; `GH_TOKEN` with a git credential helper that reads it; any `*_TOKEN`
+    variable such as `FFDISCORD_APP_TOKEN`. Nothing is written on the machine. Off until switched on per machine.
+  - Machine credentials: `fffctl machine-credential issue <id> --out FILE` and `revoke <id>` (also in the dialog); a
+    revoked machine's link drops within 20 s.
+  - Redaction also covers GitHub tokens and every value the vault holds.
+
 ### Changed
 
 - **Standing agents' delegations are ordinary ledger requests** (w527, Ben: "please fix the delegations in ff factory
@@ -108,6 +126,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   them. Config `claudeAiConnectors` sets it per role (docs/accounts.md, "claude.ai connectors").
 
 ### Fixed
+
+- **On an Android phone the paperclip offers your photos** (w528, Ben: "when i'm on my phone i cant attach photos from
+  my google photos or anything i can only select camera"). It opens a short menu: Photos and videos (Chrome's photo
+  picker, with Gallery and Google Photos), Camera, or Files (saves, zips, logs). Android Chrome shows the photo picker
+  only for an input of images and videos alone; the old any-file input got a Camera / Files chooser. iPhones, iPads and
+  desktops keep the one picker they had; paste and drop are unchanged.
 
 - **`fffctl migrate` copies from one snapshot on BEAST** (w508, Lothsahn's dry run on #134: "batch 2 of 8 broke off …
   tar: (null)", then his decision: "generate it all in one snapshot, and then tar and compress off a copy").

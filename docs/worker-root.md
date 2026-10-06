@@ -268,7 +268,7 @@ the daemon's `process.env`). The editors the daemon starts inherit it too. So th
 | `FF_PLAYER_SLOT_ROOT`, `FF_PLAYER_SLOT_COUNT` | `players/`, 8 | the slot pool; ends the drive-letter probing in `default_root()` (`player_slots.py:69-79`), which already left BEAST with rules for both `D:\work\ff-players` and `F:\ff-players` (measured) | measured: `player_slots.py:83-87` |
 | `FF_NIGHTLY_ROOT` | `nightly/` | the nightly lab | measured: `nightly.sh:17-18` |
 | `FFDISCORD_HOME` | `secrets/ffdiscord` | the Max bot config, where scripts honour it | measured: `nightly.sh:43`; whether the `ffdiscord` CLI itself does is unverified |
-| `FF_MAX_EVENTS`, `FF_UNITY_SLOTS` | `daemon/…` | already set by the daemon from `app_dir` | measured: `machine/daemon.ts:713,882` |
+| `FF_MAX_EVENTS`, `FF_UNITY_SLOTS` | `daemon/…` | already set by the daemon from `app_dir`. Scripts outside the daemon (the nightly harness, a build by hand) find the Unity slots mailbox through the pointer the install writes, `~/.config/finalfactory/unity-slots.json` (w469) | measured: `machine/daemon.ts:713,882`; `machine/unitySlots.ts` `slotsDir` |
 | `CFFIXED_USER_HOME` (Mac only, for players) | `home/` | a Mac player's `persistentDataPath` | measured: in use by `lab.py:28-34` |
 
 **Not `HOME` or `USERPROFILE`.** Overriding the profile variables for every worker is tempting and wrong. On Windows,

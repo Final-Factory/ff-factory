@@ -177,10 +177,10 @@ export function homeSecrets(env: NodeJS.ProcessEnv = process.env, platform: Node
   ];
 }
 
-/** Secret files config may name (part A of the portal VM, w464: claudeTokenFile; change 18: anthropicApiKeyFile). */
+/** Secret files config may name (part A of the portal VM, w464: claudeTokenFile; change 18: anthropicApiKeyFile; w512: vault.keyFile). */
 export const secretFilesOf = (cfg: object): (string | undefined)[] => {
-  const c = cfg as { claudeTokenFile?: unknown; anthropicApiKeyFile?: unknown };
-  return [c.claudeTokenFile, c.anthropicApiKeyFile].map((v) => (typeof v === 'string' ? v : undefined));
+  const c = cfg as { claudeTokenFile?: unknown; anthropicApiKeyFile?: unknown; vault?: { keyFile?: unknown } };
+  return [c.claudeTokenFile, c.anthropicApiKeyFile, c.vault?.keyFile].map((v) => (typeof v === 'string' ? v : undefined));
 };
 
 /**
@@ -215,6 +215,8 @@ export function portalSecretRules(o: {
       ...files.map((f) => (P.basename(P.dirname(f)).toLowerCase() === 'secrets' ? P.dirname(f) : f)),
       ...(env.FFBOX_SECRETS ? [env.FFBOX_SECRETS] : []),
       ...(env.FFBOX_CONFIG_DIR ? [env.FFBOX_CONFIG_DIR] : []),
+      // The token vault's key (docs/vault.md, w512): systemd's credentials and the VM's /etc/fff, where the key file is.
+      ...(platform === 'win32' ? [] : ['/run/credentials', '/etc/fff', ...(env.CREDENTIALS_DIRECTORY ? [env.CREDENTIALS_DIRECTORY] : [])]),
       ...homeSecrets(env, platform),
     ],
     allow: [...(o.allow ?? [])],

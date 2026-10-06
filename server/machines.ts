@@ -1,3 +1,4 @@
+import { MACHINE_ID, enrolledMachines, issueMachineToken, machineTokensFile, readMachineTokens, revokeMachineToken, tokenSha } from './machineTokens.ts';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -49,8 +50,9 @@ const RESUME_WITHIN_MS = 6 * 3_600_000;
 export const RESUME_DELAY_MS = { value: 3000 };
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
+
 /** Machine ids: short, lower-case, safe in a path and a LaunchAgent label. */
-export const MACHINE_ID = /^[a-z0-9][a-z0-9-]{0,23}$/;
+export { MACHINE_ID, enrolledMachines, issueMachineToken, revokeMachineToken };
 
 const SANDBOX_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
@@ -273,7 +275,8 @@ export class MachineManager {
   hooks?: MachineHooks;
   /** The attachment store (docs/attachments.md): what daemons may fetch, granted as files are sent to their agents. */
   attachments?: AttachmentStore;
-  private readonly links = new Map<string, { ws: WebSocket; lastPong: number; since: number }>();
+  /** `hash`: the credential hash the link authenticated with (or the portal re-issued since, register): dropRevoked compares it. */
+  private readonly links = new Map<string, { ws: WebSocket; lastPong: number; since: number; hash?: string }>();
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
   private readonly tokensFile: string;
   private readonly failures = new Map<string, number[]>();
@@ -283,7 +286,7 @@ export class MachineManager {
     this.store = store;
     this.sessions = sessions;
     sessions.placeFull = (s) => this.placeFull(s);
-    this.tokensFile = path.join(cfg.dataDir, 'machine-tokens.json');
+    this.tokensFile = machineTokensFile(cfg.dataDir);
     // A deploy runs in this process: one still marked at boot was cut short by a restart. Left 'deploying', the
     // offline watch (redeployDue) would never redeploy it; its daemon's hello clears the error if it did start.
     for (const m of store.machines.values()) {
@@ -674,11 +677,10 @@ export class MachineManager {
     if (!MACHINE_ID.test(m.id)) throw new Error(`machine id "${m.id}" must be lower-case letters, digits and dashes`);
     const prev = this.store.machines.get(m.id);
     const machine: Machine = { online: this.isOnline(m.id), sessionIds: prev?.sessionIds ?? [], createdAt: prev?.createdAt ?? new Date().toISOString(), ...m };
-    const secret = randomBytes(32).toString('base64url');
-    const token = `ffm_${m.id}_${secret}`;
-    const tokens = this.tokens();
-    tokens[m.id] = sha(token);
-    this.writeTokens(tokens);
+    const token = issueMachineToken(this.cfg.dataDir, m.id);
+    // The portal's own re-issue (a redeploy) keeps the link it has, as before: the deploy replaces that daemon itself.
+    const link = this.links.get(m.id);
+    if (link) link.hash = tokenSha(token);
     this.store.putMachine(machine);
     return { machine, token };
   }
@@ -729,19 +731,29 @@ export class MachineManager {
   remove(id: string) {
     const m = this.require(id);
     for (const sid of m.sessionIds) if (this.sessions.sessions.has(sid)) this.sessions.remove(sid);
-    const tokens = this.tokens();
-    delete tokens[m.id];
-    this.writeTokens(tokens);
+    revokeMachineToken(this.cfg.dataDir, m.id);
     this.links.get(m.id)?.ws.close(4001, 'machine removed');
     this.store.removeMachine(m.id);
   }
 
   private tokens(): Record<string, string> {
-    return readJsonDurable<Record<string, string>>(this.tokensFile, { check: checkStringMap, mode: 0o600 }) ?? {};
+    return readMachineTokens(this.tokensFile);
   }
 
-  private writeTokens(t: Record<string, string>) {
-    writeJsonDurable(this.tokensFile, t, { indent: 2, mode: 0o600 });
+  /**
+   * Drop the link of every machine whose credential was revoked or replaced from outside the portal (`fffctl
+   * machine-credential revoke` or `issue`, which edit the tokens file while the portal runs), so a leaked credential
+   * stops at once, not at its next reconnect. Checked with each heartbeat, so within PING_MS. Its record and sessions stay.
+   */
+  dropRevoked() {
+    if (!this.links.size) return;
+    const t = this.tokens();
+    for (const [id, link] of this.links) {
+      if (t[id] && (!link.hash || t[id] === link.hash)) continue;
+      console.warn(`machine ${id}: its credential was ${t[id] ? 'replaced' : 'revoked'}, dropping the connection`);
+      link.ws.close(4001, 'machine credential revoked');
+      this.detach(id);
+    }
   }
 
   /** The machine a bearer token belongs to, or undefined. Constant-time on the secret. */
@@ -1102,7 +1114,8 @@ export class MachineManager {
       return false;
     }
     this.failures.delete(ip);
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.attach(id, ws));
+    const hash = this.tokens()[id];
+    this.wss.handleUpgrade(req, socket, head, (ws) => this.attach(id, ws, hash));
     return true;
   }
 
@@ -1114,10 +1127,10 @@ export class MachineManager {
   }
 
   /** Wire a connected daemon (exported for tests: any WebSocket works). */
-  attach(id: string, ws: WebSocket) {
+  attach(id: string, ws: WebSocket, hash?: string) {
     const old = this.links.get(id);
     if (old) old.ws.close(4000, 'replaced by a newer connection');
-    const link = { ws, lastPong: Date.now(), since: Date.now() };
+    const link: { ws: WebSocket; lastPong: number; since: number; hash?: string } = { ws, lastPong: Date.now(), since: Date.now(), ...(hash ? { hash } : {}) };
     this.links.set(id, link);
     ws.on('pong', () => (link.lastPong = Date.now()));
     ws.on('message', (data) => {
@@ -1188,6 +1201,7 @@ export class MachineManager {
   }
 
   private heartbeat() {
+    this.dropRevoked();
     const now = Date.now();
     for (const [id, link] of this.links) {
       if (now - link.lastPong > DEAD_MS) {

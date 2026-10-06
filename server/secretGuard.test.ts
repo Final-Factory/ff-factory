@@ -93,6 +93,9 @@ test('w467: in the portal VM, every secret path is refused', () => {
     '/srv/fff/home/.config/gh/hosts.yml',
     '/srv/fff/ffbox-secrets/discord.json',
     '/srv/fff/base/../config/config.json',
+    // The token vault's key (w512): the key file and systemd's copy of it.
+    '/etc/fff/vault.key',
+    '/run/credentials/fff-portal.service/fff-vault-key',
   ]) assert.match(linuxFile(p) ?? '', /is FF Factory's own/, p);
   for (const p of ['/', '/srv', '/srv/fff', '/srv/fff/home', '/srv/fff/data', '/srv/fff/config']) assert.ok(linuxSearch(p), p);
 });

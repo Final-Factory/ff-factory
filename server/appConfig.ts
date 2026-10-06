@@ -51,6 +51,8 @@ export const SETTABLE_KEYS = [
   // The file holding the token the "tokenfile" roles run on (w464): a path, checked by reading it; its content is never shown.
   'claudeTokenFile',
   'machines.useHostClaudeEnv',
+  // Whether a machine's runs take their Claude token from the token vault (docs/vault.md, w512; optional `machine`). The owner's only.
+  'machines.claudeFromVault',
   // Who automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to.
   'systemPayer',
   // Files people attach to messages (docs/attachments.md): the largest one, and how long one nobody sends on is kept.
@@ -77,7 +79,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'machines.claudeFromVault']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync'];
@@ -305,6 +307,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === false || value === 'false') return false;
       throw new Error('machines.useHostClaudeEnv is true (the host token) or false (the Mac\'s own login)');
     }
+    case 'machines.claudeFromVault': {
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      throw new Error("machines.claudeFromVault is true (a vault token per run, docs/vault.md) or false (the host token or the machine's own login, as before)");
+    }
     case 'claudeTokenFile': {
       // A path, checked by reading it as a token (w464); the content is never echoed, the path is.
       if (typeof value !== 'string' || !value.trim() || !path.isAbsolute(value.trim())) throw new Error('claudeTokenFile is the absolute path of a file holding one Claude OAuth token');
@@ -476,8 +483,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   const perUser = key.startsWith('userClaudeEnv.');
   // The user id becomes a key path segment: no dots (edit config.json by hand for such a login).
   if (perUser && !(opts.user && USER_ID.test(opts.user) && !opts.user.includes('.'))) throw new Error(`${key} needs user: the user id (login name, without dots) whose account it is`);
-  const perMachine = key === 'machines.useHostClaudeEnv' || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
-  if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.useHostClaudeEnv and machines.cleanup.*, and is a machine id such as "m5"`);
+  const perMachine = key === 'machines.useHostClaudeEnv' || key === 'machines.claudeFromVault' || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
+  if (opts.machine !== undefined && (!perMachine || !MACHINE_KEY.test(opts.machine))) throw new Error(`machine is only for machines.useHostClaudeEnv, machines.claudeFromVault and machines.cleanup.*, and is a machine id such as "m5"`);
   const v = normalizeSetting(key, value, cfg, opts.users);
   if (key === 'claudeTokenFile' && v === undefined) {
     const on = Object.entries(cfg.claudeAccounts ?? {}).filter(([, x]) => x === 'tokenfile').map(([r]) => r);
@@ -525,6 +532,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else accounts[role] = v as ClaudeAccount;
     cfg.claudeAccounts = accounts;
   } else if (key === 'machines.useHostClaudeEnv') cfg.machines = { ...cfg.machines, useHostClaudeEnv: next as boolean | Record<string, boolean> | undefined };
+  else if (key === 'machines.claudeFromVault') cfg.machines = { ...cfg.machines, claudeFromVault: next as boolean | Record<string, boolean> | undefined };
   else if (key === 'systemPayer') cfg.systemPayer = v as string | undefined;
   else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.token' || key === 'providers.ffbox.devRequests') {
     const ffbox = { ...cfg.providers?.ffbox };
