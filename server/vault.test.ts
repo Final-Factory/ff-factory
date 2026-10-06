@@ -346,3 +346,41 @@ test('addSecretValues: a daemon learns the secret values of a launch spec withou
     registerSecretValues([]);
   }
 });
+
+test('vault: after a new key, the entries sealed with the old one are named, and rotating each makes it usable again', (t) => {
+  const { dir, make } = setup(t);
+  make().add({ name: 'a', kind: 'claude', value: A, share: 'anyone' });
+  make().add({ name: 'gh', kind: 'github', value: GH, share: 'anyone' });
+  const other = path.join(dir, 'new.key');
+  fs.writeFileSync(other, newKeyText(), { mode: 0o600 });
+  fs.chmodSync(other, 0o600);
+  const v = make(() => ({ file: other }));
+  assert.equal(v.status().key, 'wrong');
+  const r = v.forRun({ machineId: 'm3', role: 'workers' }, { claude: true });
+  assert.equal(r.claude, undefined);
+  assert.deepEqual(r.env, {});
+  assert.match(r.problems.join('\n'), /gh does not open with this key \(rotate it\)/);
+  v.rotate('a', B);
+  const half = v.status();
+  assert.equal(half.key, 'loaded');
+  assert.match(half.why ?? '', /sealed with another key, rotate: gh/);
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers' }, { claude: true }).claude?.token, B);
+  v.add({ name: 'c', kind: 'claude', value: C, share: 'anyone' });
+  v.remove('gh');
+  assert.equal(v.status().why, undefined, 'every entry opens again');
+});
+
+test('vault: one value per variable, the run person own entry first, then by name; a name that looks like an id opens nothing else', (t) => {
+  const { make } = setup(t);
+  const v = make();
+  v.add({ name: 'shared-gh', kind: 'github', value: ghTok('s'), share: 'anyone' });
+  v.add({ name: 'ben-gh', kind: 'github', value: ghTok('b'), owner: 'ben', share: 'owner' });
+  v.add({ name: 'a-gh', kind: 'github', value: ghTok('a'), share: 'anyone' });
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: false }).env.GH_TOKEN, ghTok('b'), "ben's own");
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'loth' }, { claude: false }).env.GH_TOKEN, ghTok('a'), 'then by name');
+  // An entry named like another's id: grants are looked up by id, never by that name.
+  const owned = v.add({ name: 'x', kind: 'claude', value: A, owner: 'loth', share: 'owner' });
+  v.add({ name: owned.id, kind: 'claude', value: B, share: 'anyone', machines: ['m9'] });
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'loth' }, { claude: true }).claude?.token, A);
+  assert.equal(v.forRun({ machineId: 'm9', role: 'workers', userId: 'ben' }, { claude: true }).claude?.token, B);
+});

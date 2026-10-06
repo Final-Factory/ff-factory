@@ -1,4 +1,4 @@
-import { MACHINE_ID, enrolledMachines, issueMachineToken, machineTokensFile, readMachineTokens, revokeMachineToken, writeMachineTokens } from './machineTokens.ts';
+import { MACHINE_ID, enrolledMachines, issueMachineToken, machineTokensFile, readMachineTokens, revokeMachineToken, tokenSha } from './machineTokens.ts';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -283,7 +283,8 @@ export class MachineManager {
   hooks?: MachineHooks;
   /** The attachment store (docs/attachments.md): what daemons may fetch, granted as files are sent to their agents. */
   attachments?: AttachmentStore;
-  private readonly links = new Map<string, { ws: WebSocket; lastPong: number; since: number }>();
+  /** `hash`: the credential hash the link authenticated with (or the portal re-issued since, register): dropRevoked compares it. */
+  private readonly links = new Map<string, { ws: WebSocket; lastPong: number; since: number; hash?: string }>();
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
   private readonly tokensFile: string;
   private readonly failures = new Map<string, number[]>();
@@ -676,6 +677,9 @@ export class MachineManager {
     const prev = this.store.machines.get(m.id);
     const machine: Machine = { online: this.isOnline(m.id), sessionIds: prev?.sessionIds ?? [], createdAt: prev?.createdAt ?? new Date().toISOString(), ...m };
     const token = issueMachineToken(this.cfg.dataDir, m.id);
+    // The portal's own re-issue (a redeploy) keeps the link it has, as before: the deploy replaces that daemon itself.
+    const link = this.links.get(m.id);
+    if (link) link.hash = tokenSha(token);
     this.store.putMachine(machine);
     return { machine, token };
   }
@@ -695,9 +699,7 @@ export class MachineManager {
   remove(id: string) {
     const m = this.require(id);
     for (const sid of m.sessionIds) if (this.sessions.sessions.has(sid)) this.sessions.remove(sid);
-    const tokens = this.tokens();
-    delete tokens[m.id];
-    this.writeTokens(tokens);
+    revokeMachineToken(this.cfg.dataDir, m.id);
     this.links.get(m.id)?.ws.close(4001, 'machine removed');
     this.store.removeMachine(m.id);
   }
@@ -706,20 +708,17 @@ export class MachineManager {
     return readMachineTokens(this.tokensFile);
   }
 
-  private writeTokens(t: Record<string, string>) {
-    writeMachineTokens(this.tokensFile, t);
-  }
-
   /**
-   * Drop the link of every machine whose credential was revoked (`fffctl machine-credential revoke`, which edits the
-   * tokens file while the portal runs): checked with each heartbeat, so within PING_MS. Its record and sessions stay.
+   * Drop the link of every machine whose credential was revoked or replaced from outside the portal (`fffctl
+   * machine-credential revoke` or `issue`, which edit the tokens file while the portal runs), so a leaked credential
+   * stops at once, not at its next reconnect. Checked with each heartbeat, so within PING_MS. Its record and sessions stay.
    */
   dropRevoked() {
     if (!this.links.size) return;
     const t = this.tokens();
     for (const [id, link] of this.links) {
-      if (t[id]) continue;
-      console.warn(`machine ${id}: its credential was revoked, dropping the connection`);
+      if (t[id] && (!link.hash || t[id] === link.hash)) continue;
+      console.warn(`machine ${id}: its credential was ${t[id] ? 'replaced' : 'revoked'}, dropping the connection`);
       link.ws.close(4001, 'machine credential revoked');
       this.detach(id);
     }
@@ -1086,15 +1085,16 @@ export class MachineManager {
       return false;
     }
     this.failures.delete(ip);
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.attach(id, ws));
+    const hash = this.tokens()[id];
+    this.wss.handleUpgrade(req, socket, head, (ws) => this.attach(id, ws, hash));
     return true;
   }
 
   /** Wire a connected daemon (exported for tests: any WebSocket works). */
-  attach(id: string, ws: WebSocket) {
+  attach(id: string, ws: WebSocket, hash?: string) {
     const old = this.links.get(id);
     if (old) old.ws.close(4000, 'replaced by a newer connection');
-    const link = { ws, lastPong: Date.now(), since: Date.now() };
+    const link: { ws: WebSocket; lastPong: number; since: number; hash?: string } = { ws, lastPong: Date.now(), since: Date.now(), ...(hash ? { hash } : {}) };
     this.links.set(id, link);
     ws.on('pong', () => (link.lastPong = Date.now()));
     ws.on('message', (data) => {

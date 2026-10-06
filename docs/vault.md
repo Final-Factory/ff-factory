@@ -42,7 +42,7 @@ Paths and code come from w511's map (`docs/worker-root.md`, ff-factory #135, mea
 ## 2. The vault on the portal
 
 **One file, `data/vault.json`, sealed value by value.** Each entry keeps its metadata in the clear (id, name, kind,
-owner, grants, fingerprint, last four characters, dates). Its value is AES-256-GCM ciphertext with a fresh 96-bit IV,
+owner, grants, fingerprint, last four characters, dates, and which key sealed it). Its value is AES-256-GCM ciphertext with a fresh 96-bit IV,
 and the entry's id and kind as additional data, so a value moved to another entry fails to open. Listing needs no key;
 only handing a value out does. The file is written atomically (`writeJsonDurable`, mode 0600, no old generations kept,
 so a removed value leaves no copy) under a lock file, and re-read when its modification time changes, so
@@ -59,8 +59,9 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
   it from the environment its agents inherit.
 - **Elsewhere** (a portal still on Windows, the e2e tests): config `vault.keyFile`. `loadConfig` refuses one inside
   `data/`; `readKey` refuses one other users can read (Linux, macOS).
-- **No key, or the wrong one:** the vault still lists, but hands nothing out. Every run falls back to what it had
-  before (section 4) and `system_status` says why.
+- **No key, or the wrong one:** the vault still lists, but hands out nothing it cannot open. Every run falls back to
+  what it had before (section 4) and `system_status` says why, naming the entries sealed with another key. Rotating an
+  entry re-seals it with the current key.
 - **Never in a backup:** `fff-backup` packs `/srv/fff` only (`tar -C "$FFF_ROOT"`, `deploy/vm/guest/fff-backup:36`).
 
 **Adding, rotating and removing.** There are two ways in, and neither goes through chat:
@@ -69,6 +70,9 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
   the command line, where any process could read it. Root's writes are handed to the `fff` user.
 - The owner's settings dialog (Settings → Token vault), backed by owner-only routes (`/api/vault`). A member gets 403.
   An API key cannot reach them: `/api` takes only a signed-in browser session.
+
+**One value per variable.** When two entries granted to a run give the same variable (two GitHub tokens), the run's
+person's own entry wins, then the first by name.
 
 **A value is never shown back.** Everything that lists the vault shows its name, kind, owner, grants, fingerprint and
 last four characters. The fingerprint is the first 12 hex characters of the value's SHA-256, the same key the usage
@@ -93,7 +97,11 @@ user id) and who may use it: `share: owner` (only work its owner asked for, the 
 per machine and revocable:
 
 - `fffctl machine-credential issue <id> --out FILE` writes a fresh credential for a machine to a 0600 file and never
-  prints it (for w513's installer). `add_machine` keeps issuing one as it does today.
+  prints it (for w513's installer). A daemon still connected with the one before is dropped within 20 s, so replacing
+  a leaked credential cuts it off at once. `add_machine` keeps issuing one as it does today; its own re-issue keeps the
+  link it has, because the redeploy replaces that daemon itself.
+- The portal and fffctl both change `machine-tokens.json` (and `vault.json`) only under a lock file, so neither loses
+  the other's change, and fffctl's files reach the `fff` user before they are renamed into place.
 - `fffctl machine-credential revoke <id>`, or ✕ beside the machine in the vault dialog, deletes the hash. The portal
   drops that machine's open link at its next heartbeat, within 20 s (`MachineManager.dropRevoked`), and refuses its
   reconnects. The machine's record, sandboxes and sessions stay, so issuing a new credential brings it back.
@@ -154,7 +162,7 @@ outrank the token) and the token is the process's only one.
 | An agent on a worker machine reads its environment | It sees its own run's secrets, as today (it must, to use them). The vault narrows that from everything in the machine's keyring to what its run needs |
 | The data folder leaks (a backup, `fffctl migrate`, a copy) | `vault.json` holds ciphertext; the key is never in `data/` or a backup |
 | An orchestrator on the portal (the same OS user) goes for the key | The secret guard refuses reads of `vault.keyFile`, `/etc/fff`, `/run/credentials` and `$CREDENTIALS_DIRECTORY` (`portalSecretRules`), as it refuses `data/` and the token file, and the variable is removed from the agents' environment. This is a seatbelt, not a boundary: a shell command of the same user can still read the credential while the service runs. The boundary is the one D2 accepted |
-| A value reaches a log, a transcript or chat | No route, tool or command returns one. Transcripts, the daemon log and the portal log redact Claude, GitHub, provider and Discord tokens by pattern, and every vault value by value, whatever its form: the portal learns them from the vault (`registerSecretValues`), each daemon from the launch specs it gets (`addSecretValues`). Errors name entries, never values |
+| A value reaches a log, a transcript or chat | No route, tool or command returns one. Transcripts, the daemon log and the portal log redact Claude, GitHub, provider and Discord tokens by pattern, and every vault value by value, whatever its form: the portal learns them from the vault and each daemon from the launch specs it gets (`addSecretValues`). A rotated or removed value stays on the list, because a run started before still holds it. Errors name entries, never values |
 | Someone asks an agent in chat to add or print a token | There is no tool for it. Values enter through fffctl (root in the VM) or the owner's own browser session |
 | FFBox | Nothing is shared: no FFBox secret is in the vault, and no vault value goes to FFBox |
 | The FFBox host's root | Can read the VM's memory and disk (D2, accepted with mitigations). The vault keeps the values out of `config.json` and `data/`; it does not change that boundary |
@@ -236,6 +244,8 @@ work is the risk, and the vault makes that an explicit choice per token (open de
 - The meters attribute a stopped vault session by the current config rather than the token it ran on, as for every
   account (`sessionSource`); live sessions are exact.
 - A dedicated OS user for the portal's own agents would make the key boundary real rather than a seatbelt (section 5).
+- The seal authenticates a value with its entry's id and kind, not its grants: someone who can write `data/` (the
+  portal's user) could re-grant an entry. Sealing the grants too would make every grant change need the key.
 
 ## Open decisions
 

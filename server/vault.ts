@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { checkObject, readJsonDurable } from './durable.ts';
+import { withFileLock, writeJsonOwned } from './machineTokens.ts';
 import type { PlanUsage, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus } from '../shared/types.ts';
 
 /**
@@ -22,12 +23,12 @@ interface Sealed {
 
 interface VaultEntry extends VaultEntryMeta {
   sealed: Sealed;
+  /** Which key sealed it (a hash prefix of the key): after a new key, the entries sealed with the old one are named, and rotating one re-seals it. */
+  keyId: string;
 }
 
 interface VaultFile {
   version: 1;
-  /** Which key sealed the entries (a hash prefix of it), so a wrong key reads as wrong, not as damaged entries. */
-  keyId?: string;
   entries: VaultEntry[];
 }
 
@@ -221,7 +222,7 @@ function checkVault(v: unknown): string | undefined {
   if (c) return c;
   const f = v as Partial<VaultFile>;
   if (f.version !== 1 || !Array.isArray(f.entries)) return 'not a version 1 vault';
-  for (const e of f.entries) if (!e || typeof e.id !== 'string' || typeof e.name !== 'string' || !VAULT_KINDS.includes(e.kind) || !e.sealed) return 'an entry is malformed';
+  for (const e of f.entries) if (!e || typeof e.id !== 'string' || typeof e.name !== 'string' || !VAULT_KINDS.includes(e.kind) || !e.sealed || typeof e.keyId !== 'string') return 'an entry is malformed';
   return undefined;
 }
 
@@ -264,8 +265,10 @@ export class Vault {
     } catch (e) {
       return { status: { key: 'unreadable', why: (e as Error).message, keyFile: src.file } };
     }
-    if (this.data.keyId && this.data.keyId !== keyIdOf(key)) return { status: { key: 'wrong', why: `the vault key ${src.file} did not seal these entries (rotate each one, or put the old key back)`, keyFile: src.file } };
-    return { key, status: { key: 'loaded', keyFile: src.file } };
+    const id = keyIdOf(key);
+    const stale = this.data.entries.filter((e) => e.keyId !== id).map((e) => e.name);
+    if (stale.length && stale.length === this.data.entries.length) return { key, status: { key: 'wrong', why: `the vault key ${src.file} sealed none of the entries; rotate each one (${stale.join(', ')}) or put the old key back`, keyFile: src.file } };
+    return { key, status: { key: 'loaded', keyFile: src.file, ...(stale.length ? { why: `sealed with another key, rotate: ${stale.join(', ')}` } : {}) } };
   }
 
   status(): VaultStatus {
@@ -275,54 +278,38 @@ export class Vault {
 
   list(): VaultEntryMeta[] {
     this.reload();
-    return this.data.entries.map(({ sealed: _s, ...meta }) => ({ ...meta, roles: [...meta.roles], machines: [...meta.machines] }));
+    return this.data.entries.map((e) => this.meta(e));
+  }
+
+  private meta(e: VaultEntry): VaultEntryMeta {
+    const { sealed: _s, keyId: _k, ...meta } = e;
+    return { ...meta, roles: [...meta.roles], machines: [...meta.machines] };
   }
 
   private find(name: string): VaultEntry {
-    const e = this.data.entries.find((x) => x.name === name || x.id === name);
+    const e = this.data.entries.find((x) => x.name === name);
     if (!e) throw new Error(`no vault entry named ${name}`);
     return e;
   }
 
+  private byId(id: string): VaultEntry | undefined {
+    return this.data.entries.find((x) => x.id === id);
+  }
+
   /** Lock, re-read, change, write: fffctl and the portal may both write. */
   private change<T>(fn: (key: Buffer | undefined) => T, needKey: boolean): T {
-    const lock = `${this.o.file}.lock`;
-    fs.mkdirSync(path.dirname(this.o.file), { recursive: true });
-    let fd: number | undefined;
-    for (let i = 0; i < 50 && fd === undefined; i++) {
-      try {
-        fd = fs.openSync(lock, 'wx', 0o600);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-        // A lock left by a crash is stale after 10 s.
-        try {
-          if (Date.now() - fs.statSync(lock).mtimeMs > 10_000) fs.rmSync(lock, { force: true });
-        } catch {
-          // gone meanwhile
-        }
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-      }
-    }
-    if (fd === undefined) throw new Error(`the vault is locked by another writer (${lock})`);
-    try {
+    return withFileLock(this.o.file, () => {
       this.mtime = -1;
       this.reload();
       const k = this.key();
       if (needKey && !k.key) throw new Error(`the vault cannot seal values: ${k.status.why}`);
       const out = fn(k.key);
-      if (k.key) this.data.keyId ??= keyIdOf(k.key);
-      writeJsonDurable(this.o.file, this.data, { indent: 2, mode: 0o600, generations: 0 });
-      if (this.o.chownLike) {
-        const st = fs.statSync(this.o.chownLike);
-        fs.chownSync(this.o.file, st.uid, st.gid);
-      }
+      // No old generations: a removed or rotated value leaves no copy behind.
+      writeJsonOwned(this.o.file, this.data, this.o.chownLike, 0);
       this.mtime = fs.statSync(this.o.file).mtimeMs;
       this.publishValues();
       return out;
-    } finally {
-      fs.closeSync(fd);
-      fs.rmSync(lock, { force: true });
-    }
+    });
   }
 
   private checkGrant(i: UpdateInput & { kind: VaultKind }) {
@@ -352,7 +339,7 @@ export class Vault {
       if (dup) throw new Error(`that value is already in the vault as ${dup.name}`);
       const at = this.now();
       const meta: VaultEntryMeta = { id: randomBytes(4).toString('hex'), name: i.name, kind: i.kind, ...(i.env ? { env: i.env } : {}), ...(i.owner ? { owner: i.owner } : {}), share, roles: grant.roles, machines: grant.machines, fingerprint: fp, last4: i.value.slice(-4), createdAt: at, updatedAt: at };
-      this.data.entries.push({ ...meta, sealed: seal(key!, meta, i.value) });
+      this.data.entries.push({ ...meta, sealed: seal(key!, meta, i.value), keyId: keyIdOf(key!) });
       return meta;
     }, true);
   }
@@ -366,9 +353,8 @@ export class Vault {
       const dup = this.data.entries.find((x) => x.fingerprint === fp && x.id !== e.id);
       if (dup) throw new Error(`that value is already in the vault as ${dup.name}`);
       const at = this.now();
-      Object.assign(e, { fingerprint: fp, last4: value.slice(-4), rotatedAt: at, updatedAt: at, sealed: seal(key!, e, value) });
-      const { sealed: _s, ...meta } = e;
-      return meta;
+      Object.assign(e, { fingerprint: fp, last4: value.slice(-4), rotatedAt: at, updatedAt: at, sealed: seal(key!, e, value), keyId: keyIdOf(key!) });
+      return this.meta(e);
     }, true);
   }
 
@@ -383,8 +369,7 @@ export class Vault {
       Object.assign(e, next, { updatedAt: this.now() });
       if (!next.owner) delete e.owner;
       if (!next.disabled) delete e.disabled;
-      const { sealed: _s, ...meta } = e;
-      return meta;
+      return this.meta(e);
     }, false);
   }
 
@@ -393,14 +378,8 @@ export class Vault {
       const e = this.find(name);
       this.data.entries = this.data.entries.filter((x) => x.id !== e.id);
       for (const [s, id] of this.lastPick) if (id === e.id) this.lastPick.delete(s);
-      const { sealed: _s, ...meta } = e;
-      return meta;
+      return this.meta(e);
     }, false);
-  }
-
-  /** A session ended for good: forget its sticky pick. */
-  forgetSession(sessionId: string) {
-    this.lastPick.delete(sessionId);
   }
 
   private open(key: Buffer, e: VaultEntry): string | undefined {
@@ -445,15 +424,18 @@ export class Vault {
       out.problems.push(`the vault cannot open ${wanted.map((e) => e.name).join(', ')}: ${status.why}`);
       return out;
     }
-    for (const e of granted) {
+    // One value per variable: the run's person's own entry first, then by name (two entries giving GH_TOKEN never race).
+    const order = (e: VaultEntryMeta) => `${same(e.owner, run.userId) ? 0 : 1}${e.name}`;
+    for (const e of [...granted].sort((a, b) => order(a).localeCompare(order(b)))) {
       if (e.kind === 'claude') continue;
+      const name = e.kind === 'github' ? 'GH_TOKEN' : e.env;
+      if (!name || name in out.env) continue;
       const v = this.open(key, e);
       if (!v) {
-        out.problems.push(`vault entry ${e.name} does not open with this key`);
+        out.problems.push(`vault entry ${e.name} does not open with this key (rotate it)`);
         continue;
       }
-      if (e.kind === 'github') out.env.GH_TOKEN = v;
-      else if (e.env) out.env[e.env] = v;
+      out.env[name] = v;
     }
     if (o.claude) {
       const sticky = run.sessionId ? this.lastPick.get(run.sessionId) : undefined;
@@ -468,15 +450,20 @@ export class Vault {
           sticky,
         );
         if (!pick) break;
-        const v = this.open(key, this.find(pick.id));
+        const e = this.byId(pick.id)!;
+        const v = this.open(key, e);
         if (v) {
-          if (run.sessionId) this.lastPick.set(run.sessionId, pick.id);
-          const { sealed: _s, ...meta } = this.find(pick.id);
-          out.claude = { entry: meta, token: v };
+          if (run.sessionId) {
+            this.lastPick.delete(run.sessionId);
+            this.lastPick.set(run.sessionId, pick.id);
+            // Oldest first: a portal that runs for months keeps the last few thousand sessions' picks only.
+            if (this.lastPick.size > 5000) this.lastPick.delete(this.lastPick.keys().next().value!);
+          }
+          out.claude = { entry: this.meta(e), token: v };
           break;
         }
         tried.add(pick.id);
-        out.problems.push(`vault entry ${pick.name} does not open with this key`);
+        out.problems.push(`vault entry ${pick.name} does not open with this key (rotate it)`);
       }
     }
     return out;

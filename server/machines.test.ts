@@ -155,6 +155,23 @@ test('machine: a revoked credential drops the link and keeps the daemon out; a n
   await until('back with the new credential', () => mm.isOnline('mx'));
 });
 
+test('machine: a credential replaced from outside drops the old link; the portal own re-issue (a redeploy) keeps it (w512)', async (t) => {
+  const { mm, daemon, cleanup, tmp } = await setup();
+  t.after(cleanup);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  // add_machine's redeploy re-issues through register: the link it has stays until the deploy replaces the daemon.
+  mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: 'http://x', maxSessions: 1 });
+  mm.dropRevoked();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(mm.isOnline('mx'), true, 'kept');
+  // fffctl machine-credential issue (a leaked credential replaced): the link on the old one goes now.
+  issueMachineToken(tmp, 'mx');
+  mm.dropRevoked();
+  await until('dropped', () => !mm.isOnline('mx'));
+  d.shutdown();
+});
+
 test('machine: the daemon reports its Mac\'s load and its own login\'s usage; offline clears the load (protocol 4)', async (t) => {
   const { mm, daemon, cleanup } = await setup();
   t.after(cleanup);
