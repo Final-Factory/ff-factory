@@ -1,11 +1,15 @@
 // Temporary (w521 measurement): per test file, the sum of its top-level tests' durations.
+const BS = String.fromCharCode(92);
 export default async function* fileTimes(source) {
   const per = new Map();
   for await (const ev of source) {
     if ((ev.type === 'test:pass' || ev.type === 'test:fail') && ev.data.nesting === 0 && ev.data.file && ev.data.details?.type !== 'suite') {
-      const f = ev.data.file.replace(/\/g, '/').replace(/^.*?\/(server|scripts|machine)\//, '$1/');
+      const parts = ev.data.file.split(BS).join('/').split('/');
+      const f = parts.slice(-2).join('/');
       const e = per.get(f) ?? { ms: 0, n: 0, max: 0 };
-      e.ms += ev.data.details.duration_ms; e.n++; e.max = Math.max(e.max, ev.data.details.duration_ms);
+      e.ms += ev.data.details.duration_ms;
+      e.n++;
+      e.max = Math.max(e.max, ev.data.details.duration_ms);
       per.set(f, e);
     }
   }
