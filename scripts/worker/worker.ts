@@ -93,6 +93,8 @@ export interface Manifest {
   service: string;
   slots: number;
   repoUrl: string;
+  /** A test install's firewall group suffix (firewall.ps1 -GroupSuffix). */
+  firewallSuffix?: string;
   createdAt: string;
   updatedAt: string;
   outside: OutsideItem[];
@@ -147,6 +149,16 @@ export interface InstallOptions {
   firewall: boolean;
   /** No clean-up passes of its own (a test install on a computer that holds other work). */
   noCleanup?: boolean;
+  /** Its own Unity slots mailbox: only a test install beside another daemon (the default is the one every script finds). */
+  unitySlotsDir?: string;
+  /**
+   * Windows: run elevated (an administrator's ssh session, as the portal's own deploy does) and give everything this run
+   * makes to this user (`icacls /setowner`), so the daemon's non-elevated git does not refuse the clone as owned by
+   * Administrators. Without it, an elevated run is refused.
+   */
+  owner?: string;
+  /** A test install beside a live one: its own firewall rule groups and no slot config. */
+  firewallSuffix?: string;
   /** daemon.json settings the old daemon had (a migration: its host guard, protected paths, MCP server, limits). */
   carry?: Record<string, unknown>;
   /** A migration replaces the old daemon's service on purpose (worker.ts migrate). */
@@ -280,6 +292,8 @@ export interface Facts {
   git?: [number, number];
   gitLfs: boolean;
   claude?: string;
+  /** Windows: Claude Code only as an npm shim (claude.cmd): the Agent SDK cannot start it and uses its own bundled one. */
+  claudeShim?: string;
   rootState: 'missing' | 'empty' | 'ours' | 'other';
   rootParentExists: boolean;
   freeGB?: number;
@@ -291,15 +305,15 @@ export interface Facts {
 }
 
 /** Every reason the install cannot go ahead, from facts gathered without changing anything. Exported for tests. */
-export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'slots' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'>): string[] {
+export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'slots' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
   const p: string[] = [];
   if (f.platform !== 'win32' && f.platform !== 'darwin') p.push(`this tool installs on Windows and macOS, not ${f.platform}`);
-  if (f.platform === 'win32' && f.elevated) p.push('run it from a normal (not administrator) PowerShell: files an elevated shell makes belong to Administrators, and git then refuses the clone; the one step that needs admin rights (the firewall rules) asks for them itself');
+  if (f.platform === 'win32' && f.elevated && !o.owner) p.push('run it from a normal (not administrator) PowerShell: files an elevated shell makes belong to Administrators, and git then refuses the clone; the one step that needs admin rights (the firewall rules) asks for them itself');
   if (!nodeSupport(f.nodeVersion.replace(/^v/, '')).ok) p.push(`node ${MIN_NODE.join('.')} or newer is needed (this is ${f.nodeVersion})`);
   if (!f.git) p.push(`git is missing: install git ${MIN_GIT.join('.')} or newer (${f.platform === 'win32' ? 'winget install --id Git.Git -e' : 'brew install git'})`);
   else if (!versionAtLeast(f.git, MIN_GIT)) p.push(`git ${f.git.join('.')} is too old: ${MIN_GIT.join('.')} or newer is needed for relative worktree paths (${f.platform === 'win32' ? 'winget upgrade --id Git.Git -e' : 'brew upgrade git'})`);
   if (!f.gitLfs) p.push(`git-lfs is missing (${f.platform === 'win32' ? 'it comes with Git for Windows: reinstall git' : 'brew install git-lfs && git lfs install'})`);
-  if (!f.claude) p.push(`Claude Code is missing (${f.platform === 'win32' ? 'irm https://claude.ai/install.ps1 | iex' : 'curl -fsSL https://claude.ai/install.sh | bash'})`);
+  if (!f.claude && !f.claudeShim) p.push(`Claude Code is missing (${f.platform === 'win32' ? 'irm https://claude.ai/install.ps1 | iex' : 'curl -fsSL https://claude.ai/install.sh | bash'})`);
   // The path rules of the computer the root is for (a test judges a Windows path anywhere).
   const pp = f.platform === 'win32' ? path.win32 : path.posix;
   if (!pp.isAbsolute(o.root)) p.push(`the root must be an absolute path (got "${o.root}")`);
@@ -365,10 +379,10 @@ async function serviceElsewhere(service: string, appDir: string): Promise<string
 async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?: string; claude?: string; sid?: string; home: string; user?: string; uid?: string; path?: string } }> {
   const git = gitVersion((await exec('git', ['--version'])).stdout);
   const lfs = (await exec('git', ['lfs', 'version'])).code === 0;
-  let probe: { node?: string; claude?: string; sid?: string; home: string; user?: string; uid?: string; path?: string; loggedOn?: boolean };
+  let probe: { node?: string; claude?: string; claudeShim?: string; sid?: string; home: string; user?: string; uid?: string; path?: string; loggedOn?: boolean };
   if (isWin) {
     const p = parseWinProbe(await ps('probing this PC', win.probeScript('')));
-    probe = { node: p.node, claude: p.claude, sid: p.sid, home: p.home, user: p.user, loggedOn: p.loggedOn };
+    probe = { node: p.node, claude: p.claude, claudeShim: p.claudeShim, sid: p.sid, home: p.home, user: p.user, loggedOn: p.loggedOn };
   } else {
     const p = parseMacProbe(await bash('probing this Mac', macProbeScript('')));
     probe = { node: p.node, claude: p.claude, home: p.home, uid: p.uid, path: p.path };
@@ -382,6 +396,7 @@ async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?:
     git,
     gitLfs: lfs,
     claude: probe.claude,
+    claudeShim: probe.claudeShim,
     rootState: rootState(o.root, id),
     rootParentExists: fs.existsSync(path.dirname(o.root)),
     freeGB: freeGB(o.root),
@@ -425,7 +440,9 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     maxSessions: 0,
     appDir: l.daemon,
     tempDir: l.tmp,
-    unitySlotsDir: path.join(l.daemon, 'unity-slots'),
+    // The Unity slots mailbox stays at its standard place (~/.ff-factory/unity-slots, machine/unitySlots.ts slotsDir),
+    // where the game's scripts and a scheduled nightly harness find it with no config (w469).
+    ...(o.unitySlotsDir ? { unitySlotsDir: o.unitySlotsDir } : {}),
     maxEventsFile: path.join(l.daemon, 'max-events.jsonl'),
     ...(o.unityEditorRoot ? { unityEditorRoot: o.unityEditorRoot } : {}),
     ...(o.unityPath ? { unityPath: o.unityPath } : {}),
@@ -523,6 +540,13 @@ export function unityEditors(home = os.homedir()): string[] {
     }
   }
   const roots = isWin ? [path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Unity', 'Hub', 'Editor')] : ['/Applications/Unity/Hub/Editor'];
+  // The install location chosen in the Hub (LothDesktop: C:\Program Files\Unity\Editor), as machine/unity.ts editorBinary reads it.
+  try {
+    const chosen = JSON.parse(fs.readFileSync(path.join(hub, 'secondaryInstallPath.json'), 'utf8')) as unknown;
+    if (typeof chosen === 'string' && chosen.trim()) roots.push(chosen.trim());
+  } catch {
+    // no choice made
+  }
   for (const r of roots) {
     try {
       for (const v of fs.readdirSync(r)) {
@@ -536,11 +560,23 @@ export function unityEditors(home = os.homedir()): string[] {
   return [...out].filter((p) => (isWin ? /unity\.exe$/i.test(p) : true));
 }
 
+/** Give paths made by an elevated run to `owner` (Windows; `recursive`: every file under them). Exported for migrate.ts. */
+export async function giveTo(owner: string, paths: string[], recursive = true) {
+  if (!isWin) return;
+  for (const p of paths.filter((x) => fs.existsSync(x))) await must(`giving ${p} to ${owner}`, 'icacls', [p, '/setowner', owner, ...(recursive ? ['/T'] : []), '/C', '/Q']);
+}
+
+/** Everything in the root to `owner`, but the sandboxes' own trees: a sandbox moved in by a rename keeps its owner. */
+async function giveRoot(l: Layout, owner: string) {
+  await giveTo(owner, [l.root, l.sandboxes], false);
+  await giveTo(owner, fs.readdirSync(l.root).filter((e) => e !== 'sandboxes').map((e) => path.join(l.root, e)));
+}
+
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */
-async function firewall(action: 'add' | 'remove', l: Layout, slots: number, editors: string[]): Promise<string> {
+async function firewall(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): Promise<string> {
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
   const log = path.join(os.tmpdir(), `ff-worker-firewall-${process.pid}.log`);
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Count', String(slots), '-LogFile', log, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : [])];
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Count', String(slots), '-LogFile', log, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
   say(`Windows Firewall: ${action === 'add' ? 'adding' : 'removing'} the rules (one administrator prompt)...`);
   // Start-Process -Verb RunAs takes one argument string; it reaches PowerShell through the environment, unquoted by no shell.
   const line = args.map((a) => (/[\s;]/.test(a) ? `"${a}"` : a)).join(' ');
@@ -576,7 +612,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     return false;
   }
   const id = f.credentialId!;
-  say(`OK: machine ${id}, node ${f.nodeVersion}, git ${f.git!.join('.')}, Claude Code ${f.claude}, ${f.freeGB ?? '?'} GB free.`);
+  say(`OK: machine ${id}, node ${f.nodeVersion}, git ${f.git!.join('.')}, Claude Code ${f.claude ?? `${f.claudeShim} (an npm shim: agents use the Agent SDK's own Claude Code)`}, ${f.freeGB ?? '?'} GB free.`);
 
   // 1. The root and its manifest.
   for (const d of [l.root, l.daemon, l.secrets, l.sandboxes, l.seed, l.players, l.nightly, l.scratch, l.tmp, l.logs]) fs.mkdirSync(d, { recursive: true });
@@ -591,6 +627,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     service: o.service,
     slots: o.slots,
     repoUrl: o.repoUrl,
+    ...(o.firewallSuffix ? { firewallSuffix: o.firewallSuffix } : {}),
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
     outside: prev?.outside ?? [],
@@ -607,8 +644,13 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   // 3. The game repo, bare, and the installer's own checkout.
   await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees);
   await syncSource(l, from);
+  if (o.owner) await giveRoot(l, o.owner);
 
   if (phase === 'prepare') return true;
+
+  // The Unity slots mailbox the daemon will use, outside the root on purpose; the uninstall removes it.
+  noteOutside(m, { kind: 'file', name: o.unitySlotsDir ?? path.join(os.homedir(), '.ff-factory', 'unity-slots'), note: 'the Unity slots mailbox every script finds (w469)' });
+  writeManifest(l.root, m);
 
   // 4. The daemon and its service. A test install cleans nothing: its settings are in place before it first starts.
   if (o.noCleanup) fs.writeFileSync(path.join(l.daemon, 'cleanup.json'), JSON.stringify({ everyMinutes: 0, softFreeGB: 0, staleOutput: { mode: 'off' } }));
@@ -616,20 +658,20 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   writeManifest(l.root, m);
   const d = isWin ? await installDaemonWin(o, l, id, f.probe) : await installDaemonMac(o, l, id, f.probe);
   say(`Daemon ${d.version} installed as ${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`}${d.started ? ' and started' : ' (it starts at the next logon)'}.`);
-  // The Unity slots mailbox is under the root: scripts outside the daemon (the nightly harness, a build by hand) find it
-  // through this pointer, or they would run without a slot (w469, docs/unity-lifecycle.md "Unity slots").
-  const slots = writeSlotsPointer(l);
-  noteOutside(m, { kind: 'file', name: slots, note: 'the Unity slots mailbox for scripts outside the daemon' });
-  writeManifest(l.root, m);
+  // No Unity slots pointer: the mailbox stays at its standard place in the home folder (daemonJson), where the daemon,
+  // its agents and scripts outside it (the nightly harness, a build by hand) all find it with no config (w469,
+  // machine/unitySlots.ts slotsDir). One mailbox, so they can never disagree. The uninstall still removes a pointer
+  // into its root (an install from before this), and slotsDir still honours one a person writes.
 
   // 5. Windows Firewall: the fixed slot paths and the Unity editors, once.
   if (isWin && o.firewall) {
     const editors = unityEditors(f.probe.home);
-    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP, note: `${o.slots} slots under ${l.players}` });
-    if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP, note: editors.join('; ') });
-    noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
+    const sfx = o.firewallSuffix ? ` ${o.firewallSuffix}` : '';
+    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.slots} slots under ${l.players}` });
+    if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP + sfx, note: editors.join('; ') });
+    if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
-    say(await firewall('add', l, o.slots, editors));
+    say(await firewall('add', l, o.slots, editors, o.firewallSuffix));
   } else if (isWin) say('Skipped the firewall rules (--no-firewall): players will prompt on first start.');
   else {
     // A Mac has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
@@ -639,6 +681,8 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     noteOutside(m, { kind: 'file', name: cfg, note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
   }
+
+  if (o.owner) await giveRoot(l, o.owner);
 
   // 6. The portal sees it.
   const p = new Progress();
@@ -795,12 +839,20 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
   say(`Stopped ${await stopRootProcesses(l.root)} process(es) still running from the root.`);
 
   // 4. Firewall rules and the slot config (Windows).
-  if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) say(await firewall('remove', l, m.slots, []));
+  if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) say(await firewall('remove', l, m.slots, [], m.firewallSuffix));
   if (!isWin && slotConfigRoot(macSlotConfig())?.startsWith(l.root)) {
     fs.rmSync(macSlotConfig(), { force: true });
     say(`Removed ${macSlotConfig()}.`);
   }
   if (removeSlotsPointer(l.root)) say(`Removed ${slotsPointer()}.`);
+
+  // The Unity slots mailbox (only when this install recorded it), and its folder when nothing else is left in it.
+  for (const o2 of m.outside.filter((x) => x.kind === 'file' && /unity-slots$/.test(x.name))) {
+    fs.rmSync(o2.name, { recursive: true, force: true });
+    const parent = path.dirname(o2.name);
+    if (path.basename(parent) === '.ff-factory' && fs.existsSync(parent) && !fs.readdirSync(parent).length) fs.rmdirSync(parent);
+    say(`Removed the Unity slots mailbox ${o2.name}.`);
+  }
 
   // 5. The root itself: rmdir /s and rm -rf unlink junctions and symlinks, they never follow them.
   process.chdir(os.tmpdir());
@@ -833,8 +885,8 @@ export async function check(root: string, m?: Manifest): Promise<CheckItem[]> {
       `$ErrorActionPreference = 'Continue'
 $t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
 "task=$([bool]$t)"
-"slotRules=$(@(Get-NetFirewallRule -Group ${win.psq(SLOT_GROUP)} -ErrorAction SilentlyContinue).Count)"
-"unityRules=$(@(Get-NetFirewallRule -Group ${win.psq(UNITY_GROUP)} -ErrorAction SilentlyContinue).Count)"
+"slotRules=$(@(Get-NetFirewallRule -Group ${win.psq(SLOT_GROUP + (m?.firewallSuffix ? ` ${m.firewallSuffix}` : ''))} -ErrorAction SilentlyContinue).Count)"
+"unityRules=$(@(Get-NetFirewallRule -Group ${win.psq(UNITY_GROUP + (m?.firewallSuffix ? ` ${m.firewallSuffix}` : ''))} -ErrorAction SilentlyContinue).Count)"
 $root = ${win.psq(l.root)}
 "rootRules=$(@(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object { [string]$_.Program -like ($root + '*') }).Count)"
 $cfg = Join-Path $env:ProgramData 'FinalFactory\\player-slots.json'
@@ -850,8 +902,9 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
     const cfgRoot = get('slotConfig');
     // A rule group counts only when this install made it: the slot group's name is shared with the game repo's own script.
-    const ours = (g: string) => !!m?.outside.some((o) => o.kind === 'firewall-group' && o.name === g);
-    const group = (g: string, n: string) => ({ what: `firewall group "${g}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
+    const sfx = m?.firewallSuffix ? ` ${m.firewallSuffix}` : '';
+    const ours = (g: string) => !!m?.outside.some((o) => o.kind === 'firewall-group' && o.name === g + sfx);
+    const group = (g: string, n: string) => ({ what: `firewall group "${g}${sfx}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
       group(SLOT_GROUP, get('slotRules')),
@@ -952,7 +1005,8 @@ async function readCredential(): Promise<string> {
 
 const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
-            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees]
+            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
+            [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
             [--unity-editor-root <dir>] [--unity-path <exe>]
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
@@ -979,6 +1033,9 @@ export async function main(argv = process.argv.slice(2)) {
       firewall: !flags.has('no-firewall'),
       noCleanup: flags.has('no-cleanup'),
       absoluteWorktrees: flags.has('absolute-worktrees'),
+      unitySlotsDir: opts['unity-slots-dir'],
+      owner: opts.owner,
+      firewallSuffix: opts['firewall-suffix'],
       unityEditorRoot: opts['unity-editor-root'],
       unityPath: opts['unity-path'],
     });
@@ -1009,6 +1066,9 @@ export async function main(argv = process.argv.slice(2)) {
           firewall: !flags.has('no-firewall'),
           noCleanup: flags.has('no-cleanup'),
           absoluteWorktrees: flags.has('absolute-worktrees'),
+          owner: opts.owner,
+          firewallSuffix: opts['firewall-suffix'],
+          unitySlotsDir: opts['unity-slots-dir'],
         },
       });
   } else if (cmd === 'check') {

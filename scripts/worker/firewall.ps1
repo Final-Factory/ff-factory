@@ -19,11 +19,14 @@ param(
     [int]$Count = 8,
     [string]$UnityExe = '',
     [switch]$Remove,
-    [string]$LogFile = ''
+    [string]$LogFile = '',
+    # A test install beside a live one: its own rule groups ("<group> <suffix>") and no slot config (the live one's stays).
+    [string]$GroupSuffix = ''
 )
 $ErrorActionPreference = 'Stop'
 $SlotGroup = 'Final Factory player slots'
 $UnityGroup = 'Final Factory Unity editors'
+if ($GroupSuffix) { $SlotGroup = "$SlotGroup $GroupSuffix"; $UnityGroup = "$UnityGroup $GroupSuffix" }
 $Config = Join-Path $env:ProgramData 'FinalFactory\player-slots.json'
 
 function Say([string]$text) {
@@ -38,11 +41,12 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why) {
-    # Rules an earlier prompt made for this exact path (outside our groups): a Block one would win.
+    # A Block rule an earlier, dismissed prompt left for this exact path (outside our groups) would win over ours.
+    # Allow rules people made stay: an uninstall then leaves the path as it found it.
     $stale = @(Get-NetFirewallApplicationFilter -Program $exe -ErrorAction SilentlyContinue |
-               Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Group -ne $SlotGroup -and $_.Group -ne $UnityGroup })
+               Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Group -ne $SlotGroup -and $_.Group -ne $UnityGroup -and $_.Action -eq 'Block' })
     if ($stale.Count) {
-        Say "  ${name}: removing $($stale.Count) earlier rule(s) for $exe"
+        Say "  ${name}: removing $($stale.Count) earlier Block rule(s) for $exe"
         $stale | Remove-NetFirewallRule
     }
     $n = 0
@@ -61,7 +65,7 @@ try {
     if ($old.Count) { $old | Remove-NetFirewallRule }
     if ($Remove) {
         $removedConfig = $false
-        if (Test-Path -LiteralPath $Config) {
+        if (-not $GroupSuffix -and (Test-Path -LiteralPath $Config)) {
             $rec = Get-Content -Raw -LiteralPath $Config | ConvertFrom-Json
             if ([string]$rec.root -and ([IO.Path]::GetFullPath([string]$rec.root)).TrimEnd('\') -ieq ([IO.Path]::GetFullPath($Root)).TrimEnd('\')) {
                 Remove-Item -LiteralPath $Config -Force
@@ -80,9 +84,11 @@ try {
         $made += Add-Allow $exe "Unity editor $(Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $exe)))" $UnityGroup 'Unity editor play mode (worker install, w513)'
         $editors++
     }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
-    [IO.File]::WriteAllText($Config, (@{ root = $Root; count = $Count } | ConvertTo-Json))
-    Say "OK: $made allow rule(s): $Root\slot0..slot$($Count - 1)\player\finalfactory.exe and $editors Unity editor(s); slot root recorded in $Config."
+    if (-not $GroupSuffix) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
+        [IO.File]::WriteAllText($Config, (@{ root = $Root; count = $Count } | ConvertTo-Json))
+    }
+    Say "OK: $made allow rule(s): $Root\slot0..slot$($Count - 1)\player\finalfactory.exe and $editors Unity editor(s)$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
 } catch {
     Say "FAILED: $($_.Exception.Message)"
     exit 1

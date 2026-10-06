@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { armScriptReimport } from '../../machine/scriptReimport.ts';
 import * as win from '../../server/machineDeployWin.ts';
 import { LABEL, macControlScript } from '../../server/machineDeploy.ts';
-import { Progress, exec, install, layoutOf, readManifest, whoami, type InstallOptions, type Layout } from './worker.ts';
+import { Progress, exec, giveTo, install, layoutOf, readManifest, whoami, type InstallOptions, type Layout } from './worker.ts';
 
 const isWin = process.platform === 'win32';
 const say = (line: string) => console.log(line);
@@ -408,6 +408,8 @@ export async function migrate(o: MigrateOptions) {
       fs.mkdirSync(path.dirname(i.to!), { recursive: true });
       fs.copyFileSync(i.from, i.to!);
     }
+    // An elevated run (--owner): the copied conversations belong to the user who resumes them.
+    if (io.owner && i.method === 'claude') await giveTo(io.owner, [i.to!]);
   }
 
   // 3. The old daemon stops, once no agent there is mid-turn (the portal says), then the moves.
@@ -429,6 +431,7 @@ export async function migrate(o: MigrateOptions) {
       j.moved.push({ id: sb.id, from: sb.path, to, method: item.method === 'rehome' ? 'rename' : 'copy' });
       writeJournal(l, j);
       j.moved[j.moved.length - 1].armedReimport = await rehome(to, sb.id, l, before, path.join(to, '.git'));
+      if (io.owner) await giveTo(io.owner, [path.join(to, '.git'), path.join(to, '.git.pre-ffw'), path.join(to, 'Assets', '__FFFactoryReimport')]);
       writeJournal(l, j);
       say(`Sandbox ${sb.id}: moved, git now in the root's clone (${before.status.length} changed file(s) kept).`);
     }

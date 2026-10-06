@@ -13,7 +13,7 @@ decisions of 2026-10-06 override it where they differ (listed at the end).
 <root>/                 any folder (lothsahn, decision 1): D:\work\ffw, F:\ffw, ~/ffw ...
   root.json             the install's id, layout version, machine, service name, and every thing outside the root it made
   daemon/               app/ (the daemon's code), src/ (the ff-factory checkout it was installed from), daemon.json (no
-                        token), run-daemon.ps1, logs/, agents/ (standing agents), unity-slots/, unity-mcp/, state files
+                        token), run-daemon.ps1, logs/, agents/ (standing agents), unity-mcp/, state files
   secrets/              machine-token: the machine's credential, owner-only (Windows ACL: the user and SYSTEM; macOS 0700)
   repo/                 the install's own bare clone of the game repo; every sandbox is a worktree of it
   sandboxes/<name>/     the sandboxes
@@ -32,7 +32,8 @@ still works, since that one wins.
 
 **In the home folder, on purpose** (lothsahn, decision 3: tool dependencies may use it; nothing overrides HOME):
 Claude Code's `~/.claude` (settings, plugins, and the agents' conversations under `~/.claude/projects/<folder name>`),
-`~/.claude.json`, git's `~/.gitconfig` and its credential helper, gh's login, `~/.ssh`, `~/.unity-mcp` (written by the
+`~/.claude.json`, the Unity slots mailbox `~/.ff-factory/unity-slots` (w469: the one place the daemon, its agents and a
+scheduled nightly harness all find with no config; the uninstall removes it), git's `~/.gitconfig` and its credential helper, gh's login, `~/.ssh`, `~/.unity-mcp` (written by the
 MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\Unity`, `%USERPROFILE%\AppData\LocalLow\Unity`,
 `~/Library/Logs/Unity`), and the game's save and data folder (`...\LocalLow\Never Games\finalfactory`,
 `~/Library/Application Support/Never Games/finalfactory`; decision 5). The uninstall leaves these.
@@ -44,7 +45,7 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 | The service | scheduled task `FFFactoryDaemon` (at logon, the user's interactive session, not elevated) | LaunchAgent `com.fffactory.daemon` (`~/Library/LaunchAgents`) |
 | Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile) and group "Final Factory Unity editors" (each Unity editor the Hub has) | none |
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
-| The Unity slots pointer for scripts outside the daemon: `{ "dir": "<root>\daemon\unity-slots" }`, read by `unity-slot` and the game's `scripts/unity_slot.py` when `FF_UNITY_SLOTS` is not set, so the nightly harness or a build by hand waits its turn instead of running ungated (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)) | `%USERPROFILE%\.config\finalfactory\unity-slots.json` | `~/.config/finalfactory/unity-slots.json` |
+| The Unity slots mailbox (`~/.ff-factory/unity-slots`, its standard place: no pointer is written, so the daemon, its agents and the nightly harness all use the same one, w469) | `%USERPROFILE%\.ff-factory\unity-slots` | `~/.ff-factory/unity-slots` |
 | The portal's record | removed through `POST /machine/unenroll` | the same |
 
 ## Install
@@ -243,8 +244,8 @@ in `<scratch>/credential.txt`, and a driver on port+1 (`POST /sandbox {name}`, `
 its own folder under its own task name, a clone, and a sandbox holding an unpushed commit plus staged, unstaged and
 untracked work.
 
-Test installs use their own service name (`-Service FFWorkerTest-…` / `--service com.fffactory.…`), `-NoCleanup` (the
-test daemon must not clean a computer that holds other work) and, where the computer's own git is older than 2.48,
+Test installs use their own service name (`-Service FFWorkerTest-…` / `--service com.fffactory.…`), their own Unity slots
+mailbox (`-UnitySlotsDir`), `-NoCleanup` (the test daemon must not clean a computer that holds other work) and, where the computer's own git is older than 2.48,
 `-AbsoluteWorktrees`. Once git makes a worktree with relative paths it marks the clone
 `extensions.relativeWorktrees`, and every older git refuses to open it (measured: git 2.45.1 says "unknown repository
 extension"). So on a real install every git the daemon and its tools use must be 2.48+, which is why the installer

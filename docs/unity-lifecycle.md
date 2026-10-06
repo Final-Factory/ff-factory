@@ -154,8 +154,9 @@ the portal; `server/hostHealth.ts` `blockReason`).
   orchestrator is told once ("over its limit... Started outside the slot gate: batch FinalFactory"), and again when it is
   back. Nothing is ever stopped or killed.
 
-**The mailbox** (`FF_UNITY_SLOTS`, which the daemon sets for its agents; else the folder a worker-root install's pointer
-`~/.config/finalfactory/unity-slots.json` names (w513 keeps the mailbox under its root); else `~/.ff-factory/unity-slots`,
+**The mailbox** (`FF_UNITY_SLOTS`, which the daemon sets for its agents; else the folder a pointer
+`~/.config/finalfactory/unity-slots.json` names, if a person wrote one (a worker-root install writes none: w513 keeps the
+mailbox here too); else `~/.ff-factory/unity-slots`,
 the same on every machine whatever its `app_dir`, so scripts find it with no config. Only the daemon's entry point
 answers it: a `Daemon` built anywhere else, a test's, keeps its own under its `app_dir`): a client writes `req-<id>.json` (`pid`, `holder`, `count`, `label`, `projects`,
 `createdAt`) and touches it while it waits or holds; the daemon answers `grant-<id>.json` or `deny-<id>.json` (`why`)
