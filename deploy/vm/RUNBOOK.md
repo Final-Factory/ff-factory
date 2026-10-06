@@ -309,6 +309,21 @@ A host installed before 2026-10-06 (w537) has the older `fff-vm`, which restarts
 update the host's scripts once, `git -C ~/ff-factory pull && sudo ~/ff-factory/deploy/vm/host/install.sh --host-only
 --yes` (it leaves the running VM alone).
 
+## 8. /tmp on the VM's disk (a VM installed before 2026-10-06)
+
+Ubuntu 26.04 keeps `/tmp` in RAM, half of it: 1.9 GiB in the 4 GiB VM. The portal's clean-up counts that as its free
+disk space and reports it as low. The guest install now masks `tmp.mount`; for a VM installed before (w537):
+
+```bash
+sudo fff-vm ssh 'df -h / /tmp; findmnt -n -o FSTYPE,OPTIONS /tmp'
+                              # before: / about 118G; /tmp "tmpfs 1.9G"; "tmpfs rw,nosuid,nodev,size=...,usrquota"
+sudo fff-vm ssh 'sudo systemctl mask tmp.mount'
+                              # Created symlink '/etc/systemd/system/tmp.mount' -> '/dev/null'.
+                              # nothing changes until the VM's next boot: the nightly, or sudo fff-vm nightly --now
+sudo fff-vm ssh 'findmnt /tmp || echo "/tmp is on the root disk"; df -h /tmp'
+                              # after that boot: "/tmp is on the root disk", and /dev/vda1 about 118G
+```
+
 ## 9. The portal's ssh to the machines
 
 The portal deploys its machines' daemons over ssh as its own account, to the aliases in

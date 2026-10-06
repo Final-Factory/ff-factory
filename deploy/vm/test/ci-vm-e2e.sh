@@ -357,6 +357,11 @@ pid1=$(cat /run/libvirt/qemu/$VM.pid)
 wait_for 300 "the portal answers after the nightly" health
 journalctl -u fff-vm-nightly --no-pager -n 0 >/dev/null 2>&1 || true
 echo "ok: nightly ($(/usr/local/sbin/fff-vm snapshots | tr '\n' ' '))"
+# The guest install masked tmp.mount (w537): from this boot on, /tmp is on the root disk, not a tmpfs of half the RAM.
+[ "$(g 'systemctl is-enabled tmp.mount' || true)" = masked ] || fail "the guest install did not mask tmp.mount"
+if g 'findmnt -n /tmp' >/dev/null 2>&1; then fail "/tmp is still its own mount after a boot: $(g 'findmnt -n /tmp')"; fi
+[ "$(g 'df --output=target /tmp | tail -n 1')" = / ] || fail "/tmp is not on the root filesystem"
+echo "MEASURE /tmp after the nightly boot: $(g 'df -h --output=source,fstype,size,avail /tmp | tail -n 1')"
 
 step "a size change in fff-vm.conf: install.sh leaves the running VM alone, the nightly applies it (w537)"
 mem_kib() { virsh dumpxml "$@" $VM | sed -n "s|.*<memory unit='KiB'>\([0-9]*\)</memory>.*|\1|p"; }

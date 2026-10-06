@@ -74,6 +74,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The portal VM keeps `/tmp` on its disk** (w537). Ubuntu 26.04 mounts `/tmp` as a tmpfs of half the RAM: 1.9 GiB
+  in the 4 GiB VM, with no swap, holding the agents' temp folders, and the portal's clean-up reported it as 1.9 GB of
+  free disk on the first day after the cut-over. The guest install masks `tmp.mount` (systemd's way back to the disk;
+  from the next boot), and the VM end-to-end test checks `/tmp` is on the root filesystem after the nightly reboot. A
+  VM installed before: RUNBOOK section 8.
 - **The nightly cold restart applies a size changed in `/etc/fff-vm/fff-vm.conf`** (w537, Lothsahn: "Can we make it do
   that during the update automatically?"). With the VM off, `fff-vm nightly` (and `--now`) defines the domain again
   from the settings, logs what changed, keeps libvirt's previous definition (`/etc/fff-vm/domain.libvirt-prev.xml`), and
