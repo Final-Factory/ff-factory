@@ -10,6 +10,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **A machine with sandboxes takes workers in them only, whatever its `max_agents`** (w536, asked by Lothsahn: "Can't
+  we get rid of this code so the settings doesn't matter?"). `start_agent` with such a machine alone is refused, naming
+  its sandboxes, and its daemon refuses too. There `max_agents` caps only its standing agents. Only a machine without
+  sandboxes (the m3, the m5 until their worker-root installs) still runs workers in its main clone; the rest of the
+  main-clone code goes once they have roots ([docs/machines.md](docs/machines.md), "Limits").
+
 ### Added
 
 - **The token vault** (w512, [docs/vault.md](docs/vault.md); lothsahn: "store a list of claude tokens and any other

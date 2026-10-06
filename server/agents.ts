@@ -2485,7 +2485,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const main = m.sessionIds.filter((id) => !this.store.sessions.get(id)?.machineSandbox);
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${platformNoun(m.platform)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
-      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${m.maxSessions === 0 ? 'sandboxes only (max_agents 0: no agents in its main clone)' : `up to ${m.maxSessions} agents in the main clone`}; Claude account of its agents: ${accountSource(this.cfg, m)}`,
+      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${poolSettingsOf(m) ? `workers in its sandboxes only; up to ${m.maxSessions} standing agents` : m.maxSessions === 0 ? 'sandboxes only (max_agents 0: no agents in its main clone)' : `up to ${m.maxSessions} agents in the main clone`}; Claude account of its agents: ${accountSource(this.cfg, m)}`,
       `  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`,
       sandboxes,
       `  ${describeGit(g)}`,

@@ -645,6 +645,9 @@ export class MachineManager {
     const sbs = (m.sandboxes ?? []).map((s) => `${m.id}/${s.id}`);
     const use = sbs.length ? `one of its sandboxes (${sbs.join(', ')})` : `a sandbox there (it has none yet: create_sandbox with machine "${m.id}")`;
     if (m.local && kind === 'worker') return `${m.id}'s main clone (${m.repoPath}) is the base its sandboxes are worktrees of: start agents in ${use}`;
+    // A machine with sandboxes takes workers in them only, whatever its max_agents (w536, lothsahn: "Can't we get rid of
+    // this code so the settings doesn't matter?"): its main clone is a person's own, or the base its sandboxes come from.
+    if (kind === 'worker' && poolSettingsOf(m)) return `${m.id} takes workers in its sandboxes only: start this one in ${use}`;
     if (m.maxSessions !== 0) return undefined;
     if (kind === 'standing') return `${m.id} takes agents in its sandboxes only (max_agents 0): a standing agent needs a computer with max_agents 1 or more; assign it elsewhere`;
     return `${m.id} takes agents in its sandboxes only (max_agents 0): start this one in ${use}`;

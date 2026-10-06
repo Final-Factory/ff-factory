@@ -962,7 +962,9 @@ test('w477: a machine with max_agents 0 takes agents in its sandboxes only: star
     (agents as unknown as { cfg: Config }).cfg.placement = { prefer };
     assert.doesNotMatch((await call(dispatcher().info, 'list_sandboxes', {})).text, /Next new game-repo work: (m5|lothdesktop)'s main clone/);
   }
-  assert.match((await call(dispatcher().info, 'list_machines', {})).text, /sandboxes only \(max_agents 0: no agents in its main clone\)/);
+  const machinesText = (await call(dispatcher().info, 'list_machines', {})).text;
+  assert.match(machinesText, /workers in its sandboxes only; up to 0 standing agents/, 'a sandbox machine');
+  assert.match(machinesText, /sandboxes only \(max_agents 0: no agents in its main clone\)/, 'the m5, without sandboxes');
 
   // start_agent with the machine alone: refused before any record is made, naming its sandboxes.
   const before = store.sessions.size;
@@ -973,7 +975,7 @@ test('w477: a machine with max_agents 0 takes agents in its sandboxes only: star
   };
   const r = await run({ machine: 'lothdesktop', prompt: 'Profile the belts', title: 'Belt profile' });
   assert.equal(r.isError, true);
-  assert.match(r.text, /lothdesktop takes agents in its sandboxes only \(max_agents 0\): start this one in one of its sandboxes \(lothdesktop\/sb1, lothdesktop\/sb2\)/);
+  assert.match(r.text, /lothdesktop takes workers in its sandboxes only: start this one in one of its sandboxes \(lothdesktop\/sb1, lothdesktop\/sb2\)/);
   const none = await run({ machine: 'm5', prompt: 'x', title: 'x' });
   assert.match(none.text, /m5 takes agents in its sandboxes only \(max_agents 0\): start this one in a sandbox there \(it has none yet: create_sandbox with machine "m5"\)/);
   assert.equal(store.sessions.size, before, 'no agent record left behind');
@@ -986,7 +988,16 @@ test('w477: a machine with max_agents 0 takes agents in its sandboxes only: star
   assert.throws(() => agents.standing.create({ name: 'Nightly reader', charter: 'Read the nightly report.', trigger: { kind: 'manual' }, machineId: 'lothdesktop' } as never), /sandboxes only \(max_agents 0\)/);
   const s = machines.createSession('lothdesktop', { kind: 'worker', title: 'old', model: 'opus', permissionMode: 'bypassPermissions' });
   assert.equal(machines.placeFull(s), undefined, 'not queued');
-  assert.throws(() => machines.dispatchSend(s as never, 'hi', 'orchestrator', 'u1'), /sandboxes only \(max_agents 0\)/);
+  assert.throws(() => machines.dispatchSend(s as never, 'hi', 'orchestrator', 'u1'), /takes workers in its sandboxes only/);
+
+  // w536: with sandboxes, max_agents no longer matters for workers: the main clone takes none at 3 either, while its
+  // standing agents still may; a machine without sandboxes (the m3) keeps its main-clone workers.
+  store.putMachine({ ...machines.require('lothdesktop'), maxSessions: 3 } as never);
+  const three = await run({ machine: 'lothdesktop', prompt: 'Profile the belts', title: 'Belt profile' });
+  assert.match(three.text, /lothdesktop takes workers in its sandboxes only: start this one in one of its sandboxes \(lothdesktop\/sb1, lothdesktop\/sb2\)/);
+  assert.equal(machines.mainCloneRefusal(machines.require('lothdesktop'), 'standing'), undefined, 'its standing agents still run');
+  assert.equal(machines.mainCloneRefusal(machines.require('m3'), 'worker'), undefined, 'the m3 has no sandboxes yet');
+  assert.doesNotMatch((await call(dispatcher().info, 'list_sandboxes', {})).text, /lothdesktop's main clone|- lothdesktop \[main clone\]/);
 });
 
 test('w464 change 6: claudeAccounts.dispatcher runs the dispatcher on that account, not the system payer\'s own token; people\'s orchestrators keep theirs', (t) => {
