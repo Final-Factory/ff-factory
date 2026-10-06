@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { QUEUE_HOLD_MS, SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
 import { collectResume } from './restart.ts';
-import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonMismatch } from './machines.ts';
+import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonMismatch, issueMachineToken, revokeMachineToken } from './machines.ts';
 import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
@@ -137,6 +137,40 @@ async function setup() {
   };
   return { store, sessions, mm, daemon, token, cleanup, tmp };
 }
+
+test('machine: a revoked credential drops the link and keeps the daemon out; a new one lets it back (w512, docs/vault.md)', async (t) => {
+  const { mm, daemon, cleanup, tmp } = await setup();
+  t.after(cleanup);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  assert.equal(revokeMachineToken(tmp, 'mx'), true);
+  mm.dropRevoked();
+  await until('dropped', () => !mm.isOnline('mx'));
+  // Its reconnects are refused: the record stays, offline.
+  await new Promise((r) => setTimeout(r, 2500));
+  assert.equal(mm.isOnline('mx'), false);
+  assert.ok(mm.list().some((m) => m.id === 'mx'), 'the record stays');
+  d.shutdown();
+  daemon(issueMachineToken(tmp, 'mx'));
+  await until('back with the new credential', () => mm.isOnline('mx'));
+});
+
+test('machine: a credential replaced from outside drops the old link; the portal own re-issue (a redeploy) keeps it (w512)', async (t) => {
+  const { mm, daemon, cleanup, tmp } = await setup();
+  t.after(cleanup);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  // add_machine's redeploy re-issues through register: the link it has stays until the deploy replaces the daemon.
+  mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: 'http://x', maxSessions: 1 });
+  mm.dropRevoked();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(mm.isOnline('mx'), true, 'kept');
+  // fffctl machine-credential issue (a leaked credential replaced): the link on the old one goes now.
+  issueMachineToken(tmp, 'mx');
+  mm.dropRevoked();
+  await until('dropped', () => !mm.isOnline('mx'));
+  d.shutdown();
+});
 
 test('machine: the daemon reports its Mac\'s load and its own login\'s usage; offline clears the load (protocol 4)', async (t) => {
   const { mm, daemon, cleanup } = await setup();

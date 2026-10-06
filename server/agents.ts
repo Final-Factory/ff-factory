@@ -36,7 +36,7 @@ import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, typ
 import { REVIEW_DEFAULTS, publishedText, type ReviewStore } from './review.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, publishedAttachmentText } from '../shared/attachments.ts';
 import { backupRecipe, backupRootFor, sandboxGuard } from './guard.ts';
-import { accountSource, dispatcherOwnAccount, hostAccount, hostClaudeEnvFor, hostProcessEnv, machineUsesLogin } from './secrets.ts';
+import { accountSource, dispatcherOwnAccount, hostAccount, hostProcessEnv, machineRunEnv } from './secrets.ts';
 import { Identity, claudeEnvFor, forLine } from './identity.ts';
 import { FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, Orchestrators, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
@@ -1500,7 +1500,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 
   // ---------------------------------------------------------------- workers on machines (docs/machines.md)
 
-  private machineBrief(m: Machine) {
+  private machineBrief(m: Machine, account = accountSource(this.cfg, m)) {
     const mac = platformNoun(m.platform);
     const recipe = backupRecipe(backupRootFor(m.repoPath), m.platform ?? 'darwin');
     return `
@@ -1509,7 +1509,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 You are a Claude Code agent started from FF Factory, the user's control room, on the machine **${m.id}**${m.purpose ? ` — ${m.purpose}` : ''}. A person or an orchestrator agent sends your messages, and each says whose it is. Nobody watches your terminal: a person reads your final message of each turn.
 ${ownerLine(this.cfg)}
 - Working directory: \`${m.repoPath}\`, the user's MAIN Final Factory clone on this ${mac}, not a disposable sandbox. It may hold their own uncommitted work.
-- Claude account: you run on ${accountSource(this.cfg, m)}, set by the portal for its agents only; the user's own Claude sessions on this ${mac} keep their login.
+- Claude account: you run on ${account}, set by the portal for its agents only; the user's own Claude sessions on this ${mac} keep their login.
 - Label: the purpose line of this machine, shown in the dashboard. Change it with \`mcp__machine__set_label\`, and set it back to \`unused\` when you are done. If another agent still works on this machine, "unused" is ignored and its label stays (the tool says so); that is expected.
 
 ## The user's work comes first: back it up, then you may clear it
@@ -1543,12 +1543,14 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 
   /** What a worker on a machine launches; the machine's daemon turns it into SDK options there. */
   private machineWorkerSpec(info: SessionInfo, m: Machine): LaunchSpec {
+    // The run's Claude account and the vault's secrets for it (docs/vault.md): a person's own token, a vault token, or the machine's.
+    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id });
     return {
       cwd: m.repoPath,
       model: info.model,
       effort: info.effort ?? this.cfg.worker.effort,
       settingSources: ['user', 'project', 'local'],
-      append: this.machineBrief(m),
+      append: this.machineBrief(m, run.account),
       // The Mac's own MCP servers load, except the portal's: an agent must not launch agents. Its Unity bridge is the
       // daemon's, confined to this clone's editor (machine/unityMcp.ts).
       strictMcp: false,
@@ -1591,12 +1593,12 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       // The host's Claude account (config machines.useHostClaudeEnv), for this agent only: not the Mac's login. A
       // person with their own (config userClaudeEnv) runs on theirs (docs/identity.md).
       // FF_SESSION_ID tags what the agent does as Max (docs/max.md); the daemon adds FF_MAX_EVENTS, the machine's own file.
-      env: { ...claudeEnvFor(this.cfg, info.requestedBy, hostClaudeEnvFor(this.cfg, m)), FF_MACHINE_ID: m.id, FF_SESSION_ID: info.id, ...connectorEnv(this.cfg, 'workers') },
-      login: machineUsesLogin(this.cfg, m),
+      env: { ...run.env, FF_MACHINE_ID: m.id, FF_SESSION_ID: info.id, ...connectorEnv(this.cfg, 'workers') },
+      login: run.login,
     };
   }
 
-  private machineSandboxBrief(m: Machine, sb: MachineSandbox) {
+  private machineSandboxBrief(m: Machine, sb: MachineSandbox, account = accountSource(this.cfg, m)) {
     const mac = platformNoun(m.platform);
     const branch = sb.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb.branch;
     const max = poolSettingsOf(m)?.maxAgentsPerSandbox ?? 2;
@@ -1612,7 +1614,7 @@ ${ownerLine(this.cfg)}
 - Sandbox: **${displayName(sb)}** (\`${m.id}/${sb.id}\`; the id is only the slot, the label is what it is doing now)
 - Worktree: \`${sb.path}\` on branch \`${branch}\`, a git worktree of the machine's main clone. Work only inside this directory.
 - Label: the sandbox's name in the dashboard; keep it saying what you are doing now with \`mcp__machine__set_label\` (label only). When you are done, set it to \`unused\`; if another agent still works in this sandbox that is ignored and its label stays (the tool says so), which is expected.
-- Claude account: you run on ${accountSource(this.cfg, m)}, set by the portal for its agents only.
+- Claude account: you run on ${account}, set by the portal for its agents only.
 - Protected: the machine's main clone \`${m.repoPath}\` (the user's own work) and the FF Factory daemon's folder. Never write there or run commands naming them; the harness blocks it.
 
 ## Unity
@@ -1640,13 +1642,14 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 
   /** What a worker in a machine sandbox launches: its worktree, the sandbox guard (not the main clone's backup rules). */
   private machineSandboxSpec(info: SessionInfo, m: Machine, sb: MachineSandbox): LaunchSpec {
+    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id });
     return {
       cwd: sb.path,
       sandbox: sb.id,
       model: info.model,
       effort: info.effort ?? this.cfg.worker.effort,
       settingSources: ['user', 'project', 'local'],
-      append: this.machineSandboxBrief(m, sb),
+      append: this.machineSandboxBrief(m, sb, run.account),
       strictMcp: false,
       // The Unity bridge of this sandbox's editor only (machine/unityMcp.ts): Claude Code has none registered for a new worktree.
       unityMcp: true,
@@ -1684,7 +1687,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       },
       publicGit: this.publicGit(),
       env: {
-        ...claudeEnvFor(this.cfg, info.requestedBy, hostClaudeEnvFor(this.cfg, m)),
+        ...run.env,
         FF_MACHINE_ID: m.id,
         FF_SANDBOX_ID: sb.id,
         FF_SANDBOX_PATH: sb.path,
@@ -1695,7 +1698,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ...(m.local ? { FF_MAX_EVENTS: eventsFileOf(this.cfg) } : {}),
         ...connectorEnv(this.cfg, 'workers'),
       },
-      login: machineUsesLogin(this.cfg, m),
+      login: run.login,
     };
   }
 

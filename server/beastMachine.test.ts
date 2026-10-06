@@ -429,7 +429,7 @@ test('beast machine: no agent ends the daemon\'s task; the reaper never touches 
 
 test('beast machine: a standing agent on it keeps the workers\' account; its daemon cleans nothing even before the first welcome', () => {
   const src = fs.readFileSync(path.join(import.meta.dirname, 'standing.ts'), 'utf8');
-  assert.match(src, /hostClaudeEnvFor\(this\.cfg, m \?\? a\.machineId\)/, 'the machine record, so the local rule applies');
+  assert.match(src, /machineRunEnv\(this\.cfg, m \?\? a\.machineId/, 'the machine record, so the local rule applies');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-dclean-'));
   try {
     const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'beast', token: 't', repoPath: dir, appDir: dir, maxEventsFile: null, cleanup: { everyMinutes: 0, softFreeGB: 0 } }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
@@ -456,6 +456,9 @@ test('w469: a daemon gives its agents the Unity slots mailbox, their holder and 
     assert.deepEqual(Object.keys(env).filter((k) => k.toUpperCase() === 'PATH'), [key]);
     assert.equal(env[key].split(path.delimiter)[0], path.join(slots, 'bin'));
     assert.equal(d.slots.dir, slots);
+    // Built without one (a test's daemon), its mailbox is its own, never the machine's real one.
+    const plain = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: path.join(dir, 'mx'), maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
+    assert.equal(plain.slots.dir, path.join(dir, 'mx', 'unity-slots'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

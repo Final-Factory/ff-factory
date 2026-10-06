@@ -1,5 +1,4 @@
-import { hostClaudeEnvFor, machineUsesLogin } from './secrets.ts';
-import { claudeEnvFor } from './identity.ts';
+import { machineRunEnv } from './secrets.ts';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
@@ -825,8 +824,11 @@ export class StandingAgents {
       gameRepos: [this.cfg.repo.url],
       // The host's Claude account (config machines.useHostClaudeEnv), for this agent only; the run's person's own
       // when they have one (config userClaudeEnv, docs/identity.md).
-      env: claudeEnvFor(this.cfg, this.currentRequester(a), hostClaudeEnvFor(this.cfg, m ?? a.machineId)),
-      login: machineUsesLogin(this.cfg, m ?? a.machineId),
+      ...(() => {
+        // The vault's token and secrets for this run (docs/vault.md), else the machine's account as before.
+        const run = machineRunEnv(this.cfg, m ?? a.machineId, { role: 'standing', requestedBy: this.currentRequester(a), sessionId: a.sessionId });
+        return { env: run.env, login: run.login };
+      })(),
     };
   }
 

@@ -1747,3 +1747,53 @@ export interface PermissionDecisionRequest {
   allow: boolean;
   message?: string;
 }
+
+// ---------------------------------------------------------------- the token vault (docs/vault.md, w512)
+
+export type VaultKind = 'claude' | 'github' | 'env';
+/** The roles a machine run has (config claudeAccounts' names): sandbox and main-clone workers, standing agents. */
+export type VaultRole = 'workers' | 'standing';
+/** owner: only work the entry's owner asked for. anyone: any run it is granted to. */
+export type VaultShare = 'owner' | 'anyone';
+
+/** A vault entry as anyone may see it: never its value. */
+export interface VaultEntryMeta {
+  id: string;
+  name: string;
+  kind: VaultKind;
+  /** kind env: the variable the value is given as. */
+  env?: string;
+  /** A portal user id: whose account or secret it is. */
+  owner?: string;
+  share: VaultShare;
+  roles: VaultRole[];
+  /** Machine ids, or ["*"] for every machine. */
+  machines: string[];
+  disabled?: boolean;
+  /** The first 12 hex characters of the value's SHA-256 (for a Claude token, the usage meters' key without "token:"). */
+  fingerprint: string;
+  last4: string;
+  createdAt: string;
+  updatedAt: string;
+  rotatedAt?: string;
+}
+
+export interface VaultStatus {
+  /** loaded: values can be handed out. missing: no key configured. unreadable: the key file cannot be read. wrong: it did not seal these entries. */
+  key: 'loaded' | 'missing' | 'unreadable' | 'wrong';
+  why?: string;
+  keyFile?: string;
+  entries: number;
+}
+
+/** What the owner's vault dialog shows (GET /api/vault). */
+export interface VaultView {
+  status: VaultStatus;
+  entries: VaultEntryMeta[];
+  kinds: VaultKind[];
+  roles: VaultRole[];
+  people: { userId: string; displayName: string }[];
+  machines: { id: string; online: boolean; claudeFromVault: boolean }[];
+  /** Machines that hold a credential now. */
+  enrolled: string[];
+}

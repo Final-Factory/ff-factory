@@ -345,6 +345,8 @@ export interface AccountContext {
   tokenFile?: { key: string; label: string; roles: HostRole[] };
   /** People's own tokens (config userClaudeEnv): key, label ("Lothsahn's token …abcd") and whose. */
   people?: { key: string; label: string; displayName: string }[];
+  /** The token vault's Claude tokens (docs/vault.md, w512): key, label ("vault: ben-max …abcd") and where they are granted. */
+  vault?: { key: string; label: string; where: string }[];
   /** Every session with its source key (sessionSource); `live`: running now (for the order). */
   sessions: { id: string; source: string; live?: boolean }[];
 }
@@ -375,6 +377,12 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
     sources.set(p.key, { label: p.label, ...entries.get(p.key), kind: 'token' });
     whose.set(p.key, p.displayName);
   }
+  const vaultWhere = new Map<string, string>();
+  for (const v of ctx.vault ?? []) {
+    if (sources.has(v.key)) continue; // the same token as another: one account
+    sources.set(v.key, { label: v.label, ...entries.get(v.key), kind: 'token' });
+    vaultWhere.set(v.key, v.where);
+  }
   for (const [key, e] of entries) {
     if (key.startsWith('login:') && key !== HOST_LOGIN && machineIds.has(key.slice(6))) sources.set(key, e);
   }
@@ -396,6 +404,8 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
     const person = whose.get(key);
     const where = person
       ? `agents working for ${person}`
+      : vaultWhere.has(key)
+        ? vaultWhere.get(key)!
       : ctx.tokenFile?.key === key && key !== ctx.token?.key
         ? `${ctx.hostName}'s token file (${roleNames(fileRoles)})`
       : e.kind === 'token'
