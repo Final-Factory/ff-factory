@@ -306,6 +306,13 @@ export async function rehome(dir: string, id: string, l: Layout, before: Awaited
   fs.writeFileSync(oldGitFile, newGit);
   fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
   await git(l.repo, ['worktree', 'repair', dir]);
+  // The old .git file kept beside it (for a rollback) is no one's work: never untracked noise in status or a commit.
+  const exclude = path.join(l.repo, 'info', 'exclude');
+  const ex = fs.existsSync(exclude) ? fs.readFileSync(exclude, 'utf8') : '';
+  if (!ex.split(/\r?\n/).includes('/.git.pre-ffw')) {
+    fs.mkdirSync(path.dirname(exclude), { recursive: true });
+    fs.appendFileSync(exclude, `${ex && !ex.endsWith('\n') ? '\n' : ''}# FF Factory: a migrated sandbox's old git link, kept until cleanup (scripts/worker/migrate.ts)\n/.git.pre-ffw\n`);
+  }
   await git(dir, ['reset', '--quiet', '--mixed', 'HEAD']);
   if (before.staged) await git(dir, ['apply', '--cached', '--binary', '--whitespace=nowarn'], before.staged);
   const after = await snapshot(dir);
