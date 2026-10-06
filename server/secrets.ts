@@ -276,20 +276,25 @@ export interface MachineRunEnv {
 export function machineRunEnv(
   cfg: Pick<Config, 'machines' | 'claudeEnv' | 'userClaudeEnv'> & Partial<Pick<Config, 'claudeAccounts'>>,
   machine: MachineRef,
-  run: { role: VaultRole; requestedBy?: Requester; sessionId?: string },
+  run: { role: VaultRole; requestedBy?: Requester; sessionId?: string; tokenUser?: string },
   ctx: VaultContext | undefined = vaultContext(),
 ): MachineRunEnv {
-  const base = claudeEnvFor(cfg, run.requestedBy, hostClaudeEnvFor(cfg, machine));
+  const vaultOn = !!ctx && claudeFromVault(cfg, machine);
+  // Whose tokens (docs/vault.md, "Whose tokens"): work nobody asked for by name runs on the person config
+  // vault.unattributed names (run.tokenUser); anything else on its requester's, else the system payer's.
+  const person = run.tokenUser ?? run.requestedBy?.userId ?? ctx?.payer?.();
+  const billed = vaultOn && run.tokenUser ? { userId: run.tokenUser, displayName: run.tokenUser } : run.requestedBy;
+  const base = claudeEnvFor(cfg, billed, hostClaudeEnvFor(cfg, machine));
   const plain = { env: base, login: machineUsesLogin(cfg, machine), account: accountSource(cfg, machine) };
-  const own = userToken(cfg, run.requestedBy?.userId);
+  const own = userToken(cfg, billed?.userId);
   if (!ctx) return plain;
-  const wantClaude = claudeFromVault(cfg, machine) && !own;
-  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: run.requestedBy?.userId ?? ctx.payer?.(), sessionId: run.sessionId }, { claude: wantClaude, usageOf: ctx.usageOf, liveOn: ctx.liveOn });
+  const wantClaude = vaultOn && !own;
+  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, sessionId: run.sessionId }, { claude: wantClaude, usageOf: ctx.usageOf, liveOn: ctx.liveOn });
   for (const p of s.problems) ctx.onProblem?.(p);
   if (s.claude) {
     return { env: { ...usageEnv(base), ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: `vault token ${s.claude.entry.name} …${s.claude.entry.last4} (picked by plan headroom, docs/vault.md)` };
   }
-  if (wantClaude) ctx.onProblem?.(`no vault Claude token for a ${run.role} run on ${refId(machine)}${run.requestedBy ? ` for ${run.requestedBy.displayName}` : ''}; it runs on ${plain.account} instead`);
+  if (wantClaude) ctx.onProblem?.(`no vault Claude token for a ${run.role} run on ${refId(machine)}${person ? ` for ${person}` : ''}; it runs on ${plain.account} instead`);
   return { ...plain, env: { ...base, ...s.env } };
 }
 

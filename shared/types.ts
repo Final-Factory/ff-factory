@@ -1210,6 +1210,11 @@ export interface WorkItem {
   subjects?: string[];
   /** Who filed it: its workers run on their account. */
   requestedBy: Requester;
+  /**
+   * Filed by the intake for nobody by name (w512): `requestedBy` is the system payer by default, and the token vault gives
+   * its workers the tokens config vault.unattributed names for where it came from (docs/vault.md, "Whose tokens").
+   */
+  unattributed?: boolean;
   /** Everyone it is for, the filer first, then the people whose requests were merged into it. They hear its news. */
   requesters: Requester[];
   /** Filed in a turn the person started (their own message), which the destructive tools require. */

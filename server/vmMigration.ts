@@ -72,7 +72,7 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
     out.claudeTokenFile = vm.claudeTokenFile;
     out.claudeAccounts = { ...(isObj(beast.claudeAccounts) ? beast.claudeAccounts : {}), orchestrator: 'tokenfile', dispatcher: 'tokenfile' };
     notes.push('the orchestrators and the dispatcher run on the stored subscription token (claudeAccounts "tokenfile")');
-  } else notes.push('the VM has no claudeTokenFile: the orchestrators and the dispatcher keep BEAST\'s accounts (run fffctl claude-token and fffctl configure --claude-tokenfile first)');
+  } else notes.push('the VM has no claudeTokenFile: the orchestrators and the dispatcher keep BEAST\'s accounts (run sudo fffctl claude-token --file FILE first: it sets both)');
   // BEAST's workers keep their account: as the portal's own host it followed claudeAccounts.workers; as a machine it
   // follows machines.useHostClaudeEnv, whose default is true (design 5.3).
   const machines: Json = { ...(isObj(beast.machines) ? beast.machines : {}), keepAgentsOnRestart: true };

@@ -10,7 +10,8 @@ import { eventsFileOf, maxEnv } from './maxEvents.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, sortAgents, sortPlaces } from '../shared/agentState.ts';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { tokenPersonForWork } from './vault.ts';
 
 /** A live state as list_work takes it (shared/workState.ts). */
 const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
@@ -1112,7 +1113,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   /** What a worker on a machine launches; the machine's daemon turns it into SDK options there. */
   private machineWorkerSpec(info: SessionInfo, m: Machine): LaunchSpec {
     // The run's Claude account and the vault's secrets for it (docs/vault.md): a person's own token, a vault token, or the machine's.
-    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id });
+    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id, tokenUser: this.tokenUserOf(info.id) });
     return {
       cwd: m.repoPath,
       model: info.model,
@@ -1166,6 +1167,16 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     };
   }
 
+  /**
+   * Whose vault tokens a worker gets when its request was filed for nobody by name (docs/vault.md, "Whose tokens"): from
+   * the request it serves now (servedBy, as the ledger reads it), else undefined (its requester's).
+   */
+  private tokenUserOf(sessionId: string): string | undefined {
+    const items = [...this.store.work.values()];
+    const served = [...servedBy(sessionId, items)].sort();
+    return served.map((id) => tokenPersonForWork(this.cfg, this.store.work.get(id))).find(Boolean);
+  }
+
   private machineSandboxBrief(m: Machine, sb: MachineSandbox, account = accountSource(this.cfg, m)) {
     const mac = platformNoun(m.platform);
     const branch = sb.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb.branch;
@@ -1210,7 +1221,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 
   /** What a worker in a machine sandbox launches: its worktree, the sandbox guard (not the main clone's backup rules). */
   private machineSandboxSpec(info: SessionInfo, m: Machine, sb: MachineSandbox): LaunchSpec {
-    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id });
+    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id, tokenUser: this.tokenUserOf(info.id) });
     return {
       cwd: sb.path,
       sandbox: sb.id,
@@ -1977,7 +1988,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const main = m.sessionIds.filter((id) => !this.store.sessions.get(id)?.machineSandbox);
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${platformNoun(m.platform)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
-      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${m.maxSessions === 0 ? 'sandboxes only (max_agents 0: no agents in its main clone)' : `up to ${m.maxSessions} agents in the main clone`}; Claude account of its agents: ${accountSource(this.cfg, m)}`,
+      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${poolSettingsOf(m) ? `workers in its sandboxes only; up to ${m.maxSessions} standing agents` : m.maxSessions === 0 ? 'sandboxes only (max_agents 0: no agents in its main clone)' : `up to ${m.maxSessions} agents in the main clone`}; Claude account of its agents: ${accountSource(this.cfg, m)}`,
       `  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`,
       sandboxes,
       `  ${describeGit(g)}`,

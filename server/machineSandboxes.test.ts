@@ -413,9 +413,9 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   a1.info.status = 'idle';
   sessions.drain();
   await until('a2 delivered once a1 is idle', () => a2.live && !sessions.queued().length);
+  // A machine with sandboxes takes no worker in its main clone (w536), whatever its max_agents.
   const main = mm.createSession('pc', { kind: 'worker', title: 'main', permissionMode: 'default' });
-  sessions.send(main.info.id, 'main clone work');
-  await until('main-clone agent live beside it', () => main.live);
+  assert.throws(() => sessions.send(main.info.id, 'main clone work'), /pc takes workers in its sandboxes only: start this one in one of its sandboxes \(pc\/sb1\)/);
 
   // The sandbox's editor, not the main clone's.
   assert.match(await mm.unity('pc', 'start', false, 'sb1'), /Started \(fake\)/);

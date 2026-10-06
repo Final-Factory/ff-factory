@@ -101,13 +101,14 @@ before redeploying by hand.
   [identity.md](identity.md)) runs on that token instead, on any Mac. Every account switch, including the
   orchestrator's, the dispatcher's and this host's own daemon's workers': [accounts.md](accounts.md).
 - **Limits.** Each machine has its own limit for its main clone and standing agents (`max_agents`,
-  default 3), and each of its sandboxes its own (`max_agents_per_sandbox`, below). The portal has no worker limit of
-  its own: it runs none (`limits.maxSessions` and `limits.maxIdleAgents` are retired). **`max_agents: 0` means sandboxes
-  only** (w477, Lothsahn on 2026-10-05, for BEAST and LothDesktop): no worker in its main clone (`start_agent` with the
-  machine alone is refused, naming its sandboxes), no standing agent assigned to it, no delegated worker sent to its
-  main clone, and the Capacity block never lists or suggests its main clone (`mainCloneRefusal` in
-  `server/machines.ts`; the daemon refuses such an agent too). This host's own daemon's main clone takes no workers
-  whatever its `max_agents` ([beast-machine.md](beast-machine.md)). They count agents
+  default 3), and each of its sandboxes its own (`max_agents_per_sandbox`, below). The portal has no worker
+  limit of its own: it runs none (`limits.maxSessions` and `limits.maxIdleAgents` are retired). **A machine with a
+  `sandbox_root` takes workers in its sandboxes only, whatever its `max_agents`** (w536, Lothsahn on 2026-10-06: "Can't we get rid of this
+  code so the settings doesn't matter?"): `start_agent` with the machine alone is refused, naming its sandboxes, the
+  Capacity block never lists its main clone, and the daemon refuses such a worker too (`mainCloneRefusal` in
+  `server/machines.ts`). There `max_agents` caps only its standing agents. Only a machine without sandboxes (the m3, the
+  m5 until their worker-root installs, docs/worker-root.md) still runs workers in its main clone. `max_agents: 0`
+  (w477) keeps every agent off a machine's main clone and standing agents off the machine. They count agents
   mid-turn only, and a message that finds them full waits in the portal's queue instead of being refused; the daemon's
   own start check counts the same way, and idle finished workers are stopped by the portal's reaper
   ([orchestrators.md](orchestrators.md#agent-limits-and-idle-workers), w384).

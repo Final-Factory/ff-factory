@@ -211,7 +211,15 @@ export interface Config {
    * In the VM the systemd credential fff-vault-key wins (deploy/vm/guest/units/fff-portal.service). The vault itself is
    * data/vault.json.
    */
-  vault?: { keyFile?: string };
+  vault?: {
+    keyFile?: string;
+    /**
+     * Whose vault tokens work nobody asked for by name runs on (w512, lothsahn 2026-10-06), by where it came from: intake
+     * (Discord, FFBox reports, releases), ffbox (FFBox-filed work naming no operator), nightly (the nightly lab's reports,
+     * the nightly regression sentry and its delegations). Portal user ids; defaults in server/vault.ts UNATTRIBUTED_DEFAULTS.
+     */
+    unattributed?: Partial<Record<'intake' | 'ffbox' | 'nightly', string>>;
+  };
   /**
    * Providers (docs/ffbox-integration.md): FFBox, whose connector dials out to /provider. `enabled` (default
    * false) lets it connect; `tokenSha256` is the SHA-256 of its connector token (ffpv1_…), set with
@@ -646,6 +654,14 @@ export function loadConfig(): Config {
   }
   if (cfg.vault !== undefined) {
     if (typeof cfg.vault !== 'object' || cfg.vault === null || Array.isArray(cfg.vault)) throw new Error('config vault is an object, e.g. { "keyFile": "/etc/fff/vault.key" }');
+    const u: unknown = cfg.vault.unattributed;
+    if (u !== undefined) {
+      if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error('config vault.unattributed is an object, e.g. { "intake": "lothsahn", "ffbox": "lothsahn", "nightly": "ben" }');
+      for (const [k, v] of Object.entries(u)) {
+        if (!['intake', 'ffbox', 'nightly'].includes(k)) throw new Error(`config vault.unattributed.${k}: no such kind of work (intake, ffbox, nightly)`);
+        if (typeof v !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(v)) throw new Error(`config vault.unattributed.${k} is a portal user id`);
+      }
+    }
     if (cfg.vault.keyFile !== undefined) {
       if (typeof cfg.vault.keyFile !== 'string' || !cfg.vault.keyFile.trim()) throw new Error('config vault.keyFile is the path of a file');
       cfg.vault.keyFile = path.resolve(cfg.vault.keyFile);

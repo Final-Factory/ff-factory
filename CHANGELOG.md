@@ -63,6 +63,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **A machine with sandboxes takes workers in them only, whatever its `max_agents`** (w536, asked by Lothsahn: "Can't
+  we get rid of this code so the settings doesn't matter?"). `start_agent` with such a machine alone is refused, naming
+  its sandboxes, and its daemon refuses too. There `max_agents` caps only its standing agents. Only a machine without
+  sandboxes (the m3, the m5 until their worker-root installs) still runs workers in its main clone; the rest of the
+  main-clone code goes once they have roots ([docs/machines.md](docs/machines.md), "Limits").
+
 - **The portal VM has 4 GiB of RAM, not 8** (w537, Lothsahn: "Change the VM to 4GB ram"). `fff-vm.conf.example`'s
   `VM_MEMORY_MB=4096`, so a rebuilt VM and CI's nested VM boot that size. Basis, measured from w442's 20-hour run on
   BEAST: the whole portal (the node server and every Claude process under it, summed per sample) peaked at 1,134 MB
@@ -86,6 +92,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   - Machine credentials: `fffctl machine-credential issue <id> --out FILE` and `revoke <id>` (also in the dialog); a
     revoked machine's link drops within 20 s.
   - Redaction also covers GitHub tokens and every value the vault holds.
+- **Whose tokens, and the tokens on the FFBox host** (w512, lothsahn 2026-10-06: "hand out my Claude and GitHub tokens
+  for requests from my orchestrator and the same from Ben's"; [docs/vault.md](docs/vault.md) sections 10 and 11).
+  - A worker run gets the Claude and GitHub tokens of the person its work is for, never another person's. Work nobody
+    asked for by name runs on config `vault.unattributed`: intake and FFBox work on lothsahn's, the nightly lab and the
+    nightly regression sentry on Ben's; FFBox work naming an operator on the operator's. Intake requests filed for
+    nobody are marked `unattributed`.
+  - Each person's tokens are kept on the FFBox host in `/etc/fff-vm/secrets/people/<user id>/` (root only), and
+    `sudo fff-vm vault-sync` pushes them into the VM's vault over ssh's stdin (also run by the installer), refusing a
+    classic GitHub token, and keeps the vault key's spare copy in `/etc/fff-vm/secrets/vault.key`.
+  - `fffctl vault put` (idempotent) and `list --names`; the VM's daily backup leaves `data/vault.json` out.
 
 ### Changed
 
