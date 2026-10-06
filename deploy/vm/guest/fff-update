@@ -102,6 +102,11 @@ refresh_scripts() {
   if [ ! -f "$src/fffctl" ] || [ ! -f "$src/lib.sh" ]; then warn "release $(basename "$1") has no deploy/vm/guest scripts; fffctl and its helpers stay as they are"; return 0; fi
   if ! c=$(install_scripts "$src"); then warn "installing fffctl and its helpers from $(basename "$1") failed"; return 0; fi
   [ -z "$c" ] || log "fffctl and its helpers from $(basename "$1"): updated $c"
+  # New machines or host keys in machines.ssh (w537): the portal's ssh aliases and pinned keys follow.
+  case " $c " in
+    *" machines.ssh "* | *" fff-machine-ssh "*)
+      as_fff "$FFF_LIB/fff-machine-ssh" --fix || warn "fff-machine-ssh: not every machine answers (above); the aliases and pinned keys are written" ;;
+  esac
   for u in "$src"/units/*; do
     [ -f "$u" ] || continue
     if ! cmp -s "$u" "/etc/systemd/system/$(basename "$u")"; then

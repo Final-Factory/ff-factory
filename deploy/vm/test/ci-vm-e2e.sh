@@ -170,6 +170,16 @@ g 'sudo jq -e ".ownerName == \"CI\" and .claudeAccounts.orchestrator == \"tokenf
   fail "config.json was not set: $(g 'sudo jq -c "{ownerName, claudeAccounts, claudeTokenFile}" /srv/fff/config/config.json')"
 matches 'Tailscale: skipped' /tmp/guest-install.log || fail "the end of the install does not list the skipped Tailscale join"
 echo "ok: the guest is set up from the host, the token stored and never printed, config.json set"
+# The machines' ssh (w537): the guest install wrote the portal account's aliases and pinned host keys (machines.ssh).
+# No machine answers here: each is pinned anyway, and nothing is accepted on first use.
+out=$(g 'sudo -H -u fff /usr/local/lib/fff/fff-machine-ssh --check' 2>&1 || true)
+echo "$out"
+for m in m3 m5 Loth2800 beast; do
+  printf '%s\n' "$out" | matches "^$m: alias ok; known_hosts: pinned; tailnet: no answer" || fail "fff-machine-ssh: $m is not set up after the guest install"
+done
+[ "$(g 'sudo stat -c "%a %U" /srv/fff/home/.ssh/config /srv/fff/home/.ssh/known_hosts' | sort -u)" = "600 fff" ] || fail "the portal's ssh config or known_hosts is not 0600 fff"
+if printf '%s' "$out" | matches 'PRIVATE KEY'; then fail "fff-machine-ssh printed a private key"; fi
+echo "ok: the portal's ssh aliases and pinned host keys for the machines"
 [ "$MODE" != zvol ] || [ "$(zfs get -H -o value mountpoint fffci/fff-vm)" = /fffci/fff-vm ] || fail "the dataset's mountpoint is not the stored answer"
 g 'printf "BASE_REPO_URL=https://github.com/Final-Factory/ff-factory.git\nBASE_BRANCH=main\n" | sudo tee -a /etc/fff/fff.conf'
 if [ "$TIMING" = fast ]; then

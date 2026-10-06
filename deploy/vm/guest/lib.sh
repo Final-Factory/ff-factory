@@ -51,8 +51,8 @@ write_file() {
 install_scripts() {
   local src=$1 f c=""
   run_cmd install -d -m 0755 "$FFF_LIB"
-  for f in lib.sh fff.conf.example config.vm.example.json; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
-  for f in fff-update fff-health fff-backup fff-base-refresh fff-migrate; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
+  for f in lib.sh fff.conf.example config.vm.example.json machines.ssh; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
+  for f in fff-update fff-health fff-backup fff-base-refresh fff-migrate fff-machine-ssh; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
   [ -z "$(write_file /usr/local/sbin/fffctl 0755 <"$src/fffctl")" ] || c+=" fffctl"
   echo "${c# }"
 }

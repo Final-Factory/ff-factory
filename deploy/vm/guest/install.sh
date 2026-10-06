@@ -163,8 +163,15 @@ EOF
 # Ubuntu 24.04 and later start sshd from ssh.socket: reload it only if it runs (a new one reads the file anyway).
 if [ -n "$sshd" ]; then run_cmd sshd -t && run_cmd systemctl try-reload-or-restart ssh.service; fi
 
-log "6/9 scripts: fffctl, fff-update, fff-health, fff-backup, fff-base-refresh, fff-migrate"
+log "6/9 scripts: fffctl, fff-update, fff-health, fff-backup, fff-base-refresh, fff-migrate, fff-machine-ssh"
 install_scripts "$here" >/dev/null
+# The machines the portal deploys daemons to: their ssh aliases and pinned host keys (machines.ssh, w537). The cut-over
+# left a VM without them, and every daemon redeploy failed on "Host key verification failed".
+if [ "$DRY_RUN" = 1 ]; then
+  log "DRY-RUN would write the machines' ssh aliases and pinned host keys (fff-machine-ssh --fix)"
+else
+  as_fff "$FFF_LIB/fff-machine-ssh" --fix || warn "fff-machine-ssh: not every machine answers yet (above); the aliases and pinned keys are written"
+fi
 
 log "7/9 ff-factory: the first release (fff-update init)"
 if [ "$DRY_RUN" = 1 ]; then
