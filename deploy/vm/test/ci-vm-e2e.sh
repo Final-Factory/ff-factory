@@ -284,7 +284,10 @@ step "hang detection: neither the agent nor the portal answers -> reset"
 b1=$(boot_id)
 g 'sudo systemctl stop fff-health.timer fff-portal qemu-guest-agent' || true
 wait_for 900 "the watch reset the VM" bash -c "[ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" != '' ] && [ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id)\" != $b1 ]"
-journalctl -u fff-vm-watch --no-pager | grep -m1 'resetting' || fail "no reset in the watch's log"
+# Read the whole journal first: grep -m1 stops at its match and journalctl, still writing, dies of SIGPIPE, which
+# pipefail turns into a failure (a 10 s watch writes enough lines for that; main run 37420115848).
+watch_log=$(journalctl -u fff-vm-watch --no-pager)
+grep -m1 'resetting' <<<"$watch_log" || fail "no reset in the watch's log"
 wait_for 300 "the portal answers after the reset" health
 
 step "watchdog device: a guest that stops petting it is reset"
@@ -295,7 +298,8 @@ systemctl stop fff-vm-watch.timer
 g 'printf "[Manager]\nRuntimeWatchdogSec=off\n" | sudo tee /etc/systemd/system.conf.d/99-ci.conf >/dev/null && sudo systemctl daemon-reexec'
 g "sudo sh -c 'exec 3>/dev/watchdog; echo x >&3; kill -9 \$\$'" || true
 wait_for 300 "the watchdog reset the VM" bash -c "[ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" != '' ] && [ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id)\" != $b1 ]"
-journalctl -u fff-vm-events --no-pager | grep -m1 'watchdog fired' || fail "fff-vm events did not see the watchdog"
+events_log=$(journalctl -u fff-vm-events --no-pager)
+grep -m1 'watchdog fired' <<<"$events_log" || fail "fff-vm events did not see the watchdog"
 g 'sudo rm -f /etc/systemd/system.conf.d/99-ci.conf'
 systemctl start fff-vm-watch.timer
 
