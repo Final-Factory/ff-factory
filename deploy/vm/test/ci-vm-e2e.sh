@@ -197,6 +197,23 @@ echo "$out"
 if printf '%s' "$out" | matches 'ci-dummy'; then fail "fffctl claude-token printed the token"; fi
 [ "$(g 'sudo stat -c "%a %U" /srv/fff/secrets/claude-oauth-token')" = "600 fff" ] || fail "the token file is not 0600 fff"
 echo "ok: the token is stored 0600, owned by fff, shown only as its last four characters"
+# The token vault (w512, docs/vault.md): the key is root's alone and reaches the portal as a systemd credential; a value
+# added with fffctl is never printed, sealed on disk, and the vault file stays the portal user's.
+[ "$(g 'sudo stat -c "%a %U" /etc/fff/vault.key')" = "600 root" ] || fail "the vault key is not 0600 root"
+if g 'sudo -u fff cat /etc/fff/vault.key' >/dev/null 2>&1; then fail "the fff user can read the vault key file"; fi
+g 'sudo test -s /run/credentials/fff-portal.service/fff-vault-key' || fail "the portal did not get the vault key as a credential"
+out=$(g 'printf "ci-vault-secret-QRST\n" >/tmp/v && sudo fffctl vault add --name ci-env --kind env --env CI_E2E_TOKEN --share anyone --file /tmp/v; rm -f /tmp/v')
+echo "$out"
+if printf '%s' "$out" | matches 'ci-vault-secret'; then fail "fffctl vault add printed the value"; fi
+g 'sudo fffctl vault list' | matches 'key: loaded' || fail "fffctl vault list: the key is not loaded"
+if g 'sudo grep -c ci-vault-secret /srv/fff/data/vault.json' >/dev/null 2>&1; then fail "the vault file holds the value in plain text"; fi
+[ "$(g 'sudo stat -c "%a %U" /srv/fff/data/vault.json')" = "600 fff" ] || fail "vault.json is not 0600 fff"
+out=$(g 'sudo fffctl machine-credential issue ci-m1 --out /tmp/cred && sudo stat -c "%a %U" /tmp/cred && sudo fffctl machine-credential revoke ci-m1; sudo rm -f /tmp/cred')
+echo "$out"
+printf '%s' "$out" | matches '^600 root$' || fail "the issued machine credential's file is not 0600 root"
+if printf '%s' "$out" | matches 'ffm_ci-m1_'; then fail "fffctl machine-credential printed the credential"; fi
+g 'sudo fffctl vault remove ci-env' >/dev/null
+echo "ok: the vault key is root's and loaded by the portal; values and credentials never printed"
 # fffctl migrate (w499) in a real guest: the wrapper, node in the release, ssh as fff with the portal's key. No BEAST here,
 # so it cannot connect: it says so, prints the line that authorizes the key, and changes nothing. (The modes themselves
 # run end to end against a synthetic BEAST in the unit tests: scripts/fff-migrate.test.ts.)

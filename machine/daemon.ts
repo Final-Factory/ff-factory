@@ -22,7 +22,7 @@ import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './
 import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
 import { MAIN_CLONE, McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { withBaseRepoLock } from '../server/sandboxes.ts';
-import { redactSecrets } from '../server/secrets.ts';
+import { SECRET_ENV, addSecretValues, redactSecrets } from '../server/secrets.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
@@ -87,7 +87,11 @@ export interface DaemonConfig {
   relocatedAt?: string;
   /** The daemon.json this config was read from (set by the entry point, never written): where a relocate is kept. */
   configFile?: string;
-  /** The Unity slots mailbox (machine/unitySlots.ts); default slotsDir(), the one place scripts look for it. */
+  /**
+   * The Unity slots mailbox (machine/unitySlots.ts). The daemon's entry point defaults it to slotsDir(), the one place
+   * scripts look for it; a Daemon built anywhere else (a test) gets `<app_dir>/unity-slots`, so it never answers the
+   * machine's real mailbox (a hung relocate test's daemon granted BEAST's slots with no limit for hours, w469).
+   */
   unitySlotsDir?: string;
   /**
    * The host guard on this machine (w466, machine/hostGuard.ts): BEAST's sandbox drive watch and remount, then its
@@ -258,7 +262,7 @@ export class Daemon {
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
     const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line));
     this.slots = new UnitySlots({
-      dir: cfg.unitySlotsDir ?? slotsDir(),
+      dir: cfg.unitySlotsDir ?? path.join(appDirOfConfig(cfg), 'unity-slots'),
       platform,
       procs: () => pd.procs(),
       alive: isAlive,
@@ -1076,6 +1080,8 @@ export class Daemon {
             if (why) throw new Error(why);
             const e = this.entry(msg.info, msg.lastSeq);
             e.spec = msg.spec;
+            // The vault's secrets for this run (docs/vault.md): this daemon's log redacts them by value too.
+            addSecretValues(Object.entries(msg.spec.env ?? {}).filter(([k]) => SECRET_ENV.test(k)).map(([, v]) => v));
             if (!e.s.live) prepare(msg.spec, this.cfg.tempDir);
             e.s.send(msg.text, msg.from, msg.uuid, msg.images, msg.requestedBy, attachments);
           } catch (err) {
@@ -1281,6 +1287,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   if (cfg.root) for (const [k, v] of Object.entries(rootEnv(cfg.root))) process.env[k] ??= v;
   // server/launch.ts keeps the public identity's gitconfig in the daemon's folder.
   process.env.FF_APP_DIR = appDirOfConfig(cfg);
+  // The real daemon answers the machine's own Unity slots mailbox, where scripts look (a worker root keeps its own).
+  cfg.unitySlotsDir ??= slotsDir();
   const d = new Daemon(cfg);
   d.start();
   log(`FF Factory daemon for machine ${cfg.id}, repo ${cfg.repoPath}, portal ${cfg.portalUrl}`);

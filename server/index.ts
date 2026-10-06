@@ -10,7 +10,7 @@ import { SandboxManager } from './sandboxes.ts';
 import { SessionManager, compactCommand, snapshotOf } from './sessions.ts';
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
-import { MachineManager, machineForPath, parseSandboxRef } from './machines.ts';
+import { MachineManager, enrolledMachines, machineForPath, parseSandboxRef, revokeMachineToken } from './machines.ts';
 import { hostSandboxFrom } from './hostMigration.ts';
 import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationView } from './providers.ts';
 import { DevRequests } from './devRequests.ts';
@@ -38,7 +38,8 @@ import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
+import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
@@ -130,6 +131,12 @@ const guardMemory = (what: 'heal' | 'backup') => {
 guardMemory('heal');
 guardMemory('backup');
 setInterval(() => guardMemory('backup'), 10 * 60_000).unref();
+// The token vault (docs/vault.md, w512): data/vault.json, sealed with a key outside data/. Loaded first, so redaction knows
+// its values (registerSecretValues) before any transcript is written or scrubbed.
+// systemd's credentials folder (the VM: the vault key) is kept here and taken out of the environment every agent inherits.
+const credentialsDir = process.env.CREDENTIALS_DIRECTORY;
+delete process.env.CREDENTIALS_DIRECTORY;
+const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
 // Transcripts written before redaction existed: no Claude OAuth or Discord token stays on disk (server/secrets.ts).
 setTimeout(() => {
   const n = scrubTranscripts(path.join(cfg.dataDir, 'transcripts'));
@@ -675,6 +682,76 @@ route('POST', '/api/work/(w[0-9]+)/decline', async (req, [id]) => {
   const b = await readJson<{ note?: string }>(req);
   const w = agents.orchestrators.declineIntake(id, requesterOf(req), typeof b.note === 'string' ? b.note.slice(0, 300) : undefined);
   return { id: w.id, status: w.status, approval: w.approval };
+});
+// ---- the token vault (docs/vault.md, w512): the owner's only. A value goes in and is never sent back: every answer is
+// the entries' metadata (fingerprint, last four characters). No orchestrator tool reaches these routes.
+const requireOwner = (req: http.IncomingMessage) => {
+  if (auth.userInfo(auth.user(req))?.role !== 'owner') throw new HttpError(403, 'only an owner manages the token vault');
+};
+const vaultView = () => ({
+  status: vault.status(),
+  entries: vault.list(),
+  kinds: VAULT_KINDS,
+  roles: VAULT_ROLES,
+  people: identity.list().map((u) => ({ userId: u.userId, displayName: u.displayName })),
+  machines: machines.list().map((m) => ({ id: m.id, online: machines.isOnline(m.id), claudeFromVault: claudeFromVault(cfg, m) })),
+  enrolled: enrolledMachines(cfg.dataDir),
+});
+const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter(Boolean) : undefined);
+const vaultChanged = () => usage.poke();
+route('GET', '/api/vault', async (req) => {
+  requireOwner(req);
+  return vaultView();
+});
+route('POST', '/api/vault', async (req) => {
+  requireOwner(req);
+  const b = await readJson<Record<string, unknown>>(req, 64 * 1024);
+  vault.add({
+    name: String(b.name ?? '').trim(),
+    kind: String(b.kind ?? '') as VaultKind,
+    value: typeof b.value === 'string' ? b.value.trim() : '',
+    env: typeof b.env === 'string' && b.env.trim() ? b.env.trim() : undefined,
+    owner: typeof b.owner === 'string' && b.owner.trim() ? b.owner.trim() : undefined,
+    share: (b.share as VaultShare | undefined) ?? undefined,
+    roles: strings(b.roles) as VaultRole[] | undefined,
+    machines: strings(b.machines),
+  });
+  vaultChanged();
+  return vaultView();
+});
+route('POST', '/api/vault/([a-z0-9._-]{1,40})/rotate', async (req, [name]) => {
+  requireOwner(req);
+  const b = await readJson<{ value?: unknown }>(req, 64 * 1024);
+  vault.rotate(name, typeof b.value === 'string' ? b.value.trim() : '');
+  vaultChanged();
+  return vaultView();
+});
+route('PATCH', '/api/vault/([a-z0-9._-]{1,40})', async (req, [name]) => {
+  requireOwner(req);
+  const b = await readJson<Record<string, unknown>>(req, 16 * 1024);
+  vault.update(name, {
+    ...(typeof b.owner === 'string' ? { owner: b.owner.trim() } : {}),
+    ...(b.share !== undefined ? { share: b.share as VaultShare } : {}),
+    ...(b.roles !== undefined ? { roles: (strings(b.roles) ?? []) as VaultRole[] } : {}),
+    ...(b.machines !== undefined ? { machines: strings(b.machines) ?? [] } : {}),
+    ...(typeof b.disabled === 'boolean' ? { disabled: b.disabled } : {}),
+  });
+  vaultChanged();
+  return vaultView();
+});
+route('DELETE', '/api/vault/([a-z0-9._-]{1,40})', async (req, [name]) => {
+  requireOwner(req);
+  vault.remove(name);
+  vaultChanged();
+  return vaultView();
+});
+// Revoke a machine's credential (docs/vault.md, section 3): its link drops now, its record stays. A new one comes from
+// `fffctl machine-credential issue` or a redeploy (add_machine).
+route('POST', '/api/machines/([a-z0-9-]{1,40})/revoke-credential', async (req, [id]) => {
+  requireOwner(req);
+  if (!revokeMachineToken(cfg.dataDir, id)) throw new HttpError(404, `machine ${id} holds no credential`);
+  machines.dropRevoked();
+  return vaultView();
 });
 // The usage meters' Refresh: poll every account now, here and on each connected machine (docs/accounts.md).
 route('POST', '/api/usage/refresh', async () => ({ started: usage.refreshNow(), machines: machines.requestUsage() }));
@@ -1590,7 +1667,21 @@ function fileTokenEntry(): { token: string; label: string }[] {
   const t = tokenFileToken(cfg);
   return t ? [{ token: t, label: `token file …${t.slice(-4)}` }] : [];
 }
-usage.personTokens = () => [...personTokens(), ...fileTokenEntry()];
+// The vault's Claude tokens (docs/vault.md) are polled like the others: section 4 picks a run's token by these numbers.
+usage.personTokens = () => [...personTokens(), ...fileTokenEntry(), ...vault.claudeTokens()];
+/** Recent reasons a run did not get what the vault should give it (a fallback, an entry that would not open), newest last. */
+const vaultProblems: { at: string; line: string }[] = [];
+setVaultContext({
+  vault,
+  usageOf: (fp) => usage.entries.get(`token:${fp}`)?.usage,
+  liveOn: (fp) => [...store.sessions.values()].filter((s) => s.account === `token:${fp}` && s.status !== 'stopped' && s.status !== 'error').length,
+  payer: () => identity.systemPayer().userId,
+  onProblem: (line) => {
+    if (vaultProblems.at(-1)?.line !== line) console.warn(`vault: ${line}`);
+    vaultProblems.push({ at: new Date().toISOString(), line });
+    if (vaultProblems.length > 20) vaultProblems.shift();
+  },
+});
 /**
  * The account a session ran on, for the meters. The dispatcher with an account of its own (claudeAccounts.dispatcher,
  * w464) runs on it, never on its person's own token, so its stopped session is counted there too.
@@ -1630,6 +1721,7 @@ function accountsNow() {
       return t ? { tokenFile: { key: tokenKey(t), label: `token file …${t.slice(-4)}`, roles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'tokenfile') } } : {};
     })(),
     people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
+    vault: vault.claudeTokens().map((v) => ({ key: `token:${v.fingerprint}`, label: v.label, where: v.where })),
     machines: machines.list().map((m) => {
       const t = toMachine(m.id);
       return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token) };
@@ -1684,7 +1776,13 @@ agents.usagePollChanged = () => {
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines()];
+  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...vaultLines()];
+};
+/** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
+const vaultLines = () => {
+  const line = vaultStatusLine(vault, machines.list().filter((m) => claudeFromVault(cfg, m)).map((m) => m.id));
+  const recent = vaultProblems.filter((p) => Date.now() - Date.parse(p.at) < 24 * 3_600_000);
+  return [...(line ? [line] : []), ...(recent.length ? [`WARNING: the vault fell short ${recent.length} time(s) in 24 h; latest (${recent.at(-1)!.at}): ${recent.at(-1)!.line}`] : [])];
 };
 const outsideWatchLines = () => {
   const w = watcher();
