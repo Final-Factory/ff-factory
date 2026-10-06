@@ -73,7 +73,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 
 | Path today | For | Created by | Scope | BEAST size | Secret | Code |
 |---|---|---|---|---|---|---|
-| `sandbox_root`: `F:\ffsb` (BEAST), `D:\work\ffsb` (LothDesktop); none on the Macs | the pool: `<root>/<name>` worktrees of the main clone, each with its own `Library` | daemon (`SandboxPool`) | S | Libraries measured: 43 GB (`slot-5`), 81 GB (`agent-mcp`), 99 GB (`mp-r2`); `agent-mcp` whole 114 GB | no | `machine/sandboxes.ts:162-172`; config `sandboxRoot` `server/config.ts:247`; `server/machines.ts:72-76,103` |
+| `sandbox_root`: `F:\ffsb` (BEAST), `D:\work\ffsb` (LothDesktop); none on the Macs | the pool: `<root>/<name>` worktrees of the main clone, each with its own `Library` | daemon (`SandboxPool`) | S | six sandboxes, 532 GB in all: 15, 61, 108, 110, 114 and 124 GB; Libraries 43 GB (`slot-5`), 81 GB (`agent-mcp`), 99 GB (`mp-r2`) | no | `machine/sandboxes.ts:162-172`; config `sandboxRoot` `server/config.ts:247`; `server/machines.ts:72-76,103` |
 | `F:\ffsb\_seed\Library` | Library seed, block-cloned on the Dev Drive | portal config `librarySeed` | M | 65 GB | no | `machine/sandboxes.ts:107-117,383`; `server/machines.ts:83-85,112-113` |
 | `F:\ffsb\_scratch`, `F:\ffsb-scratch`, `F:\tmp`, `F:\ffsb\_research`, `F:\ffsb\_w94` | long-lived scratch agents chose (builds, clones, captures) | workers | M | 141 GB, 13 GB, 553 MB, 83 MB, 670 MB | no | none in code: the brief's "scratch" convention |
 | `F:\ffsb\_agents` | standing agents' folders on BEAST (portal-run today) | portal | M | 96 KB | no | `standingRoot`, `server/config.ts:249-252`; docs/standing-agents.md:22 |
@@ -428,7 +428,7 @@ Common to all, in order (w513's tool: `migrate --dry-run`, then `migrate`, then 
    `~/.claude/projects` is what lets a worker resume its conversation (beast-machine.md "Migration": "same
    `CLAUDE_CONFIG_DIR`").
 4. **Move what is large and on the same volume, by rename.** A copy cannot work on BEAST: `F:` has 213 GB free, and
-   one sandbox is 114 GB, with Libraries of 43 to 99 GB (measured). A rename on the same volume is instant and is
+   the six sandboxes hold 532 GB (15 to 124 GB each), with Libraries of 43 to 99 GB (measured). A rename on the same volume is instant and is
    undone by renaming back. Per sandbox, while idle:
    1. Fetch its branch from the old base into `repo/`.
    2. `git -C <root>/repo worktree add --no-checkout <tmp> <branch>`, to get the admin folder.
@@ -553,7 +553,7 @@ Each with a recommendation and what it rests on.
    - *Measured:* it made 58 of the 382 rules, and `player_slots.py:94-98` turns the pool off on runners.
    - It is outside the worker install, so it needs your call or Ben's.
 9. **How sandboxes migrate.** Re-home in place by rename on the same volume (5.1 step 4), not by copy.
-   - *Measured:* 213 GB free on `F:` against one 114 GB sandbox and Libraries of 43 to 99 GB.
+   - *Measured:* 213 GB free on `F:` against 532 GB of sandboxes (15 to 124 GB each).
 10. **Legacy and scratch on BEAST.** Archive then delete `~/ff-worker` (11 GB) and the four ad-hoc scheduled tasks
     (one runs Unity elevated). Review `F:\ffsb\_scratch` (141 GB) before moving it. Ben's call: it is his machine and
     his runs.
