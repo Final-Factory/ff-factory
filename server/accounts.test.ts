@@ -116,7 +116,7 @@ test('accounts: a standing agent on this host follows claudeAccounts.standing', 
     worker: { permissionMode: 'bypassPermissions', effort: 'high' },
   } as unknown as Config;
   store = new Store(cfg.dataDir);
-  const st = new StandingAgents({ cfg, store, sessions: new Port(), systemPayer: () => BEN, notify: () => undefined, sandboxes: { list: () => [], setPurpose: () => ({}) as never }, startWorker: () => ({ info: {} as SessionInfo }), now: () => new Date('2026-09-28T10:00:00') });
+  const st = new StandingAgents({ cfg, store, sessions: new Port(), systemPayer: () => BEN, notify: () => undefined, now: () => new Date('2026-09-28T10:00:00') });
   const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 }, tools: ['delegate'] });
   const info = { id: 'x', kind: 'standing', standingId: a.id } as SessionInfo;
   const saved = process.env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -376,7 +376,7 @@ test('token file: a person orchestrator and a standing run on it ignore their pe
   } as unknown as Config;
   store = new Store(cfg.dataDir);
   // The run is Lothsahn's, who has a token of his own: the file still wins.
-  const st = new StandingAgents({ cfg, store, sessions: new Port(), systemPayer: () => LOTH, notify: () => undefined, sandboxes: { list: () => [], setPurpose: () => ({}) as never }, startWorker: () => ({ info: {} as SessionInfo }), now: () => new Date('2026-09-28T10:00:00') });
+  const st = new StandingAgents({ cfg, store, sessions: new Port(), systemPayer: () => LOTH, notify: () => undefined, now: () => new Date('2026-09-28T10:00:00') });
   const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 } });
   const saved = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-server-env';

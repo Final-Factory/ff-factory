@@ -888,8 +888,13 @@ export interface StandingAgent {
   pending?: { trigger: StandingRunTrigger; dueAt: string; deadline: string; text?: string; requestedBy?: Requester };
   /** Runs on this machine instead of this host (its folder is then on that machine). */
   machineId?: string;
-  /** Start this agent's delegation requests without the user's approval, within these limits. */
+  /** File this agent's delegation requests into the ledger without the user's approval, within these limits (w527). */
   autoApprove?: AutoApprove;
+  /**
+   * The person it works for (w527): its delegations are filed in the ledger as their requests. Set when it is created;
+   * absent on agents from before, which use the system payer (config systemPayer, else the owner).
+   */
+  owner?: Requester;
   /** Spend on the host's local date `day` (YYYY-MM-DD). */
   spend: { day: string; usd: number };
   /** Newest last, capped. */
@@ -907,23 +912,28 @@ export interface StandingAgentInput {
   /** A machine id to run on, or '' / undefined for this host. */
   machineId?: string;
   autoApprove?: Partial<AutoApprove>;
+  /** Who it works for (StandingAgent.owner); create sets the person who made it when this is absent. */
+  owner?: Requester;
 }
 
-/** Auto-approval of a standing agent's delegation requests (docs/standing-agents.md). */
+/**
+ * Auto-approval of a standing agent's delegation requests (docs/standing-agents.md, w527): within these limits a
+ * request is filed in the ledger with no click, and the dispatcher queues and places it like any request. One that
+ * spends money, publishes, changes settings or releases always waits for a person, whatever these say.
+ */
 export interface AutoApprove {
   enabled: boolean;
   maxPerRun: number;
   maxPerDay: number;
+  /** The model and effort suggested to the dispatcher for its worker (it decides). */
   model: string;
   effort: EffortLevel;
-  /** Where workers may start: unused sandboxes first, then idle machines; or only one kind. */
-  targets: 'sandboxes-then-machines' | 'sandboxes' | 'machines';
-  /** A request that finds no free target is retried until this many hours after it was filed. */
-  expiryHours: number;
-  /** Sandbox or machine ids never used, whatever their label. */
-  exclude: string[];
 }
 
+/**
+ * pending: waits for a person. approved: filed in the ledger as `workId` (by a person, or by the auto-approve rules).
+ * rejected. expired: only on requests from before w527, whose auto-approval ran out while no free sandbox was found.
+ */
 export type DelegationStatus = 'pending' | 'approved' | 'rejected' | 'expired';
 
 export interface DelegationRequest {
@@ -935,14 +945,22 @@ export interface DelegationRequest {
   createdAt: string;
   status: DelegationStatus;
   decidedAt?: string;
-  /** Set once approved: where the worker runs. */
+  /**
+   * The ledger request it was filed as, once approved (w527), or the one that already covered it (`repeat`). The
+   * dispatcher queues, places and starts it; its status, workers and PRs are that request's.
+   */
+  workId?: string;
+  /** It asked for work an open or recently finished request of the same agent already covers: not filed again. */
+  repeat?: boolean;
+  /** Before w527: where an approved request's worker ran, which the portal picked itself. */
   sandboxId?: string;
   machineId?: string;
   sessionId?: string;
   note?: string;
-  /** Auto-approval: queued waiting for a free target until `expiresAt`, or started without the user. */
+  /** Before w527: auto-approval queued waiting for a free target, or started. */
   auto?: 'queued' | 'started';
   autoApproved?: boolean;
+  /** Before w527: when an auto-approved request waiting for a free target expired. */
   expiresAt?: string;
   /** The run it was filed in (the per-run limit). */
   runId?: string;
@@ -952,9 +970,9 @@ export interface DelegationRequest {
   finishedAt?: string;
   /** What happened to it, oldest first: "10:02 queued: no free target", "10:05 started in sb2". */
   log?: string[];
-  /** Who the run that filed it was for (the system payer for a scheduled run). */
+  /** Who it is for: the agent's owner (w527; before, the person the run that filed it was for). */
   requestedBy?: Requester;
-  /** The person who approved it; absent when auto-approved. Its worker is requested by them. */
+  /** The person who approved it; absent when auto-approved. */
   approvedBy?: Requester;
 }
 
@@ -1241,6 +1259,11 @@ export interface WorkItem {
   recorded?: boolean;
   /** Where it came from when not a person's orchestrator: Discord or FFBox, through the intake (docs/intake.md). */
   source?: WorkSource;
+  /**
+   * Filed from a standing agent's delegation request (w527, docs/standing-agents.md "Delegations"), for the agent's
+   * owner: the request, the agent, and whether the agent's auto-approve rules filed it (else `approvedBy` did).
+   */
+  delegation?: WorkDelegation;
   /** The intake's classification, with its reason: an obvious bug may be worked without a person; anything else needs one. */
   triage?: WorkTriage;
   /**
@@ -1274,6 +1297,15 @@ export interface WorkItem {
    * follow-ups come from and where reply_to_ffbox and the automatic "done" reply go. Oldest first, at most 20.
    */
   ffboxDev?: WorkFfboxDev[];
+}
+
+/** The standing agent's delegation request a ledger request was filed from (w527). */
+export interface WorkDelegation {
+  id: string;
+  agentId: string;
+  agentName: string;
+  auto: boolean;
+  approvedBy?: Requester;
 }
 
 /** One pull request linked to a request: where it is, and what it did. */

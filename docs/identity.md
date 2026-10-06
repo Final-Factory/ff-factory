@@ -41,8 +41,8 @@ worker then runs on that person's Claude account when FF Factory holds one for t
 | a work request | `WorkItem.requestedBy`, `requesters` | the person whose orchestrator filed it; a merge adds the merged request's people to `requesters` |
 | the latest person a session heard from | `SessionInfo.lastRequestedBy` | set by people's and the orchestrator's messages, not by harness messages |
 | a standing run | `StandingRun.requestedBy`, and the session's `requestedBy` for that run | the login that pressed Run now or wrote to it; the **system payer** for a scheduled run |
-| a delegation request | `DelegationRequest.requestedBy` | whoever the run that filed it was for |
-| a delegation approval | `DelegationRequest.approvedBy`; its worker's `requestedBy` | the person who approved it. An auto-approved worker is requested by the request's `requestedBy` |
+| a delegation request | `DelegationRequest.requestedBy` | the agent's owner (`StandingAgent.owner`, set to whoever created it), else the system payer (w527) |
+| a delegation approval | `DelegationRequest.approvedBy`; the ledger request's `delegation.approvedBy` | the person who approved it. The ledger request is the owner's (`requestedBy`); a person who approved it joins its `requesters`. Its workers run for the owner, like any request's |
 | a `[worker update]` to a person's orchestrator | the event's `requestedBy` | that person |
 
 ### Who the orchestrators act for

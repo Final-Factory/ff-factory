@@ -1038,7 +1038,11 @@ route('GET', '/api/sandboxes/([\\w-]+)/unity-log', async (_r, [id], url) => ({
 
 // ---- standing agents (docs/standing-agents.md)
 
-route('POST', '/api/standing', async (req) => agents.standing.create(await readJson<StandingAgentInput>(req)));
+route('POST', '/api/standing', async (req) => {
+  const body = await readJson<StandingAgentInput>(req);
+  // Its delegations are filed as its owner's requests (w527): the person who made it, unless the body names another.
+  return agents.standing.create({ ...body, owner: body.owner ?? requesterOf(req) });
+});
 
 route('POST', '/api/standing/([\\w-]+)', async (req, [id]) => agents.standing.update(id, await readJson<Partial<StandingAgentInput>>(req)));
 
@@ -1054,8 +1058,10 @@ route('POST', '/api/standing/([\\w-]+)/(run|stop|pause|resume)', async (req, [id
   return action === 'pause' ? st.pause(id) : st.resume(id);
 });
 
-route('POST', '/api/delegations/([\\w-]+)/(approve|reject)', async (req, [id, action]) => {
+route('POST', '/api/delegations/([\\w-]+)/(approve|reject|bump)', async (req, [id, action]) => {
+  // w527: approving files it in the ledger for the agent's owner (no free slot needed); bump also asks to start it now.
   if (action === 'approve') return agents.standing.approveDelegation(id, { approvedBy: requesterOf(req) });
+  if (action === 'bump') return agents.standing.bumpDelegation(id, requesterOf(req));
   const { note } = await readJson<{ note?: string }>(req);
   return agents.standing.rejectDelegation(id, note);
 });

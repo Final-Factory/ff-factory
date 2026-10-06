@@ -227,10 +227,33 @@ export const DEFAULT_AUTO: AutoApprove = {
   maxPerDay: 3,
   model: 'opus',
   effort: 'high',
-  targets: 'sandboxes-then-machines',
-  expiryHours: 8,
-  exclude: ['mp-r2'],
 };
+
+/**
+ * Standing agents whose delegations are auto-approved unless a person set otherwise (w527, Ben 2026-10-06: "ideally I
+ * would not have to even click anything"): the nightly regression sentry's regression checks and test guards on the
+ * game repo. Applied once, to an agent with no auto-approve setting of its own; the person-only gate still applies.
+ */
+export const AUTO_BY_DEFAULT: readonly string[] = ['nightly-regression-sentry'];
+
+/**
+ * What only a person may approve, whatever an agent's auto-approve rules say (w527; the evidence gate's list in
+ * docs/orchestrators.md): spending money, publishing or posting outside, changing a live setting, releasing or
+ * deploying, and anything on master. Matched on the request's own words, so it errs towards asking: a request that
+ * only mentions one of these waits for a click, which is the safe side. Returns what it found, or undefined.
+ */
+const PERSON_ONLY: readonly [RegExp, string][] = [
+  [/\b(?:buy|purchase|pay for|subscribe to|billing|invoice|spend(?:ing)? (?:money|\$)|top[- ]up)\b|\$\s?\d/i, 'spends money'],
+  [/\b(?:publish(?:es|ing)?|republish|announce|patch notes|post (?:it |this |them |a \w+ )?(?:to|in|on) (?:discord|steam|reddit|twitter|x|bluesky|the forum)|tweet)\b/i, 'publishes or posts outside'],
+  [/\b(?:set_app_config|request_app_update|app (?:config|settings)|change (?:the )?(?:portal|app|steam|github|discord|server|live) (?:config|settings?)|steam branch|set ?live|default branch|branch protection|api key|token vault)\b/i, 'changes a setting'],
+  [/\b(?:ci-release|cut (?:a |the )?release|(?:make|do|start|ship|trigger) (?:a |the )?(?:new )?release|bump (?:the )?version|deploy(?:s|ing|ment)?|upload (?:a |the )?build|steam ?upload|mp-beta-deploy)\b/i, 'releases or deploys'],
+  [/\b(?:merge|push|land|pr|pull request)\b[^.\n]{0,40}?\b(?:in)?to\s+(?:master|main)\b/i, 'touches master'],
+];
+
+export function personOnlyReason(text: string): string | undefined {
+  const hits = PERSON_ONLY.filter(([re]) => re.test(text)).map(([, why]) => why);
+  return hits.length ? hits.join(', ') : undefined;
+}
 
 export function normalizeAutoApprove(input: Partial<AutoApprove>, prev: AutoApprove | undefined, models: string[]): AutoApprove {
   const out = { ...DEFAULT_AUTO, ...prev, ...Object.fromEntries(Object.entries(input ?? {}).filter(([, v]) => v !== undefined)) } as AutoApprove;
@@ -241,17 +264,14 @@ export function normalizeAutoApprove(input: Partial<AutoApprove>, prev: AutoAppr
   };
   if (!models.includes(out.model)) throw new Error(`auto-approve model must be one of ${models.join(', ')}`);
   if (!EFFORT_LEVELS.includes(out.effort)) throw new Error(`auto-approve effort must be one of ${EFFORT_LEVELS.join(', ')}`);
-  if (!['sandboxes-then-machines', 'sandboxes', 'machines'].includes(out.targets)) throw new Error('auto-approve targets: sandboxes-then-machines, sandboxes or machines');
   const perDay = int(out.maxPerDay, 'max auto-approved per day', 1, 20);
+  // targets, expiryHours and exclude from before w527 are dropped: the dispatcher places the work, and nothing expires.
   return {
     enabled: !!out.enabled,
     maxPerRun: Math.min(int(out.maxPerRun, 'max auto-approved per run', 1, 20), perDay),
     maxPerDay: perDay,
     model: out.model,
     effort: out.effort,
-    targets: out.targets,
-    expiryHours: int(out.expiryHours, 'auto-approve expiry (hours)', 1, 48),
-    exclude: [...new Set((out.exclude ?? []).map((x) => String(x).trim().toLowerCase()).filter(Boolean))],
   };
 }
 
