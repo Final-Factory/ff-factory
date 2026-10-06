@@ -51,6 +51,7 @@ while [ $# -gt 0 ]; do
 done
 need_root
 [ "$HOST$GUEST" != 00 ] || die "--host-only and --guest-only together leave nothing to do"
+[ "$REBUILD" = 0 ] || [ "$HOST" = 1 ] || die "--rebuild-vm makes the VM again: not with --guest-only"
 [ "$START" = 1 ] || GUEST=0
 [ -z "$BUNDLE" ] || [ -r "$BUNDLE" ] || die "--guest-repo-bundle $BUNDLE: not readable"
 # Questions only on a terminal; --yes (or no terminal) takes the stored answers.

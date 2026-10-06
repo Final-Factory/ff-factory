@@ -185,7 +185,9 @@ cmd_base_clone() {
 
 # What is set up, as one JSON object: the host's install.sh (deploy/vm/host/guest.sh) reads it to do only what is missing.
 cmd_state() {
-  local ts='{}' cfg=$FFF_ROOT/config/config.json joined=false ip="" funnel="" gh=false
+  local ts='{}' cfg=$FFF_ROOT/config/config.json joined=false ip="" funnel="" gh=false nkeys
+  # grep -c prints 0 and fails when nothing matches: no "|| echo 0" after it, or the count is printed twice.
+  nkeys=$(grep -c '^age1' "$BACKUP_RECIPIENTS_FILE" 2>/dev/null || true)
   ts=$(tailscale status --json 2>/dev/null || echo '{}')
   [ "$(jq -r '.BackendState // ""' <<<"$ts")" = Running ] && joined=true
   ip=$(jq -r '(.Self.TailscaleIPs // [])[] | select(test("^[0-9.]+$"))' <<<"$ts" 2>/dev/null | head -n 1 || true)
@@ -200,7 +202,7 @@ cmd_state() {
     --argjson base "$([ -d "$BASE_PATH/.git" ] && echo true || echo false)" \
     --argjson config "$(jq -c '{ownerName: (.ownerName // ""), publicUrl: (.publicUrl // ""), tokenfile: ((.claudeTokenFile // "") != "" and (.claudeAccounts.orchestrator // "") == "tokenfile" and (.claudeAccounts.dispatcher // "") == "tokenfile")}' "$cfg" 2>/dev/null || echo '{}')" \
     --arg target "$BACKUP_SSH_TARGET" \
-    --argjson recipients "$(grep -c '^age1' "$BACKUP_RECIPIENTS_FILE" 2>/dev/null || echo 0)" \
+    --argjson recipients "${nkeys:-0}" \
     '{installed: $installed, portal: {active: $active, healthy: $healthy}, claudeToken: $token,
       tailscale: {joined: $joined, ip: $ip, funnelUrl: $funnel}, github: $gh, baseClone: $base, config: $config,
       backup: {target: $target, recipients: $recipients}}'
