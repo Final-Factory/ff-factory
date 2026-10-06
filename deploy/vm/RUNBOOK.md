@@ -275,6 +275,11 @@ default), and prints the `journalctl` command for the details. Ctrl+C stops the 
 only asks for it, as `request_app_update` does. `fffctl restart` and `fffctl rollback` wait the same way until the portal
 answers again.
 
+Each update also installs `fffctl` and every helper script in `/usr/local/lib/fff` from the release it switches to (and
+from the older release on a rollback), so they stay as new as the portal; "already up to date" brings them up to the
+running release too. A changed systemd unit is not installed this way: the update's log says so, and the guest
+`install.sh` from a clone at that commit installs it.
+
 ## 7. Changing the VM's size
 
 The size is `VM_VCPUS` and `VM_MEMORY_MB` in `/etc/fff-vm/fff-vm.conf` (4096 since 2026-10-06). To change it:

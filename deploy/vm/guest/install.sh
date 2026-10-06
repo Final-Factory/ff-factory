@@ -163,10 +163,7 @@ EOF
 if [ -n "$sshd" ]; then run_cmd sshd -t && run_cmd systemctl try-reload-or-restart ssh.service; fi
 
 log "6/9 scripts: fffctl, fff-update, fff-health, fff-backup, fff-base-refresh, fff-migrate"
-run_cmd install -d -m 0755 /usr/local/lib/fff
-for f in lib.sh fff.conf.example config.vm.example.json; do write_file "/usr/local/lib/fff/$f" 0644 <"$here/$f" >/dev/null; done
-for f in fff-update fff-health fff-backup fff-base-refresh fff-migrate; do write_file "/usr/local/lib/fff/$f" 0755 <"$here/$f" >/dev/null; done
-write_file /usr/local/sbin/fffctl 0755 <"$here/fffctl" >/dev/null
+install_scripts "$here" >/dev/null
 
 log "7/9 ff-factory: the first release (fff-update init)"
 if [ "$DRY_RUN" = 1 ]; then

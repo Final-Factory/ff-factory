@@ -44,6 +44,19 @@ write_file() {
   echo changed
 }
 
+# install_scripts SRC: every helper script from SRC (a deploy/vm/guest folder) to where the VM runs it: fffctl in
+# /usr/local/sbin, the rest in $FFF_LIB. install.sh does it from its clone; fff-update from each release it switches to,
+# so "fffctl update" keeps fffctl and its helpers as new as the portal. Prints the names it changed. write_file replaces
+# a file by a new one (install), so a script running from the old copy reads on undisturbed.
+install_scripts() {
+  local src=$1 f c=""
+  run_cmd install -d -m 0755 "$FFF_LIB"
+  for f in lib.sh fff.conf.example config.vm.example.json; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
+  for f in fff-update fff-health fff-backup fff-base-refresh fff-migrate; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
+  [ -z "$(write_file /usr/local/sbin/fffctl 0755 <"$src/fffctl")" ] || c+=" fffctl"
+  echo "${c# }"
+}
+
 load_conf() {
   local here
   here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

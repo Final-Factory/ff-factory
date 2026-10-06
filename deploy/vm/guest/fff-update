@@ -71,6 +71,22 @@ prune() {
   as_fff git -C "$REPO" worktree prune
 }
 
+# refresh_scripts DIR: fffctl and the helper scripts from release DIR (install_scripts), so they move with the portal's
+# code: forward on an update, back on a rollback. A unit that changed needs install.sh (it reloads systemd): said so.
+refresh_scripts() {
+  local src=$1/deploy/vm/guest c u
+  if [ ! -f "$src/fffctl" ] || [ ! -f "$src/lib.sh" ]; then warn "release $(basename "$1") has no deploy/vm/guest scripts; fffctl and its helpers stay as they are"; return 0; fi
+  if ! c=$(install_scripts "$src"); then warn "installing fffctl and its helpers from $(basename "$1") failed"; return 0; fi
+  [ -z "$c" ] || log "fffctl and its helpers from $(basename "$1"): updated $c"
+  for u in "$src"/units/*; do
+    [ -f "$u" ] || continue
+    if ! cmp -s "$u" "/etc/systemd/system/$(basename "$u")"; then
+      warn "systemd units changed in $(basename "$1") (first: $(basename "$u")): run sudo ~/ff-factory/deploy/vm/guest/install.sh from a clone at that commit to install them"
+      break
+    fi
+  done
+}
+
 switch_to() {
   local dir=$1 cur
   cur=$(current_dir)
@@ -102,6 +118,7 @@ $(tail -n 12 "$buildlog")"
   cur_sha=$(release_sha "$(current_dir)")
   if [ "$sha" = "$cur_sha" ]; then
     log "already at ${sha:0:12}; nothing to restart"
+    refresh_scripts "$(current_dir)"
     tell_dispatcher "[app update] Already up to date at ${sha:0:9} (origin/$FFF_BRANCH); nothing was restarted."
     return 0
   fi
@@ -126,6 +143,7 @@ cmd_activate() {
   rm -f "$DATA/update.prepared.json"
   if [ -n "$dir" ]; then
     switch_to "$dir"
+    refresh_scripts "$dir"
     after=$(release_sha "$dir")
     jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$before" --arg a "$after" '{ok: true, at: $at, headBefore: $b, headAfter: $a}' | data_write update.result.json
     if [ "$after" != "$before" ]; then
@@ -147,6 +165,7 @@ cmd_rollback() {
   cur_sha=$(release_sha "$cur"); prev_sha=$(release_sha "$prev")
   ln -sfn "$prev" "$CURRENT.new" && mv -Tf "$CURRENT.new" "$CURRENT"
   ln -sfn "$cur" "$PREVIOUS.new" && mv -Tf "$PREVIOUS.new" "$PREVIOUS"
+  refresh_scripts "$prev"
   rm -f "$DATA/update.verifying.json"
   jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$cur_sha" --arg a "$prev_sha" --arg e "rolled back: $why" \
     '{ok: false, at: $at, error: $e, headBefore: $b, headAfter: $a}' | data_write update.result.json
