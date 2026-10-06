@@ -87,6 +87,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
+    env:
+      # The shards' shares of the tests, in config order (Playwright's PWTEST_SHARD_WEIGHTS): the last holds the slow
+      # WebKit projects, so it takes fewer. Each file goes to one shard whatever the weights, so none is ever left out.
+      PWTEST_SHARD_WEIGHTS: '5:5:3'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
