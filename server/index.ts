@@ -38,7 +38,7 @@ import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
@@ -1515,7 +1515,12 @@ function personTokens() {
     .filter((x): x is { u: (typeof x)['u']; token: string } => !!x.token)
     .map(({ u, token }) => ({ token, displayName: u.displayName, label: `${u.displayName}'s token …${token.slice(-4)}` }));
 }
-usage.personTokens = personTokens;
+/** The token file's token (config claudeTokenFile, w464) while a role runs on it: polled by the meters like the others. */
+function fileTokenEntry(): { token: string; label: string }[] {
+  const t = tokenFileToken(cfg);
+  return t ? [{ token: t, label: `token file …${t.slice(-4)}` }] : [];
+}
+usage.personTokens = () => [...personTokens(), ...fileTokenEntry()];
 /**
  * The account a session ran on, for the meters. The dispatcher with an account of its own (claudeAccounts.dispatcher,
  * w464) runs on it, never on its person's own token, so its stopped session is counted there too.
@@ -1523,6 +1528,11 @@ usage.personTokens = personTokens;
 function sourceOf(s: SessionInfo, token: string | undefined, toMachine: (id: string) => string | undefined) {
   const role = hostRoleOf(cfg, s);
   const login = () => hostAccount(cfg, role) === 'login';
+  // A role on the token file (w464) ran on it, whoever the session was for.
+  if (s.kind !== 'worker' && !s.machineId && hostAccount(cfg, role) === 'tokenfile') {
+    const t = tokenFileToken(cfg);
+    if (t) return sessionSource({ ...s, requestedBy: undefined }, t, toMachine, () => undefined, () => false);
+  }
   if (role === 'dispatcher') return sessionSource({ ...s, requestedBy: undefined }, token, toMachine, () => undefined, login);
   return sessionSource(s, token, toMachine, (id) => userToken(cfg, id), (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login');
 }
@@ -1545,6 +1555,10 @@ function accountsNow() {
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
     hostLoginRoles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login'),
     roles: shownRoles(cfg),
+    ...(() => {
+      const t = tokenFileToken(cfg);
+      return t ? { tokenFile: { key: tokenKey(t), label: `token file …${t.slice(-4)}`, roles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'tokenfile') } } : {};
+    })(),
     people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
     machines: machines.list().map((m) => {
       const t = toMachine(m.id);

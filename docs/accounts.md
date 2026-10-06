@@ -21,6 +21,27 @@ Every agent the portal starts runs on one of three kinds of Claude credential:
 | Workers and standing agents on a Mac | `machines.useHostClaudeEnv` | `true` (host token) or `false` (the Mac's login); global, or per machine | `true` |
 | Workers on this host's own daemon ([beast-machine.md](beast-machine.md)) | `claudeAccounts.workers`, unless `machines.useHostClaudeEnv` names the machine | as for sandbox workers here; "login" is this host's login, with the rest of `claudeEnv` (e.g. `CLAUDE_CONFIG_DIR`) kept | `"token"` |
 
+### The token file (w464)
+
+`claudeAccounts.orchestrator`, `.dispatcher` and `.standing` also take `"tokenfile"`: those roles run on the
+long-lived OAuth token (`sk-ant-oat01-…`, from `claude setup-token`) in the file config `claudeTokenFile` names,
+e.g. `/srv/fff/secrets/claude-oauth-token` (docs/portal-on-ffbox-host.md, change 18). Workers never do: a config
+setting `claudeAccounts.workers` to it is refused at load, and `set_app_config` refuses it.
+
+- **Read at each session start** (`readTokenFile`, `server/secrets.ts`) and given to that process alone as
+  `CLAUDE_CODE_OAUTH_TOKEN`, with every other Claude credential removed first (the server's own, `claudeEnv`'s token,
+  an API key). A new token in the file applies to the next session, with no restart.
+- **It wins over a person's own token**: a person's orchestrator and a standing run for a person with a token in
+  `userClaudeEnv` still run on the file when their role is set to it.
+- **Never stored or sent anywhere else**: not in `claudeEnv` (so never in a machine's launch spec), not in
+  `config.json` (which holds the path), never in an answer or an error (only its last four characters, "token file
+  …abcd"). A file that cannot be read, or holds anything but one OAuth token, stops the session start with the reason
+  and without the content. Transcripts redact `sk-ant-oat01-` tokens as they always did.
+- **The meters** poll it like the other tokens and show it as its own account, "<host>'s token file (the roles on
+  it)"; `system_status` names it per role ("token file …abcd", or "UNREADABLE" when the file cannot be read).
+- `set_app_config claudeTokenFile "<absolute path>"` checks the file reads as a token; it cannot be cleared while a
+  role is set to `"tokenfile"`.
+
 `machines.useHostClaudeEnv` takes `true`/`false` or an object with one entry per machine id, plus `"*"` for
 the machines it does not name: `{ "m3": false, "m5": false }`, or `{ "*": false, "m5": true }`.
 
