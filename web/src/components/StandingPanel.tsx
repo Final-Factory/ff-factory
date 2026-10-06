@@ -245,7 +245,9 @@ function Runs({ agent, last, now }: { agent: StandingAgent; last: StandingRun | 
 
 function Delegations({ list, now, app }: { list: DelegationRequest[]; now: number; app: AppState }) {
   const where = (d: DelegationRequest) => {
-    const sb = d.sandboxId ? app.sandboxes.find((x) => x.id === d.sandboxId) : undefined;
+    // A sandbox delegation names "<machine>/<sandbox>" (this host's own daemon's).
+    const [mid, sid] = (d.sandboxId ?? '').split('/');
+    const sb = sid ? app.machines.find((x) => x.id === mid)?.sandboxes?.find((x) => x.id === sid) : undefined;
     const m = d.machineId ? app.machines.find((x) => x.id === d.machineId) : undefined;
     return sb ? displayName(sb) : m ? displayName(m) : (d.sandboxId ?? d.machineId ?? '');
   };

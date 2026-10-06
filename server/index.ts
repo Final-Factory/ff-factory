@@ -49,7 +49,8 @@ import { VoiceService } from './voice.ts';
 import { startBaseRefresh } from './baseRefresh.ts';
 import { DRY_RUN_BANNER, defuseConfig, dryRun } from './dryRun.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AppState, HostStatus, Machine, PermissionDecisionRequest, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
+import type { AppState, CreateSandboxRequest, HostStatus, Machine, PermissionDecisionRequest, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
+import { slugify } from './sandboxes.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
 
@@ -886,6 +887,16 @@ route('POST', '/api/orchestrator/reset', async (req) => {
   // Each page has its own home chat, so each gets its own state.
   for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
   return { id };
+});
+
+// The New sandbox form: made on this host's own daemon (docs/beast-machine.md); the portal holds none itself (w510).
+route('POST', '/api/sandboxes', async (req) => {
+  const b = await readJson<CreateSandboxRequest>(req);
+  need(b.name, 'name');
+  const on = agents.defaultSandboxMachine();
+  if (!on) throw new HttpError(400, "this portal holds no sandboxes of its own and this host has no machine daemon with a sandbox root: ask the orchestrator for one on a machine (create_sandbox with machine)");
+  const note = await machines.createSandbox(on, b);
+  return { machine: on, id: slugify(b.name), note };
 });
 
 // ---- standing agents (docs/standing-agents.md)

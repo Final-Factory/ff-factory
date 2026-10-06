@@ -7,7 +7,7 @@ import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '
 import { capacityLine, fleetOf, type FleetComputer, type FleetSandbox, type PlaceAgents } from '../../../shared/fleet';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
-import { agentView, displayName, fmtBytes, fmtRelative, isUnused, lsGet, lsSet, machineGlance, machineSandboxGlance, navigate, sandboxGlance, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
+import { agentView, displayName, fmtBytes, fmtRelative, isUnused, lsGet, lsSet, machineGlance, machineSandboxGlance, navigate, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
 import { AttentionButton, DrawerButton } from './ShellButtons';
 import { describe, gpuPct, level, ramLvl, ramPct, type Lvl } from './SystemMeters';
 import { Dot, Icon } from './ui';
@@ -40,8 +40,7 @@ function agentState(s: SessionInfo): { word: string; tone: Tone; detail?: string
 /** The tooltip's second line: the live agents by name. */
 const agentsHint = (a: PlaceAgents) => (a.live.length ? `\nAgents: ${a.live.map((s) => s.title).join(', ')}` : '');
 
-const sandboxRoute = (sb: FleetSandbox, sessionId?: string): Route =>
-  sb.machineId ? { view: 'msandbox', machineId: sb.machineId, sandboxId: sb.id, sessionId } : { view: 'sandbox', sandboxId: sb.id, sessionId };
+const sandboxRoute = (sb: FleetSandbox, sessionId?: string): Route => ({ view: 'msandbox', machineId: sb.machineId!, sandboxId: sb.id, sessionId });
 
 // ---------------------------------------------------------------- collapsed groups (per viewer)
 
@@ -220,7 +219,7 @@ function PlaceHead({ glance: g, title, unused, free, unity, sub, active, hint, o
 }
 
 function SandboxItem({ sb, now, sel, variant, go }: { sb: FleetSandbox; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void }) {
-  const g = sb.sandbox ? sandboxGlance(sb.sandbox, sb.agents.live) : machineSandboxGlance(sb.machineSandbox!, sb.agents.live);
+  const g = machineSandboxGlance(sb.machineSandbox!, sb.agents.live);
   const unityAbout = /^Unity/.test(g.label);
   const title = displayName(sb);
   return (
@@ -302,7 +301,10 @@ function Places({ c, now, sel, variant, go, onNewSandbox }: { c: FleetComputer; 
           ))}
         </div>
       )}
-      {c.host && c.sandboxes.length === 0 && (
+      {c.host && !c.daemon && (
+        <p className="side-empty">The portal runs the orchestrators and the dispatcher; sandboxes and workers are on the machines.</p>
+      )}
+      {c.host && c.daemon && c.sandboxes.length === 0 && (
         <p className="side-empty">
           No sandboxes yet. Ask the orchestrator for work
           {onNewSandbox && (
@@ -326,7 +328,7 @@ let lastFleet: { key: unknown[]; fleet: FleetComputer[] } | undefined;
 
 /** fleetOf, computed once per change of what it reads (the page re-renders on every server event). */
 export function fleetFor(app: AppState): FleetComputer[] {
-  const key = [app.sandboxes, app.sessions, app.machines, app.system, app.machineStats];
+  const key = [app.sessions, app.machines, app.system, app.machineStats];
   if (!lastFleet || key.some((k, i) => k !== lastFleet!.key[i])) lastFleet = { key, fleet: fleetOf(app, sessionIndex(app.sessions)) };
   return lastFleet.fleet;
 }

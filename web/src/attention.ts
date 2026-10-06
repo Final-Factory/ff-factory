@@ -3,8 +3,8 @@
 // tab title count them, and each one opens the place where it is answered.
 import type { AppState, SessionInfo } from '../../shared/types';
 import { summarizeToolInput, toolDisplayName } from './components/toolSummary';
-import { focusDetails, focusPermission } from './store';
-import { displayName, navigate, type Route } from './util';
+import { focusPermission } from './store';
+import { navigate, type Route } from './util';
 
 export interface AttentionItem {
   key: string;
@@ -25,7 +25,6 @@ export function sessionRoute(s: SessionInfo, app: Pick<AppState, 'orchestratorId
   if (s.id === app.orchestratorId) return { view: 'home' };
   if (s.kind === 'orchestrator' && s.orchestratorRole === 'personal' && s.requestedBy) return { view: 'chat', userId: s.requestedBy.userId };
   if (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher') return { view: 'dispatcher', tab: 'conversation' };
-  if (s.sandboxId) return { view: 'sandbox', sandboxId: s.sandboxId, sessionId: s.id };
   if (s.standingId) return { view: 'agent', agentId: s.standingId, tab: 'conversation' };
   if (s.machineId && s.machineSandbox) return { view: 'msandbox', machineId: s.machineId, sandboxId: s.machineSandbox, sessionId: s.id };
   if (s.machineId) return { view: 'machine', machineId: s.machineId, sessionId: s.id };
@@ -51,21 +50,6 @@ export function attentionItems(app: AppState): AttentionItem[] {
         },
       });
     }
-  }
-  for (const sb of app.sandboxes) {
-    if (sb.unity.state !== 'blocked') continue;
-    const b = sb.unity.blocked;
-    items.push({
-      key: `u:${sb.id}`,
-      kind: 'unity',
-      title: displayName(sb),
-      detail: b?.reason === 'dialog' && b.title ? `Unity is stuck on “${b.title}”` : b?.reason === 'elevated' ? 'Unity is running as administrator' : 'Unity has gone quiet',
-      at: b?.since ?? sb.createdAt,
-      open: () => {
-        navigate({ view: 'sandbox', sandboxId: sb.id });
-        focusDetails(sb.id);
-      },
-    });
   }
   for (const d of app.delegations) {
     if (d.status !== 'pending') continue;
