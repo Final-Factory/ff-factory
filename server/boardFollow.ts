@@ -47,7 +47,79 @@ export function followed(id: string, work: ReadonlyMap<string, WorkItem>): WorkI
 export function fixLearnable(w: WorkItem): boolean {
   if (w.status !== 'done') return false;
   if (w.delivery?.fixCommit) return !w.delivery.fixPr || !w.delivery.releasedIn;
-  return !!(w.autoClosed?.sha || w.autoClosed?.by || fixedByPr(w.outcome));
+  return !!(w.delivery?.fixPr || w.autoClosed?.sha || w.autoClosed?.by || fixedByPr(w.outcome));
+}
+
+// ---------------------------------------------------------------- players' reports a request fixed (w502)
+
+const REPORT_ID = String.raw`\d{8}T\d{6}Z-(?:crash|desync)-[0-9a-f]{6,32}`;
+
+/** The player reports a request claims: its `report:<id>` keys (its subjects, or an intake diagnosis that joined it). */
+export function reportIdsOf(w: Pick<WorkItem, 'keys'>): string[] {
+  return w.keys.filter((k) => k.startsWith('report:')).map((k) => k.slice('report:'.length));
+}
+
+/**
+ * The reports a pull request's description says it fixes: one line each, exactly `Report: <report id>` (w502), like the
+ * `Discord:` lines FFBox reads. A report id quoted mid-sentence is not a claim. At most 20, each once.
+ */
+export function reportLines(text: string | undefined): string[] {
+  const out = new Set<string>();
+  for (const m of (text ?? '').matchAll(/^[ \t>*-]*Report:[ \t]*`?(\d{8}T\d{6}Z-(?:crash|desync)-[0-9a-f]{6,32})`?[ \t]*\r?$/gim)) {
+    out.add(m[1]);
+    if (out.size === 20) break;
+  }
+  return [...out];
+}
+
+/** What FFBox records for a report its request fixed (the report_fixed message, less its type). */
+export interface ReportFix {
+  reportId: string;
+  workId: string;
+  pr?: number;
+  version: string;
+  mergedIn: string;
+}
+
+/**
+ * Every report a finished request claims whose fix is merged and released (w502): one line per report, from the request
+ * it continues as (a merge into another follows that one). `target` is the branch the fix landed on ("develop").
+ * Requests that changed in the last `days` days only.
+ */
+export function reportFixesOf(work: ReadonlyMap<string, WorkItem>, target: string, now: number, days = 30): ReportFix[] {
+  const out = new Map<string, ReportFix>();
+  for (const w of work.values()) {
+    const ids = reportIdsOf(w);
+    if (!ids.length) continue;
+    const f = followed(w.id, work);
+    const d = f?.delivery;
+    if (!f || f.status !== 'done' || !d?.fixCommit || !d.releasedIn || now - Date.parse(f.updatedAt) > days * 86_400_000) continue;
+    for (const reportId of ids) out.set(reportId, { reportId, workId: f.id, ...(d.fixPr ? { pr: d.fixPr } : {}), version: d.releasedIn, mergedIn: `${target}@${d.fixCommit}` });
+  }
+  return [...out.values()].sort((a, b) => a.reportId.localeCompare(b.reportId));
+}
+
+/** w502's one-time sweep: reports a finished request is certainly the fix for, and the ones it only mentions. */
+export interface ReportSweep {
+  /** Its report keys (subjects, or a diagnosis that joined it): marked fixed once its fix is merged and released. */
+  certain: { workId: string; reportIds: string[]; released: boolean }[];
+  /** Report ids its title, brief, notes or outcome mention but it does not claim: for a person to decide, never guessed. */
+  uncertain: { workId: string; title: string; reportIds: string[] }[];
+}
+
+export function reportSweep(work: ReadonlyMap<string, WorkItem>, now: number, days = 30): ReportSweep {
+  const certain: ReportSweep['certain'] = [];
+  const uncertain: ReportSweep['uncertain'] = [];
+  for (const w of work.values()) {
+    if (w.status !== 'done' || now - Date.parse(w.updatedAt) > days * 86_400_000) continue;
+    const own = new Set(reportIdsOf(w));
+    if (own.size) certain.push({ workId: w.id, reportIds: [...own], released: !!(w.delivery?.fixCommit && w.delivery.releasedIn) });
+    const text = [w.title, w.brief, w.outcome ?? '', ...(w.notes ?? []).map((n) => n.text)].join('\n');
+    const named = [...new Set([...text.matchAll(new RegExp(REPORT_ID, 'g'))].map((m) => m[0]))].filter((id) => !own.has(id));
+    if (named.length) uncertain.push({ workId: w.id, title: w.title, reportIds: named.slice(0, 20) });
+  }
+  const byId = (a: { workId: string }, b: { workId: string }) => Number(a.workId.slice(1)) - Number(b.workId.slice(1));
+  return { certain: certain.sort(byId), uncertain: uncertain.sort(byId) };
 }
 
 /** An escalation's request FFBox may never have heard is done (w480's catch-up): one per escalated conversation. */

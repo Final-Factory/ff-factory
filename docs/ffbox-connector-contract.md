@@ -231,6 +231,7 @@ Never send the description, log lines, file names from inside the zip, or the se
 | `error` | `{ "type": "error", "code": "bad_message" \| "unsupported" \| "hello_twice" \| "not_enabled", "message": "…", "ref": "<type or ref>" }`. A message was not taken, and the connection stays up. `bad_message`: a value broke its rule; `message` names the field and the rule, never the value. `unsupported`: a type FF Factory does not know (`ref` is the type). `not_enabled`: a `request` or `board_check` while FF Factory has that part of the intake off. Log it |
 | `filed`, `board` | the answers to `request` and `board_check` ([The intake](#the-intake-requests-and-the-ledger-check)) |
 | `dev_ack`, `dev_filed`, `dev_reply` | the answers to an operator's `dev_request` and `dev_message`, and later replies to that conversation ([Dev requests](#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory)) |
+| `report_fixed` | a player's report a finished request fixed (w502; [Reports fixed](#reports-fixed-w502)), only to a connector whose hello lists it |
 
 A type the connector does not know is not fatal: answer `error` `unsupported` with the type as `ref`, or ignore it.
 
@@ -504,6 +505,25 @@ is not receiving, and drops the rest.
 filed as the mapped person's own, with no approval step; it is deduplicated by the conversation's identity keys, by the
 meaning of its title and brief (the ledger check's matcher and bands), and by the scope of open broad requests; the
 person's own orchestrator gets one line about it.
+
+## Reports fixed (w502)
+
+FF Factory → connector, only when the hello's `accepts` lists `report_fixed`:
+
+```json
+{ "type": "report_fixed", "reportId": "20261005T035612Z-crash-6102d405dc", "workId": "w414", "pr": 1064,
+  "version": "0.50.0.77", "mergedIn": "develop@ede697a08" }
+```
+
+A player's crash or desync report a finished ledger request claims (its `report:<id>` key: its subjects, a report its
+title names, an intake diagnosis that joined it, or a `Report: <id>` line in its merged PR), sent once the fix is merged
+and a release carries it. `reportId` is the report id (`^\d{8}T\d{6}Z-(crash|desync)-[0-9a-f]{6,32}$`), `workId` the
+request, `pr` the PR that merged the fix (a whole number, when known), `version` the first release carrying it,
+`mergedIn` `<target>@<sha>`. Sent again on every link (once per link for the same facts), with no receipt: FFBox
+applies it idempotently. FFBox writes it to `<status-dir>/dev/reports-fixed/<report id>.json`; ffwatch records it
+(table `report_fix`), sets the verdict of the report's diagnosis conversations (`intake:<id>`) to `FIXED` and shows
+`fixed {work, pr, version}` in the `reports` query. It posts NOTHING, on Discord or anywhere (an intake conversation has
+no thread). A connector without it skips the type (logged once per link).
 
 ## Escalations from Max (HTTP, not the connector)
 

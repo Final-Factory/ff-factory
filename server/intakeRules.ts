@@ -554,6 +554,7 @@ const END_RULES = [
   'End your final message with exactly one of these lines, on a line of its own; the harness reads it and closes or flags the request:',
   '- `FIX-LANDED: <commit sha>` once the fix is on develop (pushed by you, or a PR you merged).',
   '- `RESOLVED: <one line>` when nothing needs changing (not a bug, already fixed, a duplicate, needs info you asked the reporter for). Already fixed by a merged PR: name it, `RESOLVED: already fixed by PR #<number>`, so the reporter hears which fix and which release carries it (w480).',
+  '- A fix for a player\'s crash or desync report: put one line per report you confirmed it fixes in the PR description, exactly `Report: <report id>`, so FFBox shows the report fixed once the fix ships (w502).',
   '- `DESIGN-QUESTION: <one line>` when fixing it needs a design decision, a balance or gameplay change, or touches a determinism crown-jewel surface (Documentation/Crown-Jewel-Surfaces.md), save layout, the mod ABI, builds or releases. Do not fix those: the question goes to people (Ben or Lothsahn), and you may be messaged with their answer.',
   'DESIGN-QUESTION is only for an actual decision a person must make; never write "DESIGN-QUESTION: none" or a status after it. While the work is still going (waiting on CI, a build, a review), end the turn with none of these lines.',
 ].join('\n');

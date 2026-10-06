@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { escalationCatchUp, fixLearnable, fixedByPr, followed } from './boardFollow.ts';
+import { escalationCatchUp, fixLearnable, fixedByPr, followed, reportFixesOf, reportLines, reportSweep } from './boardFollow.ts';
 import { catchUpReport } from '../scripts/escalation-catchup.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -74,4 +74,37 @@ test('escalationCatchUp: escalated requests closed done in the last 14 days, one
   assert.match(report[1], /^conv-605 thread \d+: w305 \(merged into w306\), closed .*; fix bbbbbbbbbbbb, PR #1050, in 0\.50\.0\.77/);
   assert.match(report[2], /^conv-692 .*w436.*PR #1076 to look up/);
   assert.match(report[0], /no fix named/);
+});
+
+test('w502: reportLines reads a PR\'s `Report: <id>` lines only, each once', () => {
+  const body = ['Fix the crash on load', '', 'Report: 20261005T035612Z-crash-6102d405dc', '- Report: `20261005T035747Z-crash-1216e47e7d`', '> report: 20261005T035612Z-crash-6102d405dc', 'Seen in 20261004T000000Z-desync-abcdef0123 too.', 'Report: not-a-report'].join('\r\n');
+  assert.deepEqual(reportLines(body), ['20261005T035612Z-crash-6102d405dc', '20261005T035747Z-crash-1216e47e7d']);
+  assert.deepEqual(reportLines(undefined), []);
+});
+
+test('w502: reportFixesOf: a finished request\'s reports once its fix is merged and released, through a merge, recent only', () => {
+  const work = new Map<string, WorkItem>();
+  const put = (w: WorkItem) => work.set(w.id, w);
+  put(item('w414', { keys: ['report:20261005T035612Z-crash-6102d405dc', 'report:20261005T035747Z-crash-1216e47e7d', 'pr:1064'], delivery: { fixCommit: 'ede697a08', fixPr: 1064, releasedIn: '0.50.0.77' } }));
+  put(item('w420', { keys: ['report:20261004T000000Z-crash-aaaaaaaaaa'], delivery: { fixCommit: 'abc1234' } })); // not released
+  put(item('w421', { keys: ['report:20261004T000000Z-crash-bbbbbbbbbb'], status: 'active' })); // open
+  put(item('w422', { keys: ['report:20261004T000000Z-crash-cccccccccc'], status: 'merged', mergedInto: 'w423' }));
+  put(item('w423', { keys: [], delivery: { fixCommit: 'def5678', releasedIn: '0.50.0.78' } }));
+  put(item('w424', { keys: ['report:20261001T000000Z-crash-dddddddddd'], updatedAt: daysAgo(40), delivery: { fixCommit: 'f00f00f', releasedIn: '0.50.0.70' } }));
+  assert.deepEqual(reportFixesOf(work, 'develop', NOW, 30), [
+    { reportId: '20261004T000000Z-crash-cccccccccc', workId: 'w423', version: '0.50.0.78', mergedIn: 'develop@def5678' },
+    { reportId: '20261005T035612Z-crash-6102d405dc', workId: 'w414', pr: 1064, version: '0.50.0.77', mergedIn: 'develop@ede697a08' },
+    { reportId: '20261005T035747Z-crash-1216e47e7d', workId: 'w414', pr: 1064, version: '0.50.0.77', mergedIn: 'develop@ede697a08' },
+  ]);
+  assert.equal(fixLearnable(item('w1', { delivery: { fixPr: 1064 } })), true, 'a PR without its commit can be learnt');
+});
+
+test('w502: reportSweep: claimed reports are certain, mentioned ones are for a person', () => {
+  const work = new Map<string, WorkItem>();
+  work.set('w414', item('w414', { title: 'Fix the crash on load', brief: 'Reports 20261005T035612Z-crash-6102d405dc and 20261005T035747Z-crash-1216e47e7d.', keys: [] }));
+  work.set('w430', item('w430', { title: 'Crash 20261004T000000Z-crash-aaaaaaaaaa', keys: ['report:20261004T000000Z-crash-aaaaaaaaaa'] }));
+  work.set('w431', item('w431', { status: 'active', brief: 'see 20261004T000000Z-crash-bbbbbbbbbb' }));
+  const s = reportSweep(work, NOW, 30);
+  assert.deepEqual(s.certain, [{ workId: 'w430', reportIds: ['20261004T000000Z-crash-aaaaaaaaaa'], released: false }]);
+  assert.deepEqual(s.uncertain, [{ workId: 'w414', title: 'Fix the crash on load', reportIds: ['20261005T035612Z-crash-6102d405dc', '20261005T035747Z-crash-1216e47e7d'] }]);
 });

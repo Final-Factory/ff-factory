@@ -359,6 +359,35 @@ format in docs/ffbox-connector-contract.md, "Intake diagnoses"). Filed by `Intak
   findings, fenced as untrusted (the whole text stays on FFBox's page). The files are stored on the request
   (`source.reportFiles`).
 
+## Players' reports a request fixed (w502)
+
+A player's crash or desync report stays open on FFBox (NEEDS-INFO, unfixed) until FFBox hears its fix shipped. Crash
+reports 20261005T035612Z-crash-6102d405dc and 20261005T035747Z-crash-1216e47e7d (Build 76) were fixed by w414's PR #1064
+and still read NEEDS-INFO: their diagnoses finished before `fff.escalate.intake` was on, w414's brief only referenced
+them (no `report:` key), and FFBox links nothing for an intake filing.
+
+- **A request claims a report** by its `report:<id>` key: its `subjects` (`request_work`, or added later with
+  `update_work {id, subjects}`, open or closed), a report its title names, an intake diagnosis that joined it, or a
+  merged PR of its with a line `Report: <report id>` (`linkReportsFromPrs`, every 5 minutes, from the merged PRs gh
+  lists: the request whose PR, fix PR, auto-close PR or FFBox PR it is). A brief only references.
+- **Told when it ships.** `pushReportFixes` (every minute) sends FFBox `report_fixed {reportId, workId, pr, version,
+  mergedIn}` for every report a finished request claims once its fix is merged and a release carries it
+  (`reportFixesOf`; through a merge into another request; requests that changed in the last 30 days). The fix and
+  release are learnt by `resolveFixes` (w480) for these requests too: a FIX-LANDED commit (abbreviated or not) and its
+  merged PR, a PR named by a confirmed link, an auto-close, or "already fixed by #N". What FFBox is told is kept in
+  `intake.json` (`reportFixes`) and sent on every link, once per link (`ProviderManager.pushReportFixed`), only to a
+  connector whose hello lists `report_fixed`. FFBox records it on the report and its diagnosis (verdict FIXED) and
+  posts nothing.
+- **The backfill.** At start-up, once, w414 gets the two reports as subjects and PR #1064 as its fix
+  (`CONFIRMED_SUBJECTS`, `confirmReportSubjects`; Lothsahn confirmed it, w502). The fix's commit and its first release
+  (Build 77) are then looked up and FFBox is told.
+- **The one-time sweep** (`sweepReports`, 30 seconds after the first start): finished requests of the last 30 days that
+  claim reports are told as above; ones whose title, brief, notes or outcome only mention report ids are listed for
+  Lothsahn in one `[intake reports]` message (the reviewers, on a portal without his login), never marked on a guess.
+  `node scripts/report-sweep.ts <copy of a data dir>` lists the same, changing nothing.
+- **Workers** put `Report: <report id>` in a fix PR for each report they confirmed it fixes (`DISCORD_RULES`, the
+  intake end rules).
+
 ## Nightly e2e regressions
 
 Ben, 2026-09-30: "stop this falling through the cracks." The nightly e2e lab (FinalFactory spec 075,

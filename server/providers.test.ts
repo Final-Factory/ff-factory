@@ -941,3 +941,27 @@ test('FFBox links: FF Factory\'s own conversation page, with or without the port
   assert.equal(isFfboxConversationId('../x'), false);
   assert.equal(isFfboxConversationId(undefined), false);
 });
+
+test('w502: report_fixed goes only to a connector whose hello lists it, once per link for the same facts, again on a new link', async (t) => {
+  const { connect, pm } = await setup(t);
+  const fix = { reportId: '20261005T035612Z-crash-6102d405dc', workId: 'w414', pr: 1064, version: '0.50.0.77', mergedIn: 'develop@ede697a08' };
+  assert.equal(pm.pushReportFixed(fix), false, 'offline');
+  const old = connect();
+  await old.hello({ accepts: ['board', 'query'] });
+  assert.equal(pm.pushReportFixed(fix), false, 'a connector that does not take it gets nothing');
+  old.close();
+  await until('offline', () => !pm.online);
+  const c = connect();
+  await c.hello({ accepts: ['board', 'report_fixed', 'query'] });
+  assert.equal(pm.pushReportFixed(fix), true);
+  assert.deepEqual(await c.next('report_fixed'), { type: 'report_fixed', ...fix });
+  assert.equal(pm.pushReportFixed(fix), true, 'the same facts again: already sent on this link');
+  assert.equal(pm.pushReportFixed({ ...fix, version: '0.50.0.78' }), true);
+  assert.deepEqual(await c.next('report_fixed'), { type: 'report_fixed', ...fix, version: '0.50.0.78' }, 'changed facts go again');
+  c.close();
+  await until('offline', () => !pm.online);
+  const again = connect();
+  await again.hello({ accepts: ['report_fixed'] });
+  assert.equal(pm.pushReportFixed(fix), true);
+  assert.deepEqual(await again.next('report_fixed'), { type: 'report_fixed', ...fix }, 'a new link hears it again');
+});

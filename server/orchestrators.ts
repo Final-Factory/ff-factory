@@ -10,6 +10,7 @@ import type { Store } from './store.ts';
 import type { OptionsFactory, SessionHandle, SessionManager } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
+  subjectKeys,
   STRONG,
   decisionProblem,
   dispatchNotice,
@@ -124,6 +125,21 @@ export function ownSubjectKeys(w: Pick<WorkItem, 'title' | 'subjects' | 'ffboxDe
 }
 
 /** The w343 detach's two wrong removals (restoreDetachedSubjects). */
+/**
+ * Report links people confirmed after the fact (w502, Lothsahn 2026-10-05, "Yes, do both"): w414's PR #1064 (merged as
+ * ede697a08, first in Build 77) fixed the Build 76 crash reports 20261005T035612Z-crash-6102d405dc (Windows client) and
+ * 20261005T035747Z-crash-1216e47e7d (Mac host), which its brief only referenced. Given at start-up as `subjects`, once,
+ * with the PR when the request names none, so FFBox is told they are fixed (IntakeManager.pushReportFixes).
+ */
+const CONFIRMED_SUBJECTS: readonly { id: string; keys: readonly string[]; fixPr?: number; why: string }[] = [
+  {
+    id: 'w414',
+    keys: ['report:20261005T035612Z-crash-6102d405dc', 'report:20261005T035747Z-crash-1216e47e7d'],
+    fixPr: 1064,
+    why: 'w502: Lothsahn confirmed PR #1064 fixed these Build 76 crash reports',
+  },
+];
+
 const RESTORE_SUBJECTS: readonly [string, string][] = [
   ['w197', 'report:20261002T043921Z-desync-1d460c8b98'],
   ['w313', 'report:20261003T192822Z-desync-fba8dd45e3'],
@@ -356,6 +372,7 @@ export class Orchestrators {
     this.relinkBroadDevLinks();
     this.detachBorrowedSubjects();
     this.restoreDetachedSubjects();
+    this.confirmReportSubjects();
   }
 
   /** A person's own orchestrator, if they have one yet. */
@@ -730,10 +747,22 @@ export class Orchestrators {
   }
 
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
-  update(chat: SessionHandle, input: { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean }): string {
+  update(chat: SessionHandle, input: { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[] }): string {
     const owner = this.ownerOf(chat.info);
     if (!owner) throw new Error('only a person’s own orchestrator updates its requests');
     const w = this.requireWork(input.id);
+    // SUBJECTS ADDED LATER (w502): the threads and reports a request turned out to be the work for, open or closed.
+    // Add-only; with nothing else asked, that is the whole update.
+    let subjectLine = '';
+    if (input.subjects?.length) {
+      if (!isFor(w, owner.userId) && !this.reviewers().some((r) => same(r.userId, owner.userId))) throw new Error(`${w.id} is not ${owner.displayName}'s request`);
+      const notThreads = this.notThreads();
+      const keys = [...new Set(input.subjects.flatMap((x) => subjectKeys(String(x), notThreads)))];
+      if (!keys.length) throw new Error('subjects: Discord thread links or ids, or player report ids ("20261005T035612Z-crash-6102d405dc")');
+      const added = this.addSubjects(w.id, keys, `${owner.displayName}, update_work`);
+      subjectLine = added.length ? `${w.id} is now the work for ${added.join(', ')}.` : `${w.id} already had ${keys.join(', ')}.`;
+      if (!input.note?.trim() && !input.priority && !input.close && !input.reopen) return subjectLine;
+    }
     // A reviewer approves or declines an intake request from their own chat, in a turn of their own only: a harness
     // message (a relayed report, a worker's words) cannot approve anything.
     if (input.approve || input.decline) {
@@ -803,7 +832,7 @@ export class Orchestrators {
       const hint = input.close === 'cancelled' && live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
       this.gatherForDispatcher(owner, updateNotice(w, owner, `${what.join('; ')}.${hint}`));
     }
-    return `${w.id} is ${w.status}: ${what.join('; ')}.`;
+    return `${subjectLine ? `${subjectLine} ` : ''}${w.id} is ${w.status}: ${what.join('; ')}.`;
   }
 
   /**
@@ -2050,6 +2079,42 @@ export class Orchestrators {
       this.store.putWork(w);
       console.log(`ledger: ${id}: restored ${key} (w340: it is this request's own report)`);
       out.push({ id, key });
+    }
+    return out;
+  }
+
+  /**
+   * Add thread or report keys to a request as its subjects (w502): a person's update_work `subjects`, a merged PR's
+   * `Report: <id>` lines, or a confirmed link. Each key once; stamped with `why`. Returns the keys added.
+   */
+  addSubjects(id: string, keys: readonly string[], why: string): string[] {
+    const w = this.store.work.get(id);
+    if (!w) return [];
+    const added = keys.filter((k) => /^(report|discord):/.test(k) && !w.keys.includes(k));
+    const subjects = new Set(w.subjects ?? []);
+    for (const k of keys) subjects.add(k);
+    if (!added.length && subjects.size === (w.subjects ?? []).length) return [];
+    w.keys = [...w.keys, ...added];
+    w.subjects = [...subjects];
+    this.stamp(w, `subjects added (${why}): ${keys.join(', ')}`);
+    this.store.putWork(w);
+    console.log(`ledger: ${id}: subjects ${keys.join(', ')} (${why})`);
+    return added;
+  }
+
+  /** CONFIRMED_SUBJECTS, once each: the keys, and the fixing PR when the request names none. Returns the ids changed. */
+  confirmReportSubjects(): string[] {
+    const out: string[] = [];
+    for (const c of CONFIRMED_SUBJECTS) {
+      const w = this.store.work.get(c.id);
+      if (!w || c.keys.every((k) => w.keys.includes(k))) continue;
+      this.addSubjects(c.id, c.keys, c.why);
+      if (c.fixPr && !w.delivery?.fixPr && !w.delivery?.fixCommit) {
+        w.delivery = { ...w.delivery, fixPr: c.fixPr };
+        this.stamp(w, `its fix is PR #${c.fixPr} (${c.why})`);
+        this.store.putWork(w);
+      }
+      out.push(c.id);
     }
     return out;
   }
