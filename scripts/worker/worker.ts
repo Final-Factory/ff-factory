@@ -539,6 +539,13 @@ export function unityEditors(home = os.homedir()): string[] {
     }
   }
   const roots = isWin ? [path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Unity', 'Hub', 'Editor')] : ['/Applications/Unity/Hub/Editor'];
+  // The install location chosen in the Hub (LothDesktop: C:\Program Files\Unity\Editor), as machine/unity.ts editorBinary reads it.
+  try {
+    const chosen = JSON.parse(fs.readFileSync(path.join(hub, 'secondaryInstallPath.json'), 'utf8')) as unknown;
+    if (typeof chosen === 'string' && chosen.trim()) roots.push(chosen.trim());
+  } catch {
+    // no choice made
+  }
   for (const r of roots) {
     try {
       for (const v of fs.readdirSync(r)) {
@@ -891,7 +898,7 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     // A rule group counts only when this install made it: the slot group's name is shared with the game repo's own script.
     const sfx = m?.firewallSuffix ? ` ${m.firewallSuffix}` : '';
     const ours = (g: string) => !!m?.outside.some((o) => o.kind === 'firewall-group' && o.name === g + sfx);
-    const group = (g: string, n: string) => ({ what: `firewall group "${g}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
+    const group = (g: string, n: string) => ({ what: `firewall group "${g}${sfx}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
       group(SLOT_GROUP, get('slotRules')),
