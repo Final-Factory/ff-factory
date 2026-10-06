@@ -8,7 +8,8 @@
 //   MOCK_WORK_FILE=path        a real data/work.json, its items added to the ledger
 //   MOCK_LIVE=<events/s>       running agents' tool calls and session updates at this rate (0: none)
 import fs from 'node:fs';
-import type { AppState, SessionInfo, TranscriptEvent, WorkItem } from '../../shared/types.ts';
+import type { AppState, Machine, MachineSandbox, SessionInfo, TranscriptEvent, WorkItem } from '../../shared/types.ts';
+import { localMachine } from './scenario.ts';
 import type { World } from './scenario.ts';
 
 const env = process.env;
@@ -41,11 +42,36 @@ function reply(r: () => number, i: number): string {
   return parts.join('\n');
 }
 
-/** Stopped workers, spread over the scenario's sandboxes and machines, as a portal collects them over weeks. */
+/** A sandbox as the portal's state.json held it before w510 (only what the mock carries over). */
+interface LegacySandbox {
+  id: string;
+  branch: string;
+  base: string;
+  path: string;
+  purpose: string;
+  status: MachineSandbox['status'];
+  statusDetail?: string;
+  createdAt: string;
+  unity?: { state?: string; pid?: number };
+  git?: MachineSandbox['git'];
+}
+
+/** A scenario without a local machine (the fresh one) gets BEAST's, once real sandboxes are put on it. */
+function addLocal(state: AppState, now: number): Machine {
+  const m = localMachine(now);
+  state.machines.unshift(m);
+  return m;
+}
+
+/** The machine whose daemon runs on the portal's own host: its sandboxes are where most agents are. */
+const localOf = (state: AppState): Machine | undefined => state.machines.find((m) => m.local);
+
+/** Stopped workers, spread over the local machine's sandboxes and the other machines, as a portal collects them over weeks. */
 function syntheticSessions(state: AppState, n: number, now: number): SessionInfo[] {
   const r = rng(7);
-  const sandboxes = state.sandboxes.map((s) => s.id);
-  const machines = state.machines.map((m) => m.id);
+  const local = localOf(state);
+  const sandboxes = (local?.sandboxes ?? []).map((s) => s.id);
+  const machines = state.machines.filter((m) => !m.local).map((m) => m.id);
   const people = [
     { userId: 'ben', displayName: 'Ben' },
     { userId: 'lothsahn', displayName: 'Lothsahn' },
@@ -56,10 +82,11 @@ function syntheticSessions(state: AppState, n: number, now: number): SessionInfo
     const onMachine = machines.length && r() < 0.05;
     const at = new Date(now - (n - i) * 7 * MIN).toISOString();
     const who = people[i % people.length];
+    const place = onMachine ? { machineId: machines[Math.floor(r() * machines.length)] } : { machineId: local?.id, machineSandbox: r() < 0.95 ? sandboxes[0] : sandboxes[Math.floor(r() * sandboxes.length)] };
     out.push({
       id: `z${i.toString(36).padStart(5, '0')}`,
       kind: 'worker',
-      ...(onMachine ? { machineId: machines[Math.floor(r() * machines.length)] } : { sandboxId: r() < 0.95 ? sandboxes[0] : sandboxes[Math.floor(r() * sandboxes.length)] }),
+      ...place,
       title: sentence(r, 6).slice(0, 60),
       status: 'stopped',
       model: 'opus',
@@ -113,19 +140,29 @@ export function scaleWorld(world: World, now = Date.now()) {
   const orch = state.orchestratorId;
   let extra: SessionInfo[] = [];
   if (env.MOCK_STATE_FILE) {
-    const real = JSON.parse(fs.readFileSync(env.MOCK_STATE_FILE, 'utf8')) as { sessions?: SessionInfo[]; sandboxes?: AppState['sandboxes'] };
+    // A state.json from before w510 holds the host's own `sandboxes` and its workers' `sandboxId`; they move to the local machine.
+    const real = JSON.parse(fs.readFileSync(env.MOCK_STATE_FILE, 'utf8')) as { sessions?: SessionInfo[]; sandboxes?: LegacySandbox[] };
+    const local = localOf(state) ?? addLocal(state, now);
+    const localId = local.id;
     // Its orchestrators stay out: the page's own is the scenario's (with the real conversation, below).
-    extra = (real.sessions ?? []).filter((s) => s.kind !== 'orchestrator' && s.kind !== 'standing').map((s) => ({ ...s, pendingPermissions: s.pendingPermissions ?? [] }));
+    extra = (real.sessions ?? [])
+      .filter((s) => s.kind !== 'orchestrator' && s.kind !== 'standing')
+      .map((s) => {
+        const { sandboxId, ...rest } = s;
+        return { ...rest, ...(sandboxId ? { machineId: localId, machineSandbox: sandboxId } : {}), pendingPermissions: s.pendingPermissions ?? [] };
+      });
     // Its sandboxes too, as they are (a sandbox the scenario also has is left to the scenario; its agents join it).
-    for (const sb of real.sandboxes ?? []) if (!state.sandboxes.some((x) => x.id === sb.id)) state.sandboxes.push({ ...sb, sessionIds: [] });
+    for (const sb of real.sandboxes ?? [])
+      if (!local.sandboxes!.some((x) => x.id === sb.id)) local.sandboxes!.push({ id: sb.id, branch: sb.branch, base: sb.base, path: sb.path, purpose: sb.purpose, status: sb.status, statusDetail: sb.statusDetail, createdAt: sb.createdAt, unity: { state: sb.unity?.state === 'running' || sb.unity?.state === 'starting' || sb.unity?.state === 'crashed' ? sb.unity.state : 'stopped', pid: sb.unity?.pid }, sessionIds: [], git: sb.git });
   } else if (Number(env.MOCK_SCALE) > 0) {
     extra = syntheticSessions(state, Number(env.MOCK_SCALE), now);
   }
   state.sessions.push(...extra);
-  // Each place lists its agents by id (Sandbox.sessionIds, Machine.sessionIds), as the server keeps them.
+  // Each place lists its agents by id (MachineSandbox.sessionIds, Machine.sessionIds), as the server keeps them.
   for (const s of extra) {
-    const place = s.sandboxId ? state.sandboxes.find((x) => x.id === s.sandboxId) : s.machineId ? state.machines.find((x) => x.id === s.machineId) : undefined;
-    if (place && !s.machineSandbox) place.sessionIds.push(s.id);
+    const machine = s.machineId ? state.machines.find((x) => x.id === s.machineId) : undefined;
+    machine?.sessionIds.push(s.id);
+    if (s.machineSandbox) machine?.sandboxes?.find((x) => x.id === s.machineSandbox)?.sessionIds.push(s.id);
   }
   if (env.MOCK_TRANSCRIPT_FILE) transcripts[orch] = readJsonl(env.MOCK_TRANSCRIPT_FILE);
   else if (Number(env.MOCK_TRANSCRIPT_EVENTS) > 0) transcripts[orch] = syntheticTranscript(Number(env.MOCK_TRANSCRIPT_EVENTS), now);

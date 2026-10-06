@@ -63,7 +63,7 @@ the `linux-snapshots` artifact, review the images and commit them. On Windows or
 ```bash
 npm --prefix web run build
 node web/perf/bench.ts                                   # 7,000 stopped agents, an 8,000-event chat, live traffic
-node web/perf/bench.ts --route '#/sandbox/agent-mcp'     # the chat beside the sandbox holding most past agents
+node web/perf/bench.ts --route '#/machine/beast/sandbox/agent-mcp'# the chat beside the sandbox holding most past agents
 node web/perf/bench.ts --cpu 4 --memory 60               # a 4x slower CPU; the JS heap over an hour
 node web/perf/bench.ts --check --live 0                  # the budgets CI holds the page to
 ```

@@ -1,6 +1,6 @@
-// The mock backend's world: a realistic day of FF Factory. Several sandboxes in different states
-// (working, waiting for a permission, Unity blocked on a dialog, idle, unused, creating, error),
-// two machines, three standing agents with runs and delegations, and long transcripts with tool
+// The mock backend's world: a realistic day of FF Factory. BEAST's own daemon (the local machine,
+// "beast") holds several sandboxes in different states (working, waiting for a permission, Unity
+// on a dialog, idle, unused, creating, error), beside two other machines, three standing agents with runs and delegations, and long transcripts with tool
 // calls, thinking, code, tables, images and the harness notices the orchestrator gets.
 import type {
   AccountUsage,
@@ -9,9 +9,9 @@ import type {
   GitStatus,
   ImageRef,
   Machine,
+  MachineSandbox,
   MachineStats,
   PendingPermission,
-  Sandbox,
   SessionInfo,
   StandingAgent,
   StandingRun,
@@ -22,6 +22,36 @@ import type {
 export type Scenario = 'busy' | 'fresh';
 
 const MIN = 60_000;
+
+/** BEAST's sandbox folder; its sandboxes are on its own daemon (the local machine), not the portal's (w510). */
+export const LOCAL_SANDBOX_ROOT = 'F:/ffsb';
+
+/** The local machine's record (docs/beast-machine.md): the portal host's own daemon, where its sandboxes live. */
+export function localMachine(now: number, extra: Partial<Machine> = {}): Machine {
+  return {
+    id: 'beast',
+    name: 'BEAST',
+    host: 'localhost',
+    local: true,
+    platform: 'win32',
+    purpose: 'unused',
+    status: 'ready',
+    online: true,
+    lastSeen: new Date(now).toISOString(),
+    repoPath: 'C:/ffsb/_base',
+    home: 'C:/Users/ben',
+    portalUrl: 'http://localhost:8787',
+    sandboxRoot: LOCAL_SANDBOX_ROOT,
+    maxSandboxes: 5,
+    maxUnity: 4,
+    maxSandboxAgents: 6,
+    maxSessions: 8,
+    sessionIds: [],
+    sandboxes: [],
+    createdAt: new Date(now - 60 * 24 * 12 * MIN).toISOString(),
+    ...extra,
+  };
+}
 
 /** Everything the mock serves: the app state, transcripts and images by id. */
 export interface World {
@@ -100,10 +130,9 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
     diskTotalBytes: 3.6 * 2 ** 40,
     diskFreeBytes: 1.1 * 2 ** 40,
     gpu: { name: 'NVIDIA GeForce RTX 5090', memTotalMiB: 32607, memUsedMiB: 14540, utilPct: 41 },
-    limits: { maxUnity: 4, maxSessions: 8 },
   };
 
-  const base: Omit<AppState, 'sandboxes' | 'sessions' | 'standingAgents' | 'delegations' | 'machines'> = {
+  const base: Omit<AppState, 'sessions' | 'standingAgents' | 'delegations' | 'machines'> = {
     system,
     host: { elevated: false },
     usage: {
@@ -141,7 +170,6 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
       state: {
         ...base,
         usage: { ...base.usage!, weekly: { label: 'Weekly', percent: 4 }, session: { label: '5-hour session', percent: 0 }, models: [] },
-        sandboxes: [],
         sessions: [
           session('orch', 'orchestrator', 'Ben', { orchestratorRole: 'personal', requestedBy: { userId: 'ben', displayName: 'Ben' }, permissionMode: 'default', createdAt: iso(1), lastActivityAt: iso(1) }),
           session('dispatcher', 'orchestrator', 'Dispatcher', { orchestratorRole: 'dispatcher', permissionMode: 'default', createdAt: iso(1), lastActivityAt: iso(1), status: 'stopped' }),
@@ -156,14 +184,13 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
     };
   }
 
-  // ------------------------------------------------------------------ sandboxes
+  // ------------------------------------------------------------------ BEAST's sandboxes (on its own daemon, machine "beast")
 
-  const sb = (id: string, purpose: string, sessionIds: string[], unity: Sandbox['unity'], extra: Partial<Sandbox> = {}): Sandbox => ({
+  const sb = (id: string, purpose: string, sessionIds: string[], unity: MachineSandbox['unity'], extra: Partial<MachineSandbox> = {}): MachineSandbox => ({
     id,
-    name: id,
     branch: `sandbox/${id}`,
     base: 'origin/develop',
-    path: `F:\\ffsb\\${id}`,
+    path: `${LOCAL_SANDBOX_ROOT}/${id}`,
     purpose,
     status: 'ready',
     createdAt: iso(60 * 26),
@@ -181,30 +208,16 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
     createdAt: iso(58),
   };
 
-  const sandboxes: Sandbox[] = [
-    sb('agent-mcp', 'Lighting pass: AAA space look', ['s-light-0', 's-light-1'], { state: 'running', pid: 22672, startedAt: iso(187), logPath: 'F:\\ffsb\\agent-mcp\\Logs\\sandbox-editor.log' }, {
+  const sandboxes: MachineSandbox[] = [
+    sb('agent-mcp', 'Lighting pass: AAA space look', ['s-light-0', 's-light-1'], { state: 'running', pid: 22672, logPath: `${LOCAL_SANDBOX_ROOT}/agent-mcp/Logs/sandbox-editor.log` }, {
       git: git('feature/lighting-pass', { ahead: 3, dirty: 3, untracked: 1, head: { sha: 'b81c0e2', subject: 'Bloom threshold follows exposure; belts keep their colour', date: iso(22) }, pr: { number: 588, url: 'https://github.com/Final-Factory/FinalFactory/pull/588', title: 'Lighting pass: AAA space look', draft: true } }),
     }),
-    sb('spec-074', 'Spec 074: honest three-peer co-op (BEAST client)', ['s-coop'], { state: 'running', pid: 18800, startedAt: iso(260) }, {
+    sb('spec-074', 'Spec 074: honest three-peer co-op (BEAST client)', ['s-coop'], { state: 'running', pid: 18800 }, {
       git: git('develop', { ahead: 1, head: { sha: '9d02f7a', subject: 'Sitting 3 handoff: wave 4 cleared, no desyncs', date: iso(59) } }),
     }),
-    sb('tutorial-bugs', 'Play the tutorial single-player and log the bugs', ['s-tut'], {
-      state: 'blocked',
-      pid: 31044,
-      startedAt: iso(97),
-      blocked: {
-        reason: 'dialog',
-        title: 'Enter Safe Mode?',
-        text: 'The project has compile errors. Enter Safe Mode to fix them?\n\nAssets/Scripts/FFSystems/Logistics/BeltSplitterSystem.cs(88,17): error CS0103: The name \'splitIndex\' does not exist in the current context',
-        buttons: ['Enter Safe Mode', 'Ignore', 'Quit'],
-        dialogId: 'safe-mode',
-        advice: 'Unity found compile errors on start. "Ignore" opens the editor anyway, so the agent can fix them.',
-        since: iso(95),
-        resumeState: 'starting',
-      },
-      dismissed: [{ at: iso(96), title: 'Unity Package Manager', button: 'OK' }],
-    }, { git: git('sandbox/tutorial-bugs', { behind: 2 }) }),
-    sb('shader-blackhole', 'Black hole: lensing + Doppler beaming', ['s-bh-review', 's-bh'], { state: 'running', pid: 9120, startedAt: iso(420) }, {
+    // A machine sandbox's Unity state has no "blocked": the Safe Mode dialog lives in its agent's lastResult.
+    sb('tutorial-bugs', 'Play the tutorial single-player and log the bugs', ['s-tut'], { state: 'running', pid: 31044 }, { git: git('sandbox/tutorial-bugs', { behind: 2 }) }),
+    sb('shader-blackhole', 'Black hole: lensing + Doppler beaming', ['s-bh-review', 's-bh'], { state: 'running', pid: 9120 }, {
       git: git('feature/blackhole-doppler', { upstream: 'origin/feature/blackhole-doppler', head: { sha: '35d457e', subject: 'Black hole: ~30% cheaper ray march, stronger Doppler beaming', date: iso(180) }, pr: { number: 583, url: 'https://github.com/Final-Factory/FinalFactory/pull/583', title: 'Black hole: cheaper ray march, Doppler beaming', draft: false } }),
     }),
     sb('sb-5', 'unused', [], { state: 'stopped' }, { git: git('sandbox/sb-5', { behind: 14 }) }),
@@ -220,6 +233,12 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
   // ------------------------------------------------------------------ machines
 
   const machines: Machine[] = [
+    localMachine(now, {
+      sessionIds: sandboxes.flatMap((x) => x.sessionIds),
+      sandboxes,
+      info: { hostname: 'BEAST', os: 'Windows 11 Pro', node: 'v24.3.0', claude: '2.3.14', daemon: '1.4.0', platform: 'win32' },
+      git: git('develop'),
+    }),
     {
       id: 'm5',
       host: 'm5',
@@ -423,7 +442,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
       createdAt: iso(560),
       status: 'approved',
       decidedAt: iso(540),
-      sandboxId: 'tutorial-bugs',
+      sandboxId: 'beast/tutorial-bugs',
       sessionId: 's-tut-old',
       autoApproved: true,
       auto: 'started',
@@ -452,12 +471,12 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
     session('orch', 'orchestrator', 'Ben', { orchestratorRole: 'personal', requestedBy: { userId: 'ben', displayName: 'Ben' }, permissionMode: 'default', createdAt: iso(60 * 30), lastActivityAt: iso(3), turns: 86, costUsd: 41.72, model: 'claude-opus-5-5' }),
     session('orch-loth', 'orchestrator', 'Lothsahn', { orchestratorRole: 'personal', requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' }, permissionMode: 'default', createdAt: iso(60 * 30), lastActivityAt: iso(22), turns: 14, costUsd: 3.9, model: 'claude-opus-5-5' }),
     session('dispatcher', 'orchestrator', 'Dispatcher', { orchestratorRole: 'dispatcher', permissionMode: 'default', createdAt: iso(60 * 30), lastActivityAt: iso(21), turns: 41, costUsd: 11.3, model: 'claude-opus-5-5' }),
-    session('s-light-0', 'worker', 'Restart & dialog fixer', { sandboxId: 'agent-mcp', status: 'idle', turns: 9, costUsd: 3.1, lastActivityAt: iso(60 * 5), createdAt: iso(60 * 7), lastResult: 'The watchdog now reloads clean scenes instead of reporting the dialog.' }),
-    session('s-light-1', 'worker', 'Lighting pass (AAA space look)', { sandboxId: 'agent-mcp', status: 'running', effort: 'high', turns: 31, costUsd: 12.84, createdAt: iso(189), lastActivityAt: iso(1) }),
-    session('s-coop', 'worker', 'Honest co-op client (BEAST)', { sandboxId: 'spec-074', status: 'waiting_permission', permissionMode: 'default', turns: 57, costUsd: 18.2, createdAt: iso(262), lastActivityAt: iso(58), pendingPermissions: [coopPerm] }),
-    session('s-tut', 'worker', 'Tutorial playthrough bug hunt', { sandboxId: 'tutorial-bugs', status: 'idle', model: 'sonnet', turns: 4, costUsd: 0.62, createdAt: iso(98), lastActivityAt: iso(94), lastResult: 'Unity is stuck on the Safe Mode dialog; waiting for someone to press Ignore.' }),
-    session('s-bh', 'worker', 'Black hole shader', { sandboxId: 'shader-blackhole', status: 'idle', turns: 22, costUsd: 9.4, createdAt: iso(420), lastActivityAt: iso(176), lastResult: 'v2 is 30% cheaper (1.34 ms vs 1.92 ms). PR #583 is up.' }),
-    session('s-bh-review', 'worker', 'Review: black hole perf numbers', { sandboxId: 'shader-blackhole', status: 'stopped', model: 'sonnet', turns: 3, costUsd: 0.44, createdAt: iso(410), lastActivityAt: iso(390) }),
+    session('s-light-0', 'worker', 'Restart & dialog fixer', { machineId: 'beast', machineSandbox: 'agent-mcp', status: 'idle', turns: 9, costUsd: 3.1, lastActivityAt: iso(60 * 5), createdAt: iso(60 * 7), lastResult: 'The watchdog now reloads clean scenes instead of reporting the dialog.' }),
+    session('s-light-1', 'worker', 'Lighting pass (AAA space look)', { machineId: 'beast', machineSandbox: 'agent-mcp', status: 'running', effort: 'high', turns: 31, costUsd: 12.84, createdAt: iso(189), lastActivityAt: iso(1) }),
+    session('s-coop', 'worker', 'Honest co-op client (BEAST)', { machineId: 'beast', machineSandbox: 'spec-074', status: 'waiting_permission', permissionMode: 'default', turns: 57, costUsd: 18.2, createdAt: iso(262), lastActivityAt: iso(58), pendingPermissions: [coopPerm] }),
+    session('s-tut', 'worker', 'Tutorial playthrough bug hunt', { machineId: 'beast', machineSandbox: 'tutorial-bugs', status: 'idle', model: 'sonnet', turns: 4, costUsd: 0.62, createdAt: iso(98), lastActivityAt: iso(94), lastResult: 'Unity is stuck on the Safe Mode dialog; waiting for someone to press Ignore.' }),
+    session('s-bh', 'worker', 'Black hole shader', { machineId: 'beast', machineSandbox: 'shader-blackhole', status: 'idle', turns: 22, costUsd: 9.4, createdAt: iso(420), lastActivityAt: iso(176), lastResult: 'v2 is 30% cheaper (1.34 ms vs 1.92 ms). PR #583 is up.' }),
+    session('s-bh-review', 'worker', 'Review: black hole perf numbers', { machineId: 'beast', machineSandbox: 'shader-blackhole', status: 'stopped', model: 'sonnet', turns: 3, costUsd: 0.44, createdAt: iso(410), lastActivityAt: iso(390) }),
     session('m5-host', 'worker', 'Honest co-op host (M5)', { machineId: 'm5', status: 'running', turns: 61, costUsd: 16.3, createdAt: iso(265), lastActivityAt: iso(1) }),
     session('st-discord', 'standing', 'Discord triage', { standingId: 'discord-triage', status: 'stopped', model: 'sonnet', permissionMode: 'default', turns: 31, costUsd: 6.2, lastActivityAt: iso(45) }),
     session('st-pr', 'standing', 'PR reviewer', { standingId: 'pr-review', status: 'running', permissionMode: 'default', turns: 42, costUsd: 22.8, lastActivityAt: iso(1) }),
@@ -772,7 +791,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
   }
 
   return {
-    state: { ...base, sandboxes, sessions, standingAgents, delegations, machines, work: ledger(now), machineStats: macStats(), accounts: accounts(sessions.map((s) => s.id)) },
+    state: { ...base, sessions, standingAgents, delegations, machines, work: ledger(now), machineStats: macStats(), accounts: accounts(sessions.map((s) => s.id)) },
     transcripts,
     uploads,
     files,
