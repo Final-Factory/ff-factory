@@ -144,6 +144,8 @@ export interface InstallOptions {
   /** Windows task name or Mac LaunchAgent label; a second install on one computer (a test root) uses its own. */
   service: string;
   firewall: boolean;
+  /** No clean-up passes of its own (a test install on a computer that holds other work). */
+  noCleanup?: boolean;
   unityEditorRoot?: string;
   unityPath?: string;
 }
@@ -402,6 +404,7 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     maxEventsFile: path.join(l.daemon, 'max-events.jsonl'),
     ...(o.unityEditorRoot ? { unityEditorRoot: o.unityEditorRoot } : {}),
     ...(o.unityPath ? { unityPath: o.unityPath } : {}),
+    ...(o.noCleanup ? { cleanup: { everyMinutes: 0, softFreeGB: 0 } } : {}),
     sandboxes,
   };
 }
@@ -576,7 +579,8 @@ export async function install(o: InstallOptions, from = SRC): Promise<void> {
   await cloneRepo(l, o.repoUrl);
   await syncSource(l, from);
 
-  // 4. The daemon and its service.
+  // 4. The daemon and its service. A test install cleans nothing: its settings are in place before it first starts.
+  if (o.noCleanup) fs.writeFileSync(path.join(l.daemon, 'cleanup.json'), JSON.stringify({ everyMinutes: 0, softFreeGB: 0, staleOutput: { mode: 'off' } }));
   noteOutside(m, isWin ? { kind: 'task', name: o.service, note: 'runs the daemon at logon' } : { kind: 'launchagent', name: o.service, note: '~/Library/LaunchAgents' });
   writeManifest(l.root, m);
   const d = isWin ? await installDaemonWin(o, l, id, f.probe) : await installDaemonMac(o, l, id, f.probe);
@@ -820,7 +824,7 @@ async function readCredential(): Promise<string> {
 
 const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
-            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall]
+            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup]
             [--unity-editor-root <dir>] [--unity-path <exe>]
   uninstall [--yes] [--force] [--keep-registration]
   check     (lists what of the install exists on this computer)
@@ -842,6 +846,7 @@ export async function main(argv = process.argv.slice(2)) {
       repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
       service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
       firewall: !flags.has('no-firewall'),
+      noCleanup: flags.has('no-cleanup'),
       unityEditorRoot: opts['unity-editor-root'],
       unityPath: opts['unity-path'],
     });

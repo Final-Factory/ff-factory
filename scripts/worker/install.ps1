@@ -28,7 +28,8 @@ param(
     [string]$Ref = 'main',
     [string]$RepoUrl = 'https://github.com/Final-Factory/FinalFactory.git',
     [string]$CredentialFile = '',
-    [switch]$NoFirewall
+    [switch]$NoFirewall,
+    [switch]$NoCleanup
 )
 $ErrorActionPreference = 'Stop'
 
@@ -106,6 +107,7 @@ $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'install', '-
     '--max-sandboxes', $MaxSandboxes, '--max-agents-per-sandbox', $MaxAgentsPerSandbox, '--max-unity', $MaxUnity,
     '--slots', $Slots, '--service', $Service, '--repo-url', $RepoUrl, '--credential-stdin')
 if ($NoFirewall) { $argv += '--no-firewall' }
+if ($NoCleanup) { $argv += '--no-cleanup' }
 try {
     $credential | & $node.Path @argv
     $code = $LASTEXITCODE
