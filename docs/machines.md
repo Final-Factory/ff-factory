@@ -143,7 +143,8 @@ cut short by a portal restart shows as an error at boot rather than staying "dep
 
 **A machine's own folders.** `add_machine` (and the Add machine form) takes four optional absolute paths (and
 `sandbox_root`, [below](#machine-sandboxes)),
-kept on the machine's record (shown by `list_machines` and on the machine page) and in its `daemon.json`:
+kept on the machine's record (shown by `list_machines` and on the machine page) and in its `daemon.json` (every path a
+worker machine uses today, and the plan to put them all under one root folder: [worker-root.md](worker-root.md), w511):
 
 | Option | What it sets | Default |
 |---|---|---|
