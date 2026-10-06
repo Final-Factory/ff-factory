@@ -234,7 +234,8 @@ printf '%s' "$list" | matches -F "${ct: -4}" || fail "host-ci-claude is not in t
 printf '%s' "$list" | matches '^host-ci-github ' || fail "host-ci-github is not in the vault: $list"
 if printf '%s' "$list" | matches '^host-ci2-'; then fail "the refused token went in"; fi
 [ "$(stat -c '%a %U' /etc/fff-vm/secrets/vault.key)" = "600 root" ] || fail "the key's spare copy is not 0600 root"
-[ "$(sha256sum </etc/fff-vm/secrets/vault.key | cut -c1-64)" = "$(g 'sudo sha256sum </etc/fff/vault.key' | cut -c1-64)" ] || fail "the key's spare copy differs from the VM's key"
+# The file is named to sha256sum under sudo: a "<" redirect would be opened by the admin's own shell, which cannot read it.
+[ "$(sha256sum /etc/fff-vm/secrets/vault.key | cut -c1-64)" = "$(g 'sudo sha256sum /etc/fff/vault.key' | cut -c1-64)" ] || fail "the key's spare copy differs from the VM's key"
 /usr/local/sbin/fff-vm vault-sync 2>&1 | matches 'unchanged host-ci-claude' || fail "a second sync was not a no-op"
 rm -rf /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2
 /usr/local/sbin/fff-vm vault-sync >/dev/null 2>&1 || true
