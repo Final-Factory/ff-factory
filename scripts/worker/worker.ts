@@ -227,6 +227,8 @@ export function exec(cmd: string, args: string[], o: { cwd?: string; env?: NodeJ
       if (timer) clearTimeout(timer);
       resolve({ code: code ?? -1, stdout, stderr });
     });
+    // A program that exits without reading its input closes the pipe first (EPIPE): its exit code says how it went.
+    child.stdin?.on('error', () => undefined);
     child.stdin?.end(o.input ?? '');
   });
 }
@@ -297,8 +299,10 @@ export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'po
   else if (!versionAtLeast(f.git, MIN_GIT)) p.push(`git ${f.git.join('.')} is too old: ${MIN_GIT.join('.')} or newer is needed for relative worktree paths (${f.platform === 'win32' ? 'winget upgrade --id Git.Git -e' : 'brew upgrade git'})`);
   if (!f.gitLfs) p.push(`git-lfs is missing (${f.platform === 'win32' ? 'it comes with Git for Windows: reinstall git' : 'brew install git-lfs && git lfs install'})`);
   if (!f.claude) p.push(`Claude Code is missing (${f.platform === 'win32' ? 'irm https://claude.ai/install.ps1 | iex' : 'curl -fsSL https://claude.ai/install.sh | bash'})`);
-  if (!path.isAbsolute(o.root)) p.push(`the root must be an absolute path (got "${o.root}")`);
-  if (!f.rootParentExists) p.push(`the folder the root goes in does not exist: ${path.dirname(o.root)}`);
+  // The path rules of the computer the root is for (a test judges a Windows path anywhere).
+  const pp = f.platform === 'win32' ? path.win32 : path.posix;
+  if (!pp.isAbsolute(o.root)) p.push(`the root must be an absolute path (got "${o.root}")`);
+  if (!f.rootParentExists) p.push(`the folder the root goes in does not exist: ${pp.dirname(o.root)}`);
   if (f.rootState === 'other') p.push(`${o.root} already holds other files; pick an empty or new folder (or the root of an earlier install of this machine)`);
   if (f.freeGB !== undefined && f.freeGB < 20) p.push(`only ${f.freeGB} GB free where the root goes; the clone alone needs about 11 GB and each sandbox 15-125 GB`);
   if (!/^https?:\/\/[^/\s]+$/.test(o.portalUrl)) p.push(`the portal URL must look like https://<host> with no path (got "${o.portalUrl}")`);
