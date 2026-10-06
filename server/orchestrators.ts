@@ -41,7 +41,7 @@ import {
 } from './work.ts';
 import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, parseMarkers, quoteUntrusted, sourceTag } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
-import { doneIdsIn, doneProblem } from './ledgerRules.ts';
+import { doneIdsIn, doneProblem, mergedMentionsIn } from './ledgerRules.ts';
 import { servedBy } from '../shared/workState.ts';
 import { displayName } from '../shared/labels.ts';
 import type { AttachmentRef, Machine, WorkAutoClosed, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
@@ -49,6 +49,8 @@ import type { AttachmentRef, Machine, WorkAutoClosed, ProviderConversation, Requ
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
+/** How much of a worker's DONE reports on a request is kept for a later re-check (WorkItem.done text, w515). */
+const DONE_TEXT_CHARS = 4000;
 
 /** Filings (request_work, update_work) a personal orchestrator may make between two messages of its person. */
 export const FILINGS_PER_MESSAGE = 3;
@@ -1021,6 +1023,7 @@ export class Orchestrators {
   workerTurnEnded(s: SessionInfo, text: string) {
     this.intakeMarkers(s, text);
     this.doneMarkers(s, text);
+    this.mergedMentions(s, text);
     const wrapped = this.wrapUpAnswers(s, text);
     const line = clip(firstLine(text), 300);
     for (const w of this.itemsOf(s.id)) {
@@ -1036,6 +1039,11 @@ export class Orchestrators {
 
   /** The refusals already sent, by "<session>:<request>:<why>", so a worker that repeats a refused DONE is told once in 6 hours. */
   private readonly doneRefused = new Map<string, number>();
+  /**
+   * Reads a request's open PRs live from GitHub and updates their states (server/ledgerSweep.ts refreshLive, set when the
+   * cleanup starts; w515). Answers the open PRs gh could not read. Unset (tests, a dry run): the cached states stand.
+   */
+  prsLive?: (id: string) => Promise<{ unverified: number[] }>;
   /** Workers asked to wrap up their requests before new work (wrapUpBefore), by session id: the request ids asked about. */
   private readonly wrapUps = new Map<string, Set<string>>();
 
@@ -1094,6 +1102,7 @@ export class Orchestrators {
     if (!ids.length) return;
     const refused: string[] = [];
     const parts: string[] = [];
+    const live: string[] = [];
     const report = clip(firstLine(text), 300);
     for (const id of ids) {
       const w = this.store.work.get(id);
@@ -1106,8 +1115,10 @@ export class Orchestrators {
         refused.push(`${id}: you are not one of its workers, so your DONE does not close it (tell the dispatcher in your report instead)`);
         continue;
       }
-      // Its part is done, whatever else is left (w434: one worker's DONE closed w428 while another was still on it).
-      w.done = { ...w.done, [s.id]: { at: this.now().toISOString(), report } };
+      // Its part is done, whatever else is left (w434: one worker's DONE closed w428 while another was still on it). The
+      // reports' text is kept for a later re-check (recheckDone): each DONE of this worker's on it, newest last (w515).
+      const was = w.done?.[s.id]?.text;
+      w.done = { ...w.done, [s.id]: { at: this.now().toISOString(), report, text: (was ? `${was}\n\n${text}` : text).slice(-DONE_TEXT_CHARS) } };
       const others = this.stillOn(w, s.id);
       if (others.length) {
         const who = others.map((id) => this.workerLine(id)).join(', ');
@@ -1117,10 +1128,15 @@ export class Orchestrators {
         continue;
       }
       const problem = doneProblem(w, text);
-      if (problem) {
-        refused.push(`${id}: ${problem}`);
-        this.stamp(w, `worker ${s.id} said DONE, refused: ${problem}`);
+      // The ledger's PR states are a copy, read every few minutes, and a DONE often comes seconds after its PR merged (w515:
+      // #1080, #1089, #1092 and #1095 were refused as "still open"). Read the open ones live before refusing.
+      if (problem && this.prsLive && (w.prs ?? []).some((p) => p.state === 'open')) {
         this.store.putWork(w);
+        live.push(id);
+        continue;
+      }
+      if (problem) {
+        this.refuseDone(w, s, problem, refused);
         continue;
       }
       this.closeOnDone(w, s.id, report, `worker ${s.id} said DONE: ${w.id}`);
@@ -1132,6 +1148,29 @@ export class Orchestrators {
         // it is at a limit: the requests' logs have it
       }
     }
+    if (!live.length) return this.tellRefused(s, refused);
+    void Promise.all(
+      live.map(async (id) => {
+        const before = (this.store.work.get(id)?.prs ?? []).filter((p) => p.state === 'open').map((p) => p.number);
+        const r = await this.prsLive!(id).catch(() => ({ unverified: before }));
+        const w = this.store.work.get(id);
+        if (!w || !(isOpen(w) || w.status === 'stalled')) return;
+        const problem = doneProblem(w, text, r.unverified);
+        if (problem) return this.refuseDone(w, s, problem, refused);
+        this.closeOnDone(w, s.id, report, `worker ${s.id} said DONE: ${w.id} (its PR states read live from GitHub)`);
+      }),
+    ).finally(() => this.tellRefused(s, refused));
+  }
+
+  /** A DONE refused: in its request's log, and in the list told back to the worker. */
+  private refuseDone(w: WorkItem, s: SessionInfo, problem: string, refused: string[]) {
+    refused.push(`${w.id}: ${problem}`);
+    this.stamp(w, `worker ${s.id} said DONE, refused: ${problem}`);
+    this.store.putWork(w);
+  }
+
+  /** Tell a worker which of its DONEs were not accepted and why, each reason at most once in 6 hours. */
+  private tellRefused(s: SessionInfo, refused: readonly string[]) {
     if (!refused.length) return;
     const now = this.now().getTime();
     const fresh = refused.filter((r) => {
@@ -1147,6 +1186,37 @@ export class Orchestrators {
     } catch {
       // it is at a limit: the requests' logs have the refusal
     }
+  }
+
+  /**
+   * A worker's report says a PR the ledger holds as open merged (w515): read that request's open PRs live now rather than
+   * at the next 5-minute pass. A DONE in the same report does its own read (doneMarkers).
+   */
+  private mergedMentions(s: SessionInfo, text: string) {
+    if (!this.prsLive) return;
+    const done = new Set(doneIdsIn(text));
+    for (const w of this.itemsOf(s.id)) {
+      if (done.has(w.id) || !mergedMentionsIn(text, w.prs ?? []).length) continue;
+      void this.prsLive(w.id).then(() => this.recheckDone(w.id, `worker ${s.id}'s report said its PR merged, read live from GitHub`)).catch(() => undefined);
+    }
+  }
+
+  /**
+   * A request a worker said DONE for, refused then, whose PRs changed since (w515: w449, w454, w484 and w489 were refused
+   * on a stale "PR still open" and nothing looked again): closes it on its last DONE when nothing is missing now
+   * (doneProblem on that worker's DONE reports), nobody else is still on it, and none of its workers is mid-turn on it.
+   * `why` says what changed, for its log. Returns whether it closed.
+   */
+  recheckDone(id: string, why: string): boolean {
+    const w = this.store.work.get(id);
+    if (!w?.done || !(isOpen(w) || w.status === 'stalled') || w.question || w.flag) return false;
+    if (this.stillOn(w).length) return false;
+    const all = [...this.store.work.values()];
+    if (w.sessionIds.some((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped') && servedBy(sid, all).has(w.id))) return false;
+    const [sid, last] = Object.entries(w.done).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
+    if (doneProblem(w, last.text ?? last.report)) return false;
+    this.closeOnDone(w, sid, last.report, `worker ${sid} said DONE at ${last.at.slice(11, 16)} UTC and was refused then; ${why}`);
+    return true;
   }
 
   /**

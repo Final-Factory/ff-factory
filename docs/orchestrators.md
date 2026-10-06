@@ -175,16 +175,38 @@ the request in the Requests tab and in `list_work`. The repos asked are the game
 `origin`), or exactly `ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each, and
 `gh pr view` for a linked open PR older than that). When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
 
+**How fresh a PR's state is** (w515: w443, w449, w454, w484 and w489 were refused "PR #N is still open" seconds after
+their PRs merged, and w443 still listed #1087 open after a person closed it). The states are a copy, refreshed:
+
+- **every 5 minutes**, for every request that has linked PRs, whatever its status: a request whose worker is running or
+  waiting (its PR step is skipped, below) and a closed one too (`refreshStates`, `server/ledgerSweep.ts`). A linked open
+  PR beyond the 200-PR list is read by number, for open requests only and at most 30 a pass (GitHub allows 5,000 calls
+  an hour; the list is 2 calls a pass);
+- **live, on a worker's `DONE: <id>`**, for that request's open PRs (`refreshLive`, one `gh pr view` each), before the
+  DONE is decided. When gh cannot read one, the refusal says "couldn't verify PR #N" rather than "still open";
+- **live, on a report that says a linked PR merged** ("PR #1089 was merged", a `/pull/1089` link with "merged");
+- **once, on the first pass after the w515 deploy** (`prRepairAt` in `data/ledger.json`): every PR the ledger holds as
+  open is read again, and each request whose PRs all merged but which stays open gets a `ledger cleanup: PR repair: <id>
+  stays open: <why>` line in the server log (or `closed`).
+
+So a state is at most about 5 minutes old, and never stale where it decides a DONE. A state change is a quiet log line
+("pull request states updated (the 5-minute read): PR #1087 merged"), which does not count as activity on the request.
+
 **When a linked PR merges** (checked every 5 minutes, `LedgerSweep.checkPrs`, `server/ledgerSweep.ts`), the request
 closes as done, logging "merged as #N (sha) on date", when all of this holds:
 
 - none of its linked PRs is still open (the log says "#N merged; still open: PR #M is open" otherwise);
 - none of its workers has a turn running (a request with a running worker is never touched);
 - nothing is left after the merge (`afterMergeReason`, `server/ledgerRules.ts`). It stays open, with the log line
-  "#N merged; still open: …", for: a **release** (its title or brief says release, patch notes or `ci-release`: it ends
-  when the build is live and the patch notes are posted, which the worker's final report must say with the notes link); a
-  brief that asks for a step after the merge (a 2-peer check, an audit, "after the merge, verify"); a brief that plans
-  several PRs ("PR1 data, PR2 presentation"); a worker's last report that says more is coming; or an open question.
+  "#N merged; still open: …", for: a **release** (`isRelease`: its title cuts, ships or tags one, names the build it
+  releases, "Release 0.50.0.74", "Release Build 79", or posts its notes, or its brief runs `/ff-agents:ci-release` or
+  asks for the patch notes to be posted; it ends when the build is live and the patch notes are posted, which the
+  worker's final report must say with the notes link. A title that only mentions a release, "the release pipeline", and
+  a brief that adds "a patch notes line" are not releases, w395 and w487); a brief that puts a step after the merge
+  ("run a 2-peer check after the merge", "audit it when it lands", "post-merge", "once merged, …", "merge, then deploy".
+  A 2-peer check or paired audit in a "Done when" list that ends with the merge comes before it: w408 and w411 ran
+  theirs before merging and were held open for them); a brief that plans several PRs ("PR1 data, PR2 presentation"); a
+  worker's last report that says more is coming; or an open question.
 - the last PR to merge does not say `Part of: <id>` (`partOfReason`, w424). A worker marks a PR that is only one step of
   its request that way (a fix the real work needs first); the request stays open ("#N is one step of it … more
   follows") until a `Request:` PR of it merges, its worker reports `DONE: <id>`, or the follow-up below asks.
@@ -252,6 +274,13 @@ does not say how it went (an audit, a check, a 2-peer run, a nightly…), or for
 than two merged and the report does not say they all did (`doneProblem`, `server/ledgerRules.ts`). A request already
 closed by hand stays closed (w370), and an owner's close of someone else's request (w402) is untouched.
 
+A DONE on a request with a linked PR the ledger holds as open first reads that PR live (above), then decides on the
+fresh state. A DONE refused anyway is not forgotten (w515): `WorkItem.done` keeps the text of that worker's DONE
+reports on the request, and once its PRs have all merged or closed (the 5-minute pass, or a live read), the request
+closes on that DONE if `doneProblem` now finds nothing missing, nobody else is still on it, and none of its workers is
+running on it (`recheckDone`, `server/orchestrators.ts`). The log says "closed as done: worker … said DONE at 01:33 UTC
+and was refused then; PR #1089 merged since".
+
 **A request with several workers closes on the last one's DONE** (w434, after w428 on 2026-10-05: worker 2092b20c's DONE,
 after only its hardware read, closed the request while the placement work it was for was still unpushed). Each DONE
 records that worker's part (`WorkItem.done`: session id, when, the report's first line), and the request closes only
@@ -270,8 +299,8 @@ the message starts with `[wrap-up]`: for each request it was on, end the reply w
 `<id>: still open: <what>`, then carry on with the new work. Those requests' logs say so; the worker's next report closes
 them on a DONE, or its line naming the request becomes that request's log entry and latest line. Nothing waits on it.
 
-`scripts/ledger-dry-run.ts <copy of data>` prints what rules 1 and 4 would do now (close, ask, stall, or wait), changing
-nothing.
+`scripts/ledger-dry-run.ts <copy of data>` prints what rules 1 and 4 would do now (close, ask, stall, or wait), and which
+refused DONEs would close now, changing nothing.
 
 **Stalled** is a status of its own (`WorkItem.stalled`: kind, reason, when): out of the open lists, behind the "N stalled"
 filter on the Requests tab and `list_work status stalled`, kept like an open request. The cleanup never closes one: its

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, isRelease, mergePrs, ownerAt, partOfIdsIn, partOfReason, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, supersededBy, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, cleanupSettings, cutOffOf, doneProblem, isRelease, mergedMentionsIn, mergePrs, ownerAt, partOfIdsIn, partOfReason, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, supersededBy, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -150,4 +150,65 @@ test('w419: DONE lines, what a DONE still misses, and when the follow-up is due'
   const merged = { prs: [{ repo: 'r/r', number: 1024, state: 'merged' as const, at: new Date(T).toISOString() }] };
   assert.equal(followUpDue(merged, [], () => false), T + FOLLOW_UP_QUIET_MS);
   assert.equal(followUpDue({ ...merged, followUp: { at: new Date(T + 7 * 3_600_000).toISOString(), sessionId: 's' } }, [], () => false), T + 7 * 3_600_000 + FOLLOW_UP_EVERY_MS, 'once a day after a question');
+});
+
+test('w515: a release is a title that cuts, ships, names or posts one; "release" in passing, or a patch notes line, is not one', () => {
+  const brief = 'Fix it.';
+  // Real release requests' titles in the ledger (2026-09-29 to 2026-10-06).
+  for (const title of [
+    'Shepherd all of Lothsahn\'s open FinalFactory PRs to merge (fix conflicts, wait for CI), then cut release 0.50.0.53',
+    'Post the 0.50.0.53 patch notes as Max in #dev-patch-notes from LothDesktop once the release is live',
+    'Release 0.50.0.54 to multiplayer-beta tonight once the current fixes land (after .53)',
+    'Hotfix release 0.50.0.55 to multiplayer-beta as soon as the mega-wave cap (w92) merges',
+    'Write the 0.50.0.58 release notes (build cut from master by lothsahn) and post them on Discord once live',
+    'Merge #997, #1018 and #1021, then cut a develop release (0.50.0.73) with patch notes',
+    'Cut 0.50.0.75 right after 0.50.0.74 is live, to ship blueprint folders (#1047)',
+    'Release Build 79 from develop now (FFBox lane), then post patch notes in #dev-patch-notes',
+  ])
+    assert.ok(isRelease({ title, brief }), title);
+  // Not releases: w395, w216, the demo check, the VM update, and w487 (its brief adds a patch notes line).
+  for (const title of [
+    'Switch versioning to a single build number ("Build 576"), without breaking saves, MP or the release pipeline',
+    'Make the release flow unambiguous: one documented, checked truth of what FFBox uploads and sets live',
+    'Release-readiness check: the DEMO build for tomorrow (the demo toggle, demo builds, restricted techs)',
+    'Portal VM: make "fffctl update" blocking, streaming progress until the new release is verified',
+  ])
+    assert.ok(!isRelease({ title, brief }), title);
+  const w487 = { title: 'Connector merge: two belts feeding one at equal rates should alternate items fairly (like Factorio); fix carefully', brief: 'Done when all of the above holds and the PR is merged once it\'s green and verified. Add a patch notes line.' };
+  assert.ok(!isRelease(w487));
+  assert.equal(afterMergeReason(w487, []), undefined);
+  assert.ok(isRelease({ title: 'Ship it', brief: 'Bump the version, then post the patch notes as Max.' }));
+});
+
+test('w515: a 2-peer check or a paired audit is a step after the merge only where the brief puts it after the merge', () => {
+  const title = 'Fix it';
+  // Before the merge: the briefs of w408, w411, w449, w454 and w484 (their "Done when" ends in the merge).
+  for (const brief of [
+    'Failing-first test; paired audit and a 2-peer built run deleting a full connector (host and client). Merge when verified and green.',
+    'Built players, host plus 2 clients: the fingerprints match for several minutes after. Measured, in built players with 2 peers. Fast suite and CI green; a clip of the switch from a client\'s view; then merge (don\'t hold the PR).',
+    'single player and a 2-peer multiplayer check. 5. Merge the PR once it\'s green and verified (merge by default).',
+    'it\'s checked against Ben\'s words, plus single player and a 2-peer check; the PR is merged once it\'s green and visually verified.',
+    'a 2-peer check passes;\n- the PR is merged once it\'s green and verified.',
+  ])
+    assert.equal(afterMergeReason({ title, brief }, []), undefined, brief);
+  // After the merge, said so.
+  for (const brief of [
+    'Then run a 2-peer check after the merge.',
+    'Run the paired determinism audit when it lands.',
+    'Do a post-merge soak on develop.',
+    'Once merged, watch the nightly.',
+    'Merge with tests green, then deploy the usual way.',
+  ])
+    assert.match(afterMergeReason({ title, brief }, [])!, /after the merge/, brief);
+});
+
+test('w515: an open PR gh could not read is "couldn\'t verify", not "still open"; a report saying a linked PR merged is found', () => {
+  const w = { title: 'Fix it', brief: 'Make it work.', prs: [{ repo: 'o/r', number: 7, state: 'open' as const }] };
+  assert.match(doneProblem(w, 'DONE: w1')!, /^PR #7 is still open/);
+  assert.match(doneProblem(w, 'DONE: w1', [7])!, /^couldn't verify PR #7 on GitHub just now/);
+  const prs = [{ repo: 'o/r', number: 1089, state: 'open' as const }, { repo: 'o/r', number: 12, state: 'merged' as const }];
+  assert.deepEqual(mergedMentionsIn('PR #1089 (w454) was merged into develop at 01:32 UTC.', prs).map((p) => p.number), [1089]);
+  assert.deepEqual(mergedMentionsIn('https://github.com/o/r/pull/1089 merged', prs).map((p) => p.number), [1089]);
+  assert.deepEqual(mergedMentionsIn('PR #1089 is open, waiting on CI.', prs), []);
+  assert.deepEqual(mergedMentionsIn('PR #10890 merged.', prs), []);
 });
