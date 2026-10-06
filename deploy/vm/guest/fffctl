@@ -317,7 +317,22 @@ cmd_claude_token() {
   mv -f "$tmp" "$dest"
   # Only its last four characters are ever shown.
   echo "stored in $dest (0600, $FFF_USER), ending ...${token: -4}. Delete $f now."
-  echo "The portal uses it for the roles config claudeAccounts sets to \"tokenfile\" (code change 18; docs, 5.2), never for workers."
+  # The orchestrators and the dispatcher onto it (fffctl configure --claude-tokenfile; docs, 5.2), never workers. While a
+  # migrate dry run is in place the live config.json is BEAST's copy, and this VM's own is kept aside in migrate/before:
+  # that one is set, and the next --dry-run-copy uses it.
+  local saved=$FFF_ROOT/migrate/before/config/config.json
+  if [ -f "$FFF_ROOT/migrate/dry-run.json" ] && [ -f "$saved" ]; then
+    tmp=$(mktemp "$(dirname "$saved")/.config.XXXXXX")
+    jq --arg file "$dest" '.claudeTokenFile = $file | .claudeAccounts = ((.claudeAccounts // {}) + {orchestrator: "tokenfile", dispatcher: "tokenfile"})' "$saved" >"$tmp" ||
+      { rm -f "$tmp"; die "could not edit $saved"; }
+    chown --reference="$saved" "$tmp"
+    chmod --reference="$saved" "$tmp"
+    mv -f "$tmp" "$saved"
+    echo "a migrate dry run is in place: this VM's own config (kept aside in $saved) now runs the orchestrators and the dispatcher on it."
+    echo "sudo fffctl migrate --dry-run-copy again to check it (the resume check), or --rollback-dry-run to put that config back live."
+  else
+    cmd_configure --claude-tokenfile
+  fi
 }
 
 cmd_tailscale_join() {
