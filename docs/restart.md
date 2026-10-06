@@ -163,8 +163,9 @@ administrator rights. It cannot stop them itself; close them on the desktop.
 
 | File | Written by | Meaning |
 |---|---|---|
-| `restart.request` | scripts, `request_app_update` | empty: stop now. JSON: drain first (`drain`, `drainMinutes`, `reason`, `update`, `hold`) |
-| `drain.done` | server | the drain finished; `restart.ps1` may stop the supervisor |
+| `restart.request` | scripts, `request_app_update`, the VM's `fffctl migrate --cut-over` | empty: stop now. JSON: drain first (`drain`, `drainMinutes`, `reason`, `update`, `hold`, and `relocate`: a portal base URL every connected daemon is sent to once the drain is done, before `drain.done`; a bad URL refuses the whole request) |
+| `relocate.result.json` | server | that relocate's outcome: `url`, `at`, `ok`, `error`, and per connected machine `machine`, `ok`, `note` |
+| `drain.done` | server | the drain finished (and the relocate, when asked); `restart.ps1` may stop the supervisor |
 | `resume.json` / `resume.done.json` | server | sessions to resume / the last one used |
 | `update.request` | `restart.ps1 -Update`, server | the next supervisor updates first |
 | `update.result.json` | supervisor | `ok`, `error`, `headBefore`, `headAfter`, `at` |

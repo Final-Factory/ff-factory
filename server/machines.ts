@@ -1548,6 +1548,23 @@ export class MachineManager {
    * runs are not this portal's to stop). The drop is on purpose: nothing is resumed here, and the offline watch leaves
    * it alone until it says hello here again (`relocatedTo`). Its record's portal_url stays this portal's address.
    */
+  /**
+   * relocate() each machine of `ids` (default: every connected one), one after the other; a failure is that machine's
+   * outcome, not an error (relocate_machines, and a restart request's relocate at the cut-over, w499).
+   */
+  async relocateAll(rawUrl: string, ids?: string[]): Promise<{ machine: string; ok: boolean; note: string }[]> {
+    const which = ids?.length ? ids.map((x) => x.trim().toLowerCase()) : this.list().filter((m) => this.isOnline(m.id)).map((m) => m.id);
+    const out: { machine: string; ok: boolean; note: string }[] = [];
+    for (const id of which) {
+      try {
+        out.push({ machine: id, ok: true, note: await this.relocate(id, rawUrl) });
+      } catch (e) {
+        out.push({ machine: id, ok: false, note: (e as Error).message });
+      }
+    }
+    return out;
+  }
+
   async relocate(machineId: string, rawUrl: string, timeoutMs = 20_000): Promise<string> {
     const m = this.require(machineId);
     refuseInDryRun(`relocating ${m.id}`);

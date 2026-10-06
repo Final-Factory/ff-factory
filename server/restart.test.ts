@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   DRAIN_TAG,
   Drainer,
+  RELOCATE_RESULT_FILE,
   collectResume,
   drainMessage,
   orchestratorWasBusy,
@@ -19,6 +20,7 @@ import {
   updateLogHint,
   writeResumeFile,
   writeUpdateWanted,
+  type RelocateOutcome,
   type RestartRequest,
   type ResumeFile,
   type SessionSnapshot,
@@ -282,4 +284,116 @@ test('drain: -NoDrain restarts at once even with busy agents (they are resumed a
 test('w467: the update log is named where it is: the journal in the portal VM, data/supervisor.log on Windows', () => {
   assert.equal(updateLogHint({ FFSB_SUPERVISOR: 'systemd' }), 'journalctl -u fff-update in the VM (or fffctl logs)');
   assert.equal(updateLogHint({}), 'data/supervisor.log');
+});
+
+// ---------------------------------------------------------------- relocate at the cut-over (w499)
+
+test('restart request: relocate is read as a base URL (trailing slash dropped), anything else is kept to be refused', () => {
+  const r = (j: object) => parseRestartRequest(JSON.stringify(j));
+  assert.deepEqual(r({ drain: true, hold: true, relocate: ' https://fff.example.ts.net/ ' }), { drain: true, drainMinutes: 10, reason: 'restart', update: false, hold: true, relocate: 'https://fff.example.ts.net' });
+  assert.equal((r({ hold: true }) as RestartRequest).relocate, undefined, 'none: no key at all');
+  assert.equal((r({ relocate: 42 }) as RestartRequest).relocate, '42');
+  assert.equal((r({ relocate: '' }) as RestartRequest).relocate, '');
+});
+
+function relocating(dir: string, sessions: SessionSnapshot[], relocate?: (url: string) => Promise<RelocateOutcome[]>) {
+  const lines: string[] = [];
+  const order: string[] = [];
+  const stops: RestartRequest[] = [];
+  const d = new Drainer({
+    dataDir: dir,
+    snapshot: () => sessions,
+    tell: () => undefined,
+    stop: (req) => void (stops.push(req), order.push('stop')),
+    changed: () => undefined,
+    log: (l) => void lines.push(l),
+    ...(relocate ? { relocate: async (url: string) => (order.push(`relocate ${url}`), relocate(url)) } : {}),
+  });
+  return { d, lines, order, stops };
+}
+const settle = async (cond: () => boolean) => {
+  for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
+};
+
+test('drain with hold and relocate: the daemons go first, their outcome is written, then drain.done; once only', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-drain-relocate-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, RELOCATE_RESULT_FILE), '{"stale":true}');
+  let calls = 0;
+  const h = relocating(dir, [snap({ id: 'o', kind: 'orchestrator', status: 'idle' })], async () => {
+    calls++;
+    // drain.done must not be there yet while the daemons are being moved.
+    assert.equal(fs.existsSync(path.join(dir, 'drain.done')), false);
+    return [
+      { machine: 'beast', ok: true, note: 'beast took it' },
+      { machine: 'm3', ok: false, note: "m3's daemon speaks protocol 7 and cannot relocate" },
+    ];
+  });
+  // A hold keeps its 3 s check running for 5 minutes: stopped here, so the test file ends.
+  t.after(() => h.d.stopNow(REQ));
+  assert.match(h.d.request({ ...REQ, drain: true, hold: true, relocate: 'https://fff.example.ts.net' }), /restarting now/);
+  await settle(() => fs.existsSync(path.join(dir, 'drain.done')));
+  assert.ok(fs.existsSync(path.join(dir, 'drain.done')));
+  const result = JSON.parse(fs.readFileSync(path.join(dir, RELOCATE_RESULT_FILE), 'utf8'));
+  assert.equal(result.url, 'https://fff.example.ts.net');
+  assert.equal(result.ok, false, 'one machine did not take it');
+  assert.deepEqual(result.machines.map((m: RelocateOutcome) => [m.machine, m.ok]), [['beast', true], ['m3', false]]);
+  assert.equal(calls, 1);
+  assert.deepEqual(h.stops, [], 'held: the script stops it');
+  assert.ok(h.lines.some((l) => /relocate to https:\/\/fff\.example\.ts\.net: 1 of 2 connected daemon\(s\) took it; not: m3 \(m3's daemon speaks protocol 7/.test(l)), h.lines.join(String.fromCharCode(10)));
+});
+
+test('drain with relocate and no hold: relocated, then stopped', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-drain-relocate-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const sessions = [snap({ id: 'a', status: 'running' })];
+  const h = relocating(dir, sessions, async () => [{ machine: 'm5', ok: true, note: 'ok' }]);
+  // A hold keeps its 3 s check running for 5 minutes: stopped here, so the test file ends.
+  t.after(() => h.d.stopNow(REQ));
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  assert.match(h.d.request({ ...REQ, drain: true, relocate: 'http://127.0.0.1:8790' }), /draining/);
+  sessions[0].status = 'idle';
+  t.mock.timers.tick(3000);
+  // The check sees the drain done: the relocate starts; further checks wait for it.
+  t.mock.timers.tick(3000);
+  t.mock.timers.tick(3000);
+  t.mock.timers.reset();
+  await settle(() => h.stops.length > 0);
+  assert.deepEqual(h.order, ['relocate http://127.0.0.1:8790', 'stop']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, RELOCATE_RESULT_FILE), 'utf8')).ok, true);
+});
+
+test('drain with relocate: a URL that is not a portal base URL, or a server that cannot relocate, refuses the whole request', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-drain-relocate-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const h = relocating(dir, [], async () => assert.fail('not sent'));
+  // A hold keeps its 3 s check running for 5 minutes: stopped here, so the test file ends.
+  t.after(() => h.d.stopNow(REQ));
+  for (const bad of ['', 'fff.example.ts.net', 'https://fff.example.ts.net/x', 'ws://x']) {
+    assert.match(h.d.request({ ...REQ, hold: true, relocate: bad }), /^refused: relocate: /, bad);
+    const r = JSON.parse(fs.readFileSync(path.join(dir, RELOCATE_RESULT_FILE), 'utf8'));
+    assert.equal(r.ok, false);
+    assert.match(r.error, /not a portal base URL|not a URL/);
+  }
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(fs.existsSync(path.join(dir, 'drain.done')), false, 'no drain, no hold');
+  assert.deepEqual(h.stops, []);
+  const none = relocating(dir, []);
+  assert.match(none.d.request({ ...REQ, hold: true, relocate: 'https://fff.example.ts.net' }), /refused: relocate: this server cannot relocate machines/);
+  // The refusal leaves the drainer free for the next request.
+  assert.match(h.d.request({ ...REQ, hold: true }), /restarting now/);
+});
+
+test('drain with relocate: a relocate that throws is written as the error, and the hold still comes', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-drain-relocate-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const h = relocating(dir, [], async () => {
+    throw new Error('the machine manager is gone');
+  });
+  // A hold keeps its 3 s check running for 5 minutes: stopped here, so the test file ends.
+  t.after(() => h.d.stopNow(REQ));
+  h.d.request({ ...REQ, hold: true, relocate: 'https://fff.example.ts.net' });
+  await settle(() => fs.existsSync(path.join(dir, 'drain.done')));
+  const r = JSON.parse(fs.readFileSync(path.join(dir, RELOCATE_RESULT_FILE), 'utf8'));
+  assert.deepEqual([r.ok, r.error, r.machines], [false, 'the machine manager is gone', []]);
 });

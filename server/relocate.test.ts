@@ -14,6 +14,7 @@ import { Store } from './store.ts';
 import { SessionManager, type SessionHandle, type SessionSink } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { relocateProblem } from './machineProtocol.ts';
+import { Drainer, RELOCATE_RESULT_FILE, parseRestartRequest, type RestartRequest } from './restart.ts';
 import { Daemon, RELOCATE_FALLBACK_MS, dialUrl, patchDaemonConfig, type DaemonConfig, type Probes } from '../machine/daemon.ts';
 import type { Config } from './config.ts';
 import type { PermissionMode, SessionInfo } from '../shared/types.ts';
@@ -239,4 +240,27 @@ test('relocate: refused for a bad URL, an offline machine and a daemon from befo
   mm.report = (line) => notes.push(line);
   assert.deepEqual(await mm.watchOffline(t0 + 2 * 60 * 60_000, async () => true), ['mx'], `once it is not away, as before (${notes.join(' | ')})`);
   void store;
+});
+
+test('relocate at the cut-over (w499): a drain-and-hold request with relocate sends every connected daemon on, writes the outcome, then drain.done', async (t) => {
+  const { store, mm, a, b, daemon, onDisk, tmp } = await setup(t);
+  LongAgent.all = [];
+  daemon();
+  await until('online at A', () => mm.isOnline('mx'));
+  const stops: string[] = [];
+  const d = new Drainer({ dataDir: tmp, snapshot: () => [], tell: () => undefined, stop: (r) => void stops.push(r.reason), changed: () => undefined, log: () => undefined, relocate: (url) => mm.relocateAll(url) });
+  // What fffctl migrate --cut-over writes into BEAST's data folder.
+  const req = parseRestartRequest(JSON.stringify({ drain: true, drainMinutes: 10, reason: 'cut-over to the VM', update: false, hold: true, relocate: `${b.url}/` }));
+  assert.notEqual(req, 'now');
+  d.request(req as RestartRequest);
+  t.after(() => d.stopNow(req as RestartRequest));
+  await until('drain.done', () => fs.existsSync(path.join(tmp, 'drain.done')));
+  const result = JSON.parse(fs.readFileSync(path.join(tmp, RELOCATE_RESULT_FILE), 'utf8'));
+  assert.equal(result.url, b.url);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.machines.map((m: { machine: string; ok: boolean }) => [m.machine, m.ok]), [['mx', true]]);
+  assert.deepEqual([onDisk().portalUrl, onDisk().previousPortalUrl], [b.url, a.url], 'kept before drain.done');
+  assert.deepEqual(stops, [], 'held for the stop');
+  await until('back online, at B', () => mm.isOnline('mx') && !store.machines.get('mx')!.relocatedTo);
+  assert.equal(onDisk().portalUrl, b.url);
 });

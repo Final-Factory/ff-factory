@@ -541,6 +541,10 @@ machines?}` (protocol 8, w466) sends every connected daemon the new base URL. No
   write; use `add_machine portal_url` to change it.
 - **Old daemons:** one from before protocol 8 is refused with "let it be redeployed first". It cannot be relocated, only
   redeployed with a new `portal_url`.
+- **At the cut-over** (w499): a `restart.request` with `relocate: "<url>"` and `hold: true` makes the old portal drain,
+  relocate every connected daemon, write the outcome to `data/relocate.result.json`, then `drain.done`, and hold for the
+  stop ([restart.md](restart.md), "Files in data"). The VM's `fffctl migrate --cut-over` writes it over ssh, so the
+  daemons move while the old portal still answers their acks, and before it stops.
 
 **The portal's own host as a machine** (BEAST, `local`) is reached without ssh and dials the portal at loopback. When
 the portal leaves it, `convert_machine {machine, to: "ssh", ssh_host, portal_url}` (w466, docs/portal-on-ffbox-host.md

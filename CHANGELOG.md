@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The old portal sends its daemons to the new one at the cut-over** (w499): `restart.request` takes `relocate: "<portal
+  base URL>"`. Once the drain is done the server relocates every connected machine daemon there (as
+  `relocate_machines` does), writes each one's outcome to `data/relocate.result.json`, and only then writes `drain.done`
+  and holds (or stops). A URL that is not a portal base URL refuses the whole request, with the reason in the result
+  file. `MachineManager.relocateAll`, which `relocate_machines` now uses too. The VM's `fffctl migrate --cut-over` writes
+  this request to BEAST's portal over ssh, so the daemons move while the old portal still answers their acks. Tests:
+  `server/restart.test.ts` (order, refusals, a failing relocate) and `server/relocate.test.ts` (a real daemon moved by
+  such a request).
 - **A dry-run switch, `FFSB_DRY_RUN=1`** (w499, change 17 of docs/portal-on-ffbox-host.md): a portal started with it
   runs on a copy of another portal's data and acts on nothing outside itself, so the VM can load BEAST's copy and be
   checked while BEAST's portal keeps running. Off: wakes and the orchestrator heartbeat, timers (loaded to show, never
