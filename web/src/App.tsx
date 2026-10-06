@@ -157,10 +157,12 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   const h = host?.health;
   const drive = h && h.sandboxRoot !== 'ok';
   const disk = h && h.level !== 'ok';
-  if (!host?.elevated && !host?.drain && !drive && !disk) return null;
+  if (!host?.elevated && !host?.drain && !drive && !disk && !host?.dryRun) return null;
   const low = h?.disks.filter((d) => d.level !== 'ok').map((d) => `${d.path} ${d.freeBytes === undefined ? '?' : fmtBytes(d.freeBytes)} free`).join(', ');
   const title = (id: string) => app.sessions.find((s) => s.id === id)?.title ?? id;
-  const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string }[] = [];
+  const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string; fixed?: boolean }[] = [];
+  // Not dismissible: a dry run (FFSB_DRY_RUN=1) must never pass for the real portal.
+  if (host.dryRun) bars.push({ key: 'dryrun', kind: 'error', lead: 'DRY RUN: this is a copy, not the real portal.', rest: host.dryRun, fixed: true });
   if (host.elevated) {
     bars.push({
       key: 'elevated',
@@ -194,7 +196,7 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   return (
     <>
       {shown.map((b) => (
-        <Bar key={b.key} kind={b.kind} text={`${b.lead} ${b.rest}`} onDismiss={() => setDismissed((s) => new Set(s).add(`${b.key}:${b.lead} ${b.rest}`))}>
+        <Bar key={b.key} kind={b.kind} text={`${b.lead} ${b.rest}`} onDismiss={b.fixed ? undefined : () => setDismissed((s) => new Set(s).add(`${b.key}:${b.lead} ${b.rest}`))}>
           <b>{b.lead}</b> {b.rest}
         </Bar>
       ))}

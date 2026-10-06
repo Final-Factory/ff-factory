@@ -699,7 +699,7 @@ starting it.
 | 12 | `server/outsideWatch.ts:61-62,86` | the LAN adapter is read through PowerShell; off Windows the old values stay | clear them off Windows; optionally a second watch target with a fixed MAC, for waking BEAST | S |
 | 13 | `server/agents.ts:3083`, request_app_update's Windows text; `server/placement.ts:177,189`; `server/restart.ts:187` | text naming `F:\ffsb\_review`, "ssh to the M5 from BEAST" and `data/supervisor.log` | say where things are in the VM (`journalctl -u fff-update`, `fffctl logs`) | S |
 | 14 | `server/agents.ts:2326-2331`; `server/proc.ts:136-158` | `republish_public` starts `scripts/republish-public.ps1` through PowerShell and needs `supervise.ps1` | port it to Node, or run it on a Windows machine | M |
-| 17 | new | | a `FFSB_DRY_RUN=1` switch that turns off everything that acts outside (schedules, wakes, timers, intake, push, the FFBox link, machine deploys, the outside watch) for the dry run | S-M |
+| 17 | new | | **done** (w499): `FFSB_DRY_RUN=1` (`server/dryRun.ts`) turns off everything that acts outside: wakes, the heartbeat, timers, standing runs, intake, the ledger sweep, push, the FFBox link, Discord, every daemon link, deploys, redeploys, daemon control, relocate, the outside watch, the memory's git push, the usage poll, the resume after a start, and every Claude process but an orchestrator a person writes to; `claudeEnv` and `userClaudeEnv` are ignored. `/api/health` says `dryRun: true`; every page shows a red bar | S-M, done |
 
 **Works unchanged on Linux:** `server/discordConfig.ts` (honours `FFBOX_CONFIG_DIR`, `FFBOX_SECRETS`,
 `FFDISCORD_APP_TOKEN`); `server/usage.ts:193-194` (`CLAUDE_CONFIG_DIR`, else `~/.claude`); `server/cleanup.ts:176-189`
@@ -735,7 +735,8 @@ and the copy must not act on the world.
 3. **Copy, timed.** From inside the VM, pull BEAST's data over ssh with Windows' own `tar` on BEAST's side:
    `ssh beast "tar -C C:/ff-sandboxes -cf - config.json data" | tar -C /srv/fff/stage -xf -`. Record the size and the
    time: they decide the cut-over's copy step.
-4. **Defuse the copy.** With `FFSB_DRY_RUN=1` (change 17), or by hand: `providers.ffbox.enabled: false`, intake off,
+4. **Defuse the copy.** With `FFSB_DRY_RUN=1` (change 17: a systemd drop-in for `fff-portal.service`; what it turns off
+   is in `server/dryRun.ts`), or by hand: `providers.ffbox.enabled: false`, intake off,
    `outsideWatch.enabled: false`; delete `push-subscriptions.json`, `resume.json`, `restart.pending.json`, `wakes.json`
    and `timers.json`; pause every standing agent; blank every machine's ssh host in the copy, so the portal cannot
    redeploy a real daemon; no Discord token; no `claudeEnv` or `userClaudeEnv`, so no worker can start. The VM's key is

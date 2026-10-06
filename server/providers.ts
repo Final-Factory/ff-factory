@@ -44,6 +44,7 @@ import { metricsLine } from '../shared/providerMetrics.ts';
 import { updaterHealth } from '../shared/updaterHealth.ts';
 import { devRequestsHealth } from '../shared/devRequestsHealth.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { dryRun } from './dryRun.ts';
 import { emptyDevState, type DevLink, type DevRequests, type DevState } from './devRequests.ts';
 
 const PING_MS = 20_000;
@@ -602,6 +603,8 @@ export class ProviderManager {
       setTimeout(() => socket.destroy(), 2000).unref();
       return false;
     };
+    // A dry run (server/dryRun.ts) takes no connector: FFBox must keep talking to the real portal.
+    if (dryRun()) return refuse('503 Service Unavailable');
     if (recent.length >= 10) {
       recent.push(now);
       this.failures.set(ip, recent);

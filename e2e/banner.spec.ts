@@ -88,3 +88,35 @@ test('global notices sit above the page, in the layout: opaque, one line, full t
   const top = (await page.locator(HEADERS).first().boundingBox())!.y;
   expect(top).toBeLessThan(40);
 });
+
+test('a dry run (FFSB_DRY_RUN=1) says so above every page, and cannot be dismissed', async ({ authed: page }) => {
+  const why = 'Nothing here acts outside: no wakes, timers, heartbeats or standing runs. Only a person writing to an orchestrator starts one.';
+  const patch = (h: object) => ({ ...h, dryRun: why });
+  await page.route('**/api/state', async (route) => {
+    const res = await route.fetch();
+    const state = await res.json();
+    state.host = patch(state.host);
+    await route.fulfill({ response: res, json: state });
+  });
+  await page.routeWebSocket(/\/ws/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((m) => server.send(m));
+    server.onMessage((m) => {
+      try {
+        const ev = JSON.parse(String(m));
+        if (ev.type === 'state') ev.state.host = patch(ev.state.host);
+        else if (ev.type === 'host') ev.host = patch(ev.host);
+        ws.send(JSON.stringify(ev));
+      } catch {
+        ws.send(m);
+      }
+    });
+  });
+  await page.reload();
+  const bar = page.locator('.gbar', { hasText: 'DRY RUN' });
+  await expect(bar).toBeVisible();
+  await expect(bar).toHaveClass(/\bgbar-error\b/);
+  await expect(bar.locator('.gbar-text')).toHaveAttribute('title', `DRY RUN: this is a copy, not the real portal. ${why}`);
+  await expect(bar.getByRole('button', { name: 'Dismiss' })).toHaveCount(0);
+  await expectBelowBar(page);
+});
