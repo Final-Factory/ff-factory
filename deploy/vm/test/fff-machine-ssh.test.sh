@@ -53,6 +53,9 @@ for a in "\$@"; do
 done
 exit 255
 EOF
+# The guest script refuses root (it writes the portal account's files); CI's lint runs this as root, so it sees a uid
+# of its own here.
+printf '#!/bin/sh\n[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"\n' >"$T/bin/id"
 chmod +x "$T/bin"/*
 export PATH=$T/bin:$PATH HOME=$T/home
 mkdir -p "$HOME/.ssh"
