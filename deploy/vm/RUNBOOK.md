@@ -149,6 +149,18 @@ portal keeps running for everyone. The design is section 7.2 of
 sudo fffctl migrate --dry-run-copy
 ```
 
+Before it reads anything it takes **one point-in-time snapshot on BEAST**, and every file comes from it (the listing,
+every stream, every retry), so the copy is one consistent view of the live portal, and the live files are never held
+open (reading them in place made the portal's own saves fail, and Windows tar stop at any file that grew):
+
+- a **VSS shadow copy** of C: (the portal's data and the conversations are both on it), reached through a link in
+  BEAST's temp folder. It needs the ssh session's administrator rights, which `rydin` has;
+- otherwise a **staged copy** in BEAST's temp folder (robocopy, after checking the disk has room for it), with any
+  file it could not copy listed.
+
+It says which, and BEAST's free space. The snapshot is removed when the copy ends, when it fails, and on Ctrl+C; one a
+run could not remove (a crash) is removed by the next. `--snapshot copy` takes the staged copy without trying VSS.
+
 While it copies it says what it does:
 
 - "listing BEAST's files under C:/ff-sandboxes..." and then how many files and how much there is, and how much of it
@@ -157,8 +169,9 @@ While it copies it says what it does:
 - the time each part took (BEAST's config.json and data, then the conversations).
 
 The copy goes in streams of at most 2,000 files and 256 MB. Each stream is checked, and tried again up to 3 times if it
-breaks off. A file BEAST cannot read (open elsewhere) or that goes during the copy is named at the end and left out; the
-next run tries it again. If a stream keeps breaking, it stops and says so with BEAST's own message. Running the same
+breaks off. If BEAST's tar stops at a file (it prints `tar: (null)` for one it could not read to the end), that file is
+taken out of its stream and sent on its own, and the stream goes on. A file it cannot read or that is gone is named at
+the end and left out; the next run tries it again. If a stream keeps breaking, it stops and says so with BEAST's own message. Running the same
 command again goes on from where it stopped. On BEAST it keeps its file lists in its temp folder
 (`%TEMP%\fff-migrate-*`, removed at the end) and changes nothing else.
 

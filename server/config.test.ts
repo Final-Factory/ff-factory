@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROOT, SENDER_RULE, VOICE_DEFAULTS, loadConfig, ownerLine, retiredConfigKeys, retiredKeysLine, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
+import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, retiredConfigKeys, retiredKeysLine, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
 import { gitIsClean, gitRemotes } from './guard.ts';
 import { appVersion, formatVersion, readSha, readVersion } from './version.ts';
 
@@ -155,4 +155,16 @@ test('w467: Windows paths in config are refused off Windows (path.resolve("C:/ff
   const beast = { ...vm, sandboxRoot: 'F:/ffsb', repo: { url: 'x', basePath: 'C:\\ffsb\\_base' }, review: { root: 'F:/ffsb/_review' }, protectedPaths: ['/srv/x', 'C:/Users/rydin/nevergames'], hostDiskPaths: ['F:'] };
   assert.deepEqual(windowsPathsOffWindows(beast, 'linux'), ['sandboxRoot "F:/ffsb"', 'repo.basePath "C:\\ffsb\\_base"', 'review.root "F:/ffsb/_review"', 'protectedPaths[1] "C:/Users/rydin/nevergames"', 'hostDiskPaths[0] "F:"']);
   assert.deepEqual(windowsPathsOffWindows(beast, 'win32'), [], 'on Windows they are right');
+});
+
+test('w516: claude.ai connectors are off for the orchestrators and the dispatcher by default, on for workers and standing agents, set per role', () => {
+  assert.deepEqual(['orchestrator', 'dispatcher', 'workers', 'standing'].map((r) => claudeAiConnectorsFor({}, r as 'workers')), [false, false, true, true]);
+  const cfg = { claudeAiConnectors: { dispatcher: true, workers: false } };
+  assert.deepEqual(['orchestrator', 'dispatcher', 'workers', 'standing'].map((r) => claudeAiConnectorsFor(cfg, r as 'workers')), [false, true, false, true]);
+  assert.deepEqual(connectorEnv(cfg, 'workers'), { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' });
+  assert.deepEqual(connectorEnv(cfg, 'standing'), {});
+  assert.doesNotThrow(() => checkConnectorConfig(cfg));
+  assert.throws(() => checkConnectorConfig({ claudeAiConnectors: { worker: false } as never }), /claudeAiConnectors\.worker: no such role/);
+  assert.throws(() => checkConnectorConfig({ claudeAiConnectors: { dispatcher: 'off' } as never }), /claudeAiConnectors\.dispatcher is true or false/);
+  assert.throws(() => checkConnectorConfig({ claudeAiConnectors: false as never }), /is an object/);
 });

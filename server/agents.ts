@@ -14,7 +14,7 @@ import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLi
 
 /** A live state as list_work takes it (shared/workState.ts). */
 const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
-import { ROOT, configPath, ownerLine, publicIdentityLine, publicIdentityOf, type Config } from './config.ts';
+import { ROOT, claudeAiConnectorsFor, configPath, connectorEnv, ownerLine, publicIdentityLine, publicIdentityOf, type Config } from './config.ts';
 import { refuseInDryRun } from './dryRun.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
@@ -1178,7 +1178,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       // The host's Claude account (config machines.useHostClaudeEnv), for this agent only: not the Mac's login. A
       // person with their own (config userClaudeEnv) runs on theirs (docs/identity.md).
       // FF_SESSION_ID tags what the agent does as Max (docs/max.md); the daemon adds FF_MAX_EVENTS, the machine's own file.
-      env: { ...claudeEnvFor(this.cfg, info.requestedBy, hostClaudeEnvFor(this.cfg, m)), FF_MACHINE_ID: m.id, FF_SESSION_ID: info.id },
+      env: { ...claudeEnvFor(this.cfg, info.requestedBy, hostClaudeEnvFor(this.cfg, m)), FF_MACHINE_ID: m.id, FF_SESSION_ID: info.id, ...connectorEnv(this.cfg, 'workers') },
       login: machineUsesLogin(this.cfg, m),
     };
   }
@@ -1280,6 +1280,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ...(m.platform === 'win32' ? { MCP_TIMEOUT: '120000' } : {}),
         // On the portal's own host its agents write this server's Max events file (the daemon keeps none of its own there).
         ...(m.local ? { FF_MAX_EVENTS: eventsFileOf(this.cfg) } : {}),
+        ...connectorEnv(this.cfg, 'workers'),
       },
       login: machineUsesLogin(this.cfg, m),
     };
@@ -2827,7 +2828,9 @@ ${this.worldBrief(false)}
       tools: ['Read', 'Glob', 'Grep', 'Write', 'Edit'],
       allowedTools: ['Read', 'Glob', 'Grep', 'mcp__sandboxes'],
       mcpServers: { sandboxes: this.orchestratorTools(info) },
-      settings: { autoMemoryEnabled: true, autoMemoryDirectory: memory },
+      // No claude.ai connectors by default (w516, config claudeAiConnectors.orchestrator / .dispatcher): Gmail, Google
+      // Drive, Google Calendar and Claude Docs were 58 tools and about 41,300 input tokens in every turn, never used here.
+      settings: { autoMemoryEnabled: true, autoMemoryDirectory: memory, ...(claudeAiConnectorsFor(this.cfg, owner ? 'orchestrator' : 'dispatcher') ? {} : { disableClaudeAiConnectors: true }) },
       // Not FF Factory's secrets or data/ (w467), apart from its own memory folder and the attachment store it is handed
       // files from; and Write and Edit only in its memory folder.
       hooks: { PreToolUse: [{ hooks: [secretReadGuard(this.orchestratorSecrets(memory), cwd), memoryGuard(memory, () => this.personTurn(info.id))] }] },

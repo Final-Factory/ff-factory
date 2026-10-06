@@ -10,7 +10,7 @@ import path from 'node:path';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { DEFAULTS, MANIFEST_PS, MAX_STDIN_BYTES, Migration, parseArgs, type Options, type System } from './fff-migrate.ts';
+import { DEFAULTS, MANIFEST_PS, MAX_STDIN_BYTES, Migration, parseArgs, tarVerbose, type Options, type System } from './fff-migrate.ts';
 import { ROOT } from '../server/config.ts';
 import { claudeProjectFolder } from '../server/vmMigration.ts';
 import { Store } from '../server/store.ts';
@@ -298,7 +298,7 @@ for ($i = 0; $i -lt 120; $i++) { try { $null = Invoke-WebRequest -UseBasicParsin
   // ---- the fakes: ssh runs BEAST's side here; schtasks.exe and claude record what they were asked
   const fake = path.join(base, 'bin');
   fs.mkdirSync(fake);
-  fs.writeFileSync(path.join(fake, 'fake.env'), `PWSH=${JSON.stringify(PWSH)}\nLOG=${JSON.stringify(path.join(base, 'ssh.log'))}\nTASKS=${JSON.stringify(path.join(base, 'schtasks.log'))}\nCLAUDE_LOG=${JSON.stringify(path.join(base, 'claude.log'))}\nDENY=${JSON.stringify(path.join(base, 'deny'))}\nOLD_BEAST=${JSON.stringify(path.join(base, 'old-beast'))}\nTRUNCATE=${JSON.stringify(path.join(base, 'truncate'))}\nTARSKIP=${JSON.stringify(path.join(base, 'tarskip'))}\nTOKEN_FILE=${JSON.stringify(path.join(vm, 'secrets', 'claude-oauth-token'))}\n`);
+  fs.writeFileSync(path.join(fake, 'fake.env'), `PWSH=${JSON.stringify(PWSH)}\nLOG=${JSON.stringify(path.join(base, 'ssh.log'))}\nTASKS=${JSON.stringify(path.join(base, 'schtasks.log'))}\nCLAUDE_LOG=${JSON.stringify(path.join(base, 'claude.log'))}\nDENY=${JSON.stringify(path.join(base, 'deny'))}\nOLD_BEAST=${JSON.stringify(path.join(base, 'old-beast'))}\nTRUNCATE=${JSON.stringify(path.join(base, 'truncate'))}\nTARSKIP=${JSON.stringify(path.join(base, 'tarskip'))}\nTARNULL=${JSON.stringify(path.join(base, 'tarnull'))}\nTOKEN_FILE=${JSON.stringify(path.join(vm, 'secrets', 'claude-oauth-token'))}\n`);
   const script = (name: string, body: string) => fs.writeFileSync(path.join(fake, name), `#!/usr/bin/env bash\nset -euo pipefail\n. "$(dirname "$0")/fake.env"\n${body}`, { mode: 0o755 });
   script(
     'ssh',
@@ -337,10 +337,30 @@ if [ "\${1:-}" = tar ]; then
   # The connection breaking mid-stream, for the next N streams.
   if [ -s "$TRUNCATE" ] && [ "$(cat "$TRUNCATE")" -gt 0 ]; then
     echo $(( $(cat "$TRUNCATE") - 1 )) >"$TRUNCATE"
-    "\${args[@]}" </dev/null | head -c 3000
+    "\${args[@]}" </dev/null 2>/dev/null | head -c 3000
     echo "fake: client_loop: send disconnect: Broken pipe" >&2; exit 255
   fi
-  "\${args[@]}" </dev/null; rc=$?
+  # Windows tar stops at a file that changes while it reads it: it has named it ("a <path>", no newline yet), says
+  # "tar: (null)" on the same line and exits 1, the archive cut off in that file (measured on BEAST, w508).
+  if [ -s "$TARNULL" ]; then
+    for i in "\${!args[@]}"; do
+      if [ "\${args[$i]}" = -T ]; then
+        list=\${args[$((i + 1))]}; bad="./$(head -n 1 "$TARNULL")"
+        if grep -qxF "$bad" "$list"; then
+          upto=$(mktemp); awk -v b="$bad" '{ print } $0 == b { exit }' "$list" >"$upto"
+          args[$((i + 1))]=$upto
+          # 512-byte records (no padding to 10 KB), so the cut lands inside that file's data, as Windows tar's does.
+          n=$("\${args[@]}" -b 1 </dev/null 2>/dev/null | wc -c)
+          "\${args[@]}" -b 1 </dev/null 2>/dev/null | head -c $((n - 1024 - 700))
+          grep -v -xF "$bad" "$upto" | sed 's|^|a |' >&2
+          printf 'a %star: (null)\n' "$bad" >&2
+          exit 1
+        fi
+      fi
+    done
+  fi
+  # Windows tar's -v: "a <path>" per file on stderr; its messages as they are.
+  "\${args[@]}" </dev/null 2> >(sed -u '/^tar: /!s|^|a |' >&2); rc=$?
   if [ "$skipped" = 1 ]; then echo "tar: : Couldn't visit directory: No such file or directory" >&2; [ "$rc" = 0 ] && rc=1; fi
   exit $rc
 fi
@@ -409,6 +429,7 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   for (const check of ['starts as a dry run', 'no data restored on load', "counts equal BEAST's copy", 'an orchestrator conversation resumes']) assert.match(report, new RegExp(`PASS  ${check.replace(/[()]/g, '\\$&')}`), check);
   assert.match(report, /copied BEAST's config\.json and data: \d+ files/);
   assert.match(report, /copied 1 conversation\(s\) to resume/);
+  assert.match(report, /BEAST's config\.json and data: snapshot: a staged copy on BEAST, .*\(no VSS shadow copy: not Windows\); every file is read from it/);
   assert.match(report, /beast: from the portal's own host to a machine reached over ssh \(rydin@beast\)/);
 
   // Read-only on BEAST: every file there as it was.
@@ -594,6 +615,7 @@ test('fffctl migrate --cut-over: a BEAST portal too old to relocate is left runn
 });
 
 test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that keeps breaking stops with BEAST\'s message and the next run goes on; what tar cannot send comes another way or is named', { skip, timeout: 300_000 }, async (t) => {
+  const t0w = Date.now();
   const w = await world(t);
   const data = path.join(w.beastRoot, 'data');
   // Enough files for several streams of 3, a name tar on Windows cannot take, and one that cannot be opened.
@@ -618,19 +640,20 @@ test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that
   const ps = m1.beast.ps.bind(m1.beast);
   m1.beast.ps = async (script: string, d?: string, ms?: number) => {
     const r = await ps(script, d, ms);
-    if (script === MANIFEST_PS && d?.includes('"beast"')) fs.rmSync(vanish, { force: true });
+    // A file going after it was listed: from the snapshot it is read from.
+    if (script === MANIFEST_PS && d?.includes('"beast"')) fs.rmSync(path.join(JSON.parse(d).root, 'data', 'attachments', 'a11.bin'), { force: true });
     return r;
   };
   const r1 = await m1.pull('beast', 'data', w.beastRoot, ['config.json', 'data']);
+  await m1.dropSnapshots();
   const report1 = m1.report.join('\n');
   t.diagnostic(report1);
   assert.match(report1, /data: batch 1 of \d+ broke off: the archive stopped short \(ssh\/BEAST tar exit 255, unpacking tar exit 2\); BEAST: fake: client_loop: send disconnect: Broken pipe; here: tar: Unexpected EOF in archive.*trying again \(2 of 3\)/);
   assert.match(report1, /data: \d+ files, [\d.]+ MB on BEAST \(listed in [\d.]+ s\); to copy: \d+ files/);
   assert.match(report1, /data: copied \d+ of \d+ files, [\d.]+ MB in [\d.]+ s/);
   assert.deepEqual(r1.gone, ['data/attachments/a11.bin']);
-  assert.deepEqual(r1.locked.map((l) => l.path), ['data/locked.log']);
-  assert.match(r1.locked[0].why, /denied/i);
-  assert.match(report1, /1 file\(s\) could not be read on BEAST .*data\/locked\.log/);
+  assert.match(report1, /data: snapshot: a staged copy on BEAST, [\d.]+ MB \(no VSS shadow copy: not Windows\); every file is read from it/);
+  assert.match(report1, /1 file\(s\) could not be copied into the snapshot and are left out: .*locked\.log.*denied/i);
   assert.match(report1, /1 file\(s\) went on BEAST during the copy: data\/attachments\/a11\.bin/);
   same(unicode);
   for (let i = 0; i < 11; i++) same(`data/attachments/a${i}.bin`);
@@ -649,6 +672,8 @@ test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that
     assert.match(e.message, /data: batch 1 of \d+ \(3 files\) failed 3 times: the archive stopped short .*BEAST: fake: client_loop: send disconnect: Broken pipe.*run the same command again to go on from there/);
     return true;
   });
+  // A copy that stopped leaves its snapshot until dropped (pullAll and Ctrl+C drop it).
+  await m2.dropSnapshots();
   const m2s = manifest();
   for (let i = 0; i < 6; i++) assert.ok(!m2s.has(`data/attachments/a${i}.bin`), 'a changed file not copied whole is not trusted');
   assert.ok(m2s.has('config.json') && m2s.has(unicode), 'the rest stays');
@@ -657,11 +682,39 @@ test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that
   fs.writeFileSync(path.join(w.base, 'truncate'), '0');
   const m3 = new Migration(o, w.sys);
   const r3 = await m3.pull('beast', 'data', w.beastRoot, ['config.json', 'data']);
-  assert.equal(r3.fetched, 7, 'the six changed files and the one that can be read now');
+  await m3.dropSnapshots();
+  assert.equal(r3.fetched, 8, 'the six changed files, the one that can be read now, and the one that went from the first snapshot only');
   for (let i = 0; i < 6; i++) same(`data/attachments/a${i}.bin`);
   same('data/locked.log');
   assert.deepEqual(r3.locked, []);
 
+  // 5. A file Windows tar stops at ("tar: (null)": it changed while read): out of its stream, sent on its own, and the
+  // stream goes on.
+  fs.appendFileSync(path.join(data, 'attachments', 'a3.bin'), 'changed again');
+  fs.appendFileSync(path.join(data, 'attachments', 'a4.bin'), 'changed again');
+  fs.writeFileSync(path.join(w.base, 'tarnull'), 'data/attachments/a3.bin\n');
+  const m5 = new Migration(o, w.sys);
+  const r5 = await m5.pull('beast', 'data', w.beastRoot, ['config.json', 'data']);
+  await m5.dropSnapshots();
+  const report5 = m5.report.join('\n');
+  assert.match(report5, /data: tar on BEAST stopped at data\/attachments\/a3\.bin \(tar: \(null\)\): it is taken out of batch 1 and sent on its own; the batch goes on/);
+  assert.doesNotMatch(report5, /broke off/);
+  assert.equal(r5.fetched, 2);
+  same('data/attachments/a3.bin');
+  same('data/attachments/a4.bin');
+  fs.rmSync(path.join(w.base, 'tarnull'));
+  // Nothing of the snapshots is left on BEAST: no staged copies, no lists.
+  assert.deepEqual(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('fff-migrate-') && path.join(os.tmpdir(), n) !== w.base && fs.statSync(path.join(os.tmpdir(), n)).mtimeMs >= t0w), []);
+
   // 4. Nothing large ever goes to BEAST on stdin: refused here before ssh, as BEAST's sshd would never deliver it.
   await assert.rejects(m3.beast.ps('$FFData.Length', 'x'.repeat(MAX_STDIN_BYTES)), /never arrives through Windows OpenSSH/);
+});
+
+test('fffctl migrate (w508): Windows tar\'s -v read right, a file it stopped at included', () => {
+  assert.deepEqual(tarVerbose('a ./config.json\na ./data/state.json\na ./data/server.out.logtar: (null)\n'), { named: ['config.json', 'data/state.json', 'data/server.out.log'], errors: ['tar: (null)'] });
+  assert.deepEqual(tarVerbose("a ./x\ntar: Couldn't open ./data/locked.log: Permission denied\ntar: Error exit delayed from previous errors.\n"), { named: ['x'], errors: ["tar: Couldn't open ./data/locked.log: Permission denied", 'tar: Error exit delayed from previous errors.'] });
+  assert.deepEqual(tarVerbose(''), { named: [], errors: [] });
+  assert.deepEqual(parseArgs(['--dry-run-copy', '--snapshot', 'copy']).snapshot, 'copy');
+  assert.equal(parseArgs(['--dry-run-copy']).snapshot, 'auto');
+  assert.throws(() => parseArgs(['--dry-run-copy', '--snapshot', 'live']), /--snapshot is auto, vss or copy/);
 });

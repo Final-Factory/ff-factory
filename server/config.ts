@@ -187,6 +187,14 @@ export interface Config {
    */
   claudeAccounts?: Partial<Record<HostRole, ClaudeAccount>>;
   /**
+   * Whether each role's agents get the claude.ai connectors of the Claude account they run on (w516): Gmail, Google
+   * Drive, Google Calendar, Claude Docs and any other connected on claude.ai, which Claude Code loads by itself on a
+   * claude.ai login. Default: off for `orchestrator` (people's own) and `dispatcher`, on for `workers` and `standing`
+   * (claudeAiConnectorsFor). Off: Claude Code's `disableClaudeAiConnectors` setting for an orchestrator, its
+   * ENABLE_CLAUDEAI_MCP_SERVERS=false for any other process. docs/accounts.md, "claude.ai connectors".
+   */
+  claudeAiConnectors?: Partial<Record<ConnectorRole, boolean>>;
+  /**
    * The file holding the long-lived Claude OAuth token (sk-ant-oat01-…, from `claude setup-token`) the roles set to
    * "tokenfile" run on (w464): read at each session start into that process's CLAUDE_CODE_OAUTH_TOKEN, with every other
    * Claude credential removed. Never in claudeEnv, never sent to a machine, never shown (only its last four characters).
@@ -611,6 +619,7 @@ export function loadConfig(): Config {
   const windowsOnly = windowsPathsOffWindows(cfg);
   if (windowsOnly.length) throw new Error(`config.json names Windows paths on ${process.platform}: ${windowsOnly.join(', ')}. Use this computer's paths (the portal VM's template is deploy/vm/guest/config.vm.example.json).`);
   checkAccountConfig(cfg);
+  checkConnectorConfig(cfg);
   cfg.dataDir = path.resolve(ROOT, cfg.dataDir);
   cfg.sandboxRoot = path.resolve(cfg.sandboxRoot || path.join(cfg.dataDir, 'sandboxes'));
   cfg.standingRoot = path.resolve(raw.standingRoot ?? path.join(cfg.sandboxRoot, '_agents'));
@@ -670,6 +679,38 @@ export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machine
   if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error('config machines.useHostClaudeEnv is true, false or { "<machine id>" | "*": true | false }');
   for (const [id, v] of Object.entries(u)) {
     if (typeof v !== 'boolean') throw new Error(`config machines.useHostClaudeEnv.${id} is true or false`);
+  }
+}
+
+/**
+ * Whether a role's agents get the claude.ai connectors (config claudeAiConnectors, w516). Off by default for the
+ * orchestrators and the dispatcher: their 58 connector tools (Gmail 30, Google Drive 11, Google Calendar 9, Claude Docs 8)
+ * and Claude Docs' instructions were about 41,300 input tokens in every request (measured 2026-10-06), and orchestration
+ * never uses them. On for workers and standing agents (Ben's creator outreach, w106 and w121, used Gmail).
+ */
+/** The roles config claudeAiConnectors names: the account roles, and standing agents (which run on machines, w510). */
+export type ConnectorRole = HostRole | 'standing';
+export const CONNECTOR_ROLES: readonly ConnectorRole[] = [...HOST_ROLES, 'standing'];
+export const CLAUDE_AI_CONNECTORS_DEFAULT: Readonly<Record<ConnectorRole, boolean>> = { orchestrator: false, dispatcher: false, workers: true, standing: true };
+
+export function claudeAiConnectorsFor(cfg: Pick<Config, 'claudeAiConnectors'>, role: ConnectorRole): boolean {
+  const v = cfg.claudeAiConnectors?.[role];
+  return typeof v === 'boolean' ? v : CLAUDE_AI_CONNECTORS_DEFAULT[role];
+}
+
+/** The environment that keeps a process's claude.ai connectors from loading when its role has them off (any machine). */
+export function connectorEnv(cfg: Pick<Config, 'claudeAiConnectors'>, role: ConnectorRole): Record<string, string> {
+  return claudeAiConnectorsFor(cfg, role) ? {} : { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' };
+}
+
+/** Throws when config claudeAiConnectors is malformed: an object of role → true or false. */
+export function checkConnectorConfig(cfg: Pick<Config, 'claudeAiConnectors'>) {
+  const c: unknown = cfg.claudeAiConnectors;
+  if (c === undefined) return;
+  if (typeof c !== 'object' || c === null || Array.isArray(c)) throw new Error('config claudeAiConnectors is an object, e.g. { "dispatcher": false, "workers": true }');
+  for (const [role, v] of Object.entries(c)) {
+    if (!CONNECTOR_ROLES.includes(role as ConnectorRole)) throw new Error(`config claudeAiConnectors.${role}: no such role (${CONNECTOR_ROLES.join(', ')})`);
+    if (typeof v !== 'boolean') throw new Error(`config claudeAiConnectors.${role} is true or false`);
   }
 }
 
