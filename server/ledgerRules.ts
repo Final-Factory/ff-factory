@@ -141,13 +141,25 @@ export function mergePrs(stored: readonly WorkPr[], found: readonly (PrRecord & 
 
 // ---------------------------------------------------------------- what is left after a merge
 
-const RELEASE = /\b(ci-release|patch notes|bundleVersion|release)\b/i;
-const PEER_CHECK = /\b(2|two)[- ]peers?\b|\bpaired (determinism )?audit\b|determinism-audit|\bpost-merge\b|\bafter (it|the pr|the merge|merging)\b[^.\n]{0,40}\b(merges?|merged|lands?|landed|check|verify|test|run|watch|audit)\b|\bonce (it'?s |the pr is )?merged\b/i;
+/**
+ * A release request's title (w515): it cuts, ships or tags a release, names the build it releases ("Release 0.50.0.74",
+ * "Release Build 79", "Hotfix release 0.50.0.55"), or posts its notes. A title that merely says "release" ("the release
+ * pipeline", "Release-readiness check", "until the new release is verified") is not one.
+ */
+const RELEASE_TITLE = /\bci-release\b|\bbundleVersion\b|^\W*((hotfix|develop|master|beta) )?release (\(?\d|build \d|v\d)|\b(cut|ship|tag)\b[^.;:\n]{0,24}\brelease\b(?!-)|\b(cut|ship|tag) (build |v)?\d+(\.\d+)*\b|\b(post|publish|write)\b[^;:\n]{0,30}\b(patch|release) notes\b/i;
+/** A release request's brief: it runs ci-release, or asks for the patch notes to be posted. "Add a patch notes line" is not one (w487). */
+const RELEASE_BRIEF = /\/ff-agents:ci-release\b|\b(post|publish)\b[^.\n]{0,30}\bpatch notes\b|\bpatch notes (are |get )?(posted|published)\b/i;
+/**
+ * A step the brief puts after the merge (w515): only where it says so ("post-merge", "after the merge, verify", "run a
+ * 2-peer check after the merge", "audit it when it lands", "once merged, deploy", "merge, then deploy"). A 2-peer check or a paired audit in a
+ * "Done when" list that ends "merge once green and verified" comes before the merge (w408, w411, w449, w454, w484, w489).
+ */
+const PEER_CHECK = /\bpost-merge\b|\bafter (it|the pr|the merge|merging)\b[^.\n]{0,40}\b(merges?|merged|lands?|landed|check|verify|test|run|watch|audit)\b|\bonce (it'?s |the pr is )?merged\b|\b(check|verify|test|run|watch|audit|confirm)\b[^.\n]{0,60}\b(after (the merge|merging|it merges|it'?s merged|it lands)|(when|once) (it|the pr) (lands|merges|is merged|has merged))\b|\b(then|and) deploy(ed)?\b/i;
 const PLAN = /\bPR ?([1-9])\b[^]*\bPR ?([2-9])\b|\b(phase|part|step|stage) ?\d+ (of|\/) ?\d+\b|\bstacked (prs?|pull requests)\b|\bin (two|three|four|2|3|4) (prs?|pull requests|steps|phases)\b/i;
 const MORE_COMING = /\b(more (is |are )?coming|second pr|next pr|follow-?up pr|follow-?ups?|remaining (steps?|work|items?)|still (needs?|to do|have to|open)|next steps?|will (then )?(open|file|do|follow|post|send)|not yet|todo|to do next|left to do|waiting (for|on)|blocked)\b/i;
 
 /** Whether the request is a release (its work ends when the build is live and the patch notes are posted). */
-export const isRelease = (w: Pick<WorkItem, 'title' | 'brief'>) => RELEASE.test(w.title) || /\bpatch notes\b|\/ff-agents:ci-release\b/i.test(w.brief);
+export const isRelease = (w: Pick<WorkItem, 'title' | 'brief'>) => RELEASE_TITLE.test(w.title) || RELEASE_BRIEF.test(w.brief);
 
 /**
  * What is still left after a PR of this request merged, in words, or undefined when nothing is: a release is done when
@@ -235,6 +247,12 @@ export function doneIdsIn(text: string): string[] {
   return [...out];
 }
 
+/** The PRs the ledger holds as open that a worker's report says merged (w515: "PR #1089 was merged", ".../pull/1089 merged"). */
+export function mergedMentionsIn(text: string, prs: readonly WorkPr[]): WorkPr[] {
+  if (!/\bmerged\b/i.test(text ?? '')) return [];
+  return prs.filter((p) => p.state === 'open' && new RegExp(`(#|/pull/|\\bPR )${p.number}\\b`, 'i').test(text));
+}
+
 /** Words that say how a step after the merge went: a report that says DONE must cover it. */
 const STEP_REPORTED = /\b(audit(ed)?|2-peer|two-peer|paired|verif(y|ied|ication)|checked|nightly|soak|no desyncs?|first[- ]hour|re-?ran|ran|passed|green|confirmed)\b/i;
 
@@ -242,10 +260,12 @@ const STEP_REPORTED = /\b(audit(ed)?|2-peer|two-peer|paired|verif(y|ied|ication)
  * Why a worker's `DONE: <id>` cannot close this request yet, or undefined when it can: a pull request of it is still
  * open, a release whose report does not link the posted patch notes and say it is live, a step after the merge the
  * brief asks for that the report does not cover, or a brief that plans several PRs when fewer than two merged and the
- * report does not say they all did.
+ * report does not say they all did. `unverified`: open PRs gh could not read just now (w515): the refusal says so rather
+ * than "still open", which the ledger cannot know.
  */
-export function doneProblem(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'prs'>, report: string): string | undefined {
+export function doneProblem(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'prs'>, report: string, unverified: readonly number[] = []): string | undefined {
   const open = (w.prs ?? []).find((p) => p.state === 'open');
+  if (open && unverified.includes(open.number)) return `couldn't verify PR #${open.number} on GitHub just now (the ledger last read it as open): say DONE again in a later report`;
   if (open) return `PR #${open.number} is still open: merge or close it first`;
   const brief = `${w.title}\n${w.brief}\n${w.constraints ?? ''}`;
   if (isRelease(w) && !(NOTES_POSTED.test(report) && /\b(live|landed)\b/i.test(report))) return 'a release is done when its build is live and its patch notes are posted: say it is live and link the posted notes';

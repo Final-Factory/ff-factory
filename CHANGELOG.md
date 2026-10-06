@@ -32,6 +32,22 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
     stream goes on (measured on BEAST against real bsdtar with live writers: 3 files stopped at, 5 of 5 copied).
   - The progress line counts the bytes of the files unpacked and never goes back on a retry. OpenSSH's post-quantum
     warning about BEAST's 9.5 server is left out of BEAST's messages.
+- **The ledger's PR states are fresh, and a DONE is not refused on a merged PR** (w515, Lothsahn: "How can we fix PR's
+  having the wrong status?"). w443, w449, w454, w484 and w489 were each refused "PR #N is still open" seconds after
+  their PR merged (#1087, #1080, #1089, #1092, #1095), and nothing looked again, so they sat in "Merged, follow-up
+  pending" until a person closed them; w443 still listed #1087 open after that.
+  - **Cause:** the 5-minute PR pass skipped every request with a running or waiting worker, which is exactly when its
+    PR merges and its DONE comes, and every closed request, so their cached states froze. A refused DONE was never
+    checked again.
+  - **The fix:** a DONE on a request with an open PR reads that PR live (`gh pr view`) before deciding; gh failing says
+    "couldn't verify PR #N" instead of "still open". The 5-minute pass now refreshes the states of every request's linked
+    PRs (busy and closed ones too, by number beyond the 200-PR list, at most 30 a pass), a report saying a linked PR
+    merged reads it live at once, and a DONE refused then closes the request once its PRs merged and nothing else is
+    missing. The first pass after the deploy reads every PR the ledger holds as open and logs, for each merged request
+    still open, why it stays open.
+  - **Two rules made precise:** a release is a title that cuts, ships, names or posts one (w487's "Add a patch notes
+    line" and w395's "the release pipeline" are not); a 2-peer check or paired audit is a step after the merge only
+    where the brief puts it after the merge (w408 and w411 ran theirs before merging).
 
 - **`fffctl migrate` copies from BEAST again, and says what it is doing** (w508, Lothsahn's dry run stopped at "tar:
   Unexpected EOF in archive" after a long silence).

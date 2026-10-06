@@ -1,7 +1,10 @@
 // The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): requests nobody closes by hand. Two passes share this code.
 //
 // - Every 5 minutes (checkPrs): link each request to the pull requests its workers open, and close it as done when they
-//   have merged and nothing is left to do after the merge (w304).
+//   have merged and nothing is left to do after the merge (w304). The states of the PRs already linked are refreshed for
+//   every request, a busy or a closed one too, and a DONE refused on a PR that has merged since is checked again (w515).
+//   The first pass after a start that has not done it yet also re-reads every PR the ledger holds as open (the repair).
+// - A worker's `DONE: wNNN`, or a report that says a linked PR merged, reads that request's open PRs live (refreshLive).
 // - Every `ledger.cleanup.everyHours` hours, and on demand (run): that, plus the intake's merged requests (server/intake.ts
 //   checkMerged), requests whose worker reported them delivered, workers a usage limit or a restart cut off (resumed
 //   once, else stalled), requests another finished one probably covers, and requests nothing has touched for 24 hours,
@@ -50,7 +53,8 @@ const CHECK_EVERY_MS = 5 * 60_000;
 const RUN_WAIT_MS = 10 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
 const PRS_PER_REPO = 200;
-const REFRESH_OLD_PRS = 12;
+/** Linked open PRs the list does not reach, read one by one: at most this many a pass (GitHub's rate limit: 5000 an hour). */
+const REFRESH_OLD_PRS = 30;
 
 export interface LedgerSweepDeps {
   cfg: Config;
@@ -76,6 +80,8 @@ interface Persisted {
   lastSummary?: string;
   /** The first pass ran: it lists what stayed open and why (the one-time backfill). */
   backfilledAt?: string;
+  /** The one-time repair of stale PR states ran (w515): every PR held as open was read again, merged requests re-checked. */
+  prRepairAt?: string;
 }
 
 /** closed, resumed, asked and stalled are what a pass did; open: a merged request that stayed open, and why (told on the first pass only); note: a PR was closed without merging (always told, once). */
@@ -125,6 +131,7 @@ export class LedgerSweep {
   start() {
     // A dry run (server/dryRun.ts): the copied ledger stays as copied, so its counts can be checked against the original.
     if (dryRun()) return this;
+    this.d.orchestrators.prsLive = (id) => this.refreshLive(id);
     const every = (ms: number, f: () => void, first: number) => {
       const a = setTimeout(f, first);
       a.unref();
@@ -187,8 +194,10 @@ export class LedgerSweep {
     const acts: Action[] = [];
     try {
       const backfill = !this.data.backfilledAt;
+      const repair = !this.data.prRepairAt;
       const prs = await this.loadPrs();
       if (prs) await this.recheckClosed(prs, acts);
+      if (prs) await this.refreshStates(prs, repair);
       const work = [...this.d.store.work.values()];
       if (full && this.d.intakeMerged) {
         for (const id of await this.d.intakeMerged().catch(() => [] as string[])) {
@@ -200,6 +209,11 @@ export class LedgerSweep {
         const live = this.d.store.work.get(w.id);
         if (!live || !(isOpen(live) || live.status === 'stalled')) continue;
         if (live.approval?.state === 'pending') continue;
+        // A DONE refused while a PR was open, whose PRs are all merged or closed now (w515): it closes on that DONE.
+        if (live.done && !(live.prs ?? []).some((p) => p.state === 'open') && this.d.orchestrators.recheckDone(live.id, 'its PRs have merged or closed since')) {
+          console.log(`ledger cleanup: closed ${live.id} on its refused DONE: its PRs have merged or closed since`);
+          continue;
+        }
         const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
         // A Waiting worker (w475: a running job, a queued message or a check-in ahead) will come back, and so will a stopped
         // one its check-in or a queued message resumes (w509): as good as busy here.
@@ -221,7 +235,11 @@ export class LedgerSweep {
           console.warn(`ledger cleanup: ${live.id}: ${(e as Error).message}`);
         }
       }
-      const notable = acts.filter((a) => a.kind !== 'open' || backfill);
+      if (repair && prs) {
+        this.repairReport(acts);
+        this.data.prRepairAt = new Date(this.now()).toISOString();
+      }
+      const notable = acts.filter((a) => a.kind !== 'open' || backfill || repair);
       // Each change in the server log too (w363), with whose request it is.
       for (const a of acts) if (a.kind === 'closed' || a.kind === 'stalled' || a.kind === 'resumed' || a.kind === 'asked') console.log(`ledger cleanup: ${a.kind} ${a.id} (${a.who.map((r) => r.userId).join(', ')}): ${clip(oneLine(a.text), 200)}`);
       this.tell(notable);
@@ -376,18 +394,101 @@ export class LedgerSweep {
     }
   }
 
+  /**
+   * The states of the PRs already linked to requests (w515), from this pass's list, and by number for the open ones the
+   * list does not reach: for every request, a busy one (its PR step is skipped while its worker runs) and a closed one
+   * (w443 still showed #1087 open after a person closed it) alike. Reading by number is for open requests only, at most
+   * REFRESH_OLD_PRS a pass, except in the one-time repair, which reads every PR held as open. No new links here.
+   */
+  private async refreshStates(all: readonly PrRecord[], repair: boolean) {
+    const listed = new Map(all.map((p) => [`${p.repo.toLowerCase()}#${p.number}`, p]));
+    let viewed = 0;
+    let failed = 0;
+    for (const w of [...this.d.store.work.values()]) {
+      const open = (w.prs ?? []).filter((p) => p.state === 'open');
+      if (!open.length) continue;
+      const live = isOpen(w) || w.status === 'stalled';
+      const records: PrRecord[] = [];
+      for (const p of open) {
+        const l = listed.get(`${p.repo.toLowerCase()}#${p.number}`);
+        if (l) records.push(l);
+        else if (repair || (live && viewed < REFRESH_OLD_PRS)) {
+          viewed++;
+          const v = await this.view(p.repo, p.number).catch(() => undefined);
+          if (v) records.push(v);
+          else failed++;
+        }
+      }
+      if (records.length) this.applyStates(w.id, records, repair ? 'the one-time repair' : 'the 5-minute read', live);
+    }
+    if (repair) console.log(`ledger cleanup: PR repair: read ${viewed} PR(s) by number beyond the list; ${failed} could not be read`);
+  }
+
+  /**
+   * A request's open PRs read live from GitHub, one `gh pr view` each (w515): on a worker's DONE (server/orchestrators.ts
+   * doneMarkers) and on a report saying a linked PR merged. Updates their states; answers the ones gh could not read.
+   * `recheck`: a refused DONE is checked again when one has merged or closed (off for the DONE being decided now).
+   */
+  async refreshLive(id: string, recheck = false): Promise<{ unverified: number[] }> {
+    const w = this.d.store.work.get(id);
+    const unverified: number[] = [];
+    const found: PrRecord[] = [];
+    for (const p of (w?.prs ?? []).filter((x) => x.state === 'open').slice(0, REFRESH_OLD_PRS)) {
+      const v = await this.view(p.repo, p.number).catch(() => undefined);
+      if (v) found.push(v);
+      else unverified.push(p.number);
+    }
+    if (found.length) this.applyStates(id, found, 'read live from GitHub', recheck);
+    return { unverified };
+  }
+
+  /**
+   * New states for a request's linked PRs from gh's records (no links added or dropped), logged quietly when one changed.
+   * `recheck`: when one left open, a DONE refused while it was open is checked again (Orchestrators.recheckDone).
+   */
+  private applyStates(id: string, records: readonly PrRecord[], how: string, recheck: boolean) {
+    const w = this.d.store.work.get(id);
+    if (!w?.prs?.length) return;
+    const same = (a: { repo: string; number: number }, b: { repo: string; number: number }) => a.number === b.number && a.repo.toLowerCase() === b.repo.toLowerCase();
+    const changed: WorkPr[] = [];
+    const next = w.prs.map((p) => {
+      const r = records.find((x) => same(x, p));
+      if (!r || r.state === p.state) return p;
+      const { noted: _noted, at: _at, sha: _sha, ...rest } = p;
+      const q: WorkPr = { ...rest, state: r.state, ...(r.state === 'merged' ? { at: r.mergedAt, ...(r.sha ? { sha: r.sha } : {}) } : r.state === 'closed' ? { at: r.closedAt } : {}) };
+      changed.push(q);
+      return q;
+    });
+    if (!changed.length) return;
+    const what = changed.map((p) => `PR #${p.number} ${p.state}`).join(', ');
+    this.d.orchestrators.ledgerEdit(id, `pull request states updated (${how}): ${what}`, (x) => void (x.prs = next), true);
+    if (recheck && changed.some((p) => p.state !== 'open') && this.d.orchestrators.recheckDone(id, `${what} since (${how})`)) console.log(`ledger cleanup: closed ${id} on its refused DONE: ${what} (${how})`);
+  }
+
+  /**
+   * The one-time repair's account (w515), in the server log: each open request whose PRs have all merged, and what keeps
+   * it open, or that this pass closed it.
+   */
+  private repairReport(acts: readonly Action[]) {
+    const all = [...this.d.store.work.values()];
+    for (const a of acts.filter((x) => x.kind === 'closed')) console.log(`ledger cleanup: PR repair: ${a.id} closed: ${clip(oneLine(a.text), 200)}`);
+    for (const w of all) {
+      if (!(isOpen(w) || w.status === 'stalled') || acts.some((a) => a.id === w.id && a.kind === 'closed')) continue;
+      const prs = w.prs ?? [];
+      if (!prs.some((p) => p.state === 'merged') || prs.some((p) => p.state === 'open')) continue;
+      const workers = w.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+      const busy = workers.filter((s) => BUSY.has(s.status) || holdsItsPlace(s, this.now()));
+      const reason =
+        w.question ? 'it waits on a question' : w.flag ? 'it waits on a design question' : busy.length ? `its worker ${busy.map((s) => s.id).join(', ')} is busy or waiting, so the cleanup leaves it alone` : (partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? '')) ?? 'nothing found left; the next pass closes it');
+      console.log(`ledger cleanup: PR repair: ${w.id} stays open: ${clip(oneLine(reason), 240)}`);
+    }
+  }
+
   /** Link PRs, note what changed, close or leave open. True when the request was closed (it needs nothing more). */
   private async prStep(w: WorkItem, workers: readonly SessionInfo[], all: readonly PrRecord[], acts: Action[]): Promise<boolean> {
     const found = prsOf(w, all, { opened: this.openedBy(w, workers) });
+    // A linked PR the list no longer reaches was read by number already this pass (refreshStates).
     let prs = mergePrs(w.prs ?? [], found);
-    // A linked PR the list no longer reaches: ask for it by number (a few per pass).
-    const listed = new Set(all.map((p) => `${p.repo.toLowerCase()}#${p.number}`));
-    let refreshed = 0;
-    for (const p of prs.filter((x) => x.state === 'open' && !listed.has(`${x.repo.toLowerCase()}#${x.number}`))) {
-      if (refreshed++ >= REFRESH_OLD_PRS) break;
-      const v = await this.view(p.repo, p.number);
-      if (v) prs = mergePrs(prs, [v]);
-    }
     if (!prs.length) return false;
     const fresh = prs.filter((p) => !(w.prs ?? []).some((q) => q.repo === p.repo && q.number === p.number));
     const keep = (next: WorkPr[]) => {
