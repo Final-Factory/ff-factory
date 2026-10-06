@@ -122,6 +122,7 @@ workers are working on vs which are waiting on input"). It is derived live from 
 | state | when | the line says |
 |---|---|---|
 | **Working** | a worker it serves is `running` or `starting` (in a long command too), or FFBox runs it (`ffbox` sent or accepted) | which worker, and the tool it has been in since when |
+| **Waiting** (w475) | a worker it serves is Waiting (below, "Agent states"): between turns, with a check-in, a background task or a queued message that will bring it back | "worker eb9632fd's check-in at 23:12 UTC" |
 | **Waiting on input** | an intake approval is pending, the dispatcher's question or a design question is open, a worker it serves waits for a permission, or a worker it serves stopped asking for a decision (its last report ends asking a person to decide, or with a question) | what, and on whom: "a reviewer", the requester, the design question's people, the worker's person |
 | **Queued** | not dispatched yet (`new`), queued by the dispatcher (`queued`), or a message to its worker waits for a free agent slot (the send queue; list_work only, the page does not have the queue) | which |
 | **Merged, follow-up pending** | its PRs merged, none is open, and it is still open | the cleanup's own reason ("still open: its brief asks for a step after the merge"), or that the cleanup has not looked yet |
@@ -479,6 +480,34 @@ A timer is a standing job (`server/timers.ts`):
 | push notifications and in-page notices | a person's own orchestrator's only to that person; a worker's finished turn to the people it works for; the dispatcher's turns to nobody, its questions and errors to the owner |
 
 `/mcp` `ask_orchestrator` and `orchestrator_transcript` talk to the key's person's own orchestrator.
+
+## Agent states: Working, Waiting, Idle, Stopped
+
+Every agent shows one of these (w475, asked by Lothsahn: "clear between 'available' workers (idle) and 'waiting'
+workers"; `shared/agentState.ts` `agentState`):
+
+| State | When | Shown as |
+|---|---|---|
+| **Working** | mid-turn: `running` or `starting` (a permission request shows as **Needs you**) | blue |
+| **Waiting** | between turns (idle, or stopped and due to be resumed) but committed: a pending `wake_me` (its check-in time), a message for it held in the send queue for a free slot, or (idle only, since a restart ends them) a background task or watcher still open | violet, with what it waits on and when: "Waiting: check-in at 23:12", "Waiting: a background task", "Waiting: a queued message (…)" |
+| **Idle** (available) | finished its turn with nothing pending: free for new work, and the idle reaper's candidate | grey; a worker reads "Idle (available)" |
+| **Stopped** | no process and nothing to resume it, as before | grey |
+
+- **Where the facts come from.** The server copies each session's pending `wake_me` and queued message onto it
+  (`SessionInfo.wakeAt`, `queuedSend`; `Agents.syncWaiting`, run whenever the wakes or the send queue change and once at
+  boot); `backgroundTasks` was already there. An editor or test job the agent started is not a fact of its own: an
+  agent that waits on one sets a `wake_me` (as eb9632fd did for w448), which shows.
+- **Where it shows.** The page: every agent list, the sandbox and machine glances ("Waiting"), the agent tabs and
+  pickers, the session header, and the sidebar and Overview, which list a place's agents **Working, then Waiting, then
+  Idle, then Stopped**, the most recent activity first within each (Lothsahn: "sort the running at the top, waiting below
+  them, and idle below them"). `list_sandboxes` and `list_machines` put the state first on each agent's line
+  (`[Waiting: check-in at 23:12 UTC, idle]`), in the same order, and list a stopped agent its wake will resume with the
+  live ones. The ledger's request states show a request whose worker is Waiting as **Waiting** (above), not Stalled.
+- **What it changes.** A sandbox whose agent is Waiting is not free (the capacity block, placement, `list_sandboxes`'
+  FREE). The dispatcher's brief says never to give new work to a Waiting worker or its sandbox unless the request is its
+  own. The ledger cleanup treats a Waiting worker as busy: its request is neither stalled nor asked "Is it done?"
+  (`server/ledgerSweep.ts`). The idle reaper already kept such workers (`keepIdle`: a pending wake_me, a queued message,
+  background tasks).
 
 ## Agent limits and idle workers
 

@@ -246,7 +246,8 @@ test('fleet: the sidebar groups every computer, with its sandboxes, their agents
   await expect(sb1.locator('.row-title')).toHaveText('Nightly e2e run');
   await expect(sb1.locator('.row-sub')).toContainText('Working · feature/fleet-view');
   await expect(sb1.locator('.fl-unity')).toHaveAttribute('title', 'Unity running');
-  await expect(sb1.getByTestId('fl-agent')).toHaveText([/Review the nightly report\s*idle\s*25m/, /Nightly e2e: Windows leg\s*busy\s*2m/]);
+  // Working first, then Idle (w475).
+  await expect(sb1.getByTestId('fl-agent')).toHaveText([/Nightly e2e: Windows leg\s*busy\s*2m/, /Review the nightly report\s*idle\s*25m/]);
   await expect(loth.getByTestId('fl-sandbox-lothdesktop/sb2').locator('.fl-free')).toBeVisible();
   // The main clone: the machine's label and its own agents (not the sandbox's).
   const main = loth.getByTestId('fl-main-lothdesktop');
@@ -314,7 +315,8 @@ test('fleet: a machine sandbox has its own page: agents as tabs, Unity with its 
   if (!isMobile(page)) {
     await expect(panel.locator('.ph-facts')).toContainText('lothdesktop/sb1');
     await expect(panel.locator('.ph-facts')).toContainText('feature/fleet-view');
-    await expect(panel.getByRole('tab')).toHaveText([/Review the nightly report\s*Lothsahn/, /Nightly e2e: Windows leg/]);
+    // Working first, then Idle (w475).
+    await expect(panel.getByRole('tab')).toHaveText([/Nightly e2e: Windows leg/, /Review the nightly report\s*Lothsahn/]);
   }
   await panel.getByRole('button', { name: 'Details' }).click();
   const details = page.locator('.details-sheet');

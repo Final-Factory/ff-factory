@@ -185,7 +185,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
 }
 
 /** A live state's tone: working blue, waiting amber, queued grey, merged with a follow-up green, stalled red. */
-const LIVE_TONE: Record<WorkLiveState, Tone> = { working: 'blue', waiting: 'amber', queued: 'grey', followup: 'green', stalled: 'red' };
+const LIVE_TONE: Record<WorkLiveState, Tone> = { working: 'blue', pending: 'violet', waiting: 'amber', queued: 'grey', followup: 'green', stalled: 'red' };
 
 /**
  * What each open or stalled request is doing now (shared/workState.ts, w418), from the page's own sessions: it follows

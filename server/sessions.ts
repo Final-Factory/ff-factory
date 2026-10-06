@@ -695,7 +695,11 @@ export class SessionManager {
     return this.queue.some((q) => q.uuid === uuid);
   }
 
+  /** Called after the send queue changes: the server copies it onto the sessions (w475, SessionInfo.queuedSend). */
+  onQueueChange?: () => void;
+
   private saveQueue() {
+    this.onQueueChange?.();
     if (!this.queueFile) return;
     try {
       writeJsonDurable(this.queueFile, { queue: this.queue }, { indent: 1 });

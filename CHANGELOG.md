@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Agents show Working, Waiting, Idle or Stopped** (w475, asked by Lothsahn). Waiting: between turns but due back, on a
+  `wake_me` check-in, a background task or a message queued for it, shown in violet with what it waits on and when
+  ("Waiting: check-in at 23:12"). Idle means available. Agents are listed Working, Waiting, Idle, Stopped, the most recent
+  first in each, in the Overview, the sidebar, agent tabs, `list_sandboxes` and `list_machines`. A Waiting worker's
+  sandbox is not free, the dispatcher gives it no new work but its own, its request shows Waiting instead of Stalled,
+  and the ledger cleanup leaves it alone ([docs/orchestrators.md](docs/orchestrators.md), "Agent states").
+
 - **`claudeAccounts.dispatcher`** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 6). The dispatcher's own
   account (`"token"` or `"login"`, set with `set_app_config`). Once set, the dispatcher runs on it instead of the system
   payer's own token; unset, nothing changes. system_status names it apart only when set ([docs/accounts.md](docs/accounts.md)).

@@ -237,6 +237,22 @@ http
           res.writeHead(200).end('{}');
           return;
         }
+        // /wake {id, minutes}: a real wake_me for an agent (e2e/agentState.spec.ts, w475).
+        if (req.url === '/wake') {
+          const { id, minutes } = JSON.parse(body) as { id: string; minutes: number };
+          (internals.agents as unknown as { waker: { schedule: (id: string, m: number, n: string) => string } }).waker.schedule(id, minutes, 'e2e check-in');
+          res.writeHead(200).end('{}');
+          return;
+        }
+        // /patch-session {id, patch}: fields set on a session, e.g. backgroundTasks (e2e/agentState.spec.ts, w475).
+        if (req.url === '/patch-session') {
+          const { id, patch } = JSON.parse(body) as { id: string; patch: Record<string, unknown> };
+          const info = internals.sessions.get(id).info;
+          Object.assign(info, patch);
+          internals.store.putSession(info);
+          res.writeHead(200).end('{}');
+          return;
+        }
         const { text } = JSON.parse(body) as { text: string };
         internals.sessions.send(internals.agents.dispatcherId!, text, 'human', undefined, { requestedBy: { userId: USER, displayName: 'Tester' } });
         res.writeHead(200).end('{}');
