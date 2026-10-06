@@ -31,6 +31,8 @@ export class Waker {
   private readonly lastBeat = new Map<string, number>();
   private readonly busySince = new Map<string, number>();
   now: () => number = Date.now;
+  /** Called after the pending wakes change (armed, cancelled, fired): the server copies them onto the sessions (w475). */
+  onChange?: () => void;
 
   constructor(sessions: SessionManager, store: Store, file?: string) {
     this.sessions = sessions;
@@ -99,6 +101,7 @@ export class Waker {
   }
 
   private save() {
+    this.onChange?.();
     if (!this.file) return;
     const out: Record<string, WakeRecord> = {};
     for (const [id, t] of this.timers) out[id] = { at: t.at, note: t.note };

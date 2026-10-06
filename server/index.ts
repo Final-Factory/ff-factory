@@ -38,7 +38,7 @@ import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
@@ -353,6 +353,11 @@ const localRef = (id: string) => {
   const ref = local ? parseSandboxRef(id) : undefined;
   return ref && ref.machine === local!.id ? ref : undefined;
 };
+/** Whether this host's own daemon runs the host guard itself (w466, machine/hostGuard.ts): the sandbox drive is its then. */
+const localGuards = () => {
+  const local = machines.local();
+  return !!local && machines.guards(local.id);
+};
 /** This host's own daemon's sandboxes as host records named "<machine>/<id>" (the host guard's view). */
 const localSandboxView = () => {
   const local = machines.local();
@@ -403,9 +408,12 @@ const hostHealth = new HostHealthMonitor({
   exists: (p) => fs.existsSync(p),
   mem: () => ({ free: os.freemem(), total: os.totalmem() }),
   // Plus this host's own daemon's sandboxes as "<machine>/<id>" (docs/beast-machine.md): they are on this host's
-  // sandbox drive and disks, so the guard brings their editors and agents back after the drive, and gates them.
-  sandboxes: () => [...sandboxes.list(), ...localSandboxView()],
-  sessions: () => localSessionView(),
+  // sandbox drive and disks, so the guard brings their editors and agents back after the drive, and gates them. Not
+  // while that daemon runs the guard itself (w466): then they are its own.
+  sandboxes: () => [...sandboxes.list(), ...(localGuards() ? [] : localSandboxView())],
+  sessions: () => (localGuards() ? [...store.sessions.values()] : localSessionView()),
+  // The sandbox drive is the local daemon's to watch and remount while its guard runs (machine/hostGuard.ts).
+  watchDrive: () => !localGuards(),
   startEditor: async (id) => void (localRef(id) ? await machines.unity(localRef(id)!.machine, 'start', false, localRef(id)!.sandbox) : await sandboxes.startUnity(id)),
   stopEditor: async (id) => void (localRef(id) ? await machines.unity(localRef(id)!.machine, 'stop', false, localRef(id)!.sandbox) : await sandboxes.stopUnity(id)),
   interrupt: (id) => sessions.get(id).interrupt(),
@@ -449,13 +457,27 @@ const hostHealth = new HostHealthMonitor({
     staleAt: staleAtFile(cfg.dataDir),
     diskPaths: () => [cleanupEnv.home, cleanupEnv.tmp],
   },
-  reap: (hours) => reapBrowsers(hours),
+  // The local daemon's guard reaps this computer's leftover browsers while it runs (w466): one reaper, not two.
+  reap: (hours) => (localGuards() ? Promise.resolve([]) : reapBrowsers(hours)),
   changed: (h) => {
     host.health = h;
     broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
   },
   log: (line) => console.warn(line),
 });
+// A machine's own host guard (w466: BEAST's daemon, its drive, disks and reaper) reports like this host's.
+machines.hostReport = (id, title, body) => {
+  console.log(`host guard on ${id}: ${title}: ${body}`);
+  notifier.host(`${id}: ${title}`, body);
+  const orch = store.orchestratorId;
+  if (orch) {
+    try {
+      sessions.send(orch, `[host ${id}] ${title}. ${body}`, 'system');
+    } catch {
+      // the orchestrator is not there; the notification still went out
+    }
+  }
+};
 sandboxes.startGate = () => hostHealth.blockReason('editor');
 machines.localGate = (kind) => hostHealth.blockReason(kind);
 sessions.startGate = () => hostHealth.blockReason('agent');
@@ -1515,7 +1537,12 @@ function personTokens() {
     .filter((x): x is { u: (typeof x)['u']; token: string } => !!x.token)
     .map(({ u, token }) => ({ token, displayName: u.displayName, label: `${u.displayName}'s token …${token.slice(-4)}` }));
 }
-usage.personTokens = personTokens;
+/** The token file's token (config claudeTokenFile, w464) while a role runs on it: polled by the meters like the others. */
+function fileTokenEntry(): { token: string; label: string }[] {
+  const t = tokenFileToken(cfg);
+  return t ? [{ token: t, label: `token file …${t.slice(-4)}` }] : [];
+}
+usage.personTokens = () => [...personTokens(), ...fileTokenEntry()];
 /**
  * The account a session ran on, for the meters. The dispatcher with an account of its own (claudeAccounts.dispatcher,
  * w464) runs on it, never on its person's own token, so its stopped session is counted there too.
@@ -1523,6 +1550,11 @@ usage.personTokens = personTokens;
 function sourceOf(s: SessionInfo, token: string | undefined, toMachine: (id: string) => string | undefined) {
   const role = hostRoleOf(cfg, s);
   const login = () => hostAccount(cfg, role) === 'login';
+  // A role on the token file (w464) ran on it, whoever the session was for.
+  if (s.kind !== 'worker' && !s.machineId && hostAccount(cfg, role) === 'tokenfile') {
+    const t = tokenFileToken(cfg);
+    if (t) return sessionSource({ ...s, requestedBy: undefined }, t, toMachine, () => undefined, () => false);
+  }
   if (role === 'dispatcher') return sessionSource({ ...s, requestedBy: undefined }, token, toMachine, () => undefined, login);
   return sessionSource(s, token, toMachine, (id) => userToken(cfg, id), (kind: SessionKind) => hostAccount(cfg, hostRole(kind)) === 'login');
 }
@@ -1545,6 +1577,10 @@ function accountsNow() {
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
     hostLoginRoles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login'),
     roles: shownRoles(cfg),
+    ...(() => {
+      const t = tokenFileToken(cfg);
+      return t ? { tokenFile: { key: tokenKey(t), label: `token file …${t.slice(-4)}`, roles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'tokenfile') } } : {};
+    })(),
     people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
     machines: machines.list().map((m) => {
       const t = toMachine(m.id);

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { HOST_ROLES, roleNames, type ClaudeAccount, type Config, type HostRole } from './config.ts';
+import { HOST_ROLES, TOKEN_FILE_ROLES, roleNames, type ClaudeAccount, type Config, type HostRole } from './config.ts';
 import type { SessionInfo, SessionKind } from '../shared/types.ts';
 import { credentialsFile, loginUnusable, readStoredLogin, usageEnv } from './usage.ts';
 import { writeFileDurable } from './durable.ts';
@@ -114,11 +114,37 @@ export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'> & Partial<Pick<C
 /** The role config claudeAccounts knows a session of `kind` on this host by. */
 export const hostRole = (kind: SessionKind): HostRole => (kind === 'orchestrator' ? 'orchestrator' : kind === 'standing' ? 'standing' : 'workers');
 
-/** The account this host's agents of `role` run on (config claudeAccounts; default the token; the dispatcher, unset: the orchestrator's). */
+/**
+ * The account this host's agents of `role` run on (config claudeAccounts; default the token; the dispatcher, unset:
+ * the orchestrator's). Workers never run on the token file: a "tokenfile" there (refused at config load) reads as the token.
+ */
 export function hostAccount(cfg: Pick<Config, 'claudeAccounts'>, role: HostRole): ClaudeAccount {
   const v = cfg.claudeAccounts?.[role] ?? (role === 'dispatcher' ? cfg.claudeAccounts?.orchestrator : undefined);
+  if (v === 'tokenfile') return TOKEN_FILE_ROLES.includes(role) ? 'tokenfile' : 'token';
   return v === 'login' ? 'login' : 'token';
 }
+
+/**
+ * The OAuth token in config claudeTokenFile (w464), read now: a role set to "tokenfile" reads it at each session
+ * start, so a new token applies to the next session without a restart. Throws, never showing the content, when no file
+ * is named, it cannot be read, or what it holds is not one OAuth token.
+ */
+export function readTokenFile(cfg: Partial<Pick<Config, 'claudeTokenFile'>>): string {
+  const file = cfg.claudeTokenFile;
+  if (!file) throw new Error('config claudeTokenFile names no file, but a role is set to "tokenfile"');
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    throw new Error(`cannot read config claudeTokenFile ${file}: ${(e as NodeJS.ErrnoException).code ?? 'unreadable'}`);
+  }
+  const token = text.replace(/^\uFEFF/, '').trim();
+  if (!OAUTH_TOKEN.test(token)) throw new Error(`config claudeTokenFile ${file} does not hold one Claude OAuth token (sk-ant-oat01-…, from \`claude setup-token\`); its content is not shown`);
+  return token;
+}
+
+/** A role's credentials replaced by the token file's alone (w464): every other Claude credential removed first. */
+const withTokenFile = <E extends Record<string, string | undefined>>(cfg: Partial<Pick<Config, 'claudeTokenFile'>>, env: E): E => ({ ...usageEnv(env), CLAUDE_CODE_OAUTH_TOKEN: readTokenFile(cfg) });
 
 /** Whether the dispatcher has an account of its own (config claudeAccounts.dispatcher, w464): it then ignores the system payer's own token. */
 export const dispatcherOwnAccount = (cfg: Pick<Config, 'claudeAccounts'>) => cfg.claudeAccounts?.dispatcher !== undefined;
@@ -135,9 +161,10 @@ export function hostRoleOf(cfg: Pick<Config, 'claudeAccounts'>, info: Pick<Sessi
  * Config claudeEnv as a host agent of `role` gets it: whole ("token"), or without its credentials ("login"), so
  * the agent falls back to the claude.ai login stored on this host. Its other variables (CLAUDE_CONFIG_DIR…) stay.
  */
-export function hostClaudeEnv(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'>, role: HostRole): Record<string, string> {
+export function hostClaudeEnv(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'> & Partial<Pick<Config, 'claudeTokenFile'>>, role: HostRole): Record<string, string> {
   const env = { ...cfg.claudeEnv };
-  return hostAccount(cfg, role) === 'login' ? usageEnv(env) : env;
+  const a = hostAccount(cfg, role);
+  return a === 'tokenfile' ? withTokenFile(cfg, env) : a === 'login' ? usageEnv(env) : env;
 }
 
 /**
@@ -145,9 +172,20 @@ export function hostClaudeEnv(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'>,
  * claudeEnv over it, and for "login" without any credential, as the usage meters read the host login
  * (server/usage.ts refresh), so what they show as "<host> login" is what the agent runs on.
  */
-export function hostProcessEnv(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'>, role: HostRole, env: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+export function hostProcessEnv(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv'> & Partial<Pick<Config, 'claudeTokenFile'>>, role: HostRole, env: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
   const all = { ...env, ...cfg.claudeEnv };
-  return hostAccount(cfg, role) === 'login' ? usageEnv(all) : all;
+  const a = hostAccount(cfg, role);
+  return a === 'tokenfile' ? withTokenFile(cfg, all) : a === 'login' ? usageEnv(all) : all;
+}
+
+/** The token file's token, or undefined when no role runs on it or it cannot be read (the meters and attribution). */
+export function tokenFileToken(cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>): string | undefined {
+  if (!HOST_ROLES.some((r) => hostAccount(cfg, r) === 'tokenfile')) return undefined;
+  try {
+    return readTokenFile(cfg);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -187,8 +225,16 @@ export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'> & Part
  * host's roles, then every machine. `hostName`: this host, `hostToken`: the token its agents would get (usage.ts
  * hostToken), `people`: display names of those with their own token, which wins for work they asked for.
  */
-export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv' | 'machines'>, hostName: string, hostToken: string | undefined, machineIds: MachineRef[], people: string[] = []): string[] {
-  const here = (role: HostRole) => (hostAccount(cfg, role) === 'login' || !hostToken ? `${hostName} login` : `host token …${hostToken.slice(-4)}`);
+export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts' | 'claudeEnv' | 'machines'> & Partial<Pick<Config, 'claudeTokenFile'>>, hostName: string, hostToken: string | undefined, machineIds: MachineRef[], people: string[] = []): string[] {
+  const fileToken = tokenFileToken(cfg);
+  const here = (role: HostRole) =>
+    hostAccount(cfg, role) === 'tokenfile'
+      ? fileToken
+        ? `token file …${fileToken.slice(-4)}`
+        : 'token file (UNREADABLE: its sessions will not start)'
+      : hostAccount(cfg, role) === 'login' || !hostToken
+        ? `${hostName} login`
+        : `host token …${hostToken.slice(-4)}`;
   const logins = shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login');
   const problem = logins.length ? hostLoginProblem(cfg) : undefined;
   return [

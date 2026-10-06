@@ -340,6 +340,8 @@ export interface AccountContext {
   hostLoginRoles?: HostRole[];
   /** The roles to name apart (secrets.ts shownRoles): the dispatcher only when it has an account of its own. Default: all but the dispatcher. */
   roles?: HostRole[];
+  /** The token file (config claudeTokenFile, w464): its token's key and label, and the roles that run on it. */
+  tokenFile?: { key: string; label: string; roles: HostRole[] };
   /** People's own tokens (config userClaudeEnv): key, label ("Lothsahn's token …abcd") and whose. */
   people?: { key: string; label: string; displayName: string }[];
   /** Every session with its source key (sessionSource); `live`: running now (for the order). */
@@ -364,6 +366,9 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
   sources.set(HOST_LOGIN, entries.get(HOST_LOGIN) ?? { kind: 'login' });
   if (ctx.token) sources.set(ctx.token.key, { label: ctx.token.label, ...entries.get(ctx.token.key), kind: 'token' });
   const whose = new Map<string, string>();
+  // The token file's token (w464): its own account, named by the roles on it; the same token as the host's is one account.
+  const fileRoles = ctx.tokenFile?.roles ?? [];
+  if (ctx.tokenFile && !sources.has(ctx.tokenFile.key)) sources.set(ctx.tokenFile.key, { label: ctx.tokenFile.label, ...entries.get(ctx.tokenFile.key), kind: 'token' });
   for (const p of ctx.people ?? []) {
     if (sources.has(p.key)) continue; // the same token as the host's: one account
     sources.set(p.key, { label: p.label, ...entries.get(p.key), kind: 'token' });
@@ -377,8 +382,9 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
   // Which of this host's agents are on the token and which on its login, named only when they are split.
   const roles = ctx.roles ?? HOST_ROLES.filter((r) => r !== 'dispatcher');
   const onLogin = roles.filter((r) => ctx.hostLoginRoles?.includes(r));
-  const onToken = roles.filter((r) => !onLogin.includes(r));
-  const split = onLogin.length > 0 && onToken.length > 0;
+  const onToken = roles.filter((r) => !onLogin.includes(r) && !fileRoles.includes(r));
+  // Named when not every role is on the token: some on the login, or on the token file.
+  const split = (onLogin.length > 0 || roles.some((r) => fileRoles.includes(r))) && onToken.length > 0;
   const hostOnToken = onToken.length ? [split ? `${ctx.hostName} (${roleNames(onToken)})` : ctx.hostName] : [];
   const hostLoginWhere = `${ctx.hostName} login${ctx.token && onLogin.length ? ` (${roleNames(onLogin)})` : ''}`;
   const tokenUsers = [...hostOnToken, ...ctx.machines.filter((m) => m.usesToken).map((m) => m.id)];
@@ -389,6 +395,8 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
     const person = whose.get(key);
     const where = person
       ? `agents working for ${person}`
+      : ctx.tokenFile?.key === key && key !== ctx.token?.key
+        ? `${ctx.hostName}'s token file (${roleNames(fileRoles)})`
       : e.kind === 'token'
         ? tokenUsers.length ? `the agents' token on ${tokenUsers.join(', ')}` : "the agents' token (no agent set to it)"
         : key === HOST_LOGIN ? hostLoginWhere : `${key.slice(6)} login`;

@@ -6,7 +6,8 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import type { SessionInfo, UnityBlocked } from '../../../shared/types';
 import { focusPermission } from '../store';
-import { lsGet, lsSet, sameTitle, sessionLabel, sessionTone, useMediaQuery } from '../util';
+import { agentView, lsGet, lsSet, sameTitle, useMediaQuery } from '../util';
+import { sortAgents } from '../../../shared/agentState.ts';
 import { summarizeToolInput, toolLabel } from './toolSummary';
 import { Dot, Icon } from './ui';
 
@@ -124,7 +125,9 @@ export function AgentPicker({
 }) {
   const [all, setAll] = useState(false);
   if (!sessions.length && !onNew) return null;
-  const { shown, older } = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 100);
+  const { shown: listed, older } = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 100);
+  // Working first, then Waiting, Idle, Stopped; the most recent first in each (w475).
+  const shown = sortAgents(listed);
   const text = !selected ? 'No agents yet' : sameTitle(selected.title, place) ? `${sessions.length} ${sessions.length === 1 ? 'agent' : 'agents'}` : selected.title;
   return (
     <label className="agent-pick show-phone" title="Agent">
@@ -150,7 +153,7 @@ export function AgentPicker({
         {older > 0 && <option value="__all">Show {older} older agents…</option>}
         {shown.map((s) => (
           <option key={s.id} value={s.id}>
-            {s.title} · {sessionLabel[s.status]}
+            {s.title} · {agentView(s).text}
             {s.requestedBy ? ` · for ${s.requestedBy.displayName}` : ''}
             {s.pendingPermissions.length ? ` · ${s.pendingPermissions.length} waiting` : ''}
           </option>
@@ -181,7 +184,8 @@ export function AgentTabs({
 }) {
   const [all, setAll] = useState(false);
   if (!sessions.length && !onNew) return null;
-  const { shown, older } = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 12);
+  const { shown: listed, older } = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 12);
+  const shown = sortAgents(listed);
   return (
     <nav className="tabs hide-phone" role="tablist">
       {older > 0 && (
@@ -196,9 +200,9 @@ export function AgentTabs({
           aria-selected={s.id === selected?.id}
           className={`tab${s.id === selected?.id ? ' active' : ''}`}
           onClick={() => onSelect(s.id)}
-          title={`${s.title}: ${sessionLabel[s.status]}${s.requestedBy ? ` · requested by ${s.requestedBy.displayName}` : ''}`}
+          title={`${s.title}: ${agentView(s).text}${s.requestedBy ? ` · requested by ${s.requestedBy.displayName}` : ''}`}
         >
-          <Dot tone={sessionTone(s.status)} pulse={s.status === 'running'} />
+          <Dot tone={agentView(s).tone} pulse={s.status === 'running'} />
           <span className="ellipsis">{s.title}</span>
           {s.requestedBy && (
             <span className="tab-by" data-testid="tab-requested-by">

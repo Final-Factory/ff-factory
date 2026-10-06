@@ -7,7 +7,7 @@ import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '
 import { capacityLine, fleetOf, type FleetComputer, type FleetSandbox, type PlaceAgents } from '../../../shared/fleet';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
-import { displayName, fmtBytes, fmtRelative, isUnused, lsGet, lsSet, machineGlance, machineSandboxGlance, navigate, sandboxGlance, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
+import { agentView, displayName, fmtBytes, fmtRelative, isUnused, lsGet, lsSet, machineGlance, machineSandboxGlance, navigate, sandboxGlance, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
 import { AttentionButton, DrawerButton } from './ShellButtons';
 import { describe, gpuPct, level, ramLvl, ramPct, type Lvl } from './SystemMeters';
 import { Dot, Icon } from './ui';
@@ -25,11 +25,13 @@ const osName = (p: string | undefined) => (!p ? '' : p.startsWith('win') ? 'Wind
 
 const ago = (iso: string, now: number) => fmtRelative(iso, now).replace(' ago', '').replace('just now', 'now');
 
-/** An agent in a few words: waiting on someone, busy, starting or idle. */
-function agentState(s: SessionInfo): { word: string; tone: Tone } {
+/** An agent in a few words: waiting on someone, busy, starting, waiting on a check-in or a task (w475), or idle. */
+function agentState(s: SessionInfo): { word: string; tone: Tone; detail?: string } {
   if (s.pendingPermissions.length || s.status === 'waiting_permission') return { word: 'needs you', tone: 'amber' };
   if (s.status === 'running') return { word: 'busy', tone: 'blue' };
   if (s.status === 'starting') return { word: 'starting', tone: 'blue' };
+  const v = agentView(s);
+  if (v.waitsOn) return { word: 'waiting', tone: 'violet', detail: v.waitsOn };
   return { word: 'idle', tone: 'grey' };
 }
 
@@ -153,7 +155,7 @@ function AgentLine({ s, now, active, variant, onOpen }: { s: SessionInfo; now: n
     <button
       className={`fl-agent${active ? ' active' : ''}`}
       onClick={onOpen}
-      title={`${s.title}: ${st.word}, last active ${fmtRelative(s.lastActivityAt, now)}${s.requestedBy ? ` · for ${s.requestedBy.displayName}` : ''}${s.model ? ` · ${s.model}` : ''}`}
+      title={`${s.title}: ${st.word}${st.detail ? ` (${st.detail})` : ''}, last active ${fmtRelative(s.lastActivityAt, now)}${s.requestedBy ? ` · for ${s.requestedBy.displayName}` : ''}${s.model ? ` · ${s.model}` : ''}`}
       data-testid="fl-agent"
     >
       <Dot tone={st.tone} pulse={s.status === 'running'} />

@@ -124,5 +124,5 @@ test('workState: stalled at once when nothing works on it and nothing waits on a
 
 test('workState: counts per state', () => {
   const n = liveCounts([{ state: 'working', why: '' }, { state: 'stalled', why: '' }, { state: 'stalled', why: '' }]);
-  assert.deepEqual(n, { working: 1, waiting: 0, queued: 0, followup: 0, stalled: 2 });
+  assert.deepEqual(n, { working: 1, pending: 0, waiting: 0, queued: 0, followup: 0, stalled: 2 });
 });

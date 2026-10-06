@@ -42,6 +42,7 @@ import {
 } from './ledgerRules.ts';
 import type { LedgerCleanupState, Requester, SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
 import { servedBy } from '../shared/workState.ts';
+import { isWaitingAgent } from '../shared/agentState.ts';
 
 const CHECK_EVERY_MS = 5 * 60_000;
 /** How long a full pass waits for a running pass to end before giving up this turn. */
@@ -197,7 +198,8 @@ export class LedgerSweep {
         if (!live || !(isOpen(live) || live.status === 'stalled')) continue;
         if (live.approval?.state === 'pending') continue;
         const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
-        const busy = workers.filter((s) => BUSY.has(s.status));
+        // A Waiting worker (w475: a check-in, a background task or a queued message) will come back: as good as busy here.
+        const busy = workers.filter((s) => BUSY.has(s.status) || isWaitingAgent(s));
         if (busy.length) {
           // A worker busy on ANOTHER request (it moved on, w418) can still be asked about this one (w419): the question
           // waits until its turn ends. Nothing else touches a request with a running worker.

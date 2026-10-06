@@ -16,6 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
+import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import { MacUnity, MacUnityWatch, realDeps } from './unity.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { MAIN_CLONE, McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
@@ -36,7 +37,7 @@ import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
 import { attachmentLine } from '../shared/attachments.ts';
-import type { AttachmentRef, HostStats, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { AttachmentRef, HostHealth, HostStats, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /** Portal base URL, e.g. https://<host>.<tailnet>.ts.net */
@@ -76,6 +77,12 @@ export interface DaemonConfig {
   relocatedAt?: string;
   /** The daemon.json this config was read from (set by the entry point, never written): where a relocate is kept. */
   configFile?: string;
+  /**
+   * The host guard on this machine (w466, machine/hostGuard.ts): BEAST's sandbox drive watch and remount, then its
+   * editors and agents brought back, the disk guard over the drive's volumes and the browser reaper. Written at deploy
+   * from the portal's config for the portal's own host (and kept when it becomes an ssh machine); Windows only.
+   */
+  hostGuard?: MachineGuardSettings;
 }
 
 /** How long a relocated daemon dials only its new URL (tests shorten it). */
@@ -187,8 +194,13 @@ export class Daemon {
   /** Each place's Unity MCP status folder, kept holding only its own editor (machine/unityMcp.ts). */
   private readonly mcpScopes = new McpScopes();
 
-  constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES, poolDeps?: PoolDeps) {
+  /** The host guard (cfg.hostGuard, Windows; tests give effects). */
+  guard?: MachineGuard;
+  private readonly guardEffects?: MachineGuardEffects;
+
+  constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects) {
     this.cfg = cfg;
+    this.guardEffects = guardEffects;
     this.probes = probes;
     const platform = process.platform === 'win32' ? 'win32' : 'darwin';
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
@@ -200,6 +212,7 @@ export class Daemon {
         settings: cfg.sandboxes,
         idleStopMinutes: cfg.sandboxIdleStopMinutes,
         activity: (id) => this.sandboxActivity(id),
+        startGate: () => this.guard?.blockReason('editor'),
         onChange: () => this.reportSandboxes(),
         onEvent: (e) => {
           log(`sandboxes: ${e.text}`);
@@ -333,7 +346,54 @@ export class Daemon {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
+  /**
+   * The host guard (w466), when daemon.json has its settings, a sandbox root and real effects (Windows) or test ones:
+   * the drive, the disks of its VHDX and the reaper, on its own timer. While it runs, the hello says so and the portal's
+   * own guard leaves this computer's drive to it.
+   */
+  private startGuard() {
+    const s = this.cfg.hostGuard;
+    const root = this.currentPool()?.root ?? this.cfg.sandboxes?.root;
+    if (!s || s.pollSeconds <= 0 || !root) return;
+    if (!this.guardEffects && process.platform !== 'win32') return log('host guard: configured, but its helpers are Windows-only; not started');
+    let lastKey = '';
+    const ports = {
+      sandboxes: () =>
+        this.pool.list().map((x) => ({ id: x.id, name: x.id, branch: x.branch, base: x.base, path: x.path, purpose: '', status: x.status, createdAt: x.createdAt, unity: { state: x.unity.state === 'running' ? ('running' as const) : x.unity.state === 'starting' ? ('starting' as const) : ('stopped' as const) }, sessionIds: [] })),
+      sessions: () => [...this.entries.values()].map((e) => ({ ...e.s.info, machineId: undefined, machineSandbox: undefined, sandboxId: e.spec?.sandbox })),
+      startEditor: async (id: string) => void (await this.pool.unity(id, 'start')),
+      stopEditor: async (id: string) => void (await this.pool.unity(id, 'stop')),
+      interrupt: async (id: string) => void (await this.entries.get(id)?.s.interrupt()),
+      tell: (id: string, text: string) => {
+        const e = this.entries.get(id);
+        if (!e) throw new Error(`no agent ${id} on this machine`);
+        e.s.send(text, 'system');
+      },
+      report: (title: string, body: string) => {
+        log(`host guard: ${title}: ${body}`);
+        this.out({ type: 'host_report', title, body });
+      },
+      changed: (h: HostHealth) => {
+        // Only what the portal shows and gates on, and only when it changes: not every look.
+        const key = JSON.stringify([h.sandboxRoot, h.detail, h.level, h.blocked]);
+        if (key === lastKey) return;
+        lastKey = key;
+        this.send({ type: 'host_health', health: { checkedAt: h.checkedAt, sandboxRoot: h.sandboxRoot, level: h.level, ...(h.detail ? { detail: h.detail } : {}), ...(h.blocked ? { blocked: h.blocked } : {}) } });
+      },
+      log: (line: string) => log(`host guard: ${line}`),
+    };
+    const go = (fx: MachineGuardEffects) => {
+      if (this.stopped) return;
+      this.guard = new MachineGuard(s, root, fx, ports);
+      this.guard.start();
+      log(`host guard: watching ${root} every ${s.pollSeconds} s (remount through ffsb-helper-mount), disks ${[root, ...s.hostDiskPaths].join(', ')}${s.reapBrowsersAfterHours > 0 ? `, reaping browsers over ${s.reapBrowsersAfterHours} h` : ''}`);
+    };
+    if (this.guardEffects) go(this.guardEffects);
+    else void realGuardEffects().then(go, (e) => log(`host guard: could not start: ${(e as Error).message}`));
+  }
+
   start() {
+    this.startGuard();
     this.connect();
     // The editor of this clone: a hung or crashed one is restarted automatically (machine/unity.ts).
     this.unityWatch = new MacUnityWatch(this.unity, (text, restarted) => {
@@ -388,6 +448,7 @@ export class Daemon {
 
   shutdown() {
     this.stopped = true;
+    this.guard?.stop();
     clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
@@ -541,6 +602,8 @@ export class Daemon {
       protocol: PROTOCOL_VERSION,
       home: HOME,
       live: [...this.entries.values()].filter((e) => e.s.live).map((e) => e.s.info.id),
+      // Its host guard runs (w466): the portal's own leaves this computer's sandbox drive to it.
+      ...(this.guard ? { guard: true } : {}),
       catalog: Object.keys(CATALOG),
       info: {
         hostname: os.hostname(),
@@ -768,6 +831,9 @@ export class Daemon {
    * sandbox maxAgentsPerSandbox, and a sandbox agent needs its sandbox ready at the folder the spec names.
    */
   private startRefusal(spec: LaunchSpec): string | undefined {
+    // The sandbox drive gone or disk space low on this machine (its host guard, w466): nothing new starts in a sandbox.
+    const gate = spec.sandbox ? this.guard?.blockReason('agent') : undefined;
+    if (gate) return gate;
     if (!spec.sandbox && this.maxSessions <= 0) return "this machine takes agents in its sandboxes only (max_agents 0): start it in one of this machine's sandboxes";
     if (!spec.sandbox) return this.runningIn(undefined) >= this.maxSessions ? `already ${this.maxSessions} agents mid-turn in this machine's main clone` : undefined;
     const sb = this.pool.list().find((s) => s.id === spec.sandbox);
