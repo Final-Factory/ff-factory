@@ -18,6 +18,9 @@ param(
     [string[]]$Nightly = @(),
     [string]$PortalUrl = '',
     [int]$Slots = 8,
+    [int]$MaxSandboxes = 3,
+    [int]$MaxAgentsPerSandbox = 2,
+    [int]$MaxUnity = 2,
     [string]$Service = 'FFFactoryDaemon',
     [string]$Source = '',
     [string]$RepoUrl = 'https://github.com/Final-Factory/FinalFactory.git',
@@ -44,7 +47,7 @@ if (-not $node -or $bestv -lt [version]'22.6') { Write-Host 'Node.js 22.6 or new
 if (-not $Source) { $Source = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 $flags = @('--disable-warning=ExperimentalWarning')
 if ($bestv -lt [version]'23.6') { $flags = @('--experimental-strip-types') + $flags }
-$argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'migrate', '--root', $Root, '--slots', $Slots, '--service', $Service, '--repo-url', $RepoUrl)
+$argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'migrate', '--root', $Root, '--slots', $Slots, '--max-sandboxes', $MaxSandboxes, '--max-agents-per-sandbox', $MaxAgentsPerSandbox, '--max-unity', $MaxUnity, '--service', $Service, '--repo-url', $RepoUrl)
 if ($From) { $argv += @('--from', $From) }
 if ($FromService) { $argv += @('--from-service', $FromService) }
 if ($OldSlots) { $argv += @('--old-slots', $OldSlots) }

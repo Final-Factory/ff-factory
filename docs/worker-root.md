@@ -1,5 +1,9 @@
 # One root folder per worker machine (w511)
 
+> **Built:** w513 implemented this as [worker-install.md](worker-install.md) (install, uninstall, migration, fixed player
+> slots). lothsahn's decisions of 2026-10-06 changed some of it: the root is any folder, there is no HOME override, and
+> the game's data folder stays; that page lists them.
+
 **TL;DR:** A worker machine's daemon and its agents today write to the 63 places listed in section 1, spread over the person's home
 folder, two or three drives, `%ProgramData%` and the OS's own stores. This page lists them all (section 1), then
 proposes one root per machine (`F:\ffw` on BEAST, `D:\work\ffw` on LothDesktop, `/Users/Shared/ffw` on the Macs) holding

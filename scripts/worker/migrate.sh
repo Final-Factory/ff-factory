@@ -7,7 +7,7 @@ set -euo pipefail
 ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --root|--from|--from-service|--old-slots|--nightly|--portal-url|--slots|--service|--repo-url) ARGS+=("$1" "$2"); shift 2 ;;
+    --root|--from|--from-service|--old-slots|--nightly|--portal-url|--slots|--service|--repo-url|--max-sandboxes|--max-agents-per-sandbox|--max-unity) ARGS+=("$1" "$2"); shift 2 ;;
     --dry-run|--rollback|--cleanup|--legacy|--no-cleanup|--absolute-worktrees) ARGS+=("$1"); shift ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
