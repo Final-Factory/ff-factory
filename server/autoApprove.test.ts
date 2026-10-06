@@ -78,12 +78,15 @@ function setup(t: { after: (fn: () => void) => void }) {
     machines.push(m);
     return m;
   };
+  // The machine the sentry itself runs on (w510: standing agents run on machines); labelled, so never a target.
+  machine('home').purpose = 'nightly sentry';
   const agent = st.create({
     name: 'Nightly sentry',
     charter: 'Triage develop.',
     trigger: { kind: 'manual' },
     tools: ['delegate'],
     autoApprove: { enabled: true },
+    machineId: 'home',
   });
   t.after(() => {
     store.flush();
@@ -170,7 +173,7 @@ test('auto-approve: the per-day limit leaves the rest for the user; finishing wa
 
 test('manual approval can use an idle machine too', (t) => {
   const { st, machine, started, store } = setup(t);
-  const a = st.create({ name: 'Manual one', charter: 'x', trigger: { kind: 'manual' }, tools: ['delegate'] });
+  const a = st.create({ name: 'Manual one', charter: 'x', trigger: { kind: 'manual' }, tools: ['delegate'], machineId: 'home' });
   const d = st.requestDelegation(a.id, 'Do it', 'task');
   assert.equal(d.status, 'pending');
   assert.throws(() => st.approveDelegation(d.id), /no ready sandbox or machine/);

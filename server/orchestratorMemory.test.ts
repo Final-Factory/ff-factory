@@ -246,8 +246,4 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
   // The same folder after a fresh conversation (and after a restart: it depends only on who the chat is for).
   const again = opts(o.resetPersonal(BEN).info);
   assert.equal(again.settings.autoMemoryDirectory, dirs[0]);
-  // Standing agents get none of it: no memory folder setting, no memory guard.
-  const a = agents.standing.create({ name: 'PR Watcher', charter: 'Watch things.', trigger: { kind: 'interval', minutes: 30 }, budget: { perRunUsd: 1, perDayUsd: 2.5, maxMinutes: 20 } });
-  const standing = agents.standing.options(sessions.get(a.sessionId).info) as { settings?: { autoMemoryDirectory?: string }; hooks?: { PreToolUse?: unknown[] } };
-  assert.equal(standing.settings?.autoMemoryDirectory, undefined);
 });

@@ -16,7 +16,7 @@ import { redactSecrets } from './secrets.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { resumeMessage } from './restart.ts';
 import type { Config } from './config.ts';
-import type { Requester, Sandbox, SessionInfo, TranscriptEvent, UserInfo } from '../shared/types.ts';
+import type { Machine, Requester, Sandbox, SessionInfo, TranscriptEvent, UserInfo } from '../shared/types.ts';
 
 /** Per-user identity and attribution (docs/identity.md): who asked, and whose account pays. */
 
@@ -268,6 +268,8 @@ class Port implements SessionPort {
   }
 }
 
+const M1 = { id: 'm1', platform: 'linux', appDir: '/home/u/.fff', repoPath: '/home/u/game', maxSessions: 6, status: 'ready', purpose: 'm1 work', sessionIds: [] } as unknown as Machine;
+
 function standing(t: { after: (fn: () => void | Promise<void>) => void }) {
   let store: Store | undefined;
   const tmp = tmpDir(t, 'ffsb-ident-st-', () => store?.flush());
@@ -300,6 +302,15 @@ function standing(t: { after: (fn: () => void | Promise<void>) => void }) {
       started.push({ requestedBy: req.requestedBy });
       return { info: { id: `w${started.length}`, status: 'running' } as SessionInfo };
     },
+    // w510: standing agents run on machines; m1 is an online one whose sessions are the port's.
+    machines: {
+      list: () => [M1],
+      setPurpose: () => undefined,
+      get: (id) => (id === 'm1' ? M1 : undefined),
+      isOnline: (id) => id === 'm1',
+      liveCount: () => 0,
+      createSession: (_m, opts) => port.create({ ...opts, options: () => assert.fail('a machine session gets no SDK options here') }),
+    },
     now: () => clock.now,
   });
   return { st, port, started, notes, sandboxes, clock };
@@ -307,7 +318,7 @@ function standing(t: { after: (fn: () => void | Promise<void>) => void }) {
 
 test('standing runs: a run by hand is its person\'s (on their token), a scheduled one the system payer\'s', (t) => {
   const { st, port, clock } = standing(t);
-  const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 }, tools: ['delegate'] });
+  const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 }, tools: ['delegate'], machineId: 'm1' });
   st.runNow(a.id, 'message', 'look at #640', r(LOTH));
   const s = port.get(a.sessionId);
   const run = st.require(a.id).runs.at(-1)!;
@@ -316,7 +327,7 @@ test('standing runs: a run by hand is its person\'s (on their token), a schedule
   assert.deepEqual(s.sent[0].by, r(LOTH));
   assert.match(s.sent[0].text, /started by a message from Lothsahn/);
   assert.match(s.sent[0].text, /Lothsahn says:\nlook at #640/, 'no longer hard-wired to one name');
-  assert.equal(st.options(s.info).env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_LOTH, "the run's process runs on Lothsahn's token");
+  assert.equal(st.spec(st.require(a.id)).env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_LOTH, "the run's process runs on Lothsahn's token");
 
   // A delegation filed in that run is for Lothsahn; Ben approves it, so its worker is Ben's.
   const d = st.requestDelegation(a.id, 'Fix #640', 'Fix the belt.');
@@ -334,12 +345,12 @@ test('standing runs: a run by hand is its person\'s (on their token), a schedule
   const next = st.require(a.id).runs.at(-1)!;
   assert.equal(next.trigger, 'schedule');
   assert.deepEqual(next.requestedBy, r(BEN));
-  assert.equal(st.options(s.info).env?.CLAUDE_CODE_OAUTH_TOKEN, undefined, "Ben has no own token: the host's (none in this test)");
+  assert.equal(st.spec(st.require(a.id)).env?.CLAUDE_CODE_OAUTH_TOKEN, undefined, "Ben has no own token: the machine's own account (none in this test)");
 });
 
 test('delegations: an auto-approved worker is requested by whoever the filing run was for', (t) => {
   const { st, started, notes } = standing(t);
-  const a = st.create({ name: 'Sentry', charter: 'Watch.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true, exclude: [] } });
+  const a = st.create({ name: 'Sentry', charter: 'Watch.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true, exclude: [] }, machineId: 'm1' });
   st.runNow(a.id, 'manual', undefined, r(LOTH));
   const d = st.requestDelegation(a.id, 'Verify', 'Check it.');
   assert.equal(d.autoApproved, true);

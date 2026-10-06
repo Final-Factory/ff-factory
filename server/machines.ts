@@ -9,7 +9,7 @@ import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
-import { ADOPT_PROTOCOL, ATTACHMENT_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ATTACHMENT_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -904,7 +904,7 @@ export class MachineManager {
   async removeMachine(id: string) {
     const m = this.require(id);
     refuseInDryRun(`removing ${m.id} (its daemon would be unloaded over ssh)`);
-    if (m.local && m.sandboxes?.length) throw new Error(`${m.id} still holds ${m.sandboxes.length} sandbox(es): move them back to this host first (migrate_host_sandboxes direction "back"), or delete them`);
+    if (m.local && m.sandboxes?.length) throw new Error(`${m.id} still holds ${m.sandboxes.length} sandbox(es): delete them first, or convert it to an ssh machine with convert_machine`);
     const { undeploy } = await import('./machineDeploy.ts');
     let note = '';
     try {
@@ -1495,36 +1495,6 @@ export class MachineManager {
 
   /** The host guard's gate for the portal's own host (wired by index.ts): why a new agent or editor there must wait. */
   localGate?: (kind: 'editor' | 'agent') => string | undefined;
-
-  /**
-   * Take a worktree that already exists into a machine's pool (the host migration, server/hostMigration.ts). Resolves
-   * once the daemon has it; its snapshot arrives before the answer, so the record here has it too.
-   */
-  async adoptSandbox(machineId: string, req: { id: string; path: string; branch: string; base: string; createdAt: string; logPath?: string; purpose: string }): Promise<string> {
-    const m = this.requireSandboxDaemon(machineId);
-    const h = this.hellos.get(m.id);
-    if (!h || h.protocol < ADOPT_PROTOCOL) throw new Error(`${m.id}'s daemon speaks protocol ${h?.protocol ?? '?'} and cannot adopt sandboxes; redeploy it first`);
-    this.pendingPurpose.set(req.id, req.purpose);
-    try {
-      return await this.sandboxCall(m.id, { op: 'adopt', sandbox: req.id, path: req.path, branch: req.branch, base: req.base, createdAt: req.createdAt, logPath: req.logPath }, 2 * 60_000);
-    } catch (e) {
-      this.pendingPurpose.delete(req.id);
-      throw e;
-    }
-  }
-
-  /** Drop a sandbox from a machine's pool, leaving its folder, branch and editor (the migration back). */
-  async releaseSandbox(machineId: string, sandbox: string): Promise<string> {
-    const m = this.requireSandboxDaemon(machineId);
-    const h = this.hellos.get(m.id);
-    if (!h || h.protocol < ADOPT_PROTOCOL) throw new Error(`${m.id}'s daemon speaks protocol ${h?.protocol ?? '?'} and cannot release sandboxes`);
-    // Not only one the record shows: a migration undoes an adopt whose snapshot may not have arrived.
-    const id = slugify(sandbox);
-    const text = await this.sandboxCall(m.id, { op: 'release', sandbox: id }, 60_000);
-    m.sandboxes = (m.sandboxes ?? []).filter((s) => s.id !== id);
-    this.store.putMachine(m);
-    return text;
-  }
 
   /** Status, start, stop or restart the Unity editor of a machine's clone, on the machine (machine/unity.ts). */
   unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart', force?: boolean, sandbox?: string) {
