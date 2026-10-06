@@ -68,6 +68,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **`/compact` compacts an orchestrator's conversation** (w518, asked by Lothsahn: a long conversation cost $20.54 for
+  one short reply). `/compact` or `/compact <focus>` typed in your own chat, or Compact conversation in its menu, runs
+  Claude Code's own /compact on that conversation instead of sending the text to the model; owners have the same button
+  on the dispatcher's page. The chat says when it starts and, when it is done, the context measured before and after.
+  Mid-turn it is refused with why; it leaves the `wake_me` check-in and timers alone, and messages arriving meanwhile
+  are answered after it. `/clear` (or `/new`) opens the New conversation dialog. Details: docs/orchestrators.md,
+  "Compacting a conversation".
 - **The portal VM's end-to-end jobs wait less, and pass on main** (w505, part 1, asked by Lothsahn). The test now sets its
   own short health, update-verify, stop and watch timers (`CI_TIMING=fast`, the default; `production` runs the shipped
   defaults), so the rollback, health-restart and hang scenarios take seconds instead of minutes; the shipped defaults
