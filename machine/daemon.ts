@@ -22,7 +22,7 @@ import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './
 import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
 import { MAIN_CLONE, McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { withBaseRepoLock } from '../server/sandboxes.ts';
-import { redactSecrets } from '../server/secrets.ts';
+import { SECRET_ENV, addSecretValues, redactSecrets } from '../server/secrets.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
@@ -1030,6 +1030,8 @@ export class Daemon {
             if (why) throw new Error(why);
             const e = this.entry(msg.info, msg.lastSeq);
             e.spec = msg.spec;
+            // The vault's secrets for this run (docs/vault.md): this daemon's log redacts them by value too.
+            addSecretValues(Object.entries(msg.spec.env ?? {}).filter(([k]) => SECRET_ENV.test(k)).map(([, v]) => v));
             if (!e.s.live) prepare(msg.spec, this.cfg.tempDir);
             e.s.send(msg.text, msg.from, msg.uuid, msg.images, msg.requestedBy, attachments);
           } catch (err) {

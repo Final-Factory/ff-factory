@@ -419,7 +419,7 @@ export class Vault {
   }
 
   /** The Claude tokens the usage meters poll: every enabled claude entry the key opens, labelled by name. */
-  claudeTokens(): { token: string; label: string; fingerprint: string }[] {
+  claudeTokens(): { token: string; label: string; fingerprint: string; where: string }[] {
     this.reload();
     const { key } = this.key();
     if (!key) return [];
@@ -427,7 +427,7 @@ export class Vault {
       .filter((e) => e.kind === 'claude' && !e.disabled)
       .map((e) => ({ e, token: this.open(key, e) }))
       .filter((x): x is { e: VaultEntry; token: string } => !!x.token)
-      .map(({ e, token }) => ({ token, label: `vault: ${e.name} …${e.last4}`, fingerprint: e.fingerprint }));
+      .map(({ e, token }) => ({ token, label: `vault: ${e.name} …${e.last4}`, fingerprint: e.fingerprint, where: `the token vault: ${e.roles.join(', ')} on ${e.machines.includes('*') ? 'every machine' : e.machines.join(', ')}${e.share === 'owner' ? `, ${e.owner}'s own work` : ''}` }));
   }
 
   /**

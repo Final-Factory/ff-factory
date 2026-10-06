@@ -5,9 +5,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { FULL_PERCENT, Vault, eligible, type KeySource, envNameProblem, fingerprintOf, headroom, keySource, newKeyText, pickClaude, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
-import { claudeFromVault, machineRunEnv, redactSecrets, registerSecretValues } from './secrets.ts';
+import { SECRET_ENV, addSecretValues, claudeFromVault, machineRunEnv, redactSecrets, registerSecretValues } from './secrets.ts';
 import { GITHUB_HELPER, githubCredentialEnv } from './launch.ts';
-import { tokenKey } from './usage.ts';
+import { buildAccounts, tokenKey } from './usage.ts';
 import { checkAccountConfig } from './config.ts';
 import { enrolledMachines, issueMachineToken, revokeMachineToken } from './machineTokens.ts';
 import type { PlanUsage } from '../shared/types.ts';
@@ -317,4 +317,32 @@ test('vaultCli: add from a file, list, grant, machine credentials; no value on s
   assert.match(cli('machine-credential', 'list').stdout, /m3/);
   assert.equal(cli('machine-credential', 'revoke', 'm3').status, 0);
   for (const r of [add, ls, issued]) assert.ok(!r.stdout.includes(A.slice(13, 40)) && !r.stdout.includes(fs.readFileSync(out, 'utf8').trim().slice(7)));
+});
+
+test('the usage meters show each vault Claude token as its own account, with where it is granted', (t) => {
+  const { make } = setup(t);
+  const v = make();
+  v.add({ name: 'ben-max', kind: 'claude', value: A, owner: 'ben', machines: ['m3'] });
+  const [tok] = v.claudeTokens();
+  assert.equal(tok.where, "the token vault: workers, standing on m3, ben's own work");
+  const key = `token:${tok.fingerprint}`;
+  const entries = new Map([[key, { kind: 'token' as const, label: tok.label, usage: usage(30, 40), direct: true }]]);
+  const accounts = buildAccounts(entries, { hostName: 'vm', machines: [{ id: 'm3', usesToken: false }], vault: [{ key, label: tok.label, where: tok.where }], sessions: [{ id: 's1', source: key, live: true }] });
+  const a = accounts.find((x) => x.id === key);
+  assert.ok(a, 'listed');
+  assert.equal(a.label, `vault: ben-max …${A.slice(-4)}`);
+  assert.deepEqual(a.where, [tok.where]);
+  assert.deepEqual(a.sessionIds, ['s1']);
+  assert.equal(a.usage?.weekly?.percent, 40);
+});
+
+test('addSecretValues: a daemon learns the secret values of a launch spec without forgetting the vault ones', () => {
+  try {
+    registerSecretValues([DISCORD]);
+    const spec = { GH_TOKEN: GH, FFDISCORD_APP_TOKEN: 'x'.repeat(12), FF_SESSION_ID: 'session-123456' };
+    addSecretValues(Object.entries(spec).filter(([k]) => SECRET_ENV.test(k)).map(([, v]) => v));
+    assert.equal(redactSecrets(`${DISCORD} ${'x'.repeat(12)} session-123456`), `[redacted vault secret …${DISCORD.slice(-4)}] [redacted vault secret …xxxx] session-123456`);
+  } finally {
+    registerSecretValues([]);
+  }
 });

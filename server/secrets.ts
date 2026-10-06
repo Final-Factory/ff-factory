@@ -53,6 +53,14 @@ export function registerSecretValues(values: readonly string[]) {
   knownValues = [...new Set(values.filter((v) => typeof v === 'string' && v.length >= 8))].sort((a, b) => b.length - a.length);
 }
 
+/** The secret-looking values of a launch spec's environment (a vault's or a person's token): what a daemon adds with addSecretValues. */
+export const SECRET_ENV = /^(?:CLAUDE_CODE_OAUTH_TOKEN|GH_TOKEN)$|_(?:TOKEN|KEY|SECRET|PASSWORD)$/;
+
+/** Learn more values to redact without forgetting the ones known (a daemon, from each launch spec it gets). At most 200 kept. */
+export function addSecretValues(values: readonly string[]) {
+  registerSecretValues([...values, ...knownValues].slice(0, 200));
+}
+
 /** Whether `text` may hold a secret this module redacts (a cheap check before the regexes). */
 const maybeSecret = (text: string) =>
   text.includes('sk-ant-oat01-') || text.includes('ffpv1_') || /DISCORD|\.[A-Za-z0-9_-]{6}\.|gh[pousr]_|github_pat_/.test(text) || knownValues.some((v) => text.includes(v));
