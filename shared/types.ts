@@ -980,8 +980,6 @@ export interface HostHealth {
   blocked?: string;
   /** The last clean-up pass (server/cleanup.ts). */
   lastCleanup?: CleanupSummary;
-  /** Automatic Unity restarts in the last hour, per sandbox (docs/unity-lifecycle.md). */
-  unityRestarts?: { sandbox: string; at: string; reason: string }[];
   /** The orphan headless-browser reaper's last pass that found something (server/reaper.ts). */
   lastReap?: { at: string; killed: number; lines: string[] };
 }

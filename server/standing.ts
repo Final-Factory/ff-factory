@@ -109,7 +109,7 @@ interface ActiveRun {
 /**
  * Standing agents: long-lived Claude sessions that wake on a schedule, do their charter's job and go
  * back to sleep (docs/standing-agents.md). One run at a time per agent; a run's process lives only
- * for the run, so a sleeping agent does not hold one of the limits.maxSessions slots.
+ * for the run, so a sleeping agent does not hold one of its machine's agent slots (max_agents).
  */
 export class StandingAgents {
   private readonly cfg: Config;

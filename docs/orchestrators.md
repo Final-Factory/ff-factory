@@ -57,8 +57,8 @@ the server (`server/work.ts`) does three things:
    instead of a new one, and the new text goes into its log.
 2. **Overlaps.** It pulls keys out of the request (specs like `098`, PRs named as such, other `#N` references,
    branch-like names of the branches checked out anywhere, and the ids in `related_ids`) and compares it with open requests and those closed in the last 48 hours, live and
-   recent workers wherever they run (their title, and the branch and open PR of their sandbox, this host's or a
-   machine's, or of the machine's main clone), pending delegation requests, and commits on the base branch in the last
+   recent workers wherever they run (their title, and the branch and open PR of their sandbox, on any machine
+   (this host's own daemon included), or of the machine's main clone), pending delegation requests, and commits on the base branch in the last
    48 hours. A shared request, worker, PR or branch scores 1; a shared spec or `#N` with a similar title scores 0.8,
    without one 0.5; otherwise title similarity. 0.8 and over is strong. The person's orchestrator gets the overlaps at
    once, in the tool's answer.
@@ -526,8 +526,9 @@ to do; ignore this reminder" notes, so no past wake had failed to fire and no re
 ## Agent limits and idle workers
 
 **The limits count agents mid-turn, nothing else** (w384, 2026-10-04: a follow-up to an idle worker was refused with
-"already 6 agents running" while six idle workers held every slot). `limits.maxSessions` (this host), and a machine's
-`max_agents` (main clone), `max_sandbox_agents` (all its sandboxes) and `max_agents_per_sandbox`, count sessions that are
+"already 6 agents running" while six idle workers held every slot). A machine's
+`max_agents` (main clone), `max_sandbox_agents` (all its sandboxes) and `max_agents_per_sandbox` (the portal has no
+limit of its own since w510: it runs no workers, and `limits.maxSessions` is retired) count sessions that are
 running, starting or waiting for a permission answer (`isMidTurn`, `server/sessions.ts`). An idle session, its process up
 or not, takes no slot. Orchestrators never count. The Unity editor limits are unchanged.
 
@@ -535,11 +536,11 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   queues the message (and `start_agent`'s first prompt) in `data/send-queue.json`, which survives a restart, and delivers
   it, in order, when a turn ends or a process goes (and every 30 s). A message to a session that is mid-turn joins its turn
   at once, and a later message to a session with one waiting queues behind it. `message_agent` and `start_agent` say
-  "Queued, not refused: …" with the reason. The host guard (disk, RAM, the sandbox drive) still refuses a new process
-  for a plain message.
+  "Queued, not refused: …" with the reason. A machine's own guard (its disk, RAM and sandbox drive) still refuses a new
+  process there; the portal has no gate of its own.
 - **A worker's brief is never lost** (w496, 2026-10-06: two workers started while LothDesktop's daemon was outdated got
   only the dispatcher's later "Start your brief now"). `start_agent`'s first prompt is sent with `hold`: whatever would
-  refuse it now (the host guard, a machine's daemon that is outdated or offline, a sandbox's attachments not fetchable
+  refuse it now (a machine's daemon that is outdated or offline, a sandbox's attachments not fetchable
   yet) queues it instead, so it goes first once it can, and a later message to that worker waits behind it. Before, the
   outdated-daemon path wrote the brief to the transcript only and marked the worker failed, so the next message started
   it without one. A queued message leaves the queue only once delivered: a delivery that throws is tried again on the
@@ -549,16 +550,17 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   with a `work_id` the worker is not on yet) adds "The request as filed": its title, brief, constraints, related ids
   and every `update_work` note (`requestAsFiled`, `server/work.ts`; notes are kept whole in `WorkItem.notes`, older ones
   are read back from the log), then the intake rules and the `Request:` line. Its attachments go with it as before.
-- **Idle processes are capped by stopping, not refusing.** An idle claude process holds memory: measured on BEAST
-  (2026-10-04), 100-300 MB resident and 450-650 MB committed each. Before a new process starts on this host with
-  `limits.maxSessions` + `limits.maxIdleAgents` (default 6) processes up, the oldest idle one that nothing protects is
-  stopped (`SessionManager.makeRoom`).
+- **Idle processes.** An idle claude process holds memory: measured on BEAST (2026-10-04), 100-300 MB resident and
+  450-650 MB committed each. Before w510 a new process on the portal's own host first stopped the oldest idle one that
+  nothing protects once `limits.maxSessions` + `limits.maxIdleAgents` (default 6) processes were up
+  (`SessionManager.makeRoom`). The portal runs no workers now, so that cap and its keys are gone; idle workers on
+  machines go by the reaper below.
 - **Idle finished workers are stopped** (`Agents.reapIdle`, every 5 minutes): an idle worker whose requests are all
   closed, whose requests moved to another worker, or that has been idle for an hour (`IDLE_REAP_MS`). An hour because a
   follow-up within it reuses the conversation's cached prompt (the hour-long prompt cache); after that a resumed session
   costs the same, so the process only holds memory.
-- **What keeps an idle worker's process** (`Agents.keepIdle`, for both): mid-turn, unanswered messages or background
-  tasks, a pending permission, a pending `wake_me`, a queued message, or a sandbox (host or machine) with uncommitted
+- **What keeps an idle worker's process** (`Agents.keepIdle`): mid-turn, unanswered messages or background
+  tasks, a pending permission, a pending `wake_me`, a queued message, or a machine sandbox with uncommitted
   tracked changes. Standing agents and orchestrators are never stopped this way.
 - **Stopped is not lost.** The session keeps its history (`sdkSessionId`); `message_agent` resumes it. Its transcript says
   why it was stopped.
@@ -625,6 +627,3 @@ than Ben's own.
   tells it not to).
 - An idle personal orchestrator keeps its process until the server restarts.
 - The dispatcher cannot `message_person`: it still reaches people only through ledger decisions.
-- This host's sandboxes still run in the portal's own process. Moving them behind a daemon, as on the machines, is
-  [backlog.md](backlog.md) item 1; the dispatcher already addresses a daemon's sandbox as `"<machine>/<name>"`, and
-  nothing in the ledger or the routing depends on where a worker runs.

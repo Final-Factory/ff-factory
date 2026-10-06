@@ -10,6 +10,57 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Removed
+
+- **The portal no longer runs workers, sandboxes, Unity editors or standing agents itself; machine daemons do** (w510,
+  asked by Lothsahn, 2026-10-06: "Let's just delete that and all the code around running portal processes directly
+  (except those necessary for the orchestrator and dispatcher). The new model is the portal runs the orchestrator and
+  dispatchers, and workers are run and installed separately. The same machine could run workers, but they'll always be
+  under a different process." and "Yes, I expect we can never rollback BEAST, and that's OK."). The portal runs the
+  orchestrators (people's own and the dispatcher), the web page, the ledger, intake, timers and the providers/FFBox
+  connector. BEAST's sandboxes are its own daemon's (`add_machine local`, still supported); after the VM cut-over BEAST
+  becomes an ssh machine (`convert_machine`, kept) and the daemons are re-pointed with `relocate_machines` (kept).
+  `fffctl migrate` (w499) is kept. Portal-only mode (config `hostSandboxes: false`, w464) is the only mode.
+  - Gone: `SandboxManager` (`server/sandboxes.ts` keeps only `slugify`, `branchProblem`, `normalizePurpose`,
+    `withBaseRepoLock`, `pickEditorLog` and `pruneEditorLogs`); host worker sessions (`Agents.workerOptions`,
+    `workerBrief`, `workerTools` with `mcp__sandbox__*` and `wait_for_unity`); the host Unity watch
+    (`server/unityBlocked.ts`, the host parts of `watchdog.ts`, `unityHang.ts`, `unityMcp.ts`, `wake.ts`,
+    `switchBranch.ts`); the "this host" place in the Capacity block and placement (`set_app_config placement.*` refuses
+    "this host" and "host"); the "Unity editors running N/M; live agents N/M" line of `system_status`;
+    `SessionManager`'s host limits (`limits.maxSessions`, `limits.maxIdleAgents`, `startGate`); `MachineManager.localGate`;
+    the host guard's drive watch for the portal (`HostDeps.watchDrive`: the portal passes false and watches its data
+    volume and `hostDiskPaths`; BEAST's daemon's guard owns its drive, unchanged); `host_recovery` actions `remount`,
+    `trim`, `compact`, `selftest` and `reboot` (`cleanup` stays; `machine_daemon restart` makes the daemon's guard try
+    the mount again); the portal's browser reaper wiring (the daemon reaps); `migrate_host_sandboxes` (to the machine
+    and back), `server/hostMigration.ts`, `scripts/host-migration.ts` and the portal side of `adopt`/`release` (the
+    daemon still answers protocol 6); the elevated server's refusal to start Unity (the elevation check and the hand-off
+    to the Limited task stay, because the orchestrators' shells inherit the token); `supervise.ps1`'s wait for the
+    sandbox drive at start; `ResumeFile.editors`; `AppState.sandboxes` and the `sandbox` / `sandbox_removed` events; the
+    web host sandbox page (an old `#/sandbox/<id>` link opens that name on this host's own daemon).
+  - **Standing agents** need a machine: `create_standing_agent` and `update_standing_agent` require one. One from before
+    with none keeps its record and conversation but never runs (a manual run is refused, a scheduled one is recorded as
+    skipped, with the reason), and `system_status` names it ("Standing agents with no machine …"); giving it a machine
+    is the way out. Standing agents with a machine keep running (the portal-only mode of w464 skipped those too).
+  - **Retired config keys** (`RETIRED_CONFIG_KEYS`, `server/config.ts`): `hostSandboxes`, `librarySeed`, `librarySeedGB`,
+    `librarySeedCopy`, `limits.maxUnity`, `limits.maxSessions`, `limits.maxIdleAgents`, `limits.maxSandboxes`,
+    `limits.minFreeGB`, `unity.editorPath`, `unity.extraArgs`, `unity.watchdog`, `unity.hang`, `unity.autoRestart`,
+    `claudeAccounts.standing`. A config that sets one still loads; it is named once at startup and in `system_status`
+    and ignored. `set_app_config` no longer takes `limits.maxUnity`, `limits.maxSandboxes`, `limits.maxSessions` or
+    `claudeAccounts.standing`. Kept and still read: `sandboxRoot` (this host's own daemon's sandbox root, and the default
+    parent of `review.root` and `standingRoot`; optional), `standingRoot`, `unity.idleStopMinutes` and `unity.mcpServer`
+    (handed to that daemon), `limits.minFreeRamGB`, `hostGuard.*` and `hostDiskPaths`. `add_machine local` no longer
+    takes limits or the Library seed from the config: pass `max_sandboxes`, `max_unity`, `library_seed` and the rest to
+    `add_machine`. The VM migration (`server/vmMigration.ts`) leaves the retired keys out and no longer writes
+    `hostSandboxes`.
+  - **BEAST cannot go back to host sandboxes.** The rollback `migrate_host_sandboxes back` and the offline
+    `node scripts/host-migration.ts back` are gone. The rollback to the BEAST portal after the VM cut-over (relocate back,
+    then `convert_machine` to "local") still works.
+  - Docs: [beast-machine.md](docs/beast-machine.md), [machines.md](docs/machines.md), [restart.md](docs/restart.md),
+    [self-recovery.md](docs/self-recovery.md), [standing-agents.md](docs/standing-agents.md),
+    [accounts.md](docs/accounts.md), [unity-lifecycle.md](docs/unity-lifecycle.md),
+    [unity-dialogs.md](docs/unity-dialogs.md) and the README follow it; `docs/backlog.md` item 1 is done. Tests:
+    `server/portalOnly.test.ts` and `server/unityBlocked.test.ts` are deleted with their code; the others follow the removal.
+
 ### Fixed
 
 - **`fffctl migrate` copies from BEAST again, and says what it is doing** (w508, Lothsahn's dry run stopped at "tar:

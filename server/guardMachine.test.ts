@@ -19,5 +19,5 @@ test('machines: agents end and relaunch Unity freely, never the daemon or claude
   const denied = [`${K[1]} node`, `${K[2]} claude`, `${K[1]} -f daemon.ts`, `${K[0]} $(pgrep -f ff-factory)`, 'launchctl bootout gui/501/com.fffactory.daemon'];
   for (const c of denied) assert.match(checkShell(c, ctx) ?? '', /blocked/, c);
   // On the shared host (sandboxes) the ban stays: the unity tool restarts an editor.
-  assert.match(checkShell(`${K[1]} -9 Unity`, { ...ctx, ownMachine: false }) ?? '', /mcp__sandbox__unity/);
+  assert.match(checkShell(`${K[1]} -9 Unity`, { ...ctx, ownMachine: false }) ?? '', /mcp__machine__unity/);
 });

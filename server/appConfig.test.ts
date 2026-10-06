@@ -84,7 +84,7 @@ test("app config (w510): the portal's own pool limits and the standing account a
   const before = fs.readFileSync(file, 'utf8');
   for (const key of ['limits.maxUnity', 'limits.maxSandboxes', 'limits.maxSessions', 'claudeAccounts.standing']) {
     assert.ok(!(SETTABLE_KEYS as readonly string[]).includes(key), key);
-    assert.throws(() => setAppConfig(file, cfg as unknown as Config, key as never, '2'), undefined, key);
+    assert.throws(() => setAppConfig(file, cfg as unknown as Config, key as never, '2'), Error, key);
   }
   assert.equal(fs.readFileSync(file, 'utf8'), before, 'the file is left alone');
 });

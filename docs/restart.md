@@ -14,17 +14,19 @@ scripts\restart.ps1 -DrainMinutes 3
 
 ## What happens
 
-1. **Drain.** The script writes a JSON `data\restart.request`. The server sends every busy worker of this
-   host a `[app restart pending]` message: commit and push your work (a WIP commit is fine) and end your
-   turn. Workers on machines (BEAST's own sandboxes included, since 2026-10-05) are not drained: they keep
-   running ("Agents on machines" below). It waits until no worker is mid-turn, or until `-DrainMinutes` (default 10) passes. With
-   nobody busy it goes straight on. The orchestrator and standing agents are not waited for. The
+1. **Drain.** The script writes a JSON `data\restart.request`. The portal runs no workers of its own (w510), so every
+   worker is on a machine. The server sends every busy worker a `[app restart pending]` message: commit and push your
+   work (a WIP commit is fine) and end your turn. With `machines.keepAgentsOnRestart` on (since 2026-10-05, BEAST's own
+   daemon's sandboxes included) workers on machines are not drained: they keep running ("Agents on machines" below).
+   It waits until no worker is mid-turn, or until `-DrainMinutes` (default 10) passes. With
+   nobody busy it goes straight on. The orchestrators and the dispatcher are not waited for. The
    dashboard shows a "Restart pending" banner meanwhile. The supervisor keeps running during the
    drain; if the script is interrupted, the server gives up after 5 more minutes, tells the drained
    workers to carry on, and nothing is lost.
 2. **Stop.** The script stops the supervisor, then asks the server to stop. The server writes
-   `data\resume.json` (below), stops this host's agent processes (the orchestrators and standing agents), saves state
-   and exits. Machine daemons, their agents and all Unity editors keep running.
+   `data\resume.json` (below), stops the agent processes it runs itself (the orchestrators and the dispatcher; and the
+   machine workers' sessions, unless `machines.keepAgentsOnRestart` is on), saves state and exits. Machine daemons,
+   their agents and all Unity editors keep running.
 3. **Update** (with `-Update`). The script leaves `data\update.request`. The next supervisor runs
    `update-steps.ps1` before starting node, and writes the outcome to `data\update.result.json`.
    It fast-forwards. If the upstream has a new, unrelated history (republished) or was rewritten
@@ -36,12 +38,15 @@ scripts\restart.ps1 -DrainMinutes 3
 4. **Start**, always through the Limited `ffsb-server` task (`schtasks /run /tn ffsb-server`),
    never from the calling shell, so the app cannot inherit admin rights. If the task is missing or
    does not start a supervisor within 60 s, the script starts the supervisor directly. From an
-   elevated shell that app runs elevated: it refuses to start Unity and shows a banner.
+   elevated shell that app runs elevated: it keeps running and shows a banner, because the orchestrators' shells
+   inherit its token.
 5. **Resume.** The new server reads `data\resume.json` (renamed to `resume.done.json` first, so it
    is used once) and sends each listed worker:
-   > The app restarted (update at …). Your process was stopped; the worktree, the Unity editor and
-   > your history are intact. Check git status for half-written edits, re-pin your Unity instance,
-   > and continue where you left off.
+   > The app restarted (update at …). Your process was stopped; your working tree and your history are
+   > intact. Check git status for half-written edits and continue where you left off.
+
+   (A worker is on a machine, whose daemon kept its working tree and its editor. An orchestrator gets "your history
+   is intact" and "Continue where you left off", with no tree or Unity: `resumeMessage`, `server/restart.ts`.)
 
    plus any messages it had not answered yet. It then sends the orchestrator one `[app restarted]`
    paragraph: the version before and after ("Version 0.1.0 → 0.2.0."), who was resumed, who could
@@ -51,7 +56,7 @@ The script logs to `data\supervisor.log` and waits for the new server (3 min, or
 `-Update`). It is safe to run twice: a second run while one is in progress exits at once, and a run
 with nothing running just starts the app.
 
-**Agents on machines** (a Mac, a Windows PC, BEAST's own daemon with its sandboxes) keep running through a restart or
+**Agents on machines** (a Mac, a Windows PC, BEAST's own daemon with its sandboxes; every worker, since w510) keep running through a restart or
 an update: config `machines.keepAgentsOnRestart: true`, on since 2026-10-05 (w424; lothsahn: "Can't we make it restart
 while the workers are going?"). Their daemons are not part of the portal's process tree. The restart sends them no
 drain message and stops nothing. While the portal is down the daemons queue their agents' transcript events (up to
@@ -68,7 +73,7 @@ drain message and stops nothing. While the portal is down the daemons queue thei
   is redeployed.
 - **Until a daemon reconnects** after the restart, its agents show `stopped` with "was running when the portal stopped;
   not heard from its daemon since (it may still be running there)" (`SessionManager.restore`). Its first report puts
-  their real state back. Off (`false`), machine agents are drained and stopped like this host's, and resumed after.
+  their real state back. Off (`false`), machine agents are drained and stopped with the portal, and resumed after.
 
 ## Who is resumed
 
@@ -108,14 +113,13 @@ so the new server makes one from what the last server left (`Agents.uncleanResum
   the last beat, it went down ("BEAST went down unexpectedly (lost power, was hard-reset or crashed)
   after <time>, and booted again at <time>"). Otherwise only the server stopped (a crash or a kill).
 - **Sessions to resume:** the workers that were mid-turn (by status or by their marks) or waiting on
-  background tasks, on this host and on the Macs.
-- **Editors:** the editors that were up and died with it (`SandboxManager.lostEditors`).
+  background tasks, on the machines.
 
-Then it brings things back in order. It waits (up to 15 minutes) for the sandbox drive, which a
-reboot leaves detached until `ffsb-helper-mount` runs (docs/self-recovery.md). Next it starts those
-editors again, then resumes the agents. Each agent's message says what happened and whether its
-editor is being started again. Agents on a Mac resume once its daemon is connected and current; one
-whose process kept running on the Mac is left alone. The orchestrator gets one paragraph, starting
+Then it resumes the agents. Agents on a machine resume once its daemon is connected and current; one
+whose process kept running there is left alone. For this host's own daemon (BEAST) it first waits (up to 15 minutes)
+for the sandbox drive, which a reboot leaves detached until its daemon's guard runs `ffsb-helper-mount`
+(docs/self-recovery.md). The editors that were up are that daemon's to start again, no longer the portal's (before
+w510 the resume file listed them, `ResumeFile.editors`). The orchestrator gets one paragraph, starting
 "FF Factory restarted WITHOUT a clean stop: …".
 
 An update asked for with `request_app_update` is kept in `restart.pending.json` until the server
@@ -126,16 +130,17 @@ server resumes everything.
 **Pending `wake_me` wakes** (workers' and the orchestrator's) are kept in `data/wakes.json` and re-armed
 at startup, after a clean restart or a crash alike (`Waker.restore`). One whose time passed while the
 server was down fires at once and says how late it is. A wake that cannot start its agent (the agent
-limit, the host guard) is retried once a minute, ten times, before the transcript says it failed.
+limit, a machine that is offline or outdated) is retried once a minute, ten times, before the transcript says it failed.
 
 Crash-loop guard: a second unclean stop within 30 minutes (`unclean-recovery.last`) only reports what
 was cut off, as before. It does not resume, restart or retry anything.
 
 ## Never elevated
 
-Everything the server starts inherits its token: agent shells, and every Unity editor. An elevated
-editor stops on Unity's "running as administrator" dialog ([unity-dialogs.md](unity-dialogs.md)).
-Layers that keep the app non-elevated:
+Everything the server starts inherits its token: the orchestrators' and the dispatcher's shells. (Before w510 that
+included every Unity editor, and an elevated editor stops on Unity's "running as administrator" dialog,
+[unity-dialogs.md](unity-dialogs.md). Editors are machine daemons' now, each daemon in its own LeastPrivilege task, so
+an elevated portal no longer elevates them.) Layers that keep the app non-elevated:
 
 - `restart.ps1` always starts through the Limited task. `start-server.ps1` run from an elevated
   shell hands over to `restart.ps1`. `supervise.ps1` started elevated runs the task and exits.
@@ -144,8 +149,8 @@ Layers that keep the app non-elevated:
   `restart.ps1 -NoDrain` detached, waits for it to stop the supervisor, and exits. The task then
   brings up a fresh non-elevated supervisor and server. If it cannot hand off (no task, a task at
   RunLevel Highest, no supervisor, `FFSB_NO_DEELEVATE` set, or a hand-off tried within 15 minutes),
-  it keeps running but refuses to start Unity. The refusal shows on the sandbox card, in a dashboard
-  banner and in the logs.
+  it keeps running, with a dashboard banner, a warning in the `[app restarted]` note and a line in the logs, because
+  every orchestrator shell has admin rights. (Until w510 it also refused to start Unity.)
 - A non-elevated shell cannot stop an elevated app, because it cannot even read its command line.
   `restart.ps1` detects that and says what to do: run `restart.cmd` once as administrator.
 - **Nobody signed in.** The task runs only in its user's desktop session (LogonType Interactive), so after an
@@ -154,10 +159,6 @@ Layers that keep the app non-elevated:
   (`desktopSignedIn`), does not try a hand-off that cannot work, and its banner says: sign in to the desktop, then
   right-click `restart.cmd` > Run as administrator. `restart.ps1` logs the same when the task does not start. BEAST
   signs in by itself since 2026-10-05 (Windows automatic sign-in), so a reboot brings the task back.
-
-Editors started while the app was elevated stay elevated until they are stopped and started again.
-A non-elevated server recognises them by their window title, and the card says they run with
-administrator rights. It cannot stop them itself; close them on the desktop.
 
 ## Files in data\
 

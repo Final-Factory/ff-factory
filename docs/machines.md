@@ -1,6 +1,8 @@
 # Machines: agents on the user's Macs and Windows PCs
 
-A machine is a whole computer the portal can run agents on, beside the sandboxes on the host. By default
+A machine is a whole computer the portal can run agents on. The portal itself runs only the orchestrators and the
+dispatcher (w510, 2026-10-06): every worker, sandbox, Unity editor and standing agent runs under a machine's daemon,
+and the portal's own computer can be one too ([beast-machine.md](beast-machine.md)). By default
 agents work in the machine's main game clone, the one the user uses (no worktree unless a task truly needs
 one); a machine given a `sandbox_root` also holds its own pool of sandboxes ([Machine sandboxes](#machine-sandboxes)). Machines are Macs (the daemon is a LaunchAgent) or Windows PCs (the
 daemon is a scheduled task at the user's logon, [below](#windows-machines)), with ids such as `m5` or
@@ -95,15 +97,15 @@ before redeploying by hand.
   running keeps its account until its process restarts; after an update the daemons are redeployed
   anyway. An agent working for someone with their own token (config `userClaudeEnv`,
   [identity.md](identity.md)) runs on that token instead, on any Mac. Every account switch, including the
-  orchestrator's and this host's workers': [accounts.md](accounts.md).
-- **Limits.** Machine agents run on the Mac, so they do not count toward this host's
-  `limits.maxSessions`; each machine has its own limit for its main clone and standing agents (`max_agents`,
-  default 3), and each of its sandboxes its own (`max_agents_per_sandbox`, below). **`max_agents: 0` means sandboxes
+  orchestrator's, the dispatcher's and this host's own daemon's workers': [accounts.md](accounts.md).
+- **Limits.** Each machine has its own limit for its main clone and standing agents (`max_agents`,
+  default 3), and each of its sandboxes its own (`max_agents_per_sandbox`, below). The portal has no worker limit of
+  its own: it runs none (`limits.maxSessions` and `limits.maxIdleAgents` are retired). **`max_agents: 0` means sandboxes
   only** (w477, Lothsahn on 2026-10-05, for BEAST and LothDesktop): no worker in its main clone (`start_agent` with the
   machine alone is refused, naming its sandboxes), no standing agent assigned to it, no delegated worker sent to its
   main clone, and the Capacity block never lists or suggests its main clone (`mainCloneRefusal` in
   `server/machines.ts`; the daemon refuses such an agent too). This host's own daemon's main clone takes no workers
-  whatever its `max_agents` ([beast-machine.md](beast-machine.md)). Like the host's, they count agents
+  whatever its `max_agents` ([beast-machine.md](beast-machine.md)). They count agents
   mid-turn only, and a message that finds them full waits in the portal's queue instead of being refused; the daemon's
   own start check counts the same way, and idle finished workers are stopped by the portal's reaper
   ([orchestrators.md](orchestrators.md#agent-limits-and-idle-workers), w384).
@@ -119,7 +121,7 @@ before redeploying by hand.
   the dashboard's meters; one that cannot get back above the soft threshold also tells the orchestrator,
   with the biggest remaining consumers. Every pass is logged to `cleanup-log.jsonl` in the daemon's folder.
   `machine_cleanup` runs a pass now.
-- **Standing agents** can be assigned to a machine: their folder is `agents/<id>` in the daemon's folder
+- **Standing agents** run on a machine and need one ([standing-agents.md](standing-agents.md)): their folder is `agents/<id>` in the daemon's folder
   (`~/.ff-factory/agents/<id>` by default) on that Mac, runs wait (like a full slot) while the machine is offline, and budgets work unchanged.
 
 ## Setup and updates, from this host
@@ -260,7 +262,7 @@ log on again. A deploy while nobody is logged on installs everything and says so
   log is
   `%LOCALAPPDATA%\Unity\Editor\Editor.log`. The editor is launched through `Start-Process` so that it is
   nobody's child and outlives a daemon restart. The dialog watch reads and presses Unity's windows with
-  `scripts/unity-windows.ps1`, as the host's does ([unity-dialogs.md](unity-dialogs.md#macs)). No App Nap.
+  `scripts/unity-windows.ps1` ([unity-dialogs.md](unity-dialogs.md#macs)). No App Nap.
 - **Guard**: the same rules. Killing `node.exe` or `claude.exe`, and ending, changing or deleting the
   `FFFactoryDaemon` task (`schtasks /End|/Change|/Delete`, `Stop-/Disable-/Unregister-/Set-ScheduledTask`) are
   refused; Unity, Unity Hub and crash handlers are fine to kill. The daemon's folder (`.ff-factory`, or the
@@ -348,7 +350,7 @@ Host lothdesktop
 
 ## Machine sandboxes
 
-A machine with a `sandbox_root` holds a pool of sandboxes, as the host does: each a **git worktree of the
+A machine with a `sandbox_root` holds a pool of sandboxes (the portal's own computer included, through its own daemon): each a **git worktree of the
 machine's main clone** (`repo_path`) at `<sandbox_root>/<name>`, on its own branch, with its own `Library` and at
 most one Unity editor. The folder name is also the Unity project name, so the editor's MCP instance is
 `<name>@<hash>`, which the guard pins its agents to. They are addressed as `<machine>/<name>`, e.g.
@@ -385,8 +387,8 @@ sandbox agents in all), `max_unity: 2`.
   in it is mid-turn, named by title. The portal checks, then the daemon again with what it runs (`othersMidTurn` in
   `server/sessions.ts`); neither counts the worker calling it, nor a "running" left by an agent whose process is gone,
   which the portal clears, w422).
-- `list_sandboxes` starts with the **Capacity** block (below, "Placing work"), then shows this host's sandboxes and
-  then each machine's, grouped, with each group's limits and free count, one line per sandbox (a **FREE** flag when it is ready, labelled unused and has no live agent) and only
+- `list_sandboxes` starts with the **Capacity** block (below, "Placing work"), then shows each machine's sandboxes,
+  grouped (this host's own daemon's among them; the portal holds none), with each group's limits and free count, one line per sandbox (a **FREE** flag when it is ready, labelled unused and has no live agent) and only
   its live agents. An offline machine's sandboxes show as last reported.
 
 **Agents in a machine sandbox** get their own brief (the worktree, their editor's instance name) and the `machine`
@@ -421,7 +423,8 @@ by one shows as an error: delete it again). The portal keeps each sandbox (daemo
 the machine record (`sandboxes`). Git operations on the main clone's repository (fetch, worktree add and remove, the
 main clone's own branch switch) take one lock in the daemon.
 
-**In the web UI.** The sidebar groups everything by computer: this host, then each machine, each a collapsible group
+**In the web UI.** The sidebar groups everything by computer: this host (its own daemon's sandboxes, or "orchestrators only" when it has no
+daemon), then each machine, each a collapsible group
 whose header shows its load and `sandboxes/max_sandboxes · editors/max_unity`, then one row per sandbox (label, branch,
 editor, a **FREE** badge) with its live agents under it, then the machine's main clone and its agents. The Overview
 page (`#/overview`) shows the same as one card per computer. A machine sandbox has its own page,
@@ -440,7 +443,7 @@ none (LothDesktop's sandbox agents fell back to Unity on the command line). The 
 clone's, then a user-wide one, then the one most of its projects use. Each agent's server gets its place's own
 `UNITY_MCP_STATUS_DIR` (`<app_dir>/unity-mcp/<sandbox>`, or `_main-clone`), which the daemon keeps every 5 s holding
 only that editor's status file from `~/.unity-mcp` (and a fallback port file pointing at its port, 0 while it is
-down), as the host does for its sandboxes (`server/unityMcp.ts`). So a pinned agent never lands on another sandbox's
+down) (`readStatusFiles` and `syncStatusDir`, `server/unityMcp.ts`). So a pinned agent never lands on another sandbox's
 editor while its own restarts. A status file counts only if written since that editor started (for an editor already
 running at the daemon's first look, any age). The daemon logs the command it found, or that there is none, at start.
 
@@ -468,12 +471,11 @@ sandboxes, BEAST and LothDesktop alike, not sent to LothDesktop only when BEAST 
 LothDesktop and Beast, not just when BEAST is full").
 
 - **Capacity block** (`server/placement.ts`, `capacityLines`), first in `list_sandboxes` and in `system_status`: one
-  line per computer that holds sandboxes (this host's own pool while it has one, then each machine's, BEAST's own
-  daemon included) with its live agents against its limit (and how many are mid-turn), free sandboxes and how many
+  line per computer that holds sandboxes (each machine's, BEAST's own daemon included; the portal's host has no line of
+  its own) with its live agents against its limit (and how many are mid-turn), free sandboxes and how many
   more can be made, RAM used and its Unity editors against `max_unity` (every Unity process there, "editors 4 of 3: 1
   interactive, 3 batch", w469). Each is **BUSY** (offline; as many live agents
-  as its limit, `limits.maxSessions` here or `max_sandbox_agents` / `max_sandboxes` × `max_agents_per_sandbox` on a
-  machine; `RAM_BUSY_PCT` (85%) of its RAM or more; or no free sandbox and no room to make one) or **ROOM n%**: the
+  as its limit, `max_sandbox_agents` / `max_sandboxes` × `max_agents_per_sandbox`; `RAM_BUSY_PCT` (85%) of its RAM or more; or no free sandbox and no room to make one) or **ROOM n%**: the
   mean of its free shares of agent slots, sandboxes (free plus those it may still make), RAM and editors, each
   against its own limits (`roomOf`). The last line names where the next piece of new game-repo work goes
   (`pickComputer`): the computer with the most room; when the best two are within `EVEN_MARGIN` (10 points), the one
@@ -494,8 +496,8 @@ LothDesktop and Beast, not just when BEAST is full").
   }
   ```
 
-  `placement.prefer` names computers in order (machine ids, or `this host` / `host` for this host's own pool):
-  the next new work goes to the first of them with room. `placement.avoid` keeps a computer off unless nothing else
+  `placement.prefer` names computers in order (machine ids; `this host` and `host` are refused by `set_app_config`,
+  since the portal's host is no place for work: name its own daemon, `beast`): the next new work goes to the first of them with room. `placement.avoid` keeps a computer off unless nothing else
   has room, with the reason shown beside it. The rest come between them, spread by room as above, sandbox computers
   before main clones. `null` clears either (`set_app_config placement.avoid null` once BEAST is fixed). The Capacity
   block tags each computer `[preferred #n]`, `[avoided: <why>]` or `[main clone]`, and its last line says why the next
@@ -519,10 +521,12 @@ LothDesktop and Beast, not just when BEAST is full").
 ## The portal's own host as a machine
 
 `add_machine {id: "BEAST", local: true}` runs a daemon on the portal's own computer, deployed and controlled without
-ssh, which takes over the host's sandboxes (`migrate_host_sandboxes` moves the existing ones in place; `back` undoes
-it). Its settings default to the portal's config. Protocol 6 adds the `adopt`/`release` sandbox ops and the pool's
-total agent cap, Library seed, below-normal editors and protected paths. Everything about it, with the migration,
-rollback and deploy steps: [beast-machine.md](beast-machine.md).
+ssh, which runs this host's sandboxes (BEAST's five moved in place on 2026-10-05; the portal's own pool and the tool
+that moved them are gone, w510). Its base clone, sandbox root, protected paths, disk thresholds and Unity MCP server
+default to the portal's config; its limits and Library seed are `add_machine`'s own (`max_sandboxes`, `max_unity`,
+`library_seed`, …). Protocol 6 added the `adopt`/`release` sandbox ops (the daemon still answers them; the portal no
+longer sends them) and the pool's total agent cap, Library seed, below-normal editors and protected paths. Everything
+about it: [beast-machine.md](beast-machine.md).
 
 ## Moving the portal
 

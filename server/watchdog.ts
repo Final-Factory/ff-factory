@@ -72,7 +72,7 @@ export interface KnownDialog {
    * dialog the watchdog does not answer itself goes to the sandbox's agents first (agentAnswers).
    */
   person?: true;
-  /** Buttons an agent may never press through the unity tool's answer_dialog (checkAgentAnswer). */
+  /** Buttons never pressed in this dialog, and why (part of its advice). */
   never?: { button: RegExp; why: string };
 }
 
@@ -142,7 +142,7 @@ export const KNOWN_DIALOGS: KnownDialog[] = [
     match: /open scene\(s\) have been (modified externally|changed on disk)/i,
     action: { kind: 'dismiss', button: 'Reload', onlyIf: 'scenesClean' },
     advice:
-      'files of scenes open in the editor changed on disk (a branch switch, rebase, merge, reset, pull or stash with the editor open). "Reload" loads the new files and throws away unsaved in-editor scene edits. With no in-editor scene edits worth keeping, answer Reload (unity action "answer_dialog", button "Reload"), or restart the editor, which is the same. With edits you need, note them, Reload, and redo them: the editor cannot save them while it asks, and "Ignore" followed by a save would overwrite the new scene file with the old one, so Ignore is refused.',
+      'files of scenes open in the editor changed on disk (a branch switch, rebase, merge, reset, pull or stash with the editor open). "Reload" loads the new files and throws away unsaved in-editor scene edits. With no in-editor scene edits worth keeping, restart the editor (unity action "restart"), which reloads them. With edits you need, note them, Reload, and redo them: the editor cannot save them while it asks, and "Ignore" followed by a save would overwrite the new scene file with the old one, so Ignore is refused.',
     never: { button: /^ignore$/i, why: 'Ignore keeps the old scene in the editor, and a later save overwrites the scene file git just wrote' },
   },
   {
