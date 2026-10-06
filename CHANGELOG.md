@@ -10,6 +10,36 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **`fffctl migrate` copies from BEAST again, and says what it is doing** (w508, Lothsahn's dry run stopped at "tar:
+  Unexpected EOF in archive" after a long silence).
+  - **Cause (measured on BEAST through its own sshd):** OpenSSH for Windows 9.5p2, with cmd.exe as its shell, does
+    not hand a command its stdin whole. `tar -T -` got part of its file list, garbled, and never its end: with 2,000
+    names it packed 496 and then waited forever, so the archive never ended. Its process was still waiting 22 minutes
+    later. A PowerShell script with its data gets through up to 128 KB, and not at 256 KB.
+  - **The fix:** nothing large goes to BEAST on stdin any more (32 KB at most, refused before ssh otherwise). The
+    listing keeps its file list on BEAST, and each stream of at most 2,000 files and 256 MB is named by line numbers,
+    written to a list file there, and sent by `tar -T <file>` with ssh's stdin closed. Each stream is checked (the
+    archive whole, BEAST's tar's exit code and its own messages, always shown) and tried again up to 3 times, and a
+    stalled one is ended after 2 minutes.
+  - Files tar on Windows cannot take (names outside its code page) come through PowerShell, which names a file it
+    cannot open, or one that went, instead. The manifest names only files unpacked whole, written after each stream,
+    so a stopped run is resumed by the next.
+  - **Progress:**
+    - "listing BEAST's files..." with the count and size;
+    - a line every 5 s with files and bytes done, the rate and the time left;
+    - each part's time;
+    - the same in `--cut-over`.
+  - Tests:
+    - against the real route on BEAST: its own sshd.exe as a private loopback instance, its tar.exe and PowerShell
+      5.1, on a synthetic folder of 20,007 files and 340 MB with a locked file, Unicode names, a path over 260
+      characters and a file deleted mid-copy. 20,005 files arrive byte-identical, the locked one and the deleted one
+      are named, and the next run copies 2;
+    - in CI, the fake BEAST now gives tar no stdin, as BEAST does, and caps PowerShell's at 64 KB. A new test cuts
+      streams (retried; then always, stopped with BEAST's message and resumed) and covers a name tar cannot take, an
+      unreadable file and a vanished one.
+
 ### Added
 
 - **The portal VM's end-to-end jobs wait less, and pass on main** (w505, part 1, asked by Lothsahn). The test now sets its

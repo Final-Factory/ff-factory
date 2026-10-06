@@ -10,7 +10,7 @@ import path from 'node:path';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { DEFAULTS, Migration, parseArgs, type Options, type System } from './fff-migrate.ts';
+import { DEFAULTS, MANIFEST_PS, MAX_STDIN_BYTES, Migration, parseArgs, type Options, type System } from './fff-migrate.ts';
 import { ROOT } from '../server/config.ts';
 import { claudeProjectFolder } from '../server/vmMigration.ts';
 import { Store } from '../server/store.ts';
@@ -298,7 +298,7 @@ for ($i = 0; $i -lt 120; $i++) { try { $null = Invoke-WebRequest -UseBasicParsin
   // ---- the fakes: ssh runs BEAST's side here; schtasks.exe and claude record what they were asked
   const fake = path.join(base, 'bin');
   fs.mkdirSync(fake);
-  fs.writeFileSync(path.join(fake, 'fake.env'), `PWSH=${JSON.stringify(PWSH)}\nLOG=${JSON.stringify(path.join(base, 'ssh.log'))}\nTASKS=${JSON.stringify(path.join(base, 'schtasks.log'))}\nCLAUDE_LOG=${JSON.stringify(path.join(base, 'claude.log'))}\nDENY=${JSON.stringify(path.join(base, 'deny'))}\nOLD_BEAST=${JSON.stringify(path.join(base, 'old-beast'))}\nTOKEN_FILE=${JSON.stringify(path.join(vm, 'secrets', 'claude-oauth-token'))}\n`);
+  fs.writeFileSync(path.join(fake, 'fake.env'), `PWSH=${JSON.stringify(PWSH)}\nLOG=${JSON.stringify(path.join(base, 'ssh.log'))}\nTASKS=${JSON.stringify(path.join(base, 'schtasks.log'))}\nCLAUDE_LOG=${JSON.stringify(path.join(base, 'claude.log'))}\nDENY=${JSON.stringify(path.join(base, 'deny'))}\nOLD_BEAST=${JSON.stringify(path.join(base, 'old-beast'))}\nTRUNCATE=${JSON.stringify(path.join(base, 'truncate'))}\nTARSKIP=${JSON.stringify(path.join(base, 'tarskip'))}\nTOKEN_FILE=${JSON.stringify(path.join(vm, 'secrets', 'claude-oauth-token'))}\n`);
   const script = (name: string, body: string) => fs.writeFileSync(path.join(fake, name), `#!/usr/bin/env bash\nset -euo pipefail\n. "$(dirname "$0")/fake.env"\n${body}`, { mode: 0o755 });
   script(
     'ssh',
@@ -312,11 +312,39 @@ if [ -e "$DENY" ]; then echo "$dest: Permission denied (publickey)." >&2; exit 2
 if [ "\${1:-}" = powershell.exe ]; then
   shift; args=()
   while [ $# -gt 0 ]; do case "$1" in -ExecutionPolicy) shift 2 ;; *) args+=("$1"); shift ;; esac; done
+  # As BEAST's sshd (measured, w508): a script much over 128 KB on stdin never arrives whole. Here over 64 KB fails.
+  in=$(mktemp); cat >"$in"
+  n=$(wc -c <"$in")
+  if [ "$n" -gt 65536 ]; then rm -f "$in"; echo "fake BEAST: $n bytes on stdin never arrive through Windows OpenSSH" >&2; exit 255; fi
+  set +e
   # A BEAST portal from before w499 (2/3) ignores relocate: as if the request had none.
-  if [ -e "$OLD_BEAST" ]; then sed 's/,"relocate":"[^"]*"//' | "$PWSH" "\${args[@]}"; exit; fi
-  exec "$PWSH" "\${args[@]}"
+  if [ -e "$OLD_BEAST" ]; then sed 's/,"relocate":"[^"]*"//' <"$in" | "$PWSH" "\${args[@]}"; else "$PWSH" "\${args[@]}" <"$in"; fi
+  rc=$?; rm -f "$in"; exit $rc
 fi
-exec "$@"
+# Any other command (tar): BEAST's sshd never hands it its stdin whole (measured, w508), so here it gets none.
+if [ "\${1:-}" = tar ]; then
+  args=("$@"); skipped=0
+  # tar on Windows cannot take some names (outside its code page): it leaves them out, says so without the name, exits 1.
+  if [ -s "$TARSKIP" ]; then
+    for i in "\${!args[@]}"; do
+      if [ "\${args[$i]}" = -T ]; then
+        f=$(mktemp); sed 's|^|./|' "$TARSKIP" | grep -vxF -f - "\${args[$((i + 1))]}" >"$f" || true
+        args[$((i + 1))]=$f; skipped=1
+      fi
+    done
+  fi
+  set +e
+  # The connection breaking mid-stream, for the next N streams.
+  if [ -s "$TRUNCATE" ] && [ "$(cat "$TRUNCATE")" -gt 0 ]; then
+    echo $(( $(cat "$TRUNCATE") - 1 )) >"$TRUNCATE"
+    "\${args[@]}" </dev/null | head -c 3000
+    echo "fake: client_loop: send disconnect: Broken pipe" >&2; exit 255
+  fi
+  "\${args[@]}" </dev/null; rc=$?
+  if [ "$skipped" = 1 ]; then echo "tar: : Couldn't visit directory: No such file or directory" >&2; [ "$rc" = 0 ] && rc=1; fi
+  exit $rc
+fi
+exec "$@" </dev/null
 `,
   );
   script('schtasks.exe', 'printf \'%s\\n\' "$*" >>"$TASKS"\necho "SUCCESS: (fake)"\n');
@@ -563,4 +591,77 @@ test('fffctl migrate --cut-over: a BEAST portal too old to relocate is left runn
   assert.ok(w.beastPortal.child, "BEAST's portal still runs (held, then on by itself)");
   assert.equal(fs.readFileSync(w.vmCfgFile, 'utf8'), vmCfgBefore);
   assert.equal((await w.vmPortal.healthy()).ok, true, "this VM's portal is up again");
+});
+
+test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that keeps breaking stops with BEAST\'s message and the next run goes on; what tar cannot send comes another way or is named', { skip, timeout: 300_000 }, async (t) => {
+  const w = await world(t);
+  const data = path.join(w.beastRoot, 'data');
+  // Enough files for several streams of 3, a name tar on Windows cannot take, and one that cannot be opened.
+  fs.mkdirSync(path.join(data, 'attachments'), { recursive: true });
+  for (let i = 0; i < 12; i++) fs.writeFileSync(path.join(data, 'attachments', `a${i}.bin`), crypto.randomBytes(20_000 + i));
+  const unicode = 'data/attachments/Björn ünïcode ☃.txt';
+  fs.writeFileSync(path.join(w.beastRoot, unicode), 'a name outside the code page\n');
+  fs.writeFileSync(path.join(w.base, 'tarskip'), `${unicode}\n`);
+  const locked = path.join(data, 'locked.log');
+  fs.writeFileSync(locked, 'open elsewhere\n');
+  fs.chmodSync(locked, 0o000);
+  t.after(() => fs.existsSync(locked) && fs.chmodSync(locked, 0o600));
+  const vanish = path.join(data, 'attachments', 'a11.bin');
+  const o = { ...w.opts, batchFiles: 3, progressSeconds: 1 };
+  const stage = path.join(w.vm, 'migrate', 'stage', 'beast');
+  const manifest = () => new Set((JSON.parse(fs.readFileSync(path.join(w.vm, 'migrate', 'stage', 'beast.manifest.json'), 'utf8')) as { path: string }[]).map((e) => e.path));
+  const same = (rel: string) => assert.deepEqual(fs.readFileSync(path.join(stage, rel)), fs.readFileSync(path.join(w.beastRoot, rel)), rel);
+
+  // 1. The first stream is cut off once: tried again, and everything comes; the file deleted after the listing is named.
+  fs.writeFileSync(path.join(w.base, 'truncate'), '1');
+  const m1 = new Migration(o, w.sys);
+  const ps = m1.beast.ps.bind(m1.beast);
+  m1.beast.ps = async (script: string, d?: string, ms?: number) => {
+    const r = await ps(script, d, ms);
+    if (script === MANIFEST_PS && d?.includes('"beast"')) fs.rmSync(vanish, { force: true });
+    return r;
+  };
+  const r1 = await m1.pull('beast', 'data', w.beastRoot, ['config.json', 'data']);
+  const report1 = m1.report.join('\n');
+  t.diagnostic(report1);
+  assert.match(report1, /data: batch 1 of \d+ broke off: the archive stopped short \(ssh\/BEAST tar exit 255, unpacking tar exit 2\); BEAST: fake: client_loop: send disconnect: Broken pipe; here: tar: Unexpected EOF in archive.*trying again \(2 of 3\)/);
+  assert.match(report1, /data: \d+ files, [\d.]+ MB on BEAST \(listed in [\d.]+ s\); to copy: \d+ files/);
+  assert.match(report1, /data: copied \d+ of \d+ files, [\d.]+ MB in [\d.]+ s/);
+  assert.deepEqual(r1.gone, ['data/attachments/a11.bin']);
+  assert.deepEqual(r1.locked.map((l) => l.path), ['data/locked.log']);
+  assert.match(r1.locked[0].why, /denied/i);
+  assert.match(report1, /1 file\(s\) could not be read on BEAST .*data\/locked\.log/);
+  assert.match(report1, /1 file\(s\) went on BEAST during the copy: data\/attachments\/a11\.bin/);
+  same(unicode);
+  for (let i = 0; i < 11; i++) same(`data/attachments/a${i}.bin`);
+  const m = manifest();
+  assert.ok(m.has(unicode), 'the name tar could not take came through PowerShell');
+  assert.ok(!m.has('data/locked.log') && !m.has('data/attachments/a11.bin'), 'neither the unreadable nor the vanished file is trusted');
+  // Progress lines went to the terminal (not the report) while it copied.
+  assert.ok(w.sys.lines.some((l) => /^ {2}data: [\d,]+\/[\d,]+ files, [\d.]+ MB of [\d.]+ MB, [\d.]+ MB\/s/.test(l)), w.sys.lines.join('\n'));
+
+  // 2. Every stream breaks: it stops after 3 attempts with BEAST's message; what was copied before stays trusted.
+  fs.chmodSync(locked, 0o600);
+  for (let i = 0; i < 6; i++) fs.appendFileSync(path.join(data, 'attachments', `a${i}.bin`), 'changed');
+  fs.writeFileSync(path.join(w.base, 'truncate'), '99');
+  const m2 = new Migration(o, w.sys);
+  await assert.rejects(m2.pull('beast', 'data', w.beastRoot, ['config.json', 'data']), (e: Error) => {
+    assert.match(e.message, /data: batch 1 of \d+ \(3 files\) failed 3 times: the archive stopped short .*BEAST: fake: client_loop: send disconnect: Broken pipe.*run the same command again to go on from there/);
+    return true;
+  });
+  const m2s = manifest();
+  for (let i = 0; i < 6; i++) assert.ok(!m2s.has(`data/attachments/a${i}.bin`), 'a changed file not copied whole is not trusted');
+  assert.ok(m2s.has('config.json') && m2s.has(unicode), 'the rest stays');
+
+  // 3. The connection is good again: the next run copies what is left, and only that.
+  fs.writeFileSync(path.join(w.base, 'truncate'), '0');
+  const m3 = new Migration(o, w.sys);
+  const r3 = await m3.pull('beast', 'data', w.beastRoot, ['config.json', 'data']);
+  assert.equal(r3.fetched, 7, 'the six changed files and the one that can be read now');
+  for (let i = 0; i < 6; i++) same(`data/attachments/a${i}.bin`);
+  same('data/locked.log');
+  assert.deepEqual(r3.locked, []);
+
+  // 4. Nothing large ever goes to BEAST on stdin: refused here before ssh, as BEAST's sshd would never deliver it.
+  await assert.rejects(m3.beast.ps('$FFData.Length', 'x'.repeat(MAX_STDIN_BYTES)), /never arrives through Windows OpenSSH/);
 });

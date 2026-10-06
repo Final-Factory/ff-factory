@@ -219,19 +219,80 @@ export interface ManifestEntry {
   path: string;
   size: number;
   mtime: number;
+  /** Its line in the list BEAST kept of this listing (w508): batches name files by these numbers, never by their names. */
+  index?: number;
 }
 
-/** Lines of "<size>\t<mtime ms>\t<relative path>" (the manifest script's output), in order; bad lines are skipped. */
+/**
+ * Lines of "<size>\t<mtime ms>\t<relative path>" (the manifest script's output), in order; bad lines are skipped. A line
+ * starting with "#" is a note (the folder BEAST kept the list in), not a file. Each entry's index is its line among the
+ * file lines, as BEAST numbered them in the list it kept.
+ */
 export function parseManifest(text: string): ManifestEntry[] {
   const out: ManifestEntry[] = [];
-  for (const line of text.split('\n')) {
-    const m = /^(\d+)\t(\d+)\t(.+)$/.exec(line.replace(/\r$/, ''));
+  let index = -1;
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    if (!line || line.startsWith('#')) continue;
+    index++;
+    const m = /^(\d+)\t(\d+)\t(.+)$/.exec(line);
     if (!m) continue;
     const p = m[3].replace(/\\/g, '/');
     if (p.startsWith('/') || p.split('/').includes('..')) continue;
-    out.push({ path: p, size: Number(m[1]), mtime: Number(m[2]) });
+    out.push({ path: p, size: Number(m[1]), mtime: Number(m[2]), index });
   }
   return out;
+}
+
+/** The folder BEAST kept a listing's file list in: its "#dir\t<path>" line. */
+export function manifestDir(text: string): string | undefined {
+  return /^#dir\t(.+?)\r?$/m.exec(text)?.[1];
+}
+
+/**
+ * The files to copy, in batches of at most `maxFiles` files and `maxBytes` bytes (a larger file alone), in the order
+ * BEAST listed them. Each batch is one tar stream, checked and retried on its own (w508).
+ */
+export function batchPlan(files: ManifestEntry[], o: { maxFiles: number; maxBytes: number }): ManifestEntry[][] {
+  const out: ManifestEntry[][] = [];
+  let cur: ManifestEntry[] = [];
+  let bytes = 0;
+  for (const e of [...files].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))) {
+    if (cur.length && (cur.length >= o.maxFiles || bytes + e.size > o.maxBytes)) {
+      out.push(cur);
+      cur = [];
+      bytes = 0;
+    }
+    cur.push(e);
+    bytes += e.size;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+/** Line numbers as ranges, "0-1999,2105,2107-2110": how a batch is named to BEAST, in a few bytes (w508). */
+export function indexSpec(indices: number[]): string {
+  const s = [...new Set(indices)].sort((a, b) => a - b);
+  const parts: string[] = [];
+  for (let i = 0; i < s.length; ) {
+    let j = i;
+    while (j + 1 < s.length && s[j + 1] === s[j] + 1) j++;
+    parts.push(j > i ? `${s[i]}-${s[j]}` : String(s[i]));
+    i = j + 1;
+  }
+  return parts.join(',');
+}
+
+/** The numbers an indexSpec names. */
+export function expandSpec(spec: string): number[] {
+  if (!spec) return [];
+  return spec.split(',').flatMap((p) => {
+    const m = /^(\d+)(?:-(\d+))?$/.exec(p);
+    if (!m) throw new Error(`not an index range: ${p}`);
+    const a = Number(m[1]);
+    const b = m[2] === undefined ? a : Number(m[2]);
+    return Array.from({ length: b - a + 1 }, (_, k) => a + k);
+  });
 }
 
 /** What to fetch (new or changed in size or mtime) and what to remove from the copy (gone on BEAST). */

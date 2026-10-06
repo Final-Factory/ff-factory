@@ -149,6 +149,19 @@ portal keeps running for everyone. The design is section 7.2 of
 sudo fffctl migrate --dry-run-copy
 ```
 
+While it copies it says what it does:
+
+- "listing BEAST's files under C:/ff-sandboxes..." and then how many files and how much there is, and how much of it
+  is to copy;
+- a progress line every 5 seconds: files and megabytes done out of the total, the rate, and about how long is left;
+- the time each part took (BEAST's config.json and data, then the conversations).
+
+The copy goes in streams of at most 2,000 files and 256 MB. Each stream is checked, and tried again up to 3 times if it
+breaks off. A file BEAST cannot read (open elsewhere) or that goes during the copy is named at the end and left out; the
+next run tries it again. If a stream keeps breaking, it stops and says so with BEAST's own message. Running the same
+command again goes on from where it stopped. On BEAST it keeps its file lists in its temp folder
+(`%TEMP%\fff-migrate-*`, removed at the end) and changes nothing else.
+
 It prints and keeps in `/srv/fff/migrate/report-dry-run-*.txt`:
 
 - the copy's size and time;
