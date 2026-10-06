@@ -185,6 +185,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Orchestrators compact their conversations by themselves** (w535, Ben: "can you just compact yourself when youre
+  starting to get full?"). After a turn, once the context passes 200,000 tokens (`orchestrator.compactAtTokens`) or a
+  turn cost $1 or more with 100,000 tokens or more (`orchestrator.compactAtTurnUsd`), FF Factory runs Claude Code's
+  `/compact` with a focus that keeps open requests, unanswered questions, decisions and ids; the dispatcher too. Only
+  between turns, never ahead of an unanswered message; one chat line when it is done ("Compacted: 525,115 → 57,292
+  tokens (automatically: …)") and no notification. The header shows each orchestrator's context and its last
+  compaction; an orchestrator can ask for one itself (`compact_conversation`). Measured on a copy of Ben's orchestrator,
+  a turn's cost went from $0.21 at 521k tokens to $0.10 at 70k. Details: docs/orchestrators.md, "Automatic compaction".
 - **`/compact` compacts an orchestrator's conversation** (w518, asked by Lothsahn: a long conversation cost $20.54 for
   one short reply). `/compact` or `/compact <focus>` typed in your own chat, or Compact conversation in its menu, runs
   Claude Code's own /compact on that conversation instead of sending the text to the model; owners have the same button

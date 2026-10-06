@@ -10,6 +10,7 @@ import { refuseInDryRun } from './dryRun.ts';
 import { placeId } from './placement.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
+import { AUTO_COMPACT_LIMITS } from './autoCompact.ts';
 
 /**
  * The config.json keys an agent may change (the set_app_config tool). Only cosmetic ones, plus the public
@@ -78,6 +79,10 @@ export const SETTABLE_KEYS = [
   // Where new game-repo work goes first, and which computers it stays off (w428, docs/machines.md "Placing work").
   'placement.prefer',
   'placement.avoid',
+  // When the orchestrators compact their conversations by themselves (w535, server/autoCompact.ts): the context in
+  // tokens, and a turn's cost in USD. 0 turns either trigger off.
+  'orchestrator.compactAtTokens',
+  'orchestrator.compactAtTurnUsd',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
@@ -347,6 +352,16 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!Number.isInteger(n) || n < 1 || n > 4096) throw new Error('attachments.maxMB is a whole number of megabytes from 1 to 4096');
       return n;
     }
+    case 'orchestrator.compactAtTokens': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || (n !== 0 && (n < AUTO_COMPACT_LIMITS.minTokens || n > AUTO_COMPACT_LIMITS.maxTokens))) throw new Error(`orchestrator.compactAtTokens is 0 (off) or a whole number of tokens from ${AUTO_COMPACT_LIMITS.minTokens.toLocaleString('en-US')} to ${AUTO_COMPACT_LIMITS.maxTokens.toLocaleString('en-US')}`);
+      return n;
+    }
+    case 'orchestrator.compactAtTurnUsd': {
+      const n = Number(value);
+      if (!Number.isFinite(n) || (n !== 0 && (n < AUTO_COMPACT_LIMITS.minTurnUsd || n > AUTO_COMPACT_LIMITS.maxTurnUsd))) throw new Error(`orchestrator.compactAtTurnUsd is 0 (off) or a cost in USD from ${AUTO_COMPACT_LIMITS.minTurnUsd} to ${AUTO_COMPACT_LIMITS.maxTurnUsd}`);
+      return n;
+    }
     case 'attachments.retentionDays': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 3650) throw new Error('attachments.retentionDays is a whole number of days from 1 to 3650');
@@ -574,6 +589,8 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'hostGuard.cleanup.staleOutput') cfg.hostGuard.cleanup.staleOutput = v as Partial<StaleOutputSettings> | undefined;
   else if (key === 'machines.cleanup.staleOutput') cfg.machines = { ...cfg.machines, cleanup: { ...cfg.machines?.cleanup, staleOutput: v as Partial<StaleOutputSettings> | undefined } };
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
+  else if (key === 'orchestrator.compactAtTokens') cfg.orchestrator = { ...cfg.orchestrator, compactAtTokens: v as number | undefined };
+  else if (key === 'orchestrator.compactAtTurnUsd') cfg.orchestrator = { ...cfg.orchestrator, compactAtTurnUsd: v as number | undefined };
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;
   else if (key === 'hostGuard.cleanup.softFreeGB') cfg.hostGuard.cleanup.softFreeGB = (v as number | undefined) ?? DEFAULT_CLEANUP.softFreeGB;
