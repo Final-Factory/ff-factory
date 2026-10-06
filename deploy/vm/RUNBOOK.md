@@ -165,8 +165,13 @@ While it copies it says what it does:
 
 - "listing BEAST's files under C:/ff-sandboxes..." and then how many files and how much there is, and how much of it
   is to copy;
-- a progress line every 5 seconds: files and megabytes done out of the total, the rate, and about how long is left;
-- the time each part took (BEAST's config.json and data, then the conversations).
+- which compression it uses: zstd level 3 through BEAST's own tar, else gzip, else bzip2, else none (it never stops
+  over compression, and says why it took a lesser one). On real JSONL transcripts zstd 3 sent about a third of the
+  bytes (3.3x) and cost BEAST about 2 s of CPU for 700 MB; gzip only 1.8x and about 13 s;
+- a progress line every 5 seconds: files and megabytes done out of the total, the rate, and about how long is left. In a
+  terminal (PuTTY too) it is one line rewritten in place; in a log, a line every 30 seconds;
+- the time each part took (BEAST's config.json and data, then the conversations), and how many bytes of files came in
+  how many bytes over the wire.
 
 The copy goes in streams of at most 2,000 files and 256 MB. Each stream is checked, and tried again up to 3 times if it
 breaks off. If BEAST's tar stops at a file (it prints `tar: (null)` for one it could not read to the end), that file is
@@ -254,6 +259,21 @@ sudo fffctl migrate --cut-over
 
 Then the checks of design 7.4. A rollback after real use is design 7.5. BEAST's old portal is left exactly as it was
 for two weeks (its task disabled, not removed).
+
+## 6. Updating the portal
+
+```bash
+sudo fff-vm ssh
+sudo fffctl update
+```
+
+It waits, and shows each stage on one line rewritten in place: building the new release beside the running one (or
+"already up to date"), the drain with how many agents are still finishing and the time left, the restart, the new code
+answering, and fff-health's verification. It exits 0 once the new release is verified (or nothing needed doing), 1 when
+the build failed or the update was rolled back (with the reason), 2 when it timed out (`--timeout-minutes`, 60 by
+default), and prints the `journalctl` command for the details. Ctrl+C stops the waiting, not the update. `--no-wait`
+only asks for it, as `request_app_update` does. `fffctl restart` and `fffctl rollback` wait the same way until the portal
+answers again.
 
 ## If it must come off again
 

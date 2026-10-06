@@ -12,6 +12,29 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **`fffctl update` waits until the new release is verified, and says what is happening** (w517, Lothsahn: "sudo
+  fffctl update just says it scheduled it. How do I know when it's done? I'd prefer it be a blocking operation").
+  - **Stages shown:** the build (or "already up to date"), the drain (agents still busy, time left), the restart, the
+    new code answering, then verified, or rolled back with the reason.
+  - **Exit codes:** 0 when verified, 1 on a failed build or a rollback, 2 on a timeout, with the `journalctl` command
+    for the details.
+  - **Same machinery underneath:** `data/update.wanted`, `fff-update request`, the drain, `activate`, and fff-health's
+    `verify`, followed from outside through the units, the journals, the status files and `/api/health`, so
+    `request_app_update` works as before.
+  - **Ctrl+C** stops the waiting, not the update. `--no-wait` keeps the old behaviour. `fffctl restart` shows the
+    drain, and `fffctl rollback` waits until the portal answers with the release before.
+  - **Progress lines:** on a terminal (PuTTY's defaults too) they are rewritten in place with `\r` and `ESC[K`, never
+    moving the cursor; elsewhere a plain line at most every 30 s. The same for `fffctl migrate`, without the indent.
+- **`fffctl migrate` compresses the copy** (w517, Lothsahn: "use zstd level 3 ... Don't error. Fallback to gzip or bz2
+  or finally send uncompressed").
+  - **Choice:** zstd level 3 through BEAST's own tar.exe (bsdtar 3.8.8, built with libzstd), else gzip, else bzip2,
+    else none, whichever both sides take. It is tried once per run on a small file; a broken connection is retried
+    and is never read as "unsupported". `--compress` picks one first.
+  - **Output:** it says which it chose and why not a better one, and each part reports the bytes of files against the
+    bytes over the wire.
+  - **The guest install** adds `zstd` and `bzip2`.
+  - **Measured on BEAST's route with 698 MB of real JSONL:** zstd 3 sent 210 MB (3.3x) in 2.1 s of BEAST's time;
+    gzip 392 MB (1.8x) in 12.9 s; uncompressed 2.7 s. The zstd stream unpacked into all 77 entries.
 - **No claude.ai connectors for the orchestrators and the dispatcher** (w516, Lothsahn: "Please do an update to disable
   the gmail, drive, and calendar tools", then "Disable claude docs"). Their 58 tools (Gmail 30, Google Drive 11, Google
   Calendar 9, Claude Docs 8) were about 41,300 input tokens in every orchestrator and dispatcher turn (measured: a
