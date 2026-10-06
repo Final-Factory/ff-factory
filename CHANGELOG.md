@@ -12,6 +12,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **FFBox shows a player's report fixed once its fix ships** (w502, asked by Lothsahn). A finished request that claims
+  a crash or desync report (its subjects, a report its title names, an intake diagnosis that joined it, or a
+  `Report: <id>` line in its merged PR) now tells FFBox `report_fixed` with the PR and the release once the fix is
+  merged and released; FFBox records it on the report and marks its diagnosis FIXED, and posts nothing. `update_work`
+  takes `subjects` to add reports a request turned out to fix. Once, at start-up: w414 is linked to the two Build 76
+  crash reports PR #1064 fixed, and finished requests that only mention reports are listed for Lothsahn
+  (`node scripts/report-sweep.ts <data copy>` lists the same). Workers put `Report: <id>` in fix PRs
+  ([docs/intake.md](docs/intake.md), "Players' reports a request fixed").
+
 - **The portal VM installs with one command, and asks for what it needs** (w498, asked by Lothsahn).
   `sudo deploy/vm/host/install.sh` now installs the host side and then the portal inside the VM, and sets it up:
   - Lothsahn's subscription token, the Tailscale join with the Funnel, GitHub and the base clone;
