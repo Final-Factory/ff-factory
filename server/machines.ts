@@ -1550,15 +1550,19 @@ export class MachineManager {
     const m = this.requireSandboxDaemon(machineId);
     const pool = poolSettingsOf(m);
     if (!pool) throw new Error(`${m.id} has no sandboxes: redeploy it with add_machine sandbox_root (e.g. "D:\\work\\ffsb")`);
-    const id = slugify(req.name);
-    if (!SANDBOX_ID.test(id)) throw new Error(`"${req.name}" does not make a usable sandbox name`);
-    if ((m.sandboxes ?? []).some((s) => s.id === id)) throw new Error(`sandbox "${id}" already exists on ${m.id}`);
+    const asked = slugify(req.name);
+    if (!SANDBOX_ID.test(asked)) throw new Error(`"${req.name}" does not make a usable sandbox name`);
     if ((m.sandboxes ?? []).length >= pool.maxSandboxes) throw new Error(`already ${m.sandboxes!.length} sandboxes on ${m.id} (max_sandboxes ${pool.maxSandboxes}); delete one first`);
-    const branch = req.branch?.trim() || `sandbox/${id}`;
+    // A worker root install (w513, lothsahn 2026-10-06) names its sandboxes slot1..slotN, N its sandbox limit: the first
+    // free one. The name asked for still names the branch, so a slot used again never inherits an old sandbox's branch.
+    const id = m.root ? slotName((m.sandboxes ?? []).map((s) => s.id), pool.maxSandboxes) : asked;
+    if (!id) throw new Error(`no free slot on ${m.id} (max_sandboxes ${pool.maxSandboxes}); delete one first`);
+    if ((m.sandboxes ?? []).some((s) => s.id === id)) throw new Error(`sandbox "${id}" already exists on ${m.id}`);
+    const branch = req.branch?.trim() || `sandbox/${asked}`;
     const problem = branchProblem(branch);
     if (problem) throw new Error(problem);
     const base = req.base?.trim() || this.cfg.defaultBase;
-    const purpose = req.purpose?.trim() ? normalizePurpose(req.purpose) : 'unused';
+    const purpose = req.purpose?.trim() ? normalizePurpose(req.purpose) : id !== asked ? normalizePurpose(req.name) : 'unused';
     this.pendingPurpose.set(id, purpose);
     try {
       return await this.sandboxCall(m.id, { op: 'create', sandbox: id, branch, base, seedLibrary: req.seedLibrary ?? true, startUnity: req.startUnity ?? false }, 2 * 60_000);
@@ -1807,6 +1811,13 @@ export function leaveRoot(m: Machine): boolean {
   delete m.preRoot;
   if (p) Object.assign(m, { appDir: p.appDir, repoPath: p.repoPath, tempDir: p.tempDir, sandboxRoot: p.sandboxRoot, librarySeed: p.librarySeed });
   return m.sandboxRoot !== before;
+}
+
+/** The first free sandbox slot name, slot1..slot<max>, or undefined when all are taken (w513). Exported for tests. */
+export function slotName(taken: string[], max: number): string | undefined {
+  const used = new Set(taken.map((t) => t.toLowerCase()));
+  for (let k = 1; k <= max; k++) if (!used.has(`slot${k}`)) return `slot${k}`;
+  return undefined;
 }
 
 export function dirOptions(opts: MachineDirs, prev: MachineDirs | undefined): MachineDirs {

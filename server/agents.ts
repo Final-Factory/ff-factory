@@ -1500,7 +1500,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           'create_sandbox',
           'Create a sandbox: a new git worktree of Final Factory on its own branch, optionally with a warm Library copy and a Unity editor, on one of the user\'s machines with a sandbox_root (a worktree of its main clone, its Library seeded from the main clone\'s or another sandbox\'s; the portal holds none of its own). Returns immediately; provisioning (fetch, checkout, Library copy) continues in the background and list_sandboxes shows progress. You can call start_agent right away: the prompt is delivered once the sandbox is ready.',
           {
-            name: z.string().describe('Short slug-able name, e.g. "spec-098" or "shader-dissolve". Becomes the folder and Unity project name.'),
+            name: z.string().describe('Short slug-able name, e.g. "spec-098" or "shader-dissolve". Becomes the folder and Unity project name; on a worker-root install (w513) the sandbox is the first free slotN (N up to its max_sandboxes) instead, and this name becomes its branch (sandbox/<name>).'),
             purpose: z.string().describe('One line on what this sandbox is for.'),
             machine: z.string().optional().describe('A machine id from list_machines (e.g. "lothdesktop") to create it there; default this host\'s own daemon, when it has one. It is then addressed as "<machine>/<name>".'),
             branch: z.string().optional().describe(`Branch to check out or create. Default "sandbox/<name>", or "${FACTORY_BRANCH_PREFIX}<name>" when work_id names a request that came from FFBox (a dev request, or a diagnosis or request FFBox filed). Use an existing branch name (e.g. "098-foo") to continue work on it.`),
