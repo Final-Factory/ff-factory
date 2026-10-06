@@ -13,6 +13,9 @@ test('standing agents: create, edit, run by hand, pause and resume, delete', asy
   await modal.getByPlaceholder('Discord triage').fill(name);
   await modal.locator('textarea').fill('Check the build folder and say what you found.');
   await modal.locator('label.field').filter({ has: page.locator('span', { hasText: /^Runs$/ }) }).locator('select').selectOption('manual');
+  // Standing agents run on a machine (w510): nothing to create until one is picked.
+  await expect(create).toBeDisabled();
+  await modal.locator('label.field').filter({ has: page.locator('span', { hasText: /^Runs on$/ }) }).locator('select').selectOption('pc');
   await expect(create).toBeEnabled();
   await create.click();
   await expect(modal).toBeHidden();

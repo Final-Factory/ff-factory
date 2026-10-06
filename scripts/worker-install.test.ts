@@ -12,7 +12,8 @@ import { installScript, taskName, uninstallScript } from '../server/machineDeplo
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { claudeSlug, plan, rehome, sameVolume, type OldLayout } from './worker/migrate.ts';
-import { credentialId, daemonJson, gitVersion, layoutOf, noteOutside, parseArgs, preflightProblems, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { credentialId, daemonJson, gitVersion, layoutOf, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { slotsPointer } from '../machine/unitySlots.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', slots: 8, maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -47,11 +48,13 @@ test('worker install: every missing prerequisite is named before anything change
   assert.deepEqual(preflightProblems(GOOD, OPTS), []);
   const bad = (f: Partial<Facts>, o: Partial<typeof OPTS> = {}) => preflightProblems({ ...GOOD, ...f }, { ...OPTS, ...o }).join('\n');
   assert.match(bad({ elevated: true }), /not administrator/);
+  assert.deepEqual(preflightProblems({ ...GOOD, elevated: true }, { ...OPTS, owner: 'Lothsahn' }), [], 'an elevated run that gives its files to the user (--owner)');
   assert.match(bad({ git: [2, 45] }), /git 2\.45 is too old: 2\.48 or newer.*winget upgrade --id Git\.Git/);
   assert.match(bad({ git: undefined }), /git is missing.*winget install --id Git\.Git/);
   assert.match(bad({ platform: 'darwin', git: [2, 46] }), /brew upgrade git/);
   assert.match(bad({ gitLfs: false }), /git-lfs is missing/);
   assert.match(bad({ claude: undefined }), /Claude Code is missing/);
+  assert.deepEqual(preflightProblems({ ...GOOD, claude: undefined, claudeShim: 'C:\\Users\\l\\AppData\\Roaming\\npm\\claude.cmd' }, OPTS), [], "an npm shim is enough: the SDK uses its own (as in the portal's deploy)");
   assert.match(bad({ nodeVersion: 'v20.11.0' }), /node 22\.6 or newer/);
   assert.match(bad({ rootState: 'other' }), /already holds other files/);
   assert.match(bad({ rootParentExists: false }), /does not exist/);
@@ -117,7 +120,7 @@ test('worker daemon: a root gives the folders, the agents\' environment and the 
   assert.equal(cfg.appDir, path.join('/r', 'daemon'));
   assert.equal(cfg.tempDir, path.join('/r', 'tmp'));
   assert.equal(cfg.tokenFile, path.join('/r', 'secrets', 'machine-token'));
-  assert.equal(cfg.unitySlotsDir, path.join('/r', 'daemon', 'unity-slots'));
+  assert.equal(cfg.unitySlotsDir, undefined, 'the Unity slots mailbox stays where every script finds it (w469)');
   assert.equal(cfg.maxEventsFile, path.join('/r', 'daemon', 'max-events.jsonl'));
   assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r' }).appDir, undefined, 'no root: unchanged');
   assert.deepEqual(rootEnv('/r'), { FF_WORKER_ROOT: '/r', FF_PLAYER_SLOT_ROOT: path.join('/r', 'players'), FF_NIGHTLY_ROOT: path.join('/r', 'nightly') });
@@ -217,5 +220,22 @@ test('worker migration: a sandbox moves to the root\'s clone with its commits, s
     assert.equal(git(l.repo, 'log', '--oneline', 'sandbox/sb1').split('\n').filter(Boolean).length, 2, 'the unpushed commit came along');
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('worker install: the Unity slots pointer leads scripts outside the daemon to the root\'s mailbox; uninstall removes only its own (w469)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-wslots-'));
+  try {
+    const root = path.join(home, 'ff-worker');
+    const file = writeSlotsPointer({ daemon: path.join(root, 'daemon') }, home);
+    assert.equal(file, slotsPointer(home));
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { dir: path.join(root, 'daemon', 'unity-slots') });
+    assert.equal(removeSlotsPointer(path.join(home, 'other-root'), home), false, "another install's root: left");
+    assert.ok(fs.existsSync(file));
+    assert.equal(removeSlotsPointer(root, home), true);
+    assert.equal(fs.existsSync(file), false);
+    assert.equal(removeSlotsPointer(root, home), false, 'none left: nothing to do');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });

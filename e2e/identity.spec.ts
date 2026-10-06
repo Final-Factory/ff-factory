@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { request as pwRequest, type APIRequestContext } from '@playwright/test';
-import { ALPHA, appState, expect, isMobile, openSandbox, sendMessage, test, uniq } from './fixtures.ts';
+import { ALPHA, MACHINE, appState, expect, isMobile, openSandbox, sendMessage, test, uniq } from './fixtures.ts';
 import type { SessionInfo, StandingAgent, TranscriptEvent } from '../shared/types.ts';
 
 /**
@@ -121,7 +121,7 @@ test('an /mcp key bound to the teammate: the workers and messages its tools star
 
 test('a standing run started by hand is requested by whoever pressed Run now', async ({ authed: page }) => {
   const name = uniq('Standing');
-  const r = await page.request.post('/api/standing', { data: { name, charter: 'Say hello.', trigger: { kind: 'manual' } } });
+  const r = await page.request.post('/api/standing', { data: { name, charter: 'Say hello.', trigger: { kind: 'manual' }, machineId: MACHINE } });
   expect(r.ok(), await r.text()).toBeTruthy();
   const a = (await r.json()) as StandingAgent;
   const mate = await asMate();

@@ -30,7 +30,8 @@ param(
     [string]$CredentialFile = '',
     [switch]$NoFirewall,
     [switch]$NoCleanup,
-    [switch]$AbsoluteWorktrees
+    [switch]$AbsoluteWorktrees,
+    [string]$UnitySlotsDir = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -113,6 +114,7 @@ $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'install', '-
 if ($NoFirewall) { $argv += '--no-firewall' }
 if ($NoCleanup) { $argv += '--no-cleanup' }
 if ($AbsoluteWorktrees) { $argv += '--absolute-worktrees' }
+if ($UnitySlotsDir) { $argv += @('--unity-slots-dir', $UnitySlotsDir) }
 try {
     $credential | & $node.Path @argv
     $code = $LASTEXITCODE

@@ -28,7 +28,7 @@ import { MaxManager } from './max.ts';
 import { UsageTracker } from './usage.ts';
 import { setAppConfig } from './appConfig.ts';
 import type { Config } from './config.ts';
-import type { SessionInfo } from '../shared/types.ts';
+import type { Machine, SessionInfo } from '../shared/types.ts';
 
 /** The switch as the server reads it, on for the test and put back after. */
 function on(t: { after: (fn: () => void) => void }) {
@@ -185,8 +185,11 @@ test('dry run: a standing agent that is due does not run, and Run now is refused
     remove: () => undefined,
   };
   const clock = { now: new Date('2026-10-05T03:00:00') };
-  const st = new StandingAgents({ cfg, store, sessions: port, notify: () => undefined, now: () => clock.now });
-  const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 }, tools: ['delegate'] });
+  // w510: standing agents run on machines; m1 is an online one whose sessions are the port's.
+  const m1 = { id: 'm1', platform: 'linux', appDir: '/home/u/.fff', repoPath: '/home/u/game', maxSessions: 6, status: 'ready', purpose: 'x', sessionIds: [] } as unknown as Machine;
+  const machines = { list: () => [m1], get: (id: string) => (id === 'm1' ? m1 : undefined), isOnline: () => true, liveCount: () => 0, createSession: (_m: string, o: Parameters<SessionPort['create']>[0]) => port.create(o) };
+  const st = new StandingAgents({ cfg, store, sessions: port, notify: () => undefined, machines: machines as never, now: () => clock.now });
+  const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 }, tools: ['delegate'], machineId: 'm1' });
   const due = a.nextRunAt;
   clock.now = new Date(clock.now.getTime() + 5 * 3_600_000);
   st.tick();
