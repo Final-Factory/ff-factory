@@ -299,6 +299,8 @@ export async function rehome(dir: string, id: string, l: Layout, before: Awaited
   await git(l.repo, ['worktree', 'add', '--no-checkout', '--force', tmp, before.branch || before.head]);
   const newGit = fs.readFileSync(path.join(tmp, '.git'), 'utf8');
   fs.writeFileSync(oldGitFile.replace(/\.git$/, '.git.pre-ffw'), fs.readFileSync(oldGitFile));
+  // Git marks a worktree's .git file hidden, and Windows refuses to open a hidden file for writing: replace it.
+  fs.rmSync(oldGitFile, { force: true });
   fs.writeFileSync(oldGitFile, newGit);
   fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
   await git(l.repo, ['worktree', 'repair', dir]);
@@ -458,7 +460,10 @@ export async function rollback(root: string) {
   if (m && isWin) await win.psScript(win.LOCAL, win.uninstallScript(l.daemon, { task: m.service, only: true }), { timeoutMs: 3 * 60_000 });
   for (const mv of [...j.moved].reverse()) {
     const pre = path.join(mv.to, '.git.pre-ffw');
-    if (fs.existsSync(pre)) fs.renameSync(pre, path.join(mv.to, '.git'));
+    if (fs.existsSync(pre)) {
+      fs.rmSync(path.join(mv.to, '.git'), { force: true });
+      fs.renameSync(pre, path.join(mv.to, '.git'));
+    }
     if (mv.method === 'rename' && fs.existsSync(mv.to) && !fs.existsSync(mv.from)) fs.renameSync(mv.to, mv.from);
     say(`Sandbox ${mv.id}: back at ${mv.from}.`);
   }
