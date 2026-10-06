@@ -328,7 +328,8 @@ test('machine: a bad token is refused; tool calls go back to the portal', async 
   assert.equal(mm.authenticate('Bearer ffsb_whatever'), undefined);
 
   const d = daemon();
-  await until('online', () => mm.isOnline('mx'));
+  // Both ends: the portal's link and the daemon's own socket (a tool call before it is open is refused).
+  await until('online', () => mm.isOnline('mx') && d.connected);
   const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
   type H = (a: Record<string, unknown>) => Promise<string>;
   const handlers = (d as unknown as { handlers(id: string): Record<string, H> }).handlers(s.info.id);

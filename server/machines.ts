@@ -1150,8 +1150,10 @@ export class MachineManager {
     this.failures.delete(ip);
     const { hash, staged } = cred!;
     this.wss.handleUpgrade(req, socket, head, (ws) => {
-      this.settleCredential(id, staged);
       this.attach(id, ws, hash);
+      // The token file is written (synchronously, fsynced) after this turn, so the daemon's 101 goes out first; the
+      // link keeps the hash it presented, which dropRevoked accepts while it is the staged one (w568).
+      setImmediate(() => this.settleCredential(id, staged));
     });
     return true;
   }
