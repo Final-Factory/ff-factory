@@ -413,7 +413,9 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
 async function lockDown(dir: string, sid?: string) {
   if (isWin) {
     if (!sid) throw new Error('no SID to give the secrets folder to');
-    await must('restricting the secrets folder', 'icacls', [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F', '/T', '/Q']);
+    // The folder only (inheritable grants mean nothing on a file), then each file back to inheriting from it.
+    await must('restricting the secrets folder', 'icacls', [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F', '/Q']);
+    for (const f of fs.readdirSync(dir)) await must('restricting a secret file', 'icacls', [path.join(dir, f), '/reset', '/Q']);
   } else {
     fs.chmodSync(dir, 0o700);
     for (const f of fs.readdirSync(dir)) fs.chmodSync(path.join(dir, f), 0o600);

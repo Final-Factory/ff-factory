@@ -73,9 +73,12 @@ function Find-Node {
 }
 function Offer-Winget([string]$what, [string]$id) {
     Write-Host "$what is needed."
-    if ((Ask "Install it now with winget ($id)? [Y/n]" 'Y') -match '^[Yy]') {
+    # Only a person's explicit "y" installs anything: an unattended run (no console, -CredentialFile) never does.
+    $interactive = [Environment]::UserInteractive -and -not $CredentialFile -and -not [Console]::IsInputRedirected
+    if ($interactive -and (Ask "Install it now with winget ($id)? [y/N]" 'N') -match '^[Yy]') {
         winget install --id $id -e --accept-source-agreements --accept-package-agreements
-        Write-Host 'Done. Open a new PowerShell (so the PATH has it) and run this installer again.'
+        if ($LASTEXITCODE -eq 0) { Write-Host 'Installed. Open a new PowerShell (so the PATH has it) and run this installer again.' }
+        else { Write-Host "winget could not install it (exit $LASTEXITCODE). Install it with: winget install --id $id -e" }
     } else {
         Write-Host "Install it with: winget install --id $id -e   then run this installer again."
     }
