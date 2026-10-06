@@ -319,3 +319,28 @@ export function skipOnCopy(rel: string): boolean {
  * tokens, keys, logins or sessions stays in the VM (the brief: "wipes the copied secrets").
  */
 export const SECRET_FILES = ['config/config.json', 'data/machine-tokens.json', 'data/api-keys.json', 'data/users.json', 'data/auth-sessions.json', 'data/vapid.json', 'data/push-subscriptions.json', 'data/outside-watch.json'];
+
+/**
+ * What Lothsahn runs on the FFBox host after the cut-over so FFBox's connector dials the new portal (w537): its address
+ * is config.json's fff.url, rendered into fffconnector.service by root's 06-services.sh --install (ffbox config.md,
+ * "fff"), so nothing here can move it. Left undone after the first cut-over (2026-10-06), FFBox stayed offline with BEAST's
+ * old URL answering 502, and its board checks, dev requests and intake hand-offs waited. --install restarts only the units
+ * whose file changed and that were running (ffbox scripts/06-services.sh), so --check must name fffconnector.service
+ * alone first: another unit there would be restarted too.
+ */
+export function ffboxRelinkSteps(oldUrl: string | undefined, newUrl: string): string[] {
+  const old = (oldUrl ?? '').trim().replace(/\/+$/, '');
+  const pad = (cmd: string, says: string) => `       ${cmd.padEnd(70)} # ${says}`;
+  return [
+    `  1. Lothsahn, FFBox's link, on the FFBox host as FFBox's owner account. Until then FFBox shows offline here and its board`,
+    `     checks, dev requests and intake hand-offs wait${old ? `: its connector still dials ${old}` : ''}.`,
+    old
+      ? pad(`sed -i 's|"url": "${old}"|"url": "${newUrl}"|' ~/.config/ffbox/config.json`, 'the fff block\'s url')
+      : `       set "url" in the "fff" block of ~/.config/ffbox/config.json to "${newUrl}"`,
+    pad(`grep -n '"url"' ~/.config/ffbox/config.json`, `"url": "${newUrl}"`),
+    pad(`cd "$(cat ~/.config/ffbox/checkout)" && sh scripts/06-services.sh --check`, 'units differ ...: fffconnector.service, and no other'),
+    `         (another unit named there would be restarted too: wait until no build or run needs it, then go on)`,
+    pad('sudo sh scripts/06-services.sh --install', 'restarted fffconnector.service'),
+    pad('journalctl -u fffconnector -n 5 --no-pager', 'connected; the FFBox card here shows it online'),
+  ];
+}

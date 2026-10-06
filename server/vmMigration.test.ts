@@ -10,6 +10,7 @@ import {
   claudeProjectFolder,
   cleanOutsideWatch,
   countDiffs,
+  ffboxRelinkSteps,
   countsOf,
   expandSpec,
   historyPlan,
@@ -214,4 +215,19 @@ test('vmMigration (w508): files are named to BEAST by their line in its list, in
   assert.deepEqual(batchPlan(files, { maxFiles: 3, maxBytes: 100 }).map((b) => b.map((e) => e.path)), [['f0', 'f1'], ['f2'], ['f3', 'f4', 'f5'], ['f6']], 'a larger file alone; at most 3 files or 100 bytes');
   assert.deepEqual(batchPlan([...files].reverse(), { maxFiles: 10, maxBytes: 1000 })[0].map((e) => e.index), [0, 1, 2, 3, 4, 5, 6], "in BEAST's order");
   assert.deepEqual(batchPlan([], { maxFiles: 3, maxBytes: 100 }), []);
+});
+
+test('vmMigration: the cut-over tells Lothsahn the exact FFBox commands that move its connector to the new portal (w537)', () => {
+  const lines = ffboxRelinkSteps('https://beast.tailedfcad.ts.net/', 'https://fff.tailedfcad.ts.net');
+  const text = lines.join('\n');
+  assert.match(text, /still dials https:\/\/beast\.tailedfcad\.ts\.net\./);
+  assert.ok(text.includes(`sed -i 's|"url": "https://beast.tailedfcad.ts.net"|"url": "https://fff.tailedfcad.ts.net"|' ~/.config/ffbox/config.json`), text);
+  assert.ok(text.includes(`cd "$(cat ~/.config/ffbox/checkout)" && sh scripts/06-services.sh --check`), text);
+  assert.match(text, /fffconnector\.service, and no other/);
+  assert.ok(text.includes('sudo sh scripts/06-services.sh --install'), text);
+  assert.ok(text.includes('journalctl -u fffconnector -n 5 --no-pager'), text);
+  // Without BEAST's old URL: no sed that could match nothing; the key and the value to set.
+  const blind = ffboxRelinkSteps(undefined, 'https://fff.tailedfcad.ts.net').join('\n');
+  assert.ok(!blind.includes('sed -i'), blind);
+  assert.ok(blind.includes('set "url" in the "fff" block of ~/.config/ffbox/config.json to "https://fff.tailedfcad.ts.net"'), blind);
 });

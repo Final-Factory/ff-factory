@@ -256,7 +256,24 @@ sudo fffctl migrate --cut-over
 
 **By hand afterwards**, as the command's last lines say:
 
-1. Lothsahn sets FFBox's `fff.url` (and the escalation base URL) to the new URL and re-renders the connector's unit.
+1. **FFBox's link**: Lothsahn, on the FFBox host as FFBox's owner account. The connector's address is `fff.url` in
+   FFBox's config, rendered into its unit by root, so the migration cannot move it; until this is done FFBox shows
+   offline and its board checks, dev requests and intake hand-offs wait (2026-10-06: missed, BEAST's old URL answered
+   502). The cut-over prints these with both URLs filled in:
+
+   ```bash
+   sed -i 's|"url": "<BEAST URL>"|"url": "<new URL>"|' ~/.config/ffbox/config.json
+   grep -n '"url"' ~/.config/ffbox/config.json                  # "url": "<new URL>"
+   cd "$(cat ~/.config/ffbox/checkout)" && sh scripts/06-services.sh --check
+                                                                # units differ ...: fffconnector.service, and no other
+   sudo sh scripts/06-services.sh --install                     # restarted fffconnector.service
+   journalctl -u fffconnector -n 5 --no-pager                   # connected
+   ```
+
+   `--install` restarts only the units whose file changed and that were running, so `--check` must name
+   `fffconnector.service` alone: another unit there (drift from an earlier template change) would be restarted too,
+   which can cut a build or run in flight; wait for a quiet moment then. The token stays as it is. Max's escalations
+   post to the same `fff.url`.
 2. Everyone opens the new URL, signs in, adds the phone app again, turns notifications on, and points `/mcp` at it.
 
 Then the checks of design 7.4. A rollback after real use is design 7.5. BEAST's old portal is left exactly as it was
