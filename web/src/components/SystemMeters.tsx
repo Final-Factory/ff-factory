@@ -400,6 +400,8 @@ function cleanupTitle(x: CleanupSummary): string {
     ...(x.top ?? []).map(item),
     ...(x.planned?.length ? ['Would remove (dry-run mode):', ...x.planned.slice(0, 10).map(item)] : []),
     ...(x.listed?.length ? ['Kept, could not attribute (cleanup_log has them all):', ...x.listed.slice(0, 10).map(item)] : []),
+    // A temp folder apart from the disk (the VM's /tmp is a tmpfs: RAM), never counted as free disk (w566).
+    ...(x.temp?.length ? ['Temp, apart from the disk:', ...x.temp.map((t) => `${t.path}: ${fmtBytes(t.freeBytes ?? 0)} free of ${fmtBytes(t.totalBytes ?? 0)} (${t.ram ? 'RAM' : 'a disk of its own'})`)] : []),
   ].join('\n');
 }
 

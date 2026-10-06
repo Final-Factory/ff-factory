@@ -18,6 +18,8 @@ import {
   superseded,
   type CleanupGuard,
   type CleanupRun,
+  type VolumeStat,
+  volumeStat,
 } from './cleanup.ts';
 import { machineCleanupSettings, hostSoftFreeGB } from './config.ts';
 import { normalizeSetting, setAppConfig } from './appConfig.ts';
@@ -302,7 +304,7 @@ test('runner: hourly, every 15 minutes below the soft threshold, one notice a da
   assert.equal(low?.belowSoft, true);
   assert.equal(low?.failed, 1);
   assert.equal(notices.length, 1);
-  assert.match(notices[0], /freed 2\.0 GB \(1 item\(s\)\) but only 100\.0 GB is free, below the soft threshold of 120 GB/);
+  assert.match(notices[0], /freed 2\.0 GB \(1 item\(s\)\) but only 100\.0 GB is free on disk, below the soft threshold of 120 GB/);
   assert.match(notices[0], /Biggest remaining: C:\/Users\/rydin\/FFAlt 110\.0 GB/);
   assert.match(notices[0], /FFAlt\/Library \(400 days\)/);
   for (let i = 0; i < 4; i++) {
@@ -320,7 +322,7 @@ test('runner: hourly, every 15 minutes below the soft threshold, one notice a da
   now += 15 * 60_000;
   await r.tick();
   assert.equal(notices.length, 3, 'a new episode notices at once');
-  assert.match(describeCleanup(r.last!), /^2026-09-\d\d \d\d:\d\d \(low-space\): 1 item\(s\), 2\.0 GB, 1 skipped, 100\.0 GB free \(below the soft 120 GB\)\./);
+  assert.match(describeCleanup(r.last!), /^2026-09-\d\d \d\d:\d\d \(low-space\): 1 item\(s\), 2\.0 GB, 1 skipped, 100\.0 GB free on disk \(below the soft 120 GB\)\./);
 });
 
 test('thresholds: host soft default, per-machine settings, and what set_app_config accepts', (t) => {
@@ -350,4 +352,84 @@ test('thresholds: host soft default, per-machine settings, and what set_app_conf
   assert.equal(live.hostGuard.cleanup.everyMinutes, 30);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { machines: { cleanup: { softFreeGB: { '*': 70, m3: 40 } } }, hostGuard: { cleanup: { everyMinutes: 30 } } });
   assert.throws(() => setAppConfig(file, live, 'hostGuard.cleanup.softFreeGB', 150, { machine: 'm3' }), /machine is only for/);
+});
+
+test('runner: a RAM-backed temp folder (the VM\'s tmpfs /tmp) is never the disk; the disk is home and data, temp shown apart (w566)', async () => {
+  // fff-portal on 2026-10-06: / (ext4) 101 GB free of 118 GB holding home and data; /tmp a tmpfs of half the 4 GiB RAM.
+  const TMPFS = 0x01021994;
+  const EXT4 = 0xef53;
+  let now = Date.parse('2026-10-06T20:00:00Z');
+  const vols: Record<string, VolumeStat> = {
+    '/srv/fff/home': { free: 101 * GB, total: 118 * GB, type: EXT4, dev: 2049 },
+    '/srv/fff/data': { free: 101 * GB, total: 118 * GB, type: EXT4, dev: 2049 },
+    '/tmp': { free: 1.9 * GB, total: 2 * GB, type: TMPFS, dev: 41 },
+  };
+  const passes: boolean[] = [];
+  const notices: string[] = [];
+  const r = new CleanupRunner({
+    settings: () => ({ everyMinutes: 60, softFreeGB: 60 }),
+    diskPaths: () => ['/srv/fff/home', '/srv/fff/data'],
+    tempPaths: () => ['/tmp'],
+    statfs: async (p) => vols[p],
+    pass: async (low) => (passes.push(low), { removed: [], failed: [], bytes: 0 }),
+    consumers: async () => [],
+    log: () => undefined,
+    done: (_s, n) => void (n && notices.push(n)),
+    now: () => now,
+  });
+  const s = await r.tick();
+  assert.equal(s?.trigger, 'hourly', 'not low-space: the disk has 101 GB, above the soft 60 GB');
+  assert.deepEqual(passes, [false], 'the regular rules, not the low-space ones');
+  assert.equal(s?.freeBytes, 101 * GB);
+  assert.equal(s?.belowSoft, false);
+  assert.deepEqual(s?.temp, [{ path: '/tmp', freeBytes: 1.9 * GB, totalBytes: 2 * GB, ram: true }]);
+  assert.equal(notices.length, 0, 'no "cannot free enough disk space" notice');
+  assert.match(describeCleanup(s!), /: 0 item\(s\), 0\.0 GB, 101\.0 GB free on disk\. Temp, apart from the disk: \/tmp 1\.9 GB free of 2\.0 GB \(RAM, tmpfs\)\./);
+
+  // The disk itself low: the low-space mode and the notice key off its figure, not the tmpfs's.
+  vols['/srv/fff/data'] = { ...vols['/srv/fff/data'], free: 50 * GB };
+  now += 15 * 60_000;
+  const low = await r.tick();
+  assert.equal(low?.trigger, 'low-space');
+  assert.equal(low?.freeBytes, 50 * GB);
+  assert.equal(low?.belowSoft, true);
+  assert.match(notices[0], /only 50\.0 GB is free on disk, below the soft threshold of 60 GB/);
+
+  // A temp folder on the disk's own volume (Ubuntu 24.04, or tmp.mount masked) is not listed again.
+  vols['/srv/fff/data'] = { ...vols['/srv/fff/data'], free: 101 * GB };
+  vols['/tmp'] = { ...vols['/srv/fff/home'] };
+  const same = await r.run('asked');
+  assert.equal(same?.freeBytes, 101 * GB);
+  assert.equal(same?.temp, undefined);
+
+  // A small temp volume of its own, on disk: shown as one, still never the disk's measure.
+  vols['/tmp'] = { free: 1 * GB, total: 2 * GB, type: EXT4, dev: 77 };
+  const own = await r.run('asked');
+  assert.equal(own?.freeBytes, 101 * GB);
+  assert.equal(own?.belowSoft, false);
+  assert.deepEqual(own?.temp, [{ path: '/tmp', freeBytes: 1 * GB, totalBytes: 2 * GB, ram: false }]);
+  assert.match(describeCleanup(own!), /\/tmp 1\.0 GB free of 2\.0 GB \(a disk volume of its own\)/);
+});
+
+test('runner: a RAM volume among the disk paths (a hostDiskPaths entry on a tmpfs) is shown as RAM, not taken for the disk (w566)', async () => {
+  const r = new CleanupRunner({
+    settings: () => ({ everyMinutes: 60, softFreeGB: 60 }),
+    diskPaths: () => ['/srv/fff', '/run/scratch'],
+    statfs: async (p) => (p === '/srv/fff' ? { free: 101 * GB, total: 118 * GB, type: 0xef53, dev: 1 } : { free: 0.5 * GB, total: 1 * GB, type: 0x858458f6, dev: 2 }),
+    pass: async () => ({ removed: [], failed: [], bytes: 0 }),
+    consumers: async () => [],
+    log: () => undefined,
+    done: () => undefined,
+  });
+  const s = await r.run('asked');
+  assert.equal(s?.freeBytes, 101 * GB);
+  assert.deepEqual(s?.temp, [{ path: '/run/scratch', freeBytes: 0.5 * GB, totalBytes: 1 * GB, ram: true }]);
+});
+
+test('volumeStat: the free space, size, filesystem type and device of a real folder', async () => {
+  const v = await volumeStat(os.tmpdir());
+  assert.ok(v && v.total > 0 && v.free >= 0 && v.free <= v.total, JSON.stringify(v));
+  assert.equal(typeof v.type, 'number');
+  assert.equal(typeof v.dev, 'number');
+  assert.equal(await volumeStat(path.join(os.tmpdir(), 'no-such-folder-w566', 'x')), undefined);
 });

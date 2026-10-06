@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A RAM-backed temp folder is no longer taken for the disk** (w566, Lothsahn: "Why are you reporting that fff-portal
+  only has 1.9GB free when it has 101GB free?"). The clean-up measured the fullest of the home folder's, the temp
+  folder's and `hostDiskPaths` volumes, and on the portal VM `/tmp` is a tmpfs of half the 4 GiB RAM (Ubuntu 26.04), so
+  `system_status`, the dashboard and the "cannot free enough disk space" notice said 1.9 GB free, below the 60 GB soft
+  threshold, and it ran its low-space mode every 15 minutes. Now the disk is the home folder's and the data folder's
+  volumes (and `hostDiskPaths`; on a machine, the clone's and the sandboxes'); a tmpfs or ramfs never counts, and the
+  temp folder is shown apart, labelled RAM or a disk volume of its own, unless it is on that disk. The host guard's warn
+  and critical levels already measured only the data volume and `hostDiskPaths`.
 - **The cut-over prints the exact FFBox commands that move its connector to the new portal** (w537). After the first
   cut-over FFBox stayed offline: its connector still dialled BEAST's old URL (answering 502), because `fff.url` is
   rendered into its unit by root on the FFBox host and the step was one line among others. `fffctl migrate --cut-over`
