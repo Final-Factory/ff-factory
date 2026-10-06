@@ -591,6 +591,26 @@ test('machine: stopping or restarting a daemon is refused while agents run unles
   assert.deepEqual(await mm.watchOffline(Date.now() + 20 * 60_000, async () => true), ['mx'], 'otherwise it is redeployed as before');
 });
 
+test('machine: a daemon stopping on purpose (a worker migration, w513) is not redeployed until a daemon says hello again', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  // POST /machine/stopping, then the migration stops it: the offline watch leaves it alone while its sandboxes move
+  // (LothDesktop 2026-10-06: a redeploy 2 minutes in put the old daemon back and the move rolled back).
+  assert.deepEqual(mm.stoppingOnPurpose('mx'), { ok: true });
+  d.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  const redeployed: string[] = [];
+  mm.deployMachine = ((o: { id: string }) => (redeployed.push(o.id), store.machines.get(o.id)!)) as typeof mm.deployMachine;
+  await mm.watchOffline(Date.now(), async () => true);
+  assert.deepEqual(await mm.watchOffline(Date.now() + 40 * 60_000, async () => true), []);
+  assert.deepEqual(redeployed, []);
+  // The root's daemon (or the old one after a rollback) says hello: the hold ends.
+  daemon();
+  await until('back', () => mm.isOnline('mx') && store.machines.get('mx')!.daemonStopped === undefined);
+});
+
 test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart are resumed when the daemon is back; a stop is not', async (t) => {
   const { store, sessions, mm, daemon, cleanup } = await setup();
   t.after(cleanup);
