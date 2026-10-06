@@ -381,7 +381,10 @@ export async function migrate(o: MigrateOptions) {
   const fromService = o.fromService ?? (isWin ? win.TASK_NAME : LABEL);
   if (!old.token) throw new Error(`the old daemon.json in ${old.appDir} has no token: this tool moves a working daemon`);
   const portalUrl = (o.install.portalUrl ?? String(old.config.portalUrl ?? '')).replace(/\/+$/, '');
-  const io: InstallOptions = { ...o.install, portalUrl, token: old.token, carry: old.config, replacesService: true };
+  // The root's clone is seeded from the old clone's origin branches: no download, and no GitHub credential, which an
+  // ssh session on Windows does not have.
+  const seedFrom = old.repoPath && fs.existsSync(path.join(old.repoPath, '.git')) ? old.repoPath : undefined;
+  const io: InstallOptions = { ...o.install, portalUrl, token: old.token, carry: old.config, replacesService: true, ...(seedFrom ? { seedFrom } : {}) };
   const items = plan(old, l);
   printPlan(items, l);
   if (o.dryRun) return say('\nDry run: nothing changed.');

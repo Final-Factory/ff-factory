@@ -159,6 +159,8 @@ export interface InstallOptions {
   owner?: string;
   /** A test install beside a live one: its own firewall rule groups and no slot config. */
   firewallSuffix?: string;
+  /** A local clone of the game repo to seed the root's clone from (a migration's old clone): no download, no credential. */
+  seedFrom?: string;
   /** daemon.json settings the old daemon had (a migration: its host guard, protected paths, MCP server, limits). */
   carry?: Record<string, unknown>;
   /** A migration replaces the old daemon's service on purpose (worker.ts migrate). */
@@ -464,10 +466,23 @@ async function lockDown(dir: string, sid?: string) {
   }
 }
 
-async function cloneRepo(l: Layout, url: string, relative = true) {
+/**
+ * The root's own bare clone. `seedFrom`, a local clone of the same repo (a migration's old clone): its origin branches
+ * are copied locally instead of downloaded, so no credential is needed. An ssh session on Windows cannot reach the
+ * user's GitHub credential (LothDesktop, measured 2026-10-06), while the daemon in the user's session can; the
+ * clone's remote is still `url`, and the fetch from it below is then only tried. Exported for tests.
+ */
+export async function cloneRepo(l: Pick<Layout, 'repo'>, url: string, relative = true, seedFrom?: string) {
   if (!fs.existsSync(path.join(l.repo, 'HEAD'))) {
-    say(`Cloning ${url} into ${l.repo} (bare; about 1.3 GB of history, git's progress below)...`);
-    await must('git clone', 'git', ['clone', '--bare', '--progress', url, l.repo], { live: true });
+    if (seedFrom) {
+      say(`Seeding ${l.repo} from ${seedFrom}'s origin branches (local, no download)...`);
+      await must('git init', 'git', ['init', '--bare', '--quiet', l.repo]);
+      await must('git remote add', 'git', ['-C', l.repo, 'remote', 'add', 'origin', url]);
+      await must('git fetch (seed)', 'git', ['-C', l.repo, 'fetch', '--no-tags', '--progress', seedFrom, '+refs/remotes/origin/*:refs/remotes/origin/*'], { live: true });
+    } else {
+      say(`Cloning ${url} into ${l.repo} (bare; about 1.3 GB of history, git's progress below)...`);
+      await must('git clone', 'git', ['clone', '--bare', '--progress', url, l.repo], { live: true });
+    }
   }
   // A bare clone has no fetch refspec: sandboxes' branches stay local, origin's go to refs/remotes/origin (docs/worker-root.md 2.3).
   await must('git config', 'git', ['-C', l.repo, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
@@ -475,7 +490,9 @@ async function cloneRepo(l: Layout, url: string, relative = true) {
   await must('git config', 'git', ['-C', l.repo, 'config', 'worktree.useRelativePaths', relative ? 'true' : 'false']);
   await must('git lfs install', 'git', ['-C', l.repo, 'lfs', 'install', '--local']);
   say('Fetching origin...');
-  await must('git fetch', 'git', ['-C', l.repo, 'fetch', '--prune', '--progress', 'origin'], { live: true });
+  if (!seedFrom) return void (await must('git fetch', 'git', ['-C', l.repo, 'fetch', '--prune', '--progress', 'origin'], { live: true }));
+  const r = await exec('git', ['-c', 'credential.interactive=never', '-C', l.repo, 'fetch', '--prune', 'origin'], { env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }, timeoutMs: 10 * 60_000 });
+  if (r.code !== 0) say(`(Could not fetch origin here: ${(r.stderr || r.stdout).trim().split('\n').pop()}. The seed is enough; the daemon fetches with the user's own credentials when it next makes a sandbox.)`);
 }
 
 /** The ff-factory checkout the daemon is installed from: a clone of `from` in <root>/daemon/src, updated on a re-run. */
@@ -642,7 +659,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   await lockDown(l.secrets, f.probe.sid);
 
   // 3. The game repo, bare, and the installer's own checkout.
-  await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees);
+  await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees, o.seedFrom);
   await syncSource(l, from);
   if (o.owner) await giveRoot(l, o.owner);
 
