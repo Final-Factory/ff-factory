@@ -12,6 +12,26 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **`fffctl migrate` copies from one snapshot on BEAST** (w508, Lothsahn's dry run on #134: "batch 2 of 8 broke off …
+  tar: (null)", then his decision: "generate it all in one snapshot, and then tar and compress off a copy").
+  - **Cause (measured on BEAST, its own sshd, tar.exe and PowerShell, with writers like the live portal's):** Windows
+    tar stops at a file that grows or changes while it reads it. It prints `a <file>` and then `tar: (null)` on the same
+    line (bsdtar prints the wrong archive's empty error), exits 1, and leaves the archive cut off in that file:
+    | Live writer | tar stopped |
+    |---|---|
+    | an appended file | 15 of 15 times |
+    | the server's redirected `server.out.log` | 5 of 5 |
+    | a file rewritten in place | 2 of 5 |
+    | a file replaced by rename (the portal's saves) | 0 of 5, but the writer's renames failed 6 times while tar held it |
+  - **The fix:** before anything is read, `SNAP_PS` takes a VSS shadow copy of the volume (through a link in BEAST's
+    temp folder; recorded at once so a run that dies has it removed by the next), or else a staged copy (robocopy,
+    backup mode when elevated, after a free-space check), and says which. The listing, every stream, every retry and
+    the files sent one by one all read from it. `DROP_PS` removes it at the end, on a failure and on Ctrl+C (link
+    first, never what it points to). `--snapshot auto|vss|copy`.
+  - BEAST's tar runs with `-v`. A file it still stops at is taken out of its stream and sent through PowerShell, and the
+    stream goes on (measured on BEAST against real bsdtar with live writers: 3 files stopped at, 5 of 5 copied).
+  - The progress line counts the bytes of the files unpacked and never goes back on a retry. OpenSSH's post-quantum
+    warning about BEAST's 9.5 server is left out of BEAST's messages.
 - **The ledger's PR states are fresh, and a DONE is not refused on a merged PR** (w515, Lothsahn: "How can we fix PR's
   having the wrong status?"). w443, w449, w454, w484 and w489 were each refused "PR #N is still open" seconds after
   their PR merged (#1087, #1080, #1089, #1092, #1095), and nothing looked again, so they sat in "Merged, follow-up
