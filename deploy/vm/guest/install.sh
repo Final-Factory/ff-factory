@@ -141,6 +141,7 @@ table inet fff_guest {
     meta l4proto { icmp, ipv6-icmp } accept
     $host_rule
     iifname "tailscale0" tcp dport 443 accept comment "Funnel and tailnet HTTPS (tailscale serve) to the portal"
+    iifname "tailscale0" tcp dport 22 accept comment "ssh from the tailnet only: the tailnet policy says who; Funnel never carries 22"
     udp dport 41641 accept comment "Tailscale's direct connections"
   }
 }

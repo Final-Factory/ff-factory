@@ -233,12 +233,15 @@ Six rules:
    A rootful container would run as root and pass. FFBox has none, and adding one would
    break its own security model *(sourced: ffbox docker-security-model)*.
 5. **The guest has its own firewall** (`inet fff_guest`, `deploy/vm/guest`), which drops by default. It accepts the
-   host's address on 22 and 8790, `tailscale0` on 443 (Funnel and tailnet HTTPS), and Tailscale's UDP port.
+   host's address on 22 and 8790, `tailscale0` on 443 (Funnel and tailnet HTTPS) and 22 (ssh from the tailnet, for
+   whoever the tailnet policy lets reach `tag:fff-portal` on 22; not from the LAN, and never through Funnel), and
+   Tailscale's UDP port.
 6. **Tailnet policy** (Ben's tailnet admin, [D3](#8-risks-and-open-decisions)). The VM's node joins with a tag,
    `tag:fff-portal`, from a pre-approved, non-ephemeral auth key made for that tag. Tagged nodes' keys do not expire
    *(sourced: Tailscale KB 1085, "Key expiry for tagged devices is disabled by default")*. An OAuth client secret would
    make the node ephemeral unless `?ephemeral=false` is added *(sourced: Tailscale KB 1215)*. Grants: people's devices
-   and the four machines may reach `tag:fff-portal` on 443, and `tag:fff-portal` may reach the four machines on port
+   and the four machines may reach `tag:fff-portal` on 443 (and Lothsahn's devices on 22, for ssh into the VM; Ben adds
+   it), and `tag:fff-portal` may reach the four machines on port
    22, plus BEAST for backups; nothing else. **In place** since 2026-10-05: Ben replaced the default allow-all with
    these rules and checked them; the old policy is `deploy/vm/tailnet-policy-before-2026-10-05.hujson`. `nodeAttrs` gives `funnel` to `tag:fff-portal` only. Funnel needs MagicDNS,
    HTTPS certificates and that attribute, and listens only on 443, 8443 or 10000 *(sourced: Tailscale KB 1223)*.
