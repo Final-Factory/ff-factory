@@ -317,9 +317,10 @@ it was made.
 
 **Enroll a machine** (a new one, or after a revoke):
 1. In the VM: `sudo fffctl machine-credential issue <id> --out /tmp/<id>.cred`. It is written to that file (0600) and
-   never printed; the credential before it, if any, stops connecting.
-2. Move the file to the machine, into the daemon's `daemon.json` `token` field today (w511's `secrets/machine-token`
-   once w513 lands), or let `add_machine` do the whole deploy, which issues its own. Delete the file in the VM.
+   never printed; a daemon still on the credential before it is dropped within 20 s.
+2. Move the file to the machine and give it to the worker installer (w513, [worker-install.md](worker-install.md)):
+   `-CredentialFile` on Windows, `--credential-file` on a Mac. It goes into the root's `secrets/machine-token`. Delete
+   the file in the VM and on the machine. (A machine still deployed by `add_machine` gets its own credential that way.)
 3. The machine's daemon connects; `list_machines` shows it online. Grant it entries as above.
 
 **Cut a machine off:** `sudo fffctl machine-credential revoke <id>` (or ✕ beside it in the dialog). Its link drops
