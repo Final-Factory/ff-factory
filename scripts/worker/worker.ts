@@ -658,11 +658,10 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   writeManifest(l.root, m);
   const d = isWin ? await installDaemonWin(o, l, id, f.probe) : await installDaemonMac(o, l, id, f.probe);
   say(`Daemon ${d.version} installed as ${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`}${d.started ? ' and started' : ' (it starts at the next logon)'}.`);
-  // The Unity slots mailbox is under the root: scripts outside the daemon (the nightly harness, a build by hand) find it
-  // through this pointer, or they would run without a slot (w469, docs/unity-lifecycle.md "Unity slots").
-  const slots = writeSlotsPointer(l);
-  noteOutside(m, { kind: 'file', name: slots, note: 'the Unity slots mailbox for scripts outside the daemon' });
-  writeManifest(l.root, m);
+  // No Unity slots pointer: the mailbox stays at its standard place in the home folder (daemonJson), where the daemon,
+  // its agents and scripts outside it (the nightly harness, a build by hand) all find it with no config (w469,
+  // machine/unitySlots.ts slotsDir). One mailbox, so they can never disagree. The uninstall still removes a pointer
+  // into its root (an install from before this), and slotsDir still honours one a person writes.
 
   // 5. Windows Firewall: the fixed slot paths and the Unity editors, once.
   if (isWin && o.firewall) {
