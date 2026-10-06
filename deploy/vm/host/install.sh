@@ -539,60 +539,35 @@ runcmd:
 final_message: "fff-vm: cloud-init finished after \$UPTIME s"
 EOF
 )
-seed_iso="$VM_IMAGE_DIR/seed.iso"
+seed_iso=$(vm_seed_iso)
 if [ -n "$c1$c2$c3" ] || [ ! -f "$seed_iso" ]; then
   run_cmd cloud-localds --network-config="$seed/network-config" "$seed_iso" "$seed/user-data" "$seed/meta-data"
   run_cmd chmod 0600 "$seed_iso"
   if dom_exists && [ "$DRY_RUN" != 1 ]; then warn "the seed changed; cloud-init reads it only at the first boot of $instance_id, so a running VM keeps its first settings"; fi
 fi
-if [ "$VM_DISK_MODE" = zvol ]; then
-  disk_xml="<disk type='block' device='disk'><driver name='qemu' type='raw' cache='none' io='native' discard='unmap'/><source dev='$disk'/><target dev='vda' bus='virtio'/></disk>"
+# The domain, made from fff-vm.conf (domain_xml, lib.sh). A running VM is never redefined here: fff-vm nightly applies a
+# change while the VM is off at its cold restart, and goes back to the previous definition if the VM does not come up.
+dom_new=$(mktemp)
+domain_xml >"$dom_new"
+if ! dom_exists; then
+  write_file "$FFF_VM_ETC/domain.xml" 0600 <"$dom_new" >/dev/null
+  domain_define "$dom_new"
+  manifest_set domain_created "$VM_NAME"
 else
-  disk_xml="<disk type='file' device='disk'><driver name='qemu' type='qcow2' discard='unmap'/><source file='$disk'/><target dev='vda' bus='virtio'/></disk>"
+  dom_pending=$(domain_changes | paste -sd ';' - | sed 's/;/; /g')
+  if [ -z "$dom_pending" ]; then
+    log "the domain matches fff-vm.conf"
+  elif [ "$(dom_state)" = "shut off" ]; then
+    log "the domain is off: defining what fff-vm.conf changes now ($dom_pending)"
+    write_file "$FFF_VM_ETC/domain.xml" 0600 <"$dom_new" >/dev/null
+    domain_define "$dom_new"
+    run_cmd rm -f "$FFF_VM_STATE/domain.rejected"
+  else
+    log "fff-vm.conf changes the running domain ($dom_pending): fff-vm nightly applies it at its next cold restart ($NIGHTLY_TIME $NIGHTLY_TZ, NIGHTLY_MODE=$NIGHTLY_MODE), or now: sudo fff-vm nightly --now"
+    [ -z "$(domain_foreign)" ] || warn "it names another disk, seed, network or MAC address, which the nightly does not apply: stop the VM (virsh shutdown $VM_NAME) and run this again"
+  fi
 fi
-dom_changed=$(write_file "$FFF_VM_ETC/domain.xml" 0600 <<EOF
-<domain type='kvm'>
-  <name>$VM_NAME</name>
-  <description>$FFF_VM_MARK</description>
-  <memory unit='MiB'>$VM_MEMORY_MB</memory>
-  <currentMemory unit='MiB'>$VM_MEMORY_MB</currentMemory>
-  <vcpu placement='static'>$VM_VCPUS</vcpu>
-  <os>
-    <type arch='x86_64' machine='q35'>hvm</type>
-    <boot dev='hd'/>
-  </os>
-  <features><acpi/><apic/></features>
-  <cpu mode='host-passthrough' check='none'/>
-  <clock offset='utc'>
-    <timer name='rtc' tickpolicy='catchup'/>
-    <timer name='pit' tickpolicy='delay'/>
-    <timer name='hpet' present='no'/>
-  </clock>
-  <on_poweroff>destroy</on_poweroff>
-  <on_reboot>restart</on_reboot>
-  <on_crash>restart</on_crash>
-  <pm><suspend-to-mem enabled='no'/><suspend-to-disk enabled='no'/></pm>
-  <devices>
-    $disk_xml
-    <disk type='file' device='cdrom'><driver name='qemu' type='raw'/><source file='$seed_iso'/><target dev='sda' bus='sata'/><readonly/></disk>
-    <interface type='network'><mac address='$NET_VM_MAC'/><source network='$NET_NAME'/><model type='virtio'/></interface>
-    <serial type='pty'><log file='/var/log/libvirt/qemu/$VM_NAME-serial.log' append='on'/><target port='0'/></serial>
-    <console type='pty'><target type='serial' port='0'/></console>
-    <channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>
-    <watchdog model='i6300esb' action='reset'/>
-    <panic model='isa'/>
-    <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
-    <memballoon model='virtio'/>
-  </devices>
-</domain>
-EOF
-)
-if ! dom_exists || [ -n "$dom_changed" ]; then
-  run_cmd virsh --connect qemu:///system define "$FFF_VM_ETC/domain.xml"
-  dom_exists || manifest_set domain_created "$VM_NAME"
-  [ "$DRY_RUN" = 1 ] || manifest_set domain_created "$VM_NAME"
-  if [ "$(dom_state)" = running ]; then warn "the domain's definition changed; it applies at the next cold start (fff-vm nightly, or virsh shutdown + start)"; fi
-fi
+rm -f "$dom_new"
 run_cmd virsh --connect qemu:///system autostart "$VM_NAME"
 
 # ---------------------------------------------------------------- 10. runtime: fff-vm, hang detection, nightly, events

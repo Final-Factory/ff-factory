@@ -62,7 +62,18 @@ disk=$(vm_disk_path)
 if [ "$DELETE_DISK" = 1 ]; then
   if [ "$VM_DISK_MODE" = zvol ] && zfs list -H "$VM_ZVOL_PARENT/disk0" >/dev/null 2>&1; then
     [ "$(zfs get -H -o value fff-vm:managed "$VM_ZVOL_PARENT/disk0")" = yes ] || refuse "$VM_ZVOL_PARENT/disk0 is not fff-vm's"
-    run_cmd zfs destroy -r "$VM_ZVOL_PARENT/disk0"
+    # The volume stays busy for a moment after QEMU lets it go (udev's probe of the closed device): "cannot destroy
+    # 'fffci/fff-vm/disk0': dataset is busy" 5 s after the VM stopped (CI run 37504387061). Settle and try again.
+    if [ "$DRY_RUN" = 1 ]; then
+      run_cmd zfs destroy -r "$VM_ZVOL_PARENT/disk0"
+    else
+      for i in $(seq 12); do
+        zfs destroy -r "$VM_ZVOL_PARENT/disk0" && break
+        [ "$i" -lt 12 ] || die "$VM_ZVOL_PARENT/disk0 is still busy after a minute: look with fuser -v /dev/zvol/$VM_ZVOL_PARENT/disk0"
+        udevadm settle || true
+        sleep 5
+      done
+    fi
     if [ "$(manifest_get zfs_parent_created)" = "$VM_ZVOL_PARENT" ] && [ -z "$(zfs list -H -r -d 1 -o name "$VM_ZVOL_PARENT" | grep -vxF "$VM_ZVOL_PARENT" || true)" ]; then
       run_cmd zfs destroy "$VM_ZVOL_PARENT"
     fi
@@ -127,7 +138,7 @@ else
 fi
 if [ "$DRY_RUN" != 1 ]; then
   mv "$FFF_VM_MANIFEST" "$FFF_VM_MANIFEST.uninstalled-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
-  rm -rf "$FFF_VM_RUN" "$FFF_VM_STATE/watch.state"
+  rm -rf "$FFF_VM_RUN" "$FFF_VM_STATE/watch.state" "$FFF_VM_STATE/domain.rejected"
 fi
 log "uninstalled"
 [ "$DRY_RUN" != 1 ] || log "DRY RUN finished: nothing was changed"

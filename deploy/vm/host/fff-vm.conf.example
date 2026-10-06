@@ -7,7 +7,7 @@
 # ---------------------------------------------------------------- the VM
 VM_NAME=fff-portal
 # Sizing: docs/portal-on-ffbox-host.md, "Sizing": from BEAST's portal, measured (D12). A change applies at the next
-# nightly cold restart.
+# nightly cold restart (or sudo fff-vm nightly --now), which goes back to the previous size if the VM does not come up.
 VM_VCPUS=2
 # 4 GiB (Lothsahn, 2026-10-06, w537): the whole portal peaked at 1.1 GB resident, 2.5 GB Windows private, over 20 h.
 VM_MEMORY_MB=4096

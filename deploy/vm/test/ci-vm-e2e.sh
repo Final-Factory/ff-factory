@@ -10,7 +10,8 @@
 # What it proves, in order: a missing token stops the install before any change, the host install (twice: idempotent), the isolation (who reaches whom), the watchdog
 # armed in the guest, the guest install and the portal's health, an update (build beside, drain, switch, verify), an
 # automatic rollback of a broken update, the health restart of a hung server, the nightly drain + cold restart +
-# snapshot, the hang detection's reset, the watchdog device's reset, and the uninstall.
+# snapshot, a size change in fff-vm.conf applied by the nightly and one it goes back from, the hang detection's reset,
+# the watchdog device's reset, and the uninstall.
 set -o errexit -o nounset -o pipefail
 MODE=${1:?qcow2 or zvol}
 # fast (the default: pull requests, main): the watch, health and update-verify timers short, so the scenarios that wait
@@ -346,6 +347,53 @@ pid1=$(cat /run/libvirt/qemu/$VM.pid)
 wait_for 300 "the portal answers after the nightly" health
 journalctl -u fff-vm-nightly --no-pager -n 0 >/dev/null 2>&1 || true
 echo "ok: nightly ($(/usr/local/sbin/fff-vm snapshots | tr '\n' ' '))"
+
+step "a size change in fff-vm.conf: install.sh leaves the running VM alone, the nightly applies it (w537)"
+mem_kib() { virsh dumpxml "$@" $VM | sed -n "s|.*<memory unit='KiB'>\([0-9]*\)</memory>.*|\1|p"; }
+[ "$(mem_kib --inactive)" = 4194304 ] || fail "the VM is not defined at the default 4096 MiB: $(mem_kib --inactive) KiB"
+sed -i '/^VM_MEMORY_MB=/d' /etc/fff-vm/fff-vm.conf
+echo 'VM_MEMORY_MB=3072' >>/etc/fff-vm/fff-vm.conf
+pid1=$(cat /run/libvirt/qemu/$VM.pid)
+deploy/vm/host/install.sh --host-only 2>&1 | tee /tmp/resize-install.log
+[ "$(cat /run/libvirt/qemu/$VM.pid)" = "$pid1" ] || fail "install.sh restarted the VM for a size change"
+matches -F 'fff-vm.conf changes the running domain (memory 4096 -> 3072 MiB): fff-vm nightly applies it' /tmp/resize-install.log ||
+  fail "install.sh did not say the nightly applies the change"
+[ "$(mem_kib --inactive)" = 4194304 ] || fail "install.sh redefined the running VM"
+/usr/local/sbin/fff-vm status | tee /tmp/resize-status.txt
+matches -F 'definition: fff-vm.conf asks for memory 4096 -> 3072 MiB: the next nightly applies it' /tmp/resize-status.txt ||
+  fail "fff-vm status does not show the pending change"
+b1=$(boot_id)
+/usr/local/sbin/fff-vm nightly --now 2>&1 | tee /tmp/resize-nightly.log
+matches -F 'applying fff-vm.conf to fff-portal: memory 4096 -> 3072 MiB' /tmp/resize-nightly.log || fail "the nightly did not log the change"
+matches -F 'applied: memory 4096 -> 3072 MiB' /tmp/resize-nightly.log || fail "the nightly did not apply the change"
+! matches 'notify' /tmp/resize-nightly.log || fail "the nightly alerted"
+[ "$(boot_id)" != "$b1" ] || fail "the guest did not boot again"
+[ "$(mem_kib --inactive)" = 3145728 ] || fail "the VM is not defined at 3072 MiB: $(mem_kib --inactive) KiB"
+[ "$(mem_kib)" = 3145728 ] || fail "the VM does not run at 3072 MiB: $(mem_kib) KiB"
+virsh dominfo $VM | grep -i memory
+matches "<memory unit='KiB'>4194304</memory>" /etc/fff-vm/domain.libvirt-prev.xml || fail "the previous definition is not kept"
+wait_for 300 "the portal answers after the resize" health
+gtotal=$(g "free -m | awk '/^Mem:/ {print \$2}'")
+echo "MEASURE guest memory after the resize to 3072 MiB: total $gtotal MiB"
+[ "$gtotal" -gt 2600 ] || fail "the guest sees $gtotal MiB, not about 3 GiB"
+[ "$gtotal" -le 3072 ] || fail "the guest sees $gtotal MiB, more than 3 GiB"
+/usr/local/sbin/fff-vm status | tee /tmp/resize-status.txt
+matches -E '^VM fff-portal: running \(2 vCPUs, 3072 MiB' /tmp/resize-status.txt || fail "fff-vm status does not show the new size"
+matches -Fx '  definition: matches fff-vm.conf' /tmp/resize-status.txt || fail "fff-vm status does not say it matches"
+echo "ok: 4096 -> 3072 MiB by the nightly; install.sh left the running VM alone"
+
+step "a size libvirt cannot run: the nightly goes back to the previous definition (w537)"
+echo 'VM_VCPUS=5000' >>/etc/fff-vm/fff-vm.conf
+/usr/local/sbin/fff-vm nightly --now 2>&1 | tee /tmp/bad-nightly.log
+matches -E 'notify: fff-vm: VM settings (not applied|rolled back)' /tmp/bad-nightly.log || fail "no alert about the refused size"
+echo "MEASURE where libvirt refused 5000 vCPUs: $(grep -oE 'notify: fff-vm: VM settings (not applied|rolled back): .{0,300}' /tmp/bad-nightly.log | head -n 1)"
+virsh dominfo $VM | matches -E '^CPU\(s\): +2$' || fail "the VM does not run its previous 2 vCPUs"
+[ "$(virsh dumpxml --inactive $VM | sed -n "s|.*<vcpu[^>]*>\([0-9]*\)</vcpu>.*|\1|p")" = 2 ] || fail "the VM is not defined with its previous 2 vCPUs"
+wait_for 300 "the portal answers after going back" health
+/usr/local/sbin/fff-vm status | matches -F 'not tried again until fff-vm.conf changes' || fail "fff-vm status does not show the rejected size"
+sed -i '/^VM_VCPUS=5000$/d' /etc/fff-vm/fff-vm.conf
+/usr/local/sbin/fff-vm status | matches -Fx '  definition: matches fff-vm.conf' || fail "fff-vm status after fff-vm.conf is put back"
+echo "ok: a size libvirt cannot run is not kept; the VM runs its previous definition"
 
 step "hang detection: neither the agent nor the portal answers -> reset"
 b1=$(boot_id)

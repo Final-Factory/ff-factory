@@ -82,6 +82,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The nightly cold restart applies a size changed in `/etc/fff-vm/fff-vm.conf`** (w537, Lothsahn: "Can we make it do
+  that during the update automatically?"). With the VM off, `fff-vm nightly` (and `--now`) defines the domain again
+  from the settings, logs what changed, keeps libvirt's previous definition (`/etc/fff-vm/domain.libvirt-prev.xml`), and
+  defines that one again with an alert if libvirt refuses the new one, the VM does not start with it, or the portal does
+  not answer within 15 minutes; that size is not tried again until the settings change. `install.sh` and the nightly
+  share the domain's template (`domain_xml`, `deploy/vm/host/lib.sh`); `install.sh` no longer redefines a running VM
+  and says what the nightly will apply. `fff-vm status` shows the VM's real size and any change waiting. Fixed on the
+  way: a redefinition of the existing domain was refused by libvirt ("domain 'fff-portal' already exists with uuid
+  ..."), because the definition carried no uuid; it now carries the domain's. A host installed before this updates its
+  scripts once (`install.sh --host-only --yes`, RUNBOOK section 7).
 - **A machine with sandboxes takes workers in them only, whatever its `max_agents`** (w536, asked by Lothsahn: "Can't
   we get rid of this code so the settings doesn't matter?"). `start_agent` with such a machine alone is refused, naming
   its sandboxes, and its daemon refuses too. There `max_agents` caps only its standing agents. Only a machine without

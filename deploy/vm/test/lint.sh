@@ -14,7 +14,7 @@ scripts=(deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm
   deploy/vm/host/answers.sh deploy/vm/host/guest.sh deploy/vm/host/vault.sh
   deploy/vm/host/fff-vm.conf.example deploy/vm/guest/install.sh deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health
   deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh deploy/vm/guest/fff-migrate deploy/vm/guest/lib.sh deploy/vm/guest/fff.conf.example
-  deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh)
+  deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh deploy/vm/test/fff-vm-nightly.test.sh)
 for f in "${scripts[@]}"; do bash -n "$f"; done
 echo "bash -n: ${#scripts[@]} files parse"
 shellcheck --version | sed -n 2p
@@ -23,10 +23,13 @@ echo "shellcheck: clean"
 # Every executable script really is executable in git (the installers copy modes from the checkout).
 for f in deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm-rollback.sh deploy/vm/host/fff-vm deploy/vm/guest/install.sh \
   deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh \
-  deploy/vm/guest/fff-migrate deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh; do
+  deploy/vm/guest/fff-migrate deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh deploy/vm/test/fff-vm-nightly.test.sh; do
   [ "$(git ls-files -s "$f" | cut -c1-6)" = 100755 ] || { echo "$f is not executable in git (git update-index --chmod=+x)"; exit 1; }
 done
 python3 -m json.tool deploy/vm/guest/config.vm.example.json >/dev/null && echo "config.vm.example.json: valid JSON"
+# fff-vm nightly applying fff-vm.conf's size, against a fake libvirt (w537). It needs jq; a throwaway machine gets it.
+if [ "$units" = 1 ] && ! command -v jq >/dev/null; then apt-get install -y -q jq >/dev/null; fi
+deploy/vm/test/fff-vm-nightly.test.sh
 
 if command -v pwsh >/dev/null; then
   pwsh -NoProfile -Command '$e = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile("deploy/vm/measure/measure-portal.ps1", [ref]$null, [ref]$e); if ($e.Count) { $e; exit 1 }; "measure-portal.ps1: parses"'
