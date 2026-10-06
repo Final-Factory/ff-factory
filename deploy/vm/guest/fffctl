@@ -178,9 +178,14 @@ cmd_update() {
     shift
   done
   t0=$(date +%s)
+  # publicUrl from Tailscale when it is empty or wrong (sync_public_url); an update's restart picks it up, and when
+  # there is nothing to update the portal is restarted for it below.
+  local url_fixed=0
+  if sync_public_url; then url_fixed=1; fi
   jq -n --argjson m "$mins" --arg at "$(date -u +%FT%TZ)" '{drainMinutes: $m, reason: "update (fffctl update)", at: $at}' | data_write update.wanted
   if [ "$wait" = 0 ]; then
     echo "update requested: fff-update builds origin/$FFF_BRANCH now (journalctl -fu fff-update), then the portal drains and switches"
+    [ "$url_fixed" = 0 ] || echo "publicUrl was corrected; it applies at the portal's next restart (the update's, or fffctl restart)"
     return 0
   fi
   local details="journalctl -u fff-update -u fff-portal -u fff-health --since @$t0 --no-pager"
@@ -206,6 +211,12 @@ cmd_update() {
     exit 1
   fi
   if grep -q 'fff: already at ' <<<"$l"; then
+    if [ "$url_fixed" = 1 ]; then
+      say "already up to date at $(grep -oE 'already at [0-9a-f]+' <<<"$l" | tail -n 1 | cut -d' ' -f3); restarting for the corrected publicUrl"
+      trap - INT
+      cmd_restart --drain-minutes "$mins"
+      exit 0
+    fi
     say "already up to date at $(grep -oE 'already at [0-9a-f]+' <<<"$l" | tail -n 1 | cut -d' ' -f3): nothing to restart"
     exit 0
   fi
@@ -324,7 +335,8 @@ cmd_tailscale_join() {
   tailscale funnel --bg "http://127.0.0.1:$FFF_PORT"
   url=$(tailscale funnel status 2>/dev/null | grep -m1 -o 'https://[^ ]*' || true)
   echo "joined as $host ($tag). Funnel: ${url:-see tailscale funnel status}"
-  echo "Delete $keyfile now. Then set config.json publicUrl to ${url%/} (or set_app_config publicUrl)."
+  echo "Delete $keyfile now."
+  if sync_public_url; then cmd_restart --drain-minutes 2; fi
 }
 
 cmd_gh_login() {

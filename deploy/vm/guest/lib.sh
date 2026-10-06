@@ -57,6 +57,39 @@ install_scripts() {
   echo "${c# }"
 }
 
+# tailnet_url: this VM's own https address on the tailnet (https://<node>.<tailnet>.ts.net, the Funnel URL), or nothing
+# while Tailscale has not joined.
+tailnet_url() {
+  command -v tailscale >/dev/null || return 0
+  tailscale status --json 2>/dev/null | jq -r 'if .BackendState == "Running" then (.Self.DNSName // "" | rtrimstr(".")) else "" end' 2>/dev/null |
+    sed -nE 's#^(.+)$#https://\1#p' || true
+}
+
+# sync_public_url: config.json publicUrl (machines and the outside watchdog reach the portal there) set to tailnet_url
+# when it is empty or another ts.net address (a renamed node, a copy from another portal). A URL off ts.net was set by
+# a person on purpose and stays. Succeeds when it changed the file, so the caller restarts the portal.
+sync_public_url() {
+  local cfg=$FFF_ROOT/config/config.json want have tmp
+  [ -f "$cfg" ] || return 1
+  want=$(tailnet_url)
+  if [ -z "$want" ]; then log "publicUrl: Tailscale has not joined yet, so it stays as it is (fffctl tailscale-join sets it)"; return 1; fi
+  have=$(jq -r '.publicUrl // ""' "$cfg" 2>/dev/null || true)
+  have=${have%/}
+  [ "$have" != "$want" ] || return 1
+  if [ -n "$have" ] && ! printf '%s' "$have" | matches -E '^https://[^/]+\.ts\.net$'; then
+    log "publicUrl: $have is not on ts.net, so it stays (this VM's tailnet address is $want)"
+    return 1
+  fi
+  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would set config.json publicUrl to $want (was ${have:-empty})"; return 1; fi
+  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
+  jq --arg url "$want" '.publicUrl = $url' "$cfg" >"$tmp" || { rm -f "$tmp"; warn "could not edit $cfg"; return 1; }
+  chown "$FFF_USER:$FFF_USER" "$tmp"
+  chmod 0600 "$tmp"
+  cp -p "$cfg" "$cfg.prev"
+  mv -f "$tmp" "$cfg"
+  log "publicUrl: set to $want (was ${have:-empty})"
+}
+
 load_conf() {
   local here
   here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

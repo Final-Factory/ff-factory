@@ -185,8 +185,10 @@ if [ -f "$FFF_ROOT/config/config.json" ]; then
   log "kept: $FFF_ROOT/config/config.json"
 else
   write_file "$FFF_ROOT/config/config.json" 0600 "$FFF_USER:$FFF_USER" <"$here/config.vm.example.json" >/dev/null
-  log "written from config.vm.example.json; set ownerName and publicUrl (docs, 'Installing')"
+  log "written from config.vm.example.json; set ownerName (docs, 'Installing')"
 fi
+url_changed=0
+if sync_public_url; then url_changed=1; fi
 
 log "9/9 systemd units"
 c=""
@@ -209,8 +211,8 @@ EOF
 run_cmd systemctl enable fff-portal.service fff-health.timer fff-update.path fff-backup.timer fff-base-refresh.timer
 if [ "$START" = 1 ]; then
   run_cmd systemctl start fff-update.path fff-health.timer fff-backup.timer fff-base-refresh.timer
-  if [ -n "$c" ] && portal_active; then
-    log "units changed: restarting the portal with a drain"
+  if { [ -n "$c" ] || [ "$url_changed" = 1 ]; } && portal_active; then
+    log "$([ -n "$c" ] && echo "units changed" || echo "publicUrl changed"): restarting the portal with a drain"
     run_cmd /usr/local/sbin/fffctl restart --drain-minutes 5
   else
     run_cmd systemctl start fff-portal.service
@@ -229,7 +231,7 @@ Installed. Still to do, by a person (docs/portal-on-ffbox-host.md, "Installing")
   2. sudo fffctl tailscale-join --authkey-file /root/ts.key       tagged node, Funnel to the portal
   3. sudo fffctl gh-login --token-file /root/gh.token             the portal's GitHub token (D7)
   4. sudo fffctl base-clone                                       the game repo for orchestrators' reads
-  5. $FFF_ROOT/config/config.json: ownerName, publicUrl, claudeAccounts; then sudo fffctl restart
+  5. $FFF_ROOT/config/config.json: ownerName, claudeAccounts; then sudo fffctl restart (publicUrl: set from Tailscale)
   6. backups: age public keys in $BACKUP_RECIPIENTS_FILE, BACKUP_SSH_TARGET in $FFF_CONF,
      and authorize $BACKUP_SSH_KEY.pub there; then sudo fffctl backup
   The portal's ssh key for machine deploys: $FFF_ROOT/home/.ssh/id_ed25519.pub (authorize with from=, docs 4.3).
