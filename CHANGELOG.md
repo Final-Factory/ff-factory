@@ -10,6 +10,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **No claude.ai connectors for the orchestrators and the dispatcher** (w516, Lothsahn: "Please do an update to disable
+  the gmail, drive, and calendar tools", then "Disable claude docs"). Their 58 tools (Gmail 30, Google Drive 11, Google
+  Calendar 9, Claude Docs 8) were about 41,300 input tokens in every orchestrator and dispatcher turn (measured: a
+  person's orchestrator 65,496 → 24,199 tokens, the dispatcher 80,841 → 39,544). Workers and standing agents keep
+  them. Config `claudeAiConnectors` sets it per role (docs/accounts.md, "claude.ai connectors").
+
 ### Fixed
 
 - **`fffctl migrate` copies from one snapshot on BEAST** (w508, Lothsahn's dry run on #134: "batch 2 of 8 broke off …

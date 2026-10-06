@@ -6,7 +6,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { PORTAL_ONLY_WHY, ROOT, configPath, ownerLine, portalOnly, publicIdentityOf, type Config } from './config.ts';
+import { PORTAL_ONLY_WHY, ROOT, configPath, connectorEnv, ownerLine, portalOnly, publicIdentityOf, type Config } from './config.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
 import { portalSecretRules, secretFilesOf, type SecretRules } from './secretGuard.ts';
 import { buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from './launch.ts';
@@ -954,7 +954,8 @@ ${a.charter}
         standing: { folder: a.folder, groups: a.tools, offLimits: place.offLimits, secrets: place.secrets },
       },
       // What the agent does as Max is tagged with its session (docs/max.md); a machine's daemon sets its own FF_MAX_EVENTS.
-      env: { ...place.env, FF_STANDING_AGENT: a.id, ...(a.machineId ? { FF_SESSION_ID: a.sessionId } : maxEnv(this.cfg, a.sessionId)) },
+      // Its claude.ai connectors: config claudeAiConnectors.standing (w516; on by default).
+      env: { ...place.env, FF_STANDING_AGENT: a.id, ...(a.machineId ? { FF_SESSION_ID: a.sessionId } : maxEnv(this.cfg, a.sessionId)), ...connectorEnv(this.cfg, 'standing') },
       login: place.login,
       claudeExecutable: place.claudeExecutable,
       init: { files: { [NOTES]: this.notesSeed(a) } },
