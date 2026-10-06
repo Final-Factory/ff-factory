@@ -5,7 +5,6 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PermissionMode } from '../shared/types.ts';
-import { DEFAULT_HANG, type HangThresholds } from './unityHang.ts';
 import { checkObject, dataRecoveries, readJsonDurable } from './durable.ts';
 import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
 
@@ -19,16 +18,16 @@ import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts'
 export type ClaudeAccount = 'login' | 'token' | 'tokenfile';
 export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token', 'tokenfile'];
 /** The roles that may run on the token file (TOKEN_FILE): never workers, which run on machines and other people's work. */
-export const TOKEN_FILE_ROLES: readonly string[] = ['orchestrator', 'dispatcher', 'standing'];
+export const TOKEN_FILE_ROLES: readonly string[] = ['orchestrator', 'dispatcher'];
 /** The roles config claudeAccounts picks an account for, on this host. */
 /**
  * The roles config claudeAccounts sets an account for. `dispatcher` (w464, docs/portal-on-ffbox-host.md change 6): when
  * set, the dispatcher runs on it, and not on the system payer's own token; unset, it follows `orchestrator` as before.
  */
-export type HostRole = 'orchestrator' | 'dispatcher' | 'workers' | 'standing';
-export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'dispatcher', 'workers', 'standing'];
-const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator', dispatcher: 'the dispatcher', workers: 'workers', standing: 'standing agents' };
-/** Roles as people read them: "the orchestrator, standing agents". */
+export type HostRole = 'orchestrator' | 'dispatcher' | 'workers';
+export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'dispatcher', 'workers'];
+const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator', dispatcher: 'the dispatcher', workers: 'workers' };
+/** Roles as people read them: "the orchestrator, workers". */
 export const roleNames = (roles: readonly HostRole[]) => roles.map((r) => ROLE_NAMES[r]).join(', ');
 
 /** config.json "intake" (docs/intake.md). Every switch defaults to off, every number to a small cap. */
@@ -200,7 +199,7 @@ export interface Config {
    * (claudeAiConnectorsFor). Off: Claude Code's `disableClaudeAiConnectors` setting for an orchestrator, its
    * ENABLE_CLAUDEAI_MCP_SERVERS=false for any other process. docs/accounts.md, "claude.ai connectors".
    */
-  claudeAiConnectors?: Partial<Record<HostRole, boolean>>;
+  claudeAiConnectors?: Partial<Record<ConnectorRole, boolean>>;
   /**
    * The file holding the long-lived Claude OAuth token (sk-ant-oat01-…, from `claude setup-token`) the roles set to
    * "tokenfile" run on (w464): read at each session start into that process's CLAUDE_CODE_OAUTH_TOKEN, with every other
@@ -264,20 +263,19 @@ export interface Config {
   /** Where state.json and transcripts live. */
   dataDir: string;
   /**
-   * Whether this host holds sandboxes of its own (default true). false is the portal-only mode (w464,
-   * docs/portal-on-ffbox-host.md section 6, changes 1 and 2, D16): "this host" is no place for work (capacity,
-   * placement, list_sandboxes), create_sandbox here is refused, `sandboxRoot` and `unity` may be left out, the host
-   * guard watches the data volume instead of a sandbox drive, host_recovery runs only `cleanup`, and no standing agent
-   * runs. Work goes to the machines.
+   * The portal holds no sandboxes of its own (w510): this is the folder this host's own machine daemon keeps its
+   * sandboxes in (add_machine local takes it as its sandbox_root; BEAST's F:\ffsb), and the default parent of
+   * `review.root` and `standingRoot`. Optional (default <dataDir>/sandboxes).
    */
-  hostSandboxes?: boolean;
-  /** Every sandbox worktree is created as <sandboxRoot>/<id>. Optional in the portal-only mode (default <dataDir>/sandboxes, never used). */
   sandboxRoot: string;
   /**
-   * Standing agents' working folders are <standingRoot>/<id> (docs/standing-agents.md). Default
-   * <sandboxRoot>/_agents. Must not be inside this app's directory or dataDir, which the guard protects.
+   * Where the standing agents that ran in the portal itself before w510 kept their folders (<standingRoot>/<id>);
+   * today's run on machines (docs/standing-agents.md). Default <sandboxRoot>/_agents. Must not be inside this app's
+   * directory or dataDir, which the guard protects.
    */
   standingRoot: string;
+  /** Config keys this file still sets that nothing reads any more (w510), named once at startup: retiredConfigKeys. */
+  retiredKeys?: string[];
   repo: {
     /** Clone URL for the base repository. */
     url: string;
@@ -293,55 +291,21 @@ export interface Config {
   };
   /** Base ref for new sandbox branches. */
   defaultBase: string;
-  /** A warm Library/ folder copied into each new sandbox so Unity does not import from cold. */
-  librarySeed?: string;
   /**
-   * Size estimate of librarySeed in GB, used for the free-space check before copying it into a new
-   * sandbox (walking ~100k files to measure it would take longer than the copy).
-   */
-  librarySeedGB: number;
-  /**
-   * How the Library seed is copied on Windows. "robocopy": a full, multithreaded copy. "clone": the
-   * Windows copy engine (PowerShell Copy-Item), which block-clones on a ReFS Dev Drive when the seed and
-   * sandboxRoot are on the same volume, so a 64 GB Library costs almost no space. Measured on this host:
-   * robocopy 1.96 GB/42k files grew the volume 1.31 GB; Copy-Item grew it 0.06 GB.
-   */
-  librarySeedCopy: 'robocopy' | 'clone';
-  /**
-   * Extra volumes whose free space must also stay above limits.minFreeGB, e.g. "C:/" when
-   * sandboxRoot is a dynamically expanding Dev Drive VHDX stored on C:.
+   * Extra volumes the host guard watches besides the data volume, e.g. "C:/" (on BEAST, also handed to its own daemon's
+   * guard, which watches its sandbox drive's host volume with it).
    */
   hostDiskPaths: string[];
   /** The disk guard and the sandbox drive's self-recovery (server/hostHealth.ts, docs/self-recovery.md). */
   hostGuard: HostGuardConfig;
+  /**
+   * What this host's own machine daemon takes for its sandbox editors (MachineManager.localExtras; the portal runs no
+   * editor itself, w510): `idleStopMinutes`, an editor whose sandbox has had no agent activity for this long (and no
+   * agent mid-turn) is stopped, 0 never; `mcpServer`, the MCP-for-Unity server its workers get as "UnityMCP" (Claude
+   * Code registers it per project path, so a fresh worktree would otherwise have no Unity tools at all).
+   */
   unity: {
-    /** Editor path; `{version}` is replaced with the sandbox's ProjectSettings/ProjectVersion.txt. */
-    editorPath: string;
-    extraArgs: string[];
-    /** The startup watchdog (docs/unity-dialogs.md). */
-    watchdog: {
-      /** A starting editor whose log has not grown for this long is marked blocked. 0 turns it off. */
-      stallMinutes: number;
-      /** Press the safe button on known harmless dialogs (FMOD line endings, Safe Mode "Ignore", licensing "Retry"). */
-      autoDismiss: boolean;
-      /** How often to look at a starting (or blocked) editor's windows. */
-      startingPollSeconds: number;
-      /** How often to look at a running editor's windows. 0 turns it off. */
-      runningPollSeconds: number;
-    };
-    /** Stop an editor whose sandbox has had no agent activity for this long (and no agent mid-turn). 0: never. */
     idleStopMinutes: number;
-    /**
-     * Hang detection for running editors (docs/unity-lifecycle.md, server/unityHang.ts): the thresholds, and
-     * how often to look (each look pings the MCP bridge and checks the log; the window probe runs anyway).
-     */
-    hang: HangThresholds & { checkSeconds: number };
-    /** Restart a hung or crashed editor automatically, at most `max` times per `windowMinutes`; then report and stop. */
-    autoRestart: { enabled: boolean; max: number; windowMinutes: number };
-    /**
-     * The MCP-for-Unity server every worker gets as "UnityMCP". Claude Code registers it per project
-     * path, so a fresh worktree would otherwise have no Unity tools at all.
-     */
     mcpServer?: { command: string; args: string[]; env?: Record<string, string> };
   };
   /** Folders (relative to a sandbox or a machine's clone; `*` = any one folder) the Screenshots gallery lists. See server/images.ts. */
@@ -365,16 +329,10 @@ export interface Config {
   /** Paths no sandbox agent may write to or mention in a shell command (e.g. the live co-op checkout). */
   protectedPaths: string[];
   limits: {
-    maxUnity: number;
-    /** Agents mid-turn at once on this host (w384: idle ones do not count; a message past it is queued). */
-    maxSessions: number;
-    /** Idle agent processes kept besides the running ones before the oldest idle one is stopped (default 6). */
-    maxIdleAgents?: number;
-    /** Sandboxes that may exist at once (each holds a worktree plus a ~70 GB Library). */
-    maxSandboxes: number;
-    /** Provisioning refuses to leave less than this many GB free on the sandbox volume. */
-    minFreeGB: number;
-    /** A Unity editor is started only with at least this much free RAM (each takes ~8-12 GB). 0: no check. */
+    /**
+     * A Unity editor is started only with at least this much free RAM (each takes ~8-12 GB). 0: no check. Handed to
+     * this host's own daemon's guard (the portal runs no editor itself, w510).
+     */
     minFreeRamGB: number;
   };
   models: string[];
@@ -488,9 +446,7 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
   dataDir: './data',
   defaultBase: 'origin/develop',
   protectedPaths: [],
-  limits: { maxUnity: 3, maxSessions: 6, maxSandboxes: 4, minFreeGB: 100, minFreeRamGB: 10 },
-  librarySeedGB: 70,
-  librarySeedCopy: 'robocopy',
+  limits: { minFreeRamGB: 10 },
   hostDiskPaths: [],
   models: ['opus', 'sonnet', 'haiku', 'fable'],
   defaultModel: 'opus',
@@ -498,7 +454,56 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
   worker: { permissionMode: 'bypassPermissions', effort: 'high' },
 };
 
-const UNITY_WATCHDOG_DEFAULTS: Config['unity']['watchdog'] = { stallMinutes: 15, autoDismiss: true, startingPollSeconds: 10, runningPollSeconds: 60 };
+/**
+ * Config keys that fed the portal's own sandbox pool, editors and standing agents, all gone (w510: the portal runs only
+ * the orchestrators and the dispatcher; every sandbox, editor and standing agent is a machine daemon's). A config that
+ * still sets one loads; the key is named once at startup and in system_status, and ignored.
+ */
+export const RETIRED_CONFIG_KEYS: readonly string[] = [
+  'hostSandboxes',
+  'librarySeed',
+  'librarySeedGB',
+  'librarySeedCopy',
+  'limits.maxUnity',
+  'limits.maxSessions',
+  'limits.maxIdleAgents',
+  'limits.maxSandboxes',
+  'limits.minFreeGB',
+  'unity.editorPath',
+  'unity.extraArgs',
+  'unity.watchdog',
+  'unity.hang',
+  'unity.autoRestart',
+  // The account of the standing agents the portal ran itself; those on machines run on the machine's (machines.useHostClaudeEnv).
+  'claudeAccounts.standing',
+];
+
+/** The retired keys (RETIRED_CONFIG_KEYS) a raw config file sets. */
+export function retiredConfigKeys(raw: any): string[] {
+  return RETIRED_CONFIG_KEYS.filter((k) => {
+    const [a, b] = k.split('.');
+    return b === undefined ? raw?.[a] !== undefined : raw?.[a] !== null && typeof raw?.[a] === 'object' && raw[a][b] !== undefined;
+  });
+}
+
+/** A copy of a raw config without the retired keys (what set_app_config and the VM migration write back). */
+export function withoutRetiredKeys(raw: any): any {
+  const out = { ...raw };
+  for (const k of RETIRED_CONFIG_KEYS) {
+    const [a, b] = k.split('.');
+    if (b === undefined) delete out[a];
+    else if (out[a] !== null && typeof out[a] === 'object') {
+      out[a] = { ...out[a] };
+      delete out[a][b];
+    }
+  }
+  return out;
+}
+
+/** The startup line for retired keys, or undefined. */
+export function retiredKeysLine(keys: string[] | undefined): string | undefined {
+  return keys?.length ? `config.json sets ${keys.join(', ')}, which nothing reads any more: the portal runs no sandboxes, editors or standing agents of its own (w510). Ignored; remove them (config.example.json shows what is left).` : undefined;
+}
 
 export interface CleanupPolicy {
   /** A clean-up pass this often (minutes; 0: only when free space is below softFreeGB). */
@@ -618,22 +623,16 @@ export function configPath(): string {
  * resolves them). Also for reading another computer's config.json (the migration to the VM, server/vmMigration.ts).
  */
 export function withDefaults(raw: any): Config {
+  const kept = withoutRetiredKeys(raw);
   return {
     ...DEFAULTS,
-    ...raw,
-    limits: { ...DEFAULTS.limits, ...raw.limits },
-    orchestrator: { ...DEFAULTS.orchestrator, ...raw.orchestrator },
-    worker: { ...DEFAULTS.worker, ...raw.worker },
-    unity: {
-      extraArgs: [],
-      idleStopMinutes: 120,
-      ...raw.unity,
-      watchdog: { ...UNITY_WATCHDOG_DEFAULTS, ...raw.unity?.watchdog },
-      hang: { ...DEFAULT_HANG, startupStallMinutes: raw.unity?.watchdog?.stallMinutes ?? DEFAULT_HANG.startupStallMinutes, checkSeconds: 30, ...raw.unity?.hang },
-      autoRestart: { enabled: true, max: 3, windowMinutes: 30, ...raw.unity?.autoRestart },
-    },
-    hostGuard: { ...HOST_GUARD_DEFAULTS, ...raw.hostGuard, cleanup: { ...DEFAULT_CLEANUP, ...raw.hostGuard?.cleanup } },
-    voice: { ...VOICE_DEFAULTS, toolsDir: '', ...raw.voice },
+    ...kept,
+    limits: { ...DEFAULTS.limits, ...kept.limits },
+    orchestrator: { ...DEFAULTS.orchestrator, ...kept.orchestrator },
+    worker: { ...DEFAULTS.worker, ...kept.worker },
+    unity: { idleStopMinutes: 120, ...kept.unity },
+    hostGuard: { ...HOST_GUARD_DEFAULTS, ...kept.hostGuard, cleanup: { ...DEFAULT_CLEANUP, ...kept.hostGuard?.cleanup } },
+    voice: { ...VOICE_DEFAULTS, toolsDir: '', ...kept.voice },
   };
 }
 
@@ -645,11 +644,9 @@ export function loadConfig(): Config {
     throw new Error(fs.existsSync(file) || dataRecoveries.some((r) => r.file === file) ? `${file} is damaged and no good earlier version is left; restore it by hand.` : `No config at ${file}. Copy config.example.json to config.json and edit it.`);
   }
   const cfg = withDefaults(raw);
-  if (raw.hostSandboxes !== undefined && typeof raw.hostSandboxes !== 'boolean') throw new Error('config hostSandboxes is true or false');
-  // The portal-only mode (w464) keeps no sandboxes here: only the base clone the orchestrators read is required.
-  for (const key of portalOnly(cfg) ? (['repo'] as const) : (['sandboxRoot', 'repo', 'unity'] as const)) {
-    if (!cfg[key]) throw new Error(`config.json is missing "${key}"`);
-  }
+  cfg.retiredKeys = retiredConfigKeys(raw);
+  // The portal keeps no sandboxes (w510): only the base clone the orchestrators read is required.
+  if (!cfg.repo) throw new Error('config.json is missing "repo"');
   const windowsOnly = windowsPathsOffWindows(cfg);
   if (windowsOnly.length) throw new Error(`config.json names Windows paths on ${process.platform}: ${windowsOnly.join(', ')}. Use this computer's paths (the portal VM's template is deploy/vm/guest/config.vm.example.json).`);
   checkAccountConfig(cfg);
@@ -687,12 +684,6 @@ export function loadConfig(): Config {
   cfg.protectedPaths = cfg.protectedPaths.map((p) => path.resolve(p));
   return cfg;
 }
-
-/** The portal-only mode (config hostSandboxes: false, w464): this host runs the portal and holds no sandboxes. */
-export const portalOnly = (cfg: Pick<Config, 'hostSandboxes'>) => cfg.hostSandboxes === false;
-
-/** Why something needs this host's own sandboxes in the portal-only mode, for refusals. */
-export const PORTAL_ONLY_WHY = 'this portal holds no sandboxes of its own (config hostSandboxes: false, the portal-only mode)';
 
 /**
  * The config paths that are Windows paths ("C:/ffsb", "F:\\ffsb") on a computer that is not Windows (w467): there
@@ -747,15 +738,18 @@ export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machine
  * and Claude Docs' instructions were about 41,300 input tokens in every request (measured 2026-10-06), and orchestration
  * never uses them. On for workers and standing agents (Ben's creator outreach, w106 and w121, used Gmail).
  */
-export const CLAUDE_AI_CONNECTORS_DEFAULT: Readonly<Record<HostRole, boolean>> = { orchestrator: false, dispatcher: false, workers: true, standing: true };
+/** The roles config claudeAiConnectors names: the account roles, and standing agents (which run on machines, w510). */
+export type ConnectorRole = HostRole | 'standing';
+export const CONNECTOR_ROLES: readonly ConnectorRole[] = [...HOST_ROLES, 'standing'];
+export const CLAUDE_AI_CONNECTORS_DEFAULT: Readonly<Record<ConnectorRole, boolean>> = { orchestrator: false, dispatcher: false, workers: true, standing: true };
 
-export function claudeAiConnectorsFor(cfg: Pick<Config, 'claudeAiConnectors'>, role: HostRole): boolean {
+export function claudeAiConnectorsFor(cfg: Pick<Config, 'claudeAiConnectors'>, role: ConnectorRole): boolean {
   const v = cfg.claudeAiConnectors?.[role];
   return typeof v === 'boolean' ? v : CLAUDE_AI_CONNECTORS_DEFAULT[role];
 }
 
 /** The environment that keeps a process's claude.ai connectors from loading when its role has them off (any machine). */
-export function connectorEnv(cfg: Pick<Config, 'claudeAiConnectors'>, role: HostRole): Record<string, string> {
+export function connectorEnv(cfg: Pick<Config, 'claudeAiConnectors'>, role: ConnectorRole): Record<string, string> {
   return claudeAiConnectorsFor(cfg, role) ? {} : { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' };
 }
 
@@ -765,7 +759,7 @@ export function checkConnectorConfig(cfg: Pick<Config, 'claudeAiConnectors'>) {
   if (c === undefined) return;
   if (typeof c !== 'object' || c === null || Array.isArray(c)) throw new Error('config claudeAiConnectors is an object, e.g. { "dispatcher": false, "workers": true }');
   for (const [role, v] of Object.entries(c)) {
-    if (!HOST_ROLES.includes(role as HostRole)) throw new Error(`config claudeAiConnectors.${role}: no such role (${HOST_ROLES.join(', ')})`);
+    if (!CONNECTOR_ROLES.includes(role as ConnectorRole)) throw new Error(`config claudeAiConnectors.${role}: no such role (${CONNECTOR_ROLES.join(', ')})`);
     if (typeof v !== 'boolean') throw new Error(`config claudeAiConnectors.${role} is true or false`);
   }
 }

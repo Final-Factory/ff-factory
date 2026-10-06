@@ -28,7 +28,10 @@ arguments. There is no arbitrary command path.
 
 Each writes `%ProgramData%\ffsb-helpers\results\<action>.json` (`ok`, `at`, `detail`). The app
 starts one with `schtasks /run /tn ffsb-helper-<action>` and waits for that file
-(`server/privileged.ts`).
+(`server/privileged.ts`). Since w510 the only caller is BEAST's daemon's guard, and it starts `ffsb-helper-mount`
+only (`machine/hostGuard.ts`): the portal's `host_recovery` actions that started the others are gone. `trim`,
+`compact`, `detach`, `reboot` and `pagefile` stay installed, for a person to start by hand at BEAST
+(`schtasks /run /tn ffsb-helper-compact`).
 
 `-User` defaults to the account of the app's `ffsb-server` logon task (else the account running the
 installer). It must resolve to a SID before anything is registered; over OpenSSH `USERDOMAIN` is
@@ -42,7 +45,7 @@ version: it copies the current helper script and registers new actions (it is id
 .\scripts\install-privileged-helpers.ps1 -Uninstall
 ```
 
-**After a reboot or a power cut.** A VHDX attachment does not survive either. `ffsb-helper-mount` attaches it at boot; the supervisor (`scripts/supervise.ps1`) also starts that task when the drive is missing, and waits up to 5 minutes for it before starting the server; the server's host guard retries after that. The boot trigger is registered by `install-privileged-helpers.ps1`, so re-run it once (as administrator) after updating to get it.
+**After a reboot or a power cut.** A VHDX attachment does not survive either. `ffsb-helper-mount` attaches it at boot, and BEAST's daemon's guard starts it again when the drive is missing and retries (below). The supervisor (`scripts/supervise.ps1`) no longer waits for the drive before it starts the portal (w510: the portal holds no sandboxes); after an unclean stop the portal waits up to 15 minutes for it before it resumes BEAST's agents ([restart.md](restart.md)). The boot trigger is registered by `install-privileged-helpers.ps1`, so re-run it once (as administrator) after updating to get it.
 
 **Reboot and automatic logon.** Unity editors need the interactive desktop (GPU), and the app
 starts at logon (the `ffsb-server` task). After a reboot without automatic logon nothing comes back
@@ -52,47 +55,53 @@ Prefer to leave it off and fix what makes reboots necessary.
 
 ## 2. The host guard (`server/hostHealth.ts`)
 
-In the portal-only mode (config `hostSandboxes: false`, w464) there is no sandbox drive: the guard measures the data
-volume and `hostDiskPaths`, never blocks on or reattaches a drive, and `host_recovery` takes only `cleanup` (see the
-README, "Portal-only mode").
+Two guards run these decisions (`HostHealthMonitor`). **The portal's** has no sandbox drive (w510: it runs only the
+orchestrators and the dispatcher; `HostDeps.watchDrive` is false, `server/index.ts`): it measures the volume of its
+data folder (`dataDir`: state, transcripts, attachments) and each of `hostDiskPaths`, reports, and runs the clean-up of
+this computer. It gates nothing (`SessionManager.startGate` is gone) and never blocks on or reattaches a drive.
+`host_recovery` takes only `cleanup`. **A machine's daemon's** (`machine/hostGuard.ts`, below) owns that machine's
+sandbox drive. Before w510 the portal's guard watched the sandbox drive too, and `host_recovery` also had `remount`,
+`trim`, `compact`, `selftest` and `reboot`.
 
-Every `hostGuard.pollSeconds` (30) it measures the sandbox root's volume and each of
-`hostDiskPaths` (put `"C:/"` there when the Dev Drive's VHDX lives on C:), free RAM, and whether the
+Every `hostGuard.pollSeconds` (30) it measures the volumes above (the sandbox root's, on a daemon;
+`hostDiskPaths`, where you put `"C:/"` when the Dev Drive's VHDX lives on C:), free RAM, and, on a daemon, whether the
 sandbox root exists.
 
 **Disk levels**, with `hysteresisGB` (10) before a level clears:
 
 | Level | When (any watched volume) | What happens |
 |---|---|---|
-| warn | below `warnFreeGB` (80) | a `[host]` message to the orchestrator and a push (kind "Host health"); new editors and new agent processes on this host are refused with the reason; standing runs wait |
-| critical | below `criticalFreeGB` (40) | also: busy agents get "commit and push now, end your turn" once per episode; editors nobody is working in are stopped; a clean-up pass with every rule runs (at most every 10 minutes) |
+| warn | below `warnFreeGB` (80) | a `[host]` message to the orchestrator and a push (kind "Host health"); on a machine's daemon, new sandbox agents and editors there are also refused with the reason |
+| critical | below `criticalFreeGB` (40) | also: a clean-up pass with every rule runs (at most every 10 minutes); the daemon's guard also stops sandbox editors nobody is working in |
 
-**The sandbox drive.** When the sandbox root disappears:
+**The sandbox drive** (a machine daemon's guard; the portal's has none). When the sandbox root disappears:
 1. The guard remembers the editors that were up and the agents mid-turn in sandboxes (from its
    last look), stops those turns, and reports.
 2. It starts `ffsb-helper-mount`. If the volume holding the VHDX has less than `remountMinFreeGB`
    (30) free, it runs the clean-up and waits for space first.
 3. Failed attempts retry after 2, 5, 10 and 30 minutes; after 6 it reports and stops trying
-   (host_recovery "remount" tries again).
+   (`machine_daemon restart` makes the daemon's guard try again; `host_recovery remount` is gone).
 4. When the drive is back, it restarts those editors one at a time and sends each interrupted
    agent a resume message (check git status, re-pin Unity, continue).
 
-The guard knows the drive's state from the moment the server starts: before its first look (5 s in) it used to say
+The guard knows the drive's state from the moment it starts: before its first look (5 s in) it used to say
 "ok", so after a reboot an agent could start on a missing F:. Now a drive missing at start blocks new agents and editors
 at once, the first look reports "Sandbox drive not attached at startup" and remounts it, and between two looks a drive
 that went away blocks new work immediately.
 
-**Memory and editors.** A new editor needs `limits.minFreeRamGB` (10) free. An editor whose sandbox
-has had no agent activity for `unity.idleStopMinutes` (120), and no agent mid-turn, is stopped.
+**Memory and editors.** A new editor on a machine with a guard needs `limits.minFreeRamGB` (10) free (the portal hands
+that value to its own daemon). An editor whose sandbox has had no agent activity for `unity.idleStopMinutes` (120;
+`sandboxIdleStopMinutes` in the daemon's `daemon.json`), and no agent mid-turn, is stopped, by the pool.
 
 **Clean-up** runs all the time, not only in an emergency: see [Continuous clean-up](#5-continuous-clean-up)
-below. The critical level also starts a pass (at most every 10 minutes), and so does a sandbox drive that
-waits for space before it can be reattached.
+below. The critical level also starts a pass (at most every 10 minutes). On the portal's guard that is the pass over
+this computer; a daemon's guard runs none of its own ([beast-machine.md](beast-machine.md)).
 
 **The orphan headless-browser reaper** (`server/reaper.ts`). Scripts that drive a headless browser
 (screenshots, Playwright checks) sometimes die or hang and leave it running. Agents may not end
-browser or node processes by hand (the guard), so the server does it: once at startup, then every
-`hostGuard.reapEveryMinutes` (15). It only matches automation browsers:
+browser or node processes by hand (the guard), so a guard does it: once at startup, then every
+`hostGuard.reapEveryMinutes` (15). Since w510 that is BEAST's daemon's guard; the portal's does not reap
+(`server/index.ts` wires no `reap`). It only matches automation browsers:
 - anything under Playwright's own folder (`%LOCALAPPDATA%\ms-playwright\...`; its WebKit carries no
   profile on the command line), or
 - Edge, Chrome or Firefox started `--headless` with a profile under the temp folder.
@@ -105,17 +114,13 @@ action is logged, reported as a `[host]` message and push, and shown as `lastRea
 `system_status`. Profiles left without a process (`edge-*`, `playwright_*dev_profile-*`) are removed
 by the clean-up once untouched for an hour.
 
-**The recovery self-test** (`host_recovery` "selftest"). With no editor up and no agent busy in a
-sandbox, it detaches the sandbox drive through `ffsb-helper-detach`, lets the guard notice the missing
-drive and reattach it through `ffsb-helper-mount` exactly as in a real outage, checks that every ready
-sandbox's folder is back, and reports the timings (detach, noticed after, reattached after, total). Run
-it after installing or changing the helpers.
+**The recovery self-test** (`host_recovery` "selftest", which detached the drive through `ffsb-helper-detach` and
+timed the reattach) was removed with the portal's drive watch in w510. `ffsb-helper-detach` stays installed.
 
-The orchestrator can set `hostGuard.devDriveVhdx` and the clean-up settings (below) with
-`set_app_config`, and act by hand with `host_recovery`
-(remount, cleanup, trim, compact, reboot with `confirm_reboot`). `system_status` and the sidebar's
-meters show the guard: one disk meter per watched volume in its guard colour, and a banner while
-the drive is offline or disk space is low.
+The orchestrator can set `hostGuard.devDriveVhdx` (kept as a clean-up keep entry; the portal does not mount it) and the
+clean-up settings (below) with `set_app_config`, and act by hand with `host_recovery cleanup`. `system_status`
+and the sidebar's meters show the portal's guard: one disk meter per watched volume in its guard colour, and a banner
+while disk space is low. A machine's guard reports reach the same places as `[host <machine>] …`.
 
 ### On BEAST's daemon (w466)
 
@@ -137,13 +142,13 @@ The daemon gets these settings in its `daemon.json` at deploy (`hostGuard`, from
 `hostDiskPaths` and `limits.minFreeRamGB`), only as the portal's own host. It keeps them when `convert_machine` makes
 it an ssh machine. The helpers are Windows-only, so elsewhere the guard does not start.
 
-**One guard per drive:** while that daemon's hello says its guard runs, the portal's own guard leaves the drive alone
-(`watchDrive`). It does not watch or remount it, does not bring that daemon's sandboxes back, and does not reap.
-The portal still measures its own disks. If the daemon goes away, the portal's guard watches the drive again from
-its next look. A daemon from before this change has no guard, so the portal goes on as before. What the daemon does
-not run is the clean-up: that is its own (`machines.cleanup`), as on the other machines. Nor the idle-editor stop,
-which is its pool's. `host_recovery` (remount by hand, compact, selftest, trim, reboot) is still the portal's own: it
-reaches BEAST's helpers only while the portal runs on BEAST.
+**One guard per drive** (w510): the portal's guard never owns a drive (`watchDrive: () => false`, `server/index.ts`).
+It measures its own disks and does not watch or remount BEAST's drive, bring that daemon's sandboxes back, or reap. (From
+w466 until w510 it took the drive over when the daemon had no guard: an older daemon, or none. A daemon from before
+w466 now has no guard, so nothing watches its drive; redeploy it.) What the daemon does not run is the clean-up: that
+is the portal's for BEAST, since BEAST's daemon cleans nothing itself (`machines.cleanupFor`), and `machines.cleanup` on
+the other machines. Nor the idle-editor stop, which is its pool's. The portal's `host_recovery` reaches none of this: a
+daemon's guard that gave up (six failed mounts) starts again when the daemon restarts (`machine_daemon restart`).
 
 ## 3. The VHDX policy
 
@@ -167,13 +172,14 @@ space on C: is what made Windows drop it.
   a planned moment. A rebuild means a new, smaller VHDX (a fixed-size one never grows at all) and moving
   the sandboxes into it. That costs the block-clone sharing of the Library copies, so recreate
   sandboxes from the seed there rather than copying them.
-- **Hand freed space back**: `ffsb-helper-trim` (online), then **compact** by hand
-  (`host_recovery` "compact"). Nothing detaches the drive automatically (since 2026-09-24; the old
-  `hostGuard.compactWhenReclaimGB` idle policy is gone and the key is ignored). Compact and the
-  self-test are refused while any editor is up or any agent on this host is busy
-  (`HostHealthMonitor.detachRefusal`); the helper itself also refuses while a `Unity.exe` has a project
-  on the drive. The drive is offline for the few minutes the compaction takes; the guard knows and
-  does not treat that as an outage.
+- **Hand freed space back**: `ffsb-helper-trim` (online), then **compact**, both by hand at BEAST
+  (`schtasks /run /tn ffsb-helper-trim`, then `ffsb-helper-compact`). Nothing detaches the drive automatically (since
+  2026-09-24; the old `hostGuard.compactWhenReclaimGB` idle policy is gone and the key is ignored). Until w510 these
+  were `host_recovery` actions, which refused while any editor was up or any agent on the host was busy
+  (`HostHealthMonitor.detachRefusal`) and told the guard that the drive was offline on purpose. Now only the helper
+  checks: it refuses while a `Unity.exe` has a project on the drive. Nothing tells BEAST's daemon's guard, which by
+  `HostHealthMonitor.sandboxDrive` reports the drive lost when it goes: stop the daemon (`machine_daemon stop`) and its
+  agents first.
 - **Cap the maximum size** to what C: can hold, keeping `warnFreeGB` in reserve. Today the VHDX may
   grow to 900 GB on a 1.8 TB disk shared with everything else. Lowering the maximum means shrinking
   the partition inside and then the virtual disk (`Resize-Partition`, then `Resize-VHD`; Hyper-V
@@ -181,7 +187,7 @@ space on C: is what made Windows drop it.
   does.
 - **Memory is disk too**: an automatically managed pagefile grows on C: under memory pressure,
   exactly when things are already tight. A fixed pagefile (`-PagefileGB`), fewer concurrent editors
-  (`limits.maxUnity`, `limits.minFreeRamGB`) and stopping idle editors keep that growth away.
+  (`max_unity` on BEAST's machine record, `limits.minFreeRamGB`) and stopping idle editors keep that growth away.
 
 ## 4. Watched from outside (the outside watchdog)
 
@@ -248,7 +254,7 @@ changed for that long (a bounded walk, so a folder something still writes to sta
 | Claude Code edit snapshots | `<temp>/claude*/bash-edit-diff/*` | 12 h |
 | Claude Code task output | `<temp>/claude*/<project>/*`, and `/tmp/claude-<uid>/*/*` on a Mac | 3 days |
 | Actions runner jobs | `actions-runner*/_work/*` in the home folder (and `C:\`), except `_tool`, `_actions` | 14 days |
-| sandbox builds (host) | `<sandboxRoot>/*/Builds/*` | 7 days |
+| sandbox builds (this host's own daemon's) | `<sandboxRoot>/*/Builds/*` | 7 days |
 | build archives | `~/ff-worker/*.tar`, `*.tgz`, `*.tar.gz`, `*.zip`, `*.bundle` | 7 days |
 | playtest output | the game's `Never Games/finalfactory*/PlaytestSessions/*` (screenshots, recordings) | 14 days |
 | crash dumps | Windows: `%LOCALAPPDATA%\CrashDumps`, `%TEMP%\Unity\Editor\Crashes`; Mac: `~/Library/Logs/Unity` crashes | 2 days |
@@ -277,8 +283,10 @@ deleted. On Windows a folder with a file open inside cannot be renamed, so an en
 whole instead of half removed; a removal that fails after the rename leaves `<name>.ffclean-<n>`, which
 the next pass removes.
 
-**Per-agent hygiene.** Every worker on this host and every agent on a machine gets its own temp folder,
-`<temp>/ffa-<session>` (under the machine's `temp_dir` when it has one), as TMP, TEMP and TMPDIR. It goes
+**Per-agent hygiene.** Every agent on a machine gets its own temp folder,
+`<temp>/ffa-<session>` (under the machine's `temp_dir` when it has one), as TMP, TEMP and TMPDIR. (`sessionTempEnv`, set by
+the daemon, `machine/daemon.ts`; the portal's orchestrators never had one, and its own workers, which did, are gone
+since w510.) It goes
 when the session is removed, and two hours after the session stopped otherwise. The worker and machine
 briefs tell agents to put builds, recordings and screenshot sets there and to delete them once reported.
 
@@ -304,7 +312,7 @@ defaults.
 Until 2026-10-05 a person asked for every clean-up of build output: w451 freed 42 GB of stale player builds on
 LothDesktop after its D: fell to the 50 GB guard and blocked new editors, and BEAST's sandboxes held about 39 GB in
 their `Builds/` folders. The same pass now removes that output by itself (`server/staleOutput.ts`), on this host's
-guard (its sandboxes, its own daemon's, and the base clone) and on every machine's daemon (its sandboxes and its
+guard (its own daemon's sandboxes, and the base clone) and on every other machine's daemon (its sandboxes and its
 main clone): once a day (`everyHours`, the first turn a full day after the clean-up started, never right at a
 deploy), on every pass while free space is below the soft threshold, and on every pass asked for.
 
@@ -392,7 +400,7 @@ At most one save a second, that is under 2 % of the main thread at BEAST's size.
 **Files covered.** `state.json` (sandboxes, sessions, standing agents, delegations, machines, settings), `work.json`
 (the ledger), `intake.json`, `max.json`, `providers/*.json`, `users.json`, `api-keys.json`, `auth-sessions.json`,
 `machine-tokens.json`, `wakes.json`, `usage.json`, `spend.json`, `push-subscriptions.json`, `vapid.json`,
-`outside-watch.json`, `host-migration.json`, `resume.json`, `alive.json`, `restart.pending.json`, and `config.json`
+`outside-watch.json`, `resume.json`, `alive.json`, `restart.pending.json`, and `config.json`
 (whose `config.json.prev` counts as one more version). Transcripts stay append-only: a rewrite (a permission decision,
 the secret scrub) is crash-safe without versions, the first append after a start completes a line a crash tore, and
 zero bytes a crash left in one are skipped.

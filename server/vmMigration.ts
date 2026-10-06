@@ -4,7 +4,7 @@
 
 import { usesHostClaudeEnv } from './secrets.ts';
 import { nextPerMachine } from './appConfig.ts';
-import { withDefaults } from './config.ts';
+import { retiredConfigKeys, withDefaults, withoutRetiredKeys } from './config.ts';
 import { convertMachineRecord, localDaemonExtras } from './machines.ts';
 import type { Machine, SessionInfo, StandingAgent } from '../shared/types.ts';
 
@@ -46,9 +46,10 @@ export interface ConfigRewrite {
 /**
  * BEAST's config.json as the VM's portal runs it (design 7.3 step 5): BEAST's settings, people, tokens, intake, FFBox and
  * machine settings, with this computer's paths and server settings from the VM's own config.json (`vm`, which the guest
- * install and `fffctl configure` wrote), the portal-only mode (no sandboxes of its own), voice off, `publicUrl`, the
+ * install and `fffctl configure` wrote), voice off, `publicUrl`, the
  * orchestrators and the dispatcher on the token file when the VM has one (design 5.2), keepAgentsOnRestart, and
- * machines.useHostClaudeEnv set for BEAST so its workers keep the account they have today (design 5.3).
+ * machines.useHostClaudeEnv set for BEAST so its workers keep the account they have today (design 5.3). The keys the
+ * portal's own sandbox pool had (w510, config RETIRED_CONFIG_KEYS) are left out.
  */
 export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; beastId: string }): ConfigRewrite {
   const notes: string[] = [];
@@ -58,14 +59,13 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
     else out[k] = structuredClone(vm[k]);
   }
   out.publicUrl = o.publicUrl;
-  out.hostSandboxes = false;
   // The base clone the orchestrators read is the VM's; the host-sandbox seeding (reference repo, Library seed) is not used.
   const repo: Json = { ...(isObj(beast.repo) ? beast.repo : {}), ...(isObj(vm.repo) ? { basePath: vm.repo.basePath } : {}) };
   for (const k of ['referenceRepo', 'librarySeed', 'librarySeedGB', 'librarySeedCopy']) delete repo[k];
   if (isObj(vm.repo) && !repo.url && vm.repo.url) repo.url = vm.repo.url;
   out.repo = repo;
-  // Room for agents is BEAST's choice; the host's own editors and sandboxes are the VM's (none).
-  if (isObj(vm.limits)) out.limits = { ...(isObj(beast.limits) ? beast.limits : {}), ...pick(vm.limits, ['maxUnity', 'maxSandboxes', 'minFreeGB', 'minFreeRamGB']) };
+  // The portal holds no sandboxes or editors (w510): of the limits only minFreeRamGB is left, the VM's own.
+  if (isObj(vm.limits)) out.limits = pick(vm.limits, ['minFreeRamGB']);
   if (!out.ownerName && vm.ownerName) out.ownerName = vm.ownerName;
   // The subscription token the guest stored (fffctl claude-token, design 5.2).
   if (typeof vm.claudeTokenFile === 'string' && vm.claudeTokenFile) {
@@ -73,9 +73,6 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
     out.claudeAccounts = { ...(isObj(beast.claudeAccounts) ? beast.claudeAccounts : {}), orchestrator: 'tokenfile', dispatcher: 'tokenfile' };
     notes.push('the orchestrators and the dispatcher run on the stored subscription token (claudeAccounts "tokenfile")');
   } else notes.push('the VM has no claudeTokenFile: the orchestrators and the dispatcher keep BEAST\'s accounts (run sudo fffctl claude-token --file FILE first: it sets both)');
-  if (isObj(beast.claudeAccounts) && beast.claudeAccounts.standing === 'login') {
-    notes.push('claudeAccounts.standing is "login": standing agents here would run on the VM\'s login, not BEAST\'s (design D5)');
-  }
   // BEAST's workers keep their account: as the portal's own host it followed claudeAccounts.workers; as a machine it
   // follows machines.useHostClaudeEnv, whose default is true (design 5.3).
   const machines: Json = { ...(isObj(beast.machines) ? beast.machines : {}), keepAgentsOnRestart: true };
@@ -89,7 +86,11 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
   // Paths only BEAST had: Max's FFBox config folder and events file, an orchestrator memory folder, voice tools.
   dropWindowsPaths(out, 'max', notes);
   dropWindowsPaths(out, 'orchestrator', notes);
-  return { config: out, notes, windowsPaths: windowsPathsIn(out) };
+  // Keys nothing reads any more (w510: the portal's own sandbox pool, editors and standing agents) are left behind.
+  const retired = retiredConfigKeys(out);
+  if (retired.length) notes.push(`left out, as nothing reads them any more (w510): ${retired.join(', ')}`);
+  const config = withoutRetiredKeys(out);
+  return { config, notes, windowsPaths: windowsPathsIn(config) };
 }
 
 function pick(o: Json, keys: string[]): Json {

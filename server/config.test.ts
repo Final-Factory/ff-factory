@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, windowsPathsOffWindows } from './config.ts';
+import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, retiredConfigKeys, retiredKeysLine, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
 import { gitIsClean, gitRemotes } from './guard.ts';
 import { appVersion, formatVersion, readSha, readVersion } from './version.ts';
 
@@ -27,22 +27,19 @@ function withConfig(t: { after: (fn: () => void) => void }, raw: unknown) {
 const minimal = (dir: string) => ({
   sandboxRoot: path.join(dir, 'sb'),
   repo: { url: 'https://example.test/game.git', basePath: path.join(dir, 'base') },
-  unity: { editorPath: 'C:/Unity/{version}/Editor/Unity.exe' },
 });
 
 test('loadConfig: defaults fill what the file leaves out, nested objects merge', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  withConfig(t, { ...minimal(dir), dataDir: path.join(dir, 'data'), limits: { maxUnity: 1 }, unity: { editorPath: 'x', watchdog: { stallMinutes: 5 } }, voice: { model: 'small.en' } });
+  withConfig(t, { ...minimal(dir), dataDir: path.join(dir, 'data'), limits: { minFreeRamGB: 4 }, unity: { idleStopMinutes: 60 }, voice: { model: 'small.en' } });
   const cfg = loadConfig();
   assert.equal(cfg.port, 8790);
-  assert.deepEqual(cfg.limits, { maxUnity: 1, maxSessions: 6, maxSandboxes: 4, minFreeGB: 100, minFreeRamGB: 10 });
-  assert.equal(cfg.unity.idleStopMinutes, 120);
+  assert.deepEqual(cfg.limits, { minFreeRamGB: 4 });
+  assert.deepEqual(cfg.unity, { idleStopMinutes: 60 });
+  assert.deepEqual(cfg.retiredKeys, []);
   assert.equal(cfg.hostGuard.warnFreeGB, 80);
   assert.ok(cfg.hostGuard.cleanup.tempPatterns.includes('edge-shot-*'));
-  assert.equal(cfg.unity.watchdog.stallMinutes, 5);
-  assert.equal(cfg.unity.watchdog.autoDismiss, true);
-  assert.deepEqual(cfg.unity.extraArgs, []);
   assert.equal(cfg.voice.model, 'small.en');
   assert.equal(cfg.voice.tts, VOICE_DEFAULTS.tts);
   assert.equal(cfg.voice.toolsDir, path.join(dir, 'data', 'tools', 'whisper'));
@@ -50,24 +47,38 @@ test('loadConfig: defaults fill what the file leaves out, nested objects merge',
   assert.equal(cfg.orchestrator.notifyOnWorkerEvents, true);
 });
 
-test('loadConfig: required keys, and standing agents kept out of the app and its data', (t) => {
+test('loadConfig (w510): only the base clone is required; sandboxRoot defaults under the data folder', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  withConfig(t, { repo: minimal(dir).repo, unity: minimal(dir).unity });
-  assert.throws(() => loadConfig(), /missing "sandboxRoot"/);
+  withConfig(t, { dataDir: path.join(dir, 'data'), repo: minimal(dir).repo, standingRoot: path.join(dir, 'agents') });
+  const cfg = loadConfig();
+  assert.equal(cfg.sandboxRoot, path.join(dir, 'data', 'sandboxes'), 'a default no sandbox is ever made in');
+  withConfig(t, { dataDir: path.join(dir, 'data'), standingRoot: path.join(dir, 'agents') });
+  assert.throws(() => loadConfig(), /missing "repo"/, 'the orchestrators still read the base clone');
 });
 
-test('loadConfig: the portal-only mode (hostSandboxes false) needs only the base clone; the switch is a boolean (w464)', (t) => {
+test('loadConfig (w510): keys only the portal\'s own sandbox pool read still load, are named once, and are ignored', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  withConfig(t, { hostSandboxes: false, dataDir: path.join(dir, 'data'), repo: minimal(dir).repo, standingRoot: path.join(dir, 'agents') });
+  const old = {
+    ...minimal(dir),
+    hostSandboxes: true,
+    librarySeed: 'F:/ffsb/_seed/Library',
+    librarySeedCopy: 'clone',
+    limits: { maxUnity: 4, maxSessions: 6, maxSandboxes: 5, minFreeGB: 100, minFreeRamGB: 12 },
+    unity: { editorPath: 'C:/Unity.exe', extraArgs: [], watchdog: { stallMinutes: 5 }, idleStopMinutes: 90, mcpServer: { command: 'uvx', args: ['x'] } },
+    claudeAccounts: { orchestrator: 'login', standing: 'login' },
+  };
+  withConfig(t, old);
   const cfg = loadConfig();
-  assert.equal(cfg.hostSandboxes, false);
-  assert.equal(cfg.sandboxRoot, path.join(dir, 'data', 'sandboxes'), 'a default no sandbox is ever made in');
-  withConfig(t, { hostSandboxes: false, dataDir: path.join(dir, 'data'), standingRoot: path.join(dir, 'agents') });
-  assert.throws(() => loadConfig(), /missing "repo"/, 'the orchestrators still read the base clone');
-  withConfig(t, { ...minimal(dir), hostSandboxes: 'no' });
-  assert.throws(() => loadConfig(), /config hostSandboxes is true or false/);
+  assert.deepEqual(cfg.retiredKeys, ['hostSandboxes', 'librarySeed', 'librarySeedCopy', 'limits.maxUnity', 'limits.maxSessions', 'limits.maxSandboxes', 'limits.minFreeGB', 'unity.editorPath', 'unity.extraArgs', 'unity.watchdog', 'claudeAccounts.standing']);
+  assert.deepEqual(cfg.limits, { minFreeRamGB: 12 }, 'what is still read stays');
+  assert.deepEqual(cfg.unity, { idleStopMinutes: 90, mcpServer: { command: 'uvx', args: ['x'] } });
+  assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'login' }, 'no unknown role refused at load');
+  assert.equal((cfg as unknown as Record<string, unknown>).librarySeed, undefined);
+  assert.match(retiredKeysLine(cfg.retiredKeys) ?? '', /^config\.json sets hostSandboxes, librarySeed, .*claudeAccounts\.standing, which nothing reads any more: the portal runs no sandboxes, editors or standing agents of its own \(w510\)/);
+  assert.equal(retiredKeysLine([]), undefined);
+  assert.deepEqual(retiredConfigKeys(withoutRetiredKeys(old)), [], 'withoutRetiredKeys leaves none');
 });
 
 test('loadConfig: a standingRoot inside the app folder is refused', (t) => {

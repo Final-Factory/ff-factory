@@ -92,28 +92,20 @@ export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits &
 
 /**
  * What the portal's own host takes from this server's config when it becomes a machine (add_machine local, docs/
- * beast-machine.md): the base clone as its main clone, the host's sandbox root, limits, Library seed, protected paths
- * (plus this app and its data) and disk thresholds, editors below normal (the live game wins), and this server's own
- * loopback address. Anything add_machine is given explicitly wins. Exported for tests.
+ * beast-machine.md): the base clone as its main clone, config sandboxRoot as its sandbox root, protected paths (plus
+ * this app and its data) and disk thresholds, editors below normal (the live game wins), and this server's own loopback
+ * address. Its limits and Library seed are add_machine's own (max_sandboxes, max_unity, library_seed, …; the portal's
+ * own pool's limits went with it, w510). Anything add_machine is given explicitly wins. Exported for tests.
  */
-export function localMachineDefaults(cfg: Pick<Config, 'port' | 'repo' | 'sandboxRoot' | 'limits' | 'protectedPaths' | 'dataDir' | 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'hostGuard'>, root = ROOT) {
-  const cap = (n: number) => Math.max(1, Math.min(8, n));
+export function localMachineDefaults(cfg: Pick<Config, 'port' | 'repo' | 'sandboxRoot' | 'protectedPaths' | 'dataDir' | 'hostGuard'>, root = ROOT) {
   return {
     host: 'localhost',
     portalUrl: `http://127.0.0.1:${cfg.port}`,
     repoPath: cfg.repo.basePath,
     sandboxRoot: cfg.sandboxRoot,
-    maxSandboxes: cap(cfg.limits.maxSandboxes),
-    maxUnity: Math.max(0, Math.min(8, cfg.limits.maxUnity)),
-    // This host had one ceiling for all its workers (limits.maxSessions) and none per sandbox.
-    maxSandboxAgents: cap(cfg.limits.maxSessions),
-    maxAgentsPerSandbox: cap(cfg.limits.maxSessions),
     diskWarnGB: cfg.hostGuard.warnFreeGB,
     diskCriticalGB: Math.min(cfg.hostGuard.criticalFreeGB, cfg.hostGuard.warnFreeGB),
     protectedPaths: [...new Set([...cfg.protectedPaths, root, cfg.dataDir].filter(Boolean))],
-    librarySeed: cfg.librarySeed,
-    librarySeedCopy: cfg.librarySeedCopy,
-    librarySeedGB: cfg.librarySeedCopy === 'clone' ? 10 : cfg.librarySeedGB,
     unityBelowNormal: true,
   };
 }
@@ -1042,9 +1034,6 @@ export class MachineManager {
       const why = this.mainCloneRefusal(m, s.info.kind);
       if (why) throw new Error(why);
     }
-    // The portal's own host: its guard's gate (disk space, the sandbox drive, RAM) holds new agent processes there too.
-    const gate = !s.live && m.local && from !== 'system' ? this.localGate?.('agent') : undefined;
-    if (gate) throw new Error(`not started: ${gate}`);
     if (!this.hooks) throw new Error('machines are not wired up');
     // A new agent process is built from the spec by the daemon's own code: an outdated daemon may not understand
     // it (a tool it does not have). A live process only gets the text, so it carries on.
@@ -1560,15 +1549,10 @@ export class MachineManager {
   /** A line from the Mac's Max events file (server/max.ts validates it). */
   maxEvent?: (machineId: string, line: string) => void;
 
-  /** The host guard's gate for the portal's own host (wired by index.ts): why a new agent or editor there must wait. */
-  localGate?: (kind: 'editor' | 'agent') => string | undefined;
-
   /** Status, start, stop or restart the Unity editor of a machine's clone, on the machine (machine/unity.ts). */
   unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart', force?: boolean, sandbox?: string) {
     const m = this.require(machineId);
     if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline`);
-    const gate = m.local && (action === 'start' || action === 'restart') ? this.localGate?.('editor') : undefined;
-    if (gate) throw new Error(`not started: ${gate}`);
     // Never a sandbox field to a daemon that would ignore it and act on the main clone.
     const sb = sandbox ? (this.requireSandboxDaemon(m.id), this.requireSandbox(m.id, sandbox).id) : undefined;
     return new Promise<string>((resolve, reject) => {

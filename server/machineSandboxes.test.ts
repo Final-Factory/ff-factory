@@ -9,7 +9,6 @@ import type { EventEmitter } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, midTurnRefusal, othersMidTurn, type SessionHandle, type SessionSink } from './sessions.ts';
-import { SandboxManager } from './sandboxes.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { MachineManager, limitOptions, machineForPath, mergeSandboxes, parseSandboxRef, poolSettingsOf } from './machines.ts';
@@ -475,7 +474,7 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
   const store = new Store(cfg.dataDir);
   const sessions = new SessionManager(cfg, store);
   const mm = new MachineManager(cfg, store, sessions);
-  const agents = new Agents(cfg, store, new SandboxManager(cfg, store), sessions, mm, new Identity(cfg, () => []));
+  const agents = new Agents(cfg, store, sessions, mm, new Identity(cfg, () => []));
   // Stand-in launch specs (no Claude here); the switch is the real Agents.switchBranch.
   mm.hooks = {
     specFor: (info, m) => {

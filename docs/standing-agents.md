@@ -19,7 +19,7 @@ even one on a machine.
 
 ## Definition
 
-Stored in `data/state.json` next to the sandboxes (`StandingAgent` in `shared/types.ts`).
+Stored in `data/state.json` (`StandingAgent` in `shared/types.ts`), in the portal; only its process runs on the machine.
 
 | field | meaning |
 |---|---|
@@ -38,10 +38,10 @@ Stored in `data/state.json` next to the sandboxes (`StandingAgent` in `shared/ty
 - Each agent owns one Claude session (kind `standing`) for its whole life. A run resumes that
   session with a short `[run]` message (trigger, budget left, "read NOTES.md, do the job, update
   NOTES.md, end with a summary"). When the turn ends, the server stops the process. Between runs
-  the agent is asleep and does not count toward `limits.maxSessions`. During a run it does.
+  the agent is asleep and does not count toward its machine's `max_agents`. During a run it does.
 - **No overlap.** An agent has at most one pending or active run. A schedule tick that comes due
   while a run is active is recorded as `skipped (previous run still going)`.
-- **Limit full.** A due run waits (dashboard: "waiting for an agent slot") until a slot frees, for
+- **Limit full.** A due run waits (dashboard: "waiting for an agent slot") until its machine has a free slot, for
   at most 60 minutes or until the next scheduled occurrence, whichever is sooner. It is then
   recorded as `skipped (no free agent slot)`. Standing agents only take free slots; they never stop
   a worker.
@@ -160,7 +160,7 @@ that way, and links those four to w524 (`DELEGATIONS_HANDLED`, server/standing.t
 ## Example charter (documentation only)
 
 A PR reviewer, with trigger `every 30 minutes`, groups `shell_read` + `github_comment`, budget
-$3/run and $15/day. It needs `gh auth login` on the host; comments post as that account.
+$3/run and $15/day. It needs `gh auth login` on its machine; comments post as that account.
 
 > Review open, non-draft pull requests on example-org/example-game. Each run: list them with
 > `gh pr list -R example-org/example-game --state open --json number,title,headRefOid,isDraft,author`.

@@ -58,8 +58,6 @@ export interface QueuedSend {
  */
 export const QUEUE_HOLD_MS = 24 * 3_600_000;
 
-/** Idle agent processes kept on this host besides the running ones (limits.maxIdleAgents); the oldest idle one goes first. */
-export const DEFAULT_MAX_IDLE_AGENTS = 6;
 
 /** The prompt stream for one query(): messages pushed here become user turns, in order. */
 class InputQueue implements AsyncIterable<SDKUserMessage> {
@@ -743,7 +741,7 @@ export class SessionManager {
   private drainTimer?: NodeJS.Timeout;
   /**
    * A machine session's place is full of mid-turn agents (its sandbox, its sandboxes, its main clone): why, or undefined.
-   * Set by MachineManager; a session on a machine is never counted against this host's limits.maxSessions.
+   * Set by MachineManager. The portal runs no workers of its own (w510), so only a machine's limits apply.
    */
   placeFull?: (s: SessionHandle) => string | undefined;
   /** Why this idle session must not be stopped to make room (a pending wake_me, a dirty sandbox, …), or undefined. Set by Agents. */
@@ -852,34 +850,10 @@ export class SessionManager {
     return h;
   }
 
-  /**
-   * Agent processes on THIS host (workers and standing agents, idle or mid-turn): what holds memory. Sessions on a machine
-   * live there instead.
-   */
-  liveAgents() {
-    return [...this.sessions.values()].filter((s) => s.info.kind !== 'orchestrator' && !s.info.machineId && s.live).length;
-  }
-
-  /**
-   * Agents on THIS host that are mid-turn: what limits.maxSessions counts (w384). An idle agent, its process up or not,
-   * takes no slot: on 2026-10-04 a follow-up to an idle worker was refused because six idle ones held all the slots.
-   */
-  runningAgents() {
-    return [...this.sessions.values()].filter((s) => s.info.kind !== 'orchestrator' && !s.info.machineId && isMidTurn(s.info)).length;
-  }
-
-  /** The most idle agent processes kept on this host besides the running ones. */
-  get maxIdleAgents() {
-    const n = (this.cfg.limits as { maxIdleAgents?: number }).maxIdleAgents;
-    return typeof n === 'number' && n >= 0 ? n : DEFAULT_MAX_IDLE_AGENTS;
-  }
-
   /** Why a message to this session must wait for a free running slot, or undefined (it may go now). */
   private fullFor(s: SessionHandle): string | undefined {
     if (s.info.kind === 'orchestrator' || isMidTurn(s.info)) return undefined;
-    if (s.info.machineId) return this.placeFull?.(s);
-    const n = this.runningAgents();
-    return n >= this.cfg.limits.maxSessions ? `${n} of ${this.cfg.limits.maxSessions} agents on this host are mid-turn (limits.maxSessions)` : undefined;
+    return s.info.machineId ? this.placeFull?.(s) : undefined;
   }
 
   /** The messages waiting for a slot (oldest first): for the status views and tests. */
@@ -937,13 +911,7 @@ export class SessionManager {
         held.add(q.id);
         continue;
       }
-      const startsHere = !s.live && s.info.kind !== 'orchestrator' && !s.info.machineId;
-      if (startsHere && !q.bypassGate && this.startGate?.()) {
-        held.add(q.id);
-        continue;
-      }
       try {
-        if (startsHere) this.makeRoom(s);
         s.send(q.text, q.from, q.uuid, q.images, q.requestedBy, q.attachments);
         drop();
         sent++;
@@ -968,36 +936,12 @@ export class SessionManager {
   }
 
   /**
-   * Before a new process starts on this host: with limits.maxSessions + limits.maxIdleAgents processes up already, stop
-   * the oldest idle ones nothing protects (keepIdle) until there is room. Stopped, not lost: a message resumes them with
-   * their history. Returns the ids stopped.
-   */
-  makeRoom(s: SessionHandle): string[] {
-    const cap = this.cfg.limits.maxSessions + this.maxIdleAgents;
-    const stopped: string[] = [];
-    const idle = [...this.sessions.values()]
-      .filter((x) => x !== s && x.live && x.info.kind !== 'orchestrator' && !x.info.machineId && !isMidTurn(x.info) && !this.keepIdle?.(x))
-      .sort((a, b) => a.info.lastActivityAt.localeCompare(b.info.lastActivityAt));
-    while (this.liveAgents() >= cap && idle.length) {
-      const x = idle.shift()!;
-      this.store.append(x.info.id, { kind: 'system', text: `Stopped while idle to make room for another agent (${cap} agent processes on this host at most). Its history is kept: a message resumes it.` });
-      x.stop(true);
-      stopped.push(x.info.id);
-      console.log(`sessions: stopped idle ${x.info.id} to make room (limits.maxSessions + limits.maxIdleAgents = ${cap})`);
-    }
-    return stopped;
-  }
-
-  /** The host guard's gate (server/hostHealth.ts): why a new agent process on this host must wait. */
-  startGate?: () => string | undefined;
-
-  /**
-   * Send, enforcing the concurrent-agent ceiling and the host guard when this send would start a process.
+   * Send, enforcing a machine's agent limits when this send would start a process there (they queue it).
    * `bypassGate`: the host guard's own messages (resume after recovery, checkpoint requests).
    */
   /**
-   * `hold` (w496: a worker's first prompt, its brief): what would refuse it now (the host guard, a machine's daemon that
-   * is outdated or offline) queues it instead, and it goes as soon as it can, before any later message to the session.
+   * `hold` (w496: a worker's first prompt, its brief): what would refuse it now (a machine's daemon that is outdated or
+   * offline, or its guard) queues it instead, and it goes as soon as it can, before any later message to the session.
    */
   send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean; requestedBy?: Requester; attachments?: DeliveredAttachment[]; hold?: boolean } = {}): string {
     const s = this.get(id);
@@ -1014,7 +958,6 @@ export class SessionManager {
         return queue((e as Error).message);
       }
     } else this.checkStart(id, opts.bypassGate, from);
-    if (!s.live && s.info.kind !== 'orchestrator' && !s.info.machineId) this.makeRoom(s);
     if (!opts.hold) return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     try {
       return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
@@ -1024,16 +967,14 @@ export class SessionManager {
   }
 
   /**
-   * Throws when a message to this session would start a process on this host that the host guard refuses now; returns
-   * the session. For a caller that copies files before sending. The agent limits never refuse: send() queues instead.
+   * Throws when a message to this session would start a process that may not start now (a dry run); returns the
+   * session. For a caller that copies files before sending. The agent limits never refuse: send() queues instead. A
+   * machine's own guard refuses at its daemon. `bypassGate` is kept for callers; nothing here gates on it now (w510).
    */
-  checkStart(id: string, bypassGate?: boolean, from: 'human' | 'orchestrator' | 'system' = 'human'): SessionHandle {
+  checkStart(id: string, _bypassGate?: boolean, from: 'human' | 'orchestrator' | 'system' = 'human'): SessionHandle {
     const s = this.get(id);
     const dry = s.live ? undefined : dryRunStartRefusal(s.info, from);
     if (dry) throw new Error(`not started: ${dry}`);
-    const startsHere = !s.live && s.info.kind !== 'orchestrator' && !s.info.machineId;
-    const gate = startsHere && !bypassGate ? this.startGate?.() : undefined;
-    if (gate) throw new Error(`not started: ${gate}`);
     return s;
   }
 

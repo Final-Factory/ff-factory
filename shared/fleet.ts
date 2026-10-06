@@ -1,7 +1,8 @@
-// Every computer and what it is working on, grouped for the sidebar and the Overview board: the host
-// (BEAST) first, then each machine, each with its sandboxes, the agents in them, and a machine's
-// main-clone agents. Pure, so the server's tests can check it and the browser can run it.
-import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, Sandbox, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
+// Every computer and what it is working on, grouped for the sidebar and the Overview board: the portal's own host
+// first (with its own daemon's sandboxes when it has one, as BEAST does; the portal itself holds none, w510), then each
+// machine, each with its sandboxes, the agents in them, and a machine's main-clone agents. Pure, so the server's tests
+// can check it and the browser can run it.
+import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
 import { holdsItsPlace, placeRank, sortAgents } from './agentState.ts';
 
 /**
@@ -17,7 +18,7 @@ export interface PlaceAgents {
 }
 
 export interface FleetSandbox {
-  /** "alpha" for the host's, "lothdesktop/sb1" for a machine's: unique across the fleet. */
+  /** "lothdesktop/sb1" (<machine>/<name>): unique across the fleet. */
   key: string;
   /** The folder name (the slot). */
   id: string;
@@ -34,7 +35,6 @@ export interface FleetSandbox {
   free: boolean;
   /** Permission requests waiting in it, plus a blocked editor. */
   attention: number;
-  sandbox?: Sandbox;
   machineSandbox?: MachineSandbox;
 }
 
@@ -104,27 +104,9 @@ function summarize(c: Omit<FleetComputer, 'live' | 'busy' | 'attention'>): Fleet
 const shortHost = (h: string) => h.replace(/\.(local|lan|home)$/i, '');
 
 /** `byId`: the sessions by id, when the caller already has them (the page keeps one per sessions list). */
-export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines' | 'system' | 'machineStats'>, byId: Map<string, SessionInfo> = new Map(app.sessions.map((s) => [s.id, s]))): FleetComputer[] {
-
-  const hostSandboxes = app.sandboxes.map((sb): FleetSandbox => {
-    const agents = agentsIn(sb.sessionIds, byId);
-    return {
-      key: sb.id,
-      id: sb.id,
-      purpose: sb.purpose,
-      branch: sb.git?.branch ?? sb.branch,
-      status: sb.status,
-      statusDetail: sb.statusDetail,
-      unity: sb.unity.state,
-      agents,
-      free: isUnused(sb.purpose) && agents.live.length === 0 && sb.status === 'ready',
-      attention: waiting(agents) + (sb.unity.state === 'blocked' ? 1 : 0),
-      sandbox: sb,
-    };
-  });
-  const hostEditors = app.sandboxes.filter((s) => s.unity.state === 'running' || s.unity.state === 'starting' || s.unity.state === 'blocked' || s.unity.state === 'stopping').length;
+export function fleetOf(app: Pick<AppState, 'sessions' | 'machines' | 'system' | 'machineStats'>, byId: Map<string, SessionInfo> = new Map(app.sessions.map((s) => [s.id, s]))): FleetComputer[] {
   const host = (local?: Machine) => {
-    // With its own daemon, this host's sandboxes are that daemon's (plus any the host's old pool still has).
+    // With its own daemon, this host's sandboxes are that daemon's; without one it holds none (the portal, w510).
     const daemonSandboxes = local ? machineSandboxes(local) : [];
     return summarize({
       key: 'host',
@@ -134,11 +116,11 @@ export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines
       platform: app.system?.platform,
       online: true,
       stats: app.system,
-      sandboxes: inUseFirst([...hostSandboxes, ...daemonSandboxes]),
-      sandboxLimit: local?.sandboxRoot ? (local.maxSandboxes ?? 3) : app.system?.limits.maxSandboxes,
+      sandboxes: inUseFirst(daemonSandboxes),
+      sandboxLimit: local?.sandboxRoot ? (local.maxSandboxes ?? 3) : undefined,
       // Every Unity process there, as its daemon counts them (w469), else the sandbox editors it reports.
-      editors: (local && app.machineStats?.[local.id]?.unity?.used) ?? hostEditors + daemonSandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
-      editorLimit: local?.sandboxRoot ? (local.maxUnity ?? 2) : app.system?.limits.maxUnity,
+      editors: (local && app.machineStats?.[local.id]?.unity?.used) ?? daemonSandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
+      editorLimit: local?.sandboxRoot ? (local.maxUnity ?? 2) : undefined,
     });
   };
 
@@ -185,6 +167,8 @@ export function fleetOf(app: Pick<AppState, 'sandboxes' | 'sessions' | 'machines
 
 /** "2/3 sandboxes · 1/2 editors", or what a computer without a pool has. */
 export function capacityLine(c: FleetComputer): string {
+  // The portal's own host without a daemon of its own: it runs the orchestrators and the dispatcher only (w510).
+  if (c.host && !c.daemon) return 'orchestrators only';
   if (!c.host && c.sandboxLimit === undefined) return 'main clone only';
   // "1/3 sandboxes" counts against the limit, so it stays plural; "1 sandbox" without one does not.
   const n = (count: number, limit: number | undefined, one: string, many: string) => (limit !== undefined ? `${count}/${limit} ${many}` : `${count} ${count === 1 ? one : many}`);

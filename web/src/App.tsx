@@ -5,7 +5,6 @@ import { Login } from './components/Login';
 import { NewSandboxModal } from './components/Modals';
 import { OrchestratorView } from './components/OrchestratorView';
 import { DispatcherPanel } from './components/DispatcherPanel';
-import { SandboxPanel } from './components/SandboxPanel';
 import { SessionView } from './components/SessionView';
 import { Sidebar } from './components/Sidebar';
 import { Icon } from './components/ui';
@@ -168,7 +167,7 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
       key: 'elevated',
       kind: 'error',
       lead: 'FF Factory is running with administrator rights.',
-      rest: `It will not start Unity editors (they would stop on Unity's administrator dialog), and every agent shell has admin rights. Run scripts\\restart.cmd to bring it back non-elevated.${host.elevatedWhy ? ` (${host.elevatedWhy})` : ''}`,
+      rest: `Every orchestrator shell has admin rights. Run scripts\\restart.cmd to bring it back non-elevated.${host.elevatedWhy ? ` (${host.elevatedWhy})` : ''}`,
     });
   }
   if (drive) {
@@ -205,6 +204,8 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
 }
 
 function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactNode; layout: string; title: string } {
+  // An old #/sandbox/<id> link (the portal's own sandboxes, gone in w510): the same name on this host's own daemon.
+  if (route.view === 'sandbox') route = { view: 'msandbox', machineId: app.machines.find((m) => m.local)?.id ?? '', sandboxId: route.sandboxId, sessionId: route.sessionId };
   const orch = app.sessions.find((s) => s.id === app.orchestratorId);
   if (route.view === 'chat') {
     // Someone else's own orchestrator, read only; your own is the home page.
@@ -228,27 +229,6 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
       };
     }
     return { layout: 'single', title: 'Dispatcher', node: panel };
-  }
-  if (route.view === 'sandbox') {
-    const sb = app.sandboxes.find((s) => s.id === route.sandboxId);
-    if (!sb) return { node: <Missing what="sandbox" />, layout: 'single', title: 'Not found' };
-    if (wide) {
-      return {
-        layout: 'split',
-        title: displayName(sb),
-        node: (
-          <>
-            <OrchestratorView session={orch} compact />
-            <SandboxPanel app={app} sandbox={sb} sessionId={route.sessionId} onClose={() => navigate({ view: 'home' })} />
-          </>
-        ),
-      };
-    }
-    return {
-      layout: 'single',
-      title: displayName(sb),
-      node: <SandboxPanel app={app} sandbox={sb} sessionId={route.sessionId} onClose={() => navigate({ view: 'home' })} />,
-    };
   }
   if (route.view === 'search') {
     return { layout: 'single', title: 'Search', node: <SearchView key={route.q ?? ''} app={app} initial={route.q} /> };
@@ -361,9 +341,7 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
           fullWidth
           onBack={() =>
             navigate(
-              s.sandboxId
-                ? { view: 'sandbox', sandboxId: s.sandboxId, sessionId: s.id }
-                : s.machineId && s.machineSandbox
+              s.machineId && s.machineSandbox
                   ? { view: 'msandbox', machineId: s.machineId, sandboxId: s.machineSandbox, sessionId: s.id }
                   : s.machineId && !s.standingId
                   ? { view: 'machine', machineId: s.machineId, sessionId: s.id }

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hostSoftFreeGB, portalOnly, type Config, type HostGuardConfig } from './config.ts';
+import { hostSoftFreeGB, type Config, type HostGuardConfig } from './config.ts';
 import { CleanupRunner, describeCleanupItems, type CleanupRun, type PassOptions } from './cleanup.ts';
 import { staleOutputSettings } from './staleOutput.ts';
 import type { HelperAction, HelperResult } from './privileged.ts';
@@ -9,7 +9,9 @@ import type { DiskLevel, HostHealth, Sandbox, SessionInfo } from '../shared/type
 /**
  * The host guard (docs/self-recovery.md): watches free disk space, the sandbox drive and memory, and acts so
  * that a full disk or a lost Dev Drive heals without anyone at the desk. The decisions are pure functions
- * (tested in hostHealth.test.ts); HostHealthMonitor runs them on a timer against injected effects.
+ * (tested in hostHealth.test.ts); HostHealthMonitor runs them on a timer against injected effects. Two run it: the
+ * portal, over its own data volume and its clean-up (no sandbox drive: it holds no sandboxes, w510), and a machine's
+ * daemon, over that machine's sandbox drive (machine/hostGuard.ts; BEAST's Dev Drive, w466).
  */
 
 const GB = 1024 ** 3;
@@ -41,20 +43,6 @@ export function blockReason(
     return `only ${mem.freeGB.toFixed(1)} GB of RAM is free and an editor needs about ${mem.minFreeRamGB} GB (limits.minFreeRamGB); stop an editor first`;
   }
   return undefined;
-}
-
-/** Running editors whose sandbox has had no agent activity for `idleMinutes` and no agent mid-turn. */
-export function idleEditors(sandboxes: Sandbox[], sessions: SessionInfo[], nowMs: number, idleMinutes: number): string[] {
-  if (idleMinutes <= 0) return [];
-  const out: string[] = [];
-  for (const sb of sandboxes) {
-    if (sb.unity.state !== 'running') continue;
-    const mine = sessions.filter((s) => s.sandboxId === sb.id);
-    if (mine.some((s) => BUSY.has(s.status))) continue;
-    const last = Math.max(Date.parse(sb.unity.startedAt ?? '') || 0, ...mine.map((s) => Date.parse(s.lastActivityAt) || 0));
-    if (nowMs - last > idleMinutes * 60_000) out.push(sb.id);
-  }
-  return out;
 }
 
 /** Wait before the n-th remount attempt (1-based): at once, then 2, 5, 10, 30 minutes. */
@@ -98,8 +86,8 @@ export interface HostDeps {
   reap?(maxAgeHours: number): Promise<string[]>;
   changed(h: HostHealth): void;
   /**
-   * Whether this guard watches the sandbox drive now (default yes). No while the portal's own host's daemon runs the
-   * guard itself (w466, machine/hostGuard.ts): two guards would race to remount it and start the same editors.
+   * Whether this guard owns a sandbox drive (cfg.sandboxRoot) to watch and reattach (default yes: a machine's daemon,
+   * machine/hostGuard.ts). The portal's own guard says no (w510): it holds no sandboxes, and watches its data volume.
    */
   watchDrive?(): boolean;
   now?(): number;
@@ -108,8 +96,6 @@ export interface HostDeps {
 
 interface Recovery {
   since: number;
-  /** When the remount helper reported the drive back (for the self-test's timings). */
-  backAt?: number;
   editors: string[];
   sessions: string[];
   attempts: number;
@@ -124,8 +110,6 @@ export class HostHealthMonitor {
   private snapshot: { editors: string[]; sessions: string[] } = { editors: [], sessions: [] };
   private recovery?: Recovery;
   private helperBusy = false;
-  /** Set while a helper detaches the drive on purpose (compaction): its absence is not an outage. */
-  private maintenance = false;
   private lastCleanupAt = 0;
   readonly cleaner: CleanupRunner;
   private criticalSince = 0;
@@ -174,12 +158,14 @@ export class HostHealthMonitor {
     return blockReason(h, kind, { freeGB: this.d.mem().free / GB, minFreeRamGB: this.d.cfg.limits.minFreeRamGB });
   }
 
-  /**
-   * The guard runs (hostGuard.pollSeconds > 0): only then is a missing sandbox drive reattached, so only then does it
-   * block. The portal-only mode (w464) has no sandbox drive to watch.
-   */
+  /** This guard has a sandbox drive (HostDeps.watchDrive): a machine's daemon's does, the portal's does not (w510). */
+  private ownsDrive() {
+    return this.d.watchDrive?.() ?? true;
+  }
+
+  /** The guard runs (hostGuard.pollSeconds > 0) and owns a drive: only then is a missing drive reattached, so only then does it block. */
   private watchesDrive() {
-    return this.d.cfg.hostGuard.pollSeconds > 0 && !portalOnly(this.d.cfg) && (this.d.watchDrive?.() ?? true);
+    return this.d.cfg.hostGuard.pollSeconds > 0 && this.ownsDrive();
   }
 
   private g() {
@@ -194,7 +180,6 @@ export class HostHealthMonitor {
       await this.measure();
       await this.sandboxDrive();
       await this.diskGuard();
-      await this.idleEditors();
       await this.reapBrowsers();
       // The regular pass, and sooner below the soft threshold: before the warn level blocks new work. Not awaited:
       // a pass can walk big folders for minutes, and the guard must keep looking meanwhile.
@@ -210,8 +195,8 @@ export class HostHealthMonitor {
 
   private async measure() {
     const cfg = this.d.cfg;
-    // The portal-only mode (w464) holds no sandboxes: the data volume (state, transcripts, attachments) is what fills up.
-    const paths = [...new Map([portalOnly(cfg) ? cfg.dataDir : cfg.sandboxRoot, ...cfg.hostDiskPaths].map((p) => [volumeOf(p), p])).values()];
+    // The portal holds no sandboxes (w510): its data volume (state, transcripts, attachments) is what fills up there.
+    const paths = [...new Map([this.ownsDrive() ? cfg.sandboxRoot : cfg.dataDir, ...cfg.hostDiskPaths].map((p) => [volumeOf(p), p])).values()];
     const disks: HostHealth['disks'] = [];
     for (const p of paths) {
       const st = this.d.exists(p) ? await this.d.statfs(p) : undefined;
@@ -220,11 +205,6 @@ export class HostHealthMonitor {
       disks.push({ path: p, freeBytes: st?.free, totalBytes: st?.total, level });
     }
     const m = this.d.mem();
-    const hourAgo = this.now() - 3_600_000;
-    const unityRestarts = this.d
-      .sandboxes()
-      .flatMap((s) => (s.unity.restarts ?? []).filter((r) => r.auto && Date.parse(r.at) >= hourAgo).map((r) => ({ sandbox: s.id, at: r.at, reason: r.reason })))
-      .sort((x, y) => x.at.localeCompare(y.at));
     this.health = {
       ...this.health,
       checkedAt: new Date(this.now()).toISOString(),
@@ -232,7 +212,6 @@ export class HostHealthMonitor {
       level: worstLevel(disks.map((x) => x.level)),
       memFreeBytes: m.free,
       memTotalBytes: m.total,
-      unityRestarts: unityRestarts.length ? unityRestarts : undefined,
     };
   }
 
@@ -246,9 +225,8 @@ export class HostHealthMonitor {
   // ------------------------------------------------------------ the sandbox drive
 
   private async sandboxDrive() {
-    if (portalOnly(this.d.cfg)) return;
     if (!this.watchesDrive()) {
-      // Handed to the daemon's guard: an outage this guard was handling is the daemon's now (it finds it at its first look).
+      // No drive of its own (the portal), or the guard is off.
       this.recovery = undefined;
       this.health.sandboxRoot = 'ok';
       this.health.detail = undefined;
@@ -268,7 +246,6 @@ export class HostHealthMonitor {
       };
       return;
     }
-    if (this.maintenance) return;
     if (!this.recovery) await this.lost();
     const r = this.recovery!;
     if (this.helperBusy || this.now() < r.nextTryAt || this.health.sandboxRoot === 'failed') return;
@@ -287,14 +264,11 @@ export class HostHealthMonitor {
     this.health.detail = `attempt ${r.attempts} of ${MAX_REMOUNT_ATTEMPTS}`;
     this.helperBusy = true;
     const res = await this.d.runHelper('mount').finally(() => (this.helperBusy = false));
-    if (res.ok && this.d.exists(root)) {
-      r.backAt = this.now();
-      return this.recovered();
-    }
+    if (res.ok && this.d.exists(root)) return this.recovered();
     if (r.attempts >= MAX_REMOUNT_ATTEMPTS) {
       this.health.sandboxRoot = 'failed';
       this.health.detail = res.detail;
-      this.d.report('Sandbox drive: could not reattach it', `${MAX_REMOUNT_ATTEMPTS} attempts failed (last: ${res.detail}). The orchestrator can retry with host_recovery "remount", or reboot as a last resort.`);
+      this.d.report('Sandbox drive: could not reattach it', `${MAX_REMOUNT_ATTEMPTS} attempts failed (last: ${res.detail}). Restarting this machine's daemon (machine_daemon restart) tries again; a reboot is the last resort.`);
       return;
     }
     r.nextTryAt = this.now() + remountDelayMs(r.attempts + 1);
@@ -328,7 +302,6 @@ export class HostHealthMonitor {
   private async recovered() {
     const r = this.recovery!;
     this.recovery = undefined;
-    this.lastRecovery = { since: r.since, backAt: r.backAt ?? this.now(), attempts: r.attempts };
     this.health.sandboxRoot = 'ok';
     this.health.detail = undefined;
     const mins = Math.round((this.now() - r.since) / 60_000);
@@ -345,67 +318,13 @@ export class HostHealthMonitor {
       try {
         this.d.tell(
           id,
-          `The sandbox drive went offline at ${new Date(r.since).toLocaleTimeString()} and was reattached ${mins} min later; your turn was stopped. Your worktree is back. Check git status for half-written edits (a write may have been lost at the moment it vanished), re-pin your Unity instance if you use it (the editor is being restarted; wait_for_unity "ready"), and continue where you left off.`,
+          `The sandbox drive went offline at ${new Date(r.since).toLocaleTimeString()} and was reattached ${mins} min later; your turn was stopped. Your worktree is back. Check git status for half-written edits (a write may have been lost at the moment it vanished), re-pin your Unity instance if you use it (the editor is being restarted; unity action "status" says when it is up), and continue where you left off.`,
         );
       } catch (e) {
         failed.push(`${id}: ${(e as Error).message}`);
       }
     }
     if (failed.length) this.d.report('Sandbox drive: some work did not come back', failed.join('; '));
-  }
-
-  private lastRecovery?: { since: number; backAt: number; attempts: number };
-
-  /**
-   * The end-to-end recovery self-test (host_recovery "selftest"): with no editor up and no agent busy in a
-   * sandbox, detach the sandbox drive through ffsb-helper-detach, as Windows did on 2026-09-24, and let the
-   * guard's own recovery notice it, reattach it and bring the sandboxes back. Reports each step's timing.
-   * `pollMs` / `timeoutMs` are for tests.
-   */
-  async selftest(opts: { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<string> {
-    const root = this.d.cfg.sandboxRoot;
-    const poll = opts.pollMs ?? 1000;
-    const timeout = opts.timeoutMs ?? 10 * 60_000;
-    const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-    const no = this.detachRefusal() ?? (!this.d.exists(root) ? `${root} is not there; fix that first` : undefined);
-    if (no) throw new Error(no);
-    const ready = this.d.sandboxes().filter((s) => s.status === 'ready');
-    const t0 = this.now();
-    const lines: string[] = [];
-    const secs = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
-    this.lastRecovery = undefined;
-    const det = await this.d.runHelper('detach');
-    if (!det.ok) throw new Error(`ffsb-helper-detach failed: ${det.detail}`);
-    lines.push(`detach helper: ${secs(this.now() - t0)} (${det.detail})`);
-    let goneAt = 0;
-    while (this.now() - t0 < timeout) {
-      if (!goneAt && !this.d.exists(root)) goneAt = this.now();
-      await this.tick();
-      if (this.lastRecovery && this.d.exists(root)) break;
-      await sleep(poll);
-    }
-    const rec = this.lastRecovery as { since: number; backAt: number; attempts: number } | undefined; // set by tick() above
-    if (!rec) {
-      return `SELF-TEST FAILED: ${root} was not back within ${secs(timeout)} (state ${this.health.sandboxRoot}${this.health.detail ? `: ${this.health.detail}` : ''}). ${lines.join('; ')}. host_recovery "remount" retries.`;
-    }
-    if (goneAt) lines.push(`${root} gone after ${secs(goneAt - t0)}`);
-    lines.push(`noticed by the guard after ${secs(rec.since - (goneAt || t0))}`);
-    lines.push(`reattached by ffsb-helper-mount ${secs(rec.backAt - rec.since)} later (${rec.attempts} attempt(s))`);
-    const missing = ready.filter((s) => !this.d.exists(s.path)).map((s) => s.id);
-    lines.push(missing.length ? `sandboxes NOT back: ${missing.join(', ')}` : `all ${ready.length} sandbox folder(s) back`);
-    lines.push(`total ${secs(this.now() - t0)}`);
-    return `${missing.length ? 'SELF-TEST FAILED' : 'Self-test passed'}: ${lines.join('; ')}.`;
-  }
-
-  /** The orchestrator's host_recovery "remount": try now, even after giving up. */
-  remountNow(): string {
-    if (this.d.exists(this.d.cfg.sandboxRoot)) return `${this.d.cfg.sandboxRoot} is there; nothing to do.`;
-    if (!this.recovery) return 'The guard has not noticed the drive missing yet; it looks again within a minute.';
-    this.recovery.attempts = 0;
-    this.recovery.nextTryAt = 0;
-    this.health.sandboxRoot = 'missing';
-    void this.tick();
-    return 'Reattaching now (progress in system_status and as [host] messages).';
   }
 
   // ------------------------------------------------------------ disk space
@@ -464,46 +383,6 @@ export class HostHealthMonitor {
     for (const l of lines) this.d.log?.(`reaper: ${l}`);
     this.health.lastReap = { at: new Date(this.now()).toISOString(), killed: lines.filter((l) => l.startsWith('killed')).length, lines: lines.slice(0, 10) };
     this.d.report('Reaped leftover headless browsers', lines.join('; '));
-  }
-
-  // ------------------------------------------------------------ editors and the VHDX
-
-  private async idleEditors() {
-    // This host's own daemon's sandboxes ("<machine>/<id>", docs/beast-machine.md) have their daemon's idle stop, with the same limit.
-    for (const id of idleEditors(this.d.sandboxes().filter((s) => !s.id.includes('/')), this.d.sessions(), this.now(), this.d.cfg.unity.idleStopMinutes)) {
-      await this.d.stopEditor(id).catch(() => undefined);
-      this.d.report('Stopped an idle editor', `${id}: no agent activity for ${this.d.cfg.unity.idleStopMinutes} min (unity.idleStopMinutes).`);
-    }
-  }
-
-  /**
-   * Why the sandbox drive must not be taken away now (compact, the self-test), or undefined. Detaching it is
-   * manual only (host_recovery), never automatic, and refused while any editor is up or any agent on this
-   * host is busy: a drive pulled from under them kills their work (2026-09-24).
-   */
-  detachRefusal(): string | undefined {
-    const up = this.d.sandboxes().filter((s) => EDITOR_UP.has(s.unity.state)).map((s) => s.id);
-    if (up.length) return `editors are up (${up.join(', ')}): stop them first; this takes the sandbox drive away`;
-    const busy = this.d.sessions().filter((s) => s.kind !== 'orchestrator' && !s.machineId && BUSY.has(s.status)).map((s) => s.id);
-    if (busy.length) return `agents on this host are mid-turn (${busy.join(', ')}): wait until they are idle`;
-    if (this.recovery || this.health.sandboxRoot !== 'ok') return `the sandbox drive is not in a normal state (${this.health.sandboxRoot}); fix that first`;
-    return undefined;
-  }
-
-  /** Retrim, detach, compact and reattach the Dev Drive: host_recovery "compact" only (detachRefusal first). */
-  async compact(why: string): Promise<HelperResult> {
-    const no = this.detachRefusal();
-    if (no) return { action: 'compact', ok: false, at: new Date(this.now()).toISOString(), detail: `refused: ${no}` };
-    this.maintenance = true;
-    this.helperBusy = true;
-    try {
-      const res = await this.d.runHelper('compact');
-      this.d.report(res.ok ? 'Compacted the sandbox drive' : 'Compacting the sandbox drive failed', `${why}: ${res.detail}`);
-      return res;
-    } finally {
-      this.maintenance = false;
-      this.helperBusy = false;
-    }
   }
 
   /** host_recovery "cleanup": a pass now, stale output included; `dryRun`: what it would remove, nothing removed (w459). */

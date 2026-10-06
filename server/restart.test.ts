@@ -87,9 +87,10 @@ test('resume message: what happened, what to check, and the unanswered messages'
   const f = { reason: 'update (request_app_update)', at: '2026-09-23T18:00:00Z' };
   const m = resumeMessage({ id: 'a', kind: 'worker', title: 'a', why: 'mid-turn', unanswered: [{ text: 'build\n  it', from: 'orchestrator' }], lastFrom: 'orchestrator' }, f);
   assert.match(m, /^The app restarted \(update \(request_app_update\) at /);
-  assert.match(m, /worktree, the Unity editor and your history are intact/);
-  assert.match(m, /git status/);
-  assert.match(m, /re-pin your Unity instance/);
+  // Not on a machine: an orchestrator, the only agent the portal runs itself (w510): no worktree, no editor.
+  assert.match(m, /Your process was stopped; your history is intact\./);
+  assert.match(m, /Continue where you left off\./);
+  assert.doesNotMatch(m, /Unity|git status/);
   assert.match(m, /cut off/);
   assert.match(m, /- \(from the orchestrator, for no named person\) build it$/m);
   const d = resumeMessage({ id: 'a', kind: 'worker', title: 'a', why: 'drained', unanswered: [], lastFrom: 'human' }, f);

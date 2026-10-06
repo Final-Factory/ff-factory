@@ -303,7 +303,7 @@ export function checkEditorSwitch(cmd: string, cwd: string | undefined, sandboxP
     if (rest.some((w) => w === '-h' || w === '--help')) continue;
     if (sub === 'checkout' && rest.some((w) => w === '--' || w === '-p' || w === '--patch')) continue; // paths, not a branch
     if (!inside(gitDir)) continue;
-    return `git ${sub} to another branch is blocked while this sandbox's Unity editor is running: Unity would stop on "The open scene(s) have been modified externally". Use mcp__sandbox__switch_branch instead (it closes the open scenes across the switch, refreshes and reopens them). To restore files, use git restore <path> or git checkout -- <path>.`;
+    return `git ${sub} to another branch is blocked while this sandbox's Unity editor is running: Unity would stop on "The open scene(s) have been modified externally". Use mcp__machine__switch_branch instead (it checks the editor and switches safely). To restore files, use git restore <path> or git checkout -- <path>.`;
   }
   return undefined;
 }
@@ -530,7 +530,7 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
     return undefined;
   }
   if (killer && all.some((w) => /unity|node|claude|powershell|pwsh|tailscale|supervise/.test(w))) {
-    return 'Killing Unity, node, claude or PowerShell processes by hand is blocked: other sandboxes and the live co-op game share this machine. Use mcp__sandbox__unity (action restart; force: true for a frozen editor) to stop or restart your own editor.';
+    return 'Killing Unity, node, claude or PowerShell processes by hand is blocked: other sandboxes and the live co-op game share this machine. Use mcp__machine__unity (action restart; force: true for a frozen editor) to stop or restart your own editor.';
   }
   return undefined;
 }

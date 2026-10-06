@@ -75,8 +75,8 @@ export interface OrchestratorsDeps {
   identity: Identity;
   /** The SDK options of an orchestrator session (Agents.orchestratorOptions): its role decides its brief, tools and account. */
   options: OptionsFactory;
-  /** The sandboxes and machines: their branches and open PRs are what workers there work on. */
-  places: () => { sandboxes: Sandbox[]; machines: Machine[] };
+  /** The machines and their sandboxes: their branches and open PRs are what workers there work on. */
+  places: () => { machines: Machine[] };
   /** Commits that reached develop in the last 48 hours ("recent merges"); optional. */
   recentCommits?: () => { sha: string; subject: string }[];
   now?: () => Date;
@@ -547,12 +547,12 @@ export class Orchestrators {
   }
 
   /**
-   * The people whose workers are in this place (the owner when there are none): a sandbox of this host, a machine's
-   * main clone, or a machine sandbox. Places are the same wherever they live, so a host run by a daemon fits too.
+   * The people whose workers are in this place (the owner when there are none): a machine's main clone, or a machine
+   * sandbox (this host's own daemon's included).
    */
-  peopleAt(where: { sandboxId?: string; machineId?: string; machineSandbox?: string }): Requester[] {
+  peopleAt(where: { machineId?: string; machineSandbox?: string }): Requester[] {
     const out = new Map<string, Requester>();
-    const here = (s: SessionInfo) => (where.sandboxId ? s.sandboxId === where.sandboxId : s.machineId === where.machineId && (s.machineSandbox ?? '') === (where.machineSandbox ?? ''));
+    const here = (s: SessionInfo) => s.machineId === where.machineId && (s.machineSandbox ?? '') === (where.machineSandbox ?? '');
     // Only workers busy now or active in the last two hours: someone whose work there ended long ago is not concerned.
     const recent = (s: SessionInfo) => BUSY.includes(s.status) || this.now().getTime() - Date.parse(s.lastActivityAt) < 2 * 3_600_000;
     for (const s of this.store.sessions.values()) {
@@ -616,24 +616,19 @@ export class Orchestrators {
     w.updatedAt = now.toISOString();
   }
 
-  /** The branches checked out anywhere: this host's sandboxes, the machines' main clones and their sandboxes. */
+  /** The branches checked out anywhere: the machines' main clones and their sandboxes. */
   private knownBranches(): string[] {
-    const { sandboxes, machines } = this.d.places();
-    const machineBranches = machines.flatMap((m) => [m.git?.branch ?? '', ...(m.sandboxes ?? []).flatMap((sb) => [sb.branch, sb.git?.branch ?? ''])]);
-    return [...sandboxes.flatMap((s) => [s.branch, s.git?.branch ?? '']), ...machineBranches].filter(Boolean);
+    const { machines } = this.d.places();
+    return machines.flatMap((m) => [m.git?.branch ?? '', ...(m.sandboxes ?? []).flatMap((sb) => [sb.branch, sb.git?.branch ?? ''])]).filter(Boolean);
   }
 
   /**
-   * Where a worker works, whatever computer holds it: a sandbox of this host, a machine sandbox ("m3/sb1") or a
-   * machine's main clone, with its label and the branch and open PR there.
+   * Where a worker works, whatever computer holds it: a machine sandbox ("m3/sb1") or a machine's main clone, with its
+   * label and the branch and open PR there.
    */
   private placeOf(s: SessionInfo): { name: string; label: string; branch?: string; pr?: number } | undefined {
-    const { sandboxes, machines } = this.d.places();
+    const { machines } = this.d.places();
     const branchOf = (g: Sandbox['git'], fallback?: string) => (g?.branch && g.branch !== 'detached HEAD' ? g.branch : fallback);
-    if (s.sandboxId) {
-      const sb = sandboxes.find((x) => x.id === s.sandboxId);
-      return sb && { name: sb.id, label: displayName(sb), branch: branchOf(sb.git, sb.branch), pr: sb.git?.pr?.number };
-    }
     const m = s.machineId ? machines.find((x) => x.id === s.machineId) : undefined;
     if (!m) return undefined;
     if (s.machineSandbox) {
@@ -725,7 +720,7 @@ export class Orchestrators {
     const limit = limitProblem(this.store.work.values(), owner, now.getTime(), limitsFor('person', this.d.cfg.workLimits));
     if (limit) throw new Error(limit);
     const branches = this.knownBranches();
-    const { sandboxes, machines } = this.d.places();
+    const { machines } = this.d.places();
     const related = (input.related_ids ?? []).map((x) => String(x).trim()).filter(Boolean).slice(0, 10);
     // Its own threads and reports: the title, `subjects` and a given scope; the brief's are references (w343).
     const own = filingKeys(
@@ -739,7 +734,7 @@ export class Orchestrators {
         work: (id) => this.store.work.has(id.toLowerCase()),
         session: (id) => this.store.sessions.has(id),
         delegation: (id) => this.store.delegations.has(id),
-        sandbox: (id) => sandboxes.some((s) => same(s.id, id)),
+        sandbox: (id) => machines.some((m) => (m.sandboxes ?? []).some((sb) => same(sb.id, id) || same(`${m.id}/${sb.id}`, id))),
         machine: (id) => machines.some((m) => same(m.id, id)),
       }, branches).filter((k) => !SUBJECT_KEY.test(k)),
     ]);

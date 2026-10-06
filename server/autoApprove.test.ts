@@ -48,7 +48,6 @@ function setup(t: { after: (fn: () => void) => void }, opts: { ledger?: boolean 
     },
     get: (id) => ({ info: infos.get(id)!, live: false, stop() {} }),
     send: () => 'u',
-    liveAgents: () => 0,
     remove: () => undefined,
   };
   // A fake ledger: what was filed, and bumps. A repeat is the same title filed before.

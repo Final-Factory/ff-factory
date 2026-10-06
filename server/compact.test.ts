@@ -34,7 +34,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     store.flush();
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
-  const sessions = new SessionManager({ limits: { maxSessions: 6 } } as Config, store);
+  const sessions = new SessionManager({} as Config, store);
   const make = (kind: SessionInfo['kind'] = 'orchestrator') =>
     sessions.create({ kind, title: 'o', permissionMode: 'default', options: () => ({ model: 'opus' }), ...(kind === 'orchestrator' ? { orchestratorRole: 'personal' as const, requestedBy: LOTHSAHN } : {}) });
   const turnEnds: string[] = [];

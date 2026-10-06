@@ -206,9 +206,9 @@ export async function hostStats(diskPath: string): Promise<HostStats> {
   };
 }
 
+/** This host's load: its data volume's disk (the portal holds no sandboxes of its own, w510). */
 export async function systemStats(cfg: Config): Promise<SystemStats> {
-  const target = fs.existsSync(cfg.sandboxRoot) ? cfg.sandboxRoot : cfg.dataDir;
-  return { ...(await hostStats(target)), limits: cfg.limits };
+  return hostStats(cfg.dataDir);
 }
 
 

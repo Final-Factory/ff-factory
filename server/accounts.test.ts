@@ -30,8 +30,7 @@ test('accounts: each role on this host defaults to the token; "login" starts wit
   assert.equal(hostAccount({}, 'orchestrator'), 'token', 'no config: the token');
   assert.equal(hostAccount(cfg, 'orchestrator'), 'login');
   assert.equal(hostAccount(cfg, 'workers'), 'token');
-  assert.equal(hostAccount(cfg, 'standing'), 'token');
-  assert.deepEqual([hostRole('orchestrator'), hostRole('worker'), hostRole('standing')], ['orchestrator', 'workers', 'standing']);
+  assert.deepEqual([hostRole('orchestrator'), hostRole('worker')], ['orchestrator', 'workers']);
 
   // The orchestrator on "login": neither config claudeEnv's token nor one in the server's own environment.
   const orch = hostProcessEnv(cfg, 'orchestrator', SERVER_ENV);
@@ -41,8 +40,8 @@ test('accounts: each role on this host defaults to the token; "login" starts wit
   assert.equal(orch.PATH, '/bin');
   // Workers stay on the token, which wins over the server's environment.
   assert.equal(hostProcessEnv(cfg, 'workers', SERVER_ENV).CLAUDE_CODE_OAUTH_TOKEN, HOST_TOKEN);
-  assert.deepEqual(hostClaudeEnv(cfg, 'standing'), cfg.claudeEnv);
-  assert.deepEqual(hostClaudeEnv({ ...cfg, claudeAccounts: { standing: 'login' } }, 'standing'), { CLAUDE_CONFIG_DIR: '/cfg' });
+  assert.deepEqual(hostClaudeEnv(cfg, 'workers'), cfg.claudeEnv);
+  assert.deepEqual(hostClaudeEnv({ ...cfg, claudeAccounts: { workers: 'login' } }, 'workers'), { CLAUDE_CONFIG_DIR: '/cfg' });
 });
 
 test("accounts: a person's own token still wins for their work, on a role set to the login", () => {
@@ -74,7 +73,7 @@ test('accounts: a session records the account its process started on', async (t)
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-accounts-s-'));
   const store = new Store(dir);
-  const sessions = new SessionManager({ limits: { maxSessions: 6 } } as Config, store);
+  const sessions = new SessionManager({} as Config, store);
   t.after(async () => {
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 50));
@@ -124,15 +123,15 @@ test("accounts: the meters say which of this host's agents are on the token and 
       { id: 'm3-w', source: 'login:m3', live: true },
     ],
   };
-  const where = (roles?: ('orchestrator' | 'workers' | 'standing')[]) => Object.fromEntries(buildAccounts(new Map(), { ...ctx, hostLoginRoles: roles }).map((a) => [a.sources[0], a.where[0]]));
+  const where = (roles?: ('orchestrator' | 'workers')[]) => Object.fromEntries(buildAccounts(new Map(), { ...ctx, hostLoginRoles: roles }).map((a) => [a.sources[0], a.where[0]]));
   assert.deepEqual(where(['orchestrator']), {
     [HOST_LOGIN]: 'BEAST login (the orchestrator)',
-    [tokenKey(HOST_TOKEN)]: "the agents' token on BEAST (workers, standing agents)",
+    [tokenKey(HOST_TOKEN)]: "the agents' token on BEAST (workers)",
     'login:m3': 'm3 login',
   });
   assert.equal(where()[tokenKey(HOST_TOKEN)], "the agents' token on BEAST", 'not split: as before');
   assert.equal(where()[HOST_LOGIN], 'BEAST login');
-  assert.equal(where(['orchestrator', 'workers', 'standing'])[tokenKey(HOST_TOKEN)], "the agents' token (no agent set to it)");
+  assert.equal(where(['orchestrator', 'workers'])[tokenKey(HOST_TOKEN)], "the agents' token (no agent set to it)");
   const accounts = buildAccounts(new Map(), { ...ctx, hostLoginRoles: ['orchestrator'] });
   assert.deepEqual(accounts.find((a) => a.sources.includes(HOST_LOGIN))?.sessionIds, ['orch']);
 });
@@ -166,7 +165,7 @@ test('accounts: set_app_config sets a role to the login only when this host has 
   if (process.platform !== 'darwin') {
     // macOS keeps the login in the Keychain, where a missing file proves nothing.
     fs.rmSync(path.join(dir, '.credentials.json'));
-    assert.throws(() => setAppConfig(file, cfg, 'claudeAccounts.standing', 'login'), /no claude\.ai login is stored/);
+    assert.throws(() => setAppConfig(file, cfg, 'claudeAccounts.workers', 'login'), /no claude\.ai login is stored/);
   }
 });
 
@@ -181,7 +180,7 @@ test('accounts: set_app_config sets machines.useHostClaudeEnv for all machines o
   assert.equal(machineUsesLogin({ ...cfg, claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST_TOKEN } }, 'mini'), false);
   assert.throws(() => setAppConfig(file, cfg, 'machines.useHostClaudeEnv', 'no'), /true .* or false/);
   assert.throws(() => setAppConfig(file, cfg, 'machines.useHostClaudeEnv', false, { machine: 'a.b' }), /machine id/);
-  assert.throws(() => setAppConfig(file, cfg, 'limits.maxSandboxes', 5, { machine: 'm3' }), /only for machines\.useHostClaudeEnv/);
+  assert.throws(() => setAppConfig(file, cfg, 'ownerName', 'x', { machine: 'm3' }), /only for machines\.useHostClaudeEnv/);
   // Every machine not named, keeping the named ones.
   setAppConfig(file, cfg, 'machines.useHostClaudeEnv', true);
   assert.deepEqual(cfg.machines?.useHostClaudeEnv, { m3: false, m5: false, '*': true });
@@ -210,7 +209,7 @@ test("accounts: system_status names each kind of agent's account", (t) => {
   const [line, ...rest] = accountSetupLines(cfg, 'BEAST', HOST_TOKEN, ['m3', 'm5', 'mini'], ['Lothsahn']);
   assert.equal(
     line,
-    'Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): the orchestrator here: BEAST login; workers here: host token …9AAA; standing agents here: host token …9AAA; agents on m3: Mac login; agents on m5: Mac login; agents on mini: host token …9AAA; work asked for by Lothsahn: their own token',
+    'Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): the orchestrator here: BEAST login; workers here: host token …9AAA; agents on m3: Mac login; agents on m5: Mac login; agents on mini: host token …9AAA; work asked for by Lothsahn: their own token',
   );
   assert.deepEqual(rest, [], 'the login is usable: no warning');
   login(dir, Date.now() - 60_000);
@@ -257,9 +256,9 @@ function tokenFile(t: { after: (fn: () => void) => void }, content = `${FILE_TOK
   return file;
 }
 
-test('token file: only the orchestrator, dispatcher and standing roles may run on it, and only with a file named', () => {
-  checkAccountConfig({ claudeAccounts: { orchestrator: 'tokenfile', dispatcher: 'tokenfile', standing: 'tokenfile' }, claudeTokenFile: '/srv/fff/secrets/claude-oauth-token' } as never);
-  assert.throws(() => checkAccountConfig({ claudeAccounts: { workers: 'tokenfile' }, claudeTokenFile: '/x' } as never), /claudeAccounts\.workers cannot be "tokenfile": only orchestrator, dispatcher, standing/);
+test('token file: only the orchestrator and the dispatcher may run on it, and only with a file named', () => {
+  checkAccountConfig({ claudeAccounts: { orchestrator: 'tokenfile', dispatcher: 'tokenfile' }, claudeTokenFile: '/srv/fff/secrets/claude-oauth-token' } as never);
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { workers: 'tokenfile' }, claudeTokenFile: '/x' } as never), /claudeAccounts\.workers cannot be "tokenfile": only orchestrator, dispatcher/);
   assert.throws(() => checkAccountConfig({ claudeAccounts: { orchestrator: 'tokenfile' } } as never), /is "tokenfile" but config claudeTokenFile names no file/);
   // A hand-edited "tokenfile" on workers never reaches them.
   assert.equal(hostAccount({ claudeAccounts: { workers: 'tokenfile' } } as never, 'workers'), 'token');
@@ -303,20 +302,19 @@ test('token file: system_status names the file for the roles on it, and says whe
     fs.rmSync(tmp, { recursive: true, force: true });
   });
   const cfg = {
-    ...split({ claudeAccounts: { standing: 'tokenfile' }, claudeTokenFile: file }),
+    ...split({ claudeAccounts: { dispatcher: 'tokenfile' }, claudeTokenFile: file }),
     dataDir: path.join(tmp, 'data'),
     sandboxRoot: path.join(tmp, 'sb'),
     standingRoot: path.join(tmp, 'sb', '_agents'),
     protectedPaths: [],
     repo: { url: 'x', basePath: path.join(tmp, 'sb', '_base') },
-    limits: { maxSessions: 6 },
     models: ['opus'],
     defaultModel: 'opus',
     worker: { permissionMode: 'bypassPermissions', effort: 'high' },
   } as unknown as Config;
   store = new Store(cfg.dataDir);
-  assert.match(accountSetupLines(cfg, 'FFVM', HOST_TOKEN, [])[0], /standing agents here: token file …FFFF/);
-  assert.match(accountSetupLines({ ...cfg, claudeTokenFile: path.join(tmp, 'gone') }, 'FFVM', HOST_TOKEN, [])[0], /standing agents here: token file \(UNREADABLE: its sessions will not start\)/);
+  assert.match(accountSetupLines(cfg, 'FFVM', HOST_TOKEN, [])[0], /the dispatcher here: token file …FFFF/);
+  assert.match(accountSetupLines({ ...cfg, claudeTokenFile: path.join(tmp, 'gone') }, 'FFVM', HOST_TOKEN, [])[0], /the dispatcher here: token file \(UNREADABLE: its sessions will not start\)/);
 });
 
 test('token file: set_app_config takes "tokenfile" and claudeTokenFile, checks the file, refuses it for workers, never echoes the token', (t) => {
@@ -342,14 +340,14 @@ test('token file: the meters show it as its own account, named by the roles on i
     hostName: 'FFVM',
     token: { key: tokenKey(HOST_TOKEN), label: tokenLabel(HOST_TOKEN) },
     machines: [{ id: 'lothdesktop', usesToken: true }],
-    roles: ['orchestrator', 'dispatcher', 'workers', 'standing'],
+    roles: ['orchestrator', 'dispatcher', 'workers'],
     tokenFile: { key, label: 'token file …FFFF', roles: ['orchestrator', 'dispatcher'] },
     sessions: [{ id: 'o1', source: key, live: true }],
   });
   const file = accounts.find((a) => a.sources.includes(key))!;
   assert.deepEqual([file.label, file.where, file.sessionIds], ['token file …FFFF', ["FFVM's token file (the orchestrator, the dispatcher)"], ['o1']]);
   const host = accounts.find((a) => a.sources.includes(tokenKey(HOST_TOKEN)))!;
-  assert.match(host.where[0], /the agents' token on FFVM \(workers, standing agents\), lothdesktop/);
+  assert.match(host.where[0], /the agents' token on FFVM \(workers\), lothdesktop/);
   const text = `env: CLAUDE_CODE_OAUTH_TOKEN=${FILE_TOKEN}`;
   assert.equal(redactSecrets(text), 'env: CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-[redacted …FFFF]');
 });

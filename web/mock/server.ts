@@ -14,8 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { AppState, SearchHit, ServerEvent, SessionInfo, TranscriptEvent } from '../../shared/types.ts';
-import { buildWorld, type ImageKey, type Scenario } from './scenario.ts';
+import type { AppState, Machine, MachineSandbox, SearchHit, ServerEvent, SessionInfo, TranscriptEvent } from '../../shared/types.ts';
+import { buildWorld, localMachine, type ImageKey, type Scenario } from './scenario.ts';
 import { phoneShot, spaceScene } from './png.ts';
 import { scaleWorld, startLiveTraffic } from './scale.ts';
 
@@ -65,6 +65,22 @@ const wss = new WebSocketServer({ noServer: true });
 const now = () => new Date().toISOString();
 const find = (id: string) => state.sessions.find((s) => s.id === id);
 
+// Every sandbox is a machine's (w510); BEAST's are on its own daemon, the machine with `local`.
+const machineById = (id: string | undefined) => state.machines.find((x) => x.id === id);
+const sandboxOn = (machineId: string | undefined, id: string | undefined) => machineById(machineId)?.sandboxes?.find((x) => x.id === id);
+const allSandboxes = () => state.machines.flatMap((m) => (m.sandboxes ?? []).map((sb) => ({ machine: m, sb })));
+const sendMachine = (machine: Machine) => broadcast({ type: 'machine', machine });
+/** The local machine; a world without one (the fresh scenario) gets it when the first sandbox is created. */
+function localOrNew(): Machine {
+  let m = state.machines.find((x) => x.local);
+  if (!m) {
+    m = localMachine(Date.now());
+    state.machines.unshift(m);
+    sendMachine(m);
+  }
+  return m;
+}
+
 function broadcast(ev: ServerEvent) {
   const s = JSON.stringify(ev);
   for (const c of wss.clients) if (c.readyState === 1) c.send(s);
@@ -112,7 +128,7 @@ async function simulateTurn(sessionId: string, text: string, from: 'human' | 'or
   append(sessionId, { kind: 'tool_use', toolUseId: tid, name: s.kind === 'orchestrator' ? 'mcp__sandboxes__list_sandboxes' : 'Bash', input: s.kind === 'orchestrator' ? {} : { command: 'git status --short', description: 'Changed files' } });
   await sleep(slow ? 2500 : 900);
   if (turn.interrupted) return;
-  append(sessionId, { kind: 'tool_result', toolUseId: tid, isError: false, text: s.kind === 'orchestrator' ? JSON.stringify(state.sandboxes.map((x) => ({ id: x.id, label: x.purpose }))) : ' M Assets/Settings/URP/PostProcess_Space.asset' });
+  append(sessionId, { kind: 'tool_result', toolUseId: tid, isError: false, text: s.kind === 'orchestrator' ? JSON.stringify(allSandboxes().map(({ sb }) => ({ id: sb.id, label: sb.purpose }))) : ' M Assets/Settings/URP/PostProcess_Space.asset' });
   if (/perm/i.test(text)) {
     const requestId = 'p' + Math.random().toString(36).slice(2, 8);
     const input = { command: 'rm -rf Library/ScriptAssemblies', description: 'Clear stale assemblies' };
@@ -129,7 +145,7 @@ async function simulateTurn(sessionId: string, text: string, from: 'human' | 'or
     turns.delete(sessionId);
     return;
   }
-  const names = state.sandboxes.filter((x) => x.status === 'ready').map((x) => `**${x.purpose === 'unused' ? `${x.id} (free)` : x.purpose}**`);
+  const names = allSandboxes().filter(({ sb }) => sb.status === 'ready').map(({ sb }) => `**${sb.purpose === 'unused' ? `${sb.id} (free)` : sb.purpose}**`);
   const reply =
     s.kind === 'orchestrator'
       ? `On it. Here is where things stand for "${text.slice(0, 60)}":\n\n- ${names.slice(0, 3).join('\n- ')}\n\nThe lighting pass is still working on the belt materials; I will report back when it has screenshots. Anything else?`
@@ -180,6 +196,7 @@ function search(q: string): { hits: SearchHit[]; scanned: number; ms: number } {
         sessionKind: s?.kind,
         sandboxId: s?.sandboxId,
         machineId: s?.machineId,
+        machineSandbox: s?.machineSandbox,
         standingId: s?.standingId,
       });
     }
@@ -294,11 +311,15 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/sessions' && method === 'POST') {
     const id = 'w' + Math.random().toString(36).slice(2, 7);
+    // The page names the place as machineId (+ machineSandbox), or as a sandboxId: "<machine>/<id>", or a bare id on the local machine.
+    const [viaMachine, viaSandbox] = String(data.sandboxId ?? '').includes('/') ? String(data.sandboxId).split('/') : [undefined, data.sandboxId as string | undefined];
+    const machineId: string | undefined = data.machineId ?? viaMachine ?? (viaSandbox ? state.machines.find((x) => x.local)?.id : undefined);
+    const machineSandbox: string | undefined = data.machineSandbox ?? viaSandbox;
     const s: SessionInfo = {
       id,
       kind: 'worker',
-      sandboxId: data.sandboxId,
-      machineId: data.machineId,
+      machineId,
+      machineSandbox,
       title: data.title || String(data.prompt).replace(/\s+/g, ' ').slice(0, 60),
       status: 'starting',
       model: data.model,
@@ -311,11 +332,11 @@ const server = http.createServer(async (req, res) => {
       pendingPermissions: [],
     };
     state.sessions.push(s);
-    const owner = state.sandboxes.find((x) => x.id === data.sandboxId) ?? state.machines.find((x) => x.id === data.machineId);
+    const owner = machineById(machineId);
     if (owner) {
       owner.sessionIds.push(id);
-      if ('unity' in owner) broadcast({ type: 'sandbox', sandbox: owner });
-      else broadcast({ type: 'machine', machine: owner });
+      sandboxOn(machineId, machineSandbox)?.sessionIds.push(id);
+      sendMachine(owner);
     }
     update(s);
     void simulateTurn(id, data.prompt, 'human');
@@ -324,12 +345,12 @@ const server = http.createServer(async (req, res) => {
   if ((r = m(/^\/api\/sessions\/([^/]+)$/)) && method === 'DELETE') {
     const id = r[1];
     state.sessions = state.sessions.filter((x) => x.id !== id);
-    for (const owner of [...state.sandboxes, ...state.machines])
-      if (owner.sessionIds.includes(id)) {
-        owner.sessionIds = owner.sessionIds.filter((x) => x !== id);
-        if ('unity' in owner) broadcast({ type: 'sandbox', sandbox: owner });
-        else broadcast({ type: 'machine', machine: owner });
-      }
+    for (const machine of state.machines) {
+      const places = [machine, ...(machine.sandboxes ?? [])];
+      if (!places.some((x) => x.sessionIds.includes(id))) continue;
+      for (const x of places) x.sessionIds = x.sessionIds.filter((v) => v !== id);
+      sendMachine(machine);
+    }
     broadcast({ type: 'session_removed', id });
     return json(200, {});
   }
@@ -344,9 +365,11 @@ const server = http.createServer(async (req, res) => {
     return png(pic ? picture(pic) : undefined);
   }
   if (url.pathname === '/api/screenshots') {
-    const id = url.searchParams.get('sandbox') ?? url.searchParams.get('machine') ?? '';
+    // A machine's gallery covers its sandboxes' folders too; a sandbox is "<machine>/<id>" or the bare id.
+    const machine = url.searchParams.get('machine');
+    const ids = machine ? [machine, ...(machineById(machine)?.sandboxes ?? []).map((x) => x.id)] : [(url.searchParams.get('sandbox') ?? '').split('/').pop()!];
     const list = Object.keys(world.files)
-      .filter((p) => p.includes(`/${id.toLowerCase()}/`))
+      .filter((p) => ids.some((id) => p.includes(`/${id.toLowerCase()}/`)))
       .map((p, i) => ({ path: p.replace(/\//g, '\\'), size: 1_200_000 + i * 91_000, mtime: new Date(Date.now() - (i + 1) * 17 * 60_000).toISOString() }));
     return json(200, list);
   }
@@ -356,62 +379,57 @@ const server = http.createServer(async (req, res) => {
     seqs[id] = 0;
     return json(200, { id });
   }
+  // Creating a sandbox: on the local machine (BEAST's own daemon), as the portal's route does.
   if (url.pathname === '/api/sandboxes' && method === 'POST') {
     const id = String(data.name);
-    const sbx = {
+    const host = localOrNew();
+    if (host.sandboxes?.some((x) => x.id === id)) return json(409, { error: `sandbox "${id}" already exists on ${host.id}` });
+    const root = host.sandboxRoot ?? 'F:/ffsb';
+    const sbx: MachineSandbox = {
       id,
-      name: id,
       branch: data.branch ?? `sandbox/${id}`,
       base: data.base ?? 'origin/develop',
-      path: `F:\\ffsb\\${id}`,
+      path: `${root}/${id}`,
       purpose: data.purpose ?? 'unused',
-      status: 'creating' as const,
+      status: 'creating',
       statusDetail: 'git worktree add…',
       createdAt: now(),
       sessionIds: [],
-      unity: { state: 'stopped' as const },
+      unity: { state: 'stopped' },
     };
-    state.sandboxes.push(sbx);
-    broadcast({ type: 'sandbox', sandbox: sbx });
-    setTimeout(() => (Object.assign(sbx, { statusDetail: 'Copying Library seed (12 / 64 GB)' }), broadcast({ type: 'sandbox', sandbox: sbx })), 1500);
-    setTimeout(() => (Object.assign(sbx, { status: 'ready', statusDetail: undefined }), broadcast({ type: 'sandbox', sandbox: sbx })), 5000);
-    return json(200, sbx);
+    (host.sandboxes ??= []).push(sbx);
+    sendMachine(host);
+    setTimeout(() => (Object.assign(sbx, { statusDetail: 'Copying Library seed (12 / 64 GB)' }), sendMachine(host)), 1500);
+    setTimeout(() => (Object.assign(sbx, { status: 'ready', statusDetail: undefined }), sendMachine(host)), 5000);
+    return json(200, { machine: host.id, id, note: `Creating sandbox ${id} on ${host.id}.` });
   }
-  if ((r = m(/^\/api\/sandboxes\/([^/]+)$/)) && method === 'DELETE') {
-    const sbx = state.sandboxes.find((x) => x.id === r![1]);
-    if (!sbx) return json(404, { error: 'no such sandbox' });
-    sbx.status = 'deleting';
-    broadcast({ type: 'sandbox', sandbox: sbx });
-    setTimeout(() => {
-      state.sandboxes = state.sandboxes.filter((x) => x.id !== sbx.id);
-      broadcast({ type: 'sandbox_removed', id: sbx.id });
-    }, 2000);
-    return json(200, {});
-  }
-  if ((r = m(/^\/api\/sandboxes\/([^/]+)\/unity$/))) {
-    const sbx = state.sandboxes.find((x) => x.id === r![1]);
-    if (!sbx) return json(404, { error: 'no such sandbox' });
+  if ((r = m(/^\/api\/machines\/([^/]+)\/sandboxes\/([^/]+)\/unity$/))) {
+    const host = machineById(r[1]);
+    const sbx = sandboxOn(r[1], r[2]);
+    if (!host || !sbx) return json(404, { error: 'no such sandbox' });
+    // A machine sandbox's editor has no "stopping" state: a stop shows as running with a detail until it is down.
     const start = data.action === 'start';
-    sbx.unity = { state: start ? 'starting' : 'stopping' };
-    broadcast({ type: 'sandbox', sandbox: sbx });
+    sbx.unity = start ? { state: 'starting' } : { ...sbx.unity, detail: 'Stopping…' };
+    sendMachine(host);
     setTimeout(() => {
-      sbx.unity = start ? { state: 'running', pid: 4242, startedAt: now() } : { state: 'stopped' };
-      broadcast({ type: 'sandbox', sandbox: sbx });
+      sbx.unity = start ? { state: 'running', pid: 4242, logPath: `${sbx.path}/Logs/sandbox-editor.log` } : { state: 'stopped' };
+      sendMachine(host);
     }, 2500);
-    return json(200, {});
+    return json(200, { note: start ? 'Starting Unity.' : 'Stopping Unity.' });
   }
-  if ((r = m(/^\/api\/sandboxes\/([^/]+)\/unity-log$/))) {
+  if ((r = m(/^\/api\/machines\/([^/]+)\/sandboxes\/([^/]+)\/unity-log$/))) {
+    if (!sandboxOn(r[1], r[2])) return json(404, { error: 'no such sandbox' });
     return json(200, {
       lines: Array.from({ length: 120 }, (_, i) =>
         i % 29 === 0
-          ? 'Assets/Scripts/FFSystems/Logistics/BeltSplitterSystem.cs(88,17): error CS0103: The name \'splitIndex\' does not exist in the current context'
+          ? "Assets/Scripts/FFSystems/Logistics/BeltSplitterSystem.cs(88,17): error CS0103: The name 'splitIndex' does not exist in the current context"
           : i % 11 === 0
             ? `Warning: Shader variant stripped: BlackHole (pass ${i})`
             : `[${String(i).padStart(3, '0')}] Refreshing native plugins compatible for Editor in ${(i * 0.37).toFixed(2)} ms. Found 12 plugins.`,
       ),
     });
   }
-  if ((r = m(/^\/api\/(sandboxes|machines)\/([^/]+)\/switch-branch$/))) return json(200, { note: `Switched to ${data.branch}.` });
+  if ((r = m(/^\/api\/machines\/([^/]+)(?:\/sandboxes\/([^/]+))?\/switch-branch$/))) return json(200, { note: `Switched to ${data.branch}.` });
   if ((r = m(/^\/api\/machines\/([^/]+)\/label$/))) {
     const mc = state.machines.find((x) => x.id === r![1]);
     if (mc) {

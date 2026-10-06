@@ -17,7 +17,6 @@ import type {
   ProviderConversationView,
   ProviderIntakeEvent,
   PermissionMode,
-  Sandbox,
   SearchHit,
   ServerEvent,
   SessionInfo,
@@ -84,8 +83,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 const enc = encodeURIComponent;
 
-/** A host sandbox, a machine's main clone, or a machine sandbox (machine and sandbox). */
-export type BranchTarget = { sandbox: string; machine?: string } | { machine: string; sandbox?: string };
+/** A machine's main clone, or one of its sandboxes (the portal holds none itself, w510). */
+export type BranchTarget = { machine: string; sandbox?: string };
 
 export const api = {
   login: (username: string, password: string) => request<{ username: string }>('POST', '/api/login', { username, password }),
@@ -128,7 +127,7 @@ export const api = {
   switchBranch: (target: BranchTarget, branch: string, createFrom?: string) =>
     request<{ note: string }>(
       'POST',
-      `${target.machine && target.sandbox ? `/api/machines/${enc(target.machine)}/sandboxes/${enc(target.sandbox)}` : target.machine ? `/api/machines/${enc(target.machine)}` : `/api/sandboxes/${enc(target.sandbox!)}`}/switch-branch`,
+      `${target.sandbox ? `/api/machines/${enc(target.machine)}/sandboxes/${enc(target.sandbox)}` : `/api/machines/${enc(target.machine)}`}/switch-branch`,
       { branch, createFrom },
     ),
   setSettings: (patch: Partial<AppSettings>) => request<AppSettings>('POST', '/api/settings', patch),
@@ -156,13 +155,8 @@ export const api = {
   ledgerCleanup: () => request<{ summary: string }>('POST', '/api/ledger/cleanup', {}),
   intakePoll: () => request<{ ok: boolean; note?: string }>('POST', '/api/intake/poll', {}),
   declineWork: (id: string, note?: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/decline`, { note }),
-  /** A host sandbox, or (once the host's own daemon holds them, docs/beast-machine.md) where the daemon is making it. */
-  createSandbox: (req: CreateSandboxRequest) => request<Sandbox | { machine: string; id: string; note: string }>('POST', '/api/sandboxes', req),
-  deleteSandbox: (id: string) => request<unknown>('DELETE', `/api/sandboxes/${enc(id)}`),
-  unity: (id: string, action: 'start' | 'stop') =>
-    request<unknown>('POST', `/api/sandboxes/${enc(id)}/unity`, { action }),
-  unityLog: (id: string, lines = 200) =>
-    request<{ lines: string[] }>('GET', `/api/sandboxes/${enc(id)}/unity-log?lines=${lines}`),
+  /** A sandbox on this host's own daemon (docs/beast-machine.md), which is making it; the portal holds none itself (w510). */
+  createSandbox: (req: CreateSandboxRequest) => request<{ machine: string; id: string; note: string }>('POST', '/api/sandboxes', req),
   addMachine: (req: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string }) =>
     request<Machine>('POST', '/api/machines', req),
   redeployMachine: (id: string, force = false) => request<Machine>('POST', `/api/machines/${enc(id)}/redeploy`, { force }),

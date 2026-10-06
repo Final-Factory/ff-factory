@@ -75,29 +75,6 @@ test('permission prompt: Allow lets the tool run, Deny stops it', async ({ authe
   }
 });
 
-test('Unity blocked: the sidebar row says so, the page explains the dialog', async ({ authed: page }) => {
-  const sidebar = await openSidebar(page);
-  // Waiting on the user: in the Needs you list, and amber on the sandbox's own row.
-  await expect(sidebar.locator('.attn-item', { hasText: 'Unity blocked demo' })).toContainText('Unity is stuck on “Enter Safe Mode?”');
-  const row = sidebar.locator('.row.place', { hasText: 'Unity blocked demo' });
-  await expect(row.locator('.row-sub')).toContainText('Unity blocked');
-  await expect(row.locator('.dot')).toHaveClass(/dot-amber/);
-  await row.click();
-
-  const panel = page.locator('.sb-panel');
-  await expect(panel.locator('.ph-name')).toHaveText('Unity blocked demo');
-  const strip = panel.locator('.attn-strip-row', { hasText: 'Unity is stuck' });
-  await expect(strip).toBeVisible();
-  await strip.click();
-
-  const blocked = page.getByLabel('Details').locator('.unity-blocked');
-  await expect(blocked).toBeVisible();
-  await expect(blocked).toContainText('Dialog: Enter Safe Mode?');
-  await expect(blocked).toContainText('The project has compilation errors.');
-  await expect(blocked).toContainText('Buttons: Enter Safe Mode · Ignore · Quit');
-  await expect(blocked).toContainText('Press Ignore, then fix the compile errors.');
-});
-
 test('details sheet: opens with the sandbox, Unity and agent facts, and closes', async ({ authed: page }) => {
   const panel = await openSandbox(page, GALLERY);
   const toggle = panel.getByRole('button', { name: 'Details' });

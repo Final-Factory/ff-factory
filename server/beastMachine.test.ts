@@ -319,11 +319,8 @@ test('beast machine: add_machine local takes its settings from the config, deplo
     port: 8790,
     sandboxRoot: 'F:\\ffsb',
     repo: { url: 'https://github.com/o/g.git', basePath: 'C:\\ffsb\\_base' },
-    limits: { maxUnity: 4, maxSessions: 6, maxSandboxes: 5 },
+    limits: { minFreeRamGB: 10 },
     protectedPaths: ['C:\\Users\\rydin\\nevergames\\FinalFactory'],
-    librarySeed: 'F:\\ffsb\\_seed\\Library',
-    librarySeedCopy: 'clone',
-    librarySeedGB: 64,
     hostGuard: { warnFreeGB: 80, criticalFreeGB: 40 },
     unity: { mcpServer: { command: 'uvx.exe', args: ['mcp-for-unity'] }, idleStopMinutes: 120 },
   } as unknown as Config;
@@ -335,16 +332,9 @@ test('beast machine: add_machine local takes its settings from the config, deplo
       portalUrl: 'http://127.0.0.1:8790',
       repoPath: 'C:\\ffsb\\_base',
       sandboxRoot: 'F:\\ffsb',
-      maxSandboxes: 5,
-      maxUnity: 4,
-      maxSandboxAgents: 6,
-      maxAgentsPerSandbox: 6,
       diskWarnGB: 80,
       diskCriticalGB: 40,
       protectedPaths: ['C:\\Users\\rydin\\nevergames\\FinalFactory', 'C:\\ff-sandboxes', dir],
-      librarySeed: 'F:\\ffsb\\_seed\\Library',
-      librarySeedCopy: 'clone',
-      librarySeedGB: 10,
       unityBelowNormal: true,
     },
   );
@@ -357,7 +347,8 @@ test('beast machine: add_machine local takes its settings from the config, deplo
     seen.push(o);
     return { platform: 'win32', home: 'C:\\Users\\rydin', repoPath: o.repoPath!, node: 'node.exe', nodeVersion: '24.0.0', version: 'abc1234', started: true };
   };
-  const m = mm.deployMachine({ id: 'BEAST', local: true, maxUnity: 3 });
+  // Its limits and Library seed are add_machine's (w510: the portal's own pool's limits went with it).
+  const m = mm.deployMachine({ id: 'BEAST', local: true, maxUnity: 3, maxSandboxes: 5, maxAgentsPerSandbox: 6, maxSandboxAgents: 6, librarySeed: 'F:\\ffsb\\_seed\\Library', librarySeedCopy: 'clone' });
   assert.equal(m.local, true);
   assert.equal(m.name, 'BEAST');
   assert.equal(m.maxUnity, 3, 'what add_machine is given wins');
@@ -367,7 +358,7 @@ test('beast machine: add_machine local takes its settings from the config, deplo
   assert.equal(o.local, true);
   assert.equal(o.portalUrl, 'http://127.0.0.1:8790', "this server's loopback address: no Funnel round trip");
   assert.equal(o.repoPath, 'C:\\ffsb\\_base');
-  assert.deepEqual(o.sandboxes, { root: 'F:\\ffsb', maxSandboxes: 5, maxAgentsPerSandbox: 6, maxUnity: 3, diskWarnGB: 80, diskCriticalGB: 40, maxAgents: 6, librarySeed: 'F:\\ffsb\\_seed\\Library', librarySeedCopy: 'clone', librarySeedGB: 10, belowNormal: true, protectedPaths: localMachineDefaults(cfg).protectedPaths });
+  assert.deepEqual(o.sandboxes, { root: 'F:\\ffsb', maxSandboxes: 5, maxAgentsPerSandbox: 6, maxUnity: 3, diskWarnGB: 80, diskCriticalGB: 40, maxAgents: 6, librarySeed: 'F:\\ffsb\\_seed\\Library', librarySeedCopy: 'clone', belowNormal: true, protectedPaths: localMachineDefaults(cfg).protectedPaths });
   assert.deepEqual(o.extra, { unityMcpServer: { command: 'uvx.exe', args: ['mcp-for-unity'] }, maxEventsFile: null, sandboxIdleStopMinutes: 120, cleanup: { everyMinutes: 0, softFreeGB: 0 } });
   assert.equal(mm.local()?.id, 'beast');
   // A redeploy (an outdated daemon) keeps the base clone as the main clone rather than re-probing for one.
@@ -402,15 +393,15 @@ test('beast machine: the host group lists its daemon\'s sandboxes as its own; th
   const s = (id: string, over: Partial<SessionInfo>) => info(id, { status: 'running', ...over });
   const beast = beastMachine({ sandboxes: [{ id: 'mp-r2', branch: 'sandbox/mp-r2', base: 'origin/develop', path: 'F:\\ffsb\\mp-r2', purpose: 'unused', status: 'ready', createdAt: T, unity: { state: 'running', pid: 41592 }, sessionIds: ['w1'] }], sessionIds: ['w1'], maxUnity: 4 });
   const m5 = { ...beastMachine({ id: 'm5', local: undefined, sandboxRoot: undefined, sandboxes: [], platform: 'darwin' }) };
-  const system = { hostname: 'BEAST', platform: 'win32', limits: { maxUnity: 4, maxSessions: 6, maxSandboxes: 5 } } as SystemStats;
-  const fleet = fleetOf({ sandboxes: [], sessions: [s('w1', { machineId: 'beast', machineSandbox: 'mp-r2' })], machines: [beast, m5], system, machineStats: {} });
+  const system = { hostname: 'BEAST', platform: 'win32' } as SystemStats;
+  const fleet = fleetOf({ sessions: [s('w1', { machineId: 'beast', machineSandbox: 'mp-r2' })], machines: [beast, m5], system, machineStats: {} });
   assert.deepEqual(fleet.map((c) => c.key), ['host', 'm5']);
   const host = fleet[0];
   assert.equal(host.daemon?.id, 'beast');
   assert.deepEqual(host.sandboxes.map((x) => [x.key, x.machineId, x.agents.live.length]), [['beast/mp-r2', 'beast', 1]]);
   assert.deepEqual([host.sandboxLimit, host.editors, host.editorLimit, host.live, host.busy], [5, 1, 4, 1, 1]);
-  const before = fleetOf({ sandboxes: [hostSb('mp-r2')], sessions: [], machines: [m5], system, machineStats: {} });
-  assert.equal(before[0].daemon, undefined, 'no daemon: the host as before');
+  const before = fleetOf({ sessions: [], machines: [m5], system, machineStats: {} });
+  assert.deepEqual([before[0].daemon, before[0].sandboxes.length], [undefined, 0], 'no daemon: the portal alone, no sandboxes (w510)');
 });
 
 test('beast machine: no agent ends the daemon\'s task; the reaper never touches a daemon', async () => {

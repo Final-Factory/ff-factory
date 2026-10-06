@@ -227,9 +227,6 @@ function applyEvent(ev: ServerEvent) {
         return { app: { ...s.app, machineStats } };
       });
       return;
-    case 'sandbox':
-      set((s) => (s.app ? { app: { ...s.app, sandboxes: upsertById(s.app.sandboxes, ev.sandbox) } } : {}));
-      return;
     case 'machine':
       set((s) => (s.app ? { app: { ...s.app, machines: upsertById(s.app.machines, ev.machine) } } : {}));
       return;
@@ -263,9 +260,6 @@ function applyEvent(ev: ServerEvent) {
       return;
     case 'intake':
       set((s) => (s.app ? { app: { ...s.app, intake: ev.intake } } : {}));
-      return;
-    case 'sandbox_removed':
-      set((s) => (s.app ? { app: { ...s.app, sandboxes: s.app.sandboxes.filter((x) => x.id !== ev.id) } } : {}));
       return;
     case 'session':
       set((s) => {
@@ -493,10 +487,6 @@ export async function attempt<T>(p: Promise<T>): Promise<T | undefined> {
 // Seed a freshly started session into state so navigation works before its WS event lands.
 export function upsertSession(session: SessionInfo) {
   applyEvent({ type: 'session', session });
-}
-
-export function upsertSandbox(sandbox: import('../../shared/types').Sandbox) {
-  applyEvent({ type: 'sandbox', sandbox });
 }
 
 export function upsertMachine(machine: import('../../shared/types').Machine) {

@@ -6,8 +6,8 @@
 # Or double-click restart.cmd. See docs/restart.md.
 #
 # The app always comes back NON-elevated: it is started through the Limited "ffsb-server" task
-# (scripts/install-autostart.ps1), never from this shell, so it cannot inherit admin rights. Unity
-# editors inherit the server's token, and an elevated editor stops on Unity's administrator dialog.
+# (scripts/install-autostart.ps1), never from this shell, so it cannot inherit admin rights: the orchestrators'
+# shells inherit the server's token.
 # Safe to run twice: a second run while one is in progress exits; a run with nothing running starts it.
 param(
   [switch]$Update,
@@ -118,10 +118,10 @@ try {
   }
   if (!$started) {
     if ($elevated) {
-      # Better an app that runs (and refuses to start Unity, with a banner) than none. The flag keeps
+      # Better an app that runs (elevated, with a banner) than none. The flag keeps
       # the server from trying to hand itself to a task that just failed.
       $env:FFSB_NO_DEELEVATE = '1'
-      Write-AppLog 'WARNING: starting the supervisor from this ELEVATED shell; the server will refuse to start Unity editors until it is restarted non-elevated'
+      Write-AppLog 'WARNING: starting the supervisor from this ELEVATED shell; the orchestrators run with admin rights until it is restarted non-elevated'
     }
     Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'supervise.ps1')
     Write-AppLog 'started the supervisor directly'

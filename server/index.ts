@@ -4,14 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { HOST_ROLES, loadConfig, machineCleanupSettings, publicIdentityOf, ROOT } from './config.ts';
+import { HOST_ROLES, loadConfig, machineCleanupSettings, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { Store, bus } from './store.ts';
-import { SandboxManager } from './sandboxes.ts';
 import { SessionManager, compactCommand, snapshotOf } from './sessions.ts';
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
-import { MachineManager, enrolledMachines, machineForPath, parseSandboxRef, revokeMachineToken } from './machines.ts';
-import { hostSandboxFrom } from './sandboxView.ts';
+import { MachineManager, enrolledMachines, machineForPath, revokeMachineToken } from './machines.ts';
 import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationView } from './providers.ts';
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
@@ -21,7 +19,6 @@ import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { Notifier } from './notify.ts';
-import { refreshSandboxGit } from './gitStatus.ts';
 import { describeBusy } from './wake.ts';
 import type { SessionHandle } from './sessions.ts';
 import { machineLoadLine, systemStats } from './system.ts';
@@ -41,14 +38,10 @@ import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
-import { runHelper } from './privileged.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
 import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
-import { pruneEditorLogs, slugify } from './sandboxes.ts';
-import { agentAnswers } from './watchdog.ts';
-import { reapBrowsers } from './reaper.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
 import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, sessionSource, tokenKey, tokenLabel } from './usage.ts';
@@ -58,6 +51,7 @@ import { startBaseRefresh } from './baseRefresh.ts';
 import { DRY_RUN_BANNER, defuseConfig, dryRun } from './dryRun.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AppState, CreateSandboxRequest, HostStatus, Machine, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
+import { slugify } from './sandboxes.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
 
@@ -65,6 +59,9 @@ const WEB = path.join(ROOT, 'web', 'dist');
 const appNow = () => ({ ...appVersion(), web: webBuild(WEB) });
 
 const cfg = loadConfig();
+// Keys the portal's own sandbox pool, editors and standing agents had (w510): named once, here and in system_status.
+const retiredKeys = retiredKeysLine(cfg.retiredKeys);
+if (retiredKeys) console.warn(`config: ${retiredKeys}`);
 fs.mkdirSync(cfg.dataDir, { recursive: true });
 // The dry run (server/dryRun.ts, change 17): this portal runs on a copy of another's data and acts on nothing outside.
 const isDryRun = dryRun();
@@ -74,7 +71,7 @@ if (isDryRun) {
 }
 
 // First of all, before anything is started: never run elevated (server/elevation.ts). Everything this
-// server starts inherits its token, and an elevated Unity editor stops on a modal admin dialog.
+// server starts inherits its token: the orchestrators' shells would have admin rights.
 const elevation = await checkElevation(cfg.dataDir);
 if (elevation === 'exit') {
   console.log(`Running elevated: handed off to the Limited ${TASK_NAME} task (scripts/restart.ps1 relaunches the app non-elevated). Exiting.`);
@@ -83,8 +80,7 @@ if (elevation === 'exit') {
 const host: HostStatus = { elevated: elevation.elevated, elevatedWhy: elevation.why, ...(isDryRun ? { dryRun: DRY_RUN_BANNER } : {}) };
 if (host.elevated) {
   console.error(
-    `\n!!!!!!!! FF Factory is running WITH ADMINISTRATOR RIGHTS. It will not start Unity editors (they would stop on Unity's administrator dialog), ` +
-      `and every agent shell inherits admin rights. ${host.elevatedWhy ?? ''}` +
+    `\n!!!!!!!! FF Factory is running WITH ADMINISTRATOR RIGHTS: every orchestrator shell inherits admin rights. ${host.elevatedWhy ?? ''}` +
       // From a shell without admin rights restart.ps1 cannot stop an elevated app (docs/restart.md, "Never elevated").
       `${host.elevatedWhy?.includes('Fix:') ? '' : ' Fix: right-click scripts\\restart.cmd > Run as administrator (or run scripts\\restart.ps1 from an administrator shell).'}\n`,
   );
@@ -142,7 +138,6 @@ setTimeout(() => {
   const n = scrubTranscripts(path.join(cfg.dataDir, 'transcripts'));
   if (n) console.log(`secrets: redacted secrets (Claude OAuth or Discord tokens) in ${n} transcript(s)`);
 }, 5000);
-const sandboxes = new SandboxManager(cfg, store);
 const sessions = new SessionManager(cfg, store);
 const machines = new MachineManager(cfg, store, sessions);
 // Files people attach to messages (docs/attachments.md): stored by SHA-256, never opened; old ones go by retention.
@@ -273,12 +268,11 @@ setInterval(() => {
 const auth = new Auth(cfg.dataDir, { trustProxy: cfg.trustProxy });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
-const agents = new Agents(cfg, store, sandboxes, sessions, machines, identity);
+const agents = new Agents(cfg, store, sessions, machines, identity);
 agents.attachments = attachments;
 // Review media workers publish (docs/review.md): <sandboxRoot>/_review unless config review.root says otherwise.
 const review = new ReviewStore(() => ({ ...REVIEW_DEFAULTS, ...cfg.review, root: cfg.review?.root ?? path.join(cfg.sandboxRoot, '_review') }));
 agents.review = review;
-if (host.elevated) sandboxes.refuseUnityWhileElevated(host.elevatedWhy ?? 'Run scripts/restart.ps1 to relaunch it non-elevated.');
 
 /** The signed-in person making this request, as work records them (a route only runs for a signed-in user). */
 function requesterOf(req: http.IncomingMessage) {
@@ -319,94 +313,27 @@ agents.orchestrators.onPersonMessage = (from, to, text) => notifier.personMessag
 agents.standing.events.on('run', (a, run) => notifier.standingRun(a, run));
 agents.standing.events.on('delegation', (d) => notifier.delegation(d));
 agents.standing.events.on('delegationUpdate', (d, what) => notifier.delegationUpdate(d, what));
-// The "Unity editor stuck" notification only when a person is needed; agents answer the rest (server/unityBlocked.ts).
-sandboxes.events.on('blocked', (sb, b) => {
-  if (agentAnswers(b).person) notifier.unityBlocked(sb, b);
-});
-
-// Automatic editor restarts (docs/unity-lifecycle.md): a [unity] notice, and once the editor is back up, a
-// message to the sandbox's agents to re-pin and carry on.
-sandboxes.events.on('unityRestart', (sb, r) => {
-  const at = new Date().toLocaleTimeString();
-  const text = r.gaveUp
-    ? `automatic restart ${r.error ? `failed (${r.error})` : `stopped: ${cfg.unity.autoRestart.max} in ${cfg.unity.autoRestart.windowMinutes} min already`}; ${r.why}. Look at it, then restart it with the unity tool.`
-    : `restarted at ${at} after ${r.why}`;
-  const line = `[unity] ${sb.name} (${sb.id}): ${text}`;
-  console.log(line);
-  if (!r.gaveUp || r.error) notifier.host(`Unity in ${sb.name} ${r.gaveUp ? 'needs a person' : 'restarted'}`, text); // a give-up is also a 'blocked' notice
-  const orch = store.orchestratorId;
-  if (orch) {
-    try {
-      sessions.send(orch, line, 'system');
-    } catch {
-      // no orchestrator right now
-    }
-  }
-  // A give-up needs a person: the people whose workers are there hear it in their own chats too.
-  if (r.gaveUp) return void agents.orchestrators.toPeople(agents.orchestrators.peopleAt({ sandboxId: sb.id }), line);
-  const deadline = Date.now() + 30 * 60_000;
-  const tell = () => {
-    const cur = store.sandboxes.get(sb.id);
-    if (!cur || cur.unity.state === 'stopped' || cur.unity.state === 'crashed' || Date.now() > deadline) return;
-    if (cur.unity.state !== 'running') return void setTimeout(tell, 15_000);
-    const recent = Date.now() - 30 * 60_000;
-    for (const s of store.sessions.values()) {
-      if (s.sandboxId !== sb.id || s.kind === 'standing') continue;
-      if (!['running', 'starting', 'waiting_permission'].includes(s.status) && Date.parse(s.lastActivityAt) < recent) continue;
-      try {
-        sessions.send(s.id, `Unity was restarted after a hang/crash at ${at} (${r.why}). It is up again: re-pin (mcpforunity://instances, then set_active_instance) and continue.`, 'system');
-      } catch {
-        // offline or at its limit: it sees the editor state on its next Unity call
-      }
-    }
-  };
-  setTimeout(tell, 15_000);
-});
-
-/** "beast/sb1" as this host's own daemon's sandbox, or undefined. */
-const localRef = (id: string) => {
-  const local = machines.local();
-  const ref = local ? parseSandboxRef(id) : undefined;
-  return ref && ref.machine === local!.id ? ref : undefined;
-};
-/** Whether this host's own daemon runs the host guard itself (w466, machine/hostGuard.ts): the sandbox drive is its then. */
-const localGuards = () => {
-  const local = machines.local();
-  return !!local && machines.guards(local.id);
-};
-/** This host's own daemon's sandboxes as host records named "<machine>/<id>" (the host guard's view). */
-const localSandboxView = () => {
-  const local = machines.local();
-  return local ? (local.sandboxes ?? []).map((x) => hostSandboxFrom(x, `${local.id}/${x.id}`)) : [];
-};
-/** The sessions as the host guard sees them: those of this host's own daemon's sandboxes as if they were this host's. */
-const localSessionView = (): SessionInfo[] => {
-  const local = machines.local();
-  return [...store.sessions.values()].map((s) => {
-    if (!local || s.machineId !== local.id || !s.machineSandbox) return s;
-    const { machineId: _m, machineSandbox, ...rest } = s;
-    return { ...rest, sandboxId: `${local.id}/${machineSandbox}` };
-  });
-};
-
-// The host guard: disk space, the sandbox drive's self-recovery, RAM and idle editors (docs/self-recovery.md).
+// The portal's host guard (docs/self-recovery.md): its data volume, RAM and the clean-up of this computer. No sandbox
+// drive: the portal holds no sandboxes (w510); a machine's drive is its daemon's guard's (machine/hostGuard.ts, w466).
 const cleanupEnv = { ...hostCleanupEnv(), sandboxRoots: [cfg.sandboxRoot] };
-/** What clean-up never touches here: the sandbox root, the standing agents, the base clone, this app and its data, and the temp folders of agents running now. */
+/**
+ * What clean-up never touches here: the sandbox root (this host's own daemon's), the old standing agents' folders, the
+ * base clone, this app and its data, and the temp folders of agents running now.
+ */
 const hostCleanupGuard = () => ({
   keep: [...cfg.protectedPaths, cfg.sandboxRoot, cfg.standingRoot, cfg.repo.basePath, ROOT, cfg.dataDir, cfg.hostGuard.devDriveVhdx].filter(Boolean),
-  // This host's agents, and those this host's own daemon runs (they get their temp folder under the same %TEMP%).
+  // The orchestrators, and the agents this host's own daemon runs (they get their temp folder under the same %TEMP%).
   inUse: [...sessions.sessions.values()].filter((s) => s.live && (!s.info.machineId || store.machines.get(s.info.machineId)?.local)).map((s) => sessionTempDir(os.tmpdir(), s.info.id)),
   home: cleanupEnv.home,
 });
 /**
- * Where agents work on this host, for the stale-output rules (w459): its own sandboxes and its own daemon's (both on
- * this host's sandbox drive), each with whether its editor is known to be stopped, and the base clone.
+ * Where agents work on this host, for the stale-output rules (w459): its own daemon's sandboxes (that daemon cleans
+ * nothing itself, machines.cleanupFor), each with whether its editor is known to be stopped, and the base clone.
  */
 const hostStalePlaces = (): StalePlace[] => {
   const stopped = (state: string) => state === 'stopped' || state === 'crashed';
   const local = machines.local();
   return [
-    ...sandboxes.list().filter((s) => s.status === 'ready').map((s) => ({ id: s.id, path: s.path, kind: 'sandbox' as const, editorRunning: !stopped(s.unity.state) })),
     ...(local?.sandboxes ?? []).filter((s) => s.status === 'ready').map((s) => ({ id: `${local!.id}/${s.id}`, path: s.path, kind: 'sandbox' as const, editorRunning: !stopped(s.unity.state) })),
     { id: 'base clone', path: cfg.repo.basePath, kind: 'clone' as const },
   ];
@@ -423,15 +350,12 @@ const hostHealth = new HostHealthMonitor({
   },
   exists: (p) => fs.existsSync(p),
   mem: () => ({ free: os.freemem(), total: os.totalmem() }),
-  // Plus this host's own daemon's sandboxes as "<machine>/<id>" (docs/beast-machine.md): they are on this host's
-  // sandbox drive and disks, so the guard brings their editors and agents back after the drive, and gates them. Not
-  // while that daemon runs the guard itself (w466): then they are its own.
-  sandboxes: () => [...sandboxes.list(), ...(localGuards() ? [] : localSandboxView())],
-  sessions: () => (localGuards() ? [...store.sessions.values()] : localSessionView()),
-  // The sandbox drive is the local daemon's to watch and remount while its guard runs (machine/hostGuard.ts).
-  watchDrive: () => !localGuards(),
-  startEditor: async (id) => void (localRef(id) ? await machines.unity(localRef(id)!.machine, 'start', false, localRef(id)!.sandbox) : await sandboxes.startUnity(id)),
-  stopEditor: async (id) => void (localRef(id) ? await machines.unity(localRef(id)!.machine, 'stop', false, localRef(id)!.sandbox) : await sandboxes.stopUnity(id)),
+  // No sandboxes, editors or drive of its own (w510): those are each machine's daemon's, this host's own daemon's too.
+  sandboxes: () => [],
+  sessions: () => [...store.sessions.values()],
+  watchDrive: () => false,
+  startEditor: async () => undefined,
+  stopEditor: async () => undefined,
   interrupt: (id) => sessions.get(id).interrupt(),
   tell: (id, text) => void sessions.send(id, text, 'system', undefined, { bypassGate: true }),
   report: (title, body) => {
@@ -446,7 +370,7 @@ const hostHealth = new HostHealthMonitor({
       }
     }
   },
-  runHelper: (a) => runHelper(a),
+  runHelper: async (action) => ({ action, ok: false, at: new Date().toISOString(), detail: 'the portal has no sandbox drive (w510)' }),
   cleanup: {
     pass: async (low, opts) => {
       const guard = hostCleanupGuard();
@@ -461,10 +385,6 @@ const hostHealth = new HostHealthMonitor({
         regular: () => planCleanup({ rules: cleanupRules(env, cfg.hostGuard.cleanup), guard, low, libraries }),
         stale: () => planStaleOutput({ places: hostStalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, cleanupEnv.home), ctx: staleContextOf(store.work.values()), settings, guard }),
       });
-      if (opts.dryRun) return r;
-      for (const s of sandboxes.list().filter((x) => x.unity.logPath)) {
-        for (const p of pruneEditorLogs(path.dirname(s.unity.logPath!), s.unity.logPath!)) r.removed.push({ path: p, bytes: 0, rule: 'editor-logs' });
-      }
       return r;
     },
     consumers: () => biggestConsumers(cleanupEnv, [cfg.hostGuard.devDriveVhdx].filter(Boolean)),
@@ -473,8 +393,6 @@ const hostHealth = new HostHealthMonitor({
     staleAt: staleAtFile(cfg.dataDir),
     diskPaths: () => [cleanupEnv.home, cleanupEnv.tmp],
   },
-  // The local daemon's guard reaps this computer's leftover browsers while it runs (w466): one reaper, not two.
-  reap: (hours) => (localGuards() ? Promise.resolve([]) : reapBrowsers(hours)),
   changed: (h) => {
     host.health = h;
     broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
@@ -494,9 +412,6 @@ machines.hostReport = (id, title, body) => {
     }
   }
 };
-sandboxes.startGate = () => hostHealth.blockReason('editor');
-machines.localGate = (kind) => hostHealth.blockReason(kind);
-sessions.startGate = () => hostHealth.blockReason('agent');
 agents.hostHealth = hostHealth;
 agents.providers = providers;
 agents.max = max;
@@ -554,7 +469,6 @@ if (cfg.hostGuard.pollSeconds > 0) {
   setTimeout(() => void hostHealth.tick(), 5000);
 }
 if (!auth.hasUsers()) console.warn('No users yet. Create one on this machine: node server/user.ts <username>');
-sandboxes.reconcile();
 const cutOff = agents.boot();
 
 let lastSystem: SystemStats | undefined;
@@ -566,7 +480,6 @@ function appState(user: string | undefined): AppState {
   const mine = agents.orchestrators.personalFor(me);
   return {
     app: appNow(),
-    sandboxes: sandboxes.list(),
     sessions: [...store.sessions.values()],
     standingAgents: agents.standing.list(),
     delegations: [...store.delegations.values()],
@@ -943,11 +856,9 @@ function imageRoots(url: URL, file?: string): ImageRoots {
   // Review media (docs/review.md) is on this computer whoever published it, a worker on a machine included.
   if (file && review.contains(file)) return { roots: [review.root] };
   const sessionId = url.searchParams.get('session');
-  const sandboxId = url.searchParams.get('sandbox');
   const machineId = url.searchParams.get('machine');
-  if (sandboxId) return { roots: [sandboxes.require(sandboxId).path] };
   if (machineId) return { machine: machines.require(machineId).id, roots: [] };
-  if (!sessionId) throw new HttpError(400, 'give session, sandbox or machine');
+  if (!sessionId) throw new HttpError(400, 'give session or machine');
   return sessionImageRoots(sessionId, file);
 }
 
@@ -960,7 +871,6 @@ function sessionImageRoots(sessionId: string, file?: string): ImageRoots {
   const s = sessions.get(sessionId).info;
   if (s.machineId) return { machine: s.machineId, session: s.id, roots: [] };
   const temp = sessionTempDir(os.tmpdir(), s.id);
-  if (s.sandboxId) return { roots: [sandboxes.require(s.sandboxId).path, temp] };
   if (s.standingId) return { roots: [agents.standing.require(s.standingId).folder, temp] };
   if (s.kind === 'orchestrator') {
     const onMachine = file ? machineForPath(file, machines.list()) : undefined;
@@ -1052,12 +962,7 @@ route('DELETE', '/api/sessions/([\\w-]+)', async (_r, [id]) => {
   const s = sessions.get(id);
   if (s.info.kind === 'orchestrator') throw new HttpError(400, 'reset the orchestrator instead');
   if (s.info.kind === 'standing') throw new HttpError(400, "this is a standing agent's conversation; delete the agent instead");
-  const sb = s.info.sandboxId ? store.sandboxes.get(s.info.sandboxId) : undefined;
   sessions.remove(id);
-  if (sb) {
-    sb.sessionIds = sb.sessionIds.filter((x) => x !== id);
-    store.putSandbox(sb);
-  }
   return {};
 });
 
@@ -1082,35 +987,15 @@ route('POST', '/api/orchestrator/reset', async (req) => {
   return { id };
 });
 
+// The New sandbox form: made on this host's own daemon (docs/beast-machine.md); the portal holds none itself (w510).
 route('POST', '/api/sandboxes', async (req) => {
   const b = await readJson<CreateSandboxRequest>(req);
   need(b.name, 'name');
-  // Once this host's own daemon holds its sandboxes, a new one is made there (docs/beast-machine.md).
   const on = agents.defaultSandboxMachine();
-  if (on) {
-    const note = await machines.createSandbox(on, b);
-    return { machine: on, id: slugify(b.name), note };
-  }
-  return sandboxes.create(b);
+  if (!on) throw new HttpError(400, "this portal holds no sandboxes of its own and this host has no machine daemon with a sandbox root: ask the orchestrator for one on a machine (create_sandbox with machine)");
+  const note = await machines.createSandbox(on, b);
+  return { machine: on, id: slugify(b.name), note };
 });
-
-route('DELETE', '/api/sandboxes/([\\w-]+)', async (_r, [id]) => {
-  const sb = sandboxes.require(id);
-  for (const sid of sb.sessionIds) if (sessions.sessions.has(sid)) sessions.remove(sid);
-  void sandboxes.remove(id).catch((e) => console.error(`delete ${id}:`, e));
-  return {};
-});
-
-route('POST', '/api/sandboxes/([\\w-]+)/unity', async (req, [id]) => {
-  const { action } = await readJson<{ action: string }>(req);
-  if (action === 'start') return sandboxes.startUnity(id);
-  if (action === 'stop') return sandboxes.stopUnity(id);
-  throw new HttpError(400, 'action must be start or stop');
-});
-
-route('GET', '/api/sandboxes/([\\w-]+)/unity-log', async (_r, [id], url) => ({
-  lines: sandboxes.unityLog(id, Math.min(5000, Number(url.searchParams.get('lines')) || 200)),
-}));
 
 // ---- standing agents (docs/standing-agents.md)
 
@@ -1187,7 +1072,7 @@ route('POST', '/api/settings', async (req) => {
 
 // Each person's heartbeat wakes their own orchestrator, with their own busy workers.
 setInterval(() => {
-  const describe = (s: SessionInfo) => describeBusy(s, { sandbox: s.sandboxId ? store.sandboxes.get(s.sandboxId) : undefined, machine: s.machineId });
+  const describe = (s: SessionInfo) => describeBusy(s, { machine: s.machineId });
   for (const [userId, minutes] of Object.entries(store.settings.heartbeat ?? {})) {
     const chat = agents.orchestrators.personalOf(userId);
     if (!chat) continue;
@@ -1197,10 +1082,9 @@ setInterval(() => {
 
 // ---- switch_branch (server/switchBranch.ts)
 
-route('POST', '/api/(sandboxes|machines)/([\\w-]+)/switch-branch', async (req, [kind, id]) => {
+route('POST', '/api/machines/([\\w-]+)/switch-branch', async (req, [id]) => {
   const b = await readJson<{ branch?: string; createFrom?: string }>(req);
-  const target = kind === 'sandboxes' ? { sandbox: id } : { machine: id };
-  return { note: await agents.switchBranch({ ...target, branch: need(b.branch, 'branch').trim(), createFrom: b.createFrom?.trim() || undefined }) };
+  return { note: await agents.switchBranch({ machine: id, branch: need(b.branch, 'branch').trim(), createFrom: b.createFrom?.trim() || undefined }) };
 });
 
 // ---- a machine sandbox's page (docs/machines.md, "Machine sandboxes"): its editor, its log, its branch
@@ -1283,7 +1167,7 @@ function vocabulary(): VocabularySource {
     .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))
     .slice(0, 12);
   return {
-    sandboxes: sandboxes.list(),
+    sandboxes: machines.list().flatMap((m) => m.sandboxes ?? []),
     machines: machines.list().map((m) => m.id),
     agentNames: [...agents.standing.list().map((a) => a.name), ...recent.map((s) => s.title)],
     specs: specCache.names,
@@ -1552,24 +1436,10 @@ bus.on('event', (e: ServerEvent) => {
   void keepMessageImages(store, sessionId, event, (file) => readImageIn(sessionImageRoots(sessionId, file), file)).catch(() => undefined);
 });
 
-setInterval(() => sandboxes.poll(), 3000);
+// ---- git status: right after an agent turn on a machine, its daemon looks again (its own timer does the rest).
 
-// ---- git status per sandbox (server/gitStatus.ts): a light timer, plus right after an agent turn there.
-
-const refreshGit = (id: string) => refreshSandboxGit(store, id);
-setInterval(() => {
-  for (const id of store.sandboxes.keys()) void refreshGit(id);
-}, 60_000);
-setTimeout(() => {
-  for (const id of store.sandboxes.keys()) void refreshGit(id);
-}, 2000);
 sessions.events.on('turnEnd', (s: SessionHandle) => {
-  if (s.info.sandboxId) setTimeout(() => void refreshGit(s.info.sandboxId!), 1500);
   if (s.info.machineId) machines.refreshGit(s.info.machineId);
-});
-bus.on('event', (e) => {
-  // A sandbox that just finished provisioning.
-  if (e.type === 'sandbox' && e.sandbox.status === 'ready' && !e.sandbox.git) void refreshGit(e.sandbox.id);
 });
 setInterval(() => {
   try {
@@ -1604,7 +1474,7 @@ process.on('uncaughtException', (e) => console.error('UNCAUGHT (kept running):',
 process.on('unhandledRejection', (e) => console.error('UNHANDLED REJECTION (kept running):', e));
 
 server.listen(cfg.port, cfg.host, () => {
-  console.log(`FF Factory ${formatVersion(appVersion())} on http://${cfg.host}:${cfg.port} — sandboxes in ${cfg.sandboxRoot}, base clone ${cfg.repo.basePath}`);
+  console.log(`FF Factory ${formatVersion(appVersion())} on http://${cfg.host}:${cfg.port} — base clone ${cfg.repo.basePath}; sandboxes are the machines' (w510)`);
 });
 
 /** This app's git HEAD, to tell the orchestrator what an update or restart changed. */
@@ -1625,7 +1495,7 @@ let stopping = false;
 function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set()) {
   if (stopping) return;
   stopping = true;
-  console.log(`stopping (${req.reason}): stopping agent processes (Unity editors are left running)`);
+  console.log(`stopping (${req.reason}): stopping the portal's agent processes (the machines' agents and editors are their daemons')`);
   try {
     const f = agents.resumeFile(req, drained, appHead());
     writeResumeFile(cfg.dataDir, f);
@@ -1775,7 +1645,7 @@ agents.usagePollChanged = () => {
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...vaultLines()];
+  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...vaultLines(), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {
@@ -1864,7 +1734,7 @@ setInterval(() => {
 }, 5000);
 
 /** The managers, for the E2E harness (e2e/server.ts) to set up states no browser can reach (a blocked editor). */
-export const internals = { cfg, store, sandboxes, sessions, machines, agents, providers, max };
+export const internals = { cfg, store, sessions, machines, agents, providers, max };
 
 // Data files a crash damaged and that were restored from an earlier version (server/durable.ts). The owner hears at
 // once (a push and their own orchestrator); the restart summary carries the same lines to the dispatcher.
@@ -1915,7 +1785,7 @@ setTimeout(() => {
       console.log('dry run: nothing resumed after the start (no restart note to anyone, no resumes, no pending update)');
       return;
     }
-    const notes = host.elevated ? [`WARNING: the server is running elevated, so it will not start Unity editors: ${host.elevatedWhy ?? ''}`] : [];
+    const notes = host.elevated ? [`WARNING: the server is running elevated, so every orchestrator shell inherits admin rights: ${host.elevatedWhy ?? ''}`] : [];
     const recovered = takeRecoveryLines();
     if (recovered.length) {
       const text = `DATA RESTORED AFTER A CRASH (the last server was last alive ${lastAlive ? new Date(lastAlive.at).toISOString() : 'at an unknown time'}): ${recovered.join(' ')}`;
@@ -1935,8 +1805,8 @@ setTimeout(() => {
       agents.resumeAfterRestart(undefined, cutOff, { head: appHead(), version: appVersion().version }, notes);
       return;
     }
-    const f = agents.uncleanResumeFile(cutOff, cause, sandboxes.lostEditors, lastAlive?.at, appHead());
-    console.warn(`unclean stop: ${cause}; ${f.sessions.length} session(s) and ${f.editors?.length ?? 0} editor(s) to bring back${pending ? `; retrying the pending update (${pending.reason})` : ''}`);
+    const f = agents.uncleanResumeFile(cutOff, cause, lastAlive?.at, appHead());
+    console.warn(`unclean stop: ${cause}; ${f.sessions.length} session(s) to bring back${pending ? `; retrying the pending update (${pending.reason})` : ''}`);
     if (pending && !host.elevated) {
       // Hand it to the supervisor as a clean update would, with everything to bring back in the resume file.
       writeResumeFile(cfg.dataDir, { ...f, reason: pending.reason, update: true });

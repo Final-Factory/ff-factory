@@ -1,10 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import webpush from 'web-push';
-import { nameWithSlot } from '../shared/labels.ts';
 import { bus, emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager, TurnEndMeta } from './sessions.ts';
-import type { DelegationRequest, NotifyKind, NotifyPrefs, Requester, Sandbox, ServerEvent, SessionInfo, StandingAgent, StandingRun, UnityBlocked, WorkItem } from '../shared/types.ts';
+import type { DelegationRequest, NotifyKind, NotifyPrefs, Requester, ServerEvent, SessionInfo, StandingAgent, StandingRun, WorkItem } from '../shared/types.ts';
 import { checkArray, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 
@@ -113,12 +112,6 @@ export class Notifier {
     this.fire({ kind: 'standing', title: `${a.name} ${what}`, body: clip(firstLine(run.summary ?? ''), 180), url: `#/agent/${encodeURIComponent(a.id)}`, tag: `standing-${a.id}` });
   }
 
-  /** The Unity watchdog found an editor stuck (SandboxManager 'blocked', docs/unity-dialogs.md). */
-  unityBlocked(sb: Sandbox, b: UnityBlocked) {
-    const what = b.reason === 'dialog' ? `"${b.title}"${b.text ? `: ${b.text.replace(/\s+/g, ' ')}` : ''}` : b.title ?? 'stuck';
-    this.fire({ kind: 'unity', title: `Unity in ${nameWithSlot(sb)} is stuck`, body: clip(what, 180), url: `#/sandbox/${encodeURIComponent(sb.id)}`, tag: `unity-${sb.id}` });
-  }
-
   /** Someone's orchestrator sent this person a message (message_person): it waits in their own chat. */
   personMessage(from: Requester, to: Requester, text: string) {
     this.fire({ kind: 'person', title: `Message from ${from.displayName}`, body: clip(firstLine(text), 180), url: '#/', tag: `person-${from.userId}` }, [to.userId]);
@@ -148,9 +141,7 @@ export class Notifier {
   /** An auto-approved delegation started, finished its first turn, or expired unstarted. */
   delegationUpdate(d: DelegationRequest, what: 'started' | 'finished' | 'expired') {
     if (!d.autoApproved && what !== 'expired' && d.auto !== 'queued') return;
-    const sb = d.sandboxId ? this.store.sandboxes.get(d.sandboxId) : undefined;
-    const m = d.machineId ? this.store.machines.get(d.machineId) : undefined;
-    const where = sb ? `slot ${sb.id}` : m ? `machine ${m.id}` : (d.sandboxId ?? d.machineId ?? '');
+    const where = d.sandboxId ? `slot ${d.sandboxId}` : d.machineId ? `machine ${d.machineId}` : '';
     const title = what === 'started' ? `Auto-approved worker started (${where})` : what === 'finished' ? `Auto-approved worker finished (${where})` : 'Auto-approved request expired';
     this.fire({ kind: 'delegation', title, body: clip(`${d.agentName}: ${d.title}`, 180), url: `#/agent/${encodeURIComponent(d.agentId)}/delegations`, tag: `deleg-${d.id}` });
   }

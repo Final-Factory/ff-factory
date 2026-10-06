@@ -124,9 +124,6 @@ export function SystemFooter({ app }: { app: AppState }) {
   const computers = computersOf(app);
   const providers = (app.providers ?? []).map((p) => providerLoad(p, now));
   const many = computers.length + providers.length > 1;
-  const unityOn = app.sandboxes.filter((s) => s.unity.state !== 'stopped' && s.unity.state !== 'crashed').length;
-  // Agents mid-turn on this host are what limits.maxSessions counts (w384: idle ones take no slot); a machine's count toward its own limit.
-  const agentsOn = app.sessions.filter((s) => s.kind !== 'orchestrator' && !s.machineId && (s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission')).length;
   const plan = planGlance(app);
   const short = (label: string) => label.replace(/^Weekly\s+/i, '').replace(/^Session \(5 h\)$/i, '5h');
   const Val = ({ pct, children, warn, crit, lvl }: { pct: number; children: ReactNode; warn?: number; crit?: number; lvl?: Lvl }) => <b className={`lvl-${lvl ?? level(pct, warn, crit)}`}>{children}</b>;
@@ -137,9 +134,9 @@ export function SystemFooter({ app }: { app: AppState }) {
       {open && (
         <div className="sys-detail">
           {many ? (
-            <MachineTable computers={computers} providers={providers} health={app.host?.health} limits={<Limits sys={sys} unityOn={unityOn} agentsOn={agentsOn} />} />
+            <MachineTable computers={computers} providers={providers} health={app.host?.health} />
           ) : (
-            <Meters sys={sys} health={app.host?.health} limits={<Limits sys={sys} unityOn={unityOn} agentsOn={agentsOn} />} />
+            <Meters sys={sys} health={app.host?.health} />
           )}
           <CleanupLines computers={computers} />
           {hasPlan && <UsageRefresh />}
@@ -165,12 +162,6 @@ export function SystemFooter({ app }: { app: AppState }) {
                 )}
               </>
             )}
-            <span>
-              Unity <Val pct={(unityOn / sys.limits.maxUnity) * 100} warn={100} crit={101}>{`${unityOn}/${sys.limits.maxUnity}`}</Val>
-            </span>
-            <span>
-              Agents <Val pct={(agentsOn / sys.limits.maxSessions) * 100} warn={100} crit={101}>{`${agentsOn}/${sys.limits.maxSessions}`}</Val>
-            </span>
             {hasPlan && (
               <span title={plan.title} data-testid="plan-glance">
                 Plan{' '}
@@ -272,7 +263,7 @@ function Meter({ label, pct, value, warn = 75, crit = 90, lvl }: { label: string
 }
 
 /** The host alone (no machines): its meters, as before. */
-function Meters({ sys, health, limits }: { sys: SystemStats; health?: HostHealth; limits: ReactNode }) {
+function Meters({ sys, health }: { sys: SystemStats; health?: HostHealth }) {
   const memUsed = memUsedOf(sys);
   return (
     <div className="meters">
@@ -290,7 +281,6 @@ function Meters({ sys, health, limits }: { sys: SystemStats; health?: HostHealth
         />
       )}
       <HostDisks sys={sys} health={health} />
-      {limits}
     </div>
   );
 }
@@ -321,7 +311,7 @@ function HostDisks({ sys, health }: { sys: HostStats; health?: HostHealth }) {
 }
 
 /** Every computer, one compact row each: a bar and a number per resource. */
-function MachineTable({ computers, providers = [], health, limits }: { computers: Computer[]; providers?: ProviderLoad[]; health?: HostHealth; limits: ReactNode }) {
+function MachineTable({ computers, providers = [], health }: { computers: Computer[]; providers?: ProviderLoad[]; health?: HostHealth }) {
   const Cell = ({ pct, text, lvl, title }: { pct?: number; text: string; lvl?: Lvl; title?: string }) => (
     <span className={`mt-cell meter-${pct === undefined ? 'ok' : (lvl ?? level(pct))}`} title={title}>
       <span className="mt-num">{text}</span>
@@ -399,7 +389,6 @@ ${disksHint(m)}`} /> : <span className="mt-note">n/a</span>}
           </div>
         );
       })}
-      {limits}
     </div>
   );
 }
@@ -432,19 +421,6 @@ function CleanupLines({ computers }: { computers: Computer[] }) {
           </div>
         );
       })}
-    </div>
-  );
-}
-
-function Limits({ sys, unityOn, agentsOn }: { sys: SystemStats; unityOn: number; agentsOn: number }) {
-  return (
-    <div className="limits">
-      <span className={unityOn >= sys.limits.maxUnity ? 'at-limit' : ''}>
-        Unity editors <b>{unityOn}/{sys.limits.maxUnity}</b>
-      </span>
-      <span className={agentsOn >= sys.limits.maxSessions ? 'at-limit' : ''}>
-        Agents here <b>{agentsOn}/{sys.limits.maxSessions}</b>
-      </span>
     </div>
   );
 }

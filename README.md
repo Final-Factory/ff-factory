@@ -15,10 +15,11 @@ agent sessions with a guard hook, standing agents, remote machines, push notific
 voice input), and adapting it to another Unity project is mostly editing prompts in
 `server/agents.ts` and `config.json`. It is published as-is; see [Status](#status).
 
-**What you need:** a Windows PC with a GPU for the host (Unity editors run on its desktop), Node
-≥ 23.6, git with LFS, Unity, a Claude subscription or API access, and optionally
-[Tailscale](https://tailscale.com) to reach it from elsewhere. macOS machines can be added as extra
-agent hosts.
+**What you need:** a computer for the portal (Node ≥ 23.6, git with LFS; it needs no GPU and no Unity, since it runs
+only the orchestrators, the dispatcher and the web page), at least one **machine** that runs the workers and the Unity
+editors (a Windows PC with a GPU, or a Mac; the portal's own Windows computer can be one, see `add_machine local`), a
+Claude subscription or API access, and optionally [Tailscale](https://tailscale.com) to reach the portal from
+elsewhere.
 
 You talk to your own **orchestrator** on the main page ("start work on spec 098", "play the tutorial
 single-player and log the bugs", "read the Discord forums and find bugs"). It files the work with the
@@ -33,19 +34,19 @@ requests and start or stop Unity.
 
 | piece | what it is |
 |---|---|
-| sandbox | `git worktree` of a base clone at `<sandboxRoot>/<id>`, on its own branch, with a copy of a warm `Library/` so Unity starts without a cold import. The folder name is the Unity project name, so its editor's MCP instance is `<id>@<hash>` |
-| Unity | launched natively (`Unity.exe -projectPath …`) so it renders on the GPU; the server tracks the pid, proves the pid is still that editor (command line contains the sandbox path) before ever killing it, and marks it running once the MCP bridge logs `StdioBridgeHost started` |
-| worker agent | a Claude Code session via the [Agent SDK](https://code.claude.com/docs/en/agent-sdk), `cwd` = the sandbox, loading user + project settings (so CLAUDE.md, the ff-agents/ff-speckit/ff-discord plugins and the Unity MCP server all apply), with a sandbox brief appended to the system prompt and a `sandbox` MCP server: `mcp__sandbox__unity` to manage its own editor and `mcp__sandbox__set_label` to relabel its own sandbox |
+| sandbox | `git worktree` of a machine's base clone at `<sandbox_root>/<id>` on that machine, on its own branch, with a copy of a warm `Library/` so Unity starts without a cold import. The folder name is the Unity project name, so its editor's MCP instance is `<id>@<hash>`. The portal holds none of its own (w510); BEAST's are its own daemon's, named `beast/<id>` |
+| Unity | launched natively (`Unity.exe -projectPath …`) by the machine's daemon so it renders on the GPU; the daemon tracks the pid, proves the pid is still that editor (command line contains the sandbox path) before ever killing it, and marks it running once the MCP bridge answers |
+| worker agent | a Claude Code session via the [Agent SDK](https://code.claude.com/docs/en/agent-sdk), run by a machine's daemon with `cwd` = the sandbox, loading user + project settings (so CLAUDE.md, the ff-agents/ff-speckit/ff-discord plugins and the Unity MCP server all apply), with a sandbox brief appended to the system prompt and a `machine` MCP server: `mcp__machine__unity` to manage its own editor and `set_label` to relabel its own sandbox |
 | orchestrator | another Agent SDK session with read-only repo tools and an in-process `sandboxes` MCP server. Each person has their own, which sees everything, follows up with that person's workers and files work requests; one **dispatcher** has the tools that change things (create/delete/relabel sandbox, start/stop Unity, start/message/interrupt/stop agents, machines, standing agents) and turns the requests into work without doing the same work twice, recording each in the work ledger. See [docs/orchestrators.md](docs/orchestrators.md) |
-| standing agent | a long-lived agent with a charter and a schedule (interval, cron or manual), apart from the sandboxes: its own folder under `<sandboxRoot>/_agents` with a `NOTES.md`, one conversation resumed every run, a fresh process per run that stops when the turn ends (so it only holds an agent slot while running), and hard per-run and per-day budgets. Read-only by default; tool groups add a read-only shell, GitHub comments, or delegation requests that the user approves. See [docs/standing-agents.md](docs/standing-agents.md) |
-| machine | one of the user's Macs or Windows PCs. A daemon there (`machine/daemon.ts`: a LaunchAgent on a Mac, a scheduled task at logon on Windows, in the user's session) connects out to `/machine` with a per-machine token and runs agents in the user's main clone with the same session code, streaming everything back. Set up and updated over ssh from this host by `add_machine` / the Add button; no sandboxes, own agent limit, extra guard rules for the user's uncommitted work. See [docs/machines.md](docs/machines.md). This host itself can be one too (`add_machine local`), whose daemon then owns the host's sandboxes: [docs/beast-machine.md](docs/beast-machine.md) |
+| standing agent | a long-lived agent with a charter and a schedule (interval, cron or manual), apart from the sandboxes, run by a machine's daemon (it needs a machine: w510): its own folder in the daemon's folder with a `NOTES.md`, one conversation resumed every run, a fresh process per run that stops when the turn ends (so it only holds an agent slot while running), and hard per-run and per-day budgets. Read-only by default; tool groups add a read-only shell, GitHub comments, or delegation requests that the user approves. See [docs/standing-agents.md](docs/standing-agents.md) |
+| machine | one of the user's Macs or Windows PCs. A daemon there (`machine/daemon.ts`: a LaunchAgent on a Mac, a scheduled task at logon on Windows, in the user's session) connects out to `/machine` with a per-machine token and runs agents in the user's main clone and, given a `sandbox_root`, in its own pool of sandboxes, with the same session code, streaming everything back. Set up and updated over ssh from the portal by `add_machine` / the Add button; own agent and editor limits, extra guard rules for the user's uncommitted work. See [docs/machines.md](docs/machines.md). The portal's own computer can be one too (`add_machine local`), whose daemon then owns that computer's sandboxes, editors and workers: [docs/beast-machine.md](docs/beast-machine.md) |
 | provider | FFBox, Lothsahn's CPU-only build server, which runs agents in its own hardened containers ([docs/ffbox.md](docs/ffbox.md): what it is, how it works, and how workers change it). Its connector dials out to `/provider` with a token whose SHA-256 is in `config.json`, and reports its container classes (network, model, tier, free slots), its conversations and the crash/desync reports its intake files. Phase 1 is read-only: a card in the sidebar, a page, the orchestrator's `ffbox_activity` tool, nothing that sends it work. Off unless `providers.ffbox.enabled`. See [docs/ffbox-integration.md](docs/ffbox-integration.md) and, for the connector's author, [docs/ffbox-connector-contract.md](docs/ffbox-connector-contract.md) |
 | Max | the Discord bot agents post as, read-only. Each `ffdiscord` post, reply, thread or close by an agent FF Factory started is appended to the file in its `FF_MAX_EVENTS` (a Mac's daemon forwards its own), so the Max page lists them with channel, link, first line and session; it also checks the bot token (read from the ffbox config where it already is, never copied) and, optionally, shows the newest messages in a few channels with unread counts. An "External" strip in the sidebar shows Max and FFBox at a glance; the orchestrator has `max_activity`. See [docs/max.md](docs/max.md) |
 | intake | Discord and FFBox into the work ledger, off by default: new #bug-reports threads, trusted people's requests to Max in #dev-chat (by Discord author id), FFBox's fix branches and requests. Each carries its source and a fixed-code triage: an obvious bug may be worked without a person (when auto-approve is on); anything else needs a human, and nothing is worked until Ben or Lothsahn approves it. Deduplicated against open and finished work, capped per day, players' text fenced off as untrusted; workers end with a marker, reply in and close the thread, and a release follow-up says "live in 0.50.0.X". The Dispatcher page's Intake tab, `list_work` and the heartbeat show it. See [docs/intake.md](docs/intake.md) |
 | guard | a `PreToolUse` hook on every worker, active even in `bypassPermissions`: no push or PR to the game repo's master/main (other repos' master/main are allowed; an undeterminable target counts as the game repo), no force push, no `gh repo delete`, and `gh repo rename/create/edit/archive` or security-setting changes only on repos other than the game repo (an undeterminable one counts as the game repo), no writes to or shell commands naming a `protectedPaths` entry (the live co-op checkout), and Unity MCP calls only after pinning this sandbox's own editor. Each worker's Unity MCP server sees only its sandbox's editor (docs/unity-lifecycle.md) |
 | attachments | files people attach to a message (paperclip, paste or drop): saves, bug-report zips, `Player.log`, desync reports, up to 200 MB each by default, uploaded in chunks that resume over a flaky link. Stored once by SHA-256 in the data folder, never opened or unpacked by the server, deleted after 30 days unused. The orchestrator reads them as untrusted user files with their ids, and passes them on with `request_work`, `start_agent` or `message_agent`; each worker gets its own copy in `Inbox/` of its sandbox (a machine's daemon fetches it there). See [docs/attachments.md](docs/attachments.md) |
 | voice | a mic in every message box, and a hands-free voice mode for the car. Speech is transcribed on this machine by Whisper (faster-whisper `large-v3-turbo` on the GPU) primed with FF words and the current sandbox and agent names; an end-of-speech detector with an adaptive noise floor finishes each utterance. Dictation puts the text in the box for review; voice mode sends it, reads the reply aloud with local Kokoro TTS and listens again (barge-in, "stop" to end). Models load on demand and unload when idle; audio is not kept. Browser speech engines are the fallback. See [docs/voice.md](docs/voice.md) |
-| state | `data/state.json` (sandboxes + session metadata) and `data/transcripts/<session>.jsonl`. Sessions come back `stopped` after a restart and resume (Claude session id) on the next message |
+| state | `data/state.json` (machines and their sandboxes, session metadata, standing agents) and `data/transcripts/<session>.jsonl`. Sessions come back `stopped` after a restart and resume (Claude session id) on the next message |
 
 Workers default to `bypassPermissions` (autonomous, bounded by the guard). Switch a session to
 `default` from its panel and every tool call that would prompt shows up as an Allow/Deny card.
@@ -70,8 +71,10 @@ powershell -File scripts\\install-autostart.ps1   # start at logon, supervised
 schtasks /run /tn ffsb-server          # start it now
 ```
 
-Run it from the **logged-in desktop session** (a Task Scheduler "at log on" task, not a service
-and not over SSH): Unity editors it launches must land on the interactive desktop to get the GPU.
+On Windows, run it from a Task Scheduler "at log on" task, not a service and not over SSH. The portal itself no longer
+launches Unity (w510), but the machine daemons do, and their editors must land on the interactive desktop to get the
+GPU: a daemon is a logon task in the user's session too ([docs/machines.md](docs/machines.md)), and BEAST's own
+starts only with its user signed in.
 
 ### Access and security
 
@@ -138,16 +141,15 @@ settings agents may touch (`ownerName`, `voice.vocabulary`, `voice.ttsVoice`); e
 `config.json` is edited by hand. `republish_public` publishes this repo with a fresh history:
 [docs/republish.md](docs/republish.md).
 
-**Self-recovery.** A host guard watches free disk space, the sandbox Dev Drive and memory: it pauses new
-work and cleans known-safe junk when disk space runs low, and reattaches the Dev Drive by itself if
-Windows drops it (through SYSTEM helper tasks installed once with
-`scripts/install-privileged-helpers.ps1`), then restarts the editors and resumes the agents that were
-working there. See [docs/self-recovery.md](docs/self-recovery.md).
+**Self-recovery.** The portal's host guard watches the free disk space of its data volume and cleans known-safe junk
+when it runs low. On BEAST its daemon's guard watches the sandbox Dev Drive and memory too: it pauses new sandbox work
+when disk space runs low, and reattaches the Dev Drive by itself if Windows drops it (through SYSTEM helper tasks
+installed once with `scripts/install-privileged-helpers.ps1`), then restarts the editors and resumes the agents that
+were working there. See [docs/self-recovery.md](docs/self-recovery.md).
 
-The app must never run elevated: everything it starts inherits its token, and an elevated Unity
-editor stops at startup on a modal "running as administrator" dialog. An elevated server hands
-itself to the Limited task at startup, or (if it cannot) refuses to start editors and shows a
-banner. The Unity watchdog reports editors stuck on dialogs and dismisses the known harmless ones:
+The app must never run elevated: everything it starts (the orchestrators' shells) inherits its token. An elevated
+server hands itself to the Limited task at startup, or (if it cannot) keeps running and shows a banner. Each machine
+daemon's Unity watch reports editors stuck on dialogs and dismisses the known harmless ones:
 [docs/unity-dialogs.md](docs/unity-dialogs.md) (hangs, crashes and automatic restarts: [docs/unity-lifecycle.md](docs/unity-lifecycle.md)). Logs: `data/server.{out,err}.log` (previous run:
 `*.prev`) and `data/supervisor.log`.
 
@@ -161,7 +163,7 @@ They cover every Claude account in use, each with its own meters: the agents' to
 (`claudeEnv.CLAUDE_CODE_OAUTH_TOKEN`, shown as "host token …abcd"), this host's own claude.ai login,
 and each machine's own login (its daemon polls it the same way and reports it). Which agents run on
 which is set per role and per machine ([docs/accounts.md](docs/accounts.md)): config `claudeAccounts`
-puts the orchestrator, workers or standing agents here on this host's login instead of the token, and
+puts the orchestrators, the dispatcher or this host's own daemon's workers on this host's login instead of the token, and
 `machines.useHostClaudeEnv` puts a Mac's agents on that Mac's login. The token vault
 ([docs/vault.md](docs/vault.md)) holds Claude tokens and the workers' other secrets on the portal and hands each
 machine run what it may have, picking the Claude token by plan headroom. A login is shown by
@@ -206,21 +208,22 @@ labelled as spend. The fix is always the same: on this machine, run `claude` in 
 
 ### Sandbox Dev Drive (optional)
 
-On the reference setup, sandboxes live on `F:`, a dynamically expanding ReFS Dev Drive stored at `C:\ffsb-devdrive.vhdx`,
-with the Library seed at `F:\ffsb\_seed\Library` and `"librarySeedCopy": "clone"`. The Windows
+On the reference setup, BEAST's sandboxes live on `F:`, a dynamically expanding ReFS Dev Drive stored at `C:\ffsb-devdrive.vhdx`,
+with the Library seed at `F:\ffsb\_seed\Library` and `library_seed_copy: "clone"` given to `add_machine` (the
+config keys `librarySeed` and `librarySeedCopy` are retired). The Windows
 copy engine block-clones on ReFS, so each sandbox's 64 GB Library costs almost nothing until its
 editor rewrites files (measured: 1.96 GB / 42k files cloned for 0.06 GB; robocopy does not clone).
 `scripts\devdrive.ps1 -Create` makes it and registers `ffsb-devdrive-mount` (SYSTEM, at startup);
-the supervisor waits for the drive. `hostDiskPaths: ["C:/"]` keeps the free-space check honest,
-since the VHDX grows on C:.
+BEAST's daemon's guard attaches the drive after a reboot (the supervisor no longer waits for it). `hostDiskPaths: ["C:/"]`
+keeps the free-space check honest, since the VHDX grows on C:.
 
 ### config.json
 
 See `config.example.json` and `server/config.ts` (every field is documented there). The important
-ones: `host`, `sandboxRoot` (keep it short: Windows path lengths),
-`librarySeed` (a warm `Library/` to copy; on a ReFS Dev Drive the copy is a near-free block clone),
-`protectedPaths` (checkouts agents must never touch), `limits` (editors are ~8-12 GB RAM each),
-`ownerName` (optional: the name agents' prompts use for you; otherwise they say "the user").
+ones: `host`, `repo` (the base clone the orchestrators read; the only required key), `sandboxRoot` (optional: the
+sandbox root of this host's own daemon when `add_machine local` is used, and the default parent of `review.root` and
+`standingRoot`; keep it short: Windows path lengths), `protectedPaths` (checkouts agents must never touch),
+`limits.minFreeRamGB` (editors are ~8-12 GB RAM each), `ownerName` (optional: the name agents' prompts use for you; otherwise they say "the user").
 `publicGitIdentity` (optional `name`/`email`/`repos`): repos whose history is public, by default this
 app's own origin. Any other GitHub repo that GitHub reports as public counts too (`gh api`, cached;
 `server/publicGit.ts`). The guard refuses an agent's push to a public repo when a commit carries an email
@@ -230,16 +233,29 @@ git gets an `includeIf "hasconfig:remote.*.url:..."` through `GIT_CONFIG_COUNT` 
 every public repo of their owners, the game repo's owner and the gh account (git 2.36+; nobody's gitconfig
 changes). Without a configured `name`/`email` that identity is the gh account's login and noreply address.
 
-**Portal-only mode** (`hostSandboxes: false`, w464; [docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md),
-section 6, changes 1 and 2, D16). For a host that runs the portal and nothing else (the VM on the FFBox host):
-- "this host" is no place for work: it leaves the capacity block, placement and `list_sandboxes`, and
-  `create_sandbox` without a machine is refused with that reason. Work goes to the machines.
-- `sandboxRoot` and `unity` may be left out; only `repo` (the base clone the orchestrators read) is required.
-- The host guard watches no sandbox drive (nothing blocks on one, no `ffsb-helper-mount`) and measures the data
-  volume (`dataDir`) with `hostDiskPaths` instead. `host_recovery` runs only `cleanup`; the sandbox-drive and Windows
-  helper actions are refused with the reason.
-- No standing agent runs, here or on a machine: a manual run is refused and a scheduled one is recorded as
-  skipped, with why. Their jobs move to workers that timers start.
+**The portal runs only the orchestrators** (w510, 2026-10-06; this is what the portal-only mode of w464, config
+`hostSandboxes: false`, [docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md), section 6, changes 1 and 2, became
+the only mode, and the flag is gone). The portal runs the orchestrators (people's own and the dispatcher), the web page,
+the ledger, intake, timers and the providers/FFBox connector. Every worker, sandbox, Unity editor and standing agent runs
+under a machine daemon (`machine/daemon.ts`), on the same computer as the portal or not.
+- "this host" is no place for work: it is not in the capacity block, placement or `list_sandboxes`, and `set_app_config`
+  refuses `placement.prefer` / `placement.avoid` entries "this host" and "host". `create_sandbox` without a machine
+  goes to this host's own daemon if it has one (`add_machine local`), else is refused.
+- The host guard measures the data volume (`dataDir`) with `hostDiskPaths`, reports, and cleans this computer
+  (BEAST's own daemon's sandboxes included). It watches no sandbox drive: a machine's daemon's guard does.
+  `host_recovery` takes only `cleanup`.
+- A standing agent needs a machine; one from before with no machine keeps its record but never runs
+  ([docs/standing-agents.md](docs/standing-agents.md)).
+
+**Retired config keys** (`RETIRED_CONFIG_KEYS`, `server/config.ts`): `hostSandboxes`, `librarySeed`, `librarySeedGB`,
+`librarySeedCopy`, `limits.maxUnity`, `limits.maxSessions`, `limits.maxIdleAgents`, `limits.maxSandboxes`,
+`limits.minFreeGB`, `unity.editorPath`, `unity.extraArgs`, `unity.watchdog`, `unity.hang`, `unity.autoRestart` and
+`claudeAccounts.standing`. A config that still sets one loads: the key is named once at startup (console) and in
+`system_status`, and ignored. `set_app_config` no longer takes `limits.maxUnity`, `limits.maxSandboxes`,
+`limits.maxSessions` or `claudeAccounts.standing`. Still read: `sandboxRoot`, `standingRoot`, `unity.idleStopMinutes`
+and `unity.mcpServer` (handed to this host's own daemon), `limits.minFreeRamGB`, `hostGuard.*` and `hostDiskPaths`.
+`add_machine local` takes no limits or Library seed from the config: pass `max_sandboxes`, `max_unity`,
+`library_seed` and the rest to `add_machine`.
 
 ## Development
 
@@ -250,8 +266,8 @@ npm --prefix web run dev                             # Vite on :5173, proxies /a
 npm run typecheck && npm --prefix web run build
 ```
 
-A throwaway config pointing `repo.url` at a local bare repo and `unity.editorPath` at nothing is
-enough to exercise everything except Unity.
+A throwaway config pointing `repo.url` at a local bare repo is enough to exercise everything except a machine's
+Unity.
 
 Tests (unit and Playwright end to end), releases and the CI checks are described in
 [CONTRIBUTING.md](CONTRIBUTING.md). The running version shows in the sidebar footer and at
@@ -295,11 +311,12 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
   step is a probe that Unity gets the GPU and a licence under that user (interactive launch via
   `Start-Process -Credential` vs a non-interactive scheduled task; read `Renderer:` and licensing
   lines from the editor log). Then: a fine-grained GitHub token for that user, its own `uv`,
-  plugins and Claude login, and the server launching workers/editors as it.
+  plugins and Claude login, and the machine daemon launching workers/editors as it.
 - **Prompt injection.** Text an agent reads (web pages, issues, chat messages, files in the repo)
   can steer it. The guard stops the obvious damage, not a determined attacker.
-- **Windows-first.** The host (Unity launch, window watchdog, restart scripts) is Windows-only;
-  remote machines are macOS-only (LaunchAgent). Linux is not supported.
+- **Windows-first.** The restart scripts and a daemon on the portal's own computer (BEAST) are Windows-only; machines
+  are Windows PCs or Macs (LaunchAgent). The portal itself also runs on Linux, in the VM on the FFBox host
+  ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md)).
 - **Tied to one project.** Prompts and guard rules name Final Factory's conventions; see the top of
   this file.
 - The Dev Drive VHDX never shrinks on its own; space freed inside `F:` is reused.

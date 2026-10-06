@@ -356,14 +356,6 @@ function agentsGlance(name: string, sessions: SessionInfo[], attention: number, 
   return { tone: 'grey', label: 'Idle', detail: about(last), attention, sessionId: last.id };
 }
 
-export function sandboxGlance(sb: Sandbox, sessions: SessionInfo[]): Glance {
-  const attention = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0) + (sb.unity.state === 'blocked' ? 1 : 0);
-  if (sb.status === 'creating') return { tone: 'blue', label: 'Creating', detail: sb.statusDetail, attention, progress: true };
-  if (sb.status === 'deleting') return { tone: 'blue', label: 'Deleting', detail: sb.statusDetail, attention, progress: true };
-  if (sb.status === 'error') return { tone: 'red', label: 'Failed', detail: firstLine(sb.statusDetail), attention };
-  return agentsGlance(displayName(sb), sessions, attention, sb.unity, isUnused(sb.purpose));
-}
-
 export function machineSandboxGlance(sb: MachineSandbox, sessions: SessionInfo[]): Glance {
   const attention = sessions.reduce((n, s) => n + s.pendingPermissions.length, 0);
   if (sb.status === 'creating') return { tone: 'blue', label: 'Creating', detail: sb.statusDetail, attention, progress: true };

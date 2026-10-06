@@ -86,7 +86,7 @@ test('dry run: no worker, standing agent or machine agent starts, nor an orchest
   const queueBefore = fs.readFileSync(path.join(dir, 'send-queue.json'), 'utf8');
   const store = new Store(dir);
   t.after(() => store.flush());
-  const sessions = new SessionManager({ dataDir: dir, limits: { maxSessions: 6 } } as Config, store);
+  const sessions = new SessionManager({ dataDir: dir } as Config, store);
   const worker = sessions.create({ id: 'w1', kind: 'worker', title: 'w', permissionMode: 'bypassPermissions', options: () => assert.fail('no worker process may start') });
   const standing = sessions.create({ id: 'st1', kind: 'standing', title: 's', permissionMode: 'bypassPermissions', options: () => assert.fail('no standing process may start') });
   const orch = sessions.create({ id: 'o1', kind: 'orchestrator', title: 'o', permissionMode: 'bypassPermissions', options: () => assert.fail('no orchestrator process in a unit test') });
@@ -181,7 +181,6 @@ test('dry run: a standing agent that is due does not run, and Run now is refused
     },
     get: (id) => ({ info: infos.get(id)!, live: false, stop() {} }),
     send: (id) => (sent.push(id), 'u'),
-    liveAgents: () => 0,
     remove: () => undefined,
   };
   const clock = { now: new Date('2026-10-05T03:00:00') };
@@ -206,7 +205,7 @@ test('dry run: no push reaches a phone, the test push included', async (t) => {
   const dir = tmp(t, 'ffsb-dry-push-');
   const store = new Store(dir);
   t.after(() => store.flush());
-  const n = new Notifier(dir, store, new SessionManager({ limits: { maxSessions: 6 } } as Config, store));
+  const n = new Notifier(dir, store, new SessionManager({} as Config, store));
   const real = webpush.sendNotification;
   let calls = 0;
   (webpush as { sendNotification: unknown }).sendNotification = async () => void calls++;

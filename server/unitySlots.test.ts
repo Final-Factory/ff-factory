@@ -433,7 +433,7 @@ test('unity slots: system_status, the Capacity block and the dashboard say "edit
   const loth: Computer = { id: 'lothdesktop', online: true, live: 3, midTurn: 3, maxAgents: 6, sandboxes: 3, maxSandboxes: 3, freeSandboxes: 0, memUsedBytes: 63 * GB, memTotalBytes: 64 * GB, editors: 4, maxEditors: 3, editorsDetail: line.replace(/^editors \d+ of \S+: /, '') };
   assert.match(capacityLines([loth]).join('\n'), /editors 4 of 3: 1 interactive, 3 batch; OVER LIMIT/);
   const m = { id: 'lothdesktop', online: true, sandboxRoot: 'D:\\work\\ffsb', maxUnity: 3, sandboxes: [], sessionIds: [] } as unknown as Machine;
-  const [, pc] = fleetOf({ sandboxes: [], sessions: [], machines: [m], machineStats: { lothdesktop: stats } });
+  const [, pc] = fleetOf({ sessions: [], machines: [m], machineStats: { lothdesktop: stats } });
   assert.deepEqual([pc.editors, pc.editorLimit], [4, 3], 'the dashboard counts every Unity process, not only sandbox editors');
 });
 

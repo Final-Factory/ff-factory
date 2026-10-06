@@ -3,20 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseMarker, readStatusFiles, reopenCs, statusDirFor, syncStatusDir, unityMcpServerFor } from './unityMcp.ts';
-import type { Config } from './config.ts';
-
-test('unity bridge: the FFSB marker is found inside the tool result JSON', () => {
-  const wrapped = JSON.stringify([{ type: 'text', text: JSON.stringify({ success: true, data: { result: 'FFSB|playing=0|dirty=|scenes=Assets/A.unity;Assets/B.unity|active=Assets/A.unity' } }) }]);
-  assert.deepEqual(parseMarker(wrapped), { playing: '0', dirty: '', scenes: 'Assets/A.unity;Assets/B.unity', active: 'Assets/A.unity' });
-  assert.equal(parseMarker('nothing here'), undefined);
-});
-
-test('unity bridge: scene paths become C# literals', () => {
-  const cs = reopenCs(['Assets/Scenes/Main.unity', 'Assets/Odd "name".unity'], 'Assets/Scenes/Main.unity');
-  assert.match(cs, /new string\[\] \{ "Assets\/Scenes\/Main.unity", "Assets\/Odd \\"name\\".unity" \}/);
-  assert.match(cs, /GetSceneByPath\("Assets\/Scenes\/Main.unity"\)/);
-});
+import { readStatusFiles, syncStatusDir } from './unityMcp.ts';
 
 /**
  * Where MCP-for-Unity 10 (stdio) connects when its pinned editor is not in `dir`'s status files: the newest
@@ -47,7 +34,6 @@ test("unity MCP: a sandbox's workers only ever find, or fall back to, their own 
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
   const home = path.join(tmp, 'home', '.unity-mcp');
   fs.mkdirSync(home, { recursive: true });
-  const cfg = { dataDir: path.join(tmp, 'data'), unity: { mcpServer: { command: 'uvx', args: ['mcp-for-unity'], env: { X: '1' } } } } as unknown as Config;
   const status = (hash: string, project: string, port: number, mtime: number) => {
     const f = path.join(home, `unity-mcp-status-${hash}.json`);
     // b's editor writes a byte order mark, as some do.
@@ -61,10 +47,9 @@ test("unity MCP: a sandbox's workers only ever find, or fall back to, their own 
   // Before: every worker's server looked in ~/.unity-mcp, so a's pinned calls fell back to b's editor.
   assert.equal(upstreamFallbackPort(home), 6402);
 
-  const srv = unityMcpServerFor(cfg, 'a')!;
-  assert.deepEqual(srv.env, { X: '1', UNITY_MCP_STATUS_DIR: statusDirFor(cfg.dataDir, 'a') });
-  const dirA = srv.env.UNITY_MCP_STATUS_DIR;
-  const dirB = statusDirFor(cfg.dataDir, 'b');
+  // Each sandbox's workers get a status folder of their own (a machine daemon's, machine/unityMcp.ts).
+  const dirA = path.join(tmp, 'data', 'unity-mcp', 'a');
+  const dirB = path.join(tmp, 'data', 'unity-mcp', 'b');
   const sync = (sinceA?: number) => {
     const files = readStatusFiles(home);
     syncStatusDir(dirA, 'F:\\ffsb\\a', sinceA === undefined ? undefined : { since: sinceA }, files);

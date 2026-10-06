@@ -37,11 +37,6 @@ export const SETTABLE_KEYS = [
   'machines.cleanup.staleOutput',
   // How often every Claude account's plan usage is polled, here and by the machines' daemons (the endpoint rate-limits).
   'usagePollMinutes',
-  // How many Unity editors may run at once on this host (each takes ~8-12 GB of RAM).
-  'limits.maxUnity',
-  // How many sandboxes may exist (each holds a worktree and a ~70 GB Library), and live agents on this host.
-  'limits.maxSandboxes',
-  'limits.maxSessions',
   // The address machines and the outside watchdog reach this portal at (the Tailscale Funnel URL).
   'publicUrl',
   // The Claude account the agents run on (claude setup-token): write-only, never shown (server/secrets.ts).
@@ -54,7 +49,6 @@ export const SETTABLE_KEYS = [
   // The dispatcher's own (w464); unset, it follows the orchestrator's (and the system payer's own token).
   'claudeAccounts.dispatcher',
   'claudeAccounts.workers',
-  'claudeAccounts.standing',
   // The file holding the token the "tokenfile" roles run on (w464): a path, checked by reading it; its content is never shown.
   'claudeTokenFile',
   'machines.useHostClaudeEnv',
@@ -85,6 +79,9 @@ export const SETTABLE_KEYS = [
   'orchestrator.compactAtTurnUsd',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
+
+/** Placement names machines only: the portal holds no sandboxes of its own (w510), so "this host" is no place for work. */
+const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
 export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'machines.claudeFromVault']);
@@ -295,8 +292,7 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'claudeAccounts.orchestrator':
     case 'claudeAccounts.dispatcher':
-    case 'claudeAccounts.workers':
-    case 'claudeAccounts.standing': {
+    case 'claudeAccounts.workers': {
       const v = typeof value === 'string' ? value.trim() : value;
       const role = key.slice('claudeAccounts.'.length);
       if (v === 'tokenfile') {
@@ -335,13 +331,6 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (typeof value !== 'string' || !/^https?:\/\/[^/\s]+\/?$/.test(value.trim())) throw new Error("publicUrl is the portal's base URL, e.g. https://<host>.<tailnet>.ts.net");
       return value.trim().replace(/\/+$/, '');
     }
-    case 'limits.maxSandboxes':
-    case 'limits.maxSessions': {
-      const max = key === 'limits.maxSandboxes' ? 8 : 12;
-      const n = Number(value);
-      if (!Number.isInteger(n) || n < 1 || n > max) throw new Error(`${key} is a whole number from 1 to ${max}`);
-      return n;
-    }
     case 'usagePollMinutes': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 5 || n > 240) throw new Error('usagePollMinutes is a whole number of minutes from 5 to 240');
@@ -365,11 +354,6 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     case 'attachments.retentionDays': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 3650) throw new Error('attachments.retentionDays is a whole number of days from 1 to 3650');
-      return n;
-    }
-    case 'limits.maxUnity': {
-      const n = Number(value);
-      if (!Number.isInteger(n) || n < 1 || n > 8) throw new Error('limits.maxUnity is a whole number of editors from 1 to 8');
       return n;
     }
     case 'hostGuard.devDriveVhdx': {
@@ -412,10 +396,10 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return checkReviewers(value, users ?? []);
     case 'placement.prefer': {
       const list = typeof value === 'string' ? value.split(',') : value;
-      if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) throw new Error('placement.prefer is a list of computers, first choice first: machine ids such as "lothdesktop", or "this host" (or one comma-separated string)');
+      if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) throw new Error('placement.prefer is a list of computers, first choice first: machine ids such as "lothdesktop" (or one comma-separated string)');
       const ids = [...new Set(list.map((x) => placeId(x as string)).filter(Boolean))];
-      const bad = ids.find((x) => x !== 'this host' && !MACHINE_KEY.test(x));
-      if (bad) throw new Error(`placement.prefer: "${bad.slice(0, 40)}" is not a machine id (letters, digits, dashes) or "this host"`);
+      const bad = ids.find((x) => !MACHINE_KEY.test(x) || x === 'host');
+      if (bad) throw new Error(`placement.prefer: "${bad.slice(0, 40)}" is not a machine id (letters, digits, dashes)${NO_HOST}`);
       if (ids.length > 12) throw new Error('placement.prefer names at most 12 computers');
       return ids.length ? ids : undefined;
     }
@@ -424,7 +408,7 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       const out: Record<string, string> = {};
       for (const [k, why] of Object.entries(value as Record<string, unknown>)) {
         const id = placeId(k);
-        if (id !== 'this host' && !MACHINE_KEY.test(id)) throw new Error(`placement.avoid: "${k.slice(0, 40)}" is not a machine id or "this host"`);
+        if (!MACHINE_KEY.test(id) || id === 'host') throw new Error(`placement.avoid: "${k.slice(0, 40)}" is not a machine id${NO_HOST}`);
         if (typeof why !== 'string' || !oneLine(why) || oneLine(why).length > 200) throw new Error(`placement.avoid.${id}: say why in one line of at most 200 characters`);
         out[id] = oneLine(why);
       }
@@ -534,9 +518,6 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'voice.vocabulary') cfg.voice.vocabulary = (v as string[] | undefined) ?? [];
   else if (key === 'voice.ttsVoice') cfg.voice.ttsVoice = (v as string | undefined) ?? VOICE_DEFAULTS.ttsVoice;
   else if (key === 'hostGuard.devDriveVhdx') cfg.hostGuard.devDriveVhdx = (v as string | undefined) ?? '';
-  else if (key === 'limits.maxUnity') cfg.limits.maxUnity = (v as number | undefined) ?? 3;
-  else if (key === 'limits.maxSandboxes') cfg.limits.maxSandboxes = (v as number | undefined) ?? 4;
-  else if (key === 'limits.maxSessions') cfg.limits.maxSessions = (v as number | undefined) ?? 6;
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
   else if (key === 'claudeTokenFile') cfg.claudeTokenFile = v as string | undefined;
   else if (key === 'attachments.maxMB' || key === 'attachments.retentionDays') {
@@ -559,7 +540,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (Object.keys(env).length) all[opts.user!] = env;
     else delete all[opts.user!];
     cfg.userClaudeEnv = all;
-  } else if (key === 'claudeAccounts.orchestrator' || key === 'claudeAccounts.dispatcher' || key === 'claudeAccounts.workers' || key === 'claudeAccounts.standing') {
+  } else if (key === 'claudeAccounts.orchestrator' || key === 'claudeAccounts.dispatcher' || key === 'claudeAccounts.workers') {
     const accounts = { ...cfg.claudeAccounts };
     const role = key.slice('claudeAccounts.'.length) as HostRole;
     if (v === undefined) delete accounts[role];

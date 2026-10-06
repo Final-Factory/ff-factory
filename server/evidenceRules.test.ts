@@ -5,7 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
-import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
 import { Agents, EVIDENCE_RULES, MERGE_RULES, REPORT_LABELS, WORKER_UPDATE_RELAY } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -45,9 +44,8 @@ function world(t: { after: (fn: () => void | Promise<void>) => void }) {
   } as unknown as Config;
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
-  const sandboxes = new SandboxManager(cfg, store);
   const machines = new MachineManager(cfg, store, sessions);
-  const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
   agents.boot();
   t.after(async () => {
     agents.orchestrators.close();
@@ -87,17 +85,15 @@ test('the evidence rule: the worker settles its own guesses; a person is asked f
   assert.match(REPORT_LABELS, /an orchestrator relays only the start of a long report/);
 });
 
-test("every worker's brief carries it: a sandbox on this host, a machine's main clone, a sandbox on a machine", (t) => {
+test("every worker's brief carries it: a machine's main clone, a sandbox on a machine (w510: the portal has no workers of its own)", (t) => {
   const { agents } = world(t);
   const briefs = agents as unknown as {
-    workerBrief: (sb: unknown) => string;
     machineBrief: (m: unknown) => string;
     machineSandboxBrief: (m: unknown, sb: unknown) => string;
   };
   const sb = { id: 'alpha', path: '/sb/alpha', branch: 'fix-x', purpose: 'a fix', unity: { state: 'stopped' } };
   const mac = { id: 'm5', repoPath: '/Users/dev/FinalFactory', platform: 'darwin', sandboxRoot: '/Users/dev/ffsb' };
   for (const [name, brief] of [
-    ['sandbox', briefs.workerBrief(sb)],
     ['machine', briefs.machineBrief(mac)],
     ['machine sandbox', briefs.machineSandboxBrief(mac, sb)],
   ] as const) {

@@ -16,14 +16,19 @@ Every agent the portal starts runs on one of three kinds of Claude credential:
 |---|---|---|---|
 | The orchestrator | `claudeAccounts.orchestrator` | `"token"` or `"login"` (this host's) | `"token"` |
 | The dispatcher (w464) | `claudeAccounts.dispatcher` | same; once set it also overrides the system payer's own token in `userClaudeEnv` | unset: the system payer's own token if any, else `claudeAccounts.orchestrator`'s |
-| Sandbox workers on this host | `claudeAccounts.workers` | same | `"token"` |
-| Standing agents on this host | `claudeAccounts.standing` | same | `"token"` |
 | Workers and standing agents on a Mac | `machines.useHostClaudeEnv` | `true` (host token) or `false` (the Mac's login); global, or per machine | `true` |
-| Workers on this host's own daemon ([beast-machine.md](beast-machine.md)) | `claudeAccounts.workers`, unless `machines.useHostClaudeEnv` names the machine | as for sandbox workers here; "login" is this host's login, with the rest of `claudeEnv` (e.g. `CLAUDE_CONFIG_DIR`) kept | `"token"` |
+| Workers and standing agents on this host's own daemon ([beast-machine.md](beast-machine.md)) | `claudeAccounts.workers`, unless `machines.useHostClaudeEnv` names the machine | `"token"` or `"login"`; "login" is this host's login, with the rest of `claudeEnv` (e.g. `CLAUDE_CONFIG_DIR`) kept | `"token"` |
+
+The portal runs only the orchestrators and the dispatcher (w510, 2026-10-06), so those are the only agents whose
+account it picks itself; every worker and standing agent is on a machine. Until w510 `claudeAccounts.workers` also set
+the account of the portal's own sandbox workers, and `claudeAccounts.standing` that of the standing agents it ran. The
+`standing` key is retired: a config that sets it loads, names it once at startup and in `system_status`, and ignores it
+(`RETIRED_CONFIG_KEYS`, `server/config.ts`); `set_app_config` no longer takes it. A standing agent on a machine follows
+that machine's row above.
 
 ### The token file (w464)
 
-`claudeAccounts.orchestrator`, `.dispatcher` and `.standing` also take `"tokenfile"`: those roles run on the
+`claudeAccounts.orchestrator` and `.dispatcher` also take `"tokenfile"`: those roles run on the
 long-lived OAuth token (`sk-ant-oat01-…`, from `claude setup-token`) in the file config `claudeTokenFile` names,
 e.g. `/srv/fff/secrets/claude-oauth-token` (docs/portal-on-ffbox-host.md, change 18). Workers never do: a config
 setting `claudeAccounts.workers` to it is refused at load, and `set_app_config` refuses it.
@@ -31,8 +36,8 @@ setting `claudeAccounts.workers` to it is refused at load, and `set_app_config` 
 - **Read at each session start** (`readTokenFile`, `server/secrets.ts`) and given to that process alone as
   `CLAUDE_CODE_OAUTH_TOKEN`, with every other Claude credential removed first (the server's own, `claudeEnv`'s token,
   an API key). A new token in the file applies to the next session, with no restart.
-- **It wins over a person's own token**: a person's orchestrator and a standing run for a person with a token in
-  `userClaudeEnv` still run on the file when their role is set to it.
+- **It wins over a person's own token**: a person's orchestrator with a token in `userClaudeEnv` still runs on the
+  file when its role is set to it.
 - **Never stored or sent anywhere else**: not in `claudeEnv` (so never in a machine's launch spec), not in
   `config.json` (which holds the path), never in an answer or an error (only its last four characters, "token file
   …abcd"). A file that cannot be read, or holds anything but one OAuth token, stops the session start with the reason
@@ -45,7 +50,8 @@ setting `claudeAccounts.workers` to it is refused at load, and `set_app_config` 
 `machines.useHostClaudeEnv` takes `true`/`false` or an object with one entry per machine id, plus `"*"` for
 the machines it does not name: `{ "m3": false, "m5": false }`, or `{ "*": false, "m5": true }`.
 
-All four are in `set_app_config`'s allowlist, so the orchestrator can change them when the user asks:
+`claudeAccounts.orchestrator`, `.dispatcher`, `.workers` and `machines.useHostClaudeEnv` are in `set_app_config`'s
+allowlist, so the orchestrator can change them when the user asks:
 
 ```
 set_app_config claudeAccounts.orchestrator "login"
@@ -80,13 +86,14 @@ stored login. This is the same environment the usage tracker uses to poll the ho
 (`UsageTracker.refresh`), so the account the meters show as "<host> login" is the one those agents run on.
 The other `claudeEnv` variables, such as `CLAUDE_CONFIG_DIR`, stay.
 
-- Orchestrator and sandbox workers: `hostProcessEnv(cfg, role)` (`server/secrets.ts`), used by
-  `orchestratorOptions` and `workerOptions` (`server/agents.ts`).
-- Standing agents on this host: `hostClaudeEnv(cfg, 'standing')` plus `LaunchSpec.login` (`server/standing.ts`,
-  `place`); `buildOptions` (`server/launch.ts`) drops the credentials of the environment it starts from.
-- Agents on a Mac: the portal sends the host token in the launch spec only when the machine takes it
-  (`hostClaudeEnvFor`), and sets `LaunchSpec.login` when it does not (`machineUsesLogin`), so a token left in
-  the daemon's own environment cannot stand in for the Mac's login either.
+- The orchestrators and the dispatcher: `hostProcessEnv(cfg, role)` (`server/secrets.ts`), used by
+  `Agents.orchestratorEnv` (`server/agents.ts`); `buildOptions` (`server/launch.ts`) drops the credentials of the
+  environment it starts from.
+- Workers and standing agents on a machine (a Mac, a Windows PC, this host's own daemon): the portal sends the host
+  token in the launch spec only when the machine takes it (`hostClaudeEnvFor`; for this host's own daemon that is
+  `claudeAccounts.workers`, `usesHostClaudeEnv`), and sets `LaunchSpec.login` when it does not
+  (`machineUsesLogin`; `server/agents.ts`, and `place` in `server/standing.ts`), so a token left in the daemon's own
+  environment cannot stand in for the machine's login either.
 - A person's own token is laid over all of these (`claudeEnvFor`, `server/identity.ts`).
 
 ## claude.ai connectors (w516)
@@ -138,7 +145,7 @@ Each session maps to an account source key (`sessionSource`, `server/usage.ts`):
    role is set to `"login"`, else the host token.
 
 The usage meters (`buildAccounts`) list which host roles share the token and which the login when they are
-split, for example "the agents' token on BEAST (workers, standing agents)" and "BEAST login (the
+split, for example "the agents' token on BEAST (the orchestrator, workers)" and "BEAST login (the
 orchestrator)". `system_status` starts its account section with one line naming every role's account, the
 account of each machine's agents, and the people with their own token. It adds a warning when a role set
 to the login cannot use it.

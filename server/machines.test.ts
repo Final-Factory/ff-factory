@@ -242,7 +242,6 @@ test('machine: a daemon connects, runs a session, and everything it records land
   assert.equal(s.info.status, 'idle');
   assert.equal(s.info.costUsd, 0.01);
   assert.equal(s.live, true, 'the process stays up between turns, like a local worker');
-  assert.equal(sessions.liveAgents(), 0, "a machine's agents do not count toward this host's limit");
   assert.equal(mm.liveCount('mx'), 1);
 
   // The machine's own limit (1) counts mid-turn agents only (w384): the first is idle, so a second starts at once.

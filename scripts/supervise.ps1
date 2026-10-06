@@ -6,32 +6,19 @@ Set-Location $AppRoot
 New-Item -ItemType Directory -Force data | Out-Null
 $log = Join-Path $DataDir 'supervisor.log'
 
-# Never supervise elevated: node, every agent shell and every Unity editor would inherit admin rights
-# (and an elevated editor stops on Unity's administrator dialog). Hand off to the Limited task, which
-# starts a fresh supervisor, unless restart.ps1 already tried that and fell back to us.
+# Never supervise elevated: node and every orchestrator shell would inherit admin rights. Hand off to the
+# Limited task, which starts a fresh supervisor, unless restart.ps1 already tried that and fell back to us.
+# (The sandbox drive is no concern here since w510: the portal holds no sandboxes, and BEAST's own daemon's guard
+# attaches its Dev Drive.)
 if ((Test-Elevated) -and !$env:FFSB_NO_DEELEVATE -and (Get-LimitedTask)) {
   Write-AppLog "supervisor started elevated (pid $PID); handing off to the Limited $TaskName task" | Out-Null
   schtasks.exe /run /tn $TaskName | Out-Null
   if ($LASTEXITCODE -eq 0) { exit 0 }
-  Write-AppLog "schtasks /run /tn $TaskName failed (exit $LASTEXITCODE); supervising elevated, so the server will refuse to start Unity" | Out-Null
+  Write-AppLog "schtasks /run /tn $TaskName failed (exit $LASTEXITCODE); supervising elevated" | Out-Null
   $env:FFSB_NO_DEELEVATE = '1'
 }
 
 $PID | Out-File (Join-Path $DataDir 'supervisor.pid') -Encoding ascii
-# At boot the sandbox Dev Drive is attached by a startup task; don't start the server before it exists.
-try {
-  $sbRoot = (Get-Content (Join-Path $AppRoot 'config.json') -Raw | ConvertFrom-Json).sandboxRoot
-  $drive = Split-Path -Qualifier $sbRoot
-  if (!(Test-Path "$drive\")) {
-    # After a reboot or a power cut nothing may have attached it yet: ask the privileged mount helper
-    # (docs/self-recovery.md) rather than only waiting. It also runs at boot by itself.
-    schtasks.exe /run /tn ffsb-helper-mount 2>&1 | Out-Null
-    "$(Get-Date -Format s) $drive missing at start; started ffsb-helper-mount (exit $LASTEXITCODE)" | Out-File $log -Append
-  }
-  for ($i = 0; $i -lt 150 -and !(Test-Path "$drive\"); $i++) { Start-Sleep 2 }
-  if (!(Test-Path "$drive\")) { "$(Get-Date -Format s) WARNING: $drive not available after 5 min; starting anyway" | Out-File $log -Append }
-} catch { }
-
 # request_app_update and restart.ps1 -Update leave data\update.request; the update runs here, between
 # server runs, because npm ci replaces the node_modules the server runs from. The result goes to
 # data\update.result.json for the next server's restart summary.

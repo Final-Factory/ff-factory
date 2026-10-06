@@ -6,7 +6,7 @@
 //   node web/perf/bench.ts --cpu 4 --idle 30 --memory 10  # 4x slower CPU, 30 s idle, a 10-minute memory run
 //   MOCK_STATE_FILE=… MOCK_TRANSCRIPT_FILE=… MOCK_WORK_FILE=… node web/perf/bench.ts   # a real portal's data
 //   node web/perf/bench.ts --json out.json --dist other/dist   # write the numbers; measure another build
-//   node web/perf/bench.ts --route '#/sandbox/agent-mcp'  # the chat beside the sandbox holding most past agents
+//   node web/perf/bench.ts --route '#/machine/beast/sandbox/agent-mcp'  # the chat beside the sandbox holding most past agents
 //
 // What it reports:
 //   typing   each key typed into the orchestrator's message box: `work` from the keydown to the first task after
@@ -40,7 +40,7 @@ const LIVE = opt('live', '4');
 const PORT = Number(opt('port', '8799'));
 const DIST = opt('dist', path.join(HERE, '..', 'dist'));
 const JSON_OUT = opt('json', '');
-// The page to measure on: '' (the orchestrator), or e.g. '#/sandbox/agent-mcp' (on a wide screen the orchestrator's
+// The page to measure on: '' (the orchestrator), or e.g. '#/machine/beast/sandbox/agent-mcp' (on a wide screen the orchestrator's
 // chat beside a sandbox with thousands of past agents).
 const ROUTE = opt('route', '');
 // --check: exit 1 when a budget below is broken (CI runs it). Counts, not milliseconds, where possible: they do not
