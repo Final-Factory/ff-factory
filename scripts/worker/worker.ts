@@ -783,7 +783,6 @@ export async function check(root: string, m?: Manifest): Promise<CheckItem[]> {
       `$ErrorActionPreference = 'Continue'
 $t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
 "task=$([bool]$t)"
-"taskKey=$(Test-Path ('HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache\\Tree\\' + ${win.psq(service)}))"
 "slotRules=$(@(Get-NetFirewallRule -Group ${win.psq(SLOT_GROUP)} -ErrorAction SilentlyContinue).Count)"
 "unityRules=$(@(Get-NetFirewallRule -Group ${win.psq(UNITY_GROUP)} -ErrorAction SilentlyContinue).Count)"
 $root = ${win.psq(l.root)}
@@ -805,7 +804,6 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     const group = (g: string, n: string) => ({ what: `firewall group "${g}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
-      { what: `the task's registry entry (HKLM\\...\\Schedule\\TaskCache\\Tree\\${service})`, present: get('taskKey') === 'True' },
       group(SLOT_GROUP, get('slotRules')),
       group(UNITY_GROUP, get('unityRules')),
       { what: `firewall rules naming a path in the root`, present: Number(get('rootRules')) > 0, detail: `${get('rootRules')} rule(s)` },
