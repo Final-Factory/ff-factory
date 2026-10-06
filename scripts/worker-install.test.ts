@@ -11,7 +11,7 @@ import { macControlScript, macLabel, macReloadLines, plist } from '../server/mac
 import { installScript, taskName, uninstallScript } from '../server/machineDeployWin.ts';
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
-import { claudeSlug, plan, rehome, sameVolume, type OldLayout } from './worker/migrate.ts';
+import { carryExclude, claudeSlug, plan, rehome, sameVolume, type OldLayout } from './worker/migrate.ts';
 import { cloneRepo, credentialId, daemonJson, gitVersion, layoutOf, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 
@@ -217,13 +217,21 @@ test('worker migration: a sandbox moves to the root\'s clone with its commits, s
     git(oldSb, 'add', 's.txt');
     fs.appendFileSync(path.join(oldSb, 'README.md'), 'unstaged\n');
     fs.writeFileSync(path.join(oldSb, 'u.txt'), 'untracked\n');
+    // An agent's scratch folder the old clone's info/exclude hides (pr-fix's .w397 on LothDesktop, w513).
+    fs.mkdirSync(path.join(clone, '.git', 'info'), { recursive: true });
+    fs.appendFileSync(path.join(clone, '.git', 'info', 'exclude'), '\n.w9/\n');
+    fs.mkdirSync(path.join(oldSb, '.w9'));
+    fs.writeFileSync(path.join(oldSb, '.w9', 'scratch.bin'), 'x');
     const before = git(oldSb, 'status', '--porcelain=v1');
+    assert.doesNotMatch(before, /\.w9/);
     const head = git(oldSb, 'rev-parse', 'HEAD').trim();
 
     const l = layoutOf(path.join(base, 'root'));
     git(base, 'clone', '-q', '--bare', origin, l.repo);
     git(l.repo, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
     fs.mkdirSync(l.sandboxes, { recursive: true });
+    assert.equal(carryExclude(path.join(clone, '.git'), l.repo), 1);
+    assert.equal(carryExclude(path.join(clone, '.git'), l.repo), 0, 'carried once');
     const to = path.join(l.sandboxes, 'sb1');
     const snap = {
       head,
