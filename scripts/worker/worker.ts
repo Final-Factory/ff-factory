@@ -148,6 +148,12 @@ export interface InstallOptions {
   noCleanup?: boolean;
   /** Its own Unity slots mailbox: only a test install beside another daemon (the default is the one every script finds). */
   unitySlotsDir?: string;
+  /**
+   * Windows: run elevated (an administrator's ssh session, as the portal's own deploy does) and give everything this run
+   * makes to this user (`icacls /setowner`), so the daemon's non-elevated git does not refuse the clone as owned by
+   * Administrators. Without it, an elevated run is refused.
+   */
+  owner?: string;
   /** daemon.json settings the old daemon had (a migration: its host guard, protected paths, MCP server, limits). */
   carry?: Record<string, unknown>;
   /** A migration replaces the old daemon's service on purpose (worker.ts migrate). */
@@ -292,10 +298,10 @@ export interface Facts {
 }
 
 /** Every reason the install cannot go ahead, from facts gathered without changing anything. Exported for tests. */
-export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'slots' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'>): string[] {
+export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'slots' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
   const p: string[] = [];
   if (f.platform !== 'win32' && f.platform !== 'darwin') p.push(`this tool installs on Windows and macOS, not ${f.platform}`);
-  if (f.platform === 'win32' && f.elevated) p.push('run it from a normal (not administrator) PowerShell: files an elevated shell makes belong to Administrators, and git then refuses the clone; the one step that needs admin rights (the firewall rules) asks for them itself');
+  if (f.platform === 'win32' && f.elevated && !o.owner) p.push('run it from a normal (not administrator) PowerShell: files an elevated shell makes belong to Administrators, and git then refuses the clone; the one step that needs admin rights (the firewall rules) asks for them itself');
   if (!nodeSupport(f.nodeVersion.replace(/^v/, '')).ok) p.push(`node ${MIN_NODE.join('.')} or newer is needed (this is ${f.nodeVersion})`);
   if (!f.git) p.push(`git is missing: install git ${MIN_GIT.join('.')} or newer (${f.platform === 'win32' ? 'winget install --id Git.Git -e' : 'brew install git'})`);
   else if (!versionAtLeast(f.git, MIN_GIT)) p.push(`git ${f.git.join('.')} is too old: ${MIN_GIT.join('.')} or newer is needed for relative worktree paths (${f.platform === 'win32' ? 'winget upgrade --id Git.Git -e' : 'brew upgrade git'})`);
@@ -539,6 +545,18 @@ export function unityEditors(home = os.homedir()): string[] {
   return [...out].filter((p) => (isWin ? /unity\.exe$/i.test(p) : true));
 }
 
+/** Give paths made by an elevated run to `owner` (Windows; `recursive`: every file under them). Exported for migrate.ts. */
+export async function giveTo(owner: string, paths: string[], recursive = true) {
+  if (!isWin) return;
+  for (const p of paths.filter((x) => fs.existsSync(x))) await must(`giving ${p} to ${owner}`, 'icacls', [p, '/setowner', owner, ...(recursive ? ['/T'] : []), '/C', '/Q']);
+}
+
+/** Everything in the root to `owner`, but the sandboxes' own trees: a sandbox moved in by a rename keeps its owner. */
+async function giveRoot(l: Layout, owner: string) {
+  await giveTo(owner, [l.root, l.sandboxes], false);
+  await giveTo(owner, fs.readdirSync(l.root).filter((e) => e !== 'sandboxes').map((e) => path.join(l.root, e)));
+}
+
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */
 async function firewall(action: 'add' | 'remove', l: Layout, slots: number, editors: string[]): Promise<string> {
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
@@ -610,6 +628,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   // 3. The game repo, bare, and the installer's own checkout.
   await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees);
   await syncSource(l, from);
+  if (o.owner) await giveRoot(l, o.owner);
 
   if (phase === 'prepare') return true;
 
@@ -641,6 +660,8 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     noteOutside(m, { kind: 'file', name: cfg, note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
   }
+
+  if (o.owner) await giveRoot(l, o.owner);
 
   // 6. The portal sees it.
   const p = new Progress();
@@ -925,6 +946,7 @@ async function readCredential(): Promise<string> {
 const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
             [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
+            [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
             [--unity-editor-root <dir>] [--unity-path <exe>]
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
@@ -952,6 +974,7 @@ export async function main(argv = process.argv.slice(2)) {
       noCleanup: flags.has('no-cleanup'),
       absoluteWorktrees: flags.has('absolute-worktrees'),
       unitySlotsDir: opts['unity-slots-dir'],
+      owner: opts.owner,
       unityEditorRoot: opts['unity-editor-root'],
       unityPath: opts['unity-path'],
     });
@@ -982,6 +1005,7 @@ export async function main(argv = process.argv.slice(2)) {
           firewall: !flags.has('no-firewall'),
           noCleanup: flags.has('no-cleanup'),
           absoluteWorktrees: flags.has('absolute-worktrees'),
+          owner: opts.owner,
         },
       });
   } else if (cmd === 'check') {

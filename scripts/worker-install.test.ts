@@ -47,6 +47,7 @@ test('worker install: every missing prerequisite is named before anything change
   assert.deepEqual(preflightProblems(GOOD, OPTS), []);
   const bad = (f: Partial<Facts>, o: Partial<typeof OPTS> = {}) => preflightProblems({ ...GOOD, ...f }, { ...OPTS, ...o }).join('\n');
   assert.match(bad({ elevated: true }), /not administrator/);
+  assert.deepEqual(preflightProblems({ ...GOOD, elevated: true }, { ...OPTS, owner: 'Lothsahn' }), [], 'an elevated run that gives its files to the user (--owner)');
   assert.match(bad({ git: [2, 45] }), /git 2\.45 is too old: 2\.48 or newer.*winget upgrade --id Git\.Git/);
   assert.match(bad({ git: undefined }), /git is missing.*winget install --id Git\.Git/);
   assert.match(bad({ platform: 'darwin', git: [2, 46] }), /brew upgrade git/);
