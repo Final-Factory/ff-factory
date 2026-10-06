@@ -34,7 +34,7 @@ load_conf "$CONF"
 disk=$(vm_disk_path)
 list() {
   if [ "$VM_DISK_MODE" = zvol ]; then zfs list -H -t snapshot -o name,creation -s creation "$VM_ZVOL_PARENT/disk0" | sed 's/^[^@]*@//'
-  else qemu-img snapshot -l "$disk" | awk 'NR > 2 {print $2, $4, $5}'; fi
+  else qemu-img snapshot -l -U "$disk" | awk 'NR > 2 {print $2, $4, $5}'; fi
 }
 if [ "$LIST" = 1 ] || [ -z "$SNAP" ]; then list; exit 0; fi
 list | awk '{print $1}' | matches -xF "$SNAP" || die "no snapshot $SNAP (--list)"

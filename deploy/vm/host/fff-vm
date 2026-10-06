@@ -156,7 +156,8 @@ snapshot_list() {
   if [ "$VM_DISK_MODE" = zvol ]; then
     zfs list -H -t snapshot -o name -s creation "$VM_ZVOL_PARENT/disk0" 2>/dev/null | sed 's/.*@//'
   else
-    qemu-img snapshot -l "$(vm_disk_path)" 2>/dev/null | awk 'NR > 2 {print $2}'
+    # -U: the running VM holds the image open; listing needs force-share.
+    qemu-img snapshot -l -U "$(vm_disk_path)" 2>/dev/null | awk 'NR > 2 {print $2}'
   fi
 }
 snapshot_prune() {
