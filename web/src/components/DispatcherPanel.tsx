@@ -506,6 +506,13 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
               <span className={`tone-${tone}`}>{statusText(w)}</span>
             )}
             {w.mergedInto ? ` into ${w.mergedInto}` : ''} · <span className="mono">{w.id}</span> · {s ? sourceLabel(s) : names(w)}
+            {w.delegation ? (
+              <span data-testid={`work-delegation-${w.id}`}>
+                {' '}
+                · from {w.delegation.agentName}
+                {w.delegation.auto ? ' (auto-approved)' : ''}
+              </span>
+            ) : null}
             {isMine(w, app.me?.userId) ? <span className="tone-blue" data-testid="work-yours"> · yours</span> : null}
             {w.triage && w.triage.class !== 'needs-human' ? <span> · {triageLabel[w.triage.class]}</span> : null}
             {w.priority === 'urgent' || w.priority === 'high' ? <span className="tone-amber"> · {w.priority}</span> : null}

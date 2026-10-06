@@ -63,6 +63,21 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **Standing agents' delegations are ordinary ledger requests** (w527, Ben: "please fix the delegations in ff factory
+  so you can queue up regression fixes, ideally I would not have to even click anything though").
+  - **Filed, not placed:** an approved delegation is filed for the agent's owner with its task verbatim, and the
+    dispatcher queues, places and starts it like any request. The portal no longer looks for an `unused` sandbox
+    itself (it only ever saw its own host's and BEAST's, never other machines' sandboxes), and nothing expires.
+  - **No clicks for routine ones:** auto-approve files them at once within its per-run and per-day limits; the
+    nightly regression sentry has it on by default. Spending money, publishing, settings, releases and master always
+    wait for a person.
+  - **For the rest:** Approve queues it without a free slot; Start now makes its request urgent; a person's own
+    orchestrator can approve in their own words.
+  - **Shown like any request:** `list_work`, the Requests tab ("from <agent>"), `my_delegations`; the same request
+    again is that request. Today's four sentry requests link to w524, which started them by hand.
+
+- **CI's Windows unit tests run on two runners** (w521, asked by Lothsahn). The same test files: the three slowest on
+  one (with the typecheck, the web build and the named machine-sandbox step), every other file on the other.
 - **`fffctl update` waits until the new release is verified, and says what is happening** (w517, Lothsahn: "sudo
   fffctl update just says it scheduled it. How do I know when it's done? I'd prefer it be a blocking operation").
   - **Stages shown:** the build (or "already up to date"), the drain (agents still busy, time left), the restart, the

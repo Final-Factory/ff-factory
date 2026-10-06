@@ -96,7 +96,8 @@ export function sandboxGuard(opts: {
       const reason =
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity, ownMachine: !!opts.ownCheckout }) ??
         (opts.ownCheckout ? checkOwnCheckout(cmd, input.cwd || opts.sandboxPath, opts.ownCheckout.isClean ?? gitIsClean, ownBackup(opts.sandboxPath, opts.ownCheckout)) : undefined) ??
-        (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined);
+        (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
+        checkPlayerLaunch(cmd);
       if (reason) return deny(reason);
       const flat = cmd.replace(/\\/g, '/').toLowerCase();
       for (const s of spellings) {
@@ -136,6 +137,44 @@ export function sandboxGuard(opts: {
 }
 
 const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
+
+/** A built Final Factory player (or server) binary: finalfactory.exe, a finalfactory .app bundle, or the binary inside one. */
+const PLAYER_BINARY = /(?:^|[\\/])finalfactory(?:\.exe|\.app(?:[\\/]contents[\\/]macos[\\/]finalfactory)?)$/i;
+/** A player slot (scripts/nightly/player_slots.py): <slot root>/slotK/player/finalfactory.exe or .app. */
+const SLOT_PLAYER = /[\\/]slot\d+[\\/]player[\\/]finalfactory(?:\.exe|\.app)(?:[\\/]|$)/i;
+/** Words that start the next word as a program: a call operator, a launcher, or an environment prefix. */
+const LAUNCHERS = new Set(['&', '.', 'exec', 'nohup', 'time', 'env', 'start', 'start-process', 'saps', 'open', 'invoke-item', 'ii', 'cmd', 'cmd.exe', '/c', '/k']);
+
+/**
+ * w513 (lothsahn): a built player runs only from a player slot, never from a build, sandbox, branch, session or temp
+ * folder: Windows Firewall keys its rules on the exe's path, so every new path prompts and stalls an unattended run,
+ * and BEAST had collected rules for 163 such paths (docs/worker-root.md 2.5). A shell command that starts
+ * finalfactory.exe (or a finalfactory .app) by a path outside a slot is refused, with the slot launcher to use
+ * instead. Only the program position of a simple command counts (after a call operator, `start`, `Start-Process`,
+ * `open`, `nohup`, `env` and VAR=value prefixes): copying, listing or hashing a build is fine. Exported for tests.
+ */
+export function checkPlayerLaunch(cmd: string): string | undefined {
+  for (const seg of cmd.split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
+    const words = seg.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+    for (const word of words) {
+      const w = word.replace(/^["']|["']$/g, '');
+      const lower = w.toLowerCase();
+      if (LAUNCHERS.has(lower) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || /^-/.test(w) || w === '""' || w === '') continue;
+      // The program word: a player outside a slot is refused; anything else ends this simple command.
+      if (PLAYER_BINARY.test(w.replace(/[\\/]+$/, '')) && !SLOT_PLAYER.test(w + '/')) {
+        return (
+          `Refused: ${w} would start a built player outside a player slot. Players run only from the fixed slot paths ` +
+          '(<slot root>/slotK/player/), which Windows Firewall allows once per machine; any other path raises the firewall ' +
+          'prompt and stalls the run. Start it with `python scripts/nightly/player_slots.py launch <exe or build folder> -- <args>` ' +
+          '(`--detach` returns at once), `"${FF_LAUNCH[@]}" <exe> -- <args>` in bash after sourcing scripts/nightly/player_launch.sh, ' +
+          'or slot_path() in Python.'
+        );
+      }
+      break;
+    }
+  }
+  return undefined;
+}
 
 /** Whether `dir`'s work tree has no changes. Unknown (not a repo, git missing) counts as not clean. */
 export const gitIsClean = (dir: string): boolean => {

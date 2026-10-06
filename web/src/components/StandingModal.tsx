@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import type { AppState, AutoApprove, EffortLevel, StandingAgent, StandingToolGroup, StandingTrigger } from '../../../shared/types';
+import type { AppState, EffortLevel, StandingAgent, StandingToolGroup, StandingTrigger } from '../../../shared/types';
 import { EFFORT_LEVELS, STANDING_TOOL_GROUPS } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, upsertStanding } from '../store';
@@ -33,9 +33,6 @@ export function StandingAgentModal({ app, agent, onClose }: { app: AppState; age
   const [autoDay, setAutoDay] = useState(String(aa?.maxPerDay ?? 3));
   const [autoModel, setAutoModel] = useState(aa?.model ?? (app.config.models.includes('opus') ? 'opus' : app.config.defaultModel));
   const [autoEffort, setAutoEffort] = useState<EffortLevel>(aa?.effort ?? 'high');
-  const [autoTargets, setAutoTargets] = useState<AutoApprove['targets']>(aa?.targets ?? 'sandboxes-then-machines');
-  const [autoExpiry, setAutoExpiry] = useState(String(aa?.expiryHours ?? 8));
-  const [autoExclude, setAutoExclude] = useState((aa?.exclude ?? ['mp-r2']).join(', '));
   const [busy, setBusy] = useState(false);
 
   const valid =
@@ -65,9 +62,6 @@ export function StandingAgentModal({ app, agent, onClose }: { app: AppState; age
               maxPerDay: Number(autoDay),
               model: autoModel,
               effort: autoEffort,
-              targets: autoTargets,
-              expiryHours: Number(autoExpiry),
-              exclude: autoExclude.split(/[\s,]+/).filter(Boolean),
             },
           }
         : {}),
@@ -212,12 +206,12 @@ export function StandingAgentModal({ app, agent, onClose }: { app: AppState; age
               <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
               <span>
                 Auto-approve its delegation requests{' '}
-                <small className="dim">start workers without asking you, within these limits; they work on a branch and open PRs into develop, never merge</small>
+                <small className="dim">file them in the dispatcher's queue without asking you, within these limits; spending, publishing, settings and releases still wait for a person</small>
               </span>
             </label>
             {auto && (
               <div className="auto-box">
-                <div className="field-row field-row-3">
+                <div className="field-row">
                   <label className="field">
                     <span>Per run</span>
                     <input className="input mono" type="number" min={1} max={20} value={autoRun} onChange={(e) => setAutoRun(e.target.value)} />
@@ -226,14 +220,10 @@ export function StandingAgentModal({ app, agent, onClose }: { app: AppState; age
                     <span>Per day</span>
                     <input className="input mono" type="number" min={1} max={20} value={autoDay} onChange={(e) => setAutoDay(e.target.value)} />
                   </label>
-                  <label className="field">
-                    <span>Give up after (h)</span>
-                    <input className="input mono" type="number" min={1} max={48} value={autoExpiry} onChange={(e) => setAutoExpiry(e.target.value)} />
-                  </label>
                 </div>
-                <div className="field-row field-row-3">
+                <div className="field-row">
                   <label className="field">
-                    <span>Worker model</span>
+                    <span>Suggested model</span>
                     <select className="input" value={autoModel} onChange={(e) => setAutoModel(e.target.value)}>
                       {models.map((m) => (
                         <option key={m} value={m}>
@@ -252,20 +242,8 @@ export function StandingAgentModal({ app, agent, onClose }: { app: AppState; age
                       ))}
                     </select>
                   </label>
-                  <label className="field">
-                    <span>Where</span>
-                    <select className="input" value={autoTargets} onChange={(e) => setAutoTargets(e.target.value as AutoApprove['targets'])}>
-                      <option value="sandboxes-then-machines">Unused sandboxes, then idle machines</option>
-                      <option value="sandboxes">Unused sandboxes only</option>
-                      <option value="machines">Idle machines only</option>
-                    </select>
-                  </label>
                 </div>
-                <label className="field">
-                  <span>Never use</span>
-                  <input className="input mono" value={autoExclude} onChange={(e) => setAutoExclude(e.target.value)} placeholder="mp-r2" />
-                  <small className="dim">Only sandboxes labelled "unused" (and machines labelled "unused" with no agents and a clean tree) are ever used.</small>
-                </label>
+                <small className="dim">The dispatcher places the work wherever there is room and decides the model; nothing expires while it waits in the queue.</small>
               </div>
             )}
           </div>

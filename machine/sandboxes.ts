@@ -486,7 +486,9 @@ export class SandboxPool {
         return p;
       }
     };
-    if (!samePath(real(common.stdout.trim()), real(path.join(this.o.repoPath, '.git')))) throw new Error(`${req.path} is a worktree of ${common.stdout.trim()}, not of this machine's main clone ${this.o.repoPath}`);
+    // A worker root's clone is bare (w513): its git folder is the clone itself.
+    const own = [path.join(this.o.repoPath, '.git'), this.o.repoPath].map(real);
+    if (!own.some((p) => samePath(real(common.stdout.trim()), p))) throw new Error(`${req.path} is a worktree of ${common.stdout.trim()}, not of this machine's main clone ${this.o.repoPath}`);
     const head = await this.d.git(['-C', req.path, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
     const branch = head.code === 0 && head.stdout.trim() ? head.stdout.trim() : req.branch;
     if (this.recs.has(id)) throw new Error(`sandbox "${id}" already exists on this machine`); // raced another adopt

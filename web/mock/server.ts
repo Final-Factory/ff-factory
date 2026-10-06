@@ -439,10 +439,11 @@ const server = http.createServer(async (req, res) => {
     return json(200, mc);
   }
   if ((r = m(/^\/api\/machines\/([^/]+)\/redeploy$/))) return json(200, state.machines.find((x) => x.id === r![1]));
-  if ((r = m(/^\/api\/delegations\/([^/]+)\/(approve|reject)$/))) {
+  if ((r = m(/^\/api\/delegations\/([^/]+)\/(approve|reject|bump)$/))) {
     const d = state.delegations.find((x) => x.id === r![1]);
     if (!d) return json(404, { error: 'no such request' });
-    Object.assign(d, { status: r[2] === 'approve' ? 'approved' : 'rejected', decidedAt: now(), ...(r[2] === 'approve' ? { sandboxId: 'beast/sb-5' } : {}) });
+    // w527: approving (or Start now) files it in the ledger; the mock only records the request id.
+    Object.assign(d, { status: r[2] === 'reject' ? 'rejected' : 'approved', decidedAt: now(), ...(r[2] !== 'reject' ? { workId: d.workId ?? 'w-mock' } : {}) });
     broadcast({ type: 'delegation', request: d });
     return json(200, d);
   }

@@ -44,7 +44,16 @@ export interface DaemonConfig {
   /** Portal base URL, e.g. https://<host>.<tailnet>.ts.net */
   portalUrl: string;
   id: string;
+  /** The machine's credential for /machine; unset: read from `tokenFile` at start. */
   token: string;
+  /** A worker root install keeps its credential here (`<root>/secrets/machine-token`), not in daemon.json (w513). */
+  tokenFile?: string;
+  /**
+   * The worker root it was installed in (w513, scripts/worker; docs/worker-install.md). The daemon's folder, temp,
+   * Unity slots mailbox and Max events file default to places in it, and agents get FF_WORKER_ROOT,
+   * FF_PLAYER_SLOT_ROOT (<root>/players) and FF_NIGHTLY_ROOT (<root>/nightly).
+   */
+  root?: string;
   repoPath: string;
   /** The machine's own `claude` (its login, settings and plugins). */
   claude?: string;
@@ -118,6 +127,37 @@ export function patchDaemonConfig(file: string, fields: Partial<Pick<DaemonConfi
 }
 
 const BUSY = new Set(['running', 'starting', 'waiting_permission']);
+
+/**
+ * A worker root install's defaults (w513): what daemon.json leaves out comes from the root, so a redeploy that writes
+ * only `root` (server/machineDeploy.ts daemonConfig) keeps every folder in it. Exported for tests.
+ */
+export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
+  if (!cfg.root) return cfg;
+  const appDir = cfg.appDir || path.join(cfg.root, 'daemon');
+  return {
+    ...cfg,
+    appDir,
+    tempDir: cfg.tempDir || path.join(cfg.root, 'tmp'),
+    tokenFile: cfg.tokenFile || path.join(cfg.root, 'secrets', 'machine-token'),
+    unitySlotsDir: cfg.unitySlotsDir || path.join(appDir, 'unity-slots'),
+    maxEventsFile: cfg.maxEventsFile === undefined ? path.join(appDir, 'max-events.jsonl') : cfg.maxEventsFile,
+  };
+}
+
+/** The environment a worker root gives every agent and script (w513): where the player slots and the nightly lab are. Exported for tests. */
+export function rootEnv(root: string): Record<string, string> {
+  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), FF_NIGHTLY_ROOT: path.join(root, 'nightly') };
+}
+
+/** The machine credential: daemon.json's, else the token file's first line (w513). Exported for tests. */
+export function readToken(cfg: Pick<DaemonConfig, 'token' | 'tokenFile'>, read: (p: string) => string = (p) => fs.readFileSync(p, 'utf8')): string {
+  if (cfg.token) return cfg.token;
+  if (!cfg.tokenFile) throw new Error('daemon.json has neither a token nor a tokenFile');
+  const t = read(cfg.tokenFile).trim();
+  if (!t) throw new Error(`the token file ${cfg.tokenFile} is empty`);
+  return t;
+}
 
 /** The daemon's folder. Exported for tests. */
 export const appDirOfConfig = (cfg: Pick<DaemonConfig, 'appDir'>, home = HOME) => cfg.appDir || path.join(home, '.ff-factory');
@@ -644,6 +684,10 @@ export class Daemon {
       live: [...this.entries.values()].filter((e) => e.s.live).map((e) => e.s.info.id),
       // Its host guard runs (w466): the portal's own leaves this computer's sandbox drive to it.
       ...(this.guard ? { guard: true } : {}),
+      // A worker root install (w513): its folders, for a record the portal never deployed.
+      ...(this.cfg.root
+        ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null } }
+        : {}),
       catalog: Object.keys(CATALOG),
       info: {
         hostname: os.hostname(),
@@ -1006,8 +1050,9 @@ export class Daemon {
         return;
       case 'welcome': {
         this.maxSessions = msg.maxSessions;
-        // A portal from before protocol 5 sends no pool settings: keep daemon.json's.
-        if (msg.sandboxes !== undefined) {
+        // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install
+        // (w513) whose record has no pool yet (an enrollment, never deployed from the portal): its hello tells it.
+        if (msg.sandboxes !== undefined && !(msg.sandboxes === null && this.cfg.root)) {
           this.poolSettings = msg.sandboxes;
           this.pool.configure(msg.sandboxes);
           this.reportSandboxes();
@@ -1229,7 +1274,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   const file = process.argv[2] ?? path.join(HOME, '.ff-factory', 'daemon.json');
   const text = fs.readFileSync(file, 'utf8');
   // configFile: where a relocate keeps the portal's new URL (w466). A BOM (an editor's) is not JSON.
-  const cfg: DaemonConfig = { ...JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text), configFile: file };
+  const cfg: DaemonConfig = withRootDefaults({ ...JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text), configFile: file });
+  cfg.token = readToken(cfg);
+  // A worker root (w513): agents and the scripts they run find the player slots and the nightly lab in it.
+  if (cfg.root) for (const [k, v] of Object.entries(rootEnv(cfg.root))) process.env[k] ??= v;
   // server/launch.ts keeps the public identity's gitconfig in the daemon's folder.
   process.env.FF_APP_DIR = appDirOfConfig(cfg);
   const d = new Daemon(cfg);
