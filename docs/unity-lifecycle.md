@@ -2,35 +2,36 @@
 
 Unity editors crash and freeze often. The harness manages them fully, without asking anyone: agents
 restart their own editor with a tool, and a watch restarts a hung or crashed editor by itself.
-The dialog watchdog (modal dialogs, recovery prompts) is separate: [unity-dialogs.md](unity-dialogs.md).
+Since w510 (2026-10-06) every editor is a machine daemon's, BEAST's included; the portal runs none and has no editor
+watch of its own. The dialog watchdog (modal dialogs, recovery prompts) is separate: [unity-dialogs.md](unity-dialogs.md).
 
 ## Tools
 
 | Who | Tool | Actions |
 |---|---|---|
-| sandbox worker (host) | `mcp__sandbox__unity` | `status`, `start`, `stop`, `restart`, `log`; `force: true` kills a frozen editor at once |
-| machine worker (Mac or Windows PC) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart` (`force` as above) |
-| orchestrator | `unity` with `sandbox` or `machine` | the same; `log` is sandbox-only |
+| worker on a machine (a Mac, a Windows PC, BEAST) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart`; `force: true` kills a frozen editor at once |
+| orchestrator | `unity` with `sandbox` (`<machine>/<name>`) or `machine` | the same, and `log` for a sandbox |
 
-A normal stop asks the editor to quit, then kills it after 15 s (host) or 30 s (machine). A forced one
+A normal stop asks the editor to quit, then kills it after 30 s. A forced one
 kills at once. Both kill what the editor started and any crash reporter left open for the project
 (`UnityBugReporter`, `UnityCrashHandler64`), then remove a stale `Temp/UnityLockfile`. Start picks a
 fresh log name when the old log is still locked. Restarting is fine with unsaved scene changes.
 
-On the shared host, workers must use the tool, never kill Unity by hand: other sandboxes' editors
-and the live game run on the same machine (`server/guard.ts`). On their own Mac, machine workers may
+In a machine sandbox (BEAST's included), workers must use the tool, never kill Unity by hand: other sandboxes' editors
+and the live game run on the same machine (`server/guard.ts`). In a machine's main clone, workers may
 end and relaunch Unity however they like; the guard only protects the FF Factory daemon, the
-agent's own `claude` process and Ben's working tree.
+agent's own `claude` process and the user's working tree.
 
 ## Hang and crash detection
 
-`server/unityHang.ts` holds the verdict (`editorVerdict`), shared by the host and the Mac daemon.
-Signals:
+`server/unityHang.ts` holds the verdict (`editorVerdict`), used by the daemon's watch (`MacUnityWatch`,
+`machine/unity.ts`; the portal's own copy of the watch is gone, w510). Signals:
 
 - **Process**: the editor is gone without a stop we asked for, or Unity's bug reporter is open for
   the project. (`UnityCrashHandler64` alone is not evidence: it runs beside every Windows editor.)
-- **Window** (host only): Windows' "not responding" for the main window (`IsHungAppWindow`, from
-  `scripts/unity-windows.ps1`, probed every 60 s for running editors).
+- **Window** (not used now): Windows' "not responding" for the main window (`IsHungAppWindow`, from
+  `scripts/unity-windows.ps1`). Only the portal's own watch passed it to `editorVerdict` (`notRespondingSince`); no
+  daemon does, so on a Windows machine the "window not responding" rule below never fires.
 - **MCP bridge**: a JSON `{"type":"ping"}` over the MCP-for-Unity socket (port from
   `~/.unity-mcp/unity-mcp-status-*.json`, matched by project path). The editor answers it from its
   main thread (`EditorApplication.update`), so a frozen editor cannot; the bridge's bare framed
@@ -40,37 +41,33 @@ Signals:
 
 An editor is **hung** only when it is silent on every channel for long:
 
-| Rule | Default (config) |
+| Rule | Value (`DEFAULT_HANG`, `server/unityHang.ts`; no config since w510) |
 |---|---|
-| window not responding AND log silent | 180 s (`unity.hang.notRespondingSeconds`) |
-| bridge not answering AND log silent, not reloading | 10 min (`unity.hang.bridgeSilentMinutes`) |
-| bridge says reloading (domain reload, compile) AND log silent 10 min | 45 min (`unity.hang.reloadingMinutes`) |
-| starting, log silent | 15 min (`unity.hang.startupStallMinutes`, default `unity.watchdog.stallMinutes`) |
+| window not responding AND log silent | 180 s (`notRespondingSeconds`; unused, see above) |
+| bridge not answering AND log silent, not reloading | 10 min (`bridgeSilentMinutes`) |
+| bridge says reloading (domain reload, compile) AND log silent 10 min | 45 min (`reloadingMinutes`) |
+| starting, log silent | 15 min (`startupStallMinutes`), for an editor the watch started |
 
 A long import, compile or test run keeps the log growing, so it is never killed. An idle editor's log can be silent for hours, so the log never proves a hang by itself: the bridge does, and only after a quick ping (8 s) and a long one (60 s) both fail, since a throttled editor answers late but a frozen one never. On a Mac a silent bridge counts for nothing while the display is asleep (`pmset displaysleepnow`, App Nap throttles everything), and App Nap is turned off for Unity (`defaults write <Unity's bundle id> NSAppSleepDisabled -bool YES`, when the daemon starts and before every launch; it applies from the editor's next launch). A modal dialog is
 never a hang: it is the dialog watchdog's business (seen in the last 3 minutes).
-The host checks each running editor every `unity.hang.checkSeconds` (30); a process listing, which
-costs a few seconds, runs every 5 minutes, or at once when something already looks wrong.
+The daemon looks at each editor every 30 s.
 
 ## Automatic restart
 
-On a hang or crash, `SandboxManager.autoRestart` (host) or `MacUnityWatch` (Mac daemon, every 30 s):
+On a hang or crash, `MacUnityWatch` (the machine daemon, every 30 s; before w510 the portal's `SandboxManager.autoRestart` did the same for its own editors):
 
 1. force-kills the editor and what it started, and its crash reporters. On a Mac, a game player (any `.app` other than Unity's, e.g. the host player launched from the editor), another project's editor, Unity Hub and node/claude are never part of that, nor what they started; the result names what was left running;
-2. clears the stale lock (and, on the host, starts on a fresh log if the old one is locked);
+2. clears the stale lock;
 3. starts the editor again; the dialog watchdog answers the recovery prompts as usual;
-4. records it: on the sandbox card (`unity.restarts`, "Restarted after a hang or crash"), a
-   `[unity]` notice to the user and the orchestrator, and host health (`unityRestarts`, the last
-   hour, in `system_status`);
-5. once the editor is running again, messages the sandbox's (or machine's) agents that were busy
-   or active in the last 30 minutes: "Unity was restarted after a hang/crash at <time>; re-pin and
-   continue."
+4. records it: a `[unity] machine <id>: …` message to the orchestrator and a host notification (the daemon's
+   `unity_event`, `machines.unityEvent` in `server/index.ts`);
+5. messages the sandbox's (or machine's) agents that were busy or active in the last 30 minutes: "Unity of your sandbox
+   was restarted automatically at <time> …; re-pin it … and continue where you left off."
 
-At most **3 automatic restarts per 30 minutes** per editor (`unity.autoRestart.max`,
-`windowMinutes`; restarts asked for with the tool do not count). Past that the harness stops: a
-hung editor is marked blocked (`restart-limit`), a crashed one stays crashed, and the user and
-orchestrator are told once. Restarting it with the tool clears the block. `unity.autoRestart.enabled:
-false` turns automatic restarts off (a stalled start is then only reported, as before).
+At most **3 automatic restarts per 30 minutes** per editor (fixed in `MacUnityWatch`, `machine/unity.ts`;
+restarts asked for with the tool do not count). Past that the watch stops restarting it and the orchestrator is told
+once per window ("leaving it for a person (the unity tool still restarts it)"). The portal's `unity.autoRestart`
+config (`max`, `windowMinutes`, `enabled`) is retired.
 
 On a Mac, the watch restarts an editor it did not launch only on a hang it can prove through the
 bridge; an editor that disappears is restarted only with crash evidence (the bug reporter, or a
@@ -79,12 +76,12 @@ touches git.
 
 ## Config
 
-```json
-"unity": {
-  "hang": { "notRespondingSeconds": 180, "bridgeSilentMinutes": 10, "reloadingMinutes": 45, "startupStallMinutes": 15, "checkSeconds": 30 },
-  "autoRestart": { "enabled": true, "max": 3, "windowMinutes": 30 }
-}
-```
+None for the watch since w510. `unity.hang`, `unity.autoRestart`, `unity.watchdog`, `unity.editorPath` and
+`unity.extraArgs` are retired keys (`RETIRED_CONFIG_KEYS`, `server/config.ts`): a config that sets them loads and
+ignores them, and the portal names them once at startup and in `system_status`. What stays under `unity` is
+`idleStopMinutes` (an editor whose sandbox has no agent activity for that long, and no agent mid-turn, is stopped; 120)
+and `mcpServer`, which the portal hands to its own computer's daemon (`localDaemonExtras`, `server/machines.ts`); on
+another machine they are `daemon.json`'s `sandboxIdleStopMinutes` and `unityMcpServer`.
 
 The machines (Macs and Windows PCs, [machines.md](machines.md#windows-machines)) get the watch and the `unity` tool with the daemon: redeploy it (`add_machine`) after an
 update. An older daemon ignores the `unity` message, and the tool times out with that advice.
@@ -151,7 +148,8 @@ arbiter on the machine (no FF Factory daemon, or one from before w469) it runs a
 - **RAM.** On a machine with `max_unity`, no slot is granted while RAM use is at 85% or more (`UNITY_RAM_PCT`, the
   placement's busy line), `unity start` included: one more editor takes 8-12 GB and a Burst build 4-10 GB more, about a
   quarter of 64 GB, and LothDesktop paged at 63 of 64. The queue waits; after 10 minutes on RAM the orchestrator is told.
-  This host's own daemon already had the host guard's free-RAM gate on its editors (`limits.minFreeRamGB`, 10 GB).
+  This host's own daemon's guard has a free-RAM gate on its editors too (`limits.minFreeRamGB`, 10 GB, handed to it by
+the portal; `server/hostHealth.ts` `blockReason`).
 - **The backstop.** Unity started outside the gate counts all the same. When the machine is over its limit the
   orchestrator is told once ("over its limit... Started outside the slot gate: batch FinalFactory"), and again when it is
   back. Nothing is ever stopped or killed.
@@ -177,8 +175,8 @@ port file, or port 6400. That is another sandbox's editor, or the live game's. T
 server process (its `session_key: global` is only the in-process key), so the leak was the fallback.
 
 So each sandbox's workers run their `UnityMCP` server with `UNITY_MCP_STATUS_DIR` set to a folder of
-their own, `data/unity-mcp/<sandbox>` (`server/unityMcp.ts`, `unityMcpServerFor`; `switch_branch`'s
-own bridge too). The sandbox poll (every 3 s, `syncStatusDir`) keeps in it only that sandbox's editor's
+their own, `<app_dir>/unity-mcp/<sandbox>` on the machine (`machine/unityMcp.ts`, `scopedUnityMcp`). The daemon
+(every 5 s, `McpScopes`, `syncStatusDir` in `server/unityMcp.ts`) keeps in it only that sandbox's editor's
 status file, while its process is alive and only if the file was written since that editor was
 launched: a crashed editor's leftover file may name a port another editor has taken since. It also
 writes the legacy `unity-mcp-port.json` there with the editor's own port, or 0 while it is down, so the
@@ -187,4 +185,5 @@ editor, and a call made while it is down fails instead of landing elsewhere. Edi
 `~/.unity-mcp`, so this needs no editor restart, and the hang detection is unchanged. The guard still
 refuses Unity MCP calls until the worker pins its own `<sandbox>@<hash>`.
 
-Not covered: agents on the Macs (one clone per Mac) and Claude Code sessions outside FF Factory.
+Agents in a machine's main clone get the same, in `<app_dir>/unity-mcp/_main-clone` ([machines.md](machines.md)). Not
+covered: Claude Code sessions outside FF Factory.

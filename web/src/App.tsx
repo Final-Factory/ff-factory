@@ -167,7 +167,7 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
       key: 'elevated',
       kind: 'error',
       lead: 'FF Factory is running with administrator rights.',
-      rest: `It will not start Unity editors (they would stop on Unity's administrator dialog), and every agent shell has admin rights. Run scripts\\restart.cmd to bring it back non-elevated.${host.elevatedWhy ? ` (${host.elevatedWhy})` : ''}`,
+      rest: `Every orchestrator shell has admin rights. Run scripts\\restart.cmd to bring it back non-elevated.${host.elevatedWhy ? ` (${host.elevatedWhy})` : ''}`,
     });
   }
   if (drive) {

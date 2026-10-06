@@ -2,20 +2,18 @@
 
 Planned work that is agreed but not started, in the order it should happen.
 
-## 1. BEAST as a portal plus a machine daemon (built, deploy pending)
+## 1. BEAST as a portal plus a machine daemon (done, 2026-10-06, w510)
 
 Split BEAST into portal/orchestrator + a local machine daemon that owns BEAST's sandboxes, editors and workers (like
 the M5 and LothDesktop), so portal updates and crashes don't stop workers.
 
-Built: [beast-machine.md](beast-machine.md) (`add_machine local`, `migrate_host_sandboxes`, protocol 6). Left: the
-deploy and the in-place migration at a quiet moment Ben picks (tell Ben and Loth first), then an hour of watching.
-Once it has run for a while, delete the host's own sandbox code (`server/sandboxes.ts` and the host-only branches),
-which the rollback needs until then.
-
-The orchestrators are ready for it: the dispatcher addresses a sandbox the same way on every computer
-(`"<machine>/<name>"` for one a daemon owns), and the ledger, the overlap check and the routing of worker updates go by
-session and place, not by which process runs the worker. BEAST's sandboxes become `beast/<name>`, and bare names keep
-working.
+Built and deployed: [beast-machine.md](beast-machine.md) (`add_machine local`, protocol 6). BEAST's five sandboxes
+moved to its daemon in place on 2026-10-05 (w424, w440). Done 2026-10-06 (w510, Lothsahn: "Let's just delete that and
+all the code around running portal processes directly (except those necessary for the orchestrator and dispatcher)"):
+the portal's own sandbox pool and everything that ran workers, editors and standing agents in the portal process are
+deleted (`SandboxManager`, host worker sessions, the host Unity watch, the "this host" place and host limits,
+`migrate_host_sandboxes` and its rollback, the host sandbox page). The portal runs only the orchestrators and the
+dispatcher; BEAST cannot go back to host sandboxes, and that is accepted.
 
 ## 2. Portal restarts that leave daemon agents running (done, 2026-10-05)
 

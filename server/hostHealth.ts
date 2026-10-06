@@ -318,7 +318,7 @@ export class HostHealthMonitor {
       try {
         this.d.tell(
           id,
-          `The sandbox drive went offline at ${new Date(r.since).toLocaleTimeString()} and was reattached ${mins} min later; your turn was stopped. Your worktree is back. Check git status for half-written edits (a write may have been lost at the moment it vanished), re-pin your Unity instance if you use it (the editor is being restarted; wait_for_unity "ready"), and continue where you left off.`,
+          `The sandbox drive went offline at ${new Date(r.since).toLocaleTimeString()} and was reattached ${mins} min later; your turn was stopped. Your worktree is back. Check git status for half-written edits (a write may have been lost at the moment it vanished), re-pin your Unity instance if you use it (the editor is being restarted; unity action "status" says when it is up), and continue where you left off.`,
         );
       } catch (e) {
         failed.push(`${id}: ${(e as Error).message}`);
