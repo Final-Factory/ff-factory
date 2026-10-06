@@ -246,7 +246,8 @@ test('relocate at the cut-over (w499): a drain-and-hold request with relocate se
   const { store, mm, a, b, daemon, onDisk, tmp } = await setup(t);
   LongAgent.all = [];
   daemon();
-  await until('online at A', () => mm.isOnline('mx'));
+  // Its hello read, too: relocate needs the protocol it speaks (a link alone says 0).
+  await until('online at A, its hello read', () => mm.isOnline('mx') && (mm.protocolOf('mx') ?? 0) > 0);
   const stops: string[] = [];
   const d = new Drainer({ dataDir: tmp, snapshot: () => [], tell: () => undefined, stop: (r) => void stops.push(r.reason), changed: () => undefined, log: () => undefined, relocate: (url) => mm.relocateAll(url) });
   // What fffctl migrate --cut-over writes into BEAST's data folder.
