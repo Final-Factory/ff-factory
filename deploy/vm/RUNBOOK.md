@@ -8,8 +8,8 @@ are in [docs/portal-on-ffbox-host.md](../../docs/portal-on-ffbox-host.md). Every
 can be run again after its cause is fixed, and it does only what is missing.
 
 **What it does not do:** move the portal. BEAST keeps running the real one. The VM gets an empty portal that nobody can
-sign in to, because logins exist only once someone runs `node server/user.ts` inside the VM. The data moves later,
-after the code changes in the design's section 6, with its dry run, cut-over and rollback (section 7).
+sign in to, because logins exist only once someone runs `node server/user.ts` inside the VM. The data moves later, with
+one command in the VM, `fffctl migrate`: first a dry run (section 4 below), then the cut-over (section 5).
 
 **Do not install Tailscale on the FFBox host.** Tailscale runs inside the VM only. A tailnet on the host would put BEAST
 and the Macs within reach of FFBox's `ffdev` containers (design 1.4, rule 1).
@@ -118,6 +118,116 @@ sudo deploy/vm/host/install.sh --rebuild-vm
 It deletes the VM and its disk, **with all the portal's data in it and its snapshots** (it asks you to type the VM's
 name), and makes it again from the stored answers. Only a fresh Tailscale auth key is asked for: the stored one was
 used at the first join and deleted then. Back up first (`sudo fff-vm ssh`, `sudo fffctl backup`) if the data matters.
+
+## 4. Dry run: BEAST's portal copied into the VM, defused
+
+One command inside the VM pulls BEAST's portal (its `config.json`, `data\` and the conversations the orchestrators,
+the dispatcher and BEAST's standing agents resume) straight from BEAST over ssh. It rewrites the copy for Linux, starts
+it as a **dry run** and checks it. On BEAST it only reads: it lists files and runs `tar` there, nothing else. BEAST's
+portal keeps running for everyone. The design is section 7.2 of
+[docs/portal-on-ffbox-host.md](../../docs/portal-on-ffbox-host.md); the code is `scripts/fff-migrate.ts`.
+
+**Before:**
+
+- The VM is installed (section 2). The subscription token is stored and the base clone is there; `fffctl status`
+  shows both.
+- The portal's key is authorized on BEAST. Print the line with:
+
+  ```bash
+  sudo fff-vm ssh
+  sudo fffctl migrate --key       # the line, and whether BEAST answers yet
+  ```
+
+  Someone with administrator rights on BEAST (Ben) adds that line to `C:\ProgramData\ssh\administrators_authorized_keys`.
+  `rydin`, the account the migration logs in as, is an administrator. Edit the existing file without changing its
+  permissions. The line's `from="<the VM's tailnet IP>"` lets only the VM use the key. `--key` reports `BEAST answers:
+  BEAST|<time>` once it works.
+
+**Run it** (inside the VM: `sudo fff-vm ssh` first):
+
+```bash
+sudo fffctl migrate --dry-run-copy
+```
+
+It prints and keeps in `/srv/fff/migrate/report-dry-run-*.txt`:
+
+- the copy's size and time;
+- every rewrite it made: BEAST from the portal's own host to a machine over ssh; every machine's portal URL; the paths;
+  the portal-only mode; the orchestrators and the dispatcher on the subscription token; `machines.useHostClaudeEnv` for
+  BEAST, so its workers keep their account;
+- then four checks, each **PASS** or **FAIL**:
+  - it starts as a dry run (`/api/health` says `dryRun`);
+  - no data was restored on load;
+  - the session, work-item, machine and transcript counts equal BEAST's;
+  - the dispatcher's conversation resumes here on the token file (one short message, through `claude --resume
+    --fork-session`, so the copied conversation itself is not changed).
+
+While it is in place:
+
+- **FFSB_DRY_RUN=1** (a systemd drop-in) keeps everything that acts outside off: no wakes, timers, standing runs, intake,
+  push, FFBox link, Discord, daemon links, deploys or workers. Every page shows a red DRY RUN bar.
+- **The Funnel is off.** The portal answers only on the tailnet, at `https://fff.<tailnet>.ts.net` (`tailscale serve`).
+  The logins are BEAST's.
+- **The VM's backups are paused.**
+
+Do the checks that need a person (design 7.2, checks 2 and 4 to 13): sign in from a phone and a desktop, open
+transcripts, download an attachment, and the rest. Running the same command again copies only what changed on BEAST
+since, and checks again.
+
+**End it:**
+
+```bash
+sudo fffctl migrate --rollback-dry-run
+```
+
+It puts the VM's own config and data back from the snapshot the first run took (`/srv/fff/migrate/before`). It removes
+the copied conversations and FFSB_DRY_RUN, turns the Funnel and backups back on, and wipes the pulled copy with its
+secrets. `--keep-stage` keeps the pulled copy (root-only, `/srv/fff/migrate/stage`), so the cut-over's first copy only
+fetches what changed.
+
+## 5. Cut-over
+
+At a quiet moment Ben and Lothsahn pick (design 7.3). Workers on the machines keep running. Nobody should be
+mid-conversation with an orchestrator.
+
+**Before:**
+
+- The dry run has been rolled back.
+- BEAST's portal runs a release with the cut-over's relocate (w499, 2/3). Check its version on its page.
+- The Funnel is on in the VM (`fffctl status`).
+- The key line from section 4 is on BEAST.
+
+```bash
+sudo fff-vm ssh
+sudo fffctl migrate --cut-over
+```
+
+1. **A first copy while BEAST still runs**, rewritten once to check it. Nothing on BEAST changes yet.
+2. **It asks you to type `CUT OVER`.** Anything else stops there, with nothing touched.
+3. **The VM's own portal stops**, so a daemon sent to it meets a closed door and retries rather than being refused.
+4. **BEAST's portal drains**, up to `--drain-minutes` (5 by default). It sends every connected daemon to the VM's
+   public URL (relocate), writes the outcome, and holds. Each machine is listed as relocated or not.
+5. **BEAST's portal is stopped**, by its own `scripts\stop-server.ps1`, and its `ffsb-server` task is disabled, so
+   nothing starts it again. Its folder and data stay as they are.
+6. **The rest of the copy** (what changed since step 1), the rewrite, and the VM's portal starts for real.
+7. **The checks:** the portal answers within 3 minutes, and each relocated daemon says hello within 3 minutes.
+
+**If the portal in the VM does not come up**, the command rolls back by itself:
+
+- the VM's own data back;
+- BEAST's task enabled and started again, on BEAST's data as it was;
+- the relocated daemons return to BEAST by themselves within about 10 minutes (their fallback).
+
+**A machine that was not relocated** (an old daemon) or does not say hello is named. Redeploy it from the new portal
+(`machine_daemon redeploy`).
+
+**By hand afterwards**, as the command's last lines say:
+
+1. Lothsahn sets FFBox's `fff.url` (and the escalation base URL) to the new URL and re-renders the connector's unit.
+2. Everyone opens the new URL, signs in, adds the phone app again, turns notifications on, and points `/mcp` at it.
+
+Then the checks of design 7.4. A rollback after real use is design 7.5. BEAST's old portal is left exactly as it was
+for two weeks (its task disabled, not removed).
 
 ## If it must come off again
 

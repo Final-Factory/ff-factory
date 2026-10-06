@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# fff-migrate: what "fffctl migrate" runs (w499; /usr/local/lib/fff/fff-migrate). It moves the portal from BEAST into
+# this VM, pulling everything from BEAST itself over ssh with the portal's key; the work is scripts/fff-migrate.ts in the
+# running release (docs/portal-on-ffbox-host.md 7.2 and 7.3, deploy/vm/RUNBOOK.md "Dry run" and "Cut-over"). Root.
+#
+#   fffctl migrate --key                 the line to authorize this VM's key on BEAST, and a test of the connection
+#   fffctl migrate --dry-run-copy        a defused copy of BEAST's portal here (FFSB_DRY_RUN=1, no Funnel), checked
+#   fffctl migrate --rollback-dry-run    back to this VM's own portal; the copy and its secrets wiped
+#   fffctl migrate --cut-over            BEAST's portal drains, sends its daemons here and stops; this one takes over
+#   options: --ssh USER@HOST (default rydin@beast) and the rest: fffctl migrate --help
+set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
+need_root
+load_conf
+app=$(readlink -e "$CURRENT") || die "no release at $CURRENT: install the portal first (deploy/vm/guest/install.sh)"
+[ -f "$app/scripts/fff-migrate.ts" ] || die "the release at $app has no scripts/fff-migrate.ts (older than w499): fffctl update first"
+exec node "$app/scripts/fff-migrate.ts" --root "$FFF_ROOT" --port "$FFF_PORT" --user "$FFF_USER" --claude "$FFF_ROOT/home/.local/bin/claude" "$@"

@@ -30,6 +30,9 @@
 #                                       the stored subscription token (claudeTokenFile, claudeAccounts "tokenfile"); the
 #                                       portal restarts when it changed
 #   fffctl state                        what is set up, as JSON (the host's install.sh reads it to do only what is missing)
+#   fffctl migrate --key | --dry-run-copy | --rollback-dry-run | --cut-over [--ssh USER@HOST]
+#                                       move the portal from BEAST into this VM, pulling its config, data and conversations
+#                                       over ssh (deploy/vm/RUNBOOK.md "Dry run" and "Cut-over"; fffctl migrate --help)
 set -o errexit -o nounset -o pipefail
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
@@ -277,6 +280,7 @@ case "${1:-status}" in
   backup-config) shift; cmd_backup_config "$@" ;;
   configure) shift; cmd_configure "$@" ;;
   state) cmd_state ;;
-  -h | --help | help) sed -n '2,33p' "$0" ;;
+  migrate) shift; exec "$FFF_LIB/fff-migrate" "$@" ;;
+  -h | --help | help) sed -n '2,36p' "$0" ;;
   *) die "unknown command $1 (fffctl help)" ;;
 esac

@@ -180,6 +180,20 @@ echo "$out"
 if printf '%s' "$out" | matches 'ci-dummy'; then fail "fffctl claude-token printed the token"; fi
 [ "$(g 'sudo stat -c "%a %U" /srv/fff/secrets/claude-oauth-token')" = "600 fff" ] || fail "the token file is not 0600 fff"
 echo "ok: the token is stored 0600, owned by fff, shown only as its last four characters"
+# fffctl migrate (w499) in a real guest: the wrapper, node in the release, ssh as fff with the portal's key. No BEAST here,
+# so it cannot connect: it says so, prints the line that authorizes the key, and changes nothing. (The modes themselves
+# run end to end against a synthetic BEAST in the unit tests: scripts/fff-migrate.test.ts.)
+set +e
+out=$(g 'sudo fffctl migrate --key --ssh rydin@beast.invalid' 2>&1)
+rc=$?
+set -e
+echo "$out"
+[ "$rc" = 2 ] || fail "fffctl migrate --key without a BEAST: exit $rc, not 2"
+printf '%s' "$out" | matches -F 'no-agent-forwarding,no-port-forwarding,no-X11-forwarding ssh-ed25519 ' || fail "fffctl migrate --key printed no authorized_keys line"
+printf '%s' "$out" | matches 'cannot reach BEAST as rydin@beast.invalid' || fail "fffctl migrate --key did not say it could not connect"
+if printf '%s' "$out" | matches 'ci-dummy'; then fail "fffctl migrate printed the token"; fi
+g 'test ! -e /srv/fff/migrate/dry-run.json' || fail "fffctl migrate --key changed something"
+echo "ok: fffctl migrate runs in the guest: it says when BEAST cannot be reached, with the key line to authorize"
 
 step "update: build beside the running portal, drain, switch, verify"
 before=$(sha_of)
