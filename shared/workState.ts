@@ -3,11 +3,14 @@
 // Dispatcher page; it never changes a request. The stored status (and the cleanup's `stalled`, which still decides what
 // it closes or stalls, server/ledgerSweep.ts) stays as it is (docs/orchestrators.md, "Ledger").
 import type { SessionInfo, WorkItem } from './types.ts';
+import { agentState } from './agentState.ts';
 
-export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'followup' | 'stalled';
-export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'followup', 'stalled'];
+export type WorkLiveState = 'working' | 'pending' | 'waiting' | 'queued' | 'followup' | 'stalled';
+export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'pending', 'waiting', 'queued', 'followup', 'stalled'];
 export const WORK_LIVE_LABEL: Record<WorkLiveState, string> = {
   working: 'Working',
+  /** Its worker is between turns but will come back to it (w475): a check-in, a background task, a queued message. */
+  pending: 'Waiting',
   waiting: 'Waiting on input',
   queued: 'Queued',
   followup: 'Merged, follow-up pending',
@@ -96,6 +99,10 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
     return { state: 'working', why: `${busy.map((s) => s.id).join(', ')} ${busy[0].status === 'starting' ? 'starting' : 'mid-turn'}${tool ? `, in ${tool.name} since ${ago(tool.since, f.now)}` : ''}` };
   }
   if (w.ffbox && (w.ffbox.state === 'sent' || w.ffbox.state === 'accepted')) return { state: 'working', why: `on FFBox${w.ffbox.conversation ? ` (conversation ${w.ffbox.conversation})` : ''}` };
+
+  // Waiting (w475): a worker on it is between turns but will come back to it, so it is not stalled.
+  const coming = mine.map((s) => ({ s, a: agentState(s) })).find((x) => x.a.state === 'waiting');
+  if (coming) return { state: 'pending', why: `worker ${coming.s.id}'s ${coming.a.waitsOn}` };
 
   // Waiting on input: a person must approve, answer, decide or allow something.
   if (w.approval?.state === 'pending') return { state: 'waiting', why: 'an intake request waiting for a reviewer to approve or decline it', waitsOn: ['a reviewer'] };

@@ -1,4 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
+import { agentState, type AgentState } from '../../shared/agentState.ts';
 import type { AppVersion, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 import { updaterHealth } from '../../shared/updaterHealth';
@@ -65,7 +66,7 @@ export function useNow(ms = 15000): number {
 
 // ---------- status vocab ----------
 
-export type Tone = 'green' | 'amber' | 'blue' | 'grey' | 'red';
+export type Tone = 'green' | 'amber' | 'blue' | 'grey' | 'red' | 'violet';
 
 export function sessionTone(s: SessionStatus): Tone {
   switch (s) {
@@ -205,6 +206,14 @@ export function fmtUntil(iso: string | undefined, now: number): string {
   return `in ${Math.round(h / 24)}d`;
 }
 
+/** An agent's state (shared/agentState.ts, w475) as the page shows it: its tone, its word, and what it waits on in the browser's time. */
+const STATE_TONE: Record<AgentState, Tone> = { working: 'blue', needs_you: 'amber', waiting: 'violet', idle: 'grey', error: 'red', stopped: 'grey' };
+const localTime = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+export function agentView(s: SessionInfo): { tone: Tone; label: string; text: string; waitsOn?: string } {
+  const a = agentState(s, localTime);
+  return { tone: STATE_TONE[a.state], label: a.state === 'idle' && s.kind === 'worker' ? 'Idle (available)' : a.label, text: a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.label, ...(a.waitsOn ? { waitsOn: a.waitsOn } : {}) };
+}
+
 export function isBusy(s: SessionInfo | undefined): boolean {
   return !!s && (s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission');
 }
@@ -301,6 +310,9 @@ function agentsGlance(name: string, sessions: SessionInfo[], attention: number, 
   if (busy) return { tone: 'blue', label: 'Working', detail: about(busy), attention, sessionId: busy.id };
   const failed = sessions.findLast((s) => s.status === 'error');
   if (failed) return { tone: 'red', label: 'Agent error', detail: about(failed), attention, sessionId: failed.id };
+  // Between turns but coming back (w475): not free, not idle.
+  const coming = sessions.find((s) => agentView(s).waitsOn);
+  if (coming) return { tone: 'violet', label: 'Waiting', detail: agentView(coming).waitsOn, attention, sessionId: coming.id };
   if (unity?.state === 'starting') return { tone: 'blue', label: 'Unity starting', attention };
   if (unused) return { tone: 'grey', label: 'Free', attention };
   const last = sessions.at(-1);
