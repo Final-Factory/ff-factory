@@ -82,8 +82,12 @@ echo "libvirt default network autostart after install: ${default_before:-none}"
 
 step "host install again: idempotent, the VM keeps running"
 pid1=$(cat /run/libvirt/qemu/$VM.pid)
+# As on Loth2400 (w497), where --no-install-recommends left it uncreated: the install must make it, or the VM's next
+# start (the nightly cold restart below) fails on "Failed to create file '/var/lib/libvirt/dnsmasq/virbr-fff.macs.new'".
+rm -rf /var/lib/libvirt/dnsmasq
 deploy/vm/host/install.sh 2>&1 | tee /tmp/second-install.log
 [ "$(cat /run/libvirt/qemu/$VM.pid)" = "$pid1" ] || fail "the second install restarted the VM"
+[ -d /var/lib/libvirt/dnsmasq ] || fail "the install did not create /var/lib/libvirt/dnsmasq"
 
 step "first boot: cloud-init, the watchdog"
 wait_for 900 "ssh as the admin user" g true
