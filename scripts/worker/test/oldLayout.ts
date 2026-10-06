@@ -51,6 +51,7 @@ git(sb, 'add', '.gitignore');
 // The seed, the nightly lab, the Claude conversations.
 fs.mkdirSync(seed, { recursive: true });
 fs.writeFileSync(path.join(seed, 'seed.bin'), Buffer.alloc(1 << 20, 3));
+fs.mkdirSync(nightly, { recursive: true });
 fs.writeFileSync(path.join(nightly, 'run.json'), '{"night":1}\n');
 const claude = path.join(os.homedir(), '.claude', 'projects', claudeSlug(sb));
 fs.mkdirSync(claude, { recursive: true });
