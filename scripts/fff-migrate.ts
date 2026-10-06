@@ -1005,7 +1005,8 @@ export class Migration {
       }
     } finally {
       stopCopy();
-      void this.beast.ps(CLEAN_PS, dir, 60_000).catch(() => undefined);
+      // Awaited: a run that ends right after must not leave its lists in BEAST's temp folder.
+      await this.beast.ps(CLEAN_PS, dir, 60_000).catch(() => undefined);
     }
     if (fetch.length) {
       const t = Math.max((Date.now() - tc) / 1000, 0.001);
