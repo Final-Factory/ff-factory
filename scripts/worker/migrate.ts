@@ -274,6 +274,27 @@ async function git(dir: string, args: string[], input?: string) {
   return r.stdout;
 }
 
+/**
+ * Append the old clone's info/exclude lines (shared by all its worktrees) that the root's clone lacks. Returns how many
+ * it added. Exported for tests.
+ */
+export function carryExclude(fromGitDir: string, toRepo: string): number {
+  let from = '';
+  try {
+    from = fs.readFileSync(path.join(fromGitDir, 'info', 'exclude'), 'utf8');
+  } catch {
+    return 0;
+  }
+  const file = path.join(toRepo, 'info', 'exclude');
+  const have = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const known = new Set(have.split(/\r?\n/).map((x) => x.trim()));
+  const add = [...new Set(from.split(/\r?\n/).map((x) => x.trim()))].filter((x) => x && !x.startsWith('#') && !known.has(x));
+  if (!add.length) return 0;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${have && !have.endsWith('\n') ? '\n' : ''}# FF Factory: carried from the old clone (scripts/worker/migrate.ts)\n${add.join('\n')}\n`);
+  return add.length;
+}
+
 /** What a worktree holds that must survive the move: its HEAD, branch, status and both diffs. */
 async function snapshot(dir: string) {
   return {
@@ -402,6 +423,9 @@ export async function migrate(o: MigrateOptions) {
     fs.rmSync(journalFile(l), { force: true });
     throw new Error('the install into the root could not start (see above); nothing of the old layout was touched');
   }
+  // What the old clone hid from every worktree's status (agents' scratch folders) stays hidden in the root's clone:
+  // without it a moved sandbox shows thousands more untracked files and the move rolls back (LothDesktop, w513).
+  if (old.repoPath) carryExclude(path.join(old.repoPath, '.git'), l.repo);
 
   // 2. Copy pass one while the old daemon still runs: daemon state and Claude conversations.
   const p = new Progress();
