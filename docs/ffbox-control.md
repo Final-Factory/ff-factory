@@ -59,23 +59,66 @@ The facts this rests on are in `docs/ffbox-control-facts.md`: ffbox master `00e8
   - So `ffbox_activity status` and the dashboard show who paused it, why and since when.
   - A new `capacity.state` value is not needed; it would need a connector change (facts 8).
 
-## CI: the release label
+## CI: how a pause stops runners taking work (worked out for Lothsahn, 2026-10-06)
 
-- **Today:** every job is `runs-on: ffgithubrunners`, and a job is known to be a release only after a runner has taken
-  it (facts 1). GitHub hands a queued job to any runner with matching labels, so FFBox cannot choose which job a new
-  runner takes.
-- **The change, in the game repo:**
-  - A first job on a GitHub-hosted runner decides "release run" from the push: a version bump on develop or master,
-    the test `ask-release` makes today.
-  - Every self-hosted job of that run then asks for `ffrelease`; every other run asks for `ffgithubrunners`.
-- **The change in ffbox:** `ci_lane` mints for both labels from the queue per label. A pause stops minting for
-  `ffgithubrunners` only.
-- **Alternatives considered:**
-  - Stopping all minting: blocks the release, which needs its own "Test in" jobs.
-  - A gate job that waits while paused: holds a runner or burns hosted minutes.
-  - Cancelling queued non-release runs: loses work, and the ask says hold, not cancel.
-- **Cancel and re-run** stay with GitHub. Workers already have `gh` on the game repo. `ffbox_control` adds a check
-  that refuses to cancel a release run.
+Labels: **[M]** measured, **[S]** sourced (doc or code), **[G]** a guess.
+
+### 1. How FFBox runs its runners today
+
+- **Only JIT runners.** Every one is an org-level just-in-time runner: `POST /orgs/Final-Factory/actions/runners/generate-jitconfig`, with name, `runner_group_id` 1 and labels [S] ffbox `runners/lib/gh.sh:159-169`. A JIT runner "performs at most one job before being automatically removed" [S] [GitHub, Self-hosted runners reference](https://docs.github.com/en/actions/reference/runners/self-hosted-runners). There is one container per runner, launched with `FFGHR_JITCONFIG` [S] `ci_lane.py:662`. Nothing re-registers: each job gets a fresh registration.
+- **Labels and group.** The labels are `Linux,X64,ffgithubrunners` [S] `runners/lib/config.sh:236`. The group is 1, Default, the only group on the free plan [S] `gh.sh:157-158`.
+- **The pool.** `keep()` adds at most one runner per pass while the pool is short of its idle target, within the lane's ceiling and the box's [S] `ci_lane.py:1366-1450`, `may_admit` `:434-451`.
+- **What starts it, measured on Build 81** (run 37508889022, 0.50.0.81) [M]:
+  - The GitHub-hosted job "Is this push a version bump" finished at 18:07:48.
+  - Release (win64), Release (osx) and Test in editmode were created at 18:07:48, all asking for `ffgithubrunners`.
+  - They started 2-18 s later on `ffghr-loth2400-{3,1,4}-…`.
+
+### 2. How a pause stops new work without killing a running job
+
+| Way | Verdict |
+|---|---|
+| **Stop minting JIT runners for the paused label** | **Used.** No new runner means no new job for that label. A job waits "queued until a runner comes online" [S] (GitHub, same page) |
+| **Delete the idle runners of the paused label, registration first** | **Used.** This is `drop_idle`'s rule, measured on the box on 2026-09-28: GitHub refuses to delete a runner that has a job, and once it has deleted one it gives it none, so the delete is also the lock [S] `ci_lane.py:1652-1660`. A runner GitHub keeps is left to finish. Without this, each idle runner (target 1 today) would take one more non-release job |
+| Stopping the runner service between jobs | Does not apply: a JIT runner runs one job and its container ends [S] |
+| Removing a label from a registered runner (`DELETE /orgs/{org}/actions/runners/{id}/labels/{name}`) | Possible: the App's runner permission covers it [S] [REST docs](https://docs.github.com/en/rest/actions/self-hosted-runners). Not needed, because deleting idle runners is simpler and already proven on the box. Whether a label change touches a job already assigned: not documented [G: it does not] |
+| Runner groups (restrict to workflows) | Not available: extra groups and workflow restriction need GitHub Team or Enterprise; Final-Factory is on Free [S] [runner groups docs](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/managing-access-to-self-hosted-runners-using-groups), `gh.sh:157-158` |
+| "Disabling" a runner | No such REST call: only delete [S] REST docs |
+| A gate in the workflow (`if: vars.X`, or a job that waits) | Rejected: `if` skips the job, which loses it. A waiting job burns hosted minutes and needs admin to set a repo variable |
+
+- **A job already assigned** finishes: nothing stops busy containers [S] `ci_lane.py:1386-1395` (a drain serves running jobs).
+- **A queued job** waits, but "a job can be in the queue for 24 hours before it is automatically cancelled" [S] [GitHub, limits](https://docs.github.com/en/actions/reference/limits). So a pause is capped below that: 20 h, after which ffwatch resumes by itself. Asking for longer is refused.
+
+### 3. Marking a release run before its first self-hosted job
+
+- **The decision already exists.** Job `versionBump`, "Is this push a version bump", runs on `ubuntu-latest` and outputs `bumped=true` for a version bump [S] game `main.yml:99-130`. `testRunner` and `release` both `need` it [S] `:132`, `:681`.
+- **Self-hosted jobs are created only after it finishes** [M] (§1, created at 18:07:48).
+- **The change:**
+  - `testRunner`: `runs-on: ${{ needs.versionBump.outputs.bumped == 'true' && 'ffrelease' || 'ffgithubrunners' }}`.
+  - `release`: `runs-on: ffrelease`, since its `if` already needs `bumped`.
+  - The `needs` context is allowed in `runs-on` [S] [contexts table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts): "github, needs, strategy, matrix, vars, inputs".
+- **Where versionBump is skipped** (pull requests, dispatches), `bumped` is empty, so the job asks for `ffgithubrunners` [G from GitHub's expression rules, to be checked on the first PR run]. The nightly cache rebuild (`rebuild-caches.yml`) stays `ffgithubrunners`.
+- **ci_lane** mints per label: `ffgithubrunners` with its idle target as today, and `ffrelease` when the queue holds a job asking for it. ci_lane already lists queued and running jobs [S] `ci_lane.py:853-858`. The release lane's own rules (grants, `release_tests`) are unchanged.
+- **A release pushed during a pause:** its build and its "Test in" jobs ask for `ffrelease`, which a pause never stops, so it ships as usual. PR checks and nightlies wait.
+- **Labels must match exactly.** A runner takes a job only when it has all of that job's labels [S] (GitHub routing). So the two pools must never share a label set: no runner may carry both labels.
+
+### 4. Races and failure modes
+
+| Case | What happens |
+|---|---|
+| Pause at the moment GitHub hands an idle runner a job | Registration-first delete: GitHub refuses, so the job runs. One extra job at most per idle runner [S] `ci_lane.py:1652-1660` |
+| Connector restarts | No effect: the pause lives in `~/.config/ffbox/paused.json` on ffwatch's side. The connector only reports it |
+| ffwatch restarts | It reads `paused.json` at start; running containers are served (adopted) and minting stays off [G until tested] |
+| A runner crashes mid-job | As today: GitHub fails the job, and `reap.sh` sweeps the registration. During a pause nothing re-mints `ffgithubrunners`, and `ffrelease` re-mints only for a queued release job |
+| The updater | It drains both lanes while it updates and then lifts its drain files [S] `update_ffbox.sh:545-562,854,1122`. It never touches `paused.json`, so the pause holds through updates. A release in flight waits through an update, as today |
+| The workflow change lands while a release run is already queued under the old label | That run's jobs ask for `ffgithubrunners`. So the change merges with no pause on, and a pause is refused while a release run with old labels is queued |
+| GitHub-hosted runners are down | versionBump waits, and so does the whole run, as today |
+
+### 5. What it needs on GitHub's side
+
+- **No new permission for FFBox.** Its GitHub App already mints JIT runners and deletes registrations, which need the org "Self-hosted runners: write" permission (classic equivalent `admin:org`) [S] REST docs, `gh.sh:169,187`. Choosing labels at mint time is part of the same call.
+- **No org or repo settings**, no runner groups (not available on Free), no repo variables.
+- **The `workflow` scope** is needed only to push the change to `.github/workflows/main.yml` [S: GitHub refuses workflow-file updates from tokens without it]. So that PR is pushed from LothDesktop, never BEAST, as you asked. Nothing at run time needs it.
+- **Measured:** BEAST's token (`gist`, `read:org`, `repo`) is refused by the org runner APIs with "You must be an org admin or have the runners and runner groups fine-grained permission" [M]. FF Factory reads job state through FFBox, never through these APIs.
 
 ## Commands (`ffboxctl`, in the ffbox repo)
 
