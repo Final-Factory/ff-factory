@@ -2,13 +2,13 @@
 // (BEAST) first, then each machine, each with its sandboxes, the agents in them, and a machine's
 // main-clone agents. Pure, so the server's tests can check it and the browser can run it.
 import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, Sandbox, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
-import { isWaitingAgent, sortAgents } from './agentState.ts';
+import { holdsItsPlace, placeRank, sortAgents } from './agentState.ts';
 
 /**
  * Agents with a process (working, waiting on someone, idle), and stopped ones their wake_me or a queued message will
  * resume (Waiting, w475). Other stopped and failed ones are only counted.
  */
-export const isLiveAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'idle' || s.status === 'waiting_permission' || isWaitingAgent(s);
+export const isLiveAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'idle' || s.status === 'waiting_permission' || holdsItsPlace(s);
 
 /** Agents in one place: the live ones (Working, then Waiting, then Idle; the most recent first in each, w475) and how many more have stopped or failed. */
 export interface PlaceAgents {
@@ -83,8 +83,15 @@ function agentsIn(ids: string[], byId: Map<string, SessionInfo>, keep: (s: Sessi
 
 const waiting = (a: PlaceAgents) => a.live.reduce((n, s) => n + s.pendingPermissions.length, 0);
 
-/** In-use sandboxes first, free ones last; otherwise in the order they came. */
-const inUseFirst = (list: FleetSandbox[]) => [...list.filter((s) => !s.free), ...list.filter((s) => s.free)];
+/**
+ * Sandboxes by status (w509, Lothsahn): a Working agent first, then Waiting, then Idle, then those with no live agent,
+ * free ones last; the most recent activity first within each; otherwise in the order they came.
+ */
+const inUseFirst = (list: FleetSandbox[]) =>
+  list
+    .map((s, i) => ({ s, i, ...placeRank(s.agents.live) }))
+    .sort((a, b) => a.rank - b.rank || Number(a.s.free) - Number(b.s.free) || b.latest.localeCompare(a.latest) || a.i - b.i)
+    .map((x) => x.s);
 
 function summarize(c: Omit<FleetComputer, 'live' | 'busy' | 'attention'>): FleetComputer {
   const places = [...c.sandboxes.map((s) => s.agents), ...(c.main ? [c.main] : [])];

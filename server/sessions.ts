@@ -295,6 +295,7 @@ export class AgentSession implements SessionHandle {
     // A new process: the last one's background tasks ended with it.
     this.backgroundTasks = 0;
     this.info.backgroundTasks = undefined;
+    this.info.backgroundJobs = undefined;
     this.q = runQuery({ prompt: this.input, options });
     // What this process runs on, whatever the config says later (the account meters, docs/accounts.md).
     this.update({ status: 'starting', account: accountKeyOf(options.env ?? process.env) });
@@ -343,8 +344,11 @@ export class AgentSession implements SessionHandle {
             this.events.emit('turnEnd', this, this.lastTurnText);
           }
         } else if (m.subtype === 'background_tasks_changed') {
-          this.backgroundTasks = m.tasks.filter((t) => !t.ambient).length;
-          this.update({ statusDetail: this.backgroundTasks ? `${this.backgroundTasks} background task(s)` : undefined, backgroundTasks: this.backgroundTasks || undefined });
+          const jobs = m.tasks.filter((t) => !t.ambient);
+          this.backgroundTasks = jobs.length;
+          // What each job is, as the agent described it (w509): what a Waiting agent waits on.
+          const named = jobs.slice(0, 5).map((t) => ({ type: String(t.task_type ?? '').slice(0, 30), description: String(t.description ?? '').replace(/\s+/g, ' ').trim().slice(0, 100) }));
+          this.update({ statusDetail: this.backgroundTasks ? `${this.backgroundTasks} background task(s)` : undefined, backgroundTasks: this.backgroundTasks || undefined, backgroundJobs: named.length ? named : undefined });
         }
         return;
       case 'stream_event': {
@@ -525,6 +529,7 @@ export class AgentSession implements SessionHandle {
     if (!this.info.turnOpenSince && !this.info.backgroundTasks) return;
     this.info.turnOpenSince = undefined;
     this.info.backgroundTasks = undefined;
+    this.info.backgroundJobs = undefined;
     this.store.putSession(this.info);
     this.store.flush?.();
   }

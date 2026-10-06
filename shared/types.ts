@@ -200,6 +200,13 @@ export interface SessionInfo {
   backgroundTasks?: number;
   /** Its pending wake_me (w475): when it comes due (ISO). Kept in step by the server (Agents.syncWaiting). */
   wakeAt?: string;
+  /** That wake_me's note, cut (w509): what the agent said it will check, shown as what it waits on. */
+  wakeNote?: string;
+  /**
+   * Its live background jobs (w509), from the SDK's background_tasks_changed set without the ambient ones: the
+   * description the agent gave each ("CI on PR #1098", "player build") and its kind. At most 5. Gone with its process.
+   */
+  backgroundJobs?: { type: string; description: string }[];
   /** Why a message to it waits in the send queue for a free slot (w475, w384), while one does. */
   queuedSend?: string;
   /**

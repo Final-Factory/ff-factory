@@ -450,10 +450,13 @@ portal never sends it one: it says the daemon is being redeployed.
 
 ### Placing work
 
-A sandbox whose agent is **Waiting** (w475; [orchestrators.md](orchestrators.md), "Agent states"): between turns but
-due back, on a `wake_me` check-in, a background task or a queued message) is not free: it does not count among a
-computer's free sandboxes, `list_sandboxes` does not mark it FREE, and the dispatcher gives it no new work unless the
-request is its own. `list_machines` and `list_sandboxes` show each agent's state first, Working, then Waiting, then Idle.
+A sandbox whose agent is **Waiting** (w475, w509; [orchestrators.md](orchestrators.md), "Agent states": alive between
+turns with a running job, a queued message or a check-in ahead, and the line says which), or whose stopped agent its
+check-in or a queued message will resume, is not free: it does not count among a computer's free sandboxes,
+`list_sandboxes` does not mark it FREE, and the dispatcher gives it no new work unless the request is its own.
+`list_machines` and `list_sandboxes` show each agent's state first (Working, then Waiting, then Idle), and
+`list_sandboxes` lists each computer's sandboxes by status too: a Working agent first, then Waiting, then Idle, then
+none live or unused, the most recent activity first within each.
 
 The dispatcher picks the computer for each request itself (`start_agent` with a sandbox id; there is no automatic
 placement), so FF Factory shows it each computer's room where it decides, names the computer the next piece of work

@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **Waiting says on what, and only means alive with something pending** (w509, asked by Lothsahn: "aren't waiting jobs
+  waiting on tests or other things to run?"). A Waiting agent shows its running job by the description it gave it
+  ("Waiting: CI on PR #1098 · check-in 06:10"), a queued message, or its check-in with its note's first words, and a job
+  is told apart from a timer alone. A stopped agent is never Waiting ("Stopped (resumes at check-in tomorrow 00:08)"),
+  an overdue check-in does not count, and times carry their day. Sandboxes are listed by status (Working, Waiting, Idle,
+  then none live) on the Overview, the sidebar and in `list_sandboxes` ([docs/orchestrators.md](docs/orchestrators.md),
+  "Agent states").
+
 ### Added
 
 - **The portal VM's end-to-end jobs wait less, and pass on main** (w505, part 1, asked by Lothsahn). The test now sets its
