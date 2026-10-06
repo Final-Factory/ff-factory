@@ -127,7 +127,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           node web/perf/bench.ts --check --live 0 --keys 60 --idle 5
-          node web/perf/bench.ts --check --live 0 --keys 60 --idle 5 --route '#/machine/beast/sandbox/agent-mcp'
+          node web/perf/bench.ts --check --live 0 --keys 60 --idle 5 --route '#/sandbox/agent-mcp'
       - name: Upload the report and traces
         if: failure()
         uses: actions/upload-artifact@v7
