@@ -6,6 +6,7 @@ import { bus, emit, type Store } from './store.ts';
 import type { SessionHandle, SessionManager } from './sessions.ts';
 import type { DelegationRequest, NotifyKind, NotifyPrefs, Requester, Sandbox, ServerEvent, SessionInfo, StandingAgent, StandingRun, UnityBlocked, WorkItem } from '../shared/types.ts';
 import { checkArray, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
+import { dryRun } from './dryRun.ts';
 
 /** A browser's push subscription, as PushSubscription.toJSON() gives it, plus that device's choices. */
 export interface PushSub {
@@ -220,6 +221,8 @@ export class Notifier {
   }
 
   private async push(s: PushSub, n: Notice): Promise<boolean> {
+    // A dry run (server/dryRun.ts) pushes to no phone: the copied subscriptions are the real portal's people's.
+    if (dryRun()) return false;
     try {
       await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, JSON.stringify(n), {
         TTL: 6 * 3600,

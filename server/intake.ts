@@ -66,6 +66,7 @@ import { mentionsScenario, nightlyAgainLine, nightlyDraft, nightlyKey, nightlySk
 import { isOpen } from './work.ts';
 import { linkedClosed, linkedDone, mergeCandidates, mergedBy, mergedText, parseLog, prNumberOf, type MergeRecord } from './mergedIntake.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { dryRun } from './dryRun.ts';
 import { escalationCatchUp, escalationRef, fixLearnable, fixedByPr, followed, reportFixesOf, reportIdsOf, reportLines, reportSweep, type BoardWatch, type CatchUpLine, type ReportFix, type ReportSweep } from './boardFollow.ts';
 import type { IntakeEntry, IntakeSummary, MaxEvent, ProviderConversation, WorkAutoClosed, WorkItem, WorkSource, WorkSourceKind } from '../shared/types.ts';
 import { ffboxConversationHref } from '../shared/ffboxLinks.ts';
@@ -200,6 +201,8 @@ export class IntakeManager {
 
   /** Start the timers for what is switched on (not in unit tests, which call the steps by hand). */
   start() {
+    // A dry run (server/dryRun.ts) polls nothing: no Discord, no releases, no merge or board checks.
+    if (dryRun()) return this;
     const s = this.settings;
     const every = (ms: number, f: () => void, first: number) => {
       const a = setTimeout(f, first);

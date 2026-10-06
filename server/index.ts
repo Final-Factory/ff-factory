@@ -54,6 +54,7 @@ import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, ses
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { startBaseRefresh } from './baseRefresh.ts';
+import { DRY_RUN_BANNER, defuseConfig, dryRun } from './dryRun.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AppState, CreateSandboxRequest, HostStatus, Machine, PermissionDecisionRequest, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 
@@ -64,6 +65,12 @@ const appNow = () => ({ ...appVersion(), web: webBuild(WEB) });
 
 const cfg = loadConfig();
 fs.mkdirSync(cfg.dataDir, { recursive: true });
+// The dry run (server/dryRun.ts, change 17): this portal runs on a copy of another's data and acts on nothing outside.
+const isDryRun = dryRun();
+if (isDryRun) {
+  const ignored = defuseConfig(cfg);
+  console.warn(`\n!!!!!!!! DRY RUN (FFSB_DRY_RUN=1). ${DRY_RUN_BANNER}${ignored.length ? ` Ignored: config ${ignored.join(' and ')}.` : ''}\n`);
+}
 
 // First of all, before anything is started: never run elevated (server/elevation.ts). Everything this
 // server starts inherits its token, and an elevated Unity editor stops on a modal admin dialog.
@@ -72,7 +79,7 @@ if (elevation === 'exit') {
   console.log(`Running elevated: handed off to the Limited ${TASK_NAME} task (scripts/restart.ps1 relaunches the app non-elevated). Exiting.`);
   process.exit(0);
 }
-const host: HostStatus = { elevated: elevation.elevated, elevatedWhy: elevation.why };
+const host: HostStatus = { elevated: elevation.elevated, elevatedWhy: elevation.why, ...(isDryRun ? { dryRun: DRY_RUN_BANNER } : {}) };
 if (host.elevated) {
   console.error(
     `\n!!!!!!!! FF Factory is running WITH ADMINISTRATOR RIGHTS. It will not start Unity editors (they would stop on Unity's administrator dialog), ` +
@@ -96,6 +103,8 @@ const memoryRoot = memoryRootOf(cfg);
 // private remote only (server/memoryGit.ts; docs/orchestrators.md, "Memory in a private repository").
 let lastMemoryGit = '';
 const versionMemoryNow = () => {
+  // A dry run pushes nothing: the memory's remote is the real portal's.
+  if (isDryRun) return;
   const pub = publicIdentityOf(cfg);
   const identity = pub.name && pub.email ? { name: pub.name, email: pub.email } : { name: 'FF Factory', email: 'ff-factory@users.noreply.github.com' };
   void versionMemory(memoryRoot, { identity })
@@ -227,7 +236,7 @@ machines.cleanupNotice = (machineId, text) => {
 // The outside watchdog (docs/self-recovery.md): a Mac watches this host and alerts the user's phone through ntfy.
 const outside = loadOutsideWatchState(cfg.dataDir);
 const watcher = () =>
-  cfg.outsideWatch?.enabled === false
+  cfg.outsideWatch?.enabled === false || isDryRun
     ? undefined
     : watcherOf(
         cfg.outsideWatch?.machine,
@@ -1299,7 +1308,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
     // version of an open-source app is public anyway.
-    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow() });
+    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), ...(isDryRun ? { dryRun: true } : {}) });
     if (url.pathname === '/api/login' && req.method === 'POST') {
       const { username, password } = await readJson<{ username?: string; password?: string }>(req);
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
@@ -1642,7 +1651,7 @@ agents.extraStatusLines = () => {
 const outsideWatchLines = () => {
   const w = watcher();
   const c = watchConfig();
-  if (!w || !c) return [`Outside watchdog: off (${cfg.outsideWatch?.enabled === false ? 'outsideWatch.enabled is false' : !c ? 'no publicUrl to watch' : 'no machine to watch from'})`];
+  if (!w || !c) return [`Outside watchdog: off (${isDryRun ? 'a dry run' : cfg.outsideWatch?.enabled === false ? 'outsideWatch.enabled is false' : !c ? 'no publicUrl to watch' : 'no machine to watch from'})`];
   return [
     `Outside watchdog: ${w} checks ${c.healthUrl} and pings ${c.host} every 60 s${machines.isOnline(w) ? '' : ` (${w} is offline now)`}; alerts go to ntfy topic "${c.ntfyTopic}" (subscribe in the ntfy app); Wake-on-LAN ${c.mac ? `to ${c.mac}${c.broadcast ? ` via ${c.broadcast}` : ''}` : 'not possible yet (MAC unknown)'}`,
   ];
@@ -1696,7 +1705,8 @@ setInterval(() => {
 const inbox = path.join(cfg.dataDir, 'orchestrator-inbox');
 setInterval(() => {
   const id = store.orchestratorId;
-  if (!id || !fs.existsSync(inbox)) return;
+  // A dry run leaves the copied inbox alone: those notes are the real portal's.
+  if (!id || isDryRun || !fs.existsSync(inbox)) return;
   for (const name of fs.readdirSync(inbox).filter((n) => n.endsWith('.txt')).sort()) {
     const file = path.join(inbox, name);
     let text = '';
@@ -1728,6 +1738,8 @@ function takeRecoveryLines(): string[] {
   return fresh.map(describeRecovery);
 }
 function tellOwnerRecovered(text: string) {
+  // A dry run tells nobody (no push, no orchestrator): the log has it, where the migration's check reads it.
+  if (isDryRun) return void console.warn(`dry run: ${text}`);
   notifier.host('Data restored after a crash', text);
   if (!cfg.orchestrator.notifyOnWorkerEvents) return;
   try {
@@ -1742,6 +1754,7 @@ setInterval(() => {
   if (!lines.length) return;
   const text = `DATA RESTORED: ${lines.join(' ')}`;
   tellOwnerRecovered(text);
+  if (isDryRun) return;
   const orch = store.orchestratorId;
   if (orch) {
     try {
@@ -1758,6 +1771,13 @@ setInterval(() => {
 // was pending then is retried first (docs/restart.md).
 setTimeout(() => {
   try {
+    if (isDryRun) {
+      // A dry run resumes nothing, retries no update and leaves the copied resume files as they are.
+      const recovered = takeRecoveryLines();
+      if (recovered.length) tellOwnerRecovered(`DATA RESTORED AFTER A CRASH: ${recovered.join(' ')}`);
+      console.log('dry run: nothing resumed after the start (no restart note to anyone, no resumes, no pending update)');
+      return;
+    }
     const notes = host.elevated ? [`WARNING: the server is running elevated, so it will not start Unity editors: ${host.elevatedWhy ?? ''}`] : [];
     const recovered = takeRecoveryLines();
     if (recovered.length) {

@@ -18,6 +18,7 @@ import { readDiscordConfig, type DiscordConfig } from './discordConfig.ts';
 import { FileTail, cleanLine, eventsFileOf, parseEventLine, type CliEvent } from './maxEvents.ts';
 import type { MaxEvent, MaxInboundChannel, MaxInboundItem, MaxSummary, SessionInfo } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { dryRun } from './dryRun.ts';
 
 const KEEP_EVENTS = 500;
 const HEALTH_EVERY_MS = 15 * 60_000;
@@ -129,6 +130,8 @@ export class MaxManager {
 
   /** Start tailing and the timers (not in unit tests, which drive it by hand). */
   start() {
+    // A dry run (server/dryRun.ts) reaches no Discord: no token check, no inbound poll.
+    if (dryRun()) return this;
     try {
       fs.mkdirSync(path.dirname(this.eventsFile), { recursive: true });
     } catch {

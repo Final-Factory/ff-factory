@@ -10,6 +10,7 @@ import { emit } from './store.ts';
 import { accountKeyOf } from './usage.ts';
 import { senderOf, type SessionSnapshot, type Unanswered } from './restart.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { dryRun, dryRunStartRefusal } from './dryRun.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
 export const MID_TURN: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -247,6 +248,9 @@ export class AgentSession implements SessionHandle {
 
   /** Queue a user message; returns its uuid, which the answering turn's result lists in `answers`. */
   send(text: string, from: 'human' | 'orchestrator' | 'system' = 'human', uuid: string = randomUUID(), images: ImageInput[] = [], requestedBy?: Requester, attachments: DeliveredAttachment[] = []): string {
+    // The dry run (server/dryRun.ts): the last word on any process start, whoever sends.
+    const no = this.q ? undefined : dryRunStartRefusal(this.info, from);
+    if (no) throw new Error(`not started: ${no}`);
     // A person's message (or the orchestrator's on a person's behalf) says who this session now works for; the
     // harness's own messages carry the person they are about, but do not change that.
     if (requestedBy && from !== 'system') this.info.lastRequestedBy = requestedBy;
@@ -565,7 +569,8 @@ export class SessionManager {
     this.cfg = cfg;
     this.store = store;
     const dir = (cfg as { dataDir?: string }).dataDir;
-    if (dir) {
+    // A dry run (server/dryRun.ts) neither delivers nor keeps the copied portal's waiting messages: they are that portal's.
+    if (dir && !dryRun()) {
       this.queueFile = path.join(dir, 'send-queue.json');
       try {
         this.queue = readJsonDurable<{ queue: QueuedSend[] }>(this.queueFile, { check: checkObject })?.queue ?? [];
@@ -820,11 +825,11 @@ export class SessionManager {
     if (full) return queue(full);
     if (opts.hold) {
       try {
-        this.checkStart(id, opts.bypassGate);
+        this.checkStart(id, opts.bypassGate, from);
       } catch (e) {
         return queue((e as Error).message);
       }
-    } else this.checkStart(id, opts.bypassGate);
+    } else this.checkStart(id, opts.bypassGate, from);
     if (!s.live && s.info.kind !== 'orchestrator' && !s.info.machineId) this.makeRoom(s);
     if (!opts.hold) return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     try {
@@ -838,8 +843,10 @@ export class SessionManager {
    * Throws when a message to this session would start a process on this host that the host guard refuses now; returns
    * the session. For a caller that copies files before sending. The agent limits never refuse: send() queues instead.
    */
-  checkStart(id: string, bypassGate?: boolean): SessionHandle {
+  checkStart(id: string, bypassGate?: boolean, from: 'human' | 'orchestrator' | 'system' = 'human'): SessionHandle {
     const s = this.get(id);
+    const dry = s.live ? undefined : dryRunStartRefusal(s.info, from);
+    if (dry) throw new Error(`not started: ${dry}`);
     const startsHere = !s.live && s.info.kind !== 'orchestrator' && !s.info.machineId;
     const gate = startsHere && !bypassGate ? this.startGate?.() : undefined;
     if (gate) throw new Error(`not started: ${gate}`);

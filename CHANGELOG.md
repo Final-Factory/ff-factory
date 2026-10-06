@@ -21,6 +21,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   (`node scripts/report-sweep.ts <data copy>` lists the same). Workers put `Report: <id>` in fix PRs
   ([docs/intake.md](docs/intake.md), "Players' reports a request fixed").
 
+- **A dry-run switch, `FFSB_DRY_RUN=1`** (w499, change 17 of docs/portal-on-ffbox-host.md): a portal started with it
+  runs on a copy of another portal's data and acts on nothing outside itself, so the VM can load BEAST's copy and be
+  checked while BEAST's portal keeps running. Off: wakes and the orchestrator heartbeat, timers (loaded to show, never
+  due), standing runs and Run now, intake polls and the ledger sweep, web push (the test push too), the FFBox connector
+  link (503), Discord (Max), every machine daemon link (503), deploys, redeploys, daemon start/stop/restart, removing a
+  machine, relocate, the offline and outdated redeploys with their ssh probes, the outside watch, the orchestrator
+  memory's git push, the usage poll, everything the resume after a start would do (resumes, restart notes, the pending
+  update), the orchestrator inbox, the copied send queue, `republish_public`, and starting any Claude process but an
+  orchestrator a person writes to. Config `claudeEnv` and `userClaudeEnv` are ignored (in memory; the file keeps them),
+  and `set_app_config` refuses to set them. `/api/health` answers `dryRun: true`, the log starts with a `DRY RUN` line,
+  and every page shows a red bar that cannot be dismissed. `server/dryRun.ts`; tests in `server/dryRun.test.ts` (each
+  part, plus the real server booted on copied-looking data) and `e2e/banner.spec.ts`.
 - **The portal VM installs with one command, and asks for what it needs** (w498, asked by Lothsahn).
   `sudo deploy/vm/host/install.sh` now installs the host side and then the portal inside the VM, and sets it up:
   - Lothsahn's subscription token, the Tailscale join with the Funnel, GitHub and the base clone;

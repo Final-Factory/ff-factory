@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { PORTAL_ONLY_WHY, ROOT, configPath, ownerLine, portalOnly, publicIdentityOf, type Config } from './config.ts';
+import { dryRun, refuseInDryRun } from './dryRun.ts';
 import { portalSecretRules, secretFilesOf, type SecretRules } from './secretGuard.ts';
 import { buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from './launch.ts';
 import type { Store } from './store.ts';
@@ -311,6 +312,7 @@ export class StandingAgents {
    */
   runNow(id: string, trigger: 'manual' | 'message' = 'manual', text?: string, requestedBy?: Requester): string {
     const a = this.require(id);
+    refuseInDryRun(`a run of ${a.name}`);
     if (portalOnly(this.cfg)) throw new Error(STANDING_PORTAL_ONLY);
     if (this.active.has(a.id)) {
       if (trigger === 'message' && text) {
@@ -358,6 +360,8 @@ export class StandingAgents {
 
   /** Called every few seconds: due schedules, waiting runs, and runs past their time limit. */
   tick() {
+    // A dry run (server/dryRun.ts): no schedule comes due, nothing waiting starts, nothing is recorded as skipped.
+    if (dryRun()) return;
     this.retryAutoDelegations();
     const now = this.now();
     for (const a of this.list()) {
