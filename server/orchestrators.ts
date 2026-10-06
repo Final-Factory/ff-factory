@@ -123,6 +123,8 @@ export interface IntakeFiling {
   brief: string;
   source: WorkSource;
   requestedBy: Requester;
+  /** A person asked for it (a trusted Discord request, an FFBox operator); otherwise it is filed for nobody by name (WorkItem.unattributed). */
+  person?: boolean;
   priority?: WorkPriority;
   /** The auto-approve rule for its kind (config intake); the server checks today's count and overlaps in flight. */
   autoApprove: { enabled: boolean; maxPerDay: number; allowed?: boolean };
@@ -1538,6 +1540,7 @@ export class Orchestrators {
       keys,
       requestedBy: asRequester(f.requestedBy),
       requesters: [asRequester(f.requestedBy)],
+      ...(f.person ? {} : { unattributed: true }),
       humanAsked: false,
       status: 'new',
       createdAt: now.toISOString(),

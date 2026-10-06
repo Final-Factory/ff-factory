@@ -35,6 +35,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   - Machine credentials: `fffctl machine-credential issue <id> --out FILE` and `revoke <id>` (also in the dialog); a
     revoked machine's link drops within 20 s.
   - Redaction also covers GitHub tokens and every value the vault holds.
+- **Whose tokens, and the tokens on the FFBox host** (w512, lothsahn 2026-10-06: "hand out my Claude and GitHub tokens
+  for requests from my orchestrator and the same from Ben's"; [docs/vault.md](docs/vault.md) sections 10 and 11).
+  - A worker run gets the Claude and GitHub tokens of the person its work is for, never another person's. Work nobody
+    asked for by name runs on config `vault.unattributed`: intake and FFBox work on lothsahn's, the nightly lab and the
+    nightly regression sentry on Ben's; FFBox work naming an operator on the operator's. Intake requests filed for
+    nobody are marked `unattributed`.
+  - Each person's tokens are kept on the FFBox host in `/etc/fff-vm/secrets/people/<user id>/` (root only), and
+    `sudo fff-vm vault-sync` pushes them into the VM's vault over ssh's stdin (also run by the installer), refusing a
+    classic GitHub token, and keeps the vault key's spare copy in `/etc/fff-vm/secrets/vault.key`.
+  - `fffctl vault put` (idempotent) and `list --names`; the VM's daily backup leaves `data/vault.json` out.
 
 ### Changed
 

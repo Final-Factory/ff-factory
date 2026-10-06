@@ -133,6 +133,14 @@ guest_setup() {
     todo "the portal's deploy key: once Tailscale is joined, run this again and it prints the from= line for each machine"
   fi
 
+  # 8. The token vault (docs/vault.md, "Whose tokens"): each person's tokens kept here go into the VM's vault, and its
+  # key's spare copy comes back here. A rebuilt VM gets them back from here (its backups leave the vault out).
+  # shellcheck source=vault.sh
+  . "$here/vault.sh"
+  if [ -d "$FFF_VM_ETC/secrets/people" ] || [ ! -f "$FFF_VM_ETC/secrets/vault.key" ]; then
+    vault_sync || todo "the token vault: not every token went in (the warnings above say why); fix that, then sudo fff-vm vault-sync"
+  fi
+
   st=$(guest_state)
   jq -e .portal.healthy <<<"$st" >/dev/null || todo "the portal does not answer /api/health: sudo fff-vm ssh, then sudo fffctl status and sudo fffctl logs"
   gssh 'sudo fffctl status' || true

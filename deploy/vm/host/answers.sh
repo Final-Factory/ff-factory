@@ -6,7 +6,8 @@
 #   /etc/fff-vm/admin_authorized_keys   the admin's ssh public key(s)
 #   /etc/fff-vm/ntfy-url                the alerts' ntfy URL (0600)
 #   /etc/fff-vm/backup-recipients.txt   the backups' age public keys
-#   /etc/fff-vm/secrets/                claude-token, tailscale-authkey, gh-token: 0600 in a 0700 folder, root's
+#   /etc/fff-vm/secrets/                claude-token, tailscale-authkey, gh-token: 0600 in a 0700 folder, root's;
+#                                       people/<user id>/{claude,github}-token and vault.key: the token vault (vault.sh)
 # A secret is read without echo, never put on a command line, in a log or in the cloud-init seed, and goes into the VM
 # only over ssh's stdin (guest.sh). Root on this host can read the VM anyway (design D2): this copy changes no boundary.
 #

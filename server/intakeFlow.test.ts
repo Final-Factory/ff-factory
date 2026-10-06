@@ -229,6 +229,7 @@ test('intake: a new bug thread waits for a person; the dispatcher hears it only 
   assert.equal(w.approval?.why, w.triage?.reason);
   assert.match(w.triage!.reason, /^needs a human: it gives the agents instructions; no clear defect/, 'w299: an instruction to the agents holds it too');
   assert.deepEqual([w.source?.kind, w.source?.untrusted, w.source?.threadId, w.source?.version], ['discord-bug', true, id, '0.50.0.46']);
+  assert.equal(w.unattributed, true, 'w512: filed for nobody by name, so its workers get the tokens config vault.unattributed.intake names');
   assert.ok(w.brief.includes(UNTRUSTED_HEADER));
   assert.equal(intake.summary().today.pending, 1);
   await new Promise((r) => setTimeout(r, 60));
@@ -328,6 +329,7 @@ test('intake: a trusted personâ€™s request to Max is filed for them; a strangerâ
   assert.equal(work().length, 1);
   const w = work()[0];
   assert.deepEqual([w.requestedBy.userId, w.source?.kind, w.source?.untrusted, w.approval?.state], ['lothsahn', 'discord-request', false, 'pending']);
+  assert.equal(w.unattributed, undefined, "w512: a person's own request runs on that person's tokens");
   assert.match(w.title, /^Discord request: the alt-tab freeze is back/);
   assert.match(w.brief, /trusted by their Discord author id/);
   const ignored = intake.summary().recent.find((e) => e.action === 'ignored')!;

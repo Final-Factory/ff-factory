@@ -5,6 +5,9 @@
 //   node server/vaultCli.ts list
 //   node server/vaultCli.ts add --name NAME --kind claude|github|env [--env VAR] [--owner USER] [--share owner|anyone]
 //                               [--roles workers,standing] [--machines m3,m5|*] (--file FILE | --stdin)
+//   node server/vaultCli.ts put --name NAME --kind ... [the add options] (--file FILE | --stdin)
+//                               add, or bring an entry to this value and these grants (the FFBox host's fff-vm vault-sync)
+//   node server/vaultCli.ts list --names                  the entries' names only, one per line
 //   node server/vaultCli.ts rotate NAME (--file FILE | --stdin)
 //   node server/vaultCli.ts grant NAME [--owner USER] [--share owner|anyone] [--roles …] [--machines …] [--enable | --disable]
 //   node server/vaultCli.ts remove NAME
@@ -20,7 +23,7 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { loadConfig } from './config.ts';
 import { enrolledMachines, issueMachineToken, machineTokensFile, revokeMachineToken } from './machineTokens.ts';
-import { VAULT_FILE, Vault, keySource, newKeyText, type VaultEntryMeta, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
+import { VAULT_FILE, Vault, fingerprintOf, keySource, newKeyText, type VaultEntryMeta, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 
 const { values: o, positionals: args } = parseArgs({
   allowPositionals: true,
@@ -35,6 +38,7 @@ const { values: o, positionals: args } = parseArgs({
     file: { type: 'string' },
     stdin: { type: 'boolean' },
     out: { type: 'string' },
+    names: { type: 'boolean' },
     force: { type: 'boolean' },
     enable: { type: 'boolean' },
     disable: { type: 'boolean' },
@@ -114,6 +118,10 @@ try {
   switch (cmd) {
     case undefined:
     case 'list': {
+      if (o.names) {
+        for (const e of vault.list()) console.log(e.name);
+        break;
+      }
       const s = vault.status();
       console.log(`key: ${s.key}${s.keyFile ? ` (${s.keyFile})` : ''}${s.why ? `: ${s.why}` : ''}`);
       const all = vault.list();
@@ -132,6 +140,32 @@ try {
         machines: list(o.machines),
       });
       console.log(`added: ${show(e)}${o.file ? `\nDelete ${o.file} now (shred -u).` : ''}`);
+      break;
+    }
+    case 'put': {
+      // Idempotent: the same value and grants change nothing; a new value rotates; other grants are set.
+      const name = o.name ?? die('--name NAME');
+      const kind = (o.kind ?? die('--kind claude|github|env')) as VaultKind;
+      const value = readValue();
+      const grants = {
+        ...(o.owner !== undefined ? { owner: o.owner } : {}),
+        share: (o.share ?? 'owner') as VaultShare,
+        roles: (list(o.roles) ?? ['workers', 'standing']) as VaultRole[],
+        machines: list(o.machines) ?? ['*'],
+      };
+      const was = vault.list().find((e) => e.name === name);
+      if (!was) {
+        const e = vault.add({ name, kind, value, env: o.env, ...grants });
+        console.log(`added: ${show(e)}`);
+        break;
+      }
+      if (was.kind !== kind || (was.env ?? undefined) !== (o.env ?? undefined)) die(`${name} is kind ${was.kind}${was.env ? ` (${was.env})` : ''}; remove it first to change its kind`);
+      const rotated = was.fingerprint !== fingerprintOf(value);
+      if (rotated) vault.rotate(name, value);
+      const same = (a: string[], b: string[]) => a.join() === b.join();
+      const regrant = (grants.owner ?? '') !== (was.owner ?? '') || grants.share !== was.share || !same(grants.roles, was.roles) || !same(grants.machines.map((m) => m.toLowerCase()), was.machines) || was.disabled;
+      const e = regrant ? vault.update(name, { ...grants, owner: grants.owner ?? '', disabled: false }) : vault.list().find((x) => x.name === name)!;
+      console.log(`${rotated ? 'rotated' : regrant ? 'regranted' : 'unchanged'}: ${show(e)}`);
       break;
     }
     case 'rotate': {
