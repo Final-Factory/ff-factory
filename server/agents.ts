@@ -334,7 +334,8 @@ export class Agents {
         setPurpose: (id, purpose) => machines.setPurpose(id, purpose),
         get: (id) => store.machines.get(id),
         isOnline: (id) => machines.isOnline(id),
-        liveCount: (id) => machines.liveCount(id),
+        // Standing agents share the main clone's agent slots (max_agents), not its sandboxes' (MachineManager.liveIn).
+        liveCount: (id) => machines.liveIn(id, undefined),
         mainCloneRefusal: (m, kind) => machines.mainCloneRefusal(m, kind),
         createSession: (id, opts) => machines.createSession(id, opts),
       },
