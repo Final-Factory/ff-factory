@@ -10,7 +10,7 @@ import { stallCandidate } from './ledgerRules.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
 import type { DelegationFiling } from './orchestrators.ts';
-import type { DelegationRequest, Requester, SessionInfo, WorkItem } from '../shared/types.ts';
+import type { DelegationRequest, Machine, Requester, SessionInfo, WorkItem } from '../shared/types.ts';
 
 /**
  * Standing agents' delegations (w527, docs/standing-agents.md "Delegations"): the auto-approve rules and the
@@ -57,6 +57,9 @@ function setup(t: { after: (fn: () => void) => void }, opts: { ledger?: boolean 
   const bumped: { id: string; by: Requester }[] = [];
   const notes: { text: string; by?: Requester }[] = [];
   const clock = { now: now0 };
+  // w510: standing agents run on machines; m1 is an online one whose sessions are the port's.
+  const m1 = { id: 'm1', platform: 'linux', appDir: '/home/u/.fff', repoPath: '/home/u/game', maxSessions: 6, status: 'ready', purpose: 'x', sessionIds: [] } as unknown as Machine;
+  const machines = { list: () => [m1], get: (id: string) => (id === 'm1' ? m1 : undefined), isOnline: () => true, liveCount: () => 0, createSession: (_m: string, o: Parameters<SessionPort['create']>[0]) => port.create(o) };
   const st = new StandingAgents({
     cfg,
     store,
@@ -81,9 +84,9 @@ function setup(t: { after: (fn: () => void) => void }, opts: { ledger?: boolean 
               return Object.assign(items.get(id)!, { priority: 'urgent' });
             },
           },
-    now: () => clock.now,
+    machines: machines as never, now: () => clock.now,
   });
-  const agent = st.create({ name: 'Nightly sentry', charter: 'Triage develop.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true }, owner: BEN });
+  const agent = st.create({ name: 'Nightly sentry', charter: 'Triage develop.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true }, owner: BEN, machineId: 'm1' });
   t.after(() => {
     store.flush();
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -233,8 +236,8 @@ test("migration: an old auto-queued request is filed on the first tick, today's 
   store.putDelegation(old('q1', { auto: 'queued', expiresAt: now0.toISOString(), requestedBy: BEN }));
   store.putDelegation(old('2c70e0fa', { status: 'rejected', note: 'started by hand under w524 as worker abc' }));
   // The sentry, with no auto-approve setting of its own; and one a person switched off, which stays off.
-  const sentry = st.create({ name: 'nightly-regression-sentry', charter: 'x', trigger: { kind: 'manual' }, tools: ['delegate'] });
-  const off = st.create({ name: 'Other sentry', charter: 'x', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: false } });
+  const sentry = st.create({ name: 'nightly-regression-sentry', charter: 'x', trigger: { kind: 'manual' }, tools: ['delegate'], machineId: 'm1' });
+  const off = st.create({ name: 'Other sentry', charter: 'x', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: false }, machineId: 'm1' });
   assert.equal(sentry.autoApprove, undefined);
   st.tick();
   const q = store.delegations.get('q1')!;

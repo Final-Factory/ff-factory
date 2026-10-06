@@ -9,6 +9,8 @@
 #   fff-vm events            alerts on libvirt's watchdog, crash and stop events (fff-vm-events.service)
 #   fff-vm snapshots         the disk's snapshots
 #   fff-vm notify-test       send a test alert to the ntfy topic
+#   fff-vm vault-sync        each person's tokens in /etc/fff-vm/secrets/people/<user id>/ into the VM's vault, and the
+#                            vault key's spare copy back here (docs/vault.md, "Whose tokens"); values never printed
 set -o errexit -o nounset -o pipefail
 LIB=${FFF_VM_LIB:-/usr/local/lib/fff-vm}
 # shellcheck source=lib.sh
@@ -258,6 +260,11 @@ case "${1:-status}" in
   events) cmd_events ;;
   snapshots) snapshot_list ;;
   notify-test) notify "fff-vm: test" "A test alert from $(hostname -s) (fff-vm notify-test)." ;;
-  -h | --help | help) sed -n '2,11p' "$0" ;;
+  vault-sync)
+    # shellcheck source=vault.sh
+    . "$LIB/vault.sh"
+    vault_sync
+    ;;
+  -h | --help | help) sed -n '2,/^set -o/{/^#/p}' "$0" ;;
   *) die "unknown command $1 (fff-vm help)" ;;
 esac

@@ -1,19 +1,15 @@
-import { hostAccount, hostClaudeEnv, machineRunEnv } from './secrets.ts';
-import { claudeEnvFor } from './identity.ts';
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
+import { machineRunEnv } from './secrets.ts';
+import { NIGHTLY_SENTRY, unattributedPerson } from './vault.ts';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { PORTAL_ONLY_WHY, ROOT, configPath, connectorEnv, ownerLine, portalOnly, publicIdentityOf, type Config } from './config.ts';
+import { connectorEnv, ownerLine, publicIdentityOf, type Config } from './config.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
-import { portalSecretRules, secretFilesOf, type SecretRules } from './secretGuard.ts';
-import { buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from './launch.ts';
+import type { SecretRules } from './secretGuard.ts';
+import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { Store } from './store.ts';
 import type { OptionsFactory } from './sessions.ts';
 import { slugify } from './sandboxes.ts';
-import { maxEnv } from './maxEvents.ts';
 import type { DelegationFiling } from './orchestrators.ts';
 import {
   addSpend,
@@ -52,10 +48,10 @@ import type {
 import { appDirOf } from '../shared/types.ts';
 
 /**
- * D16 (w464, docs/portal-on-ffbox-host.md): the portal-only mode runs no standing agent, here or on a machine. Their
- * jobs move to ordinary workers that timers wake.
+ * w510: standing agents run on a machine's daemon; the portal itself runs only the orchestrators and the dispatcher.
+ * One left from before, with no machine, keeps its record and conversation but does not run until it is given one.
  */
-export const STANDING_PORTAL_ONLY = `standing agents do not run on this portal (${PORTAL_ONLY_WHY}); their jobs run as workers that timers start`;
+export const STANDING_NEEDS_MACHINE = 'standing agents run on a machine, not in the portal (w510): give it one with update_standing_agent machine (an id from list_machines)';
 
 /** What a standing agent needs from a session: SessionManager and AgentSession satisfy it; tests fake it. */
 export interface SessionLike {
@@ -131,8 +127,6 @@ interface ActiveRun {
  */
 export class StandingAgents {
   private readonly cfg: Config;
-  /** The host guard's gate (server/hostHealth.ts): while set, runs on this host wait. */
-  hostGate?: () => string | undefined;
   private readonly store: Store;
   private readonly sessions: SessionPort;
   private readonly deps: StandingDeps;
@@ -152,10 +146,6 @@ export class StandingAgents {
     this.sessions.events.on('result', (s: SessionLike, subtype: string) => this.onResult(s, subtype));
     this.sessions.events.on('turnEnd', (s: SessionLike, text: string) => this.onTurnEnd(s, text));
     this.sessions.events.on('ended', (s: SessionLike) => this.onEnded(s));
-  }
-
-  get root() {
-    return this.cfg.standingRoot;
   }
 
   list() {
@@ -184,6 +174,8 @@ export class StandingAgents {
       }
       if (!this.hasSession(a.sessionId)) a.sessionId = this.newSession(a).info.id;
       a.state = a.pending ? 'waiting' : a.enabled ? 'asleep' : 'paused';
+      // w510: one from before with no machine keeps its record and conversation, and says why it does not run.
+      if (!a.machineId) a.stateDetail = STANDING_NEEDS_MACHINE;
       this.store.putStanding(a);
     }
     // Sessions whose agent is gone (deleted while the server was down, or a torn save).
@@ -210,6 +202,7 @@ export class StandingAgents {
     if (!charter) throw new Error('charter is required');
     const problem = triggerProblem(input.trigger);
     if (problem) throw new Error(problem);
+    if (!input.machineId?.trim()) throw new Error(STANDING_NEEDS_MACHINE);
     const now = this.now();
     const enabled = input.enabled ?? true;
     const a: StandingAgent = {
@@ -233,7 +226,6 @@ export class StandingAgents {
       spend: { day: '', usd: 0 },
       runs: [],
     };
-    this.ensureFolder(a);
     a.sessionId = this.newSession(a).info.id;
     this.store.putStanding(a);
     return a;
@@ -266,7 +258,9 @@ export class StandingAgents {
     if (moved) {
       if (this.active.has(a.id) || a.pending) throw new Error(`${a.name} has a run in progress or waiting; stop it before moving the agent`);
       next.machineId = this.machineOf(patch.machineId);
+      if (!next.machineId) throw new Error(STANDING_NEEDS_MACHINE);
       next.folder = this.folderFor(a.id, next.machineId);
+      next.stateDetail = undefined;
     }
     const scheduleChanged = patch.trigger !== undefined || (patch.enabled !== undefined && patch.enabled !== a.enabled);
     if (scheduleChanged) next.nextRunAt = next.enabled ? nextRunAfter(next.trigger, this.now())?.toISOString() : undefined;
@@ -280,7 +274,6 @@ export class StandingAgents {
     if (moved) {
       // A conversation lives where its process runs: moving the agent starts a fresh one there.
       if (this.hasSession(a.sessionId)) this.sessions.remove(a.sessionId);
-      this.ensureFolder(a);
       a.sessionId = this.newSession(a).info.id;
     }
     // The session picks up the model and name; tools, charter and budget apply when its next run starts.
@@ -327,7 +320,7 @@ export class StandingAgents {
   runNow(id: string, trigger: 'manual' | 'message' = 'manual', text?: string, requestedBy?: Requester): string {
     const a = this.require(id);
     refuseInDryRun(`a run of ${a.name}`);
-    if (portalOnly(this.cfg)) throw new Error(STANDING_PORTAL_ONLY);
+    if (!a.machineId) throw new Error(`${a.name}: ${STANDING_NEEDS_MACHINE}`);
     if (this.active.has(a.id)) {
       if (trigger === 'message' && text) {
         this.sessions.send(a.sessionId, text, 'human', undefined, { requestedBy });
@@ -421,25 +414,25 @@ export class StandingAgents {
 
   private tryStart(a: StandingAgent): string {
     const p = a.pending!;
-    if (portalOnly(this.cfg)) {
-      // D16 (w464): a scheduled run is recorded as skipped, with why, and nothing starts.
+    if (!a.machineId) {
+      // w510: one with no machine (from before) is recorded as skipped, with why, and nothing starts.
       a.pending = undefined;
-      this.recordSkip(a, p.trigger, p.dueAt, STANDING_PORTAL_ONLY);
+      this.recordSkip(a, p.trigger, p.dueAt, STANDING_NEEDS_MACHINE);
       a.state = a.enabled ? 'asleep' : 'paused';
-      a.stateDetail = STANDING_PORTAL_ONLY;
+      a.stateDetail = STANDING_NEEDS_MACHINE;
       this.store.putStanding(a);
-      return `Skipped: ${STANDING_PORTAL_ONLY}.`;
+      return `Skipped: ${STANDING_NEEDS_MACHINE}.`;
     }
-    const m = a.machineId ? this.deps.machines?.get(a.machineId) : undefined;
+    const m = this.deps.machines?.get(a.machineId);
     const online = !!m && !!this.deps.machines?.isOnline(m.id);
     const verdict = admit({
       agent: a,
       now: this.now(),
       busy: this.active.has(a.id),
-      liveAgents: m ? this.deps.machines!.liveCount(m.id) : this.sessions.liveAgents(),
-      maxAgents: m ? m.maxSessions : this.cfg.limits.maxSessions,
+      liveAgents: m ? this.deps.machines!.liveCount(m.id) : 0,
+      maxAgents: m ? m.maxSessions : 0,
       deadline: new Date(p.deadline),
-      unavailable: a.machineId && !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : m ? this.deps.machines?.mainCloneRefusal?.(m, 'standing') : a.machineId ? undefined : this.hostGate?.(),
+      unavailable: !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : this.deps.machines?.mainCloneRefusal?.(m!, 'standing'),
     });
     if (verdict.action === 'wait') {
       a.state = 'waiting';
@@ -460,7 +453,6 @@ export class StandingAgents {
 
   private startRun(a: StandingAgent, trigger: StandingRunTrigger, dueAt: string, capUsd: number, text?: string, requestedBy?: Requester): string {
     const now = this.now();
-    this.ensureFolder(a);
     if (!this.hasSession(a.sessionId)) a.sessionId = this.newSession(a).info.id;
     const s = this.sessions.get(a.sessionId);
     // A run's process must start fresh: its options (budget cap, tools, charter) are fixed at start.
@@ -788,10 +780,10 @@ export class StandingAgents {
       if (!this.deps.machines) throw new Error('machines are not available');
       return this.deps.machines.createSession(a.machineId, opts);
     }
-    return this.sessions.create({ ...opts, options: this.options });
+    return this.sessions.create({ ...opts, options: this.noMachineOptions });
   }
 
-  /** A machine id as stored: '' means this host. Throws for an unknown machine. */
+  /** A machine id as stored ('' or none: no machine, which create and update refuse). Throws for an unknown machine. */
   private machineOf(id: string | undefined): string | undefined {
     const m = id?.trim().toLowerCase();
     if (!m) return undefined;
@@ -804,7 +796,8 @@ export class StandingAgents {
 
   private folderFor(id: string, machineId: string | undefined) {
     const m = machineId ? this.deps.machines?.get(machineId.trim().toLowerCase()) : undefined;
-    return m ? `${appDirOf(m)}/agents/${id}` : path.join(this.root, id);
+    if (!m) throw new Error(STANDING_NEEDS_MACHINE);
+    return `${appDirOf(m)}/agents/${id}`;
   }
 
   private notesSeed(a: StandingAgent) {
@@ -817,52 +810,28 @@ export class StandingAgents {
     return act ? a.runs.find((r) => r.id === act.runId)?.requestedBy : undefined;
   }
 
-  /** The folder of an agent that runs here; a machine's daemon makes its own (spec.init). */
-  private ensureFolder(a: StandingAgent) {
-    if (a.machineId) return;
-    fs.mkdirSync(a.folder, { recursive: true });
-    const notes = path.join(a.folder, NOTES);
-    if (!fs.existsSync(notes)) fs.writeFileSync(notes, this.notesSeed(a));
-  }
-
-  /** Where an agent runs: this host (next to the sandboxes and the base clone) or a machine (next to the user's clone). */
+  /** Where an agent runs: its machine, next to the user's clone there (w510: never the portal itself). */
   private place(a: StandingAgent) {
-    if (a.machineId) {
-      const m = this.deps.machines?.get(a.machineId);
-      const dir = m ? appDirOf(m) : '~/.ff-factory';
-      return {
-        where: `the machine ${a.machineId}`,
-        repoNote: m ? `The user's main Final Factory clone on this machine is \`${m.repoPath}\`. Read it with Read/Grep; never change it.` : '',
-        protectedPaths: [`${dir}/app`, `${dir}/daemon.json`],
-        offLimits: [`${dir}/app`],
-        // The daemon's token and secrets (w467); the machine's home secrets are added there, by standingGuard.
-        secrets: { deny: [`${dir}/daemon.json*`, `${dir}/secrets`], allow: [] } as SecretRules,
-        gameRepos: [this.cfg.repo.url],
-        // The host's Claude account (config machines.useHostClaudeEnv), for this agent only; the run's person's own
-        // when they have one (config userClaudeEnv, docs/identity.md).
-        ...(() => {
-          // The vault's token and secrets for this run (docs/vault.md), else the machine's account as before.
-          const run = machineRunEnv(this.cfg, m ?? a.machineId, { role: 'standing', requestedBy: this.currentRequester(a), sessionId: a.sessionId });
-          return { env: run.env, login: run.login };
-        })(),
-        claudeExecutable: undefined,
-      };
-    }
+    if (!a.machineId) throw new Error(`${a.name}: ${STANDING_NEEDS_MACHINE}`);
+    const m = this.deps.machines?.get(a.machineId);
+    const dir = m ? appDirOf(m) : '~/.ff-factory';
     return {
-      where: os.hostname(),
-      repoNote: `The game repo's base clone is at \`${this.cfg.repo.basePath}\` (it may lag origin). Read it with Read/Grep; do not run commands in it or in any sandbox under \`${this.cfg.sandboxRoot}\`.`,
-      protectedPaths: [...this.cfg.protectedPaths, ROOT, this.cfg.dataDir],
-      offLimits: [this.cfg.sandboxRoot, this.cfg.repo.basePath],
-      // FF Factory's config, secrets and data/ (w467): not read, not searched.
-      secrets: portalSecretRules({ configFile: configPath(), appRoot: ROOT, dataDir: this.cfg.dataDir, secretFiles: secretFilesOf(this.cfg) }),
-      gameRepos: [this.cfg.repo.url, this.cfg.repo.basePath],
-      // Config claudeAccounts.standing: the host token or this host's stored login (docs/accounts.md); the run's
-      // person's own token when they have one.
-      // On the token file (w464): that token alone, read at this run's start, whoever the run is for; the process starts
-      // with no credential of the server's own (login true strips them) and gets the file's.
-      env: hostAccount(this.cfg, 'standing') === 'tokenfile' ? hostClaudeEnv(this.cfg, 'standing') : claudeEnvFor(this.cfg, this.currentRequester(a), hostClaudeEnv(this.cfg, 'standing')),
-      login: hostAccount(this.cfg, 'standing') !== 'token',
-      claudeExecutable: this.cfg.claudeExecutable,
+      where: `the machine ${a.machineId}`,
+      repoNote: m ? `The user's main Final Factory clone on this machine is \`${m.repoPath}\`. Read it with Read/Grep; never change it.` : '',
+      protectedPaths: [`${dir}/app`, `${dir}/daemon.json`],
+      offLimits: [`${dir}/app`],
+      // The daemon's token and secrets (w467); the machine's home secrets are added there, by standingGuard.
+      secrets: { deny: [`${dir}/daemon.json*`, `${dir}/secrets`], allow: [] } as SecretRules,
+      gameRepos: [this.cfg.repo.url],
+      // The host's Claude account (config machines.useHostClaudeEnv), for this agent only; the run's person's own
+      // when they have one (config userClaudeEnv, docs/identity.md).
+      ...(() => {
+        // The vault's token and secrets for this run (docs/vault.md), else the machine's account as before. The nightly
+        // regression sentry runs on the tokens config vault.unattributed.nightly names ("Whose tokens").
+        const tokenUser = a.id === NIGHTLY_SENTRY ? unattributedPerson(this.cfg, 'nightly') : undefined;
+        const run = machineRunEnv(this.cfg, m ?? a.machineId, { role: 'standing', requestedBy: this.currentRequester(a), sessionId: a.sessionId, tokenUser });
+        return { env: run.env, login: run.login };
+      })(),
     };
   }
 
@@ -941,9 +910,8 @@ ${a.charter}
       },
       // What the agent does as Max is tagged with its session (docs/max.md); a machine's daemon sets its own FF_MAX_EVENTS.
       // Its claude.ai connectors: config claudeAiConnectors.standing (w516; on by default).
-      env: { ...place.env, FF_STANDING_AGENT: a.id, ...(a.machineId ? { FF_SESSION_ID: a.sessionId } : maxEnv(this.cfg, a.sessionId)), ...connectorEnv(this.cfg, 'standing') },
+      env: { ...place.env, FF_STANDING_AGENT: a.id, FF_SESSION_ID: a.sessionId, ...connectorEnv(this.cfg, 'standing') },
       login: place.login,
-      claudeExecutable: place.claudeExecutable,
       init: { files: { [NOTES]: this.notesSeed(a) } },
     };
   }
@@ -975,12 +943,19 @@ ${a.charter}
     };
   }
 
-  /** SDK options for a standing agent that runs here, rebuilt every time a run starts its process. */
-  readonly options: OptionsFactory = (info: SessionInfo): Options => {
-    const a = this.store.standing.get(info.standingId ?? '');
-    if (!a) throw new Error(`standing agent ${info.standingId} no longer exists`);
-    return buildOptions(this.spec(a), this.handlers(a.id));
+  /**
+   * The options of a standing agent's conversation kept in the portal: one from before w510 with no machine. It keeps
+   * its record and transcript, but never starts a process here.
+   */
+  readonly noMachineOptions: OptionsFactory = (info: SessionInfo): Options => {
+    throw new Error(`${this.store.standing.get(info.standingId ?? '')?.name ?? info.title}: ${STANDING_NEEDS_MACHINE}`);
   };
+
+  /** system_status: the standing agents from before w510 with no machine, which do not run until given one. */
+  noMachineLine(): string | undefined {
+    const left = this.list().filter((a) => !a.machineId);
+    return left.length ? `Standing agents with no machine (they do not run; ${STANDING_NEEDS_MACHINE.replace(/^standing agents run/, 'they run')}): ${left.map((a) => a.id).join(', ')}` : undefined;
+  }
 
   /** One agent, for the orchestrator's list. */
   describe(a: StandingAgent) {

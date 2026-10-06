@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { EventEmitter } from 'node:events';
 import { checkAccountConfig, type Config } from './config.ts';
 import { accountSetupLines, hostAccount, hostClaudeEnv, hostClaudeEnvFor, hostLoginProblem, hostProcessEnv, hostRole, hostRoleOf, machineUsesLogin, readTokenFile, redactSecrets, tokenFileToken } from './secrets.ts';
 import { nextPerMachine, setAppConfig } from './appConfig.ts';
@@ -11,7 +10,6 @@ import { claudeEnvFor } from './identity.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { HOST_LOGIN, accountKeyOf, buildAccounts, sessionSource, tokenKey, tokenLabel } from './usage.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
-import { StandingAgents, type SessionPort } from './standing.ts';
 import { Store } from './store.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import type { Requester, SessionInfo } from '../shared/types.ts';
@@ -70,64 +68,6 @@ test('accounts: a Mac set to its own login drops any credential of the daemon; o
   assert.equal(buildOptions(spec({ env: { ...cfg.claudeEnv }, login: false }), {}, MAC_ENV).env?.CLAUDE_CODE_OAUTH_TOKEN, HOST_TOKEN);
   // Lothsahn's work on m3 runs on his token.
   assert.equal(buildOptions(spec({ env: claudeEnvFor(cfg, LOTH, {}), login: true }), {}, MAC_ENV).env?.CLAUDE_CODE_OAUTH_TOKEN, LOTH_TOKEN);
-});
-
-/** A SessionPort that records nothing but the sessions it made. */
-class Port implements SessionPort {
-  readonly events = new EventEmitter();
-  readonly all = new Map<string, { info: SessionInfo; live: boolean; stop(): void }>();
-  create(opts: Parameters<SessionPort['create']>[0]) {
-    const info = { id: `s${this.all.size + 1}`, kind: opts.kind, standingId: opts.standingId, title: opts.title, status: 'stopped', permissionMode: opts.permissionMode, createdAt: '', lastActivityAt: '', turns: 0, costUsd: 0, pendingPermissions: [] } as unknown as SessionInfo;
-    const s = { info, live: false, stop: () => undefined };
-    this.all.set(info.id, s);
-    return s;
-  }
-  get(id: string) {
-    return this.all.get(id)!;
-  }
-  send() {
-    return 'u';
-  }
-  liveAgents() {
-    return 0;
-  }
-  remove(id: string) {
-    this.all.delete(id);
-  }
-}
-
-test('accounts: a standing agent on this host follows claudeAccounts.standing', (t) => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-accounts-'));
-  let store: Store | undefined;
-  t.after(() => {
-    store?.flush();
-    fs.rmSync(tmp, { recursive: true, force: true });
-  });
-  const cfg = {
-    ...split(),
-    dataDir: path.join(tmp, 'data'),
-    sandboxRoot: path.join(tmp, 'sb'),
-    standingRoot: path.join(tmp, 'sb', '_agents'),
-    protectedPaths: [],
-    repo: { url: 'x', basePath: path.join(tmp, 'sb', '_base') },
-    limits: { maxSessions: 6 },
-    models: ['opus'],
-    defaultModel: 'opus',
-    worker: { permissionMode: 'bypassPermissions', effort: 'high' },
-  } as unknown as Config;
-  store = new Store(cfg.dataDir);
-  const st = new StandingAgents({ cfg, store, sessions: new Port(), systemPayer: () => BEN, notify: () => undefined, now: () => new Date('2026-09-28T10:00:00') });
-  const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 }, tools: ['delegate'] });
-  const info = { id: 'x', kind: 'standing', standingId: a.id } as SessionInfo;
-  const saved = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  process.env.CLAUDE_CODE_OAUTH_TOKEN = ENV_TOKEN;
-  t.after(() => (saved === undefined ? delete process.env.CLAUDE_CODE_OAUTH_TOKEN : (process.env.CLAUDE_CODE_OAUTH_TOKEN = saved)));
-  assert.equal(st.options(info).env?.CLAUDE_CODE_OAUTH_TOKEN, HOST_TOKEN, 'default: the host token');
-  cfg.claudeAccounts = { standing: 'login' };
-  const env = st.options(info).env!;
-  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, undefined, "login: not even the server environment's token");
-  assert.equal(env.CLAUDE_CONFIG_DIR, '/cfg');
-  assert.equal(env.FF_STANDING_AGENT, a.id);
 });
 
 test('accounts: a session records the account its process started on', async (t) => {
@@ -354,7 +294,7 @@ test('token file: an unreadable or malformed file stops the session start, and t
   assert.equal(tokenFileToken(split({ claudeAccounts: { orchestrator: 'tokenfile' }, claudeTokenFile: bad })), undefined, 'the meters: unknown, not a throw');
 });
 
-test('token file: a person orchestrator and a standing run on it ignore their person\'s own token; system_status names it', (t) => {
+test('token file: system_status names the file for the roles on it, and says when it cannot be read', (t) => {
   const file = tokenFile(t);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-accounts-'));
   let store: Store | undefined;
@@ -375,15 +315,6 @@ test('token file: a person orchestrator and a standing run on it ignore their pe
     worker: { permissionMode: 'bypassPermissions', effort: 'high' },
   } as unknown as Config;
   store = new Store(cfg.dataDir);
-  // The run is Lothsahn's, who has a token of his own: the file still wins.
-  const st = new StandingAgents({ cfg, store, sessions: new Port(), systemPayer: () => LOTH, notify: () => undefined, now: () => new Date('2026-09-28T10:00:00') });
-  const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 } });
-  const saved = process.env.ANTHROPIC_API_KEY;
-  process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-server-env';
-  t.after(() => (saved === undefined ? delete process.env.ANTHROPIC_API_KEY : (process.env.ANTHROPIC_API_KEY = saved)));
-  const env = st.options({ id: 'x', kind: 'standing', standingId: a.id } as SessionInfo).env!;
-  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, FILE_TOKEN);
-  assert.equal(env.ANTHROPIC_API_KEY, undefined, "no credential of the server's own");
   assert.match(accountSetupLines(cfg, 'FFVM', HOST_TOKEN, [])[0], /standing agents here: token file …FFFF/);
   assert.match(accountSetupLines({ ...cfg, claudeTokenFile: path.join(tmp, 'gone') }, 'FFVM', HOST_TOKEN, [])[0], /standing agents here: token file \(UNREADABLE: its sessions will not start\)/);
 });

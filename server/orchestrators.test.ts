@@ -1092,7 +1092,7 @@ test('w496: the request as filed: whole notes from WorkItem.notes, older ones fr
 test("w527: a standing agent's delegation flows into the ledger and onto a worker with no clicks; queued, it waits for capacity", async (t) => {
   const { store, agents, o, dispatcher, chat, call, heard } = await setupOnMachine(t);
   const st = agents.standing;
-  const sentry = st.create({ name: 'Nightly sentry', charter: 'Watch develop.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true }, owner: BEN });
+  const sentry = st.create({ name: 'Nightly sentry', charter: 'Watch develop.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true }, owner: BEN, machineId: 'pc' });
   const title = 'Verify suspected regressions from PRs #1105, #1024, #1065';
   const task = 'Run MP-belt-items-after-load-join on develop. If it fails, bisect PR 1105, PR 1024 and PR 1065, fix with a test guard, and open a PR into develop.';
 
@@ -1151,9 +1151,9 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
 });
 
 test('w527: Approve, the orchestrator in its person\'s own words, and Start now: queued without a free slot, bumped to the front', async (t) => {
-  const { store, agents, dispatcher, chat, call, heard } = setup(t);
+  const { store, agents, dispatcher, chat, call, heard } = await setupOnMachine(t);
   const st = agents.standing;
-  const a = st.create({ name: 'PR reviewer', charter: 'Review PRs.', trigger: { kind: 'manual' }, tools: ['delegate'], owner: LOTH });
+  const a = st.create({ name: 'PR reviewer', charter: 'Review PRs.', trigger: { kind: 'manual' }, tools: ['delegate'], owner: LOTH, machineId: 'pc' });
   const d = st.requestDelegation(a.id, 'Fix the doc links', 'Fix the broken links in docs/.');
   assert.equal(d.status, 'pending', 'no auto-approve: it waits');
   assert.equal(store.work.size, 0);

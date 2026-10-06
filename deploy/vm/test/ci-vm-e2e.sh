@@ -63,7 +63,7 @@ PORTAL_OWNER_NAME=CI
 GUEST_TAILSCALE=skip
 GUEST_GITHUB=skip
 GUEST_BACKUP_SSH_TARGET=
-# The sizes are the defaults (D12: 2 vCPUs, 8 GiB), so CI boots the size the FFBox host runs; only the disk is small.
+# The sizes are the defaults (D12: 2 vCPUs, 4 GiB), so CI boots the size the FFBox host runs; only the disk is small.
 VM_DISK_GB=16
 $(if [ "$TIMING" = fast ]; then printf 'WATCH_INTERVAL_SEC=10\nWATCH_FAILS_BEFORE_RESET=2\nWATCH_BOOT_GRACE_SEC=90\n'; fi)
 NIGHTLY_MODE=always
@@ -214,6 +214,36 @@ printf '%s' "$out" | matches '^600 root$' || fail "the issued machine credential
 if printf '%s' "$out" | matches 'ffm_ci-m1_'; then fail "fffctl machine-credential printed the credential"; fi
 g 'sudo fffctl vault remove ci-env' >/dev/null
 echo "ok: the vault key is root's and loaded by the portal; values and credentials never printed"
+# Whose tokens (w512, docs/vault.md): a person's tokens kept on the host go into the vault with fff-vm vault-sync, never
+# printed; a classic GitHub token is refused; a second sync changes nothing; a removed file removes its entry; the key's
+# spare copy on the host matches the VM's key.
+# No head at the end of the pipe: under pipefail its early exit would SIGPIPE the writers.
+rnd() { local s; s=$(head -c 96 /dev/urandom | base64 -w0 | tr -dc 'A-Za-z0-9'); printf '%s' "${s:0:$1}"; }
+ct="sk-ant-oat01-$(rnd 44)"
+gt="github_pat_$(rnd 40)"
+install -d -m 0700 /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2
+printf '%s\n' "$ct" | install -m 0600 /dev/stdin /etc/fff-vm/secrets/people/ci/claude-token
+printf '%s\n' "$gt" | install -m 0600 /dev/stdin /etc/fff-vm/secrets/people/ci/github-token
+printf 'ghp_%s\n' "$(rnd 36)" | install -m 0600 /dev/stdin /etc/fff-vm/secrets/people/ci2/github-token
+out=$(/usr/local/sbin/fff-vm vault-sync 2>&1) || true
+echo "$out"
+for v in "$ct" "$gt"; do if printf '%s' "$out" | matches -F "${v:13:24}"; then fail "fff-vm vault-sync printed a token"; fi; done
+printf '%s' "$out" | matches 'not one fine-grained GitHub token' || fail "a classic GitHub token was not refused"
+list=$(g 'sudo fffctl vault list')
+printf '%s' "$list" | matches -F "${ct: -4}" || fail "host-ci-claude is not in the vault: $list"
+printf '%s' "$list" | matches '^host-ci-github ' || fail "host-ci-github is not in the vault: $list"
+if printf '%s' "$list" | matches '^host-ci2-'; then fail "the refused token went in"; fi
+[ "$(stat -c '%a %U' /etc/fff-vm/secrets/vault.key)" = "600 root" ] || fail "the key's spare copy is not 0600 root"
+# The file is named to sha256sum under sudo: a "<" redirect would be opened by the admin's own shell, which cannot read it.
+[ "$(sha256sum /etc/fff-vm/secrets/vault.key | cut -c1-64)" = "$(g 'sudo sha256sum /etc/fff/vault.key' | cut -c1-64)" ] || fail "the key's spare copy differs from the VM's key"
+# Captured first: the sync exits 1 (ci2's classic token is still refused), which pipefail would carry through a pipe.
+out=$(/usr/local/sbin/fff-vm vault-sync 2>&1) || true
+printf '%s' "$out" | matches 'unchanged host-ci-claude' || fail "a second sync was not a no-op: $out"
+printf '%s' "$out" | matches 'unchanged host-ci-github' || fail "a second sync was not a no-op: $out"
+rm -rf /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2
+/usr/local/sbin/fff-vm vault-sync >/dev/null 2>&1 || true
+if g 'sudo fffctl vault list --names' | matches '^host-ci-'; then fail "a removed person's entries stayed in the vault"; fi
+echo "ok: fff-vm vault-sync: per-person tokens in, never printed, a classic GitHub token refused, removals follow, the key copied"
 # fffctl migrate (w499) in a real guest: the wrapper, node in the release, ssh as fff with the portal's key. No BEAST here,
 # so it cannot connect: it says so, prints the line that authorizes the key, and changes nothing. (The modes themselves
 # run end to end against a synthetic BEAST in the unit tests: scripts/fff-migrate.test.ts.)

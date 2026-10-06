@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { checkObject, readJsonDurable } from './durable.ts';
 import { withFileLock, writeJsonOwned } from './machineTokens.ts';
-import type { PlanUsage, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus } from '../shared/types.ts';
+import type { PlanUsage, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus, WorkItem } from '../shared/types.ts';
 
 /**
  * The token vault (docs/vault.md, w512): the secrets worker runs need, kept by the portal, encrypted value by value with a
@@ -67,6 +67,39 @@ export function envNameProblem(name: string | undefined): string | undefined {
   if (!ENV_SUFFIX.test(name)) return `${name}: a vault variable ends in _TOKEN, _KEY, _SECRET or _PASSWORD`;
   if (ENV_RESERVED.test(name)) return `${name}: CLAUDE_, ANTHROPIC_, GH_, GITHUB_ and GIT_ variables are not kind env (use kind claude or github)`;
   return undefined;
+}
+
+// ---------------------------------------------------------------- whose tokens (docs/vault.md, "Whose tokens")
+
+/** Kinds of work nobody asked for by name (config vault.unattributed). */
+export type UnattributedKind = 'intake' | 'ffbox' | 'nightly';
+/**
+ * lothsahn, 2026-10-06: "Intake should be my token. Nightly sentry Ben. Ffbox me unless it provides an operator... In that
+ * case, use the token of the operator." (An FFBox request naming an operator is that person's own: not unattributed.)
+ */
+export const UNATTRIBUTED_DEFAULTS: Readonly<Record<UnattributedKind, string>> = { intake: 'lothsahn', ffbox: 'lothsahn', nightly: 'ben' };
+/** The nightly regression sentry's standing agent id (server/schedule.ts AUTO_BY_DEFAULT). */
+export const NIGHTLY_SENTRY = 'nightly-regression-sentry';
+
+/** Which kind of nobody's work a request is, or undefined when a person asked for it. */
+export function unattributedKind(w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed'>): UnattributedKind | undefined {
+  if (w.delegation?.agentId === NIGHTLY_SENTRY) return 'nightly';
+  if (!w.unattributed || !w.source) return undefined;
+  const k = w.source.kind;
+  return k === 'nightly' ? 'nightly' : k.startsWith('ffbox-') ? 'ffbox' : 'intake';
+}
+
+/** The user id whose vault tokens a kind of nobody's work runs on: config vault.unattributed, else the defaults. */
+export const unattributedPerson = (cfg: { vault?: { unattributed?: Partial<Record<UnattributedKind, string>> } }, kind: UnattributedKind) =>
+  cfg.vault?.unattributed?.[kind] ?? UNATTRIBUTED_DEFAULTS[kind];
+
+/**
+ * Whose tokens a worker serving `w` gets (w512): the configured person for work nobody asked for by name, else undefined
+ * (the run's own person: its requester, which for a request is whoever filed it).
+ */
+export function tokenPersonForWork(cfg: { vault?: { unattributed?: Partial<Record<UnattributedKind, string>> } }, w: Pick<WorkItem, 'source' | 'delegation' | 'unattributed'> | undefined): string | undefined {
+  const kind = w ? unattributedKind(w) : undefined;
+  return kind ? unattributedPerson(cfg, kind) : undefined;
 }
 
 // ---------------------------------------------------------------- the key

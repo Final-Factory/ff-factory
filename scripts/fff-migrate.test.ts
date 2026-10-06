@@ -10,7 +10,7 @@ import path from 'node:path';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { BATCH_PS, DEFAULTS, MANIFEST_PS, MAX_STDIN_BYTES, Migration, codecOrder, liveOut, parseArgs, tarVerbose, type Options, type System } from './fff-migrate.ts';
+import { BATCH_PS, DEFAULTS, MANIFEST_PS, MAX_STDIN_BYTES, Migration, asUserCommand, codecOrder, liveOut, parseArgs, tarVerbose, type Options, type System } from './fff-migrate.ts';
 import { ROOT } from '../server/config.ts';
 import { claudeProjectFolder } from '../server/vmMigration.ts';
 import { Store } from '../server/store.ts';
@@ -440,8 +440,13 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   assert.match(report, /copied 1 conversation\(s\) to resume/);
   assert.match(report, /BEAST's config\.json and data: snapshot: a staged copy on BEAST, .*\(no VSS shadow copy: not Windows\); every file is read from it/);
   // zstd where this machine can unpack it (GitHub's runners can), else gzip, said so.
-  const want = HAS_ZSTD ? /^compression: zstd level 3$/m : /^compression: gzip \(not: zstd: no zstd here\)$/m;
-  assert.match(report, want);
+  if (HAS_ZSTD) {
+    assert.match(report, /^compression: trying zstd level 3\.\.\.\ncompression: using zstd level 3$/m);
+  } else {
+    assert.match(report, /^compression: zstd level 3 failed, falling back to gzip\.\.\.$/m);
+    assert.match(report, /^  compression check \(zstd\): no zstd here$/m, 'the reason is in the saved report');
+    assert.match(report, /^compression: using gzip$/m);
+  }
   assert.match(report, /copied [\d,]+ of [\d,]+ files, [\d.]+ MB of files in [\d.]+ MB over the wire \((zstd level 3|gzip), [\d.]+x\)/);
   assert.match(report, /beast: from the portal's own host to a machine reached over ssh \(rydin@beast\)/);
 
@@ -707,7 +712,10 @@ test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that
   const mz = new Migration(o, w.sys);
   const rz = await mz.pull('beast', 'data', w.beastRoot, ['config.json', 'data']);
   await mz.dropSnapshots();
-  assert.match(mz.report.join('\n'), HAS_ZSTD ? /compression: gzip \(not: zstd: tar\.exe: Option --zstd is not supported\)/ : /compression: gzip \(not: zstd: no zstd here\)/);
+  const rep = mz.report.join('\n');
+  assert.match(rep, /^compression: zstd level 3 failed, falling back to gzip\.\.\.\ncompression: using gzip$/m);
+  assert.match(rep, HAS_ZSTD ? /^  compression check \(zstd\): tar\.exe: Option --zstd is not supported$/m : /^  compression check \(zstd\): no zstd here$/m);
+  assert.ok(!w.sys.lines.some((l) => /compression check|not supported|no zstd here/.test(l)), 'tar\'s reason stays off the terminal');
   assert.equal(rz.fetched, 1);
   same('data/attachments/a2.bin');
   fs.rmSync(path.join(w.base, 'nozstd'));
@@ -741,6 +749,19 @@ test('fffctl migrate (w508): Windows tar\'s -v read right, a file it stopped at 
   assert.deepEqual(parseArgs(['--dry-run-copy', '--snapshot', 'copy']).snapshot, 'copy');
   assert.equal(parseArgs(['--dry-run-copy']).snapshot, 'auto');
   assert.throws(() => parseArgs(['--dry-run-copy', '--snapshot', 'live']), /--snapshot is auto, vss or copy/);
+});
+
+test('fffctl migrate: as the portal\'s account through setpriv, which execs, so a kill reaches the program itself', { skip: process.getuid?.() !== 0 || spawnSync('setpriv', ['--version']).status !== 0 ? 'needs root and setpriv' : undefined }, async () => {
+  assert.deepEqual(asUserCommand(undefined, 'ssh', ['-n', 'beast']), ['ssh', ['-n', 'beast']]);
+  assert.deepEqual(asUserCommand('nobody', 'ssh', ['-n', 'beast']), ['setpriv', ['--reuid', 'nobody', '--regid', execFileSync('id', ['-g', 'nobody'], { encoding: 'utf8' }).trim(), '--init-groups', '--', 'ssh', '-n', 'beast']]);
+  // runuser stayed as a parent: the stall limit's SIGKILL ended it and left ssh running, holding the pipes (the hang).
+  const [c, a] = asUserCommand('nobody', 'sleep', ['300']);
+  const child = spawn(c, a, { stdio: ['ignore', 'pipe', 'pipe'] });
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(fs.readFileSync(`/proc/${child.pid}/comm`, 'utf8').trim(), 'sleep', 'the pid spawn() gave is the program, not a wrapper');
+  const closed = new Promise((r) => child.on('close', r));
+  child.kill('SIGKILL');
+  await Promise.race([closed, new Promise((_, rej) => setTimeout(() => rej(new Error('the pipes stayed open after the kill')), 5000))]);
 });
 
 test('fffctl migrate (w517): zstd level 3 first, then gzip, bzip2 and none; a named one goes first', () => {

@@ -139,9 +139,22 @@ interface Result {
   stderr: string;
 }
 
-/** Run a program; `asUser` runs it as the portal's account (runuser -m, so the given environment reaches it). */
+/**
+ * `cmd args` as `user` when one is given, with the environment the caller passes. setpriv, not runuser: setpriv execs
+ * the program, so the pid spawn() returns is the program's own and a kill reaches it. runuser stays as a parent that
+ * waits for it; killing that left the program running with the pipes open, so a stalled copy's ssh was never ended and
+ * the copy hung, its progress line repeating (2026-10-06, a stopped ssh left behind by the stall limit's SIGKILL).
+ */
+export function asUserCommand(user: string | undefined, cmd: string, args: string[]): [string, string[]] {
+  if (!user) return [cmd, args];
+  // The account's own primary group, by number: setpriv takes no group name that is not a group's.
+  const gid = spawnSync('id', ['-g', user], { encoding: 'utf8' }).stdout?.trim();
+  return ['setpriv', ['--reuid', user, '--regid', gid || user, '--init-groups', '--', cmd, ...args]];
+}
+
+/** Run a program; `asUser` runs it as the portal's account (asUserCommand). */
 export function run(cmd: string, args: string[], o: { input?: string | Buffer; env?: NodeJS.ProcessEnv; cwd?: string; asUser?: string; timeoutMs?: number; stdout?: NodeJS.WritableStream } = {}): Promise<Result> {
-  const [c, a] = o.asUser ? ['runuser', ['-m', '-u', o.asUser, '--', cmd, ...args]] : [cmd, args];
+  const [c, a] = asUserCommand(o.asUser, cmd, args);
   return new Promise((resolve) => {
     const child = spawn(c, a, { env: o.env ?? process.env, cwd: o.cwd ?? '/', windowsHide: true });
     let stdout = '';
@@ -270,8 +283,8 @@ export class Beast {
 
   /** ssh, as the portal's account when this runs as root. */
   private spawnSsh(remote: string[], noStdin = false) {
-    const args = this.sshArgs(remote, noStdin);
-    return spawn(this.o.user ? 'runuser' : 'ssh', this.o.user ? ['-m', '-u', this.o.user, '--', 'ssh', ...args] : args, { env: this.env(), cwd: '/', stdio: [noStdin ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    const [c, a] = asUserCommand(this.o.user, 'ssh', this.sshArgs(remote, noStdin));
+    return spawn(c, a, { env: this.env(), cwd: '/', stdio: [noStdin ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
   }
 
   private static input(script: string, data?: string): string {
@@ -726,6 +739,11 @@ export class Migration {
     this.report.push(line);
   }
 
+  /** Into the saved report only: detail a person at the terminal does not need, kept for whoever reads why. */
+  private note(line: string) {
+    this.report.push(line);
+  }
+
   private get marker() {
     return path.join(this.dir, 'dry-run.json');
   }
@@ -775,20 +793,28 @@ export class Migration {
 
   /**
    * zstd level 3, else gzip, else bzip2, else none: the first both sides take, tried on one small file of the copy
-   * (a stream of its own, unpacked aside). Never an error: "none" always works. Says which, and why not the better ones.
+   * (a stream of its own, unpacked aside). Never an error: "none" always works. The terminal shows each try and the
+   * one used ("trying zstd level 3...", "zstd level 3 failed, falling back to gzip...", "using gzip"); why a try
+   * failed (tar's own message) goes to the saved report only, since falling back is expected and not a failure.
    */
   private async chooseCodec(root: string, dir: string, all: string, probe: ManifestEntry): Promise<Codec> {
     if (this.codec) return this.codec;
-    const why: string[] = [];
-    for (const c of codecOrder(this.o.compress)) {
-      if (c.needs && spawnSync(c.needs, ['--version'], { stdio: 'ignore' }).status !== 0) {
-        why.push(`${c.name}: no ${c.needs} here`);
-        continue;
-      }
+    const order = codecOrder(this.o.compress);
+    for (const [i, c] of order.entries()) {
+      const next = order[i + 1];
+      const fallBack = (why: string) => {
+        this.note(`  compression check (${c.name}): ${why}`);
+        if (next) this.say(`compression: ${c.label} failed, falling back to ${next.name === 'none' ? 'no compression' : next.label}...`);
+      };
       if (c.name === 'none') {
         this.codec = c;
         break;
       }
+      if (c.needs && spawnSync(c.needs, ['--version'], { stdio: 'ignore' }).status !== 0) {
+        fallBack(`no ${c.needs} here`);
+        continue;
+      }
+      if (i === 0) this.say(`compression: trying ${c.label}...`);
       const lr = await this.beast.ps(BATCH_PS, JSON.stringify({ dir, all, out: 'probe.list', spec: indexSpec([probe.index!]) }), 120_000);
       const listPath = /^list\t(.+)$/m.exec(lr.stdout)?.[1]?.trim();
       const aside = path.join(this.dir, 'probe');
@@ -805,7 +831,8 @@ export class Migration {
         // retries deal with the connection).
         if (r && (r.sshCode === 255 || r.stalled)) {
           if (attempt < this.o.attempts) {
-            this.say(`  compression check (${c.name}): the stream broke off (${tarVerbose(r.remoteErr).errors.slice(-1)[0] ?? `ssh exit ${r.sshCode}`}); trying again`);
+            this.note(`  compression check (${c.name}): the stream broke off (${tarVerbose(r.remoteErr).errors.slice(-1)[0] ?? `ssh exit ${r.sshCode}`})`);
+            this.say(`compression: the connection dropped during the check; trying ${c.label} again...`);
             await sleep(2000);
             continue;
           }
@@ -816,10 +843,10 @@ export class Migration {
         break;
       }
       if (this.codec) break;
-      why.push(`${c.name}: ${refused}`);
+      fallBack(refused);
     }
     this.codec ??= CODECS[CODECS.length - 1];
-    this.say(`compression: ${this.codec.label}${why.length ? ` (not: ${why.join('; ')})` : ''}`);
+    this.say(`compression: using ${this.codec.name === 'none' ? 'no compression' : this.codec.label}`);
     return this.codec;
   }
 

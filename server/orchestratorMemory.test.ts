@@ -11,7 +11,7 @@ import { MachineManager } from './machines.ts';
 import { Agents, FFBOX_BRIEF } from './agents.ts';
 import { Identity } from './identity.ts';
 import { memoryDirFor, memoryGuard, memoryKey, memoryWriteProblem, secretIn, type GuardFs } from './orchestratorMemory.ts';
-import type { Config } from './config.ts';
+import { connectorEnv, type Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 
@@ -246,16 +246,12 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
   // The same folder after a fresh conversation (and after a restart: it depends only on who the chat is for).
   const again = opts(o.resetPersonal(BEN).info);
   assert.equal(again.settings.autoMemoryDirectory, dirs[0]);
-  // Standing agents get none of it: no memory folder setting, no memory guard.
-  const a = agents.standing.create({ name: 'PR Watcher', charter: 'Watch things.', trigger: { kind: 'interval', minutes: 30 }, budget: { perRunUsd: 1, perDayUsd: 2.5, maxMinutes: 20 } });
-  const standing = agents.standing.options(sessions.get(a.sessionId).info) as { settings?: { autoMemoryDirectory?: string }; hooks?: { PreToolUse?: unknown[] }; env?: Record<string, string | undefined> };
-  assert.equal(standing.settings?.autoMemoryDirectory, undefined);
-  // w516: no claude.ai connectors for people's orchestrators or the dispatcher by default; standing agents keep theirs.
+  // w516: no claude.ai connectors for people's orchestrators or the dispatcher by default; standing agents (on machines) keep theirs.
   for (const x of [ben, loth, disp]) assert.equal((x.settings as { disableClaudeAiConnectors?: boolean }).disableClaudeAiConnectors, true);
-  assert.equal(standing.env?.ENABLE_CLAUDEAI_MCP_SERVERS, undefined);
+  assert.equal(connectorEnv(cfg, 'standing').ENABLE_CLAUDEAI_MCP_SERVERS, undefined);
   // Config claudeAiConnectors turns them on per role, and off for another role.
   cfg.claudeAiConnectors = { dispatcher: true, standing: false };
   assert.equal((opts(sessions.get(agents.dispatcherId!).info).settings as { disableClaudeAiConnectors?: boolean }).disableClaudeAiConnectors, undefined);
   assert.equal((opts(o.personalFor(BEN).info).settings as { disableClaudeAiConnectors?: boolean }).disableClaudeAiConnectors, true);
-  assert.equal((agents.standing.options(sessions.get(a.sessionId).info) as { env: Record<string, string> }).env.ENABLE_CLAUDEAI_MCP_SERVERS, 'false');
+  assert.equal(connectorEnv(cfg, 'standing').ENABLE_CLAUDEAI_MCP_SERVERS, 'false');
 });
