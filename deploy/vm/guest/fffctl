@@ -199,7 +199,7 @@ cmd_update() {
   before=$(main_pid)
   while [ "$(systemctl show -p ActiveState --value fff-update.service)" = activating ]; do
     late && timeout_out
-    l=$(since_log fff-update.service "$t0" | grep -E 'fff: (building|release)' | tail -n 1 | sed -E 's/^[^ ]+ fff: //' || true)
+    l=$(since_log fff-update.service "$t0" | grep -E 'fff: (fetching|fetched|building|release)' | tail -n 1 | sed -E 's/^[^ ]+ fff: //' || true)
     live build "${l:-fetching origin/$FFF_BRANCH} ($(mmss $(($(date +%s) - t0))))"
     sleep 2
   done
