@@ -69,6 +69,14 @@ export interface PoolOptions {
   startGate?: () => string | undefined;
   /** Room a warm Library copy needs, in GB, on top of the warning threshold (a clone on APFS costs far less up front). */
   librarySeedGB?: number;
+  /**
+   * Whether an editor of this sandbox may start now, by the machine's Unity slots (w469, machine/unitySlots.ts: every
+   * Unity process on the machine counts, and waiting launches go first): undefined yes, else why not. Unset: only the
+   * pool's own editors count against max_unity, as before.
+   */
+  editorSlot?(id: string): Promise<string | undefined>;
+  /** Every Unity editor of the machine, counted now, for `unity status`. */
+  slotsStatus?(): Promise<string>;
 }
 
 /** Why `branch` cannot be a sandbox branch (the host's rules, plus git's), or undefined. Exported for tests. */
@@ -195,6 +203,8 @@ export class SandboxPool {
   private readonly provisioning = new Map<string, AbortController>();
   private readonly busy = new Set<string>();
   private disk: { level: DiskLevel; freeBytes?: number } = { level: 'ok' };
+  /** When each sandbox's editor was last stopped with the tool (its launches keep a holder's priority a while, w469). */
+  private readonly stoppedAt = new Map<string, number>();
   private lastGitAt = 0;
   private ticking = false;
 
@@ -273,6 +283,11 @@ export class SandboxPool {
   editorKnownStopped(id: string): boolean {
     const s = this.unityState.get(id)?.state;
     return s === 'stopped' || s === 'crashed';
+  }
+
+  /** Its editor was stopped with the tool within `ms`: a worker stopping it to build its own project keeps its turn. */
+  stoppedWithin(id: string, ms: number): boolean {
+    return this.d.now() - (this.stoppedAt.get(id) ?? -Infinity) < ms;
   }
 
   editorUp(id: string): boolean {
@@ -514,10 +529,13 @@ export class SandboxPool {
     if (action === 'status') {
       const ed = this.editorFor(r);
       const u = this.unityState.get(id) ?? { state: 'stopped' };
-      return [`sandbox ${id}: unity ${u.state}${u.detail ? ` (${u.detail})` : ''}`, await ed.unity.status(), ed.watch?.describe(), `log ${ed.unity.logFile}`].filter(Boolean).join('\n');
+      return [`sandbox ${id}: unity ${u.state}${u.detail ? ` (${u.detail})` : ''}`, await ed.unity.status(), ed.watch?.describe(), `log ${ed.unity.logFile}`, await this.o.slotsStatus?.()].filter(Boolean).join('\n');
     }
     if (r.status !== 'ready') throw new Error(`sandbox ${id} is ${r.status}${r.statusDetail ? ` (${r.statusDetail})` : ''}, not ready`);
+    // A restart keeps the slot its editor had: it is not queued behind others (a hung editor must come back).
+    const hadEditor = action === 'restart' && this.editorUp(id);
     const out: string[] = [];
+    if (action === 'stop') this.stoppedAt.set(id, this.d.now());
     if (action === 'stop' || action === 'restart') {
       const ed = this.editorFor(r);
       ed.watch?.expectExit();
@@ -529,11 +547,18 @@ export class SandboxPool {
     const s = this.need();
     const gate = this.o.startGate?.();
     if (gate) throw new Error(`not started: ${gate}`);
-    const up = this.runningEditors().filter((x) => x !== id);
-    if (up.length >= s.maxUnity) throw new Error(`already ${up.length} sandbox editors running on this machine (${up.join(', ')}; max_unity ${s.maxUnity}); stop one first`);
     if (this.disk.level !== 'ok') throw new Error(`not started: disk space is ${this.disk.level} on ${s.root}; new editors wait until space is freed`);
     const current = this.editorFor(r);
     if (current.unity.editors(await this.d.procs()).length) return [...out, `Already running (${await current.unity.status()}).`].join(' ');
+    if (!hadEditor) {
+      if (this.o.editorSlot) {
+        const why = await this.o.editorSlot(id);
+        if (why) throw new Error(why);
+      } else {
+        const up = this.runningEditors().filter((x) => x !== id);
+        if (up.length >= s.maxUnity) throw new Error(`already ${up.length} sandbox editors running on this machine (${up.join(', ')}; max_unity ${s.maxUnity}); stop one first`);
+      }
+    }
     const logsDir = path.join(r.path, 'Logs');
     const logFile = pickEditorLog(logsDir, new Date(this.d.now()));
     pruneEditorLogs(logsDir, logFile);

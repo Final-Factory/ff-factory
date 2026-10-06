@@ -92,6 +92,82 @@ update. An older daemon ignores the `unity` message, and the tool times out with
 Tests: `server/unityHang.test.ts` (verdicts, budget, a fake bridge), `server/macUnity.test.ts`
 (the Mac stop/start/restart and the watch).
 
+## Unity slots: every editor counts
+
+**Why** (w469, Lothsahn on 2026-10-05: "Can we just account for every unity editor process that's running?" and "Can
+we make batch builds count towards unity editors?"). LothDesktop reached 63 of 64 GB of RAM and 100% CPU with one
+interactive editor and three `-batchmode` player builds (about 24.5 GB of Unity.exe and 21 GB of Burst's bcl.exe), while
+its limit of 3 counted only the interactive editor.
+
+**What counts** (`machine/unitySlots.ts`, `unityProcesses`). A machine's `max_unity` counts every top-level Unity editor
+process running there, whoever started it: sandbox editors, the main clone's or its owner's own editor, `-batchmode`
+builds and test runs, a second editor for a peer run, editors started by scripts (the nightly harness, ffmode, clone
+tools). A Unity process is the Unity binary itself (Windows: image name `Unity.exe`; a Mac: a command line that starts
+with `.../Unity.app/Contents/MacOS/Unity`), so a script whose arguments name Unity does not count. Not counted:
+AssetImportWorkers (`-name AssetImportWorkerN`, `-parentPid`, or any Unity started by a Unity), bcl.exe,
+Unity.ILPP.Runner, the shader compiler, Unity Hub, and built game players (FinalFactory.exe or .app), which are shown
+beside the count ("2 game players (not counted)") because the RAM gate below already covers them: a player takes 2-3 GB,
+a fifth of an editor with its build.
+
+**How it is counted.** Each Unity process belongs to the slot holder whose process started it (its nearest ancestor that
+holds or waits for a slot, or a project the request named), else to the sandbox or main clone whose project it has
+open, else to nobody (started outside the gate). A holder counts its granted slots or its Unity processes, whichever is
+more; a sandbox counts its editor from the moment it is starting; each process outside the gate counts one. So
+"editors 4 of 3: 1 interactive, 3 batch" is the real load, and nothing more is granted while it is over.
+
+**The gate.** An interactive editor goes through `unity start` as before; a start is refused while the machine is full
+or launches wait ahead of it, with the counts and who holds the slots (a restart keeps the slot its editor had, so a
+hung editor always comes back). Every other launch takes a slot through a mailbox the daemon arbitrates, the
+**`unity-slot`** command (first on the PATH of every agent the daemon runs) or the game repo's
+`scripts/unity_slot.py`, which its build and audit scripts call themselves:
+
+```sh
+unity-slot run [--count N] [--label "<what>"] [--project <path>]... [--timeout <min>] -- <command> [args...]
+unity-slot acquire [--count N] [--label ...] [--ttl <min>]   # hold in the background, prints the id
+unity-slot release <id>
+unity-slot status
+```
+
+`run` waits its turn, runs the command and frees the slot when it ends (its exit code is passed on). Launches inside a
+`run` pass straight through (`FF_UNITY_SLOT_HELD`), so a script that wraps itself does not ask twice. Without a slot
+arbiter on the machine (no FF Factory daemon, or one from before w469) it runs at once and says so.
+
+**The queue** (`assess`):
+
+- **All or nothing.** A request takes all its slots at once or none. A peer run that needs two editors asks for 2.
+- **Holders first.** When slots free, waiting requests from holders (a sandbox whose editor runs, a run that already
+  holds slots; agents in a sandbox carry `FF_UNITY_HOLDER=sandbox:<id>`) go first, then new requesters, oldest first in
+  each. A sandbox whose editor was stopped with the tool in the last 5 minutes keeps a holder's turn, so a worker that
+  stops its editor to build its own project in batch mode is not sent to the back. The first that does not fit stops
+  the queue, so singles never starve a peer run waiting for two.
+- **No deadlock.** A waiter that holds slots (its own process's, or its sandbox's open editor) and asks for more than the
+  limit leaves it is refused at once ("ask for all N at once"). When every slot in use is held by waiters, nothing would
+  ever free one: a later waiter that fits goes first (it can finish), and if none fits the newest waiting holder is
+  refused, so two runs never each hold part of what they need and wait forever (tested: two 2-editor peer runs on a
+  limit of 3, all at once and one editor at a time).
+- **Stuck or crashed holders.** A waiter or holder whose process is gone, or whose request file was not touched for 90
+  s (the client touches it every 15 s), is freed at once and the orchestrator told. A waiter that has held slots while
+  waiting for 30 minutes is refused. `acquire` holds for at most its `--ttl` (120 min).
+- **RAM.** On a machine with `max_unity`, no slot is granted while RAM use is at 85% or more (`UNITY_RAM_PCT`, the
+  placement's busy line), `unity start` included: one more editor takes 8-12 GB and a Burst build 4-10 GB more, about a
+  quarter of 64 GB, and LothDesktop paged at 63 of 64. The queue waits; after 10 minutes on RAM the orchestrator is told.
+  This host's own daemon already had the host guard's free-RAM gate on its editors (`limits.minFreeRamGB`, 10 GB).
+- **The backstop.** Unity started outside the gate counts all the same. When the machine is over its limit the
+  orchestrator is told once ("over its limit... Started outside the slot gate: batch FinalFactory"), and again when it is
+  back. Nothing is ever stopped or killed.
+
+**The mailbox** (`~/.ff-factory/unity-slots`, or `FF_UNITY_SLOTS`; the same on every machine whatever its `app_dir`, so
+scripts find it with no config): a client writes `req-<id>.json` (`pid`, `holder`, `count`, `label`, `projects`,
+`createdAt`) and touches it while it waits or holds; the daemon answers `grant-<id>.json` or `deny-<id>.json` (`why`)
+and keeps `arbiter.json` fresh (the counts line, who waits, who holds) every 15 s, every 5 s while anything waits or
+holds. The daemon looks with the process listing its sandbox watch already makes (cached 5 s).
+
+**Where it shows.** `list_sandboxes` (the machine's header and its Capacity line), `system_status` (each machine's
+line), the dashboard's group header (`4/3 editors`) and `unity status` all say "editors 4 of 3: 1 interactive, 3 batch",
+with what waits, the RAM line and the game players. A machine with no `max_unity` (no sandbox root) is counted and never
+held up. Tests: `server/unitySlots.test.ts`, the w469 tests in `server/machineSandboxes.test.ts` and
+`server/beastMachine.test.ts`.
+
 ## Each sandbox's Unity MCP reaches only its editor
 
 MCP-for-Unity (stdio) finds editors through the status files every editor writes to `~/.unity-mcp`.

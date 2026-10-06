@@ -22,6 +22,8 @@ export interface Proc {
   pid: number;
   ppid: number;
   cmd: string;
+  /** Windows: the image name (Unity.exe), which says what the program is whatever its command line holds. */
+  name?: string;
 }
 
 export interface UnityDeps {
@@ -363,7 +365,7 @@ export class MacUnity {
 export function parseWinProcs(json: string, log?: (line: string) => void): Proc[] {
   // Tolerant of raw control characters and of an unreadable entry (server/watchdog.ts parsePsJson).
   const rows = parsePsJson<{ pid: number; ppid: number; cmd?: string | null; name?: string | null }>(json, 'the Windows process list', log);
-  return rows.map((r) => ({ pid: Number(r.pid), ppid: Number(r.ppid), cmd: r.cmd || r.name || '' }));
+  return rows.map((r) => ({ pid: Number(r.pid), ppid: Number(r.ppid), cmd: r.cmd || r.name || '', ...(r.name ? { name: r.name } : {}) }));
 }
 
 // Control characters other than tab and line breaks are dropped from names and command lines before ConvertTo-Json,

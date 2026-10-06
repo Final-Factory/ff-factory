@@ -4,7 +4,7 @@ import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
 import type { StaleContext } from './staleOutput.ts';
-import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
  * Bumped when either side must be redeployed to keep talking. 4: the daemon reports its Mac's load
@@ -148,8 +148,11 @@ export type FromDaemon =
   | { type: 'sandbox_result'; id: string; ok: boolean; text: string }
   /** The sandbox pool did something the orchestrator should hear of (the disk guard, an idle editor stopped). */
   | { type: 'sandbox_event'; text: string; sandbox?: string; checkpoint?: boolean }
-  /** The Mac's CPU, RAM, GPU and disk (server/system.ts), every 15 s (protocol 4+). */
-  | { type: 'stats'; stats: HostStats }
+  /**
+   * The Mac's CPU, RAM, GPU and disk (server/system.ts), every 15 s (protocol 4+). `unity` (w469): every Unity editor
+   * there against max_unity, and the launches waiting for a slot (machine/unitySlots.ts); an older daemon sends none.
+   */
+  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport }
   /** The plan usage of the Mac's own Claude login (not the host token), every config usagePollMinutes and on usage_now (protocol 4+). */
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
   /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */

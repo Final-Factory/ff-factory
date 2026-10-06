@@ -1,7 +1,8 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import type { Config } from './config.ts';
-import type { HostStats, SystemStats } from '../shared/types.ts';
+import type { HostStats, SystemStats, UnitySlotsReport } from '../shared/types.ts';
+import { unitySlotsLine } from '../shared/fleet.ts';
 import { run } from './proc.ts';
 import { memUsed } from '../shared/stats.ts';
 
@@ -229,8 +230,9 @@ export function statsLine(name: string, s: HostStats): string {
 }
 
 /** A machine's system_status line: its load, or why there is none. */
-export function machineLoadLine(m: { id: string; lastSeen?: string }, stats: HostStats | undefined, online: boolean, protocol?: number): string {
-  if (stats) return statsLine(m.id, stats);
+export function machineLoadLine(m: { id: string; lastSeen?: string }, stats: (HostStats & { unity?: UnitySlotsReport }) | undefined, online: boolean, protocol?: number): string {
+  // Its Unity editors as its daemon counts them (w469): every Unity process there, against max_unity.
+  if (stats) return `${statsLine(m.id, stats)}${stats.unity ? `; Unity ${unitySlotsLine(stats.unity)}` : ''}`;
   // A current daemon sends its first numbers a few seconds after it connects (after every portal restart, w424); only one
   // from before protocol 4 never does.
   if (online && protocol !== undefined && protocol < 4) return `${m.id}: online, no load numbers (a daemon from before protocol 4 sends none; the portal redeploys it once no agent runs there)`;
