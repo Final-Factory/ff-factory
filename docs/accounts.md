@@ -80,6 +80,34 @@ The other `claudeEnv` variables, such as `CLAUDE_CONFIG_DIR`, stay.
   the daemon's own environment cannot stand in for the Mac's login either.
 - A person's own token is laid over all of these (`claudeEnvFor`, `server/identity.ts`).
 
+## claude.ai connectors (w516)
+
+On a claude.ai login (or a token of a claude.ai account), Claude Code loads that account's **claude.ai connectors** by
+itself: Gmail, Google Drive, Google Calendar, Claude Docs and any other connected on claude.ai, as `mcp__claude_ai_*`
+tools. An orchestrator's built-in tools are only Read, Glob, Grep, Write and Edit (no tool search), and, as measured below, every connector tool goes into every turn.
+Measured on 2026-10-06 (`orchestratorOptions` on a test config, one fresh session per role started with a one-word
+prompt on BEAST's login, input tokens of its first request after the connectors connected):
+
+| | with the connectors | without | tools |
+|---|---|---|---|
+| a person's orchestrator | 65,496 | 24,199 | 86 → 28 |
+| the dispatcher | 80,841 | 39,544 | 114 → 56 |
+
+The 58 connector tools (Gmail 30, Google Drive 11, Google Calendar 9, Claude Docs 8) and Claude Docs' instructions were
+41,297 tokens. Orchestration never uses them, so they are **off for people's orchestrators and the dispatcher by
+default**, and on for workers and standing agents (Ben's creator outreach, w106 and w121, used Gmail). Config
+`claudeAiConnectors` sets it per role, with the roles of `claudeAccounts`:
+
+```json
+"claudeAiConnectors": { "orchestrator": false, "dispatcher": false, "workers": true, "standing": true }
+```
+
+Off is Claude Code's own `disableClaudeAiConnectors` setting for an orchestrator (passed with its other settings in
+`orchestratorOptions`), and `ENABLE_CLAUDEAI_MCP_SERVERS=false` in the process environment for a worker or a standing
+agent (which reaches a machine's daemon with the launch spec). It does not touch what is connected on claude.ai. It is
+in config.json only, not `set_app_config`: it changes what tools an agent has. A malformed value stops the server at
+start (`checkConnectorConfig`, `server/config.ts`).
+
 ## When a change takes effect
 
 The environment is fixed when an agent's process starts. A change applies to agents started after it;

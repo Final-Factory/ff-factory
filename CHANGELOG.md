@@ -35,6 +35,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   - **The guest install** adds `zstd` and `bzip2`.
   - **Measured on BEAST's route with 698 MB of real JSONL:** zstd 3 sent 210 MB (3.3x) in 2.1 s of BEAST's time;
     gzip 392 MB (1.8x) in 12.9 s; uncompressed 2.7 s. The zstd stream unpacked into all 77 entries.
+- **No claude.ai connectors for the orchestrators and the dispatcher** (w516, Lothsahn: "Please do an update to disable
+  the gmail, drive, and calendar tools", then "Disable claude docs"). Their 58 tools (Gmail 30, Google Drive 11, Google
+  Calendar 9, Claude Docs 8) were about 41,300 input tokens in every orchestrator and dispatcher turn (measured: a
+  person's orchestrator 65,496 → 24,199 tokens, the dispatcher 80,841 → 39,544). Workers and standing agents keep
+  them. Config `claudeAiConnectors` sets it per role (docs/accounts.md, "claude.ai connectors").
 
 ### Fixed
 
@@ -121,6 +126,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Mid-turn it is refused with why; it leaves the `wake_me` check-in and timers alone, and messages arriving meanwhile
   are answered after it. `/clear` (or `/new`) opens the New conversation dialog. Details: docs/orchestrators.md,
   "Compacting a conversation".
+- **The portal VM's CI runs only when a change needs it** (w505, part 2, asked by Lothsahn).
+  - Until now every PR touching `server/agents.ts` (most of them) waited on three nested-VM jobs. Now a plan job picks
+    them:
+    - the representative job (a zvol on a 24.04 host) for a PR touching `deploy/vm`, `server/restart.ts`, the
+      packages, or `server/index.ts`'s restart, drain, inbox or health code;
+    - all three when the host scripts, the test or the workflow change, on every merge to main, and nightly;
+    - none for any other PR.
+  - One nightly job keeps the production timing.
+  - The dry run's "changed nothing" checks on the firewall table and libvirt can fail now (a `!` under `set -e` never
+    did).
+  ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md), 10.3)
 - **The portal VM's end-to-end jobs wait less, and pass on main** (w505, part 1, asked by Lothsahn). The test now sets its
   own short health, update-verify, stop and watch timers (`CI_TIMING=fast`, the default; `production` runs the shipped
   defaults), so the rollback, health-restart and hang scenarios take seconds instead of minutes; the shipped defaults
