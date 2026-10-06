@@ -19,9 +19,22 @@ import type { Proc, UnityPlatform } from './unity.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import type { UnitySlotsReport } from '../shared/types.ts';
 
-/** Where the mailbox is: the same on every machine whatever the daemon's app_dir, so scripts find it with no config. */
+/**
+ * The pointer a worker-root install (w513, scripts/worker/worker.ts) leaves for scripts outside the daemon: its mailbox
+ * is under the root, not in the home folder. The same file on both OSes, beside the Mac's player-slots.json.
+ */
+export const slotsPointer = (home = os.homedir()) => path.join(home, '.config', 'finalfactory', 'unity-slots.json');
+
+/**
+ * Where the mailbox is: FF_UNITY_SLOTS (the daemon sets it for its agents), else the folder the worker-root pointer
+ * names, else the home folder's, the same on every machine whatever the daemon's app_dir, so scripts find it with no
+ * config. A pointer naming a folder that is gone (an uninstalled root) is ignored.
+ */
 export function slotsDir(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
-  return env.FF_UNITY_SLOTS || path.join(home, '.ff-factory', 'unity-slots');
+  if (env.FF_UNITY_SLOTS) return env.FF_UNITY_SLOTS;
+  const p = readJson<{ dir?: unknown }>(slotsPointer(home));
+  if (p && typeof p.dir === 'string' && p.dir && fs.existsSync(p.dir)) return p.dir;
+  return path.join(home, '.ff-factory', 'unity-slots');
 }
 
 /**
