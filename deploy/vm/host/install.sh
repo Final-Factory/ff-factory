@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# Install the FF Factory portal VM on the FFBox host (docs/portal-on-ffbox-host.md). Run by Lothsahn as root:
+# Install the FF Factory portal VM on the FFBox host (docs/portal-on-ffbox-host.md, deploy/vm/RUNBOOK.md). One command,
+# run by Lothsahn as root, does the host and then the portal inside the VM:
 #
 #   sudo deploy/vm/host/install.sh --dry-run           # what it would do, and any conflict, changing nothing
-#   sudo deploy/vm/host/install.sh                     # do it (again: idempotent)
+#   sudo deploy/vm/host/install.sh                     # do it: asks for what it needs first (again: idempotent)
 #   options: --config FILE (default /etc/fff-vm/fff-vm.conf)  --no-start (define, do not start)  --wait (until the
-#            guest agent answers)
+#            guest agent answers)  --host-only  --guest-only  --yes (no questions: the stored answers, or stop with
+#            the list of what is missing)  --rebuild-vm (delete the VM and its disk, make it again from the stored
+#            answers)  --guest-repo-bundle FILE (build the portal from this git bundle instead of GitHub; CI)
+#
+# Before it changes anything it gathers every answer it needs (answers.sh): the VM's ZFS dataset and its mountpoint,
+# the time zone, the admin's ssh key, the alerts' ntfy URL, the portal's owner name, Lothsahn's Claude subscription
+# token, Ben's Tailscale auth key, the GitHub token and the backups, each stored in /etc/fff-vm (secrets in
+# /etc/fff-vm/secrets, root-only), so a re-run or a rebuilt VM asks nothing it already knows.
 #
 # It installs KVM, QEMU and libvirt; an isolated libvirt network with NAT out to the internet only; an nftables table
 # that keeps the VM away from the host's services, FFBox's containers and the LAN, and everything on the host but root
@@ -20,27 +28,83 @@ here=$(cd "$(dirname "$0")" && pwd)
 CONF=/etc/fff-vm/fff-vm.conf
 START=1
 WAIT=0
+HOST=1
+GUEST=1
+YES=0
+REBUILD=0
+BUNDLE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --config) CONF=$2; shift ;;
     --no-start) START=0 ;;
     --wait) WAIT=1 ;;
-    -h | --help) sed -n '2,15p' "$0"; exit 0 ;;
+    --host-only) GUEST=0 ;;
+    --guest-only) HOST=0 ;;
+    --yes) YES=1 ;;
+    --rebuild-vm) REBUILD=1 ;;
+    --guest-repo-bundle) BUNDLE=$2; shift ;;
+    -h | --help) sed -n '2,22p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
 done
 need_root
-if [ -f "$CONF" ]; then load_conf "$CONF"; else
-  [ "$DRY_RUN" = 1 ] || die "no config at $CONF: copy $here/fff-vm.conf.example there and edit it (at least VM_ZVOL_PARENT, or VM_DISK_MODE=qcow2)"
-  warn "no config at $CONF; the dry run uses the defaults in fff-vm.conf.example"
-  load_conf "$here/fff-vm.conf.example"
-fi
+[ "$HOST$GUEST" != 00 ] || die "--host-only and --guest-only together leave nothing to do"
+[ "$START" = 1 ] || GUEST=0
+[ -z "$BUNDLE" ] || [ -r "$BUNDLE" ] || die "--guest-repo-bundle $BUNDLE: not readable"
+# Questions only on a terminal; --yes (or no terminal) takes the stored answers.
+INTERACTIVE=0
+if [ "$YES" = 0 ] && [ -t 0 ] && [ -r /dev/tty ]; then INTERACTIVE=1; fi
+LOAD_CONF_PARTIAL=1
+if [ -f "$CONF" ]; then load_conf "$CONF"; else load_conf "$here/fff-vm.conf.example"; fi
+VM_ZFS_MOUNTPOINT=${VM_ZFS_MOUNTPOINT:-}
+# shellcheck source=answers.sh
+. "$here/answers.sh"
+# shellcheck source=guest.sh
+. "$here/guest.sh"
 [ "$DRY_RUN" = 1 ] && log "DRY RUN: nothing will be changed"
 
+# ---------------------------------------------------------------- 0. every answer, before anything changes
+log "0/12 what this install needs ($([ "$INTERACTIVE" = 1 ] && echo 'asking for what is not stored yet' || echo "the stored answers in $FFF_VM_ETC"))"
+[ "$HOST" = 0 ] || answers_host
+if [ "$GUEST" = 1 ]; then
+  # What the guest has already: nothing on a new VM (or one about to be rebuilt), else fffctl state.
+  gstate='{}'
+  if [ "$REBUILD" = 0 ] && command -v virsh >/dev/null && guest_reachable; then gstate=$(guest_state); fi
+  answers_guest "$gstate"
+fi
+if [ "$DRY_RUN" = 1 ] && [ ${#MISSING[@]} -gt 0 ]; then
+  for m in "${MISSING[@]}"; do warn "a real run would stop here, nothing changed: missing $m"; done
+  MISSING=()
+fi
+answers_check
+[ "$VM_DISK_MODE" != zvol ] || [ -n "$VM_ZVOL_PARENT" ] || [ "$DRY_RUN" = 1 ] || die "VM_DISK_MODE=zvol needs VM_ZVOL_PARENT"
+if [ "$HOST" = 0 ]; then
+  [ "$DRY_RUN" = 1 ] || [ "$(dom_state)" = running ] || die "--guest-only: the VM $VM_NAME is not running (sudo fff-vm status); run without --guest-only"
+fi
+
+# ---------------------------------------------------------------- rebuild: the old VM and its disk go first
+if [ "$REBUILD" = 1 ]; then
+  log "--rebuild-vm: $VM_NAME and its disk (the portal's data, its snapshots) are deleted, then made again from $FFF_VM_ETC"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRY-RUN would run uninstall.sh --delete-disk --keep-config, then install everything again"
+  else
+    if [ "$INTERACTIVE" = 1 ]; then
+      printf 'This deletes the VM %s and its disk with all the portal data in it. Type the VM name to go on: ' "$VM_NAME" >/dev/tty
+      IFS= read -r confirm </dev/tty || confirm=""
+      [ "$confirm" = "$VM_NAME" ] || die "not confirmed: nothing was changed"
+    elif [ "$YES" != 1 ]; then die "--rebuild-vm without a terminal needs --yes"; fi
+    "$here/uninstall.sh" --config "$CONF" --delete-disk --keep-config
+    # The new VM has a new host key and a new first boot; a used Tailscale key cannot join it.
+    rm -f "$FFF_VM_ETC/ssh/known_hosts"
+  fi
+fi
+
+if [ "$HOST" = 1 ]; then
+
 # ---------------------------------------------------------------- 1. preflight
-log "1/10 preflight"
+log "1/12 preflight"
 [ "$(uname -m)" = x86_64 ] || die "x86_64 only (this is $(uname -m))"
 # shellcheck disable=SC1091
 . /etc/os-release
@@ -54,7 +118,7 @@ if [ "$mem_free_mb" -lt $((VM_MEMORY_MB + 2048)) ] && ! dom_exists 2>/dev/null; 
 fi
 
 # ---------------------------------------------------------------- 2. conflicts that need no libvirt
-log "2/10 conflicts on the host (refuse rather than override)"
+log "2/12 conflicts on the host (refuse rather than override)"
 if command -v nft >/dev/null; then
   if nft list table inet fff_vm >/dev/null 2>&1 && ! nft list table inet fff_vm | matches -F "$FFF_VM_MARK"; then
     refuse "an nftables table 'inet fff_vm' exists and is not this installer's"
@@ -108,7 +172,7 @@ for g in libvirt disk; do
 done
 
 # ---------------------------------------------------------------- 3. packages
-log "3/10 packages"
+log "3/12 packages"
 # ubuntu-keyring holds /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg (ubuntu-cloudimage-keyring is a dummy since noble).
 pkgs=(qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients cloud-image-utils ubuntu-keyring gpgv nftables jq curl)
 missing=()
@@ -131,7 +195,7 @@ if [ "$DRY_RUN" != 1 ]; then
 fi
 
 # ---------------------------------------------------------------- 4. conflicts inside libvirt
-log "4/10 conflicts in libvirt"
+log "4/12 conflicts in libvirt"
 if command -v virsh >/dev/null && v version >/dev/null 2>&1; then
   if net_exists && ! net_is_ours; then refuse "a libvirt network named $NET_NAME exists and is not this installer's"; fi
   if dom_exists && ! dom_is_ours; then refuse "a libvirt domain named $VM_NAME exists and is not this installer's"; fi
@@ -154,7 +218,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 5. firewall
-log "5/10 firewall (table inet fff_vm, before the network starts)"
+log "5/12 firewall (table inet fff_vm, before the network starts)"
 # Connected networks of the host (its LAN included, whatever its addresses), blocked for the VM as well as the
 # private ranges: a LAN on public addresses is still Lothsahn's LAN.
 # Those already inside a private range are left out, so the set holds no overlapping intervals.
@@ -243,7 +307,7 @@ fi
 [ "$DRY_RUN" = 1 ] || nft list table inet fff_vm | matches -F "$FFF_VM_MARK" || die "the firewall table did not load"
 
 # ---------------------------------------------------------------- 6. the isolated network
-log "6/10 network $NET_NAME ($NET_BRIDGE, ${NET_HOST_IP%.*}.0/$NET_PREFIX, NAT, no DHCP, no DNS)"
+log "6/12 network $NET_NAME ($NET_BRIDGE, ${NET_HOST_IP%.*}.0/$NET_PREFIX, NAT, no DHCP, no DNS)"
 net_xml=$(cat <<EOF
 <network>
   <name>$NET_NAME</name>
@@ -271,7 +335,7 @@ fi
 if [ "$DRY_RUN" != 1 ] && pgrep -af dnsmasq | matches "$NET_NAME"; then warn "a dnsmasq runs for $NET_NAME although DHCP and DNS are off"; fi
 
 # ---------------------------------------------------------------- 7. libvirt's default network
-log "7/10 libvirt's default network (DEFAULT_NET_ACTION=$DEFAULT_NET_ACTION)"
+log "7/12 libvirt's default network (DEFAULT_NET_ACTION=$DEFAULT_NET_ACTION)"
 if command -v virsh >/dev/null && v net-info default >/dev/null 2>&1; then
   users=$(for d in $(v list --all --name); do v dumpxml "$d" | matches "<source network='default'" && echo "$d"; done || true)
   act=$DEFAULT_NET_ACTION
@@ -293,7 +357,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 8. the disk
-log "8/10 disk ($VM_DISK_MODE, $VM_DISK_GB GiB) from the Ubuntu $VM_OS_VERSION cloud image"
+log "8/12 disk ($VM_DISK_MODE, $VM_DISK_GB GiB) from the Ubuntu $VM_OS_VERSION cloud image"
 disk=$(vm_disk_path)
 run_cmd install -d -m 0711 "$VM_IMAGE_DIR"
 disk_exists=no
@@ -301,6 +365,12 @@ if [ "$VM_DISK_MODE" = zvol ]; then
   if zfs list -H "$VM_ZVOL_PARENT/disk0" >/dev/null 2>&1; then disk_exists=yes; fi
 elif [ -e "$disk" ]; then
   disk_exists=yes
+fi
+# The VM's dataset's mountpoint (asked for; nothing is written there: the disk is a volume inside it). Changed only on a
+# dataset this installer made.
+if [ "$VM_DISK_MODE" = zvol ] && [ -n "$VM_ZFS_MOUNTPOINT" ] && zfs list -H "$VM_ZVOL_PARENT" >/dev/null 2>&1 &&
+  [ "$(zfs get -H -o value fff-vm:managed "$VM_ZVOL_PARENT")" = yes ] && [ "$(zfs get -H -o value mountpoint "$VM_ZVOL_PARENT")" != "$VM_ZFS_MOUNTPOINT" ]; then
+  run_cmd zfs set mountpoint="$VM_ZFS_MOUNTPOINT" "$VM_ZVOL_PARENT"
 fi
 if [ "$disk_exists" = yes ]; then
   log "the disk exists ($disk): left as it is (never overwritten; grow it by hand)"
@@ -326,7 +396,7 @@ else
     log "image verified: $img sha256 $want"
     if [ "$VM_DISK_MODE" = zvol ]; then
       if ! zfs list -H "$VM_ZVOL_PARENT" >/dev/null 2>&1; then
-        zfs create -p -o fff-vm:managed=yes "$VM_ZVOL_PARENT"
+        zfs create -p -o fff-vm:managed=yes ${VM_ZFS_MOUNTPOINT:+-o mountpoint="$VM_ZFS_MOUNTPOINT"} "$VM_ZVOL_PARENT"
         manifest_set zfs_parent_created "$VM_ZVOL_PARENT"
       fi
       # Not sparse: the volume's full size is reserved in the pool, so neither FFBox nor the VM can fill the other.
@@ -345,7 +415,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 9. cloud-init seed and the domain
-log "9/10 cloud-init seed and the domain $VM_NAME"
+log "9/12 cloud-init seed and the domain $VM_NAME"
 run_cmd install -d -m 0700 "$FFF_VM_ETC/ssh"
 if [ ! -f "$FFF_VM_ETC/ssh/id_ed25519" ]; then
   run_cmd ssh-keygen -q -t ed25519 -N '' -C "root@$(hostname -s) fff-vm" -f "$FFF_VM_ETC/ssh/id_ed25519"
@@ -525,7 +595,7 @@ fi
 run_cmd virsh --connect qemu:///system autostart "$VM_NAME"
 
 # ---------------------------------------------------------------- 10. runtime: fff-vm, hang detection, nightly, events
-log "10/10 fff-vm, hang detection, nightly reboot and alerts"
+log "10/12 fff-vm, hang detection, nightly reboot and alerts"
 run_cmd install -d -m 0755 /usr/local/lib/fff-vm
 for f in lib.sh fff-vm.conf.example; do write_file "/usr/local/lib/fff-vm/$f" 0644 <"$here/$f" >/dev/null; done
 write_file /usr/local/sbin/fff-vm 0755 <"$here/fff-vm" >/dev/null
@@ -572,5 +642,12 @@ if [ "$WAIT" = 1 ] && [ "$DRY_RUN" != 1 ] && [ "$START" = 1 ]; then
   log "the guest agent answers"
 fi
 
-log "done. Next: sudo fff-vm status; sudo fff-vm ssh, then inside the VM: git clone https://github.com/Final-Factory/ff-factory.git && sudo ff-factory/deploy/vm/guest/install.sh (docs/portal-on-ffbox-host.md, 'Installing')"
+fi # HOST
+
+if [ "$GUEST" = 1 ]; then
+  guest_setup "$BUNDLE"
+  print_todo
+else
+  log "the host is done. The portal inside the VM: sudo $0 --guest-only (or without --host-only next time)"
+fi
 [ "$DRY_RUN" != 1 ] || log "DRY RUN finished: nothing was changed"
