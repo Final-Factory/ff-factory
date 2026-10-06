@@ -16,7 +16,8 @@ import { redactSecrets } from './secrets.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { resumeMessage } from './restart.ts';
 import type { Config } from './config.ts';
-import type { Machine, Requester, Sandbox, SessionInfo, TranscriptEvent, UserInfo } from '../shared/types.ts';
+import type { DelegationFiling } from './orchestrators.ts';
+import type { Machine, Requester, Sandbox, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 
 /** Per-user identity and attribution (docs/identity.md): who asked, and whose account pays. */
 
@@ -287,9 +288,9 @@ function standing(t: { after: (fn: () => void | Promise<void>) => void }) {
   } as unknown as Config;
   store = new Store(cfg.dataDir);
   const port = new Port();
-  const started: { requestedBy?: Requester }[] = [];
+  // What reached the ledger (w527): an approved delegation is filed there, for the agent's owner.
+  const filed: DelegationFiling[] = [];
   const notes: { text: string; by?: Requester }[] = [];
-  const sandboxes: Sandbox[] = [{ id: 'sb1', purpose: 'unused', status: 'ready', sessionIds: [] } as unknown as Sandbox];
   const clock = { now: new Date('2026-09-27T10:00:00') };
   const st = new StandingAgents({
     cfg,
@@ -297,15 +298,17 @@ function standing(t: { after: (fn: () => void | Promise<void>) => void }) {
     sessions: port,
     systemPayer: () => r(BEN),
     notify: (text, by) => notes.push({ text, by }),
-    sandboxes: { list: () => sandboxes, setPurpose: (_id, p) => Object.assign(sandboxes[0], { purpose: p }) },
-    startWorker: (req) => {
-      started.push({ requestedBy: req.requestedBy });
-      return { info: { id: `w${started.length}`, status: 'running' } as SessionInfo };
+    ledger: {
+      file: (f) => {
+        filed.push(f);
+        return { item: { id: `w${filed.length}`, status: 'new', title: f.title } as WorkItem, repeat: false };
+      },
+      get: () => undefined,
+      bump: () => assert.fail('no bump'),
     },
     // w510: standing agents run on machines; m1 is an online one whose sessions are the port's.
     machines: {
       list: () => [M1],
-      setPurpose: () => undefined,
       get: (id) => (id === 'm1' ? M1 : undefined),
       isOnline: (id) => id === 'm1',
       liveCount: () => 0,
@@ -313,11 +316,11 @@ function standing(t: { after: (fn: () => void | Promise<void>) => void }) {
     },
     now: () => clock.now,
   });
-  return { st, port, started, notes, sandboxes, clock };
+  return { st, port, filed, notes, clock };
 }
 
 test('standing runs: a run by hand is its person\'s (on their token), a scheduled one the system payer\'s', (t) => {
-  const { st, port, clock } = standing(t);
+  const { st, port, clock, filed } = standing(t);
   const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 }, tools: ['delegate'], machineId: 'm1' });
   st.runNow(a.id, 'message', 'look at #640', r(LOTH));
   const s = port.get(a.sessionId);
@@ -329,13 +332,15 @@ test('standing runs: a run by hand is its person\'s (on their token), a schedule
   assert.match(s.sent[0].text, /Lothsahn says:\nlook at #640/, 'no longer hard-wired to one name');
   assert.equal(st.spec(st.require(a.id)).env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_LOTH, "the run's process runs on Lothsahn's token");
 
-  // A delegation filed in that run is for Lothsahn; Ben approves it, so its worker is Ben's.
+  // A delegation filed in that run is for the agent's owner (w527; none set, so the system payer, Ben), not the run's
+  // person. Lothsahn approves it: it is filed for Ben, approved by Lothsahn.
   const d = st.requestDelegation(a.id, 'Fix #640', 'Fix the belt.');
-  assert.deepEqual(d.requestedBy, r(LOTH));
+  assert.deepEqual(d.requestedBy, r(BEN));
   assert.equal(d.status, 'pending');
-  st.approveDelegation(d.id, { approvedBy: r(BEN) });
-  assert.deepEqual(st.require(a.id) && d.approvedBy, r(BEN));
-  assert.match(d.log!.join('\n'), /approved by Ben: worker w1/);
+  st.approveDelegation(d.id, { approvedBy: r(LOTH) });
+  assert.deepEqual(d.approvedBy, r(LOTH));
+  assert.deepEqual([filed[0].owner, filed[0].approvedBy], [r(BEN), r(LOTH)]);
+  assert.match(d.log!.join('\n'), /approved by Lothsahn: filed as w1 for Ben/);
 
   // The run ends; the next scheduled one is the system payer's.
   s.live = false;
@@ -348,14 +353,16 @@ test('standing runs: a run by hand is its person\'s (on their token), a schedule
   assert.equal(st.spec(st.require(a.id)).env?.CLAUDE_CODE_OAUTH_TOKEN, undefined, "Ben has no own token: the machine's own account (none in this test)");
 });
 
-test('delegations: an auto-approved worker is requested by whoever the filing run was for', (t) => {
-  const { st, started, notes } = standing(t);
-  const a = st.create({ name: 'Sentry', charter: 'Watch.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true, exclude: [] }, machineId: 'm1' });
-  st.runNow(a.id, 'manual', undefined, r(LOTH));
+test("delegations (w527): an auto-approved one is filed for the agent's owner, whoever the filing run was for", (t) => {
+  const { st, filed, notes } = standing(t);
+  const a = st.create({ name: 'Sentry', charter: 'Watch.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true }, owner: r(LOTH), machineId: 'm1' });
+  st.runNow(a.id, 'manual', undefined, r(BEN));
   const d = st.requestDelegation(a.id, 'Verify', 'Check it.');
   assert.equal(d.autoApproved, true);
   assert.equal(d.approvedBy, undefined, 'nobody approved it');
-  assert.deepEqual(started.at(-1)!.requestedBy, r(LOTH));
-  assert.deepEqual(notes.at(-1)!.by, r(LOTH), 'the orchestrator hears whom it is for');
-  assert.match(st.require(a.id).runs.at(-1)!.requestedBy!.displayName, /Lothsahn/);
+  assert.equal(d.workId, 'w1');
+  assert.deepEqual(filed.at(-1)!.owner, r(LOTH));
+  assert.deepEqual(notes.at(-1)!.by, r(LOTH), "the owner's orchestrator hears of it");
+  assert.match(notes.at(-1)!.text, /^\[auto-delegation\] "Sentry" filed w1 "Verify" for Lothsahn/);
+  assert.match(st.require(a.id).runs.at(-1)!.requestedBy!.displayName, /Ben/, 'the run itself stays Ben\'s');
 });

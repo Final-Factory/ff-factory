@@ -279,7 +279,8 @@ FF Factory gives AI agents a shell on your machine. Treat access to it like SSH 
   anything here. `providers.ffbox.enabled` (default false) turns it off at once.
 - **Standing agents** can be pointed at untrusted text (issues, Discord). They are read-only by
   default, have per-run and per-day budgets, and anything that writes goes through a delegation
-  request that you approve (unless you turn on auto-approve for that agent).
+  request. You approve it, or the agent's auto-approve rules do; approved, it becomes a request in the dispatcher's
+  queue for the agent's owner. One that spends money, publishes, changes a setting or releases always waits for you.
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 

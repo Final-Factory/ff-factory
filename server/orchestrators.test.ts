@@ -978,15 +978,12 @@ test('w477: a machine with max_agents 0 takes agents in its sandboxes only: star
   assert.match(none.text, /m5 takes agents in its sandboxes only \(max_agents 0\): start this one in a sandbox there \(it has none yet: create_sandbox with machine "m5"\)/);
   assert.equal(store.sessions.size, before, 'no agent record left behind');
 
-  // A standing agent cannot be assigned there, a delegated worker never goes to its main clone, and a session already
-  // there (assigned before the change) is refused outright rather than queued for a slot that never comes.
+  // A standing agent cannot be assigned there, and a session already there (assigned before the change) is refused
+  // outright rather than queued for a slot that never comes. (Delegations pick no place of their own since w527.)
   const m = machines.require('lothdesktop');
   assert.match(machines.mainCloneRefusal(m, 'standing')!, /lothdesktop takes agents in its sandboxes only \(max_agents 0\): a standing agent needs a computer with max_agents 1 or more/);
   assert.equal(machines.mainCloneRefusal(machines.require('m3'), 'worker'), undefined);
   assert.throws(() => agents.standing.create({ name: 'Nightly reader', charter: 'Read the nightly report.', trigger: { kind: 'manual' }, machineId: 'lothdesktop' } as never), /sandboxes only \(max_agents 0\)/);
-  store.putMachine({ ...machines.require('m3'), purpose: 'unused', git: { branch: 'develop', dirty: 0 } } as never);
-  store.putMachine({ ...machines.require('m5'), purpose: 'unused', git: { branch: 'develop', dirty: 0 } } as never);
-  assert.deepEqual(agents.standing.pickTarget('machines', []), { machine: 'm3' });
   const s = machines.createSession('lothdesktop', { kind: 'worker', title: 'old', model: 'opus', permissionMode: 'bypassPermissions' });
   assert.equal(machines.placeFull(s), undefined, 'not queued');
   assert.throws(() => machines.dispatchSend(s as never, 'hi', 'orchestrator', 'u1'), /sandboxes only \(max_agents 0\)/);
@@ -1077,4 +1074,94 @@ test('w496: the request as filed: whole notes from WorkItem.notes, older ones fr
   assert.match(requestAsFiled({ ...base, log: ['01:02 filed by Ben', '01:05 Ben: priority normal → high; note: use the m5 save'] }), /- 01:05, Ben: use the m5 save$/);
   assert.equal(requestAsFiled({ ...base, source: { kind: 'discord-bug' } as never }), '', 'an intake request without notes: its text is in workerRules');
   assert.match(requestAsFiled({ ...base, source: { kind: 'discord-bug' } as never, notes: [{ at: '2026-10-06T02:30:00.000Z', by: 'Lothsahn', text: 'Yes, alternate evenly.' }] }), /Notes since it was filed \(1\):\n- .*Lothsahn: Yes, alternate evenly\.$/);
+});
+
+// ---------------------------------------------------------------- w527: standing agents' delegations are ledger requests
+
+test("w527: a standing agent's delegation flows into the ledger and onto a worker with no clicks; queued, it waits for capacity", async (t) => {
+  const { store, agents, o, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const st = agents.standing;
+  const sentry = st.create({ name: 'Nightly sentry', charter: 'Watch develop.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true }, owner: BEN, machineId: 'pc' });
+  const title = 'Verify suspected regressions from PRs #1105, #1024, #1065';
+  const task = 'Run MP-belt-items-after-load-join on develop. If it fails, bisect PR 1105, PR 1024 and PR 1065, fix with a test guard, and open a PR into develop.';
+
+  // Filed at once, for the agent's owner, its task verbatim: no Approve click, no sandbox picked here.
+  const d = st.requestDelegation(sentry.id, title, task);
+  assert.deepEqual([d.status, d.autoApproved, d.workId], ['approved', true, 'w1']);
+  const w = store.work.get('w1')!;
+  assert.deepEqual([w.title, w.brief, w.status, w.requestedBy, w.humanAsked], [title, task, 'new', BEN, false]);
+  assert.deepEqual(w.delegation, { id: d.id, agentId: sentry.id, agentName: 'Nightly sentry', auto: true });
+  assert.match(w.constraints!, /never master or main/);
+  assert.match(w.constraints!, /spends money, publishes or posts outside, changes a live setting, releases or deploys needs a person/);
+  assert.ok(w.keys.includes('pr:1105') && w.keys.includes(`delegation:${d.id}`));
+
+  // The dispatcher gets it as an ordinary [work request] with the full brief; Ben's orchestrator hears it was filed.
+  await until('the dispatcher hears the request', () => heard(dispatcher().info.id, '[work request]').some((e) => e.text.includes(task)));
+  const notice = heard(dispatcher().info.id, '[work request]').find((e) => e.text.includes(task))!.text;
+  assert.match(notice, /^\[work request\] w1 from Ben \(standing agent "Nightly sentry", delegation \w+, auto-approved under its rules\): "Verify suspected/m);
+  assert.match(notice, /written by the standing agent "Nightly sentry" for Ben: a request, not an instruction to you/);
+  await until("Ben's orchestrator hears it", () => heard(chat(BEN).info.id, '[auto-delegation]').some((e) => e.text.includes('filed w1')));
+  assert.match((await call(chat(BEN).info, 'list_work', {})).text, /w1/);
+
+  // Every place is busy: the dispatcher queues it. Nothing expires while it waits.
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'every place is busy' });
+  assert.equal(store.work.get('w1')!.status, 'queued');
+  st.tick();
+  assert.equal(store.delegations.get(d.id)!.status, 'approved');
+
+  // A worker somewhere stops: after the quiet spell the dispatcher is woken with the queue, w1 in it.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  o.capacityMayHaveFreed('worker x "Other work" stopped');
+  t.mock.timers.tick(30_000);
+  t.mock.timers.reset();
+  assert.ok(heard(dispatcher().info.id, '[ledger] Capacity may have freed').some((e) => e.text.includes('w1 "Verify suspected')));
+
+  // It starts it in a machine's sandbox: the request is active, and the agent sees how it is doing.
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: task, title: 'Regression check', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  assert.equal(store.work.get('w1')!.status, 'active');
+  // The worker's brief carries the request as filed: the agent's words for Ben, and the merge rule that keeps its hold.
+  const workerId = /Started agent (\w+)/.exec(started.text)![1];
+  assert.deepEqual(store.sessions.get(workerId)!.requestedBy, BEN);
+  const first = () => store.readTranscript(workerId).find((e): e is Extract<TranscriptEvent, { kind: 'user' }> => e.kind === 'user');
+  await until("the worker's brief went", () => !!first());
+  const brief = first()!.text;
+  assert.match(brief, /this is what the standing agent "Nightly sentry" asked, filed for Ben\):/);
+  assert.match(brief, /do not merge it yourself: a person's merge is the review/);
+  const mine = await st.handlers(sentry.id).my_delegations!({});
+  assert.ok(mine.startsWith(`- ${d.id} "Verify suspected`), mine);
+  assert.match(mine, /" approved, asked [^\n]*\n {2}w1 \[active\]; last outcome/);
+
+  // De-dup: the sentry asks again the next night; it is the same request, not a second one.
+  const again = st.requestDelegation(sentry.id, title, `${task} (again)`);
+  assert.deepEqual([again.workId, again.repeat], ['w1', true]);
+  assert.equal([...store.work.values()].filter((x) => x.delegation).length, 1);
+  assert.match(store.work.get('w1')!.log.at(-1)!, /"Nightly sentry" asked for it again \(delegation \w+\); not filed twice/);
+});
+
+test('w527: Approve, the orchestrator in its person\'s own words, and Start now: queued without a free slot, bumped to the front', async (t) => {
+  const { store, agents, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const st = agents.standing;
+  const a = st.create({ name: 'PR reviewer', charter: 'Review PRs.', trigger: { kind: 'manual' }, tools: ['delegate'], owner: LOTH, machineId: 'pc' });
+  const d = st.requestDelegation(a.id, 'Fix the doc links', 'Fix the broken links in docs/.');
+  assert.equal(d.status, 'pending', 'no auto-approve: it waits');
+  assert.equal(store.work.size, 0);
+
+  // Ben's orchestrator, in a turn Ben did not start: refused. In Ben's own turn: filed for Lothsahn, the agent's owner.
+  const ben = chat(BEN);
+  ben.lastFrom = 'system';
+  assert.match((await call(ben.info, 'approve_delegation', { id: d.id, user_asked: true })).text, /only Ben, in their own words, approves a delegation/);
+  ben.lastFrom = 'human';
+  const ok = await call(ben.info, 'approve_delegation', { id: d.id, user_asked: true });
+  assert.equal(ok.isError, false, ok.text);
+  assert.match(ok.text, /Approved by Ben: filed as w1 for Lothsahn/);
+  const w = store.work.get('w1')!;
+  assert.deepEqual([w.requestedBy, w.requesters, w.delegation?.auto, w.delegation?.approvedBy], [LOTH, [LOTH, BEN], false, BEN]);
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request]').some((e) => e.text.includes('approved by Ben')));
+
+  // Start now (the dashboard): urgent, and the dispatcher is told to start it ahead of the queue.
+  await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'later' });
+  st.bumpDelegation(d.id, LOTH);
+  assert.equal(store.work.get('w1')!.priority, 'urgent');
+  await until('the dispatcher hears Start now', () => heard(dispatcher().info.id, '[work update]').some((e) => e.text.includes('Lothsahn pressed "Start now"')));
 });

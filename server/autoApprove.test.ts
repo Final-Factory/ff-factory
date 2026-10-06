@@ -5,14 +5,25 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { StandingAgents, type SessionLike, type SessionPort } from './standing.ts';
-import { normalizeAutoApprove, DEFAULT_AUTO } from './schedule.ts';
+import { normalizeAutoApprove, DEFAULT_AUTO, personOnlyReason } from './schedule.ts';
+import { stallCandidate } from './ledgerRules.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
-import type { GitStatus, Machine, Sandbox, SessionInfo } from '../shared/types.ts';
+import type { DelegationFiling } from './orchestrators.ts';
+import type { DelegationRequest, Machine, Requester, SessionInfo, WorkItem } from '../shared/types.ts';
+
+/**
+ * Standing agents' delegations (w527, docs/standing-agents.md "Delegations"): the auto-approve rules and the
+ * person-only gate decide whether one needs a click; approved, it is filed in the ledger for the agent's owner and the
+ * dispatcher takes it from there. Nothing here picks a sandbox, starts a worker or expires. The ledger is faked: the
+ * flow through the real one, the dispatcher and a worker is in orchestrators.test.ts.
+ */
 
 const now0 = new Date('2026-09-24T03:00:00');
+const BEN: Requester = { userId: 'ben', displayName: 'Ben' };
+const LOTH: Requester = { userId: 'lothsahn', displayName: 'Lothsahn' };
 
-function setup(t: { after: (fn: () => void) => void }) {
+function setup(t: { after: (fn: () => void) => void }, opts: { ledger?: boolean } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-auto-'));
   const cfg = {
     dataDir: path.join(tmp, 'data'),
@@ -40,145 +51,204 @@ function setup(t: { after: (fn: () => void) => void }) {
     liveAgents: () => 0,
     remove: () => undefined,
   };
-  const sandboxes: Sandbox[] = [];
-  const machines: Machine[] = [];
-  const started: { where: string; model?: string; effort?: string; prompt: string }[] = [];
-  const notes: string[] = [];
+  // A fake ledger: what was filed, and bumps. A repeat is the same title filed before.
+  const filed: DelegationFiling[] = [];
+  const items = new Map<string, WorkItem>();
+  const bumped: { id: string; by: Requester }[] = [];
+  const notes: { text: string; by?: Requester }[] = [];
   const clock = { now: now0 };
+  // w510: standing agents run on machines; m1 is an online one whose sessions are the port's.
+  const m1 = { id: 'm1', platform: 'linux', appDir: '/home/u/.fff', repoPath: '/home/u/game', maxSessions: 6, status: 'ready', purpose: 'x', sessionIds: [] } as unknown as Machine;
+  const machines = { list: () => [m1], get: (id: string) => (id === 'm1' ? m1 : undefined), isOnline: () => true, liveCount: () => 0, createSession: (_m: string, o: Parameters<SessionPort['create']>[0]) => port.create(o) };
   const st = new StandingAgents({
     cfg,
     store,
     sessions: port,
-    notify: (x) => notes.push(x),
-    sandboxes: { list: () => sandboxes, setPurpose: (id, p) => Object.assign(sandboxes.find((s) => s.id === id)!, { purpose: p }) },
-    machines: {
-      list: () => machines,
-      setPurpose: (id, p) => Object.assign(machines.find((m) => m.id === id)!, { purpose: p }),
-      get: (id) => machines.find((m) => m.id === id),
-      isOnline: (id) => !!machines.find((m) => m.id === id)?.online,
-      liveCount: () => 0,
-      createSession: () => ({ info: {} as SessionInfo, live: false, stop() {} }),
-    },
-    startWorker: (req) => {
-      const id = `w${started.length + 1}`;
-      started.push({ where: req.sandbox ?? `machine:${req.machine}`, model: req.model, effort: req.effort, prompt: req.prompt });
-      const info = { id, kind: 'worker', title: req.title ?? '', status: 'running', permissionMode: 'bypassPermissions', createdAt: '', lastActivityAt: '', turns: 0, costUsd: 0, pendingPermissions: [] } as SessionInfo;
-      store.sessions.set(id, info);
-      return { info };
-    },
-    now: () => clock.now,
+    systemPayer: () => BEN,
+    notify: (text, by) => notes.push({ text, by }),
+    ledger:
+      opts.ledger === false
+        ? undefined
+        : {
+            file: (f) => {
+              const same = [...items.values()].find((w) => w.title === f.title);
+              if (same) return { item: same, repeat: true };
+              filed.push(f);
+              const w = { id: `w${filed.length}`, title: f.title, status: 'new', priority: 'normal', requestedBy: f.owner } as WorkItem;
+              items.set(w.id, w);
+              return { item: w, repeat: false };
+            },
+            get: (id) => items.get(id),
+            bump: (id, by) => {
+              bumped.push({ id, by });
+              return Object.assign(items.get(id)!, { priority: 'urgent' });
+            },
+          },
+    machines: machines as never, now: () => clock.now,
   });
-  const sandbox = (id: string, purpose = 'unused'): Sandbox => {
-    const s = { id, name: id, branch: `sandbox/${id}`, base: 'origin/develop', path: path.join(tmp, id), purpose, status: 'ready', createdAt: '', unity: { state: 'stopped' }, sessionIds: [] } as Sandbox;
-    sandboxes.push(s);
-    return s;
-  };
-  const machine = (id: string, git: Partial<GitStatus> = { dirty: 0 }): Machine => {
-    const m = { id, host: id, purpose: 'unused', status: 'ready', online: true, repoPath: '/r', home: '/h', portalUrl: '', maxSessions: 3, sessionIds: [], createdAt: '', git: { branch: 'develop', untracked: 0, at: '', ...git } } as Machine;
-    machines.push(m);
-    return m;
-  };
-  // The machine the sentry itself runs on (w510: standing agents run on machines); labelled, so never a target.
-  machine('home').purpose = 'nightly sentry';
-  const agent = st.create({
-    name: 'Nightly sentry',
-    charter: 'Triage develop.',
-    trigger: { kind: 'manual' },
-    tools: ['delegate'],
-    autoApprove: { enabled: true },
-    machineId: 'home',
-  });
+  const agent = st.create({ name: 'Nightly sentry', charter: 'Triage develop.', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: true }, owner: BEN, machineId: 'm1' });
   t.after(() => {
     store.flush();
     fs.rmSync(tmp, { recursive: true, force: true });
   });
-  return { st, store, sandbox, machine, started, notes, agent, clock, events };
+  return { st, store, filed, items, bumped, notes, agent, clock, events };
 }
 
-test('auto-approve: defaults are Opus, high effort, 3 per run and per day, never mp-r2', () => {
+test('auto-approve: defaults are Opus, high effort, 3 per run and per day; the old placement fields are dropped', () => {
   const a = normalizeAutoApprove({ enabled: true }, undefined, ['opus', 'sonnet']);
   assert.deepEqual(a, { ...DEFAULT_AUTO, enabled: true });
   assert.equal(a.model, 'opus');
   assert.equal(a.effort, 'high');
-  assert.deepEqual(a.exclude, ['mp-r2']);
+  const old = { enabled: true, maxPerRun: 2, maxPerDay: 5, model: 'opus', effort: 'high', targets: 'sandboxes', expiryHours: 8, exclude: ['mp-r2'] } as never;
+  assert.deepEqual(Object.keys(normalizeAutoApprove({}, old, ['opus'])).sort(), ['effort', 'enabled', 'maxPerDay', 'maxPerRun', 'model']);
   assert.throws(() => normalizeAutoApprove({ effort: 'extreme' as never }, undefined, ['opus']), /effort/);
   assert.throws(() => normalizeAutoApprove({ model: 'gpt' }, undefined, ['opus']), /model/);
   assert.equal(normalizeAutoApprove({ maxPerRun: 9, maxPerDay: 2 }, undefined, ['opus']).maxPerRun, 2, 'per run never above per day');
 });
 
-test('auto-approve: starts at once on an unused sandbox, with the safety brief, model and effort; skips mp-r2 and labelled ones', (t) => {
-  const { st, sandbox, started, notes, agent } = setup(t);
-  sandbox('mp-r2');
-  sandbox('busy', 'spec 098 work');
-  const free = sandbox('sb3');
-  const d = st.requestDelegation(agent.id, 'Verify 1a2b3c', 'Check commit 1a2b3c.');
+test('the person-only gate: money, publishing, settings, releases and master; not the words a regression brief uses', () => {
+  for (const [text, why] of [
+    ['Buy a second Steam key for the test account', 'spends money'],
+    ['Raise the budget to $50 a day', 'spends money'],
+    ['Post the patch notes to Discord', 'publishes'],
+    ['Publish the agent kit', 'publishes'],
+    ['Change the portal settings so the intake is on', 'changes a setting'],
+    ['Call set_app_config to raise maxSessions', 'changes a setting'],
+    ['Move the Steam branch to the new build', 'changes a setting'],
+    ['Cut a release once this is fixed', 'releases'],
+    ['Bump the version and run ci-release', 'releases'],
+    ['Deploy the portal', 'releases'],
+    ['Merge the fix into master', 'touches master'],
+  ] as const) {
+    assert.match(personOnlyReason(text) ?? '(none)', new RegExp(why), text);
+  }
+  for (const text of [
+    'Verify suspected regressions from PRs #1105, #1024, #1065: run MP-belt-items-after-load-join on develop, bisect if it fails, fix with a test, PR into develop.',
+    'The scenario failed on the nightly of 2026-10-06 (develop 98995630a, in release 0.50.0.47). No Discord posts. Hand the logs over with publish_attachment.',
+    'Add a test guard for the belt deletion regression; master is untouched.',
+  ]) {
+    assert.equal(personOnlyReason(text), undefined, text);
+  }
+});
+
+test("auto-approved: filed in the ledger at once for the agent's owner, its task verbatim, and the owner's orchestrator hears it", (t) => {
+  const { st, filed, notes, agent } = setup(t);
+  const task = 'Check commit 1a2b3c.\n\nRun the fast suite; open a PR into develop with a test.';
+  const d = st.requestDelegation(agent.id, 'Verify 1a2b3c', task);
   assert.equal(d.status, 'approved');
   assert.equal(d.autoApproved, true);
-  assert.equal(d.sandboxId, 'sb3');
-  assert.deepEqual([started[0].where, started[0].model, started[0].effort], ['sb3', 'opus', 'high']);
-  assert.match(started[0].prompt, /Do NOT push to develop directly/);
-  assert.match(started[0].prompt, /pull request into develop only\. Never merge it/);
-  assert.match(free.purpose, /Verify 1a2b3c/);
-  assert.match(d.log!.join('\n'), /auto-approved: worker w1 started in sandbox sb3/);
-  assert.match(notes.at(-1)!, /^\[auto-delegation\] Started worker w1 in sandbox sb3/);
+  assert.equal(d.workId, 'w1');
+  assert.deepEqual(d.requestedBy, BEN);
+  assert.equal(d.sandboxId, undefined, 'it picks no sandbox of its own');
+  assert.deepEqual({ ...filed[0] }, { delegationId: d.id, agentId: agent.id, agentName: 'Nightly sentry', title: 'Verify 1a2b3c', task, owner: BEN, approvedBy: undefined, model: 'opus', effort: 'high' });
+  assert.match(d.log!.at(-1)!, /auto-approved: filed as w1 for Ben; the dispatcher queues and places it/);
+  assert.deepEqual(notes.at(-1)!.by, BEN);
+  assert.match(notes.at(-1)!.text, /^\[auto-delegation\] "Nightly sentry" filed w1 "Verify 1a2b3c" for Ben \(auto-approved under its rules\)/);
 });
 
-test('auto-approve: no free target queues it; it starts when one frees, on an idle machine too, and expires by morning', (t) => {
-  const { st, store, sandbox, machine, started, notes, agent, clock } = setup(t);
-  const d1 = st.requestDelegation(agent.id, 'A', 'task a');
-  assert.equal(d1.status, 'pending');
-  assert.equal(d1.auto, 'queued');
-  assert.match(d1.log!.at(-1)!, /no free target yet/);
-
-  machine('m3', { dirty: 2 }); // dirty tree: not a target
-  clock.now = new Date(now0.getTime() + 10 * 60_000);
-  st.tick();
-  assert.equal(store.delegations.get(d1.id)!.status, 'pending');
-  machine('m5', { dirty: 0 });
-  st.tick();
-  assert.equal(store.delegations.get(d1.id)!.machineId, 'm5');
-  assert.equal(started[0].where, 'machine:m5');
-
-  const d2 = st.requestDelegation(agent.id, 'B', 'task b');
-  assert.equal(d2.auto, 'queued');
-  clock.now = new Date(now0.getTime() + 9 * 3600_000); // past the 8 h expiry
-  st.tick();
-  assert.equal(store.delegations.get(d2.id)!.status, 'expired');
-  assert.match(notes.at(-1)!, /expired: no free sandbox or machine/);
-  sandbox('sb9');
-  st.tick();
-  assert.equal(started.length, 1, 'an expired request never starts');
-});
-
-test('auto-approve: the per-day limit leaves the rest for the user; finishing wakes the orchestrator once', (t) => {
-  const { st, sandbox, started, notes, agent, events, store } = setup(t);
-  for (const id of ['a', 'b', 'c', 'd']) sandbox(id);
+test('auto-approve rules: the per-run and per-day limits, the person-only gate and auto-approve off each leave it for a click', (t) => {
+  const { st, filed, notes, agent, store } = setup(t);
   const ds = ['1', '2', '3', '4'].map((n) => st.requestDelegation(agent.id, `T${n}`, `task ${n}`));
   assert.deepEqual(
     ds.map((d) => d.status),
     ['approved', 'approved', 'approved', 'pending'],
   );
-  assert.equal(ds[3].auto, undefined);
   assert.match(ds[3].log!.at(-1)!, /not auto-approved: already 3 today; waiting for the user/);
-  assert.match(notes.at(-1)!, /waits for the user's approval/);
-  assert.equal(started.length, 3);
+  assert.match(notes.at(-1)!.text, /^\[standing agent\] "Nightly sentry" asks for work \(delegation request \w+\): "T4"\. It waits for Ben's approval/);
+  assert.equal(filed.length, 3);
 
-  const worker = { info: store.sessions.get('w1')! };
-  events.emit('turnEnd', worker, '## Verified: 1a2b3c is fine\nDetails');
-  events.emit('turnEnd', worker, 'another turn');
-  const fin = notes.filter((x) => x.includes('finished:'));
-  assert.equal(fin.length, 1);
-  assert.match(fin[0], /Worker w1 \(sandbox a\) for "Nightly sentry" finished: Verified: 1a2b3c is fine/);
+  // A new day: the gate still stops a release, whatever the rules say.
+  store.delegations.clear();
+  const rel = st.requestDelegation(agent.id, 'Ship it', 'Fix the belt and then cut a release.');
+  assert.equal(rel.status, 'pending');
+  assert.match(rel.log!.at(-1)!, /not auto-approved: it releases or deploys, which only a person approves/);
+
+  // Auto-approve off: every request waits.
+  st.update(agent.id, { autoApprove: { enabled: false } });
+  assert.equal(st.requestDelegation(agent.id, 'Other', 'task').status, 'pending');
+  assert.equal(filed.length, 3);
 });
 
-test('manual approval can use an idle machine too', (t) => {
-  const { st, machine, started, store } = setup(t);
-  const a = st.create({ name: 'Manual one', charter: 'x', trigger: { kind: 'manual' }, tools: ['delegate'], machineId: 'home' });
-  const d = st.requestDelegation(a.id, 'Do it', 'task');
+test('approve: the button files it in the queue without any free slot; Start now approves and bumps; a second approve is refused', (t) => {
+  const { st, filed, bumped, agent, items } = setup(t);
+  st.update(agent.id, { autoApprove: { enabled: false } });
+  const d = st.requestDelegation(agent.id, 'Do it', 'task');
   assert.equal(d.status, 'pending');
-  assert.throws(() => st.approveDelegation(d.id), /no ready sandbox or machine/);
-  machine('m5');
-  st.approveDelegation(d.id, { model: 'sonnet', effort: 'max' });
-  assert.equal(store.delegations.get(d.id)!.machineId, 'm5');
-  assert.deepEqual([started[0].model, started[0].effort], ['sonnet', 'max']);
+  st.approveDelegation(d.id, { approvedBy: LOTH, model: 'sonnet', effort: 'max' });
+  assert.equal(d.status, 'approved');
+  assert.equal(d.workId, 'w1');
+  assert.deepEqual([filed[0].owner, filed[0].approvedBy, filed[0].model, filed[0].effort], [BEN, LOTH, 'sonnet', 'max']);
+  assert.match(d.log!.at(-1)!, /approved by Lothsahn: filed as w1 for Ben/);
+  assert.throws(() => st.approveDelegation(d.id), /already approved \(w1\)/);
+
+  // Start now on an approved one: its request goes urgent.
+  st.bumpDelegation(d.id, LOTH);
+  assert.deepEqual(bumped, [{ id: 'w1', by: LOTH }]);
+  assert.equal(items.get('w1')!.priority, 'urgent');
+
+  // Start now on a pending one: approved by whoever pressed it, then bumped.
+  const e = st.requestDelegation(agent.id, 'Another', 'task');
+  st.bumpDelegation(e.id, BEN);
+  assert.equal(e.status, 'approved');
+  assert.deepEqual(e.approvedBy, BEN);
+  assert.deepEqual(bumped.at(-1), { id: 'w2', by: BEN });
+  const r = st.requestDelegation(agent.id, 'Third', 'task');
+  st.rejectDelegation(r.id, 'no');
+  assert.throws(() => st.bumpDelegation(r.id, BEN), /is rejected: nothing to start/);
+});
+
+test('de-dup: the same work again links to the request already filed instead of a second one', (t) => {
+  const { st, filed, notes, agent } = setup(t);
+  const a = st.requestDelegation(agent.id, 'Verify 1a2b3c', 'Check it.');
+  const b = st.requestDelegation(agent.id, 'Verify 1a2b3c', 'Check it again.');
+  assert.equal(filed.length, 1);
+  assert.equal(b.workId, a.workId);
+  assert.equal(b.repeat, true);
+  assert.match(b.log!.at(-1)!, /auto-approved: the same as w1 \(new\), not filed again/);
+  assert.match(notes.at(-1)!.text, /asked again for w1 "Verify 1a2b3c" \(new\); not filed twice/);
+});
+
+test('no expiry: an auto-approved request stays filed however long it waits, and a queued delegation request never stalls', (t) => {
+  const { st, store, agent, clock } = setup(t);
+  const d = st.requestDelegation(agent.id, 'Verify', 'task');
+  for (const days of [1, 3, 9]) {
+    clock.now = new Date(now0.getTime() + days * 86_400_000);
+    st.tick();
+    assert.equal(store.delegations.get(d.id)!.status, 'approved');
+    assert.equal(store.delegations.get(d.id)!.expiresAt, undefined);
+  }
+  const base = { status: 'queued', delegation: { id: d.id, agentId: agent.id, agentName: 'Nightly sentry', auto: true } } as WorkItem;
+  assert.equal(stallCandidate(base), false, 'queued on purpose: it waits for capacity');
+  assert.equal(stallCandidate({ ...base, status: 'new' }), true, 'one nobody decided on still stalls');
+  assert.equal(stallCandidate({ ...base, delegation: undefined }), true, "a person's queued request: the rule as before");
+});
+
+test('without a ledger nothing is filed: it waits for a person', (t) => {
+  const { st, agent } = setup(t, { ledger: false });
+  const d = st.requestDelegation(agent.id, 'Verify', 'task');
+  assert.equal(d.status, 'pending');
+  assert.match(d.log!.at(-1)!, /no work ledger here/);
+});
+
+test("migration: an old auto-queued request is filed on the first tick, today's four handled by hand link to w524, the sentry gets auto-approve", (t) => {
+  const { st, store, filed, agent } = setup(t);
+  const old = (id: string, extra: Partial<DelegationRequest>): DelegationRequest => ({ id, agentId: agent.id, agentName: agent.name, title: `old ${id}`, task: 'x', createdAt: now0.toISOString(), status: 'pending', log: [], ...extra });
+  store.putDelegation(old('q1', { auto: 'queued', expiresAt: now0.toISOString(), requestedBy: BEN }));
+  store.putDelegation(old('2c70e0fa', { status: 'rejected', note: 'started by hand under w524 as worker abc' }));
+  // The sentry, with no auto-approve setting of its own; and one a person switched off, which stays off.
+  const sentry = st.create({ name: 'nightly-regression-sentry', charter: 'x', trigger: { kind: 'manual' }, tools: ['delegate'], machineId: 'm1' });
+  const off = st.create({ name: 'Other sentry', charter: 'x', trigger: { kind: 'manual' }, tools: ['delegate'], autoApprove: { enabled: false }, machineId: 'm1' });
+  assert.equal(sentry.autoApprove, undefined);
+  st.tick();
+  const q = store.delegations.get('q1')!;
+  assert.deepEqual([q.status, q.workId, q.auto, q.expiresAt], ['approved', 'w1', undefined, undefined]);
+  assert.equal(filed.length, 1);
+  const h = store.delegations.get('2c70e0fa')!;
+  assert.deepEqual([h.status, h.workId], ['rejected', 'w524']);
+  assert.match(h.log!.at(-1)!, /handled under w524/);
+  assert.equal(st.require(sentry.id).autoApprove?.enabled, true);
+  assert.equal(st.require(off.id).autoApprove?.enabled, false);
+  // Once per start: a second tick files nothing more.
+  st.tick();
+  assert.equal(filed.length, 1);
 });
