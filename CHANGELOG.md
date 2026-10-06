@@ -78,6 +78,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
       unreadable file and a vanished one.
 ### Changed
 
+- **CI's Playwright tests run in three shards** (w521, asked by Lothsahn). The same tests split across three runners by
+  file (`playwright test --shard`), the performance budgets in the first; rendering visual baselines still runs every
+  test in one job, so the `linux-snapshots` artifact is whole.
 - **Waiting says on what, and only means alive with something pending** (w509, asked by Lothsahn: "aren't waiting jobs
   waiting on tests or other things to run?"). A Waiting agent shows its running job by the description it gave it
   ("Waiting: CI on PR #1098 · check-in 06:10"), a queued message, or its check-in with its note's first words, and a job
