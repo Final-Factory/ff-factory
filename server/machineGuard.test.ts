@@ -156,12 +156,12 @@ test('machine guard: a remount waits for space on the VHDX volume; the reaper re
   assert.equal(g.health.sandboxRoot, 'ok');
 });
 
-test("the portal's own guard leaves the drive to the daemon's: no remount, no block, while watchDrive says no", async () => {
+test("a guard that owns no drive (the portal's, w510: watchDrive no) never remounts or blocks on it; one that gives it up mid-outage drops its recovery", async () => {
   let handedOver = true;
   let drive = false;
   const helper: string[] = [];
   const deps: HostDeps = {
-    cfg: { sandboxRoot: 'F:\\ffsb', hostDiskPaths: ['C:\\'], limits: { minFreeRamGB: 0 }, unity: { idleStopMinutes: 0 }, hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', compactWhenReclaimGB: 0, reapBrowsersAfterHours: 0, reapEveryMinutes: 15, cleanup: { everyMinutes: 0, softFreeGB: 0 } } } as unknown as Config,
+    cfg: { sandboxRoot: 'F:\\ffsb', dataDir: 'C:\\fff\\data', hostDiskPaths: ['C:\\'], limits: { minFreeRamGB: 0 }, unity: { idleStopMinutes: 0 }, hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', compactWhenReclaimGB: 0, reapBrowsersAfterHours: 0, reapEveryMinutes: 15, cleanup: { everyMinutes: 0, softFreeGB: 0 } } } as unknown as Config,
     statfs: async () => ({ free: 500 * GB, total: 900 * GB }),
     exists: (p) => (p.startsWith('F') ? drive : true),
     mem: () => ({ free: 30 * GB, total: 64 * GB }),
@@ -180,7 +180,7 @@ test("the portal's own guard leaves the drive to the daemon's: no remount, no bl
   const portal = new HostHealthMonitor(deps);
   await portal.tick();
   assert.deepEqual([portal.status.sandboxRoot, helper.length, portal.blockReason('agent')], ['ok', 0, undefined], 'the daemon remounts it, not the portal');
-  handedOver = false; // the daemon went away (or its guard is off): the portal watches again
+  handedOver = false; // a guard that owns the drive (a daemon's) watches it
   await portal.tick();
   assert.deepEqual([portal.status.sandboxRoot, helper], ['missing', ['mount']]);
   handedOver = true; // and hands back mid-outage: its recovery is dropped
