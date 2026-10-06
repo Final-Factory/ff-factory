@@ -8,7 +8,7 @@ import { addSpend, admit, advanceSchedule, dayKey, MAX_WAIT_MS, nextCron, normal
 import { StandingAgents, type SessionLike, type SessionPort } from './standing.ts';
 import { Store } from './store.ts';
 import type { Config } from './config.ts';
-import type { SessionInfo } from '../shared/types.ts';
+import type { Machine, SessionInfo } from '../shared/types.ts';
 
 const at = (s: string) => new Date(s); // local time: no "Z"
 
@@ -145,6 +145,18 @@ class FakePort implements SessionPort {
   }
 }
 
+/** One online machine, m1, with room for `port.max` agents; its sessions are the port's (w510: standing agents run on machines). */
+const M1 = { id: 'm1', platform: 'linux', appDir: '/home/u/.fff', repoPath: '/home/u/game', maxSessions: 2, status: 'ready', purpose: 'm1 work', sessionIds: [] } as unknown as Machine;
+function fakeMachines(port: FakePort): NonNullable<ConstructorParameters<typeof StandingAgents>[0]['machines']> {
+  return {
+    list: () => [M1],
+    get: (id) => (id === 'm1' ? { ...M1, maxSessions: port.max } : undefined),
+    isOnline: (id) => id === 'm1',
+    liveCount: () => port.liveAgents(),
+    createSession: (_m, opts) => port.create({ ...opts, options: () => assert.fail('a machine session gets no SDK options here') }),
+  };
+}
+
 function setup() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-standing-'));
   const cfg = {
@@ -167,20 +179,22 @@ function setup() {
     store,
     sessions: port,
     notify: (t) => notes.push(t),
+    machines: fakeMachines(port),
     now: () => clock.now,
   });
   const advance = (min: number) => (clock.now = new Date(clock.now.getTime() + min * 60_000));
   return { st, store, port, clock, advance, notes, cleanup: () => (store.flush(), fs.rmSync(tmp, { recursive: true, force: true })) };
 }
 
-const def = { name: 'PR Watcher', charter: 'Watch things.', trigger: { kind: 'interval' as const, minutes: 30 }, budget: { perRunUsd: 1, perDayUsd: 2.5, maxMinutes: 20 } };
+const def = { name: 'PR Watcher', charter: 'Watch things.', machineId: 'm1', trigger: { kind: 'interval' as const, minutes: 30 }, budget: { perRunUsd: 1, perDayUsd: 2.5, maxMinutes: 20 } };
 
 test('manager: a scheduled run starts at its slot, sleeps after its turn, and books the spend', (t) => {
   const { st, port, advance, cleanup } = setup();
   t.after(cleanup);
   const a = st.create(def);
   assert.equal(a.id, 'pr-watcher');
-  assert.ok(fs.existsSync(path.join(a.folder, 'NOTES.md')), 'folder and notes seeded');
+  assert.equal(a.folder, '/home/u/.fff/agents/pr-watcher', "its folder is on its machine (the daemon seeds NOTES.md, spec.init)");
+  assert.match(st.spec(a).init?.files?.['NOTES.md'] ?? '', /^# PR Watcher: notes/);
   assert.equal(a.nextRunAt, at('2026-09-23T10:30:00').toISOString());
   const s = port.get(a.sessionId);
 
@@ -267,7 +281,7 @@ test('manager: budgets — the run cap reaches the SDK, a run over it is stopped
   const a = st.create(def);
   const s = port.get(a.sessionId);
   st.runNow(a.id);
-  assert.equal(st.options(s.info).maxBudgetUsd, 1, 'per-run cap passed as maxBudgetUsd');
+  assert.equal(st.spec(a).maxBudgetUsd, 1, 'per-run cap passed as maxBudgetUsd');
 
   s.finishTurn('partial', 1.2, 'success');
   let run = st.require(a.id).runs.at(-1)!;
@@ -276,14 +290,14 @@ test('manager: budgets — the run cap reaches the SDK, a run over it is stopped
   assert.equal(st.require(a.id).spend.usd, 1.2);
 
   st.runNow(a.id);
-  assert.equal(st.options(s.info).maxBudgetUsd, 1, 'min(per run $1, $1.30 left today)');
+  assert.equal(st.spec(a).maxBudgetUsd, 1, 'min(per run $1, $1.30 left today)');
   s.finishTurn('stopped: error_max_budget_usd', 1.0, 'error_max_budget_usd');
   run = st.require(a.id).runs.at(-1)!;
   assert.equal(run.outcome, 'budget');
   assert.equal(Number(st.require(a.id).spend.usd.toFixed(2)), 2.2);
 
   st.runNow(a.id);
-  assert.ok(Math.abs((st.options(s.info).maxBudgetUsd ?? 0) - 0.3) < 1e-9, 'only what is left today');
+  assert.ok(Math.abs((st.spec(a).maxBudgetUsd ?? 0) - 0.3) < 1e-9, 'only what is left today');
   s.finishTurn('ok', 0.3);
 
   // $2.50 of $2.50 spent: the next run is skipped, not started.
@@ -339,6 +353,7 @@ test('manager: a process that dies mid-run records an error; pause drops the sch
     store,
     sessions: port,
     notify: () => undefined,
+    machines: fakeMachines(port),
   });
   fresh.boot();
   assert.equal(fresh.require(a.id).runs.at(-1)!.outcome, 'interrupted');
@@ -373,16 +388,35 @@ test('delegation: needs the tool group, notifies the orchestrator, and approval 
   assert.throws(() => st.rejectDelegation(d.id), /already rejected/);
 });
 
-test('portal-only (w464, D16): no standing run starts here; a manual run is refused and a scheduled one is skipped with why', (t) => {
-  const { st, port, advance, cleanup } = setup();
+test('w510: standing agents run on machines only; one from before with no machine keeps its record but never runs', (t) => {
+  const { st, store, port, advance, cleanup } = setup();
   t.after(cleanup);
+  assert.throws(() => st.create({ ...def, machineId: undefined }), /^Error: standing agents run on a machine, not in the portal \(w510\)/);
+  assert.throws(() => st.create({ ...def, machineId: ' ' }), /standing agents run on a machine/);
   const a = st.create(def);
-  (st as unknown as { cfg: Config }).cfg.hostSandboxes = false;
-  assert.throws(() => st.runNow(a.id), /standing agents do not run on this portal \(this portal holds no sandboxes of its own \(config hostSandboxes: false/);
+  assert.throws(() => st.update(a.id, { machineId: '' }), /standing agents run on a machine/, 'it cannot be moved into the portal');
+  assert.equal(st.require(a.id).machineId, 'm1');
+
+  // One left in state.json from before w510, with no machine and its folder on the portal's host.
+  const old = { ...st.require(a.id), id: 'old-sentry', name: 'Old sentry', machineId: undefined, folder: '/srv/agents/old-sentry', sessionId: '', runs: [], nextRunAt: at('2026-09-23T10:30:00').toISOString() };
+  store.putStanding(old);
+  st.boot();
+  const b = st.require('old-sentry');
+  assert.match(b.stateDetail ?? '', /^standing agents run on a machine/, 'boot says why it does not run');
+  assert.ok(b.sessionId, 'its conversation record is kept');
+  assert.throws(() => st.runNow(b.id), /^Error: Old sentry: standing agents run on a machine/);
   advance(30);
   st.tick();
-  assert.equal(port.get(a.sessionId).live, false, 'nothing started');
-  const last = st.require(a.id).runs.at(-1)!;
+  assert.equal(port.get(b.sessionId).live, false, 'nothing started');
+  const last = st.require(b.id).runs.at(-1)!;
   assert.equal(last.outcome, 'skipped');
-  assert.match(last.summary ?? '', /^standing agents do not run on this portal/);
+  assert.match(last.summary ?? '', /^standing agents run on a machine/);
+  assert.match(st.noMachineLine() ?? '', /^Standing agents with no machine \(they do not run; .*\): old-sentry$/);
+
+  // Giving it a machine is the way out: it runs there from then on.
+  const moved = st.update(b.id, { machineId: 'm1' });
+  assert.equal(moved.stateDetail, undefined);
+  assert.equal(moved.folder, '/home/u/.fff/agents/old-sentry');
+  assert.equal(st.noMachineLine(), undefined);
+  assert.match(st.runNow(b.id), /Started/);
 });
