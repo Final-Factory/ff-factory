@@ -5552,3 +5552,9 @@ button.board-head-link:hover {
 .timer-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 240px; }
 .timer-note { white-space: pre-wrap; overflow-wrap: anywhere; }
 .timer-actions { display: flex; flex-wrap: wrap; gap: 4px; flex-shrink: 0; margin-left: auto; }
+
+/* The token vault in the settings dialog (docs/vault.md): an owner's only. */
+.vault-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.vault-row { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.vault-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.vault-add { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }

@@ -8,6 +8,7 @@ import { browserSpeechSupported } from '../voice/browserSpeech';
 import type { VoiceEnginePref } from '../../../shared/voice';
 import { Modal } from './ui';
 import { versionLabel } from '../util';
+import { VaultSettings } from './Vault';
 
 /** This device's settings: notifications and voice input. */
 export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () => void }) {
@@ -82,6 +83,7 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
         </div>
         <p className="dim small">These choices belong to this device; your phone and your desktop can differ. While the app is in front, nothing pops up.</p>
         <VoiceSettings />
+        <VaultSettings />
         {app && (
           <div className="field about" data-testid="about-version">
             <span>About</span>

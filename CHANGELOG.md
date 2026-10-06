@@ -10,6 +10,24 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Added
+
+- **The token vault** (w512, [docs/vault.md](docs/vault.md); lothsahn: "store a list of claude tokens and any other
+  tokens the workers need so that it can pass it out securely to the workers in the cluster at runtime").
+  - The portal keeps Claude subscription tokens, a GitHub token and named secrets in `data/vault.json`, each value
+    sealed with AES-256-GCM under a key outside the data folder (in the VM `/etc/fff/vault.key`, root only, handed to
+    the portal as a systemd credential). A value is never shown back: listings give a fingerprint and its last four
+    characters.
+  - Owners add, rotate, grant and remove entries in Settings → Token vault, or with `sudo fffctl vault` (a value from a
+    file or stdin, never the command line). Members get 403; no agent tool reaches it.
+  - Each machine run gets what it is granted as environment in its launch spec: one Claude token, picked by plan
+    headroom (the person's own first, nothing at 95% or more while another has room, sticky per session) on machines
+    config `machines.claudeFromVault` names; `GH_TOKEN` with a git credential helper that reads it; any `*_TOKEN`
+    variable such as `FFDISCORD_APP_TOKEN`. Nothing is written on the machine. Off until switched on per machine.
+  - Machine credentials: `fffctl machine-credential issue <id> --out FILE` and `revoke <id>` (also in the dialog); a
+    revoked machine's link drops within 20 s.
+  - Redaction also covers GitHub tokens and every value the vault holds.
+
 ### Changed
 
 - **Standing agents' delegations are ordinary ledger requests** (w527, Ben: "please fix the delegations in ff factory

@@ -7,6 +7,8 @@ set -o errexit -o nounset -o pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 FFF_LIB=${FFF_LIB:-/usr/local/lib/fff}
 FFF_CONF=${FFF_CONF:-/etc/fff/fff.conf}
+# The token vault's key (docs/vault.md): root only, outside the data folder; fff-portal.service loads it as a credential.
+FFF_VAULT_KEY=${FFF_VAULT_KEY:-/etc/fff/vault.key}
 DRY_RUN=${DRY_RUN:-0}
 
 log() { printf '%s fff: %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
