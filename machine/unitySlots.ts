@@ -399,6 +399,8 @@ export interface RequestFile {
 export interface ArbiterFile {
   v: 1;
   pid: number;
+  /** Which arbiter wrote it (one per UnitySlots): two writing one mailbox are told apart. */
+  instance?: string;
   machine?: string;
   at: string;
   limit?: number;
@@ -464,6 +466,10 @@ export interface ArbiterDeps {
 
 export class UnitySlots {
   private readonly d: ArbiterDeps;
+  /** This arbiter's own mark in arbiter.json: another one writing the same mailbox is told apart by it. */
+  private readonly instance = randomBytes(6).toString('hex');
+  /** Other arbiters already reported, by instance. */
+  private readonly foreign = new Set<string>();
   private last?: { a: Assessment; reqs: SlotRequest[]; ramPct?: number; at: number };
   private overSince = 0;
   private ramSince = 0;
@@ -570,6 +576,13 @@ export class UnitySlots {
     }
     this.last = { a, reqs, ramPct, at: now };
     this.notices(a, now);
+    // Another live arbiter on this mailbox (a second daemon on the same home folder, a test's daemon) grants past the
+    // limit: the orchestrator hears of it once per arbiter, so it can be stopped.
+    const cur = readJson<ArbiterFile>(arbiterFile(this.d.dir));
+    if (cur?.instance && cur.instance !== this.instance && now - Date.parse(cur.at) <= ARBITER_FRESH_MS && this.d.alive(cur.pid) && !this.foreign.has(cur.instance)) {
+      this.foreign.add(cur.instance);
+      this.d.onEvent?.(`another process (pid ${cur.pid}${cur.machine ? `, machine "${cur.machine}"` : ''}) is answering this machine's Unity slots mailbox ${this.d.dir} too, so launches may be granted past the limit. Stop it: a second daemon on the same home folder, or a test's daemon left running.`);
+    }
     try {
       writeAtomic(arbiterFile(this.d.dir), JSON.stringify(this.arbiterFile(), null, 1));
     } catch (e) {
@@ -607,6 +620,7 @@ export class UnitySlots {
     return {
       v: 1,
       pid: process.pid,
+      instance: this.instance,
       machine: this.d.machine,
       at: new Date(l.at).toISOString(),
       limit: l.a.limit,
