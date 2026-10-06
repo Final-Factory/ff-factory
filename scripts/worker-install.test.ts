@@ -117,7 +117,7 @@ test('worker daemon: a root gives the folders, the agents\' environment and the 
   assert.equal(cfg.appDir, path.join('/r', 'daemon'));
   assert.equal(cfg.tempDir, path.join('/r', 'tmp'));
   assert.equal(cfg.tokenFile, path.join('/r', 'secrets', 'machine-token'));
-  assert.equal(cfg.unitySlotsDir, path.join('/r', 'daemon', 'unity-slots'));
+  assert.equal(cfg.unitySlotsDir, undefined, 'the Unity slots mailbox stays where every script finds it (w469)');
   assert.equal(cfg.maxEventsFile, path.join('/r', 'daemon', 'max-events.jsonl'));
   assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r' }).appDir, undefined, 'no root: unchanged');
   assert.deepEqual(rootEnv('/r'), { FF_WORKER_ROOT: '/r', FF_PLAYER_SLOT_ROOT: path.join('/r', 'players'), FF_NIGHTLY_ROOT: path.join('/r', 'nightly') });

@@ -130,7 +130,9 @@ const BUSY = new Set(['running', 'starting', 'waiting_permission']);
 
 /**
  * A worker root install's defaults (w513): what daemon.json leaves out comes from the root, so a redeploy that writes
- * only `root` (server/machineDeploy.ts daemonConfig) keeps every folder in it. Exported for tests.
+ * only `root` (server/machineDeploy.ts daemonConfig) keeps every folder in it. Not the Unity slots mailbox: it stays
+ * where every script finds it with no config (machine/unitySlots.ts slotsDir, the game's scripts/unity_slot.py),
+ * so a scheduled nightly harness outside the daemon still queues with its editors (w469). Exported for tests.
  */
 export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
   if (!cfg.root) return cfg;
@@ -140,7 +142,6 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
     appDir,
     tempDir: cfg.tempDir || path.join(cfg.root, 'tmp'),
     tokenFile: cfg.tokenFile || path.join(cfg.root, 'secrets', 'machine-token'),
-    unitySlotsDir: cfg.unitySlotsDir || path.join(appDir, 'unity-slots'),
     maxEventsFile: cfg.maxEventsFile === undefined ? path.join(appDir, 'max-events.jsonl') : cfg.maxEventsFile,
   };
 }

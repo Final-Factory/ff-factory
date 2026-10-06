@@ -146,6 +146,8 @@ export interface InstallOptions {
   firewall: boolean;
   /** No clean-up passes of its own (a test install on a computer that holds other work). */
   noCleanup?: boolean;
+  /** Its own Unity slots mailbox: only a test install beside another daemon (the default is the one every script finds). */
+  unitySlotsDir?: string;
   /** daemon.json settings the old daemon had (a migration: its host guard, protected paths, MCP server, limits). */
   carry?: Record<string, unknown>;
   /** A migration replaces the old daemon's service on purpose (worker.ts migrate). */
@@ -424,7 +426,9 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     maxSessions: 0,
     appDir: l.daemon,
     tempDir: l.tmp,
-    unitySlotsDir: path.join(l.daemon, 'unity-slots'),
+    // The Unity slots mailbox stays at its standard place (~/.ff-factory/unity-slots, machine/unitySlots.ts slotsDir),
+    // where the game's scripts and a scheduled nightly harness find it with no config (w469).
+    ...(o.unitySlotsDir ? { unitySlotsDir: o.unitySlotsDir } : {}),
     maxEventsFile: path.join(l.daemon, 'max-events.jsonl'),
     ...(o.unityEditorRoot ? { unityEditorRoot: o.unityEditorRoot } : {}),
     ...(o.unityPath ? { unityPath: o.unityPath } : {}),
@@ -608,6 +612,10 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   await syncSource(l, from);
 
   if (phase === 'prepare') return true;
+
+  // The Unity slots mailbox the daemon will use, outside the root on purpose; the uninstall removes it.
+  noteOutside(m, { kind: 'file', name: o.unitySlotsDir ?? path.join(os.homedir(), '.ff-factory', 'unity-slots'), note: 'the Unity slots mailbox every script finds (w469)' });
+  writeManifest(l.root, m);
 
   // 4. The daemon and its service. A test install cleans nothing: its settings are in place before it first starts.
   if (o.noCleanup) fs.writeFileSync(path.join(l.daemon, 'cleanup.json'), JSON.stringify({ everyMinutes: 0, softFreeGB: 0, staleOutput: { mode: 'off' } }));
@@ -795,6 +803,14 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
     say(`Removed ${macSlotConfig()}.`);
   }
 
+  // The Unity slots mailbox (only when this install recorded it), and its folder when nothing else is left in it.
+  for (const o2 of m.outside.filter((x) => x.kind === 'file' && /unity-slots$/.test(x.name))) {
+    fs.rmSync(o2.name, { recursive: true, force: true });
+    const parent = path.dirname(o2.name);
+    if (path.basename(parent) === '.ff-factory' && fs.existsSync(parent) && !fs.readdirSync(parent).length) fs.rmdirSync(parent);
+    say(`Removed the Unity slots mailbox ${o2.name}.`);
+  }
+
   // 5. The root itself: rmdir /s and rm -rf unlink junctions and symlinks, they never follow them.
   process.chdir(os.tmpdir());
   const rm = isWin ? await exec('cmd.exe', ['/d', '/c', 'rmdir', '/s', '/q', l.root]) : await exec('rm', ['-rf', l.root]);
@@ -908,7 +924,7 @@ async function readCredential(): Promise<string> {
 
 const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
-            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees]
+            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
             [--unity-editor-root <dir>] [--unity-path <exe>]
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
@@ -935,6 +951,7 @@ export async function main(argv = process.argv.slice(2)) {
       firewall: !flags.has('no-firewall'),
       noCleanup: flags.has('no-cleanup'),
       absoluteWorktrees: flags.has('absolute-worktrees'),
+      unitySlotsDir: opts['unity-slots-dir'],
       unityEditorRoot: opts['unity-editor-root'],
       unityPath: opts['unity-path'],
     });
