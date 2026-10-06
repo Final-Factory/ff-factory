@@ -139,9 +139,22 @@ interface Result {
   stderr: string;
 }
 
-/** Run a program; `asUser` runs it as the portal's account (runuser -m, so the given environment reaches it). */
+/**
+ * `cmd args` as `user` when one is given, with the environment the caller passes. setpriv, not runuser: setpriv execs
+ * the program, so the pid spawn() returns is the program's own and a kill reaches it. runuser stays as a parent that
+ * waits for it; killing that left the program running with the pipes open, so a stalled copy's ssh was never ended and
+ * the copy hung, its progress line repeating (2026-10-06, a stopped ssh left behind by the stall limit's SIGKILL).
+ */
+export function asUserCommand(user: string | undefined, cmd: string, args: string[]): [string, string[]] {
+  if (!user) return [cmd, args];
+  // The account's own primary group, by number: setpriv takes no group name that is not a group's.
+  const gid = spawnSync('id', ['-g', user], { encoding: 'utf8' }).stdout?.trim();
+  return ['setpriv', ['--reuid', user, '--regid', gid || user, '--init-groups', '--', cmd, ...args]];
+}
+
+/** Run a program; `asUser` runs it as the portal's account (asUserCommand). */
 export function run(cmd: string, args: string[], o: { input?: string | Buffer; env?: NodeJS.ProcessEnv; cwd?: string; asUser?: string; timeoutMs?: number; stdout?: NodeJS.WritableStream } = {}): Promise<Result> {
-  const [c, a] = o.asUser ? ['runuser', ['-m', '-u', o.asUser, '--', cmd, ...args]] : [cmd, args];
+  const [c, a] = asUserCommand(o.asUser, cmd, args);
   return new Promise((resolve) => {
     const child = spawn(c, a, { env: o.env ?? process.env, cwd: o.cwd ?? '/', windowsHide: true });
     let stdout = '';
@@ -270,8 +283,8 @@ export class Beast {
 
   /** ssh, as the portal's account when this runs as root. */
   private spawnSsh(remote: string[], noStdin = false) {
-    const args = this.sshArgs(remote, noStdin);
-    return spawn(this.o.user ? 'runuser' : 'ssh', this.o.user ? ['-m', '-u', this.o.user, '--', 'ssh', ...args] : args, { env: this.env(), cwd: '/', stdio: [noStdin ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    const [c, a] = asUserCommand(this.o.user, 'ssh', this.sshArgs(remote, noStdin));
+    return spawn(c, a, { env: this.env(), cwd: '/', stdio: [noStdin ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
   }
 
   private static input(script: string, data?: string): string {
