@@ -153,7 +153,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   root.json                      install id, layout version, every path outside the root it created (2.3)
   daemon/                        app/, app.new/, app.old/, daemon.json (no secrets), run-daemon.ps1,
                                  sandboxes.json, cleanup*, unity-slots/, unity-mcp/<place>/, max-events.jsonl
-  secrets/                       owner-only: machine token, ntfy topic, gh token, ssh key, ffdiscord/ffbox/ffnightly config
+  secrets/                       owner-only files: the machine token, the ntfy topic, the gh token, the ssh key, the bot configs
   logs/                          daemon, supervisor, install, uninstall, migration, clean-up logs
   repo/                          the install's own bare clone of the game repo (git objects + LFS store)
   sandboxes/<name>/              worktrees of repo/, each with its Library
