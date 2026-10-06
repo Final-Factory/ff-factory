@@ -41,12 +41,11 @@ prepare() {
   if [ -e "$dir" ]; then as_fff git -C "$REPO" worktree remove --force "$dir" >&2 2>/dev/null || rm -rf "$dir"; fi
   as_fff git -C "$REPO" worktree prune >&2
   as_fff git -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2
-  (
-    cd "$dir"
-    as_fff npm ci --no-audit --no-fund --loglevel=error
-    as_fff npm --prefix web ci --no-audit --no-fund --loglevel=error
-    as_fff npm --prefix web run build --silent
-  ) >&2
+  {
+    as_fff_in "$dir" npm ci --no-audit --no-fund --loglevel=error
+    as_fff_in "$dir" npm --prefix web ci --no-audit --no-fund --loglevel=error
+    as_fff_in "$dir" npm --prefix web run build --silent
+  } >&2
   as_fff touch "$dir.ready"
   log "release ${sha:0:12} built"
   echo "$dir"
