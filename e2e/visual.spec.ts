@@ -53,6 +53,8 @@ test('visual: the settings sheet', async ({ page }) => {
   const sheet = page.locator('.modal');
   await expect(sheet.getByTestId('about-version')).toBeAttached();
   await expect(sheet.locator('.form > .field').last()).toBeAttached();
+  // The owner's token vault section (docs/vault.md) loads after the sheet opens.
+  await expect(sheet.getByTestId('vault-key')).toBeVisible();
   await expect(sheet).toHaveScreenshot('settings.png', { mask: [sheet.getByTestId('about-version')] });
 });
 

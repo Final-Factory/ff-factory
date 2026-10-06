@@ -163,6 +163,12 @@ export interface Config {
   machines?: {
     useHostClaudeEnv?: boolean | Record<string, boolean>;
     /**
+     * The token vault (docs/vault.md, w512; default false): a machine's runs take their Claude token from the vault,
+     * chosen per run by plan headroom, instead of the host token or the machine's own login. Same shape as
+     * useHostClaudeEnv: true, false, or per machine with "*" for the rest. A person's own token still wins for their work.
+     */
+    claudeFromVault?: boolean | Record<string, boolean>;
+    /**
      * Each machine daemon's own clean-up (docs/self-recovery.md): a pass every `everyMinutes` (default 60) and
      * sooner below `softFreeGB` (default 80). A number for every machine, or per machine with "*" for the rest.
      */
@@ -193,6 +199,12 @@ export interface Config {
    * Claude credential removed. Never in claudeEnv, never sent to a machine, never shown (only its last four characters).
    */
   claudeTokenFile?: string;
+  /**
+   * The token vault (docs/vault.md, w512): `keyFile`, the file holding its key (32 bytes, base64), outside the data folder.
+   * In the VM the systemd credential fff-vault-key wins (deploy/vm/guest/units/fff-portal.service). The vault itself is
+   * data/vault.json.
+   */
+  vault?: { keyFile?: string };
   /**
    * Providers (docs/ffbox-integration.md): FFBox, whose connector dials out to /provider. `enabled` (default
    * false) lets it connect; `tokenSha256` is the SHA-256 of its connector token (ffpv1_…), set with
@@ -626,6 +638,15 @@ export function loadConfig(): Config {
     if (typeof cfg.claudeTokenFile !== 'string' || !cfg.claudeTokenFile.trim()) throw new Error('config claudeTokenFile is the path of a file');
     cfg.claudeTokenFile = path.resolve(cfg.claudeTokenFile);
   }
+  if (cfg.vault !== undefined) {
+    if (typeof cfg.vault !== 'object' || cfg.vault === null || Array.isArray(cfg.vault)) throw new Error('config vault is an object, e.g. { "keyFile": "/etc/fff/vault.key" }');
+    if (cfg.vault.keyFile !== undefined) {
+      if (typeof cfg.vault.keyFile !== 'string' || !cfg.vault.keyFile.trim()) throw new Error('config vault.keyFile is the path of a file');
+      cfg.vault.keyFile = path.resolve(cfg.vault.keyFile);
+      const rel = path.relative(cfg.dataDir, cfg.vault.keyFile);
+      if (!rel.startsWith('..') && !path.isAbsolute(rel)) throw new Error(`config vault.keyFile (${cfg.vault.keyFile}) must be outside the data folder (docs/vault.md)`);
+    }
+  }
   cfg.voice.toolsDir = cfg.voice.toolsDir ? path.resolve(ROOT, cfg.voice.toolsDir) : path.join(cfg.dataDir, 'tools', 'whisper');
   cfg.protectedPaths = cfg.protectedPaths.map((p) => path.resolve(p));
   return cfg;
@@ -674,11 +695,13 @@ export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machine
       if (v === 'tokenfile' && !(cfg as Partial<Pick<Config, 'claudeTokenFile'>>).claudeTokenFile) throw new Error(`config claudeAccounts.${role} is "tokenfile" but config claudeTokenFile names no file`);
     }
   }
-  const u: unknown = cfg.machines?.useHostClaudeEnv;
-  if (u === undefined || typeof u === 'boolean') return;
-  if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error('config machines.useHostClaudeEnv is true, false or { "<machine id>" | "*": true | false }');
-  for (const [id, v] of Object.entries(u)) {
-    if (typeof v !== 'boolean') throw new Error(`config machines.useHostClaudeEnv.${id} is true or false`);
+  for (const key of ['useHostClaudeEnv', 'claudeFromVault'] as const) {
+    const u: unknown = cfg.machines?.[key];
+    if (u === undefined || typeof u === 'boolean') continue;
+    if (typeof u !== 'object' || u === null || Array.isArray(u)) throw new Error(`config machines.${key} is true, false or { "<machine id>" | "*": true | false }`);
+    for (const [id, v] of Object.entries(u)) {
+      if (typeof v !== 'boolean') throw new Error(`config machines.${key}.${id} is true or false`);
+    }
   }
 }
 
