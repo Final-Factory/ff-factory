@@ -423,3 +423,16 @@ test('unity slots: system_status, the Capacity block and the dashboard say "edit
   const [, pc] = fleetOf({ sandboxes: [], sessions: [], machines: [m], machineStats: { lothdesktop: stats } });
   assert.deepEqual([pc.editors, pc.editorLimit], [4, 3], 'the dashboard counts every Unity process, not only sandbox editors');
 });
+
+test('unity slots: a second arbiter answering the same mailbox is reported once (a hung test daemon granted BEAST\'s slots, w469)', async (t) => {
+  const { dir, slots, events } = arbiter(t);
+  await slots.tick();
+  const rogue = new UnitySlots({ dir, platform: 'win32', procs: async () => [], alive: () => true, now: () => Date.now(), limit: () => undefined, places: () => [], ramPct: () => undefined, machine: 'mx' });
+  await rogue.tick();
+  await slots.tick();
+  await rogue.tick();
+  await slots.tick();
+  const told = events.filter((e) => e.startsWith('another process'));
+  assert.equal(told.length, 1, 'once per arbiter');
+  assert.match(told[0], /another process \(pid \d+, machine "mx"\) is answering this machine's Unity slots mailbox .* too, so launches may be granted past the limit/);
+});
