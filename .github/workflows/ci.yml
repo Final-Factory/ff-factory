@@ -24,12 +24,17 @@ env:
 
 jobs:
   checks:
-    name: Typecheck, unit tests, build (${{ matrix.os }})
+    name: Typecheck, unit tests, build (${{ matrix.os }}${{ matrix.shard && format(', {0}', matrix.shard) || '' }})
     strategy:
       fail-fast: false
       matrix:
-        # Windows too: the host is Windows, and the update/republish/elevation tests drive PowerShell.
-        os: [ubuntu-latest, windows-latest]
+        # Windows too: the host is Windows, and the update/republish/elevation tests drive PowerShell. Its runner is
+        # CPU-bound on them (150 s), so the test files are split across two (node --test-shard); the typecheck and the
+        # web build run in the first.
+        include:
+          - os: ubuntu-latest
+          - { os: windows-latest, shard: 1/2 }
+          - { os: windows-latest, shard: 2/2 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -48,18 +53,26 @@ jobs:
           git config --global user.email "ci@users.noreply.github.com"
       - run: npm ci --no-audit --no-fund
       - run: npm ci --prefix web --no-audit --no-fund
+        if: matrix.shard != '2/2'
       - name: Typecheck (server, shared, scripts, e2e)
+        if: matrix.shard != '2/2'
         run: npm run typecheck
       - name: Typecheck (web)
+        if: matrix.shard != '2/2'
         run: npm --prefix web run typecheck
       - name: Unit tests with coverage
+        if: ${{ !matrix.shard }}
         shell: bash
         run: |
           set -o pipefail
           npm run test:coverage 2>&1 | tee coverage.txt
+      - name: Unit tests with coverage, ${{ matrix.shard }} of the files
+        if: ${{ matrix.shard }}
+        shell: bash
+        run: node --test --test-shard=${{ matrix.shard }} --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts
       - name: Machine sandboxes on Windows (git worktrees, robocopy, rd in a temp repo)
         # Also part of the unit tests above; its own step so a worktree regression on Windows is named as one.
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.shard == '1/2'
         shell: bash
         run: node --test server/machineSandboxes.test.ts
       - name: Coverage summary
@@ -76,6 +89,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Build the web UI
+        if: matrix.shard != '2/2'
         run: npm --prefix web run build
 
   e2e:
