@@ -2,7 +2,7 @@
 $AppRoot = Split-Path -Parent $PSScriptRoot
 $DataDir = Join-Path $AppRoot 'data'
 # The logon task scripts/install-autostart.ps1 registers. It runs at RunLevel Limited in the desktop
-# session, so whatever it starts is never elevated and its Unity editors get the GPU.
+# session, so whatever it starts is never elevated (and, on a host with a local daemon, gets the desktop session).
 # FFSB_TASK_NAME overrides it for tests, so a test instance can never start the real app.
 $TaskName = if ($env:FFSB_TASK_NAME) { $env:FFSB_TASK_NAME } else { 'ffsb-server' }
 

@@ -2,7 +2,7 @@
 // first (with its own daemon's sandboxes when it has one, as BEAST does; the portal itself holds none, w510), then each
 // machine, each with its sandboxes, the agents in them, and a machine's main-clone agents. Pure, so the server's tests
 // can check it and the browser can run it.
-import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, Sandbox, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
+import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
 import { holdsItsPlace, placeRank, sortAgents } from './agentState.ts';
 
 /**
@@ -35,7 +35,6 @@ export interface FleetSandbox {
   free: boolean;
   /** Permission requests waiting in it, plus a blocked editor. */
   attention: number;
-  sandbox?: Sandbox;
   machineSandbox?: MachineSandbox;
 }
 
@@ -168,6 +167,8 @@ export function fleetOf(app: Pick<AppState, 'sessions' | 'machines' | 'system' |
 
 /** "2/3 sandboxes · 1/2 editors", or what a computer without a pool has. */
 export function capacityLine(c: FleetComputer): string {
+  // The portal's own host without a daemon of its own: it runs the orchestrators and the dispatcher only (w510).
+  if (c.host && !c.daemon) return 'orchestrators only';
   if (!c.host && c.sandboxLimit === undefined) return 'main clone only';
   // "1/3 sandboxes" counts against the limit, so it stays plural; "1 sandbox" without one does not.
   const n = (count: number, limit: number | undefined, one: string, many: string) => (limit !== undefined ? `${count}/${limit} ${many}` : `${count} ${count === 1 ? one : many}`);

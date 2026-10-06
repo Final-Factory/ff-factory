@@ -15,10 +15,8 @@ function placeOf(h: SearchHit, app: AppState): { route: Route; label: string } {
     if (!s || s.id === app.orchestratorId) return { route: { view: 'home' }, label: '' };
     return { route: sessionRoute(s, app), label: s.orchestratorRole === 'dispatcher' ? 'Dispatcher' : `${s.title}'s orchestrator` };
   }
-  if (h.sandboxId) {
-    const sb = app.sandboxes.find((x) => x.id === h.sandboxId);
-    return { route: { view: 'sandbox', sandboxId: h.sandboxId, sessionId: h.sessionId }, label: sb ? displayName(sb) : h.sandboxId };
-  }
+  // A worker in a sandbox the portal held itself before w510: its conversation only.
+  if (h.sandboxId) return { route: { view: 'session', sessionId: h.sessionId }, label: h.sandboxId };
   if (h.standingId) return { route: { view: 'agent', agentId: h.standingId, tab: 'conversation' }, label: 'Standing agent' };
   if (h.machineId) {
     const m = app.machines.find((x) => x.id === h.machineId);
@@ -112,11 +110,13 @@ export function SearchView({ app, initial }: { app: AppState; initial?: string }
         {(!phone || filters) && <div className="search-filters">
           <select className="input" value={place} onChange={(e) => setPlace(e.target.value)} aria-label="Where">
             <option value="">Everywhere</option>
-            {app.sandboxes.map((s) => (
-              <option key={s.id} value={`sandbox:${s.id}`}>
-                {displayName(s)} (slot {s.id})
-              </option>
-            ))}
+            {app.machines.flatMap((m) =>
+              (m.sandboxes ?? []).map((s) => (
+                <option key={`${m.id}/${s.id}`} value={`sandbox:${m.id}/${s.id}`}>
+                  {displayName(s)} (slot {m.id}/{s.id})
+                </option>
+              )),
+            )}
             {app.machines.map((m) => (
               <option key={m.id} value={`machine:${m.id}`}>
                 {displayName(m)} (machine {m.id})

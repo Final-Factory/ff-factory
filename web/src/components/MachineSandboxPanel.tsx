@@ -5,7 +5,7 @@ import { attempt, sessionsByIds, toast, useStore } from '../store';
 import { displayName, fmtRelative, isUnused, machineSandboxGlance, navigate, unityLabel, unityTone, useNow } from '../util';
 import { NewAgentModal } from './Modals';
 import { GitFacts, SwitchBranchModal } from './Git';
-import { UnityLogDrawer } from './SandboxPanel';
+import { UnityLogDrawer } from './UnityLogDrawer';
 import { SessionDetails, SessionView } from './SessionView';
 import { AgentPicker, AgentTabs, AttentionStrip, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 import { Chip, CopyButton, Icon, StateText } from './ui';

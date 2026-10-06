@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { EFFORT_LEVELS, type AppState, type EffortLevel, type PermissionMode } from '../../../shared/types';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
-import { attempt, upsertSandbox, upsertSession } from '../store';
+import { attempt, upsertSession } from '../store';
 import { FREE_TEXT, navigate, PERMISSION_MODES } from '../util';
 import { useTextareaDictation } from '../voice/useTextareaDictation';
 import { DictationBar, MicButton } from './Mic';
@@ -41,13 +41,9 @@ export function NewSandboxModal({ app, onClose }: { app: AppState; onClose: () =
       }),
     );
     setBusy(false);
-    if (sb && 'machine' in sb) {
-      // Made by this host's own daemon: its page fills in from the daemon's next report.
+    if (sb) {
+      // Made by this host's own daemon (the portal holds none itself, w510): its page fills in from the daemon's next report.
       navigate({ view: 'msandbox', machineId: sb.machine, sandboxId: sb.id });
-      onClose();
-    } else if (sb) {
-      upsertSandbox(sb);
-      navigate({ view: 'sandbox', sandboxId: sb.id });
       onClose();
     }
   };

@@ -1,5 +1,5 @@
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { Machine, PendingPermission, Sandbox, SessionInfo, StandingAgent, TranscriptEvent } from '../../../shared/types';
+import type { Machine, PendingPermission, SessionInfo, StandingAgent, TranscriptEvent } from '../../../shared/types';
 import { parseNotice, type Notice, type NoticeKind } from '../../../shared/notices';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
@@ -464,7 +464,6 @@ const NOTICE_ICON: Record<NoticeKind, IconName> = {
 /** What a notice names, as the page knows it now: each one only, so a row re-renders when its own things change. */
 interface NoticeRefs {
   s?: SessionInfo;
-  sb?: Sandbox;
   m?: Machine;
   standing?: StandingAgent;
   orchestratorId?: string;
@@ -473,7 +472,6 @@ interface NoticeRefs {
 function useNoticeRefs(n: Notice): NoticeRefs {
   return {
     s: useStore((st) => (n.sessionId && st.app ? sessionIndex(st.app.sessions).get(n.sessionId) : undefined)),
-    sb: useStore((st) => (n.sandboxId ? st.app?.sandboxes.find((x) => x.id === n.sandboxId) : undefined)),
     m: useStore((st) => (n.machineId ? st.app?.machines.find((x) => x.id === n.machineId) : undefined)),
     standing: useStore((st) => (n.kind === 'delegation-request' ? st.app?.standingAgents.find((x) => x.name === n.standingName) : undefined)),
     orchestratorId: useStore((st) => st.app?.orchestratorId),
@@ -481,18 +479,18 @@ function useNoticeRefs(n: Notice): NoticeRefs {
 }
 
 /** A notice's line with today's names (a session's title, a sandbox's label), and where it points. */
-function describeNotice(n: Notice, { s, sb, m, standing, orchestratorId }: NoticeRefs): { text: string; route?: Route; where?: string } {
+function describeNotice(n: Notice, { s, m, standing, orchestratorId }: NoticeRefs): { text: string; route?: Route; where?: string } {
   const agent = s?.title ?? n.agentTitle;
-  const placeName = sb ? displayName(sb) : m ? displayName(m) : n.sandboxId ?? n.machineId;
+  const placeName = m ? displayName(m) : (n.sandboxId ?? n.machineId);
   const where = placeName && !(agent && sameTitle(agent, placeName)) ? placeName : undefined;
-  const route: Route | undefined = s && orchestratorId !== undefined ? sessionRoute(s, { orchestratorId }) : sb ? { view: 'sandbox', sandboxId: sb.id } : m ? { view: 'machine', machineId: m.id } : undefined;
+  const route: Route | undefined = s && orchestratorId !== undefined ? sessionRoute(s, { orchestratorId }) : m ? { view: 'machine', machineId: m.id } : undefined;
   switch (n.kind) {
     case 'worker-done':
       return { text: `${agent ?? 'A worker'} finished a turn`, route, where };
     case 'worker-permission':
       return { text: `${agent ?? 'A worker'} wants to use ${n.tool}${n.detail ? `: ${n.detail}` : ''}`, route, where };
     case 'unity-blocked':
-      return { text: `${n.summary}${placeName ? ` in ${placeName}` : ''}`, route: sb ? { view: 'sandbox', sandboxId: sb.id } : undefined };
+      return { text: `${n.summary}${placeName ? ` in ${placeName}` : ''}` };
     case 'delegation-request':
       return { text: n.summary, route: standing ? { view: 'agent', agentId: standing.id, tab: 'delegations' } : undefined };
     case 'auto-started':
