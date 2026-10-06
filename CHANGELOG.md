@@ -28,8 +28,59 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
     revoked machine's link drops within 20 s.
   - Redaction also covers GitHub tokens and every value the vault holds.
 
+### Changed
+
+- **`fffctl update` waits until the new release is verified, and says what is happening** (w517, Lothsahn: "sudo
+  fffctl update just says it scheduled it. How do I know when it's done? I'd prefer it be a blocking operation").
+  - **Stages shown:** the build (or "already up to date"), the drain (agents still busy, time left), the restart, the
+    new code answering, then verified, or rolled back with the reason.
+  - **Exit codes:** 0 when verified, 1 on a failed build or a rollback, 2 on a timeout, with the `journalctl` command
+    for the details.
+  - **Same machinery underneath:** `data/update.wanted`, `fff-update request`, the drain, `activate`, and fff-health's
+    `verify`, followed from outside through the units, the journals, the status files and `/api/health`, so
+    `request_app_update` works as before.
+  - **Ctrl+C** stops the waiting, not the update. `--no-wait` keeps the old behaviour. `fffctl restart` shows the
+    drain, and `fffctl rollback` waits until the portal answers with the release before.
+  - **Progress lines:** on a terminal (PuTTY's defaults too) they are rewritten in place with `\r` and `ESC[K`, never
+    moving the cursor; elsewhere a plain line at most every 30 s. The same for `fffctl migrate`, without the indent.
+- **`fffctl migrate` compresses the copy** (w517, Lothsahn: "use zstd level 3 ... Don't error. Fallback to gzip or bz2
+  or finally send uncompressed").
+  - **Choice:** zstd level 3 through BEAST's own tar.exe (bsdtar 3.8.8, built with libzstd), else gzip, else bzip2,
+    else none, whichever both sides take. It is tried once per run on a small file; a broken connection is retried
+    and is never read as "unsupported". `--compress` picks one first.
+  - **Output:** it says which it chose and why not a better one, and each part reports the bytes of files against the
+    bytes over the wire.
+  - **The guest install** adds `zstd` and `bzip2`.
+  - **Measured on BEAST's route with 698 MB of real JSONL:** zstd 3 sent 210 MB (3.3x) in 2.1 s of BEAST's time;
+    gzip 392 MB (1.8x) in 12.9 s; uncompressed 2.7 s. The zstd stream unpacked into all 77 entries.
+- **No claude.ai connectors for the orchestrators and the dispatcher** (w516, Lothsahn: "Please do an update to disable
+  the gmail, drive, and calendar tools", then "Disable claude docs"). Their 58 tools (Gmail 30, Google Drive 11, Google
+  Calendar 9, Claude Docs 8) were about 41,300 input tokens in every orchestrator and dispatcher turn (measured: a
+  person's orchestrator 65,496 → 24,199 tokens, the dispatcher 80,841 → 39,544). Workers and standing agents keep
+  them. Config `claudeAiConnectors` sets it per role (docs/accounts.md, "claude.ai connectors").
+
 ### Fixed
 
+- **`fffctl migrate` copies from one snapshot on BEAST** (w508, Lothsahn's dry run on #134: "batch 2 of 8 broke off …
+  tar: (null)", then his decision: "generate it all in one snapshot, and then tar and compress off a copy").
+  - **Cause (measured on BEAST, its own sshd, tar.exe and PowerShell, with writers like the live portal's):** Windows
+    tar stops at a file that grows or changes while it reads it. It prints `a <file>` and then `tar: (null)` on the same
+    line (bsdtar prints the wrong archive's empty error), exits 1, and leaves the archive cut off in that file:
+    | Live writer | tar stopped |
+    |---|---|
+    | an appended file | 15 of 15 times |
+    | the server's redirected `server.out.log` | 5 of 5 |
+    | a file rewritten in place | 2 of 5 |
+    | a file replaced by rename (the portal's saves) | 0 of 5, but the writer's renames failed 6 times while tar held it |
+  - **The fix:** before anything is read, `SNAP_PS` takes a VSS shadow copy of the volume (through a link in BEAST's
+    temp folder; recorded at once so a run that dies has it removed by the next), or else a staged copy (robocopy,
+    backup mode when elevated, after a free-space check), and says which. The listing, every stream, every retry and
+    the files sent one by one all read from it. `DROP_PS` removes it at the end, on a failure and on Ctrl+C (link
+    first, never what it points to). `--snapshot auto|vss|copy`.
+  - BEAST's tar runs with `-v`. A file it still stops at is taken out of its stream and sent through PowerShell, and the
+    stream goes on (measured on BEAST against real bsdtar with live writers: 3 files stopped at, 5 of 5 copied).
+  - The progress line counts the bytes of the files unpacked and never goes back on a retry. OpenSSH's post-quantum
+    warning about BEAST's 9.5 server is left out of BEAST's messages.
 - **The ledger's PR states are fresh, and a DONE is not refused on a merged PR** (w515, Lothsahn: "How can we fix PR's
   having the wrong status?"). w443, w449, w454, w484 and w489 were each refused "PR #N is still open" seconds after
   their PR merged (#1087, #1080, #1089, #1092, #1095), and nothing looked again, so they sat in "Merged, follow-up
@@ -76,6 +127,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
       unreadable file and a vanished one.
 ### Changed
 
+- **CI's Playwright tests run in three shards** (w521, asked by Lothsahn). The same tests split across three runners by
+  file (`playwright test --shard`), the performance budgets in the first; rendering visual baselines still runs every
+  test in one job, so the `linux-snapshots` artifact is whole.
 - **Waiting says on what, and only means alive with something pending** (w509, asked by Lothsahn: "aren't waiting jobs
   waiting on tests or other things to run?"). A Waiting agent shows its running job by the description it gave it
   ("Waiting: CI on PR #1098 · check-in 06:10"), a queued message, or its check-in with its note's first words, and a job
@@ -86,6 +140,24 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **`/compact` compacts an orchestrator's conversation** (w518, asked by Lothsahn: a long conversation cost $20.54 for
+  one short reply). `/compact` or `/compact <focus>` typed in your own chat, or Compact conversation in its menu, runs
+  Claude Code's own /compact on that conversation instead of sending the text to the model; owners have the same button
+  on the dispatcher's page. The chat says when it starts and, when it is done, the context measured before and after.
+  Mid-turn it is refused with why; it leaves the `wake_me` check-in and timers alone, and messages arriving meanwhile
+  are answered after it. `/clear` (or `/new`) opens the New conversation dialog. Details: docs/orchestrators.md,
+  "Compacting a conversation".
+- **The portal VM's CI runs only when a change needs it** (w505, part 2, asked by Lothsahn).
+  - Until now every PR touching `server/agents.ts` (most of them) waited on three nested-VM jobs. Now a plan job picks
+    them:
+    - the representative job (a zvol on a 24.04 host) for a PR touching `deploy/vm`, `server/restart.ts`, the
+      packages, or `server/index.ts`'s restart, drain, inbox or health code;
+    - all three when the host scripts, the test or the workflow change, on every merge to main, and nightly;
+    - none for any other PR.
+  - One nightly job keeps the production timing.
+  - The dry run's "changed nothing" checks on the firewall table and libvirt can fail now (a `!` under `set -e` never
+    did).
+  ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md), 10.3)
 - **The portal VM's end-to-end jobs wait less, and pass on main** (w505, part 1, asked by Lothsahn). The test now sets its
   own short health, update-verify, stop and watch timers (`CI_TIMING=fast`, the default; `production` runs the shipped
   defaults), so the rollback, health-restart and hang scenarios take seconds instead of minutes; the shipped defaults

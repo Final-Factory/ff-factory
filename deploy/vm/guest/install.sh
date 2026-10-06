@@ -72,7 +72,8 @@ Unattended-Upgrade::Origins-Pattern {
 EOF
 
 log "3/9 packages"
-pkgs=(nodejs git git-lfs gh openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades)
+# zstd and bzip2: fffctl migrate unpacks BEAST's copy with them (w517).
+pkgs=(nodejs git git-lfs gh openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades zstd bzip2)
 missing=()
 for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | matches 'install ok installed' || missing+=("$p"); done
 if [ -n "$c" ] || [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q; fi

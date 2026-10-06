@@ -4,10 +4,15 @@
 #   fffctl status                       the portal, its release, health, Tailscale, the base clone, backups
 #   fffctl logs [-f]                    the portal's journal
 #   fffctl restart [--no-drain] [--drain-minutes N]
-#                                       drain busy agents, restart, resume them (restart.ps1's job)
-#   fffctl update [--drain-minutes N]   build origin/main beside the running portal, then drain and switch
-#                                       (what request_app_update does; restart.ps1 -Update's job)
-#   fffctl rollback                     back to the previous release
+#                                       drain busy agents, restart, resume them (restart.ps1's job); waits until the
+#                                       portal answers again, showing the drain
+#   fffctl update [--drain-minutes N] [--no-wait] [--timeout-minutes N]
+#                                       build origin/main beside the running portal, then drain and switch (what
+#                                       request_app_update does; restart.ps1 -Update's job). Waits, showing each stage,
+#                                       until the new release is verified: exit 0 then (or already up to date), 1 on a
+#                                       failed build or a rollback, 2 on a timeout. Ctrl+C stops waiting, not the update.
+#                                       --no-wait: only ask for it
+#   fffctl rollback                     back to the previous release; waits until the portal answers with it
 #   fffctl prepare-shutdown [--drain-minutes N] [--reason TEXT]
 #                                       drain, stop the portal and keep it stopped until the next boot (the host's
 #                                       nightly restart runs this through the guest agent first)
@@ -56,6 +61,64 @@ restart_request() {
     '{drain: (if $d == "false" then false else $d end), drainMinutes: $m, reason: $r, update: $u, hold: false}' | data_write restart.request
 }
 main_pid() { systemctl show -p MainPID --value fff-portal.service; }
+
+# Progress (w517): on a terminal one line redrawn in place (\r and ESC[K only: no cursor movement, which PuTTY's
+# defaults handle); elsewhere (a log, CI) a plain line when the stage changes, else at most every 30 s.
+LIVE=""; LIVE_AT=0; LIVE_KEY=""
+live() { # KEY TEXT
+  if [ -t 1 ]; then
+    printf '\r\033[K%s' "$2"
+    LIVE=1
+  elif [ "$1" != "$LIVE_KEY" ] || [ $(($(date +%s) - LIVE_AT)) -ge 30 ]; then
+    echo "$2"
+    LIVE_AT=$(date +%s); LIVE_KEY=$1
+  fi
+}
+say() { # TEXT: a line that stays (it ends a live one)
+  if [ -n "$LIVE" ]; then printf '\r\033[K'; LIVE=""; fi
+  echo "$*"
+}
+mmss() { local s=$1; [ "$s" -lt 0 ] && s=0; printf '%dm%02ds' $((s / 60)) $((s % 60)); }
+# The journal of UNIT since epoch SECS, as plain lines.
+since_log() { journalctl -u "$1" --since "@$2" -o cat --no-pager 2>/dev/null || true; }
+# SECS of an ISO time ("" for none).
+iso_s() { [ -n "$1" ] && date -d "$1" +%s 2>/dev/null || echo 0; }
+# The drain the server is doing, from its own log line since SECS: "draining: N agent(s) ..., at most M left", or "".
+drain_line() {
+  local l n until left
+  l=$(since_log fff-portal.service "$1" | grep -E '^drain \(|^restart \(' | tail -n 1 || true)
+  case "$l" in
+    drain*"asked "*" busy agent"*"waiting until "*)
+      n=$(sed -E 's/.*asked ([0-9]+) busy agent.*/\1/' <<<"$l")
+      until=$(sed -E 's/.*waiting until ([^ ]+).*/\1/' <<<"$l")
+      left=$(($(iso_s "$until") - $(date +%s)))
+      echo "draining: $n agent(s) finishing their turn, at most $(mmss "$left") left"
+      ;;
+    restart*) echo "no agent is busy: restarting now" ;;
+  esac
+}
+# Waits for the portal's main process to change from PID (it restarts), showing the drain. Seconds at most.
+wait_restart() { # PID SINCE MAXSECS
+  local start; start=$(date +%s)
+  while [ $(($(date +%s) - start)) -lt "$3" ]; do
+    local now; now=$(main_pid)
+    if [ "$now" != "$1" ] && [ "$now" != 0 ]; then return 0; fi
+    local d; d=$(drain_line "$2" || true)
+    if [ -n "$d" ]; then live drain "$d"; else live wait "waiting for the portal to stop ($(mmss $(($(date +%s) - start))))"; fi
+    sleep 2
+  done
+  return 1
+}
+# The SHA the portal answers /api/health with ("" when it does not answer).
+health_sha() { health_json 2>/dev/null | jq -r '.sha // empty' 2>/dev/null || true; }
+# An update.result.json written since SECS: "ok" or "failed: <error>", else "".
+result_since() {
+  local f=$DATA/update.result.json at
+  [ -f "$f" ] || return 0
+  at=$(jq -r '.at // empty' "$f" 2>/dev/null || true)
+  [ "$(iso_s "$at")" -ge "$1" ] || return 0
+  if [ "$(jq -r '.ok' "$f")" = true ]; then echo ok; else echo "failed: $(jq -r '.error // "no reason given"' "$f")"; fi
+}
 wait_healthy() {
   local secs=$1 _
   for _ in $(seq "$secs"); do health_json >/dev/null 2>&1 && return 0; sleep 1; done
@@ -81,27 +144,115 @@ cmd_status() {
 }
 
 cmd_restart() {
-  local drain=auto mins=10 before
+  local drain=auto mins=10 before t0
   while [ $# -gt 0 ]; do
     case "$1" in --no-drain) drain=false ;; --drain-minutes) mins=$2; shift ;; *) die "unknown option $1" ;; esac
     shift
   done
   portal_active || { systemctl start fff-portal.service; wait_healthy 120 && echo "started"; return; }
-  before=$(main_pid)
+  before=$(main_pid); t0=$(date +%s)
   restart_request "$drain" "$mins" "restart (fffctl)" false
-  echo "asked the portal to $([ "$drain" = false ] && echo 'stop now' || echo "drain (up to $mins min)") and restart; waiting"
-  for _ in $(seq $(((mins + 3) * 60))); do
-    [ "$(main_pid)" != "$before" ] && [ "$(main_pid)" != 0 ] && wait_healthy 120 && { echo "restarted (pid $(main_pid))"; return 0; }
+  say "asked the portal to $([ "$drain" = false ] && echo 'stop now' || echo "drain (up to $mins min)") and restart"
+  wait_restart "$before" "$t0" $(((mins + 3) * 60)) || { say "the portal did not stop within $((mins + 3)) min"; die "fffctl status, fffctl logs"; }
+  say "restarting (pid $(main_pid))"
+  for _ in $(seq 120); do
+    if health_json >/dev/null 2>&1; then say "restarted: the portal answers ($(health_sha)), in $(mmss $(($(date +%s) - t0)))"; return 0; fi
+    live start "starting ($(mmss $(($(date +%s) - t0))))"
     sleep 1
   done
-  die "the portal did not come back; fffctl status, fffctl logs"
+  say "the portal does not answer 2 minutes after its restart"
+  die "fffctl status, fffctl logs"
 }
 
+# The update (w517): the same machinery as request_app_update (data/update.wanted, fff-update request, the drain, fff-update
+# activate, fff-health's verify), followed from outside: the service, the journals, the status files and /api/health.
 cmd_update() {
-  local mins=10
-  while [ $# -gt 0 ]; do case "$1" in --drain-minutes) mins=$2; shift ;; *) die "unknown option $1" ;; esac; shift; done
+  local mins=10 wait=1 limit=60 t0 wanted=$DATA/update.wanted target="" before r l
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --drain-minutes) mins=$2; shift ;;
+      --no-wait) wait=0 ;;
+      --timeout-minutes) limit=$2; shift ;;
+      *) die "unknown option $1" ;;
+    esac
+    shift
+  done
+  t0=$(date +%s)
   jq -n --argjson m "$mins" --arg at "$(date -u +%FT%TZ)" '{drainMinutes: $m, reason: "update (fffctl update)", at: $at}' | data_write update.wanted
-  echo "update requested: fff-update builds origin/$FFF_BRANCH now (journalctl -fu fff-update), then the portal drains and switches"
+  if [ "$wait" = 0 ]; then
+    echo "update requested: fff-update builds origin/$FFF_BRANCH now (journalctl -fu fff-update), then the portal drains and switches"
+    return 0
+  fi
+  local details="journalctl -u fff-update -u fff-portal -u fff-health --since @$t0 --no-pager"
+  trap 'say ""; say "stopped waiting: the update goes on by itself (fffctl status; $details)"; exit 130' INT
+  deadline=$((t0 + limit * 60))
+  late() { [ "$(date +%s)" -gt "$deadline" ]; }
+  timeout_out() { say "no outcome after $limit min (it may still finish: fffctl status). Details: $details"; exit 2; }
+  say "update: fff-update builds origin/$FFF_BRANCH beside the running portal (Ctrl+C stops waiting, not the update)"
+  # 1. The build: fff-update request takes update.wanted away when it starts, and is done when its oneshot unit is.
+  while [ -e "$wanted" ]; do late && timeout_out; live queued "waiting for fff-update to start ($(mmss $(($(date +%s) - t0))))"; sleep 1; done
+  before=$(main_pid)
+  while [ "$(systemctl show -p ActiveState --value fff-update.service)" = activating ]; do
+    late && timeout_out
+    l=$(since_log fff-update.service "$t0" | grep -E 'fff: (building|release)' | tail -n 1 | sed -E 's/^[^ ]+ fff: //' || true)
+    live build "${l:-fetching origin/$FFF_BRANCH} ($(mmss $(($(date +%s) - t0))))"
+    sleep 2
+  done
+  l=$(since_log fff-update.service "$t0")
+  if [ "$(systemctl show -p Result --value fff-update.service)" != success ]; then
+    say "the build FAILED: nothing was restarted, the running version stays. Last lines:"
+    tail -n 15 <<<"$l"
+    say "All of it: journalctl -u fff-update --since @$t0 --no-pager"
+    exit 1
+  fi
+  if grep -q 'fff: already at ' <<<"$l"; then
+    say "already up to date at $(grep -oE 'already at [0-9a-f]+' <<<"$l" | tail -n 1 | cut -d' ' -f3): nothing to restart"
+    exit 0
+  fi
+  target=$(jq -r '.sha // empty' "$DATA/update.prepared.json" 2>/dev/null || true)
+  [ -n "$target" ] || target=$(grep -oE 'built [0-9a-f]+' <<<"$l" | tail -n 1 | cut -d' ' -f2 || true)
+  say "built ${target:0:12} in $(mmss $(($(date +%s) - t0)))"
+  # 2. The drain and the restart.
+  wait_restart "$before" "$t0" $(((mins + 5) * 60)) || { say "the portal did not restart within $((mins + 5)) min of the build"; say "Details: $details"; exit 2; }
+  say "restarting: switching to ${target:0:12}"
+  # 3. The new code answering, then fff-health's verify (or a rollback).
+  local answered=0
+  while :; do
+    late && timeout_out
+    r=$(result_since "$t0")
+    case "$r" in
+      failed:*) say "the update FAILED: ${r#failed: }"; say "Details: $details"; exit 1 ;;
+    esac
+    local got; got=$(health_sha)
+    if [ "$answered" = 0 ] && [ -n "$got" ] && [ "${target:0:${#got}}" = "$got" ]; then
+      say "the new code answers: $got"
+      answered=1
+    fi
+    if [ "$answered" = 1 ] && [ "$r" = ok ] && [ ! -e "$DATA/update.verifying.json" ]; then
+      say "verified: ${target:0:12} runs (the update took $(mmss $(($(date +%s) - t0))))"
+      trap - INT
+      return 0
+    fi
+    if [ "$answered" = 1 ]; then live verify "verifying (fff-health confirms within a minute)"; else live start "starting the new code ($(mmss $(($(date +%s) - t0))))"; fi
+    sleep 2
+  done
+}
+
+# A rollback (w517): fff-update rollback restarts the portal on the release before; this waits until it answers with it.
+cmd_rollback() {
+  local prev t0
+  prev=$(release_sha "$(readlink -e "$PREVIOUS" 2>/dev/null || true)")
+  [ -n "$prev" ] || die "no previous release to go back to"
+  t0=$(date +%s)
+  "$FFF_LIB/fff-update" rollback "asked for by hand (fffctl rollback)"
+  for _ in $(seq 180); do
+    local got; got=$(health_sha)
+    if [ -n "$got" ] && [ "${prev:0:${#got}}" = "$got" ]; then say "rolled back: the portal answers with $got (in $(mmss $(($(date +%s) - t0))))"; return 0; fi
+    live start "waiting for the portal to answer with ${prev:0:12} ($(mmss $(($(date +%s) - t0))))"
+    sleep 1
+  done
+  say "the portal does not answer with ${prev:0:12} 3 minutes after the rollback"
+  die "fffctl status, fffctl logs"
 }
 
 cmd_prepare_shutdown() {
@@ -316,7 +467,7 @@ case "${1:-status}" in
   logs) shift; exec journalctl -u fff-portal.service -u fff-update.service -u fff-health.service --no-pager -n 200 "$@" ;;
   restart) shift; cmd_restart "$@" ;;
   update) shift; cmd_update "$@" ;;
-  rollback) exec "$FFF_LIB/fff-update" rollback "asked for by hand (fffctl rollback)" ;;
+  rollback) cmd_rollback ;;
   prepare-shutdown) shift; cmd_prepare_shutdown "$@" ;;
   start) rm -f "$HOLD"; systemctl start fff-portal.service; wait_healthy 180 && echo "portal up" ;;
   claude-token) shift; cmd_claude_token "$@" ;;
@@ -331,6 +482,6 @@ case "${1:-status}" in
   migrate) shift; exec "$FFF_LIB/fff-migrate" "$@" ;;
   vault) shift; cmd_vault "$@" ;;
   machine-credential) shift; vault_cli machine-credential "$@" ;;
-  -h | --help | help) sed -n '2,45p' "$0" ;;
+  -h | --help | help) sed -n '2,/^set -o/{/^#/p}' "$0" ;;
   *) die "unknown command $1 (fffctl help)" ;;
 esac

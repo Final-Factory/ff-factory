@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { failureDetail, psCommand, psq, stdinOf } from '../server/machineDeployWin.ts';
 import {
@@ -77,6 +77,10 @@ export interface Options {
   attempts: number;
   stallSeconds: number;
   progressSeconds: number;
+  /** How BEAST's files are held still while they are copied (w508): a VSS shadow copy, else a staged copy ("auto"). */
+  snapshot: 'auto' | 'vss' | 'copy';
+  /** The stream's compression (w517): zstd level 3, else gzip, else bzip2, else none ("auto"); a named one goes first. */
+  compress: 'auto' | 'zstd' | 'gzip' | 'bzip2' | 'none';
 }
 
 export const DEFAULTS: Omit<Options, 'mode'> = {
@@ -101,6 +105,8 @@ export const DEFAULTS: Omit<Options, 'mode'> = {
   attempts: 3,
   stallSeconds: 120,
   progressSeconds: 5,
+  snapshot: 'auto',
+  compress: 'auto',
 };
 
 /** What differs between the VM and a test: the portal's service, its log, the Funnel, the backups, a typed answer. */
@@ -121,6 +127,8 @@ export interface System {
   /** One line typed by a person. */
   ask(prompt: string): Promise<string>;
   out(line: string): void;
+  /** A progress line (w517): on a terminal redrawn in place; elsewhere a plain line now and then. Absent: out(). */
+  live?(line: string): void;
 }
 
 // ---------------------------------------------------------------- running things
@@ -163,6 +171,32 @@ export function run(cmd: string, args: string[], o: { input?: string | Buffer; e
  */
 export const MAX_STDIN_BYTES = 32 * 1024;
 
+/**
+ * How a stream is compressed (w517, Lothsahn: "use zstd level 3 ... Don't error. Fallback to gzip or bz2 or finally
+ * send uncompressed"). BEAST's tar.exe (bsdtar 3.8.8, built with libzstd, zlib and bz2lib) packs with `remote`; tar
+ * here unpacks with `local`, which needs the program `needs`.
+ */
+export interface Codec {
+  name: 'zstd' | 'gzip' | 'bzip2' | 'none';
+  label: string;
+  remote: string[];
+  local: string[];
+  needs?: string;
+}
+
+export const CODECS: Codec[] = [
+  { name: 'zstd', label: 'zstd level 3', remote: ['--zstd', '--options', 'zstd:compression-level=3'], local: ['--zstd'], needs: 'zstd' },
+  { name: 'gzip', label: 'gzip', remote: ['-z'], local: ['-z'], needs: 'gzip' },
+  { name: 'bzip2', label: 'bzip2', remote: ['-j'], local: ['-j'], needs: 'bzip2' },
+  { name: 'none', label: 'none', remote: [], local: [] },
+];
+
+/** The codecs to try, best first: a named one, then the rest in order; "none" always last. */
+export function codecOrder(want: Options['compress']): Codec[] {
+  const first = want === 'auto' ? [] : CODECS.filter((c) => c.name === want);
+  return [...first, ...CODECS.filter((c) => !first.includes(c))].filter((c, i, a) => a.indexOf(c) === i);
+}
+
 /** One tar stream from BEAST: what came, how it ended. */
 export interface StreamResult {
   /** ssh's exit code: BEAST's tar's (0, 1 for warnings such as a locked file), or 255 when the connection broke. */
@@ -175,6 +209,35 @@ export interface StreamResult {
   /** The files unpacked, by their path in the archive (without "./"). */
   unpacked: Set<string>;
   stalled: boolean;
+}
+
+/**
+ * BEAST's messages without ssh's own: the host-key notice, and OpenSSH 10's warning about BEAST's 9.5 server
+ * ("** This session may be vulnerable to "store now, decrypt later" attacks" and its follow-up lines).
+ */
+export const quiet = (stderr: string) =>
+  stderr
+    .replace(/\r/g, '')
+    .split('\n')
+    .filter((l) => l.trim() && !/^Warning: Permanently added/.test(l) && !/^\*\* /.test(l))
+    .join('\n');
+
+/**
+ * Windows tar's -v on stderr: the files it named ("a <path>", the newline written only once the file is done) and its
+ * messages. One it stopped at has its error on the same line, "a ./data/x.jsonltar: (null)" (measured on BEAST, w508).
+ */
+export function tarVerbose(stderr: string): { named: string[]; errors: string[] } {
+  const named: string[] = [];
+  const errors: string[] = [];
+  for (const line of stderr.split('\n')) {
+    if (!line.trim()) continue;
+    const m = /^a (?:\.\/)?(.*?)(tar: .*)?$/.exec(line);
+    if (m) {
+      named.push(m[1].trim());
+      if (m[2]) errors.push(m[2].trim());
+    } else errors.push(line.trim());
+  }
+  return { named, errors };
 }
 
 /** BEAST, over ssh as the portal's account with the portal's key. */
@@ -219,7 +282,8 @@ export class Beast {
 
   /** A PowerShell script on BEAST (the bootstrap of server/machineDeployWin.ts, fed on stdin), with $FFData. */
   async ps(script: string, data?: string, timeoutMs = 120_000): Promise<Result> {
-    return run('ssh', this.sshArgs(psCommand()), { input: Beast.input(script, data), env: this.env(), asUser: this.o.user, timeoutMs });
+    const r = await run('ssh', this.sshArgs(psCommand()), { input: Beast.input(script, data), env: this.env(), asUser: this.o.user, timeoutMs });
+    return { ...r, stderr: quiet(r.stderr) };
   }
 
   /**
@@ -228,12 +292,12 @@ export class Beast {
    * (-n): tar on BEAST reads nothing from it. BEAST's sshd runs commands under cmd.exe (no DefaultShell set), which
    * passes tar's bytes through untouched. A stream with no byte for stallSeconds is ended and reported as stalled.
    */
-  stream(root: string, listPath: string, dest: string, onBytes: (n: number) => void, onStart?: (unpacked: Set<string>) => void): Promise<StreamResult> {
+  stream(root: string, listPath: string, dest: string, onBytes: (n: number) => void, onStart?: (unpacked: Set<string>) => void, codec: Codec = CODECS[CODECS.length - 1]): Promise<StreamResult> {
     fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
     const q = (a: string) => (/\s/.test(a) ? `"${a}"` : a);
-    const ssh = this.spawnSsh(['tar', '-C', q(root), '-cf', '-', '-T', q(listPath)], true);
+    const ssh = this.spawnSsh(['tar', ...codec.remote, '-C', q(root), '-cvf', '-', '-T', q(listPath)], true);
     // Forward slashes for tar where this runs on Windows (a test against BEAST's own sshd); a no-op in the VM.
-    const untar = spawn('tar', ['-C', process.platform === 'win32' ? dest.replace(/\\/g, '/') : dest, '-xvf', '-', '--no-same-owner', '--no-same-permissions'], { cwd: '/' });
+    const untar = spawn('tar', [...codec.local, '-C', process.platform === 'win32' ? dest.replace(/\\/g, '/') : dest, '-xvf', '-', '--no-same-owner', '--no-same-permissions'], { cwd: '/' });
     const r: StreamResult = { sshCode: -1, untarCode: -1, remoteErr: '', localErr: '', bytes: 0, unpacked: new Set(), stalled: false };
     onStart?.(r.unpacked);
     let last = Date.now();
@@ -252,10 +316,13 @@ export class Beast {
     untar.stdin.on('error', () => undefined);
     ssh.stderr!.on('data', (d) => (r.remoteErr += d));
     untar.stderr.on('data', (d) => (r.localErr += d));
-    // Unpacking failed: the stream is of no use, end it now rather than at the stall limit.
+    // Unpacking failed: the stream is of no use. ssh gets a moment to pass on BEAST's last words (tar's error comes
+    // after its data), then it is ended rather than left to the stall limit.
+    let grace: NodeJS.Timeout | undefined;
     untar.on('close', (code) => {
-      if (code !== 0) ssh.kill('SIGKILL');
+      if (code !== 0) grace = setTimeout(() => ssh.kill('SIGKILL'), 5000);
     });
+    ssh.on('close', () => clearTimeout(grace));
     let partial = '';
     untar.stdout.on('data', (d) => {
       const lines = (partial + d).split('\n');
@@ -268,7 +335,7 @@ export class Beast {
       if (partial.trim()) r.unpacked.add(partial.trim().replace(/^\.\//, ''));
       r.sshCode = sc;
       r.untarCode = tc;
-      r.remoteErr = r.remoteErr.replace(/\r/g, '').split('\n').filter((l) => l.trim() && !/^Warning: Permanently added/.test(l)).join('\n');
+      r.remoteErr = quiet(r.remoteErr);
       return r;
     });
   }
@@ -342,7 +409,7 @@ $req = $FFData | ConvertFrom-Json
 $dir = Join-Path ([IO.Path]::GetTempPath()) ('fff-migrate-' + $req.run)
 $null = New-Item -ItemType Directory -Force -Path $dir
 # Lists left by runs a day old or more (one that stopped half way) go.
-Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'fff-migrate-*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'fff-migrate-*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-1) -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 $enc = New-Object Text.UTF8Encoding $false
 $list = New-Object IO.StreamWriter((Join-Path $dir ($req.name + '.all')), $false, $enc)
 $list.NewLine = [string][char]10
@@ -416,6 +483,138 @@ foreach ($part in $req.spec.Split(',')) {
   }
 }
 $o.Flush()
+`;
+
+/**
+ * One point-in-time view of the files to copy, on BEAST, before anything is read (lothsahn, w508: "generate it all in one
+ * snapshot, and then tar and compress off a copy"). $FFData: {run, name, root, include, skip, mode}. mode "auto" or
+ * "vss": a VSS shadow copy of the volume holding root (one per volume and run, shared by the run's copies), reached
+ * through a directory link <temp>\ffm-snap-<run>-<drive>; its id is recorded in <temp>\ffm-shadows.txt at once, so a
+ * run that dies has it removed by the next. Otherwise (mode "copy", or VSS refused): a staged copy of the include set
+ * in <temp>\fff-migrate-<run>\stage-<name>, by robocopy (backup mode when elevated), after checking the disk has room.
+ * Prints "mode", "root" (where to read from), "free", and "vsswhy", "size", "failed" lines as they apply.
+ */
+export const SNAP_PS = `
+$ErrorActionPreference = 'Stop'
+$req = $FFData | ConvertFrom-Json
+$tmp = [IO.Path]::GetTempPath()
+$win = [Environment]::OSVersion.Platform -eq 'Win32NT'
+function Say([string]$k, [string]$v) { [Console]::Out.WriteLine($k + [char]9 + $v) }
+function Free([string]$p) { try { (New-Object IO.DriveInfo([IO.Path]::GetPathRoot($p))).AvailableFreeSpace } catch { -1 } }
+$rootFull = (Resolve-Path -LiteralPath $req.root).ProviderPath.TrimEnd([char]92, [char]47)
+$vssWhy = ''
+if ($req.mode -ne 'copy') {
+  if (-not $win) { $vssWhy = 'not Windows' } else {
+    $vol = [IO.Path]::GetPathRoot($rootFull)
+    $link = Join-Path $tmp ('ffm-snap-' + $req.run + '-' + $vol.Substring(0, 1))
+    $state = Join-Path $tmp 'ffm-shadows.txt'
+    if (-not (Test-Path -LiteralPath $link)) {
+      # Shadows an earlier run recorded and did not remove (it died, or was stopped): only those, never anyone else's.
+      if (Test-Path -LiteralPath $state) {
+        $keep = @()
+        foreach ($l in [IO.File]::ReadAllLines($state)) {
+          $f = $l.Split([char]9)
+          if ($f.Count -lt 3) { continue }
+          if ($f[0] -eq $req.run) { $keep += $l; continue }
+          try { if (Test-Path -LiteralPath $f[2]) { [IO.Directory]::Delete($f[2]) } } catch { }
+          try { Get-CimInstance Win32_ShadowCopy | Where-Object { $_.ID -eq $f[1] } | Remove-CimInstance } catch { }
+        }
+        [IO.File]::WriteAllLines($state, [string[]]$keep)
+      }
+      try {
+        $r = Invoke-CimMethod -ClassName Win32_ShadowCopy -MethodName Create -Arguments @{ Volume = $vol; Context = 'ClientAccessible' }
+        if ($r.ReturnValue -ne 0) { throw ('Win32_ShadowCopy.Create returned ' + $r.ReturnValue) }
+        $id = [string]$r.ShadowID
+        [IO.File]::AppendAllText($state, $req.run + [char]9 + $id + [char]9 + $link + [char]10)
+        $dev = [string](Get-CimInstance Win32_ShadowCopy | Where-Object { $_.ID -eq $id }).DeviceObject
+        if (-not $dev) { throw ('no device for shadow ' + $id) }
+        $o = & cmd.exe /c mklink /d $link ($dev + '\\') 2>&1
+        if (-not (Test-Path -LiteralPath $link)) { throw ('mklink: ' + ($o -join ' ')) }
+      } catch {
+        $vssWhy = $_.Exception.Message -replace '\\s+', ' '
+        try { if (Test-Path -LiteralPath $link) { [IO.Directory]::Delete($link) } } catch { }
+        try { if ($id) { Get-CimInstance Win32_ShadowCopy | Where-Object { $_.ID -eq $id } | Remove-CimInstance } } catch { }
+      }
+    }
+    $mapped = Join-Path $link $rootFull.Substring($vol.Length)
+    if (-not $vssWhy -and (Test-Path -LiteralPath $mapped)) {
+      Say 'mode' 'vss'
+      Say 'root' $mapped.Replace([char]92, [char]47)
+      Say 'free' ([string](Free $rootFull) + [char]9 + $vol)
+      exit 0
+    }
+    if (-not $vssWhy) { $vssWhy = 'the shadow copy does not show ' + $rootFull }
+  }
+  if ($req.mode -eq 'vss') { throw ('no VSS snapshot: ' + $vssWhy) }
+}
+# A staged copy of the set.
+$stage = Join-Path (Join-Path $tmp ('fff-migrate-' + $req.run)) ('stage-' + $req.name)
+$null = New-Item -ItemType Directory -Force -Path $stage
+$skip = @($req.skip) | ForEach-Object { (Join-Path $rootFull $_) }
+$size = [long]0
+foreach ($inc in @($req.include)) {
+  $p = Join-Path $rootFull $inc
+  if (Test-Path -LiteralPath $p -PathType Leaf) { $size += (Get-Item -LiteralPath $p -Force).Length }
+  elseif (Test-Path -LiteralPath $p) {
+    foreach ($f in @(Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+      $in = $true; foreach ($s in $skip) { if ($f.FullName.StartsWith($s + [IO.Path]::DirectorySeparatorChar)) { $in = $false; break } }
+      if ($in) { $size += $f.Length }
+    }
+  }
+}
+$free = Free $stage
+Say 'free' ([string]$free + [char]9 + [IO.Path]::GetPathRoot($stage))
+Say 'size' ([string]$size)
+if ($free -ge 0 -and $free -lt $size + 1073741824) { throw ('not enough room on BEAST for a staged copy: ' + $size + ' bytes to copy, ' + $free + ' free at ' + $stage + ' (needs 1 GB to spare)') }
+$adm = $false
+if ($win) { $adm = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+foreach ($inc in @($req.include)) {
+  $src = Join-Path $rootFull $inc
+  $dst = Join-Path $stage $inc
+  if (-not (Test-Path -LiteralPath $src)) { continue }
+  $leaf = Test-Path -LiteralPath $src -PathType Leaf
+  if ($win) {
+    $common = @('/COPY:DT', '/R:1', '/W:1', '/NP', '/NFL', '/NDL', '/NJH', '/NJS', '/XJ')
+    if ($adm) { $common += '/B' }
+    if ($leaf) { $a = @((Split-Path -Parent $src), (Split-Path -Parent $dst), (Split-Path -Leaf $src)) + $common }
+    else { $a = @($src, $dst, '/E', '/DCOPY:T') + $common; if ($skip.Count) { $a += '/XD'; $a += $skip } }
+    $out = & robocopy.exe @a 2>&1 | ForEach-Object { [string]$_ }
+    $code = $LASTEXITCODE
+    for ($i = 0; $i -lt $out.Count; $i++) { if ($out[$i] -match 'ERROR \\d+ \\(0x[0-9A-Fa-f]+\\) (.*)$') { Say 'failed' ($Matches[1] + ' ' + ($(if ($i + 1 -lt $out.Count) { $out[$i + 1].Trim() } else { '' }))) } }
+    if ($code -ge 16) { throw ('robocopy failed (exit ' + $code + '): ' + (($out | Select-Object -Last 3) -join ' | ')) }
+  } else {
+    $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst)
+    $o = & cp -a $src $dst 2>&1
+    foreach ($l in @($o)) { if ([string]$l) { Say 'failed' ([string]$l) } }
+    foreach ($s in $skip) { $rel = $s.Substring($rootFull.Length + 1); if ($rel.StartsWith($inc)) { Remove-Item -LiteralPath (Join-Path $stage $rel) -Recurse -Force -ErrorAction SilentlyContinue } }
+  }
+}
+Say 'mode' 'copy'
+Say 'vsswhy' $vssWhy
+Say 'root' $stage.Replace([char]92, [char]47)
+`;
+
+/**
+ * Ends a run's snapshot: $FFData is the run. Its links go first (removing a link, never what it points to), then its
+ * shadow copies, then its folder of lists and staged copies.
+ */
+export const DROP_PS = `
+$tmp = [IO.Path]::GetTempPath()
+$run = [string]$FFData
+$n = 0
+foreach ($l in @(Get-ChildItem -LiteralPath $tmp -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like ('ffm-snap-' + $run + '-*') })) { try { [IO.Directory]::Delete($l.FullName) } catch { } }
+$state = Join-Path $tmp 'ffm-shadows.txt'
+if (Test-Path -LiteralPath $state) {
+  $keep = @()
+  foreach ($l in [IO.File]::ReadAllLines($state)) {
+    $f = $l.Split([char]9)
+    if ($f.Count -ge 3 -and $f[0] -eq $run) { try { Get-CimInstance Win32_ShadowCopy | Where-Object { $_.ID -eq $f[1] } | Remove-CimInstance; $n++ } catch { } } else { $keep += $l }
+  }
+  [IO.File]::WriteAllLines($state, [string[]]$keep)
+}
+$d = Join-Path $tmp ('fff-migrate-' + $run)
+if ((Test-Path -LiteralPath $d) -and -not ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
+'dropped' + [char]9 + $n
 `;
 
 /** Removes a run's list files from BEAST's temp folder: $FFData is the folder. */
@@ -571,9 +770,104 @@ export class Migration {
     }
   }
 
+  /** The compression this run uses, chosen at its first copy (w517). */
+  private codec?: Codec;
+
+  /**
+   * zstd level 3, else gzip, else bzip2, else none: the first both sides take, tried on one small file of the copy
+   * (a stream of its own, unpacked aside). Never an error: "none" always works. Says which, and why not the better ones.
+   */
+  private async chooseCodec(root: string, dir: string, all: string, probe: ManifestEntry): Promise<Codec> {
+    if (this.codec) return this.codec;
+    const why: string[] = [];
+    for (const c of codecOrder(this.o.compress)) {
+      if (c.needs && spawnSync(c.needs, ['--version'], { stdio: 'ignore' }).status !== 0) {
+        why.push(`${c.name}: no ${c.needs} here`);
+        continue;
+      }
+      if (c.name === 'none') {
+        this.codec = c;
+        break;
+      }
+      const lr = await this.beast.ps(BATCH_PS, JSON.stringify({ dir, all, out: 'probe.list', spec: indexSpec([probe.index!]) }), 120_000);
+      const listPath = /^list\t(.+)$/m.exec(lr.stdout)?.[1]?.trim();
+      const aside = path.join(this.dir, 'probe');
+      let refused = '';
+      for (let attempt = 1; attempt <= this.o.attempts; attempt++) {
+        fs.rmSync(aside, { recursive: true, force: true });
+        const r = listPath ? await this.beast.stream(root, listPath, aside, () => undefined, undefined, c) : undefined;
+        fs.rmSync(aside, { recursive: true, force: true });
+        if (r && r.untarCode === 0 && [0, 1, 2].includes(r.sshCode) && r.unpacked.has(probe.path)) {
+          this.codec = c;
+          break;
+        }
+        // A broken connection says nothing about the compression: try again; still broken, keep it (the copy's own
+        // retries deal with the connection).
+        if (r && (r.sshCode === 255 || r.stalled)) {
+          if (attempt < this.o.attempts) {
+            this.say(`  compression check (${c.name}): the stream broke off (${tarVerbose(r.remoteErr).errors.slice(-1)[0] ?? `ssh exit ${r.sshCode}`}); trying again`);
+            await sleep(2000);
+            continue;
+          }
+          this.codec = c;
+          break;
+        }
+        refused = r ? (tarVerbose(r.remoteErr).errors.slice(-1)[0] ?? r.localErr.trim().split('\n').slice(-1)[0] ?? `exit ${r.sshCode}`) : 'no probe list';
+        break;
+      }
+      if (this.codec) break;
+      why.push(`${c.name}: ${refused}`);
+    }
+    this.codec ??= CODECS[CODECS.length - 1];
+    this.say(`compression: ${this.codec.label}${why.length ? ` (not: ${why.join('; ')})` : ''}`);
+    return this.codec;
+  }
+
+  /** Runs whose snapshot is still on BEAST: dropped at the end, on a failure, and on Ctrl+C (main). */
+  readonly runs = new Set<string>();
+
+  /**
+   * The point-in-time view to copy from (w508): SNAP_PS on BEAST, once per run and volume for a shadow copy, or a staged
+   * copy of this set. Returns where to read from. Says which, with BEAST's free disk space and anything it could not copy.
+   */
+  async beastSnapshot(run: string, name: string, label: string, root: string, include: string[], skip: string[]): Promise<string> {
+    const t0 = Date.now();
+    this.sys.out(`${label}: taking a snapshot on BEAST (${this.o.snapshot === 'copy' ? 'a staged copy' : 'a VSS shadow copy, else a staged copy'})...`);
+    this.runs.add(run);
+    const stop = this.ticker(() => `  still taking the snapshot (${span((Date.now() - t0) / 1000)})`);
+    const r = await this.beast.ps(SNAP_PS, JSON.stringify({ run, name, root, include, skip, mode: this.o.snapshot }), 60 * 60_000).finally(stop);
+    const field = (k: string) => [...r.stdout.matchAll(new RegExp(`^${k}\t(.*)$`, 'gm'))].map((m) => m[1].replace(/\r$/, ''));
+    const mode = field('mode')[0];
+    const at = field('root')[0];
+    if (r.code !== 0 || !mode || !at) throw new Error(`no snapshot on BEAST, so nothing is copied (reading the live files would copy a view no one ever had): ${failureDetail(r)}`);
+    const [freeBytes, drive] = (field('free')[0] ?? '').split('\t');
+    const free = Number(freeBytes) >= 0 ? `${size(Number(freeBytes))} free on BEAST's ${drive || 'disk'}` : "BEAST's free space unknown";
+    if (mode === 'vss') this.say(`${label}: snapshot: a VSS shadow copy of BEAST's ${drive || 'volume'}, taken ${new Date().toISOString().slice(11, 19)} UTC; every file is read from it (${free}; ${secs(Date.now() - t0)})`);
+    else {
+      const why = field('vsswhy')[0];
+      this.say(`${label}: snapshot: a staged copy on BEAST, ${size(Number(field('size')[0] ?? 0))}${why ? ` (no VSS shadow copy: ${why})` : ''}; every file is read from it (${free} before it; ${secs(Date.now() - t0)})`);
+      const failed = field('failed');
+      if (failed.length) this.say(`  ${label}: ${count(failed.length)} file(s) could not be copied into the snapshot and are left out: ${failed.slice(0, 10).join('; ')}${failed.length > 10 ? `; and ${failed.length - 10} more` : ''}`);
+    }
+    return at;
+  }
+
+  /** Removes a run's snapshot from BEAST (its shadow copy, link and staged copies). */
+  async dropSnapshot(run: string) {
+    if (!this.runs.has(run)) return;
+    const r = await this.beast.ps(DROP_PS, run, 120_000).catch((e: Error) => ({ code: -1, stdout: '', stderr: e.message }));
+    if (r.code === 0) this.runs.delete(run);
+    else this.say(`  could not remove the snapshot on BEAST (${failureDetail(r)}); the next run removes it`);
+  }
+
+  /** Every snapshot this process took, removed (Ctrl+C, a failure). */
+  async dropSnapshots() {
+    for (const run of [...this.runs]) await this.dropSnapshot(run);
+  }
+
   /** A progress line every progressSeconds while `what` runs (the listing, a copy): it reads well over plain ssh. */
   private ticker(line: () => string) {
-    const t = setInterval(() => this.sys.out(line()), this.o.progressSeconds * 1000);
+    const t = setInterval(() => (this.sys.live ? this.sys.live(line()) : this.sys.out(line())), this.o.progressSeconds * 1000);
     t.unref?.();
     return () => clearInterval(t);
   }
@@ -586,10 +880,12 @@ export class Migration {
    * manifest is written after each stream and names only files that were unpacked whole, so a run that stops is resumed
    * by the next, which never trusts a file it did not finish.
    */
-  async pull(name: string, label: string, root: string, include: string[], skip: string[] = []): Promise<{ files: number; bytes: number; fetched: number; removed: number; ms: number; total: number; locked: { path: string; why: string }[]; gone: string[] }> {
+  async pull(name: string, label: string, liveRoot: string, include: string[], skip: string[] = [], snapRun = `${Date.now()}-${process.pid}`): Promise<{ files: number; bytes: number; fetched: number; removed: number; ms: number; total: number; locked: { path: string; why: string }[]; gone: string[] }> {
     const t0 = Date.now();
-    const run = `${Date.now()}-${process.pid}-${name}`;
-    this.sys.out(`${label}: listing BEAST's files under ${root}...`);
+    const run = `${snapRun}-${name}`;
+    // Everything below reads the snapshot: the listing, every stream and every retry, and the files sent one by one.
+    const root = await this.beastSnapshot(snapRun, name, label, liveRoot, include, skip);
+    this.sys.out(`${label}: listing BEAST's files under ${liveRoot} (in the snapshot)...`);
     const stopList = this.ticker(() => `  still listing (${span((Date.now() - t0) / 1000)})`);
     const r = await this.beast.ps(MANIFEST_PS, JSON.stringify({ root, include, skip, run, name }), 10 * 60_000).finally(stopList);
     if (r.code !== 0) throw new Error(`listing ${root} on BEAST failed: ${failureDetail(r)}`);
@@ -615,46 +911,75 @@ export class Migration {
     const tc = Date.now();
     let bytes = 0;
     let done = 0;
+    let doneBytes = 0;
+    const sizes = new Map(fetch.map((e) => [e.path, e.size]));
+    // What the progress line shows only ever goes up: a stream tried again does not take back what it showed (w508).
+    let shownFiles = 0;
+    let shownBytes = 0;
     const progress = () => {
+      let inflight = 0;
+      for (const p of current ?? []) inflight += sizes.get(p) ?? 0;
+      shownFiles = Math.max(shownFiles, Math.min(done + (current?.size ?? 0), fetch.length));
+      shownBytes = Math.max(shownBytes, Math.min(doneBytes + inflight, want));
       const s = (Date.now() - tc) / 1000;
-      const rate = bytes / Math.max(s, 0.001);
-      const left = Math.max(want - bytes, 0);
-      const eta = bytes >= 1024 * 1024 && s >= 5 && left > 0 ? `, about ${span(left / rate)} left` : bytes === 0 ? ', waiting for BEAST' : '';
-      return `  ${label}: ${count(Math.min(done + unpackedNow(), fetch.length))}/${count(fetch.length)} files, ${size(Math.min(bytes, want))} of ${size(want)}, ${mb(rate)}/s${eta}`;
+      const rate = shownBytes / Math.max(s, 0.001);
+      const left = Math.max(want - shownBytes, 0);
+      const eta = shownBytes >= 1024 * 1024 && s >= 5 && left > 0 ? `, about ${span(left / rate)} left` : bytes === 0 ? ', waiting for BEAST' : '';
+      return `  ${label}: ${count(shownFiles)}/${count(fetch.length)} files, ${size(shownBytes)} of ${size(want)}, ${mb(rate)}/s${eta}`;
     };
     // Files of the stream in flight, as tar here names them while it unpacks.
     let current: Set<string> | undefined;
-    const unpackedNow = () => current?.size ?? 0;
     const stopCopy = fetch.length ? this.ticker(progress) : () => undefined;
     const missing: ManifestEntry[] = [];
     const locked: { path: string; why: string }[] = [];
     const gone: string[] = [];
     try {
       const batches = batchPlan(fetch, { maxFiles: this.o.batchFiles, maxBytes: this.o.batchMB * 1024 * 1024 });
+      const codec = batches.length ? await this.chooseCodec(root, dir, `${name}.all`, [...fetch].sort((a, b) => a.size - b.size)[0]) : CODECS[CODECS.length - 1];
       for (const [bi, batch] of batches.entries()) {
-        const out = `${bi}.list`;
-        const lr = await this.beast.ps(BATCH_PS, JSON.stringify({ dir, all: `${name}.all`, out, spec: indexSpec(batch.map((e) => e.index!)) }), 120_000);
-        const listPath = /^list\t(.+)$/m.exec(lr.stdout)?.[1]?.trim();
-        if (lr.code !== 0 || !listPath) throw new Error(`BEAST could not write the list for batch ${bi + 1} of ${batches.length}: ${failureDetail(lr)}`);
         let res: StreamResult | undefined;
-        for (let attempt = 1; ; attempt++) {
-          const before = bytes;
-          res = await this.beast.stream(root, listPath, dest, (n) => (bytes += n), (u) => (current = u));
+        // The batch as it is streamed: a file tar on BEAST stops at is taken out of it (and sent one by one below).
+        let files = batch;
+        const out = `${bi}.list`;
+        let listPath = '';
+        const writeList = async () => {
+          const lr = await this.beast.ps(BATCH_PS, JSON.stringify({ dir, all: `${name}.all`, out, spec: indexSpec(files.map((e) => e.index!)) }), 120_000);
+          listPath = /^list\t(.+)$/m.exec(lr.stdout)?.[1]?.trim() ?? '';
+          if (lr.code !== 0 || !listPath) throw new Error(`BEAST could not write the list for batch ${bi + 1} of ${batches.length}: ${failureDetail(lr)}`);
+        };
+        await writeList();
+        let taken = 0;
+        for (let attempt = 1; ; ) {
+          res = await this.beast.stream(root, listPath, dest, (n) => (bytes += n), (u) => (current = u), codec);
           current = undefined;
           // Whole: tar here read the archive to its end, and tar on BEAST finished (0; 1 or 2 when some files could not
           // be read, which are dealt with below). 255 is ssh's own failure (the connection), anything else a crash.
           const whole = !res.stalled && res.untarCode === 0 && [0, 1, 2].includes(res.sshCode);
           if (whole) break;
-          bytes = before;
-          const why = `${res.stalled ? `no data for ${this.o.stallSeconds} s` : res.untarCode !== 0 ? 'the archive stopped short' : 'tar on BEAST did not finish'} (ssh/BEAST tar exit ${res.sshCode}, unpacking tar exit ${res.untarCode})${res.remoteErr ? `; BEAST: ${res.remoteErr.split('\n').slice(-3).join(' | ')}` : ''}${res.localErr ? `; here: ${res.localErr.trim().split('\n').slice(-2).join(' | ')}` : ''}`;
-          if (attempt >= this.o.attempts) throw new Error(`${label}: batch ${bi + 1} of ${batches.length} (${count(batch.length)} files) failed ${attempt} times: ${why}. The files copied before it are kept; run the same command again to go on from there`);
+          // tar on BEAST names each file as it packs it (-v): after an error (Windows tar prints "tar: (null)" for one it
+          // could not read to the end), the last one named is the one it stopped at.
+          const { named, errors } = tarVerbose(res.remoteErr);
+          const culprit = !res.stalled && res.sshCode !== 255 && errors.length ? named[named.length - 1] : undefined;
+          const why = `${res.stalled ? `no data for ${this.o.stallSeconds} s` : res.untarCode !== 0 ? 'the archive stopped short' : 'tar on BEAST did not finish'} (ssh/BEAST tar exit ${res.sshCode}, unpacking tar exit ${res.untarCode})${errors.length ? `; BEAST: ${errors.slice(-3).join(' | ')}` : ''}${res.localErr ? `; here: ${res.localErr.trim().split('\n').slice(-2).join(' | ')}` : ''}`;
+          const bad = culprit ? files.find((e) => e.path === culprit) : undefined;
+          if (bad && taken < 20) {
+            taken++;
+            files = files.filter((e) => e !== bad);
+            missing.push(bad);
+            this.say(`  ${label}: tar on BEAST stopped at ${bad.path} (${errors.slice(-1)[0] ?? 'no message'}): it is taken out of batch ${bi + 1} and sent on its own; the batch goes on`);
+            await writeList();
+            continue;
+          }
+          if (attempt >= this.o.attempts) throw new Error(`${label}: batch ${bi + 1} of ${batches.length} (${count(files.length)} files) failed ${attempt} times: ${why}. The files copied before it are kept; run the same command again to go on from there`);
           this.say(`  ${label}: batch ${bi + 1} of ${batches.length} broke off: ${why}; trying again (${attempt + 1} of ${this.o.attempts})`);
+          attempt++;
           await sleep(2000);
         }
-        for (const e of batch) {
+        for (const e of files) {
           if (res.unpacked.has(e.path)) {
             kept.set(e.path, e);
             done++;
+            doneBytes += e.size;
           } else missing.push(e);
         }
         save();
@@ -669,6 +994,7 @@ export class Migration {
           for (const p of f.got) {
             kept.set(p, byPath.get(p)!);
             done++;
+            doneBytes += byPath.get(p)!.size;
           }
           gone.push(...f.gone);
           locked.push(...f.locked);
@@ -679,9 +1005,13 @@ export class Migration {
       }
     } finally {
       stopCopy();
-      void this.beast.ps(CLEAN_PS, dir, 60_000).catch(() => undefined);
+      // Awaited: a run that ends right after must not leave its lists in BEAST's temp folder.
+      await this.beast.ps(CLEAN_PS, dir, 60_000).catch(() => undefined);
     }
-    if (fetch.length) this.say(`${label}: copied ${count(done)} of ${count(fetch.length)} files, ${size(bytes)} in ${secs(Date.now() - tc)} (${mb(bytes / Math.max((Date.now() - tc) / 1000, 0.001))}/s)`);
+    if (fetch.length) {
+      const t = Math.max((Date.now() - tc) / 1000, 0.001);
+      this.say(`${label}: copied ${count(done)} of ${count(fetch.length)} files, ${size(doneBytes)} of files in ${size(bytes)} over the wire (${this.codec?.label ?? 'none'}${bytes > 0 && doneBytes > 0 ? `, ${(doneBytes / bytes).toFixed(1)}x` : ''}), in ${secs(t * 1000)}: ${mb(doneBytes / t)}/s of files, ${mb(bytes / t)}/s on the wire`);
+    }
     const show = (xs: string[]) => `${xs.slice(0, 10).join(', ')}${xs.length > 10 ? `, and ${xs.length - 10} more` : ''}`;
     if (gone.length) this.say(`  ${label}: ${count(gone.length)} file(s) went on BEAST during the copy: ${show(gone)}`);
     if (locked.length) this.say(`  ${label}: ${count(locked.length)} file(s) could not be read on BEAST (open elsewhere, or no access), left out and tried again by the next run: ${show(locked.map((l) => `${l.path} (${l.why})`))}`);
@@ -694,14 +1024,24 @@ export class Migration {
     fs.mkdirSync(this.stage, { recursive: true, mode: 0o700 });
     fs.chmodSync(this.stage, 0o700);
     const t0 = Date.now();
-    const d = await this.pull('beast', "BEAST's config.json and data", this.o.beastRoot, ['config.json', 'data'], ['data/tools']);
+    // One snapshot run for both copies: on BEAST's C: one shadow copy holds the portal's data and the conversations.
+    const snapRun = `${Date.now()}-${process.pid}`;
+    try {
+      return await this.pullBoth(snapRun, t0);
+    } finally {
+      await this.dropSnapshot(snapRun);
+    }
+  }
+
+  private async pullBoth(snapRun: string, t0: number): Promise<{ moves: HistoryMove[]; ms: number }> {
+    const d = await this.pull('beast', "BEAST's config.json and data", this.o.beastRoot, ['config.json', 'data'], ['data/tools'], snapRun);
     this.say(`copied BEAST's config.json and data: ${count(d.files)} files, ${size(d.total)} in all; this time ${count(d.fetched)} file(s), ${size(d.bytes)} over the wire, ${count(d.removed)} removed, in ${secs(d.ms)}`);
     const beastCfg = readJson(path.join(this.stage, 'beast', 'config.json'));
     const state = readJson(path.join(this.stage, 'beast', 'data', 'state.json'));
     const vm = this.vmTemplate();
     const moves = historyPlan(state, { beastBase: String((beastCfg.repo as Json | undefined)?.basePath ?? ''), vmBase: String((vm.repo as Json | undefined)?.basePath ?? path.join(this.o.root, 'base')), vmStandingRoot: String(vm.standingRoot ?? path.join(this.o.root, 'agents')) });
     const include = moves.flatMap((m) => [`${m.fromFolder}/${m.sdkSessionId}.jsonl`, `${m.fromFolder}/${m.sdkSessionId}`]);
-    const h = await this.pull('claude', 'the conversations', `${this.o.beastClaudeDir.replace(/[\\/]+$/, '')}/projects`, include);
+    const h = await this.pull('claude', 'the conversations', `${this.o.beastClaudeDir.replace(/[\\/]+$/, '')}/projects`, include, [], snapRun);
     this.say(`copied ${moves.length} conversation(s) to resume (the orchestrators', the dispatcher's, this host's standing agents'): ${count(h.files)} files, ${size(h.total)}; this time ${count(h.fetched)} file(s) in ${secs(h.ms)}`);
     const have = new Set(this.loadManifest('claude').map((e) => e.path));
     for (const m of moves) if (!have.has(`${m.fromFolder}/${m.sdkSessionId}.jsonl`)) this.say(`  no history on BEAST for ${m.kind} "${m.title}" (${m.sdkSessionId}): it starts a fresh conversation`);
@@ -1167,7 +1507,33 @@ export function vmSystem(o: Options): System {
           resolve(a);
         });
       }),
-    out: (line) => console.log(line),
+    ...liveOut(),
+  };
+}
+
+/**
+ * Lines for a person (w517, Lothsahn: "overwrite the first line on every update so it doesn't keep scrolling"): on a
+ * terminal the progress line is redrawn in place (\r and ESC[K only, no cursor movement: PuTTY's defaults), without
+ * the indent, and the next lasting line takes its place; elsewhere (a log, CI) a progress line at most every 30 s.
+ */
+export function liveOut(stream: NodeJS.WriteStream = process.stdout, now = () => Date.now()): Pick<System, 'out' | 'live'> {
+  let pending = false;
+  let last = 0;
+  return {
+    out: (line) => {
+      if (pending) stream.write('\r\x1b[K');
+      pending = false;
+      stream.write(`${line}\n`);
+    },
+    live: (line) => {
+      if (stream.isTTY) {
+        stream.write(`\r\x1b[K${line.trimStart()}`);
+        pending = true;
+      } else if (now() - last >= 30_000) {
+        last = now();
+        stream.write(`${line.trimStart()}\n`);
+      }
+    },
   };
 }
 
@@ -1177,6 +1543,8 @@ export const USAGE = `fffctl migrate --key | --dry-run-copy | --rollback-dry-run
   options: --ssh USER@HOST (BEAST, default ${DEFAULTS.ssh})  --beast-ssh-host H (what this portal deploys to BEAST by, default --ssh)
            --beast-root DIR (${DEFAULTS.beastRoot})  --beast-claude-dir DIR (${DEFAULTS.beastClaudeDir})  --beast-task NAME (${DEFAULTS.beastTask})
            --public-url URL (default config.json publicUrl)  --drain-minutes N (${DEFAULTS.drainMinutes})  --no-resume-check
+           --snapshot auto|vss|copy (how BEAST's files are held still while copied: a VSS shadow copy, else a staged copy)
+           --compress auto|zstd|gzip|bzip2|none (zstd level 3 by default, falling back to the next one either side lacks)
   (docs/portal-on-ffbox-host.md 7.2, 7.3; deploy/vm/RUNBOOK.md "Dry run" and "Cut-over")`;
 
 export function parseArgs(argv: string[], base: Omit<Options, 'mode'> = DEFAULTS): Options {
@@ -1213,6 +1581,18 @@ export function parseArgs(argv: string[], base: Omit<Options, 'mode'> = DEFAULTS
       case '--no-resume-check': o.resumeCheck = false; break;
       case '--keep-stage': o.keepStage = true; break;
       case '--no-tailscale': o.tailscale = false; break;
+      case '--compress': {
+        const v = need(i++);
+        if (!['auto', 'zstd', 'gzip', 'bzip2', 'none'].includes(v)) throw new Error(`--compress is auto, zstd, gzip, bzip2 or none\n${USAGE}`);
+        o.compress = v as Options['compress'];
+        break;
+      }
+      case '--snapshot': {
+        const v = need(i++);
+        if (v !== 'auto' && v !== 'vss' && v !== 'copy') throw new Error(`--snapshot is auto, vss or copy\n${USAGE}`);
+        o.snapshot = v;
+        break;
+      }
       case '-h': case '--help': throw new Error(USAGE);
       default: throw new Error(`unknown option ${a}\n${USAGE}`);
     }
@@ -1237,6 +1617,20 @@ export async function main(argv: string[], sysFor: (o: Options) => System = vmSy
     return 2;
   }
   const m = new Migration(o, sysFor(o));
+  // Ctrl+C (or a stop): the snapshot on BEAST goes too, then the command ends.
+  let stopping = false;
+  const onSignal = (sig: NodeJS.Signals) => {
+    if (stopping) return;
+    stopping = true;
+    console.error(`\n${sig}: removing the snapshot on BEAST, then stopping...`);
+    const give = setTimeout(() => process.exit(130), 120_000);
+    void m.dropSnapshots().finally(() => {
+      clearTimeout(give);
+      process.exit(130);
+    });
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
   try {
     if (o.mode === 'key') return await m.key();
     if (o.mode === 'dry-run-copy') return await m.dryRunCopy();

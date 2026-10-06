@@ -1036,14 +1036,30 @@ the release, health, Tailscale, the login, the base clone and backups; `fffctl s
 
 ### 10.3 What CI proves
 
-[`vm-scripts.yml`](../.github/workflows/vm-scripts.yml) runs on every change to `deploy/vm/`, `server/restart.ts` or
-`server/agents.ts`, and weekly, on `ubuntu-24.04` and `ubuntu-26.04` runners, which have KVM *(sourced: GitHub
-changelog 2024-04-02)*.
+[`vm-scripts.yml`](../.github/workflows/vm-scripts.yml) runs on `ubuntu-24.04` and `ubuntu-26.04` runners, which have
+KVM *(sourced: GitHub changelog 2024-04-02)*. Its plan job picks what a change needs (w505), and says why in the run's
+summary:
+
+| When | Lint | End to end |
+|---|---|---|
+| A PR touching `deploy/vm/host`, `deploy/vm/test` or the workflow | yes | all three below |
+| A PR touching other `deploy/vm` files | yes | the representative one: a zvol on a 24.04 host, the FFBox host's own setup |
+| A PR touching `server/restart.ts` (drain, restart, hold), the packages the guest builds, or a hunk of `server/index.ts` in its restart, drain, inbox, health or stop code (`VM_MARKERS`) | no | the representative one |
+| Any other PR | no | none: it never waits on a VM |
+| Every merge to `main` that touched any of those | yes | all three |
+| Nightly | yes | all three, plus one at production timing |
+
+The jobs run the fast timing: the test's own settings make the health checks every 10 s (2 failures), the update
+verify window 45 s, the portal's stop timeout 15 s and the host watch every 10 s (2 failures), so the scenarios that
+wait on those timers take seconds. The same code runs; only the shipped defaults' numbers differ, and the nightly
+production-timing job runs with those defaults (5 min verify, 4 checks 30 s apart, 120 s start grace, 75 s stop
+timeout, the watch every 60 s with a 300 s boot grace). The boot grace stays 90 s in the fast timing: a first boot takes
+about 70 s, and a shorter grace would reset it.
 
 - **Lint:** shellcheck and `bash -n` on every script, `systemd-analyze verify` on every unit, the template's JSON and
   the PowerShell script's syntax. Then both installers' `--dry-run`, checking that nothing changed.
-- **End to end**, three times, each booting the 26.04 guest: a zvol (on a file-backed pool) on a 24.04 host, a zvol on
-  a 26.04 host, and qcow2 on a 24.04 host. Each is run by
+- **End to end**, each booting the 26.04 guest: a zvol (on a file-backed pool) on a 24.04 host, a zvol on a 26.04
+  host, and qcow2 on a 24.04 host (which of them, above). Each is run by
   [`ci-vm-e2e.sh`](../deploy/vm/test/ci-vm-e2e.sh):
   - a run with a required token missing stops with exit 2, naming it, before any change (no package, file or table);
   - the host install twice, the second a no-op that leaves the VM running;
