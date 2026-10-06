@@ -10,7 +10,8 @@ import { eventsFileOf, maxEnv } from './maxEvents.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, sortAgents, sortPlaces } from '../shared/agentState.ts';
-import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { tokenPersonForWork } from './vault.ts';
 
 /** A live state as list_work takes it (shared/workState.ts). */
 const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
@@ -26,6 +27,7 @@ import { agentAnswers } from './watchdog.ts';
 import { searchTranscripts } from './search.ts';
 import { openUnity, unityMcpServerFor, type SceneState, type UnityBridge } from './unityMcp.ts';
 import { CATALOG } from './launch.ts';
+import { AutoCompactor } from './autoCompact.ts';
 import { COMPILE_DONE, COMPILE_FAILED, activityLine, readSince, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
 import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, pinnedWork, placementHint, type Computer } from './placement.ts';
@@ -258,6 +260,8 @@ export class Agents {
   readonly waker: Waker;
   /** Orchestrators' standing timers (server/timers.ts, docs/orchestrators.md "Timers"). */
   readonly timers: Timers;
+  /** The orchestrators compact their conversations by themselves between turns (w535, server/autoCompact.ts). */
+  readonly autoCompact: AutoCompactor;
   /** The logins, and who automatic work is for (server/identity.ts); index.ts passes one that reads data/users.json. */
   readonly identity: Identity;
   /** People's own orchestrators, the dispatcher and the work ledger (docs/orchestrators.md). */
@@ -273,6 +277,7 @@ export class Agents {
     this.machines = machines;
     this.identity = identity;
     this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
+    this.autoCompact = new AutoCompactor(sessions, cfg);
     // IDLE WORKERS (w384): what keeps one from being stopped to make room, and the reaper of finished ones.
     sessions.keepIdle = (s) => this.keepIdle(s);
     // What each agent waits on between turns (w475): its wake_me and a queued message, on its session for the page.
@@ -1544,7 +1549,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   /** What a worker on a machine launches; the machine's daemon turns it into SDK options there. */
   private machineWorkerSpec(info: SessionInfo, m: Machine): LaunchSpec {
     // The run's Claude account and the vault's secrets for it (docs/vault.md): a person's own token, a vault token, or the machine's.
-    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id });
+    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id, tokenUser: this.tokenUserOf(info.id) });
     return {
       cwd: m.repoPath,
       model: info.model,
@@ -1598,6 +1603,16 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     };
   }
 
+  /**
+   * Whose vault tokens a worker gets when its request was filed for nobody by name (docs/vault.md, "Whose tokens"): from
+   * the request it serves now (servedBy, as the ledger reads it), else undefined (its requester's).
+   */
+  private tokenUserOf(sessionId: string): string | undefined {
+    const items = [...this.store.work.values()];
+    const served = [...servedBy(sessionId, items)].sort();
+    return served.map((id) => tokenPersonForWork(this.cfg, this.store.work.get(id))).find(Boolean);
+  }
+
   private machineSandboxBrief(m: Machine, sb: MachineSandbox, account = accountSource(this.cfg, m)) {
     const mac = platformNoun(m.platform);
     const branch = sb.git?.branch && sb.git.branch !== 'detached HEAD' ? sb.git.branch : sb.branch;
@@ -1642,7 +1657,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 
   /** What a worker in a machine sandbox launches: its worktree, the sandbox guard (not the main clone's backup rules). */
   private machineSandboxSpec(info: SessionInfo, m: Machine, sb: MachineSandbox): LaunchSpec {
-    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id });
+    const run = machineRunEnv(this.cfg, m, { role: 'workers', requestedBy: info.requestedBy, sessionId: info.id, tokenUser: this.tokenUserOf(info.id) });
     return {
       cwd: sb.path,
       sandbox: sb.id,
@@ -2191,6 +2206,15 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           }),
         ),
         tool(
+          'compact_conversation',
+          'Compact your own conversation once this turn ends (w535): Claude Code summarises it, so each later turn costs less. FF Factory already does this by itself when your context passes its threshold; ask for it sooner when a long stretch of work is finished and its detail is no longer needed. It runs between turns only, before any message that arrives later, never ahead of one waiting for an answer. What is not in the summary is gone: by default it keeps open requests, unanswered questions, decisions and ids; give a focus to keep something else. Your memory folder is not touched.',
+          { focus: z.string().max(2000).optional().describe('What the summary must keep, in place of the default focus: "keep w530\'s profiling numbers and the PR list".') },
+          wrap(async ({ focus }) => {
+            if (!ctx.sessionId) throw new Error('compact_conversation is for an orchestrator of this portal');
+            return this.autoCompact.request(ctx.sessionId, focus ?? '');
+          }),
+        ),
+        tool(
           'set_timer',
           `Set a standing timer (docs/orchestrators.md, "Timers"): it wakes you with [timer <id> "<title>"] and your note, once at a time, every N minutes, or daily, until you cancel it. Use it for every standing "every N" or "each morning" job your person asks for, so you never have to re-arm anything; use wake_me only for a one-off check-in. A person writing does not cancel a timer: cancel_timer when they say stop. Delivered after your current turn, never dropped; fires that pile up are coalesced into one message with the count. Caps: ${TIMER_LIMITS.activePerOwner} active timers, every_minutes at least ${TIMER_LIMITS.minEveryMinutes}, at most ${TIMER_LIMITS.deliveriesPerDay} timer messages a day (past that, fires wait). A timer's turn carries no one's authority: what needs your person's own words still needs them to write.`,
           {
@@ -2375,7 +2399,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ),
         tool(
           'set_app_config',
-          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …); publicGitIdentity.name / .email: the identity agents commit with in public repos such as this app's own (the guard refuses pushes there with other emails; GitHub noreply addresses are always fine); hostGuard.devDriveVhdx: the sandbox Dev Drive's .vhdx path; publicUrl: the portal's base URL that machines and the outside watchdog reach it at (the Tailscale Funnel URL); claudeEnv.CLAUDE_CODE_OAUTH_TOKEN: the Claude account's OAuth token the agents run on (sk-ant-oat01-…, from "claude setup-token"), write-only: it is never shown back, only "set (…last 4)", and redacted from transcripts; userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN (with user: a user id): that person's own Claude token, which agents working for them run on instead (same rules; only when that person asked for it); claudeAccounts.orchestrator / .workers / .standing: which Claude account this host's orchestrator (you), sandbox workers and standing agents run on: "token" (claudeEnv's token, the default) or "login" (the claude.ai login stored on this host; refused when none is stored or it has expired); a person's own token still wins for their work; machines.useHostClaudeEnv (optionally with machine: a machine id): true (default) runs that Mac's agents (workers and standing agents there) on this host's token, false on the Mac's own login; without machine it sets every machine not named; systemPayer: the user id automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to (default the owner); providers.ffbox.enabled: true lets FFBox's connector connect (read-only reports: capacity, conversations, intake), false drops it at once (default false); providers.ffbox.token: FFBox's connector token (ffpv1_…), write-only, stored only as its SHA-256; providers.ffbox.devRequests (an owner's only, the whole block): { enabled (default true), perHour (0-1000, default 20), maxFiles (0-10, default 10), maxRequestMB (1-500, default 500) }, unknown keys refused; limits.maxUnity: how many Unity editors may run at once on this host (1-8, default 3; applies to the next start, running editors are not stopped); limits.maxSandboxes: how many sandboxes may exist (1-8, default 4); limits.maxSessions: how many agents may be mid-turn at once on this host (1-12, default 6; idle ones do not count, and a message past it is queued); both apply at once; placement.prefer: the computers new game-repo work goes to first, in order (machine ids such as "lothdesktop", "m5", or "this host"; a list or one comma-separated string; null clears), and placement.avoid: computers kept off unless nothing else has room, each with why ({ "beast": "BEAST unstable, 2026-10-05" }; null clears) (docs/machines.md, "Placing work"); attachments.maxMB: the largest file a person may attach to a message (1-4096 MB, default 200); attachments.retentionDays: how many days an attached file nobody sent on is kept (1-3650, default 30) (docs/attachments.md); hostGuard.cleanup.ageRules: JSON list of { "path", "olderThanDays" (>= 3) } whose old entries each clean-up pass removes (never a drive root, the home folder, the sandboxes, this app or a protected path); hostGuard.cleanup.everyMinutes: how often this host's clean-up runs (0 = only below the soft threshold, else 15-1440, default 60); hostGuard.cleanup.softFreeGB: below this much free space it runs every 15 minutes with the cache-emptying rules, and tells you when it cannot get back above (default warnFreeGB + 40 = 120; must be above warnFreeGB); machines.cleanup.everyMinutes / machines.cleanup.softFreeGB (optionally with machine): the same for the machines' daemons (defaults 60 and 80 GB). usagePollMinutes: how often every Claude account's plan usage is polled, here and by the machines' daemons (5-240, default 15; the usage endpoint rate-limits). intake.ffbox (an owner's only: refused unless the person who asked is an owner): the FFBox intake's whole block, replaced, so a key left out takes its default (docs/intake.md): an object with enabled (default false), branches, diagnoses, requests (default true once enabled), boardCheck (answer FFBox's ledger check), escalations (both default false), repo ("owner/name" as board answers name the game repo; default from repo.url), dailyCap (0-200, default 10), match { high (default 0.7), medium (default 0.45) } (board_check's match bands, 0-1), autoApprove { enabled (default false), maxPerDay (0-100, default 3) } and desync { enabled (default true), maxPerDay (0-100, default 10) } (Lothsahn's FFBox desync PR policy: such a PR is approved at once into a review-and-merge request under the policy); unknown keys are refused; it applies at once, and FFBox's connection stays up (a board_check or request while it is off is answered not_enabled). value null removes the key (back to the default). intake.reviewers (an owner's only, like intake.ffbox): who may approve or decline intake requests and answer design questions: a list of user ids (or one comma-separated string), each a login that exists (e.g. ["ben", "lothsahn"]; unknown ids are refused and nothing is written); the whole list is replaced, and null removes it (then only the owner decides); it applies at once (docs/intake.md). Only when the user asked for the change.`,
+          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …); publicGitIdentity.name / .email: the identity agents commit with in public repos such as this app's own (the guard refuses pushes there with other emails; GitHub noreply addresses are always fine); hostGuard.devDriveVhdx: the sandbox Dev Drive's .vhdx path; publicUrl: the portal's base URL that machines and the outside watchdog reach it at (the Tailscale Funnel URL); claudeEnv.CLAUDE_CODE_OAUTH_TOKEN: the Claude account's OAuth token the agents run on (sk-ant-oat01-…, from "claude setup-token"), write-only: it is never shown back, only "set (…last 4)", and redacted from transcripts; userClaudeEnv.CLAUDE_CODE_OAUTH_TOKEN (with user: a user id): that person's own Claude token, which agents working for them run on instead (same rules; only when that person asked for it); claudeAccounts.orchestrator / .workers / .standing: which Claude account this host's orchestrator (you), sandbox workers and standing agents run on: "token" (claudeEnv's token, the default) or "login" (the claude.ai login stored on this host; refused when none is stored or it has expired); a person's own token still wins for their work; machines.useHostClaudeEnv (optionally with machine: a machine id): true (default) runs that Mac's agents (workers and standing agents there) on this host's token, false on the Mac's own login; without machine it sets every machine not named; systemPayer: the user id automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to (default the owner); providers.ffbox.enabled: true lets FFBox's connector connect (read-only reports: capacity, conversations, intake), false drops it at once (default false); providers.ffbox.token: FFBox's connector token (ffpv1_…), write-only, stored only as its SHA-256; providers.ffbox.devRequests (an owner's only, the whole block): { enabled (default true), perHour (0-1000, default 20), maxFiles (0-10, default 10), maxRequestMB (1-500, default 500) }, unknown keys refused; limits.maxUnity: how many Unity editors may run at once on this host (1-8, default 3; applies to the next start, running editors are not stopped); limits.maxSandboxes: how many sandboxes may exist (1-8, default 4); limits.maxSessions: how many agents may be mid-turn at once on this host (1-12, default 6; idle ones do not count, and a message past it is queued); both apply at once; placement.prefer: the computers new game-repo work goes to first, in order (machine ids such as "lothdesktop", "m5", or "this host"; a list or one comma-separated string; null clears), and placement.avoid: computers kept off unless nothing else has room, each with why ({ "beast": "BEAST unstable, 2026-10-05" }; null clears) (docs/machines.md, "Placing work"); attachments.maxMB: the largest file a person may attach to a message (1-4096 MB, default 200); attachments.retentionDays: how many days an attached file nobody sent on is kept (1-3650, default 30) (docs/attachments.md); orchestrator.compactAtTokens: an orchestrator (the dispatcher too) compacts its conversation by itself between turns once its context reaches this many tokens (0 = off, else 50,000-900,000, default 200,000); orchestrator.compactAtTurnUsd: or once a turn cost at least this many USD with the context at 100,000 tokens or more (0 = off, else 0.05-50, default 1) (docs/orchestrators.md, "Compacting a conversation"); hostGuard.cleanup.ageRules: JSON list of { "path", "olderThanDays" (>= 3) } whose old entries each clean-up pass removes (never a drive root, the home folder, the sandboxes, this app or a protected path); hostGuard.cleanup.everyMinutes: how often this host's clean-up runs (0 = only below the soft threshold, else 15-1440, default 60); hostGuard.cleanup.softFreeGB: below this much free space it runs every 15 minutes with the cache-emptying rules, and tells you when it cannot get back above (default warnFreeGB + 40 = 120; must be above warnFreeGB); machines.cleanup.everyMinutes / machines.cleanup.softFreeGB (optionally with machine): the same for the machines' daemons (defaults 60 and 80 GB). usagePollMinutes: how often every Claude account's plan usage is polled, here and by the machines' daemons (5-240, default 15; the usage endpoint rate-limits). intake.ffbox (an owner's only: refused unless the person who asked is an owner): the FFBox intake's whole block, replaced, so a key left out takes its default (docs/intake.md): an object with enabled (default false), branches, diagnoses, requests (default true once enabled), boardCheck (answer FFBox's ledger check), escalations (both default false), repo ("owner/name" as board answers name the game repo; default from repo.url), dailyCap (0-200, default 10), match { high (default 0.7), medium (default 0.45) } (board_check's match bands, 0-1), autoApprove { enabled (default false), maxPerDay (0-100, default 3) } and desync { enabled (default true), maxPerDay (0-100, default 10) } (Lothsahn's FFBox desync PR policy: such a PR is approved at once into a review-and-merge request under the policy); unknown keys are refused; it applies at once, and FFBox's connection stays up (a board_check or request while it is off is answered not_enabled). value null removes the key (back to the default). intake.reviewers (an owner's only, like intake.ffbox): who may approve or decline intake requests and answer design questions: a list of user ids (or one comma-separated string), each a login that exists (e.g. ["ben", "lothsahn"]; unknown ids are refused and nothing is written); the whole list is replaced, and null removes it (then only the owner decides); it applies at once (docs/intake.md). Only when the user asked for the change.`,
           {
             key: z.enum(SETTABLE_KEYS),
             // An object (intake.ffbox) is a loose object, unknown keys kept for normalizeSetting to name: z.record breaks the
@@ -2478,7 +2502,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     const main = m.sessionIds.filter((id) => !this.store.sessions.get(id)?.machineSandbox);
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${platformNoun(m.platform)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? 'online' : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}; ${m.status}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
-      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${m.maxSessions === 0 ? 'sandboxes only (max_agents 0: no agents in its main clone)' : `up to ${m.maxSessions} agents in the main clone`}; Claude account of its agents: ${accountSource(this.cfg, m)}`,
+      `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${poolSettingsOf(m) ? `workers in its sandboxes only; up to ${m.maxSessions} standing agents` : m.maxSessions === 0 ? 'sandboxes only (max_agents 0: no agents in its main clone)' : `up to ${m.maxSessions} agents in the main clone`}; Claude account of its agents: ${accountSource(this.cfg, m)}`,
       `  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`,
       sandboxes,
       `  ${describeGit(g)}`,

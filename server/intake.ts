@@ -433,6 +433,7 @@ export class IntakeManager {
       source,
       triage: triageOf(source),
       requestedBy: person,
+      person: true,
       autoApprove: { ...s.discord.autoApprove, allowed: s.discord.autoApprove.requests },
       kinds: DISCORD_KINDS,
       lookbackDays: s.lookbackDays,
@@ -540,6 +541,7 @@ export class IntakeManager {
       // their bug report, triaged by its words (w299).
       triage: desync?.triage ?? triageOf(source, operator ? 'operator' : m.opener, m.kind === 'escalate' ? undefined : { title: m.title, text: m.brief }),
       requestedBy: operator ?? this.d.identity.systemPayer(),
+      ...(operator ? { person: true } : {}),
       autoApprove: desync?.autoApprove ?? s.autoApprove,
       kinds: FFBOX_KINDS,
       lookbackDays: this.settings.lookbackDays,

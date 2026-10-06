@@ -971,6 +971,8 @@ export class Daemon {
     const gate = spec.sandbox ? this.guard?.blockReason('agent') : undefined;
     if (gate) return gate;
     if (!spec.sandbox && this.maxSessions <= 0) return "this machine takes agents in its sandboxes only (max_agents 0): start it in one of this machine's sandboxes";
+    // A machine with sandboxes takes no worker in its main clone (w536); a standing agent works in its own folder.
+    if (!spec.sandbox && this.currentPool() && path.resolve(spec.cwd).toLowerCase() === path.resolve(this.cfg.repoPath).toLowerCase()) return "this machine takes workers in its sandboxes only: start it in one of this machine's sandboxes";
     if (!spec.sandbox) return this.runningIn(undefined) >= this.maxSessions ? `already ${this.maxSessions} agents mid-turn in this machine's main clone` : undefined;
     const sb = this.pool.list().find((s) => s.id === spec.sandbox);
     if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;

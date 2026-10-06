@@ -474,6 +474,12 @@ test('w477: a daemon with max_agents 0 refuses an agent outside its sandboxes, w
     assert.match(refusal({ sandbox: 'sb1' })!, /no sandbox "sb1" on this machine/);
     const three = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'm5', token: 't', repoPath: dir, appDir: path.join(dir, 'x'), maxSessions: 3, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
     assert.equal((three as unknown as { startRefusal(s: unknown): string | undefined }).startRefusal({ cwd: dir }), undefined, 'a main clone with room takes it');
+    // w536: a machine with sandboxes takes no worker in its main clone, whatever max_agents; a standing agent's folder is fine.
+    const pool = { root: path.join(dir, 'ffsb'), maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 1, diskCriticalGB: 1 };
+    const sbx = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: dir, appDir: path.join(dir, 'y'), maxSessions: 3, maxEventsFile: null, sandboxes: pool }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
+    const refuse = (cwd: string) => (sbx as unknown as { startRefusal(s: unknown): string | undefined }).startRefusal({ cwd });
+    assert.match(refuse(dir)!, /takes workers in its sandboxes only/);
+    assert.equal(refuse(path.join(dir, 'y', 'agents', 'nightly-reader')), undefined, 'a standing agent in its own folder');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

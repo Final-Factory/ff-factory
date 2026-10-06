@@ -22,6 +22,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   way: a redefinition of the existing domain was refused by libvirt ("domain 'fff-portal' already exists with uuid
   ..."), because the definition carried no uuid; it now carries the domain's. A host installed before this updates its
   scripts once (`install.sh --host-only --yes`, RUNBOOK section 7).
+- **A machine with sandboxes takes workers in them only, whatever its `max_agents`** (w536, asked by Lothsahn: "Can't
+  we get rid of this code so the settings doesn't matter?"). `start_agent` with such a machine alone is refused, naming
+  its sandboxes, and its daemon refuses too. There `max_agents` caps only its standing agents. Only a machine without
+  sandboxes (the m3, the m5 until their worker-root installs) still runs workers in its main clone; the rest of the
+  main-clone code goes once they have roots ([docs/machines.md](docs/machines.md), "Limits").
+
 - **The portal VM has 4 GiB of RAM, not 8** (w537, Lothsahn: "Change the VM to 4GB ram"). `fff-vm.conf.example`'s
   `VM_MEMORY_MB=4096`, so a rebuilt VM and CI's nested VM boot that size. Basis, measured from w442's 20-hour run on
   BEAST: the whole portal (the node server and every Claude process under it, summed per sample) peaked at 1,134 MB
@@ -45,6 +51,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   - Machine credentials: `fffctl machine-credential issue <id> --out FILE` and `revoke <id>` (also in the dialog); a
     revoked machine's link drops within 20 s.
   - Redaction also covers GitHub tokens and every value the vault holds.
+- **Whose tokens, and the tokens on the FFBox host** (w512, lothsahn 2026-10-06: "hand out my Claude and GitHub tokens
+  for requests from my orchestrator and the same from Ben's"; [docs/vault.md](docs/vault.md) sections 10 and 11).
+  - A worker run gets the Claude and GitHub tokens of the person its work is for, never another person's. Work nobody
+    asked for by name runs on config `vault.unattributed`: intake and FFBox work on lothsahn's, the nightly lab and the
+    nightly regression sentry on Ben's; FFBox work naming an operator on the operator's. Intake requests filed for
+    nobody are marked `unattributed`.
+  - Each person's tokens are kept on the FFBox host in `/etc/fff-vm/secrets/people/<user id>/` (root only), and
+    `sudo fff-vm vault-sync` pushes them into the VM's vault over ssh's stdin (also run by the installer), refusing a
+    classic GitHub token, and keeps the vault key's spare copy in `/etc/fff-vm/secrets/vault.key`.
+  - `fffctl vault put` (idempotent) and `list --names`; the VM's daily backup leaves `data/vault.json` out.
 
 ### Changed
 
@@ -179,6 +195,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Orchestrators compact their conversations by themselves** (w535, Ben: "can you just compact yourself when youre
+  starting to get full?"). After a turn, once the context passes 200,000 tokens (`orchestrator.compactAtTokens`) or a
+  turn cost $1 or more with 100,000 tokens or more (`orchestrator.compactAtTurnUsd`), FF Factory runs Claude Code's
+  `/compact` with a focus that keeps open requests, unanswered questions, decisions and ids; the dispatcher too. Only
+  between turns, never ahead of an unanswered message; one chat line when it is done ("Compacted: 525,115 → 57,292
+  tokens (automatically: …)") and no notification. The header shows each orchestrator's context and its last
+  compaction; an orchestrator can ask for one itself (`compact_conversation`). Measured on a copy of Ben's orchestrator,
+  a turn's cost went from $0.21 at 521k tokens to $0.10 at 70k. Details: docs/orchestrators.md, "Automatic compaction".
 - **`/compact` compacts an orchestrator's conversation** (w518, asked by Lothsahn: a long conversation cost $20.54 for
   one short reply). `/compact` or `/compact <focus>` typed in your own chat, or Compact conversation in its menu, runs
   Claude Code's own /compact on that conversation instead of sending the text to the model; owners have the same button

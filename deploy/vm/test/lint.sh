@@ -11,7 +11,7 @@ units=0
 [ "${1:-}" != --units ] || units=1
 
 scripts=(deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm-rollback.sh deploy/vm/host/fff-vm deploy/vm/host/lib.sh
-  deploy/vm/host/answers.sh deploy/vm/host/guest.sh
+  deploy/vm/host/answers.sh deploy/vm/host/guest.sh deploy/vm/host/vault.sh
   deploy/vm/host/fff-vm.conf.example deploy/vm/guest/install.sh deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health
   deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh deploy/vm/guest/fff-migrate deploy/vm/guest/lib.sh deploy/vm/guest/fff.conf.example
   deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh deploy/vm/test/fff-vm-nightly.test.sh)

@@ -144,7 +144,8 @@ test('convert_machine (live): BEAST becomes an ssh machine and back with its dae
     throw new Error('no real deploy in a test');
   };
   mm.hooks = {
-    specFor: () => ({ cwd: tmp, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: tmp, protectedPaths: [], gameRepos: [] } }),
+    // A standing agent in its own folder (a machine with sandboxes takes no worker in its main clone, w536).
+    specFor: () => ({ cwd: path.join(tmp, 'agents', 'w'), settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: path.join(tmp, 'agents', 'w'), protectedPaths: [], gameRepos: [] } }),
     handlersFor: () => ({}),
   };
   const server = http.createServer();
@@ -173,7 +174,7 @@ test('convert_machine (live): BEAST becomes an ssh machine and back with its dae
   LongAgent.all = [];
   d.start();
   await until('online', () => mm.isOnline('beast'));
-  const s = mm.createSession('beast', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  const s = mm.createSession('beast', { kind: 'standing', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'a long turn');
   await until('mid-turn', () => s.info.status === 'running');
   const same = () => {

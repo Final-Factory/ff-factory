@@ -28,28 +28,52 @@ verify_secs() { echo "${UPDATE_VERIFY_SEC:-$((UPDATE_VERIFY_MIN * 60))}"; }
 
 current_dir() { readlink -e "$CURRENT" 2>/dev/null || true; }
 
+# deps_from OLD NEW SUB: NEW/SUB/node_modules as hard links of OLD's when SUB's package.json and package-lock.json are
+# the same in both, which is what npm ci would install anyway (seconds instead of half a minute). The caches tools write
+# into node_modules are left out, so nothing writes through a link into the running release's files.
+deps_from() {
+  local old=$1 new=$2 sub=$3 f
+  [ -n "$old" ] && [ -f "$old.ready" ] && [ -d "$old/$sub/node_modules" ] || return 1
+  for f in package.json package-lock.json; do cmp -s "$old/$sub/$f" "$new/$sub/$f" || return 1; done
+  rm -rf "$new/$sub/node_modules"
+  as_fff cp -al "$old/$sub/node_modules" "$new/$sub/node_modules" || { rm -rf "$new/$sub/node_modules"; return 1; }
+  rm -rf "$new/$sub/node_modules/.cache" "$new/$sub/node_modules/.vite" "$new/$sub/node_modules/.tmp"
+}
+
+# prepare [REF]: build REF beside the running release and print its folder. Every step is checked here: this runs in
+# $(...) and under "if", where bash ignores errexit, so a failed npm ci would otherwise still mark the release ready.
 prepare() {
-  local ref=${1:-origin/$FFF_BRANCH} sha dir
-  as_fff git -C "$REPO" fetch --prune --quiet origin >&2
+  local ref=${1:-origin/$FFF_BRANCH} sha dir cur sub t
+  log "fetching $ref"
+  t=$(date +%s)
+  as_fff git -C "$REPO" fetch --prune --quiet origin >&2 || die "git fetch of $FFF_REPO_URL failed"
   sha=$(as_fff git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}") || die "no commit $ref in $FFF_REPO_URL"
   dir=$RELEASES/${sha:0:12}
+  log "fetched ${sha:0:12} in $(($(date +%s) - t)) s"
   if [ -f "$dir.ready" ] && [ -e "$dir/.git" ]; then
     log "release ${sha:0:12} is already built"
     echo "$dir"
     return 0
   fi
   log "building ${sha:0:12} ($ref) in $dir"
+  t=$(date +%s)
   rm -f "$dir.ready"
   if [ -e "$dir" ]; then as_fff git -C "$REPO" worktree remove --force "$dir" >&2 2>/dev/null || rm -rf "$dir"; fi
-  as_fff git -C "$REPO" worktree prune >&2
-  as_fff git -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2
-  {
-    as_fff_in "$dir" npm ci --no-audit --no-fund --loglevel=error
-    as_fff_in "$dir" npm --prefix web ci --no-audit --no-fund --loglevel=error
-    as_fff_in "$dir" npm --prefix web run build --silent
-  } >&2
-  as_fff touch "$dir.ready"
-  log "release ${sha:0:12} built"
+  as_fff git -C "$REPO" worktree prune >&2 || true
+  as_fff git -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2 || die "git worktree add $dir failed"
+  cur=$(current_dir)
+  for sub in . web; do
+    if [ "$cur" != "$dir" ] && deps_from "$cur" "$dir" "$sub"; then
+      log "building ${sha:0:12}: $sub dependencies unchanged, node_modules reused from $(basename "$cur")"
+    else
+      log "building ${sha:0:12}: npm ci ($sub)"
+      as_fff_in "$dir/$sub" npm ci --no-audit --no-fund --loglevel=error >&2 || die "npm ci in $sub failed"
+    fi
+  done
+  log "building ${sha:0:12}: web build"
+  as_fff_in "$dir" npm --prefix web run build --silent >&2 || die "the web build failed"
+  as_fff touch "$dir.ready" || die "could not mark $dir ready"
+  log "release ${sha:0:12} built in $(($(date +%s) - t)) s"
   echo "$dir"
 }
 
@@ -71,6 +95,22 @@ prune() {
   as_fff git -C "$REPO" worktree prune
 }
 
+# refresh_scripts DIR: fffctl and the helper scripts from release DIR (install_scripts), so they move with the portal's
+# code: forward on an update, back on a rollback. A unit that changed needs install.sh (it reloads systemd): said so.
+refresh_scripts() {
+  local src=$1/deploy/vm/guest c u
+  if [ ! -f "$src/fffctl" ] || [ ! -f "$src/lib.sh" ]; then warn "release $(basename "$1") has no deploy/vm/guest scripts; fffctl and its helpers stay as they are"; return 0; fi
+  if ! c=$(install_scripts "$src"); then warn "installing fffctl and its helpers from $(basename "$1") failed"; return 0; fi
+  [ -z "$c" ] || log "fffctl and its helpers from $(basename "$1"): updated $c"
+  for u in "$src"/units/*; do
+    [ -f "$u" ] || continue
+    if ! cmp -s "$u" "/etc/systemd/system/$(basename "$u")"; then
+      warn "systemd units changed in $(basename "$1") (first: $(basename "$u")): run sudo ~/ff-factory/deploy/vm/guest/install.sh from a clone at that commit to install them"
+      break
+    fi
+  done
+}
+
 switch_to() {
   local dir=$1 cur
   cur=$(current_dir)
@@ -90,18 +130,22 @@ cmd_request() {
     rm -f "$wanted"
   fi
   log "update requested ($reason): building origin/$FFF_BRANCH beside the running server"
-  local buildlog=$APP/last-build.log
-  if ! dir=$(prepare "origin/$FFF_BRANCH" 2>"$buildlog"); then
-    cat "$buildlog" >&2
+  # The build's output goes to the journal as it happens (fffctl update shows each step from there) and to the build
+  # log, whose last lines a failure reports.
+  local buildlog=$APP/last-build.log out=$APP/.prepared-dir
+  rm -f "$out"
+  if ! prepare "origin/$FFF_BRANCH" 2>&1 >"$out" | tee "$buildlog" >&2; then
     tell_dispatcher "[app update] The update was NOT done: building origin/$FFF_BRANCH failed, so nothing was restarted and the running version stays. Last lines (journalctl -u fff-update in the VM for all):
 $(tail -n 12 "$buildlog")"
     exit 1
   fi
-  cat "$buildlog" >&2
+  dir=$(cat "$out")
+  rm -f "$out"
   sha=$(release_sha "$dir")
   cur_sha=$(release_sha "$(current_dir)")
   if [ "$sha" = "$cur_sha" ]; then
     log "already at ${sha:0:12}; nothing to restart"
+    refresh_scripts "$(current_dir)"
     tell_dispatcher "[app update] Already up to date at ${sha:0:9} (origin/$FFF_BRANCH); nothing was restarted."
     return 0
   fi
@@ -126,6 +170,7 @@ cmd_activate() {
   rm -f "$DATA/update.prepared.json"
   if [ -n "$dir" ]; then
     switch_to "$dir"
+    refresh_scripts "$dir"
     after=$(release_sha "$dir")
     jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$before" --arg a "$after" '{ok: true, at: $at, headBefore: $b, headAfter: $a}' | data_write update.result.json
     if [ "$after" != "$before" ]; then
@@ -147,6 +192,7 @@ cmd_rollback() {
   cur_sha=$(release_sha "$cur"); prev_sha=$(release_sha "$prev")
   ln -sfn "$prev" "$CURRENT.new" && mv -Tf "$CURRENT.new" "$CURRENT"
   ln -sfn "$cur" "$PREVIOUS.new" && mv -Tf "$PREVIOUS.new" "$PREVIOUS"
+  refresh_scripts "$prev"
   rm -f "$DATA/update.verifying.json"
   jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$cur_sha" --arg a "$prev_sha" --arg e "rolled back: $why" \
     '{ok: false, at: $at, error: $e, headBefore: $b, headAfter: $a}' | data_write update.result.json

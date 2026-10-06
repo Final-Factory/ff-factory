@@ -76,7 +76,9 @@ sudo deploy/vm/host/install.sh
 ```
 
 It ends with `fffctl status` from inside the VM (the portal active, its release, Tailscale and the Funnel URL), and a
-short list of what it could not do itself, each with why. Typically:
+short list of what it could not do itself, each with why. The portal's `publicUrl` is set from the VM's tailnet address
+(`https://<node>.<tailnet>.ts.net`) by the guest install, `fffctl tailscale-join` and every `fffctl update`, whenever
+it is empty or a different ts.net address; a URL off ts.net is left alone. Typically:
 
 - **the portal's deploy key**, to add on each machine it deploys to (BEAST, LothDesktop, M3, M5): the installer prints
   the whole `from="<the VM's tailnet IP>",no-agent-forwarding,... ssh-ed25519 ...` line (design 4.3). Add it to
@@ -274,6 +276,11 @@ the build failed or the update was rolled back (with the reason), 2 when it time
 default), and prints the `journalctl` command for the details. Ctrl+C stops the waiting, not the update. `--no-wait`
 only asks for it, as `request_app_update` does. `fffctl restart` and `fffctl rollback` wait the same way until the portal
 answers again.
+
+Each update also installs `fffctl` and every helper script in `/usr/local/lib/fff` from the release it switches to (and
+from the older release on a rollback), so they stay as new as the portal; "already up to date" brings them up to the
+running release too. A changed systemd unit is not installed this way: the update's log says so, and the guest
+`install.sh` from a clone at that commit installs it.
 
 ## 7. Changing the VM's size
 

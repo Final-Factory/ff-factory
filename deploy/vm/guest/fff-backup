@@ -33,7 +33,7 @@ existing=()
 for p in "${parts[@]}"; do [ ! -e "$FFF_ROOT/$p" ] || existing+=("$p"); done
 log "archiving ${existing[*]} to $out"
 set +o pipefail
-tar -C "$FFF_ROOT" --warning=no-file-changed --exclude=home/.cache --exclude=home/.npm --exclude=home/.local/share/claude/versions \
+tar -C "$FFF_ROOT" --warning=no-file-changed --exclude='data/vault.json*' --exclude=home/.cache --exclude=home/.npm --exclude=home/.local/share/claude/versions \
   -czf - "${existing[@]}" | age -R "$BACKUP_RECIPIENTS_FILE" -o "$out"
 codes=("${PIPESTATUS[@]}")
 set -o pipefail
