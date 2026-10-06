@@ -495,6 +495,7 @@ export class MachineManager {
       if (!this.offlineSince.has(m.id)) this.offlineSince.set(m.id, now);
       if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
       if (m.relocatedTo) continue; // sent to another portal (relocate): a redeploy from here would pull it back
+      if (m.root) continue; // a worker root install (w513) is started and updated on its computer, never over ssh
       const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
       if (!why) continue;
       // The portal's own host needs no ssh: it is always there when this code runs.
@@ -563,6 +564,14 @@ export class MachineManager {
         continue;
       }
       if (this.deploying.has(m.id)) continue;
+      // A worker root install (w513) updates by running its installer again there: say so once, never redeploy over ssh.
+      if (m.root) {
+        if (this.reportedOutdated.get(m.id) !== why) {
+          this.reportedOutdated.set(m.id, why);
+          this.report?.(`[machines] ${m.id}'s daemon is outdated (${why}). It is a worker root install (${m.root}): update it there by running its installer again (docs/worker-install.md, "Updating").`);
+        }
+        continue;
+      }
       const live = this.liveCount(m.id);
       if (live > 0) {
         if (this.reportedOutdated.get(m.id) !== why) {
