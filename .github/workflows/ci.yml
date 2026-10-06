@@ -56,7 +56,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          npm run test:coverage 2>&1 | tee coverage.txt
+          node --test --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/ci-file-times.mjs --test-reporter-destination=file-times.txt server/*.test.ts scripts/*.test.ts 2>&1 | tee coverage.txt
+          cat file-times.txt
+          node -p "require('os').availableParallelism()"
       - name: Machine sandboxes on Windows (git worktrees, robocopy, rd in a temp repo)
         # Also part of the unit tests above; its own step so a worktree regression on Windows is named as one.
         if: runner.os == 'Windows'
