@@ -12,7 +12,7 @@ import { installScript, taskName, uninstallScript } from '../server/machineDeplo
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { claudeSlug, plan, rehome, sameVolume, type OldLayout } from './worker/migrate.ts';
-import { credentialId, daemonJson, gitVersion, layoutOf, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { cloneRepo, credentialId, daemonJson, gitVersion, layoutOf, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
@@ -168,6 +168,29 @@ test('worker migration: Claude\'s folder names, volumes and the plan', () => {
     assert.ok(items.some((i) => i.method === 'leave' && i.what === 'the old clone'));
     assert.ok(items.some((i) => i.method === 'leave' && i.what === 'player slots'));
     assert.ok(items.some((i) => i.what.startsWith('the machine credential') && i.note === 'never printed'));
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('worker install: a migration seeds the root\'s clone from the old clone\'s origin branches, its remote still the real one', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-seed-'));
+  const git = (cwd: string, ...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', ...a], { cwd, stdio: 'pipe' }).toString();
+  try {
+    const origin = path.join(base, 'origin');
+    fs.mkdirSync(origin);
+    git(origin, 'init', '-q', '-b', 'develop');
+    fs.writeFileSync(path.join(origin, 'a.txt'), 'a\n');
+    git(origin, 'add', '-A');
+    git(origin, 'commit', '-qm', 'init');
+    const clone = path.join(base, 'clone');
+    git(base, 'clone', '-q', origin, clone);
+    git(clone, 'checkout', '-q', '-b', 'mine');
+    const repo = path.join(base, 'root', 'repo');
+    await cloneRepo({ repo }, 'https://example.invalid/never/fetched.git', false, clone);
+    assert.equal(git(repo, 'rev-parse', 'refs/remotes/origin/develop').trim(), git(origin, 'rev-parse', 'develop').trim());
+    assert.equal(git(repo, 'for-each-ref', 'refs/heads').trim(), '', "the person's own branches stay theirs");
+    assert.equal(git(repo, 'config', 'remote.origin.url').trim(), 'https://example.invalid/never/fetched.git');
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
