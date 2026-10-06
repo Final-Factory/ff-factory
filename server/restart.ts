@@ -130,7 +130,7 @@ export function resumeMessage(e: ResumeEntry, f: Pick<ResumeFile, 'reason' | 'at
         : 'Your last turn was cut off mid-way, so a tool call may not have finished.',
     e.machineId
       ? 'Check git status for half-written edits and continue where you left off.'
-      : 'Check git status for half-written edits, re-pin your Unity instance (read mcpforunity://instances, then set_active_instance), and continue where you left off.',
+      : 'Continue where you left off.',
   ];
   const pending = e.unanswered.filter((u) => u.text.trim());
   if (pending.length) {
