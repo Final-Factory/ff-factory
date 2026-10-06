@@ -11,8 +11,8 @@ import { macControlScript, macLabel, macReloadLines, plist } from '../server/mac
 import { installScript, taskName, uninstallScript } from '../server/machineDeployWin.ts';
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
-import { carryExclude, claudeSlug, plan, rehome, sameVolume, type OldLayout } from './worker/migrate.ts';
-import { cloneRepo, credentialId, daemonJson, gitVersion, layoutOf, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
+import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
@@ -269,4 +269,23 @@ test('worker install: the Unity slots pointer leads scripts outside the daemon t
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('worker migration: the portal holds its redeploys before the old daemon stops, and the stop checks nothing of it runs (w513)', async () => {
+  const asked: string[] = [];
+  const answer = (status: number) => (async (url: string | URL | Request, init?: RequestInit) => {
+    asked.push(`${init?.method} ${String(url)} ${new Headers(init?.headers).get('authorization')}`);
+    return new Response('{}', { status });
+  }) as typeof fetch;
+  assert.deepEqual(await holdRedeploys('https://portal.example', 'ffm_pc_x', answer(200)), { ok: true });
+  assert.deepEqual(asked, ['POST https://portal.example/machine/stopping Bearer ffm_pc_x']);
+  const old = await holdRedeploys('https://portal.example', 'ffm_pc_x', answer(404));
+  assert.equal(old.ok === false && old.tooOld, true, 'an older portal: allowed only once its daemon was stopped from the portal');
+  const refused = await holdRedeploys('https://portal.example', 'ffm_pc_x', answer(401));
+  assert.equal(refused.ok === false && !refused.tooOld && /HTTP 401/.test(refused.error), true);
+  // The stop counts what still runs from the old folder: the supervisor and the daemon, nothing else.
+  const s = stopOldScript('D:\\work\\.ff-factory', 'FFFactoryDaemon');
+  assert.match(s, /Stop-FFDaemon/);
+  assert.ok(s.includes(`$marks = @('D:\\work\\.ff-factory\\app\\machine\\daemon.ts', 'D:\\work\\.ff-factory\\run-daemon.ps1')`));
+  assert.match(s, /'left=' \+ \$left\.Count/);
 });

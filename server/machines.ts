@@ -964,6 +964,15 @@ export class MachineManager {
   }
 
   /**
+   * The machine's own word that its daemon stops on purpose now (POST /machine/stopping, a worker migration, w513): as
+   * after machine_daemon stop, the offline redeploy leaves it alone until a daemon says hello (which clears it).
+   */
+  stoppingOnPurpose(id: string): { ok: true } {
+    this.update(id, { daemonStopped: true });
+    return { ok: true };
+  }
+
+  /**
    * Start, stop or restart a machine's daemon over ssh. Stopping or restarting ends its agents, so it is refused
    * while any run unless forced (as a redeploy is). A stopped daemon is left alone by the offline redeploy until
    * it is started (or redeployed) again.
