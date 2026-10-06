@@ -769,7 +769,10 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
 
   // 3. The service, then whatever still runs from the root.
   if (isWin) await ps('removing the daemon task', win.uninstallScript(l.daemon, { task: m.service, only: true }));
-  else await bash('unloading the LaunchAgent', macControlScript('uninstall', m.service));
+  else {
+    // bootout returns before the daemon has gone (it stops its agents first): wait until launchd no longer has it.
+    await bash('unloading the LaunchAgent', `${macControlScript('uninstall', m.service)}i=0\nwhile launchctl print gui/$(id -u)/${m.service} >/dev/null 2>&1 && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done\n`, 2 * 60_000);
+  }
   say(`Removed the ${m.service} ${isWin ? 'task' : 'LaunchAgent'}.`);
   say(`Stopped ${await stopRootProcesses(l.root)} process(es) still running from the root.`);
 
