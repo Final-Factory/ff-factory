@@ -9,6 +9,14 @@ game repo, it asks for a sandbox worker instead of doing the work itself.
 The list starts empty. Nothing is seeded or hard-coded: every agent is defined in the UI or through
 the orchestrator's tools.
 
+**Every standing agent runs on a machine** (w510, 2026-10-06): its process is a child of that machine's daemon, never
+of the portal, which runs only the orchestrators and the dispatcher. `create_standing_agent` and the New standing agent
+form require a machine. One from before with no machine keeps its record, history and conversation, but never runs:
+a manual run is refused and a scheduled one is recorded as skipped, with the reason. `system_status` names each such
+agent, and giving it a machine (`update_standing_agent machine`, or Edit → Runs on) is the way out; moving it starts a
+fresh conversation there. This replaces D16 of the portal-only mode (w464), which ran no standing agent at all, not
+even one on a machine.
+
 ## Definition
 
 Stored in `data/state.json` next to the sandboxes (`StandingAgent` in `shared/types.ts`).
@@ -19,7 +27,8 @@ Stored in `data/state.json` next to the sandboxes (`StandingAgent` in `shared/ty
 | charter | the agent's standing instructions, appended to its system prompt |
 | model | one of `config.models` |
 | trigger | `every N minutes`, a 5-field cron expression (host local time), or `manual only` |
-| folder | its working directory, `<standingRoot>/<id>` (default `<sandboxRoot>/_agents/<id>`, e.g. `F:\ffsb\_agents\pr-reviewer`). It holds `NOTES.md`, the agent's durable state. Not a sandbox and never under the app's data dir (the guard protects that) |
+| machine | the machine it runs on (required) |
+| folder | its working directory on that machine, `<daemon folder>/agents/<id>`; the daemon makes it and seeds `NOTES.md`, the agent's durable state. Not a sandbox |
 | enabled | a paused agent keeps its definition, history and conversation but never runs on schedule. Run now still works |
 | budget | `perRunUsd`, `perDayUsd` and `maxMinutes` per run (added: a hung run would hold an agent slot forever) |
 | tools | tool groups, below |
@@ -114,8 +123,9 @@ request's log, pushed as a notification, and the orchestrator of the person the 
 
 - **No seeded agent**: the example below is documentation only.
 - Added `maxMinutes` per run, and "Stop run".
-- Folders live under `<sandboxRoot>/_agents` (`standingRoot` in config), never in `data/`: the
-  guard's own-folder exception would otherwise unprotect the whole data dir.
+- Folders live in the machine daemon's folder, never in the portal's `data/`: the guard's own-folder exception would
+  otherwise unprotect the whole data dir. (Before w510, agents that ran in the portal itself had theirs under
+  `<standingRoot>`, by default `<sandboxRoot>/_agents`.)
 - The read-only shell is an allowlist, not a denylist. It is a seatbelt like the rest of the guard:
   an agent can still read any file the host user can, and a comment is a way out. Keep charters
   that read untrusted text (Discord, PR bodies) away from `github_comment` unless needed.
