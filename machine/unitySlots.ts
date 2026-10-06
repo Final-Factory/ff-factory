@@ -408,11 +408,27 @@ export interface ArbiterFile {
   granted: { id: string; label: string; count: number; holder: string }[];
 }
 
-/** Write a file whole: a reader never sees half of it. */
+/**
+ * Write a file whole: a reader never sees half of it. On Windows a rename over a file another process has open for a
+ * moment (a client reading arbiter.json, a virus scanner looking at a new file) fails with EPERM or EBUSY: retried for
+ * up to half a second.
+ */
 function writeAtomic(file: string, data: string) {
   const tmp = `${file}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
   fs.writeFileSync(tmp, data);
-  fs.renameSync(tmp, file);
+  for (let i = 0; ; i++) {
+    try {
+      fs.renameSync(tmp, file);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (i >= 20 || !(code === 'EPERM' || code === 'EBUSY' || code === 'EACCES')) {
+        rm(tmp);
+        throw e;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
 }
 
 function readJson<T>(file: string): T | undefined {
@@ -554,7 +570,12 @@ export class UnitySlots {
     }
     this.last = { a, reqs, ramPct, at: now };
     this.notices(a, now);
-    writeAtomic(arbiterFile(this.d.dir), JSON.stringify(this.arbiterFile(), null, 1));
+    try {
+      writeAtomic(arbiterFile(this.d.dir), JSON.stringify(this.arbiterFile(), null, 1));
+    } catch (e) {
+      // The next look writes it again; clients count it as gone only after a minute without one.
+      this.d.log?.(`unity slots: could not write ${arbiterFile(this.d.dir)}: ${(e as Error).message}`);
+    }
     return a;
   }
 

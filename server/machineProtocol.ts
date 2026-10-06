@@ -4,7 +4,7 @@ import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
 import type { StaleContext } from './staleOutput.ts';
-import type { AttachmentRef, CleanupSummary, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
+import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
  * Bumped when either side must be redeployed to keep talking. 4: the daemon reports its Mac's load
@@ -22,7 +22,8 @@ import type { AttachmentRef, CleanupSummary, HostStats, ImageFile, ImageInput, M
  * (GET /machine/attachments/<id> with its token) before the message goes to the agent, and the `fetch_attachment` tool.
  * A protocol-6 daemon would drop them, so the portal never sends it any.
  * 8: `relocate` (w466, docs/machines.md "Moving the portal"): a connected daemon is told the portal's new URL, keeps it
- * in its daemon.json and dials it, its agents running on; it falls back to the URL before if the new one never answers.
+ * in its daemon.json and dials it, its agents running on; it falls back to the URL before if the new one never answers. * Also (w466, unreleased with it): `guard` in the hello, a daemon running the host guard (machine/hostGuard.ts: BEAST's
+ * sandbox drive, its disks, the browser reaper), and its `host_report` and `host_health` messages.
  */
 export const PROTOCOL_VERSION = 8;
 
@@ -117,7 +118,11 @@ export type ToDaemon =
 
 export type FromDaemon =
   /** `catalog`: the MCP tools this daemon can serve (protocol 3+); info.daemon is the commit it was deployed from. */
-  | { type: 'hello'; protocol: number; info: NonNullable<Machine['info']>; home: string; live: string[]; catalog?: string[] }
+  | { type: 'hello'; protocol: number; info: NonNullable<Machine['info']>; home: string; live: string[]; catalog?: string[]; guard?: boolean }
+  /** Its host guard has news for people (protocol 8, w466): the drive gone or back, disk space, a reaped browser. Relayed like the portal's own guard's. */
+  | { type: 'host_report'; title: string; body: string }
+  /** Its host guard's state, when it changes (protocol 8, w466). */
+  | { type: 'host_health'; health: Pick<HostHealth, 'checkedAt' | 'sandboxRoot' | 'level' | 'detail' | 'blocked'> }
   /** The session's current record (the daemon's AgentSession changed it). */
   | { type: 'session'; info: SessionInfo; live: boolean }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }

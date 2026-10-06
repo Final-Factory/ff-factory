@@ -65,6 +65,8 @@ export interface PoolOptions {
   /** For the orchestrator: an editor restarted or given up on, the disk guard, an idle editor stopped. */
   onEvent(e: { text: string; sandbox?: string; restarted?: boolean; unity?: boolean; checkpoint?: boolean }): void;
   idleStopMinutes?: number;
+  /** Why a sandbox editor may not start now (the machine's host guard, w466: the drive is gone, disk space is low), or undefined. */
+  startGate?: () => string | undefined;
   /** Room a warm Library copy needs, in GB, on top of the warning threshold (a clone on APFS costs far less up front). */
   librarySeedGB?: number;
   /**
@@ -543,6 +545,8 @@ export class SandboxPool {
       if (action === 'stop') return out.join(' ');
     }
     const s = this.need();
+    const gate = this.o.startGate?.();
+    if (gate) throw new Error(`not started: ${gate}`);
     if (this.disk.level !== 'ok') throw new Error(`not started: disk space is ${this.disk.level} on ${s.root}; new editors wait until space is freed`);
     const current = this.editorFor(r);
     if (current.unity.editors(await this.d.procs()).length) return [...out, `Already running (${await current.unity.status()}).`].join(' ');

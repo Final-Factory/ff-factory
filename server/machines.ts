@@ -18,7 +18,7 @@ import { openPr } from './gitStatus.ts';
 import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 
@@ -135,7 +135,7 @@ export function convertMachineRecord(m: Machine, to: 'ssh' | 'local', o: { sshHo
     delete next.local;
     next.host = host;
     next.portalUrl = url;
-    const keep = { ...(o.extras?.unityMcpServer ? { unityMcpServer: o.extras.unityMcpServer } : {}), ...(o.extras?.sandboxIdleStopMinutes !== undefined ? { sandboxIdleStopMinutes: o.extras.sandboxIdleStopMinutes } : {}) };
+    const keep = { ...(o.extras?.unityMcpServer ? { unityMcpServer: o.extras.unityMcpServer } : {}), ...(o.extras?.sandboxIdleStopMinutes !== undefined ? { sandboxIdleStopMinutes: o.extras.sandboxIdleStopMinutes } : {}), ...(o.extras?.hostGuard ? { hostGuard: o.extras.hostGuard } : {}) };
     if (Object.keys(keep).length) next.daemonExtras = keep;
     return next;
   }
@@ -147,6 +147,12 @@ export function convertMachineRecord(m: Machine, to: 'ssh' | 'local', o: { sshHo
   next.portalUrl = url;
   delete next.daemonExtras;
   return next;
+}
+
+/** The host guard settings the portal's own host's daemon gets (w466): this server's own guard's, for the same computer. Exported for tests. */
+export function guardSettingsOf(cfg: Pick<Config, 'hostGuard' | 'hostDiskPaths' | 'limits'>): MachineGuardSettings {
+  const g = cfg.hostGuard;
+  return { pollSeconds: g.pollSeconds, warnFreeGB: g.warnFreeGB, criticalFreeGB: g.criticalFreeGB, hysteresisGB: g.hysteresisGB, remountMinFreeGB: g.remountMinFreeGB, hostDiskPaths: [...cfg.hostDiskPaths], reapBrowsersAfterHours: g.reapBrowsersAfterHours, reapEveryMinutes: g.reapEveryMinutes, minFreeRamGB: cfg.limits.minFreeRamGB };
 }
 
 /** The limits a deploy stores: each given one checked, an unset one kept from the previous deploy. Exported for tests. */
@@ -484,7 +490,15 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; daemon?: string; catalog?: string[] }>();
+  private readonly hellos = new Map<string, { protocol: number; daemon?: string; catalog?: string[]; guard?: boolean }>();
+
+  /** Whether a connected machine's daemon runs the host guard (w466): its hello said so. */
+  guards(id: string): boolean {
+    return this.isOnline(id) && !!this.hellos.get(id)?.guard;
+  }
+
+  /** A machine's host guard has news for people (wired by index.ts: as the portal's own guard reports). */
+  hostReport?: (machineId: string, title: string, body: string) => void;
   /** The commit this portal runs (a deploy stamps the daemon with the same), for the version check. */
   portalHead: string | undefined = gitHead(ROOT);
   private readonly reportedOutdated = new Map<string, string>();
@@ -863,6 +877,9 @@ export class MachineManager {
       sandboxIdleStopMinutes: u.idleStopMinutes,
       // No clean-up of its own even before the portal's first welcome: this host's guard cleans this computer.
       cleanup: { everyMinutes: 0, softFreeGB: 0 },
+      // The drive watch and remount, its disks and the reaper run in its daemon (w466, D11): the portal hands them over
+      // as soon as the daemon's hello says its guard runs, and they stay with BEAST when the portal moves to its VM.
+      ...((this.cfg.hostGuard?.pollSeconds ?? 0) > 0 ? { hostGuard: guardSettingsOf(this.cfg) } : {}),
     };
   }
 
@@ -1128,7 +1145,8 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, daemon: msg.info?.daemon, catalog: msg.catalog });
+        this.hellos.set(id, { protocol: msg.protocol, daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}) });
+        if (!msg.guard) delete m.guard;
         // Its daemon runs and reached us: an install or connection error from before is over (a deploy in progress
         // settles the status itself). A 'deploying' left by a portal restart mid-deploy is over too.
         if (m.status === 'error' || (m.status === 'deploying' && !this.deploying.has(id))) Object.assign(m, { status: 'ready', statusDetail: undefined });
@@ -1252,6 +1270,12 @@ export class MachineManager {
         else p.reject(new Error(msg.error ?? 'refused'));
         return;
       }
+      case 'host_report':
+        this.hostReport?.(id, String(msg.title ?? ''), String(msg.body ?? ''));
+        return;
+      case 'host_health':
+        if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });
+        return;
       case 'switch_result': {
         const p = this.switchCalls.get(msg.id);
         if (!p) return;
