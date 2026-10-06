@@ -947,7 +947,8 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Real paths: a Mac's temp folder (/var -> /private/var), where the uninstall runs its copy, is a symlink.
+if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
   main().catch((e) => {
     console.error(`ERROR: ${(e as Error).message}`);
     process.exitCode = 1;

@@ -554,7 +554,8 @@ async function legacy(l: Layout) {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Real paths: a Mac's temp folder (/var -> /private/var), where the uninstall runs its copy, is a symlink.
+if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
   console.error('Run the migration through worker.ts: node scripts/worker/worker.ts migrate --root <root> [--dry-run|--rollback|--cleanup]');
   process.exitCode = 2;
 }
