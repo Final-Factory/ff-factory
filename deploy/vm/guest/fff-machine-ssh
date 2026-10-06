@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# fff-machine-ssh (w537): the portal's ssh to the machines it deploys daemons to (BEAST, LothDesktop, the m3, the m5),
+# as the portal's account (fff). The machines, their ssh users and their pinned host keys are in machines.ssh beside it.
+# Run by the guest install and by fffctl update when machines.ssh changes; the host's deploy/vm/host/machine-ssh.sh
+# streams it into a VM whose own copy is older.
+#
+#   fff-machine-ssh --check   read only: each machine's alias, its key in known_hosts, the key this VM sees over the
+#                             tailnet, and whether ssh gets in; exit 1 when anything is missing or refused
+#   fff-machine-ssh --fix     write the aliases (one managed block at the top of ~/.ssh/config) and the pinned keys
+#                             (~/.ssh/known_hosts, replacing that host's lines), then check. A machine whose key over the
+#                             tailnet differs from the pinned one is refused: nothing is written for it.
+#   --data FILE               the machines (default /usr/local/lib/fff/machines.ssh)
+#
+# Never accepts a key on first use, and prints no private key: only the portal's public key, in the line a machine adds
+# to its authorized_keys when ssh is refused.
+set -o errexit -o nounset -o pipefail
+DATA=/usr/local/lib/fff/machines.ssh
+MODE=check
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) MODE=check ;;
+    --fix) MODE=fix ;;
+    --data) DATA=$2; shift ;;
+    *) echo "fff-machine-ssh: unknown option $1 (--check, --fix, --data FILE)" >&2; exit 2 ;;
+  esac
+  shift
+done
+[ "$(id -u)" != 0 ] || { echo "fff-machine-ssh: run it as the portal's account: sudo -H -u fff fff-machine-ssh --$MODE" >&2; exit 2; }
+[ -r "$DATA" ] || { echo "fff-machine-ssh: no $DATA" >&2; exit 2; }
+SSH_DIR=$HOME/.ssh
+CFG=$SSH_DIR/config
+KH=$SSH_DIR/known_hosts
+BEGIN='# >>> fff machines (written by fff-machine-ssh from machines.ssh: change it there) >>>'
+END='# <<< fff machines <<<'
+# "alias host user key", one machine a line.
+machines=$(sed -e 's/#.*//' "$DATA" | awk 'NF >= 4 {print $1, $2, $3, $4}')
+[ -n "$machines" ] || { echo "fff-machine-ssh: no machines in $DATA" >&2; exit 2; }
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+fp() { printf 'x ssh-ed25519 %s\n' "$1" | ssh-keygen -l -f - 2>/dev/null | awk '{print $2}'; }
+# The ed25519 key HOST shows over the network now (nothing when it does not answer).
+seen_key() { { ssh-keyscan -T 10 -t ed25519 "$1" 2>/dev/null || true; } | awk '$2 == "ssh-ed25519" {print $3; exit}'; }
+# The ed25519 keys known_hosts holds for HOST (hashed lines included).
+known_keys() { { ssh-keygen -F "$1" -f "$KH" 2>/dev/null || true; } | awk '$1 !~ /^#/ && $2 == "ssh-ed25519" {print $3}'; }
+
+block() {
+  local alias host user key
+  echo "$BEGIN"
+  while read -r alias host user key <&3; do printf 'Host %s\n  HostName %s\n  User %s\n' "$alias" "$host" "$user"; done 3<<<"$machines"
+  printf 'Host %s\n  StrictHostKeyChecking yes\n  ServerAliveInterval 30\n  ServerAliveCountMax 4\n' "$(awk '{print $1}' <<<"$machines" | paste -sd' ' -)"
+  echo "$END"
+}
+
+fix() {
+  local alias host user key h seen tmp
+  install -d -m 0700 "$SSH_DIR"
+  touch "$CFG" "$KH"
+  chmod 600 "$CFG" "$KH"
+  while read -r alias host user key <&3; do
+    h=$(lower "$host")
+    seen=$(seen_key "$h")
+    if [ -n "$seen" ] && [ "$seen" != "$key" ]; then
+      echo "$alias: REFUSED: $h shows $(fp "$seen") over the tailnet, not the pinned $(fp "$key"); nothing written for it. If it was reinstalled, check the key on the machine itself and change machines.ssh"
+      continue
+    fi
+    ssh-keygen -R "$h" -f "$KH" >/dev/null 2>&1 || true
+    printf '%s ssh-ed25519 %s\n' "$h" "$key" >>"$KH"
+    if [ -n "$seen" ]; then echo "$alias: pinned $(fp "$key") for $h (the same over the tailnet)"; else
+      echo "$alias: pinned $(fp "$key") for $h (no answer now: pinned anyway, it was checked when machines.ssh was written)"
+    fi
+  done 3<<<"$machines"
+  rm -f "$KH.old"
+  # The managed block first: ssh takes the first value it finds for each setting.
+  tmp=$(mktemp "$SSH_DIR/.config.XXXXXX")
+  { block; awk -v b="$BEGIN" -v e="$END" '$0 == b {skip = 1} !skip {print} $0 == e {skip = 0}' "$CFG"; } >"$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CFG"
+  echo "aliases written: $(awk '{print $1}' <<<"$machines" | paste -sd' ' -) ($CFG)"
+}
+
+check() {
+  local alias host user key h want got known seen out line ip bad=0 refused=0
+  while read -r alias host user key <&3; do
+    h=$(lower "$host")
+    want="$user@$h"
+    # -F: the portal account's own config (its $HOME is its home; ssh would read the passwd entry's, the same file).
+    got=$(ssh -F "$CFG" -G "$alias" 2>/dev/null | awk '$1 == "user" {u = $2} $1 == "hostname" {n = $2} END {print u "@" n}')
+    known=$(known_keys "$h")
+    seen=$(seen_key "$h")
+    line="$alias: alias $([ "$got" = "$want" ] && echo ok || echo "MISSING (ssh -G gives $got, not $want)")"
+    if grep -qxF "$key" <<<"$known"; then line+="; known_hosts: pinned"; elif [ -n "$known" ]; then line+="; known_hosts: ANOTHER key ($(fp "$(head -n 1 <<<"$known")"))"; else line+="; known_hosts: MISSING"; fi
+    if [ -z "$seen" ]; then line+="; tailnet: no answer"; elif [ "$seen" = "$key" ]; then line+="; tailnet: $(fp "$seen") = pinned"; else line+="; tailnet: $(fp "$seen") DIFFERS from the pinned $(fp "$key")"; fi
+    if out=$(ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$alias" exit 0 2>&1); then line+="; ssh: ok"; else
+      line+="; ssh: $(tail -n 1 <<<"$out")"
+      bad=1
+      case "$out" in *"Permission denied"*) refused=1 ;; esac
+    fi
+    case "$line" in *MISSING* | *ANOTHER* | *DIFFERS*) bad=1 ;; esac
+    echo "$line"
+  done 3<<<"$machines"
+  if [ "$refused" = 1 ]; then
+    ip=$({ tailscale ip -4 2>/dev/null || true; } | head -n 1)
+    printf '%s\n' "A machine that says Permission denied adds this line to the ssh user's ~/.ssh/authorized_keys (a Windows admin account: C:\\ProgramData\\ssh\\administrators_authorized_keys):"
+    echo "from=\"${ip:-<the tailnet IP of this VM>}\",no-agent-forwarding,no-port-forwarding,no-X11-forwarding $(cat "$SSH_DIR/id_ed25519.pub" 2>/dev/null || echo '<no ~/.ssh/id_ed25519.pub>')"
+  fi
+  return "$bad"
+}
+
+if [ "$MODE" = fix ]; then fix; fi
+check

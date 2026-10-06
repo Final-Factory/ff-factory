@@ -17,6 +17,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   rendered into its unit by root on the FFBox host and the step was one line among others. `fffctl migrate --cut-over`
   now ends with the `sed` of the old URL to the new, the `06-services.sh --check` that must name only
   `fffconnector.service`, the `--install` and the check, each with what it should print; RUNBOOK section 5 has the same.
+- **The portal VM reaches its machines over ssh again** (w537). The cut-over left the VM without the machines' ssh
+  aliases and host keys, so every daemon redeploy failed on "Host key verification failed". `deploy/vm/guest/machines.ssh`
+  lists the machines (alias, MagicDNS name, ssh user) with each ed25519 host key pinned (checked on two paths from
+  BEAST); `fff-machine-ssh --fix` writes them into the portal account's `~/.ssh/config` (one managed block,
+  `StrictHostKeyChecking yes`) and `known_hosts`, refusing a machine that shows another key, and `--check` reports each
+  machine and prints the `authorized_keys` line for one that refuses the portal's key. The guest install runs it,
+  `fffctl update` runs it when `machines.ssh` changes, and `deploy/vm/host/machine-ssh.sh --check|--fix` runs it in a
+  VM from the host (RUNBOOK section 9).
 
 ### Removed
 

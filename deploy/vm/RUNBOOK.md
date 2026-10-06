@@ -294,10 +294,12 @@ default), and prints the `journalctl` command for the details. Ctrl+C stops the 
 only asks for it, as `request_app_update` does. `fffctl restart` and `fffctl rollback` wait the same way until the portal
 answers again.
 
-Each update also installs `fffctl` and every helper script in `/usr/local/lib/fff` from the release it switches to (and
-from the older release on a rollback), so they stay as new as the portal; "already up to date" brings them up to the
-running release too. A changed systemd unit is not installed this way: the update's log says so, and the guest
-`install.sh` from a clone at that commit installs it.
+Each update also runs the new release's own guest `install.sh` (with `--no-start`), after the build and before the
+restart: the VM's firewall, systemd units, sshd settings, packages, folders, `fffctl` and its helper scripts all come
+with it, so a change to any of them reaches the VM by `fffctl update` alone. It changes only what differs (apt only for a
+missing package). If it fails, nothing restarts and the running version stays, as with a failed build. "Already up to
+date" runs it too, for the running release. A rollback goes back to the older code and its scripts but keeps the newer
+system setup.
 
 ## 7. Changing the VM's size
 
@@ -340,6 +342,27 @@ sudo fff-vm ssh 'sudo systemctl mask tmp.mount'
 sudo fff-vm ssh 'findmnt /tmp || echo "/tmp is on the root disk"; df -h /tmp'
                               # after that boot: "/tmp is on the root disk", and /dev/vda1 about 118G
 ```
+
+## 9. The portal's ssh to the machines
+
+The portal deploys its machines' daemons over ssh as its own account, to the aliases in
+[`guest/machines.ssh`](guest/machines.ssh) (`m3`, `m5`, `Loth2800`, `beast`), with each host key pinned there. A VM
+installed or updated (`fffctl update`) after w537 writes them by itself. A VM from before, or any time, from the host:
+
+```bash
+git -C ~/ff-factory pull --ff-only
+sudo ~/ff-factory/deploy/vm/host/machine-ssh.sh --check   # read only: one line per machine
+sudo ~/ff-factory/deploy/vm/host/machine-ssh.sh --fix     # write the aliases and pinned keys, then the same lines
+```
+
+After `--fix`, each line should read `<alias>: alias ok; known_hosts: pinned; tailnet: SHA256:... = pinned; ssh: ok`.
+`tailnet: ... DIFFERS` (and `REFUSED` from `--fix`): the machine shows another key than the pinned one; nothing is
+written for it: check the key on the machine itself (`ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub`, on Windows
+`C:\ProgramData\ssh\ssh_host_ed25519_key.pub`) and change `machines.ssh`. `ssh: ... Permission denied (publickey)`:
+that machine does not have the portal's key yet; the output ends with the `from="..."` line to add to that ssh user's
+`~/.ssh/authorized_keys` (a Windows admin account: `C:\ProgramData\ssh\administrators_authorized_keys`). Then
+redeploy one machine's daemon from the portal (an orchestrator: `machine_daemon` redeploy, the m3 first) and check it
+connects.
 
 ## If it must come off again
 
