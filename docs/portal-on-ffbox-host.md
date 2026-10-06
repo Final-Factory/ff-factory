@@ -334,8 +334,10 @@ cloud-init (a NoCloud seed ISO from `cloud-localds`, read at the first boot only
   packages.ubuntu.com file lists for noble's linux-modules-6.8.0-101-generic and linux-modules-extra-6.8.0-101-generic,
   and its cloud image manifest; resolute splits its kernel the same way, and CI checks the device is armed)*. `package_reboot_if_required` boots once into an upgraded kernel, so the module matches it.
 - the watchdog: `RuntimeWatchdogSec=30s` makes PID 1 pet `/dev/watchdog0` *(sourced: systemd-system.conf(5))*.
-  `RebootWatchdogSec=10min` covers a hung shutdown. `fff-watchdog-arm.service` re-executes PID 1 if the device appeared
-  after it started *(measured in CI: `/sys/class/watchdog/watchdog0/state` is `active`)*.
+  `RebootWatchdogSec=10min` covers a hung shutdown. `fff-watchdog-arm.service` loads `i6300esb` with an explicit
+  `modprobe` on every boot and re-executes PID 1 if the device appeared after it started. With `modules-load.d` alone
+  the module stayed unloaded on every boot after the first *(measured in CI; the cause, Ubuntu's blacklist of watchdog
+  drivers, which `systemd-modules-load` honours and an explicit `modprobe` does not, is a guess)* *(measured in CI: `/sys/class/watchdog/watchdog0/state` is `active`)*.
 - security updates every day. `Automatic-Reboot "false"`, because the host's nightly cycle restarts the VM. The guest's
   apt timers move to just before it: lists at 10:30 and upgrades at 11:00 UTC, each with up to 10 minutes of random
   delay. Ubuntu's default upgrade timer is 06:00 plus up to 60 minutes *(sourced: noble's apt-daily-upgrade.timer)*.

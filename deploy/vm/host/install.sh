@@ -413,6 +413,9 @@ write_files:
       [Manager]
       RuntimeWatchdogSec=30s
       RebootWatchdogSec=10min
+  # Ubuntu blacklists watchdog drivers, and systemd-modules-load honours the blacklist, so modules-load.d alone left
+  # i6300esb unloaded on every boot after the first (measured in CI). An explicit modprobe loads it; then PID 1 is
+  # re-executed if it started before the device existed.
   - path: /etc/systemd/system/fff-watchdog-arm.service
     content: |
       [Unit]
@@ -420,7 +423,7 @@ write_files:
       After=systemd-modules-load.service
       [Service]
       Type=oneshot
-      ExecStart=/bin/sh -c 'for i in \$(seq 20); do [ -e /dev/watchdog0 ] && break; sleep 1; done; [ "\$(cat /sys/class/watchdog/watchdog0/state 2>/dev/null)" = active ] || systemctl daemon-reexec; sleep 2; echo "watchdog0: \$(cat /sys/class/watchdog/watchdog0/state 2>/dev/null || echo missing)"'
+      ExecStart=/bin/sh -c 'modprobe i6300esb; for i in \$(seq 20); do [ -e /dev/watchdog0 ] && break; sleep 1; done; [ "\$(cat /sys/class/watchdog/watchdog0/state 2>/dev/null)" = active ] || systemctl daemon-reexec; sleep 2; echo "watchdog0: \$(cat /sys/class/watchdog/watchdog0/state 2>/dev/null || echo missing)"'
       [Install]
       WantedBy=multi-user.target
   # Security updates every day; the host reboots the VM afterwards (fff-vm nightly at $NIGHTLY_TIME $NIGHTLY_TZ).
