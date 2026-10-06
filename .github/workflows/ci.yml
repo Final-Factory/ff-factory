@@ -1,200 +1,53 @@
 name: CI
 
+# w521 measurement branch only (never merged): the unit tests several ways on one runner each.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       update_snapshots:
-        description: Re-render every visual snapshot (Linux) and upload them as the "linux-snapshots" artifact
+        description: unused here
         type: boolean
         default: false
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
 
-env:
-  NODE_VERSION: 24
-
 jobs:
-  checks:
-    name: Typecheck, unit tests, build (${{ matrix.os }})
+  variants:
+    name: Unit test variants (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        # Windows too: the host is Windows, and the update/republish/elevation tests drive PowerShell.
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: 24
           cache: npm
           cache-dependency-path: |
             package-lock.json
             web/package-lock.json
-      - name: A git identity for the tests that commit
-        # Global config, not GIT_AUTHOR_* variables: some tests set a commit's identity with -c on purpose.
-        run: |
+      - run: |
           git config --global user.name "FF Factory CI"
           git config --global user.email "ci@users.noreply.github.com"
+        shell: bash
       - run: npm ci --no-audit --no-fund
-      - run: npm ci --prefix web --no-audit --no-fund
-      - name: Typecheck (server, shared, scripts, e2e)
-        run: npm run typecheck
-      - name: Typecheck (web)
-        run: npm --prefix web run typecheck
-      - name: Unit tests with coverage
+      - name: A, as CI runs it (coverage, default concurrency)
         shell: bash
         run: |
-          set -o pipefail
-          npm run test:coverage 2>&1 | tee coverage.txt
-      - name: Machine sandboxes on Windows (git worktrees, robocopy, rd in a temp repo)
-        # Also part of the unit tests above; its own step so a worktree regression on Windows is named as one.
-        if: runner.os == 'Windows'
-        shell: bash
-        run: node --test server/machineSandboxes.test.ts
-      - name: Coverage summary
-        if: always() && runner.os == 'Linux'
+          s=$(date +%s); npm run test:coverage > a.txt 2>&1 || echo "A FAILED"; echo "A wall $(( $(date +%s) - s )) s"; grep -E '^ℹ (tests|pass|fail|duration_ms)' a.txt
+      - name: B, no coverage (default concurrency)
         shell: bash
         run: |
-          {
-            echo '### Unit tests'
-            grep -E '^ℹ (tests|pass|fail|skipped) ' coverage.txt | sed 's/^ℹ /- /'
-            echo
-            echo '### Coverage (files the tests load)'
-            echo '```'
-            sed -n '/start of coverage report/,/end of coverage report/p' coverage.txt | sed 's/^ℹ //'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Build the web UI
-        run: npm --prefix web run build
-
-  e2e:
-    name: Playwright (Chromium + WebKit)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            web/package-lock.json
-      - run: npm ci --no-audit --no-fund
-      - run: npm ci --prefix web --no-audit --no-fund
-      - name: Playwright version
-        id: pw
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - name: Cache browsers
-        id: browsers
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
-      - name: Install browsers
-        if: steps.browsers.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium webkit
-      - name: Install browser system libraries
-        if: steps.browsers.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium webkit
-      - name: Build the web UI
-        run: npm --prefix web run build
-      - name: Snapshot mode
-        id: snap
+          s=$(date +%s); npm test > b.txt 2>&1 || echo "B FAILED"; echo "B wall $(( $(date +%s) - s )) s"; grep -E '^ℹ (tests|pass|fail|duration_ms)' b.txt
+      - name: C, coverage, --test-concurrency=6
         shell: bash
         run: |
-          # With no Linux baselines committed yet (or when asked), render them instead of comparing.
-          if [ "${{ inputs.update_snapshots }}" = "true" ] || ! ls e2e/__screenshots__/*/*-linux.png >/dev/null 2>&1; then
-            echo "update=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::Rendering visual baselines instead of comparing them; commit the linux-snapshots artifact into e2e/__screenshots__/."
-          fi
-      - name: Run Playwright
-        run: npx playwright test ${{ steps.snap.outputs.update == 'true' && '--update-snapshots=all' || '' }}
-      - name: Performance budgets (web/perf/bench.ts, 7,000 stopped agents)
-        # Render counts and DOM size per key typed, and layouts at rest, on the orchestrator and beside the sandbox
-        # holding most past agents: counts, so a slow runner does not fail it.
-        if: ${{ !cancelled() }}
-        run: |
-          node web/perf/bench.ts --check --live 0 --keys 60 --idle 5
-          node web/perf/bench.ts --check --live 0 --keys 60 --idle 5 --route '#/sandbox/agent-mcp'
-      - name: Upload the report and traces
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: playwright-report
-          path: |
-            playwright-report/
-            test-results/
-          retention-days: 14
-      - name: Upload rendered snapshots
-        if: always() && steps.snap.outputs.update == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-snapshots
-          path: e2e/__screenshots__/
-          retention-days: 14
-
-  secrets:
-    name: Secret scan (gitleaks)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    env:
-      GITLEAKS_VERSION: 8.30.1
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Install gitleaks
-        run: |
-          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
-          file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$RUNNER_TEMP/$file" "$base/$file"
-          curl -sSfL -o "$RUNNER_TEMP/checksums.txt" "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
-          (cd "$RUNNER_TEMP" && grep " $file\$" checksums.txt | sha256sum -c -)
-          tar -xzf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP" gitleaks
-      - name: Scan the history of this commit
-        # HEAD only: other branches on the remote are not what is being merged.
-        run: $RUNNER_TEMP/gitleaks git . --log-opts=HEAD --redact --no-banner --verbose
-      - name: Scan the working tree
-        run: $RUNNER_TEMP/gitleaks dir . --redact --no-banner
-
-  identity:
-    name: Commit identities are noreply
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Check the new commits
+          s=$(date +%s); node --test --test-concurrency=6 --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts > c.txt 2>&1 || echo "C FAILED"; echo "C wall $(( $(date +%s) - s )) s"; grep -E '^ℹ (tests|pass|fail|duration_ms)' c.txt; grep -E '^✖' c.txt | head -5
+      - name: D, coverage, --test-concurrency=8
         shell: bash
-        env:
-          EVENT: ${{ github.event_name }}
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.sha }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ "$EVENT" = pull_request ]; then
-            range="$PR_BASE..$PR_HEAD"
-          elif [ "$EVENT" = push ] && [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] && git merge-base --is-ancestor "$BEFORE" "$AFTER" 2>/dev/null; then
-            range="$BEFORE..$AFTER"
-          else
-            # A new branch, a manual run or a rewritten history: check everything reachable.
-            range="$AFTER"
-          fi
-          node scripts/check-identity.ts "$range"
+          s=$(date +%s); node --test --test-concurrency=8 --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts > d.txt 2>&1 || echo "D FAILED"; echo "D wall $(( $(date +%s) - s )) s"; grep -E '^ℹ (tests|pass|fail|duration_ms)' d.txt; grep -E '^✖' d.txt | head -5
