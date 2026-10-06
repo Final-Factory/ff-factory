@@ -53,7 +53,7 @@ test('worker install: every missing prerequisite is named before anything change
   assert.match(bad({ platform: 'darwin', git: [2, 46] }), /brew upgrade git/);
   assert.match(bad({ gitLfs: false }), /git-lfs is missing/);
   assert.match(bad({ claude: undefined }), /Claude Code is missing/);
-  assert.deepEqual(preflightProblems({ ...GOOD, claude: undefined, claudeShim: 'C:\Users\l\AppData\Roaming\npm\claude.cmd' }, OPTS), [], 'an npm shim is enough: the SDK uses its own (as the portal's deploy)');
+  assert.deepEqual(preflightProblems({ ...GOOD, claude: undefined, claudeShim: 'C:\\Users\\l\\AppData\\Roaming\\npm\\claude.cmd' }, OPTS), [], "an npm shim is enough: the SDK uses its own (as in the portal's deploy)");
   assert.match(bad({ nodeVersion: 'v20.11.0' }), /node 22\.6 or newer/);
   assert.match(bad({ rootState: 'other' }), /already holds other files/);
   assert.match(bad({ rootParentExists: false }), /does not exist/);
