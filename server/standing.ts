@@ -1,4 +1,5 @@
 import { hostAccount, hostClaudeEnv, machineRunEnv } from './secrets.ts';
+import { NIGHTLY_SENTRY, unattributedPerson } from './vault.ts';
 import { claudeEnvFor } from './identity.ts';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -842,7 +843,9 @@ export class StandingAgents {
         // when they have one (config userClaudeEnv, docs/identity.md).
         ...(() => {
           // The vault's token and secrets for this run (docs/vault.md), else the machine's account as before.
-          const run = machineRunEnv(this.cfg, m ?? a.machineId, { role: 'standing', requestedBy: this.currentRequester(a), sessionId: a.sessionId });
+          // The nightly regression sentry runs on the tokens config vault.unattributed.nightly names (docs/vault.md).
+          const tokenUser = a.id === NIGHTLY_SENTRY ? unattributedPerson(this.cfg, 'nightly') : undefined;
+          const run = machineRunEnv(this.cfg, m ?? a.machineId, { role: 'standing', requestedBy: this.currentRequester(a), sessionId: a.sessionId, tokenUser });
           return { env: run.env, login: run.login };
         })(),
         claudeExecutable: undefined,

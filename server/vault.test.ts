@@ -4,11 +4,11 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { FULL_PERCENT, Vault, eligible, type KeySource, envNameProblem, fingerprintOf, headroom, keySource, newKeyText, pickClaude, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
+import { FULL_PERCENT, NIGHTLY_SENTRY, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, headroom, keySource, newKeyText, pickClaude, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
 import { SECRET_ENV, addSecretValues, claudeFromVault, machineRunEnv, redactSecrets, registerSecretValues } from './secrets.ts';
 import { GITHUB_HELPER, githubCredentialEnv } from './launch.ts';
 import { buildAccounts, tokenKey } from './usage.ts';
-import { checkAccountConfig } from './config.ts';
+import { checkAccountConfig, loadConfig } from './config.ts';
 import { enrolledMachines, issueMachineToken, revokeMachineToken } from './machineTokens.ts';
 import type { PlanUsage } from '../shared/types.ts';
 
@@ -227,7 +227,7 @@ test('machineRunEnv: off by default; on, a vault token alone with the daemon cre
   v.update('shared', { machines: ['m5'] });
   const fb = machineRunEnv(on, m, { role: 'workers' }, ctx);
   assert.equal(fb.env.CLAUDE_CODE_OAUTH_TOKEN, C);
-  assert.match(problems.at(-1) ?? '', /no vault Claude token for a workers run on m3; it runs on host token/);
+  assert.match(problems.at(-1) ?? '', /no vault Claude token for a workers run on m3 for ben; it runs on host token/);
   assert.ok(!problems.join('\n').includes(A.slice(13, 30)), 'problems never hold a value');
 });
 
@@ -383,4 +383,60 @@ test('vault: one value per variable, the run person own entry first, then by nam
   v.add({ name: owned.id, kind: 'claude', value: B, share: 'anyone', machines: ['m9'] });
   assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'loth' }, { claude: true }).claude?.token, A);
   assert.equal(v.forRun({ machineId: 'm9', role: 'workers', userId: 'ben' }, { claude: true }).claude?.token, B);
+});
+
+test("whose tokens: nobody's work by where it came from (lothsahn's defaults), an operator's own, configurable", () => {
+  const src = (kind: string) => ({ kind, untrusted: true }) as never;
+  assert.deepEqual(UNATTRIBUTED_DEFAULTS, { intake: 'lothsahn', ffbox: 'lothsahn', nightly: 'ben' });
+  assert.equal(unattributedKind({ unattributed: true, source: src('discord-bug') }), 'intake');
+  assert.equal(unattributedKind({ unattributed: true, source: src('release') }), 'intake');
+  assert.equal(unattributedKind({ unattributed: true, source: src('ffbox-request') }), 'ffbox');
+  assert.equal(unattributedKind({ unattributed: true, source: src('nightly') }), 'nightly');
+  assert.equal(unattributedKind({ delegation: { id: 'd', agentId: NIGHTLY_SENTRY, agentName: 'Nightly sentry', auto: true } }), 'nightly', "the sentry's delegations");
+  assert.equal(unattributedKind({ source: src('ffbox-request') }), undefined, 'an FFBox request naming an operator is theirs');
+  assert.equal(unattributedKind({}), undefined, "a person's own request");
+  assert.equal(tokenPersonForWork({}, { unattributed: true, source: src('ffbox-diagnosis') }), 'lothsahn');
+  assert.equal(tokenPersonForWork({ vault: { unattributed: { ffbox: 'ben' } } }, { unattributed: true, source: src('ffbox-diagnosis') }), 'ben');
+  assert.equal(tokenPersonForWork({}, undefined), undefined);
+  assert.equal(unattributedPerson({}, 'nightly'), 'ben');
+});
+
+test('config: vault.unattributed names a portal user per kind of work', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-vcfg-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'config.json');
+  const base = { dataDir: path.join(dir, 'data'), sandboxRoot: path.join(dir, 'sb'), repo: { url: 'https://example.test/g.git', basePath: path.join(dir, 'b') }, unity: { editorPath: 'x' } };
+  const before = process.env.FFSB_CONFIG;
+  process.env.FFSB_CONFIG = file;
+  t.after(() => (before === undefined ? delete process.env.FFSB_CONFIG : (process.env.FFSB_CONFIG = before)));
+  fs.writeFileSync(file, JSON.stringify({ ...base, vault: { unattributed: { intake: 'lothsahn', nightly: 'ben' } } }));
+  assert.deepEqual(loadConfig().vault?.unattributed, { intake: 'lothsahn', nightly: 'ben' });
+  fs.writeFileSync(file, JSON.stringify({ ...base, vault: { unattributed: { players: 'x' } } }));
+  assert.throws(() => loadConfig(), /vault\.unattributed\.players: no such kind of work/);
+  fs.writeFileSync(file, JSON.stringify({ ...base, vault: { unattributed: { intake: 'not a user' } } }));
+  assert.throws(() => loadConfig(), /vault\.unattributed\.intake is a portal user id/);
+});
+
+test("machineRunEnv per person: each person's own Claude and GitHub tokens, never another's; nobody's work on the configured person's", (t) => {
+  const { make } = setup(t);
+  const v = make();
+  v.add({ name: 'host-ben-claude', kind: 'claude', value: A, owner: 'ben', share: 'owner' });
+  v.add({ name: 'host-ben-github', kind: 'github', value: ghTok('b'), owner: 'ben', share: 'owner' });
+  v.add({ name: 'host-lothsahn-claude', kind: 'claude', value: B, owner: 'lothsahn', share: 'owner' });
+  v.add({ name: 'host-lothsahn-github', kind: 'github', value: ghTok('l'), owner: 'lothsahn', share: 'owner' });
+  const ctx: VaultContext = { vault: v, payer: () => 'ben' };
+  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: C }, userClaudeEnv: {}, machines: { claudeFromVault: true } };
+  const m = { id: 'm3' };
+  const loth = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const r1 = machineRunEnv(cfg, m, { role: 'workers', requestedBy: loth }, ctx);
+  assert.deepEqual([r1.env.CLAUDE_CODE_OAUTH_TOKEN, r1.env.GH_TOKEN], [B, ghTok('l')], "lothsahn's request: his");
+  const r2 = machineRunEnv(cfg, m, { role: 'workers', requestedBy: { userId: 'ben', displayName: 'Ben' } }, ctx);
+  assert.deepEqual([r2.env.CLAUDE_CODE_OAUTH_TOKEN, r2.env.GH_TOKEN], [A, ghTok('b')], "Ben's request: his");
+  const r3 = machineRunEnv(cfg, m, { role: 'workers' }, ctx);
+  assert.deepEqual([r3.env.CLAUDE_CODE_OAUTH_TOKEN, r3.env.GH_TOKEN], [A, ghTok('b')], "no requester: the system payer's");
+  const r4 = machineRunEnv(cfg, m, { role: 'workers', requestedBy: { userId: 'ben', displayName: 'Ben' }, tokenUser: 'lothsahn' }, ctx);
+  assert.deepEqual([r4.env.CLAUDE_CODE_OAUTH_TOKEN, r4.env.GH_TOKEN], [B, ghTok('l')], "intake work billed to Ben runs on lothsahn's tokens");
+  // Someone with no token of their own gets nobody else's: the machine's own account, as before the vault.
+  const r5 = machineRunEnv(cfg, m, { role: 'workers', requestedBy: { userId: 'mate', displayName: 'Mate' } }, ctx);
+  assert.deepEqual([r5.env.CLAUDE_CODE_OAUTH_TOKEN, r5.env.GH_TOKEN], [C, undefined]);
 });

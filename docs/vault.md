@@ -26,7 +26,7 @@ Paths and code come from w511's map (`docs/worker-root.md`, ff-factory #135, mea
 | Secret | Who uses it | Where today | Decision |
 |---|---|---|---|
 | Claude subscription OAuth tokens (`sk-ant-oat01-…`, `claude setup-token`) | every worker and standing run | config `claudeEnv.CLAUDE_CODE_OAUTH_TOKEN` (the host token), `userClaudeEnv` (people's own), a machine's own `/login` (`~/.claude/.credentials.json` or the Keychain), BEAST's `~/.claude-worker-token` | **Moves**: kind `claude`, one chosen per run ([section 4](#4-which-claude-token-a-run-gets)) |
-| The workers' GitHub token (push, PRs, `gh`) | every worker | gh's login in each machine's keyring (BEAST: Windows Credential Manager, git's helper `gh auth git-credential`; measured in w511) | **Moves**: kind `github`, given as `GH_TOKEN`, plus a git credential helper that reads it (`githubCredentialEnv`). Which account owns it is w511's open decision 4 |
+| The workers' GitHub token (push, PRs, `gh`) | every worker | gh's login in each machine's keyring (BEAST: Windows Credential Manager, git's helper `gh auth git-credential`; measured in w511) | **Moves**: kind `github`, given as `GH_TOKEN`, plus a git credential helper that reads it (`githubCredentialEnv`). One fine-grained token per person (lothsahn, 2026-10-06; section 10) |
 | Max's Discord bot token (posting as Max) | runs that post as Max (LothDesktop's today) | `~/.config/ffbox/secrets.env` and `config.json` on LothDesktop | **Moves**: kind `env`, `FFDISCORD_APP_TOKEN`, granted to the posting machine only. *Measured:* `ffdiscord.py:9,236-238` (ff-discord plugin) reads `FFDISCORD_APP_TOKEN` from the environment before any file. `FFDISCORD_SERVER_ID` is not a secret and stays in the machine's config |
 | Any other API key a run needs later | as granted | — | kind `env`, any variable ending `_TOKEN`, `_KEY`, `_SECRET` or `_PASSWORD` |
 | The machine token (`ffm_<id>_…`) | the daemon, to reach the portal | `daemon.json` (w511 moves it to `secrets/machine-token`) | **Stays**: it is the enrollment credential, the one thing a machine must hold to be given anything |
@@ -175,10 +175,10 @@ environment. Nothing else.
 Each step can be undone on its own. The commands are in [Cut-over](#cut-over).
 
 1. **Build the vault in the VM, after the portal's cut-over (w508).** The key is made in the VM; `vault.json` is in
-   `data/`, so a later `fffctl migrate` or a restore carries it, and root carries the key (section 8). Do not fill a
+   `data/`, so a later `fffctl migrate` carries it; the FFBox host keeps the tokens and the key's spare copy (sections 8, 11). Do not fill a
    vault on BEAST's portal: its key would have to be carried across by hand.
-2. **Enter the tokens** with `fffctl vault add` or the dialog: each person's Claude tokens with their owner and whether
-   they are shared, the workers' GitHub token, Max's Discord token for the posting machine.
+2. **Enter the tokens:** each person's Claude and GitHub tokens on the FFBox host, then `fff-vm vault-sync` (section
+   11); Max's Discord token in the VM with `fffctl vault add`.
 3. **Switch one machine at a time:** `set_app_config machines.claudeFromVault true machine: "<id>"`, m3 first, then
    m5, LothDesktop, BEAST. Its next agent process runs on a vault token; running ones keep theirs.
 4. **Grant the other secrets** to that machine, then check that a worker there can `gh auth status` and push, and, on
@@ -228,14 +228,18 @@ time?
   usage" *(guess: no threshold is published)*.
 
 **Answer:** one token on several of its owner's machines at once is fine *(sourced)*. One token serving other people's
-work is the risk, and the vault makes that an explicit choice per token (open decision 1).
+work is the risk; lothsahn decided each person's tokens serve only their own work (section 10).
 
 ## 8. Moving the portal (w508) and backups
 
-- `vault.json` is in `data/`, so `fffctl migrate` and the daily backup carry it, as ciphertext.
-- The key is in neither. Its spare copy is kept as root on the FFBox host (open decision 2), from where root puts it
-  back into a rebuilt or new VM (cut-over step 3 shows both directions). Without it: `sudo fffctl vault init
-  --new-key`, then rotate every entry (each lists as unopenable until then).
+- **The FFBox host is where the tokens live** (lothsahn, 2026-10-06; [section 11](#11-the-tokens-on-the-ffbox-host)).
+  The VM's vault is filled from there by `fff-vm vault-sync`, so a rebuilt or moved VM gets them back from the host.
+- **Not in the VM's daily backup:** `fff-backup` leaves `data/vault.json` out (`--exclude='data/vault.json*'`), and the
+  key was never in it (`/etc/fff` is not under `/srv/fff`).
+- **The key's spare copy** is `/etc/fff-vm/secrets/vault.key` on the host, kept in step with the VM's key by every
+  `fff-vm vault-sync` (the one before kept as `.prev`). Entries added by hand in the VM (Max's Discord token, say) open
+  again after a rebuild once root puts that copy back:
+  `sudo sh -c 'fff-vm ssh "sudo install -m 0600 /dev/stdin /etc/fff/vault.key" < /etc/fff-vm/secrets/vault.key' && sudo fff-vm ssh 'sudo fffctl vault init'`.
 
 ## 9. Follow-ups
 
@@ -247,73 +251,143 @@ work is the risk, and the vault makes that an explicit choice per token (open de
 - The seal authenticates a value with its entry's id and kind, not its grants: someone who can write `data/` (the
   portal's user) could re-grant an entry. Sealing the grants too would make every grant change need the key.
 
-## Open decisions
+## 10. Whose tokens
 
-1. **Sharing across people** (lothsahn, and Ben for his own tokens). *Recommendation:* each person's token
-   `share: owner`, and only the system payer's token shared, for work nobody asked for; share a token across people
-   only if its owner accepts the terms risk in section 7, or move shared work to Team seats or API keys. *Rests on:*
-   the Consumer Terms quote (sourced) and a guess on how it applies to a two-person team.
-2. **Where the key's spare copy lives.** *Recommendation:* `/etc/fff-vm/secrets/vault.key` on the FFBox host (root
-   only), beside the tokens w498's installer already keeps there for rebuilding the VM; never in the daily backup.
-   *Rests on:* D2 (root on that host can read the VM anyway, so the boundary does not move; the VM doc).
-3. **The workers' GitHub token's account** (w511 decision 4): Ben's or a bot account. The vault takes either.
+lothsahn's decision (2026-10-06): "I would like the portal to hand out my Claude and GitHub tokens for requests from my
+orchestrator and the same from Ben's." And for work nobody asked for by name: "Intake should be my token. Nightly sentry
+Ben. Ffbox me unless it provides an operator... In that case, use the token of the operator."
+
+**The rule.** A worker run gets the Claude token and the GitHub token of the person its work is for, and nobody else's:
+
+| The run | Whose tokens | Where the code decides |
+|---|---|---|
+| A request a person filed (their orchestrator's `request_work`, a trusted Discord request to Max) | that person's | the run's `requestedBy` (`machineRunEnv`) |
+| A worker a person's orchestrator started directly | that person's | the same (`actingFor`, the author of the message it serves) |
+| A request both people asked for (one merged into the other) | the person who filed it first | `WorkItem.requestedBy`; a merge adds people to `requesters` only (the merge in `Orchestrators.decide`, `server/orchestrators.ts`), and the dispatcher's `work_id` starts run as `requestedBy` (`dispatcherActor`). *Why:* it is the one requester the ledger already bills and attributes the request to; picking per run among `requesters` would make two runs of one request land on different accounts |
+| Intake work nobody named: Discord bug reports, FFBox reports and diagnoses, release follow-ups | config `vault.unattributed.intake`, default `lothsahn` | `WorkItem.unattributed` (set by `fileIntake` when no person asked), `unattributedKind`, `tokenPersonForWork` |
+| FFBox-filed work naming no operator | `vault.unattributed.ffbox`, default `lothsahn` | the same |
+| FFBox work naming an operator (an ffdev dev request, an operator's escalation) | that operator's, mapped to the FF Factory login of the same name | the request is filed for them (`fileDevRequest` from `server/devRequests.ts`; an operator's escalation in `server/intake.ts`), so it is not unattributed |
+| The nightly lab's reports, the nightly regression sentry and the workers its delegations start | `vault.unattributed.nightly`, default `ben` | `unattributedKind` (source `nightly`, or a delegation from `nightly-regression-sentry`); the sentry's own runs in `server/standing.ts` |
+| Anything else no person asked for | the system payer's (config `systemPayer`) | `machineRunEnv` |
+
+The token person changes only which vault entries a run gets. Who a request is billed to in the ledger, who hears
+about it, and the usage attribution stay as they are.
+
+**Tokens are not shared across people.** Every per-person entry is `share: owner`. A run whose person has no token in
+the vault gets nobody else's: it runs as it did before the vault (the machine's own login or the host token), and
+`system_status` warns. Change the defaults with `vault.unattributed` in `config.json`, e.g.
+`"vault": { "unattributed": { "intake": "lothsahn", "ffbox": "lothsahn", "nightly": "ben" } }` (user ids).
+
+## 11. The tokens on the FFBox host
+
+**Where:** on the FFBox host (Loth2400), root only, beside what the VM installer already keeps:
+
+```text
+/etc/fff-vm/secrets/                     0700 root
+  people/<user id>/claude-token          0600: one 'claude setup-token' token (sk-ant-oat01-...)
+  people/<user id>/github-token          0600: one fine-grained GitHub token (github_pat_...)
+  vault.key                              0600: the spare copy of the VM's vault key
+```
+
+**How the VM gets them: pushed in, not shared.** `sudo fff-vm vault-sync` (`deploy/vm/host/vault.sh`) sends each file
+over ssh's stdin to `fffctl vault put` in the VM, as the installer already sends the Claude and GitHub tokens
+(`push_secret`, `deploy/vm/host/guest.sh`). The entries are `host-<user>-claude` and `host-<user>-github`, `share:
+owner`, for workers and standing agents on every machine. A second run changes nothing; a new value rotates its entry; a
+removed file removes its entry. Entries not named `host-…` (added by hand) are left alone. The installer's guest step
+runs it too, so a re-run or a rebuilt VM is filled again.
+
+*Why not a read-only virtiofs share:* it needs a new device in the VM's libvirt definition and a cold restart of the
+VM; while mounted, every file in it is readable from inside the VM by root and anything root runs, at any time, rather
+than only the values the vault was given; and the vault would need a second reader for it. The push needs nothing new
+on the host and reuses a path the installer already uses and CI already tests.
+
+**Checks before a value goes in:** a Claude token must be one `sk-ant-oat01-…` token; a GitHub token must be
+fine-grained (`github_pat_…`). A classic `ghp_` token is refused: lothsahn asked for fine-grained tokens, one per person,
+scoped to the Final-Factory repositories.
+
+## Decisions
+
+1. **Sharing across people:** no. Each person's own tokens for their own work (lothsahn, 2026-10-06; section 10).
+2. **Where the tokens and the key's spare copy live:** on the FFBox host under `/etc/fff-vm`, root only, not in the
+   VM's daily backup (lothsahn, 2026-10-06; section 11).
+3. **The workers' GitHub token:** one fine-grained token per person, scoped to the Final-Factory repositories
+   (lothsahn, 2026-10-06), in place of w511's single workers' token.
 
 ## Cut-over
 
-In order, by lothsahn (Ben for his own tokens). Nothing here runs until he says so. It assumes the portal already runs
-in the VM (w508's cut-over) and this change is on `main`.
+In order. Nothing here runs until lothsahn says so; each person puts in their own tokens, on the FFBox host, never
+through chat. It assumes the portal runs in the VM (w508's cut-over) and this change is on `main`.
 
-1. **The guest's scripts, then the portal's code.** On the FFBox host:
-   ```bash
-   cd ~/ff-factory && git pull && sudo deploy/vm/host/install.sh --guest-only
-   sudo fff-vm ssh 'sudo fffctl update'
-   sudo fff-vm ssh 'sudo fffctl status'                      # until the release is main's newest and /api/health answers
-   ```
-   The guest install puts in the new `fffctl` and `fff-portal.service` and makes `/etc/fff/vault.key`; the update
-   builds the release with the vault and restarts the portal on it, which loads the key.
-2. **Check the key.** `sudo fff-vm ssh 'sudo fffctl vault list'` prints `key: loaded (…)` and `no entries`.
-3. **The key's spare copy** (decision 2), on the FFBox host, never printed:
-   ```bash
-   sudo sh -c 'umask 077; fff-vm ssh "sudo cat /etc/fff/vault.key" > /etc/fff-vm/secrets/vault.key'
-   # Back into a rebuilt VM later:
-   sudo sh -c 'fff-vm ssh "sudo install -m 0600 /dev/stdin /etc/fff/vault.key" < /etc/fff-vm/secrets/vault.key' && sudo fff-vm ssh 'sudo fffctl vault init'
-   ```
-4. **Each Claude account.** On a computer signed in to it, `claude setup-token`; put the token alone in a file
-   (`chmod 600`), copy it into the VM (`sudo fff-vm ssh`, or `scp` to the admin user), then in the VM:
-   ```bash
-   sudo fffctl vault add --kind claude --name ben-max --owner ben --share owner --file /tmp/t && shred -u /tmp/t
-   ```
-   Repeat per account. Names are free text; `--owner` is a portal user id; add `--machines m3,m5` or
-   `--roles workers` to narrow it (default: workers and standing, every machine). Or use Settings → Token vault.
-5. **The workers' GitHub token:**
-   `sudo fffctl vault add --kind github --name workers-gh --share anyone --file /tmp/gh && shred -u /tmp/gh`.
-6. **Max's Discord token, for the posting machine only:**
-   `sudo fffctl vault add --kind env --env FFDISCORD_APP_TOKEN --name max-discord --share anyone --machines lothdesktop --file /tmp/d && shred -u /tmp/d`.
-7. **Check.** `sudo fffctl vault list` shows each entry's fingerprint and last four characters; so does Settings →
-   Token vault. Within a minute the usage meters show a "vault: <name> …abcd" account per Claude entry.
-8. **Switch the first machine** (yourself in `set_app_config`, or ask your orchestrator):
-   `set_app_config machines.claudeFromVault true machine: "m3"`. Start a worker there: its brief says "vault token
-   <name> …abcd", and `system_status` lists it under that account with no vault warning.
-9. **Repeat step 8** for m5, lothdesktop and beast.
-10. **After a few days with no fallback warning**, retire each machine's own logins (section 6, step 5).
+**1. The portal and the scripts** (lothsahn, on the FFBox host):
 
-**Rollback, any time:** `set_app_config machines.claudeFromVault false machine: "<id>"`, and
-`sudo fffctl vault grant <name> --machines <the others>` to take a machine out of an entry. A machine to cut off
-entirely: `sudo fffctl machine-credential revoke <id>`.
+```bash
+cd ~/ff-factory && git pull
+sudo deploy/vm/host/install.sh --guest-only          # new fffctl, fff-portal.service, fff-backup; the VM's vault key; fff-vm vault-sync
+sudo fff-vm ssh 'sudo fffctl update'
+sudo fff-vm ssh 'sudo fffctl status'                 # until the release is main's newest and /api/health answers
+sudo fff-vm ssh 'sudo fffctl vault list'             # "key: loaded"
+```
+
+**2. Each person's tokens** (each person makes their own; lothsahn or Ben puts them on the host as root):
+
+- **Claude:** on any computer signed in to your claude.ai account, run `claude setup-token` and copy the token it
+  prints.
+- **GitHub:** github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new
+  token:
+  - Resource owner: **Final-Factory**; Repository access: **All repositories** (or select FinalFactory, ff-factory,
+    final-factory-agents and the others workers push to);
+  - Permissions: **Contents: Read and write**, **Pull requests: Read and write**, **Workflows: Read and write** (to push
+    a change under `.github/workflows`), **Actions: Read** (to read CI runs; Read and write if workers re-run them),
+    Metadata: Read (automatic);
+  - Expiration: up to a year; note the date. If the organization requires approval for fine-grained tokens, an owner
+    approves it under the organization's Settings → Personal access tokens.
+- **Put them on the host** (`<id>` is your portal user id: `lothsahn`, `ben`). Each command reads the token from the
+  terminal without echoing it, so it is never on a command line, in shell history or in chat:
+
+```bash
+sudo install -d -m 0700 /etc/fff-vm/secrets/people/<id>
+sudo sh -c 'umask 077; read -rs -p "Claude token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/claude-token'; echo
+sudo sh -c 'umask 077; read -rs -p "GitHub token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/github-token'; echo
+sudo fff-vm vault-sync                               # "added host-<id>-claude", "added host-<id>-github"; values never shown
+```
+
+Ben is not on the FFBox host: lothsahn runs the same commands there, and Ben types his own tokens at the hidden prompts
+(the two can share one ssh session to the host, for instance with `tmux`), or Ben hands the two values to lothsahn
+through a channel that is not chat (in person, or a password manager's share).
+
+**3. Check:** `sudo fff-vm ssh 'sudo fffctl vault list'` shows `host-lothsahn-claude`, `host-lothsahn-github`,
+`host-ben-claude`, `host-ben-github`, each with its last four characters; within a minute the usage meters show
+"vault: host-<id>-claude …abcd" accounts.
+
+**4. Max's Discord token, for the posting machine only** (in the VM; unchanged):
+`sudo fffctl vault add --kind env --env FFDISCORD_APP_TOKEN --name max-discord --share anyone --machines lothdesktop --file /tmp/d && shred -u /tmp/d`.
+
+**5. Switch one machine at a time** (lothsahn, in `set_app_config` or through his orchestrator):
+`set_app_config machines.claudeFromVault true machine: "m3"`, then m5, lothdesktop and beast. A worker started there
+for lothsahn's request says "vault token host-lothsahn-claude …abcd" in its brief, and `gh auth status` there shows his
+token; one for Ben's request shows Ben's.
+
+**6. After a few days with no fallback warning in `system_status`**, retire each machine's own logins (section 6, step
+5).
+
+**Rotating a token later:** replace its file (step 2), then `sudo fff-vm vault-sync`. **Removing a person's:** delete
+their files, then `sudo fff-vm vault-sync`; revoke the tokens where they were made.
+
+**Rollback, any time:** `set_app_config machines.claudeFromVault false machine: "<id>"`. A machine to cut off
+entirely: `sudo fff-vm ssh 'sudo fffctl machine-credential revoke <id>'`.
 
 ## Runbook
 
-**Add a token:** step 4, 5 or 6 above (`fffctl vault add … --file FILE`), or Settings → Token vault → Add a token
-(owners only). The value is never shown again.
+**Add, rotate or remove a person's tokens:** the files under `/etc/fff-vm/secrets/people/<id>/`, then
+`sudo fff-vm vault-sync` (Cut-over, step 2).
 
-**Rotate a token:** make the new one, then `sudo fffctl vault rotate <name> --file FILE` (or Rotate in the dialog).
-Runs started from then get it; running ones keep the old one until their process restarts. Revoke the old token where
-it was made.
+**Any other secret** (in the VM): `sudo fffctl vault add … --file FILE`, or Settings → Token vault → Add a token
+(owners only). The value is never shown again. `sudo fffctl vault rotate <name> --file FILE` replaces it; runs started
+from then get it.
 
-**Change who gets it:** `sudo fffctl vault grant <name> [--machines m3,m5|*] [--roles workers,standing] [--owner ID]
-[--share owner|anyone] [--enable|--disable]`.
-
-**Remove a token:** `sudo fffctl vault remove <name>`, then revoke it where it was made.
+**Change who gets an entry:** `sudo fffctl vault grant <name> [--machines m3,m5|*] [--roles workers,standing]
+[--owner ID] [--share owner|anyone] [--enable|--disable]`. A `host-…` entry's grants are reset by the next
+`vault-sync`.
 
 **Enroll a machine** (a new one, or after a revoke):
 1. In the VM: `sudo fffctl machine-credential issue <id> --out /tmp/<id>.cred`. It is written to that file (0600) and
@@ -321,7 +395,7 @@ it was made.
 2. Move the file to the machine and give it to the worker installer (w513, [worker-install.md](worker-install.md)):
    `-CredentialFile` on Windows, `--credential-file` on a Mac. It goes into the root's `secrets/machine-token`. Delete
    the file in the VM and on the machine. (A machine still deployed by `add_machine` gets its own credential that way.)
-3. The machine's daemon connects; `list_machines` shows it online. Grant it entries as above.
+3. The machine's daemon connects; `list_machines` shows it online.
 
 **Cut a machine off:** `sudo fffctl machine-credential revoke <id>` (or ✕ beside it in the dialog). Its link drops
 within 20 s; its sandboxes and sessions stay for when it is enrolled again.
