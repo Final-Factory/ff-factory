@@ -17,6 +17,15 @@ import type { Config } from '../server/config.ts';
 
 // ---------------------------------------------------------------- the synthetic BEAST and VM
 
+// Each fff-migrate*.test.ts file is its own process and gets a temp folder of its own (os.tmpdir() and BEAST's
+// [IO.Path]::GetTempPath() both read TMPDIR): the files run side by side, and the copy test checks that BEAST's snapshot
+// folders are gone from its temp folder afterwards, which another file's snapshots would fail.
+if (process.platform !== 'win32') {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffm-'));
+  process.env.TMPDIR = tmp;
+  process.once('exit', () => fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 }));
+}
+
 export const PWSH = (() => {
   if (process.platform === 'win32') return undefined;
   for (const p of [process.env.FAKE_PWSH, ...(process.env.PATH ?? '').split(':').map((d) => path.join(d, 'pwsh'))]) if (p && fs.existsSync(p)) return p;
