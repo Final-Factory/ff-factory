@@ -47,19 +47,19 @@ test('unclean stop: the heartbeat and a pending update survive on disk; a clean 
   assert.equal(takePendingRestart(dir, Date.now() + 25 * 3_600_000), undefined, 'a day old: stale');
 });
 
-test('unclean stop: agents are told what happened, and whether their editor is coming back', () => {
+test('unclean stop: agents are told what happened (a worker on a machine kept its working tree; w510: no editor of the portal)', () => {
   const cause = 'BEAST went down unexpectedly (lost power, was hard-reset or crashed) after 9/24/2026, 5:13:10 PM, and booted again at 9/24/2026, 5:23:06 PM';
-  const f: ResumeFile = { version: 1, reason: cause, cause, update: false, at: '2026-09-24T23:13:10Z', sessions: [], orchestratorBusy: true, editors: ['sb1'] };
+  const f: ResumeFile = { version: 1, reason: cause, cause, update: false, at: '2026-09-24T23:13:10Z', sessions: [], orchestratorBusy: true };
   const e = (over: Partial<ResumeEntry>): ResumeEntry => ({ id: 'w1', kind: 'worker', title: 't', why: 'mid-turn', unanswered: [{ text: 'do the thing', from: 'orchestrator' }], lastFrom: 'orchestrator', ...over });
-  const withEditor = resumeMessage(e({ sandboxId: 'sb1' }), f);
-  assert.match(withEditor, /^BEAST went down unexpectedly.*\. The app is back and resumes you now\..*your Unity editor is being started again: wait for it \(mcp__sandbox__wait_for_unity/);
-  assert.match(withEditor, /do the thing/);
-  assert.match(resumeMessage(e({ sandboxId: 'sb2' }), f), /your Unity editor was not running/);
-  assert.doesNotMatch(resumeMessage(e({ machineId: 'm5' }), f), /Unity editor/);
-  const sum = restartSummary(f, [{ id: 'w1', title: 't', sandboxId: 'sb1', ok: true }], undefined, { head: 'abc', version: '0.1.0' });
+  const worker = resumeMessage(e({ machineId: 'beast' }), f);
+  assert.match(worker, /^BEAST went down unexpectedly.*\. The app is back and resumes you now\. Your process was stopped; your working tree and your history are intact\./);
+  assert.match(worker, /do the thing/);
+  assert.doesNotMatch(worker, /Unity editor/);
+  assert.match(resumeMessage(e({ kind: 'orchestrator' }), f), /Your process was stopped; your history is intact\./);
+  const sum = restartSummary(f, [{ id: 'w1', title: 't', machineId: 'beast', ok: true }], undefined, { head: 'abc', version: '0.1.0' });
   assert.match(sum, /^\[app restarted\] FF Factory restarted WITHOUT a clean stop: BEAST went down unexpectedly/);
-  assert.match(sum, /Unity editors that were up: sb1 \(started again before their agents resumed\)/);
-  assert.match(sum, /Resumed automatically: "t" \(w1 in sb1\)/);
+  assert.doesNotMatch(sum, /Unity editors that were up/);
+  assert.match(sum, /Resumed automatically: "t" \(w1 on beast\)/);
   const upd = restartSummary({ ...f, update: true, reason: 'update (request_app_update)' }, [], { ok: true, at: '', headBefore: 'aaaaaaaaaa', headAfter: 'bbbbbbbbbb' }, { head: 'bbb', version: '0.1.0' });
   assert.match(upd, /The update that was pending then \(update \(request_app_update\)\) was retried\..*Update OK \(aaaaaaaaa → bbbbbbbbb\)/);
 });

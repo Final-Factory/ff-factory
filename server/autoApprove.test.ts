@@ -37,7 +37,6 @@ function setup(t: { after: (fn: () => void) => void }) {
     },
     get: (id) => ({ info: infos.get(id)!, live: false, stop() {} }),
     send: () => 'u',
-    liveAgents: () => 0,
     remove: () => undefined,
   };
   const sandboxes: Sandbox[] = [];

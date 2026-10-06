@@ -6,7 +6,6 @@ import path from 'node:path';
 import type { HookInput } from '@anthropic-ai/claude-agent-sdk';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
-import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
 import { Agents, FFBOX_BRIEF } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -205,9 +204,8 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
   } as unknown as Config;
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
-  const sandboxes = new SandboxManager(cfg, store);
   const machines = new MachineManager(cfg, store, sessions);
-  const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
   agents.boot();
   t.after(async () => {
     agents.orchestrators.close();

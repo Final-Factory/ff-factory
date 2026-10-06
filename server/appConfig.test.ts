@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkReviewers, normalizeSetting, setAppConfig } from './appConfig.ts';
+import { SETTABLE_KEYS, checkReviewers, normalizeSetting, setAppConfig } from './appConfig.ts';
 import type { Config } from './config.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
@@ -79,15 +79,14 @@ test('set_app_config: host guard housekeeping, with age rules kept away from any
   assert.throws(() => normalizeSetting('hostGuard.devDriveVhdx', 'C:/not-a-disk.txt'));
 });
 
-test('app config: limits.maxUnity caps editors at once, live, 1 to 8', (t) => {
+test("app config (w510): the portal's own pool limits and the standing account are no longer settable", (t) => {
   const { file, cfg } = setup(t);
-  const full = { ...cfg, limits: { maxUnity: 3, maxSessions: 6 } } as unknown as Config;
-  setAppConfig(file, full, 'limits.maxUnity', '2');
-  assert.equal(full.limits.maxUnity, 2, 'applies at once');
-  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).limits.maxUnity, 2);
-  for (const bad of ['0', '9', '2.5', 'two']) assert.throws(() => setAppConfig(file, full, 'limits.maxUnity', bad), /1 to 8/, bad);
-  setAppConfig(file, full, 'limits.maxUnity', null);
-  assert.equal(full.limits.maxUnity, 3, 'null: back to the default');
+  const before = fs.readFileSync(file, 'utf8');
+  for (const key of ['limits.maxUnity', 'limits.maxSandboxes', 'limits.maxSessions', 'claudeAccounts.standing']) {
+    assert.ok(!(SETTABLE_KEYS as readonly string[]).includes(key), key);
+    assert.throws(() => setAppConfig(file, cfg as unknown as Config, key as never, '2'), undefined, key);
+  }
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'the file is left alone');
 });
 
 test('app config: attachments.maxMB and attachments.retentionDays, live, bounded (docs/attachments.md)', (t) => {
@@ -123,23 +122,6 @@ test('app config: publicUrl (the portal address machines and the outside watchdo
   for (const bad of ['beast.tailedfcad.ts.net', 'https://beast.tailedfcad.ts.net/api', 'ftp://x']) assert.throws(() => setAppConfig(file, full, 'publicUrl', bad), /base URL/, bad);
 });
 
-test('app config: limits.maxSandboxes (1-8) and limits.maxSessions (1-12), live', (t) => {
-  const { file, cfg } = setup(t);
-  const full = { ...cfg, limits: { maxUnity: 3, maxSessions: 6, maxSandboxes: 4 } } as unknown as Config;
-  setAppConfig(file, full, 'limits.maxSandboxes', 5);
-  setAppConfig(file, full, 'limits.maxSessions', '8');
-  assert.equal(full.limits.maxSandboxes, 5, 'the create tool sees it at once');
-  assert.equal(full.limits.maxSessions, 8);
-  const saved = JSON.parse(fs.readFileSync(file, 'utf8')).limits;
-  assert.equal(saved.maxSandboxes, 5);
-  assert.equal(saved.maxSessions, 8);
-  assert.equal(saved.maxUnity, 3, 'the other limits stay');
-  for (const bad of ['0', '9', '2.5']) assert.throws(() => setAppConfig(file, full, 'limits.maxSandboxes', bad), /1 to 8/, bad);
-  for (const bad of ['0', '13']) assert.throws(() => setAppConfig(file, full, 'limits.maxSessions', bad), /1 to 12/, bad);
-  setAppConfig(file, full, 'limits.maxSandboxes', null);
-  assert.equal(full.limits.maxSandboxes, 4, 'null: the default');
-});
-
 test('checkReviewers: logins that exist, in their own spelling, deduplicated; the rest refused', () => {
   const users = ['Ben', 'lothsahn'];
   assert.deepEqual(checkReviewers(['ben', 'LOTHSAHN', 'Ben'], users), ['Ben', 'lothsahn']);
@@ -166,12 +148,15 @@ test('set_app_config: placement.prefer and placement.avoid (w428), live, cleared
   assert.deepEqual(cfg.placement?.prefer, ['lothdesktop', 'm5', 'm3']);
   assert.deepEqual(setAppConfig(file, cfg, 'placement.avoid', { BEAST: 'BEAST unstable, 2026-10-05' }).after, { beast: 'BEAST unstable, 2026-10-05' });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')).placement, { prefer: ['lothdesktop', 'm5', 'm3'], avoid: { beast: 'BEAST unstable, 2026-10-05' } });
-  assert.deepEqual(setAppConfig(file, cfg, 'placement.prefer', ['host', 'lothdesktop']).after, ['this host', 'lothdesktop'], '"host" is this host');
+  // w510: the portal holds no sandboxes, so "this host" ("host") is no place for work; name its daemon instead.
+  for (const host of ['host', 'this host']) assert.throws(() => setAppConfig(file, cfg, 'placement.prefer', [host, 'lothdesktop']), /no place for work any more \(w510\)/, host);
+  assert.throws(() => setAppConfig(file, cfg, 'placement.avoid', { 'this host': 'x' }), /no place for work/);
+  assert.deepEqual(setAppConfig(file, cfg, 'placement.prefer', ['beast', 'lothdesktop']).after, ['beast', 'lothdesktop']);
   assert.throws(() => setAppConfig(file, cfg, 'placement.prefer', ['loth desktop']), /not a machine id/);
   assert.throws(() => setAppConfig(file, cfg, 'placement.avoid', { beast: '' }), /say why/);
   assert.throws(() => setAppConfig(file, cfg, 'placement.avoid', ['beast']), /is an object/);
   // Once BEAST is fixed: null clears, and the rest of the block stays.
   setAppConfig(file, cfg, 'placement.avoid', null);
-  assert.deepEqual(cfg.placement, { prefer: ['this host', 'lothdesktop'] });
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { prefer: ['this host', 'lothdesktop'] });
+  assert.deepEqual(cfg.placement, { prefer: ['beast', 'lothdesktop'] });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { prefer: ['beast', 'lothdesktop'] });
 });

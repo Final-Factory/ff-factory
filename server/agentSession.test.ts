@@ -24,7 +24,7 @@ setQueryForTesting(((args: { prompt: never; options: Options }) => {
   return fake(args);
 }) as never);
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }, maxSessions = 6, limits: Record<string, number> = {}) {
+function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-agent-'));
   const store = new Store(dir);
   t.after(async () => {
@@ -35,7 +35,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, maxSessio
     store.flush();
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
-  const sessions = new SessionManager({ limits: { maxSessions, ...limits } } as Config, store);
+  const sessions = new SessionManager({} as Config, store);
   const worker = (permissionMode: SessionInfo['permissionMode'] = 'bypassPermissions', kind: SessionInfo['kind'] = 'worker') =>
     sessions.create({ kind, title: 'w', permissionMode, options: () => ({ model: 'opus' }) });
   return { dir, store, sessions, worker };
@@ -200,39 +200,23 @@ test('a failed turn is recorded as not ok', async (t) => {
   assert.equal(s.info.lastResult, 'stopped: error_during_execution');
 });
 
-test('w384: the agent limit counts mid-turn agents only: a message to an idle worker goes through with every slot held by idle ones', async (t) => {
-  const { sessions, worker } = setup(t, 2);
+test('w384: with every running slot of its place busy a message is queued, not refused, and delivered when a turn ends; the orchestrator never waits', async (t) => {
+  const { sessions, worker, store } = setup(t);
+  // Workers are on a machine (w510: the portal runs none itself); its place holds 2 mid-turn agents at most.
   const a = worker();
   const b = worker();
   const c = worker();
-  sessions.send(a.info.id, 'one');
-  sessions.send(b.info.id, 'two');
-  await until(() => a.info.status === 'idle' && b.info.status === 'idle', 'both idle');
-  assert.equal(sessions.liveAgents(), 2, 'their processes are still up');
-  assert.equal(sessions.runningAgents(), 0, 'but neither is mid-turn');
-  // 4b35b8c1 on 2026-10-04: refused "already 6 agents running (limits.maxSessions)" with six idle workers.
-  const uuid = sessions.send(c.info.id, 'three');
-  assert.equal(sessions.isQueued(uuid), false, 'delivered at once, not queued');
-  assert.equal(c.info.status === 'running' || c.info.status === 'starting', true, c.info.status);
-  await until(() => c.info.status === 'idle', 'c answered');
-  // And an idle one is resumed the same way.
-  sessions.send(a.info.id, 'more');
-  await until(() => a.info.status === 'idle', 'a answered again');
-});
-
-test('w384: with every running slot busy a message is queued, not refused, and delivered when a turn ends; the orchestrator never waits', async (t) => {
-  const { sessions, worker, store } = setup(t, 2);
-  const a = worker();
-  const b = worker();
-  const c = worker();
+  for (const s of [a, b, c]) s.info.machineId = 'm1';
+  const midTurn = () => [a, b, c].filter((s) => ['running', 'starting', 'waiting_permission'].includes(s.info.status)).length;
+  sessions.placeFull = () => (midTurn() >= 2 ? `${midTurn()} of 2 agents on m1 are mid-turn` : undefined);
   const o = worker('default', 'orchestrator');
   sessions.send(a.info.id, '#slow one');
   sessions.send(b.info.id, '#slow two');
-  assert.equal(sessions.runningAgents(), 2);
+  assert.equal(midTurn(), 2);
   const uuid = sessions.send(c.info.id, 'three');
   assert.equal(sessions.isQueued(uuid), true, 'queued');
   assert.notEqual(c.info.status, 'running');
-  assert.match(sessions.queued()[0].why, /2 of 2 agents on this host are mid-turn \(limits\.maxSessions\)/);
+  assert.match(sessions.queued()[0].why, /2 of 2 agents on m1 are mid-turn/);
   // A follow-up to a session already mid-turn joins its turn; the orchestrator never counts.
   assert.equal(sessions.isQueued(sessions.send(a.info.id, 'more')), false);
   assert.equal(sessions.isQueued(sessions.send(o.info.id, 'hi')), false);
@@ -245,27 +229,6 @@ test('w384: with every running slot busy a message is queued, not refused, and d
   assert.deepEqual(said, ['three', 'four'], 'in order');
 });
 
-test('w384: past limits.maxSessions + limits.maxIdleAgents processes, the oldest idle one nothing protects is stopped to make room, resumably', async (t) => {
-  const { sessions, worker } = setup(t, 1, { maxIdleAgents: 1 });
-  const a = worker();
-  const b = worker();
-  const c = worker();
-  sessions.keepIdle = (s) => (s.info.id === b.info.id ? 'its wake_me is pending' : undefined);
-  sessions.send(a.info.id, 'one');
-  await until(() => a.info.status === 'idle', 'a idle');
-  sessions.send(b.info.id, 'two');
-  await until(() => b.info.status === 'idle', 'b idle');
-  assert.equal(sessions.liveAgents(), 2);
-  sessions.send(c.info.id, 'three');
-  assert.equal(a.live, false, 'the oldest idle one went');
-  assert.equal(b.live, true, 'a protected one stays');
-  assert.equal(a.info.status, 'stopped');
-  await until(() => c.info.status === 'idle', 'c answered');
-  // Resumable: a message brings it back (b is protected, so c, now the oldest idle, makes room).
-  sessions.send(a.info.id, 'back');
-  await until(() => a.info.status === 'idle', 'a resumed');
-});
-
 test('restore: sessions come back stopped; one cut off mid-turn says so and is reported', (t) => {
   const { dir, store } = setup(t);
   const base = { title: 't', permissionMode: 'default' as const, createdAt: 'x', lastActivityAt: 'x', turns: 0, costUsd: 0 };
@@ -275,7 +238,7 @@ test('restore: sessions come back stopped; one cut off mid-turn says so and is r
   store.flush();
 
   const again = new Store(dir);
-  const restored = new SessionManager({ limits: { maxSessions: 6 } } as Config, again);
+  const restored = new SessionManager({} as Config, again);
   const cutOff = restored.restore((info) => (info.id === 'orphan' ? undefined : () => ({})));
   assert.deepEqual(cutOff.map((i) => i.id), ['busy']);
   assert.deepEqual([...restored.sessions.keys()].sort(), ['busy', 'calm']);
@@ -299,7 +262,7 @@ test('restart marks: a process that ends with the server leaves its turn open, a
 
   // The server goes too; the next one finds it cut off and resumes it.
   const again = new Store(dir);
-  const restored = new SessionManager({ limits: { maxSessions: 6 } } as Config, again);
+  const restored = new SessionManager({} as Config, again);
   const cutOff = restored.restore(() => () => ({}));
   assert.deepEqual(cutOff.map((i) => i.id), [s.info.id]);
   const snaps = cutOff.map((i) => ({ ...snapshotOf(restored.get(i.id)), status: i.status }));
@@ -316,7 +279,7 @@ test('restart marks: a worker cut off mid-turn by a crash is resumed (restore us
   store.putSession({ ...base, id: 'busy', kind: 'worker', sandboxId: 'sb', status: 'running' });
   store.flush();
   const again = new Store(dir);
-  const restored = new SessionManager({ limits: { maxSessions: 6 } } as Config, again);
+  const restored = new SessionManager({} as Config, again);
   const cutOff = restored.restore(() => () => ({}));
   // Agents.uncleanResumeFile: the cut-off list's own status, over the restored session's snapshot.
   assert.equal(cutOff[0].status, 'running');
@@ -377,7 +340,7 @@ test('restart marks: an idle worker waiting on a background task is resumed, tol
   // After a crash as well: the next server finds it in the store.
   store.flush();
   const again = new Store(dir);
-  const cutOff = new SessionManager({ limits: { maxSessions: 6 } } as Config, again).restore(() => () => ({}));
+  const cutOff = new SessionManager({} as Config, again).restore(() => () => ({}));
   assert.deepEqual(cutOff.map((i) => i.id), [s.info.id]);
   assert.match(texts(again, s.info.id).at(-1)!, /1 background task\(s\) running; they were stopped/);
   again.flush();

@@ -5,7 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
-import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -60,9 +59,8 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
   } as unknown as Config;
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
-  const sandboxes = new SandboxManager(cfg, store);
   const machines = new MachineManager(cfg, store, sessions);
-  const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
   agents.boot();
   const o = agents.orchestrators;
   const world = { prs: [] as PrRecord[] | undefined, clear: true as boolean | undefined, resumed: [] as { id: string; text: string }[], view: undefined as ((number: number) => PrRecord | undefined) | undefined, viewed: [] as number[] };

@@ -12,11 +12,7 @@
     "referenceRepo": "C:/path/to/your/existing/clone"
   },
   "defaultBase": "origin/develop",
-  "librarySeed": "C:/path/to/your/existing/clone/Library",
-  "librarySeedGB": 70,
   "unity": {
-    "editorPath": "C:/Program Files/Unity/Hub/Editor/{version}/Editor/Unity.exe",
-    "extraArgs": [],
     "mcpServer": {
       "command": "uvx",
       "args": [
@@ -31,10 +27,7 @@
     "C:/path/to/a/checkout/agents/must/not/touch"
   ],
   "limits": {
-    "maxUnity": 3,
-    "maxSessions": 6,
-    "maxSandboxes": 4,
-    "minFreeGB": 100
+    "minFreeRamGB": 10
   },
   "models": [
     "opus",

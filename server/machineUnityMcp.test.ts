@@ -9,7 +9,6 @@ import { realPoolDeps } from '../machine/sandboxes.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
-import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -158,7 +157,7 @@ test('machine unity mcp: the portal asks for it for main-clone and sandbox agent
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
   const machines = new MachineManager(cfg, store, sessions);
-  const agents = new Agents(cfg, store, new SandboxManager(cfg, store), sessions, machines, new Identity(cfg, () => []));
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => []));
   t.after(async () => {
     agents.orchestrators.close();
     sessions.stopAll();
