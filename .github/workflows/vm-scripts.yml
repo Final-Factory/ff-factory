@@ -1,20 +1,38 @@
 name: Portal VM scripts
 
-# deploy/vm: the FF Factory portal's VM on the FFBox host (docs/portal-on-ffbox-host.md). Lint on every change to
-# them; the end-to-end job builds the real thing on a throwaway runner: libvirt, the isolated network and firewall,
-# a VM from the Ubuntu cloud image, the guest install, updates, rollback, health restarts, the nightly cycle, hang
-# detection, the watchdog and the uninstall. Weekly as well, since it depends on outside sources (the cloud image,
-# NodeSource, GitHub CLI and Tailscale repositories).
+# deploy/vm: the FF Factory portal's VM on the FFBox host (docs/portal-on-ffbox-host.md). The end-to-end job builds the
+# real thing on a throwaway runner: libvirt, the isolated network and firewall, a VM from the Ubuntu cloud image, the
+# one-command install (host, then the guest from the host), updates, rollback, health restarts, the nightly cycle, hang
+# detection, the watchdog and the uninstall (deploy/vm/test/ci-vm-e2e.sh).
+#
+# What runs when (w505; the plan job decides, and says why in its summary):
+#   pull request  the representative job, a zvol on an ubuntu-24.04 host (the FFBox host's own setup), when the PR
+#                 touches deploy/vm, this workflow, the server code the VM scenarios drive (server/restart.ts: drain,
+#                 restart, hold; server/index.ts where it reads restart.request, the orchestrator inbox, /api/health or
+#                 stops; see VM_MARKERS), or the packages the guest builds. The two other jobs (a zvol on an
+#                 ubuntu-26.04 host, qcow2 on ubuntu-24.04) as well when it touches deploy/vm/host, deploy/vm/test or
+#                 this workflow. Lint (shellcheck, units, dry runs) when it touches deploy/vm or this workflow.
+#                 Nothing else: a PR that touches none of these never waits on a VM.
+#   push to main  all three, after a merge that touched any of those paths.
+#   nightly       all three, plus one at production timing: the fast mode's short health, verify and watch timers
+#                 (set only by the test) replaced by the shipped defaults. Also because it depends on outside sources
+#                 (the cloud image, NodeSource, GitHub CLI and Tailscale repositories).
 on:
   pull_request:
     branches: [main]
-    paths: ['deploy/vm/**', 'server/restart.ts', 'server/agents.ts', '.github/workflows/vm-scripts.yml']
+    paths: ['deploy/vm/**', '.github/workflows/vm-scripts.yml', 'server/restart.ts', 'server/index.ts', 'package.json', 'package-lock.json', 'web/package.json', 'web/package-lock.json']
   push:
     branches: [main]
-    paths: ['deploy/vm/**', 'server/restart.ts', 'server/agents.ts', '.github/workflows/vm-scripts.yml']
+    paths: ['deploy/vm/**', '.github/workflows/vm-scripts.yml', 'server/restart.ts', 'server/index.ts', 'package.json', 'package-lock.json', 'web/package.json', 'web/package-lock.json']
   schedule:
-    - cron: '17 6 * * 1'
+    - cron: '17 6 * * *'
   workflow_dispatch:
+    inputs:
+      scope:
+        description: 'representative (one job), full (three) or nightly (three plus production timing)'
+        default: full
+        type: choice
+        options: [representative, full, nightly]
 
 concurrency:
   group: vm-${{ github.event.pull_request.number || github.ref }}
@@ -22,10 +40,80 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  plan:
+    name: Plan (which VM jobs this change needs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      lint: ${{ steps.plan.outputs.lint }}
+      e2e: ${{ steps.plan.outputs.e2e }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SCOPE: ${{ inputs.scope }}
+          # server/index.ts: a hunk (changed lines, context or its header) with one of these touches what the VM drives.
+          VM_MARKERS: 'restartFlag|restart\.request|parseRestartRequest|[Dd]rainer|stopServer|plainStop|keepDaemonAgents|orchestrator-inbox|inbox|/api/health|appNow|SIGTERM|SIGINT|process\.exit|[Rr]esumeFile|update\.result|UPDATE_RESULT|ALIVE_FILE'
+        run: |
+          set -euo pipefail
+          rep='{"disk":"zvol","host":"ubuntu-24.04","timing":"fast"}'
+          full="$rep,"'{"disk":"zvol","host":"ubuntu-26.04","timing":"fast"},{"disk":"qcow2","host":"ubuntu-24.04","timing":"fast"}'
+          prod='{"disk":"zvol","host":"ubuntu-24.04","timing":"production"}'
+          lint=true e2e=true why=""
+          case "$EVENT" in
+            schedule) matrix="[$full,$prod]"; why="nightly: all three, and one at production timing" ;;
+            push) matrix="[$full]"; why="main after a merge: all three" ;;
+            workflow_dispatch)
+              case "${SCOPE:-full}" in
+                representative) matrix="[$rep]" ;;
+                nightly) matrix="[$full,$prod]" ;;
+                *) matrix="[$full]" ;;
+              esac
+              why="by hand: ${SCOPE:-full}" ;;
+            pull_request)
+              files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename')
+              echo "changed files:"; printf '  %s\n' $files
+              lint=false e2e=false host=false
+              for f in $files; do
+                case "$f" in
+                  deploy/vm/host/* | deploy/vm/test/* | .github/workflows/vm-scripts.yml) lint=true e2e=true host=true; why+=" $f (all three);" ;;
+                  deploy/vm/*) lint=true e2e=true; why+=" $f;" ;;
+                  server/restart.ts | package.json | package-lock.json | web/package.json | web/package-lock.json) e2e=true; why+=" $f;" ;;
+                  server/index.ts)
+                    # No patch (a diff too large for the API): count it as touching the VM's paths.
+                    patch=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[] | select(.filename == "server/index.ts") | .patch // "NO-PATCH"')
+                    if [ "$patch" = NO-PATCH ] || grep -Eq "$VM_MARKERS" <<<"$patch"; then
+                      e2e=true; why+=" server/index.ts (its restart, drain, inbox or health code);"
+                    else
+                      echo "server/index.ts: no hunk near the restart, drain, inbox or health code"
+                    fi ;;
+                esac
+              done
+              if [ "$host" = true ]; then matrix="[$full]"; else matrix="[$rep]"; fi
+              [ -n "$why" ] || why="nothing the VM jobs cover changed"
+              ;;
+          esac
+          echo "lint=$lint" >>"$GITHUB_OUTPUT"
+          echo "e2e=$e2e" >>"$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+          {
+            echo "### Portal VM jobs"
+            echo "- lint: $lint"
+            echo "- end to end: $e2e $( [ "$e2e" = true ] && echo "$matrix" | jq -r '[.[] | "\(.disk) on \(.host) (\(.timing))"] | join(", ")')"
+            echo "- why:$why"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   lint:
     name: Lint (shellcheck, units, dry runs)
+    needs: plan
+    if: needs.plan.outputs.lint == 'true'
     # The guest's release (decision D14: 26.04), so the guest install's dry run meets its packages.
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -38,8 +126,9 @@ jobs:
           printf 'VM_DISK_MODE=qcow2\n' | sudo tee /tmp/fff-vm.conf
           sudo deploy/vm/host/install.sh --dry-run --config /tmp/fff-vm.conf
           test ! -e /etc/fff-vm && test ! -e /var/lib/fff-vm/manifest && test ! -e /usr/local/sbin/fff-vm
-          ! sudo nft list table inet fff_vm 2>/dev/null
-          ! dpkg -l libvirt-daemon-system 2>/dev/null | grep -q '^ii'
+          # "! cmd" never fails a step under set -e (bash skips errexit for it): say it with an exit.
+          if sudo nft list table inet fff_vm >/dev/null 2>&1; then echo "the dry run loaded the firewall table"; exit 1; fi
+          if dpkg -l libvirt-daemon-system 2>/dev/null | grep '^ii' >/dev/null; then echo "the dry run installed libvirt"; exit 1; fi
       - name: Guest install --dry-run changes nothing
         run: |
           sudo deploy/vm/guest/install.sh --dry-run
@@ -51,19 +140,18 @@ jobs:
           sudo deploy/vm/test/lint.sh --units
 
   e2e:
-    name: End to end, a 26.04 guest in a nested VM (${{ matrix.disk }} on an ${{ matrix.host }} host)
-    needs: lint
+    name: End to end, a 26.04 guest in a nested VM (${{ matrix.disk }} on an ${{ matrix.host }} host, ${{ matrix.timing }} timing)
+    needs: [plan, lint]
+    # Lint skipped (no deploy/vm change) is fine; lint failed is not.
+    if: ${{ !cancelled() && needs.plan.outputs.e2e == 'true' && needs.lint.result != 'failure' }}
     # The guest is always the default release (26.04, D14). The FFBox host's release is not known here, so the host
     # side runs on both LTS releases, with the zvol (D13) on both.
     runs-on: ${{ matrix.host }}
-    timeout-minutes: 75
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { disk: zvol, host: ubuntu-24.04 }
-          - { disk: zvol, host: ubuntu-26.04 }
-          - { disk: qcow2, host: ubuntu-24.04 }
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -77,7 +165,9 @@ jobs:
           ls -l /dev/kvm
           grep -Ec 'vmx|svm' /proc/cpuinfo
       - name: Run
-        run: sudo --preserve-env=CI deploy/vm/test/ci-vm-e2e.sh ${{ matrix.disk }}
+        env:
+          CI_TIMING: ${{ matrix.timing }}
+        run: sudo --preserve-env=CI,CI_TIMING deploy/vm/test/ci-vm-e2e.sh ${{ matrix.disk }}
       - name: Logs
         if: failure()
         run: |
@@ -90,6 +180,6 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: vm-logs-${{ matrix.disk }}-${{ matrix.host }}
+          name: vm-logs-${{ matrix.disk }}-${{ matrix.host }}-${{ matrix.timing }}
           path: vm-logs/
           retention-days: 14
