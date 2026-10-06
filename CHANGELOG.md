@@ -161,6 +161,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A worker's brief is never lost** (w496, asked by Ben). Workers started while LothDesktop's daemon was outdated got
+  only the dispatcher's later nudge: the brief had been written to the transcript only. `start_agent`'s first prompt
+  now waits in the send queue whatever would refuse it (an outdated or offline daemon, the host guard) and goes first;
+  a queued message leaves the queue only once delivered, retried for up to 24 hours instead of dropped on the first
+  error. Every worker started for a request also gets the request as filed: title, brief, constraints, related ids and
+  its people's notes ([docs/orchestrators.md](docs/orchestrators.md#agent-limits-and-idle-workers)).
+
 - **A thread Max escalated hears when its fix merges** (w480, asked by Lothsahn). FFBox watches board ref
   `conv-<conversation>` after an escalation, but the ledger left a conversation's own request out of that
   conversation's check, so the answer was always `clear` and no merge notice ever came: w436 (#ask-assistant, range
