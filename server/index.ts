@@ -1292,15 +1292,16 @@ const server = http.createServer(async (req, res) => {
       );
     }
     // A worker install asking about itself, or leaving (w513, docs/worker-install.md): its own token, nothing else.
-    if (url.pathname === '/machine/whoami' || url.pathname === '/machine/unenroll') {
+    if (url.pathname === '/machine/whoami' || url.pathname === '/machine/unenroll' || url.pathname === '/machine/stopping') {
       const machineId = machines.authenticate(req.headers.authorization);
       if (!machineId || !store.machines.has(machineId)) return send(res, 401, { error: 'a valid machine token is required' });
       if (url.pathname === '/machine/whoami' && req.method === 'GET') return send(res, 200, machines.selfStatus(machineId));
+      if (url.pathname === '/machine/stopping' && req.method === 'POST') return send(res, 200, machines.stoppingOnPurpose(machineId));
       if (url.pathname === '/machine/unenroll' && req.method === 'POST') {
         const r = machines.unenroll(machineId, url.searchParams.get('force') === '1');
         return send(res, r.ok ? 200 : 409, r);
       }
-      return send(res, 405, { error: 'GET /machine/whoami or POST /machine/unenroll' });
+      return send(res, 405, { error: 'GET /machine/whoami, POST /machine/stopping or POST /machine/unenroll' });
     }
     // The nightly e2e lab's report (docs/intake.md, "Nightly e2e regressions"): a key minted --scope nightly, nothing else.
     if (url.pathname === '/api/intake/nightly' && req.method === 'POST') {

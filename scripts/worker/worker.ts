@@ -282,6 +282,22 @@ export interface WhoAmI {
   sandboxes: string[];
 }
 
+/**
+ * POST /machine/stopping (server/index.ts, w513): the daemon stops on purpose now (a migration), so the portal's offline
+ * redeploy leaves the machine alone until a daemon says hello again. A portal without the route (404) is fine only if it
+ * was told another way: the daemon was stopped with machine_daemon stop, and none runs (the caller checks). Exported for tests.
+ */
+export async function holdRedeploys(portalUrl: string, token: string, fetcher: typeof fetch = fetch): Promise<{ ok: true } | { ok: false; error: string; tooOld?: boolean }> {
+  try {
+    const r = await fetcher(`${portalUrl}/machine/stopping`, { method: 'POST', headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) });
+    if (r.ok) return { ok: true };
+    if (r.status === 404) return { ok: false, tooOld: true, error: 'the portal is too old to hold its redeploys during a migration (no /machine/stopping)' };
+    return { ok: false, error: `the portal refused to hold its redeploys (HTTP ${r.status})` };
+  } catch (e) {
+    return { ok: false, error: `the portal did not answer (${(e as Error).message})` };
+  }
+}
+
 /** GET /machine/whoami (server/index.ts, w513). Exported for tests. */
 export async function whoami(portalUrl: string, token: string, fetcher: typeof fetch = fetch): Promise<{ ok: true; me: WhoAmI } | { ok: false; error: string }> {
   try {

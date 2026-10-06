@@ -162,7 +162,6 @@ test('convert_machine (live): BEAST becomes an ssh machine and back with its dae
   delete reg.local;
   delete reg.online;
   const { token } = mm.register(reg as Machine);
-  const tokensBefore = fs.readFileSync(path.join(tmp, 'machine-tokens.json'), 'utf8');
   const d = new Daemon({ portalUrl: url, id: 'beast', token, repoPath: tmp, appDir: tmp, claude: 'no-such-claude', maxSessions: 3, maxEventsFile: null }, (i, s, o, e) => new LongAgent(i, s, o, e), PROBES);
   t.after(async () => {
     d.shutdown();
@@ -174,6 +173,10 @@ test('convert_machine (live): BEAST becomes an ssh machine and back with its dae
   LongAgent.all = [];
   d.start();
   await until('online', () => mm.isOnline('beast'));
+  // Once its daemon has connected with it, the token register staged is the machine's only one (w568).
+  const tokensBefore = fs.readFileSync(path.join(tmp, 'machine-tokens.json'), 'utf8');
+  assert.match(tokensBefore, /"beast": "[0-9a-f]{64}"/);
+  assert.doesNotMatch(tokensBefore, /next:beast/);
   const s = mm.createSession('beast', { kind: 'standing', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'a long turn');
   await until('mid-turn', () => s.info.status === 'running');
