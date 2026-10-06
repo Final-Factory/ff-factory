@@ -789,7 +789,11 @@ $root = ${win.psq(l.root)}
 "rootRules=$(@(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object { [string]$_.Program -like ($root + '*') }).Count)"
 $cfg = Join-Path $env:ProgramData 'FinalFactory\\player-slots.json'
 "slotConfig=$(if (Test-Path -LiteralPath $cfg) { (Get-Content -Raw -LiteralPath $cfg | ConvertFrom-Json).root } else { '' })"
-"procs=$(@(Get-CimInstance Win32_Process -Property CommandLine | Where-Object { ([string]$_.CommandLine).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $_.ProcessId -ne $PID }).Count)"
+$all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CommandLine)
+$mine = New-Object System.Collections.Generic.HashSet[int]
+$id = $PID
+while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId -eq $id } | Select-Object -First 1).ParentProcessId }
+"procs=$(@($all | Where-Object { ([string]$_.CommandLine).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and -not $mine.Contains([int]$_.ProcessId) }).Count)"
 "runKeys=$(@(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -ErrorAction SilentlyContinue | ForEach-Object { $_.PSObject.Properties } | Where-Object { ([string]$_.Value).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count)"
 `,
     );
@@ -807,7 +811,8 @@ $cfg = Join-Path $env:ProgramData 'FinalFactory\\player-slots.json'
   } else {
     const plistFile = path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
     const loaded = (await exec('launchctl', ['print', `gui/${process.getuid?.()}/${service}`])).code === 0;
-    const procs = (await exec('pgrep', ['-f', l.root])).stdout.split('\n').filter((p) => p && Number(p) !== process.pid).length;
+    const mine = await ancestors();
+    const procs = (await exec('pgrep', ['-f', l.root])).stdout.split('\n').filter((p) => p && !mine.has(Number(p))).length;
     items.push(
       { what: `LaunchAgent plist ${plistFile}`, present: fs.existsSync(plistFile) },
       { what: `LaunchAgent ${service} loaded`, present: loaded },
