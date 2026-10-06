@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **BEAST's daemon guards BEAST's sandbox drive itself** (w466, asked by Lothsahn; change 4 of
+  docs/portal-on-ffbox-host.md, decided as D11). The Dev Drive watch, the remount through `ffsb-helper-mount` with its
+  retries, then the editors restarted and the interrupted agents resumed, the disk levels and the headless-browser
+  reaper run in the portal's own host's daemon (`machine/hostGuard.ts`, the same `HostHealthMonitor`). So they stay
+  with BEAST when the portal moves to its VM. While the daemon's hello says its guard runs, the portal's own guard
+  leaves the drive to it. Its reports reach the dispatcher as `[host beast] …`, and new sandbox agents and editors on
+  BEAST wait with the reason while the drive is gone (docs/self-recovery.md, "On BEAST's daemon").
+
 - **The "tokenfile" account** (w464, asked by Lothsahn; docs/portal-on-ffbox-host.md change 18). `claudeAccounts`
   `.orchestrator`, `.dispatcher` and `.standing` take `"tokenfile"`: those roles run on the OAuth token in the file config
   `claudeTokenFile` names, read at each session start into that process alone with every other Claude credential

@@ -97,6 +97,11 @@ export interface HostDeps {
   /** Kill stale automation browsers (server/reaper.ts); one line per reaped tree. */
   reap?(maxAgeHours: number): Promise<string[]>;
   changed(h: HostHealth): void;
+  /**
+   * Whether this guard watches the sandbox drive now (default yes). No while the portal's own host's daemon runs the
+   * guard itself (w466, machine/hostGuard.ts): two guards would race to remount it and start the same editors.
+   */
+  watchDrive?(): boolean;
   now?(): number;
   log?(line: string): void;
 }
@@ -174,7 +179,7 @@ export class HostHealthMonitor {
    * block. The portal-only mode (w464) has no sandbox drive to watch.
    */
   private watchesDrive() {
-    return this.d.cfg.hostGuard.pollSeconds > 0 && !portalOnly(this.d.cfg);
+    return this.d.cfg.hostGuard.pollSeconds > 0 && !portalOnly(this.d.cfg) && (this.d.watchDrive?.() ?? true);
   }
 
   private g() {
@@ -242,6 +247,13 @@ export class HostHealthMonitor {
 
   private async sandboxDrive() {
     if (portalOnly(this.d.cfg)) return;
+    if (!this.watchesDrive()) {
+      // Handed to the daemon's guard: an outage this guard was handling is the daemon's now (it finds it at its first look).
+      this.recovery = undefined;
+      this.health.sandboxRoot = 'ok';
+      this.health.detail = undefined;
+      return;
+    }
     const root = this.d.cfg.sandboxRoot;
     const there = this.d.exists(root);
     if (there) {

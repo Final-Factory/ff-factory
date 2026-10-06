@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { run } from './proc.ts';
 import * as win from './machineDeployWin.ts';
-import { platformNoun, type MachinePlatform, type SandboxPoolSettings } from '../shared/types.ts';
+import { platformNoun, type MachineGuardSettings, type MachinePlatform, type SandboxPoolSettings } from '../shared/types.ts';
 
 /**
  * Install or update the daemon on a machine over ssh (docs/machines.md), with this host's own ssh setup:
@@ -245,6 +245,8 @@ export interface DaemonExtras {
   maxEventsFile?: string | null;
   sandboxIdleStopMinutes?: number;
   cleanup?: { everyMinutes: number; softFreeGB: number };
+  /** The host guard on the portal's own host (w466, machine/hostGuard.ts): its drive, its disks, the browser reaper. */
+  hostGuard?: MachineGuardSettings;
 }
 
 /** A machine's folder options, as add_machine takes them and daemon.json keeps them. */
