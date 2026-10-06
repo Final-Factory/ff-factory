@@ -646,6 +646,17 @@ export async function sandboxRisks(sandboxesDir: string): Promise<SandboxRisk[]>
   return out;
 }
 
+/** This process and every one above it (Mac): the uninstall's own command lines name the root too. */
+async function ancestors(): Promise<Set<number>> {
+  const out = new Set<number>([process.pid]);
+  let pid = process.ppid;
+  while (pid > 1 && !out.has(pid)) {
+    out.add(pid);
+    pid = Number((await exec('ps', ['-o', 'ppid=', '-p', String(pid)])).stdout.trim()) || 0;
+  }
+  return out;
+}
+
 /** Stop every process started from the root (editors of its sandboxes, players in its slots, agents' shells), never Unity Hub. */
 async function stopRootProcesses(root: string): Promise<number> {
   if (isWin) {
@@ -653,8 +664,13 @@ async function stopRootProcesses(root: string): Promise<number> {
       'stopping what runs from the root',
       `$root = ${win.psq(root)}
 $n = 0
-foreach ($p in @(Get-CimInstance Win32_Process -Property ProcessId, Name, CommandLine, ExecutablePath)) {
-  if ($p.ProcessId -eq $PID -or [string]$p.Name -match '^Unity Hub\\.exe$') { continue }
+$all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, ExecutablePath)
+# This uninstall itself (its command line names the root too): this script and every process above it.
+$mine = New-Object System.Collections.Generic.HashSet[int]
+$id = $PID
+while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId -eq $id } | Select-Object -First 1).ParentProcessId }
+foreach ($p in $all) {
+  if ($mine.Contains([int]$p.ProcessId) -or [string]$p.Name -match '^Unity Hub\\.exe$') { continue }
   $c = [string]$p.CommandLine + ' ' + [string]$p.ExecutablePath
   if ($c.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; $n++ }
 }
@@ -664,7 +680,8 @@ foreach ($p in @(Get-CimInstance Win32_Process -Property ProcessId, Name, Comman
     return Number(/stopped=(\d+)/.exec(out)?.[1] ?? 0);
   }
   const r = await exec('pgrep', ['-f', root]);
-  const pids = r.stdout.split('\n').map(Number).filter((p) => p && p !== process.pid);
+  const mine = await ancestors();
+  const pids = r.stdout.split('\n').map(Number).filter((p) => p && !mine.has(p));
   for (const p of pids) {
     try {
       process.kill(p, 'SIGTERM');
