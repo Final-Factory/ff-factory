@@ -9,8 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import crypto from 'node:crypto';
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { DEFAULTS, MANIFEST_PS, MAX_STDIN_BYTES, Migration, parseArgs, tarVerbose, type Options, type System } from './fff-migrate.ts';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { BATCH_PS, DEFAULTS, MANIFEST_PS, MAX_STDIN_BYTES, Migration, codecOrder, liveOut, parseArgs, tarVerbose, type Options, type System } from './fff-migrate.ts';
 import { ROOT } from '../server/config.ts';
 import { claudeProjectFolder } from '../server/vmMigration.ts';
 import { Store } from '../server/store.ts';
@@ -45,6 +45,7 @@ const PWSH = (() => {
 })();
 const skip = !PWSH ? 'needs Linux with pwsh (the fake BEAST runs its PowerShell scripts)' : undefined;
 
+const HAS_ZSTD = spawnSync('zstd', ['--version'], { stdio: 'ignore' }).status === 0;
 const lanIp = () => Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
 
 async function freePort(): Promise<number> {
@@ -298,7 +299,7 @@ for ($i = 0; $i -lt 120; $i++) { try { $null = Invoke-WebRequest -UseBasicParsin
   // ---- the fakes: ssh runs BEAST's side here; schtasks.exe and claude record what they were asked
   const fake = path.join(base, 'bin');
   fs.mkdirSync(fake);
-  fs.writeFileSync(path.join(fake, 'fake.env'), `PWSH=${JSON.stringify(PWSH)}\nLOG=${JSON.stringify(path.join(base, 'ssh.log'))}\nTASKS=${JSON.stringify(path.join(base, 'schtasks.log'))}\nCLAUDE_LOG=${JSON.stringify(path.join(base, 'claude.log'))}\nDENY=${JSON.stringify(path.join(base, 'deny'))}\nOLD_BEAST=${JSON.stringify(path.join(base, 'old-beast'))}\nTRUNCATE=${JSON.stringify(path.join(base, 'truncate'))}\nTARSKIP=${JSON.stringify(path.join(base, 'tarskip'))}\nTARNULL=${JSON.stringify(path.join(base, 'tarnull'))}\nTOKEN_FILE=${JSON.stringify(path.join(vm, 'secrets', 'claude-oauth-token'))}\n`);
+  fs.writeFileSync(path.join(fake, 'fake.env'), `PWSH=${JSON.stringify(PWSH)}\nLOG=${JSON.stringify(path.join(base, 'ssh.log'))}\nTASKS=${JSON.stringify(path.join(base, 'schtasks.log'))}\nCLAUDE_LOG=${JSON.stringify(path.join(base, 'claude.log'))}\nDENY=${JSON.stringify(path.join(base, 'deny'))}\nOLD_BEAST=${JSON.stringify(path.join(base, 'old-beast'))}\nTRUNCATE=${JSON.stringify(path.join(base, 'truncate'))}\nTARSKIP=${JSON.stringify(path.join(base, 'tarskip'))}\nTARNULL=${JSON.stringify(path.join(base, 'tarnull'))}\nNOZSTD=${JSON.stringify(path.join(base, 'nozstd'))}\nTOKEN_FILE=${JSON.stringify(path.join(vm, 'secrets', 'claude-oauth-token'))}\n`);
   const script = (name: string, body: string) => fs.writeFileSync(path.join(fake, name), `#!/usr/bin/env bash\nset -euo pipefail\n. "$(dirname "$0")/fake.env"\n${body}`, { mode: 0o755 });
   script(
     'ssh',
@@ -323,7 +324,15 @@ if [ "\${1:-}" = powershell.exe ]; then
 fi
 # Any other command (tar): BEAST's sshd never hands it its stdin whole (measured, w508), so here it gets none.
 if [ "\${1:-}" = tar ]; then
-  args=("$@"); skipped=0
+  args=(); skipped=0
+  # bsdtar's --options (the zstd level) is BEAST's; GNU tar takes --zstd at its own level. A BEAST without zstd refuses it.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --options) shift 2 ;;
+      --zstd) if [ -e "$NOZSTD" ]; then echo "tar.exe: Option --zstd is not supported" >&2; exit 1; fi; args+=("$1"); shift ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
   # tar on Windows cannot take some names (outside its code page): it leaves them out, says so without the name, exits 1.
   if [ -s "$TARSKIP" ]; then
     for i in "\${!args[@]}"; do
@@ -430,6 +439,10 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   assert.match(report, /copied BEAST's config\.json and data: \d+ files/);
   assert.match(report, /copied 1 conversation\(s\) to resume/);
   assert.match(report, /BEAST's config\.json and data: snapshot: a staged copy on BEAST, .*\(no VSS shadow copy: not Windows\); every file is read from it/);
+  // zstd where this machine can unpack it (GitHub's runners can), else gzip, said so.
+  const want = HAS_ZSTD ? /^compression: zstd level 3$/m : /^compression: gzip \(not: zstd: no zstd here\)$/m;
+  assert.match(report, want);
+  assert.match(report, /copied [\d,]+ of [\d,]+ files, [\d.]+ MB of files in [\d.]+ MB over the wire \((zstd level 3|gzip), [\d.]+x\)/);
   assert.match(report, /beast: from the portal's own host to a machine reached over ssh \(rydin@beast\)/);
 
   // Read-only on BEAST: every file there as it was.
@@ -635,10 +648,10 @@ test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that
   const same = (rel: string) => assert.deepEqual(fs.readFileSync(path.join(stage, rel)), fs.readFileSync(path.join(w.beastRoot, rel)), rel);
 
   // 1. The first stream is cut off once: tried again, and everything comes; the file deleted after the listing is named.
-  fs.writeFileSync(path.join(w.base, 'truncate'), '1');
   const m1 = new Migration(o, w.sys);
   const ps = m1.beast.ps.bind(m1.beast);
   m1.beast.ps = async (script: string, d?: string, ms?: number) => {
+    if (script === BATCH_PS && d?.includes('"out":"0.list"')) fs.writeFileSync(path.join(w.base, 'truncate'), '1');
     const r = await ps(script, d, ms);
     // A file going after it was listed: from the snapshot it is read from.
     if (script === MANIFEST_PS && d?.includes('"beast"')) fs.rmSync(path.join(JSON.parse(d).root, 'data', 'attachments', 'a11.bin'), { force: true });
@@ -648,9 +661,9 @@ test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that
   await m1.dropSnapshots();
   const report1 = m1.report.join('\n');
   t.diagnostic(report1);
-  assert.match(report1, /data: batch 1 of \d+ broke off: the archive stopped short \(ssh\/BEAST tar exit 255, unpacking tar exit 2\); BEAST: fake: client_loop: send disconnect: Broken pipe; here: tar: Unexpected EOF in archive.*trying again \(2 of 3\)/);
+  assert.match(report1, /data: batch 1 of \d+ broke off: the archive stopped short \(ssh\/BEAST tar exit 255, unpacking tar exit 2\); BEAST: fake: client_loop: send disconnect: Broken pipe; here: tar: (Unexpected EOF in archive|Child returned status 1).*trying again \(2 of 3\)/, 'cut short: plain tar says so, or the decompressor does');
   assert.match(report1, /data: \d+ files, [\d.]+ MB on BEAST \(listed in [\d.]+ s\); to copy: \d+ files/);
-  assert.match(report1, /data: copied \d+ of \d+ files, [\d.]+ MB in [\d.]+ s/);
+  assert.match(report1, /data: copied \d+ of \d+ files, [\d.]+ MB of files in [\d.]+ MB over the wire \([^)]*\), in [\d.]+ s: [\d.]+ MB\/s of files, [\d.]+ MB\/s on the wire/);
   assert.deepEqual(r1.gone, ['data/attachments/a11.bin']);
   assert.match(report1, /data: snapshot: a staged copy on BEAST, [\d.]+ MB \(no VSS shadow copy: not Windows\); every file is read from it/);
   assert.match(report1, /1 file\(s\) could not be copied into the snapshot and are left out: .*locked\.log.*denied/i);
@@ -688,6 +701,17 @@ test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that
   same('data/locked.log');
   assert.deepEqual(r3.locked, []);
 
+  // 4b. A BEAST whose tar has no zstd: gzip instead, said so, and the copy is the same.
+  fs.writeFileSync(path.join(w.base, 'nozstd'), '');
+  fs.appendFileSync(path.join(data, 'attachments', 'a2.bin'), 'once more');
+  const mz = new Migration(o, w.sys);
+  const rz = await mz.pull('beast', 'data', w.beastRoot, ['config.json', 'data']);
+  await mz.dropSnapshots();
+  assert.match(mz.report.join('\n'), HAS_ZSTD ? /compression: gzip \(not: zstd: tar\.exe: Option --zstd is not supported\)/ : /compression: gzip \(not: zstd: no zstd here\)/);
+  assert.equal(rz.fetched, 1);
+  same('data/attachments/a2.bin');
+  fs.rmSync(path.join(w.base, 'nozstd'));
+
   // 5. A file Windows tar stops at ("tar: (null)": it changed while read): out of its stream, sent on its own, and the
   // stream goes on.
   fs.appendFileSync(path.join(data, 'attachments', 'a3.bin'), 'changed again');
@@ -717,4 +741,34 @@ test('fffctl migrate (w508): Windows tar\'s -v read right, a file it stopped at 
   assert.deepEqual(parseArgs(['--dry-run-copy', '--snapshot', 'copy']).snapshot, 'copy');
   assert.equal(parseArgs(['--dry-run-copy']).snapshot, 'auto');
   assert.throws(() => parseArgs(['--dry-run-copy', '--snapshot', 'live']), /--snapshot is auto, vss or copy/);
+});
+
+test('fffctl migrate (w517): zstd level 3 first, then gzip, bzip2 and none; a named one goes first', () => {
+  assert.deepEqual(codecOrder('auto').map((c) => c.name), ['zstd', 'gzip', 'bzip2', 'none']);
+  assert.deepEqual(codecOrder('gzip').map((c) => c.name), ['gzip', 'zstd', 'bzip2', 'none']);
+  assert.deepEqual(codecOrder('none').map((c) => c.name), ['none', 'zstd', 'gzip', 'bzip2']);
+  assert.deepEqual(codecOrder('auto')[0].remote, ['--zstd', '--options', 'zstd:compression-level=3'], "BEAST's tar takes the level this way (measured: bsdtar 3.8.8 writes zstd frames)");
+  assert.equal(parseArgs(['--dry-run-copy', '--compress', 'bzip2']).compress, 'bzip2');
+  assert.throws(() => parseArgs(['--dry-run-copy', '--compress', 'xz']), /--compress is auto, zstd, gzip, bzip2 or none/);
+});
+
+test('fffctl migrate (w517): on a terminal the progress line is redrawn in place (\\r, ESC[K, no indent); in a log, a line at most every 30 s', () => {
+  const tty = { isTTY: true, out: '', write(s: string) { this.out += s; return true; } };
+  const o = liveOut(tty as unknown as NodeJS.WriteStream);
+  o.live!('  data: 1/10 files');
+  o.live!('  data: 5/10 files');
+  o.out('data: copied 10 of 10 files');
+  assert.equal(tty.out, '\r\x1b[Kdata: 1/10 files\r\x1b[Kdata: 5/10 files\r\x1b[Kdata: copied 10 of 10 files\n');
+  assert.doesNotMatch(tty.out, /\x1b\[\d*[ABF]/, 'no cursor movement');
+  let t = 0;
+  const log = { isTTY: false, out: '', write(s: string) { this.out += s; return true; } };
+  const l = liveOut(log as unknown as NodeJS.WriteStream, () => t);
+  t = 30_000;
+  l.live!('  data: 1/10 files');
+  t = 35_000;
+  l.live!('  data: 2/10 files');
+  t = 61_000;
+  l.live!('  data: 9/10 files');
+  l.out('data: copied 10 of 10 files');
+  assert.equal(log.out, 'data: 1/10 files\ndata: 9/10 files\ndata: copied 10 of 10 files\n');
 });
