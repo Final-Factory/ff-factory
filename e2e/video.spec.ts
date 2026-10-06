@@ -1,11 +1,12 @@
 import { appState, expect, openSandbox, startWorker, test, uniq } from './fixtures.ts';
 
 test('video: a clip an agent mentions plays inline, seeks with HTTP ranges, and is in the gallery (without its .meta)', async ({ authed: page, browserName }) => {
-  const alpha = (await appState(page.request)).sandboxes.find((s) => s.id === 'alpha')!;
+  // Videos from a machine are not shown yet (server/index.ts /api/image): the clip is in this host's sandbox videos.
+  const alpha = (await appState(page.request)).sandboxes.find((s) => s.id === 'videos')!;
   const clip = `${alpha.path.replace(/\\/g, '/')}/Assets/Screenshots/Videos/clip.webm`;
   const tag = uniq('vid');
-  const s = await startWorker(page.request, `see ${clip} ${tag}`, { title: `Video ${tag}` });
-  const panel = await openSandbox(page, 'alpha', s.id);
+  const s = await startWorker(page.request, `see ${clip} ${tag}`, { title: `Video ${tag}`, sandbox: 'videos' });
+  const panel = await openSandbox(page, 'videos', s.id);
   await expect(panel.locator('.msg-assistant', { hasText: `Echo: see ${clip}` })).toBeVisible();
 
   // Inline player: Playwright's Chromium decodes WebM (its WebKit builds do not, and hide what they cannot
@@ -29,7 +30,7 @@ test('video: a clip an agent mentions plays inline, seeks with HTTP ranges, and 
   const whole = await page.request.get(src);
   expect(whole.status()).toBe(200);
   expect(whole.headers()['content-type']).toBe('video/webm');
-  const outside = `/api/image?${new URLSearchParams({ session: s.id, path: clip.replace('/alpha/', '/gallery/') })}`;
+  const outside = `/api/image?${new URLSearchParams({ session: s.id, path: clip.replace('/videos/', '/elsewhere/') })}`;
   expect((await page.request.get(outside)).status()).toBe(404);
 
   // The Screenshots gallery (in the sandbox's Details) lists the clip, never Unity's .meta beside it.

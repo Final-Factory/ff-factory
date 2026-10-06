@@ -1138,6 +1138,8 @@ export interface SearchHit {
   sessionKind?: SessionKind;
   sandboxId?: string;
   machineId?: string;
+  /** With machineId: the machine sandbox the session works in. */
+  machineSandbox?: string;
   standingId?: string;
 }
 

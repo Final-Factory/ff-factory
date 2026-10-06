@@ -12,6 +12,29 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **`fffctl update` waits until the new release is verified, and says what is happening** (w517, Lothsahn: "sudo
+  fffctl update just says it scheduled it. How do I know when it's done? I'd prefer it be a blocking operation").
+  - **Stages shown:** the build (or "already up to date"), the drain (agents still busy, time left), the restart, the
+    new code answering, then verified, or rolled back with the reason.
+  - **Exit codes:** 0 when verified, 1 on a failed build or a rollback, 2 on a timeout, with the `journalctl` command
+    for the details.
+  - **Same machinery underneath:** `data/update.wanted`, `fff-update request`, the drain, `activate`, and fff-health's
+    `verify`, followed from outside through the units, the journals, the status files and `/api/health`, so
+    `request_app_update` works as before.
+  - **Ctrl+C** stops the waiting, not the update. `--no-wait` keeps the old behaviour. `fffctl restart` shows the
+    drain, and `fffctl rollback` waits until the portal answers with the release before.
+  - **Progress lines:** on a terminal (PuTTY's defaults too) they are rewritten in place with `\r` and `ESC[K`, never
+    moving the cursor; elsewhere a plain line at most every 30 s. The same for `fffctl migrate`, without the indent.
+- **`fffctl migrate` compresses the copy** (w517, Lothsahn: "use zstd level 3 ... Don't error. Fallback to gzip or bz2
+  or finally send uncompressed").
+  - **Choice:** zstd level 3 through BEAST's own tar.exe (bsdtar 3.8.8, built with libzstd), else gzip, else bzip2,
+    else none, whichever both sides take. It is tried once per run on a small file; a broken connection is retried
+    and is never read as "unsupported". `--compress` picks one first.
+  - **Output:** it says which it chose and why not a better one, and each part reports the bytes of files against the
+    bytes over the wire.
+  - **The guest install** adds `zstd` and `bzip2`.
+  - **Measured on BEAST's route with 698 MB of real JSONL:** zstd 3 sent 210 MB (3.3x) in 2.1 s of BEAST's time;
+    gzip 392 MB (1.8x) in 12.9 s; uncompressed 2.7 s. The zstd stream unpacked into all 77 entries.
 - **No claude.ai connectors for the orchestrators and the dispatcher** (w516, Lothsahn: "Please do an update to disable
   the gmail, drive, and calendar tools", then "Disable claude docs"). Their 58 tools (Gmail 30, Google Drive 11, Google
   Calendar 9, Claude Docs 8) were about 41,300 input tokens in every orchestrator and dispatcher turn (measured: a
@@ -86,6 +109,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
       unreadable file and a vanished one.
 ### Changed
 
+- **CI's Playwright tests run in three shards** (w521, asked by Lothsahn). The same tests split across three runners by
+  file (`playwright test --shard`), the performance budgets in the first; rendering visual baselines still runs every
+  test in one job, so the `linux-snapshots` artifact is whole.
 - **Waiting says on what, and only means alive with something pending** (w509, asked by Lothsahn: "aren't waiting jobs
   waiting on tests or other things to run?"). A Waiting agent shows its running job by the description it gave it
   ("Waiting: CI on PR #1098 · check-in 06:10"), a queued message, or its check-in with its note's first words, and a job
@@ -103,6 +129,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Mid-turn it is refused with why; it leaves the `wake_me` check-in and timers alone, and messages arriving meanwhile
   are answered after it. `/clear` (or `/new`) opens the New conversation dialog. Details: docs/orchestrators.md,
   "Compacting a conversation".
+- **The portal VM's CI runs only when a change needs it** (w505, part 2, asked by Lothsahn).
+  - Until now every PR touching `server/agents.ts` (most of them) waited on three nested-VM jobs. Now a plan job picks
+    them:
+    - the representative job (a zvol on a 24.04 host) for a PR touching `deploy/vm`, `server/restart.ts`, the
+      packages, or `server/index.ts`'s restart, drain, inbox or health code;
+    - all three when the host scripts, the test or the workflow change, on every merge to main, and nightly;
+    - none for any other PR.
+  - One nightly job keeps the production timing.
+  - The dry run's "changed nothing" checks on the firewall table and libvirt can fail now (a `!` under `set -e` never
+    did).
+  ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md), 10.3)
 - **The portal VM's end-to-end jobs wait less, and pass on main** (w505, part 1, asked by Lothsahn). The test now sets its
   own short health, update-verify, stop and watch timers (`CI_TIMING=fast`, the default; `production` runs the shipped
   defaults), so the rollback, health-restart and hang scenarios take seconds instead of minutes; the shipped defaults

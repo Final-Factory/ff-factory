@@ -1,5 +1,5 @@
 import type { APIRequestContext } from '@playwright/test';
-import { appState, expect, go, isMobile, startWorker, test, uniq } from './fixtures.ts';
+import { ALPHA, appState, expect, go, isMobile, sandboxHash, startWorker, test, uniq } from './fixtures.ts';
 
 /**
  * An agent's state on the page (w475, asked by Lothsahn): Working, Waiting (a wake_me, a background task: violet, with
@@ -57,7 +57,7 @@ test("an agent's page says Waiting and on what", async ({ authed: page }) => {
   const s = await startWorker(page.request, `checks in later ${tag}`, { title: `Waits ${tag}` });
   await expect.poll(async () => (await appState(page.request)).sessions.find((x) => x.id === s.id)?.status, { timeout: 15_000 }).toBe('idle');
   await hook(page.request, 'wake', { id: s.id, minutes: 30 });
-  await go(page, `#/sandbox/alpha/${s.id}`);
+  await go(page, sandboxHash(ALPHA, s.id));
   // Tabs on a wide screen, a picker on a phone: each names the state and what it waits on.
   if (isMobile(page)) await expect(page.locator('option', { hasText: `Waits ${tag}` })).toHaveText(/Waits \S+ · Waiting: check-in \d\d:\d\d/);
   else await expect(page.getByRole('tab', { name: new RegExp(`Waits ${tag}`) })).toHaveAttribute('title', /^Waits \S+: Waiting: check-in \d\d:\d\d/);

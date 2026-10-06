@@ -21,7 +21,7 @@ test('search: finds the seeded transcript, and a hit opens it at that message', 
   await expect(page).toHaveURL(/#\/search\/zebrafish$/);
 
   await hit.click();
-  await expect(page).toHaveURL(/#\/sandbox\/gallery\/gallery1$/);
+  await expect(page).toHaveURL(/#\/machine\/pc\/sandbox\/gallery\/gallery1$/);
   const msg = page.locator('.sb-panel .msg-user', { hasText: 'zebrafish' });
   await expect(msg).toBeInViewport();
 

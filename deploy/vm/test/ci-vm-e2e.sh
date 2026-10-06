@@ -219,8 +219,17 @@ main_at_head
 git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 g 'cat > /tmp/ff.bundle.new && mv /tmp/ff.bundle.new /tmp/ff.bundle && chmod 644 /tmp/ff.bundle' </tmp/ff.bundle
 want=$(git -C "$ROOT" rev-parse --short=7 HEAD)
-g 'sudo fffctl update --drain-minutes 0'
+# Blocking (w517): it returns once the new release is verified, having shown each stage.
 t0=$(date +%s)
+set +e
+out=$(g 'sudo fffctl update --drain-minutes 0' 2>&1)
+rc=$?
+set -e
+echo "$out"
+[ "$rc" = 0 ] || fail "fffctl update: exit $rc, not 0"
+printf '%s' "$out" | matches -E 'built [0-9a-f]{12} in ' || fail "fffctl update did not say what it built"
+printf '%s' "$out" | matches -E '^verified: [0-9a-f]{12} runs' || fail "fffctl update did not wait for the verification"
+echo "MEASURE blocking update: $(($(date +%s) - t0)) s from fffctl update to its 'verified'"
 down=0
 until [ "$(health 2>/dev/null | jq -r .sha 2>/dev/null)" = "$want" ]; do
   health >/dev/null 2>&1 || down=$((down + 2))
@@ -231,6 +240,9 @@ echo "MEASURE update: $(($(date +%s) - t0)) s from fffctl update to the new vers
 g 'sudo cat /srv/fff/data/update.result.json' | jq -e --arg w "$want" '.ok == true and (.headAfter | startswith($w)) and (.headBefore | length) > 0' || fail "update.result.json does not record the switch to $want"
 wait_for 300 "the update verified" g 'test ! -e /srv/fff/data/update.verifying.json'
 echo "ok: $before -> $want"
+out=$(g 'sudo fffctl update --drain-minutes 0' 2>&1)
+echo "$out"
+printf '%s' "$out" | matches -E "^already up to date at $want" || fail "a second fffctl update did not say it was already up to date"
 
 step "a broken update is rolled back by itself"
 good=$want
@@ -239,9 +251,17 @@ git -C "$ROOT" -c user.name=ci -c user.email=ci@users.noreply.github.com commit 
 main_at_head
 git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 g 'cat > /tmp/ff.bundle.new && mv /tmp/ff.bundle.new /tmp/ff.bundle && chmod 644 /tmp/ff.bundle' </tmp/ff.bundle
-g 'sudo fffctl update --drain-minutes 0'
-# Expected within about a minute (fast: 45 s, checks every 10 s) or 6 (production: 5 min); on a timeout, say why first.
+# Blocking: it ends with the rollback and exit 1. Expected within about a minute (fast: 45 s, checks every 10 s) or 6
+# (production: 5 min); on a timeout, say why first.
 t0=$(date +%s)
+set +e
+out=$(g 'sudo fffctl update --drain-minutes 0' 2>&1)
+rc=$?
+set -e
+echo "$out"
+[ "$rc" = 1 ] || fail "fffctl update of a broken commit: exit $rc, not 1"
+printf '%s' "$out" | matches 'the update FAILED: rolled back' || fail "fffctl update did not say it was rolled back"
+printf '%s' "$out" | matches 'journalctl -u fff-update' || fail "fffctl update did not say where the details are"
 until g 'sudo cat /srv/fff/data/update.result.json' 2>/dev/null | jq -e '.ok == false and (.error | test("rolled back"))' >/dev/null 2>&1; do
   if [ $(($(date +%s) - t0)) -ge "$([ "$TIMING" = fast ] && echo 240 || echo 600)" ]; then
     g 'sudo fffctl status; sudo cat /srv/fff/data/update.result.json /srv/fff/data/update.verifying.json; sudo ls -la /srv/fff/app /srv/fff/data; sudo journalctl --no-pager -n 60 -u fff-update -u fff-health -u fff-portal' || true

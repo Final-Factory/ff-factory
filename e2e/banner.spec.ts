@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { expect, go, isMobile, test } from './fixtures.ts';
+import { ALPHA, expect, go, isMobile, sandboxHash, test } from './fixtures.ts';
 
 const REASON = 'update (request_app_update)';
 
@@ -64,7 +64,7 @@ test('global notices sit above the page, in the layout: opaque, one line, full t
   await expectBelowBar(page);
   if (!isMobile(page)) {
     // With a side panel open too (the case in the report): both headers are below it.
-    await go(page, '#/sandbox/alpha');
+    await go(page, sandboxHash(ALPHA));
     await expect(page.locator('.sb-panel')).toBeVisible();
     await expectBelowBar(page);
   }
