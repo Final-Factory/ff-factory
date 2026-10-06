@@ -58,6 +58,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **On an Android phone the paperclip offers your photos** (w528, Ben: "when i'm on my phone i cant attach photos from
+  my google photos or anything i can only select camera"). It opens a short menu: Photos and videos (Chrome's photo
+  picker, with Gallery and Google Photos), Camera, or Files (saves, zips, logs). Android Chrome shows the photo picker
+  only for an input of images and videos alone; the old any-file input got a Camera / Files chooser. iPhones, iPads and
+  desktops keep the one picker they had; paste and drop are unchanged.
+
 - **`fffctl migrate` copies from one snapshot on BEAST** (w508, Lothsahn's dry run on #134: "batch 2 of 8 broke off …
   tar: (null)", then his decision: "generate it all in one snapshot, and then tar and compress off a copy").
   - **Cause (measured on BEAST, its own sshd, tar.exe and PowerShell, with writers like the live portal's):** Windows
