@@ -96,14 +96,15 @@ async function setup(t: { after: (fn: () => unknown) => void }) {
   const sessions = new SessionManager(cfg, store);
   const mm = new MachineManager(cfg, store, sessions);
   mm.hooks = {
-    specFor: (info) => ({ cwd: tmp, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: tmp, protectedPaths: [], gameRepos: [] }, model: info.model }),
+    // A standing agent in its own folder: no agent works in the main clone (w536).
+    specFor: (info) => ({ cwd: path.join(tmp, 'agents', 'a'), settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: path.join(tmp, 'agents', 'a'), protectedPaths: [], gameRepos: [] }, model: info.model }),
     handlersFor: () => ({}),
   };
   const a = await listen(mm);
   const b = await listen(mm);
-  const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: a.url, maxSessions: 2 });
+  const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: a.url });
   const configFile = path.join(tmp, 'daemon.json');
-  const written: DaemonConfig = { portalUrl: a.url, id: 'mx', token, repoPath: tmp, appDir: tmp, claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null };
+  const written: DaemonConfig = { portalUrl: a.url, id: 'mx', token, repoPath: tmp, appDir: tmp, claude: 'no-such-claude', maxEventsFile: null };
   fs.writeFileSync(configFile, JSON.stringify(written, null, 2));
   const daemons: Daemon[] = [];
   /** A daemon as the entry point starts one: its daemon.json as it is on disk now, and where it is. */
@@ -156,7 +157,7 @@ test('relocate: a daemon follows the portal to its new URL with an agent mid-tur
   LongAgent.all = [];
   daemon();
   await until('online at A', () => mm.isOnline('mx'));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  const s = mm.createSession('mx', { kind: 'standing', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'a long turn');
   await until('mid-turn', () => s.info.status === 'running' && LongAgent.all.length === 1);
   const agent = LongAgent.all[0];
@@ -193,7 +194,7 @@ test('relocate: a new URL that never answers sends the daemon back to the one be
   t.after(() => (RELOCATE_FALLBACK_MS.value = saved));
   daemon();
   await until('online at A', () => mm.isOnline('mx'));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  const s = mm.createSession('mx', { kind: 'standing', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'a long turn');
   await until('mid-turn', () => s.info.status === 'running');
   const nowhere = await deadUrl();

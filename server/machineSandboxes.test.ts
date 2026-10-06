@@ -311,9 +311,9 @@ test('machine sandboxes: settings, limits, references and snapshots on the porta
   const m = { repoPath: 'D:\\work\\FFFRepo', home: 'C:\\Users\\l', platform: 'win32' as const, sandboxRoot: 'D:\\work\\ffsb' };
   assert.equal(machineForPath('D:/work/ffsb/sb1/Assets/Screenshots/a.png', [m]), m, "a sandbox's screenshot belongs to its machine");
 
-  const cfg = JSON.parse(daemonConfig({ portalUrl: 'https://p', id: 'x', token: 't', repoPath: '/r', maxSessions: 3, sandboxes: poolSettingsOf({ sandboxRoot: '/s', maxSandboxes: 3 }) }));
+  const cfg = JSON.parse(daemonConfig({ portalUrl: 'https://p', id: 'x', token: 't', repoPath: '/r', sandboxes: poolSettingsOf({ sandboxRoot: '/s', maxSandboxes: 3 }) }));
   assert.deepEqual(cfg.sandboxes, { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 50, diskCriticalGB: 20 }, 'daemon.json keeps them');
-  assert.equal(JSON.parse(daemonConfig({ portalUrl: 'https://p', id: 'x', token: 't', repoPath: '/r', maxSessions: 3 })).sandboxes, undefined);
+  assert.equal(JSON.parse(daemonConfig({ portalUrl: 'https://p', id: 'x', token: 't', repoPath: '/r' })).sandboxes, undefined);
 });
 
 // ---------------------------------------------------------------- portal <-> daemon, end to end
@@ -376,7 +376,7 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
   await new Promise<void>((res) => server.listen(0, '127.0.0.1', res));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, maxSessions: 1, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 1, maxUnity: 1 });
+  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 1, maxUnity: 1 });
   const { d: poolDeps, running } = deps(r.main);
   const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
@@ -413,9 +413,9 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   a1.info.status = 'idle';
   sessions.drain();
   await until('a2 delivered once a1 is idle', () => a2.live && !sessions.queued().length);
-  // A machine with sandboxes takes no worker in its main clone (w536), whatever its max_agents.
+  // No worker runs in a main clone (w536).
   const main = mm.createSession('pc', { kind: 'worker', title: 'main', permissionMode: 'default' });
-  assert.throws(() => sessions.send(main.info.id, 'main clone work'), /pc takes workers in its sandboxes only: start this one in one of its sandboxes \(pc\/sb1\)/);
+  assert.throws(() => sessions.send(main.info.id, 'main clone work'), /pc runs workers in sandboxes only: start this one in one of its sandboxes \(pc\/sb1\)/);
 
   // The sandbox's editor, not the main clone's.
   assert.match(await mm.unity('pc', 'start', false, 'sb1'), /Started \(fake\)/);
@@ -487,7 +487,7 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
   server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
   await new Promise<void>((res) => server.listen(0, '127.0.0.1', res));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, maxSessions: 3, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 3, maxUnity: 1 });
+  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 3, maxUnity: 1 });
   const { d: poolDeps } = deps(r.main);
   const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 3, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {
@@ -576,7 +576,7 @@ test('stale output on a machine: the portal sends the ledger facts, a dry run co
   server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
   await new Promise<void>((res) => server.listen(0, '127.0.0.1', res));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, maxSessions: 1, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 1, maxUnity: 1 });
+  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 1, maxUnity: 1 });
   const { d: poolDeps } = deps(r.main);
   const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 1, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
   t.after(async () => {

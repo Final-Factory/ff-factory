@@ -46,6 +46,7 @@ import type {
   WorkItem,
 } from '../shared/types.ts';
 import { appDirOf } from '../shared/types.ts';
+import { agentCap } from './machines.ts';
 
 /**
  * w510: standing agents run on a machine's daemon; the portal itself runs only the orchestrators and the dispatcher.
@@ -90,9 +91,8 @@ export interface StandingDeps {
     list(): Machine[];
     get(id: string): Machine | undefined;
     isOnline(id: string): boolean;
+    /** Agents mid-turn on the machine, in its sandboxes and standing agents together: what its agent cap counts (w536). */
     liveCount(id: string): number;
-    /** Why no agent of this kind may run outside its sandboxes there (w477: max_agents 0), or undefined. */
-    mainCloneRefusal?(m: Machine, kind?: SessionInfo['kind']): string | undefined;
     createSession(machineId: string, opts: { kind: 'standing'; title: string; model?: string; permissionMode: PermissionMode; standingId?: string }): SessionLike;
   };
   now?: () => Date;
@@ -122,7 +122,7 @@ interface ActiveRun {
 /**
  * Standing agents: long-lived Claude sessions that wake on a schedule, do their charter's job and go
  * back to sleep (docs/standing-agents.md). One run at a time per agent; a run's process lives only
- * for the run, so a sleeping agent does not hold one of its machine's agent slots (max_agents).
+ * for the run, so a sleeping agent does not hold one of its machine's agent slots (its agent cap, w536).
  */
 export class StandingAgents {
   private readonly cfg: Config;
@@ -429,9 +429,9 @@ export class StandingAgents {
       now: this.now(),
       busy: this.active.has(a.id),
       liveAgents: m ? this.deps.machines!.liveCount(m.id) : 0,
-      maxAgents: m ? m.maxSessions : 0,
+      maxAgents: m ? agentCap(m) : 0,
       deadline: new Date(p.deadline),
-      unavailable: !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : this.deps.machines?.mainCloneRefusal?.(m!, 'standing'),
+      unavailable: !online ? `machine ${a.machineId} is ${m ? 'offline' : 'gone'}` : undefined,
     });
     if (verdict.action === 'wait') {
       a.state = 'waiting';
@@ -788,8 +788,6 @@ export class StandingAgents {
     if (!m) return undefined;
     const machine = this.deps.machines?.get(m);
     if (!machine) throw new Error(`no machine "${m}"`);
-    const why = this.deps.machines?.mainCloneRefusal?.(machine, 'standing');
-    if (why) throw new Error(why);
     return m;
   }
 

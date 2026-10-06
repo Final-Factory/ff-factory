@@ -60,7 +60,7 @@ the server (`server/work.ts`) does three things:
 2. **Overlaps.** It pulls keys out of the request (specs like `098`, PRs named as such, other `#N` references,
    branch-like names of the branches checked out anywhere, and the ids in `related_ids`) and compares it with open requests and those closed in the last 48 hours, live and
    recent workers wherever they run (their title, and the branch and open PR of their sandbox, on any machine
-   (this host's own daemon included), or of the machine's main clone), pending delegation requests, and commits on the base branch in the last
+   (this host's own daemon included)), pending delegation requests, and commits on the base branch in the last
    48 hours. A shared request, worker, PR or branch scores 1; a shared spec or `#N` with a similar title scores 0.8,
    without one 0.5; otherwise title similarity. 0.8 and over is strong. The person's orchestrator gets the overlaps at
    once, in the tool's answer.
@@ -666,7 +666,7 @@ to do; ignore this reminder" notes, so no past wake had failed to fire and no re
 
 **The limits count agents mid-turn, nothing else** (w384, 2026-10-04: a follow-up to an idle worker was refused with
 "already 6 agents running" while six idle workers held every slot). A machine's
-`max_agents` (main clone), `max_sandbox_agents` (all its sandboxes) and `max_agents_per_sandbox` (the portal has no
+agent cap (`max_sandbox_agents`: its sandboxes' and its standing agents together, w536) and `max_agents_per_sandbox` (the portal has no
 limit of its own since w510: it runs no workers, and `limits.maxSessions` is retired) count sessions that are
 running, starting or waiting for a permission answer (`isMidTurn`, `server/sessions.ts`). An idle session, its process up
 or not, takes no slot. Orchestrators never count. The Unity editor limits are unchanged.

@@ -57,6 +57,7 @@ export interface DaemonConfig {
   repoPath: string;
   /** The machine's own `claude` (its login, settings and plugins). */
   claude?: string;
+  /** Obsolete (w536): the portal sends the agent cap in its welcome. Read only to say so once at start. */
   maxSessions?: number;
   /** The daemon's folder (add_machine app_dir): agents, outside-watch.json, the public identity. Default <home>/.ff-factory. */
   appDir?: string;
@@ -227,7 +228,8 @@ export class Daemon {
   private stopped = false;
   /** What keeps the machine awake while agents run: caffeinate on a Mac, a PowerShell holding SetThreadExecutionState on Windows. */
   private caffeinate?: ChildProcess;
-  private maxSessions: number;
+  /** The machine's agent cap (the portal's welcome.maxSessions, w536): its sandboxes' and standing agents mid-turn together. */
+  private maxSessions = 3;
   private readonly timers: NodeJS.Timeout[] = [];
   private readonly makeSession: SessionFactory;
   private readonly probes: Probes;
@@ -300,7 +302,7 @@ export class Daemon {
       pd,
     );
     this.makeSession = makeSession;
-    this.maxSessions = cfg.maxSessions ?? 3;
+    if (cfg.maxSessions !== undefined) log(`daemon.json maxSessions (${cfg.maxSessions}) is obsolete (w536): workers run in sandboxes only, and the portal sends this machine's agent cap`);
     for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'] as SignalName[]) {
       this.events.on(name, (s: SessionHandle, arg?: unknown) => {
         this.out({ type: 'signal', name, sessionId: s.info.id, arg: name === 'permission' ? undefined : arg });
@@ -955,7 +957,7 @@ export class Daemon {
   }
 
   /**
-   * Mid-turn agents in one place (a sandbox, the main clone, or '*' for all sandboxes): what the agent limits count
+   * Mid-turn agents in one place (a sandbox, outside sandboxes: standing agents, or '*' for all sandboxes): what the agent limits count
    * (w384). Idle agents, their process up or not, take no slot; the portal queues a message until one is free.
    */
   private runningIn(sandbox: string | undefined | '*') {
@@ -963,17 +965,20 @@ export class Daemon {
   }
 
   /**
-   * Why a new agent process for `spec` may not start here, or undefined: the main clone takes maxSessions agents, each
-   * sandbox maxAgentsPerSandbox, and a sandbox agent needs its sandbox ready at the folder the spec names.
+   * Why a new agent process for `spec` may not start here, or undefined: the main clone takes no agent (w536), the
+   * machine maxSessions (its agent cap) mid-turn in its sandboxes and standing agents together, each sandbox
+   * maxAgentsPerSandbox, and a sandbox agent needs its sandbox ready at the folder the spec names.
    */
   private startRefusal(spec: LaunchSpec): string | undefined {
     // The sandbox drive gone or disk space low on this machine (its host guard, w466): nothing new starts in a sandbox.
     const gate = spec.sandbox ? this.guard?.blockReason('agent') : undefined;
     if (gate) return gate;
-    if (!spec.sandbox && this.maxSessions <= 0) return "this machine takes agents in its sandboxes only (max_agents 0): start it in one of this machine's sandboxes";
-    // A machine with sandboxes takes no worker in its main clone (w536); a standing agent works in its own folder.
-    if (!spec.sandbox && this.currentPool() && path.resolve(spec.cwd).toLowerCase() === path.resolve(this.cfg.repoPath).toLowerCase()) return "this machine takes workers in its sandboxes only: start it in one of this machine's sandboxes";
-    if (!spec.sandbox) return this.runningIn(undefined) >= this.maxSessions ? `already ${this.maxSessions} agents mid-turn in this machine's main clone` : undefined;
+    if (!spec.sandbox) {
+      // No agent works in the main clone (w536); a standing agent works in its own folder, under the machine's cap.
+      if (path.resolve(spec.cwd).toLowerCase() === path.resolve(this.cfg.repoPath).toLowerCase()) return "this machine runs workers in sandboxes only: start it in one of this machine's sandboxes";
+      const all = this.runningIn('*') + this.runningIn(undefined);
+      return all >= this.maxSessions ? `already ${all} agents mid-turn on this machine, in its sandboxes and standing agents together (its agent cap ${this.maxSessions})` : undefined;
+    }
     const sb = this.pool.list().find((s) => s.id === spec.sandbox);
     if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;
     if (sb.status !== 'ready') return `sandbox ${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`;
@@ -1056,6 +1061,7 @@ export class Daemon {
         );
         return;
       case 'welcome': {
+        // The machine's agent cap (w536; a portal before it sent the old main-clone max_agents here).
         this.maxSessions = msg.maxSessions;
         // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install
         // (w513) whose record has no pool yet (an enrollment, never deployed from the portal): its hello tells it.

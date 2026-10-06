@@ -16,7 +16,7 @@ import { parseRange } from './images.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { fetchAttachment, fetchAttachments } from '../machine/attachments.ts';
 import type { Config } from './config.ts';
-import type { AttachmentRef, DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo } from '../shared/types.ts';
+import type { AttachmentRef, DeliveredAttachment, ImageInput, MachineSandbox, PermissionMode, Requester, SessionInfo } from '../shared/types.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
 process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
@@ -26,6 +26,12 @@ process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'))
  * machine token, resuming a dropped download and checking its SHA-256, into the agent's Inbox, before the message goes
  * on; and the fetch_attachment tool does the same on demand.
  */
+
+/**
+ * Sandbox "sb" at `dir`, as the portal records it. These daemons have no pool: the spec names no sandbox, so a daemon
+ * runs the worker in that folder as it would a standing agent's, under the machine's agent cap.
+ */
+const sandboxAt = (dir: string): MachineSandbox => ({ id: 'sb', branch: 'sandbox/sb', base: 'origin/develop', path: dir, purpose: 'unused', status: 'ready', createdAt: '', unity: { state: 'stopped' }, sessionIds: [] });
 
 const until = async (what: string, cond: () => boolean, ms = 30_000) => {
   const end = Date.now() + ms;
@@ -175,8 +181,11 @@ test('portal to machine: a message with attachments reaches the agent after its 
   server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: clone, home: root, portalUrl: url, maxSessions: 2 });
-  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: clone, appDir: path.join(root, 'app'), claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
+  // The worker is in sandbox "sb" at `clone` (w536: none in the main clone, here `main`); see sandboxAt.
+  const main = path.join(root, 'main');
+  fs.mkdirSync(main);
+  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: main, home: root, portalUrl: url, sandboxes: [sandboxAt(clone)] });
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: main, appDir: path.join(root, 'app'), claude: 'no-such-claude', maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
   t.after(async () => {
     daemon.shutdown();
     server.close();
@@ -196,7 +205,7 @@ test('portal to machine: a message with attachments reaches the agent after its 
   const a = await up('Battleship.zip', save);
   const b = await up('Player.log', log);
 
-  const s = mm.createSession('pc', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  const s = mm.createSession('pc', { kind: 'worker', title: 'w', permissionMode: 'default', sandbox: 'sb' });
   sessions.send(s.info.id, 'Load this save and find the desync.', 'orchestrator', undefined, { attachments: [publicRef(a), publicRef(b)] });
   await until('the agent got the message', () => FakeAgent.got.length === 1);
   const got = FakeAgent.got[0];
@@ -274,10 +283,13 @@ test('publish_attachment, end to end: a worker on a Mac publishes a save; a work
   const daemons: Record<string, Daemon> = {};
   const tokens: Record<string, string> = {};
   for (const [id, clone] of Object.entries(clones)) {
-    const { token } = mm.register({ id, host: id, purpose: 'unused', status: 'ready', repoPath: clone, home: path.dirname(clone), portalUrl: url, maxSessions: 2 });
+    // Each worker is in sandbox "sb" at `clone` (w536: none in the main clone).
+    const main = path.join(path.dirname(clone), 'main');
+    fs.mkdirSync(main);
+    const { token } = mm.register({ id, host: id, purpose: 'unused', status: 'ready', repoPath: main, home: path.dirname(clone), portalUrl: url, sandboxes: [sandboxAt(clone)] });
     tokens[id] = token;
     daemons[id] = new Daemon(
-      { portalUrl: url, id, token, repoPath: clone, appDir: path.join(path.dirname(clone), 'app'), tempDir: path.join(path.dirname(clone), 'tmp'), claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null },
+      { portalUrl: url, id, token, repoPath: main, appDir: path.join(path.dirname(clone), 'app'), tempDir: path.join(path.dirname(clone), 'tmp'), claude: 'no-such-claude', maxEventsFile: null },
       (i, s, o, e) => new FakeAgent(i, s, o, e),
       PROBES,
     );
@@ -293,7 +305,7 @@ test('publish_attachment, end to end: a worker on a Mac publishes a save; a work
 
   // The Mac's worker made a save (9 MB: more than one 8 MB chunk) in its working folder.
   const ben: Requester = { userId: 'ben', displayName: 'Ben' };
-  const macWorker = mm.createSession('mac', { kind: 'worker', title: 'Make the landing-zone save', permissionMode: 'default', requestedBy: ben });
+  const macWorker = mm.createSession('mac', { kind: 'worker', title: 'Make the landing-zone save', permissionMode: 'default', requestedBy: ben, sandbox: 'sb' });
   sessions.send(macWorker.info.id, 'Make the save.', 'orchestrator');
   await until('the Mac worker runs', () => FakeAgent.got.length === 1);
   const save = randomBytes(9 * 1024 * 1024 + 4321);
@@ -316,7 +328,7 @@ test('publish_attachment, end to end: a worker on a Mac publishes a save; a work
   assert.equal(files.usage().files, 1);
 
   // The orchestrator passes the id on (message_agent / start_agent attachments: [id]): LothDesktop's daemon fetches it.
-  const ldWorker = mm.createSession('lothdesktop', { kind: 'worker', title: 'Repro on the landing-zone save', permissionMode: 'default' });
+  const ldWorker = mm.createSession('lothdesktop', { kind: 'worker', title: 'Repro on the landing-zone save', permissionMode: 'default', sandbox: 'sb' });
   sessions.send(ldWorker.info.id, 'Load the attached save.', 'orchestrator', undefined, { attachments: files.resolve([id]).map(publicRef) });
   await until('the LothDesktop worker got it', () => FakeAgent.got.length === 2);
   const got = FakeAgent.got[1];

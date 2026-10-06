@@ -469,7 +469,6 @@ export interface Machine {
   unityBelowNormal?: boolean;
   /** Portal URL the daemon connects to. */
   portalUrl: string;
-  maxSessions: number;
   sessionIds: string[];
   /** Reported by the daemon. */
   info?: { hostname: string; os: string; node: string; claude?: string; daemon: string; platform?: MachinePlatform };
@@ -1777,7 +1776,7 @@ export interface PermissionDecisionRequest {
 // ---------------------------------------------------------------- the token vault (docs/vault.md, w512)
 
 export type VaultKind = 'claude' | 'github' | 'env';
-/** The roles a machine run has (config claudeAccounts' names): sandbox and main-clone workers, standing agents. */
+/** The roles a machine run has (config claudeAccounts' names): sandbox workers, standing agents. */
 export type VaultRole = 'workers' | 'standing';
 /** owner: only work the entry's owner asked for. anyone: any run it is granted to. */
 export type VaultShare = 'owner' | 'anyone';

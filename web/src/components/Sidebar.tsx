@@ -201,16 +201,14 @@ export function Sidebar({
   );
 }
 
-/** What the sidebar marks as open: a sandbox (host "alpha" or machine "m5/sb1"), a machine's main clone, an agent. */
+/** What the sidebar marks as open: a sandbox (host "alpha" or machine "m5/sb1"), an agent in one. */
 function selectionOf(route: Route, sessions: Map<string, SessionInfo>): FleetSelection {
   if (route.view === 'sandbox') return { sandbox: route.sandboxId, sessionId: route.sessionId };
   if (route.view === 'msandbox') return { sandbox: `${route.machineId}/${route.sandboxId}`, sessionId: route.sessionId };
-  if (route.view === 'machine') return { machineMain: route.machineId, sessionId: route.sessionId };
   if (route.view !== 'session') return {};
   const s = sessions.get(route.sessionId);
   if (s?.sandboxId) return { sandbox: s.sandboxId, sessionId: s.id };
   if (s?.machineId && s.machineSandbox) return { sandbox: `${s.machineId}/${s.machineSandbox}`, sessionId: s.id };
-  if (s?.machineId) return { machineMain: s.machineId, sessionId: s.id };
   return {};
 }
 

@@ -1,13 +1,13 @@
 // Every computer and what it is working on (shared/fleet.ts), drawn twice: as collapsible groups in the
 // sidebar, and as one card per computer on the Overview board. A group is its header (name, online, load,
-// sandbox and editor counts), its sandboxes with their live agents, and a machine's main-clone agents.
+// sandbox and editor counts) and its sandboxes with their live agents (every worker runs in one, w536).
 import { useState, type ReactNode } from 'react';
-import type { AppState, HostHealth, Machine, Provider, SessionInfo } from '../../../shared/types';
+import type { AppState, HostHealth, Provider, SessionInfo } from '../../../shared/types';
 import { cpuPct, disksHint, memPct, metricsLine, metricsStale, rootDisk } from '../../../shared/providerMetrics';
 import { capacityLine, fleetOf, type FleetComputer, type FleetSandbox, type PlaceAgents } from '../../../shared/fleet';
 import { useAttention } from '../attention';
 import { sessionIndex } from '../store';
-import { agentView, displayName, fmtBytes, fmtRelative, isUnused, lsGet, lsSet, machineGlance, machineSandboxGlance, navigate, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
+import { agentView, displayName, fmtBytes, fmtRelative, isUnused, lsGet, lsSet, machineSandboxGlance, navigate, unityLabel, unityTone, useNow, type Glance, type Route, type Tone } from '../util';
 import { AttentionButton, DrawerButton } from './ShellButtons';
 import { describe, gpuPct, level, ramLvl, ramPct, type Lvl } from './SystemMeters';
 import { Dot, Icon } from './ui';
@@ -17,7 +17,6 @@ type Variant = 'side' | 'board';
 /** Where the user is, so the sidebar can mark it. */
 export interface FleetSelection {
   sandbox?: string;
-  machineMain?: string;
   sessionId?: string;
 }
 
@@ -252,37 +251,7 @@ function SandboxItem({ sb, now, sel, variant, go }: { sb: FleetSandbox; now: num
   );
 }
 
-function MainClone({ m, agents, now, sel, variant, go }: { m: Machine; agents: PlaceAgents; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void }) {
-  const g = machineGlance(m, agents.live, now);
-  return (
-    <div className="fl-sb fl-main" data-testid={`fl-main-${m.id}`}>
-      <PlaceHead
-        glance={g}
-        title={displayName(m)}
-        unused={isUnused(m.purpose)}
-        sub={
-          <>
-            <span className="row-prefix">main clone · </span>
-            <span className={`tone-${g.tone}`}>{g.label}</span>
-            {m.git && (
-              <>
-                {' · '}
-                <span className="mono fl-branch">{m.git.branch}</span>
-              </>
-            )}
-          </>
-        }
-        active={sel.machineMain === m.id && !sel.sessionId}
-        hint={`The main clone on ${m.name ?? m.id}${m.repoPath ? ` (${m.repoPath})` : ''}${m.git ? ` · ${m.git.branch}` : ''}${agentsHint(agents)}`}
-        onClick={() => go({ view: 'machine', machineId: m.id })}
-        testId="fl-main-row"
-      />
-      <Agents agents={agents} now={now} sel={sel} variant={variant} open={(s) => go({ view: 'machine', machineId: m.id, sessionId: s.id })} />
-    </div>
-  );
-}
-
-/** A computer's places: its sandboxes (free ones last) and a machine's main clone. On the board, free sandboxes are one line of chips. */
+/** A computer's places: its sandboxes (free ones last). On the board, free sandboxes are one line of chips. */
 function Places({ c, now, sel, variant, go, onNewSandbox }: { c: FleetComputer; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void; onNewSandbox?: () => void }) {
   const free = variant === 'board' ? c.sandboxes.filter((s) => s.free) : [];
   const shown = variant === 'board' ? c.sandboxes.filter((s) => !s.free) : c.sandboxes;
@@ -318,7 +287,6 @@ function Places({ c, now, sel, variant, go, onNewSandbox }: { c: FleetComputer; 
           .
         </p>
       )}
-      {c.machine && <MainClone m={c.machine} agents={c.main!} now={now} sel={sel} variant={variant} go={go} />}
     </div>
   );
 }

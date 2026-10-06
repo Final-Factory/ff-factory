@@ -740,7 +740,7 @@ export class SessionManager {
   private readonly queueFile?: string;
   private drainTimer?: NodeJS.Timeout;
   /**
-   * A machine session's place is full of mid-turn agents (its sandbox, its sandboxes, its main clone): why, or undefined.
+   * A machine session's place is full of mid-turn agents (its sandbox, or the machine's agent cap): why, or undefined.
    * Set by MachineManager. The portal runs no workers of its own (w510), so only a machine's limits apply.
    */
   placeFull?: (s: SessionHandle) => string | undefined;

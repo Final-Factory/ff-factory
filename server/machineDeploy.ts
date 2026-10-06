@@ -231,7 +231,6 @@ export interface DeployOptions {
   /** The checkout whose committed code is deployed (this server's own). */
   root: string;
   repoPath?: string;
-  maxSessions: number;
   /** "owner/name" of the game repo (config repo.url), to find its clone when repoPath is not given. */
   repoSlug?: string;
   /** The machine's own folders (add_machine; docs/machines.md): unset means the defaults. */
@@ -352,7 +351,7 @@ npm ci --omit=dev --no-audit --no-fund --loglevel=error
   );
 
   step('installing');
-  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, sandboxes: opts.sandboxes, ...opts.dirs });
+  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, sandboxes: opts.sandboxes, ...opts.dirs });
   await must(
     opts.host,
     'install',
@@ -425,7 +424,7 @@ async function mustPs(host: win.Target, what: string, script: string, opts: { ti
 }
 
 /** The daemon's config file (both platforms); a folder option left unset is left out. Exported for tests. */
-export function daemonConfig(o: { portalUrl: string; id: string; token: string; repoPath: string; claude?: string; maxSessions: number; sandboxes?: SandboxPoolSettings | null; extra?: DaemonExtras } & MachineDirs): string {
+export function daemonConfig(o: { portalUrl: string; id: string; token: string; repoPath: string; claude?: string; sandboxes?: SandboxPoolSettings | null; extra?: DaemonExtras } & MachineDirs): string {
   return JSON.stringify(
     {
       portalUrl: o.portalUrl,
@@ -433,7 +432,6 @@ export function daemonConfig(o: { portalUrl: string; id: string; token: string; 
       token: o.token,
       repoPath: o.repoPath,
       claude: o.claude,
-      maxSessions: o.maxSessions,
       root: o.root,
       appDir: o.appDir,
       unityEditorRoot: o.unityEditorRoot,
@@ -521,7 +519,7 @@ async function deployWindows(opts: DeployOptions): Promise<DeployResult> {
   await mustPs(host, 'npm ci', win.npmScript(p.node, version, appDir), { timeoutMs: 10 * 60_000 });
 
   step('installing');
-  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, maxSessions: opts.maxSessions, sandboxes: opts.sandboxes, extra: opts.extra, ...opts.dirs });
+  const config = daemonConfig({ portalUrl: opts.portalUrl, id: opts.id, token: opts.token, repoPath, claude: p.claude, sandboxes: opts.sandboxes, extra: opts.extra, ...opts.dirs });
   const out = await mustPs(host, 'install', win.installScript({ sid: p.sid, home: p.home, config, node: p.node, flag: support.flag, appDir, previousAppDir: opts.previousAppDir }), { timeoutMs: 3 * 60_000 });
   return { platform: 'win32', home: p.home, repoPath, node: p.node, nodeVersion: p.nodeVersion ?? '', claude: p.claude, version, started: /started=True/.test(out) };
 }

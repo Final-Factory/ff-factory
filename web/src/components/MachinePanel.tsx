@@ -1,31 +1,37 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { platformNoun, type AppState, type Machine } from '../../../shared/types';
 import { api } from '../api';
-import { attempt, sessionsByIds, toast, upsertMachine, useStore } from '../store';
+import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
 import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
-import { NewAgentModal } from './Modals';
 import { ScreenshotsDrawer } from './Images';
-import { GitFacts, SwitchBranchModal } from './Git';
-import { SessionDetails, SessionView } from './SessionView';
-import { AgentPicker, AgentTabs, AttentionStrip, DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
+import { GitFacts } from './Git';
+import { DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
 
-/** One of the user's Macs or Windows PCs (docs/machines.md): its daemon's state, its clone, and its agents. */
-export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: AppState; machine: Machine; sessionId?: string; onClose?: () => void }) {
+const midTurn = (status: string) => status === 'running' || status === 'starting' || status === 'waiting_permission';
+
+/**
+ * A machine's agent cap, as server/machines.ts agentCap counts it (w536): its sandboxes' and its standing agents
+ * mid-turn together, max_sandbox_agents or every sandbox full; 2 standing agents on a machine without sandboxes.
+ */
+const agentCap = (m: Machine) => (m.sandboxRoot ? (m.maxSandboxAgents ?? (m.maxSandboxes ?? 3) * (m.maxAgentsPerSandbox ?? 2)) : 2);
+
+/**
+ * One of the user's Macs or Windows PCs (docs/machines.md): its daemon's state, its clone and its sandboxes. Its
+ * workers are in its sandboxes, each with its own page (w536: none in the main clone); standing agents have theirs.
+ */
+export function MachinePanel({ app, machine: m, onClose }: { app: AppState; machine: Machine; onClose?: () => void }) {
   const now = useNow();
-  // Standing agents assigned here have their own page, and so do its sandboxes; the tabs are the main clone's workers.
   const here = sessionsByIds(app.sessions, m.sessionIds);
-  const sessions = here.filter((s) => s.kind !== 'standing' && !s.machineSandbox);
-  const selected = sessions.find((s) => s.id === sessionId) ?? sessions[sessions.length - 1];
-  const [newAgent, setNewAgent] = useState(false);
   const [label, setLabel] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [confirmRedeploy, setConfirmRedeploy] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [shotsOpen, setShotsOpen] = useState(false);
-  const [switchOpen, setSwitchOpen] = useState(false);
   // A redeploy or daemon restart stops every agent there, its sandboxes' too.
-  const live = here.filter((s) => s.kind !== 'standing' && (s.status === 'running' || s.status === 'starting' || s.status === 'waiting_permission')).length;
+  const live = here.filter((s) => s.kind !== 'standing' && midTurn(s.status)).length;
+  // What its agent cap counts: sandbox and standing agents mid-turn.
+  const running = here.filter((s) => midTurn(s.status)).length;
   const g = m.git;
 
   const redeploy = async () => {
@@ -40,15 +46,7 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
   };
 
   const [details, setDetails] = useDetailsOpen('machine');
-  const pick = (id: string) => navigate({ view: 'machine', machineId: m.id, sessionId: id }, true);
-  const canAdd = m.status === 'ready' && m.online;
-  const glance = machineGlance(m, sessions, now);
-  const waiting = sessions.find((s) => s.pendingPermissions.length > 0);
-  const focusRequest = useStore((s) => s.focusRequestId);
-  useEffect(() => {
-    const owner = focusRequest ? sessions.find((s) => s.pendingPermissions.some((p) => p.requestId === focusRequest)) : undefined;
-    if (owner && owner.id !== selected?.id) pick(owner.id);
-  }, [focusRequest]);
+  const glance = machineGlance(m, here, now);
 
   return (
     <section className="sb-panel">
@@ -69,13 +67,11 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
                 </>
               )}
             </span>
-            {m.status === 'ready' && <AgentPicker place={displayName(m)} sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!canAdd} />}
           </>
         }
         detailsOpen={details}
         onToggleDetails={() => setDetails(!details)}
       />
-      <AttentionStrip session={waiting} />
       {m.status === 'deploying' && (
         <div className="sb-progress">
           <div className="indeterminate" />
@@ -146,19 +142,13 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
           <div className="unity-bar">
             <Chip tone={machineTone(m)}>{machineLabel(m)}</Chip>
             <span className="dim small ellipsis">
-              {m.online ? (m.maxSessions === 0 ? `${live} agents running (sandboxes only)` : `${live}/${m.maxSessions} agents running`) : m.lastSeen ? `last seen ${fmtRelative(m.lastSeen, now)}` : 'never connected'}
+              {m.online ? `${running}/${agentCap(m)} agents running` : m.lastSeen ? `last seen ${fmtRelative(m.lastSeen, now)}` : 'never connected'}
               {m.statusDetail && m.status === 'ready' ? ` · ${m.statusDetail}` : ''}
             </span>
           </div>
           <div className="details-buttons">
             <button className="btn btn-ghost btn-sm" disabled={!m.online} onClick={() => setShotsOpen(true)} title="Screenshots and other images agents left in the clone">
               <Icon name="image" size={14} /> Screenshots
-            </button>
-            <button className="btn btn-ghost btn-sm" disabled={!m.online} onClick={() => setSwitchOpen(true)} title="Switch the clone to another branch">
-              <Icon name="branch" size={14} /> Branch
-            </button>
-            <button className="btn btn-sm btn-primary" disabled={!canAdd} onClick={() => setNewAgent(true)}>
-              <Icon name="plus" size={13} /> New agent
             </button>
           </div>
         </DetailsSection>
@@ -173,28 +163,16 @@ export function MachinePanel({ app, machine: m, sessionId, onClose }: { app: App
             </div>
           </DetailsSection>
         )}
-        {selected && <SessionDetails session={selected} />}
       </DetailsSheet>
 
-      <AgentTabs sessions={sessions} selected={selected} onSelect={pick} />
+      <div className="panel-empty">
+        <Icon name="bot" size={28} />
+        <p>{m.sandboxRoot ? "Workers run in this machine's sandboxes, each with its own page." : 'This machine has no sandboxes, so it takes no workers.'}</p>
+        <p className="dim small">No agent works in its main clone. Its standing agents count against its agent cap too.</p>
+      </div>
 
-      {selected ? (
-        <SessionView key={selected.id} session={selected} embedded />
-      ) : (
-        <div className="panel-empty">
-          <Icon name="bot" size={28} />
-          <p>No agents in this machine's main clone yet.</p>
-          <p className="dim small">They work in the user's main clone here, next to their own uncommitted work.</p>
-          <button className="btn btn-primary" disabled={!canAdd} onClick={() => setNewAgent(true)}>
-            <Icon name="plus" size={14} /> New agent
-          </button>
-        </div>
-      )}
-
-      {newAgent && <NewAgentModal app={app} target={{ machineId: m.id, name: displayName(m) }} onClose={() => setNewAgent(false)} />}
       {label && <LabelModal machine={m} onClose={() => setLabel(false)} />}
       {shotsOpen && <ScreenshotsDrawer place={{ machine: m.id }} title={displayName(m)} onClose={() => setShotsOpen(false)} />}
-      {switchOpen && <SwitchBranchModal target={{ machine: m.id }} name={m.id} git={m.git} onClose={() => setSwitchOpen(false)} />}
       {confirmRedeploy && (
         <Confirm
           title={`Redeploy ${m.id}?`}
@@ -294,7 +272,6 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
   const [host, setHost] = useState('');
   const [portalUrl, setPortalUrl] = useState(location.origin);
   const [repoPath, setRepoPath] = useState('');
-  const [max, setMax] = useState('3');
   const [appDir, setAppDir] = useState('');
   const [unityRoot, setUnityRoot] = useState('');
   const [tempDir, setTempDir] = useState('');
@@ -310,8 +287,6 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
         host: host.trim() || undefined,
         portalUrl: portalUrl.trim().replace(/\/+$/, ''),
         repoPath: repoPath.trim() || undefined,
-        // 0: sandboxes only (w477); empty: the default 3.
-        maxSessions: max.trim() === '' || !Number.isFinite(Number(max)) ? 3 : Number(max),
         appDir: appDir.trim() || undefined,
         // A path to the executable itself (Unity.exe, .../MacOS/Unity) is unity_path; a folder of versions is unity_editor_root.
         ...(/(Unity\.exe|\/MacOS\/Unity)$/i.test(unityRoot.trim()) ? { unityPath: unityRoot.trim() } : { unityEditorRoot: unityRoot.trim() || undefined }),
@@ -365,16 +340,10 @@ export function AddMachineModal({ onClose }: { onClose: () => void }) {
           <span>Portal URL the machine connects to</span>
           <input className="input mono" value={portalUrl} onChange={(e) => setPortalUrl(e.target.value)} />
         </label>
-        <div className="field-row">
-          <label className="field">
-            <span>Final Factory clone</span>
-            <input className="input mono" value={repoPath} onChange={(e) => setRepoPath(e.target.value)} placeholder="found automatically" />
-          </label>
-          <label className="field">
-            <span>Max agents at once</span>
-            <input className="input mono" type="number" min={0} max={8} value={max} onChange={(e) => setMax(e.target.value)} />
-          </label>
-        </div>
+        <label className="field">
+          <span>Final Factory clone</span>
+          <input className="input mono" value={repoPath} onChange={(e) => setRepoPath(e.target.value)} placeholder="found automatically" />
+        </label>
         <div className="field-row">
           <label className="field">
             <span>Daemon folder</span>

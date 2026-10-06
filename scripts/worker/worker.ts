@@ -422,8 +422,8 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     ...(fs.existsSync(path.join(l.seed, 'Library')) ? { librarySeed: path.join(l.seed, 'Library') } : {}),
   };
   // A migration keeps the old daemon's settings (its host guard, protected paths, MCP server, idle stop); the root's
-  // folders and the credential file replace its own, and the token never goes into daemon.json.
-  const { token: _t, appDir: _a, tempDir: _d, repoPath: _r, sandboxes: oldPool, unitySlotsDir: _u, maxEventsFile: _m, configFile: _c, ...carried } = (o.carry ?? {}) as Record<string, unknown>;
+  // folders and the credential file replace its own, the token never goes into daemon.json, and max_agents is gone (w536).
+  const { token: _t, appDir: _a, tempDir: _d, repoPath: _r, sandboxes: oldPool, unitySlotsDir: _u, maxEventsFile: _m, configFile: _c, maxSessions: _ms, ...carried } = (o.carry ?? {}) as Record<string, unknown>;
   if (oldPool && typeof oldPool === 'object') {
     const { root: _pr, librarySeed: _ls, ...poolRest } = oldPool as Record<string, unknown>;
     Object.assign(sandboxes, { ...poolRest, root: sandboxes.root, ...(sandboxes.librarySeed ? { librarySeed: sandboxes.librarySeed } : {}) });
@@ -436,8 +436,6 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     tokenFile: l.token,
     repoPath: l.repo,
     claude,
-    // No agents in a clone (w477): this machine takes work in its sandboxes only.
-    maxSessions: 0,
     appDir: l.daemon,
     tempDir: l.tmp,
     // The Unity slots mailbox stays at its standard place (~/.ff-factory/unity-slots, machine/unitySlots.ts slotsDir),

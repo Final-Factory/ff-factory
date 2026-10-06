@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
-import { MachineManager } from './machines.ts';
+import { MachineManager, STANDING_CAP_NO_POOL, agentCap } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
@@ -369,7 +369,6 @@ test('overlaps reach every computer: a worker in a machine sandbox is found by t
     repoPath: '/Users/u/game',
     home: '/Users/u',
     portalUrl: 'http://x',
-    maxSessions: 3,
     sessionIds: [],
     createdAt: T0,
     sandboxes: [{ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', path: '/Users/u/sandboxes/sb1', purpose: 'Belt splitter fix', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: ['mw1'], git: { branch: '098-belt-splitter', dirty: 0, untracked: 0, at: T0 } }],
@@ -846,42 +845,36 @@ test("w402: a member cannot close or reopen another person's request, even in th
 
 // ---------------------------------------------------------------- w416: placing work where there is room
 
-test('w477: a machine with max_agents 0 takes agents in its sandboxes only: start_agent with it alone is refused naming its sandboxes, placement never suggests its main clone, standing agents stay off it', async (t) => {
+test('w536: every worker runs in a sandbox: start_agent with a machine alone is refused naming its sandboxes, no main clone takes work, and standing agents count against the agent cap', async (t) => {
   const { store, agents, dispatcher, call } = setup(t);
   const GB = 1024 ** 3;
   const machines = (agents as unknown as { machines: MachineManager }).machines;
   const machine = (id: string, extra: Record<string, unknown>) =>
     store.putMachine({ id, host: id, purpose: 'unused', status: 'ready', online: true, repoPath: `/w/${id}`, home: '/h', portalUrl: 'http://x', sessionIds: [], createdAt: T0, ...extra } as never);
-  const sb = (id: string) => ({ id, branch: `sandbox/${id}`, base: 'origin/develop', path: `D:\work\ffsb\${id}`, purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
-  machine('lothdesktop', { platform: 'win32', maxSessions: 0, sandboxRoot: 'D:\work\ffsb', maxSandboxes: 3, maxSandboxAgents: 6, sandboxes: [sb('sb1'), sb('sb2')] });
-  // A main-clone machine set to 0 has no place for work at all.
-  machine('m5', { platform: 'darwin', maxSessions: 0 });
-  machine('m3', { platform: 'darwin', maxSessions: 2 });
+  const sb = (id: string) => ({ id, branch: `sandbox/${id}`, base: 'origin/develop', path: `D:\\work\\ffsb\\${id}`, purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
+  machine('lothdesktop', { platform: 'win32', sandboxRoot: 'D:\\work\\ffsb', maxSandboxes: 3, maxSandboxAgents: 6, sandboxes: [sb('sb1'), sb('sb2')] });
+  // No sandbox_root: no workers at all (it gets one through the worker installer, w513).
+  machine('m3', { platform: 'darwin' });
+  // A small pool: its agent cap is every sandbox full, 1 x 2.
+  machine('beast', { platform: 'win32', sandboxRoot: 'F:\\ffsb', maxSandboxes: 1, maxAgentsPerSandbox: 2, sandboxes: [sb('sb1')] });
   Object.assign(machines, { isOnline: () => true, statsOf: () => ({ hostname: 'x', platform: 'x', cpuModel: 'x', cpuCount: 8, loadPct: 5, memTotalBytes: 64 * GB, memFreeBytes: 40 * GB, at: T0 }) });
   agents.hostMem = () => ({ free: 50 * GB, total: 64 * GB });
+  assert.deepEqual(['lothdesktop', 'm3', 'beast'].map((id) => agentCap(machines.require(id))), [6, STANDING_CAP_NO_POOL, 2]);
 
-  // add_machine takes 0; the record and the HTTP route are validated the same way.
+  // add_machine has no max_agents any more.
   const add = agents.toolSpecs().find((x) => x.name === 'add_machine')!;
-  const { z } = await import('zod');
-  assert.equal(z.object(add.schema).safeParse({ id: 'lothdesktop', max_agents: 0 }).success, true);
-  assert.equal(z.object(add.schema).safeParse({ id: 'lothdesktop', max_agents: -1 }).success, false);
-  assert.throws(() => machines.deployMachine({ id: 'lothdesktop', maxSessions: -1 }), /max_agents is a whole number from 0 \(sandboxes only\) to 8/);
-  assert.throws(() => machines.deployMachine({ id: 'lothdesktop', maxSessions: 2.5 }), /from 0 \(sandboxes only\) to 8/);
+  assert.equal('max_agents' in add.schema, false);
 
-  // The capacity block lists LothDesktop's sandboxes and the m3, never a main clone with max_agents 0.
+  // The capacity block holds sandbox computers only; list_machines shows each one's agent cap.
   const list = (await call(dispatcher().info, 'list_sandboxes', {})).text;
   assert.match(list, /\n- lothdesktop: ROOM \d+%/);
-  assert.match(list, /\n- m3 \[main clone\]: ROOM/);
-  assert.doesNotMatch(list, /- m5\b|m5's main clone/);
-  for (const prefer of [['m5', 'lothdesktop'], ['lothdesktop']]) {
-    (agents as unknown as { cfg: Config }).cfg.placement = { prefer };
-    assert.doesNotMatch((await call(dispatcher().info, 'list_sandboxes', {})).text, /Next new game-repo work: (m5|lothdesktop)'s main clone/);
-  }
+  assert.doesNotMatch(list, /main clone|- m3\b/);
   const machinesText = (await call(dispatcher().info, 'list_machines', {})).text;
-  assert.match(machinesText, /workers in its sandboxes only; up to 0 standing agents/, 'a sandbox machine');
-  assert.match(machinesText, /sandboxes only \(max_agents 0: no agents in its main clone\)/, 'the m5, without sandboxes');
+  assert.match(machinesText, /workers in its sandboxes; up to 6 agents in all, standing agents included/);
+  assert.match(machinesText, /no workers \(no sandbox_root\); up to 2 agents in all, standing agents included/);
+  assert.doesNotMatch(machinesText, /max_agents|in the main clone/);
 
-  // start_agent with the machine alone: refused before any record is made, naming its sandboxes.
+  // start_agent with the machine alone: refused before any record is made, naming its sandboxes, with or without them.
   const before = store.sessions.size;
   const start = beltFor('remote', agents.toolSpecs('human', agents.fixedActor(LOTH), { role: 'remote', owner: LOTH })).find((x) => x.name === 'start_agent')!;
   const run = async (a: Record<string, unknown>) => {
@@ -890,29 +883,34 @@ test('w477: a machine with max_agents 0 takes agents in its sandboxes only: star
   };
   const r = await run({ machine: 'lothdesktop', prompt: 'Profile the belts', title: 'Belt profile' });
   assert.equal(r.isError, true);
-  assert.match(r.text, /lothdesktop takes workers in its sandboxes only: start this one in one of its sandboxes \(lothdesktop\/sb1, lothdesktop\/sb2\)/);
-  const none = await run({ machine: 'm5', prompt: 'x', title: 'x' });
-  assert.match(none.text, /m5 takes agents in its sandboxes only \(max_agents 0\): start this one in a sandbox there \(it has none yet: create_sandbox with machine "m5"\)/);
+  assert.match(r.text, /lothdesktop runs workers in sandboxes only: start this one in one of its sandboxes \(lothdesktop\/sb1, lothdesktop\/sb2\)/);
+  const none = await run({ machine: 'm3', prompt: 'x', title: 'x' });
+  assert.equal(none.isError, true);
+  assert.match(none.text, /m3 runs workers in sandboxes only: start this one in a sandbox, on a computer that has a sandbox root \(it has none\)/);
   assert.equal(store.sessions.size, before, 'no agent record left behind');
+  // unity and switch_branch act on sandboxes only.
+  for (const [tool, args] of [['unity', { machine: 'm3', action: 'status' }], ['switch_branch', { machine: 'lothdesktop', branch: 'feature/x' }]] as const) {
+    assert.match((await call(dispatcher().info, tool, args)).text, /a machine's main clone takes no agents \(w536\): give a sandbox/, tool);
+  }
 
-  // A standing agent cannot be assigned there, and a session already there (assigned before the change) is refused
-  // outright rather than queued for a slot that never comes. (Delegations pick no place of their own since w527.)
-  const m = machines.require('lothdesktop');
-  assert.match(machines.mainCloneRefusal(m, 'standing')!, /lothdesktop takes agents in its sandboxes only \(max_agents 0\): a standing agent needs a computer with max_agents 1 or more/);
-  assert.equal(machines.mainCloneRefusal(machines.require('m3'), 'worker'), undefined);
-  assert.throws(() => agents.standing.create({ name: 'Nightly reader', charter: 'Read the nightly report.', trigger: { kind: 'manual' }, machineId: 'lothdesktop' } as never), /sandboxes only \(max_agents 0\)/);
-  const s = machines.createSession('lothdesktop', { kind: 'worker', title: 'old', model: 'opus', permissionMode: 'bypassPermissions' });
-  assert.equal(machines.placeFull(s), undefined, 'not queued');
-  assert.throws(() => machines.dispatchSend(s as never, 'hi', 'orchestrator', 'u1'), /takes workers in its sandboxes only/);
+  // A worker recorded in a main clone before the change is refused outright, not queued for a slot.
+  const old = machines.createSession('m3', { kind: 'worker', title: 'old', model: 'opus', permissionMode: 'bypassPermissions' });
+  assert.equal(machines.placeFull(old), undefined, 'not queued');
+  assert.throws(() => machines.dispatchSend(old as never, 'hi', 'orchestrator', 'u1'), /m3 runs workers in sandboxes only/);
+  assert.equal(machines.mainCloneRefusal(machines.require('m3'), 'standing'), undefined, 'standing agents are never refused by it');
 
-  // w536: with sandboxes, max_agents no longer matters for workers: the main clone takes none at 3 either, while its
-  // standing agents still may; a machine without sandboxes (the m3) keeps its main-clone workers.
-  store.putMachine({ ...machines.require('lothdesktop'), maxSessions: 3 } as never);
-  const three = await run({ machine: 'lothdesktop', prompt: 'Profile the belts', title: 'Belt profile' });
-  assert.match(three.text, /lothdesktop takes workers in its sandboxes only: start this one in one of its sandboxes \(lothdesktop\/sb1, lothdesktop\/sb2\)/);
-  assert.equal(machines.mainCloneRefusal(machines.require('lothdesktop'), 'standing'), undefined, 'its standing agents still run');
-  assert.equal(machines.mainCloneRefusal(machines.require('m3'), 'worker'), undefined, 'the m3 has no sandboxes yet');
-  assert.doesNotMatch((await call(dispatcher().info, 'list_sandboxes', {})).text, /lothdesktop's main clone|- lothdesktop \[main clone\]/);
+  // The agent cap: BEAST's sandbox agents and standing agents mid-turn together, 2.
+  const nightly = agents.standing.create({ name: 'Nightly reader', charter: 'Read the nightly report.', trigger: { kind: 'manual' }, machineId: 'beast' } as never);
+  const busy = machines.createSession('beast', { kind: 'worker', title: 'busy', model: 'opus', permissionMode: 'bypassPermissions', sandbox: 'sb1' });
+  busy.info.status = 'running';
+  const next = machines.createSession('beast', { kind: 'worker', title: 'next', model: 'opus', permissionMode: 'bypassPermissions', sandbox: 'sb1' });
+  assert.equal(machines.placeFull(next), undefined, '1 of 2');
+  const duty = machines.createSession('beast', { kind: 'standing', title: 'duty', model: 'opus', permissionMode: 'bypassPermissions' });
+  duty.info.status = 'running';
+  assert.match(machines.placeFull(next)!, /2 agents mid-turn on beast, in sandboxes and standing agents together \(its agent cap 2\)/);
+  assert.match(agents.standing.runNow(nightly.id), /^Waiting: waiting for an agent slot \(2\/2 in use\)/);
+  duty.info.status = 'idle';
+  assert.equal(machines.placeFull(next), undefined, 'an idle agent takes no slot');
 });
 
 test('w464 change 6: claudeAccounts.dispatcher runs the dispatcher on that account, not the system payer\'s own token; people\'s orchestrators keep theirs', (t) => {

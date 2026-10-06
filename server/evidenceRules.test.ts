@@ -85,18 +85,14 @@ test('the evidence rule: the worker settles its own guesses; a person is asked f
   assert.match(REPORT_LABELS, /an orchestrator relays only the start of a long report/);
 });
 
-test("every worker's brief carries it: a machine's main clone, a sandbox on a machine (w510: the portal has no workers of its own)", (t) => {
+test("every worker's brief carries it: a sandbox on a machine (w510: the portal has no workers of its own; w536: none in a main clone)", (t) => {
   const { agents } = world(t);
   const briefs = agents as unknown as {
-    machineBrief: (m: unknown) => string;
     machineSandboxBrief: (m: unknown, sb: unknown) => string;
   };
   const sb = { id: 'alpha', path: '/sb/alpha', branch: 'fix-x', purpose: 'a fix', unity: { state: 'stopped' } };
   const mac = { id: 'm5', repoPath: '/Users/dev/FinalFactory', platform: 'darwin', sandboxRoot: '/Users/dev/ffsb' };
-  for (const [name, brief] of [
-    ['machine', briefs.machineBrief(mac)],
-    ['machine sandbox', briefs.machineSandboxBrief(mac, sb)],
-  ] as const) {
+  for (const [name, brief] of [['machine sandbox', briefs.machineSandboxBrief(mac, sb)]] as const) {
     assert.ok(brief.includes(EVIDENCE_RULES), `${name}: the evidence rule`);
     assert.ok(brief.includes(`instead of guessing. ${REPORT_LABELS}`), `${name}: the labels, in Reporting`);
     assert.ok(brief.indexOf(EVIDENCE_RULES) < brief.indexOf('## Reporting'), `${name}: the rule comes before Reporting`);

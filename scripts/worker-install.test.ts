@@ -80,10 +80,11 @@ test('worker install: daemon.json keeps every folder in the root and no token; a
   assert.equal(j.repoPath, l.repo);
   assert.equal(j.appDir, l.daemon);
   assert.equal(j.tempDir, l.tmp);
-  assert.equal(j.maxSessions, 0, 'sandboxes only (w477)');
+  assert.equal('maxSessions' in j, false, 'no max_agents (w536): the portal sends the agent cap');
   assert.equal((j.sandboxes as { root: string }).root, l.sandboxes);
-  const carried = daemonJson({ ...o, carry: { token: TOKEN, appDir: 'C:\\old', repoPath: 'C:\\ffsb\\_base', hostGuard: { devDriveVhdx: 'C:\\ffsb-devdrive.vhdx' }, sandboxes: { root: 'F:\\ffsb', maxSandboxes: 5, librarySeed: 'F:\\ffsb\\_seed\\Library', belowNormal: true } } }, l, 'beast', undefined);
+  const carried = daemonJson({ ...o, carry: { token: TOKEN, appDir: 'C:\\old', repoPath: 'C:\\ffsb\\_base', maxSessions: 3, hostGuard: { devDriveVhdx: 'C:\\ffsb-devdrive.vhdx' }, sandboxes: { root: 'F:\\ffsb', maxSandboxes: 5, librarySeed: 'F:\\ffsb\\_seed\\Library', belowNormal: true } } }, l, 'beast', undefined);
   assert.equal('token' in carried, false, 'the old token never reaches the new daemon.json');
+  assert.equal('maxSessions' in carried, false, 'nor its max_agents (w536)');
   assert.deepEqual(carried.hostGuard, { devDriveVhdx: 'C:\\ffsb-devdrive.vhdx' });
   assert.equal(carried.appDir, l.daemon);
   assert.equal(carried.repoPath, l.repo);

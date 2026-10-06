@@ -43,7 +43,7 @@ test('machine dirs: daemon.json carries the folders, and leaves unset ones out',
   assert.equal(c.unityEditorRoot, 'C:\\Program Files\\Unity\\Editor');
   assert.equal(c.tempDir, 'D:\\tmp');
   assert.ok(!('unityPath' in c));
-  assert.deepEqual(Object.keys(JSON.parse(daemonConfig(base))).sort(), ['id', 'maxSessions', 'portalUrl', 'repoPath', 'token']);
+  assert.deepEqual(Object.keys(JSON.parse(daemonConfig(base))).sort(), ['id', 'portalUrl', 'repoPath', 'token']);
   assert.equal(appDirOfConfig({ appDir: APP }), APP);
   assert.equal(appDirOfConfig({}, '/Users/b'), path.join('/Users/b', '.ff-factory'));
   // Each agent gets its own folder under temp_dir (else the system's), removed once its session is gone.
@@ -53,7 +53,7 @@ test('machine dirs: daemon.json carries the folders, and leaves unset ones out',
 });
 
 test('machine dirs (Windows scripts): every script works in the app_dir, and the stop also finds a daemon in the old folder', () => {
-  const config = daemonConfig({ portalUrl: 'https://p', id: 'lothdesktop', token: 't', repoPath: 'D:\\Games\\FF', maxSessions: 3, appDir: APP });
+  const config = daemonConfig({ portalUrl: 'https://p', id: 'lothdesktop', token: 't', repoPath: 'D:\\Games\\FF', appDir: APP });
   const install = win.installScript({ sid: SID, home: 'C:\\Users\\Loth', config, node: 'C:\\Program Files\\nodejs\\node.exe', flag: false, appDir: 'D:/work/.ff-factory', previousAppDir: undefined });
   for (const s of [win.uploadScript(APP), win.npmScript('C:\\n\\node.exe', 'abc', APP), install, win.controlScript('restart', APP), win.uninstallScript(APP)]) {
     assert.match(s, /^\$F = 'D:\\work\\\.ff-factory'$/m, 'the folder is the app_dir');

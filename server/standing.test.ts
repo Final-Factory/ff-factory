@@ -146,11 +146,12 @@ class FakePort implements SessionPort {
 }
 
 /** One online machine, m1, with room for `port.max` agents; its sessions are the port's (w510: standing agents run on machines). */
-const M1 = { id: 'm1', platform: 'linux', appDir: '/home/u/.fff', repoPath: '/home/u/game', maxSessions: 2, status: 'ready', purpose: 'm1 work', sessionIds: [] } as unknown as Machine;
+const M1 = { id: 'm1', platform: 'linux', appDir: '/home/u/.fff', repoPath: '/home/u/game', status: 'ready', purpose: 'm1 work', sessionIds: [] } as unknown as Machine;
 function fakeMachines(port: FakePort): NonNullable<ConstructorParameters<typeof StandingAgents>[0]['machines']> {
   return {
     list: () => [M1],
-    get: (id) => (id === 'm1' ? { ...M1, maxSessions: port.max } : undefined),
+    // Its agent cap (w536) is port.max.
+    get: (id) => (id === 'm1' ? { ...M1, sandboxRoot: '/home/u/ffsb', maxSandboxAgents: port.max } : undefined),
     isOnline: (id) => id === 'm1',
     liveCount: () => port.liveAgents(),
     createSession: (_m, opts) => port.create({ ...opts, options: () => assert.fail('a machine session gets no SDK options here') }),

@@ -178,7 +178,7 @@ machines.unityEvent = (machineId, text, restarted, sandbox) => {
   if (!restarted) return;
   const recent = Date.now() - 30 * 60_000;
   for (const s of store.sessions.values()) {
-    // Only the agents of that editor's place: the sandbox's, or the main clone's.
+    // Only the agents of that editor's sandbox (workers run in sandboxes only, w536).
     if (s.machineId !== machineId || s.kind === 'standing' || s.machineSandbox !== sandbox || s.stoppedOnPurpose) continue;
     if (!['running', 'starting', 'waiting_permission'].includes(s.status) && Date.parse(s.lastActivityAt) < recent) continue;
     try {
@@ -1107,13 +1107,12 @@ route('POST', '/api/machines/([\\w-]+)/sandboxes/([\\w-]+)/switch-branch', async
 // ---- machines (docs/machines.md)
 
 route('POST', '/api/machines', async (req) => {
-  const b = await readJson<{ id?: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string } & Pick<Machine, 'sandboxRoot' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity' | 'diskWarnGB' | 'diskCriticalGB'>>(req);
+  const b = await readJson<{ id?: string; host?: string; portalUrl?: string; repoPath?: string; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string } & Pick<Machine, 'sandboxRoot' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity' | 'diskWarnGB' | 'diskCriticalGB'>>(req);
   return machines.deployMachine({
     id: need(b.id, 'id'),
     host: b.host,
     portalUrl: b.portalUrl,
     repoPath: b.repoPath || undefined,
-    maxSessions: b.maxSessions,
     appDir: b.appDir,
     unityEditorRoot: b.unityEditorRoot,
     unityPath: b.unityPath,

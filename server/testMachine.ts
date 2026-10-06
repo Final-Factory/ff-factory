@@ -108,8 +108,7 @@ export interface TestMachineOptions {
   sandboxes?: (string | { name: string; purpose?: string; branch?: string })[];
   /** The portal's address when it already serves /machine (the e2e server); else the machine gets a stand-in portal of its own. */
   portalUrl?: string;
-  /** Main-clone agents (max_agents, default 1) and the pool's limits. */
-  maxSessions?: number;
+  /** The pool's limits. */
   maxSandboxes?: number;
   maxAgentsPerSandbox?: number;
   maxUnity?: number;
@@ -177,7 +176,6 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
     home: repos.root,
     appDir,
     tempDir: path.join(repos.root, 'tmp'),
-    maxSessions: o.maxSessions ?? 1,
     sandboxRoot: settings.root,
     maxSandboxes: settings.maxSandboxes,
     maxAgentsPerSandbox: settings.maxAgentsPerSandbox,
@@ -219,7 +217,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
       // Never this computer's own Unity MCP entry from ~/.claude.json: a command nothing runs (the fake SDK starts no stdio server).
       const busBefore = new Set(bus.listeners('event'));
       daemon = new Daemon(
-        { portalUrl: url, id, token, repoPath: repos.main, appDir, tempDir: path.join(repos.root, 'tmp'), unitySlotsDir: path.join(repos.root, 'slots'), claude: 'no-such-claude', maxSessions: o.maxSessions ?? 1, maxEventsFile: null, sandboxes: settings, sandboxIdleStopMinutes: 0, cleanup: NO_CLEANUP, unityMcpServer: { command: 'no-such-unity-mcp', args: [] } },
+        { portalUrl: url, id, token, repoPath: repos.main, appDir, tempDir: path.join(repos.root, 'tmp'), unitySlotsDir: path.join(repos.root, 'slots'), claude: 'no-such-claude', maxEventsFile: null, sandboxes: settings, sandboxIdleStopMinutes: 0, cleanup: NO_CLEANUP, unityMcpServer: { command: 'no-such-unity-mcp', args: [] } },
         o.makeSession,
         FAKE_PROBES,
         poolDeps,

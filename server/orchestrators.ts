@@ -547,8 +547,8 @@ export class Orchestrators {
   }
 
   /**
-   * The people whose workers are in this place (the owner when there are none): a machine's main clone, or a machine
-   * sandbox (this host's own daemon's included).
+   * The people whose workers are in this place (the owner when there are none): a machine sandbox (this host's own
+   * daemon's included). Workers run in sandboxes only (w536).
    */
   peopleAt(where: { machineId?: string; machineSandbox?: string }): Requester[] {
     const out = new Map<string, Requester>();
@@ -623,8 +623,8 @@ export class Orchestrators {
   }
 
   /**
-   * Where a worker works, whatever computer holds it: a machine sandbox ("m3/sb1") or a machine's main clone, with its
-   * label and the branch and open PR there.
+   * Where a worker works, whatever computer holds it: a machine sandbox ("m3/sb1"), with its label and the branch and
+   * open PR there (workers run in sandboxes only, w536).
    */
   private placeOf(s: SessionInfo): { name: string; label: string; branch?: string; pr?: number } | undefined {
     const { machines } = this.d.places();

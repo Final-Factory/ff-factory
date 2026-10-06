@@ -83,7 +83,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 const enc = encodeURIComponent;
 
-/** A machine's main clone, or one of its sandboxes (the portal holds none itself, w510). */
+/** One of a machine's sandboxes (the portal holds none itself, w510; a machine alone, its main clone, is refused, w536). */
 export type BranchTarget = { machine: string; sandbox?: string };
 
 export const api = {
@@ -157,7 +157,7 @@ export const api = {
   declineWork: (id: string, note?: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/decline`, { note }),
   /** A sandbox on this host's own daemon (docs/beast-machine.md), which is making it; the portal holds none itself (w510). */
   createSandbox: (req: CreateSandboxRequest) => request<{ machine: string; id: string; note: string }>('POST', '/api/sandboxes', req),
-  addMachine: (req: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string }) =>
+  addMachine: (req: { id: string; host?: string; portalUrl?: string; repoPath?: string; appDir?: string; unityEditorRoot?: string; unityPath?: string; tempDir?: string }) =>
     request<Machine>('POST', '/api/machines', req),
   redeployMachine: (id: string, force = false) => request<Machine>('POST', `/api/machines/${enc(id)}/redeploy`, { force }),
   machineDaemon: (id: string, action: 'start' | 'stop' | 'restart', force = false) => request<{ note: string }>('POST', `/api/machines/${enc(id)}/daemon`, { action, force }),

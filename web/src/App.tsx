@@ -236,7 +236,7 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
   if (route.view === 'machine') {
     const m = app.machines.find((x) => x.id === route.machineId);
     if (!m) return { node: <Missing what="machine" />, layout: 'single', title: 'Not found' };
-    const panel = <MachinePanel app={app} machine={m} sessionId={route.sessionId} onClose={() => navigate({ view: 'home' })} />;
+    const panel = <MachinePanel app={app} machine={m} onClose={() => navigate({ view: 'home' })} />;
     if (wide) {
       return {
         layout: 'split',

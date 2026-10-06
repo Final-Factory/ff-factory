@@ -32,7 +32,6 @@ const machine = (id: string, online: boolean): Machine => ({
   repoPath: '/Users/dev/FinalFactory',
   home: '/Users/dev',
   portalUrl: 'https://portal.example.ts.net',
-  maxSessions: 3,
   sessionIds: [],
   createdAt: at(-100),
 });
