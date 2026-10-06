@@ -262,6 +262,9 @@ if ! net_exists; then
   manifest_set network_created "$NET_NAME"
 fi
 run_cmd virsh --connect qemu:///system net-autostart "$NET_NAME"
+# libvirt writes $NET_BRIDGE.macs into this when a VM starts, even with DHCP off, and --no-install-recommends can leave
+# it uncreated ("Failed to create file '/var/lib/libvirt/dnsmasq/virbr-fff.macs.new'").
+run_cmd install -d -m 0755 /var/lib/libvirt/dnsmasq
 if [ "$DRY_RUN" = 1 ] || [ "$(v net-info "$NET_NAME" | awk '/^Active:/ {print $2}')" != yes ]; then
   run_cmd virsh --connect qemu:///system net-start "$NET_NAME"
 fi
