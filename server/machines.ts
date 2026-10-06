@@ -1,4 +1,4 @@
-import { MACHINE_ID, enrolledMachines, issueMachineToken, machineTokensFile, readMachineTokens, revokeMachineToken, tokenSha } from './machineTokens.ts';
+import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -675,15 +675,16 @@ export class MachineManager {
 
   // ---------------------------------------------------------------- records and tokens
 
-  /** Add or replace a machine's record and mint its token (returned once; only the hash is kept). */
+  /**
+   * Add or replace a machine's record and mint its token (returned once; only the hash is kept). The token is staged
+   * beside the machine's current one, not in its place (w568): both work until the machine's daemon connects with one
+   * of them (attach), so a deploy that fails before the machine has the new token leaves it its old one.
+   */
   register(m: Omit<Machine, 'online' | 'sessionIds' | 'createdAt'> & Partial<Pick<Machine, 'sessionIds' | 'createdAt'>>): { machine: Machine; token: string } {
     if (!MACHINE_ID.test(m.id)) throw new Error(`machine id "${m.id}" must be lower-case letters, digits and dashes`);
     const prev = this.store.machines.get(m.id);
     const machine: Machine = { online: this.isOnline(m.id), sessionIds: prev?.sessionIds ?? [], createdAt: prev?.createdAt ?? new Date().toISOString(), ...m };
-    const token = issueMachineToken(this.cfg.dataDir, m.id);
-    // The portal's own re-issue (a redeploy) keeps the link it has, as before: the deploy replaces that daemon itself.
-    const link = this.links.get(m.id);
-    if (link) link.hash = tokenSha(token);
+    const token = stageMachineToken(this.cfg.dataDir, m.id);
     this.store.putMachine(machine);
     return { machine, token };
   }
@@ -753,6 +754,7 @@ export class MachineManager {
     const t = this.tokens();
     for (const [id, link] of this.links) {
       if (t[id] && (!link.hash || t[id] === link.hash)) continue;
+      if (link.hash && t[stagedKey(id)] === link.hash) continue; // connected with a deploy's staged credential (w568)
       console.warn(`machine ${id}: its credential was ${t[id] ? 'replaced' : 'revoked'}, dropping the connection`);
       link.ws.close(4001, 'machine credential revoked');
       this.detach(id);
@@ -761,11 +763,32 @@ export class MachineManager {
 
   /** The machine a bearer token belongs to, or undefined. Constant-time on the secret. */
   authenticate(header: string | undefined): string | undefined {
+    return this.credential(header)?.id;
+  }
+
+  /**
+   * The machine a bearer token belongs to, the hash it matched, and whether that is a deploy's staged credential (w568):
+   * the current one and a staged one both open the portal until the machine connects with one of them.
+   */
+  private credential(header: string | undefined): { id: string; hash: string; staged: boolean } | undefined {
     const m = /^Bearer\s+(ffm_([a-z0-9-]+)_[A-Za-z0-9_-]{40,})$/.exec(header ?? '');
     if (!m) return undefined;
-    const want = this.tokens()[m[2]];
-    if (!want) return undefined;
-    return timingSafeEqual(Buffer.from(want, 'hex'), createHash('sha256').update(m[1]).digest()) ? m[2] : undefined;
+    const t = this.tokens();
+    const got = createHash('sha256').update(m[1]).digest();
+    const same = (want: string | undefined) => !!want && timingSafeEqual(Buffer.from(want, 'hex'), got);
+    if (same(t[m[2]])) return { id: m[2], hash: t[m[2]], staged: false };
+    if (same(t[stagedKey(m[2])])) return { id: m[2], hash: t[stagedKey(m[2])], staged: true };
+    return undefined;
+  }
+
+  /**
+   * A daemon connected: the credential it has settles a deploy's two (w568). With the staged one, that becomes its only
+   * one. With the current one while a staged one waits and no deploy runs (the deploy failed, and the old daemon is the
+   * one running), the staged one goes.
+   */
+  private settleCredential(id: string, staged: boolean) {
+    if (staged) promoteStagedToken(this.cfg.dataDir, id);
+    else if (!this.deploying.has(id)) dropStagedToken(this.cfg.dataDir, id);
   }
 
   // ---------------------------------------------------------------- deploying (server/machineDeploy.ts)
@@ -900,6 +923,8 @@ export class MachineManager {
 
   private async runDeploy(m: Machine, token: string, repoPath: string | undefined, previousAppDir: string | undefined) {
     this.deploying.add(m.id);
+    // Whether the machine may have the new token: only the install step writes it there (daemon.json, w568).
+    let reachedInstall = false;
     const { repoSlug } = await import('./machineDeploy.ts');
     const { ROOT } = await import('./config.ts');
     try {
@@ -907,7 +932,10 @@ export class MachineManager {
       // The old daemon goes, and the new one starts, during the install step.
       let installAt = Date.now();
       const step = (s: string) => {
-        if (s === 'installing') installAt = Date.now();
+        if (s === 'installing') {
+          installAt = Date.now();
+          reachedInstall = true;
+        }
         this.update(m.id, { statusDetail: s });
       };
       const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : m.daemonExtras ? { extra: m.daemonExtras } : {}) });
@@ -928,6 +956,9 @@ export class MachineManager {
           : { status: 'error', statusDetail: `installed, but the daemon has not connected to ${m.portalUrl}; see ${daemonLogPath(r.platform, m.appDir)} on ${m.host}` },
       );
     } catch (e) {
+      // Failed before the install step: the machine never got the new token, so it keeps the one it has (w568). Failed
+      // during it: it may have either, and both stay good until its daemon connects with one (settleCredential).
+      if (!reachedInstall) dropStagedToken(this.cfg.dataDir, m.id);
       // A daemon still connected (the old one kept running, or it came back) works: not an error alongside a live
       // link, but the failed redeploy stays in view.
       const live = this.isOnline(m.id) && this.hellos.has(m.id);
@@ -1111,8 +1142,8 @@ export class MachineManager {
     }
     const now = Date.now();
     const recent = (this.failures.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
-    const auth = this.authenticate(req.headers.authorization);
-    const id = auth && this.store.machines.has(auth) ? auth : undefined;
+    const cred = this.credential(req.headers.authorization);
+    const id = cred && this.store.machines.has(cred.id) ? cred.id : undefined;
     if (!id) {
       const locked = recent.length >= 10;
       if (!locked) recent.push(now);
@@ -1126,8 +1157,13 @@ export class MachineManager {
       return false;
     }
     this.failures.delete(ip);
-    const hash = this.tokens()[id];
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.attach(id, ws, hash));
+    const { hash, staged } = cred!;
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.attach(id, ws, hash);
+      // The token file is written (synchronously, fsynced) after this turn, so the daemon's 101 goes out first; the
+      // link keeps the hash it presented, which dropRevoked accepts while it is the staged one (w568).
+      setImmediate(() => this.settleCredential(id, staged));
+    });
     return true;
   }
 

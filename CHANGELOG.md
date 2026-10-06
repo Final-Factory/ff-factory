@@ -12,6 +12,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A redeploy whose ssh step fails no longer locks the machine out** (w568, found in w513). `register` replaced the
+  machine's token before the deploy's ssh step; when that failed, the machine kept its old token and its daemon's next
+  reconnect was refused. The new token is now staged beside the current one (`next:<id>` in `machine-tokens.json`):
+  both work until the machine's daemon connects with one of them, which then stays; a deploy that fails before its
+  install step drops the staged one. Tests: a failed ssh step (the old daemon reconnects), a successful redeploy (the
+  old token stops working once the new daemon has the new one), a failure during the install (the machine's next
+  connection settles it).
 - **A RAM-backed temp folder is no longer taken for the disk** (w566, Lothsahn: "Why are you reporting that fff-portal
   only has 1.9GB free when it has 101GB free?"). The clean-up measured the fullest of the home folder's, the temp
   folder's and `hostDiskPaths` volumes, and on the portal VM `/tmp` is a tmpfs of half the 4 GiB RAM (Ubuntu 26.04), so

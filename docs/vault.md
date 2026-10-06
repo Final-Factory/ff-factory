@@ -98,8 +98,11 @@ per machine and revocable:
 
 - `fffctl machine-credential issue <id> --out FILE` writes a fresh credential for a machine to a 0600 file and never
   prints it (for w513's installer). A daemon still connected with the one before is dropped within 20 s, so replacing
-  a leaked credential cuts it off at once. `add_machine` keeps issuing one as it does today; its own re-issue keeps the
-  link it has, because the redeploy replaces that daemon itself.
+  a leaked credential cuts it off at once. `add_machine`'s deploy mints one too, but stages it beside the machine's
+  current one (`next:<id>` in `machine-tokens.json`, w568): both work until the machine's daemon connects with one, and
+  that one stays. A deploy that fails before its install step drops the staged one, so the machine keeps the token it
+  has. Before w568 the new token replaced the old at once, and a redeploy whose ssh step failed left the machine with a
+  token the portal no longer took at its next reconnect.
 - The portal and fffctl both change `machine-tokens.json` (and `vault.json`) only under a lock file, so neither loses
   the other's change, and fffctl's files reach the `fff` user before they are renamed into place.
 - `fffctl machine-credential revoke <id>`, or ✕ beside the machine in the vault dialog, deletes the hash. The portal
