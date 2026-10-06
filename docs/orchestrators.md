@@ -9,7 +9,9 @@ starts anything. The record of every request and what became of it is the work l
 
 **A person's own orchestrator** (`orchestratorRole: 'personal'`, its `requestedBy` is its person) talks only with that
 person. It runs on their own Claude token when config `userClaudeEnv` has one, otherwise on the account
-`claudeAccounts.orchestrator` picks (the owner's), and `system_status` says which. Its tools, as listed in
+`claudeAccounts.orchestrator` picks (the owner's), and `system_status` says which. It gets none of that account's
+claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnectors`, [accounts.md](accounts.md),
+"claude.ai connectors"), and neither does the dispatcher. Its tools, as listed in
 `server/belts.ts` `PERSONAL_TOOLS`:
 
 - read everything: `list_sandboxes`, `list_machines`, `list_branches`, `agent_transcript`, `search_transcripts`,
