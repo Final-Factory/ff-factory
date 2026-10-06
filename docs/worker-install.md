@@ -79,9 +79,12 @@ slot config (one UAC prompt); and it waits until the portal sees the machine onl
 updates the code and keeps everything else (that is also how a root install is **updated**: the portal never
 redeploys one over ssh, it says "re-run its installer" when the daemon is outdated).
 
-**The credential** is the machine's `/machine` token, `ffm_<machine id>_<secret>`: the only token on the box (w512). The
-portal makes the machine's record and the credential (w512's enrollment, worker d91ca8cf); the installer only stores
-it. A migration needs none: it keeps the token the old daemon already has.
+**The credential** is the machine's `/machine` token, `ffm_<machine id>_<secret>`: the only token on the box
+([vault.md](vault.md), "Enrollment is the machine token", w512). In the portal's VM, `sudo fffctl machine-credential
+issue <id> --out /tmp/<id>.cred` writes one to a 0600 file and never prints it. Move that file to the machine and give
+it to the installer with `-CredentialFile` / `--credential-file` (deleted by hand afterwards), or paste it at the hidden
+prompt. Everything else a worker needs (the Claude token, the GitHub token) comes from the vault with each run, so the
+installer asks for no other secret. A migration needs none: it keeps the token the old daemon already has.
 
 ## Uninstall
 
