@@ -213,6 +213,8 @@ export type ToConnector =
   | DevFiled
   | DevReply
   | DevUpdate
+  /** A player's report a finished request fixed (w502): sent only to a connector whose hello lists "report_fixed". */
+  | ReportFixedMessage
   /** The work messages (docs/ffbox-connector-contract.md), sent only to a connector that lists them in hello.accepts. */
   | ToConnectorWork;
 
@@ -686,6 +688,22 @@ export interface DevReply {
   conversation: string;
   text: string;
   from: 'orchestrator' | 'fff';
+}
+
+/**
+ * portal → connector (w502): a player's crash or desync report that a finished request fixed, once the fix is merged and
+ * a release carries it. The request claimed the report (its `subjects`, or an intake diagnosis that joined it). FFBox
+ * records it on the report and its diagnosis conversation and posts nothing. Sent again on every link, once per link.
+ */
+export interface ReportFixedMessage {
+  type: 'report_fixed';
+  reportId: string;
+  workId: string;
+  pr?: number;
+  /** The first release that carries the fix ("0.50.0.77"). */
+  version?: string;
+  /** `<target>@<sha>`. */
+  mergedIn?: string;
 }
 
 /**

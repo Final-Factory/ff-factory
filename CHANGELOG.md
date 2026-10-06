@@ -44,6 +44,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   this request to BEAST's portal over ssh, so the daemons move while the old portal still answers their acks. Tests:
   `server/restart.test.ts` (order, refusals, a failing relocate) and `server/relocate.test.ts` (a real daemon moved by
   such a request).
+- **FFBox shows a player's report fixed once its fix ships** (w502, asked by Lothsahn). A finished request that claims
+  a crash or desync report (its subjects, a report its title names, an intake diagnosis that joined it, or a
+  `Report: <id>` line in its merged PR) now tells FFBox `report_fixed` with the PR and the release once the fix is
+  merged and released; FFBox records it on the report and marks its diagnosis FIXED, and posts nothing. `update_work`
+  takes `subjects` to add reports a request turned out to fix. Once, at start-up: w414 is linked to the two Build 76
+  crash reports PR #1064 fixed, and finished requests that only mention reports are listed for Lothsahn
+  (`node scripts/report-sweep.ts <data copy>` lists the same). Workers put `Report: <id>` in fix PRs
+  ([docs/intake.md](docs/intake.md), "Players' reports a request fixed").
+
 - **A dry-run switch, `FFSB_DRY_RUN=1`** (w499, change 17 of docs/portal-on-ffbox-host.md): a portal started with it
   runs on a copy of another portal's data and acts on nothing outside itself, so the VM can load BEAST's copy and be
   checked while BEAST's portal keeps running. Off: wakes and the orchestrator heartbeat, timers (loaded to show, never

@@ -37,6 +37,7 @@ import {
   type QueryResult,
   REPORT_LIMITS,
   type ReportChunkMessage,
+  type ReportFixedMessage,
   type ReportEndMessage,
 } from './providerProtocol.ts';
 import type { Provider, ProviderCapacity, ProviderClass, ProviderConversation, ProviderConversationView, ProviderIntakeEvent, ProviderMetrics, ProviderTurn, ProviderUpdater, ProviderDevRequests } from '../shared/types.ts';
@@ -139,6 +140,8 @@ interface Link {
   helloTimer?: NodeJS.Timeout;
   /** Unknown message types already logged on this link (each is logged once). */
   unknownTypes: Set<string>;
+  /** report_fixed messages sent on this link (w502), by report id: the facts sent, so each goes once per link. */
+  reportsSent?: Map<string, string>;
   /** Set when the portal closes the link: the code and reason it sent, and the line people see for a parse failure. */
   closedBy?: { code: number; reason: string; detail?: string };
 }
@@ -1022,6 +1025,22 @@ export class ProviderManager {
     const link = this.link;
     if (!link?.hello) return false;
     this.send(link, { type: 'board', ref, ...answer, update: true });
+    return true;
+  }
+
+  /**
+   * A player's report a finished request fixed (w502), to a connector whose hello lists "report_fixed": once per link
+   * for the same facts (FFBox applies it idempotently, and hears it again after every reconnect). True when it went now
+   * or already went on this link; false when it could not go (offline, or a connector that does not take it).
+   */
+  pushReportFixed(fix: Omit<ReportFixedMessage, 'type'>): boolean {
+    const link = this.link;
+    if (!link?.hello || link.ws.readyState !== link.ws.OPEN || !this.data.accepts?.includes('report_fixed')) return false;
+    const facts = JSON.stringify([fix.workId, fix.pr ?? null, fix.version ?? null, fix.mergedIn ?? null]);
+    link.reportsSent ??= new Map();
+    if (link.reportsSent.get(fix.reportId) === facts) return true;
+    this.send(link, { type: 'report_fixed', ...fix });
+    link.reportsSent.set(fix.reportId, facts);
     return true;
   }
 

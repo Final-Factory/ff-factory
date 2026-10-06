@@ -174,7 +174,7 @@ const WORK_ID_ONLY = 'work_id is for the dispatcher, which decides the requests:
  * refuses agents' writes in FFBox's channels, and "fixed"-type posts in a thread about an ffbox/* branch.
  */
 const DISCORD_RULES = `## Discord
-#bug-reports and dev_bug_reports belong to FFBox: read their threads and download their files freely, but never post, reply, react, rename or close there (\`ffdiscord\` refuses). When you fix a bug from a Discord report, add one line per report to your PR description before it merges, exactly \`Discord: https://discord.com/channels/<guild id>/<thread id>\` for a thread, or the original message's own link \`Discord: https://discord.com/channels/<guild id>/<channel id>/<message id>\` for a message in a channel (#ask-assistant, a chat); FFBox tells the thread or the message when the PR merges, and a PR without the line tells nobody (w480). When you merge or land an \`ffbox/*\` branch or PR (a \`review/*\` rebase included), never post a "fixed" or "merged" notice to the reporter, in any channel or as Max: FFBox sees the merge and posts it itself.`;
+#bug-reports and dev_bug_reports belong to FFBox: read their threads and download their files freely, but never post, reply, react, rename or close there (\`ffdiscord\` refuses). When you fix a bug from a Discord report, add one line per report to your PR description before it merges, exactly \`Discord: https://discord.com/channels/<guild id>/<thread id>\` for a thread, or the original message's own link \`Discord: https://discord.com/channels/<guild id>/<channel id>/<message id>\` for a message in a channel (#ask-assistant, a chat); FFBox tells the thread or the message when the PR merges, and a PR without the line tells nobody (w480). When you confirm which player crash or desync report your fix addresses, add one line per report too, exactly \`Report: <report id>\` (e.g. \`Report: 20261005T035612Z-crash-6102d405dc\`): FFBox then shows that report fixed once the fix ships (w502). Only a report you confirmed it fixes, never one you only read. When you merge or land an \`ffbox/*\` branch or PR (a \`review/*\` rebase included), never post a "fixed" or "merged" notice to the reporter, in any channel or as Max: FFBox sees the merge and posts it itself.`;
 
 /**
  * What FFBox is and how FF Factory works with it, in Lothsahn's words (w49, 2026-09-30). Both orchestrators' briefs
@@ -3043,6 +3043,11 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           reopen: z.literal(true).optional(),
           approve: z.literal(true).optional().describe('An intake request that needs a human (list_work status needs_human): your person, a reviewer, approves it in their own words now. Never on your own.'),
           decline: z.literal(true).optional().describe('The same, declined (a note says why).'),
+          subjects: z
+            .array(z.string())
+            .max(50)
+            .optional()
+            .describe('Add-only: Discord threads (link or id) and player reports ("20261005T035612Z-crash-6102d405dc") this request turned out to be THE WORK FOR, open or closed. A finished request\'s reports are then marked fixed on FFBox once its fix ships (w502). Only what it fixed or diagnosed, never a report it merely read.'),
         },
         wrap(async (a) => o.update(chat(), a)),
       ),
