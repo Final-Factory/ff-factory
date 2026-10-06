@@ -17,6 +17,9 @@ VM_OS_VERSION=26.04
 # zvol: a ZFS volume <VM_ZVOL_PARENT>/disk0 (snapshots, zfs send, a fixed reservation). qcow2: a file in VM_IMAGE_DIR.
 VM_DISK_MODE=zvol
 VM_ZVOL_PARENT=
+# Where that dataset is mounted (zfs mountpoint; asked for, default /<dataset>). Nothing is written there: the disk is
+# a volume inside it.
+VM_ZFS_MOUNTPOINT=
 # The cloud image cache, the cloud-init seed ISO, and the qcow2 disk in qcow2 mode. libvirt's AppArmor profile
 # allows /var/lib/libvirt/images.
 VM_IMAGE_DIR=/var/lib/libvirt/images/fff-vm
@@ -74,3 +77,16 @@ SNAPSHOTS_KEEP=7
 # ---------------------------------------------------------------- alerts
 # One line: the ntfy URL with FF Factory's outside-watch topic, https://ntfy.sh/<topic>. Root-only (0600).
 NTFY_URL_FILE=/etc/fff-vm/ntfy-url
+
+# ---------------------------------------------------------------- the portal inside (install.sh sets it up, w498)
+# The answers install.sh asks for are stored here by it; the secrets are files in /etc/fff-vm/secrets (0600, root's):
+# claude-token (Lothsahn's, from "claude setup-token"), tailscale-authkey (Ben's one-use key; deleted once used),
+# gh-token (the portal's GitHub token, D7). The backups' age public keys are in /etc/fff-vm/backup-recipients.txt.
+# config.json's ownerName.
+PORTAL_OWNER_NAME=
+# join (the default: needs a fresh auth key until the node has joined) or skip (CI).
+GUEST_TAILSCALE="join"
+# token (the default: needs gh-token) or skip (left for later, said at the end of the install).
+GUEST_GITHUB=token
+# The backups' sftp target, user@host on the tailnet (D17); set but empty: backups off for now.
+# GUEST_BACKUP_SSH_TARGET=fff-backup@beast

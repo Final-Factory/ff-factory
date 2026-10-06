@@ -7,7 +7,7 @@
 #
 #   sudo deploy/vm/test/ci-vm-e2e.sh qcow2|zvol      (from the repository root, as root)
 #
-# What it proves, in order: the host install (twice: idempotent), the isolation (who reaches whom), the watchdog
+# What it proves, in order: a missing token stops the install before any change, the host install (twice: idempotent), the isolation (who reaches whom), the watchdog
 # armed in the guest, the guest install and the portal's health, an update (build beside, drain, switch, verify), an
 # automatic rollback of a broken update, the health restart of a hung server, the nightly drain + cold restart +
 # snapshot, the hang detection's reset, the watchdog device's reset, and the uninstall.
@@ -43,9 +43,17 @@ sha_of() { health | jq -r .sha; }
 
 step "host dry run before anything is installed"
 mkdir -p /etc/fff-vm
+# The answers install.sh would ask for (answers.sh), stored as a person's first run stores them; no Tailscale or GitHub
+# in CI. The ntfy URL points nowhere, so CI's resets send no real alerts.
 cat >/etc/fff-vm/fff-vm.conf <<EOF
 VM_DISK_MODE=$MODE
 VM_ZVOL_PARENT=fffci/fff-vm
+VM_ZFS_MOUNTPOINT=/fffci/fff-vm
+VM_TIMEZONE=America/Denver
+PORTAL_OWNER_NAME=CI
+GUEST_TAILSCALE=skip
+GUEST_GITHUB=skip
+GUEST_BACKUP_SSH_TARGET=
 # The sizes are the defaults (D12: 2 vCPUs, 8 GiB), so CI boots the size the FFBox host runs; only the disk is small.
 VM_DISK_GB=16
 WATCH_INTERVAL_SEC=20
@@ -60,14 +68,34 @@ if [ "$MODE" = zvol ]; then
   truncate -s 40G /var/tmp/fffci.img
   zpool create -f fffci /var/tmp/fffci.img
 fi
+ssh-keygen -q -t ed25519 -N '' -C ci-admin -f /root/ci-admin
+cp /root/ci-admin.pub /etc/fff-vm/admin_authorized_keys
+echo 'https://127.0.0.1:9/fff-ci' >/etc/fff-vm/ntfy-url
+chmod 600 /etc/fff-vm/ntfy-url
 deploy/vm/host/install.sh --dry-run
 if [ -e /var/lib/fff-vm/manifest ] || [ -e /usr/local/sbin/fff-vm ] || nft list table inet fff_vm >/dev/null 2>&1; then
   fail "the dry run changed something"
 fi
 echo "ok: the dry run changed nothing"
 
+step "a missing token stops the install before it changes anything"
+conf_before=$(sha256sum /etc/fff-vm/fff-vm.conf)
+rc=0
+deploy/vm/host/install.sh --yes >/tmp/no-token.log 2>&1 || rc=$?
+cat /tmp/no-token.log
+[ "$rc" = 2 ] || fail "a run without the Claude token exited $rc, not 2"
+matches 'secrets/claude-token' /tmp/no-token.log || fail "the refusal does not name the missing Claude token"
+if [ -e /var/lib/fff-vm/manifest ] || [ -e /usr/local/sbin/fff-vm ] || nft list table inet fff_vm >/dev/null 2>&1 ||
+  dpkg -l libvirt-daemon-system 2>/dev/null | grep '^ii' >/dev/null || [ "$(sha256sum /etc/fff-vm/fff-vm.conf)" != "$conf_before" ]; then
+  fail "the refused run changed something"
+fi
+echo "ok: refused before any change, naming what is missing"
+# The stored answers a person's first run leaves (answers.sh): root's, 0600 in a 0700 folder.
+install -d -m 0700 /etc/fff-vm/secrets
+printf 'sk-ant-oat01-ci-dummy-0123456789abcdef-WXYZ\n' | install -m 0600 /dev/stdin /etc/fff-vm/secrets/claude-token
+
 step "host install"
-deploy/vm/host/install.sh --wait
+deploy/vm/host/install.sh --host-only --wait
 /usr/local/sbin/fff-vm status
 nft list table inet fff_vm | matches 'fff-vm: FF Factory portal VM' || fail "firewall table"
 ! pgrep -af dnsmasq | matches fff-isolated || fail "a dnsmasq serves the VM's network"
@@ -85,7 +113,7 @@ pid1=$(cat /run/libvirt/qemu/$VM.pid)
 # As on Loth2400 (w497), where --no-install-recommends left it uncreated: the install must make it, or the VM's next
 # start (the nightly cold restart below) fails on "Failed to create file '/var/lib/libvirt/dnsmasq/virbr-fff.macs.new'".
 rm -rf /var/lib/libvirt/dnsmasq
-deploy/vm/host/install.sh 2>&1 | tee /tmp/second-install.log
+deploy/vm/host/install.sh --host-only 2>&1 | tee /tmp/second-install.log
 [ "$(cat /run/libvirt/qemu/$VM.pid)" = "$pid1" ] || fail "the second install restarted the VM"
 [ -d /var/lib/libvirt/dnsmasq ] || fail "the install did not create /var/lib/libvirt/dnsmasq"
 
@@ -121,15 +149,20 @@ if command -v docker >/dev/null; then
 fi
 nft list table inet fff_vm | grep -E 'counter packets [1-9]' || true
 
-step "guest install"
+step "guest install, from the host (install.sh --guest-only: the stored answers, no questions)"
 git -C "$ROOT" branch -f main HEAD
 git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
-g 'cat > /tmp/ff.bundle' </tmp/ff.bundle
-g 'chmod 644 /tmp/ff.bundle && rm -rf /tmp/ff-factory && git clone -q -b main /tmp/ff.bundle /tmp/ff-factory'
-g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --dry-run'
 t0=$(date +%s)
-g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --repo /tmp/ff.bundle'
-echo "MEASURE guest install (packages, npm ci, web build, start) in a $(g nproc)-vCPU VM: $(($(date +%s) - t0)) s"
+deploy/vm/host/install.sh --guest-only --yes --guest-repo-bundle /tmp/ff.bundle 2>&1 | tee /tmp/guest-install.log
+echo "MEASURE guest install (packages, npm ci, web build, start, settings) in a $(g nproc)-vCPU VM: $(($(date +%s) - t0)) s"
+if matches -e 'ci-dummy' -e '0123456789abcdef' /tmp/guest-install.log; then fail "the install printed the Claude token"; fi
+[ "$(g 'sudo stat -c "%a %U" /srv/fff/secrets/claude-oauth-token')" = "600 fff" ] || fail "the stored token is not 0600 fff"
+g 'test ! -e /run/fff-install/claude-token' || fail "the token's hand-over file was left in the guest"
+g 'sudo jq -e ".ownerName == \"CI\" and .claudeAccounts.orchestrator == \"tokenfile\" and .claudeAccounts.dispatcher == \"tokenfile\" and .claudeTokenFile == \"/srv/fff/secrets/claude-oauth-token\"" /srv/fff/config/config.json' >/dev/null ||
+  fail "config.json was not set: $(g 'sudo jq -c "{ownerName, claudeAccounts, claudeTokenFile}" /srv/fff/config/config.json')"
+matches 'Tailscale: skipped' /tmp/guest-install.log || fail "the end of the install does not list the skipped Tailscale join"
+echo "ok: the guest is set up from the host, the token stored and never printed, config.json set"
+[ "$MODE" != zvol ] || [ "$(zfs get -H -o value mountpoint fffci/fff-vm)" = /fffci/fff-vm ] || fail "the dataset's mountpoint is not the stored answer"
 g 'printf "UPDATE_VERIFY_MIN=2\nBASE_REPO_URL=https://github.com/Final-Factory/ff-factory.git\nBASE_BRANCH=main\n" | sudo tee -a /etc/fff/fff.conf'
 wait_for 120 "the portal answers the host" health
 health
@@ -137,7 +170,7 @@ health
 g 'sudo fffctl status'
 sleep 60
 g 'echo "MEASURE guest memory (MiB), portal idle with empty data:"; free -m; echo "MEASURE node server RSS (KiB): $(ps -o rss= -p $(systemctl show -p MainPID --value fff-portal))"; echo "MEASURE release on disk: $(sudo sh -c "du -sh /srv/fff/app/releases/*/" | head -n 1)"; echo "MEASURE npm cache: $(sudo du -sh /srv/fff/home/.npm | cut -f1)"; echo "MEASURE bare repo: $(sudo du -sh /srv/fff/app/repo.git | cut -f1)"; echo "MEASURE root filesystem:"; df -h /'
-g 'sudo /tmp/ff-factory/deploy/vm/guest/install.sh --repo /tmp/ff.bundle' | tail -n 3
+deploy/vm/host/install.sh --guest-only --yes --guest-repo-bundle /tmp/ff.bundle 2>&1 | tail -n 12
 echo "ok: the guest install ran twice"
 g 'sudo fffctl base-clone' && g 'sudo systemctl start fff-base-refresh.service && sudo journalctl -u fff-base-refresh -n 3 --no-pager'
 g 'sudo nft list table inet fff_guest' >/dev/null || fail "the guest's firewall table"

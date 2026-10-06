@@ -2,13 +2,14 @@
 # Undo deploy/vm/host/install.sh on the FFBox host: the host's way back to how it was before the portal VM.
 #
 #   sudo deploy/vm/host/uninstall.sh --dry-run
-#   sudo deploy/vm/host/uninstall.sh [--delete-disk] [--purge-packages] [--config FILE]
+#   sudo deploy/vm/host/uninstall.sh [--delete-disk] [--purge-packages] [--keep-config] [--config FILE]
 #
 # Stops and removes the VM's definition, its network, the firewall table and every fff-vm unit and file, and puts
 # libvirt's default network back as it was. It removes only what /var/lib/fff-vm/manifest says install.sh made.
 # The VM's disk (and its snapshots) stays unless --delete-disk: it holds the portal's data until the migration
 # back is done (docs/portal-on-ffbox-host.md, "Rollback"). Packages stay unless --purge-packages, which removes only
-# those install.sh installed. /etc/fff-vm is kept as a tarball in /var/backups first.
+# those install.sh installed. /etc/fff-vm is kept as a tarball in /var/backups first, or left in place with --keep-config
+# (install.sh --rebuild-vm: the stored answers and secrets make the new VM).
 set -o errexit -o nounset -o pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib.sh
@@ -17,13 +18,15 @@ here=$(cd "$(dirname "$0")" && pwd)
 CONF=/etc/fff-vm/fff-vm.conf
 DELETE_DISK=0
 PURGE=0
+KEEP_CONFIG=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --config) CONF=$2; shift ;;
     --delete-disk) DELETE_DISK=1 ;;
     --purge-packages) PURGE=1 ;;
-    -h | --help) sed -n '2,12p' "$0"; exit 0 ;;
+    --keep-config) KEEP_CONFIG=1 ;;
+    -h | --help) sed -n '2,13p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -99,7 +102,9 @@ for f in /etc/systemd/system/fff-vm-firewall.service /etc/systemd/system/fff-vm-
 done
 [ ! -d /usr/local/lib/fff-vm ] || run_cmd rm -rf /usr/local/lib/fff-vm
 run_cmd systemctl daemon-reload
-if [ -d "$FFF_VM_ETC" ]; then
+if [ "$KEEP_CONFIG" = 1 ]; then
+  log "kept in place: $FFF_VM_ETC (--keep-config)"
+elif [ -d "$FFF_VM_ETC" ]; then
   keep="/var/backups/fff-vm-etc-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
   run_cmd tar -C / -czf "$keep" "${FFF_VM_ETC#/}"
   run_cmd chmod 0600 "$keep"
