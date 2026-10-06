@@ -440,8 +440,13 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   assert.match(report, /copied 1 conversation\(s\) to resume/);
   assert.match(report, /BEAST's config\.json and data: snapshot: a staged copy on BEAST, .*\(no VSS shadow copy: not Windows\); every file is read from it/);
   // zstd where this machine can unpack it (GitHub's runners can), else gzip, said so.
-  const want = HAS_ZSTD ? /^compression: zstd level 3$/m : /^compression: gzip \(not: zstd: no zstd here\)$/m;
-  assert.match(report, want);
+  if (HAS_ZSTD) {
+    assert.match(report, /^compression: trying zstd level 3\.\.\.\ncompression: using zstd level 3$/m);
+  } else {
+    assert.match(report, /^compression: zstd level 3 failed, falling back to gzip\.\.\.$/m);
+    assert.match(report, /^  compression check \(zstd\): no zstd here$/m, 'the reason is in the saved report');
+    assert.match(report, /^compression: using gzip$/m);
+  }
   assert.match(report, /copied [\d,]+ of [\d,]+ files, [\d.]+ MB of files in [\d.]+ MB over the wire \((zstd level 3|gzip), [\d.]+x\)/);
   assert.match(report, /beast: from the portal's own host to a machine reached over ssh \(rydin@beast\)/);
 
@@ -707,7 +712,10 @@ test('fffctl migrate, the copy (w508): a stream cut off is tried again; one that
   const mz = new Migration(o, w.sys);
   const rz = await mz.pull('beast', 'data', w.beastRoot, ['config.json', 'data']);
   await mz.dropSnapshots();
-  assert.match(mz.report.join('\n'), HAS_ZSTD ? /compression: gzip \(not: zstd: tar\.exe: Option --zstd is not supported\)/ : /compression: gzip \(not: zstd: no zstd here\)/);
+  const rep = mz.report.join('\n');
+  assert.match(rep, /^compression: zstd level 3 failed, falling back to gzip\.\.\.\ncompression: using gzip$/m);
+  assert.match(rep, HAS_ZSTD ? /^  compression check \(zstd\): tar\.exe: Option --zstd is not supported$/m : /^  compression check \(zstd\): no zstd here$/m);
+  assert.ok(!w.sys.lines.some((l) => /compression check|not supported|no zstd here/.test(l)), 'tar\'s reason stays off the terminal');
   assert.equal(rz.fetched, 1);
   same('data/attachments/a2.bin');
   fs.rmSync(path.join(w.base, 'nozstd'));
