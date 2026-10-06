@@ -701,7 +701,7 @@ export class Migration {
     if (fs.existsSync(this.marker)) throw new Error('a dry run is still in place: sudo fffctl migrate --rollback-dry-run first');
     const hello = await this.connect();
     this.say(`BEAST answers over ssh: ${hello}`);
-    if (this.o.tailscale && (await this.sys.funnelState()) !== 'funnel') throw new Error(`the Funnel is not on, so the daemons and people could not reach this portal: fffctl tailscale-join, or tailscale funnel --bg http://127.0.0.1:${this.o.port}`);
+    if (this.o.tailscale && (await this.sys.funnelState()) !== 'funnel') throw new Error(`the Funnel is not on (tailscale funnel status), so the daemons and people could not reach this portal: fffctl tailscale-join, or tailscale funnel --bg http://127.0.0.1:${this.o.port}; --no-tailscale skips this check when the portal is reached some other way`);
     fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     // 1. The first copy while BEAST still runs, so the stop waits only for what changes after it; rewritten once to check
     // it before anything is touched.
