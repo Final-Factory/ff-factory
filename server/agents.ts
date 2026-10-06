@@ -47,7 +47,7 @@ import { ghNoreply, githubSlug, publicReposOf } from './publicGit.ts';
 import { statsLine, systemStats } from './system.ts';
 import { commandLine, launchIndependent, run } from './proc.ts';
 import { type HostHealthMonitor } from './hostHealth.ts';
-import { describeCleanup, describeCleanupItems, describeCleanupLog, sessionTempEnv } from './cleanup.ts';
+import { describeCleanup, describeCleanupItems, describeCleanupLog } from './cleanup.ts';
 import type { HostHealth } from '../shared/types.ts';
 import { StandingAgents } from './standing.ts';
 import type { MachineManager } from './machines.ts';

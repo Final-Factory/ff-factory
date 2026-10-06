@@ -284,8 +284,9 @@ whole instead of half removed; a removal that fails after the rename leaves `<na
 the next pass removes.
 
 **Per-agent hygiene.** Every agent on a machine gets its own temp folder,
-`<temp>/ffa-<session>` (under the machine's `temp_dir` when it has one), as TMP, TEMP and TMPDIR. (The portal's
-orchestrators no longer do: `sessionTempEnv` is set by the daemon only, since w510.) It goes
+`<temp>/ffa-<session>` (under the machine's `temp_dir` when it has one), as TMP, TEMP and TMPDIR. (`sessionTempEnv`, set by
+the daemon, `machine/daemon.ts`; the portal's orchestrators never had one, and its own workers, which did, are gone
+since w510.) It goes
 when the session is removed, and two hours after the session stopped otherwise. The worker and machine
 briefs tell agents to put builds, recordings and screenshot sets there and to delete them once reported.
 
