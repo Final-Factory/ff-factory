@@ -799,10 +799,13 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     );
     const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
     const cfgRoot = get('slotConfig');
+    // A rule group counts only when this install made it: the slot group's name is shared with the game repo's own script.
+    const ours = (g: string) => !!m?.outside.some((o) => o.kind === 'firewall-group' && o.name === g);
+    const group = (g: string, n: string) => ({ what: `firewall group "${g}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
-      { what: `firewall group "${SLOT_GROUP}"`, present: Number(get('slotRules')) > 0, detail: `${get('slotRules')} rule(s)` },
-      { what: `firewall group "${UNITY_GROUP}"`, present: Number(get('unityRules')) > 0, detail: `${get('unityRules')} rule(s)` },
+      group(SLOT_GROUP, get('slotRules')),
+      group(UNITY_GROUP, get('unityRules')),
       { what: `firewall rules naming a path in the root`, present: Number(get('rootRules')) > 0, detail: `${get('rootRules')} rule(s)` },
       { what: 'slot config %ProgramData%\\FinalFactory\\player-slots.json pointing into the root', present: !!cfgRoot && cfgRoot.toLowerCase().startsWith(l.root.toLowerCase()), detail: cfgRoot || 'none' },
       { what: 'processes whose command line names the root', present: Number(get('procs')) > 0, detail: get('procs') },
