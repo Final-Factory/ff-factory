@@ -185,7 +185,7 @@ test('dry run: a standing agent that is due does not run, and Run now is refused
     remove: () => undefined,
   };
   const clock = { now: new Date('2026-10-05T03:00:00') };
-  const st = new StandingAgents({ cfg, store, sessions: port, notify: () => undefined, sandboxes: { list: () => [], setPurpose: () => ({}) as never }, startWorker: () => assert.fail('no worker'), now: () => clock.now });
+  const st = new StandingAgents({ cfg, store, sessions: port, notify: () => undefined, now: () => clock.now });
   const a = st.create({ name: 'Triager', charter: 'Triage.', trigger: { kind: 'interval', minutes: 30 }, tools: ['delegate'] });
   const due = a.nextRunAt;
   clock.now = new Date(clock.now.getTime() + 5 * 3_600_000);

@@ -118,7 +118,17 @@ export type ToDaemon =
 
 export type FromDaemon =
   /** `catalog`: the MCP tools this daemon can serve (protocol 3+); info.daemon is the commit it was deployed from. */
-  | { type: 'hello'; protocol: number; info: NonNullable<Machine['info']>; home: string; live: string[]; catalog?: string[]; guard?: boolean }
+  | {
+      type: 'hello';
+      protocol: number;
+      info: NonNullable<Machine['info']>;
+      home: string;
+      live: string[];
+      catalog?: string[];
+      guard?: boolean;
+      /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
+      layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null };
+    }
   /** Its host guard has news for people (protocol 8, w466): the drive gone or back, disk space, a reaped browser. Relayed like the portal's own guard's. */
   | { type: 'host_report'; title: string; body: string }
   /** Its host guard's state, when it changes (protocol 8, w466). */

@@ -498,6 +498,7 @@ export class MachineManager {
       if (!this.offlineSince.has(m.id)) this.offlineSince.set(m.id, now);
       if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
       if (m.relocatedTo) continue; // sent to another portal (relocate): a redeploy from here would pull it back
+      if (m.root) continue; // a worker root install (w513) is started and updated on its computer, never over ssh
       const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
       if (!why) continue;
       // The portal's own host needs no ssh: it is always there when this code runs.
@@ -566,6 +567,14 @@ export class MachineManager {
         continue;
       }
       if (this.deploying.has(m.id)) continue;
+      // A worker root install (w513) updates by running its installer again there: say so once, never redeploy over ssh.
+      if (m.root) {
+        if (this.reportedOutdated.get(m.id) !== why) {
+          this.reportedOutdated.set(m.id, why);
+          this.report?.(`[machines] ${m.id}'s daemon is outdated (${why}). It is a worker root install (${m.root}): update it there by running its installer again (docs/worker-install.md, "Updating").`);
+        }
+        continue;
+      }
       const live = this.liveCount(m.id);
       if (live > 0) {
         if (this.reportedOutdated.get(m.id) !== why) {
@@ -693,6 +702,37 @@ export class MachineManager {
 
   setPurpose(id: string, purpose: string) {
     return this.update(id, { purpose: normalizePurpose(purpose) });
+  }
+
+  /**
+   * What a machine may know about itself, asked with its own token (GET /machine/whoami, w513): the worker installer
+   * checks its credential with it, and the uninstaller which agents still run there before it removes anything.
+   */
+  selfStatus(id: string) {
+    const m = this.require(id);
+    const agents = [...this.sessions.sessions.values()]
+      .filter((s) => s.info.machineId === id && s.live)
+      .map((s) => ({ id: s.info.id, title: s.info.title, sandbox: s.info.machineSandbox, midTurn: isMidTurn(s.info) }));
+    return { id: m.id, online: this.isOnline(id), root: m.root, agents, sandboxes: (m.sandboxes ?? []).map((sb) => sb.id) };
+  }
+
+  /**
+   * A machine leaving on its own (POST /machine/unenroll, w513: the worker uninstaller): its record and token go, as
+   * remove_machine does, without touching the computer (the uninstaller stops its own daemon). Refused while an agent
+   * there is mid-turn, unless forced; then the agents are stopped on purpose first, so nothing resumes them.
+   */
+  unenroll(id: string, force = false): { ok: true } | { ok: false; error: string; agents: { id: string; title: string; sandbox?: string }[] } {
+    refuseInDryRun(`unenrolling ${id}`);
+    const busy = this.selfStatus(id).agents.filter((a) => a.midTurn);
+    if (busy.length && !force) return { ok: false, error: `${busy.length} agent(s) are mid-turn on ${id}`, agents: busy };
+    for (const sid of this.require(id).sessionIds) {
+      const s = this.handle(sid);
+      if (s?.live) s.stop();
+    }
+    this.expectDrop(id, false);
+    this.remove(id);
+    this.report?.(`[machines] ${id} unenrolled itself (its worker install was uninstalled there); its record and token are gone.`);
+    return { ok: true };
   }
 
   /** Forget a machine: its token stops working and its sessions are removed. */
@@ -1090,6 +1130,13 @@ export class MachineManager {
     return true;
   }
 
+  /** The welcome a daemon gets on connecting, and again when its hello moved its pool (w513). */
+  private welcomeOf(m: Machine, sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }))) {
+    // A worker root install (w513) whose record has no pool of its own yet keeps daemon.json's until its hello says it.
+    const pool = m.sandboxRoot || !m.root ? poolSettingsOf(m) : undefined;
+    return { type: 'welcome' as const, machineId: m.id, maxSessions: m.maxSessions, sessions, sandboxes: pool };
+  }
+
   /** Wire a connected daemon (exported for tests: any WebSocket works). */
   attach(id: string, ws: WebSocket, hash?: string) {
     const old = this.links.get(id);
@@ -1113,7 +1160,7 @@ export class MachineManager {
     Object.assign(m, { online: true, lastSeen: new Date().toISOString() });
     this.store.putMachine(m);
     const sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }));
-    ws.send(JSON.stringify({ type: 'welcome', machineId: id, maxSessions: m.maxSessions, sessions, sandboxes: poolSettingsOf(m) } satisfies ToDaemon));
+    ws.send(JSON.stringify(this.welcomeOf(m, sessions) satisfies ToDaemon));
     const watch = this.outsideWatchFor?.(id);
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
     const cleanup = this.cleanupFor?.(id);
@@ -1195,7 +1242,10 @@ export class MachineManager {
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
         else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
         Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined, relocatedTo: undefined });
+        // A worker root install (w513): its folders; a pool folder that changed goes back to it at once.
+        const repool = msg.layout ? adoptLayout(m, msg.layout) : leaveRoot(m);
         this.store.putMachine(m);
+        if (repool) this.links.get(id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
         const live = new Set(msg.live);
         for (const sid of m.sessionIds) {
           const s = this.handle(sid);
@@ -1710,9 +1760,57 @@ export function machineDir(p: string | undefined, what: string): string | undefi
  * The folder options a deploy stores (add_machine): each given one checked and normalised (machineDir), "" back to the
  * default, an unset one kept from the previous deploy. Exported for tests.
  */
+/**
+ * What a worker root install's hello says about its folders (w513), onto its record. A root the record does not know
+ * yet (a new install, or a migration from today's layout into a root) is the daemon's to say: its daemon folder, clone,
+ * temp folder and sandbox folder replace the record's, and the record's limits stay. The same root again only fills
+ * what the record lacks: add_machine and set_app_config stay in charge. Returns whether the pool's folder changed (the
+ * portal then sends the daemon its pool settings again). Exported for tests.
+ */
+export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, { type: 'hello' }>['layout']>): boolean {
+  const moved = m.root !== layout.root;
+  const before = m.sandboxRoot;
+  // Moving from today's layout into a root (a migration): keep where it was, for a rollback.
+  if (moved && !m.root) m.preRoot = { appDir: m.appDir, repoPath: m.repoPath, tempDir: m.tempDir, sandboxRoot: m.sandboxRoot, librarySeed: m.librarySeed };
+  m.root = layout.root;
+  if (moved || !m.appDir) m.appDir = layout.appDir;
+  if (moved || !m.repoPath) m.repoPath = layout.repoPath;
+  if ((moved || !m.tempDir) && layout.tempDir) m.tempDir = layout.tempDir;
+  const pool = layout.sandboxes;
+  if (pool && (moved || !m.sandboxRoot)) {
+    Object.assign(m, {
+      sandboxRoot: pool.root,
+      maxSandboxes: m.maxSandboxes ?? pool.maxSandboxes,
+      maxAgentsPerSandbox: m.maxAgentsPerSandbox ?? pool.maxAgentsPerSandbox,
+      maxUnity: m.maxUnity ?? pool.maxUnity,
+      diskWarnGB: m.diskWarnGB ?? pool.diskWarnGB,
+      diskCriticalGB: m.diskCriticalGB ?? pool.diskCriticalGB,
+      ...(m.maxSandboxAgents === undefined && pool.maxAgents !== undefined ? { maxSandboxAgents: pool.maxAgents } : {}),
+      ...(pool.librarySeed && (moved || !m.librarySeed) ? { librarySeed: pool.librarySeed } : {}),
+    });
+  }
+  return m.sandboxRoot !== before;
+}
+
+/**
+ * A daemon without a root said hello to a record that has one: the migration into the root was rolled back, and the
+ * old daemon runs again from its old folders. The record gets those back (kept by adoptLayout). Returns whether the
+ * pool's folder changed. Exported for tests.
+ */
+export function leaveRoot(m: Machine): boolean {
+  if (!m.root) return false;
+  const before = m.sandboxRoot;
+  const p = m.preRoot;
+  delete m.root;
+  delete m.preRoot;
+  if (p) Object.assign(m, { appDir: p.appDir, repoPath: p.repoPath, tempDir: p.tempDir, sandboxRoot: p.sandboxRoot, librarySeed: p.librarySeed });
+  return m.sandboxRoot !== before;
+}
+
 export function dirOptions(opts: MachineDirs, prev: MachineDirs | undefined): MachineDirs {
   const pick = (k: keyof MachineDirs, what: string) => (opts[k] === undefined ? prev?.[k] : machineDir(opts[k], what));
-  return { appDir: pick('appDir', 'app_dir'), unityEditorRoot: pick('unityEditorRoot', 'unity_editor_root'), unityPath: pick('unityPath', 'unity_path'), tempDir: pick('tempDir', 'temp_dir'), sandboxRoot: pick('sandboxRoot', 'sandbox_root') };
+  const root = pick('root', 'root');
+  return { ...(root !== undefined ? { root } : {}), appDir: pick('appDir', 'app_dir'), unityEditorRoot: pick('unityEditorRoot', 'unity_editor_root'), unityPath: pick('unityPath', 'unity_path'), tempDir: pick('tempDir', 'temp_dir'), sandboxRoot: pick('sandboxRoot', 'sandbox_root') };
 }
 
 /**

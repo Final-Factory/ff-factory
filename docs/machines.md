@@ -179,6 +179,10 @@ becomes one of the accounts in the usage meters, merged by email with the same l
 daemon from before protocol 4 sends neither; the machine shows "no numbers yet" until the usual
 redeploy of outdated daemons updates it.
 
+**Worker root installs** (w513, [worker-install.md](worker-install.md)): a machine installed on the computer itself with
+`scripts/worker/install.ps1` or `install.sh` keeps everything under one root, reports it in its hello (`layout`), and is
+never redeployed over ssh: when it is outdated the portal says to re-run its installer there.
+
 **Versions.** A deploy stamps the daemon with the portal's commit (`machine/VERSION`); its hello reports
 it, with the protocol number and the tools it can serve. A daemon from another commit or protocol is
 outdated (`MachineManager.outdated`): after an app update that is every Mac. The portal redeploys an

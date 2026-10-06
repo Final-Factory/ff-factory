@@ -1,5 +1,5 @@
 import { expect, test as base, type APIRequestContext, type Cookie, type Locator, type Page } from '@playwright/test';
-import type { AppState, SessionInfo } from '../shared/types.ts';
+import type { AppState, MachineSandbox, SessionInfo } from '../shared/types.ts';
 
 export const USER = 'tester';
 export const PASSWORD = 'e2e-password-123';
@@ -29,9 +29,29 @@ export async function appState(request: APIRequestContext): Promise<AppState> {
   return r.json();
 }
 
+/** The seeded machine's sandboxes (e2e/server.ts): tests start their workers in ALPHA; GALLERY is never changed. */
+export const MACHINE = 'pc';
+export const ALPHA = `${MACHINE}/alpha`;
+export const GALLERY = `${MACHINE}/gallery`;
+
+/** A machine sandbox ("pc/alpha") as the portal reports it. */
+export function machineSandbox(app: AppState, ref: string): MachineSandbox {
+  const [m, id] = ref.split('/');
+  const sb = app.machines?.find((x) => x.id === m)?.sandboxes?.find((x) => x.id === id);
+  expect(sb, `no machine sandbox ${ref}`).toBeTruthy();
+  return sb!;
+}
+
+/** The route of a sandbox's page (or one of its agents'): "pc/alpha" is a machine's, a bare id this host's. */
+export function sandboxHash(ref: string, sessionId?: string) {
+  const [m, id] = ref.includes('/') ? ref.split('/') : [undefined, ref];
+  const tail = sessionId ? `/${sessionId}` : '';
+  return m ? `#/machine/${m}/sandbox/${id}${tail}` : `#/sandbox/${id}${tail}`;
+}
+
 /** Start a worker agent in a sandbox through the API; the fake agent answers `prompt` at once. */
 export async function startWorker(request: APIRequestContext, prompt: string, opts: { sandbox?: string; title?: string; permissionMode?: string } = {}): Promise<SessionInfo> {
-  const r = await request.post('/api/sessions', { data: { sandboxId: opts.sandbox ?? 'alpha', prompt, title: opts.title, permissionMode: opts.permissionMode } });
+  const r = await request.post('/api/sessions', { data: { sandboxId: opts.sandbox ?? ALPHA, prompt, title: opts.title, permissionMode: opts.permissionMode } });
   expect(r.ok(), await r.text()).toBeTruthy();
   return r.json();
 }
@@ -133,9 +153,9 @@ export async function openSidebar(page: Page) {
   return page.locator('.sidebar');
 }
 
-/** A sandbox's (or one of its agents') page; on a wide desktop it sits beside the orchestrator. */
+/** A sandbox's (or one of its agents') page ("pc/alpha" on a machine); on a wide desktop it sits beside the orchestrator. */
 export async function openSandbox(page: Page, sandboxId: string, sessionId?: string) {
-  await go(page, `#/sandbox/${sandboxId}${sessionId ? `/${sessionId}` : ''}`);
+  await go(page, sandboxHash(sandboxId, sessionId));
   const panel = page.locator('.sb-panel');
   await expect(panel).toBeVisible();
   return panel;

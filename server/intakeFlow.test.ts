@@ -23,6 +23,7 @@ import { run } from './proc.ts';
 import type { Config } from './config.ts';
 import type { ProviderConversation, Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { startTestMachine } from './testMachine.ts';
 
 /**
  * The intake end to end (docs/intake.md; shared/intake.ts's FFBox signatures are server/intake.test.ts) on a real Agents with the scripted fake SDK and a fake Discord: what a poll
@@ -99,7 +100,7 @@ class FakeDiscord implements DiscordReader {
   }
 }
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg: Config['intake'] = {}, extra: Partial<Config> = {}) {
+function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg: Config['intake'] = {}, extra: Partial<Config> = {}, hostSandboxes = true) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-intake-'));
   const cfg = {
     dataDir: dir,
@@ -123,7 +124,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg
   const machines = new MachineManager(cfg, store, sessions);
   const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
   Object.defineProperty(agents, 'workerOptions', { value: () => ({ model: 'opus' }) });
-  for (const id of ['alpha', 'beta']) store.putSandbox({ id, name: id, branch: `sandbox/${id}`, base: 'develop', path: path.join(dir, id), purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
+  if (hostSandboxes) for (const id of ['alpha', 'beta']) store.putSandbox({ id, name: id, branch: `sandbox/${id}`, base: 'develop', path: path.join(dir, id), purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
   agents.boot();
   const o = agents.orchestrators;
   // Intake notices gather for a minute in production; a moment here.
@@ -132,7 +133,10 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg
   const attention: string[] = [];
   o.onIntakeAttention = (w, what) => attention.push(`${what} ${w.id}`);
   const intake = new IntakeManager({ cfg, store, identity: agents.identity, orchestrators: o, discord });
+  /** Run first at the end (a machine's daemon goes before the portal's folder). */
+  const closers: (() => Promise<void>)[] = [];
   t.after(async () => {
+    for (const c of closers) await c();
     intake.close();
     o.close();
     sessions.stopAll();
@@ -149,7 +153,15 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg
   };
   const heard = (id: string, tag: string) => store.readTranscript(id).filter((e): e is Extract<TranscriptEvent, { kind: 'user' }> => e.kind === 'user' && e.from === 'system' && e.text.split('\n').some((l) => l.startsWith(tag)));
   const work = () => [...store.work.values()];
-  return { dir, cfg, store, sessions, agents, o, intake, discord, dispatcher, call, heard, work, attention };
+  return { dir, cfg, store, sessions, machines, closers, agents, o, intake, discord, dispatcher, call, heard, work, attention };
+}
+
+/** The same, with sandboxes alpha and beta on a machine (pc/alpha and pc/beta, worktrees on its in-process daemon) instead of this host. */
+async function setupOnMachine(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg: Config['intake'] = {}, extra: Partial<Config> = {}) {
+  const env = setup(t, intakeCfg, extra, false);
+  const pc = await startTestMachine(env.machines, { sandboxes: ['alpha', 'beta'] });
+  env.closers.push(() => pc.stop());
+  return { ...env, pc };
 }
 
 const on = { discord: { enabled: true, trusted: { [LOTH_ID]: 'lothsahn' } } };
@@ -194,8 +206,16 @@ test("every worker's brief: FFBox's channels are read-only, the PR's Discord lin
   assert.match(brief, /never post a "fixed" or "merged" notice/);
 });
 
+test("every machine worker's brief: the same Discord rules in a machine sandbox", async (t) => {
+  const { agents, machines } = await setupOnMachine(t);
+  const brief = (agents as unknown as { machineSandboxBrief: (m: unknown, sb: unknown) => string }).machineSandboxBrief(machines.require('pc'), machines.requireSandbox('pc', 'alpha'));
+  assert.match(brief, /## Discord\n#bug-reports and dev_bug_reports belong to FFBox/);
+  assert.ok(brief.includes('`Discord: https://discord.com/channels/<guild id>/<thread id>`'));
+  assert.match(brief, /never post a "fixed" or "merged" notice/);
+});
+
 test('intake: a new bug thread waits for a person; the dispatcher hears it only once approved, with the rules added to its worker', async (t) => {
-  const { intake, discord, o, dispatcher, call, heard, work, sessions, store, attention } = setup(t, on);
+  const { intake, discord, o, dispatcher, call, heard, work, sessions, store, attention } = await setupOnMachine(t, on);
   discord.thread(-60, 'An old report');
   await intake.pollDiscord();
   assert.equal(work().length, 0, 'the first look only marks where new starts');
@@ -213,7 +233,7 @@ test('intake: a new bug thread waits for a person; the dispatcher hears it only 
   assert.equal(intake.summary().today.pending, 1);
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(heard(dispatcher().info.id, '[work request]').length, 0, 'not the dispatcher’s until a person approves');
-  assert.match((await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'fix it', title: 'x', work_id: w.id })).text, /waits for a person to approve it/);
+  assert.match((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'fix it', title: 'x', work_id: w.id })).text, /waits for a person to approve it/);
   assert.match((await call(dispatcher().info, 'decide_work', { id: w.id, action: 'queue', note: 'x' })).text, /waits for a person to approve it/);
   assert.match((await call(dispatcher().info, 'list_work', { source: 'discord' })).text, new RegExp(`${w.id} \\[new; Discord #beta-bugs, untrusted, needs a human\\]`));
   assert.match((await call(dispatcher().info, 'list_work', { status: 'needs_human' })).text, new RegExp(`^- ${w.id} `));
@@ -238,9 +258,10 @@ test('intake: a new bug thread waits for a person; the dispatcher hears it only 
   assert.match(w.log.join('\n'), /approved by Ben \(triage at filing: needs a human: it gives the agents instructions/);
   assert.equal((await call(dispatcher().info, 'list_work', { status: 'needs_human' })).text, 'Nothing needs a human.');
 
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Investigate and fix the belt report.', title: 'Belt report', work_id: w.id });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Investigate and fix the belt report.', title: 'Belt report', work_id: w.id });
   assert.equal(started.isError, false, started.text);
   const worker = [...store.sessions.values()].find((s) => s.kind === 'worker')!;
+  await until('the worker got its brief', () => store.readTranscript(worker.id).some((e) => e.kind === 'user'));
   const brief = store.readTranscript(worker.id).find((e) => e.kind === 'user') as Extract<TranscriptEvent, { kind: 'user' }>;
   assert.match(brief.text, /^Investigate and fix the belt report\./);
   assert.match(brief.text, new RegExp(`Intake rules for ${w.id}`));
@@ -316,13 +337,13 @@ test('intake: a trusted person’s request to Max is filed for them; a stranger�
 });
 
 test('intake: a design question goes to the reviewers, who join the request; their answer reopens it for the dispatcher', async (t) => {
-  const { intake, o, call, dispatcher, heard, store, attention } = setup(t, { discord: { enabled: true, autoApprove: { enabled: true } }, reviewers: ['ben', 'lothsahn'] });
+  const { intake, o, call, dispatcher, heard, store, attention } = await setupOnMachine(t, { discord: { enabled: true, autoApprove: { enabled: true } }, reviewers: ['ben', 'lothsahn'] });
   intake.fileBug(parseBugThread({ id: flake(1), parent_id: BUGS, name: 'Splitters prefer the left belt' }, undefined, { channel: '#beta-bugs' }));
   const w = [...store.work.values()][0];
   assert.equal(w.triage?.class, 'needs-human', 'auto-approve is on, but this is not an obvious bug');
   assert.equal(w.approval?.state, 'pending');
   o.approveIntake(w.id, LOTH);
-  await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Look at the splitter report.', title: 'Splitter', work_id: w.id });
+  await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Look at the splitter report.', title: 'Splitter', work_id: w.id });
   const worker = [...store.sessions.values()].find((s) => s.kind === 'worker')!;
   // w355: w349's worker ended two turns like this; the request became a question for nothing.
   const status = w.status;
@@ -537,15 +558,15 @@ test('merged work: a PR gh lists as merged closes its request when its branch is
 });
 
 test('one place: work started outside the ledger (over /mcp, from the dashboard, for a delegation) is recorded in it, once', async (t) => {
-  const { agents, o, store, work } = setup(t);
+  const { agents, o, store, work } = await setupOnMachine(t);
   const remote = beltFor('remote', agents.toolSpecs('human', agents.fixedActor(LOTH), { role: 'remote', owner: LOTH })).find((x) => x.name === 'start_agent')!;
-  const r = await remote.handler({ sandbox: 'alpha', prompt: 'Profile the belt system', title: 'Belt profile' });
+  const r = await remote.handler({ sandbox: 'pc/alpha', prompt: 'Profile the belt system', title: 'Belt profile' });
   const text = r.content.map((c) => c.text).join('');
   assert.match(text, /recorded in the ledger as w1/);
   const [w] = work();
   assert.deepEqual([w.status, w.requestedBy.userId, w.source, w.humanAsked, w.recorded], ['active', 'lothsahn', undefined, true, true]);
   assert.equal(limitProblem(Array.from({ length: 20 }, () => w), LOTH, Date.now(), { perHour: 1, perDay: 1 }), undefined, 'recorded starts are not filings: they never use up the limits');
-  assert.match(w.log[0], /started over \/mcp for Lothsahn: worker .* in alpha/);
+  assert.match(w.log[0], /started over \/mcp for Lothsahn: worker .* in sandbox pc\/alpha/);
   const worker = store.sessions.get(w.sessionIds[0])!;
   assert.equal(o.recordStart(worker, 'again', BEN, 'started by Ben from the dashboard', true), 'w1', 'a worker already on a request is not recorded twice');
   assert.equal(work().length, 1);
@@ -784,7 +805,7 @@ const desyncDiag = (n: number, o: Partial<ProviderConversation> = {}) =>
   conv({ id: `d${n}`, source: 'intake', opener: 'system', agentClass: 'ffdiagnose', title: `Desync ${SURFACES[n]} at heartbeat ${n * 1000}`, branch: `ffbox/${SURFACES[n].toLowerCase()}-${n}`, key: `desync:0.50.0:${SURFACES[n]}`, pr: { number: 900 + n, state: 'open' }, ...o });
 
 test('desync PR policy: FFBox desync diagnoses and their PRs arrive approved, with the policy in the worker brief; anything else keeps its triage', async (t) => {
-  const { intake, work, o, call, dispatcher, store, cfg } = setup(t, { ffbox: { enabled: true } });
+  const { intake, work, o, call, dispatcher, store, cfg } = await setupOnMachine(t, { ffbox: { enabled: true } });
   // An ffdiagnose diagnosis with a PR: approved at once, though the FFBox source's own auto-approve is off.
   intake.onConversation(desyncDiag(1));
   const w = work()[0];
@@ -807,9 +828,10 @@ test('desync PR policy: FFBox desync diagnoses and their PRs arrive approved, wi
   assert.equal(work().at(-1)!.triage?.class, 'needs-human');
 
   // The worker's brief carries the policy and the fourth ending.
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Review it.', title: 'Desync PR', work_id: w.id });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Review it.', title: 'Desync PR', work_id: w.id });
   assert.equal(started.isError, false, started.text);
   const worker = [...store.sessions.values()].find((s) => s.kind === 'worker')!;
+  await until('the worker got its brief', () => store.readTranscript(worker.id).some((e) => e.kind === 'user'));
   const brief = (store.readTranscript(worker.id).find((e) => e.kind === 'user') as Extract<TranscriptEvent, { kind: 'user' }>).text;
   for (const re of [/FFBox desync PR policy/, /Classify first/, /Class 1, report generation only/, /Class 2, a desync fix/, /2-peer built-player check/, /Class 3, capture during play/, /less than 1% of develop's value/, /PERF-ESCALATION: <one line>/, /Review FFBox's branch `ffbox\/minerbots-1` \(PR #901\)/]) assert.match(brief, re);
 
@@ -837,11 +859,11 @@ test('desync PR policy: its own daily count, inside the FFBox cap and the duplic
 });
 
 test('desync PR policy: what each class ends with; a class 3 PR with a cost goes back to the intake for a developer', async (t) => {
-  const { intake, work, o, call, dispatcher, store, sessions, heard, attention } = setup(t, { ffbox: { enabled: true }, reviewers: ['ben', 'lothsahn'] });
+  const { intake, work, o, call, dispatcher, store, sessions, heard, attention } = await setupOnMachine(t, { ffbox: { enabled: true }, reviewers: ['ben', 'lothsahn'] });
   const startOn = async (n: number) => {
     intake.onConversation(desyncDiag(n));
     const w = work().at(-1)!;
-    const sb = n % 2 ? 'alpha' : 'beta';
+    const sb = n % 2 ? 'pc/alpha' : 'pc/beta';
     const r = await call(dispatcher().info, 'start_agent', { sandbox: sb, prompt: 'Review it.', title: `Desync PR ${n}`, work_id: w.id });
     assert.equal(r.isError, false, r.text);
     const worker = [...store.sessions.values()].find((s) => s.kind === 'worker' && w.sessionIds.includes(s.id))!;
@@ -863,7 +885,7 @@ test('desync PR policy: what each class ends with; a class 3 PR with a cost goes
   assert.ok(attention.includes(`pending ${w.id}`));
   assert.equal(heard(o.personalFor(LOTH).info.id, '[intake escalation]').length, 1);
   assert.match((await call(dispatcher().info, 'list_work', { status: 'needs_human' })).text, new RegExp(w.id));
-  assert.match((await call(dispatcher().info, 'start_agent', { sandbox: 'beta', prompt: 'merge it', title: 'x', work_id: w.id })).text, /waits for a person to approve it/);
+  assert.match((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/beta', prompt: 'merge it', title: 'x', work_id: w.id })).text, /waits for a person to approve it/);
   // A reviewer's approval sends it back to the dispatcher (merge it as it is).
   o.approveIntake(w.id, LOTH);
   assert.equal(w.approval?.state, 'approved');
@@ -871,7 +893,7 @@ test('desync PR policy: what each class ends with; a class 3 PR with a cost goes
   intake.onConversation(conv({ id: 'op1', opener: 'operator', title: 'Tidy logs', branch: 'ffbox/tidy' }));
   const other = work().at(-1)!;
   o.approveIntake(other.id, BEN);
-  await call(dispatcher().info, 'start_agent', { sandbox: 'alpha', prompt: 'Review.', title: 'Tidy', work_id: other.id });
+  await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Review.', title: 'Tidy', work_id: other.id });
   const ow = store.sessions.get([...store.sessions.values()].find((s) => s.kind === 'worker' && other.sessionIds.includes(s.id))!.id)!;
   await until('the worker idles', () => sessions.get(ow.id).info.status === 'idle');
   o.workerTurnEnded(ow, 'PERF-ESCALATION: tick +5%');

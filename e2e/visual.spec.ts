@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { expect, openSandbox, openSidebar, signIn, test } from './fixtures.ts';
+import { GALLERY, expect, openSandbox, openSidebar, signIn, test } from './fixtures.ts';
 
 // Visual baselines (e2e/__screenshots__/<project>/, Linux renders from CI). Element shots, so the
 // sidebar (which shows what parallel tests create) stays out; the clock is frozen for relative times,
@@ -41,7 +41,7 @@ test('visual: orchestrator home', async ({ page }) => {
 
 test('visual: the seeded sandbox page', async ({ page }) => {
   await open(page);
-  const panel = await openSandbox(page, 'gallery');
+  const panel = await openSandbox(page, GALLERY);
   await expect(panel.locator('.msg-assistant[data-turn-end="ok"]')).toBeVisible();
   await expect(panel).toHaveScreenshot('sandbox-gallery.png');
 });

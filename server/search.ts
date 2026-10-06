@@ -121,6 +121,7 @@ export function searchTranscripts(dir: string, sessions: Map<string, SessionInfo
         sessionKind: s?.kind,
         sandboxId: s?.sandboxId,
         machineId: s?.machineId,
+        machineSandbox: s?.machineSandbox,
         standingId: s?.standingId,
       });
     }

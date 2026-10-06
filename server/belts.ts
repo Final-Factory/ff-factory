@@ -25,6 +25,8 @@ export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
   'max_activity',
   'list_standing_agents',
   'list_delegation_requests',
+  // a standing agent's delegation, approved in a turn the person started themselves (w527; checked in the handler)
+  'approve_delegation',
   // its own
   'wake_me',
   'set_heartbeat',

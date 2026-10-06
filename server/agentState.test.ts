@@ -15,6 +15,7 @@ import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { createTestMachine } from './testMachine.ts';
 
 /**
  * An agent's state (w475, w509): Working, Waiting (alive between turns with a running job, a queued message or a
@@ -137,7 +138,7 @@ test("the Overview lists a place's agents Working, Waiting, Idle, a stopped one 
 
 const PEOPLE: UserInfo[] = [{ ...BEN, role: 'owner' }];
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
+async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-agent-state-'));
   const cfg = {
     dataDir: dir,
@@ -154,31 +155,34 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     unity: {},
   } as unknown as Config;
   const store = new Store(dir);
+  // Sandboxes alpha and beta are on a machine (pc/alpha, pc/beta, on its in-process daemon), with the workers the portal kept there.
+  const pc = await createTestMachine({ sandboxes: ['alpha', { name: 'beta', purpose: 'w490' }] });
+  store.putMachine(pc.record({ alpha: ['eb9632fd'], beta: ['b1'] }));
+  store.putSession(s('eb9632fd', { status: 'stopped', machineId: 'pc', machineSandbox: 'alpha', title: 'w448: merge #1083' }));
+  store.putSession(s('b1', { status: 'stopped', machineId: 'pc', machineSandbox: 'beta', title: 'w490' }));
   const sessions = new SessionManager(cfg, store);
   const sandboxes = new SandboxManager(cfg, store);
   const machines = new MachineManager(cfg, store, sessions);
   const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
-  store.putSandbox({ id: 'alpha', name: 'alpha', branch: 'sandbox/alpha', base: 'origin/develop', path: path.join(dir, 'alpha'), purpose: 'unused', status: 'ready', createdAt: T, unity: { state: 'stopped' }, sessionIds: ['eb9632fd'] });
-  store.putSandbox({ id: 'beta', name: 'beta', branch: 'sandbox/beta', base: 'origin/develop', path: path.join(dir, 'beta'), purpose: 'w490', status: 'ready', createdAt: T, unity: { state: 'stopped' }, sessionIds: ['b1'] });
-  store.putSession(s('eb9632fd', { status: 'idle', sandboxId: 'alpha', title: 'w448: merge #1083' }));
-  store.putSession(s('b1', { status: 'stopped', sandboxId: 'beta', title: 'w490' }));
   agents.boot();
   // A worker alive between turns (boot marks a session without a process stopped).
   store.sessions.get('eb9632fd')!.status = 'idle';
   t.after(async () => {
+    await pc.stop();
     agents.orchestrators.close();
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
+  await pc.connect(machines);
   return { store, sessions, agents };
 }
 
 type WakerLike = { schedule: (id: string, m: number, n: string) => string; cancel: (id: string) => boolean };
 
-test('the server copies a pending wake_me (time and note) and a queued message onto the session, and clears them when they go', (t) => {
-  const { store, sessions, agents } = setup(t);
+test('the server copies a pending wake_me (time and note) and a queued message onto the session, and clears them when they go', async (t) => {
+  const { store, sessions, agents } = await setup(t);
   const waker = (agents as unknown as { waker: WakerLike }).waker;
   assert.equal(store.sessions.get('eb9632fd')?.wakeAt, undefined);
   waker.schedule('eb9632fd', 15, 'merge #1083 when the tests pass');
@@ -197,15 +201,16 @@ test('the server copies a pending wake_me (time and note) and a queued message o
   assert.equal(store.sessions.get('eb9632fd')?.queuedSend, undefined);
 });
 
-test('list_sandboxes: Waiting and on what, sandboxes by status, and a sandbox whose worker is Waiting is not free', (t) => {
-  const { agents } = setup(t);
+test('list_sandboxes: Waiting and on what, sandboxes by status, and a sandbox whose worker is Waiting is not free', async (t) => {
+  const { agents } = await setup(t);
   const waker = (agents as unknown as { waker: WakerLike }).waker;
   const before = agents.describeAllSandboxes();
-  assert.match(before, /- alpha FREE/, 'unused label and an idle agent with nothing pending: free');
+  assert.match(before, /- pc\/alpha FREE/, 'unused label and an idle agent with nothing pending: free');
+  assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1);
   waker.schedule('eb9632fd', 15, 'merge #1083 when CI is green');
   const text = agents.describeAllSandboxes();
   assert.doesNotMatch(text, /alpha FREE/, 'its worker will come back to it');
   assert.match(text, /- eb9632fd "w448: merge #1083" \[Waiting: check-in [^\]]*: “merge #1083 when CI is green”, idle\]/);
-  assert.ok(text.indexOf('- alpha') < text.indexOf('- beta'), 'the sandbox with a Waiting agent before the one with none live');
-  assert.equal(agents.places()[0].freeSandboxes, 0, 'the capacity block and placement do not count it free');
+  assert.ok(text.indexOf('- pc/alpha') < text.indexOf('- pc/beta'), 'the sandbox with a Waiting agent before the one with none live');
+  assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 0, 'the capacity block and placement do not count it free');
 });

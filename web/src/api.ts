@@ -206,6 +206,8 @@ export const api = {
   voiceTranscribe: (audio: string) => request<TranscribeResult>('POST', '/api/voice/transcribe', { audio }),
   decideDelegation: (id: string, approve: boolean, note?: string) =>
     request<DelegationRequest>('POST', `/api/delegations/${enc(id)}/${approve ? 'approve' : 'reject'}`, { note }),
+  /** "Start now" (w527): approves a pending one, and asks the dispatcher to start its ledger request ahead of the queue. */
+  bumpDelegation: (id: string) => request<DelegationRequest>('POST', `/api/delegations/${enc(id)}/bump`, {}),
 };
 
 export type WsStatus = 'connecting' | 'open' | 'closed';

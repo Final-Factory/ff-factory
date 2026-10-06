@@ -167,8 +167,6 @@ function setup() {
     store,
     sessions: port,
     notify: (t) => notes.push(t),
-    sandboxes: { list: () => [], setPurpose: () => ({}) as never },
-    startWorker: () => ({ info: {} as SessionInfo }),
     now: () => clock.now,
   });
   const advance = (min: number) => (clock.now = new Date(clock.now.getTime() + min * 60_000));
@@ -341,8 +339,6 @@ test('manager: a process that dies mid-run records an error; pause drops the sch
     store,
     sessions: port,
     notify: () => undefined,
-    sandboxes: { list: () => [], setPurpose: () => ({}) as never },
-    startWorker: () => ({ info: {} as SessionInfo }),
   });
   fresh.boot();
   assert.equal(fresh.require(a.id).runs.at(-1)!.outcome, 'interrupted');
@@ -363,7 +359,7 @@ test('manager: definitions are validated', (t) => {
   assert.equal(u.nextRunAt, at('2026-09-23T11:00:00').toISOString());
 });
 
-test('delegation: needs the tool group, notifies the orchestrator, and approval needs an unused sandbox', (t) => {
+test('delegation: needs the tool group, notifies the orchestrator, and approval needs the work ledger (no sandbox of its own)', (t) => {
   const { st, notes, cleanup } = setup();
   t.after(cleanup);
   const plain = st.create(def);
@@ -371,8 +367,8 @@ test('delegation: needs the tool group, notifies the orchestrator, and approval 
   const a = st.create({ ...def, name: 'Delegator', tools: ['delegate'] });
   const d = st.requestDelegation(a.id, 'Fix the belt', 'Fix the null ref in BeltSystem.');
   assert.equal(d.status, 'pending');
-  assert.match(notes.at(-1)!, /asks for a sandbox worker/);
-  assert.throws(() => st.approveDelegation(d.id), /no ready sandbox or machine labelled "unused"/);
+  assert.match(notes.at(-1)!, /asks for work \(delegation request \w+\): "Fix the belt"\. It waits for its owner's approval/);
+  assert.throws(() => st.approveDelegation(d.id), /no work ledger here/);
   assert.equal(st.rejectDelegation(d.id, 'not now').status, 'rejected');
   assert.throws(() => st.rejectDelegation(d.id), /already rejected/);
 });

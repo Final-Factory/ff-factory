@@ -329,6 +329,8 @@ export function followUpDecision(
 export function stallCandidate(w: WorkItem): boolean {
   if (!['new', 'queued', 'active'].includes(w.status)) return false;
   if (w.approval?.state === 'pending' || w.question || w.flag) return false;
+  // A standing agent's delegation the dispatcher queued waits for capacity, however long (w527: no expiry while queued).
+  if (w.delegation && w.status === 'queued') return false;
   return true;
 }
 

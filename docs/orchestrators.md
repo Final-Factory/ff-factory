@@ -69,7 +69,17 @@ the server (`server/work.ts`) does three things:
 Requests also come from the intake ([intake.md](intake.md)): Discord bug reports, trusted people's requests to Max
 and FFBox's work, each with its source, its triage (an obvious bug, or it needs a human) and, until a reviewer approves
 it, `approval: pending`, which keeps it from the dispatcher and makes `start_agent` refuse it. Work started from the
-dashboard, over `/mcp` or for a delegation is recorded as an active request too, so the ledger shows all work.
+dashboard or over `/mcp` is recorded as an active request too, so the ledger shows all work.
+
+**Standing agents' delegations** (w527; [standing-agents.md](standing-agents.md#delegation)) are requests like the
+rest. Once approved (by the agent's auto-approve rules, with no click, or by a person: the Approve button, Start now,
+or `approve_delegation` in their own words) one is filed for the agent's owner (`Orchestrators.fileDelegation`), its
+task verbatim as the brief, with the overlap check and the automated sources' caps. Its `[work request]` names the
+agent and who approved it ("w12 from Ben (standing agent "Nightly sentry", delegation 2c70e0fa, auto-approved under
+its rules)"), and the dispatcher queues, places and starts it like any request. The same agent asking again for an
+open request, or one finished in the last two days, with the same title is that request. A request the dispatcher
+queued for one waits for capacity however long it takes: the cleanup never stalls it. Start now on the dashboard
+makes it urgent and tells the dispatcher to start it ahead of the queue (`bumpWork`).
 
 The dispatcher then does one of these for each request:
 
@@ -361,8 +371,8 @@ one rule, and it is the agent's own to enforce (`server/evidenceRules.test.ts` p
   alone can answer. For both orchestrators done means merged: no brief ends at an open PR waiting for a person.
 
 One rule keeps its hold: a task a standing agent delegated is delivered as a pull request and never merged by its
-worker (`server/standing.ts`, `startDelegated`). Its text may come from outside the team, and a person's merge is the
-review.
+worker (the constraints every delegation's request carries, `delegationConstraints` in `server/orchestrators.ts`). Its
+text may come from outside the team, and a person's merge is the review.
 
 The full rule, the checklists (visual changes, merges, releases) and the dated lessons are the `evidence-gate` skill of
 the `ff-agents` plugin (repo final-factory-agents). The briefs hold only what every agent needs without loading it.
@@ -537,7 +547,7 @@ summary alone). `detail: 'summary'` did not move after a compaction, so it is no
 | `[worker update]` (a turn an orchestrator started ended, or a permission is waiting) | the orchestrators of the people the worker works for: its requests' requesters, else whoever started it, else the system payer. The ledger records the worker's last line; the dispatcher is not woken |
 | `[ledger]` | the dispatcher: after a restart or a fresh conversation, the requests still waiting (what it had not answered died with its process); and when requests are queued and a worker ends a turn, after 30 s of quiet, at least 2 minutes apart and at most 20 an hour (a wake that comes too soon waits) |
 | a failed worker of an open request | the dispatcher, as a `[work update]` |
-| `[standing agent]`, `[auto-delegation]` | the orchestrator of the person the run was for (the system payer for a scheduled run) |
+| `[standing agent]`, `[auto-delegation]` | the orchestrator of the agent's owner (the system payer when it has none): a request waiting for a click, or one its auto-approve rules filed (w527) |
 | `[unity blocked]` | the dispatcher, and the people whose workers are in that sandbox |
 | `[app restarted]`, `[machines]`, `[unity]`, `[host]`, the orchestrator inbox | the dispatcher. A person's orchestrator cut off mid-turn by a restart is told to pick its turn up again |
 | `[heartbeat]` | each person's own orchestrator, with that person's busy workers, when they turned it on |
@@ -688,8 +698,8 @@ than Ben's own.
 
 ## Not in this version
 
-- Delegation requests are not ledger items until their worker starts (then it is recorded), so a dashboard or
-  automatic approval skips the overlap check.
+- A delegation waiting for a person's click is not a ledger item yet: it shows on its agent's page, in
+  `list_delegation_requests` and in the overlap check, and becomes one when approved.
 - `/mcp` has `list_work` but not `request_work`.
 - Roles are still not enforced: a member's work can go to the owner's machines if the dispatcher sends it there (its brief
   tells it not to).

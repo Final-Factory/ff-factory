@@ -15,9 +15,15 @@ import { platformNoun, type MachineGuardSettings, type MachinePlatform, type San
  */
 
 export const LABEL = 'com.fffactory.daemon';
+
+/** A LaunchAgent label, checked: it is spliced into shell lines and the plist's file name. Exported for tests. */
+export function macLabel(label: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/.test(label)) throw new Error(`"${label}" is not a usable LaunchAgent label`);
+  return label;
+}
 const SSH = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15'];
 /** Node that can run the TypeScript directly: 22.6+ with --experimental-strip-types, 23.6+ without. */
-const MIN_NODE = [22, 6];
+export const MIN_NODE = [22, 6];
 
 export interface Probe {
   uid: string;
@@ -79,13 +85,10 @@ export function repoSlug(url: string): string | undefined {
   return /[:/]([^/:\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(url.trim())?.[1];
 }
 
-/** `slug` ("owner/name", from config repo.url) is how the game clone is recognised among the host's repos. */
-export async function probe(host: string, slug = ''): Promise<Probe> {
+/** The Mac probe script: `key=value` lines (scripts/worker runs it locally, probe() over ssh). Exported for them. */
+export function macProbeScript(slug = ''): string {
   if (slug && !/^[\w.-]+\/[\w.-]+$/.test(slug)) throw new Error(`"${slug}" is not an owner/name repo slug`);
-  const out = await must(
-    host,
-    'probe',
-    `
+  return `
 set -u
 echo "uid=$(id -u)"
 echo "home=$HOME"
@@ -112,9 +115,11 @@ find "$HOME" -maxdepth 4 -type d -name .git -not -path "*/Library/*" 2>/dev/null
   u=$(git -C "$r" remote get-url origin 2>/dev/null || true)
   case "$u" in *[:/]${slug}|*[:/]${slug}.git) echo "repo=$r" ;; esac
 done
-`,
-    60_000,
-  );
+`;
+}
+
+/** What the Mac probe printed. Exported for scripts/worker. */
+export function parseMacProbe(out: string): Probe {
   const kv = out.split('\n').map((l) => l.trim().split(/=(.*)/s));
   const get = (k: string) => kv.find(([key]) => key === k)?.[1] || undefined;
   return {
@@ -127,6 +132,11 @@ done
     gh: get('gh'),
     repos: kv.filter(([k]) => k === 'repo').map(([, v]) => v),
   };
+}
+
+/** `slug` ("owner/name", from config repo.url) is how the game clone is recognised among the host's repos. */
+export async function probe(host: string, slug = ''): Promise<Probe> {
+  return parseMacProbe(await must(host, 'probe', macProbeScript(slug), 60_000));
 }
 
 /** Whether `v` ("22.15.0") runs our TypeScript, and whether it needs the strip-types flag. */
@@ -166,7 +176,7 @@ export function agentPath(home: string, node: string, userPath: string): string 
 /** The daemon's folder on a Mac: the machine's app_dir, else ~/.ff-factory. */
 export const macAppDir = (home: string, appDir?: string) => appDir || `${home}/.ff-factory`;
 
-export function plist(home: string, node: string, flag: boolean, userPath = '', appDir?: string): string {
+export function plist(home: string, node: string, flag: boolean, userPath = '', appDir?: string, label = LABEL): string {
   const dir = macAppDir(home, appDir);
   const app = `${dir}/app`;
   const args = [node, ...(flag ? ['--experimental-strip-types'] : []), '--disable-warning=ExperimentalWarning', `${app}/machine/daemon.ts`, `${dir}/daemon.json`];
@@ -174,7 +184,7 @@ export function plist(home: string, node: string, flag: boolean, userPath = '', 
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${LABEL}</string>
+  <key>Label</key><string>${xml(macLabel(label))}</string>
   <key>ProgramArguments</key>
   <array>${args.map((a) => `<string>${xml(a)}</string>`).join('')}</array>
   <key>WorkingDirectory</key><string>${xml(app)}</string>
@@ -251,6 +261,8 @@ export interface DaemonExtras {
 
 /** A machine's folder options, as add_machine takes them and daemon.json keeps them. */
 export interface MachineDirs {
+  /** The worker root (w513): daemon.json keeps it, and the daemon derives its other folders from it. */
+  root?: string;
   appDir?: string;
   unityEditorRoot?: string;
   unityPath?: string;
@@ -422,6 +434,7 @@ export function daemonConfig(o: { portalUrl: string; id: string; token: string; 
       repoPath: o.repoPath,
       claude: o.claude,
       maxSessions: o.maxSessions,
+      root: o.root,
       appDir: o.appDir,
       unityEditorRoot: o.unityEditorRoot,
       unityPath: o.unityPath,
@@ -523,9 +536,9 @@ export type DaemonAction = 'start' | 'stop' | 'restart';
  * Input/output error" and leaves no daemon at all (m3, 2026-09-29, after `sleep 1`). So: wait up to 30 s for the
  * old one to be gone, then bootstrap, retrying a few times. `domain` is `gui/<uid>`. Exported for tests.
  */
-export function macReloadLines(domain: string): string {
-  const target = `${domain}/${LABEL}`;
-  const plistPath = `"$HOME/Library/LaunchAgents/${LABEL}.plist"`;
+export function macReloadLines(domain: string, label = LABEL): string {
+  const target = `${domain}/${macLabel(label)}`;
+  const plistPath = `"$HOME/Library/LaunchAgents/${label}.plist"`;
   return `launchctl bootout ${target} 2>/dev/null || true
 i=0
 while launchctl print ${target} >/dev/null 2>&1 && [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done
@@ -540,9 +553,9 @@ done
 }
 
 /** The Mac's launchctl lines for each action on the LaunchAgent. Exported for tests. */
-export function macControlScript(action: DaemonAction | 'uninstall'): string {
-  const plistPath = `"$HOME/Library/LaunchAgents/${LABEL}.plist"`;
-  const target = `gui/$(id -u)/${LABEL}`;
+export function macControlScript(action: DaemonAction | 'uninstall', label = LABEL): string {
+  const plistPath = `"$HOME/Library/LaunchAgents/${macLabel(label)}.plist"`;
+  const target = `gui/$(id -u)/${label}`;
   switch (action) {
     case 'start':
       return `set -e\nlaunchctl print ${target} >/dev/null 2>&1 || launchctl bootstrap gui/$(id -u) ${plistPath}\n`;

@@ -61,8 +61,8 @@ total across sandboxes), `librarySeed`/`librarySeedCopy`/`librarySeedGB`, `below
 
 **Routing.** `Agents.target` resolves a bare name to the local machine's sandbox when the host has none of that name,
 so `mp-r2` and `beast/mp-r2` are the same everywhere (tools, the ledger, the dispatcher). `create_sandbox` and the New
-sandbox form default to the local machine (`defaultSandboxMachine`). Standing agents' auto-delegation picks free
-`beast/<name>` sandboxes too. `list_sandboxes` shows the host group only while the host still has sandboxes of its own.
+sandbox form default to the local machine (`defaultSandboxMachine`). Standing agents' delegations are ledger
+requests the dispatcher places like any other (w527), on `beast/<name>` sandboxes as on any machine's. `list_sandboxes` shows the host group only while the host still has sandboxes of its own.
 
 **The guard** of a BEAST sandbox agent is the machine sandbox guard plus the protected paths (the live game, this app
 and its data). Ending or changing the daemon's scheduled task is refused for every agent (`server/guard.ts`), and the

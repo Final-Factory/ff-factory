@@ -6,9 +6,13 @@
  *   E2E_PORT=8791 node e2e/server.ts      (needs the web UI built: npm --prefix web run build)
  *
  * Seeded state (fixed, so screenshots are stable):
- *   sandbox "alpha"    ready, Unity stopped: tests start their own worker agents here
- *   sandbox "gallery"  one idle worker with a seeded transcript, for visual snapshots; never changed
- *   sandbox "stuck"    Unity blocked on a dialog (the watchdog's badge)
+ *   machine "pc"       an in-process machine daemon (server/testMachine.ts): real git worktrees, a stand-in Unity editor,
+ *                      the same fake agent; its clean-up never runs
+ *   sandbox "pc/alpha"    ready, Unity stopped: tests start their own worker agents here
+ *   sandbox "pc/gallery"  one idle worker with a seeded transcript, for visual snapshots; never changed
+ *   sandbox "stuck"    a sandbox of this host, Unity blocked on a dialog (the watchdog's badge; a host-only state)
+ *   sandbox "videos"   a sandbox of this host with a short clip in its screenshots (videos from a machine are not shown
+ *                      yet: e2e/video.spec.ts)
  *   login              tester / e2e-password-123 (the owner)
  *   second login       teammate / e2e-teammate-456, "Team Mate", a member (e2e/identity.spec.ts), with an /mcp API
  *                      key bound to it in <data folder>/../teammate-key.txt
@@ -66,14 +70,12 @@ function repo(dir: string, branch: string) {
   git(dir, '-c', 'user.name=E2E', '-c', 'user.email=e2e@users.noreply.github.com', 'commit', '-q', '-m', 'Initial commit');
 }
 repo(path.join(base, 'base'), 'develop');
-for (const id of ['alpha', 'gallery', 'stuck']) repo(path.join(sandboxRoot, id), `sandbox/${id}`);
+for (const id of ['stuck', 'videos']) repo(path.join(sandboxRoot, id), `sandbox/${id}`);
 // A short clip in a sandbox's screenshot folder, with the .meta Unity writes beside it (e2e/video.spec.ts).
-const videos = path.join(sandboxRoot, 'alpha', 'Assets', 'Screenshots', 'Videos');
+const videos = path.join(sandboxRoot, 'videos', 'Assets', 'Screenshots', 'Videos');
 fs.mkdirSync(videos, { recursive: true });
 fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(videos, 'clip.webm'));
 fs.writeFileSync(path.join(videos, 'clip.webm.meta'), 'fileFormatVersion: 2\nguid: 0\n');
-// A screenshot in a sandbox that the orchestrator mentions by path (e2e/images.spec.ts).
-fs.writeFileSync(path.join(sandboxRoot, 'gallery', 'Screenshots', 'orch-proof.png'), Buffer.from(RED_PNG, 'base64'));
 
 // Max (docs/max.md): the token in a scratch ffbox config, a mock Discord, and what agents' ffdiscord calls wrote.
 const discordPort = port + 100;
@@ -112,6 +114,8 @@ fs.writeFileSync(
       orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: true },
       worker: { permissionMode: 'bypassPermissions', effort: 'low' },
       voice: { enabled: false, autoInstall: false, tts: false },
+      // The machine "pc" never watches this host from outside (it would ping it and alert a phone).
+      outsideWatch: { enabled: false },
       // A 20 MB cap: e2e/attachments.spec.ts sends a 9 MB file (two chunks) and is refused a 21 MB one.
       attachments: { maxMB: 20 },
       max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },
@@ -146,7 +150,8 @@ const sandbox = (id: string, purpose: string, sessionIds: string[] = []): Sandbo
 const gallery: SessionInfo = {
   id: 'gallery1',
   kind: 'worker',
-  sandboxId: 'gallery',
+  machineId: 'pc',
+  machineSandbox: 'gallery',
   title: 'Seeded worker',
   status: 'idle',
   model: 'opus',
@@ -159,10 +164,19 @@ const gallery: SessionInfo = {
   pendingPermissions: [],
   lastResult: 'The belt splitter now balances all three outputs.',
 };
+process.env.FFSB_CONFIG = configFile;
+// The machine "pc" and its sandboxes alpha and gallery, made before the portal boots so its record (with gallery1) is
+// there when the portal restores its sessions; its daemon connects once the portal listens.
+const { createTestMachine } = await import('../server/testMachine.ts');
+const pc = await createTestMachine({ id: 'pc', portalUrl: `http://127.0.0.1:${port}`, parent: base, prefix: 'machine-', maxSessions: 1, maxSandboxes: 4, maxAgentsPerSandbox: 50, sandboxes: [{ name: 'alpha', purpose: 'E2E playground' }, { name: 'gallery', purpose: 'Visual baseline' }] });
+for (const id of ['alpha', 'gallery']) fs.mkdirSync(path.join(pc.path(id), 'Screenshots'), { recursive: true });
+// A screenshot in a sandbox that the orchestrator mentions by path (e2e/images.spec.ts).
+fs.writeFileSync(path.join(pc.path('gallery'), 'Screenshots', 'orch-proof.png'), Buffer.from(RED_PNG, 'base64'));
 fs.writeFileSync(
   path.join(dataDir, 'state.json'),
   JSON.stringify({
-    sandboxes: [sandbox('alpha', 'E2E playground'), sandbox('gallery', 'Visual baseline', ['gallery1']), sandbox('stuck', 'Unity blocked demo')],
+    sandboxes: [sandbox('stuck', 'Unity blocked demo'), sandbox('videos', 'Video clips')],
+    machines: [pc.record({ gallery: ['gallery1'] })],
     sessions: [gallery],
     settings: { heartbeatMinutes: null },
   }),
@@ -180,7 +194,6 @@ const events: Unnumbered[] = [
 fs.mkdirSync(path.join(dataDir, 'transcripts'), { recursive: true });
 fs.writeFileSync(path.join(dataDir, 'transcripts', 'gallery1.jsonl'), events.map((e, i) => JSON.stringify({ seq: i + 1, ...e })).join('\n') + '\n');
 
-process.env.FFSB_CONFIG = configFile;
 // No stored claude.ai login here, so the plan meter reports "unavailable" instead of starting a CLI;
 // and no agents' token from the environment this runs in, which the meter would poll for real.
 process.env.CLAUDE_CONFIG_DIR = path.join(base, 'claude');
@@ -201,6 +214,7 @@ const { setQueryForTesting } = await import('../server/sessions.ts');
 setQueryForTesting(fakeQuery() as never);
 
 const { internals } = await import('../server/index.ts');
+await pc.connect(internals.machines);
 
 // After the server's own reconcile (which clears a blocked state on boot): an editor stuck on a dialog.
 // It has no pid and no log, so the poll and the watchdog leave it as it is.

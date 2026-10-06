@@ -79,36 +79,61 @@ Tool groups (none by default, so the default is read-only on files only):
 
 ### Delegation
 
-`request_delegation(title, task)` records a delegation request and tells the orchestrator of the person
-the run was for (the system payer's for a scheduled run; [orchestrators.md](orchestrators.md)). The user
-approves or rejects it on the dashboard, or asks their orchestrator, which files it as a work request for
-the dispatcher: `approve_delegation` requires `user_asked` and a request its person asked for, like
-`delete_sandbox`. Approving picks a ready sandbox labelled `unused` with no live
-agent, or else an online machine labelled `unused` with no agents and a clean tree, relabels it, and
-starts a worker with the task. No free target: the approval fails and the request stays pending.
-`my_delegations` lets the agent see its requests and, once approved, the worker's status and last
-result on its next run.
+A standing agent asks for real work with `request_delegation(title, task)`. Since w527 an approved delegation is an
+ordinary request in the work ledger ([orchestrators.md](orchestrators.md#requests-and-the-ledger)): it is filed for the
+agent's **owner** (`owner`, set to the person who created the agent; agents from before have none and use the system
+payer, config `systemPayer`, else the owner), with the task verbatim as its brief and a fixed constraints line
+(written by the agent; a PR into develop, never master or main, which its worker does not merge: a person's merge is
+the review; anything that spends money, publishes, changes a live setting or releases needs a person). The dispatcher gets it as a normal `[work request]`, with the agent and who
+approved it in its first line, and queues, places (LothDesktop, the Macs, BEAST within its caps, by the placement
+rules) and starts it like any other. Nothing here picks a sandbox, starts a worker or expires: a request the
+dispatcher queued waits for capacity however long it takes, and the ledger cleanup never stalls it
+(`stallCandidate`). Its status shows in `list_work` and the dashboard's Requests tab ("from <agent>"), and the agent
+sees it with `my_delegations` (the request's status, PRs and last outcome).
 
-**Auto-approve** (per agent, `autoApprove` / the `auto_*` fields of create/update_standing_agent,
-and the editor): requests start without the user, up to `maxPerRun` and `maxPerDay` (default 3 and 3),
-with `model` / `effort` (default opus, high) on `targets` (default unused sandboxes, then idle
-machines; `exclude` default `mp-r2`; a sandbox not labelled `unused` is never used). A request over
-the limits waits for the user as before. One with no free target is queued and retried every tick until
-`expiryHours` (default 8) after it was filed, then marked `expired`. The worker gets the normal
-guard plus a brief: its own branch, a PR into develop only, never merge. Every step is in the
-request's log, pushed as a notification, and the orchestrator of the person the request is for is woken
-(`[auto-delegation]`) when a worker starts, finishes its first turn, or a request expires.
+How a request is approved:
+
+- **Auto-approve** (per agent, `autoApprove` / the `auto_*` fields of create/update_standing_agent, and the editor):
+  within `maxPerRun` and `maxPerDay` (default 3 and 3) a request is filed at once, with no click. `model` / `effort`
+  (default opus, high) are passed on to the dispatcher as a suggestion. The owner's orchestrator hears each one
+  (`[auto-delegation] "<agent>" filed w12 ...`), to mention to its person. The nightly regression sentry
+  (`nightly-regression-sentry`) gets auto-approve on by default (`AUTO_BY_DEFAULT`, server/schedule.ts) unless a
+  person set it either way.
+- **The person-only gate** (`personOnlyReason`, server/schedule.ts): a request whose title or task asks to spend
+  money, publish or post outside, change a setting (app config, a Steam branch, secrets' homes), release or deploy,
+  or merge into master waits for a person whatever the rules say. It matches the request's words, so it errs towards
+  a click.
+- **A person**: the Approve button on the agent's page ("Approve: queue it") files it at once; it never needs a free
+  slot. "Approve and start now", and "Start now" on an approved one, make its request urgent and tell the dispatcher
+  to start it ahead of the queue (`POST /api/delegations/<id>/bump`). The dispatcher's `approve_delegation` needs a
+  request its person asked for in their own words (`work_id`), like `delete_sandbox`; a person's own orchestrator
+  has `approve_delegation` too, and it works only in a turn its person started.
+
+**De-dup**: the same agent asking again with the same title while its request is open, or within two days of it
+finishing (`DELEGATION_LOOKBACK_MS`), is that request: a log line on it, not a second filing, and the delegation
+shows `repeat`. Anything else is filed with the ledger's overlap check, like every filing, and the dispatcher merges
+what repeats. The automated sources' caps apply (`workLimits.standing`, 10 an hour and 40 a day by default).
+
+Before w527 the portal picked a target itself: a host sandbox (or one of BEAST's own daemon's) labelled `unused`,
+or a whole machine labelled `unused` with no agents and a clean tree, and retried an auto-approved request until
+`expiryHours`. It never looked at other machines' sandboxes, so on 2026-10-06 the sentry's four requests (2c70e0fa,
+3e15c546, 2fc4dfb9, a99fe7d2) waited "no free target" for hours while three LothDesktop sandboxes sat labelled
+`unused`; they were started by hand under w524. The first tick after the update files any request still queued
+that way, and links those four to w524 (`DELEGATIONS_HANDLED`, server/standing.ts). `targets`, `expiryHours` and
+`exclude` are dropped from saved settings.
 
 ## Dashboard and orchestrator
 
 - Sidebar section **Standing agents**: a card per agent with status, next run, and today's spend.
   The agent page shows status, trigger, next run, today's spend vs budget, the last run's result
-  and summary, run history, pending delegation requests (Approve / Reject), and the conversation.
+  and summary, run history, its delegation requests (pending ones: Reject, Approve: queue it, Approve and start now;
+  filed ones: their request and its status, and Start now), and the conversation.
   Buttons: Run now, Stop run, Pause / Resume, Edit, Delete (confirms).
 - Dispatcher tools (also on `/mcp`): `list_standing_agents`, `create_standing_agent`,
   `update_standing_agent`, `run_standing_agent_now`, `pause_standing_agent`,
   `resume_standing_agent`, `list_delegation_requests`, `approve_delegation` / `reject_delegation`,
-  and `delete_standing_agent` (requires `user_asked`). People's own orchestrators have the two lists.
+  and `delete_standing_agent` (requires `user_asked`). People's own orchestrators have the two lists and
+  `approve_delegation` (only in a turn their person started).
 
 ## Decisions and changes from the brief
 
@@ -119,8 +144,8 @@ request's log, pushed as a notification, and the orchestrator of the person the 
 - The read-only shell is an allowlist, not a denylist. It is a seatbelt like the rest of the guard:
   an agent can still read any file the host user can, and a comment is a way out. Keep charters
   that read untrusted text (Discord, PR bodies) away from `github_comment` unless needed.
-- Not in v1: starting delegated workers without approval, reporting a delegated worker's result
-  back into the agent's run automatically, Discord or web tools, per-agent environment/secrets.
+- Not in v1: reporting a delegated request's result back into the agent's run automatically (it reads it with
+  `my_delegations`), Discord or web tools, per-agent environment/secrets.
 
 ## Example charter (documentation only)
 

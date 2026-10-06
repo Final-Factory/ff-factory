@@ -1115,7 +1115,11 @@ route('GET', '/api/sandboxes/([\\w-]+)/unity-log', async (_r, [id], url) => ({
 
 // ---- standing agents (docs/standing-agents.md)
 
-route('POST', '/api/standing', async (req) => agents.standing.create(await readJson<StandingAgentInput>(req)));
+route('POST', '/api/standing', async (req) => {
+  const body = await readJson<StandingAgentInput>(req);
+  // Its delegations are filed as its owner's requests (w527): the person who made it, unless the body names another.
+  return agents.standing.create({ ...body, owner: body.owner ?? requesterOf(req) });
+});
 
 route('POST', '/api/standing/([\\w-]+)', async (req, [id]) => agents.standing.update(id, await readJson<Partial<StandingAgentInput>>(req)));
 
@@ -1131,8 +1135,10 @@ route('POST', '/api/standing/([\\w-]+)/(run|stop|pause|resume)', async (req, [id
   return action === 'pause' ? st.pause(id) : st.resume(id);
 });
 
-route('POST', '/api/delegations/([\\w-]+)/(approve|reject)', async (req, [id, action]) => {
+route('POST', '/api/delegations/([\\w-]+)/(approve|reject|bump)', async (req, [id, action]) => {
+  // w527: approving files it in the ledger for the agent's owner (no free slot needed); bump also asks to start it now.
   if (action === 'approve') return agents.standing.approveDelegation(id, { approvedBy: requesterOf(req) });
+  if (action === 'bump') return agents.standing.bumpDelegation(id, requesterOf(req));
   const { note } = await readJson<{ note?: string }>(req);
   return agents.standing.rejectDelegation(id, note);
 });
@@ -1382,6 +1388,17 @@ const server = http.createServer(async (req, res) => {
     if (reviewUpload) {
       const machineId = machines.authenticate(req.headers.authorization);
       return await reviewHttp(review, machineId && store.machines.has(machineId) ? machineId : undefined, req, res, reviewUpload[1], Number(url.searchParams.get('offset') ?? 0));
+    }
+    // A worker install asking about itself, or leaving (w513, docs/worker-install.md): its own token, nothing else.
+    if (url.pathname === '/machine/whoami' || url.pathname === '/machine/unenroll') {
+      const machineId = machines.authenticate(req.headers.authorization);
+      if (!machineId || !store.machines.has(machineId)) return send(res, 401, { error: 'a valid machine token is required' });
+      if (url.pathname === '/machine/whoami' && req.method === 'GET') return send(res, 200, machines.selfStatus(machineId));
+      if (url.pathname === '/machine/unenroll' && req.method === 'POST') {
+        const r = machines.unenroll(machineId, url.searchParams.get('force') === '1');
+        return send(res, r.ok ? 200 : 409, r);
+      }
+      return send(res, 405, { error: 'GET /machine/whoami or POST /machine/unenroll' });
     }
     // The nightly e2e lab's report (docs/intake.md, "Nightly e2e regressions"): a key minted --scope nightly, nothing else.
     if (url.pathname === '/api/intake/nightly' && req.method === 'POST') {
@@ -1848,7 +1865,7 @@ setInterval(() => {
 }, 5000);
 
 /** The managers, for the E2E harness (e2e/server.ts) to set up states no browser can reach (a blocked editor). */
-export const internals = { cfg, store, sandboxes, sessions, agents, providers, max };
+export const internals = { cfg, store, sandboxes, sessions, machines, agents, providers, max };
 
 // Data files a crash damaged and that were restored from an earlier version (server/durable.ts). The owner hears at
 // once (a push and their own orchestrator); the restart summary carries the same lines to the dispatcher.
