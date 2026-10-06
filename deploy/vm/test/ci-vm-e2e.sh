@@ -63,7 +63,7 @@ PORTAL_OWNER_NAME=CI
 GUEST_TAILSCALE=skip
 GUEST_GITHUB=skip
 GUEST_BACKUP_SSH_TARGET=
-# The sizes are the defaults (D12: 2 vCPUs, 8 GiB), so CI boots the size the FFBox host runs; only the disk is small.
+# The sizes are the defaults (D12: 2 vCPUs, 4 GiB), so CI boots the size the FFBox host runs; only the disk is small.
 VM_DISK_GB=16
 $(if [ "$TIMING" = fast ]; then printf 'WATCH_INTERVAL_SEC=10\nWATCH_FAILS_BEFORE_RESET=2\nWATCH_BOOT_GRACE_SEC=90\n'; fi)
 NIGHTLY_MODE=always
