@@ -1205,9 +1205,11 @@ export interface WorkItem {
   links?: Record<string, { at: string; how: 'sent' | 'linked' }>;
   /**
    * Its workers that said `DONE: <id>` for their part, by session id, with when and the report's first line (w434): the
-   * request closes once none of its workers is still on it (each said DONE, ended, or moved on to newer work).
+   * request closes once none of its workers is still on it (each said DONE, ended, or moved on to newer work). `text`:
+   * the full text of that worker's DONE reports on it, newest last (the last 4000 characters), which a refused DONE is
+   * checked against again when its PRs change (w515; absent on DONEs recorded before).
    */
-  done?: Record<string, { at: string; report: string }>;
+  done?: Record<string, { at: string; report: string; text?: string }>;
   /** Files its person attached (request_work attachments): every worker started for it gets a copy. */
   attachments?: AttachmentRef[];
   /** What it may repeat, found when it was filed; strongest first. */
