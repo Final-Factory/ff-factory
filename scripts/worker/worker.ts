@@ -291,6 +291,8 @@ export interface Facts {
   git?: [number, number];
   gitLfs: boolean;
   claude?: string;
+  /** Windows: Claude Code only as an npm shim (claude.cmd): the Agent SDK cannot start it and uses its own bundled one. */
+  claudeShim?: string;
   rootState: 'missing' | 'empty' | 'ours' | 'other';
   rootParentExists: boolean;
   freeGB?: number;
@@ -310,7 +312,7 @@ export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'po
   if (!f.git) p.push(`git is missing: install git ${MIN_GIT.join('.')} or newer (${f.platform === 'win32' ? 'winget install --id Git.Git -e' : 'brew install git'})`);
   else if (!versionAtLeast(f.git, MIN_GIT)) p.push(`git ${f.git.join('.')} is too old: ${MIN_GIT.join('.')} or newer is needed for relative worktree paths (${f.platform === 'win32' ? 'winget upgrade --id Git.Git -e' : 'brew upgrade git'})`);
   if (!f.gitLfs) p.push(`git-lfs is missing (${f.platform === 'win32' ? 'it comes with Git for Windows: reinstall git' : 'brew install git-lfs && git lfs install'})`);
-  if (!f.claude) p.push(`Claude Code is missing (${f.platform === 'win32' ? 'irm https://claude.ai/install.ps1 | iex' : 'curl -fsSL https://claude.ai/install.sh | bash'})`);
+  if (!f.claude && !f.claudeShim) p.push(`Claude Code is missing (${f.platform === 'win32' ? 'irm https://claude.ai/install.ps1 | iex' : 'curl -fsSL https://claude.ai/install.sh | bash'})`);
   // The path rules of the computer the root is for (a test judges a Windows path anywhere).
   const pp = f.platform === 'win32' ? path.win32 : path.posix;
   if (!pp.isAbsolute(o.root)) p.push(`the root must be an absolute path (got "${o.root}")`);
@@ -376,10 +378,10 @@ async function serviceElsewhere(service: string, appDir: string): Promise<string
 async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?: string; claude?: string; sid?: string; home: string; user?: string; uid?: string; path?: string } }> {
   const git = gitVersion((await exec('git', ['--version'])).stdout);
   const lfs = (await exec('git', ['lfs', 'version'])).code === 0;
-  let probe: { node?: string; claude?: string; sid?: string; home: string; user?: string; uid?: string; path?: string; loggedOn?: boolean };
+  let probe: { node?: string; claude?: string; claudeShim?: string; sid?: string; home: string; user?: string; uid?: string; path?: string; loggedOn?: boolean };
   if (isWin) {
     const p = parseWinProbe(await ps('probing this PC', win.probeScript('')));
-    probe = { node: p.node, claude: p.claude, sid: p.sid, home: p.home, user: p.user, loggedOn: p.loggedOn };
+    probe = { node: p.node, claude: p.claude, claudeShim: p.claudeShim, sid: p.sid, home: p.home, user: p.user, loggedOn: p.loggedOn };
   } else {
     const p = parseMacProbe(await bash('probing this Mac', macProbeScript('')));
     probe = { node: p.node, claude: p.claude, home: p.home, uid: p.uid, path: p.path };
@@ -393,6 +395,7 @@ async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?:
     git,
     gitLfs: lfs,
     claude: probe.claude,
+    claudeShim: probe.claudeShim,
     rootState: rootState(o.root, id),
     rootParentExists: fs.existsSync(path.dirname(o.root)),
     freeGB: freeGB(o.root),
@@ -601,7 +604,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     return false;
   }
   const id = f.credentialId!;
-  say(`OK: machine ${id}, node ${f.nodeVersion}, git ${f.git!.join('.')}, Claude Code ${f.claude}, ${f.freeGB ?? '?'} GB free.`);
+  say(`OK: machine ${id}, node ${f.nodeVersion}, git ${f.git!.join('.')}, Claude Code ${f.claude ?? `${f.claudeShim} (an npm shim: agents use the Agent SDK's own Claude Code)`}, ${f.freeGB ?? '?'} GB free.`);
 
   // 1. The root and its manifest.
   for (const d of [l.root, l.daemon, l.secrets, l.sandboxes, l.seed, l.players, l.nightly, l.scratch, l.tmp, l.logs]) fs.mkdirSync(d, { recursive: true });
