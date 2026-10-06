@@ -69,7 +69,8 @@ load_conf() {
     die "no config at $file (copy fff-vm.conf.example there and edit it)"
   fi
   case "$VM_DISK_MODE" in zvol | qcow2) ;; *) die "VM_DISK_MODE is zvol or qcow2, not '$VM_DISK_MODE'" ;; esac
-  [ "$VM_DISK_MODE" != zvol ] || [ -n "$VM_ZVOL_PARENT" ] || die "VM_DISK_MODE=zvol needs VM_ZVOL_PARENT (a dataset, e.g. tank/fff-vm)"
+  # install.sh asks for VM_ZVOL_PARENT when it is missing (LOAD_CONF_PARTIAL=1), and checks it after the questions.
+  [ "${LOAD_CONF_PARTIAL:-0}" = 1 ] || [ "$VM_DISK_MODE" != zvol ] || [ -n "$VM_ZVOL_PARENT" ] || die "VM_DISK_MODE=zvol needs VM_ZVOL_PARENT (a dataset, e.g. tank/fff-vm)"
   case "$NIGHTLY_MODE" in always | if-required | off) ;; *) die "NIGHTLY_MODE is always, if-required or off" ;; esac
 }
 

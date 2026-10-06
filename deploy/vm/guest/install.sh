@@ -3,6 +3,7 @@
 #
 #   git clone https://github.com/Final-Factory/ff-factory.git && sudo ff-factory/deploy/vm/guest/install.sh [--dry-run]
 #   options: --repo URL (default FFF_REPO_URL)  --ref REF (default origin/<FFF_BRANCH>)  --no-start
+#            --no-todo (no list of what is left: the host's install.sh, which runs this, does those steps itself)
 #
 # Idempotent. It installs Node (CI's major version), git, git-lfs, gh, ssh, age, Tailscale and the Claude Code CLI;
 # the "fff" service account and /srv/fff; ff-factory as a release (fff-update); config.json from the VM template
@@ -16,13 +17,15 @@ here=$(cd "$(dirname "$0")" && pwd)
 REPO_URL=""
 REF=""
 START=1
+TODO=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --repo) REPO_URL=$2; shift ;;
     --ref) REF=$2; shift ;;
     --no-start) START=0 ;;
-    -h | --help) sed -n '2,12p' "$0"; exit 0 ;;
+    --no-todo) TODO=0 ;;
+    -h | --help) sed -n '2,13p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -214,7 +217,7 @@ if [ "$START" = 1 ]; then
   fi
 fi
 
-cat >&2 <<EOF
+[ "$TODO" = 1 ] && cat >&2 <<EOF
 
 Installed. Still to do, by a person (docs/portal-on-ffbox-host.md, "Installing"):
   1. sudo fffctl claude-token --file /root/claude.token          Lothsahn's subscription token (D4, 'claude setup-token')

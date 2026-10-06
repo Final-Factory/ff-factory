@@ -32,6 +32,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   and `set_app_config` refuses to set them. `/api/health` answers `dryRun: true`, the log starts with a `DRY RUN` line,
   and every page shows a red bar that cannot be dismissed. `server/dryRun.ts`; tests in `server/dryRun.test.ts` (each
   part, plus the real server booted on copied-looking data) and `e2e/banner.spec.ts`.
+- **The portal VM installs with one command, and asks for what it needs** (w498, asked by Lothsahn).
+  `sudo deploy/vm/host/install.sh` now installs the host side and then the portal inside the VM, and sets it up:
+  - Lothsahn's subscription token, the Tailscale join with the Funnel, GitHub and the base clone;
+  - config.json (`ownerName`, `publicUrl`, the orchestrators and the dispatcher on the token file);
+  - the backups.
+
+  It asks first, before changing anything, for the ZFS dataset and its mountpoint, the time zone, the ssh key, the
+  ntfy URL, the owner name, the tokens and the backup target. It checks each answer and stores it in `/etc/fff-vm`
+  (secrets root-only in `/etc/fff-vm/secrets`), so a re-run or `--rebuild-vm` asks nothing it knows. Without a
+  terminal or with `--yes`, a missing answer stops it with the list and nothing changed. It ends with the few lines
+  only a person can add, such as the deploy key's `from=` line for each machine.
+  ([deploy/vm/RUNBOOK.md](deploy/vm/RUNBOOK.md))
+
 - **The portal in its own VM on the FFBox host: design and install scripts** (w441, Lothsahn's request to make w439,
   the container design, a VM). The portal moves into a KVM/QEMU VM that libvirt manages. It has its own isolated
   network: NAT out to the internet only, with an nftables table that keeps it away from the host, FFBox's containers
