@@ -349,7 +349,7 @@ export function buildWorld(scenario: Scenario, now = Date.now()): World {
       state: 'asleep',
       nextRunAt: new Date(now + 12 * MIN).toISOString(),
       spend: { day: localDay(now), usd: 1.84 },
-      autoApprove: { enabled: true, maxPerRun: 1, maxPerDay: 3, model: 'sonnet', effort: 'high', targets: 'sandboxes-then-machines', expiryHours: 8, exclude: ['agent-mcp'] },
+      autoApprove: { enabled: true, maxPerRun: 1, maxPerDay: 3, model: 'sonnet', effort: 'high' },
       runs: [
         run('r-28', 200, 'ok', 0.21, 'No new bug reports since 08:30. Two questions in #ask-assistant were already answered by Max.'),
         run('r-29', 170, 'ok', 0.34, '## 1 new bug\n\n**Belt splitter drops items at 3-way junctions** (3 reports: kyle_b, Zorander, mira). Reproduced from the save one of them attached. Filed delegation **d-81f2**.', 6),

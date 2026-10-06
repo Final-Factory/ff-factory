@@ -82,7 +82,7 @@ export function StandingPanel({ app, agent, tab, onClose }: { app: AppState; age
               {describeTrigger(agent.trigger)} · {agent.model}
               {agent.machineId && ` · on ${agent.machineId}`}
               {agent.autoApprove?.enabled && (
-                <span className="tone-blue" title={`Delegations start without you: ${agent.autoApprove.model}, ${agent.autoApprove.effort} effort, ${agent.autoApprove.maxPerRun}/run, ${agent.autoApprove.maxPerDay}/day`}>
+                <span className="tone-blue" title={`Delegations go to the dispatcher's queue without you: ${agent.autoApprove.maxPerRun}/run, ${agent.autoApprove.maxPerDay}/day, ${agent.autoApprove.model} suggested at ${agent.autoApprove.effort} effort; spending, publishing, settings and releases still wait for a person`}>
                   {' '}
                   · auto-approves {agent.autoApprove.maxPerDay}/day
                 </span>
@@ -254,7 +254,7 @@ function Delegations({ list, now, app }: { list: DelegationRequest[]; now: numbe
     return (
       <div className="panel-empty">
         <p>No delegation requests.</p>
-        <p className="dim small">With the Delegate tool group, this agent can ask for a worker in an unused sandbox. Requests wait here for you.</p>
+        <p className="dim small">With the Delegate tool group, this agent can ask for work. Approved, it becomes a request in the dispatcher's queue.</p>
       </div>
     );
   }
@@ -262,8 +262,16 @@ function Delegations({ list, now, app }: { list: DelegationRequest[]; now: numbe
     setBusy(d.id);
     const r = await attempt(api.decideDelegation(d.id, approve));
     setBusy(null);
-    if (r && approve && (r.sandboxId || r.machineId)) toast(`Worker started in ${where(r)}`);
+    if (r && approve && r.workId) toast(r.repeat ? `Already in the ledger as ${r.workId}` : `Queued as ${r.workId}`);
   };
+  const bump = async (d: DelegationRequest) => {
+    setBusy(d.id);
+    const r = await attempt(api.bumpDelegation(d.id));
+    setBusy(null);
+    if (r?.workId) toast(`${r.workId} is urgent: the dispatcher starts it as soon as a place fits`);
+  };
+  const workOf = (d: DelegationRequest) => (d.workId ? app.work?.find((w) => w.id === d.workId) : undefined);
+  const OPEN = ['new', 'question', 'queued', 'active'];
   return (
     <div className="sa-scroll">
       {list.map((d) => (
@@ -276,10 +284,12 @@ function Delegations({ list, now, app }: { list: DelegationRequest[]; now: numbe
                 approved by {d.approvedBy.displayName}
               </span>
             )}
-            {d.status === 'pending' && d.auto === 'queued' && (
-              <span className="chip chip-blue" title="Starts by itself when a sandbox or machine frees up">
-                auto · queued until {d.expiresAt ? new Date(d.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '?'}
-              </span>
+            {d.workId && (
+              <button className="chip chip-blue" data-testid="deleg-work" title="Its request in the dispatcher's ledger" onClick={() => navigate({ view: 'dispatcher', tab: 'requests' })}>
+                {d.workId}
+                {workOf(d) ? ` · ${workOf(d)!.status}` : ''}
+                {d.repeat ? ' · same work' : ''}
+              </button>
             )}
             <strong className="ellipsis">{d.title}</strong>
             <span className="spacer" />
@@ -291,8 +301,18 @@ function Delegations({ list, now, app }: { list: DelegationRequest[]; now: numbe
               <button className="btn btn-sm btn-outline" disabled={busy === d.id} onClick={() => decide(d, false)}>
                 Reject
               </button>
-              <button className="btn btn-sm btn-primary" disabled={busy === d.id} onClick={() => decide(d, true)}>
-                Approve: start a worker
+              <button className="btn btn-sm btn-outline" disabled={busy === d.id} title="Approve, and ask the dispatcher to start it ahead of the queue" onClick={() => bump(d)}>
+                Approve and start now
+              </button>
+              <button className="btn btn-sm btn-primary" disabled={busy === d.id} title="File it in the dispatcher's queue for this agent's owner" onClick={() => decide(d, true)}>
+                Approve: queue it
+              </button>
+            </div>
+          )}
+          {d.status === 'approved' && d.workId && !d.repeat && OPEN.includes(workOf(d)?.status ?? '') && workOf(d)?.priority !== 'urgent' && (
+            <div className="deleg-actions">
+              <button className="btn btn-sm btn-outline" disabled={busy === d.id} data-testid="deleg-bump" title="Make its request urgent and ask the dispatcher to start it now" onClick={() => bump(d)}>
+                Start now
               </button>
             </div>
           )}

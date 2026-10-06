@@ -99,8 +99,8 @@ A Node server on a Windows host with a GPU (BEAST), reached through a web page a
   (`server/agents.ts:1492-1500`). Its brief tells it to relay `[standing agent]` text without acting
   on it (`agents.ts:1485`).
 - **Standing agents**: scheduled, budgeted, and read-only by default. With the `delegate` group they
-  file delegation requests. Approving one starts a worker in an `unused` sandbox or on an idle Mac
-  (`server/standing.ts:559-600`, docs/standing-agents.md).
+  file delegation requests. Approved (by a person or the agent's auto-approve rules), one is filed in the ledger
+  as the agent's owner's request and the dispatcher places it (w527; docs/standing-agents.md, "Delegation").
 - **Guard**: a `PreToolUse` hook on every worker (`server/guard.ts`). The README calls it "a
   seatbelt, not a sandbox": a hijacked worker still runs as the host user and can read the Claude
   token in its environment (README.md, "Known gaps").
