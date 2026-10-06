@@ -10,6 +10,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **The portal VM has 4 GiB of RAM, not 8** (w537, Lothsahn: "Change the VM to 4GB ram"). `fff-vm.conf.example`'s
+  `VM_MEMORY_MB=4096`, so a rebuilt VM and CI's nested VM boot that size. Basis, measured from w442's 20-hour run on
+  BEAST: the whole portal (the node server and every Claude process under it, summed per sample) peaked at 1,134 MB
+  resident and 2,470 MB Windows private (p99 876 MB and 1,942 MB). The runbook's new section 7 says how to change the
+  size of a running VM: the setting, `install.sh --host-only --yes`, `fff-vm nightly --now`, and what to check.
+
 ### Added
 
 - **The token vault** (w512, [docs/vault.md](docs/vault.md); lothsahn: "store a list of claude tokens and any other

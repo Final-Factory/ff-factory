@@ -275,6 +275,22 @@ default), and prints the `journalctl` command for the details. Ctrl+C stops the 
 only asks for it, as `request_app_update` does. `fffctl restart` and `fffctl rollback` wait the same way until the portal
 answers again.
 
+## 7. Changing the VM's size
+
+The size is `VM_VCPUS` and `VM_MEMORY_MB` in `/etc/fff-vm/fff-vm.conf` (4096 since 2026-10-06). To change it:
+
+```bash
+sudo fff-vm ssh 'systemctl is-active fff-update.service; pgrep -af "[f]ff-migrate" || echo "no migrate running"'
+                                                      # a safe point: "inactive" and "no migrate running"
+sudo sed -i 's/^VM_MEMORY_MB=.*/VM_MEMORY_MB=4096/' /etc/fff-vm/fff-vm.conf
+sudo ~/ff-factory/deploy/vm/host/install.sh --host-only --yes
+                                                      # writes domain.xml again and defines it; on a running VM it
+                                                      # warns that the change applies at the next cold start
+sudo fff-vm nightly --now                             # drain, shut down, snapshot, start, wait for the portal
+sudo virsh dominfo fff-portal | grep -i memory        # Max memory and Used memory: 4194304 KiB
+sudo fff-vm ssh 'free -m; sudo fffctl status'         # Mem total about 3,900 MiB; the portal active, /api/health ok
+```
+
 ## If it must come off again
 
 ```bash
