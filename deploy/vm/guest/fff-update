@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# fff-update: the portal VM's updater (deploy/vm/guest; /usr/local/lib/fff/fff-update), in place of supervise.ps1,
+# update.ps1 and update-steps.ps1. Root; git and npm run as fff.
+#
+# Releases are git worktrees of one bare clone, $FFF_ROOT/app/releases/<sha12>, each with its own node_modules and
+# web build; $FFF_ROOT/app/current is the one fff-portal.service runs, previous the one before it. So the new code is
+# built while the old one runs, and the switch at the restart takes a second.
+#
+#   fff-update request       fff-update.path started it: data/update.wanted is there (request_app_update or
+#                            "fffctl update"). Builds origin/<branch>, then asks the server for the drain and the
+#                            restart (restart.request with update: true); the server leaves data/update.request
+#                            and exits, and the next start switches.
+#   fff-update activate      fff-portal.service's ExecStartPre (as root): if data/update.request is there, switch to
+#                            the prepared release (or build one now: an update cut off by a crash), record the result
+#                            for the server's restart summary, and start verifying it.
+#   fff-update verify        fff-health calls it: once the new code answers /api/health with its SHA the update is
+#                            done; past UPDATE_VERIFY_MIN minutes without that, roll back.
+#   fff-update rollback [WHY] back to the previous release, restart.
+#   fff-update prepare [REF] build REF (default origin/<branch>) and print the release folder.
+#   fff-update init [REF]    the first release (install.sh).
+set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
+need_root
+load_conf
+
+current_dir() { readlink -e "$CURRENT" 2>/dev/null || true; }
+
+prepare() {
+  local ref=${1:-origin/$FFF_BRANCH} sha dir
+  as_fff git -C "$REPO" fetch --prune --quiet origin >&2
+  sha=$(as_fff git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}") || die "no commit $ref in $FFF_REPO_URL"
+  dir=$RELEASES/${sha:0:12}
+  if [ -f "$dir.ready" ] && [ -e "$dir/.git" ]; then
+    log "release ${sha:0:12} is already built"
+    echo "$dir"
+    return 0
+  fi
+  log "building ${sha:0:12} ($ref) in $dir"
+  rm -f "$dir.ready"
+  if [ -e "$dir" ]; then as_fff git -C "$REPO" worktree remove --force "$dir" >&2 2>/dev/null || rm -rf "$dir"; fi
+  as_fff git -C "$REPO" worktree prune >&2
+  as_fff git -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2
+  (
+    cd "$dir"
+    as_fff npm ci --no-audit --no-fund --loglevel=error
+    as_fff npm --prefix web ci --no-audit --no-fund --loglevel=error
+    as_fff npm --prefix web run build --silent
+  ) >&2
+  as_fff touch "$dir.ready"
+  log "release ${sha:0:12} built"
+  echo "$dir"
+}
+
+# Keep current, previous, the prepared one and RELEASES_KEEP_EXTRA more (newest first).
+prune() {
+  local keep cur prev prepared d n=0
+  cur=$(current_dir); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
+  prepared=$(jq -r '.dir // empty' "$DATA/update.prepared.json" 2>/dev/null || true)
+  keep=" $cur $prev $prepared "
+  for d in $(find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p
+' | sort -rn | cut -d' ' -f2-); do
+    case "$keep" in *" $d "*) continue ;; esac
+    n=$((n + 1))
+    [ "$n" -gt "$RELEASES_KEEP_EXTRA" ] || continue
+    log "removing old release $(basename "$d")"
+    as_fff git -C "$REPO" worktree remove --force "$d" 2>/dev/null || rm -rf "$d"
+    rm -f "$d.ready"
+  done
+  as_fff git -C "$REPO" worktree prune
+}
+
+switch_to() {
+  local dir=$1 cur
+  cur=$(current_dir)
+  [ "$cur" = "$dir" ] && return 0
+  [ -z "$cur" ] || ln -sfn "$cur" "$PREVIOUS.new"
+  [ -z "$cur" ] || mv -Tf "$PREVIOUS.new" "$PREVIOUS"
+  ln -sfn "$dir" "$CURRENT.new"
+  mv -Tf "$CURRENT.new" "$CURRENT"
+  chown -h "$FFF_USER:$FFF_USER" "$CURRENT" "$PREVIOUS" 2>/dev/null || true
+}
+
+cmd_request() {
+  local wanted=$DATA/update.wanted drain=10 reason='update' dir sha cur_sha
+  if [ -f "$wanted" ]; then
+    drain=$(jq -r '.drainMinutes // 10' "$wanted" 2>/dev/null || echo 10)
+    reason=$(jq -r '.reason // "update"' "$wanted" 2>/dev/null || echo update)
+    rm -f "$wanted"
+  fi
+  log "update requested ($reason): building origin/$FFF_BRANCH beside the running server"
+  local buildlog=$APP/last-build.log
+  if ! dir=$(prepare "origin/$FFF_BRANCH" 2>"$buildlog"); then
+    cat "$buildlog" >&2
+    tell_dispatcher "[app update] The update was NOT done: building origin/$FFF_BRANCH failed, so nothing was restarted and the running version stays. Last lines (journalctl -u fff-update in the VM for all):
+$(tail -n 12 "$buildlog")"
+    exit 1
+  fi
+  cat "$buildlog" >&2
+  sha=$(release_sha "$dir")
+  cur_sha=$(release_sha "$(current_dir)")
+  if [ "$sha" = "$cur_sha" ]; then
+    log "already at ${sha:0:12}; nothing to restart"
+    tell_dispatcher "[app update] Already up to date at ${sha:0:9} (origin/$FFF_BRANCH); nothing was restarted."
+    return 0
+  fi
+  jq -n --arg sha "$sha" --arg dir "$dir" --arg at "$(date -u +%FT%TZ)" '{sha: $sha, dir: $dir, at: $at}' | data_write update.prepared.json
+  jq -n --argjson m "$drain" --arg r "update to ${sha:0:9} ($reason)" '{drain: "auto", drainMinutes: $m, reason: $r, update: true, hold: false}' |
+    data_write restart.request
+  log "built ${sha:0:12}; asked the server to drain (up to $drain min) and restart"
+}
+
+cmd_activate() {
+  local req=$DATA/update.request dir="" before after err=""
+  [ -f "$req" ] || exit 0
+  rm -f "$req"
+  before=$(release_sha "$(current_dir)")
+  dir=$(jq -r '.dir // empty' "$DATA/update.prepared.json" 2>/dev/null || true)
+  if [ -z "$dir" ] || [ ! -f "$dir.ready" ]; then
+    # An update the server handed over without a prepared release: one cut off by a crash (server/index.ts), or an
+    # old-style request. Build it now, while the portal is down.
+    log "no prepared release: building origin/$FFF_BRANCH now (the portal is down meanwhile)"
+    dir=$(prepare "origin/$FFF_BRANCH") || { dir=""; err="building origin/$FFF_BRANCH failed (journalctl -u fff-portal in the VM)"; }
+  fi
+  rm -f "$DATA/update.prepared.json"
+  if [ -n "$dir" ]; then
+    switch_to "$dir"
+    after=$(release_sha "$dir")
+    jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$before" --arg a "$after" '{ok: true, at: $at, headBefore: $b, headAfter: $a}' | data_write update.result.json
+    if [ "$after" != "$before" ]; then
+      jq -n --arg sha "$after" --arg prev "$before" --argjson d "$(($(date +%s) + UPDATE_VERIFY_MIN * 60))" '{sha: $sha, previous: $prev, deadline: $d}' |
+        data_write update.verifying.json
+    fi
+    log "switched ${before:0:12} -> ${after:0:12}; verifying for $UPDATE_VERIFY_MIN min"
+    prune || warn "pruning old releases failed"
+  else
+    jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$before" --arg e "$err" '{ok: false, at: $at, error: $e, headBefore: $b, headAfter: $b}' | data_write update.result.json
+    log "update failed: $err; starting ${before:0:12} again"
+  fi
+}
+
+cmd_rollback() {
+  local why=${1:-asked for by hand} cur prev cur_sha prev_sha
+  cur=$(current_dir); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
+  if [ -z "$prev" ] || [ ! -f "$prev.ready" ]; then die "no previous release to go back to"; fi
+  cur_sha=$(release_sha "$cur"); prev_sha=$(release_sha "$prev")
+  ln -sfn "$prev" "$CURRENT.new" && mv -Tf "$CURRENT.new" "$CURRENT"
+  ln -sfn "$cur" "$PREVIOUS.new" && mv -Tf "$PREVIOUS.new" "$PREVIOUS"
+  rm -f "$DATA/update.verifying.json"
+  jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$cur_sha" --arg a "$prev_sha" --arg e "rolled back: $why" \
+    '{ok: false, at: $at, error: $e, headBefore: $b, headAfter: $a}' | data_write update.result.json
+  tell_dispatcher "[app update] Rolled back from ${cur_sha:0:9} to ${prev_sha:0:9}: $why. Data files are not rolled back (formats only move forward); the host's disk snapshots hold older states."
+  log "rolled back ${cur_sha:0:12} -> ${prev_sha:0:12}: $why; restarting the portal"
+  systemctl restart fff-portal.service
+}
+
+cmd_verify() {
+  local f=$DATA/update.verifying.json sha deadline got
+  [ -f "$f" ] || return 0
+  sha=$(jq -r .sha "$f"); deadline=$(jq -r .deadline "$f")
+  got=$(health_json 2>/dev/null | jq -r '.sha // empty' 2>/dev/null || true)
+  if [ -n "$got" ] && [ "${sha:0:${#got}}" = "$got" ]; then
+    rm -f "$f"
+    log "update to ${sha:0:12} verified: the portal answers with it"
+    return 0
+  fi
+  if [ "$(date +%s)" -gt "$deadline" ]; then
+    cmd_rollback "the new version ${sha:0:9} did not answer /api/health within $UPDATE_VERIFY_MIN minutes of its start"
+  fi
+}
+
+cmd_init() {
+  local ref=${1:-origin/$FFF_BRANCH} dir
+  install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$APP" "$RELEASES"
+  if [ ! -d "$REPO" ]; then
+    log "cloning $FFF_REPO_URL"
+    as_fff git clone --bare --quiet "$FFF_REPO_URL" "$REPO"
+    as_fff git -C "$REPO" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  fi
+  as_fff git -C "$REPO" remote set-url origin "$FFF_REPO_URL"
+  dir=$(prepare "$ref")
+  if [ -z "$(current_dir)" ]; then switch_to "$dir"; log "current release: $(basename "$dir")"; else log "a current release exists ($(basename "$(current_dir)")); updates go through fffctl update"; fi
+}
+
+case "${1:-}" in
+  request) cmd_request ;;
+  activate) cmd_activate ;;
+  verify) cmd_verify ;;
+  rollback) shift; cmd_rollback "$*" ;;
+  prepare) shift; prepare "${1:-}" ;;
+  init) shift; cmd_init "${1:-}" ;;
+  prune) prune ;;
+  *) sed -n '2,27p' "$0"; exit 2 ;;
+esac

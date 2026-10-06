@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# fff-vm: the FF Factory portal VM's host-side tool (deploy/vm/host; installed as /usr/local/sbin/fff-vm). Root only.
+#
+#   fff-vm status            the VM, its agent, the portal's health, the firewall table, timers, snapshots
+#   fff-vm ssh [CMD...]      a shell (or CMD) in the guest as the admin user, over the private network
+#   fff-vm console           the guest's serial console (Ctrl+] leaves)
+#   fff-vm watch             one hang check (fff-vm-watch.timer runs it every minute)
+#   fff-vm nightly [--now]   drain the portal, shut the VM down, snapshot the disk, start it (fff-vm-nightly.timer)
+#   fff-vm events            alerts on libvirt's watchdog, crash and stop events (fff-vm-events.service)
+#   fff-vm snapshots         the disk's snapshots
+#   fff-vm notify-test       send a test alert to the ntfy topic
+set -o errexit -o nounset -o pipefail
+LIB=${FFF_VM_LIB:-/usr/local/lib/fff-vm}
+# shellcheck source=lib.sh
+. "$LIB/lib.sh"
+need_root
+load_conf "${FFF_VM_CONF:-$FFF_VM_ETC/fff-vm.conf}"
+mkdir -p "$FFF_VM_RUN" "$FFF_VM_STATE"
+WATCH_STATE=$FFF_VM_STATE/watch.state
+MAINT=$FFF_VM_RUN/maintenance
+
+# ---------------------------------------------------------------- small helpers
+state_get() { if [ -f "$WATCH_STATE" ]; then grep -E "^$1=" "$WATCH_STATE" | tail -n 1 | cut -d= -f2- || true; fi; }
+state_set() {
+  local tmp
+  tmp=$(mktemp "$FFF_VM_STATE/.watch.XXXXXX")
+  {
+    if [ -f "$WATCH_STATE" ]; then grep -vE "^$1=" "$WATCH_STATE" || true; fi
+    echo "$1=$2"
+  } >"$tmp"
+  mv "$tmp" "$WATCH_STATE"
+}
+now() { date +%s; }
+# Seconds since the VM's QEMU process started (a cold start or a host reboot), or a large number if unknown.
+qemu_age() {
+  local pid
+  pid=$(cat "/run/libvirt/qemu/$VM_NAME.pid" 2>/dev/null || true)
+  [ -n "$pid" ] && ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || echo 999999
+}
+in_maintenance() { [ -f "$MAINT" ] && [ $(($(now) - $(stat -c %Y "$MAINT"))) -lt 7200 ]; }
+agent_ok() { guest_agent '{"execute":"guest-ping"}' 10 >/dev/null; }
+ssh_guest() {
+  ssh -i "$FFF_VM_ETC/ssh/id_ed25519" -o UserKnownHostsFile="$FFF_VM_ETC/ssh/known_hosts" -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=10 -o BatchMode=yes "$VM_ADMIN_USER@$NET_VM_IP" "$@"
+}
+firewall_ok() { nft list table inet fff_vm 2>/dev/null | matches -F "$FFF_VM_MARK"; }
+
+# The firewall table must be there whenever the VM runs (a reload of nftables.service with "flush ruleset" drops it).
+ensure_firewall() {
+  firewall_ok && return 0
+  log "the firewall table inet fff_vm is missing; loading it again"
+  if nft -f "$FFF_VM_ETC/fff-vm.nft"; then
+    notify "fff-vm: firewall restored" "The table inet fff_vm was missing on $(hostname -s) (a reload of the host's nftables?) and was loaded again."
+  else
+    notify "fff-vm: FIREWALL MISSING" "The table inet fff_vm is missing on $(hostname -s) and could not be loaded; the VM is shut down until it is."
+    v shutdown "$VM_NAME" >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
+reset_vm() {
+  local why=$1 resets recent t
+  resets=$(state_get resets)
+  recent=""
+  for t in $resets; do [ $(($(now) - t)) -lt 21600 ] && recent+=" $t"; done
+  # shellcheck disable=SC2086
+  if [ "$(set -- $recent; echo $#)" -ge "$WATCH_MAX_RESETS_6H" ]; then
+    if [ $(($(now) - $(state_get gaveup_alert || echo 0))) -gt 3600 ]; then
+      notify "fff-vm: NOT resetting" "$VM_NAME: $why, but it was reset $WATCH_MAX_RESETS_6H times in 6 hours already. Look: sudo fff-vm status; sudo virsh console $VM_NAME."
+      state_set gaveup_alert "$(now)"
+    fi
+    return 0
+  fi
+  log "resetting $VM_NAME: $why"
+  v reset "$VM_NAME" || { v destroy "$VM_NAME" || true; v start "$VM_NAME"; }
+  state_set resets "${recent# } $(now)"
+  state_set fails 0
+  state_set reset_at "$(now)"
+  notify "fff-vm: VM reset" "$VM_NAME on $(hostname -s) was reset: $why."
+}
+
+# ---------------------------------------------------------------- watch
+cmd_watch() {
+  local st fails a h down_since down_min
+  ensure_firewall || return 0
+  if in_maintenance; then log "maintenance (nightly or by hand): no check"; return 0; fi
+  st=$(dom_state)
+  case "$st" in
+    running) ;;
+    "shut off")
+      if v dominfo "$VM_NAME" | matches '^Autostart: *enable'; then
+        log "$VM_NAME is shut off outside maintenance; starting it"
+        v start "$VM_NAME" && notify "fff-vm: VM started" "$VM_NAME on $(hostname -s) was off outside the nightly window and was started again."
+      fi
+      return 0 ;;
+    paused)
+      if [ $(($(now) - $(state_get paused_alert || echo 0))) -gt 3600 ]; then
+        notify "fff-vm: VM paused" "$VM_NAME is paused ($(v domstate "$VM_NAME" --reason | head -n 1)); not resetting: an I/O error pause means the host's disk is full or failing."
+        state_set paused_alert "$(now)"
+      fi
+      return 0 ;;
+    missing) log "no domain $VM_NAME"; return 0 ;;
+    *) log "$VM_NAME is $st"; return 0 ;;
+  esac
+  if [ "$(qemu_age)" -lt "$WATCH_BOOT_GRACE_SEC" ]; then log "booting ($(qemu_age)s)"; return 0; fi
+  a=no; h=no
+  agent_ok && a=yes
+  portal_healthy && h=yes
+  if [ "$a" = yes ]; then state_set agent_seen 1; fi
+  if [ "$a" = yes ] || [ "$h" = yes ]; then
+    state_set fails 0
+    if [ "$h" = yes ]; then state_set portal_down_since ""; return 0; fi
+    # The guest is alive and its own systemd restarts the portal; the host only alerts, and resets as a last resort.
+    down_since=$(state_get portal_down_since)
+    [ -n "$down_since" ] || { down_since=$(now); state_set portal_down_since "$down_since"; }
+    down_min=$((($(now) - down_since) / 60))
+    log "guest alive, portal not answering for $down_min min"
+    if [ "$down_min" -ge "$WATCH_PORTAL_ALERT_MIN" ] && [ $(($(now) - $(state_get portal_alert || echo 0))) -gt 3600 ]; then
+      notify "fff-vm: portal down" "The FF Factory portal in $VM_NAME has not answered /api/health for $down_min minutes; the VM itself answers. Look: sudo fff-vm ssh sudo fffctl status."
+      state_set portal_alert "$(now)"
+    fi
+    if [ "$PORTAL_DOWN_RESET_MIN" -gt 0 ] && [ "$down_min" -ge "$PORTAL_DOWN_RESET_MIN" ]; then
+      state_set portal_down_since ""
+      reset_vm "the portal did not answer for $down_min minutes although the guest did"
+    fi
+    return 0
+  fi
+  # Neither answers.
+  if [ "$(state_get agent_seen)" != 1 ]; then
+    # The first boot (cloud-init installs the agent, upgrades, maybe reboots): never reset it, alert after 30 min.
+    if [ "$(qemu_age)" -gt 1800 ] && [ -z "$(state_get firstboot_alert)" ]; then
+      notify "fff-vm: first boot not done" "$VM_NAME has run 30 minutes and its guest agent never answered. Look: sudo virsh console $VM_NAME."
+      state_set firstboot_alert "$(now)"
+    fi
+    log "the guest agent has never answered yet (first boot?)"
+    return 0
+  fi
+  fails=$(($(state_get fails || echo 0) + 1))
+  state_set fails "$fails"
+  log "no answer from the guest agent nor the portal ($fails of $WATCH_FAILS_BEFORE_RESET)"
+  if [ "$fails" -ge "$WATCH_FAILS_BEFORE_RESET" ]; then
+    reset_vm "neither the guest agent nor the portal answered for $fails checks in a row"
+  fi
+}
+
+# ---------------------------------------------------------------- nightly
+snapshot_create() {
+  local name=$1
+  if [ "$VM_DISK_MODE" = zvol ]; then
+    zfs snapshot "$VM_ZVOL_PARENT/disk0@$name"
+  else
+    qemu-img snapshot -c "$name" "$(vm_disk_path)"
+  fi
+}
+snapshot_list() {
+  if [ "$VM_DISK_MODE" = zvol ]; then
+    zfs list -H -t snapshot -o name -s creation "$VM_ZVOL_PARENT/disk0" 2>/dev/null | sed 's/.*@//'
+  else
+    # -U: the running VM holds the image open; listing needs force-share.
+    qemu-img snapshot -l -U "$(vm_disk_path)" 2>/dev/null | awk 'NR > 2 {print $2}'
+  fi
+}
+snapshot_prune() {
+  local all n
+  all=$(snapshot_list | grep '^fff-' || true)
+  n=$(printf '%s\n' "$all" | grep -c . || true)
+  [ "$n" -gt "$SNAPSHOTS_KEEP" ] || return 0
+  printf '%s\n' "$all" | head -n $((n - SNAPSHOTS_KEEP)) | while read -r s; do
+    if [ "$VM_DISK_MODE" = zvol ]; then zfs destroy "$VM_ZVOL_PARENT/disk0@$s"; else qemu-img snapshot -d "$s" "$(vm_disk_path)"; fi
+    log "snapshot $s removed (keeping $SNAPSHOTS_KEEP)"
+  done
+}
+
+cmd_nightly() {
+  local force=${1:-} t0 out rc reason="" pid
+  t0=$(now)
+  if [ "$NIGHTLY_MODE" = off ] && [ "$force" != --now ]; then log "NIGHTLY_MODE=off"; return 0; fi
+  [ "$(dom_state)" = running ] || { log "$VM_NAME is $(dom_state); nothing to do"; return 0; }
+  if [ "$NIGHTLY_MODE" = if-required ] && [ "$force" != --now ]; then
+    out=$(guest_exec 30 /bin/sh -c 'test -e /run/reboot-required && echo guest' || true)
+    [ -z "$out" ] || reason="the guest needs a reboot (/run/reboot-required)"
+    pid=$(cat "/run/libvirt/qemu/$VM_NAME.pid" 2>/dev/null || true)
+    # An upgrade replaced the QEMU binary the VM still runs.
+    if [ -n "$pid" ] && readlink "/proc/$pid/exe" 2>/dev/null | matches '(deleted)'; then
+      reason="${reason:+$reason; }the host's QEMU was updated"
+    fi
+    [ -n "$reason" ] || { log "if-required: no reboot needed tonight"; return 0; }
+  fi
+  touch "$MAINT"
+  trap 'rm -f "$MAINT"' EXIT
+  log "nightly: draining the portal (up to $NIGHTLY_DRAIN_MIN min)${reason:+; $reason}"
+  set +e
+  out=$(guest_exec $(((NIGHTLY_DRAIN_MIN + 5) * 60)) /usr/local/sbin/fffctl prepare-shutdown --drain-minutes "$NIGHTLY_DRAIN_MIN" --reason "nightly restart for security updates")
+  rc=$?
+  set -e
+  case $rc in
+    0) log "drained: ${out//$'\n'/ }" ;;
+    125) log "the guest agent did not take the drain; shutting down anyway (the portal's own SIGTERM stop records what to resume)" ;;
+    *) log "the drain ended with $rc (${out//$'\n'/ }); shutting down anyway" ;;
+  esac
+  v shutdown "$VM_NAME" --mode agent,acpi >/dev/null 2>&1 || v shutdown "$VM_NAME" >/dev/null 2>&1 || true
+  for _ in $(seq 60); do [ "$(dom_state)" = "shut off" ] && break; sleep 5; done
+  if [ "$(dom_state)" != "shut off" ]; then
+    log "no clean shutdown in 5 minutes; forcing it off"
+    v destroy "$VM_NAME" || true
+    notify "fff-vm: nightly forced off" "$VM_NAME did not shut down within 5 minutes at the nightly restart and was forced off."
+  fi
+  # The disk is consistent now: no writer.
+  if snapshot_create "fff-nightly-$(date -u +%Y%m%d-%H%M)"; then snapshot_prune; else warn "snapshot failed"; fi
+  v start "$VM_NAME"
+  for _ in $(seq 60); do agent_ok && break; sleep 5; done
+  agent_ok || notify "fff-vm: nightly start" "$VM_NAME did not answer its guest agent within 5 minutes of the nightly start."
+  for _ in $(seq 120); do portal_healthy && break; sleep 5; done
+  if portal_healthy; then
+    log "nightly done in $(($(now) - t0)) s; the portal is up"
+  else
+    notify "fff-vm: portal not back" "After the nightly restart the FF Factory portal in $VM_NAME has not answered for 10 minutes; fff-vm watch keeps checking."
+  fi
+}
+
+# ---------------------------------------------------------------- events
+cmd_events() {
+  log "watching libvirt events for $VM_NAME"
+  v event --domain "$VM_NAME" --all --loop --timestamp | while IFS= read -r line; do
+    case "$line" in
+      *"'watchdog'"*) notify "fff-vm: watchdog fired" "$VM_NAME: ${line#*: }. The guest stopped petting its watchdog (a hung kernel or PID 1) and was reset." ;;
+      *"'lifecycle'"*Crashed*) notify "fff-vm: VM crashed" "$VM_NAME: ${line#*: }" ;;
+      *"'lifecycle'"*Stopped*)
+        if in_maintenance; then log "$line (nightly)"; else notify "fff-vm: VM stopped" "$VM_NAME: ${line#*: } outside the nightly window."; fi ;;
+      *"'reboot'"*) log "$line" ;;
+      *"'lifecycle'"* | *"'io-error"*) log "$line"; case "$line" in *io-error*) notify "fff-vm: VM disk I/O error" "$VM_NAME: ${line#*: }" ;; esac ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------- status
+cmd_status() {
+  echo "VM $VM_NAME: $(dom_state) ($VM_VCPUS vCPUs, $VM_MEMORY_MB MiB, disk $(vm_disk_path))"
+  echo "  autostart: $(v dominfo "$VM_NAME" 2>/dev/null | awk '/^Autostart:/ {print $2}'); QEMU process age: $(qemu_age) s"
+  echo "  guest agent: $(agent_ok && echo answers || echo 'no answer')"
+  echo "  portal http://$NET_VM_IP:$PORTAL_PORT/api/health: $(curl -fsS -m 10 "http://$NET_VM_IP:$PORTAL_PORT/api/health" 2>/dev/null || echo 'no answer')"
+  echo "  firewall table inet fff_vm: $(firewall_ok && echo loaded || echo MISSING)"
+  echo "  network $NET_NAME: $(v net-info "$NET_NAME" 2>/dev/null | awk '/^Active:/ {print "active " $2}')"
+  ws=$(paste -sd' ' "$WATCH_STATE" 2>/dev/null || true)
+  echo "  watch state: ${ws:-none}"
+  echo "  maintenance: $(in_maintenance && echo yes || echo no)"
+  systemctl list-timers --no-pager fff-vm-watch.timer fff-vm-nightly.timer 2>/dev/null | sed 's/^/  /' | head -n 4
+  echo "  snapshots: $(snapshot_list | tr '\n' ' ')"
+  echo "  alerts: $([ -r "$NTFY_URL_FILE" ] && echo "configured ($NTFY_URL_FILE)" || echo 'NOT configured')"
+}
+
+case "${1:-status}" in
+  status) cmd_status ;;
+  ssh) shift; if [ $# -eq 0 ]; then ssh_guest -t; else ssh_guest "$@"; fi ;;
+  console) exec virsh --connect qemu:///system console "$VM_NAME" ;;
+  watch) cmd_watch ;;
+  nightly) shift; cmd_nightly "${1:-}" ;;
+  events) cmd_events ;;
+  snapshots) snapshot_list ;;
+  notify-test) notify "fff-vm: test" "A test alert from $(hostname -s) (fff-vm notify-test)." ;;
+  -h | --help | help) sed -n '2,11p' "$0" ;;
+  *) die "unknown command $1 (fff-vm help)" ;;
+esac

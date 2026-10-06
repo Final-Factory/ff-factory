@@ -1,0 +1,7 @@
+[Unit]
+Description=FF Factory portal: build the new release beside the running one, then ask for the drain (fff-update)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/fff/fff-update request
+TimeoutStartSec=30min

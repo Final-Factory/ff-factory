@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# fff-base-refresh: keep the base clone the orchestrators read on origin/<BASE_BRANCH> (fff-base-refresh.timer,
+# every 15 minutes; root, git as fff). The server fetches it only for list_branches (docs, change 11), so without
+# this the orchestrators would read old code. Fetch, then move the detached HEAD only when nothing is modified there.
+set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
+need_root
+load_conf
+[ -d "$BASE_PATH/.git" ] || { log "no base clone at $BASE_PATH (fffctl base-clone)"; exit 0; }
+install -d -m 0755 /run/fff
+exec 9>"/run/fff/base-refresh.lock"
+flock -n 9 || { log "a refresh is already running"; exit 0; }
+as_fff git -C "$BASE_PATH" fetch --prune --quiet origin
+if [ -n "$(as_fff git -C "$BASE_PATH" status --porcelain --untracked-files=no)" ]; then
+  warn "the base clone has modified files; HEAD left where it is"
+  exit 0
+fi
+as_fff git -C "$BASE_PATH" checkout --quiet --detach "origin/$BASE_BRANCH"
+log "base clone at $(as_fff git -C "$BASE_PATH" log -1 --format='%h %cr')"

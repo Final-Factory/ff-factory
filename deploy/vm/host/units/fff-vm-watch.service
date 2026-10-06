@@ -1,0 +1,9 @@
+[Unit]
+Description=fff-vm: hang detection for the FF Factory portal VM
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/portal-on-ffbox-host.md
+After=libvirtd.service virtqemud.service fff-vm-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fff-vm watch
+TimeoutStartSec=5min

@@ -14,9 +14,11 @@ import {
   restartSummary,
   versionLine,
   resumeMessage,
+  systemdSupervised,
   takeResumeFile,
   updateLogHint,
   writeResumeFile,
+  writeUpdateWanted,
   type RestartRequest,
   type ResumeFile,
   type SessionSnapshot,
@@ -168,6 +170,24 @@ test('resume file: written atomically, taken once', () => {
     fs.writeFileSync(path.join(dir, 'update.result.json'), String.fromCharCode(0xfeff) + '{"ok":true,"at":"2026-09-23T18:05:00Z"}');
     assert.equal(readUpdateResult(dir, '2026-09-23T18:00:00Z')?.ok, true);
     assert.equal(readUpdateResult(dir, '2026-09-23T18:10:00Z'), undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('systemd supervisor: only the VM unit variable together with an INVOCATION_ID systemd set', () => {
+  assert.equal(systemdSupervised({}), false);
+  assert.equal(systemdSupervised({ FFSB_SUPERVISOR: 'systemd' }), false, 'a shell that copied the variable is not systemd');
+  assert.equal(systemdSupervised({ INVOCATION_ID: '0123abcd' }), false, 'another unit (a test runner under systemd) is not the portal');
+  assert.equal(systemdSupervised({ FFSB_SUPERVISOR: 'systemd', INVOCATION_ID: '0123abcd' }), true);
+});
+
+test('update.wanted: what the VM updater reads, written whole', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-wanted-'));
+  try {
+    writeUpdateWanted(dir, { drainMinutes: 7, reason: 'update (request_app_update)' }, new Date('2026-10-05T12:00:00Z'));
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'update.wanted'), 'utf8')), { drainMinutes: 7, reason: 'update (request_app_update)', at: '2026-10-05T12:00:00.000Z' });
+    assert.deepEqual(fs.readdirSync(dir), ['update.wanted'], 'no temp file left beside it');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

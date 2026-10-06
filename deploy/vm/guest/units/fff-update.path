@@ -1,0 +1,9 @@
+[Unit]
+Description=FF Factory portal: an update was asked for (data/update.wanted)
+
+[Path]
+PathExists=/srv/fff/data/update.wanted
+Unit=fff-update.service
+
+[Install]
+WantedBy=multi-user.target

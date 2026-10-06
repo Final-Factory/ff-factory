@@ -1,0 +1,69 @@
+{
+  "port": 8790,
+  "host": "0.0.0.0",
+  "trustProxy": true,
+  "publicUrl": "",
+  "ownerName": "",
+  "usagePollMinutes": 15,
+  "dataDir": "/srv/fff/data",
+  "sandboxRoot": "/srv/fff/sandboxes",
+  "standingRoot": "/srv/fff/agents",
+  "repo": {
+    "url": "https://github.com/Final-Factory/FinalFactory.git",
+    "basePath": "/srv/fff/base"
+  },
+  "defaultBase": "origin/develop",
+  "unity": {
+    "editorPath": "/nonexistent/no-unity-in-the-portal-vm"
+  },
+  "protectedPaths": [],
+  "limits": {
+    "maxUnity": 1,
+    "maxSessions": 6,
+    "maxSandboxes": 1,
+    "minFreeGB": 10,
+    "minFreeRamGB": 0
+  },
+  "models": ["opus", "sonnet", "haiku", "fable"],
+  "defaultModel": "opus",
+  "orchestrator": {
+    "model": "opus",
+    "effort": "medium",
+    "notifyOnWorkerEvents": true
+  },
+  "worker": {
+    "permissionMode": "bypassPermissions",
+    "effort": "high"
+  },
+  "hostDiskPaths": ["/srv/fff"],
+  "review": {
+    "root": "/srv/fff/review"
+  },
+  "voice": {
+    "enabled": false,
+    "autoInstall": false,
+    "tts": false
+  },
+  "hostGuard": {
+    "warnFreeGB": 20,
+    "criticalFreeGB": 10,
+    "remountMinFreeGB": 5,
+    "devDriveVhdx": "",
+    "reapBrowsersAfterHours": 0,
+    "compactWhenReclaimGB": 0,
+    "cleanup": {
+      "ageRules": []
+    }
+  },
+  "machines": {
+    "keepAgentsOnRestart": true
+  },
+  "providers": {
+    "ffbox": {
+      "enabled": false
+    }
+  },
+  "ledger": {
+    "cleanup": { "enabled": true, "everyHours": 4 }
+  }
+}

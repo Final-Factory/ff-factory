@@ -459,6 +459,28 @@ export function mayRecoverUnclean(dataDir: string, now = Date.now(), withinMs = 
 }
 export const PENDING_RESTART_FILE = 'restart.pending.json';
 
+/**
+ * Whether systemd supervises this server: the portal VM's fff-portal.service (deploy/vm/guest) sets
+ * FFSB_SUPERVISOR=systemd, and systemd sets INVOCATION_ID for each run of a unit (systemd.exec(5)), so a shell that
+ * only copied the variable does not count. Under systemd, Restart=always starts the server again after it exits.
+ */
+export function systemdSupervised(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.FFSB_SUPERVISOR === 'systemd' && !!env.INVOCATION_ID;
+}
+
+export const UPDATE_WANTED_FILE = 'update.wanted';
+
+/**
+ * request_app_update under systemd: data/update.wanted asks the VM's updater (deploy/vm/guest/fff-update, started by
+ * fff-update.path) to build the new code beside the running server. Once it is built, the updater writes
+ * restart.request with update: true, so the drain, the stop and the resume are the ones restart.ps1 -Update gets on
+ * Windows, and the new code starts within seconds of the stop. Written whole (a temp file and a rename): the path
+ * unit fires as soon as the file exists.
+ */
+export function writeUpdateWanted(dataDir: string, o: { drainMinutes: number; reason: string }, now = new Date()) {
+  writeJsonDurable(path.join(dataDir, UPDATE_WANTED_FILE), { drainMinutes: o.drainMinutes, reason: o.reason, at: now.toISOString() }, { generations: 0 });
+}
+
 /** The server's heartbeat (every 30 s): after an unclean stop it says when the server was last alive. */
 export function writeAlive(dataDir: string, now = Date.now()) {
   try {

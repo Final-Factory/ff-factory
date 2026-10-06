@@ -12,6 +12,28 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The portal in its own VM on the FFBox host: design and install scripts** (w441, Lothsahn's request to make w439,
+  the container design, a VM). The portal moves into a KVM/QEMU VM that libvirt manages. It has its own isolated
+  network: NAT out to the internet only, with an nftables table that keeps it away from the host, FFBox's containers
+  and the LAN, and everything on the host but root away from it. Tailscale and Funnel run inside it. `deploy/vm/host`
+  installs it (idempotent, `--dry-run`, refusing anything not its own) with hang detection, a watchdog device, and a
+  nightly drain, cold restart and snapshot. `deploy/vm/guest` sets up the portal inside, with `fffctl`. An updater
+  (`fff-update`) builds the new code beside the running server, switches at the drain's restart and rolls back by
+  itself, so `request_app_update` works under systemd: `server/restart.ts` `systemdSupervised` and
+  `writeUpdateWanted`. Lothsahn's decisions so far are in the doc's table: his subscription token (`claude
+  setup-token`) for the orchestrators and the dispatcher, stored in the VM's `secrets/` (`fffctl claude-token`), which
+  FF Factory passes to those sessions only once code change 18 is in; BEAST's Dev Drive recovery moves into BEAST's
+  daemon; the guest is Ubuntu 26.04 on a zvol, on a 24.04 or 26.04 host; no standing agents run in the VM. There is
+  also a read-only footprint measurement for BEAST (`deploy/vm/measure`) and sizing with its basis. CI
+  (`vm-scripts.yml`) lints the scripts and runs them end to end in a nested VM, with qcow2 and with a zvol
+  ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md)).
+- **Design: the portal in its own container on the FFBox host** (w439, the request for this design, asked by
+  Lothsahn). Design only, nothing deployed: a rootless Podman pod under its own Unix account on FFBox's Linux host,
+  Tailscale inside the pod and nothing published on the host, so FFBox and FF Factory share no account, file, daemon,
+  network or secret; the isolation options compared, the image, volumes, secrets and backups, container-native
+  restarts and updates with rollback, reachability, the Claude account for the orchestrators and the dispatcher, the
+  code changes with file:line and size, the migration with a dry run, cut-over and rollback, and the decisions left
+  for Lothsahn and Ben ([docs/portal-on-ffbox-host.md](docs/portal-on-ffbox-host.md)).
 - **Every Unity process counts toward a machine's editor limit, and launches wait in a queue for a slot** (w469, asked
   by Lothsahn: "Can we just account for every unity editor process that's running?"). LothDesktop reached 63 of 64 GB
   with one interactive editor and three `-batchmode` builds while its limit of 3 counted one. `max_unity` now counts

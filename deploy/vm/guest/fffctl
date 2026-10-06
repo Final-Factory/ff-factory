@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# fffctl: the FF Factory portal inside its VM (deploy/vm/guest; /usr/local/sbin/fffctl). Root (sudo).
+#
+#   fffctl status                       the portal, its release, health, Tailscale, the base clone, backups
+#   fffctl logs [-f]                    the portal's journal
+#   fffctl restart [--no-drain] [--drain-minutes N]
+#                                       drain busy agents, restart, resume them (restart.ps1's job)
+#   fffctl update [--drain-minutes N]   build origin/main beside the running portal, then drain and switch
+#                                       (what request_app_update does; restart.ps1 -Update's job)
+#   fffctl rollback                     back to the previous release
+#   fffctl prepare-shutdown [--drain-minutes N] [--reason TEXT]
+#                                       drain, stop the portal and keep it stopped until the next boot (the host's
+#                                       nightly restart runs this through the guest agent first)
+#   fffctl start                        start the portal again after prepare-shutdown, without a reboot
+#   fffctl claude-token --file FILE     Lothsahn's subscription token ("claude setup-token", sk-ant-oat01-...) for the
+#                                       orchestrators and the dispatcher (decision D4): stored in $FFF_ROOT/secrets,
+#                                       never in config.json or a unit
+#   fffctl claude-login                 an interactive claude.ai login instead (not the decided route)
+#   fffctl tailscale-join --authkey-file FILE [--hostname fff] [--tag tag:fff-portal]
+#                                       join the tailnet as a tagged node and open the Funnel to the portal
+#   fffctl gh-login --token-file FILE   the portal's GitHub token (a fine-grained token on a machine user)
+#   fffctl base-clone                   clone the game repo for the orchestrators' reads (needs gh-login first)
+#   fffctl backup                       an encrypted backup now (fff-backup.timer does it every day)
+set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
+need_root
+load_conf
+HOLD=/run/fff/portal.hold
+
+restart_request() {
+  # $1 drain (auto|false), $2 minutes, $3 reason, $4 update (true|false)
+  jq -n --arg d "$1" --argjson m "$2" --arg r "$3" --argjson u "$4" \
+    '{drain: (if $d == "false" then false else $d end), drainMinutes: $m, reason: $r, update: $u, hold: false}' | data_write restart.request
+}
+main_pid() { systemctl show -p MainPID --value fff-portal.service; }
+wait_healthy() {
+  local secs=$1 _
+  for _ in $(seq "$secs"); do health_json >/dev/null 2>&1 && return 0; sleep 1; done
+  return 1
+}
+
+cmd_status() {
+  local cur prev h
+  cur=$(readlink -e "$CURRENT" 2>/dev/null || echo none); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || echo none)
+  echo "portal: $(systemctl is-active fff-portal.service) (pid $(main_pid))$([ -e "$HOLD" ] && echo ', HELD until reboot (fffctl start)')"
+  h=$(health_json 2>/dev/null || echo 'no answer')
+  echo "  /api/health: $h"
+  echo "  release: $(basename "$cur") ($(release_sha "$cur" || true)); previous: $(basename "$prev")"
+  [ ! -f "$DATA/update.verifying.json" ] || echo "  verifying an update: $(cat "$DATA/update.verifying.json")"
+  [ ! -f "$DATA/update.result.json" ] || echo "  last update result: $(cat "$DATA/update.result.json")"
+  echo "  data: $(du -sh "$DATA" 2>/dev/null | cut -f1); disk: $(df -h --output=avail,pcent "$FFF_ROOT" | tail -n 1 | xargs) free/used"
+  echo "tailscale: $(tailscale status --self --peers=false 2>/dev/null | head -n 1 || echo 'not joined')"
+  echo "  funnel: $(tailscale funnel status 2>/dev/null | grep -m1 -o 'https://[^ ]*' || echo none)"
+  echo "claude login: $([ -s "$FFF_ROOT/home/.claude/.credentials.json" ] && echo stored || echo 'none (fffctl claude-login)')"
+  echo "base clone: $([ -d "$BASE_PATH/.git" ] && as_fff git -C "$BASE_PATH" log -1 --format='%h %cr' || echo 'none (fffctl base-clone)')"
+  echo "backups: $([ -n "$BACKUP_SSH_TARGET" ] && echo "to $BACKUP_SSH_TARGET:$BACKUP_REMOTE_DIR" || echo off); last: $(journalctl -u fff-backup.service -n 1 --no-pager -o cat 2>/dev/null || true)"
+  systemctl list-timers --no-pager 'fff-*' 2>/dev/null | head -n 6
+}
+
+cmd_restart() {
+  local drain=auto mins=10 before
+  while [ $# -gt 0 ]; do
+    case "$1" in --no-drain) drain=false ;; --drain-minutes) mins=$2; shift ;; *) die "unknown option $1" ;; esac
+    shift
+  done
+  portal_active || { systemctl start fff-portal.service; wait_healthy 120 && echo "started"; return; }
+  before=$(main_pid)
+  restart_request "$drain" "$mins" "restart (fffctl)" false
+  echo "asked the portal to $([ "$drain" = false ] && echo 'stop now' || echo "drain (up to $mins min)") and restart; waiting"
+  for _ in $(seq $(((mins + 3) * 60))); do
+    [ "$(main_pid)" != "$before" ] && [ "$(main_pid)" != 0 ] && wait_healthy 120 && { echo "restarted (pid $(main_pid))"; return 0; }
+    sleep 1
+  done
+  die "the portal did not come back; fffctl status, fffctl logs"
+}
+
+cmd_update() {
+  local mins=10
+  while [ $# -gt 0 ]; do case "$1" in --drain-minutes) mins=$2; shift ;; *) die "unknown option $1" ;; esac; shift; done
+  jq -n --argjson m "$mins" --arg at "$(date -u +%FT%TZ)" '{drainMinutes: $m, reason: "update (fffctl update)", at: $at}' | data_write update.wanted
+  echo "update requested: fff-update builds origin/$FFF_BRANCH now (journalctl -fu fff-update), then the portal drains and switches"
+}
+
+cmd_prepare_shutdown() {
+  local mins=10 reason="stop (fffctl prepare-shutdown)" t0
+  while [ $# -gt 0 ]; do
+    case "$1" in --drain-minutes) mins=$2; shift ;; --reason) reason=$2; shift ;; *) die "unknown option $1" ;; esac
+    shift
+  done
+  t0=$(date +%s)
+  install -d -m 0755 /run/fff
+  touch "$HOLD"
+  if portal_active; then
+    restart_request auto "$mins" "$reason" false
+    # The server drains, records what to resume, stops its agents and exits 0; ExecCondition then keeps systemd
+    # from starting it again while the hold file exists.
+    for _ in $(seq $(((mins + 2) * 60))); do portal_active || break; sleep 1; done
+    if portal_active; then
+      echo "no stop after the drain; stopping it (SIGTERM: it still records what to resume)"
+      systemctl stop fff-portal.service
+    fi
+  fi
+  echo "portal stopped after $(($(date +%s) - t0)) s; held until the next boot"
+}
+
+cmd_claude_login() {
+  local claude=$FFF_ROOT/home/.local/bin/claude
+  [ -x "$claude" ] || die "no Claude Code CLI at $claude (install.sh installs it)"
+  cat <<EOF
+Sign in with Lothsahn's claude.ai account, as the portal's account $FFF_USER:
+  1. In the Claude Code prompt that opens, type /login and pick the Claude account with a subscription.
+  2. Open the URL it shows on any device, sign in, and paste the code back here.
+  3. Type /exit.
+The login is stored in $FFF_ROOT/home/.claude/.credentials.json (0600, $FFF_USER only). Then set
+claudeAccounts.orchestrator (and claudeAccounts.dispatcher, change 6) to "login" (docs/portal-on-ffbox-host.md, 5.2).
+EOF
+  as_fff bash -c "cd ~ && exec '$claude'" || true
+  if [ -s "$FFF_ROOT/home/.claude/.credentials.json" ]; then echo "login stored"; else echo "no login stored"; exit 1; fi
+}
+
+cmd_claude_token() {
+  local f="" token dest=$FFF_ROOT/secrets/claude-oauth-token tmp
+  while [ $# -gt 0 ]; do case "$1" in --file) f=$2; shift ;; *) die "unknown option $1" ;; esac; shift; done
+  if [ -z "$f" ] || [ ! -r "$f" ]; then die "--file FILE: the subscription token from 'claude setup-token' (sk-ant-oat01-...), alone in a file (chmod 600)"; fi
+  token=$(head -n 1 "$f" | tr -d '[:space:]')
+  case "$token" in sk-ant-oat01-*) ;; *) die "that is not a 'claude setup-token' token (they start sk-ant-oat01-)" ;; esac
+  install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT/secrets"
+  tmp=$(mktemp "$FFF_ROOT/secrets/.token.XXXXXX")
+  printf '%s\n' "$token" >"$tmp"
+  chown "$FFF_USER:$FFF_USER" "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$dest"
+  # Only its last four characters are ever shown.
+  echo "stored in $dest (0600, $FFF_USER), ending ...${token: -4}. Delete $f now."
+  echo "The portal uses it for the roles config claudeAccounts sets to \"tokenfile\" (code change 18; docs, 5.2), never for workers."
+}
+
+cmd_tailscale_join() {
+  local keyfile="" host=fff tag=tag:fff-portal url
+  while [ $# -gt 0 ]; do
+    case "$1" in --authkey-file) keyfile=$2; shift ;; --hostname) host=$2; shift ;; --tag) tag=$2; shift ;; *) die "unknown option $1" ;; esac
+    shift
+  done
+  if [ -z "$keyfile" ] || [ ! -r "$keyfile" ]; then
+    die "--authkey-file FILE: a tagged ($tag), pre-approved, non-ephemeral auth key from the tailnet's admin console, in a file (chmod 600); it is read from the file, never from the command line"
+  fi
+  # file: keeps the key off the command line, where any process could read it.
+  tailscale up --auth-key="file:$keyfile" --hostname="$host" --advertise-tags="$tag"
+  tailscale set --auto-update
+  tailscale funnel --bg "http://127.0.0.1:$FFF_PORT"
+  url=$(tailscale funnel status 2>/dev/null | grep -m1 -o 'https://[^ ]*' || true)
+  echo "joined as $host ($tag). Funnel: ${url:-see tailscale funnel status}"
+  echo "Delete $keyfile now. Then set config.json publicUrl to ${url%/} (or set_app_config publicUrl)."
+}
+
+cmd_gh_login() {
+  local tf=""
+  while [ $# -gt 0 ]; do case "$1" in --token-file) tf=$2; shift ;; *) die "unknown option $1" ;; esac; shift; done
+  if [ -z "$tf" ] || [ ! -r "$tf" ]; then die "--token-file FILE: the portal's fine-grained GitHub token (decision D7), in a file"; fi
+  as_fff gh auth login --hostname github.com --with-token <"$tf"
+  as_fff gh auth setup-git --hostname github.com
+  as_fff gh auth status --hostname github.com 2>&1 | grep -v -i token || true
+  echo "Delete $tf now."
+}
+
+cmd_base_clone() {
+  if [ -d "$BASE_PATH/.git" ]; then echo "base clone exists at $BASE_PATH ($(as_fff git -C "$BASE_PATH" log -1 --format='%h %cr'))"; return 0; fi
+  install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$(dirname "$BASE_PATH")"
+  echo "cloning $BASE_REPO_URL ($BASE_BRANCH) into $BASE_PATH without LFS files"
+  as_fff git clone --quiet --branch "$BASE_BRANCH" "$BASE_REPO_URL" "$BASE_PATH"
+  as_fff git -C "$BASE_PATH" checkout --quiet --detach "origin/$BASE_BRANCH"
+  systemctl start fff-base-refresh.timer
+  echo "done: $(du -sh "$BASE_PATH" | cut -f1)"
+}
+
+case "${1:-status}" in
+  status) cmd_status ;;
+  logs) shift; exec journalctl -u fff-portal.service -u fff-update.service -u fff-health.service --no-pager -n 200 "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
+  update) shift; cmd_update "$@" ;;
+  rollback) exec "$FFF_LIB/fff-update" rollback "asked for by hand (fffctl rollback)" ;;
+  prepare-shutdown) shift; cmd_prepare_shutdown "$@" ;;
+  start) rm -f "$HOLD"; systemctl start fff-portal.service; wait_healthy 180 && echo "portal up" ;;
+  claude-token) shift; cmd_claude_token "$@" ;;
+  claude-login) cmd_claude_login ;;
+  tailscale-join) shift; cmd_tailscale_join "$@" ;;
+  gh-login) shift; cmd_gh_login "$@" ;;
+  base-clone) cmd_base_clone ;;
+  backup) exec systemctl start --wait fff-backup.service ;;
+  -h | --help | help) sed -n '2,23p' "$0" ;;
+  *) die "unknown command $1 (fffctl help)" ;;
+esac

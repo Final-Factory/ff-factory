@@ -1,0 +1,76 @@
+# shellcheck shell=bash
+# sourced by lib.sh: every name here is read by the scripts
+# shellcheck disable=SC2034
+# Settings for the FF Factory portal VM on the FFBox host (deploy/vm/host, docs/portal-on-ffbox-host.md).
+# Copy to /etc/fff-vm/fff-vm.conf and edit; anything left out keeps the value below. Shell syntax, read by bash.
+
+# ---------------------------------------------------------------- the VM
+VM_NAME=fff-portal
+# Sizing: docs/portal-on-ffbox-host.md, "Sizing": from BEAST's portal, measured (D12). A change applies at the next
+# nightly cold restart.
+VM_VCPUS=2
+VM_MEMORY_MB=8192
+VM_DISK_GB=120
+# Ubuntu cloud image release for the guest: resolute (26.04 LTS, decision D14; CI boots it) or noble (24.04 LTS).
+VM_OS_RELEASE=resolute
+VM_OS_VERSION=26.04
+# zvol: a ZFS volume <VM_ZVOL_PARENT>/disk0 (snapshots, zfs send, a fixed reservation). qcow2: a file in VM_IMAGE_DIR.
+VM_DISK_MODE=zvol
+VM_ZVOL_PARENT=
+# The cloud image cache, the cloud-init seed ISO, and the qcow2 disk in qcow2 mode. libvirt's AppArmor profile
+# allows /var/lib/libvirt/images.
+VM_IMAGE_DIR=/var/lib/libvirt/images/fff-vm
+# The guest's admin account (sudo, key-only ssh). Its keys: the host root's own key (made by install.sh, for
+# "fff-vm ssh") plus every key in VM_ADMIN_KEYS_FILE, if that file exists (one OpenSSH public key per line).
+VM_ADMIN_USER=fffadmin
+VM_ADMIN_KEYS_FILE=/etc/fff-vm/admin_authorized_keys
+VM_TIMEZONE=UTC
+
+# ---------------------------------------------------------------- the isolated network
+# The VM's own libvirt network: NAT out to the internet only. No DHCP or DNS from the host (no dnsmasq): the guest
+# has a static address and public resolvers, so the VM needs no service on the host at all.
+NET_NAME=fff-isolated
+NET_BRIDGE=virbr-fff
+NET_PREFIX=24
+NET_HOST_IP=10.213.41.1
+NET_VM_IP=10.213.41.10
+NET_VM_MAC=52:54:00:fa:41:0a
+GUEST_DNS="1.1.1.1 9.9.9.9"
+# The libvirt network "default" (virbr0, 192.168.122.0/24) that Ubuntu's libvirt package makes and starts:
+#   auto    stop it and turn its autostart off only when this install put libvirt on the host and no domain uses it
+#   leave   never touch it
+#   disable stop it and turn its autostart off (refused if any domain uses it)
+DEFAULT_NET_ACTION=auto
+
+# ---------------------------------------------------------------- the portal inside
+PORTAL_PORT=8790
+
+# ---------------------------------------------------------------- hang detection (fff-vm-watch.timer)
+WATCH_INTERVAL_SEC=60
+# A check fails when the guest agent does not answer AND the portal's /api/health does not either.
+WATCH_FAILS_BEFORE_RESET=3
+# No checks this long after the VM's QEMU process started (boot, cloud-init, the portal's start).
+WATCH_BOOT_GRACE_SEC=300
+# The agent answers but the portal has not for this long: an alert; with PORTAL_DOWN_RESET_MIN (0 = never) a reset.
+WATCH_PORTAL_ALERT_MIN=20
+PORTAL_DOWN_RESET_MIN=60
+# At most this many resets in 6 hours; past it, alerts only (a VM that keeps dying needs a person).
+WATCH_MAX_RESETS_6H=3
+
+# ---------------------------------------------------------------- nightly reboot (fff-vm-nightly.timer)
+# always: a cold cycle (drain, shut down, snapshot, start) every night, which also picks up the host's QEMU updates.
+# if-required: only when the guest says /run/reboot-required or the host's QEMU binary is newer than the VM's process.
+# off: none.
+NIGHTLY_MODE=always
+# 12:00 UTC: the quietest hour in 30 days of commits to the game repo and ff-factory (docs, "Nightly reboot").
+NIGHTLY_TIME=12:00
+NIGHTLY_TZ=UTC
+NIGHTLY_DRAIN_MIN=10
+# The guest's unattended-upgrades run this long before the reboot (its apt timers are moved, see cloud-init).
+UPGRADE_LEAD_MIN=60
+# Disk snapshots taken while the VM is off each night, newest kept.
+SNAPSHOTS_KEEP=7
+
+# ---------------------------------------------------------------- alerts
+# One line: the ntfy URL with FF Factory's outside-watch topic, https://ntfy.sh/<topic>. Root-only (0600).
+NTFY_URL_FILE=/etc/fff-vm/ntfy-url

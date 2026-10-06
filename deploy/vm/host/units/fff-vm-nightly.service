@@ -1,0 +1,9 @@
+[Unit]
+Description=fff-vm: drain the FF Factory portal, cold-restart its VM and snapshot the disk
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/portal-on-ffbox-host.md
+After=libvirtd.service virtqemud.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fff-vm nightly
+TimeoutStartSec=2h

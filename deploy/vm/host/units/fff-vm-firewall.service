@@ -1,0 +1,19 @@
+[Unit]
+Description=fff-vm: nftables isolation of the FF Factory portal VM (table inet fff_vm only)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/portal-on-ffbox-host.md
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target libvirtd.service virtqemud.service virtnetworkd.service shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# One transaction: the file adds, deletes and redefines the table, so a reload never leaves the VM unfiltered.
+ExecStart=/usr/sbin/nft -f /etc/fff-vm/fff-vm.nft
+ExecReload=/usr/sbin/nft -f /etc/fff-vm/fff-vm.nft
+ExecStop=-/usr/sbin/nft delete table inet fff_vm
+
+[Install]
+WantedBy=multi-user.target

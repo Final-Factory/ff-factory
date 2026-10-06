@@ -61,7 +61,7 @@ import { describeTrigger } from './schedule.ts';
 import { describeGit, refreshSandboxGit } from './gitStatus.ts';
 import { displayName } from '../shared/labels.ts';
 import type { StandingAgentInput, StandingTrigger, UnityBlocked } from '../shared/types.ts';
-import { collectResume, orchestratorWasBusy, readUpdateResult, restartSummary, resumeMessage, versionLine, waitingOnWakeLine, type AppNow, type RestartRequest, type ResumeFile, type ResumeOutcome } from './restart.ts';
+import { collectResume, orchestratorWasBusy, readUpdateResult, restartSummary, resumeMessage, systemdSupervised, versionLine, waitingOnWakeLine, writeUpdateWanted, type AppNow, type RestartRequest, type ResumeFile, type ResumeOutcome } from './restart.ts';
 import { appVersion, formatVersion } from './version.ts';
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
@@ -2368,6 +2368,11 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             drain_minutes: z.number().int().min(0).max(60).optional().describe('How long to wait for busy workers to wrap up. Default 10; 0 restarts at once (they are resumed afterwards).'),
           },
           wrap(async ({ drain_minutes }) => {
+            if (systemdSupervised()) {
+              // The portal VM (deploy/vm/guest): the updater builds first, then asks for the same drain and restart.
+              writeUpdateWanted(this.cfg.dataDir, { drainMinutes: drain_minutes ?? 10, reason: 'update (request_app_update)' });
+              return `Update requested: the updater (fff-update) builds the latest code beside this server while it keeps running (a few minutes; journalctl -u fff-update in the VM). Then busy workers are asked to commit, push and end their turn (up to ${drain_minutes ?? 10} min), every agent process stops, and the server starts again on the new code within seconds, resumes the interrupted workers and messages you with a summary. If the build fails, nothing restarts and you get a message saying why; if the new code is not healthy within 5 minutes, it is rolled back to this version. Unity editors keep running.`;
+            }
             if (!(await this.ourProcessRunning('supervisor.pid', 'supervise.ps1'))) {
               throw new Error('no supervisor (scripts/supervise.ps1) is running, so nothing would run the update or start the server again; the user has to run scripts/restart.ps1 -Update at the desktop');
             }

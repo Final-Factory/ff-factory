@@ -1,0 +1,45 @@
+# shellcheck shell=bash
+# sourced by lib.sh
+# shellcheck disable=SC2034
+# Settings for the FF Factory portal inside its VM (deploy/vm/guest). Copy to /etc/fff/fff.conf to change any;
+# anything left out keeps the value below. The portal's own settings are in $FFF_ROOT/config/config.json.
+
+FFF_ROOT=/srv/fff
+FFF_USER=fff
+# Must match config.json's "port".
+FFF_PORT=8790
+# The app (ff-factory) and the branch updates follow.
+FFF_REPO_URL=https://github.com/Final-Factory/ff-factory.git
+FFF_BRANCH=main
+# Node's major version: CI's (.github/workflows/ci.yml NODE_VERSION).
+NODE_MAJOR=24
+
+# ---------------------------------------------------------------- health and updates
+# fff-health.timer checks /api/health every 30 s; this many failures in a row restart the portal.
+HEALTH_FAILS_BEFORE_RESTART=4
+HEALTH_START_GRACE_SEC=120
+# A new version not healthy within this many minutes of its start is rolled back.
+UPDATE_VERIFY_MIN=5
+# Releases kept on disk besides the current and the previous one.
+RELEASES_KEEP_EXTRA=1
+
+# ---------------------------------------------------------------- the base clone orchestrators read
+BASE_REPO_URL=https://github.com/Final-Factory/FinalFactory.git
+BASE_BRANCH=develop
+# Must match config.json's repo.basePath.
+BASE_PATH=/srv/fff/base
+
+# ---------------------------------------------------------------- backups (fff-backup.timer)
+# Empty: backups off. An ssh destination the VM reaches over the tailnet, e.g. fff-backup@beast. Its account
+# should hold nothing else; the key is BACKUP_SSH_KEY (made by install.sh; authorize its .pub there).
+BACKUP_SSH_TARGET=
+# A folder on that machine, relative to the account's home (sftp path).
+BACKUP_REMOTE_DIR=fff-backups
+BACKUP_KEEP=14
+# age public keys (one per line, "age1..."). The private keys stay off the FFBox host, with Ben and Lothsahn.
+BACKUP_RECIPIENTS_FILE=/etc/fff/backup-recipients.txt
+BACKUP_SSH_KEY=/etc/fff/backup_ed25519
+# Review media (publish_review) can be large; off by default.
+BACKUP_INCLUDE_REVIEW=no
+# UTC; before the host's nightly restart at 12:00 UTC.
+BACKUP_TIME=11:15

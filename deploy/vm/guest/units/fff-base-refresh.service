@@ -1,0 +1,9 @@
+[Unit]
+Description=FF Factory portal: keep the orchestrators' base clone on origin/develop (fff-base-refresh)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/fff/fff-base-refresh
+TimeoutStartSec=30min
+Nice=10
