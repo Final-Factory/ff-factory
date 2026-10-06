@@ -746,3 +746,17 @@ test('w434: the last worker ending (or moving on) closes a request its other wor
     worker(s.id, { ...s, status });
   }
 });
+
+test('w475: a request whose worker is Waiting (a check-in, a background task, a queued message) is not stalled or asked about', async (t) => {
+  const { request, worker, sweep, get } = setup(t);
+  request('w1', { sessionIds: ['s1'], updatedAt: ago(70) });
+  worker('s1', { lastActivityAt: ago(60), wakeAt: new Date(NOW + 10 * 60_000).toISOString() });
+  request('w2', { sessionIds: ['s2'], updatedAt: ago(70) });
+  worker('s2', { lastActivityAt: ago(60), backgroundTasks: 1 });
+  request('w3', { sessionIds: ['s3'], updatedAt: ago(70) });
+  worker('s3', { lastActivityAt: ago(60) });
+  await sweep.run();
+  assert.equal(get('w1').status, 'active', 'its worker checks in later');
+  assert.equal(get('w2').status, 'active', 'its worker has a background task open');
+  assert.equal(get('w3').status, 'stalled', 'idle with nothing pending: stalled, as before');
+});

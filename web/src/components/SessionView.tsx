@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import type { PermissionMode, SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, openSession, useStore } from '../store';
-import { fmtCost, fmtRelative, navigate, PERMISSION_MODES, sessionLabel, sessionTone, useNow } from '../util';
+import { agentView, fmtCost, fmtRelative, navigate, PERMISSION_MODES, useNow } from '../util';
 import { Composer } from './Composer';
 import { Transcript } from './Transcript';
 import { Confirm, Dot, Icon, StateText } from './ui';
@@ -41,7 +41,7 @@ export function SessionView({
           <PanelHeader
             onBack={onBack}
             title={session.title}
-            state={<StateText tone={sessionTone(session.status)} label={sessionLabel[session.status]} pulse={session.status === 'running'} />}
+            state={<StateText tone={agentView(session).tone} label={agentView(session).text} pulse={session.status === 'running'} />}
             detailsOpen={details}
             onToggleDetails={() => setDetails(!details)}
           />
@@ -94,7 +94,7 @@ export function SessionDetails({ session, fullWidth }: { session: SessionInfo; f
       }
     >
       <div className="session-title">
-        <Dot tone={sessionTone(session.status)} pulse={session.status === 'running'} />
+        <Dot tone={agentView(session).tone} pulse={session.status === 'running'} />
         {renaming ? (
           <form
             className="rename-form"
@@ -164,7 +164,9 @@ export function SessionMeta({ session }: { session: SessionInfo }) {
   const account = useStore((s) => (s.app ? accountOf(s.app, session.id) : undefined));
   return (
     <div className="session-meta">
-      <span className={`tone-${sessionTone(session.status)}`}>{sessionLabel[session.status]}</span>
+      <span className={`tone-${agentView(session).tone}`} data-testid="agent-state">
+        {agentView(session).text}
+      </span>
       {session.model && <span className="mono">{session.model}</span>}
       {session.requestedBy && (
         <span title={`Requested by ${session.requestedBy.displayName} (${session.requestedBy.userId}): the person this agent works for`} data-testid="session-requested-by">

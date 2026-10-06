@@ -11,8 +11,7 @@ import {
   isOpenWork,
   navigate,
   providerGlance,
-  sessionLabel,
-  sessionTone,
+  agentView,
   standingGlance,
   useNow,
   versionLabel,
@@ -86,10 +85,10 @@ export function Sidebar({
           <Row
             active={route.view === 'home'}
             icon="chat"
-            tone={sessionTone(orch.status)}
+            tone={agentView(orch).tone}
             pulse={orch.status === 'running'}
             title="Orchestrator"
-            sub={<span className={`tone-${sessionTone(orch.status)}`}>{sessionLabel[orch.status]}</span>}
+            sub={<span className={`tone-${agentView(orch).tone}`}>{agentView(orch).text}</span>}
             badge={orch.personMessages?.length ? { count: orch.personMessages.length, hint: `Unread: ${peopleMessagesHint(orch.personMessages)}` } : undefined}
             onClick={() => go({ view: 'home' })}
           />
@@ -101,13 +100,13 @@ export function Sidebar({
               key={s.id}
               active={route.view === 'chat' && route.userId.toLowerCase() === who.userId.toLowerCase()}
               icon="chat"
-              tone={sessionTone(s.status)}
+              tone={agentView(s).tone}
               pulse={s.status === 'running'}
               title={who.displayName}
               sub={
                 <>
                   <span className="row-prefix">Orchestrator · </span>
-                  <span className={`tone-${sessionTone(s.status)}`}>{sessionLabel[s.status]}</span>
+                  <span className={`tone-${agentView(s).tone}`}>{agentView(s).text}</span>
                 </>
               }
               hint={`${who.displayName}’s own orchestrator (read only)`}

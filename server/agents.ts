@@ -9,6 +9,7 @@ import type { MaxManager } from './max.ts';
 import { eventsFileOf, maxEnv } from './maxEvents.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
+import { agentState, agentStateText, isWaitingAgent, sortAgents } from '../shared/agentState.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 
 /** A live state as list_work takes it (shared/workState.ts). */
@@ -275,6 +276,9 @@ export class Agents {
     this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
     // IDLE WORKERS (w384): what keeps one from being stopped to make room, and the reaper of finished ones.
     sessions.keepIdle = (s) => this.keepIdle(s);
+    // What each agent waits on between turns (w475): its wake_me and a queued message, on its session for the page.
+    this.waker.onChange = () => this.syncWaiting();
+    sessions.onQueueChange = () => this.syncWaiting();
     const reap = setInterval(() => this.reapIdle(), REAP_EVERY_MS);
     reap.unref?.();
     this.timers = new Timers(
@@ -383,6 +387,25 @@ export class Agents {
     sessions.events.on('permission', (s: SessionHandle, p: { toolName: string; input: unknown }) => this.onWorkerPermission(s, p));
     // The watchdog's alarms. Push notifications to the user (when the app has them) belong on this same event.
     sandboxes.events.on('blocked', (sb, b) => this.onUnityBlocked(sb, b));
+  }
+
+  /**
+   * Copy each session's pending wake_me and queued message onto it (SessionInfo.wakeAt, queuedSend; w475), so the page,
+   * list_sandboxes and the ledger's request states can tell a Waiting agent from an Idle one. Only changed sessions are
+   * written (and sent to the page).
+   */
+  syncWaiting() {
+    const queued = this.sessions.queued();
+    for (const s of this.store.sessions.values()) {
+      const wakeAt = this.waker.pending(s.id)?.at;
+      const queuedSend = queued.find((q) => q.id === s.id)?.why;
+      if (s.wakeAt === wakeAt && s.queuedSend === queuedSend) continue;
+      if (wakeAt) s.wakeAt = wakeAt;
+      else delete s.wakeAt;
+      if (queuedSend) s.queuedSend = queuedSend;
+      else delete s.queuedSend;
+      this.store.putSession(s);
+    }
   }
 
   /**
@@ -573,6 +596,8 @@ export class Agents {
     // The wake_me wakes the last server had pending (workers' and the orchestrator's): a restart must not lose them.
     const wakes = this.waker.restore();
     if (wakes) console.log(`wake_me: re-armed ${wakes} pending wake(s)`);
+    // A wake or queued message the last server left on a session, but no longer pending, must not show it Waiting.
+    this.syncWaiting();
     // Orchestrators' timers: what came due while the server was down is delivered once, coalesced, with the count.
     const timers = this.timers.start();
     if (timers) console.log(`timers: ${timers} orchestrator timer(s) loaded`);
@@ -1700,13 +1725,15 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
 
   /** An agent line for the listings: live agents only (the full history is in the dashboard and search_transcripts). */
   private agentLine(s: SessionInfo) {
-    return `    - ${s.id} "${s.title}" [${s.status}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`;
+    // Its state first (w475): Working, Waiting (and on what), Idle (free for new work), Stopped.
+    return `    - ${s.id} "${s.title}" [${agentStateText(s)}${agentState(s).state === 'waiting' ? `, ${s.status}` : ''}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`;
   }
 
   /** Live agents of a place (a process up or mid-turn), and how many earlier ones there were. */
   private liveAgents(ids: string[]): { live: SessionInfo[]; earlier: number } {
     const all = ids.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
-    const live = all.filter((s) => this.sessions.sessions.get(s.id)?.live || BUSY_STATUS.has(s.status) || s.pendingPermissions.length > 0);
+    // A stopped agent its wake_me or a queued message will resume is Waiting, and listed with the live ones (w475).
+    const live = sortAgents(all.filter((s) => this.sessions.sessions.get(s.id)?.live || BUSY_STATUS.has(s.status) || s.pendingPermissions.length > 0 || isWaitingAgent(s)));
     return { live, earlier: all.length - live.length };
   }
 
@@ -1717,6 +1744,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   }
 
   /** Free: ready, labelled unused, no live agent. */
+  /** A sandbox ready for new work: unused, with no live agent and none Waiting to come back to it (w475). */
   private free(x: { status: string; purpose: string; sessionIds: string[] }) {
     return x.status === 'ready' && isUnused(x.purpose) && this.liveAgents(x.sessionIds).live.length === 0;
   }
@@ -3191,6 +3219,7 @@ ${this.worldBrief(true)}
 ## Dispatching
 - You get \`[work request]\` (a person's orchestrator filed a request, with the server's check for overlapping work), \`[work update]\` (a requester added to, re-prioritised, cancelled or reopened one), \`[ledger]\` (capacity may have freed while requests are queued), and the harness's notices (\`[app restarted]\`, \`[machines]\`, \`[unity]\`, \`[unity blocked]\`, \`[host]\`). \`[wake_me]\` messages are your own check-ins coming back. \`[timer <id> "<title>"]\` messages are your own standing timers firing (set_timer; docs/orchestrators.md, "Timers"): do the job; their turn carries no one's authority, so destructive and admin tools still need a person's own words.
 - For each new request, check list_work, list_sandboxes and list_machines for work already in flight, then do exactly one: start it (start_agent with its work_id and a complete brief: goal, done-criteria, constraints, the skill to use), give it to a worker already on the same thing (message_agent with work_id), or decide_work: merge it into the open request it repeats, link the workers already doing it, queue it (say for what), ask its requester (only when you cannot choose; at most 3 questions), reject it (say why), or done (nothing is needed).
+- Agents show a state (list_sandboxes, list_machines): Working (mid-turn), Waiting (between turns but committed: a check-in it set with wake_me, a background task, or a message queued for it; the line says what and when), Idle (finished, nothing pending: free for new work), or Stopped. Never give new work to a Waiting worker, or start new work in its sandbox, unless the request is its own (the one it is waiting to come back to): it will wake and carry on there. Idle workers and free sandboxes take new work.
 - Ids: Say what every id is, every time: a request id like w293, a PR number, a commit, a worker or session id or a sandbox name always comes with what it is in plain English, "w293 (stopping people from chatting with the dispatcher)", on every appearance, not only the first (\`/ff-agents:evidence-gate\`, lessons/say-what-an-id-is.md). Your decide_work notes, which the requester's orchestrator reads, follow it.
 - A brief for work that spends money, publishes, changes something live, releases or changes what players see also carries the decisions the work must settle (keep the requester's list, or write it from the request) and says the worker settles its own guesses by research and then proceeds; every worker's own brief has the rule, and the skill is \`/ff-agents:evidence-gate\`. decide_work ask is for what only the requester can answer, never for something a worker could research.
 - A release (a version bump on develop or master, \`/ff-agents:ci-release\`) goes to a worker whose brief says "post the patch notes in #dev-patch-notes once live", on a machine with the ffdiscord config (LothDesktop today). It is done only when the worker reports both the branch it LANDED on (develop: development, master: pre-release) and the #dev-patch-notes message link. A report of a landed build without the link keeps the release open, with the post as its next step for a machine that can make it.

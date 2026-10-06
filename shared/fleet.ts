@@ -2,11 +2,15 @@
 // (BEAST) first, then each machine, each with its sandboxes, the agents in them, and a machine's
 // main-clone agents. Pure, so the server's tests can check it and the browser can run it.
 import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, Sandbox, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
+import { isWaitingAgent, sortAgents } from './agentState.ts';
 
-/** Agents with a process: working, waiting on someone or idle. Stopped and failed ones are only counted. */
-export const isLiveAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'idle' || s.status === 'waiting_permission';
+/**
+ * Agents with a process (working, waiting on someone, idle), and stopped ones their wake_me or a queued message will
+ * resume (Waiting, w475). Other stopped and failed ones are only counted.
+ */
+export const isLiveAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'idle' || s.status === 'waiting_permission' || isWaitingAgent(s);
 
-/** Agents in one place: the live ones (oldest first) and how many more have stopped or failed. */
+/** Agents in one place: the live ones (Working, then Waiting, then Idle; the most recent first in each, w475) and how many more have stopped or failed. */
 export interface PlaceAgents {
   live: SessionInfo[];
   stopped: number;
@@ -73,7 +77,7 @@ const busyAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'r
 
 function agentsIn(ids: string[], byId: Map<string, SessionInfo>, keep: (s: SessionInfo) => boolean = () => true): PlaceAgents {
   const all = ids.map((id) => byId.get(id)).filter((s): s is SessionInfo => !!s && keep(s));
-  const live = all.filter(isLiveAgent);
+  const live = sortAgents(all.filter(isLiveAgent));
   return { live, stopped: all.length - live.length };
 }
 
