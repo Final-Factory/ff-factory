@@ -54,8 +54,18 @@ test('orchestrator chat: a .zip and a .log through the paperclip upload with pro
   const log = Buffer.from(`[Desync] heartbeat 1200 diverged ${tag}\n`);
   // The zip's second chunk is cut off once on its way: the upload must pick up where the server says it got.
   let cut = 0;
+  // Each file's first chunk waits until the test has seen it uploading: on CI's runners a whole 9 MB upload sometimes
+  // ended before the progress bar was looked for (mobile-safari, 3 of 28 runs on 2026-10-06, passing on the retry).
+  let held = 0;
+  let release!: () => void;
+  const uploading = new Promise<void>((r) => (release = r));
   await page.route('**/api/attachments/uploads/*?offset=*', async (route) => {
-    if (!cut && new URL(route.request().url()).searchParams.get('offset') === String(8 * MB)) {
+    const offset = new URL(route.request().url()).searchParams.get('offset');
+    if (offset === '0') {
+      held++;
+      await uploading;
+    }
+    if (!cut && offset === String(8 * MB)) {
       cut++;
       return route.abort('connectionreset');
     }
@@ -70,6 +80,8 @@ test('orchestrator chat: a .zip and a .log through the paperclip upload with pro
   await expect(page.locator('.orch .composer-file-bar').first()).toBeVisible();
   // While a file uploads, Send waits for it.
   await expect(page.locator('.orch .composer').getByRole('button', { name: 'Send' })).toBeDisabled();
+  console.log(`w521: ${browserName} held ${held} first chunks`);
+  release();
   await expect(page.locator('.orch .composer-file.done')).toHaveCount(2, { timeout: 20_000 });
   // Playwright's WebKit did not route this page's requests at all on Windows (measured 2026-10-02: not even the JSON
   // POST), so the cut is only certain in Chromium.
