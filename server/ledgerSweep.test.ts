@@ -65,14 +65,17 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
   const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
   agents.boot();
   const o = agents.orchestrators;
-  const world = { prs: [] as PrRecord[] | undefined, clear: true as boolean | undefined, resumed: [] as { id: string; text: string }[] };
+  const world = { prs: [] as PrRecord[] | undefined, clear: true as boolean | undefined, resumed: [] as { id: string; text: string }[], view: undefined as ((number: number) => PrRecord | undefined) | undefined, viewed: [] as number[] };
   const sweep = new LedgerSweep({
     cfg,
     store,
     orchestrators: o,
     repos: async () => [REPO],
     prs: async () => world.prs,
-    viewPr: async () => undefined,
+    viewPr: async (_repo, number) => {
+      world.viewed.push(number);
+      return world.view?.(number);
+    },
     resume: (id, text) => void world.resumed.push({ id, text }),
     limitsClear: () => world.clear,
     now: () => NOW,
@@ -759,4 +762,128 @@ test('w475: a request whose worker is Waiting (a check-in, a background task, a 
   assert.equal(get('w1').status, 'active', 'its worker checks in later');
   assert.equal(get('w2').status, 'active', 'its worker has a background task open');
   assert.equal(get('w3').status, 'stalled', 'idle with nothing pending: stalled, as before');
+});
+
+// ---------------------------------------------------------------- w515: PR states read live, refused DONEs re-checked
+
+test('w515: a DONE seconds after its PR merged closes the request: the open PR is read live before refusing', async (t) => {
+  const { request, worker, pr, world, sweep, o, get } = setup(t);
+  // w484 on 2026-10-06: PR #1092 merged at 01:55:49, the DONE came at 01:56:24, the ledger still held it open.
+  request('w1', { sessionIds: ['s1'], prs: [{ repo: REPO, number: 1092, state: 'open', via: 'line' }] });
+  const s1 = worker('s1');
+  o.prsLive = (id) => sweep.refreshLive(id);
+  world.view = (n) => (n === 1092 ? pr(1092, { body: 'Request: w1', mergedAt: ago(0.01) }) : undefined);
+  o.workerTurnEnded(s1, 'TL;DR: merged as #1092; the 2-peer check passed before the merge.\nDONE: w1');
+  await until('it closes', () => get('w1').status === 'done');
+  const w = get('w1');
+  assert.deepEqual(w.prs?.map((p) => [p.number, p.state]), [[1092, 'merged']]);
+  assert.match(w.log.join('\n'), /pull request states updated \(read live from GitHub\): PR #1092 merged/);
+  assert.match(w.log.join('\n'), /closed as done: worker s1 said DONE: w1 \(its PR states read live from GitHub\)/);
+  assert.doesNotMatch(w.log.join('\n'), /refused/);
+  assert.deepEqual(world.viewed, [1092]);
+});
+
+test('w515: when gh cannot read the PR, the refusal says it could not verify it, not that it is still open', async (t) => {
+  const { request, worker, sweep, o, get } = setup(t);
+  request('w1', { sessionIds: ['s1'], prs: [{ repo: REPO, number: 11, state: 'open', via: 'line' }] });
+  const s1 = worker('s1');
+  o.prsLive = (id) => sweep.refreshLive(id);
+  o.workerTurnEnded(s1, 'Merged.\nDONE: w1');
+  await until('it is refused', () => get('w1').log.some((l) => /refused/.test(l)));
+  assert.equal(get('w1').status, 'active');
+  assert.match(get('w1').log.join('\n'), /said DONE, refused: couldn't verify PR #11 on GitHub just now \(the ledger last read it as open\)/);
+  assert.doesNotMatch(get('w1').log.join('\n'), /still open/);
+  // A live read that throws is the same: unverified.
+  request('w2', { sessionIds: ['s1'], prs: [{ repo: REPO, number: 12, state: 'open', via: 'line' }] });
+  o.prsLive = async () => {
+    throw new Error('gh: HTTP 502');
+  };
+  o.workerTurnEnded(s1, 'Merged.\nDONE: w2');
+  await until('it is refused', () => get('w2').log.some((l) => /refused/.test(l)));
+  assert.match(get('w2').log.join('\n'), /couldn't verify PR #12/);
+});
+
+test('w515: a PR closed without merging and its merged replacement: the DONE closes the request (#1081 then #1087)', async (t) => {
+  const { request, worker, pr, world, sweep, o, get } = setup(t);
+  // w443: #1081 was closed and superseded by #1087, which merged; the ledger held both as open.
+  request('w1', { sessionIds: ['s1'], prs: [{ repo: REPO, number: 1081, state: 'open', via: 'line' }, { repo: REPO, number: 1087, state: 'open', via: 'line' }] });
+  const s1 = worker('s1');
+  o.prsLive = (id) => sweep.refreshLive(id);
+  world.view = (n) => (n === 1081 ? pr(1081, { state: 'closed', mergedAt: undefined, closedAt: ago(2) }) : n === 1087 ? pr(1087, { mergedAt: ago(0.01) }) : undefined);
+  o.workerTurnEnded(s1, 'The fix merged as #1087 (#1081 was closed, superseded by it).\nDONE: w1');
+  await until('it closes', () => get('w1').status === 'done');
+  assert.deepEqual(get('w1').prs?.map((p) => [p.number, p.state]), [[1081, 'closed'], [1087, 'merged']]);
+  // The same in the 5-minute pass: the list has both, the request is closed as merged, the closed one is not a blocker.
+  request('w2', { sessionIds: ['s2'], prs: [{ repo: REPO, number: 2081, state: 'open', via: 'line' }, { repo: REPO, number: 2087, state: 'open', via: 'line' }] });
+  worker('s2');
+  world.prs = [pr(2081, { body: 'Request: w2', state: 'closed', mergedAt: undefined, closedAt: ago(3) }), pr(2087, { body: 'Request: w2', mergedAt: ago(1) })];
+  assert.deepEqual(await sweep.checkPrs(), ['w2']);
+  assert.equal(get('w2').autoClosed?.pr, 2087);
+});
+
+test('w515: a DONE refused on a stale open PR closes on the next pass once the PR shows merged; a busy or closed request gets fresh states too', async (t) => {
+  const { request, worker, pr, world, sweep, o, get } = setup(t);
+  // No live read (as before w515): refused on the cached state.
+  request('w1', { sessionIds: ['s1'], brief: 'Done when: a 2-peer check passes; the PR is merged once it is green and verified.', prs: [{ repo: REPO, number: 1089, state: 'open', via: 'line' }] });
+  const s1 = worker('s1');
+  o.workerTurnEnded(s1, 'TL;DR: merged as #1089. Checked in a built player at 1080p, 1440p and Steam Deck, and the 2-peer check passed.\nDONE: w1');
+  assert.match(get('w1').log.join('\n'), /refused: PR #1089 is still open/);
+  // Its worker answers the refusal with another DONE, whose own text names no check (w454's second report).
+  o.workerTurnEnded(s1, 'PR #1089 was merged at 01:32 UTC; gh pr view reports state MERGED.\nDONE: w1');
+  assert.match(get('w1').done!.s1.text!, /2-peer check passed[^]*gh pr view reports/, 'both DONE reports are kept for the re-check');
+  // A busy request (its worker is on it) and a closed one.
+  request('w2', { sessionIds: ['s2'], prs: [{ repo: REPO, number: 22, state: 'open', via: 'line' }] });
+  worker('s2', { status: 'running' });
+  request('w3', { status: 'done', sessionIds: [], prs: [{ repo: REPO, number: 33, state: 'open', via: 'line' }] });
+  world.prs = [pr(1089, { body: 'Request: w1', mergedAt: ago(0.1) }), pr(22, { body: 'Request: w2', mergedAt: ago(0.1) }), pr(33, { body: 'Request: w3', mergedAt: ago(5) })];
+  await sweep.checkPrs();
+  const w1 = get('w1');
+  assert.equal(w1.status, 'done');
+  assert.match(w1.log.join('\n'), /closed as done: worker s1 said DONE at \d\d:\d\d UTC and was refused then; PR #1089 merged since/);
+  assert.equal(get('w2').status, 'active', 'its worker is running: states only, never closed');
+  assert.deepEqual(get('w2').prs?.map((p) => p.state), ['merged']);
+  assert.equal(get('w3').status, 'done');
+  assert.deepEqual(get('w3').prs?.map((p) => p.state), ['merged'], 'a closed request no longer lists a merged PR as open (w443)');
+});
+
+test('w515: a refused DONE whose report does not cover a step after the merge stays refused; a report saying a PR merged reads it live', async (t) => {
+  const { request, worker, pr, world, sweep, o, get } = setup(t);
+  request('w1', { sessionIds: ['s1'], brief: 'Fix it, then run the paired determinism audit after the merge.', prs: [{ repo: REPO, number: 11, state: 'open', via: 'line' }] });
+  const s1 = worker('s1');
+  o.workerTurnEnded(s1, 'It is in.\nDONE: w1');
+  world.prs = [pr(11, { body: 'Request: w1', mergedAt: ago(0.1) })];
+  await sweep.checkPrs();
+  assert.equal(get('w1').status, 'active');
+  assert.match(get('w1').log.join('\n'), /PR #11 merged; still open: its brief asks for a step after the merge/);
+  // A report that says #21 merged reads it live at once.
+  request('w2', { sessionIds: ['s2'], prs: [{ repo: REPO, number: 21, state: 'open', via: 'line' }] });
+  const s2 = worker('s2');
+  o.prsLive = (id) => sweep.refreshLive(id);
+  world.view = (n) => (n === 21 ? pr(21, { mergedAt: ago(0.01) }) : undefined);
+  o.workerTurnEnded(s2, 'PR #21 is merged into develop; waiting on the nightly before I call it done.');
+  await until('its state is read', () => get('w2').prs?.[0].state === 'merged');
+  assert.equal(get('w2').status, 'active', 'no DONE: the PR pass decides, not the report');
+});
+
+test('w515: the one-time repair reads every PR the ledger holds as open, once, and logs what stays open and why', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  // Older than the list reaches: only a read by number finds them.
+  request('w1', { status: 'done', prs: [{ repo: REPO, number: 1087, state: 'open', via: 'line' }] });
+  request('w2', { sessionIds: ['s2'], prs: [{ repo: REPO, number: 1085, state: 'open', via: 'line', partOf: true }] });
+  worker('s2');
+  world.prs = [];
+  world.view = (n) => (n === 1087 || n === 1085 ? pr(n, { body: n === 1085 ? 'Part of: w2' : 'Request: w1', mergedAt: ago(10) }) : undefined);
+  const logs: string[] = [];
+  const log = t.mock.method(console, 'log', (...a: unknown[]) => void logs.push(a.join(' ')));
+  await sweep.checkPrs();
+  log.mock.restore();
+  assert.deepEqual(world.viewed.sort(), [1085, 1087]);
+  assert.deepEqual(get('w1').prs?.map((p) => p.state), ['merged']);
+  assert.equal(get('w2').status, 'active');
+  assert.ok(logs.some((l) => /PR repair: w2 stays open: PR #1085 is one step of it/.test(l)), logs.join('\n'));
+  // Once: a later pass reads no closed request's PR by number again.
+  world.viewed = [];
+  request('w3', { status: 'done', prs: [{ repo: REPO, number: 9, state: 'open', via: 'line' }] });
+  await sweep.checkPrs();
+  assert.deepEqual(world.viewed, []);
 });

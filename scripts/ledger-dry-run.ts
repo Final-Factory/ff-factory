@@ -2,14 +2,15 @@
  * What the ledger cleanup's merged-request rules would do now (w419; docs/orchestrators.md, "Ledger cleanup"), on a COPY
  * of a portal's data folder, changing nothing: which requests the pull-request rule would close (every linked PR merged,
  * nothing left after the merge), which ones it would ask its worker "Is it done?" about, and which it would stall as
- * follow-up unconfirmed. It uses the PR states the copy has stored (no gh), the same rules as server/ledgerSweep.ts and
- * its skip for a worker running on the request.
+ * follow-up unconfirmed, and which a worker's DONE, refused then, closes now (w515: Orchestrators.recheckDone). It uses
+ * the PR states the copy has stored (no gh), the same rules as server/ledgerSweep.ts and its skip for a worker running on
+ * the request.
  *
  *   node scripts/ledger-dry-run.ts <data dir> [w342,w10] [at=2026-10-05T08:00Z]
  *
  * at= runs the rules as of that time instead of now (the copy's sessions and PRs stay as they were).
  */
-import { afterMergeReason, followUpDecision, followUpDue } from '../server/ledgerRules.ts';
+import { afterMergeReason, doneProblem, followUpDecision, followUpDue, partOfReason } from '../server/ledgerRules.ts';
 import { servedBy } from '../shared/workState.ts';
 import { ledgerStates } from './ledger-states.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
@@ -37,7 +38,17 @@ export function dryRun(work: readonly WorkItem[], session: (id: string) => Sessi
       out.push({ id: w.id, does: 'wait', why: `a worker is running on it (${busy.map((s) => s.id).join(', ')})` });
       continue;
     }
-    const reason = afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
+    // A DONE refused while a PR was open (w515): it closes now when nothing is missing and nobody else is still on it.
+    const said = Object.entries(w.done ?? {}).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
+    const stillOn = workers.filter((s) => !w.done?.[s.id] && s.status !== 'stopped' && s.status !== 'error' && servedBy(s.id, work).has(w.id));
+    if (said && !stillOn.length && !w.question && !w.flag) {
+      const problem = doneProblem(w, said[1].text ?? said[1].report);
+      if (!problem) {
+        out.push({ id: w.id, does: 'close', why: `worker ${said[0]}'s DONE of ${said[1].at.slice(11, 16)} UTC, refused then, passes now (every linked PR merged)` });
+        continue;
+      }
+    }
+    const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
     if (!reason) {
       if (!busy.length) out.push({ id: w.id, does: 'close', why: `every linked PR merged (${merged.map((p) => `#${p.number}`).join(', ')}) and nothing is left after the merge` });
       continue;
