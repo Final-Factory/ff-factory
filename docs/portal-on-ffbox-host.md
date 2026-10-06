@@ -510,7 +510,10 @@ outage, a first boot that does not finish, and a nightly restart that does not c
    `src/core/service.c`, `SERVICE_RESTART_ALWAYS: return s->result != SERVICE_SKIP_CONDITION`; measured in CI)*. With
    `keepAgentsOnRestart`, the daemons' workers are not touched.
 3. **A cold restart.** `virsh shutdown` (agent, then ACPI), forced off after 5 minutes, then `virsh start`. A cold
-   start, not a guest reboot, so a QEMU the host updated is picked up too.
+   start, not a guest reboot, so a QEMU the host updated is picked up too. While the VM is off it applies a size
+   changed in `fff-vm.conf` (w537): `virsh define` of the domain made from the settings, libvirt's previous definition
+   kept, and that one defined again (with an alert) if libvirt refuses the new one, the VM does not start with it, or
+   the portal does not answer within 15 minutes. A change of disk, seed, network or MAC address is `install.sh`'s.
 4. **Snapshots the disk** in between, while nothing writes, and prunes to the last 7.
 5. **Waits for the portal.** The hold file was in `/run`, so the portal starts at boot and resumes the interrupted
    sessions (`resume.json`). If it is not back within 10 minutes, an alert.
@@ -992,9 +995,10 @@ The private bytes are Windows' committed memory, an upper bound for what the sam
 | Host set aside | **about 4.2 GiB RAM**, 2 threads, the zvol's 120 GiB reservation plus its snapshots | 4 GiB, plus QEMU about 70 MiB (50 + 2 × 8 + 2) and libvirt 65 MiB; no memory ballooning down (`currentMemory` = `memory`) | sourced overhead |
 | Network | no sizing need | the portal's traffic is control messages, transcripts and attachments up to 200 MB *(sourced: `attachments.maxMB` default)*. BEAST's adapters moved 2.3 GB in and 10.7 GB out a day, but that is the whole host, workers included *(measured on BEAST, an upper bound)* | sourced; measured upper bound |
 
-The sizes are one setting each in `/etc/fff-vm/fff-vm.conf` (`VM_VCPUS`, `VM_MEMORY_MB`). After a change,
-`install.sh --host-only --yes` writes the domain again (`virsh define`), and it applies at the next cold restart: the
-nightly one, or `fff-vm nightly --now` (deploy/vm/RUNBOOK.md, "Changing the VM's size").
+The sizes are one setting each in `/etc/fff-vm/fff-vm.conf` (`VM_VCPUS`, `VM_MEMORY_MB`). The nightly cold restart
+applies a change by itself (w537): with the VM off it defines the domain again from the settings, and goes back to the
+previous definition, with an alert, if libvirt refuses the new one or the VM does not come up with it. `fff-vm nightly
+--now` does it at once (deploy/vm/RUNBOOK.md, "Changing the VM's size").
 
 ## 10. Installing
 

@@ -131,3 +131,106 @@ guest_exec() {
 }
 
 portal_healthy() { curl -fsS -m 10 -o /dev/null "http://$NET_VM_IP:$PORTAL_PORT/api/health"; }
+
+# ---------------------------------------------------------------- the domain's definition (w537)
+# Made from fff-vm.conf by domain_xml, here, for both: install.sh defines it for a new VM or one that is off, and fff-vm
+# nightly applies a change to a running VM's while it is off at the cold restart, with the previous one to fall back on.
+vm_seed_iso() { echo "$VM_IMAGE_DIR/seed.iso"; }
+
+# domain_xml: the VM's libvirt definition, from fff-vm.conf.
+domain_xml() {
+  local disk seed_iso disk_xml
+  disk=$(vm_disk_path)
+  seed_iso=$(vm_seed_iso)
+  if [ "$VM_DISK_MODE" = zvol ]; then
+    disk_xml="<disk type='block' device='disk'><driver name='qemu' type='raw' cache='none' io='native' discard='unmap'/><source dev='$disk'/><target dev='vda' bus='virtio'/></disk>"
+  else
+    disk_xml="<disk type='file' device='disk'><driver name='qemu' type='qcow2' discard='unmap'/><source file='$disk'/><target dev='vda' bus='virtio'/></disk>"
+  fi
+  cat <<EOF
+<domain type='kvm'>
+  <name>$VM_NAME</name>
+  <description>$FFF_VM_MARK</description>
+  <memory unit='MiB'>$VM_MEMORY_MB</memory>
+  <currentMemory unit='MiB'>$VM_MEMORY_MB</currentMemory>
+  <vcpu placement='static'>$VM_VCPUS</vcpu>
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features><acpi/><apic/></features>
+  <cpu mode='host-passthrough' check='none'/>
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>restart</on_crash>
+  <pm><suspend-to-mem enabled='no'/><suspend-to-disk enabled='no'/></pm>
+  <devices>
+    $disk_xml
+    <disk type='file' device='cdrom'><driver name='qemu' type='raw'/><source file='$seed_iso'/><target dev='sda' bus='sata'/><readonly/></disk>
+    <interface type='network'><mac address='$NET_VM_MAC'/><source network='$NET_NAME'/><model type='virtio'/></interface>
+    <serial type='pty'><log file='/var/log/libvirt/qemu/$VM_NAME-serial.log' append='on'/><target port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>
+    <watchdog model='i6300esb' action='reset'/>
+    <panic model='isa'/>
+    <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
+    <memballoon model='virtio'/>
+  </devices>
+</domain>
+EOF
+}
+
+# domain_define FILE: virsh define it. An existing domain keeps its uuid: libvirt refuses a definition without one for a
+# name it knows ("domain 'fff-portal' already exists with uuid ..."; measured with libvirt 10.0's test driver, w537).
+domain_define() {
+  local file=$1 uuid tmp rc=0
+  uuid=$(v domuuid "$VM_NAME" 2>/dev/null | head -n 1 | tr -d ' ' || true)
+  tmp=$(mktemp)
+  if [ -n "$uuid" ] && ! matches '<uuid>' "$file"; then
+    sed "s|^\( *<name>.*</name>\)\$|\1\n  <uuid>$uuid</uuid>|" "$file" >"$tmp"
+  else
+    cat "$file" >"$tmp"
+  fi
+  run_cmd virsh --connect qemu:///system define "$tmp" || rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# dom_size [--inactive]: "MEMORY_MIB VCPUS" of the domain as it runs (or, --inactive, as it starts next); nothing when
+# there is no domain. libvirt keeps the memory in KiB.
+dom_size() {
+  { v dumpxml "$@" "$VM_NAME" 2>/dev/null || true; } |
+    awk -F'[<>]' '$2 ~ /^memory( |$)/ {m = int($3 / 1024)} $2 ~ /^vcpu( |$)/ {c = $3} END {if (m != "" && c != "") print m, c}'
+}
+
+# domain_ident: the disk, seed, network and MAC address a definition (on stdin) names. A change there is install.sh's
+# to make (a disk made, a network, the guest's first-boot network config), never the nightly's.
+domain_ident() { { grep -oE "<source (file|dev|network)='[^']*'|<mac address='[^']*'" || true; } | tr '[:upper:]' '[:lower:]' | sort | paste -sd' ' -; }
+
+# domain_changes: what the definition from fff-vm.conf changes in the domain's next start, one phrase per line; nothing
+# when they match or there is no domain. The size is compared with libvirt's own definition; the rest with the
+# definition last given to libvirt ($FFF_VM_ETC/domain.xml), which changes only with the scripts' own template.
+domain_changes() {
+  local have stored=$FFF_VM_ETC/domain.xml sizes="<(memory|currentMemory|vcpu)[ >]"
+  have=$(dom_size --inactive)
+  [ -n "$have" ] || return 0
+  [ "${have% *}" = "$VM_MEMORY_MB" ] || echo "memory ${have% *} -> $VM_MEMORY_MB MiB"
+  [ "${have#* }" = "$VM_VCPUS" ] || echo "vCPUs ${have#* } -> $VM_VCPUS"
+  if [ ! -f "$stored" ] || [ "$(grep -vE "$sizes" "$stored")" != "$(domain_xml | grep -vE "$sizes")" ]; then
+    echo "the rest of the definition (the scripts' template, against $stored)"
+  fi
+}
+
+# domain_foreign: "<now> -> <fff-vm.conf's>" when fff-vm.conf names another disk, seed, network or MAC address than the
+# domain's definition; nothing when they are the same.
+domain_foreign() {
+  local have want
+  have=$({ v dumpxml --inactive "$VM_NAME" 2>/dev/null || true; } | domain_ident)
+  want=$(domain_xml | domain_ident)
+  [ "$have" = "$want" ] || echo "$have -> $want"
+}
