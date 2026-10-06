@@ -9,8 +9,8 @@ watch of its own. The dialog watchdog (modal dialogs, recovery prompts) is separ
 
 | Who | Tool | Actions |
 |---|---|---|
-| worker on a machine (a Mac, a Windows PC, BEAST) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart`; `force: true` kills a frozen editor at once |
-| orchestrator | `unity` with `sandbox` (`<machine>/<name>`) or `machine` | the same, and `log` for a sandbox |
+| worker in a machine sandbox (a Mac, a Windows PC, BEAST) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart` of its sandbox's editor; `force: true` kills a frozen editor at once |
+| orchestrator | `unity` with `sandbox` (`<machine>/<name>`, or `machine` plus a bare name) | the same, and `log`; a machine alone (its main clone) is refused (w536) |
 
 A normal stop asks the editor to quit, then kills it after 30 s. A forced one
 kills at once. Both kill what the editor started and any crash reporter left open for the project
@@ -18,9 +18,8 @@ kills at once. Both kill what the editor started and any crash reporter left ope
 fresh log name when the old log is still locked. Restarting is fine with unsaved scene changes.
 
 In a machine sandbox (BEAST's included), workers must use the tool, never kill Unity by hand: other sandboxes' editors
-and the live game run on the same machine (`server/guard.ts`). In a machine's main clone, workers may
-end and relaunch Unity however they like; the guard only protects the FF Factory daemon, the
-agent's own `claude` process and the user's working tree.
+and the live game run on the same machine (`server/guard.ts`). No agent works in a machine's main clone (w536), and
+the daemon runs no editor or watch for it: its owner's own editor there is theirs.
 
 ## Hang and crash detection
 
@@ -97,7 +96,7 @@ interactive editor and three `-batchmode` player builds (about 24.5 GB of Unity.
 its limit of 3 counted only the interactive editor.
 
 **What counts** (`machine/unitySlots.ts`, `unityProcesses`). A machine's `max_unity` counts every top-level Unity editor
-process running there, whoever started it: sandbox editors, the main clone's or its owner's own editor, `-batchmode`
+process running there, whoever started it: sandbox editors, a person's own editor (in their clone), `-batchmode`
 builds and test runs, a second editor for a peer run, editors started by scripts (the nightly harness, ffmode, clone
 tools). A Unity process is the Unity binary itself (Windows: image name `Unity.exe`; a Mac: a command line that starts
 with `.../Unity.app/Contents/MacOS/Unity`), so a script whose arguments name Unity does not count. Not counted:
@@ -107,8 +106,8 @@ beside the count ("2 game players (not counted)") because the RAM gate below alr
 a fifth of an editor with its build.
 
 **How it is counted.** Each Unity process belongs to the slot holder whose process started it (its nearest ancestor that
-holds or waits for a slot, or a project the request named), else to the sandbox or main clone whose project it has
-open, else to nobody (started outside the gate). A holder counts its granted slots or its Unity processes, whichever is
+holds or waits for a slot, or a project the request named), else to the sandbox whose project it has
+open, else to nobody (started outside the gate: a person's own editor among them, w536). A holder counts its granted slots or its Unity processes, whichever is
 more; a sandbox counts its editor from the moment it is starting; each process outside the gate counts one. So
 "editors 4 of 3: 1 interactive, 3 batch" is the real load, and nothing more is granted while it is over.
 
@@ -188,5 +187,5 @@ editor, and a call made while it is down fails instead of landing elsewhere. Edi
 `~/.unity-mcp`, so this needs no editor restart, and the hang detection is unchanged. The guard still
 refuses Unity MCP calls until the worker pins its own `<sandbox>@<hash>`.
 
-Agents in a machine's main clone get the same, in `<app_dir>/unity-mcp/_main-clone` ([machines.md](machines.md)). Not
+An agent outside a sandbox (a standing agent) gets no UnityMCP (w536, [machines.md](machines.md)). Not
 covered: Claude Code sessions outside FF Factory.

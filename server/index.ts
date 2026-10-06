@@ -20,7 +20,6 @@ import { parseEscalation } from './escalationRules.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { Notifier } from './notify.ts';
 import { describeBusy } from './wake.ts';
-import type { SessionHandle } from './sessions.ts';
 import { machineLoadLine, systemStats } from './system.ts';
 import { Auth } from './auth.ts';
 import { Identity, asRequester, userToken } from './identity.ts';
@@ -1435,11 +1434,6 @@ bus.on('event', (e: ServerEvent) => {
   void keepMessageImages(store, sessionId, event, (file) => readImageIn(sessionImageRoots(sessionId, file), file)).catch(() => undefined);
 });
 
-// ---- git status: right after an agent turn on a machine, its daemon looks again (its own timer does the rest).
-
-sessions.events.on('turnEnd', (s: SessionHandle) => {
-  if (s.info.machineId) machines.refreshGit(s.info.machineId);
-});
 setInterval(() => {
   try {
     agents.standing.tick();

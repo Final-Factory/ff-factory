@@ -3,7 +3,6 @@ import { platformNoun, type AppState, type Machine } from '../../../shared/types
 import { api } from '../api';
 import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
 import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
-import { ScreenshotsDrawer } from './Images';
 import { GitFacts } from './Git';
 import { DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
@@ -27,7 +26,6 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [confirmRedeploy, setConfirmRedeploy] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
-  const [shotsOpen, setShotsOpen] = useState(false);
   // A redeploy or daemon restart stops every agent there, its sandboxes' too.
   const live = here.filter((s) => s.kind !== 'standing' && midTurn(s.status)).length;
   // What its agent cap counts: sandbox and standing agents mid-turn.
@@ -115,7 +113,8 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
               <Icon name="folder" size={13} /> <span className="ellipsis">{m.repoPath || 'repo not found yet'}</span>
               {m.repoPath && <CopyButton text={m.repoPath} label="Copy path" />}
             </span>
-            <GitFacts git={g} />
+            {/* Its main clone's git, from a daemon before w536 only. */}
+            {g && <GitFacts git={g} />}
             {(m.appDir || m.unityEditorRoot || m.unityPath || m.tempDir) && (
               <span className="fact mono" title="The machine's folders (add_machine app_dir, unity_editor_root, unity_path, temp_dir)">
                 <Icon name="folder" size={13} />
@@ -146,11 +145,6 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
               {m.statusDetail && m.status === 'ready' ? ` · ${m.statusDetail}` : ''}
             </span>
           </div>
-          <div className="details-buttons">
-            <button className="btn btn-ghost btn-sm" disabled={!m.online} onClick={() => setShotsOpen(true)} title="Screenshots and other images agents left in the clone">
-              <Icon name="image" size={14} /> Screenshots
-            </button>
-          </div>
         </DetailsSection>
         {(m.sandboxes?.length ?? 0) > 0 && (
           <DetailsSection title="Sandboxes">
@@ -172,7 +166,6 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
       </div>
 
       {label && <LabelModal machine={m} onClose={() => setLabel(false)} />}
-      {shotsOpen && <ScreenshotsDrawer place={{ machine: m.id }} title={displayName(m)} onClose={() => setShotsOpen(false)} />}
       {confirmRedeploy && (
         <Confirm
           title={`Redeploy ${m.id}?`}

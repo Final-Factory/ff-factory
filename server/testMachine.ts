@@ -231,9 +231,6 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
       (daemon as unknown as { awake: () => void }).awake = () => undefined;
       m.daemon = daemon;
       daemon.start();
-      // No watch of the main clone's editor: there is none, and each look lists the computer's processes for real (a
-      // PowerShell CIM query on Windows, every 30 s per daemon).
-      daemon.unityWatch = undefined;
       const names = pool.list().map((s) => s.id);
       await until(`machine ${id} online with its sandboxes`, () => {
         const rec = mm.list().find((x) => x.id === id);
