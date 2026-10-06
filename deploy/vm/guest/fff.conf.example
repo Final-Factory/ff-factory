@@ -20,6 +20,8 @@ HEALTH_FAILS_BEFORE_RESTART=4
 HEALTH_START_GRACE_SEC=120
 # A new version not healthy within this many minutes of its start is rolled back.
 UPDATE_VERIFY_MIN=5
+# The same in seconds, and it wins when set: only CI's fast test mode sets it (deploy/vm/test/ci-vm-e2e.sh).
+UPDATE_VERIFY_SEC=
 # Releases kept on disk besides the current and the previous one.
 RELEASES_KEEP_EXTRA=1
 

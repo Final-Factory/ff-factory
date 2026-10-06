@@ -13,6 +13,12 @@
 # snapshot, the hang detection's reset, the watchdog device's reset, and the uninstall.
 set -o errexit -o nounset -o pipefail
 MODE=${1:?qcow2 or zvol}
+# fast (the default: pull requests, main): the watch, health and update-verify timers short, so the scenarios that wait
+# on them take seconds; set only here, in the test's own settings and drop-ins, never in the shipped defaults.
+# production (nightly): the shipped defaults, as the FFBox host runs them (deploy/vm/host/fff-vm.conf.example,
+# deploy/vm/guest/fff.conf.example, the units as installed).
+TIMING=${CI_TIMING:-fast}
+case "$TIMING" in fast | production) ;; *) echo "CI_TIMING is fast or production" >&2; exit 2 ;; esac
 cd "$(dirname "$0")/../../.."
 ROOT=$PWD
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
@@ -27,6 +33,9 @@ VM=fff-portal
 IP=10.213.41.10
 HOSTIP=10.213.41.1
 g() { /usr/local/sbin/fff-vm ssh "$@"; }
+# The bundle's main must be HEAD. On a push to main the checkout IS main (git refuses to force-move the branch a worktree
+# has checked out, which failed every main run from #108 to w505), and it is already HEAD.
+main_at_head() { [ "$(git -C "$ROOT" branch --show-current)" = main ] || git -C "$ROOT" branch -f main HEAD; }
 health() { curl -fsS -m 10 "http://$IP:8790/api/health"; }
 wait_for() { # SECONDS DESCRIPTION CMD...
   local secs=$1 what=$2 t0
@@ -56,9 +65,7 @@ GUEST_GITHUB=skip
 GUEST_BACKUP_SSH_TARGET=
 # The sizes are the defaults (D12: 2 vCPUs, 8 GiB), so CI boots the size the FFBox host runs; only the disk is small.
 VM_DISK_GB=16
-WATCH_INTERVAL_SEC=20
-WATCH_FAILS_BEFORE_RESET=2
-WATCH_BOOT_GRACE_SEC=90
+$(if [ "$TIMING" = fast ]; then printf 'WATCH_INTERVAL_SEC=10\nWATCH_FAILS_BEFORE_RESET=2\nWATCH_BOOT_GRACE_SEC=90\n'; fi)
 NIGHTLY_MODE=always
 SNAPSHOTS_KEEP=2
 EOF
@@ -150,7 +157,7 @@ fi
 nft list table inet fff_vm | grep -E 'counter packets [1-9]' || true
 
 step "guest install, from the host (install.sh --guest-only: the stored answers, no questions)"
-git -C "$ROOT" branch -f main HEAD
+main_at_head
 git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 t0=$(date +%s)
 deploy/vm/host/install.sh --guest-only --yes --guest-repo-bundle /tmp/ff.bundle 2>&1 | tee /tmp/guest-install.log
@@ -163,12 +170,22 @@ g 'sudo jq -e ".ownerName == \"CI\" and .claudeAccounts.orchestrator == \"tokenf
 matches 'Tailscale: skipped' /tmp/guest-install.log || fail "the end of the install does not list the skipped Tailscale join"
 echo "ok: the guest is set up from the host, the token stored and never printed, config.json set"
 [ "$MODE" != zvol ] || [ "$(zfs get -H -o value mountpoint fffci/fff-vm)" = /fffci/fff-vm ] || fail "the dataset's mountpoint is not the stored answer"
-g 'printf "UPDATE_VERIFY_MIN=2\nBASE_REPO_URL=https://github.com/Final-Factory/ff-factory.git\nBASE_BRANCH=main\n" | sudo tee -a /etc/fff/fff.conf'
+g 'printf "BASE_REPO_URL=https://github.com/Final-Factory/ff-factory.git\nBASE_BRANCH=main\n" | sudo tee -a /etc/fff/fff.conf'
+if [ "$TIMING" = fast ]; then
+  # A new release has 45 s to answer; a hung server is restarted after 2 failed checks 10 s apart, 20 s after its start,
+  # and killed 15 s after SIGTERM. The same code paths as the defaults (5 min, 4 x 30 s, 120 s, 75 s), sooner.
+  g 'printf "UPDATE_VERIFY_SEC=45\nHEALTH_FAILS_BEFORE_RESTART=2\nHEALTH_START_GRACE_SEC=20\n" | sudo tee -a /etc/fff/fff.conf'
+  g 'sudo mkdir -p /etc/systemd/system/fff-health.timer.d /etc/systemd/system/fff-portal.service.d &&
+     printf "[Timer]\nOnUnitActiveSec=10s\n" | sudo tee /etc/systemd/system/fff-health.timer.d/ci-fast.conf >/dev/null &&
+     printf "[Service]\nTimeoutStopSec=15\n" | sudo tee /etc/systemd/system/fff-portal.service.d/ci-fast.conf >/dev/null &&
+     sudo systemctl daemon-reload && sudo systemctl restart fff-health.timer'
+fi
 wait_for 120 "the portal answers the host" health
 health
 [ "$(sha_of)" = "$(git -C "$ROOT" rev-parse --short=7 HEAD)" ] || fail "the portal runs $(sha_of), not HEAD"
 g 'sudo fffctl status'
-sleep 60
+# Production timing only: the idle memory needs a minute to settle; the fast run measures it at once.
+[ "$TIMING" != production ] || sleep 60
 g 'echo "MEASURE guest memory (MiB), portal idle with empty data:"; free -m; echo "MEASURE node server RSS (KiB): $(ps -o rss= -p $(systemctl show -p MainPID --value fff-portal))"; echo "MEASURE release on disk: $(sudo sh -c "du -sh /srv/fff/app/releases/*/" | head -n 1)"; echo "MEASURE npm cache: $(sudo du -sh /srv/fff/home/.npm | cut -f1)"; echo "MEASURE bare repo: $(sudo du -sh /srv/fff/app/repo.git | cut -f1)"; echo "MEASURE root filesystem:"; df -h /'
 deploy/vm/host/install.sh --guest-only --yes --guest-repo-bundle /tmp/ff.bundle 2>&1 | tail -n 12
 echo "ok: the guest install ran twice"
@@ -198,7 +215,7 @@ echo "ok: fffctl migrate runs in the guest: it says when BEAST cannot be reached
 step "update: build beside the running portal, drain, switch, verify"
 before=$(sha_of)
 git -C "$ROOT" -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q --allow-empty -m "ci: an update to install"
-git -C "$ROOT" branch -f main HEAD
+main_at_head
 git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 g 'cat > /tmp/ff.bundle.new && mv /tmp/ff.bundle.new /tmp/ff.bundle && chmod 644 /tmp/ff.bundle' </tmp/ff.bundle
 want=$(git -C "$ROOT" rev-parse --short=7 HEAD)
@@ -219,16 +236,16 @@ step "a broken update is rolled back by itself"
 good=$want
 sed -i '1i throw new Error("ci: broken on purpose");' "$ROOT/server/index.ts"
 git -C "$ROOT" -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q -am "ci: a broken update"
-git -C "$ROOT" branch -f main HEAD
+main_at_head
 git -C "$ROOT" bundle create /tmp/ff.bundle HEAD main
 g 'cat > /tmp/ff.bundle.new && mv /tmp/ff.bundle.new /tmp/ff.bundle && chmod 644 /tmp/ff.bundle' </tmp/ff.bundle
 g 'sudo fffctl update --drain-minutes 0'
-# Expected within about 3 minutes (UPDATE_VERIFY_MIN=2, fff-health every 30 s); on a timeout, say why before failing.
+# Expected within about a minute (fast: 45 s, checks every 10 s) or 6 (production: 5 min); on a timeout, say why first.
 t0=$(date +%s)
 until g 'sudo cat /srv/fff/data/update.result.json' 2>/dev/null | jq -e '.ok == false and (.error | test("rolled back"))' >/dev/null 2>&1; do
-  if [ $(($(date +%s) - t0)) -ge 480 ]; then
+  if [ $(($(date +%s) - t0)) -ge "$([ "$TIMING" = fast ] && echo 240 || echo 600)" ]; then
     g 'sudo fffctl status; sudo cat /srv/fff/data/update.result.json /srv/fff/data/update.verifying.json; sudo ls -la /srv/fff/app /srv/fff/data; sudo journalctl --no-pager -n 60 -u fff-update -u fff-health -u fff-portal' || true
-    fail "no rollback within 480 s"
+    fail "no rollback in time"
   fi
   sleep 5
 done
@@ -266,7 +283,7 @@ echo "ok: nightly ($(/usr/local/sbin/fff-vm snapshots | tr '\n' ' '))"
 step "hang detection: neither the agent nor the portal answers -> reset"
 b1=$(boot_id)
 g 'sudo systemctl stop fff-health.timer fff-portal qemu-guest-agent' || true
-wait_for 600 "the watch reset the VM" bash -c "[ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" != '' ] && [ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id)\" != $b1 ]"
+wait_for 900 "the watch reset the VM" bash -c "[ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" != '' ] && [ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id)\" != $b1 ]"
 journalctl -u fff-vm-watch --no-pager | grep -m1 'resetting' || fail "no reset in the watch's log"
 wait_for 300 "the portal answers after the reset" health
 

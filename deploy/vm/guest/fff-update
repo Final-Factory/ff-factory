@@ -23,6 +23,8 @@ set -o errexit -o nounset -o pipefail
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
 need_root
 load_conf
+# The verify window in seconds: UPDATE_VERIFY_SEC when set (CI's test mode), else UPDATE_VERIFY_MIN minutes.
+verify_secs() { echo "${UPDATE_VERIFY_SEC:-$((UPDATE_VERIFY_MIN * 60))}"; }
 
 current_dir() { readlink -e "$CURRENT" 2>/dev/null || true; }
 
@@ -127,10 +129,10 @@ cmd_activate() {
     after=$(release_sha "$dir")
     jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$before" --arg a "$after" '{ok: true, at: $at, headBefore: $b, headAfter: $a}' | data_write update.result.json
     if [ "$after" != "$before" ]; then
-      jq -n --arg sha "$after" --arg prev "$before" --argjson d "$(($(date +%s) + UPDATE_VERIFY_MIN * 60))" '{sha: $sha, previous: $prev, deadline: $d}' |
+      jq -n --arg sha "$after" --arg prev "$before" --argjson d "$(($(date +%s) + $(verify_secs)))" '{sha: $sha, previous: $prev, deadline: $d}' |
         data_write update.verifying.json
     fi
-    log "switched ${before:0:12} -> ${after:0:12}; verifying for $UPDATE_VERIFY_MIN min"
+    log "switched ${before:0:12} -> ${after:0:12}; verifying for $(verify_secs) s"
     prune || warn "pruning old releases failed"
   else
     jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$before" --arg e "$err" '{ok: false, at: $at, error: $e, headBefore: $b, headAfter: $b}' | data_write update.result.json
@@ -164,7 +166,7 @@ cmd_verify() {
     return 0
   fi
   if [ "$(date +%s)" -gt "$deadline" ]; then
-    cmd_rollback "the new version ${sha:0:9} did not answer /api/health within $UPDATE_VERIFY_MIN minutes of its start"
+    cmd_rollback "the new version ${sha:0:9} did not answer /api/health within $(verify_secs) s of its start"
   fi
 }
 
