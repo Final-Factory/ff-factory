@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The old portal sends its daemons to the new one at the cut-over** (w499): `restart.request` takes `relocate: "<portal
+  base URL>"`. Once the drain is done the server relocates every connected machine daemon there (as
+  `relocate_machines` does), writes each one's outcome to `data/relocate.result.json`, and only then writes `drain.done`
+  and holds (or stops). A URL that is not a portal base URL refuses the whole request, with the reason in the result
+  file. `MachineManager.relocateAll`, which `relocate_machines` now uses too. The VM's `fffctl migrate --cut-over` writes
+  this request to BEAST's portal over ssh, so the daemons move while the old portal still answers their acks. Tests:
+  `server/restart.test.ts` (order, refusals, a failing relocate) and `server/relocate.test.ts` (a real daemon moved by
+  such a request).
 - **FFBox shows a player's report fixed once its fix ships** (w502, asked by Lothsahn). A finished request that claims
   a crash or desync report (its subjects, a report its title names, an intake diagnosis that joined it, or a
   `Report: <id>` line in its merged PR) now tells FFBox `report_fixed` with the PR and the release once the fix is

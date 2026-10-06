@@ -2687,17 +2687,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
           user_asked: z.literal(true).describe('Must be true: the user explicitly asked for this.'),
         },
         wrap(async ({ url, machines }) => {
-          const ids = machines?.length ? machines.map((x) => x.trim().toLowerCase()) : mm.list().filter((m) => mm.isOnline(m.id)).map((m) => m.id);
-          if (!ids.length) throw new Error('no machine is connected');
-          const lines: string[] = [];
-          for (const id of ids) {
-            try {
-              lines.push(await mm.relocate(id, url));
-            } catch (e) {
-              lines.push(`${id}: NOT relocated: ${(e as Error).message}`);
-            }
-          }
-          return lines.join('\n');
+          const done = await mm.relocateAll(url, machines);
+          if (!done.length) throw new Error('no machine is connected');
+          return done.map((r) => (r.ok ? r.note : `${r.machine}: NOT relocated: ${r.note}`)).join('\n');
         }),
       ),
       tool(

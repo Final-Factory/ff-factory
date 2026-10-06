@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { DrainStatus, Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { writeJsonDurable } from './durable.ts';
+import { relocateProblem } from './machineProtocol.ts';
 
 /**
  * Restarts that do not lose work (docs/restart.md). Before the server stops it records which agent
@@ -277,6 +278,31 @@ export interface RestartRequest {
   reason: string;
   update: boolean;
   hold: boolean;
+  /**
+   * Moving the portal (w499, the cut-over to the VM): once the drain is done, and before drain.done, every connected
+   * machine daemon is sent to the portal at this base URL (relocate, docs/machines.md "Moving the portal"); the outcome
+   * goes to data/relocate.result.json. A URL that is not a portal base URL refuses the whole request.
+   */
+  relocate?: string;
+}
+
+/** Where a restart request's relocate writes its outcome, before drain.done. */
+export const RELOCATE_RESULT_FILE = 'relocate.result.json';
+
+/** One machine's relocate. */
+export interface RelocateOutcome {
+  machine: string;
+  ok: boolean;
+  note: string;
+}
+
+/** relocate.result.json: the URL, when, and each connected machine's outcome, or why nothing was sent. */
+export interface RelocateResult {
+  url: string;
+  at: string;
+  ok: boolean;
+  error?: string;
+  machines: RelocateOutcome[];
 }
 
 export function parseRestartRequest(text: string): RestartRequest | 'now' {
@@ -291,12 +317,14 @@ export function parseRestartRequest(text: string): RestartRequest | 'now' {
   if (!j || typeof j !== 'object') return 'now';
   const drain = j.drain === 'auto' || j.drain === true || j.drain === false ? j.drain : 'auto';
   const mins = Number(j.drainMinutes);
+  const relocate = j.relocate === undefined ? undefined : typeof j.relocate === 'string' ? j.relocate.trim().replace(/\/+$/, '') : String(j.relocate);
   return {
     drain,
     drainMinutes: Number.isFinite(mins) && mins >= 0 ? Math.min(mins, 120) : 10,
     reason: typeof j.reason === 'string' && j.reason.trim() ? j.reason.trim().slice(0, 200) : 'restart',
     update: j.update === true,
     hold: j.hold === true,
+    ...(relocate !== undefined ? { relocate } : {}),
   };
 }
 
@@ -314,6 +342,8 @@ export interface DrainDeps {
   log(line: string): void;
   /** Where the hold handshake file goes. */
   dataDir: string;
+  /** Send every connected machine daemon to the portal at `url` (a request's relocate). Absent: such requests are refused. */
+  relocate?(url: string): Promise<RelocateOutcome[]>;
 }
 
 export function drainMessage(req: RestartRequest, deadline: Date): string {
@@ -337,6 +367,9 @@ export class Drainer {
   private drained = new Set<string>();
   private timer?: NodeJS.Timeout;
   private holdUntil?: number;
+  /** The request's relocate: running, or done (it runs once, between the drain and drain.done or the stop). */
+  private relocating = false;
+  private relocated = false;
   private readonly deps: DrainDeps;
 
   constructor(deps: DrainDeps) {
@@ -346,6 +379,16 @@ export class Drainer {
   /** Start a restart. Returns a one-line note for whoever asked. */
   request(req: RestartRequest): string {
     if (this.req) return `a restart is already pending (${this.req.reason}); it proceeds once agents are idle or by ${this.status?.deadline ?? 'its deadline'}`;
+    if (req.relocate !== undefined) {
+      fs.rmSync(path.join(this.deps.dataDir, RELOCATE_RESULT_FILE), { force: true });
+      const bad = relocateProblem(req.relocate) ?? (this.deps.relocate ? undefined : 'this server cannot relocate machines');
+      if (bad) {
+        this.writeRelocateResult({ url: req.relocate, at: new Date().toISOString(), ok: false, error: bad, machines: [] });
+        this.deps.log(`restart (${req.reason}) refused: relocate ${req.relocate}: ${bad}`);
+        return `refused: relocate: ${bad}`;
+      }
+    }
+    this.relocated = false;
     const busy = busyWorkers(this.deps.snapshot());
     if (req.drain === false || !busy.length || req.drainMinutes === 0) {
       this.req = req;
@@ -373,7 +416,7 @@ export class Drainer {
   }
 
   private check() {
-    if (!this.req || !this.status) return;
+    if (!this.req || !this.status || this.relocating) return;
     if (this.holdUntil !== undefined) {
       if (Date.now() > this.holdUntil) this.giveUp('nothing stopped the server after the drain');
       return;
@@ -391,6 +434,17 @@ export class Drainer {
 
   private finish() {
     const req = this.req!;
+    if (req.relocate && !this.relocated) {
+      // The daemons go to the new portal while this one still answers them (their acks), then the hold or the stop.
+      if (this.relocating) return;
+      this.relocating = true;
+      void this.relocateAll(req.relocate).finally(() => {
+        this.relocating = false;
+        this.relocated = true;
+        if (this.req === req) this.finish();
+      });
+      return;
+    }
     if (req.hold) {
       // scripts/restart.ps1 is waiting for this, then stops the supervisor and asks for the real stop.
       fs.writeFileSync(path.join(this.deps.dataDir, 'drain.done'), new Date().toISOString());
@@ -409,10 +463,37 @@ export class Drainer {
     this.deps.stop(this.req ?? fallback, this.drained);
   }
 
+  private async relocateAll(url: string) {
+    const at = new Date().toISOString();
+    let result: RelocateResult;
+    try {
+      const machines = await this.deps.relocate!(url);
+      result = { url, at, ok: machines.every((m) => m.ok), machines };
+    } catch (e) {
+      result = { url, at, ok: false, error: (e as Error).message, machines: [] };
+    }
+    this.writeRelocateResult(result);
+    const not = result.machines.filter((m) => !m.ok);
+    this.deps.log(
+      `drain: relocate to ${url}: ${result.error ?? `${result.machines.length - not.length} of ${result.machines.length} connected daemon(s) took it${not.length ? `; not: ${not.map((m) => `${m.machine} (${m.note})`).join('; ')}` : ''}`}`,
+    );
+  }
+
+  private writeRelocateResult(r: RelocateResult) {
+    try {
+      writeJsonDurable(path.join(this.deps.dataDir, RELOCATE_RESULT_FILE), r, { indent: 2, generations: 0 });
+    } catch (e) {
+      this.deps.log(`drain: could not write ${RELOCATE_RESULT_FILE}: ${(e as Error).message}`);
+    }
+  }
+
   private giveUp(why: string) {
     clearInterval(this.timer);
     this.timer = undefined;
-    this.deps.log(`drain: cancelled (${why}); carrying on`);
+    const moved = this.relocated && this.req?.relocate;
+    this.deps.log(
+      `drain: cancelled (${why}); carrying on${moved ? `. The daemons relocated to ${moved} come back here by themselves if it never answers (their fallback, after 10 minutes)` : ''}`,
+    );
     fs.rmSync(path.join(this.deps.dataDir, 'drain.done'), { force: true });
     for (const id of this.drained) {
       try {
@@ -424,6 +505,7 @@ export class Drainer {
     this.req = undefined;
     this.status = undefined;
     this.holdUntil = undefined;
+    this.relocated = false;
     this.drained = new Set();
     this.deps.changed();
   }

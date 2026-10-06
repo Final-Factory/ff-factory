@@ -1668,6 +1668,8 @@ const drainer = new Drainer({
   stop: (req, drained) => stopServer(req, drained),
   changed: () => broadcast({ type: 'host', host: { ...host, drain: drainer.status } }),
   log: (line) => console.log(line),
+  // The cut-over (w499, docs/portal-on-ffbox-host.md 7.3): restart.request's relocate sends the daemons to the new portal.
+  relocate: (url) => machines.relocateAll(url),
 });
 agents.requestRestart = (req) => {
   // An update survives a power cut or a crash during the drain: the next server retries it (below).
