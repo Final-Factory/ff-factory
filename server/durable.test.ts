@@ -133,8 +133,10 @@ test('background saves: a steady stream of changes cannot postpone the write', a
   let n = 0;
   const s = new SnapshotFile(f, () => JSON.stringify({ n }), { delayMs: 50, intervalMs: 200, label: 'test' });
   const t0 = Date.now();
-  // A change every 20 ms for 700 ms: the old trailing debounce (reset on every change) would not have written once.
-  while (Date.now() - t0 < 700) {
+  // A change every 20 ms for 700 ms, and on until the file is there (at most 10 s): the old trailing debounce (reset on
+  // every change) would not have written once. The write starts after 50 ms, but on a loaded CI runner its fsync can
+  // take longer than the 650 ms left (Windows, 3 of 80 runs on 2026-10-06).
+  while (Date.now() - t0 < 700 || (!fs.existsSync(f) && Date.now() - t0 < 10_000)) {
     n++;
     s.changed();
     await new Promise((r) => setTimeout(r, 20));

@@ -79,9 +79,18 @@ jobs:
         run: npm --prefix web run build
 
   e2e:
-    name: Playwright (Chromium + WebKit)
+    name: Playwright (Chromium + WebKit, ${{ matrix.shard }}/3)
+    # The same tests, split across three runners by file (playwright test --shard); each starts its own servers.
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      # The shards' shares of the tests, in config order (Playwright's PWTEST_SHARD_WEIGHTS): the last holds the slow
+      # WebKit projects, so it takes fewer. Each file goes to one shard whatever the weights, so none is ever left out.
+      PWTEST_SHARD_WEIGHTS: '5:5:3'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -120,11 +129,13 @@ jobs:
             echo "::warning::Rendering visual baselines instead of comparing them; commit the linux-snapshots artifact into e2e/__screenshots__/."
           fi
       - name: Run Playwright
-        run: npx playwright test ${{ steps.snap.outputs.update == 'true' && '--update-snapshots=all' || '' }}
+        # Rendering baselines runs every test in the first shard alone, so its linux-snapshots artifact is whole.
+        if: steps.snap.outputs.update != 'true' || matrix.shard == 1
+        run: npx playwright test ${{ steps.snap.outputs.update == 'true' && '--update-snapshots=all' || format('--shard={0}/3', matrix.shard) }}
       - name: Performance budgets (web/perf/bench.ts, 7,000 stopped agents)
         # Render counts and DOM size per key typed, and layouts at rest, on the orchestrator and beside the sandbox
-        # holding most past agents: counts, so a slow runner does not fail it.
-        if: ${{ !cancelled() }}
+        # holding most past agents: counts, so a slow runner does not fail it. In one shard.
+        if: ${{ !cancelled() && matrix.shard == 1 }}
         run: |
           node web/perf/bench.ts --check --live 0 --keys 60 --idle 5
           node web/perf/bench.ts --check --live 0 --keys 60 --idle 5 --route '#/sandbox/agent-mcp'
@@ -132,13 +143,13 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.shard }}
           path: |
             playwright-report/
             test-results/
           retention-days: 14
       - name: Upload rendered snapshots
-        if: always() && steps.snap.outputs.update == 'true'
+        if: always() && steps.snap.outputs.update == 'true' && matrix.shard == 1
         uses: actions/upload-artifact@v7
         with:
           name: linux-snapshots
