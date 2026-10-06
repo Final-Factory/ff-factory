@@ -292,11 +292,11 @@ async function snapshot(dir: string) {
  */
 export async function rehome(dir: string, id: string, l: Layout, before: Awaited<ReturnType<typeof snapshot>>, oldGitFile: string) {
   const ref = before.branch || `refs/ffw/${id}`;
+  // An entry a cut-off earlier run left (its folder gone) would hold the branch, or push this one's name to "<id>1".
+  await git(l.repo, ['worktree', 'prune']);
   await git(l.repo, ['fetch', '--no-tags', '--quiet', dir, `+${before.head}:refs/heads/${ref.replace(/^refs\/heads\//, '')}`]);
   const tmp = path.join(l.sandboxes, '.ffw-rehome', id);
   fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
-  // An entry a cut-off earlier run left (its folder gone) would push this one's name to "<id>1".
-  await git(l.repo, ['worktree', 'prune']);
   fs.mkdirSync(path.dirname(tmp), { recursive: true });
   await git(l.repo, ['worktree', 'add', '--no-checkout', '--force', tmp, before.branch || before.head]);
   const newGit = fs.readFileSync(path.join(tmp, '.git'), 'utf8');
@@ -477,6 +477,8 @@ export async function rollback(root: string) {
     say(`Sandbox ${mv.id}: back at ${mv.from}.`);
   }
   for (const r of [...j.renamed].reverse()) if (fs.existsSync(r.to) && !fs.existsSync(r.from)) fs.renameSync(r.to, r.from);
+  // The root's clone forgets the worktrees that went back.
+  if (fs.existsSync(path.join(l.repo, 'HEAD'))) await exec('git', ['-C', l.repo, 'worktree', 'prune']);
   if (j.oldService) await restoreOldService(j.oldService);
   j.state = 'rolled-back';
   writeJournal(l, j);
