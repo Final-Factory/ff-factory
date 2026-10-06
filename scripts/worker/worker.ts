@@ -574,6 +574,8 @@ export async function install(o: InstallOptions, from = SRC): Promise<void> {
   for (let k = 0; k < o.slots; k++) fs.mkdirSync(path.join(l.players, `slot${k}`), { recursive: true });
 
   // 2. The credential, owner-only.
+  // The folder first: a file written after inherits its owner-only rights (and one from an earlier run gets them back).
+  await lockDown(l.secrets, f.probe.sid);
   fs.writeFileSync(l.token, o.token.trim() + '\n', { mode: 0o600 });
   await lockDown(l.secrets, f.probe.sid);
 
