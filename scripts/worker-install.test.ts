@@ -48,11 +48,13 @@ test('worker install: every missing prerequisite is named before anything change
   assert.deepEqual(preflightProblems(GOOD, OPTS), []);
   const bad = (f: Partial<Facts>, o: Partial<typeof OPTS> = {}) => preflightProblems({ ...GOOD, ...f }, { ...OPTS, ...o }).join('\n');
   assert.match(bad({ elevated: true }), /not administrator/);
+  assert.deepEqual(preflightProblems({ ...GOOD, elevated: true }, { ...OPTS, owner: 'Lothsahn' }), [], 'an elevated run that gives its files to the user (--owner)');
   assert.match(bad({ git: [2, 45] }), /git 2\.45 is too old: 2\.48 or newer.*winget upgrade --id Git\.Git/);
   assert.match(bad({ git: undefined }), /git is missing.*winget install --id Git\.Git/);
   assert.match(bad({ platform: 'darwin', git: [2, 46] }), /brew upgrade git/);
   assert.match(bad({ gitLfs: false }), /git-lfs is missing/);
   assert.match(bad({ claude: undefined }), /Claude Code is missing/);
+  assert.deepEqual(preflightProblems({ ...GOOD, claude: undefined, claudeShim: 'C:\\Users\\l\\AppData\\Roaming\\npm\\claude.cmd' }, OPTS), [], "an npm shim is enough: the SDK uses its own (as in the portal's deploy)");
   assert.match(bad({ nodeVersion: 'v20.11.0' }), /node 22\.6 or newer/);
   assert.match(bad({ rootState: 'other' }), /already holds other files/);
   assert.match(bad({ rootParentExists: false }), /does not exist/);
@@ -118,7 +120,7 @@ test('worker daemon: a root gives the folders, the agents\' environment and the 
   assert.equal(cfg.appDir, path.join('/r', 'daemon'));
   assert.equal(cfg.tempDir, path.join('/r', 'tmp'));
   assert.equal(cfg.tokenFile, path.join('/r', 'secrets', 'machine-token'));
-  assert.equal(cfg.unitySlotsDir, path.join('/r', 'daemon', 'unity-slots'));
+  assert.equal(cfg.unitySlotsDir, undefined, 'the Unity slots mailbox stays where every script finds it (w469)');
   assert.equal(cfg.maxEventsFile, path.join('/r', 'daemon', 'max-events.jsonl'));
   assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r' }).appDir, undefined, 'no root: unchanged');
   assert.deepEqual(rootEnv('/r'), { FF_WORKER_ROOT: '/r', FF_PLAYER_SLOT_ROOT: path.join('/r', 'players'), FF_NIGHTLY_ROOT: path.join('/r', 'nightly') });
