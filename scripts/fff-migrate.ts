@@ -726,6 +726,11 @@ export class Migration {
     this.report.push(line);
   }
 
+  /** Into the saved report only: detail a person at the terminal does not need, kept for whoever reads why. */
+  private note(line: string) {
+    this.report.push(line);
+  }
+
   private get marker() {
     return path.join(this.dir, 'dry-run.json');
   }
@@ -775,20 +780,28 @@ export class Migration {
 
   /**
    * zstd level 3, else gzip, else bzip2, else none: the first both sides take, tried on one small file of the copy
-   * (a stream of its own, unpacked aside). Never an error: "none" always works. Says which, and why not the better ones.
+   * (a stream of its own, unpacked aside). Never an error: "none" always works. The terminal shows each try and the
+   * one used ("trying zstd level 3...", "zstd level 3 failed, falling back to gzip...", "using gzip"); why a try
+   * failed (tar's own message) goes to the saved report only, since falling back is expected and not a failure.
    */
   private async chooseCodec(root: string, dir: string, all: string, probe: ManifestEntry): Promise<Codec> {
     if (this.codec) return this.codec;
-    const why: string[] = [];
-    for (const c of codecOrder(this.o.compress)) {
-      if (c.needs && spawnSync(c.needs, ['--version'], { stdio: 'ignore' }).status !== 0) {
-        why.push(`${c.name}: no ${c.needs} here`);
-        continue;
-      }
+    const order = codecOrder(this.o.compress);
+    for (const [i, c] of order.entries()) {
+      const next = order[i + 1];
+      const fallBack = (why: string) => {
+        this.note(`  compression check (${c.name}): ${why}`);
+        if (next) this.say(`compression: ${c.label} failed, falling back to ${next.name === 'none' ? 'no compression' : next.label}...`);
+      };
       if (c.name === 'none') {
         this.codec = c;
         break;
       }
+      if (c.needs && spawnSync(c.needs, ['--version'], { stdio: 'ignore' }).status !== 0) {
+        fallBack(`no ${c.needs} here`);
+        continue;
+      }
+      if (i === 0) this.say(`compression: trying ${c.label}...`);
       const lr = await this.beast.ps(BATCH_PS, JSON.stringify({ dir, all, out: 'probe.list', spec: indexSpec([probe.index!]) }), 120_000);
       const listPath = /^list\t(.+)$/m.exec(lr.stdout)?.[1]?.trim();
       const aside = path.join(this.dir, 'probe');
@@ -805,7 +818,8 @@ export class Migration {
         // retries deal with the connection).
         if (r && (r.sshCode === 255 || r.stalled)) {
           if (attempt < this.o.attempts) {
-            this.say(`  compression check (${c.name}): the stream broke off (${tarVerbose(r.remoteErr).errors.slice(-1)[0] ?? `ssh exit ${r.sshCode}`}); trying again`);
+            this.note(`  compression check (${c.name}): the stream broke off (${tarVerbose(r.remoteErr).errors.slice(-1)[0] ?? `ssh exit ${r.sshCode}`})`);
+            this.say(`compression: the connection dropped during the check; trying ${c.label} again...`);
             await sleep(2000);
             continue;
           }
@@ -816,10 +830,10 @@ export class Migration {
         break;
       }
       if (this.codec) break;
-      why.push(`${c.name}: ${refused}`);
+      fallBack(refused);
     }
     this.codec ??= CODECS[CODECS.length - 1];
-    this.say(`compression: ${this.codec.label}${why.length ? ` (not: ${why.join('; ')})` : ''}`);
+    this.say(`compression: using ${this.codec.name === 'none' ? 'no compression' : this.codec.label}`);
     return this.codec;
   }
 
