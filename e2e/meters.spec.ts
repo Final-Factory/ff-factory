@@ -21,7 +21,6 @@ const SYSTEM: SystemStats = {
   diskTotalBytes: 4000 * GB,
   diskFreeBytes: 1100 * GB,
   gpu: { name: 'NVIDIA GeForce RTX 5090', memTotalMiB: 32607, memUsedMiB: 14540, utilPct: 41 },
-  limits: { maxUnity: 4, maxSessions: 8 },
 };
 
 const machine = (id: string, online: boolean): Machine => ({
@@ -99,7 +98,6 @@ async function fixedWorld(page: Page, shape: Shape) {
         const fixed: AppState = {
           ...s,
           sessions: [...orch, { ...orch[0], id: 'w-busy', kind: 'worker', title: 'Busy worker', status: 'running' }],
-          sandboxes: [],
           standingAgents: [],
           delegations: [],
           providers: [],
@@ -153,7 +151,9 @@ test('meters: every machine gets a cell with three bars, in the footprint of the
   // The plan cell: the account nearest its weekly limit, which one, and how many more.
   await expect(foot.getByTestId('plan-glance')).toHaveText('Plan 98% …9AAA +1');
   await expect(foot.getByTestId('plan-glance')).toHaveAttribute('title', 'host token …9AAA: weekly 98%\nowner@example.com: weekly 23%');
-  expect((await foot.locator('.sys-toggle').boundingBox())!.height, 'no taller than the host alone').toBeLessThanOrEqual(hostOnly + 1);
+  // The cells fit in two text lines, the footprint the host alone had with its editor and agent counts before w510
+  // (52 px measured at this size; those counts went with the portal's own pool).
+  expect((await foot.locator('.sys-toggle').boundingBox())!.height, 'no taller than two lines').toBeLessThanOrEqual(Math.max(hostOnly, 52) + 1);
   await expect(foot).toHaveScreenshot('meters-collapsed.png');
 });
 
@@ -165,8 +165,8 @@ test('meters: open, every computer is a row and every account its limits and age
   await expect(table.getByTestId('mrow-BEAST')).toContainText(/BEAST\s*38%\s*55%\s*45%\s*1\.1 TB/);
   await expect(table.getByTestId('mrow-m5')).toContainText(/m5\s*64%\s*53%\s*71%\s*900 GB/);
   await expect(table.locator('.mt-off')).toHaveText(/m3\s*offline/);
-  await expect(foot.locator('.limits')).toContainText('Unity editors 0/4');
-  await expect(foot.locator('.limits')).toContainText('Agents here 1/8');
+  // No editor or agent limits of the portal's own (w510): each machine's are on its row.
+  await expect(foot.locator('.limits')).toHaveCount(0);
 
   const token = foot.getByTestId('account-…9AAA');
   await expect(token).toContainText('host token …9AAA');

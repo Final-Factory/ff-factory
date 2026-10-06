@@ -6,7 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
-import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -100,7 +99,7 @@ class FakeDiscord implements DiscordReader {
   }
 }
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg: Config['intake'] = {}, extra: Partial<Config> = {}, hostSandboxes = true) {
+function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg: Config['intake'] = {}, extra: Partial<Config> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-intake-'));
   const cfg = {
     dataDir: dir,
@@ -120,11 +119,8 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg
   } as unknown as Config;
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
-  const sandboxes = new SandboxManager(cfg, store);
   const machines = new MachineManager(cfg, store, sessions);
-  const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
-  Object.defineProperty(agents, 'workerOptions', { value: () => ({ model: 'opus' }) });
-  if (hostSandboxes) for (const id of ['alpha', 'beta']) store.putSandbox({ id, name: id, branch: `sandbox/${id}`, base: 'develop', path: path.join(dir, id), purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
   agents.boot();
   const o = agents.orchestrators;
   // Intake notices gather for a minute in production; a moment here.
@@ -158,7 +154,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg
 
 /** The same, with sandboxes alpha and beta on a machine (pc/alpha and pc/beta, worktrees on its in-process daemon) instead of this host. */
 async function setupOnMachine(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg: Config['intake'] = {}, extra: Partial<Config> = {}) {
-  const env = setup(t, intakeCfg, extra, false);
+  const env = setup(t, intakeCfg, extra);
   const pc = await startTestMachine(env.machines, { sandboxes: ['alpha', 'beta'] });
   env.closers.push(() => pc.stop());
   return { ...env, pc };
@@ -196,14 +192,6 @@ test('intake: #bug-reports is FFBox\'s: never polled or filed from, even when co
   assert.deepEqual([...new Set(polled)], [BUGS], "FFBox's forum is never read for filing");
   assert.deepEqual(work().map((w) => [w.source?.channel, w.title]), [['#beta-bugs', 'Discord bug: Splitters prefer the left belt']]);
   assert.match(intake.summary().discord.ffboxOwned!.join(), /bug_reports,dev_bug_reports/);
-});
-
-test("every worker's brief: FFBox's channels are read-only, the PR's Discord line, no fixed notice for ffbox/* work", (t) => {
-  const { agents, store } = setup(t);
-  const brief = (agents as unknown as { workerBrief: (sb: unknown) => string }).workerBrief(store.sandboxes.get('alpha'));
-  assert.match(brief, /## Discord\n#bug-reports and dev_bug_reports belong to FFBox/);
-  assert.ok(brief.includes('`Discord: https://discord.com/channels/<guild id>/<thread id>`'));
-  assert.match(brief, /never post a "fixed" or "merged" notice/);
 });
 
 test("every machine worker's brief: the same Discord rules in a machine sandbox", async (t) => {

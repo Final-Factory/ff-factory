@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import type { AppState, Machine, MachineSandbox, MachineStats, Sandbox, ServerEvent, SessionInfo, SystemStats } from '../shared/types.ts';
+import type { AppState, Machine, MachineSandbox, MachineStats, ServerEvent, SessionInfo, SystemStats } from '../shared/types.ts';
 import { expect, isMobile, openSidebar, settle, signIn, test } from './fixtures.ts';
 
 // The sidebar's computers and the Overview board (web/src/components/Fleet.tsx, shared/fleet.ts): BEAST, then
@@ -23,7 +23,6 @@ const SYSTEM: SystemStats = {
   diskTotalBytes: 4000 * GB,
   diskFreeBytes: 1100 * GB,
   gpu: { name: 'NVIDIA GeForce RTX 5090', memTotalMiB: 32607, memUsedMiB: 14540, utilPct: 41 },
-  limits: { maxUnity: 4, maxSessions: 8, maxSandboxes: 10 },
 };
 
 const stats = (loadPct: number, usedGB: number, totalGB: number, gpu: MachineStats['gpu']): MachineStats => ({
@@ -51,20 +50,6 @@ const worker = (base: SessionInfo, id: string, title: string, status: SessionInf
   pendingPermissions: [],
   sandboxId: undefined,
   ...where,
-});
-
-const hostSb = (id: string, purpose: string, sessionIds: string[], unity: Sandbox['unity']['state']): Sandbox => ({
-  id,
-  name: id,
-  branch: `sandbox/${id}`,
-  base: 'develop',
-  path: `F:/ffsb/${id}`,
-  purpose,
-  status: 'ready',
-  createdAt: min(600),
-  unity: { state: unity },
-  sessionIds,
-  git: git(id === 'agent-a' ? 'feature/honest-coop' : `sandbox/${id}`),
 });
 
 const machineSb = (id: string, purpose: string, sessionIds: string[], unity: MachineSandbox['unity']['state'], branch: string): MachineSandbox => ({
@@ -95,8 +80,11 @@ const machine = (id: string, extra: Partial<Machine>): Machine => ({
   ...extra,
 });
 
-/** The fixed fleet: BEAST with two sandboxes, LothDesktop with a sandbox pool, the M5 with its main clone, an offline M3. */
-function fleet(s: AppState): AppState {
+/**
+ * The fleet as the machines report it, before BEAST's sandboxes are put on its own daemon (onBeastsDaemon): BEAST's two
+ * workers name their sandbox only. LothDesktop with a sandbox pool, the M5 with its main clone, an offline M3.
+ */
+function fleetBase(s: AppState): AppState {
   const orch = s.sessions.find((x) => x.id === s.orchestratorId)!;
   const gallery = s.sessions.find((x) => x.id === 'gallery1')!;
   const sessions = [
@@ -111,7 +99,6 @@ function fleet(s: AppState): AppState {
   return {
     ...s,
     sessions,
-    sandboxes: [hostSb('agent-a', 'Honest co-op playthrough', ['b-play', 'b-old'], 'running'), hostSb('agent-b', 'unused', [], 'stopped')],
     standingAgents: [],
     delegations: [],
     providers: [],
@@ -140,12 +127,12 @@ function fleet(s: AppState): AppState {
 }
 
 /**
- * After the migration (docs/beast-machine.md): BEAST's own daemon, machine "beast", holds its two sandboxes; the host
- * has none of its own. `online` false: that daemon is down.
+ * The fixed fleet: BEAST's own daemon, machine "beast", holds BEAST's two sandboxes (docs/beast-machine.md; the portal
+ * holds none of its own, w510). `online` false: that daemon is down.
  */
-function migratedFleet(online = true) {
+function onBeastsDaemon(online = true) {
   return (s: AppState): AppState => {
-    const f = fleet(s);
+    const f = fleetBase(s);
     const onBeast = (x: SessionInfo) => (x.sandboxId ? { ...x, sandboxId: undefined, machineId: 'beast', machineSandbox: x.sandboxId } : x);
     const beast = machine('beast', {
       name: 'BEAST',
@@ -164,9 +151,10 @@ function migratedFleet(online = true) {
         { ...machineSb('agent-b', 'unused', [], 'stopped', 'sandbox/agent-b'), path: 'F:/ffsb/agent-b' },
       ],
     });
-    return { ...f, sandboxes: [], sessions: f.sessions.map(onBeast), machines: [beast, ...f.machines] };
+    return { ...f, sessions: f.sessions.map(onBeast), machines: [beast, ...f.machines] };
   };
 }
+const fleet = onBeastsDaemon();
 
 async function fixedFleet(page: Page, hash = '#/', shape: (s: AppState) => AppState = fleet) {
   await page.routeWebSocket('**/ws', (ws) => {
@@ -219,7 +207,7 @@ test('fleet: the sidebar groups every computer, with its sandboxes, their agents
 
   const beast = sidebar.getByTestId('fl-group-host');
   await expect(beast.locator('.fl-name')).toHaveText('BEAST');
-  await expect(beast.getByTestId('fl-capacity')).toHaveText('2/10 sandboxes · 1/4 editors');
+  await expect(beast.getByTestId('fl-capacity')).toHaveText('2/5 sandboxes · 1/4 editors');
   await expect(beast.getByTestId('fl-agents-sum')).toHaveText('1 agent, 1 busy');
   await expect(beast.getByTestId('meter-CPU')).toHaveText('CPU 38%');
   await expect(beast.getByTestId('meter-GPU')).toHaveText('GPU 45%');
@@ -231,11 +219,11 @@ test('fleet: the sidebar groups every computer, with its sandboxes, their agents
   // Nor is the counts line.
   expect(await beast.getByTestId('fl-capacity').evaluate((e) => e.scrollWidth <= e.clientWidth + 1), 'counts line cut short').toBe(true);
   // A live agent: its title, busy or idle, and how long since it last did something; a stopped one is a count.
-  const play = beast.getByTestId('fl-sandbox-agent-a');
+  const play = beast.getByTestId('fl-sandbox-beast/agent-a');
   await expect(play.getByTestId('fl-agent')).toHaveCount(1);
   await expect(play.getByTestId('fl-agent')).toContainText(/Honest co-op: BEAST client\s*busy\s*1m/);
   await expect(play.locator('.fl-stopped')).toHaveText('+1 stopped');
-  await expect(beast.getByTestId('fl-sandbox-agent-b').locator('.fl-free')).toHaveText('FREE');
+  await expect(beast.getByTestId('fl-sandbox-beast/agent-b').locator('.fl-free')).toHaveText('FREE');
 
   const loth = sidebar.getByTestId('fl-group-lothdesktop');
   await expect(loth.locator('.fl-title')).toContainText('LothDesktop');
@@ -343,7 +331,7 @@ test('fleet: the machine sandbox routes answer, and name what is missing', async
 });
 
 test("fleet: BEAST's own daemon holds its sandboxes: they stay under BEAST, and open as its machine sandboxes", async ({ page }) => {
-  await fixedFleet(page, '#/', migratedFleet());
+  await fixedFleet(page, '#/', onBeastsDaemon());
   const sidebar = await openSidebar(page);
   const groups = sidebar.locator('.fl-group');
   // No group of its own for the daemon: the same four computers as before the migration. Counted first, as above: the
@@ -367,7 +355,7 @@ test("fleet: BEAST's own daemon holds its sandboxes: they stay under BEAST, and 
 });
 
 test("fleet: BEAST's card says when its daemon is down, and opens the daemon's page", async ({ page }) => {
-  await fixedFleet(page, '#/overview', migratedFleet(false));
+  await fixedFleet(page, '#/overview', onBeastsDaemon(false));
   const board = page.getByTestId('overview');
   await expect(board.locator('.board-card')).toHaveCount(4);
   const card = board.getByTestId('board-host');

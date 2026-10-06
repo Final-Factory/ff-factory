@@ -8,7 +8,6 @@ import { workLive } from '../shared/workState.ts';
 import { fleetOf } from '../shared/fleet.ts';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
-import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -126,9 +125,11 @@ test("the Overview lists a place's agents Working, Waiting, Idle, a stopped one 
     s('z1', { status: 'stopped', wakeAt: new Date(now + 3_600_000).toISOString() }),
     s('q1', { lastActivityAt: new Date(now - 60_000).toISOString() }),
   ];
-  const sb = (id: string, ids: string[], purpose = 'work') => ({ id, name: id, branch: 'b', base: 'origin/develop', path: `/${id}`, purpose, status: 'ready', createdAt: T, unity: { state: 'stopped' }, sessionIds: ids });
-  const app = { sandboxes: [sb('mp-r2', ['x1']), sb('unused', [], 'unused'), sb('quiet', ['q1']), sb('alpha', ['i1', 'w1', 'r1', 'z1'])], sessions, machines: [] } as never;
-  const host = fleetOf(app)[0];
+  const sb = (id: string, ids: string[], purpose = 'work') => ({ id, branch: 'b', base: 'origin/develop', path: `/${id}`, purpose, status: 'ready', createdAt: T, unity: { state: 'stopped' }, sessionIds: ids });
+  // The sandboxes are a machine's (w510: the portal holds none of its own).
+  const pc = { id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', online: true, repoPath: '/r', home: '/h', portalUrl: 'http://x', maxSessions: 3, sandboxRoot: '/s', sessionIds: [], createdAt: T, sandboxes: [sb('mp-r2', ['x1']), sb('unused', [], 'unused'), sb('quiet', ['q1']), sb('alpha', ['i1', 'w1', 'r1', 'z1'])] };
+  const app = { sessions, machines: [pc] } as never;
+  const host = fleetOf(app)[1];
   const alpha = host.sandboxes.find((x) => x.id === 'alpha')!;
   assert.deepEqual(alpha.agents.live.map((x) => x.id), ['r1', 'w1', 'i1', 'z1']);
   assert.deepEqual(host.sandboxes.map((x) => x.id), ['alpha', 'quiet', 'mp-r2', 'unused']);
@@ -161,9 +162,8 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
   store.putSession(s('eb9632fd', { status: 'stopped', machineId: 'pc', machineSandbox: 'alpha', title: 'w448: merge #1083' }));
   store.putSession(s('b1', { status: 'stopped', machineId: 'pc', machineSandbox: 'beta', title: 'w490' }));
   const sessions = new SessionManager(cfg, store);
-  const sandboxes = new SandboxManager(cfg, store);
   const machines = new MachineManager(cfg, store, sessions);
-  const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
   agents.boot();
   // A worker alive between turns (boot marks a session without a process stopped).
   store.sessions.get('eb9632fd')!.status = 'idle';

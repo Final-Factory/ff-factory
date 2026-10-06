@@ -8,7 +8,6 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { Store, bus } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
-import { SandboxManager } from './sandboxes.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
@@ -77,18 +76,12 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
   } as unknown as Config;
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
-  const sandboxes = new SandboxManager(cfg, store);
   const machines = new MachineManager(cfg, store, sessions);
-  const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
   const files = new AttachmentStore(dir, () => cfg.attachments);
   agents.attachments = files;
   machines.attachments = files;
-  Object.defineProperty(agents, 'workerOptions', { value: () => ({ model: 'opus' }) });
   let alpha = path.join(dir, 'alpha');
-  if (!extra.onMachine) {
-    fs.mkdirSync(alpha);
-    store.putSandbox({ id: 'alpha', name: 'alpha', branch: 'sandbox/alpha', base: 'origin/develop', path: alpha, purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
-  }
   agents.boot();
   // onMachine: sandbox alpha is on a machine instead (pc/alpha, a worktree on its in-process daemon).
   let pc: TestMachine | undefined;

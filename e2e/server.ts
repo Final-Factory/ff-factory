@@ -10,9 +10,8 @@
  *                      the same fake agent; its clean-up never runs
  *   sandbox "pc/alpha"    ready, Unity stopped: tests start their own worker agents here
  *   sandbox "pc/gallery"  one idle worker with a seeded transcript, for visual snapshots; never changed
- *   sandbox "stuck"    a sandbox of this host, Unity blocked on a dialog (the watchdog's badge; a host-only state)
- *   sandbox "videos"   a sandbox of this host with a short clip in its screenshots (videos from a machine are not shown
- *                      yet: e2e/video.spec.ts)
+ *   review clip        <sandbox root>/_review/w000-clips/clip.webm, a short clip in the review folder (e2e/video.spec.ts;
+ *                      the portal holds no sandboxes of its own, w510, and videos from a machine are not shown yet)
  *   login              tester / e2e-password-123 (the owner)
  *   second login       teammate / e2e-teammate-456, "Team Mate", a member (e2e/identity.spec.ts), with an /mcp API
  *                      key bound to it in <data folder>/../teammate-key.txt
@@ -30,7 +29,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { Sandbox, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { RED_PNG, fakeQuery } from './fakeAgent.ts';
 import { E2E_PROVIDER_TOKEN } from './mockConnector.ts';
 import { CH, SEEDED_CURSORS, snowflake, startMockDiscord, writeFfboxConfig, writeMaxEvents } from './mockDiscord.ts';
@@ -69,12 +68,10 @@ function repo(dir: string, branch: string) {
   git(dir, '-c', 'user.name=E2E', '-c', 'user.email=e2e@users.noreply.github.com', 'commit', '-q', '-m', 'Initial commit');
 }
 repo(path.join(base, 'base'), 'develop');
-for (const id of ['stuck', 'videos']) repo(path.join(sandboxRoot, id), `sandbox/${id}`);
-// A short clip in a sandbox's screenshot folder, with the .meta Unity writes beside it (e2e/video.spec.ts).
-const videos = path.join(sandboxRoot, 'videos', 'Assets', 'Screenshots', 'Videos');
-fs.mkdirSync(videos, { recursive: true });
-fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(videos, 'clip.webm'));
-fs.writeFileSync(path.join(videos, 'clip.webm.meta'), 'fileFormatVersion: 2\nguid: 0\n');
+// A short clip in the review folder (the default <sandbox root>/_review), where workers publish theirs (e2e/video.spec.ts).
+const clips = path.join(sandboxRoot, '_review', 'w000-clips');
+fs.mkdirSync(clips, { recursive: true });
+fs.copyFileSync(path.join(ROOT, 'e2e', 'fixtures', 'clip.webm'), path.join(clips, 'clip.webm'));
 
 // Max (docs/max.md): the token in a scratch ffbox config, a mock Discord, and what agents' ffdiscord calls wrote.
 const discordPort = port + 100;
@@ -103,8 +100,6 @@ fs.writeFileSync(
       sandboxRoot,
       repo: { url: path.join(base, 'base'), basePath: path.join(base, 'base') },
       defaultBase: 'develop',
-      unity: { editorPath: path.join(base, 'no-unity', 'Unity.exe'), watchdog: { stallMinutes: 0, runningPollSeconds: 0, autoDismiss: false } },
-      limits: { maxUnity: 2, maxSessions: 50, maxSandboxes: 10, minFreeGB: 0 },
       models: ['opus', 'sonnet'],
       defaultModel: 'opus',
       // Worker updates reach people's own orchestrators (docs/orchestrators.md; e2e/orchestrators.spec.ts).
@@ -132,18 +127,6 @@ fs.writeFileSync(
 
 const T0 = '2026-09-24T09:00:00.000Z';
 const at = (min: number) => new Date(Date.parse(T0) + min * 60_000).toISOString();
-const sandbox = (id: string, purpose: string, sessionIds: string[] = []): Sandbox => ({
-  id,
-  name: id,
-  branch: `sandbox/${id}`,
-  base: 'develop',
-  path: path.join(sandboxRoot, id),
-  purpose,
-  status: 'ready',
-  createdAt: T0,
-  unity: { state: 'stopped' },
-  sessionIds,
-});
 const gallery: SessionInfo = {
   id: 'gallery1',
   kind: 'worker',
@@ -172,7 +155,7 @@ fs.writeFileSync(path.join(pc.path('gallery'), 'Screenshots', 'orch-proof.png'),
 fs.writeFileSync(
   path.join(dataDir, 'state.json'),
   JSON.stringify({
-    sandboxes: [sandbox('stuck', 'Unity blocked demo'), sandbox('videos', 'Video clips')],
+    sandboxes: [],
     machines: [pc.record({ gallery: ['gallery1'] })],
     sessions: [gallery],
     settings: { heartbeatMinutes: null },
@@ -213,25 +196,6 @@ setQueryForTesting(fakeQuery() as never);
 const { internals } = await import('../server/index.ts');
 await pc.connect(internals.machines);
 
-// After the server's own reconcile (which clears a blocked state on boot): an editor stuck on a dialog.
-// It has no pid and no log, so the poll and the watchdog leave it as it is.
-const stuck = internals.store.sandboxes.get('stuck')!;
-internals.store.putSandbox({
-  ...stuck,
-  unity: {
-    state: 'blocked',
-    detail: 'blocked: Safe Mode: compile errors',
-    blocked: {
-      reason: 'dialog',
-      title: 'Enter Safe Mode?',
-      text: 'The project has compilation errors.',
-      buttons: ['Enter Safe Mode', 'Ignore', 'Quit'],
-      advice: 'Press Ignore, then fix the compile errors.',
-      since: at(5),
-      resumeState: 'starting',
-    },
-  },
-});
 // The dispatcher takes no person's message any more (docs/orchestrators.md), so a test that needs its fake model to take
 // a turn (call one of its tools) has this stand-in on <port + 200> (which also patches a request for e2e/ledger.spec.ts): it sends the owner's words straight to the
 // session, as the owner's message used to arrive. Only this test harness has it.
