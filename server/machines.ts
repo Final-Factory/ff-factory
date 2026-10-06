@@ -1117,6 +1117,13 @@ export class MachineManager {
     return true;
   }
 
+  /** The welcome a daemon gets on connecting, and again when its hello moved its pool (w513). */
+  private welcomeOf(m: Machine, sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }))) {
+    // A worker root install (w513) whose record has no pool of its own yet keeps daemon.json's until its hello says it.
+    const pool = m.sandboxRoot || !m.root ? poolSettingsOf(m) : undefined;
+    return { type: 'welcome' as const, machineId: m.id, maxSessions: m.maxSessions, sessions, sandboxes: pool };
+  }
+
   /** Wire a connected daemon (exported for tests: any WebSocket works). */
   attach(id: string, ws: WebSocket) {
     const old = this.links.get(id);
@@ -1140,9 +1147,7 @@ export class MachineManager {
     Object.assign(m, { online: true, lastSeen: new Date().toISOString() });
     this.store.putMachine(m);
     const sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }));
-    // A worker root install (w513) whose record has no pool of its own yet keeps daemon.json's until its hello says it.
-    const pool = m.sandboxRoot || !m.root ? poolSettingsOf(m) : undefined;
-    ws.send(JSON.stringify({ type: 'welcome', machineId: id, maxSessions: m.maxSessions, sessions, sandboxes: pool } satisfies ToDaemon));
+    ws.send(JSON.stringify(this.welcomeOf(m, sessions) satisfies ToDaemon));
     const watch = this.outsideWatchFor?.(id);
     if (watch !== undefined) ws.send(JSON.stringify({ type: 'outside_watch', config: watch } satisfies ToDaemon));
     const cleanup = this.cleanupFor?.(id);
@@ -1223,8 +1228,10 @@ export class MachineManager {
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
         else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
         Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined, relocatedTo: undefined });
-        if (msg.layout) adoptLayout(m, msg.layout);
+        // A worker root install (w513): its folders; a pool folder that changed goes back to it at once.
+        const repool = msg.layout ? adoptLayout(m, msg.layout) : false;
         this.store.putMachine(m);
+        if (repool) this.links.get(id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
         const live = new Set(msg.live);
         for (const sid of m.sessionIds) {
           const s = this.handle(sid);
@@ -1740,18 +1747,21 @@ export function machineDir(p: string | undefined, what: string): string | undefi
  * default, an unset one kept from the previous deploy. Exported for tests.
  */
 /**
- * What a worker root install's hello says about its folders (w513), onto its record: the root, and the daemon's
- * folder, clone, temp folder and sandbox pool where the record has none yet (a record an enrollment made, never
- * deployed from here). What the record already holds wins: add_machine and set_app_config stay in charge.
- * Exported for tests.
+ * What a worker root install's hello says about its folders (w513), onto its record. A root the record does not know
+ * yet (a new install, or a migration from today's layout into a root) is the daemon's to say: its daemon folder, clone,
+ * temp folder and sandbox folder replace the record's, and the record's limits stay. The same root again only fills
+ * what the record lacks: add_machine and set_app_config stay in charge. Returns whether the pool's folder changed (the
+ * portal then sends the daemon its pool settings again). Exported for tests.
  */
-export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, { type: 'hello' }>['layout']>) {
+export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, { type: 'hello' }>['layout']>): boolean {
+  const moved = m.root !== layout.root;
+  const before = m.sandboxRoot;
   m.root = layout.root;
-  m.appDir ||= layout.appDir;
-  if (!m.repoPath) m.repoPath = layout.repoPath;
-  if (!m.tempDir && layout.tempDir) m.tempDir = layout.tempDir;
+  if (moved || !m.appDir) m.appDir = layout.appDir;
+  if (moved || !m.repoPath) m.repoPath = layout.repoPath;
+  if ((moved || !m.tempDir) && layout.tempDir) m.tempDir = layout.tempDir;
   const pool = layout.sandboxes;
-  if (!m.sandboxRoot && pool) {
+  if (pool && (moved || !m.sandboxRoot)) {
     Object.assign(m, {
       sandboxRoot: pool.root,
       maxSandboxes: m.maxSandboxes ?? pool.maxSandboxes,
@@ -1760,14 +1770,16 @@ export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, 
       diskWarnGB: m.diskWarnGB ?? pool.diskWarnGB,
       diskCriticalGB: m.diskCriticalGB ?? pool.diskCriticalGB,
       ...(m.maxSandboxAgents === undefined && pool.maxAgents !== undefined ? { maxSandboxAgents: pool.maxAgents } : {}),
-      ...(!m.librarySeed && pool.librarySeed ? { librarySeed: pool.librarySeed } : {}),
+      ...(pool.librarySeed && (moved || !m.librarySeed) ? { librarySeed: pool.librarySeed } : {}),
     });
   }
+  return m.sandboxRoot !== before;
 }
 
 export function dirOptions(opts: MachineDirs, prev: MachineDirs | undefined): MachineDirs {
   const pick = (k: keyof MachineDirs, what: string) => (opts[k] === undefined ? prev?.[k] : machineDir(opts[k], what));
-  return { root: pick('root', 'root'), appDir: pick('appDir', 'app_dir'), unityEditorRoot: pick('unityEditorRoot', 'unity_editor_root'), unityPath: pick('unityPath', 'unity_path'), tempDir: pick('tempDir', 'temp_dir'), sandboxRoot: pick('sandboxRoot', 'sandbox_root') };
+  const root = pick('root', 'root');
+  return { ...(root !== undefined ? { root } : {}), appDir: pick('appDir', 'app_dir'), unityEditorRoot: pick('unityEditorRoot', 'unity_editor_root'), unityPath: pick('unityPath', 'unity_path'), tempDir: pick('tempDir', 'temp_dir'), sandboxRoot: pick('sandboxRoot', 'sandbox_root') };
 }
 
 /**

@@ -146,6 +146,10 @@ export interface InstallOptions {
   firewall: boolean;
   /** No clean-up passes of its own (a test install on a computer that holds other work). */
   noCleanup?: boolean;
+  /** daemon.json settings the old daemon had (a migration: its host guard, protected paths, MCP server, limits). */
+  carry?: Record<string, unknown>;
+  /** A migration replaces the old daemon's service on purpose (worker.ts migrate). */
+  replacesService?: boolean;
   unityEditorRoot?: string;
   unityPath?: string;
 }
@@ -314,7 +318,9 @@ function rootState(root: string, machineId?: string): Facts['rootState'] {
   const entries = fs.readdirSync(root);
   if (!entries.length) return 'empty';
   const m = readManifest(root);
-  return m && (!machineId || m.machineId === machineId) ? 'ours' : 'other';
+  if (m) return !machineId || m.machineId === machineId ? 'ours' : 'other';
+  // A migration in progress made the root before the install (scripts/worker/migrate.ts).
+  return entries.every((e) => ['migration.json', 'migration', 'daemon', 'sandboxes', 'seed', 'nightly', 'scratch'].includes(e)) && entries.includes('migration.json') ? 'ours' : 'other';
 }
 
 function freeGB(dir: string): number | undefined {
@@ -370,7 +376,7 @@ async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?:
     freeGB: freeGB(o.root),
     portal,
     credentialId: id,
-    serviceElsewhere: await serviceElsewhere(o.service, layoutOf(o.root).daemon),
+    serviceElsewhere: o.replacesService ? undefined : await serviceElsewhere(o.service, layoutOf(o.root).daemon),
     loggedOn: probe.loggedOn,
     probe,
   };
@@ -389,7 +395,15 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     diskCriticalGB: 20,
     ...(fs.existsSync(path.join(l.seed, 'Library')) ? { librarySeed: path.join(l.seed, 'Library') } : {}),
   };
+  // A migration keeps the old daemon's settings (its host guard, protected paths, MCP server, idle stop); the root's
+  // folders and the credential file replace its own, and the token never goes into daemon.json.
+  const { token: _t, appDir: _a, tempDir: _d, repoPath: _r, sandboxes: oldPool, unitySlotsDir: _u, maxEventsFile: _m, configFile: _c, ...carried } = (o.carry ?? {}) as Record<string, unknown>;
+  if (oldPool && typeof oldPool === 'object') {
+    const { root: _pr, librarySeed: _ls, ...poolRest } = oldPool as Record<string, unknown>;
+    Object.assign(sandboxes, { ...poolRest, root: sandboxes.root, ...(sandboxes.librarySeed ? { librarySeed: sandboxes.librarySeed } : {}) });
+  }
   return {
+    ...carried,
     portalUrl: o.portalUrl,
     id,
     root: l.root,
@@ -537,7 +551,7 @@ async function confirm(question: string, yes: boolean): Promise<boolean> {
   return answer === 'y' || answer === 'yes';
 }
 
-export async function install(o: InstallOptions, from = SRC): Promise<void> {
+export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'prepare' | 'finish' = 'all'): Promise<boolean> {
   const l = layoutOf(path.resolve(o.root));
   o.root = l.root;
   say(`FF Factory worker install into ${l.root}`);
@@ -548,7 +562,7 @@ export async function install(o: InstallOptions, from = SRC): Promise<void> {
     say(`\nNot installing: ${problems.length} problem(s):`);
     for (const p of problems) say(`- ${p}`);
     process.exitCode = 2;
-    return;
+    return false;
   }
   const id = f.credentialId!;
   say(`OK: machine ${id}, node ${f.nodeVersion}, git ${f.git!.join('.')}, Claude Code ${f.claude}, ${f.freeGB ?? '?'} GB free.`);
@@ -583,6 +597,8 @@ export async function install(o: InstallOptions, from = SRC): Promise<void> {
   await cloneRepo(l, o.repoUrl);
   await syncSource(l, from);
 
+  if (phase === 'prepare') return true;
+
   // 4. The daemon and its service. A test install cleans nothing: its settings are in place before it first starts.
   if (o.noCleanup) fs.writeFileSync(path.join(l.daemon, 'cleanup.json'), JSON.stringify({ everyMinutes: 0, softFreeGB: 0, staleOutput: { mode: 'off' } }));
   noteOutside(m, isWin ? { kind: 'task', name: o.service, note: 'runs the daemon at logon' } : { kind: 'launchagent', name: o.service, note: '~/Library/LaunchAgents' });
@@ -606,7 +622,8 @@ export async function install(o: InstallOptions, from = SRC): Promise<void> {
     const w = await whoami(o.portalUrl, o.token);
     if (w.ok && w.me.online) {
       p.done(`The portal sees ${id} online${w.me.root ? ` with root ${w.me.root}` : ''}.`);
-      return summary(l, m);
+      summary(l, m);
+      return true;
     }
     p.update(`waiting for the daemon to connect to ${o.portalUrl} (${i * 2}s)`);
     await new Promise((r) => setTimeout(r, 2000));
@@ -614,6 +631,7 @@ export async function install(o: InstallOptions, from = SRC): Promise<void> {
   p.done(`The daemon has not connected yet. Its log: ${path.join(l.logs, 'daemon.log')}`);
   process.exitCode = 1;
   summary(l, m);
+  return false;
 }
 
 function summary(l: Layout, m: Manifest) {
@@ -857,6 +875,9 @@ const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <f
             [--unity-editor-root <dir>] [--unity-path <exe>]
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
+  migrate   [--from <old daemon folder>] [--from-service <its task or label>] [--old-slots <dir>]
+            [--nightly <dir;dir>] [--dry-run] | --rollback | --cleanup [--legacy]
+            (today's layout into the root; the credential comes from the old daemon.json)
 The OS wrappers (scripts/worker/install.ps1, install.sh) ask for these and pipe the credential.`;
 
 export async function main(argv = process.argv.slice(2)) {
@@ -882,6 +903,31 @@ export async function main(argv = process.argv.slice(2)) {
   } else if (cmd === 'uninstall') {
     if (!opts.root) throw new Error(USAGE);
     await uninstall({ root: opts.root, yes: flags.has('yes'), force: flags.has('force'), keepRegistration: flags.has('keep-registration') });
+  } else if (cmd === 'migrate') {
+    if (!opts.root) throw new Error(USAGE);
+    const mig = await import('./migrate.ts');
+    if (flags.has('rollback')) await mig.rollback(opts.root);
+    else if (flags.has('cleanup')) await mig.cleanup({ root: opts.root, legacy: flags.has('legacy') });
+    else
+      await mig.migrate({
+        from: opts.from,
+        fromService: opts['from-service'],
+        oldSlots: opts['old-slots'],
+        nightly: opts.nightly ? opts.nightly.split(';').filter(Boolean) : [],
+        dryRun: flags.has('dry-run'),
+        install: {
+          root: opts.root,
+          portalUrl: opts['portal-url']?.replace(/\/+$/, ''),
+          maxSandboxes: num('max-sandboxes', 3),
+          maxAgentsPerSandbox: num('max-agents-per-sandbox', 2),
+          maxUnity: num('max-unity', 2),
+          slots: num('slots', 8),
+          repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
+          service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
+          firewall: !flags.has('no-firewall'),
+          noCleanup: flags.has('no-cleanup'),
+        },
+      });
   } else if (cmd === 'check') {
     if (!opts.root) throw new Error(USAGE);
     const root = path.resolve(opts.root);

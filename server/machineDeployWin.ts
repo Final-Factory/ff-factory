@@ -35,7 +35,7 @@ export interface WinService {
 /** The task name of `service`, checked: it is spliced into PowerShell and task XML. Exported for tests. */
 export function taskName(service?: WinService): string {
   const t = service?.task ?? TASK_NAME;
-  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/.test(t)) throw new Error(`"${t}" is not a usable scheduled task name`);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(t)) throw new Error(`"${t}" is not a usable scheduled task name`);
   return t;
 }
 /** A script run over ssh: its exit code (-1 when it could not start or was killed), output, and whether the timeout killed it. */
@@ -495,7 +495,7 @@ try { $null = Register-ScheduledTask -TaskName '${TASK}' -Xml $xml -Force } catc
   $x = Join-Path $F 'daemon-task.xml'
   [IO.File]::WriteAllText($x, $xml, [Text.Encoding]::Unicode)
   if (-not (Get-ScheduledTask -TaskName '${TASK}' -ErrorAction SilentlyContinue)) {
-    throw "registering the ${TASK} task failed ($why). Register it once from an administrator PowerShell: Register-ScheduledTask -TaskName '${TASK}' -Xml (Get-Content -Raw '$x'); then redeploy"
+    throw "registering the ${TASK} task failed ($why). Register it once from an administrator PowerShell: Register-ScheduledTask -TaskName ${TASK} -Xml (Get-Content -Raw '$x'); then redeploy"
   }
   'registered=kept'
 }
