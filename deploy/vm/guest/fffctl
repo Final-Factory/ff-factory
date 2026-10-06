@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fffctl: the FF Factory portal inside its VM (deploy/vm/guest; /usr/local/sbin/fffctl). Root (sudo).
+# fffctl: the FF Factory portal inside its VM (deploy/vm/guest; /usr/local/sbin/fffctl). Root: run without sudo, it runs itself again through sudo.
 #
 #   fffctl status                       the portal, its release, health, Tailscale, the base clone, backups
 #   fffctl logs [-f]                    the portal's journal
@@ -49,6 +49,8 @@
 #                                       move the portal from BEAST into this VM, pulling its config, data and conversations
 #                                       over ssh (deploy/vm/RUNBOOK.md "Dry run" and "Cut-over"; fffctl migrate --help)
 set -o errexit -o nounset -o pipefail
+# Not root: the same command again through sudo (the VM's admin account has it without a password).
+if [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" "$@"; fi
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
 need_root
