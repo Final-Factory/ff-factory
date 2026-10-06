@@ -41,6 +41,7 @@ export function StandingAgentModal({ app, agent, onClose }: { app: AppState; age
   const valid =
     name.trim().length > 0 &&
     charter.trim().length > 0 &&
+    machineId !== '' &&
     (kind !== 'interval' || Number(minutes) >= 5) &&
     (kind !== 'cron' || cron.trim().split(/\s+/).length === 5);
   const trigger = (): StandingTrigger => (kind === 'interval' ? { kind, minutes: Number(minutes) } : kind === 'cron' ? { kind, expr: cron.trim() } : { kind: 'manual' });
@@ -171,17 +172,25 @@ export function StandingAgentModal({ app, agent, onClose }: { app: AppState; age
           )}
           {kind === 'manual' && <div className="field" />}
         </div>
-        {(app.machines.length > 0 || agent?.machineId) && (
+        {app.machines.length === 0 ? (
+          <div className="field">
+            <span>Runs on</span>
+            <small className="tone-amber">Standing agents run on a machine, not in the portal. Add a machine first.</small>
+          </div>
+        ) : (
           <label className="field">
             <span>Runs on</span>
             <select className="input" value={machineId} onChange={(e) => setMachineId(e.target.value)}>
-              <option value="">{app.system?.hostname ?? 'this host'} (with the sandboxes)</option>
+              <option value="" disabled>
+                Pick a machine
+              </option>
               {app.machines.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.id} · {displayName(m)} {m.online ? '' : '(offline)'}
                 </option>
               ))}
             </select>
+            {agent && !agent.machineId && <small className="tone-amber">It has no machine, so it does not run: standing agents run on a machine, not in the portal.</small>}
             {agent && (agent.machineId ?? '') !== machineId && <small className="tone-amber">Moving it starts a fresh conversation there; NOTES.md does not move.</small>}
           </label>
         )}

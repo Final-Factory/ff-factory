@@ -31,7 +31,7 @@ import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts'
 import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, pinnedWork, placementHint, type Computer } from './placement.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
-import { HostMigrator, hostSandboxFrom } from './hostMigration.ts';
+import { hostSandboxFrom } from './sandboxView.ts';
 import { WORK_OPEN, WORK_PRIORITIES, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
 import { attachmentForMachine, publicRef, publishableFile, uploadForMachine, type AttachmentStore } from './attachments.ts';
 import { REVIEW_DEFAULTS, publishedText, type ReviewStore } from './review.ts';
@@ -234,7 +234,6 @@ export class Agents {
   private readonly sessions: SessionManager;
   readonly standing: StandingAgents;
   /** Moves this host's sandboxes to its own machine daemon and back (docs/beast-machine.md). */
-  readonly migrator: HostMigrator;
   /** Starts a (drained) restart; wired by index.ts, which owns stopping the server. Returns a note for the caller. */
   requestRestart?: (req: RestartRequest) => string;
   /** Plan usage lines for system_status (server/usage.ts); wired by index.ts. */
@@ -299,13 +298,6 @@ export class Agents {
       options: this.orchestratorOptions,
       places: () => ({ sandboxes: sandboxes.list(), machines: machines.list() }),
       recentCommits: () => this.recentCommits,
-    });
-    this.migrator = new HostMigrator({
-      cfg,
-      store,
-      sessions,
-      machines,
-      hostSession: (info) => new AgentSession(info, store, this.workerOptions, sessions.events),
     });
     this.standing = new StandingAgents({
       cfg,
@@ -592,7 +584,7 @@ export class Agents {
    */
   boot(): SessionInfo[] {
     const cutOff = this.sessions.restore(
-      (info) => (info.kind === 'orchestrator' ? this.orchestratorOptions : info.kind === 'standing' ? this.standing.options : info.sandboxId ? this.workerOptions : undefined),
+      (info) => (info.kind === 'orchestrator' ? this.orchestratorOptions : info.kind === 'standing' ? this.standing.noMachineOptions : info.sandboxId ? this.workerOptions : undefined),
       (info) => this.machines.restore(info),
     );
     this.standing.boot();
@@ -2338,6 +2330,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
               ...(this.usageLines?.() ?? []),
               ...hostHealthLines(this.hostHealth?.status),
               ...(this.extraStatusLines?.() ?? []),
+              ...[this.standing.noMachineLine()].filter((l): l is string => !!l),
             ].join('\n');
           }),
         ),
@@ -2626,7 +2619,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             .boolean()
             .optional()
             .describe(
-              "This host itself, the portal's own computer (docs/beast-machine.md): no ssh; the daemon is installed and controlled here, runs as this server's user in its own scheduled task, and takes over this host's sandboxes (migrate_host_sandboxes moves the existing ones). Its settings default to this server's config (base clone, sandbox root, limits, Library seed, protected paths, loopback portal URL). Windows only; at most one machine.",
+              "This host itself, the portal's own computer (docs/beast-machine.md): no ssh; the daemon is installed and controlled here, runs as this server's user in its own scheduled task, and holds this host's sandboxes (the portal holds none of its own, w510). Its settings default to this server's config (base clone, sandbox root, limits, Library seed, protected paths, loopback portal URL). Windows only; at most one machine.",
             ),
           force: z.boolean().optional().describe('Redeploy even though agents are running there (they stop).'),
         },
@@ -2655,7 +2648,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             local: a.local,
             force: a.force,
           });
-          return `Deploying to ${m.id} (${m.local ? 'this host, no ssh' : `ssh ${m.host}`}, portal ${m.portalUrl}); list_machines shows progress.${m.local && this.sandboxes.list().length ? ` This host still has ${this.sandboxes.list().length} sandbox(es) of its own: once ${m.id} is connected and no agent is mid-turn there, move them with migrate_host_sandboxes.` : ''}`;
+          return `Deploying to ${m.id} (${m.local ? 'this host, no ssh' : `ssh ${m.host}`}, portal ${m.portalUrl}); list_machines shows progress.`;
         }),
       ),
       tool(
@@ -2733,16 +2726,6 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         { machine: z.string(), user_asked: z.literal(true).describe('Must be true: the user explicitly asked for this.') },
         wrap(async ({ machine }) => mm.removeMachine(machine)),
       ),
-      tool(
-        'migrate_host_sandboxes',
-        "Move this host's sandboxes to its own machine daemon (direction \"to_machine\"; add_machine with local: true first), or back (\"back\", the rollback), docs/beast-machine.md. Only the owner changes: folders, branches, Libraries and running editors stay as they are, and every agent record moves with its sandbox (history and session ids unchanged). Refused while an agent there is mid-turn; idle agent processes are stopped first. Keeps a copy of state.json from before. Run it with dry_run first. ONLY when the user asked for it.",
-        {
-          direction: z.enum(['to_machine', 'back']),
-          dry_run: z.boolean().optional().describe('Only say what would move and what stands in the way.'),
-          user_asked: z.literal(true).describe('Must be true: the user explicitly asked for this.'),
-        },
-        wrap(async ({ direction, dry_run }) => (direction === 'back' ? this.migrator.back(!!dry_run) : this.migrator.toMachine(!!dry_run))),
-      ),
     ];
   }
 
@@ -2764,7 +2747,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       budget_per_day_usd: z.number().positive().optional().describe('Hard stop per local day (default $10).'),
       max_minutes: z.number().int().min(1).max(240).optional().describe('Time limit per run (default 45).'),
       enabled: z.boolean().optional().describe('False = paused. Default true on create.'),
-      machine: z.string().optional().describe('Run on this machine (an id from list_machines) instead of this host; "" moves it back to this host. Moving starts a fresh conversation there.'),
+      machine: z.string().optional().describe('The machine it runs on (an id from list_machines); required on create. Standing agents run on machines only, never in the portal (w510). Moving starts a fresh conversation there.'),
       auto_approve_delegations: z
         .boolean()
         .optional()
@@ -2814,7 +2797,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       ),
       tool(
         'create_standing_agent',
-        'Define a new standing agent. It gets its own folder with a NOTES.md, and one long-lived conversation it resumes every run. Give exactly one of every_minutes, cron or manual_only. Create one only when the user asked for it.',
+        'Define a new standing agent on a machine (machine is required: standing agents run under a machine daemon, never in the portal). It gets its own folder with a NOTES.md, and one long-lived conversation it resumes every run. Give exactly one of every_minutes, cron or manual_only. Create one only when the user asked for it.',
         { name: z.string(), charter, ...fields },
         wrap(async (a) => {
           const i = input(a);

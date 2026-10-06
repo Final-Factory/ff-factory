@@ -11,7 +11,7 @@ import { SessionManager, snapshotOf } from './sessions.ts';
 import { TIMER_LIMITS } from './timers.ts';
 import { Agents } from './agents.ts';
 import { MachineManager, machineForPath, parseSandboxRef } from './machines.ts';
-import { hostSandboxFrom } from './hostMigration.ts';
+import { hostSandboxFrom } from './sandboxView.ts';
 import { KEEP_CONVERSATIONS, ProviderManager, conversationQueryId, conversationView } from './providers.ts';
 import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
@@ -490,7 +490,6 @@ machines.hostReport = (id, title, body) => {
 sandboxes.startGate = () => hostHealth.blockReason('editor');
 machines.localGate = (kind) => hostHealth.blockReason(kind);
 sessions.startGate = () => hostHealth.blockReason('agent');
-agents.standing.hostGate = () => hostHealth.blockReason('agent');
 agents.hostHealth = hostHealth;
 agents.providers = providers;
 agents.max = max;
