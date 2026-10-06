@@ -26,7 +26,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { armScriptReimport } from '../../machine/scriptReimport.ts';
 import * as win from '../../server/machineDeployWin.ts';
-import { LABEL } from '../../server/machineDeploy.ts';
+import { LABEL, macControlScript } from '../../server/machineDeploy.ts';
 import { Progress, exec, install, layoutOf, readManifest, whoami, type InstallOptions, type Layout } from './worker.ts';
 
 const isWin = process.platform === 'win32';
@@ -516,6 +516,13 @@ export async function cleanup(o: CleanupOptions) {
   if (old.repoPath && fs.existsSync(old.repoPath)) {
     await exec('git', ['-C', old.repoPath, 'worktree', 'prune']);
     say(`Pruned the worktree entries of moved sandboxes in ${old.repoPath}.`);
+  }
+  // The old service, when the root's has another name (with the same name, the install replaced it already).
+  const svc = j.oldService;
+  if (svc && svc.name !== readManifest(l.root)?.service) {
+    if (svc.kind === 'task') await win.psScript(win.LOCAL, win.uninstallScript(j.from, { task: svc.name, only: true }), { timeoutMs: 3 * 60_000 });
+    else await exec('bash', ['-c', `${macControlScript('uninstall', svc.name)}`]);
+    say(`Removed the old ${svc.kind === 'task' ? 'task' : 'LaunchAgent'} ${svc.name}.`);
   }
   fs.rmSync(j.from, { recursive: true, force: true });
   say(`Deleted the old daemon folder ${j.from}.`);
