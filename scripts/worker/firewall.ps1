@@ -19,11 +19,14 @@ param(
     [int]$Count = 8,
     [string]$UnityExe = '',
     [switch]$Remove,
-    [string]$LogFile = ''
+    [string]$LogFile = '',
+    # A test install beside a live one: its own rule groups ("<group> <suffix>") and no slot config (the live one's stays).
+    [string]$GroupSuffix = ''
 )
 $ErrorActionPreference = 'Stop'
 $SlotGroup = 'Final Factory player slots'
 $UnityGroup = 'Final Factory Unity editors'
+if ($GroupSuffix) { $SlotGroup = "$SlotGroup $GroupSuffix"; $UnityGroup = "$UnityGroup $GroupSuffix" }
 $Config = Join-Path $env:ProgramData 'FinalFactory\player-slots.json'
 
 function Say([string]$text) {
@@ -61,7 +64,7 @@ try {
     if ($old.Count) { $old | Remove-NetFirewallRule }
     if ($Remove) {
         $removedConfig = $false
-        if (Test-Path -LiteralPath $Config) {
+        if (-not $GroupSuffix -and (Test-Path -LiteralPath $Config)) {
             $rec = Get-Content -Raw -LiteralPath $Config | ConvertFrom-Json
             if ([string]$rec.root -and ([IO.Path]::GetFullPath([string]$rec.root)).TrimEnd('\') -ieq ([IO.Path]::GetFullPath($Root)).TrimEnd('\')) {
                 Remove-Item -LiteralPath $Config -Force
@@ -80,8 +83,10 @@ try {
         $made += Add-Allow $exe "Unity editor $(Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $exe)))" $UnityGroup 'Unity editor play mode (worker install, w513)'
         $editors++
     }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
-    [IO.File]::WriteAllText($Config, (@{ root = $Root; count = $Count } | ConvertTo-Json))
+    if (-not $GroupSuffix) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
+        [IO.File]::WriteAllText($Config, (@{ root = $Root; count = $Count } | ConvertTo-Json))
+    }
     Say "OK: $made allow rule(s): $Root\slot0..slot$($Count - 1)\player\finalfactory.exe and $editors Unity editor(s); slot root recorded in $Config."
 } catch {
     Say "FAILED: $($_.Exception.Message)"

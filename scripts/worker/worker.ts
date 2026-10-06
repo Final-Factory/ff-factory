@@ -92,6 +92,8 @@ export interface Manifest {
   service: string;
   slots: number;
   repoUrl: string;
+  /** A test install's firewall group suffix (firewall.ps1 -GroupSuffix). */
+  firewallSuffix?: string;
   createdAt: string;
   updatedAt: string;
   outside: OutsideItem[];
@@ -154,6 +156,8 @@ export interface InstallOptions {
    * Administrators. Without it, an elevated run is refused.
    */
   owner?: string;
+  /** A test install beside a live one: its own firewall rule groups and no slot config. */
+  firewallSuffix?: string;
   /** daemon.json settings the old daemon had (a migration: its host guard, protected paths, MCP server, limits). */
   carry?: Record<string, unknown>;
   /** A migration replaces the old daemon's service on purpose (worker.ts migrate). */
@@ -558,10 +562,10 @@ async function giveRoot(l: Layout, owner: string) {
 }
 
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */
-async function firewall(action: 'add' | 'remove', l: Layout, slots: number, editors: string[]): Promise<string> {
+async function firewall(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): Promise<string> {
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
   const log = path.join(os.tmpdir(), `ff-worker-firewall-${process.pid}.log`);
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Count', String(slots), '-LogFile', log, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : [])];
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Count', String(slots), '-LogFile', log, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
   say(`Windows Firewall: ${action === 'add' ? 'adding' : 'removing'} the rules (one administrator prompt)...`);
   // Start-Process -Verb RunAs takes one argument string; it reaches PowerShell through the environment, unquoted by no shell.
   const line = args.map((a) => (/[\s;]/.test(a) ? `"${a}"` : a)).join(' ');
@@ -612,6 +616,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     service: o.service,
     slots: o.slots,
     repoUrl: o.repoUrl,
+    ...(o.firewallSuffix ? { firewallSuffix: o.firewallSuffix } : {}),
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
     outside: prev?.outside ?? [],
@@ -646,11 +651,12 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   // 5. Windows Firewall: the fixed slot paths and the Unity editors, once.
   if (isWin && o.firewall) {
     const editors = unityEditors(f.probe.home);
-    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP, note: `${o.slots} slots under ${l.players}` });
-    if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP, note: editors.join('; ') });
-    noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
+    const sfx = o.firewallSuffix ? ` ${o.firewallSuffix}` : '';
+    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.slots} slots under ${l.players}` });
+    if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP + sfx, note: editors.join('; ') });
+    if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
-    say(await firewall('add', l, o.slots, editors));
+    say(await firewall('add', l, o.slots, editors, o.firewallSuffix));
   } else if (isWin) say('Skipped the firewall rules (--no-firewall): players will prompt on first start.');
   else {
     // A Mac has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
@@ -818,7 +824,7 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
   say(`Stopped ${await stopRootProcesses(l.root)} process(es) still running from the root.`);
 
   // 4. Firewall rules and the slot config (Windows).
-  if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) say(await firewall('remove', l, m.slots, []));
+  if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) say(await firewall('remove', l, m.slots, [], m.firewallSuffix));
   if (!isWin && slotConfigRoot(macSlotConfig())?.startsWith(l.root)) {
     fs.rmSync(macSlotConfig(), { force: true });
     say(`Removed ${macSlotConfig()}.`);
@@ -863,8 +869,8 @@ export async function check(root: string, m?: Manifest): Promise<CheckItem[]> {
       `$ErrorActionPreference = 'Continue'
 $t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
 "task=$([bool]$t)"
-"slotRules=$(@(Get-NetFirewallRule -Group ${win.psq(SLOT_GROUP)} -ErrorAction SilentlyContinue).Count)"
-"unityRules=$(@(Get-NetFirewallRule -Group ${win.psq(UNITY_GROUP)} -ErrorAction SilentlyContinue).Count)"
+"slotRules=$(@(Get-NetFirewallRule -Group ${win.psq(SLOT_GROUP + (m?.firewallSuffix ? ` ${m.firewallSuffix}` : ''))} -ErrorAction SilentlyContinue).Count)"
+"unityRules=$(@(Get-NetFirewallRule -Group ${win.psq(UNITY_GROUP + (m?.firewallSuffix ? ` ${m.firewallSuffix}` : ''))} -ErrorAction SilentlyContinue).Count)"
 $root = ${win.psq(l.root)}
 "rootRules=$(@(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object { [string]$_.Program -like ($root + '*') }).Count)"
 $cfg = Join-Path $env:ProgramData 'FinalFactory\\player-slots.json'
@@ -880,7 +886,8 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
     const cfgRoot = get('slotConfig');
     // A rule group counts only when this install made it: the slot group's name is shared with the game repo's own script.
-    const ours = (g: string) => !!m?.outside.some((o) => o.kind === 'firewall-group' && o.name === g);
+    const sfx = m?.firewallSuffix ? ` ${m.firewallSuffix}` : '';
+    const ours = (g: string) => !!m?.outside.some((o) => o.kind === 'firewall-group' && o.name === g + sfx);
     const group = (g: string, n: string) => ({ what: `firewall group "${g}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
@@ -975,6 +982,7 @@ export async function main(argv = process.argv.slice(2)) {
       absoluteWorktrees: flags.has('absolute-worktrees'),
       unitySlotsDir: opts['unity-slots-dir'],
       owner: opts.owner,
+      firewallSuffix: opts['firewall-suffix'],
       unityEditorRoot: opts['unity-editor-root'],
       unityPath: opts['unity-path'],
     });
@@ -1006,6 +1014,8 @@ export async function main(argv = process.argv.slice(2)) {
           noCleanup: flags.has('no-cleanup'),
           absoluteWorktrees: flags.has('absolute-worktrees'),
           owner: opts.owner,
+          firewallSuffix: opts['firewall-suffix'],
+          unitySlotsDir: opts['unity-slots-dir'],
         },
       });
   } else if (cmd === 'check') {
