@@ -277,10 +277,12 @@ default), and prints the `journalctl` command for the details. Ctrl+C stops the 
 only asks for it, as `request_app_update` does. `fffctl restart` and `fffctl rollback` wait the same way until the portal
 answers again.
 
-Each update also installs `fffctl` and every helper script in `/usr/local/lib/fff` from the release it switches to (and
-from the older release on a rollback), so they stay as new as the portal; "already up to date" brings them up to the
-running release too. A changed systemd unit is not installed this way: the update's log says so, and the guest
-`install.sh` from a clone at that commit installs it.
+Each update also runs the new release's own guest `install.sh` (with `--no-start`), after the build and before the
+restart: the VM's firewall, systemd units, sshd settings, packages, folders, `fffctl` and its helper scripts all come
+with it, so a change to any of them reaches the VM by `fffctl update` alone. It changes only what differs (apt only for a
+missing package). If it fails, nothing restarts and the running version stays, as with a failed build. "Already up to
+date" runs it too, for the running release. A rollback goes back to the older code and its scripts but keeps the newer
+system setup.
 
 ## 7. Changing the VM's size
 

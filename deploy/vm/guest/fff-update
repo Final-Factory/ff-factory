@@ -7,7 +7,8 @@
 # built while the old one runs, and the switch at the restart takes a second.
 #
 #   fff-update request       fff-update.path started it: data/update.wanted is there (request_app_update or
-#                            "fffctl update"). Builds origin/<branch>, then asks the server for the drain and the
+#                            "fffctl update"). Builds origin/<branch>, runs that release's guest install.sh (the VM's
+#                            firewall, units, sshd, packages, scripts), then asks the server for the drain and the
 #                            restart (restart.request with update: true); the server leaves data/update.request
 #                            and exits, and the next start switches.
 #   fff-update activate      fff-portal.service's ExecStartPre (as root): if data/update.request is there, switch to
@@ -105,10 +106,26 @@ refresh_scripts() {
   for u in "$src"/units/*; do
     [ -f "$u" ] || continue
     if ! cmp -s "$u" "/etc/systemd/system/$(basename "$u")"; then
-      warn "systemd units changed in $(basename "$1") (first: $(basename "$u")): run sudo ~/ff-factory/deploy/vm/guest/install.sh from a clone at that commit to install them"
+      log "systemd units differ from $(basename "$1")'s (first: $(basename "$u")): kept as they are (an update's system setup installs a release's units)"
       break
     fi
   done
+}
+
+# system_setup DIR: the release's own guest install.sh, so an update brings everything that release sets up in the VM
+# (firewall, systemd units, sshd, packages, folders, fffctl and its helpers), not only its code. It does work only
+# where something differs (apt only for a missing package), changes units with a daemon-reload so the update's restart
+# uses them, and starts nothing (--no-start). --ref pins its release step to DIR, which is already built.
+system_setup() {
+  local dir=$1 sha
+  sha=$(release_sha "$dir")
+  if [ ! -x "$dir/deploy/vm/guest/install.sh" ]; then
+    warn "release $(basename "$dir") has no guest install.sh; only fffctl and its helpers are refreshed"
+    refresh_scripts "$dir"
+    return 0
+  fi
+  log "building ${sha:0:12}: system setup (its deploy/vm/guest/install.sh)"
+  "$dir/deploy/vm/guest/install.sh" --no-start --no-todo --ref "$sha"
 }
 
 switch_to() {
@@ -143,9 +160,14 @@ $(tail -n 12 "$buildlog")"
   rm -f "$out"
   sha=$(release_sha "$dir")
   cur_sha=$(release_sha "$(current_dir)")
+  # The release's system setup, before anything restarts: a failure leaves the running version as it is.
+  if ! system_setup "$dir" 2>&1 | tee -a "$buildlog" >&2; then
+    tell_dispatcher "[app update] The update was NOT done: the system setup of ${sha:0:9} (its guest install.sh) failed, so nothing was restarted and the running version stays. Last lines (journalctl -u fff-update in the VM for all):
+$(tail -n 12 "$buildlog")"
+    exit 1
+  fi
   if [ "$sha" = "$cur_sha" ]; then
     log "already at ${sha:0:12}; nothing to restart"
-    refresh_scripts "$(current_dir)"
     tell_dispatcher "[app update] Already up to date at ${sha:0:9} (origin/$FFF_BRANCH); nothing was restarted."
     return 0
   fi
