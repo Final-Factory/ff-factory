@@ -1067,8 +1067,10 @@ export interface CleanupSummary {
   freedBytes?: number;
   /** Entries skipped (in use, refused by the guard, or only partly removed). */
   failed?: number;
-  /** Free space after the pass on the fullest volume it watches. */
+  /** Free space after the pass on the fullest disk volume it watches (home, data, ...): never a RAM-backed one (w566). */
   freeBytes?: number;
+  /** Temp folders on a volume apart from that disk, each as RAM (a tmpfs) or a disk volume of its own: shown, never counted. */
+  temp?: { path: string; freeBytes?: number; totalBytes?: number; ram: boolean }[];
   softFreeGB: number;
   /** Still below the soft threshold after the pass. */
   belowSoft?: boolean;

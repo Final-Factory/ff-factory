@@ -40,7 +40,7 @@ import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
-import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
+import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries, volumeStat } from './cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
@@ -340,14 +340,8 @@ const hostStalePlaces = (): StalePlace[] => {
 };
 const hostHealth = new HostHealthMonitor({
   cfg,
-  statfs: async (p) => {
-    try {
-      const s = await fs.promises.statfs(p);
-      return { free: s.bavail * s.bsize, total: s.blocks * s.bsize };
-    } catch {
-      return undefined;
-    }
-  },
+  // With the filesystem type and the device: a RAM-backed temp folder is never the disk (w566).
+  statfs: volumeStat,
   exists: (p) => fs.existsSync(p),
   mem: () => ({ free: os.freemem(), total: os.totalmem() }),
   // No sandboxes, editors or drive of its own (w510): those are each machine's daemon's, this host's own daemon's too.
@@ -391,7 +385,10 @@ const hostHealth = new HostHealthMonitor({
     stale: async () => (await staleUnityLibraries([cleanupEnv.home], cfg.hostGuard.cleanup.libraryReportDays)).filter((l) => !neverDelete(l.path, hostCleanupGuard())),
     log: (e) => appendCleanupLog(cfg.dataDir, e),
     staleAt: staleAtFile(cfg.dataDir),
-    diskPaths: () => [cleanupEnv.home, cleanupEnv.tmp],
+    // The disk is the volume(s) of the home folder and the data; the temp folder is shown apart (in the VM a tmpfs of half
+    // the RAM, which as "the disk" read 1.9 GB free while the disk had 101 GB, w566).
+    diskPaths: () => [cleanupEnv.home, cfg.dataDir],
+    tempPaths: () => [cleanupEnv.tmp],
   },
   changed: (h) => {
     host.health = h;
