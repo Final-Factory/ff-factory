@@ -21,6 +21,15 @@
 #   fffctl gh-login --token-file FILE   the portal's GitHub token (a fine-grained token on a machine user)
 #   fffctl base-clone                   clone the game repo for the orchestrators' reads (needs gh-login first)
 #   fffctl backup                       an encrypted backup now (fff-backup.timer does it every day)
+#   fffctl backup-config --target USER@HOST --recipients-file FILE
+#                                       where the backups go (BACKUP_SSH_TARGET in /etc/fff/fff.conf) and the age public
+#                                       keys they are encrypted to (/etc/fff/backup-recipients.txt); --target "" turns
+#                                       them off
+#   fffctl configure [--owner-name NAME] [--public-url URL] [--claude-tokenfile]
+#                                       set config.json's ownerName, publicUrl, and the orchestrators and the dispatcher on
+#                                       the stored subscription token (claudeTokenFile, claudeAccounts "tokenfile"); the
+#                                       portal restarts when it changed
+#   fffctl state                        what is set up, as JSON (the host's install.sh reads it to do only what is missing)
 set -o errexit -o nounset -o pipefail
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
@@ -174,6 +183,83 @@ cmd_base_clone() {
   echo "done: $(du -sh "$BASE_PATH" | cut -f1)"
 }
 
+# What is set up, as one JSON object: the host's install.sh (deploy/vm/host/guest.sh) reads it to do only what is missing.
+cmd_state() {
+  local ts='{}' cfg=$FFF_ROOT/config/config.json joined=false ip="" funnel="" gh=false nkeys
+  # grep -c prints 0 and fails when nothing matches: no "|| echo 0" after it, or the count is printed twice.
+  nkeys=$(grep -c '^age1' "$BACKUP_RECIPIENTS_FILE" 2>/dev/null || true)
+  ts=$(tailscale status --json 2>/dev/null || echo '{}')
+  [ "$(jq -r '.BackendState // ""' <<<"$ts")" = Running ] && joined=true
+  ip=$(jq -r '(.Self.TailscaleIPs // [])[] | select(test("^[0-9.]+$"))' <<<"$ts" 2>/dev/null | head -n 1 || true)
+  funnel=$(tailscale funnel status 2>/dev/null | grep -m1 -o 'https://[^ ]*' || true)
+  as_fff gh auth status --hostname github.com >/dev/null 2>&1 && gh=true
+  jq -n \
+    --argjson installed "$([ -x "$FFF_LIB/fff-update" ] && [ -e "$CURRENT" ] && echo true || echo false)" \
+    --argjson active "$(portal_active && echo true || echo false)" \
+    --argjson healthy "$(health_json >/dev/null 2>&1 && echo true || echo false)" \
+    --argjson token "$([ -s "$FFF_ROOT/secrets/claude-oauth-token" ] && echo true || echo false)" \
+    --argjson joined "$joined" --arg ip "$ip" --arg funnel "${funnel%/}" --argjson gh "$gh" \
+    --argjson base "$([ -d "$BASE_PATH/.git" ] && echo true || echo false)" \
+    --argjson config "$(jq -c '{ownerName: (.ownerName // ""), publicUrl: (.publicUrl // ""), tokenfile: ((.claudeTokenFile // "") != "" and (.claudeAccounts.orchestrator // "") == "tokenfile" and (.claudeAccounts.dispatcher // "") == "tokenfile")}' "$cfg" 2>/dev/null || echo '{}')" \
+    --arg target "$BACKUP_SSH_TARGET" \
+    --argjson recipients "${nkeys:-0}" \
+    '{installed: $installed, portal: {active: $active, healthy: $healthy}, claudeToken: $token,
+      tailscale: {joined: $joined, ip: $ip, funnelUrl: $funnel}, github: $gh, baseClone: $base, config: $config,
+      backup: {target: $target, recipients: $recipients}}'
+}
+
+# config.json's ownerName, publicUrl and the token-file accounts, set by the host's install.sh; restarts if it changed.
+cmd_configure() {
+  local owner="" url="" tokenfile=0 set_owner=0 set_url=0 cfg=$FFF_ROOT/config/config.json tmp
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --owner-name) owner=$2; set_owner=1; shift ;;
+      --public-url) url=$2; set_url=1; shift ;;
+      --claude-tokenfile) tokenfile=1 ;;
+      *) die "unknown option $1" ;;
+    esac
+    shift
+  done
+  [ -f "$cfg" ] || die "no $cfg: run deploy/vm/guest/install.sh first"
+  if [ "$tokenfile" = 1 ] && [ ! -s "$FFF_ROOT/secrets/claude-oauth-token" ]; then die "no stored subscription token: fffctl claude-token --file FILE first"; fi
+  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
+  jq --arg owner "$owner" --argjson so "$set_owner" --arg url "$url" --argjson su "$set_url" --argjson tf "$tokenfile" \
+    --arg file "$FFF_ROOT/secrets/claude-oauth-token" \
+    '(if $so == 1 then .ownerName = $owner else . end)
+     | (if $su == 1 then .publicUrl = $url else . end)
+     | (if $tf == 1 then .claudeTokenFile = $file | .claudeAccounts = ((.claudeAccounts // {}) + {orchestrator: "tokenfile", dispatcher: "tokenfile"}) else . end)' \
+    "$cfg" >"$tmp" || { rm -f "$tmp"; die "could not edit $cfg"; }
+  chown "$FFF_USER:$FFF_USER" "$tmp"
+  chmod 0600 "$tmp"
+  if cmp -s "$tmp" "$cfg"; then rm -f "$tmp"; echo "config.json: unchanged"; return 0; fi
+  mv -f "$tmp" "$cfg"
+  echo "config.json:$([ "$set_owner" = 0 ] || echo " ownerName $owner;")$([ "$set_url" = 0 ] || echo " publicUrl ${url:-(none)};")$([ "$tokenfile" = 0 ] || echo ' orchestrators and dispatcher on the subscription token;') restarting"
+  cmd_restart --drain-minutes 2
+}
+
+# Where the backups go and who can open them.
+cmd_backup_config() {
+  local target="" rf="" set_target=0 tmp
+  while [ $# -gt 0 ]; do
+    case "$1" in --target) target=$2; set_target=1; shift ;; --recipients-file) rf=$2; shift ;; *) die "unknown option $1" ;; esac
+    shift
+  done
+  if [ -n "$rf" ]; then
+    [ -r "$rf" ] || die "--recipients-file $rf: not readable"
+    grep -Eq '^age1[0-9a-z]{58}$' "$rf" || die "$rf holds no age public key (age1...)"
+    grep -E '^age1[0-9a-z]{58}$' "$rf" | write_file "$BACKUP_RECIPIENTS_FILE" 0644 >/dev/null
+    echo "backup recipients: $(grep -c '^age1' "$BACKUP_RECIPIENTS_FILE") age key(s) in $BACKUP_RECIPIENTS_FILE"
+  fi
+  if [ "$set_target" = 1 ]; then
+    case "$target" in "" | [A-Za-z0-9._-]*@[A-Za-z0-9._-]*) ;; *) die "--target is user@host (or \"\" for off), not '$target'" ;; esac
+    tmp=$(mktemp)
+    { grep -v '^BACKUP_SSH_TARGET=' "$FFF_CONF" 2>/dev/null || true; echo "BACKUP_SSH_TARGET=$target"; } >"$tmp"
+    install -m 0644 "$tmp" "$FFF_CONF"
+    rm -f "$tmp"
+    echo "backups: $([ -n "$target" ] && echo "to $target" || echo off) ($FFF_CONF)"
+  fi
+}
+
 case "${1:-status}" in
   status) cmd_status ;;
   logs) shift; exec journalctl -u fff-portal.service -u fff-update.service -u fff-health.service --no-pager -n 200 "$@" ;;
@@ -188,6 +274,9 @@ case "${1:-status}" in
   gh-login) shift; cmd_gh_login "$@" ;;
   base-clone) cmd_base_clone ;;
   backup) exec systemctl start --wait fff-backup.service ;;
-  -h | --help | help) sed -n '2,23p' "$0" ;;
+  backup-config) shift; cmd_backup_config "$@" ;;
+  configure) shift; cmd_configure "$@" ;;
+  state) cmd_state ;;
+  -h | --help | help) sed -n '2,33p' "$0" ;;
   *) die "unknown command $1 (fffctl help)" ;;
 esac

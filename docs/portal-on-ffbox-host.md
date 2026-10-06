@@ -261,6 +261,10 @@ Six rules:
   keys whose private keys are kept off the FFBox host (by Ben and Lothsahn), and sends it with sftp to an account on
   BEAST over the tailnet, keeping the last 14. Neither the host nor the VM can open an older backup. Nothing here
   costs money.
+- **A copy on the host (w498):** the installer keeps the answers it asked for in `/etc/fff-vm/secrets`
+  (`claude-token`, `gh-token`, and the Tailscale auth key until it has been used: 0600 files in a 0700 folder,
+  root's), so a rebuilt VM needs no one to find them again. Root on the FFBox host can already read the VM's memory and
+  disk ([D2](#8-risks-and-open-decisions)), so this copy moves no trust boundary; it is one more place root reads them.
 - **At rest:** LUKS in the guest or ZFS encryption of the zvol is optional. It protects pulled disks, not a running
   host: the key has to be on the host to boot unattended.
 
@@ -855,7 +859,7 @@ it rests on.
 | # | Decision | Recommendation | Basis | Whose | Status |
 |---|---|---|---|---|---|
 | D1 | Isolation runtime | A KVM/QEMU VM managed by libvirt. Rootless Podman (w439, the container design) stays the fallback if the RAM cannot be spared | 1.2, 1.7; measured in CI: QEMU as `libvirt-qemu` under an enforcing AppArmor profile, every isolation check passed | Lothsahn | **Decided**: a VM (Lothsahn, w441: this revision) |
-| D2 | Root on the FFBox host can read the portal's secrets: the VM's memory and disk, and commands through its guest agent. That includes the ssh key to Ben's machines, the host token and Lothsahn's subscription token | Accept, with `from=`-restricted keys, a tailnet policy that allows only port 22, `sudo` on that box kept narrow, and no FFBox account in `libvirt` or `disk` | 1.2: nothing on a shared host stops root | Ben (his machines and tokens), Lothsahn | **Accepted** with those mitigations (Lothsahn, 2026-10-05) |
+| D2 | Root on the FFBox host can read the portal's secrets: the VM's memory and disk, and commands through its guest agent. That includes the ssh key to Ben's machines, the host token and Lothsahn's subscription token | Accept, with `from=`-restricted keys, a tailnet policy that allows only port 22, `sudo` on that box kept narrow, and no FFBox account in `libvirt` or `disk` | 1.2: nothing on a shared host stops root | Ben (his machines and tokens), Lothsahn | **Accepted** with those mitigations (Lothsahn, 2026-10-05). Since w498 the installer also keeps a copy of the tokens in `/etc/fff-vm/secrets` (root-only), for rebuilding the VM: root could read them in the VM anyway, so the boundary is the same (1.5) |
 | D3 | Tailnet and name | The VM's node in Ben's tailnet, where the daemons and BEAST are ([machines.md](machines.md)), tagged `tag:fff-portal` from a pre-approved, non-ephemeral auth key, Funnel for that tag only; name `fff` or another neutral name that will not change again | 4.1, 1.4 rule 6 | Ben | **Accepted**: Ben's tailnet, a tagged node (Lothsahn, 2026-10-05) |
 | D4 | Which account the orchestrators and the dispatcher run on | Lothsahn's subscription token (`claude setup-token`, `sk-ant-oat01-…`), kept in `/srv/fff/secrets/claude-oauth-token` and passed to those sessions only as `CLAUDE_CODE_OAUTH_TOKEN` (code change 18) | 5.2; Claude Code authentication docs; `server/secrets.ts` (`hostClaudeEnvFor`) | Lothsahn | **Decided**: every orchestrator and the dispatcher on Lothsahn's subscription token, billed against his Max plan, not per token (Lothsahn, 2026-10-05) |
 | D5 | Standing agents' account | Keep them as they are (the host token), so their billing does not change with the move | 5.3 | Ben (the system payer), Lothsahn | **Decided**: as now (Lothsahn, 2026-10-05) |
@@ -955,31 +959,39 @@ throwaway one.
 **The step-by-step commands for tonight's install, with Ben's Tailscale steps, the choices made for it and the open
 questions, are in [`deploy/vm/RUNBOOK.md`](../deploy/vm/RUNBOOK.md).** The steps below are the overview.
 
-### 10.1 On the host
+### 10.1 One command on the host (w498)
 
-1. Read [`deploy/vm/host/fff-vm.conf.example`](../deploy/vm/host/fff-vm.conf.example). Copy it to
-   `/etc/fff-vm/fff-vm.conf` and set at least `VM_ZVOL_PARENT` (a new dataset, e.g. `<pool>/fff-vm`) or
-   `VM_DISK_MODE=qcow2`.
-2. Put Lothsahn's ssh public key(s) in `/etc/fff-vm/admin_authorized_keys`. Put the ntfy URL with FF Factory's
-   outside-watch topic in `/etc/fff-vm/ntfy-url` (one line, `chmod 600`).
-3. `sudo deploy/vm/host/install.sh --dry-run`: read what it would do, and every warning or refusal.
-4. `sudo deploy/vm/host/install.sh --wait`. The first boot takes a few minutes: cloud-init upgrades and may reboot once.
-5. `sudo fff-vm status` (the VM, its agent, the firewall table, the timers), then `sudo fff-vm notify-test`.
+`sudo deploy/vm/host/install.sh` installs the host side, then the portal inside the VM, and sets it up. Before it
+changes anything it gathers every answer (`deploy/vm/host/answers.sh`): the VM's ZFS dataset and its mountpoint, the
+time zone, the admin's ssh key, the alerts' ntfy URL, the owner name, Lothsahn's subscription token, Ben's Tailscale
+auth key, the GitHub token (skipped only on an explicit yes) and the backups (may be left empty). Each answer is checked
+(token formats, the Tailscale key's age) and stored in `/etc/fff-vm`, so a re-run or a rebuilt VM asks nothing it
+knows. Without a terminal, or with `--yes`, it takes the stored answers and, when a required one is missing, stops
+with exit 2 and the list, having changed nothing.
 
-### 10.2 In the VM
+1. Host steps 1-10, as before: preflight and conflicts, packages, the firewall table, the isolated network, the disk
+   (the ZFS dataset made with the mountpoint given), the cloud-init seed and the domain, the units.
+2. The guest (`deploy/vm/host/guest.sh`), over the host's own path into the VM (`fff-vm ssh`: root's key, the private
+   bridge): it copies `deploy/vm/guest` in and runs its `install.sh`, then, reading `fffctl state` to do only what is
+   missing: `fffctl claude-token`, `tailscale-join` (the used key is then deleted on the host), `gh-login` and
+   `base-clone`, `configure` (`ownerName`, `publicUrl` from the Funnel URL, `claudeTokenFile` and `claudeAccounts`
+   orchestrator and dispatcher `tokenfile`, then a restart), `backup-config` and a first backup.
+3. It ends with `fffctl status` and a short list of what it could not do itself, each with why: the portal's deploy key
+   as the whole `from=` line for each machine (4.3), and the backup key's line when the first backup could not reach
+   the target.
 
-1. `sudo fff-vm ssh`, then `git clone https://github.com/Final-Factory/ff-factory.git`.
-2. `sudo ff-factory/deploy/vm/guest/install.sh --dry-run`, then without `--dry-run`. At the end the portal answers on
-   `http://127.0.0.1:8790/api/health` with the template config.
-3. The steps that need a person, each an `fffctl` command (`sudo fffctl help`): `claude-token --file F` (D4: the
-   token from `claude setup-token`),
-   `tailscale-join --authkey-file F`, `gh-login --token-file F`, `base-clone`; `ownerName`, `publicUrl` and
-   `claudeAccounts` in `/srv/fff/config/config.json`, then `fffctl restart`; the backup: age public keys in
-   `/etc/fff/backup-recipients.txt`, `BACKUP_SSH_TARGET` in `/etc/fff/fff.conf`, `/etc/fff/backup_ed25519.pub`
-   authorized on the target, then `fffctl backup`.
-4. Then the migration ([7](#7-migration)).
+Secrets reach the VM only over ssh's stdin, into a root-only file in the guest's `/run` (memory), handed to `fffctl`
+as a file and removed. Never on a command line, in a log or in the cloud-init seed. On a host where the VM already
+runs, the same command changes nothing on the host and does only what is missing inside. `--host-only` and
+`--guest-only` run one half; `--rebuild-vm` deletes the VM and its disk (after the VM's name is typed) and makes it
+again from the stored answers, asking only for a fresh Tailscale key. The step-by-step version is
+[`deploy/vm/RUNBOOK.md`](../deploy/vm/RUNBOOK.md).
 
-`fffctl status` shows the release, health, Tailscale, the login, the base clone and backups. The host's
+### 10.2 By hand, inside the VM
+
+`deploy/vm/guest/install.sh` still runs on its own (`sudo fff-vm ssh`, a clone of ff-factory, `sudo
+ff-factory/deploy/vm/guest/install.sh`): it then lists the `fffctl` commands above for a person. `fffctl status` shows
+the release, health, Tailscale, the login, the base clone and backups; `fffctl state` the same as JSON. The host's
 `fff-vm status` shows the VM from outside.
 
 ### 10.3 What CI proves
@@ -993,7 +1005,10 @@ changelog 2024-04-02)*.
 - **End to end**, three times, each booting the 26.04 guest: a zvol (on a file-backed pool) on a 24.04 host, a zvol on
   a 26.04 host, and qcow2 on a 24.04 host. Each is run by
   [`ci-vm-e2e.sh`](../deploy/vm/test/ci-vm-e2e.sh):
+  - a run with a required token missing stops with exit 2, naming it, before any change (no package, file or table);
   - the host install twice, the second a no-op that leaves the VM running;
+  - the guest installed and set up from the host (`install.sh --guest-only --yes`, the stored test answers): the token
+    stored 0600 and never printed, config.json's owner and token-file accounts set, the skipped steps listed;
   - cloud-init and the armed watchdog;
   - the isolation, each a connection attempt:
     - the VM reaches the internet;
