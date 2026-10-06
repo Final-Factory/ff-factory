@@ -12,6 +12,8 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **CI's Windows unit tests run on two runners** (w521, asked by Lothsahn). The same test files: the three slowest on
+  one (with the typecheck, the web build and the named machine-sandbox step), every other file on the other.
 - **`fffctl update` waits until the new release is verified, and says what is happening** (w517, Lothsahn: "sudo
   fffctl update just says it scheduled it. How do I know when it's done? I'd prefer it be a blocking operation").
   - **Stages shown:** the build (or "already up to date"), the drain (agents still busy, time left), the restart, the
