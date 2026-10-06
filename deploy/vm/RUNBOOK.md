@@ -277,19 +277,30 @@ answers again.
 
 ## 7. Changing the VM's size
 
-The size is `VM_VCPUS` and `VM_MEMORY_MB` in `/etc/fff-vm/fff-vm.conf` (4096 since 2026-10-06). To change it:
+The size is `VM_VCPUS` and `VM_MEMORY_MB` in `/etc/fff-vm/fff-vm.conf` (4096 since 2026-10-06). Edit it; the nightly
+cold restart (`NIGHTLY_TIME`, 12:00 UTC) applies it, or now:
 
 ```bash
-sudo fff-vm ssh 'systemctl is-active fff-update.service; pgrep -af "[f]ff-migrate" || echo "no migrate running"'
-                                                      # a safe point: "inactive" and "no migrate running"
 sudo sed -i 's/^VM_MEMORY_MB=.*/VM_MEMORY_MB=4096/' /etc/fff-vm/fff-vm.conf
-sudo ~/ff-factory/deploy/vm/host/install.sh --host-only --yes
-                                                      # writes domain.xml again and defines it; on a running VM it
-                                                      # warns that the change applies at the next cold start
-sudo fff-vm nightly --now                             # drain, shut down, snapshot, start, wait for the portal
-sudo virsh dominfo fff-portal | grep -i memory        # Max memory and Used memory: 4194304 KiB
-sudo fff-vm ssh 'free -m; sudo fffctl status'         # Mem total about 3,900 MiB; the portal active, /api/health ok
+sudo fff-vm status            # definition: fff-vm.conf asks for memory 8192 -> 4096 MiB: the next nightly applies it
+sudo fff-vm nightly --now     # optional, instead of waiting: drain, shut down, snapshot, apply, start, wait for the portal
+sudo fff-vm status            # VM fff-portal: running (2 vCPUs, 4096 MiB, ...); definition: matches fff-vm.conf
+sudo fff-vm ssh 'free -m'     # Mem: total about 3,910 MiB (CI's 4 GiB guest)
 ```
+
+With the VM off, the nightly defines the new size (`journalctl -u fff-vm-nightly` shows what changed) and keeps libvirt's
+previous definition in `/etc/fff-vm/domain.libvirt-prev.xml`. If libvirt refuses the new one, the VM does not start
+with it, or the portal does not answer within 15 minutes of the start, it defines the previous one again, starts the VM,
+and alerts; `fff-vm status` then says so, and that size is not tried again until `fff-vm.conf` changes. `--now` drains
+the portal like the nightly: run it when no update or migration is under way (`sudo fff-vm ssh 'systemctl is-active
+fff-update.service; pgrep -af "[f]ff-migrate" || echo "no migrate running"'` says `inactive` and `no migrate running`).
+A change to the disk, seed, network or MAC address in `fff-vm.conf` is not the nightly's: stop the VM and run
+`install.sh --host-only`, which defines whatever changed while the VM is off. `install.sh` never redefines a running VM;
+it says what the nightly will apply.
+
+A host installed before 2026-10-06 (w537) has the older `fff-vm`, which restarts the VM without applying anything:
+update the host's scripts once, `git -C ~/ff-factory pull && sudo ~/ff-factory/deploy/vm/host/install.sh --host-only
+--yes` (it leaves the running VM alone).
 
 ## If it must come off again
 

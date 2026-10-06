@@ -5,7 +5,8 @@
 #   fff-vm ssh [CMD...]      a shell (or CMD) in the guest as the admin user, over the private network
 #   fff-vm console           the guest's serial console (Ctrl+] leaves)
 #   fff-vm watch             one hang check (fff-vm-watch.timer runs it every minute)
-#   fff-vm nightly [--now]   drain the portal, shut the VM down, snapshot the disk, start it (fff-vm-nightly.timer)
+#   fff-vm nightly [--now]   drain the portal, shut the VM down, snapshot the disk, apply a size change in fff-vm.conf,
+#                            start it (fff-vm-nightly.timer); back to the previous definition if it does not come up
 #   fff-vm events            alerts on libvirt's watchdog, crash and stop events (fff-vm-events.service)
 #   fff-vm snapshots         the disk's snapshots
 #   fff-vm notify-test       send a test alert to the ntfy topic
@@ -171,8 +172,87 @@ snapshot_prune() {
   done
 }
 
+# ---------------------------------------------------------------- nightly: fff-vm.conf's changes to the domain (w537)
+# Applied while the VM is off; libvirt's previous definition is kept to go back to when the VM does not come up with the
+# new one. A definition that was gone back from is not tried again until fff-vm.conf changes (domain.rejected).
+DOM_PREV=$FFF_VM_ETC/domain.libvirt-prev.xml
+DOM_REJECTED=$FFF_VM_STATE/domain.rejected
+DOM_APPLIED=""
+DOM_BACK=""
+dom_sha() { domain_xml | sha256sum | cut -c1-16; }
+dom_rejected() { [ -f "$DOM_REJECTED" ] && [ "$(cut -d' ' -f1 "$DOM_REJECTED")" = "$(dom_sha)" ]; }
+dom_pending() { domain_changes | paste -sd ';' - | sed 's/;/; /g'; }
+
+domain_apply() {
+  local changes foreign tmp err
+  changes=$(dom_pending)
+  [ -n "$changes" ] || return 0
+  foreign=$(domain_foreign)
+  if [ -n "$foreign" ]; then
+    notify "fff-vm: VM settings not applied" "fff-vm.conf changes $VM_NAME ($changes), but also its disk, seed, network or MAC address ($foreign), which the nightly never applies: stop the VM and run install.sh --host-only. It runs its current definition."
+    return 0
+  fi
+  if dom_rejected; then
+    log "not applying fff-vm.conf ($changes): the VM did not come up with it ($(cut -d' ' -f2- "$DOM_REJECTED")); tried again once fff-vm.conf changes"
+    return 0
+  fi
+  log "applying fff-vm.conf to $VM_NAME: $changes"
+  tmp=$(mktemp)
+  domain_xml >"$tmp"
+  if [ -f "$FFF_VM_ETC/domain.xml" ]; then
+    { diff "$FFF_VM_ETC/domain.xml" "$tmp" || true; } | sed -n 's/^\([<>]\) */\1 /p' | while IFS= read -r l; do log "  $l"; done
+  fi
+  # Nothing is defined unless the way back is saved first.
+  if ! v dumpxml --inactive "$VM_NAME" >"$tmp.prev" 2>/dev/null || ! matches '<uuid>' "$tmp.prev" || ! install -m 0600 "$tmp.prev" "$DOM_PREV"; then
+    rm -f "$tmp" "$tmp.prev"
+    notify "fff-vm: VM settings not applied" "libvirt's current definition of $VM_NAME could not be saved to $DOM_PREV, so fff-vm.conf's change ($changes) was not applied."
+    return 0
+  fi
+  rm -f "$tmp.prev"
+  if ! err=$(domain_define "$tmp" 2>&1); then
+    rm -f "$tmp"
+    echo "$(dom_sha) $(date -u +%FT%TZ): libvirt refused it: ${err//$'\n'/ }" >"$DOM_REJECTED"
+    notify "fff-vm: VM settings not applied" "libvirt refused the definition fff-vm.conf asks for ($changes): ${err//$'\n'/ }. $VM_NAME runs its current definition; not tried again until fff-vm.conf changes."
+    return 0
+  fi
+  if [ -f "$FFF_VM_ETC/domain.xml" ]; then cp -p "$FFF_VM_ETC/domain.xml" "$FFF_VM_ETC/domain.xml.prev"; fi
+  install -m 0600 "$tmp" "$FFF_VM_ETC/domain.xml"
+  rm -f "$tmp"
+  DOM_APPLIED=$changes
+  log "defined; libvirt's previous definition is kept in $DOM_PREV"
+}
+
+# domain_back WHY: define the previous definition again (the VM stopped first) and remember why.
+domain_back() {
+  local why=$1
+  log "going back to the previous definition: $why"
+  [ "$(dom_state)" = "shut off" ] || stop_vm || true
+  v define "$DOM_PREV" >/dev/null || notify "fff-vm: going back failed" "$VM_NAME: libvirt refused its previous definition ($DOM_PREV) too; it starts with the new one. Look: sudo virsh dumpxml --inactive $VM_NAME."
+  if [ -f "$FFF_VM_ETC/domain.xml.prev" ]; then cp -p "$FFF_VM_ETC/domain.xml.prev" "$FFF_VM_ETC/domain.xml"; fi
+  echo "$(dom_sha) $(date -u +%FT%TZ): $why" >"$DOM_REJECTED"
+  DOM_BACK=$why
+}
+
+# stop_vm: a clean shutdown (the guest agent, else ACPI); forced off after 5 minutes, and then it fails.
+stop_vm() {
+  v shutdown "$VM_NAME" --mode agent,acpi >/dev/null 2>&1 || v shutdown "$VM_NAME" >/dev/null 2>&1 || true
+  for _ in $(seq 60); do [ "$(dom_state)" = "shut off" ] && return 0; sleep 5; done
+  log "no clean shutdown in 5 minutes; forcing it off"
+  v destroy "$VM_NAME" || true
+  return 1
+}
+
+# wait_up: the guest agent within 5 minutes (else an alert), then the portal within 10; fails when the portal does not
+# answer.
+wait_up() {
+  for _ in $(seq 60); do agent_ok && break; sleep 5; done
+  agent_ok || notify "fff-vm: nightly start" "$VM_NAME did not answer its guest agent within 5 minutes of the nightly start."
+  for _ in $(seq 120); do portal_healthy && return 0; sleep 5; done
+  return 1
+}
+
 cmd_nightly() {
-  local force=${1:-} t0 out rc reason="" pid
+  local force=${1:-} t0 out rc reason="" pid err up=yes
   t0=$(now)
   if [ "$NIGHTLY_MODE" = off ] && [ "$force" != --now ]; then log "NIGHTLY_MODE=off"; return 0; fi
   [ "$(dom_state)" = running ] || { log "$VM_NAME is $(dom_state); nothing to do"; return 0; }
@@ -184,6 +264,8 @@ cmd_nightly() {
     if [ -n "$pid" ] && readlink "/proc/$pid/exe" 2>/dev/null | matches '(deleted)'; then
       reason="${reason:+$reason; }the host's QEMU was updated"
     fi
+    out=$(dom_pending)
+    if [ -n "$out" ] && ! dom_rejected && [ -z "$(domain_foreign)" ]; then reason="${reason:+$reason; }fff-vm.conf changes the VM ($out)"; fi
     [ -n "$reason" ] || { log "if-required: no reboot needed tonight"; return 0; }
   fi
   touch "$MAINT"
@@ -198,20 +280,30 @@ cmd_nightly() {
     125) log "the guest agent did not take the drain; shutting down anyway (the portal's own SIGTERM stop records what to resume)" ;;
     *) log "the drain ended with $rc (${out//$'\n'/ }); shutting down anyway" ;;
   esac
-  v shutdown "$VM_NAME" --mode agent,acpi >/dev/null 2>&1 || v shutdown "$VM_NAME" >/dev/null 2>&1 || true
-  for _ in $(seq 60); do [ "$(dom_state)" = "shut off" ] && break; sleep 5; done
-  if [ "$(dom_state)" != "shut off" ]; then
-    log "no clean shutdown in 5 minutes; forcing it off"
-    v destroy "$VM_NAME" || true
-    notify "fff-vm: nightly forced off" "$VM_NAME did not shut down within 5 minutes at the nightly restart and was forced off."
-  fi
+  stop_vm || notify "fff-vm: nightly forced off" "$VM_NAME did not shut down within 5 minutes at the nightly restart and was forced off."
   # The disk is consistent now: no writer.
   if snapshot_create "fff-nightly-$(date -u +%Y%m%d-%H%M)"; then snapshot_prune; else warn "snapshot failed"; fi
-  v start "$VM_NAME"
-  for _ in $(seq 60); do agent_ok && break; sleep 5; done
-  agent_ok || notify "fff-vm: nightly start" "$VM_NAME did not answer its guest agent within 5 minutes of the nightly start."
-  for _ in $(seq 120); do portal_healthy && break; sleep 5; done
-  if portal_healthy; then
+  # The VM starts whatever happened in there.
+  domain_apply || warn "applying fff-vm.conf failed (exit $?)"
+  if ! err=$(v start "$VM_NAME" 2>&1); then
+    [ -n "$DOM_APPLIED" ] || die "$VM_NAME did not start: ${err//$'\n'/ }"
+    domain_back "it did not start: ${err//$'\n'/ }"
+    v start "$VM_NAME"
+  fi
+  if ! wait_up; then
+    up=no
+    if [ -n "$DOM_APPLIED" ] && [ -z "$DOM_BACK" ]; then
+      domain_back "the portal did not answer within 15 minutes of the start"
+      v start "$VM_NAME"
+      if wait_up; then up=yes; fi
+    fi
+  fi
+  if [ -n "$DOM_BACK" ]; then
+    notify "fff-vm: VM settings rolled back" "fff-vm.conf asked for $DOM_APPLIED, and $DOM_BACK. $VM_NAME runs its previous definition again; the portal is $([ "$up" = yes ] && echo up || echo 'NOT up either'). Not tried again until fff-vm.conf changes; details: journalctl -u fff-vm-nightly."
+  elif [ -n "$DOM_APPLIED" ]; then
+    log "applied: $DOM_APPLIED"
+  fi
+  if [ "$up" = yes ]; then
     log "nightly done in $(($(now) - t0)) s; the portal is up"
   else
     notify "fff-vm: portal not back" "After the nightly restart the FF Factory portal in $VM_NAME has not answered for 10 minutes; fff-vm watch keeps checking."
@@ -234,8 +326,32 @@ cmd_events() {
 }
 
 # ---------------------------------------------------------------- status
+# The domain's definition against fff-vm.conf, in a line.
+dom_status() {
+  local pending next
+  dom_exists || { echo "no domain"; return 0; }
+  pending=$(dom_pending)
+  if [ -z "$pending" ]; then
+    next=$(dom_size --inactive)
+    if [ "$(dom_state)" = running ] && [ "$next" != "$(dom_size)" ]; then
+      echo "matches fff-vm.conf; the next start runs ${next#* } vCPUs, ${next% *} MiB"
+    else
+      echo "matches fff-vm.conf"
+    fi
+  elif [ -n "$(domain_foreign)" ]; then
+    echo "fff-vm.conf changes $pending, and names another disk, seed, network or MAC address ($(domain_foreign)): install.sh's to apply, never the nightly's"
+  elif dom_rejected; then
+    echo "fff-vm.conf asks for $pending; the VM did not come up with it ($(cut -d' ' -f2- "$DOM_REJECTED")): not tried again until fff-vm.conf changes"
+  else
+    echo "fff-vm.conf asks for $pending: the next nightly applies it ($NIGHTLY_TIME $NIGHTLY_TZ, NIGHTLY_MODE=$NIGHTLY_MODE), or now: sudo fff-vm nightly --now"
+  fi
+}
+
 cmd_status() {
-  echo "VM $VM_NAME: $(dom_state) ($VM_VCPUS vCPUs, $VM_MEMORY_MB MiB, disk $(vm_disk_path))"
+  local size
+  size=$(dom_size)
+  echo "VM $VM_NAME: $(dom_state) (${size:+${size#* } vCPUs, ${size% *} MiB, }disk $(vm_disk_path))"
+  echo "  definition: $(dom_status)"
   echo "  autostart: $(v dominfo "$VM_NAME" 2>/dev/null | awk '/^Autostart:/ {print $2}'); QEMU process age: $(qemu_age) s"
   echo "  guest agent: $(agent_ok && echo answers || echo 'no answer')"
   echo "  portal http://$NET_VM_IP:$PORTAL_PORT/api/health: $(curl -fsS -m 10 "http://$NET_VM_IP:$PORTAL_PORT/api/health" 2>/dev/null || echo 'no answer')"
@@ -258,6 +374,6 @@ case "${1:-status}" in
   events) cmd_events ;;
   snapshots) snapshot_list ;;
   notify-test) notify "fff-vm: test" "A test alert from $(hostname -s) (fff-vm notify-test)." ;;
-  -h | --help | help) sed -n '2,11p' "$0" ;;
+  -h | --help | help) sed -n '2,12p' "$0" ;;
   *) die "unknown command $1 (fff-vm help)" ;;
 esac

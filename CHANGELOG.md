@@ -12,6 +12,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The nightly cold restart applies a size changed in `/etc/fff-vm/fff-vm.conf`** (w537, Lothsahn: "Can we make it do
+  that during the update automatically?"). With the VM off, `fff-vm nightly` (and `--now`) defines the domain again
+  from the settings, logs what changed, keeps libvirt's previous definition (`/etc/fff-vm/domain.libvirt-prev.xml`), and
+  defines that one again with an alert if libvirt refuses the new one, the VM does not start with it, or the portal does
+  not answer within 15 minutes; that size is not tried again until the settings change. `install.sh` and the nightly
+  share the domain's template (`domain_xml`, `deploy/vm/host/lib.sh`); `install.sh` no longer redefines a running VM
+  and says what the nightly will apply. `fff-vm status` shows the VM's real size and any change waiting. Fixed on the
+  way: a redefinition of the existing domain was refused by libvirt ("domain 'fff-portal' already exists with uuid
+  ..."), because the definition carried no uuid; it now carries the domain's. A host installed before this updates its
+  scripts once (`install.sh --host-only --yes`, RUNBOOK section 7).
 - **The portal VM has 4 GiB of RAM, not 8** (w537, Lothsahn: "Change the VM to 4GB ram"). `fff-vm.conf.example`'s
   `VM_MEMORY_MB=4096`, so a rebuilt VM and CI's nested VM boot that size. Basis, measured from w442's 20-hour run on
   BEAST: the whole portal (the node server and every Claude process under it, summed per sample) peaked at 1,134 MB

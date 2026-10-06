@@ -127,7 +127,7 @@ else
 fi
 if [ "$DRY_RUN" != 1 ]; then
   mv "$FFF_VM_MANIFEST" "$FFF_VM_MANIFEST.uninstalled-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
-  rm -rf "$FFF_VM_RUN" "$FFF_VM_STATE/watch.state"
+  rm -rf "$FFF_VM_RUN" "$FFF_VM_STATE/watch.state" "$FFF_VM_STATE/domain.rejected"
 fi
 log "uninstalled"
 [ "$DRY_RUN" != 1 ] || log "DRY RUN finished: nothing was changed"
