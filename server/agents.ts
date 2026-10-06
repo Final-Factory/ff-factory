@@ -9,7 +9,7 @@ import type { MaxManager } from './max.ts';
 import { eventsFileOf, maxEnv } from './maxEvents.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
-import { agentState, agentStateText, isWaitingAgent, sortAgents } from '../shared/agentState.ts';
+import { agentState, agentStateText, holdsItsPlace, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 
 /** A live state as list_work takes it (shared/workState.ts). */
@@ -398,11 +398,16 @@ export class Agents {
   syncWaiting() {
     const queued = this.sessions.queued();
     for (const s of this.store.sessions.values()) {
-      const wakeAt = this.waker.pending(s.id)?.at;
+      const wake = this.waker.pending(s.id);
+      const wakeAt = wake?.at;
+      // Its note's start (w509): what the agent said it will check then.
+      const wakeNote = wake?.note ? wake.note.replace(/\s+/g, ' ').trim().slice(0, 120) : undefined;
       const queuedSend = queued.find((q) => q.id === s.id)?.why;
-      if (s.wakeAt === wakeAt && s.queuedSend === queuedSend) continue;
+      if (s.wakeAt === wakeAt && s.wakeNote === wakeNote && s.queuedSend === queuedSend) continue;
       if (wakeAt) s.wakeAt = wakeAt;
       else delete s.wakeAt;
+      if (wakeNote) s.wakeNote = wakeNote;
+      else delete s.wakeNote;
       if (queuedSend) s.queuedSend = queuedSend;
       else delete s.queuedSend;
       this.store.putSession(s);
@@ -1728,7 +1733,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   private liveAgents(ids: string[]): { live: SessionInfo[]; earlier: number } {
     const all = ids.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
     // A stopped agent its wake_me or a queued message will resume is Waiting, and listed with the live ones (w475).
-    const live = sortAgents(all.filter((s) => this.sessions.sessions.get(s.id)?.live || BUSY_STATUS.has(s.status) || s.pendingPermissions.length > 0 || isWaitingAgent(s)));
+    // A stopped agent its check-in or a queued message will resume (w509: Stopped, not Waiting) is listed with the live ones.
+    const live = sortAgents(all.filter((s) => this.sessions.sessions.get(s.id)?.live || BUSY_STATUS.has(s.status) || s.pendingPermissions.length > 0 || holdsItsPlace(s)));
     return { live, earlier: all.length - live.length };
   }
 
@@ -1875,15 +1881,21 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     return on ? (placementHint(on, this.places(), this.lastPlaced, this.cfg.placement, this.review?.root) ?? '') : '';
   }
 
+  /** A place's sessions, for sorting places by their agents' state (w509). */
+  private sessionsOf(ids: readonly string[]): SessionInfo[] {
+    return ids.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
+  }
+
   describeAllSandboxes(): string {
-    const host = this.sandboxes.list();
+    // Sandboxes by status (w509): a Working agent first, then Waiting, then Idle, then empty or unused; latest activity first.
+    const host = sortPlaces(this.sandboxes.list(), (sb) => this.sessionsOf(sb.sessionIds));
     const local = this.machines.local();
     // Once this host's own daemon holds its sandboxes, the host's old pool is shown only while it still has some.
     const parts = portalOnly(this.cfg) ? [`## this host: no sandboxes (${PORTAL_ONLY_WHY}); work goes to the machines below`] : local && !host.length ? [] : [`## this host (${host.length}/${this.cfg.limits.maxSandboxes} sandboxes, ${host.filter((s) => this.free(s)).length} free)`, ...host.map((s) => this.describeSandbox(s))];
     for (const m of this.machines.list()) {
       const pool = poolSettingsOf(m);
       if (!pool && !m.sandboxes?.length) continue;
-      const sbs = m.sandboxes ?? [];
+      const sbs = sortPlaces(m.sandboxes ?? [], (sb) => this.sessionsOf(sb.sessionIds));
       const disk = this.machines.diskOf(m.id);
       const state = this.machines.isOnline(m.id) ? 'online' : 'OFFLINE (last known state)';
       const u = this.machines.statsOf(m.id)?.unity;

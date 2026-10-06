@@ -21,7 +21,7 @@ test('the Overview shows Working, Waiting and Idle agents in that order, Waiting
   const status = async (id: string) => (await appState(page.request)).sessions.find((s) => s.id === id)?.status;
   for (const s of [idle, waits, task]) await expect.poll(() => status(s.id), { timeout: 15_000 }).toBe('idle');
   await hook(page.request, 'wake', { id: waits.id, minutes: 30 });
-  await hook(page.request, 'patch-session', { id: task.id, patch: { backgroundTasks: 1 } });
+  await hook(page.request, 'patch-session', { id: task.id, patch: { backgroundTasks: 1, backgroundJobs: [{ type: 'local_bash', description: `CI on PR #1098 ${tag}` }] } });
   await expect.poll(async () => (await appState(page.request)).sessions.find((s) => s.id === waits.id)?.wakeAt).toBeTruthy();
 
   await go(page, '#/overview');
@@ -30,8 +30,11 @@ test('the Overview shows Working, Waiting and Idle agents in that order, Waiting
   const line = (title: string) => lines.filter({ hasText: title });
   await expect(line(`Check-in ${tag}`)).toContainText('waiting');
   await expect(line(`Check-in ${tag}`).locator('.fl-agent-state')).toHaveClass(/tone-violet/);
-  await expect(line(`Check-in ${tag}`)).toHaveAttribute('title', /waiting \(check-in at \d\d:\d\d/);
-  await expect(line(`Build ${tag}`)).toHaveAttribute('title', /waiting \(a background task\)/);
+  await expect(line(`Check-in ${tag}`)).toHaveAttribute('title', /waiting \(check-in \d\d:\d\d.*: “e2e check-in”\)/);
+  // What it waits on, on the board itself (w509): the running job's description, or the check-in and its note.
+  await expect(line(`Build ${tag}`).getByTestId('fl-agent-why')).toHaveText(`CI on PR #1098 ${tag}`);
+  await expect(line(`Check-in ${tag}`).getByTestId('fl-agent-why')).toContainText('“e2e check-in”');
+  await expect(line(`Build ${tag}`)).toHaveAttribute('title', new RegExp(`waiting \\(CI on PR #1098 ${tag}\\)`));
   await expect(line(`Idle ${tag}`)).toContainText('idle');
 
   // A working one goes to the top while its turn runs (#slow streams for a few seconds).
@@ -56,6 +59,6 @@ test("an agent's page says Waiting and on what", async ({ authed: page }) => {
   await hook(page.request, 'wake', { id: s.id, minutes: 30 });
   await go(page, `#/sandbox/alpha/${s.id}`);
   // Tabs on a wide screen, a picker on a phone: each names the state and what it waits on.
-  if (isMobile(page)) await expect(page.locator('option', { hasText: `Waits ${tag}` })).toHaveText(/Waits \S+ · Waiting: check-in at \d\d:\d\d/);
-  else await expect(page.getByRole('tab', { name: new RegExp(`Waits ${tag}`) })).toHaveAttribute('title', /^Waits \S+: Waiting: check-in at \d\d:\d\d/);
+  if (isMobile(page)) await expect(page.locator('option', { hasText: `Waits ${tag}` })).toHaveText(/Waits \S+ · Waiting: check-in \d\d:\d\d/);
+  else await expect(page.getByRole('tab', { name: new RegExp(`Waits ${tag}`) })).toHaveAttribute('title', /^Waits \S+: Waiting: check-in \d\d:\d\d/);
 });

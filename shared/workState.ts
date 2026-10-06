@@ -101,7 +101,7 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   if (w.ffbox && (w.ffbox.state === 'sent' || w.ffbox.state === 'accepted')) return { state: 'working', why: `on FFBox${w.ffbox.conversation ? ` (conversation ${w.ffbox.conversation})` : ''}` };
 
   // Waiting (w475): a worker on it is between turns but will come back to it, so it is not stalled.
-  const coming = mine.map((s) => ({ s, a: agentState(s) })).find((x) => x.a.state === 'waiting');
+  const coming = mine.map((s) => ({ s, a: agentState(s, undefined, f.now) })).find((x) => x.a.state === 'waiting');
   if (coming) return { state: 'pending', why: `worker ${coming.s.id}'s ${coming.a.waitsOn}` };
 
   // Waiting on input: a person must approve, answer, decide or allow something.

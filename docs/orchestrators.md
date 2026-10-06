@@ -489,24 +489,38 @@ workers"; `shared/agentState.ts` `agentState`):
 | State | When | Shown as |
 |---|---|---|
 | **Working** | mid-turn: `running` or `starting` (a permission request shows as **Needs you**) | blue |
-| **Waiting** | between turns (idle, or stopped and due to be resumed) but committed: a pending `wake_me` (its check-in time), a message for it held in the send queue for a free slot, or (idle only, since a restart ends them) a background task or watcher still open | violet, with what it waits on and when: "Waiting: check-in at 23:12", "Waiting: a background task", "Waiting: a queued message (…)" |
+| **Waiting** | alive between turns (idle) with something real pending, checked in this order: a **running job** (a background task or watcher the agent started, which a restart ends), a message for it held in the send queue for a free slot, or only a **timer** (its `wake_me` check-in, still ahead) | violet, with what it waits on (w509): "Waiting: CI on PR #1098 · check-in 06:10 UTC" (a job, by the description the agent gave it), "Waiting: a queued message (…)", "Waiting: check-in 16:29 UTC: “merge #1083 when…”" (a timer, with its note's first words) |
 | **Idle** (available) | finished its turn with nothing pending: free for new work, and the idle reaper's candidate | grey; a worker reads "Idle (available)" |
-| **Stopped** | no process and nothing to resume it, as before | grey |
+| **Stopped** | no process. Never Waiting (w509). When its check-in or a queued message will start it again it says so, "Stopped (resumes at check-in tomorrow 00:08 UTC)", is listed with the live agents and keeps its sandbox from counting as free | grey |
 
-- **Where the facts come from.** The server copies each session's pending `wake_me` and queued message onto it
-  (`SessionInfo.wakeAt`, `queuedSend`; `Agents.syncWaiting`, run whenever the wakes or the send queue change and once at
-  boot); `backgroundTasks` was already there. An editor or test job the agent started is not a fact of its own: an
-  agent that waits on one sets a `wake_me` (as eb9632fd did for w448), which shows.
+A check-in more than 2 minutes past its time has fired or is failing to (`Waker.fire` retries a refused delivery for
+up to 10 minutes, then gives up and says so in the agent's transcript): it is not pending, so it no longer makes an
+agent Waiting or resuming. Times carry their day when it is not today ("tomorrow 00:08 UTC"): w509 started from two
+stopped workers listed as "Waiting: check-in at 16:29 UTC" that read like yesterday's. Measured on BEAST on 2026-10-06 at
+06:06 UTC, every wake in `data/wakes.json` was still ahead; those two had been set by the workers themselves with "Nothing
+to do; ignore this reminder" notes, so no past wake had failed to fire and no record was stale.
+
+- **Where the facts come from.** The server copies each session's pending `wake_me`, its note's start and a queued
+  message onto it (`SessionInfo.wakeAt`, `wakeNote`, `queuedSend`; `Agents.syncWaiting`, run whenever the wakes or the
+  send queue change and once at boot). The SDK's live set of background tasks gives `backgroundTasks` and, since w509,
+  `backgroundJobs`: each one's description and kind (`server/sessions.ts`, `background_tasks_changed`), which a machine's
+  daemon forwards too once it runs this version (until then: "a background task"). An editor or test job the agent
+  started from a background command shows by that command's description; one it waits on otherwise is a `wake_me`.
 - **Where it shows.** The page: every agent list, the sandbox and machine glances ("Waiting"), the agent tabs and
   pickers, the session header, and the sidebar and Overview, which list a place's agents **Working, then Waiting, then
   Idle, then Stopped**, the most recent activity first within each (Lothsahn: "sort the running at the top, waiting below
   them, and idle below them"). `list_sandboxes` and `list_machines` put the state first on each agent's line
   (`[Waiting: check-in at 23:12 UTC, idle]`), in the same order, and list a stopped agent its wake will resume with the
   live ones. The ledger's request states show a request whose worker is Waiting as **Waiting** (above), not Stalled.
+  The Overview board shows what a Waiting agent waits on beside its state (the full text on hover).
+- **Sandboxes by status** (w509, Lothsahn). The Overview and the sidebar (per computer) and `list_sandboxes` (per
+  computer) list sandboxes with a Working agent (or one that needs you) first, then Waiting, then Idle, then those
+  with no live agent, unused ones last; the most recent activity first within each (`placeRank`, `sortPlaces`).
 - **What it changes.** A sandbox whose agent is Waiting is not free (the capacity block, placement, `list_sandboxes`'
-  FREE). The dispatcher's brief says never to give new work to a Waiting worker or its sandbox unless the request is its
-  own. The ledger cleanup treats a Waiting worker as busy: its request is neither stalled nor asked "Is it done?"
-  (`server/ledgerSweep.ts`). The idle reaper already kept such workers (`keepIdle`: a pending wake_me, a queued message,
+  FREE), nor is one whose stopped agent will resume there (`holdsItsPlace`). The dispatcher's brief says never to give
+  new work to a Waiting worker or its sandbox unless the request is its own. The ledger cleanup treats a Waiting worker,
+  and a stopped one its check-in will resume, as busy: its request is neither stalled nor asked "Is it done?"
+  (`server/ledgerSweep.ts`). The agents meter still counts agents mid-turn against the limit (w384), as Lothsahn asked. The idle reaper already kept such workers (`keepIdle`: a pending wake_me, a queued message,
   background tasks).
 
 ## Agent limits and idle workers

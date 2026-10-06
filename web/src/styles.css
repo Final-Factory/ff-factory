@@ -175,6 +175,8 @@ code,
 .tone-grey { color: var(--text-3); }
 .tone-red { color: var(--red); }
 .tone-violet { color: var(--violet); }
+/* What a Waiting agent waits on, beside its state on the Overview board (w509). */
+.fl-agent-why { flex: 0 1 auto; color: var(--text-3); font-size: var(--fs-xs); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 22ch; }
 
 .show-phone {
   display: none !important;
@@ -5385,7 +5387,8 @@ body {
 
 .fl-agent-title {
   flex: 1;
-  min-width: 0;
+  /* Room for the title before what a Waiting agent waits on (w509). */
+  min-width: 12ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

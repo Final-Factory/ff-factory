@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { agentState, type AgentState } from '../../shared/agentState.ts';
+import { agentState, type AgentState, type WaitKind } from '../../shared/agentState.ts';
 import type { AppVersion, ImageInput, Machine, MachineSandbox, MaxSummary, PermissionMode, Provider, Sandbox, SessionInfo, WorkItem, WorkStatus, SessionStatus, UnityState, SandboxStatus, StandingAgent, StandingRunOutcome, StandingTrigger } from '../../shared/types';
 import { displayName, isUnused } from '../../shared/labels';
 import { updaterHealth } from '../../shared/updaterHealth';
@@ -208,10 +208,18 @@ export function fmtUntil(iso: string | undefined, now: number): string {
 
 /** An agent's state (shared/agentState.ts, w475) as the page shows it: its tone, its word, and what it waits on in the browser's time. */
 const STATE_TONE: Record<AgentState, Tone> = { working: 'blue', needs_you: 'amber', waiting: 'violet', idle: 'grey', error: 'red', stopped: 'grey' };
-const localTime = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-export function agentView(s: SessionInfo): { tone: Tone; label: string; text: string; waitsOn?: string } {
+/** "06:10", "tomorrow 00:08" or a date: the browser's clock, with the day when it is not today (w509). */
+const localTime = (iso: string, now: number) => {
+  const at = new Date(iso);
+  const hm = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const day = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((day(at) - day(new Date(now))) / 86_400_000);
+  return days === 0 ? hm : days === 1 ? `tomorrow ${hm}` : `${at.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${hm}`;
+};
+export function agentView(s: SessionInfo): { tone: Tone; label: string; text: string; waitsOn?: string; kind?: WaitKind } {
   const a = agentState(s, localTime);
-  return { tone: STATE_TONE[a.state], label: a.state === 'idle' && s.kind === 'worker' ? 'Idle (available)' : a.label, text: a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.label, ...(a.waitsOn ? { waitsOn: a.waitsOn } : {}) };
+  const text = a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes})` : a.label;
+  return { tone: STATE_TONE[a.state], label: a.state === 'idle' && s.kind === 'worker' ? 'Idle (available)' : a.label, text, ...(a.waitsOn ? { waitsOn: a.waitsOn } : {}), ...(a.kind ? { kind: a.kind } : {}) };
 }
 
 export function isBusy(s: SessionInfo | undefined): boolean {
