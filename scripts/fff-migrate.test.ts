@@ -298,7 +298,7 @@ for ($i = 0; $i -lt 120; $i++) { try { $null = Invoke-WebRequest -UseBasicParsin
   // ---- the fakes: ssh runs BEAST's side here; schtasks.exe and claude record what they were asked
   const fake = path.join(base, 'bin');
   fs.mkdirSync(fake);
-  fs.writeFileSync(path.join(fake, 'fake.env'), `PWSH=${JSON.stringify(PWSH)}\nLOG=${JSON.stringify(path.join(base, 'ssh.log'))}\nTASKS=${JSON.stringify(path.join(base, 'schtasks.log'))}\nCLAUDE_LOG=${JSON.stringify(path.join(base, 'claude.log'))}\nDENY=${JSON.stringify(path.join(base, 'deny'))}\nTOKEN_FILE=${JSON.stringify(path.join(vm, 'secrets', 'claude-oauth-token'))}\n`);
+  fs.writeFileSync(path.join(fake, 'fake.env'), `PWSH=${JSON.stringify(PWSH)}\nLOG=${JSON.stringify(path.join(base, 'ssh.log'))}\nTASKS=${JSON.stringify(path.join(base, 'schtasks.log'))}\nCLAUDE_LOG=${JSON.stringify(path.join(base, 'claude.log'))}\nDENY=${JSON.stringify(path.join(base, 'deny'))}\nOLD_BEAST=${JSON.stringify(path.join(base, 'old-beast'))}\nTOKEN_FILE=${JSON.stringify(path.join(vm, 'secrets', 'claude-oauth-token'))}\n`);
   const script = (name: string, body: string) => fs.writeFileSync(path.join(fake, name), `#!/usr/bin/env bash\nset -euo pipefail\n. "$(dirname "$0")/fake.env"\n${body}`, { mode: 0o755 });
   script(
     'ssh',
@@ -312,6 +312,8 @@ if [ -e "$DENY" ]; then echo "$dest: Permission denied (publickey)." >&2; exit 2
 if [ "\${1:-}" = powershell.exe ]; then
   shift; args=()
   while [ $# -gt 0 ]; do case "$1" in -ExecutionPolicy) shift 2 ;; *) args+=("$1"); shift ;; esac; done
+  # A BEAST portal from before w499 (2/3) ignores relocate: as if the request had none.
+  if [ -e "$OLD_BEAST" ]; then sed 's/,"relocate":"[^"]*"//' | "$PWSH" "\${args[@]}"; exit; fi
   exec "$PWSH" "\${args[@]}"
 fi
 exec "$@"
@@ -399,6 +401,9 @@ test('fffctl migrate --dry-run-copy, again, then --rollback-dry-run: a read-only
   assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'tokenfile', dispatcher: 'tokenfile' });
   assert.equal(cfg.dataDir, path.join(w.vm, 'data'));
   assert.equal((fs.statSync(w.vmCfgFile).mode & 0o777).toString(8), '600');
+  // The data folder closed to others (the portal's own later writes inside it take its umask), the secrets and the
+  // pulled copy its owner's only.
+  for (const f of ['data', 'data/machine-tokens.json', 'migrate/stage', 'migrate/stage/beast/config.json']) assert.equal((fs.statSync(path.join(w.vm, f)).mode & 0o077).toString(8), '0', `${f} is its owner's only`);
   const state = JSON.parse(fs.readFileSync(path.join(w.vm, 'data', 'state.json'), 'utf8'));
   const beast = state.machines.find((x: { id: string }) => x.id === 'beast');
   assert.deepEqual([beast.local, beast.host, beast.portalUrl], [undefined, 'rydin@beast', w.publicUrl]);
@@ -539,3 +544,23 @@ test('fffctl migrate --cut-over: a portal here that does not come up puts everyt
   assert.ok(!(state.machines ?? []).some((x: { id: string }) => x.id === 'beast'));
 });
 
+
+test('fffctl migrate --cut-over: a BEAST portal too old to relocate is left running, and nothing here changes', { skip: skip ?? (lanIp() ? undefined : 'no network address'), timeout: 300_000 }, async (t) => {
+  const w = await world(t);
+  await w.beastPortal.start();
+  await w.beastPortal.healthy();
+  await w.vmPortal.start();
+  await w.vmPortal.healthy();
+  const vmCfgBefore = fs.readFileSync(w.vmCfgFile, 'utf8');
+  fs.writeFileSync(path.join(w.base, 'old-beast'), '');
+  w.sys.answers = ['CUT OVER'];
+  const m = migration(w, 'cut-over');
+  assert.equal(await m.cutOver(), 1);
+  const report = m.report.join('\n');
+  t.diagnostic(report);
+  assert.match(report, /drained but wrote no relocate result: it runs code from before w499 \(2\/3\)/);
+  assert.ok(!fs.existsSync(path.join(w.base, 'schtasks.log')), 'its task untouched');
+  assert.ok(w.beastPortal.child, "BEAST's portal still runs (held, then on by itself)");
+  assert.equal(fs.readFileSync(w.vmCfgFile, 'utf8'), vmCfgBefore);
+  assert.equal((await w.vmPortal.healthy()).ok, true, "this VM's portal is up again");
+});

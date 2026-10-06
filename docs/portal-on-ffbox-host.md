@@ -697,8 +697,8 @@ starting it.
 
 | # | Where | Today | Change | Size |
 |---|---|---|---|---|
-| 9 | `machine/daemon.ts:337`; `server/machineDeploy.ts:414-417` | a daemon dials the URL written at deploy | a `relocate {url}` message, so moving the portal (and moving it back) needs no ssh redeploy | S-M |
-| 10 | `server/sessions.ts:274` | sessions resume by Claude session id; Claude Code keeps histories under `<config dir>/projects/<the cwd as a folder name>`, and the orchestrators' cwd moves from `C:\ffsb\_base` to `/srv/fff/base`, standing agents' from `F:\ffsb\_agents\<name>` to `/srv/fff/agents/<name>` | the migration copies those folders under their new names *(guess: a resumed conversation accepts the new cwd; the dry run tests one)*. Fallback: a fresh conversation (`server/index.ts:894`), with the ledger and orchestrator memory carried over | S |
+| 9 | `machine/daemon.ts:337`; `server/machineDeploy.ts:414-417` | a daemon dials the URL written at deploy | **done** (w466, #115): a `relocate {url}` message, so moving the portal (and moving it back) needs no ssh redeploy. w499 adds `relocate` to `restart.request`, so the old portal sends its daemons on as it drains for the cut-over | S-M, done |
+| 10 | `server/sessions.ts:274` | sessions resume by Claude session id; Claude Code keeps histories under `<config dir>/projects/<the cwd as a folder name>`, and the orchestrators' cwd moves from `C:\ffsb\_base` to `/srv/fff/base`, standing agents' from `F:\ffsb\_agents\<name>` to `/srv/fff/agents/<name>` | **done** (w499): `fffctl migrate` copies each orchestrator's, the dispatcher's and this host's standing agents' conversation (`<sdkSessionId>.jsonl` and its folder) under the new folder name (`server/vmMigration.ts` `historyPlan`, `claudeProjectFolder`). The dry run resumes the dispatcher's with `claude --resume --fork-session` on the token file *(measured in CI with a fake CLI that finds the file by the new cwd; the real resume is the dry run's check on the VM)*. Fallback: a fresh conversation (`server/index.ts:894`), with the ledger and orchestrator memory carried over | S, done |
 | 11 | `server/agents.ts:2209`; `server/sandboxes.ts:331` | the base clone is fetched only by `list_branches` and sandbox creation, and its working tree, which orchestrators read, is never moved | in the VM `fff-base-refresh.timer` does it every 15 minutes; a server-side timer under `withBaseRepoLock` would serve other Linux hosts too | S |
 | 12 | `server/outsideWatch.ts:61-62,86` | the LAN adapter is read through PowerShell; off Windows the old values stay | clear them off Windows; optionally a second watch target with a fixed MAC, for waking BEAST | S |
 | 13 | `server/agents.ts:3083`, request_app_update's Windows text; `server/placement.ts:177,189`; `server/restart.ts:187` | text naming `F:\ffsb\_review`, "ssh to the M5 from BEAST" and `data/supervisor.log` | say where things are in the VM (`journalctl -u fff-update`, `fffctl logs`) | S |
@@ -732,6 +732,26 @@ Rough effort for 1 to 4, 6, 7, 18 and 19: about two weeks of one worker's time *
 
 The VM is idle until the cut-over, so the dry run uses it and is then rolled back. Nothing in it is visible to anyone,
 and the copy must not act on the world.
+
+**One command (w499):** `sudo fffctl migrate --dry-run-copy` inside the VM ([RUNBOOK](../deploy/vm/RUNBOOK.md),
+"Dry run"; `scripts/fff-migrate.ts`) does steps 1 to 4 and checks 1 and 3:
+
+- **Step 1:** its own snapshot of the VM's config and data in `/srv/fff/migrate/before`. `fff-vm nightly --now` first
+  still adds a disk snapshot.
+- **Step 2:** the Funnel off (tailnet only, `tailscale serve`) instead of a second node.
+- **Step 3:** the copy, pulled over ssh with the portal's key, timed. A file manifest makes a second run copy only what
+  changed.
+- **Step 4:** `FFSB_DRY_RUN=1` as a systemd drop-in, plus the rewrite of 7.3 step 5 and the backups paused.
+
+It reports PASS or FAIL for:
+
+- the dry-run start;
+- no "restored" note;
+- the counts against BEAST's copy;
+- one orchestrator conversation resuming.
+
+Step 6 is `sudo fffctl migrate --rollback-dry-run`. The steps below are what it does, and the checks a person still
+makes.
 
 1. **A snapshot to come back to:** `fff-vm nightly --now` (it drains nothing yet and snapshots the clean install).
 2. **A separate node**: `fffctl tailscale-join --hostname fff-dryrun` with Funnel, so no daemon, browser or FFBox finds
@@ -777,6 +797,26 @@ and the copy must not act on the world.
 
 At a quiet moment Ben and Lothsahn pick. Workers may be mid-turn (they keep running); nobody should be mid-conversation
 with an orchestrator.
+
+**One command (w499):** `sudo fffctl migrate --cut-over` inside the VM ([RUNBOOK](../deploy/vm/RUNBOOK.md), "Cut-over")
+does steps 2 to 6:
+
+1. It takes the first copy while BEAST runs.
+2. It asks for a typed `CUT OVER`.
+3. It stops the VM's own portal first, so relocated daemons meet a closed door rather than a refusal.
+4. It writes `restart.request` with `relocate` to BEAST over ssh. BEAST's portal drains, relocates its daemons and holds;
+   `relocate.result.json` lists each machine.
+5. It stops BEAST's portal with `stop-server.ps1` and disables `ffsb-server`.
+6. It copies the rest, rewrites it, starts the VM's portal, and waits for each relocated daemon's hello.
+
+Two refusals and one rollback:
+
+- **BEAST's code is too old:** a portal that drains without writing a relocate result runs code from before w499 (2/3).
+  It is left running.
+- **The VM's portal is not healthy:** the command puts the VM's data back and enables and starts `ffsb-server` again.
+  The daemons fall back to BEAST within about 10 minutes.
+
+Steps 7 and 8 stay by hand; the command prints them.
 
 1. **The day before**: the guest runs the release to be used, and the production node `fff` has joined, with Funnel and
    the tailnet policy in place. The portal is held (`fffctl prepare-shutdown`). The new public key is on the four

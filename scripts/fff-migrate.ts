@@ -388,6 +388,7 @@ export class Migration {
     writeJson(this.manifestFile(name), remote.filter((e) => !gone.has(e.path)));
     const total = remote.reduce((n, e) => n + e.size, 0);
     if (got.vanished.length) this.say(`  ${got.vanished.length} file(s) went on BEAST during the copy (fetched again next time if they come back)`);
+    await this.ownerOnly(dest);
     return { files: remote.length, bytes: got.bytes, fetched: fetch.length, removed: remove.length, ms: Date.now() - t0, total };
   }
 
@@ -430,7 +431,8 @@ export class Migration {
     const next = path.join(this.dir, 'next');
     fs.rmSync(next, { recursive: true, force: true });
     fs.mkdirSync(path.join(next, 'config'), { recursive: true, mode: 0o700 });
-    fs.cpSync(path.join(this.stage, 'beast', 'data'), path.join(next, 'data'), { recursive: true, preserveTimestamps: true });
+    // A reflink where the disk has them (the copy can be gigabytes); the stage stays as BEAST's, for the next delta.
+    fs.cpSync(path.join(this.stage, 'beast', 'data'), path.join(next, 'data'), { recursive: true, preserveTimestamps: true, mode: fs.constants.COPYFILE_FICLONE });
     const c = rewriteConfig(beastCfg, vm, { publicUrl, beastId: this.o.beastId });
     writeJson(path.join(next, 'config', 'config.json'), c.config);
     for (const n of c.notes) this.say(`  config: ${n}`);
@@ -446,10 +448,18 @@ export class Migration {
     return { next, publicUrl };
   }
 
+  /** The portal's account owns it, and only it reads it (its secrets among the rest). */
   private async chownTree(p: string) {
+    await this.ownerOnly(p);
     if (!this.o.user) return;
     const r = await run('chown', ['-R', `${this.o.user}:${this.o.user}`, p]);
     if (r.code !== 0) throw new Error(`chown ${p}: ${r.stderr.trim()}`);
+  }
+
+  private async ownerOnly(p: string) {
+    if (process.platform === 'win32' || !fs.existsSync(p)) return;
+    const r = await run('chmod', ['-R', 'go-rwx', p]);
+    if (r.code !== 0) throw new Error(`chmod ${p}: ${r.stderr.trim()}`);
   }
 
   /** The portal stopped: the rewritten copy becomes its config and data, and the conversations go where it resumes them. */
@@ -735,6 +745,8 @@ export class Migration {
     }
     const outcome = state.trim().split('\n').pop();
     if (outcome !== 'done') return giveUp(`BEAST's portal did not finish its drain (${outcome || failureDetail(wr)}; a hold gives up by itself after 5 minutes)`, relocated.some((m) => m.ok));
+    // Code from before the cut-over's relocate (w499, 2/3) drains and holds but moves no daemon, and writes no result.
+    if (!rest.trim()) return giveUp("BEAST's portal drained but wrote no relocate result: it runs code from before w499 (2/3), which cannot send its daemons here. Deploy it there first; its hold gives up by itself after 5 minutes", false);
     for (const m of relocated) this.say(`  ${m.ok ? 'relocated' : 'NOT relocated'}: ${m.machine}${m.ok ? '' : ` (${m.note}): redeploy it from here once it is up (machine_daemon redeploy)`}`);
     // 3. Stop BEAST's portal for good; its task disabled, so nothing starts it again.
     const st = await this.beast.ps(stopPs(this.o.beastRoot, this.o.beastTask, beastPort), undefined, 5 * 60_000);

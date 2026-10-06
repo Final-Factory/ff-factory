@@ -12,6 +12,30 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **`fffctl migrate`: the portal moves from BEAST into its VM with one command run in the VM** (w499, asked by Lothsahn:
+  "I'd ideally like the new orchestrator to be able to connect to beast and just download everything directly"). It
+  pulls BEAST's `config.json`, `data\` (without `data\tools` and the supervisor's files) and the conversations the
+  orchestrators, the dispatcher and BEAST's standing agents resume (change 10, under their new folder names). It uses
+  ssh with the portal's own key: `--key` prints the `from=` line to authorize on BEAST.
+  - `--dry-run-copy` snapshots the VM's own portal, pulls (read-only on BEAST: it lists files and runs `tar`), and
+    rewrites the copy for Linux. The rewrite covers the paths, `publicUrl`, BEAST from local to ssh, every machine's
+    portal URL, the outside watch without BEAST's MAC, the token-file accounts, voice off, the portal-only mode, and
+    BEAST's workers kept on their account. It then starts the copy with `FFSB_DRY_RUN=1` and the Funnel off, and
+    checks it: health, no restored data, counts, and the dispatcher's conversation resuming on the token file. Run
+    again, it copies only what changed.
+  - `--rollback-dry-run` puts the VM's own portal back and wipes the copy and its secrets.
+  - `--cut-over` asks for a typed `CUT OVER`, has BEAST's portal drain, relocate its daemons and hold, then stops it,
+    disables its task, copies the rest, starts the VM's portal and checks the daemons' hellos. It rolls everything back
+    by itself if the VM's portal does not come up, and leaves BEAST running if its code is too old to relocate.
+
+  Secrets travel only over ssh; the pulled copy is root-only (0700) and the installed data `fff`'s (0600); no token is
+  printed or put on a command line. `scripts/fff-migrate.ts`, `server/vmMigration.ts`, `deploy/vm/guest/fff-migrate`;
+  `deploy/vm/RUNBOOK.md` sections 4 and 5. Tests:
+  - `server/vmMigration.test.ts`: the rewrites;
+  - `scripts/fff-migrate.test.ts`: end to end against a synthetic BEAST through a fake ssh that runs BEAST's
+    PowerShell under pwsh and its tar as tar, with real portals on both sides and a real daemon moved at the cut-over
+    (Linux CI);
+  - the VM end-to-end: `fffctl migrate --key` in a real guest.
 - **The old portal sends its daemons to the new one at the cut-over** (w499): `restart.request` takes `relocate: "<portal
   base URL>"`. Once the drain is done the server relocates every connected machine daemon there (as
   `relocate_machines` does), writes each one's outcome to `data/relocate.result.json`, and only then writes `drain.done`
