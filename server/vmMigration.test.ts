@@ -6,12 +6,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, windowsPathsOffWindows } from './config.ts';
 import {
+  batchPlan,
   claudeProjectFolder,
   cleanOutsideWatch,
   countDiffs,
   countsOf,
+  expandSpec,
   historyPlan,
+  indexSpec,
   manifestDiff,
+  manifestDir,
   parseManifest,
   rewriteConfig,
   rewriteState,
@@ -190,4 +194,23 @@ test('vmMigration: the manifest is read safely, and the copy fetches only what c
   assert.deepEqual(d.remove, ['data/old.json']);
   for (const skip of ['data/tools/whisper/model.bin', 'data/supervisor.pid', 'data/supervisor.log', 'data/restart.request', 'data/drain.done', 'data/relocate.result.json']) assert.equal(skipOnCopy(skip), true, skip);
   for (const keep of ['data/state.json', 'data/resume.json', 'data/transcripts/x.jsonl', 'config.json', 'data/toolsets.json']) assert.equal(skipOnCopy(keep), false, keep);
+});
+
+test('vmMigration (w508): files are named to BEAST by their line in its list, in a few bytes, and copied in bounded batches', () => {
+  const text = '10\t1\tconfig.json\n20\t2\tdata/a\nbad line\n5\t1\t../escape\n30\t3\tdata/b\n#dir\t/tmp/fff-migrate-1\n';
+  const m = parseManifest(text);
+  assert.deepEqual(m.map((e) => [e.path, e.index]), [['config.json', 0], ['data/a', 1], ['data/b', 4]], 'every file line counts, a refused one too; a # note does not');
+  assert.equal(manifestDir(text), '/tmp/fff-migrate-1');
+  assert.equal(manifestDir('10\t1\tx\n'), undefined);
+  assert.equal(indexSpec([5, 1, 2, 3, 9, 10, 3]), '1-3,5,9-10');
+  assert.equal(indexSpec([]), '');
+  assert.deepEqual(expandSpec('1-3,5,9-10'), [1, 2, 3, 5, 9, 10]);
+  assert.deepEqual(expandSpec(''), []);
+  assert.throws(() => expandSpec('1-x'), /not an index range/);
+  const lines = Array.from({ length: 4001 }, (_, i) => i);
+  assert.ok(indexSpec(lines.filter((i) => i % 2 === 0)).length < 32 * 1024, 'even 2,000 scattered lines stay far under what BEAST takes on stdin');
+  const files = [10, 50, 300, 20, 20, 20, 20].map((size, index) => ({ path: `f${index}`, size, mtime: 0, index }));
+  assert.deepEqual(batchPlan(files, { maxFiles: 3, maxBytes: 100 }).map((b) => b.map((e) => e.path)), [['f0', 'f1'], ['f2'], ['f3', 'f4', 'f5'], ['f6']], 'a larger file alone; at most 3 files or 100 bytes');
+  assert.deepEqual(batchPlan([...files].reverse(), { maxFiles: 10, maxBytes: 1000 })[0].map((e) => e.index), [0, 1, 2, 3, 4, 5, 6], "in BEAST's order");
+  assert.deepEqual(batchPlan([], { maxFiles: 3, maxBytes: 100 }), []);
 });
