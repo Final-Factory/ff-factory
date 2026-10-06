@@ -25,7 +25,8 @@ while [ $# -gt 0 ]; do
     --source) SOURCE=$2; shift 2 ;;
     --ref) REF=$2; shift 2 ;;
     --repo-url) REPO=$2; shift 2 ;;
-    --absolute-worktrees) EXTRA=--absolute-worktrees; shift ;;
+    --absolute-worktrees) EXTRA="$EXTRA --absolute-worktrees"; shift ;;
+    --no-cleanup) EXTRA="$EXTRA --no-cleanup"; shift ;;
     --credential-file) CREDFILE=$2; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -71,4 +72,4 @@ trap '[ -n "$TEMP" ] && rm -rf "$TEMP"' EXIT
 FLAGS=(--disable-warning=ExperimentalWarning)
 [ "$BEST" -ge 23006 ] || FLAGS=(--experimental-strip-types "${FLAGS[@]}")
 printf '%s\n' "$CRED" | "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" install --root "$ROOT" --portal-url "$PORTAL" \
-  --max-sandboxes "$MAXSB" --max-agents-per-sandbox "$MAXAG" --max-unity "$MAXU" --slots "$SLOTS" --service "$SERVICE" --repo-url "$REPO" --credential-stdin ${EXTRA:+"$EXTRA"}
+  --max-sandboxes "$MAXSB" --max-agents-per-sandbox "$MAXAG" --max-unity "$MAXU" --slots "$SLOTS" --service "$SERVICE" --repo-url "$REPO" --credential-stdin $EXTRA
