@@ -236,7 +236,10 @@ if printf '%s' "$list" | matches '^host-ci2-'; then fail "the refused token went
 [ "$(stat -c '%a %U' /etc/fff-vm/secrets/vault.key)" = "600 root" ] || fail "the key's spare copy is not 0600 root"
 # The file is named to sha256sum under sudo: a "<" redirect would be opened by the admin's own shell, which cannot read it.
 [ "$(sha256sum /etc/fff-vm/secrets/vault.key | cut -c1-64)" = "$(g 'sudo sha256sum /etc/fff/vault.key' | cut -c1-64)" ] || fail "the key's spare copy differs from the VM's key"
-/usr/local/sbin/fff-vm vault-sync 2>&1 | matches 'unchanged host-ci-claude' || fail "a second sync was not a no-op"
+# Captured first: the sync exits 1 (ci2's classic token is still refused), which pipefail would carry through a pipe.
+out=$(/usr/local/sbin/fff-vm vault-sync 2>&1) || true
+printf '%s' "$out" | matches 'unchanged host-ci-claude' || fail "a second sync was not a no-op: $out"
+printf '%s' "$out" | matches 'unchanged host-ci-github' || fail "a second sync was not a no-op: $out"
 rm -rf /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2
 /usr/local/sbin/fff-vm vault-sync >/dev/null 2>&1 || true
 if g 'sudo fffctl vault list --names' | matches '^host-ci-'; then fail "a removed person's entries stayed in the vault"; fi
