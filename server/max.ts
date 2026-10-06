@@ -278,7 +278,7 @@ export class MaxManager {
     if (!s) return id ? 'unknown session' : 'outside FF Factory';
     if (s.kind === 'orchestrator') return 'orchestrator';
     if (s.kind === 'standing') return `standing: ${(s.standingId && this.deps.standingName?.(s.standingId)) || s.standingId || s.title}`;
-    return s.machineId ? `worker on ${s.machineId}` : s.sandboxId ? `worker in ${s.sandboxId}` : 'worker';
+    return s.machineId ? (s.machineSandbox ? `worker in ${s.machineId}/${s.machineSandbox}` : `worker on ${s.machineId}`) : s.sandboxId ? `worker in ${s.sandboxId}` : 'worker';
   }
 
   private urlOf(ev: MaxEvent, guild?: string): string | undefined {

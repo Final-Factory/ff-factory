@@ -18,6 +18,7 @@ import { MockConnector } from '../e2e/mockConnector.ts';
 import type { Config } from './config.ts';
 import type { ProviderConversation, Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
+import { startTestMachine } from './testMachine.ts';
 
 /**
  * The ledger check both ways, end to end (docs/ffbox-connector-contract.md, "Protocol 2"): a fake FFBox connector over
@@ -68,8 +69,9 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
   const machines = new MachineManager(cfg, store, sessions);
   const agents = new Agents(cfg, store, sandboxes, sessions, machines, new Identity(cfg, () => PEOPLE));
   Object.defineProperty(agents, 'workerOptions', { value: () => ({ model: 'opus' }) });
-  store.putSandbox({ id: 'lag', name: 'lag', branch: 'sandbox/lag-lead', base: 'origin/develop', path: path.join(dir, 'lag'), purpose: 'unused', status: 'ready', createdAt: T0, unity: { state: 'stopped' }, sessionIds: [] });
   agents.boot();
+  // The worker's sandbox is on a machine: pc/lag, a worktree on branch sandbox/lag-lead on its in-process daemon.
+  const pc = await startTestMachine(machines, { sandboxes: [{ name: 'lag', branch: 'sandbox/lag-lead' }] });
   const o = agents.orchestrators;
   (o as unknown as { d: { intakeGatherMs: number } }).d.intakeGatherMs = 20;
   const pm = new ProviderManager(cfg);
@@ -87,6 +89,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     return c;
   };
   t.after(async () => {
+    await pc.stop();
     for (const c of conns) c.close();
     pm.close();
     server.close();
@@ -143,10 +146,13 @@ test('ledger check both ways: handshake, exact thread keys, what to watch, and t
   assert.equal(((await c.next('board')) as { verdict: string }).verdict, 'clear');
 
   // A worker starts on it in sandbox/lag-lead, and opens PR 812: the answer is pushed again, with the branch to watch.
-  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'lag', prompt: 'Fix the lag.', title: 'Lag', work_id: a.id });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/lag', prompt: 'Fix the lag.', title: 'Lag', work_id: a.id });
   assert.equal(started.isError, false, started.text);
-  const sb = store.sandboxes.get('lag')!;
-  store.putSandbox({ ...sb, git: { branch: 'sandbox/lag-lead', dirty: 0, untracked: 0, pr: { number: 812, url: 'https://github.com/Final-Factory/FinalFactory/pull/812', title: 'Lag', draft: false }, at: T0 } });
+  // Its PR, as the daemon's next git look would report it.
+  const m = store.machines.get('pc')!;
+  const sb = m.sandboxes!.find((x) => x.id === 'lag')!;
+  sb.git = { branch: 'sandbox/lag-lead', dirty: 0, untracked: 0, pr: { number: 812, url: 'https://github.com/Final-Factory/FinalFactory/pull/812', title: 'Lag', draft: false }, at: T0 };
+  store.putMachine(m);
   assert.equal(intake.recheckBoards(), 1, 'only the answer that changed goes');
   board = (await c.next('board')) as typeof board;
   assert.equal(board.update, true);

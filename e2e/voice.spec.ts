@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { BOX, boxText, expect, signIn, startWorker, test, uniq } from './fixtures.ts';
+import { ALPHA, BOX, boxText, expect, sandboxHash, signIn, startWorker, test, uniq } from './fixtures.ts';
 import { fakeVoice } from './voice.ts';
 
 // Voice is turned off on the E2E server (no local Whisper, no Kokoro), so voice mode and the mic use
@@ -18,7 +18,7 @@ async function voicePage(page: Page, browserName: string, prefs?: object) {
   const tag = uniq('voice');
   const s = await startWorker(page.request, `hi ${tag}`, { title: `Voice ${tag}` });
   const status = page.waitForResponse((r) => r.url().endsWith('/api/voice'));
-  await page.goto(`/#/sandbox/alpha/${s.id}`);
+  await page.goto(`/${sandboxHash(ALPHA, s.id)}`);
   expect((await (await status).json()).state).toBe('unavailable');
   const panel = page.locator('.sb-panel');
   await expect(panel.locator('.msg-assistant[data-turn-end]')).toHaveCount(1);

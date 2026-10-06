@@ -1750,7 +1750,7 @@ setInterval(() => {
 }, 5000);
 
 /** The managers, for the E2E harness (e2e/server.ts) to set up states no browser can reach (a blocked editor). */
-export const internals = { cfg, store, sandboxes, sessions, agents, providers, max };
+export const internals = { cfg, store, sandboxes, sessions, machines, agents, providers, max };
 
 // Data files a crash damaged and that were restored from an earlier version (server/durable.ts). The owner hears at
 // once (a push and their own orchestrator); the restart summary carries the same lines to the dispatcher.

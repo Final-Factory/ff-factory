@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { RED_PNG } from './fakeAgent.ts';
 import type { Locator, Page } from '@playwright/test';
-import { BOX, appState, expect, openSandbox, pastePng, sendMessage, startWorker, test, uniq } from './fixtures.ts';
+import { ALPHA, BOX, GALLERY, appState, expect, machineSandbox, openSandbox, pastePng, sendMessage, startWorker, test, uniq } from './fixtures.ts';
 
 /** The images are on screen and actually decoded (a broken link has no natural size). */
 async function expectLoaded(images: Locator) {
@@ -13,7 +13,7 @@ async function expectLoaded(images: Locator) {
 async function workerPage(page: Page, prompt: string) {
   const tag = uniq('img');
   const s = await startWorker(page.request, `${prompt} ${tag}`, { title: `Images ${tag}` });
-  const panel = await openSandbox(page, 'alpha', s.id);
+  const panel = await openSandbox(page, ALPHA, s.id);
   // The first turn is done before the test goes on (its reply is on screen, marked finished).
   await expect(panel.locator('.msg-assistant[data-turn-end]')).toHaveCount(1);
   return { panel, tag };
@@ -65,7 +65,7 @@ test('a tool result with a screenshot shows the image inline', async ({ authed: 
 test("the orchestrator's messages show images from any sandbox, markdown or bare path, with the lightbox", async ({ authed: page }) => {
   const tag = uniq('orchimg');
   const app = await appState(page.request);
-  const gallery = app.sandboxes.find((s) => s.id === 'gallery')!;
+  const gallery = machineSandbox(app, GALLERY);
   const shot = `${gallery.path}${gallery.path.includes('\\') ? '\\' : '/'}Screenshots${gallery.path.includes('\\') ? '\\' : '/'}orch-proof.png`;
   // The fake orchestrator echoes the message: its reply carries a markdown image of a sandbox file, then the same file by bare path.
   await sendMessage(page.request, app.orchestratorId!, `before and after ![after](${shot}) ${tag}`);
@@ -84,7 +84,7 @@ test("the orchestrator's messages show images from any sandbox, markdown or bare
   await expectLoaded(bare.locator('.img-strip img'));
   await expect(bare.locator('.md img')).toHaveCount(0);
   // Outside every root the orchestrator oversees: refused by the server.
-  const denied = await page.request.get(`/api/image?${new URLSearchParams({ session: app.orchestratorId!, path: shot.replace(/sandboxes.*$/, 'elsewhere.png') })}`);
+  const denied = await page.request.get(`/api/image?${new URLSearchParams({ session: app.orchestratorId!, path: shot.replace(/[\\/]ffsb[\\/]gallery[\\/].*$/, '/elsewhere.png') })}`);
   expect(denied.status()).toBe(404);
 });
 
@@ -97,7 +97,7 @@ const HOSTILE_SVG =
 test('inline images: a PNG and an SVG file, PNG and SVG data URIs, sanitised, kept after the files are gone', async ({ authed: page }) => {
   const tag = uniq('inline');
   const app = await appState(page.request);
-  const alpha = app.sandboxes.find((s) => s.id === 'alpha')!;
+  const alpha = machineSandbox(app, ALPHA);
   const dir = path.join(alpha.path, 'Screenshots');
   fs.mkdirSync(dir, { recursive: true });
   const png = path.join(dir, `${tag}.png`);

@@ -190,8 +190,8 @@ test('meters: Refresh usage polls every account now; each account says as of whe
   await button.click();
   const r = await asked;
   expect(r.ok()).toBeTruthy();
-  // The live test server: no machine connected, and its one poll may already be running.
-  expect(await r.json()).toMatchObject({ started: expect.any(Boolean), machines: 0 });
+  // The live test server: its one machine (pc) connected, and its one poll may already be running.
+  expect(await r.json()).toMatchObject({ started: expect.any(Boolean), machines: 1 });
   await expect(button).toBeDisabled();
   await expect(button).toHaveText('Refreshing…');
 });
@@ -216,9 +216,13 @@ test('meters: a server from before per-account usage still shows the host and it
 test('meters: the server lists its accounts, with each agent on the one it runs on', async ({ page }) => {
   await signIn(page);
   const s = await appState(page.request);
-  expect(s.machineStats).toEqual({});
-  // The test server has no token and no stored login: its own login, not fetched or unavailable, is the one account.
-  expect(s.accounts?.map((a) => [a.kind, a.sources])).toEqual([['login', ['host:login']]]);
-  expect(s.accounts![0].sessionIds).toEqual(expect.arrayContaining([s.orchestratorId, 'gallery1']));
+  expect(Object.keys(s.machineStats ?? {})).toEqual(['pc']);
+  // The test server has no token and no stored login: its own login, not fetched or unavailable, and its machine's.
+  expect(s.accounts?.map((a) => [a.kind, a.sources]).sort()).toEqual([
+    ['login', ['host:login']],
+    ['login', ['login:pc']],
+  ]);
+  expect(s.accounts!.find((a) => a.sources.includes('host:login'))!.sessionIds).toEqual(expect.arrayContaining([s.orchestratorId]));
+  expect(s.accounts!.flatMap((a) => a.sessionIds)).toContain('gallery1');
   expect(JSON.stringify(s.accounts)).not.toMatch(/sk-ant/);
 });

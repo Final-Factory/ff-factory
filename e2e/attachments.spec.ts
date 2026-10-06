@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { Page } from '@playwright/test';
 import type { DeliveredAttachment, TranscriptEvent } from '../shared/types.ts';
-import { appState, expect, openSandbox, startWorker, test, uniq } from './fixtures.ts';
+import { ALPHA, appState, expect, machineSandbox, openSandbox, startWorker, test, uniq } from './fixtures.ts';
 
 /**
  * Attachments (docs/attachments.md): files other than images in the composer (the paperclip, paste and drop), uploaded
@@ -112,7 +112,7 @@ test('paste and drop: a pasted log and a dropped zip become files to send, not i
 test('a worker gets the file in its sandbox: Inbox/<id>-<name>, byte for byte, and its prompt names that path', async ({ authed: page }) => {
   const tag = uniq('inbox');
   const s = await startWorker(page.request, `setup ${tag}`, { title: `Attachments ${tag}` });
-  const panel = await openSandbox(page, 'alpha', s.id);
+  const panel = await openSandbox(page, ALPHA, s.id);
   await expect(panel.locator('.msg-assistant[data-turn-end]')).toHaveCount(1);
   const data = Buffer.from(`NullReferenceException in BeltSystem ${tag}\n`.repeat(1000));
   await attach(page, '.sb-panel', [{ name: `Player-${tag}.log`, mimeType: 'text/plain', buffer: data }]);
@@ -123,7 +123,7 @@ test('a worker gets the file in its sandbox: Inbox/<id>-<name>, byte for byte, a
   const events = (await (await page.request.get(`/api/sessions/${s.id}/events`)).json()) as TranscriptEvent[];
   const sent = events.find((e) => e.kind === 'user' && e.text === `here is the log ${tag}`) as { attachments?: DeliveredAttachment[] };
   const att = sent.attachments![0];
-  const alpha = (await appState(page.request)).sandboxes.find((x) => x.id === 'alpha')!;
+  const alpha = machineSandbox(await appState(page.request), ALPHA);
   expect(att.path).toBe(path.join(alpha.path, 'Inbox', `${att.id}-Player-${tag}.log`));
   expect(fs.readFileSync(att.path!)).toEqual(data);
   expect(fs.readFileSync(path.join(alpha.path, 'Inbox', '.gitignore'), 'utf8')).toMatch(/^\*$/m);
@@ -164,15 +164,15 @@ test('an upload goes on while its chat is closed: switch to another chat and bac
   const tag = uniq('away');
   const a = await startWorker(page.request, `first ${tag}`, { title: `Away A ${tag}` });
   const b = await startWorker(page.request, `second ${tag}`, { title: `Away B ${tag}` });
-  const panel = await openSandbox(page, 'alpha', a.id);
+  const panel = await openSandbox(page, ALPHA, a.id);
   await attach(page, '.sb-panel', [{ name: `big-${tag}.zip`, mimeType: 'application/zip', buffer: bytes(9 * MB, 7) }]);
   await expect(panel.locator('.composer-file')).toHaveCount(1);
   // Another chat at once: its composer has none of A's files.
-  await openSandbox(page, 'alpha', b.id);
+  await openSandbox(page, ALPHA, b.id);
   await expect(page.locator('.sb-panel .msg-assistant', { hasText: `second ${tag}` })).toBeVisible();
   await expect(page.locator('.sb-panel .composer-file')).toHaveCount(0);
   // Back to A: the upload finished meanwhile, and the file goes with the message.
-  await openSandbox(page, 'alpha', a.id);
+  await openSandbox(page, ALPHA, a.id);
   await expect(page.locator('.sb-panel .composer-file.done')).toHaveCount(1, { timeout: 20_000 });
   await sendFrom(page, '.sb-panel', `came back ${tag}`);
   await expect(page.locator('.sb-panel .msg-user', { hasText: `came back ${tag}` }).locator('.attach-chip')).toContainText(`big-${tag}.zip`);

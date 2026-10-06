@@ -48,7 +48,7 @@ test('Max: the External strip, then the page: health, the last error, and what a
   await expect(post).toContainText('Belt splitter fix is on develop (PR #690)');
   await expect(post.getByRole('link', { name: '#dev-chat' })).toHaveAttribute('href', new RegExp(`^https://discord\\.com/channels/${GUILD}/${CH.devChat}/\\d+$`));
   await expect(post.getByRole('button', { name: 'Seeded worker' })).toBeVisible();
-  await expect(post).toContainText('worker in gallery');
+  await expect(post).toContainText('worker in pc/gallery');
   await expect(rows.nth(1)).toContainText('post failed');
   // A reply in a forum thread names the thread and its forum, and shows only its first line.
   const reply = rows.nth(3);

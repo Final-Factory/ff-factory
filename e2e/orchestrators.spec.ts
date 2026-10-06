@@ -1,5 +1,5 @@
 import type { APIRequestContext, Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
-import { BOX, appState, expect, go, isMobile, openSidebar, sendMessage, sendToChat, test, uniq } from './fixtures.ts';
+import { ALPHA, BOX, appState, expect, go, isMobile, openSidebar, sendMessage, sendToChat, test, uniq } from './fixtures.ts';
 import type { ServerEvent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 
 /**
@@ -155,7 +155,7 @@ test('the ledger dedupes: the overlap is found at once, a repeat is the same req
     expect((await appState(page.request)).work!.filter((w) => w.title.toLowerCase().includes(`desync on load ${tag}`))).toHaveLength(1);
 
     // Starting the repeat needs a reason; merging it is the answer.
-    expect(await useTool(page.request, dispatcher, 'start_agent', { sandbox: 'alpha', prompt: `fix ${tag}`, title: `Belt ${tag}`, work_id: b.id })).toMatch(new RegExp(`^ERROR: ${b.id} may repeat work in flight: ${a.id} `));
+    expect(await useTool(page.request, dispatcher, 'start_agent', { sandbox: ALPHA, prompt: `fix ${tag}`, title: `Belt ${tag}`, work_id: b.id })).toMatch(new RegExp(`^ERROR: ${b.id} may repeat work in flight: ${a.id} `));
     expect(await useTool(page.request, dispatcher, 'decide_work', { id: b.id, action: 'merge', into: a.id, note: `Same fix ${tag}` })).toMatch(new RegExp(`^${b.id} merged: merged into ${a.id} `));
 
     const now = await appState(page.request);
@@ -191,7 +191,7 @@ test("worker updates go to the chats of the people the work is for, never to the
     // A request of the owner's, started by the dispatcher: its updates reach the owner's chat.
     await useTool(page.request, me.orchestratorId, 'request_work', { title: `Make the tutorial skippable ${tag}`, brief: 'Add a skip button.' });
     const w = await workTitled(page.request, `Make the tutorial skippable ${tag}`);
-    const started = await useTool(page.request, dispatcher, 'start_agent', { sandbox: 'alpha', prompt: `add a skip button ${tag}`, title: `Skip ${tag}`, work_id: w.id });
+    const started = await useTool(page.request, dispatcher, 'start_agent', { sandbox: ALPHA, prompt: `add a skip button ${tag}`, title: `Skip ${tag}`, work_id: w.id });
     const worker = /Started agent (\w+)/.exec(started)![1];
     expect((await appState(page.request)).sessions.find((s) => s.id === worker)!.requestedBy?.userId).toBe('tester');
     await expect.poll(async () => (await heard(page.request, me.orchestratorId, '[worker update]', `Echo: add a skip button ${tag}`)).length).toBe(1);
@@ -203,7 +203,7 @@ test("worker updates go to the chats of the people the work is for, never to the
     await expect(page.locator('.orch .notice', { hasText: `Skip ${tag} finished a turn` })).toBeVisible();
 
     // A follow-up from the teammate's orchestrator to the teammate's own worker: the teammate hears it, nobody else.
-    const r = await mateCtx.request.post('/api/sessions', { data: { sandboxId: 'alpha', prompt: `look at the inventory ${tag}`, title: `Inventory ${tag}` } });
+    const r = await mateCtx.request.post('/api/sessions', { data: { sandboxId: ALPHA, prompt: `look at the inventory ${tag}`, title: `Inventory ${tag}` } });
     expect(r.ok(), await r.text()).toBeTruthy();
     const v = (await r.json()) as { id: string };
     expect(await useTool(mateCtx.request, mate.orchestratorId, 'message_agent', { session_id: v.id, text: `also the tooltips ${tag}` })).toBe('Sent, for Team Mate.');

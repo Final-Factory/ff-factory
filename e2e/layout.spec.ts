@@ -1,4 +1,4 @@
-import { BOX, expect, expectFullyVisible, expectNoHorizontalOverflow, expectTapTargets, isMobile, openSandbox, openSidebar, settle, test } from './fixtures.ts';
+import { BOX, GALLERY, expect, expectFullyVisible, expectNoHorizontalOverflow, expectTapTargets, isMobile, openSandbox, openSidebar, settle, test } from './fixtures.ts';
 
 // The main screens fit the viewport on every project; on a phone, the primary controls are at least
 // 44 px (Apple's and Google's minimum touch target).
@@ -21,7 +21,7 @@ test('layout: orchestrator home', async ({ authed: page }) => {
 });
 
 test('layout: a sandbox page', async ({ authed: page }) => {
-  const panel = await openSandbox(page, 'gallery');
+  const panel = await openSandbox(page, GALLERY);
   await expect(panel.locator('.msg-assistant').first()).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await expectFullyVisible(page, '.sb-panel .composer-box');
