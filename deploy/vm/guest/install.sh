@@ -43,6 +43,15 @@ log "1/9 preflight"
 log "guest: $PRETTY_NAME, $(nproc) vCPUs, $(awk '/MemTotal/ {printf "%.1f GiB", $2/1048576}' /proc/meminfo), $(df -h --output=avail / | tail -n 1 | xargs) free on /"
 [ -f /etc/fff-vm-guest.env ] || warn "no /etc/fff-vm-guest.env (made by the host's cloud-init): not the portal VM? The firewall gets no rule for the host's health check"
 curl -fsS -m 15 -o /dev/null "https://deb.nodesource.com/node_$NODE_MAJOR.x/dists/nodistro/Release" || die "no route to the internet (deb.nodesource.com)"
+# /tmp on the root disk, not in RAM (w537). Ubuntu 26.04 mounts it as a tmpfs (its release notes: "the /tmp directory is
+# now a tmpfs file system by default"), half the RAM in systemd's tmp.mount (size=50%): 1.9 GiB in the 4 GiB VM, which
+# has no swap. The agents' temp folders (TMPDIR=/tmp/ffa-<session>) would take memory from the portal there, and the
+# portal's clean-up counts /tmp as free disk space (server/cleanup.ts), so it reported 1.9 GB free on the first day.
+# systemd's way back to the disk (docs/API_FILE_SYSTEMS.md): mask tmp.mount. It applies from the next boot.
+if [ "$(systemctl is-enabled tmp.mount 2>/dev/null || true)" != masked ]; then
+  run_cmd systemctl mask tmp.mount
+  if [ "$(findmnt -n -o FSTYPE /tmp 2>/dev/null || true)" = tmpfs ]; then log "/tmp is a tmpfs until the VM's next boot (fff-vm nightly restarts it every night)"; fi
+fi
 
 log "2/9 apt sources: NodeSource node_$NODE_MAJOR.x, GitHub CLI, Tailscale"
 codename=${VERSION_CODENAME:?}
