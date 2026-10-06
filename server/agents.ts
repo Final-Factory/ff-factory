@@ -15,6 +15,7 @@ import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLi
 /** A live state as list_work takes it (shared/workState.ts). */
 const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
 import { PORTAL_ONLY_WHY, ROOT, configPath, ownerLine, portalOnly, publicIdentityLine, publicIdentityOf, type Config } from './config.ts';
+import { refuseInDryRun } from './dryRun.ts';
 import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock, type SandboxManager } from './sandboxes.ts';
@@ -1021,7 +1022,7 @@ export class Agents {
     const store = this.attachments;
     if (!store) throw new Error('attachments are not wired into this server');
     // A held first prompt is queued by send() if it cannot start yet; anything else is refused now, before files are copied.
-    const info = (opts.hold ? this.sessions.get(id) : this.sessions.checkStart(id, opts.bypassGate)).info;
+    const info = (opts.hold ? this.sessions.get(id) : this.sessions.checkStart(id, opts.bypassGate, from)).info;
     if (info.kind === 'standing') throw new Error('standing agents take text only: hand the files to a worker instead');
     if (info.kind === 'orchestrator') {
       store.touch(files.map((f) => f.id));
@@ -2428,6 +2429,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             dry_run: z.boolean().optional().describe('Preflight only: build and scan the squashed commit, report, change nothing on GitHub.'),
           },
           wrap(async ({ dry_run }) => {
+            if (!dry_run) refuseInDryRun('republish_public');
             if (await this.ourProcessRunning('republish.pid', 'republish-public.ps1')) throw new Error('republish-public.ps1 is already running; wait for its [republish] message');
             if (!dry_run && !(await this.ourProcessRunning('supervisor.pid', 'supervise.ps1'))) {
               throw new Error('no supervisor (scripts/supervise.ps1) is running, and the republish ends with an app update that needs one; the user has to start the app with scripts/restart.ps1');

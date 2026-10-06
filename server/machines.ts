@@ -21,6 +21,7 @@ import type { AttachmentStore } from './attachments.ts';
 import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -463,6 +464,8 @@ export class MachineManager {
    */
   async watchOffline(now = Date.now(), reachable: (host: string) => Promise<boolean> = sshReachable): Promise<string[]> {
     const done: string[] = [];
+    // A dry run (server/dryRun.ts) probes and redeploys nothing: every machine belongs to the real portal.
+    if (dryRun()) return done;
     for (const m of this.list()) {
       if (this.isOnline(m.id)) {
         this.offlineSince.delete(m.id);
@@ -531,6 +534,7 @@ export class MachineManager {
    */
   checkOutdated(now = Date.now()): string[] {
     const done: string[] = [];
+    if (dryRun()) return done;
     for (const m of this.list()) {
       const why = this.outdated(m.id);
       if (!why) {
@@ -709,6 +713,7 @@ export class MachineManager {
   deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; purpose?: string; force?: boolean; local?: boolean } & MachineDirs & SandboxLimits & PoolExtras) {
     const typed = opts.id.trim();
     const id = typed.toLowerCase();
+    refuseInDryRun(`deploying ${id}`);
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
     // 0: sandboxes only (w477), no agents in its main clone.
     if (opts.maxSessions !== undefined && (!Number.isInteger(opts.maxSessions) || opts.maxSessions < 0 || opts.maxSessions > 8)) throw new Error('max_agents is a whole number from 0 (sandboxes only) to 8');
@@ -785,6 +790,7 @@ export class MachineManager {
    */
   convertMachine(id: string, to: 'ssh' | 'local', o: { sshHost?: string; portalUrl?: string; redeploy?: boolean } = {}): string {
     const m = this.require(id);
+    if (o.redeploy) refuseInDryRun(`redeploying ${m.id}`);
     if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
     // Checked before anything changes: a redeploy restarts its daemon, which stops its agents.
     if (o.redeploy && this.liveCount(m.id) > 0) throw new Error(`${m.id} has ${this.liveCount(m.id)} agent(s) running; a redeploy would stop them. Convert without redeploy (its daemon stays connected), or stop them first`);
@@ -886,6 +892,7 @@ export class MachineManager {
   /** Stop and unload the daemon on the machine (best effort), then forget the machine here. */
   async removeMachine(id: string) {
     const m = this.require(id);
+    refuseInDryRun(`removing ${m.id} (its daemon would be unloaded over ssh)`);
     if (m.local && m.sandboxes?.length) throw new Error(`${m.id} still holds ${m.sandboxes.length} sandbox(es): move them back to this host first (migrate_host_sandboxes direction "back"), or delete them`);
     const { undeploy } = await import('./machineDeploy.ts');
     let note = '';
@@ -905,6 +912,7 @@ export class MachineManager {
    */
   async controlDaemon(id: string, action: 'start' | 'stop' | 'restart', force = false): Promise<string> {
     const m = this.require(id);
+    refuseInDryRun(`a daemon ${action} on ${m.id}`);
     if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
     const live = this.liveCount(m.id);
     if (action !== 'start' && live > 0 && !force) throw new Error(`${m.id} has ${live} agent(s) running; a daemon ${action} stops them. Stop them first or pass force.`);
@@ -1029,6 +1037,14 @@ export class MachineManager {
    * Tokens are 240+ random bits checked with one SHA-256, so the lockout is not what stops guessing.
    */
   upgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, ip: string) {
+    // A dry run (server/dryRun.ts) links no daemon: a daemon that found it (relocated by mistake) keeps dialling and falls
+    // back to its own portal (RELOCATE_FALLBACK_MINUTES).
+    if (dryRun()) {
+      console.warn(`machine: refused a daemon link from ${ip}: ${DRY_RUN_WHY}`);
+      socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return false;
+    }
     const now = Date.now();
     const recent = (this.failures.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
     const auth = this.authenticate(req.headers.authorization);
@@ -1534,6 +1550,7 @@ export class MachineManager {
    */
   async relocate(machineId: string, rawUrl: string, timeoutMs = 20_000): Promise<string> {
     const m = this.require(machineId);
+    refuseInDryRun(`relocating ${m.id}`);
     const url = rawUrl.trim().replace(/\/+$/, '');
     const bad = relocateProblem(url);
     if (bad) throw new Error(bad);

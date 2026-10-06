@@ -18,6 +18,7 @@ import type { Store } from './store.ts';
 import { emit } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { dryRun } from './dryRun.ts';
 import { run as runProc } from './proc.ts';
 import { isOpen, settleByHand } from './work.ts';
 import {
@@ -122,6 +123,8 @@ export class LedgerSweep {
   }
 
   start() {
+    // A dry run (server/dryRun.ts): the copied ledger stays as copied, so its counts can be checked against the original.
+    if (dryRun()) return this;
     const every = (ms: number, f: () => void, first: number) => {
       const a = setTimeout(f, first);
       a.unref();

@@ -6,6 +6,7 @@ import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { HOST_ROLES, roleNames, type Config, type HostRole } from './config.ts';
 import type { AccountUsage, PlanUsage, SessionInfo, SessionKind, UsageMeter } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { dryRun } from './dryRun.ts';
 
 /**
  * The user's Claude plan usage: the weekly limit, the 5-hour session limit and any per-model weekly limit,
@@ -688,6 +689,8 @@ export class UsageTracker {
 
   /** One poll now (so the meters are not empty), then one every interval; a new token is polled within seconds. */
   start() {
+    // A dry run (server/dryRun.ts) sends no account's token anywhere to poll it.
+    if (dryRun()) return;
     this.started = true;
     void this.refresh();
     setInterval(() => {

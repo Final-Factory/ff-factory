@@ -6,6 +6,7 @@ import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret, readTokenFile }
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
 import { writeFileDurable } from './durable.ts';
+import { refuseInDryRun } from './dryRun.ts';
 import { placeId } from './placement.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
@@ -486,6 +487,8 @@ export function nextPerMachine<T extends boolean | number>(cur: unknown, machine
  */
 export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { user?: string; machine?: string; users?: readonly string[] } = {}): { before: unknown; after: unknown } {
   if (!SETTABLE_KEYS.includes(key)) throw new Error(`${key} cannot be changed by an agent; allowed: ${SETTABLE_KEYS.join(', ')}`);
+  // A dry run ignores both (server/dryRun.ts); one set here would arm what it keeps off.
+  if (key.startsWith('claudeEnv.') || key.startsWith('userClaudeEnv.')) refuseInDryRun(key);
   const perUser = key.startsWith('userClaudeEnv.');
   // The user id becomes a key path segment: no dots (edit config.json by hand for such a login).
   if (perUser && !(opts.user && USER_ID.test(opts.user) && !opts.user.includes('.'))) throw new Error(`${key} needs user: the user id (login name, without dots) whose account it is`);

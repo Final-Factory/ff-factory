@@ -3,6 +3,7 @@ import type { SessionManager } from './sessions.ts';
 import type { Store } from './store.ts';
 import type { Sandbox, SessionInfo } from '../shared/types.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { dryRun, refuseInDryRun } from './dryRun.ts';
 
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 
@@ -43,6 +44,7 @@ export class Waker {
   /** Message `sessionId` with `note` after `minutes` (one pending wake per session: a new one replaces it). */
   schedule(sessionId: string, minutes: number, note: string): string {
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > 24 * 60) throw new Error('minutes must be between 1 and 1440');
+    refuseInDryRun('wake_me');
     this.sessions.get(sessionId);
     const at = this.now() + minutes * 60_000;
     this.arm(sessionId, { at, note: note.trim().slice(0, 2000) });
@@ -75,7 +77,8 @@ export class Waker {
    * Returns how many were re-armed.
    */
   restore(): number {
-    if (!this.file) return 0;
+    // A dry run (server/dryRun.ts) arms none and leaves the copied file as it is.
+    if (!this.file || dryRun()) return 0;
     let saved: Record<string, WakeRecord> = {};
     try {
       saved = readJsonDurable<Record<string, WakeRecord>>(this.file, { check: checkObject }) ?? {};
@@ -113,6 +116,7 @@ export class Waker {
   }
 
   private fire(sessionId: string, tries: number) {
+    if (dryRun()) return;
     const t = this.timers.get(sessionId);
     this.timers.delete(sessionId);
     if (!t || !this.sessions.sessions.has(sessionId)) return void this.save();
@@ -136,7 +140,7 @@ export class Waker {
    * line (the intake's: Discord and FFBox requests waiting for approval or for this person, docs/intake.md).
    */
   heartbeat(orchestratorId: string | undefined, minutes: number | null | undefined, describe: (s: SessionInfo) => string, mine: (s: SessionInfo) => boolean = () => true, extra: () => string = () => '') {
-    if (!orchestratorId) return;
+    if (!orchestratorId || dryRun()) return;
     const busy = [...this.store.sessions.values()].filter((s) => s.kind === 'worker' && BUSY.includes(s.status) && mine(s));
     const now = this.now();
     if (!busy.length) {

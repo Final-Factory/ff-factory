@@ -950,6 +950,8 @@ export interface HostStatus {
   elevated: boolean;
   /** Why it is still elevated and what fixes it. */
   elevatedWhy?: string;
+  /** This portal is a dry run (FFSB_DRY_RUN=1, server/dryRun.ts): what it keeps off. */
+  dryRun?: string;
   /** A restart is waiting for busy agents to finish (scripts/restart.ps1 or request_app_update). */
   drain?: DrainStatus;
   /** Disks, the sandbox drive, memory, and what the guard is doing about them (server/hostHealth.ts). */

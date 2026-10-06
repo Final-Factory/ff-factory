@@ -17,6 +17,7 @@
 // tool that needs a person's own words refuses it, as it refuses a wake_me turn.
 import { randomBytes } from 'node:crypto';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
+import { dryRun, refuseInDryRun } from './dryRun.ts';
 
 /** When a timer fires. `every` and `daily` recur; `once` ends after its fire. */
 export type TimerSchedule =
@@ -172,6 +173,7 @@ export class Timers {
 
   /** A new timer for `owner`; its record. Throws a sentence saying what was wrong. */
   create(owner: string, input: TimerInput, createdBy: string): TimerRecord {
+    refuseInDryRun('a new timer');
     if (!this.host.exists(owner)) throw new Error('no such orchestrator');
     const active = this.of(owner).filter((t) => !t.endedAt);
     if (active.length >= TIMER_LIMITS.activePerOwner) throw new Error(`you have ${active.length} timers; at most ${TIMER_LIMITS.activePerOwner} are active at once. Cancel one first (list_timers shows them).`);
@@ -263,6 +265,8 @@ export class Timers {
   /** Load the file, deliver once what came due while FF Factory was down, and start ticking. How many timers loaded. */
   start(): number {
     this.load();
+    // A dry run (server/dryRun.ts) loads them to show, and never ticks: nothing comes due, nothing is delivered.
+    if (dryRun()) return this.timers.size;
     this.tick();
     this.tickTimer = setInterval(() => this.tick(), TICK_MS);
     this.tickTimer.unref?.();
@@ -275,6 +279,7 @@ export class Timers {
 
   /** Mark each due timer pending and move it on, then deliver what can be delivered. */
   tick() {
+    if (dryRun()) return;
     const now = this.now();
     for (const t of this.timers.values()) {
       if (t.endedAt || !t.enabled || !t.nextFireAt) continue;
@@ -317,6 +322,7 @@ export class Timers {
 
   /** Deliver every pending fire of `owner` in one message, when it is not mid-turn and the budget allows. */
   private flush(owner: string) {
+    if (dryRun()) return;
     const due = this.of(owner).filter((t) => t.pending);
     if (!due.length || !this.host.exists(owner) || this.host.busy(owner)) return;
     const now = this.now();
