@@ -25,6 +25,8 @@ import type {
   StandingAgentInput,
   StartSessionRequest,
   TranscriptEvent,
+  VaultEntryMeta,
+  VaultView,
 } from '../../shared/types';
 import type { TranscribeResult, VoiceStatus } from '../../shared/voice';
 
@@ -99,6 +101,13 @@ export const api = {
   maxInbound: () => request<(MaxInboundChannel & { items: MaxInboundItem[] })[]>('GET', '/api/max/inbound'),
   maxSeen: (alias: string) => request<{ ok: boolean }>('POST', `/api/max/inbound/${encodeURIComponent(alias)}/seen`),
   refreshUsage: () => request<{ started: boolean; machines: number }>('POST', '/api/usage/refresh'),
+  // The token vault (docs/vault.md): the owner's only. A value goes in and never comes back; answers carry metadata only.
+  vault: () => request<VaultView>('GET', '/api/vault'),
+  vaultAdd: (e: Pick<VaultEntryMeta, 'name' | 'kind' | 'share' | 'roles' | 'machines'> & { env?: string; owner?: string; value: string }) => request<VaultView>('POST', '/api/vault', e),
+  vaultRotate: (name: string, value: string) => request<VaultView>('POST', `/api/vault/${encodeURIComponent(name)}/rotate`, { value }),
+  vaultUpdate: (name: string, patch: Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'roles' | 'machines' | 'disabled'>>) => request<VaultView>('PATCH', `/api/vault/${encodeURIComponent(name)}`, patch),
+  vaultRemove: (name: string) => request<VaultView>('DELETE', `/api/vault/${encodeURIComponent(name)}`),
+  revokeMachineCredential: (id: string) => request<VaultView>('POST', `/api/machines/${encodeURIComponent(id)}/revoke-credential`),
   maxRefresh: () => request<{ ok: boolean; note?: string }>('POST', '/api/max/refresh'),
   events: (sessionId: string, limit = 500) =>
     request<TranscriptEvent[]>('GET', `/api/sessions/${enc(sessionId)}/events?limit=${limit}`),

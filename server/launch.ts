@@ -130,6 +130,25 @@ function publicGitEnvFor(spec: LaunchSpec, baseEnv: NodeJS.ProcessEnv): Record<s
 }
 
 /**
+ * The git credential helper for a run the token vault gave a GitHub token (docs/vault.md, w512): for https://github.com
+ * only, the helpers git would otherwise use are cleared (an empty value resets the list) and one reads GH_TOKEN from the
+ * environment when git asks. So git pushes as that token whatever helper the machine has (a keyring, Git Credential
+ * Manager), and the token is never written to any config. Command-scope config entries (GIT_CONFIG_*), appended after
+ * the ones already in `prior` (the public identity's).
+ */
+export const GITHUB_HELPER = '!f() { test "$1" = get && echo username=x-access-token && echo "password=$GH_TOKEN"; }; f';
+export function githubCredentialEnv(prior: Record<string, string | undefined>): Record<string, string> {
+  const n = Number(prior.GIT_CONFIG_COUNT ?? 0) || 0;
+  return {
+    [`GIT_CONFIG_KEY_${n}`]: 'credential.https://github.com.helper',
+    [`GIT_CONFIG_VALUE_${n}`]: '',
+    [`GIT_CONFIG_KEY_${n + 1}`]: 'credential.https://github.com.helper',
+    [`GIT_CONFIG_VALUE_${n + 1}`]: GITHUB_HELPER,
+    GIT_CONFIG_COUNT: String(n + 2),
+  };
+}
+
+/**
  * SDK options for a spec. `handlers` answers the spec's MCP tools; `processEnv` is the environment to start from (without its
  * credentials for spec.login); `editorRunning`, for a machine sandbox, says whether its editor is up (raw branch switches are
  * refused then).
@@ -183,7 +202,11 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     ...(spec.maxBudgetUsd !== undefined ? { maxBudgetUsd: spec.maxBudgetUsd } : {}),
     hooks: { PreToolUse: [{ hooks }] },
     // Git fails fast instead of waiting on a credential prompt nobody will answer.
-    env: { MCP_TIMEOUT: '120000', ...baseEnv, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env },
+    env: (() => {
+      const env: Record<string, string | undefined> = { MCP_TIMEOUT: '120000', ...baseEnv, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env };
+      // A vault GitHub token (GH_TOKEN): gh reads it itself; git gets a helper that reads it (githubCredentialEnv).
+      return spec.env?.GH_TOKEN ? { ...env, ...githubCredentialEnv(env) } : env;
+    })(),
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
   };
 }

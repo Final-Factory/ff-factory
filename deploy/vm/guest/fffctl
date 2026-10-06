@@ -30,6 +30,16 @@
 #                                       the stored subscription token (claudeTokenFile, claudeAccounts "tokenfile"); the
 #                                       portal restarts when it changed
 #   fffctl state                        what is set up, as JSON (the host's install.sh reads it to do only what is missing)
+#   fffctl vault list | add | rotate | grant | remove ...
+#                                       the token vault (docs/vault.md): secrets the portal hands worker runs. A value comes
+#                                       from --file FILE or --stdin, never the command line, and is never shown back
+#                                       (fffctl vault help)
+#   fffctl vault init [--new-key]       make the vault key ($FFF_VAULT_KEY) if missing and restart the portal to load it;
+#                                       --new-key replaces it (the old one kept beside it; every entry then needs rotating)
+#   fffctl vault export-key --out FILE  a copy of the key for safekeeping (0600, root): docs/vault.md, open decision 2
+#   fffctl machine-credential list | issue ID --out FILE | revoke ID
+#                                       a machine's own credential (its enrollment): issue writes it to FILE, never the
+#                                       screen; revoke cuts the machine off within 20 s (docs/vault.md, section 3)
 #   fffctl migrate --key | --dry-run-copy | --rollback-dry-run | --cut-over [--ssh USER@HOST]
 #                                       move the portal from BEAST into this VM, pulling its config, data and conversations
 #                                       over ssh (deploy/vm/RUNBOOK.md "Dry run" and "Cut-over"; fffctl migrate --help)
@@ -186,6 +196,43 @@ cmd_base_clone() {
   echo "done: $(du -sh "$BASE_PATH" | cut -f1)"
 }
 
+# The vault and machine credentials, through the portal's own code (server/vaultCli.ts) in the current release, as root:
+# it reads the key file directly and gives what it writes to the fff user.
+vault_cli() {
+  [ -e "$CURRENT/server/vaultCli.ts" ] || die "the current release has no vault (fffctl update first)"
+  (cd "$CURRENT" && FFF_VAULT_KEY_FILE=$FFF_VAULT_KEY FFSB_CONFIG=$FFF_ROOT/config/config.json node server/vaultCli.ts "$@")
+}
+
+cmd_vault() {
+  case "${1:-list}" in
+    init)
+      local fresh=0
+      [ "${2:-}" = --new-key ] && fresh=1
+      if [ -s "$FFF_VAULT_KEY" ] && [ "$fresh" = 0 ]; then
+        echo "the vault key exists ($FFF_VAULT_KEY)"
+      else
+        [ ! -s "$FFF_VAULT_KEY" ] || cp -p "$FFF_VAULT_KEY" "$FFF_VAULT_KEY.old-$(date -u +%Y%m%dT%H%M%SZ)"
+        (umask 077 && head -c 32 /dev/urandom | base64 >"$FFF_VAULT_KEY.tmp")
+        chmod 0600 "$FFF_VAULT_KEY.tmp"
+        mv -f "$FFF_VAULT_KEY.tmp" "$FFF_VAULT_KEY"
+        echo "a new vault key in $FFF_VAULT_KEY (0600, root; its content is not shown)"
+      fi
+      # systemd hands the key over at start (LoadCredential=): a restart loads a new one.
+      cmd_restart --drain-minutes 2
+      vault_cli list | head -n 1
+      ;;
+    export-key)
+      [ "${2:-}" = --out ] && [ -n "${3:-}" ] || die "fffctl vault export-key --out FILE"
+      [ -s "$FFF_VAULT_KEY" ] || die "no vault key yet (fffctl vault init)"
+      [ ! -e "$3" ] || die "$3 exists; pick a new file"
+      install -m 0600 -o root -g root "$FFF_VAULT_KEY" "$3"
+      echo "a copy of the vault key in $3 (0600, root). Keep it where docs/vault.md (open decision 2) says, then delete $3."
+      ;;
+    help | -h | --help) sed -n '2,15p' "$CURRENT/server/vaultCli.ts" ;;
+    *) vault_cli "$@" ;;
+  esac
+}
+
 # What is set up, as one JSON object: the host's install.sh (deploy/vm/host/guest.sh) reads it to do only what is missing.
 cmd_state() {
   local ts='{}' cfg=$FFF_ROOT/config/config.json joined=false ip="" funnel="" gh=false nkeys
@@ -201,12 +248,13 @@ cmd_state() {
     --argjson active "$(portal_active && echo true || echo false)" \
     --argjson healthy "$(health_json >/dev/null 2>&1 && echo true || echo false)" \
     --argjson token "$([ -s "$FFF_ROOT/secrets/claude-oauth-token" ] && echo true || echo false)" \
+    --argjson vaultKey "$([ -s "$FFF_VAULT_KEY" ] && echo true || echo false)" \
     --argjson joined "$joined" --arg ip "$ip" --arg funnel "${funnel%/}" --argjson gh "$gh" \
     --argjson base "$([ -d "$BASE_PATH/.git" ] && echo true || echo false)" \
     --argjson config "$(jq -c '{ownerName: (.ownerName // ""), publicUrl: (.publicUrl // ""), tokenfile: ((.claudeTokenFile // "") != "" and (.claudeAccounts.orchestrator // "") == "tokenfile" and (.claudeAccounts.dispatcher // "") == "tokenfile")}' "$cfg" 2>/dev/null || echo '{}')" \
     --arg target "$BACKUP_SSH_TARGET" \
     --argjson recipients "${nkeys:-0}" \
-    '{installed: $installed, portal: {active: $active, healthy: $healthy}, claudeToken: $token,
+    '{installed: $installed, portal: {active: $active, healthy: $healthy}, claudeToken: $token, vaultKey: $vaultKey,
       tailscale: {joined: $joined, ip: $ip, funnelUrl: $funnel}, github: $gh, baseClone: $base, config: $config,
       backup: {target: $target, recipients: $recipients}}'
 }
@@ -281,6 +329,8 @@ case "${1:-status}" in
   configure) shift; cmd_configure "$@" ;;
   state) cmd_state ;;
   migrate) shift; exec "$FFF_LIB/fff-migrate" "$@" ;;
-  -h | --help | help) sed -n '2,36p' "$0" ;;
+  vault) shift; cmd_vault "$@" ;;
+  machine-credential) shift; vault_cli machine-credential "$@" ;;
+  -h | --help | help) sed -n '2,45p' "$0" ;;
   *) die "unknown command $1 (fffctl help)" ;;
 esac

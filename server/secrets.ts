@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { HOST_ROLES, TOKEN_FILE_ROLES, roleNames, type ClaudeAccount, type Config, type HostRole } from './config.ts';
-import type { SessionInfo, SessionKind } from '../shared/types.ts';
+import type { Requester, SessionInfo, SessionKind } from '../shared/types.ts';
+import { claudeEnvFor, userToken } from './identity.ts';
+import { vaultContext, type VaultContext, type VaultRole } from './vault.ts';
 import { credentialsFile, loginUnusable, readStoredLogin, usageEnv } from './usage.ts';
 import { writeFileDurable } from './durable.ts';
 
@@ -39,8 +41,21 @@ const DISCORD_ASSIGNMENT = /\b((?:FF)?DISCORD(?:_APP)?_TOKEN)(\s*[=:]\s*\\?["']?
 
 const lastFour = (m: string) => m.slice(-4);
 
+/** A GitHub token (classic, OAuth, app, refresh or fine-grained), the vault's kind github (w512). */
+const GITHUB_TOKEN_ANYWHERE = /(?<![A-Za-z0-9_])(gh[pousr]_|github_pat_)[A-Za-z0-9_]{30,}/g;
+
+/**
+ * Values the token vault holds (server/vault.ts, w512), whatever their form: redacted by value, so a vault secret with no
+ * recognisable shape (an env-kind API key) never reaches a transcript or a log either. Only values of 8+ characters.
+ */
+let knownValues: string[] = [];
+export function registerSecretValues(values: readonly string[]) {
+  knownValues = [...new Set(values.filter((v) => typeof v === 'string' && v.length >= 8))].sort((a, b) => b.length - a.length);
+}
+
 /** Whether `text` may hold a secret this module redacts (a cheap check before the regexes). */
-const maybeSecret = (text: string) => text.includes('sk-ant-oat01-') || text.includes('ffpv1_') || /DISCORD|\.[A-Za-z0-9_-]{6}\./.test(text);
+const maybeSecret = (text: string) =>
+  text.includes('sk-ant-oat01-') || text.includes('ffpv1_') || /DISCORD|\.[A-Za-z0-9_-]{6}\.|gh[pousr]_|github_pat_/.test(text) || knownValues.some((v) => text.includes(v));
 
 /**
  * `text` with its secrets replaced: a Claude OAuth token by "sk-ant-oat01-[redacted …abcd]", a Discord bot token
@@ -48,9 +63,12 @@ const maybeSecret = (text: string) => text.includes('sk-ant-oat01-') || text.inc
  */
 export function redactSecrets(text: string): string {
   if (!maybeSecret(text)) return text;
-  return text
+  let out = text;
+  for (const v of knownValues) if (out.includes(v)) out = out.split(v).join(`[redacted vault secret …${lastFour(v)}]`);
+  return out
     .replace(OAUTH_TOKEN_ANYWHERE, (m) => `sk-ant-oat01-[redacted …${lastFour(m)}]`)
     .replace(PROVIDER_TOKEN_ANYWHERE, (m) => `ffpv1_[redacted …${lastFour(m)}]`)
+    .replace(GITHUB_TOKEN_ANYWHERE, (m, prefix: string) => `${prefix}[redacted …${lastFour(m)}]`)
     .replace(DISCORD_ASSIGNMENT, (_m, name: string, sep: string, value: string) => (value.startsWith('[redacted') ? _m : `${name}${sep}[redacted …${lastFour(value)}]`))
     .replace(DISCORD_TOKEN_ANYWHERE, (m) => `[redacted Discord token …${lastFour(m)}]`);
 }
@@ -218,6 +236,53 @@ export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'> & Part
   const token = hostClaudeEnvFor(cfg, machine).CLAUDE_CODE_OAUTH_TOKEN;
   if (token) return `host token …${token.slice(-4)}`;
   return refLocal(machine) ? `${os.hostname()} login (this host's stored Claude login, claudeAccounts.workers)` : "Mac login (the Mac's own Claude Code login)";
+}
+
+/**
+ * Whether a machine's runs take their Claude token from the token vault (config machines.claudeFromVault, docs/vault.md;
+ * default no): an entry naming the machine, else "*", else the value itself.
+ */
+export function claudeFromVault(cfg: Pick<Config, 'machines'>, machine: MachineRef): boolean {
+  const u = cfg.machines?.claudeFromVault;
+  if (u === undefined) return false;
+  if (typeof u === 'boolean') return u;
+  return u[refId(machine)] ?? u['*'] ?? false;
+}
+
+/** What a machine run starts with (machineRunEnv): its environment, whether it drops the daemon's own credentials, and its account for people. */
+export interface MachineRunEnv {
+  env: Record<string, string>;
+  login: boolean;
+  /** "vault token ben-max …abcd", "host token …abcd" or "Mac login", safe to show. */
+  account: string;
+}
+
+/**
+ * The Claude account and the vault's secrets a run on a machine gets (docs/vault.md, sections 3 and 4). In order: a
+ * person's own token (config userClaudeEnv) for their work, as before; then, on a machine config machines.claudeFromVault
+ * names, a vault Claude token chosen by plan headroom; else the machine's account without the vault (hostClaudeEnvFor:
+ * the host token or its own login). Every other vault entry granted to the run's role and machine is added as
+ * environment. With a vault token, `login` is true so the daemon's own credentials (an API key in its environment would
+ * outrank the token) are dropped and only the token remains. Without a vault context, exactly what it was before.
+ */
+export function machineRunEnv(
+  cfg: Pick<Config, 'machines' | 'claudeEnv' | 'userClaudeEnv'> & Partial<Pick<Config, 'claudeAccounts'>>,
+  machine: MachineRef,
+  run: { role: VaultRole; requestedBy?: Requester; sessionId?: string },
+  ctx: VaultContext | undefined = vaultContext(),
+): MachineRunEnv {
+  const base = claudeEnvFor(cfg, run.requestedBy, hostClaudeEnvFor(cfg, machine));
+  const plain = { env: base, login: machineUsesLogin(cfg, machine), account: accountSource(cfg, machine) };
+  const own = userToken(cfg, run.requestedBy?.userId);
+  if (!ctx) return plain;
+  const wantClaude = claudeFromVault(cfg, machine) && !own;
+  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: run.requestedBy?.userId ?? ctx.payer?.(), sessionId: run.sessionId }, { claude: wantClaude, usageOf: ctx.usageOf, liveOn: ctx.liveOn });
+  for (const p of s.problems) ctx.onProblem?.(p);
+  if (s.claude) {
+    return { env: { ...usageEnv(base), ...s.env, CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, login: true, account: `vault token ${s.claude.entry.name} …${s.claude.entry.last4} (picked by plan headroom, docs/vault.md)` };
+  }
+  if (wantClaude) ctx.onProblem?.(`no vault Claude token for a ${run.role} run on ${refId(machine)}${run.requestedBy ? ` for ${run.requestedBy.displayName}` : ''}; it runs on ${plain.account} instead`);
+  return { ...plain, env: { ...base, ...s.env } };
 }
 
 /**

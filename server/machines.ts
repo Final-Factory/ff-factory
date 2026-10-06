@@ -1,3 +1,4 @@
+import { MACHINE_ID, enrolledMachines, issueMachineToken, machineTokensFile, readMachineTokens, revokeMachineToken, writeMachineTokens } from './machineTokens.ts';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -49,8 +50,9 @@ const RESUME_WITHIN_MS = 6 * 3_600_000;
 export const RESUME_DELAY_MS = { value: 3000 };
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
+
 /** Machine ids: short, lower-case, safe in a path and a LaunchAgent label. */
-export const MACHINE_ID = /^[a-z0-9][a-z0-9-]{0,23}$/;
+export { MACHINE_ID, enrolledMachines, issueMachineToken, revokeMachineToken };
 
 const SANDBOX_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
@@ -291,7 +293,7 @@ export class MachineManager {
     this.store = store;
     this.sessions = sessions;
     sessions.placeFull = (s) => this.placeFull(s);
-    this.tokensFile = path.join(cfg.dataDir, 'machine-tokens.json');
+    this.tokensFile = machineTokensFile(cfg.dataDir);
     // A deploy runs in this process: one still marked at boot was cut short by a restart. Left 'deploying', the
     // offline watch (redeployDue) would never redeploy it; its daemon's hello clears the error if it did start.
     for (const m of store.machines.values()) {
@@ -673,11 +675,7 @@ export class MachineManager {
     if (!MACHINE_ID.test(m.id)) throw new Error(`machine id "${m.id}" must be lower-case letters, digits and dashes`);
     const prev = this.store.machines.get(m.id);
     const machine: Machine = { online: this.isOnline(m.id), sessionIds: prev?.sessionIds ?? [], createdAt: prev?.createdAt ?? new Date().toISOString(), ...m };
-    const secret = randomBytes(32).toString('base64url');
-    const token = `ffm_${m.id}_${secret}`;
-    const tokens = this.tokens();
-    tokens[m.id] = sha(token);
-    this.writeTokens(tokens);
+    const token = issueMachineToken(this.cfg.dataDir, m.id);
     this.store.putMachine(machine);
     return { machine, token };
   }
@@ -705,11 +703,26 @@ export class MachineManager {
   }
 
   private tokens(): Record<string, string> {
-    return readJsonDurable<Record<string, string>>(this.tokensFile, { check: checkStringMap, mode: 0o600 }) ?? {};
+    return readMachineTokens(this.tokensFile);
   }
 
   private writeTokens(t: Record<string, string>) {
-    writeJsonDurable(this.tokensFile, t, { indent: 2, mode: 0o600 });
+    writeMachineTokens(this.tokensFile, t);
+  }
+
+  /**
+   * Drop the link of every machine whose credential was revoked (`fffctl machine-credential revoke`, which edits the
+   * tokens file while the portal runs): checked with each heartbeat, so within PING_MS. Its record and sessions stay.
+   */
+  dropRevoked() {
+    if (!this.links.size) return;
+    const t = this.tokens();
+    for (const [id, link] of this.links) {
+      if (t[id]) continue;
+      console.warn(`machine ${id}: its credential was revoked, dropping the connection`);
+      link.ws.close(4001, 'machine credential revoked');
+      this.detach(id);
+    }
   }
 
   /** The machine a bearer token belongs to, or undefined. Constant-time on the secret. */
@@ -1152,6 +1165,7 @@ export class MachineManager {
   }
 
   private heartbeat() {
+    this.dropRevoked();
     const now = Date.now();
     for (const [id, link] of this.links) {
       if (now - link.lastPong > DEAD_MS) {

@@ -104,6 +104,13 @@ if [ -n "$REPO_URL" ] && ! matches -xF "FFF_REPO_URL=$REPO_URL" "$FFF_CONF" 2>/d
     echo "FFF_REPO_URL=$REPO_URL" >>"$FFF_CONF"
   fi
 fi
+# The token vault's key (docs/vault.md): 32 random bytes, root only, never in the data folder or a backup.
+if [ ! -s "$FFF_VAULT_KEY" ]; then
+  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would make the vault key $FFF_VAULT_KEY (0600, root)"; else
+    (umask 077 && head -c 32 /dev/urandom | base64 >"$FFF_VAULT_KEY")
+    chmod 0600 "$FFF_VAULT_KEY"
+  fi
+fi
 if [ ! -f "$BACKUP_SSH_KEY" ]; then
   run_cmd ssh-keygen -q -t ed25519 -N '' -C "fff-backup@$(hostname -s)" -f "$BACKUP_SSH_KEY"
 fi
