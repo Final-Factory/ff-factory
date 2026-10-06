@@ -621,6 +621,14 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     writeManifest(l.root, m);
     say(await firewall('add', l, o.slots, editors));
   } else if (isWin) say('Skipped the firewall rules (--no-firewall): players will prompt on first start.');
+  else {
+    // A Mac has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
+    const cfg = macSlotConfig();
+    fs.mkdirSync(path.dirname(cfg), { recursive: true });
+    fs.writeFileSync(cfg, JSON.stringify({ root: l.players, count: o.slots }, null, 2) + '\n');
+    noteOutside(m, { kind: 'file', name: cfg, note: 'the slot root for scripts outside the daemon' });
+    writeManifest(l.root, m);
+  }
 
   // 6. The portal sees it.
   const p = new Progress();
@@ -778,6 +786,10 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
 
   // 4. Firewall rules and the slot config (Windows).
   if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) say(await firewall('remove', l, m.slots, []));
+  if (!isWin && slotConfigRoot(macSlotConfig())?.startsWith(l.root)) {
+    fs.rmSync(macSlotConfig(), { force: true });
+    say(`Removed ${macSlotConfig()}.`);
+  }
 
   // 5. The root itself: rmdir /s and rm -rf unlink junctions and symlinks, they never follow them.
   process.chdir(os.tmpdir());
@@ -847,9 +859,21 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
       { what: `LaunchAgent plist ${plistFile}`, present: fs.existsSync(plistFile) },
       { what: `LaunchAgent ${service} loaded`, present: loaded },
       { what: 'processes whose command line names the root', present: procs > 0, detail: String(procs) },
+      { what: `slot config ${macSlotConfig()} pointing into the root`, present: !!slotConfigRoot(macSlotConfig())?.startsWith(l.root), detail: slotConfigRoot(macSlotConfig()) ?? 'none' },
     );
   }
   return items;
+}
+
+/** Where scripts/nightly/player_slots.py reads a Mac's slot root (its config_path()). */
+export const macSlotConfig = (home = os.homedir()) => path.join(home, '.config', 'finalfactory', 'player-slots.json');
+
+function slotConfigRoot(file: string): string | undefined {
+  try {
+    return (JSON.parse(fs.readFileSync(file, 'utf8')) as { root?: string }).root;
+  } catch {
+    return undefined;
+  }
 }
 
 /** What the uninstall leaves on purpose (docs/worker-install.md, "What stays"). */
