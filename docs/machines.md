@@ -237,8 +237,9 @@ depends on which default shell is set.
 **What runs it.** The task starts at logon of that user (trigger and principal by SID), in their interactive
 session (the Claude login, the GPU and the desktop Unity needs), not elevated (`LeastPrivilege`), at normal
 priority (a task's default 7 would give every agent and Unity below-normal CPU, I/O and memory priority), with
-no time limit and no battery or idle conditions. Its action is `powershell.exe -WindowStyle Hidden -File
-run-daemon.ps1`, a supervisor like the portal's own `scripts/supervise.ps1`: it starts
+no time limit and no battery or idle conditions. Its action is `conhost.exe --headless powershell.exe -WindowStyle
+Hidden -File run-daemon.ps1` (headless since w603: with Windows Terminal as the default terminal, `-WindowStyle
+Hidden` alone left a Terminal window open on the desktop for as long as the daemon ran), a supervisor like the portal's own `scripts/supervise.ps1`: it starts
 `node machine/daemon.ts <daemon.json>` hidden, and again whenever it exits (10 s, doubling up to 5 minutes
 while it keeps dying within 5 minutes). Its output is in `logs\daemon.log` and `daemon.err.log` in its folder
 (the previous run's in `*.prev`), the supervisor's own lines in `supervisor.log`. Task Scheduler restarts the

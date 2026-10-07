@@ -24,6 +24,7 @@ import { SECRET_ENV, addSecretValues, redactSecrets } from '../server/secrets.ts
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
+import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
 import { hostStats } from '../server/system.ts';
@@ -181,11 +182,14 @@ export const cleanupConfigFile = (appDir: string) => path.join(appDir, 'cleanup.
 export interface Probes {
   stats: (diskPath: string) => Promise<HostStats>;
   usage: (claude: string | undefined) => Promise<{ reply: UsageReply; account: AccountIdentity }>;
+  /** Git Bash's /tmp, made when missing (Windows; server/gitBashTmp.ts). Tests leave it out: the host's is not theirs. */
+  bashTmp?: () => Promise<{ dir?: string; made: boolean; error?: string }>;
 }
 
 const REAL_PROBES: Probes = {
   stats: hostStats,
   usage: (claude) => fetchPlanUsage(usageEnv(process.env), { cwd: HOME, claudeExecutable: claude }),
+  bashTmp: () => ensureGitBashTmp(),
 };
 
 /** Builds a session; the real one is an AgentSession, tests pass a fake. */
@@ -241,6 +245,8 @@ export class Daemon {
   private staleCtx?: StaleContext;
   /** Each place's Unity MCP status folder, kept holding only its own editor (machine/unityMcp.ts). */
   private readonly mcpScopes = new McpScopes();
+  /** Windows: the folder Git Bash maps /tmp to, never cleaned up and made again when missing (server/gitBashTmp.ts, w603). */
+  private bashTmp?: string;
 
   /** The host guard (cfg.hostGuard, Windows; tests give effects). */
   guard?: MachineGuard;
@@ -315,6 +321,7 @@ export class Daemon {
       tempPaths: () => [env.tmp],
       statfs: volumeStat,
       pass: async (low, opts) => {
+        await this.ensureBashTmp();
         const guard = this.cleanupGuard();
         const root = this.sandboxRoot();
         const settings = staleOutputSettings(this.cleanupSettings.staleOutput);
@@ -366,9 +373,22 @@ export class Daemon {
     const c = this.cfg;
     return {
       keep: [c.repoPath, this.sandboxRoot(), appDirOfConfig(c), c.unityEditorRoot, c.unityPath, this.maxEventsFile && path.dirname(this.maxEventsFile), ...(this.currentPool()?.protectedPaths ?? [])].filter((x): x is string => !!x),
-      inUse: [...this.entries.values()].filter((e) => e.s.live).map((e) => sessionTempDir(agentTempRoot(c.tempDir), e.s.info.id)),
+      inUse: [
+        ...[...this.entries.values()].filter((e) => e.s.live).map((e) => sessionTempDir(agentTempRoot(c.tempDir), e.s.info.id)),
+        // Every bash of this user uses it as /tmp, whichever session's folder it was.
+        ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), agentTempRoot(c.tempDir)])].filter((x): x is string => !!x),
+      ],
       home: HOME,
     };
+  }
+
+  /** Git Bash's /tmp (Windows): looked up again, and made when something removed it (w603). */
+  private async ensureBashTmp(): Promise<void> {
+    if (!this.probes.bashTmp) return;
+    const r = await this.probes.bashTmp();
+    if (r.dir) this.bashTmp = r.dir;
+    if (r.made) log(`git bash: made its /tmp again (${r.dir}); while it was missing every bash printed "could not find /tmp, please create!"`);
+    if (r.error) log(`git bash: could not make its /tmp (${r.dir}): ${r.error}`);
   }
 
   private get maxEventsFile(): string | undefined {
@@ -480,6 +500,11 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
     this.timers.push(setInterval(() => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
+    // Git Bash's /tmp (Windows, w603): kept out of clean-up and made again if anything else removes it.
+    if (process.platform === 'win32') {
+      void this.ensureBashTmp();
+      this.timers.push(setInterval(() => void this.ensureBashTmp(), 5 * 60_000));
+    }
     // What agents here did as Max (the ffdiscord CLI's lines): forwarded, and queued while the link is down.
     const maxFile = this.maxEventsFile;
     if (maxFile) {
@@ -1152,8 +1177,12 @@ export class Daemon {
         e?.s.stop();
         this.entries.delete(msg.sessionId);
         this.awake();
-        // Its own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene").
-        void fs.promises.rm(sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId), { recursive: true, force: true, maxRetries: 2 }).catch(() => undefined);
+        // Its own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene"), unless it became Git Bash's /tmp (w603).
+        const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId);
+        const same = (a: string, b: string) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+        if (!this.bashTmp || !same(this.bashTmp, temp)) {
+          void fs.promises.rm(temp, { recursive: true, force: true, maxRetries: 2 }).catch(() => undefined);
+        }
         return;
       }
       case 'mode':
