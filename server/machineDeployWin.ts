@@ -171,26 +171,31 @@ function Invoke-Native([string]$Exe, [string[]]$Argv) {
 }`;
 
 /**
- * Stop the daemon: end the task, then kill the supervisor and the daemon with everything they started (agents,
- * their shells), except a Unity editor or Unity Hub and what those started: the editor is the user's and outlives
- * a daemon restart, as on a Mac. The task is disabled meanwhile so its restart-on-failure does not bring it back.
+ * Stop the daemon: end the task, then kill the supervisor and the daemon with everything they started, except a Unity
+ * editor or Unity Hub and what those started (the editor is the user's and outlives a daemon restart, as on a Mac) and,
+ * unless -Agents, the agent hosts and what they run (w605: the agents, their shells and players outlive a reinstall or
+ * restart, and the next daemon takes them back; machine/agentHost.ts). -Agents (a stop, the uninstall) ends those too,
+ * a previous daemon's included. The task is disabled meanwhile so its restart-on-failure does not bring it back.
  */
 const stopFns = (task: string) => `
-function Stop-FFDaemon {
+function Stop-FFDaemon([switch]$Agents) {
   $task = Get-ScheduledTask -TaskName '${task}' -ErrorAction SilentlyContinue
   if ($task) { $null = $task | Disable-ScheduledTask -ErrorAction SilentlyContinue; $task | Stop-ScheduledTask -ErrorAction SilentlyContinue }
-  $marks = @()
-  foreach ($d in $FFDirs) { $marks += (Join-Path $d 'app\\machine\\daemon.ts'); $marks += (Join-Path $d 'run-daemon.ps1') }
+  $marks = @(); $hosts = @()
+  foreach ($d in $FFDirs) { $marks += (Join-Path $d 'app\\machine\\daemon.ts'); $marks += (Join-Path $d 'run-daemon.ps1'); $hosts += (Join-Path $d 'app\\machine\\agentHost.ts') }
+  if ($Agents) { $marks += $hosts }
   $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine)
   $queue = New-Object System.Collections.Generic.Queue[int]
+  $keep = New-Object System.Collections.Generic.HashSet[int]
   foreach ($p in $all) {
     $c = [string]$p.CommandLine
     foreach ($m in $marks) { if ($c.IndexOf($m, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $queue.Enqueue([int]$p.ProcessId) } }
+    if (-not $Agents) { foreach ($h in $hosts) { if ($c.IndexOf($h, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $null = $keep.Add([int]$p.ProcessId) } } }
   }
   $kill = New-Object System.Collections.Generic.List[int]
   while ($queue.Count -gt 0) {
     $id = $queue.Dequeue()
-    if ($kill.Contains($id) -or $id -eq $PID) { continue }
+    if ($kill.Contains($id) -or $id -eq $PID -or $keep.Contains($id)) { continue }
     $kill.Add($id)
     foreach ($p in $all) { if ([int]$p.ParentProcessId -eq $id -and [string]$p.Name -notmatch '^Unity( Hub)?\\.exe$') { $queue.Enqueue([int]$p.ProcessId) } }
   }
@@ -507,18 +512,28 @@ if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }
 `;
 }
 
-/** Start, stop or restart the daemon (its task and processes). Prints `stopped=<n>` and/or `started=True|False`. */
+/** Only the stop (prints `stopped=<n>`): with `agents`, the agent hosts too. Exported for tests. */
+export function stopScript(agents: boolean, appDir?: string, service?: WinService): string {
+  return `${head({ appDir, service })}
+'stopped=' + (Stop-FFDaemon${agents ? ' -Agents' : ''})
+`;
+}
+
+/**
+ * Start, stop or restart the daemon (its task and processes). A stop ends its agents too; a restart leaves the agent
+ * hosts running for the new daemon (w605). Prints `stopped=<n>` and/or `started=True|False`.
+ */
 export function controlScript(action: 'start' | 'stop' | 'restart', appDir?: string, service?: WinService): string {
   return `${head({ appDir, service })}
-${action !== 'start' ? "'stopped=' + (Stop-FFDaemon)" : ''}
+${action === 'stop' ? "'stopped=' + (Stop-FFDaemon -Agents)" : action === 'restart' ? "'stopped=' + (Stop-FFDaemon)" : ''}
 ${action !== 'stop' ? "if (Test-FFLoggedOn) { Start-FFDaemon; 'started=True' } else { 'started=False' }" : ''}
 `;
 }
 
-/** Stop the daemon and delete its task; its files stay in its folder. */
+/** Stop the daemon and its agents and delete its task; its files stay in its folder. */
 export function uninstallScript(appDir?: string, service?: WinService): string {
   return `${head({ appDir, service })}
-$null = Stop-FFDaemon
+$null = Stop-FFDaemon -Agents
 Unregister-ScheduledTask -TaskName '${taskName(service)}' -Confirm:$false -ErrorAction SilentlyContinue
 `;
 }

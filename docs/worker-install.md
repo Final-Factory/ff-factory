@@ -116,9 +116,37 @@ today) shows "update available" and keeps taking, starting and resuming agents (
 (outdated) stops new agents there until the install is updated.
 
 To update a worker, re-run its installer as for the first install: it fetches the code, keeps the root, its
-credential, sandboxes and limits, restarts the daemon and waits until the portal sees it again. Re-running it stops
-the daemon together with the agents it runs (`Stop-FFDaemon`; Unity editors keep running), and the portal resumes the
-agents that were mid-turn once the new daemon says hello, so update while the machine is quiet.
+credential, sandboxes and limits, restarts the daemon and waits until the portal sees it again.
+
+**A re-run does not stop running work** (w605). Each agent process runs in an agent host of its own
+(`machine/agentHost.ts`), started detached from the daemon, so it outlives the daemon ([machines.md](machines.md),
+"Agents outlive their daemon"). The re-run stops only the daemon and its supervisor (`Stop-FFDaemon` without `-Agents`
+on Windows, `launchctl` on a Mac). Agents mid-turn carry on: their shells, builds and players keep running, and so do
+idle agents' processes. Unity editors keep running as before. The new daemon finds the hosts in
+`<root>\daemon\hosts\`, takes them back, forwards to the portal whatever they recorded meanwhile, and their turns
+report to the portal as if nothing happened. An agent whose host is gone (the computer restarted, it crashed) is resumed
+by the portal with its conversation (`claude --resume`) if it was mid-turn, and otherwise on its next message.
+
+- **The first update onto this version still stops running agents**: a daemon from before w605 runs its agents
+  inside its own process, so they end when it stops. The portal resumes the mid-turn ones as before; idle ones show
+  stopped and come back on their next message. Every update after that keeps them.
+- A stop (`machine_daemon stop`, or `Stop-FFDaemon -Agents`) and the uninstall still end the agents.
+
+Measured on BEAST (2026-10-07), with a throwaway install (`-Service FFW605Test`, a scratch root, a tiny game repo)
+against the throwaway portal (`scripts/worker/test/portal.ts`, which can now start a worker: `POST /agent`) and real
+Claude Code agents on BEAST's own login:
+
+1. Installed from ff-factory main at 7162d69 while the portal ran ca4a133 (same protocol 8): the machine showed
+   "update available: it runs 7162d69, this portal ca4a13329", and a new agent there started and answered.
+2. Re-ran the installer from ca4a133 (the first update onto agent hosts): it took 11 s, and the old daemon's idle agent
+   ended with it, as expected.
+3. A new agent started a 100 s command (Claude Code put it in the background). Re-running the installer took 12 s. The
+   new daemon logged "agent host 9658a61e (pid 58208) adopted: idle, live", and the command's end woke the agent in the
+   same process, which went on and reported "DONE-W605" to the portal with no resume message.
+4. The same agent ran a 100 s command in the foreground, and the installer ran again (9 s) during it. The new daemon
+   logged "adopted: running, live". The command printed its line, and the agent answered "DONE-FOREGROUND" from the
+   same host process. The transcript's 22 events are in order, none twice.
+5. The uninstall ended the host and left nothing of the install ("Nothing of the wtest install remains").
 
 ### The portal's ssh (w568)
 

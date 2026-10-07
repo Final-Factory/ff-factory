@@ -551,18 +551,21 @@ done
 }
 
 /** The Mac's launchctl lines for each action on the LaunchAgent. Exported for tests. */
-export function macControlScript(action: DaemonAction | 'uninstall', label = LABEL): string {
+export function macControlScript(action: DaemonAction | 'uninstall', label = LABEL, appDir?: string): string {
   const plistPath = `"$HOME/Library/LaunchAgents/${macLabel(label)}.plist"`;
   const target = `gui/$(id -u)/${label}`;
+  // A stop or uninstall ends this daemon's agent hosts too (w605); a restart leaves them for the next daemon.
+  const host = appDir ? `'${appDir.replace(/\/+$/, '').replace(/'/g, `'\\''`)}/app/machine/agentHost.ts'` : '"$HOME/.ff-factory/app/machine/agentHost.ts"';
+  const hosts = `pkill -f ${host} 2>/dev/null || true\n`;
   switch (action) {
     case 'start':
       return `set -e\nlaunchctl print ${target} >/dev/null 2>&1 || launchctl bootstrap gui/$(id -u) ${plistPath}\n`;
     case 'stop':
-      return `launchctl bootout ${target} 2>/dev/null || true\n`;
+      return `launchctl bootout ${target} 2>/dev/null || true\n${hosts}`;
     case 'restart':
       return `set -e\nif launchctl print ${target} >/dev/null 2>&1; then launchctl kickstart -k ${target}; else launchctl bootstrap gui/$(id -u) ${plistPath}; fi\n`;
     case 'uninstall':
-      return `launchctl bootout ${target} 2>/dev/null || true\nrm -f ${plistPath}\n`;
+      return `launchctl bootout ${target} 2>/dev/null || true\n${hosts}rm -f ${plistPath}\n`;
   }
 }
 
@@ -583,7 +586,7 @@ export async function controlDaemon(host: string, platform: MachinePlatform | un
       .filter(Boolean)
       .join('; ');
   }
-  await must(host, `daemon ${action}`, macControlScript(action), 60_000);
+  await must(host, `daemon ${action}`, macControlScript(action, LABEL, appDir), 60_000);
   return action === 'stop' ? 'unloaded the LaunchAgent (it loads again at the next login)' : action === 'start' ? 'loaded the LaunchAgent' : 'restarted the LaunchAgent';
 }
 
@@ -591,5 +594,5 @@ export async function controlDaemon(host: string, platform: MachinePlatform | un
 export async function undeploy(host: string, platform?: MachinePlatform, appDir?: string, local = false) {
   const pf = local ? 'win32' : (platform ?? (await detectPlatform(host)));
   if (pf === 'win32') await mustPs(local ? win.LOCAL : host, 'uninstall', win.uninstallScript(appDir), { timeoutMs: 2 * 60_000 });
-  else await must(host, 'uninstall', macControlScript('uninstall'), 60_000);
+  else await must(host, 'uninstall', macControlScript('uninstall', LABEL, appDir), 60_000);
 }

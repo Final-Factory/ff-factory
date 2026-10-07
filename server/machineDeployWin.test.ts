@@ -173,7 +173,67 @@ test('windows: a deploy that knows its clone does not search for one; the probe 
   assert.doesNotMatch(win.probeScript('Some-Org/SomeGame'), /=\s*\[string\]\(&/);
 });
 
-test('windows (real PowerShell): the probe survives a repo without an origin, and without a slug it searches nothing', { skip: process.platform !== 'win32' && 'Windows only' }, async (t) => {
+test('windows (real PowerShell): a reinstall or restart stops the daemon and its other children but leaves the agent hosts and what they run; a stop or uninstall ends them too (w605)', { skip: process.platform !== 'win32' && 'Windows only', timeout: 3 * 60_000 }, async (t) => {
+  // Only stand-ins of its own, under a throwaway folder, and a task name that does not exist: so it runs on any Windows
+  // box, never touching the computer's real daemon (service.only: no other daemon folder is looked at).
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-stop-'));
+  const service = { task: 'FFW605StopTest', only: true };
+  const daemonMark = path.join(appDir, 'app', 'machine', 'daemon.ts');
+  const hostMark = path.join(appDir, 'app', 'machine', 'agentHost.ts');
+  const out = path.join(appDir, 'pids.json');
+  const keep = 'setInterval(() => {}, 1000)';
+  // The daemon stand-in names daemon.ts; it starts a shell (a plain child, as the caffeinate holder is) and a detached
+  // host naming agentHost.ts, whose agent is its own plain child.
+  const host = `const a = require('child_process').spawn(process.execPath, ['-e', '${keep}'], { stdio: 'ignore' }); require('fs').writeFileSync(process.argv[2], String(a.pid)); ${keep}`;
+  const daemon = `const { spawn } = require('child_process'); const [, daemonMark, out] = process.argv; const hostMark = require('path').join(require('path').dirname(daemonMark), 'agentHost.ts');
+const shell = spawn(process.execPath, ['-e', '${keep}'], { stdio: 'ignore' });
+const host = spawn(process.execPath, ['-e', ${JSON.stringify(host)}, hostMark, out + '.agent'], { detached: true, stdio: 'ignore' });
+host.unref();
+require('fs').writeFileSync(out, JSON.stringify({ daemon: process.pid, shell: shell.pid, host: host.pid })); ${keep}`;
+  spawn(process.execPath, ['-e', daemon, daemonMark, out], { stdio: 'ignore', windowsHide: true }).unref();
+  const pids: number[] = [];
+  t.after(() => {
+    for (const p of pids) {
+      try {
+        process.kill(p, 'SIGKILL');
+      } catch {
+        // gone
+      }
+    }
+    fs.rmSync(appDir, { recursive: true, force: true });
+  });
+  const alive = (p: number) => {
+    try {
+      process.kill(p, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const end = Date.now() + 30_000;
+  while (!(fs.existsSync(out) && fs.existsSync(out + '.agent')) && Date.now() < end) await new Promise((r) => setTimeout(r, 100));
+  const p = JSON.parse(fs.readFileSync(out, 'utf8')) as { daemon: number; shell: number; host: number };
+  const agent = Number(fs.readFileSync(out + '.agent', 'utf8'));
+  pids.push(p.daemon, p.shell, p.host, agent);
+
+  const restart = await runPs(win.stopScript(false, appDir, service), { timeoutMs: 60_000 });
+  assert.equal(restart.code, 0, restart.stderr);
+  // The daemon and its shell, and the console hosts Windows gives console programs.
+  assert.ok(Number(/stopped=(\d+)/.exec(restart.stdout)?.[1]) >= 2, restart.stdout);
+  assert.deepEqual([alive(p.daemon), alive(p.shell)], [false, false], 'the daemon and its shell are stopped');
+  assert.deepEqual([alive(p.host), alive(agent)], [true, true], 'the agent host and its agent run on');
+
+  // A stop (or the uninstall): the host too, though its daemon is gone and it is nobody's child any more.
+  const stop = await runPs(win.stopScript(true, appDir, service), { timeoutMs: 60_000 });
+  assert.equal(stop.code, 0, stop.stderr);
+  assert.deepEqual([alive(p.host), alive(agent)], [false, false], 'a stop ends the host and its agent');
+  assert.match(win.controlScript('stop'), /Stop-FFDaemon -Agents/);
+  assert.match(win.uninstallScript(), /Stop-FFDaemon -Agents/);
+  assert.match(win.controlScript('restart'), /\(Stop-FFDaemon\)/);
+  assert.match(win.installScript({ sid: SID, home: 'C:\\Users\\Ben', config: '{}', node: 'C:\\n\\node.exe', flag: false }), /\$null = Stop-FFDaemon\n/);
+});
+
+test('windows (real PowerShell): the probe survives a repo without an origin, and without a slug it searches nothing',{ skip: process.platform !== 'win32' && 'Windows only' }, async (t) => {
   // Read-only, so it runs on any Windows box, not only CI: a throwaway home with the clone and a repo that has no
   // origin (as BEAST has), searched as the home folder; the drives' own repos may show up too and are ignored.
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-probe-'));
@@ -220,6 +280,10 @@ test('mac: start, stop, restart and uninstall of the LaunchAgent', () => {
   assert.doesNotMatch(macControlScript('stop'), /rm -f/, 'a stop keeps the plist: the daemon loads again at the next login');
   assert.match(macControlScript('restart'), /kickstart -k gui\/\$\(id -u\)\/com\.fffactory\.daemon/);
   assert.match(macControlScript('uninstall'), /rm -f "\$HOME\/Library\/LaunchAgents\/com\.fffactory\.daemon\.plist"/);
+  // w605: a stop or uninstall ends this daemon's agent hosts; a restart leaves them for the next daemon.
+  assert.match(macControlScript('stop', 'com.fffactory.daemon', "/Users/o'b/ffw/daemon/"), /pkill -f '\/Users\/o'\\''b\/ffw\/daemon\/app\/machine\/agentHost\.ts' 2>\/dev\/null \|\| true/);
+  assert.match(macControlScript('uninstall'), /pkill -f "\$HOME\/\.ff-factory\/app\/machine\/agentHost\.ts"/);
+  assert.doesNotMatch(macControlScript('restart'), /pkill/);
 });
 
 test('daemon: keeps the machine awake with caffeinate on a Mac, SetThreadExecutionState on Windows, nothing elsewhere', () => {

@@ -16,6 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
+import { HOST_PROTOCOL, HostedSession, hostAlive, hostFolders, hostPlace, hostsDir, readHostState } from './agentHost.ts';
 import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
@@ -54,6 +55,12 @@ export interface DaemonConfig {
   repoPath: string;
   /** The machine's own `claude` (its login, settings and plugins). */
   claude?: string;
+  /**
+   * Run each agent process in an agent host of its own (machine/agentHost.ts, w605), so a daemon restart, update or
+   * reinstall leaves it running and the next daemon takes it back. Default: on. false runs them inside the daemon, as
+   * before (they end with it).
+   */
+  agentHosts?: boolean;
   /** Obsolete (w536): the portal sends the agent cap in its welcome. Read only to say so once at start. */
   maxSessions?: number;
   /** The daemon's folder (add_machine app_dir): agents, outside-watch.json, the public identity. Default <home>/.ff-factory. */
@@ -228,6 +235,8 @@ export class Daemon {
   private maxSessions = 3;
   private readonly timers: NodeJS.Timeout[] = [];
   private readonly makeSession: SessionFactory;
+  /** Agents run in agent hosts (cfg.agentHosts; tests that give a session factory run them in this process). */
+  private readonly hosted: boolean;
   private readonly probes: Probes;
   private maxTail?: FileTail;
   /** The machine's sandboxes (machine/sandboxes.ts): worktrees of the clone with their own editors. */
@@ -252,7 +261,7 @@ export class Daemon {
   guard?: MachineGuard;
   private readonly guardEffects?: MachineGuardEffects;
 
-  constructor(cfg: DaemonConfig, makeSession: SessionFactory = (info, sink, options, events) => new AgentSession(info, sink, options, events), probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects) {
+  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects) {
     this.cfg = cfg;
     this.guardEffects = guardEffects;
     this.probes = probes;
@@ -296,7 +305,8 @@ export class Daemon {
       },
       pd,
     );
-    this.makeSession = makeSession;
+    this.makeSession = makeSession ?? ((info, sink, options, events) => new AgentSession(info, sink, options, events));
+    this.hosted = cfg.agentHosts ?? !makeSession;
     if (cfg.maxSessions !== undefined) log(`daemon.json maxSessions (${cfg.maxSessions}) is obsolete (w536): workers run in sandboxes only, and the portal sends this machine's agent cap`);
     for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'] as SignalName[]) {
       this.events.on(name, (s: SessionHandle, arg?: unknown) => {
@@ -476,6 +486,12 @@ export class Daemon {
   }
 
   start() {
+    // The agents the daemon before this one left running (w605), before the hello names the live ones.
+    try {
+      this.adoptHosts();
+    } catch (e) {
+      log(`agent hosts: could not look for them: ${(e as Error).message}`);
+    }
     this.startGuard();
     this.connect();
     // The sandboxes' editors (state, hang/crash watch), their git status, the disk guard and the idle-editor stop.
@@ -492,6 +508,7 @@ export class Daemon {
     const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
     log(mcp.server ? `unity mcp: ${mcp.server.command} ${mcp.server.args.join(' ')} (from ${mcp.source})` : `unity mcp: none (${mcp.source}); agents here get no Unity MCP bridge`);
     this.timers.push(setInterval(() => this.syncMcpScopes(), 5_000));
+    this.timers.push(setInterval(() => this.syncHostEditors(), 5_000));
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
     const watch = readOutsideWatch(outsideWatchFile(appDirOfConfig(this.cfg)));
     if (watch) this.outsideWatch = new OutsideWatch(watch);
@@ -540,7 +557,11 @@ export class Daemon {
     for (const t of this.timers) clearInterval(t);
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
     // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
-    for (const e of this.entries.values()) e.s.stop(false);
+    // Agents in hosts (w605) run on: the next daemon takes them back. Detached here, never stopped.
+    for (const e of this.entries.values()) {
+      if (e.s instanceof HostedSession) e.s.detach();
+      else e.s.stop(false);
+    }
     this.caffeinate?.kill();
     this.ws?.close();
   }
@@ -689,6 +710,7 @@ export class Daemon {
       protocol: PROTOCOL_VERSION,
       // The oldest portal it serves (w605): a daemon updated before its portal keeps working with it.
       oldestPortal: OLDEST_PORTAL_PROTOCOL,
+      ...(this.hosted ? { agentHosts: true } : {}),
       home: HOME,
       live: [...this.entries.values()].filter((e) => e.s.live).map((e) => e.s.info.id),
       // Its host guard runs (w466): the portal's own leaves this computer's sandbox drive to it.
@@ -912,24 +934,50 @@ export class Daemon {
     return all;
   }
 
+  /**
+   * The spec as this machine runs it: its Unity MCP server, its own claude, and in the environment the session's temp
+   * folder (TMP, TEMP and TMPDIR, removed once the session is gone), FF_MAX_EVENTS (where the ffdiscord CLI reports what
+   * the agent did as Max: this machine's file, tailed above) and the Unity slots commands.
+   */
+  private runSpec(info: Pick<SessionInfo, 'id'>, spec: LaunchSpec): LaunchSpec {
+    const maxFile = this.maxEventsFile;
+    return { ...spec, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...this.slotEnv(spec) } };
+  }
+
+  /** Where agent hosts keep their files (machine/agentHost.ts). */
+  private get hostsRoot() {
+    return hostsDir(appDirOfConfig(this.cfg));
+  }
+
+  /** A session whose process runs in an agent host (w605): it outlives this daemon. */
+  private hostedSession(info: SessionInfo, seq: number, holder: { e?: Entry }): HostedSession {
+    return new HostedSession(info, seq, {
+      root: this.hostsRoot,
+      out: (m) => this.out(m),
+      events: this.events,
+      handlers: () => this.handlers(info.id),
+      spec: () => this.runSpec(info, holder.e!.spec!),
+      editorUp: () => {
+        const sb = holder.e?.spec?.sandbox;
+        return sb ? this.pool.editorUp(sb) : undefined;
+      },
+      changed: () => this.awake(),
+      log: (line) => log(line),
+    });
+  }
+
   private entry(info: SessionInfo, lastSeq: number): Entry {
     let e = this.entries.get(info.id);
     if (!e) {
       const events = this.events;
       const holder: { e?: Entry } = {};
-      const s = this.makeSession({ ...info, pendingPermissions: [] }, this.sink(), () => {
-        const spec = holder.e!.spec!;
-        // FF_MAX_EVENTS: where the ffdiscord CLI reports what the agent did as Max (this machine's file, tailed above).
-        const maxFile = this.maxEventsFile;
-        const sandbox = spec.sandbox;
-        // TMP, TEMP and TMPDIR: the session's own folder under temp_dir, removed once the session is gone.
-        return buildOptions(
-          { ...spec, stdioMcp: this.stdioMcpFor(spec), claudeExecutable: spec.claudeExecutable ?? this.cfg.claude, env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...this.slotEnv(spec) } },
-          this.handlers(info.id),
-          process.env,
-          sandbox ? () => this.pool.editorUp(sandbox) : undefined,
-        );
-      }, events);
+      const s = this.hosted
+        ? this.hostedSession({ ...info, pendingPermissions: [] }, lastSeq, holder)
+        : this.makeSession({ ...info, pendingPermissions: [] }, this.sink(), () => {
+            const spec = holder.e!.spec!;
+            const sandbox = spec.sandbox;
+            return buildOptions(this.runSpec(info, spec), this.handlers(info.id), process.env, sandbox ? () => this.pool.editorUp(sandbox) : undefined);
+          }, events);
       e = { s, seq: lastSeq };
       holder.e = e;
       this.entries.set(info.id, e);
@@ -938,7 +986,59 @@ export class Daemon {
       Object.assign(e.s.info, { title: info.title, model: info.model, permissionMode: info.permissionMode, sdkSessionId: e.s.info.sdkSessionId ?? info.sdkSessionId });
     }
     e.seq = Math.max(e.seq, lastSeq);
+    if (e.s instanceof HostedSession) e.s.seq = Math.max(e.s.seq, lastSeq);
     return e;
+  }
+
+  /**
+   * At start (w605): take back the agent hosts the daemon before this one started. A host still running is adopted, its
+   * agent carrying on mid-turn or idle; what it recorded meanwhile is forwarded. One that is gone leaves its session not
+   * live: the portal resumes it if it was mid-turn (resumeCutOff), and its next message starts a new host.
+   */
+  private adoptHosts() {
+    if (!this.hosted) return;
+    let kept = 0;
+    let gone = 0;
+    for (const h of hostFolders(this.hostsRoot)) {
+      if (h.record && h.record.hostProtocol !== HOST_PROTOCOL) {
+        log(`agent host ${h.sessionId} (pid ${h.record.pid}) speaks host protocol ${h.record.hostProtocol}, this daemon ${HOST_PROTOCOL}: left running, not adopted`);
+        continue;
+      }
+      const state = readHostState(h.dir);
+      if (!state) {
+        // Never got going (no record yet): nothing it did can be lost.
+        if (!h.record || !hostAlive(h.dir)) fs.rmSync(h.dir, { recursive: true, force: true });
+        continue;
+      }
+      const place = hostPlace(h.dir);
+      const holder: { e?: Entry } = {};
+      const s = this.hostedSession({ ...state.info, pendingPermissions: [] }, 0, holder);
+      const e: Entry = { s, seq: 0, ...(place ? { spec: place as LaunchSpec } : {}) };
+      holder.e = e;
+      this.entries.set(h.sessionId, e);
+      if (s.adopt()) {
+        e.seq = s.seq;
+        kept++;
+        log(`agent host ${h.sessionId} (pid ${h.record?.pid}) adopted: ${s.info.status}${s.live ? ', live' : ''}`);
+      } else {
+        this.entries.delete(h.sessionId);
+        gone++;
+      }
+    }
+    if (kept || gone) log(`agent hosts: ${kept} adopted, ${gone} gone (their sessions are resumed by the portal if they were mid-turn)`);
+  }
+
+  /** Tell each agent host whether its sandbox's editor is up, when that changes (the guard there asks). */
+  private readonly editorSent = new Map<string, boolean>();
+  private syncHostEditors() {
+    for (const [id, e] of this.entries) {
+      const sb = e.spec?.sandbox;
+      if (!(e.s instanceof HostedSession) || !sb || !e.s.live) continue;
+      const up = this.pool.editorUp(sb);
+      if (this.editorSent.get(id) === up) continue;
+      this.editorSent.set(id, up);
+      e.s.editor(up);
+    }
   }
 
   private liveCount() {
@@ -1068,6 +1168,7 @@ export class Daemon {
         for (const [id, e] of this.entries) {
           if (!known.has(id)) {
             e.s.stop();
+            e.s.dispose?.();
             this.entries.delete(id);
           }
         }
@@ -1177,6 +1278,7 @@ export class Daemon {
       case 'remove': {
         const e = this.entries.get(msg.sessionId);
         e?.s.stop();
+        e?.s.dispose?.();
         this.entries.delete(msg.sessionId);
         this.awake();
         // Its own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene"), unless it became Git Bash's /tmp (w603).
@@ -1285,7 +1387,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   d.start();
   log(`FF Factory daemon for machine ${cfg.id}, repo ${cfg.repoPath}, portal ${cfg.portalUrl}`);
   const quit = () => {
-    log('shutting down: stopping agent processes');
+    log('shutting down: agents in agent hosts run on for the next daemon; any others stop');
     d.shutdown();
     setTimeout(() => process.exit(0), 500);
   };
