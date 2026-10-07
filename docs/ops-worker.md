@@ -87,6 +87,14 @@ process of the portal: it would get the portal's account and everything that acc
 4. The binary is `/usr/local/lib/fff/ops/claude`, the same Claude Code as the Agent SDK the portal runs.
    `fff-ops-sync` copies it there (as root) at every portal start, because `fff-ops` cannot enter `/srv/fff`. The
    launcher refuses to run it when the header's SDK version differs.
+5. **One process at a time, in turn (w638).** While a connection is open, systemd drops any other the moment it
+   arrives, without a word ("Too many incoming connections (1), dropping connection." in the VM's journal). A stop
+   (`fresh: true`, `ops_worker stop`, the idle stop, the portal's) sends Claude Code the SDK's own interrupt and ends
+   its input, so it ends its turn and exits; the spawner keeps the socket until then. The next process waits for that
+   close, then connects, and tries again every 250 ms while systemd still drops it (it frees the connection a moment
+   after the process exits), for up to 60 s (`OPS_SLOT`). Before this, a fresh job connected while the old process was
+   still exiting, systemd dropped it, and the job failed with "Claude Code process exited with code 1" (twice on
+   2026-10-07). `deploy/vm/test/fff-ops-socket.test.sh` checks it under real systemd in CI.
 
 ## What it may do, and what enforces it
 
@@ -309,8 +317,9 @@ restarts with a drain. Check it:
 
 If it does not start, the transcript says why, in the launcher's words: a version mismatch (restart the portal once:
 `fff-ops-sync` runs at its start), no credential (the orchestrators' account is a login, not a token), or the socket
-missing (the update did not run the new `install.sh`). `journalctl -t fff-ops -t fff-ops-ssh -t fff-ops-priv` in the
-VM shows its side.
+missing (the update did not run the new `install.sh`). "still had its one process after 60 s" means the last process
+did not exit after its stop (see `ops_worker status`). `journalctl -t fff-ops -t fff-ops-ssh -t fff-ops-priv` in the
+VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
 
 ## Code and tests
 
@@ -321,8 +330,13 @@ VM shows its side.
   `units/fff-ops.socket`, and the install step (9/10) that writes `fff-ops@.service`, `fff-ops-scratch.service` and
   the sudoers file.
 - `server/opsWorker.test.ts`: who reaches it, the belts, the shell seatbelt, writes and reads, redaction, the header,
-  the spawner against a fake socket, the one session with its job rule and lifetime, and a deploy (only in the
-  person's own turn, the grant, the report after the restart).
+  the spawner against a fake socket, a fresh job from every state the last process can be in (just after a turn,
+  mid-turn, after the idle stop, after a failed start, a resume after a stop) through the real Agent SDK and a
+  stand-in for systemd's one-connection socket (w638), the one session with its job rule and lifetime, and a deploy
+  (only in the person's own turn, the grant, the report after the restart).
+- `deploy/vm/test/fff-ops-socket.test.sh` (CI's unit-test job on Linux, w638): `fff-ops.socket`'s own settings under
+  real systemd, the real launcher with a fake claude and the portal's `opsSpawner`: systemd drops a second connection
+  while one is open, and a new process started right after a stop runs, the last one idle or mid-turn.
 - `deploy/vm/test/fff-ops.test.sh` (run by `lint.sh`): the launcher against a fake claude (arguments, environment,
   fd 3, refusals), the ssh wrapper against a fake ssh, real scp and sftp copies both ways through the wrappers to a fake
   machine running a real `sftp-server` (and the options, port, host and command they refuse), and the root wrapper's
