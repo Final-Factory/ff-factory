@@ -37,6 +37,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   launcher's reason in the transcript instead of only "exited with code 1", and a stop followed at once by a new process
   no longer adds a false "Claude Code process aborted by user" error.
 
+- **The dev-request test reads the portal's answer before giving up** (w636). On Windows CI it failed with
+  'no "dev_ack" from the portal in 5000 ms' though the portal had acked at once: the portal's synchronous store flush,
+  in the same process, held the event loop past the deadline, and the fake connector's timer ran before its socket was
+  read. Past the deadline it now lets I/O run once before it says so.
 - **Flaky unit tests wait for what they check, not a fixed time** (w636, asked by lothsahn). The background-save and
   state-save tests, the unity-slots crashed-holder, waiter and CLI tests, the download-resume test and the agent-host
   "new host" test (Windows reused the dead host's pid) failed on Windows runners; each now waits on the event it checks. The Mac dialog and Unity watch tests no longer ask the real
