@@ -12,6 +12,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A daemon with a bad token logs the portal's 401, not a parse error** (w636). The portal's refusal had bare LF line
+  ends, which the daemon's HTTP client could not parse ("Parse Error: Missing expected CR"); it now ends its lines with
+  CRLF and says Connection: close.
 - **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
   clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
   Whisper goes with a ping ahead of it: no answer within 2 s and the clip falls back, and the machine is skipped until it
