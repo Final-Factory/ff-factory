@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# fff-ops-priv (w597, docs/ops-worker.md): what the orchestration worker may do as root in the portal VM, and nothing
+# more. Its PATH's fffctl (ops-bin/fffctl) runs `sudo -n /usr/local/lib/fff/fff-ops-priv ARGS`; sudoers lets fff-ops run
+# this one file as root.
+#
+#   fffctl status                      the portal, its release, health, Tailscale, backups (fffctl status)
+#   fffctl state                       what is set up, as JSON (fffctl state)
+#   fffctl logs [N]                    the portal's last N journal lines (default 200, at most 2000), secrets redacted
+#   fffctl machine-ssh-check           the portal's ssh to each machine (fff-machine-ssh --check: read only)
+#   fffctl credential list             the machines that hold a credential
+#   fffctl credential issue ID --to TARGET
+#                                      a new /machine credential for machine ID, written straight into a file on TARGET
+#                                      over the portal's ssh (~/.ff-factory/machine-credential-ID there; on Windows under
+#                                      %USERPROFILE%). Never printed: only the remote path and its last four characters.
+#                                      TARGET must answer ssh first; issuing replaces the machine's credential, so its
+#                                      running daemon is dropped within 20 s.
+#   fffctl update                      the portal deploy (fffctl update --no-wait: build origin/main beside, drain,
+#                                      restart, verify, roll back by itself), only with the grant the portal leaves in
+#                                      its data folder when Lothsahn or Ben asks for a deploy in a turn of their own
+#                                      (ops_worker deploy): good for 15 minutes, once, removed here before anything runs.
+#                                      No options: no other ref, no drain setting.
+#
+# Everything else fffctl does (restart, rollback, configure, the vault, tokens, migrate, backups, shutdown) is a
+# person's and is not here. Every call is logged to the journal (tag fff-ops-priv); sudo logs it too.
+set -o errexit -o nounset -o pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+FFF_LIB=${FFF_LIB:-/usr/local/lib/fff}
+refuse() { echo "fffctl (orchestration worker): $*" >&2; exit 2; }
+[ "$(id -u)" -eq 0 ] || refuse "run through sudo (the worker's fffctl does it)"
+FFFCTL=/usr/local/sbin/fffctl
+# shellcheck source=lib.sh
+. "$FFF_LIB/lib.sh"
+load_conf
+logger -t fff-ops-priv -- "fffctl $*" 2>/dev/null || true
+
+# The patterns redactSecrets (server/secrets.ts) knows, for log lines.
+redact() {
+  sed -E -e 's/sk-ant-oat01-[A-Za-z0-9_-]{40,}/sk-ant-oat01-[redacted]/g' -e 's/sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{40,}/sk-ant-api-[redacted]/g' \
+    -e 's/(ffm_[A-Za-z0-9.-]{1,64}_)[A-Za-z0-9_-]{32,}/\1[redacted]/g' -e 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]{30,}/\1[redacted]/g' \
+    -e 's/ffpv1_[A-Za-z0-9_-]{10,}/ffpv1_[redacted]/g' -e 's/tskey-[a-z]+-[A-Za-z0-9-]{16,}/tskey-[redacted]/g'
+}
+
+ssh_as_fff() { runuser -u "$FFF_USER" -- "$FFF_LIB/fff-ops-ssh" "$@"; }
+
+credential_issue() {
+  local id=$1 target=$2 tmp platform remote enc ps out
+  [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || refuse "not a machine id: '${id:0:80}'"
+  # Reach it first: a credential issued for a machine we then cannot write to would only cut its daemon off.
+  out=$(ssh_as_fff "$target" uname -s </dev/null 2>/dev/null || true)
+  case "$out" in
+    Darwin* | Linux*) platform=posix ;;
+    *)
+      out=$(ssh_as_fff "$target" 'echo %OS%' </dev/null 2>&1) || refuse "$target does not answer ssh: ${out:0:300}"
+      platform=windows
+      ;;
+  esac
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  "$FFFCTL" machine-credential issue "$id" --out "$tmp/cred" >"$tmp/issued" 2>&1 || refuse "fffctl machine-credential issue $id failed: $(redact <"$tmp/issued" | tail -n 3)"
+  remote="machine-credential-$id"
+  if [ "$platform" = posix ]; then
+    out=$(ssh_as_fff "$target" "umask 077 && mkdir -p ~/.ff-factory && cat > ~/.ff-factory/$remote && chmod 600 ~/.ff-factory/$remote && echo stored ~/.ff-factory/$remote" <"$tmp/cred" 2>&1) ||
+      refuse "the credential was issued but could not be written on $target: ${out:0:300}. The machine's old credential no longer works; run this again"
+  else
+    # Base64 UTF-16LE (-EncodedCommand) so cmd.exe or PowerShell as the ssh shell pass it on unchanged.
+    ps="\$d = Join-Path \$env:USERPROFILE '.ff-factory'; New-Item -ItemType Directory -Force -Path \$d | Out-Null; \$f = Join-Path \$d '$remote'; [IO.File]::WriteAllText(\$f, [Console]::In.ReadToEnd().Trim()); 'stored ' + \$f"
+    enc=$(printf '%s' "$ps" | iconv -t UTF-16LE | base64 -w0)
+    out=$(ssh_as_fff "$target" "powershell -NoProfile -NonInteractive -EncodedCommand $enc" <"$tmp/cred" 2>&1) ||
+      refuse "the credential was issued but could not be written on $target: ${out:0:300}. The machine's old credential no longer works; run this again"
+  fi
+  redact <"$tmp/issued" | sed -E 's/ is in [^ ]+ \(0600\)/ was issued/; s/ Move it to the machine, then delete [^ ]+\.$//'
+  echo "on $target: $(printf '%s' "$out" | tr -d '\r' | tail -n 1) (give it to the worker installer with --credential-file / -CredentialFile, then delete it there)"
+}
+
+case "${1:-help}" in
+  status) exec "$FFFCTL" status ;;
+  state) exec "$FFFCTL" state ;;
+  logs)
+    n=${2:-200}
+    if ! [[ $n =~ ^[0-9]{1,4}$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt 2000 ]; then refuse "logs [N]: N from 1 to 2000"; fi
+    journalctl -u fff-portal.service -n "$n" --no-pager -o short-iso | redact
+    ;;
+  machine-ssh-check) runuser -u "$FFF_USER" -- env HOME="$FFF_ROOT/home" "$FFF_LIB/fff-machine-ssh" --check ;;
+  credential)
+    case "${2:-}" in
+      list) exec "$FFFCTL" machine-credential list ;;
+      issue)
+        if [ $# -ne 5 ] || [ "$4" != --to ]; then refuse "credential issue ID --to TARGET"; fi
+        credential_issue "$3" "$5"
+        ;;
+      *) refuse "credential list | credential issue ID --to TARGET (revoking is a person's: sudo fffctl machine-credential revoke)" ;;
+    esac
+    ;;
+  update)
+    if [ $# -ne 1 ]; then refuse "update takes no options: it builds origin/$FFF_BRANCH"; fi
+    grant=$DATA/ops-deploy.grant
+    [ -f "$grant" ] || refuse "no deploy was asked for: only Lothsahn or Ben ask for one, in a turn of their own, through their orchestrator's ops_worker deploy (good for 15 minutes, once)"
+    owner=$(stat -c %U "$grant")
+    by=$(jq -r '.by // ""' "$grant" 2>/dev/null || true)
+    expires=$(jq -r '.expires // ""' "$grant" 2>/dev/null || true)
+    # Used once, whatever follows.
+    rm -f "$grant"
+    [ "$owner" = "$FFF_USER" ] || refuse "the deploy grant is not the portal's ($owner): refused"
+    if [ -z "$by" ] || [ "$(date -d "$expires" +%s 2>/dev/null || echo 0)" -le "$(date +%s)" ]; then refuse "the deploy grant ran out (${expires:-no time}): ask your person to ask for the deploy again"; fi
+    before=$(release_sha "$(readlink -e "$CURRENT" 2>/dev/null || true)")
+    logger -t fff-ops-priv -- "deploy asked for by $by: fffctl update from ${before:-unknown}" 2>/dev/null || true
+    echo "deploy asked for by $by; the portal runs $(basename "$(readlink -e "$CURRENT" 2>/dev/null || echo none)") at commit ${before:-unknown}"
+    "$FFFCTL" update --no-wait
+    echo "asked for: the portal builds origin/$FFF_BRANCH beside the running release, drains, restarts on it, verifies it and rolls back by itself. Your process ends with the old portal; FF Factory messages you when the new one is up."
+    ;;
+  help | -h | --help) sed -n '5,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) refuse "fffctl $1 is a person's (restarts, rollbacks, settings, the vault, migrations). You have: status, state, logs [N], machine-ssh-check, credential list, credential issue ID --to TARGET, and update with a deploy grant" ;;
+esac

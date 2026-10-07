@@ -32,7 +32,7 @@ import { switchBranch } from '../server/switchBranch.ts';
 import { publishFromMachine } from './review.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, type CleanupGuard } from '../server/cleanup.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
@@ -321,11 +321,10 @@ export class Daemon {
     const env = hostCleanupEnv(cfg.tempDir);
     this.cleaner = new CleanupRunner({
       settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
-      diskPaths: () => [HOME, env.tmp, cfg.repoPath, ...(this.sandboxRoot() && fs.existsSync(this.sandboxRoot()!) ? [this.sandboxRoot()!] : [])],
-      statfs: async (p) => {
-        const st = await fs.promises.statfs(p).catch(() => undefined);
-        return st && { free: st.bavail * st.bsize, total: st.blocks * st.bsize };
-      },
+      // The temp folder apart: a RAM-backed one (a Linux tmpfs) is never the disk (w566).
+      diskPaths: () => [HOME, cfg.repoPath, ...(this.sandboxRoot() && fs.existsSync(this.sandboxRoot()!) ? [this.sandboxRoot()!] : [])],
+      tempPaths: () => [env.tmp],
+      statfs: volumeStat,
       pass: async (low, opts) => {
         const guard = this.cleanupGuard();
         const root = this.sandboxRoot();

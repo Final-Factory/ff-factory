@@ -21,6 +21,8 @@ WorkingDirectory=/srv/fff/app/current
 ExecCondition=/bin/sh -c '! test -e /run/fff/portal.hold'
 # As root ("+"): switch to the release fff-update prepared when the server left data/update.request.
 ExecStartPre=+/usr/local/lib/fff/fff-update activate
+# As root, never failing the start: the orchestration worker's Claude Code is this release's Agent SDK's (w597).
+ExecStartPre=-+/usr/local/lib/fff/fff-ops-sync
 ExecStart=/usr/bin/node server/index.ts
 Restart=always
 RestartSec=3

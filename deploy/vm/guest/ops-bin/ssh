@@ -1,0 +1,4 @@
+#!/bin/sh
+# The orchestration worker's ssh (w597, docs/ops-worker.md): the portal's ssh to the machines, as the portal's account,
+# through fff-ops-ssh (fixed options, pinned host keys). `ssh m5 'whoami'`.
+exec sudo -n -u fff /usr/local/lib/fff/fff-ops-ssh "$@"

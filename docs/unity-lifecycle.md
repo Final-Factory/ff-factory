@@ -144,7 +144,9 @@ arbiter on the machine (no FF Factory daemon, or one from before w469) it runs a
   limit of 3, all at once and one editor at a time).
 - **Stuck or crashed holders.** A waiter or holder whose process is gone, or whose request file was not touched for 90
   s (the client touches it every 15 s), is freed at once and the orchestrator told. A waiter that has held slots while
-  waiting for 30 minutes is refused. `acquire` holds for at most its `--ttl` (120 min).
+  waiting for 30 minutes is refused. `acquire` holds for at most its `--ttl` (120 min). A waiter still alive whose
+  request was dropped that way (suspended, then resumed) files it again under its first time and keeps its place; before
+  this it waited silently for a grant that could not come (LothDesktop, 2026-10-07: a `run` waited 4 h).
 - **RAM.** On a machine with `max_unity`, no slot is granted while RAM use is at 85% or more (`UNITY_RAM_PCT`, the
   placement's busy line), `unity start` included: one more editor takes 8-12 GB and a Burst build 4-10 GB more, about a
   quarter of 64 GB, and LothDesktop paged at 63 of 64. The queue waits; after 10 minutes on RAM the orchestrator is told.

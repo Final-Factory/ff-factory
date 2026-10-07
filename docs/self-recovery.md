@@ -238,7 +238,10 @@ Now the host guard and every machine daemon clean up by themselves (`server/clea
 - **A pass every 15 minutes while free space is below the soft threshold** (`softFreeGB`), which also runs
   the rules that empty whole caches. On BEAST the soft threshold defaults to `warnFreeGB` + 40 = **120 GB**,
   so clean-up works hard well before the hard block at 80 GB; on the machines it is **80 GB**. The volumes
-  measured are the home folder's, the temp folder's and (host) `hostDiskPaths`; the fullest one counts.
+  measured are the disk's: the home folder's, (host) the data folder's and `hostDiskPaths`, (machine) the clone's
+  and the sandboxes'; the fullest one counts. A RAM-backed filesystem (tmpfs, ramfs) never counts, and the temp
+  folder is shown apart (`temp` in the summary: RAM, or a disk volume of its own) unless it is on that disk (w566:
+  the portal VM's `/tmp` is a tmpfs of half its RAM, and as "the disk" it read 1.9 GB free while the disk had 101 GB).
 - The critical level, a sandbox drive waiting for space, `host_recovery cleanup` and `machine_cleanup` run
   a pass at once, with every rule.
 

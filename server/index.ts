@@ -33,6 +33,7 @@ import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
+import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
@@ -40,7 +41,7 @@ import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
 import { serveStatic, webBuild } from './webStatic.ts';
-import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries } from './cleanup.ts';
+import { appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, staleUnityLibraries, volumeStat } from './cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, staleOutputSettings, type StalePlace } from './staleOutput.ts';
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, mayRecoverUnclean, parseRestartRequest, readAlive, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, type RestartRequest } from './restart.ts';
@@ -48,7 +49,9 @@ import { UsageTracker, accountLines, buildAccounts, hostToken, machineToken, ses
 import { appVersion, formatVersion } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { startBaseRefresh } from './baseRefresh.ts';
-import { DRY_RUN_BANNER, defuseConfig, dryRun } from './dryRun.ts';
+import { DRY_RUN_BANNER, DRY_RUN_WHY, defuseConfig, dryRun } from './dryRun.ts';
+import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
+import { machineSshHttp } from './machineSshHttp.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AppState, CreateSandboxRequest, HostStatus, Machine, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -140,6 +143,8 @@ setTimeout(() => {
 }, 5000);
 const sessions = new SessionManager(cfg, store);
 const machines = new MachineManager(cfg, store, sessions);
+// The machines' host keys, pinned from their records (w568): a rebuilt or moved portal writes them again.
+if (!dryRun()) machines.pinHostKeys();
 // Files people attach to messages (docs/attachments.md): stored by SHA-256, never opened; old ones go by retention.
 const attachments = new AttachmentStore(cfg.dataDir, () => cfg.attachments);
 machines.attachments = attachments;
@@ -286,6 +291,11 @@ function requesterOf(req: http.IncomingMessage) {
  * So one person's chat never gets the other's messages, and nobody spends someone else's Claude account.
  */
 function mayDrive(req: http.IncomingMessage, s: SessionInfo) {
+  // The orchestration worker (w597): only Lothsahn and Ben interrupt it from the page; nobody writes to it there.
+  if (s.kind === 'ops') {
+    if (!OPS_PEOPLE.includes(requesterOf(req).userId.toLowerCase())) throw new HttpError(403, OPS_REFUSED);
+    return;
+  }
   if (s.kind !== 'orchestrator') return;
   const me = requesterOf(req);
   const owner = agents.orchestrators.ownerOf(s);
@@ -340,14 +350,8 @@ const hostStalePlaces = (): StalePlace[] => {
 };
 const hostHealth = new HostHealthMonitor({
   cfg,
-  statfs: async (p) => {
-    try {
-      const s = await fs.promises.statfs(p);
-      return { free: s.bavail * s.bsize, total: s.blocks * s.bsize };
-    } catch {
-      return undefined;
-    }
-  },
+  // With the filesystem type and the device: a RAM-backed temp folder is never the disk (w566).
+  statfs: volumeStat,
   exists: (p) => fs.existsSync(p),
   mem: () => ({ free: os.freemem(), total: os.totalmem() }),
   // No sandboxes, editors or drive of its own (w510): those are each machine's daemon's, this host's own daemon's too.
@@ -391,7 +395,10 @@ const hostHealth = new HostHealthMonitor({
     stale: async () => (await staleUnityLibraries([cleanupEnv.home], cfg.hostGuard.cleanup.libraryReportDays)).filter((l) => !neverDelete(l.path, hostCleanupGuard())),
     log: (e) => appendCleanupLog(cfg.dataDir, e),
     staleAt: staleAtFile(cfg.dataDir),
-    diskPaths: () => [cleanupEnv.home, cleanupEnv.tmp],
+    // The disk is the volume(s) of the home folder and the data; the temp folder is shown apart (in the VM a tmpfs of half
+    // the RAM, which as "the disk" read 1.9 GB free while the disk had 101 GB, w566).
+    diskPaths: () => [cleanupEnv.home, cfg.dataDir],
+    tempPaths: () => [cleanupEnv.tmp],
   },
   changed: (h) => {
     host.health = h;
@@ -707,6 +714,7 @@ route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
     return { note: agents.standing.runNow(s.info.standingId, 'message', need(text, 'text'), requesterOf(req)) };
   }
   if (!imgs.length && !files.length) need(text, 'text');
+  if (s.info.kind === 'ops') throw new HttpError(403, OPS_REFUSED);
   mayDrive(req, s.info);
   // `/compact [focus]` (w518) is no message: it compacts the conversation. Its wake_me check-in and budgets stay.
   const focus = s.info.kind === 'orchestrator' && !imgs.length && !files.length ? compactCommand(String(text ?? '')) : undefined;
@@ -909,6 +917,7 @@ route('POST', '/api/sessions/([\\w-]+)/title', async (req, [id]) => {
   const s = sessions.get(id);
   if (s.info.kind === 'standing') throw new HttpError(400, "a standing agent's conversation carries the agent's name; rename the agent instead");
   if (s.info.kind === 'orchestrator') throw new HttpError(400, "an orchestrator's name is its person's (or Dispatcher)");
+  if (s.info.kind === 'ops') throw new HttpError(400, 'the orchestration worker keeps its name');
   return { title: sessions.setTitle(id, need(title, 'title')) };
 });
 
@@ -931,6 +940,7 @@ route('POST', '/api/sessions/([\\w-]+)/mode', async (req, [id]) => {
   const { mode } = await readJson<{ mode: string }>(req);
   if (!['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'].includes(mode)) throw new HttpError(400, 'bad mode');
   const s = sessions.get(id);
+  if (s.info.kind === 'ops') throw new HttpError(400, "the orchestration worker's permission mode is fixed (its guard and the VM's fences hold it)");
   mayDrive(req, s.info);
   await s.setMode(mode as never);
   return {};
@@ -962,6 +972,7 @@ route('DELETE', '/api/sessions/([\\w-]+)', async (_r, [id]) => {
   const s = sessions.get(id);
   if (s.info.kind === 'orchestrator') throw new HttpError(400, 'reset the orchestrator instead');
   if (s.info.kind === 'standing') throw new HttpError(400, "this is a standing agent's conversation; delete the agent instead");
+  if (s.info.kind === 'ops') throw new HttpError(400, 'the orchestration worker is fixed: stop it instead (its conversation stays)');
   sessions.remove(id);
   return {};
 });
@@ -1271,16 +1282,35 @@ const server = http.createServer(async (req, res) => {
       const machineId = machines.authenticate(req.headers.authorization);
       return await reviewHttp(review, machineId && store.machines.has(machineId) ? machineId : undefined, req, res, reviewUpload[1], Number(url.searchParams.get('offset') ?? 0));
     }
+    // A worker install setting up the portal's ssh (w568, server/machineSshHttp.ts): its own token, nothing else.
+    if (url.pathname === '/machine/ssh') {
+      const { run } = await import('./proc.ts');
+      return await machineSshHttp(
+        {
+          machineOf: (h) => {
+            const id = machines.authenticate(h);
+            return id && store.machines.has(id) ? id : undefined;
+          },
+          publicKey: () => portalPublicKey(),
+          tailnetAddress: () => tailnetAddress(run),
+          register: (id, ssh) => machines.registerSsh(id, ssh),
+          refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
+        },
+        req,
+        res,
+      );
+    }
     // A worker install asking about itself, or leaving (w513, docs/worker-install.md): its own token, nothing else.
-    if (url.pathname === '/machine/whoami' || url.pathname === '/machine/unenroll') {
+    if (url.pathname === '/machine/whoami' || url.pathname === '/machine/unenroll' || url.pathname === '/machine/stopping') {
       const machineId = machines.authenticate(req.headers.authorization);
       if (!machineId || !store.machines.has(machineId)) return send(res, 401, { error: 'a valid machine token is required' });
       if (url.pathname === '/machine/whoami' && req.method === 'GET') return send(res, 200, machines.selfStatus(machineId));
+      if (url.pathname === '/machine/stopping' && req.method === 'POST') return send(res, 200, machines.stoppingOnPurpose(machineId));
       if (url.pathname === '/machine/unenroll' && req.method === 'POST') {
         const r = machines.unenroll(machineId, url.searchParams.get('force') === '1');
         return send(res, r.ok ? 200 : 409, r);
       }
-      return send(res, 405, { error: 'GET /machine/whoami or POST /machine/unenroll' });
+      return send(res, 405, { error: 'GET /machine/whoami, POST /machine/stopping or POST /machine/unenroll' });
     }
     // The nightly e2e lab's report (docs/intake.md, "Nightly e2e regressions"): a key minted --scope nightly, nothing else.
     if (url.pathname === '/api/intake/nightly' && req.method === 'POST') {

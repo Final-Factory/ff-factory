@@ -1,0 +1,16 @@
+# The machines the portal deploys daemons to over ssh, as fff-machine-ssh writes them into the portal account's
+# ~/.ssh/config (the alias, its host and user) and ~/.ssh/known_hosts (the host key, pinned: never accepted on first use).
+# One line each: alias, host (its tailnet MagicDNS name), ssh user, ed25519 host key. The alias is the machine's
+# ssh_host in the portal (add_machine); "rydin@beast" finds the alias beast.
+#
+# Each key was checked on two paths (w537, 2026-10-06, measured from BEAST): m3, m5 and loth2800 against the key BEAST
+# had trusted for weeks of deploys, beast against its own sshd over loopback, each equal to a fresh ssh-keyscan over the
+# tailnet. A machine reinstalled (a new host key) or a new machine: put its key here (ssh-keyscan -t ed25519 <host>,
+# checked on the machine itself with ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub), then fffctl update, or
+# deploy/vm/host/machine-ssh.sh --fix on the host.
+#
+# alias    host      user       ed25519 host key                                                     fingerprint
+m3         m3        benryding  AAAAC3NzaC1lZDI1NTE5AAAAIJPzhFYZX4GtbGkBP2Fl8RqwkZaXjQ9fUWN9P+p+/OX3  # SHA256:dNKSZKv7qWFocpDj+Fe2B2XbsPgdqDdbZ7m1dtk6H9c
+m5         m5        benryding  AAAAC3NzaC1lZDI1NTE5AAAAIBayZWjCWfjUsoRkWYw2VNcYjTdMXLXCNZeS7eETg+g5  # SHA256:Ss8og0lE5Gja7ZaGwAwDZw18DV3kUbsrIzU5ISOzWN4
+Loth2800   Loth2800  Lothsahn   AAAAC3NzaC1lZDI1NTE5AAAAIETlsnzQENULciyaMBvln+JfwZ/G3lUR/66yugqBGq+b  # SHA256:pyzyAdXNTzuW3t2hUWl2/diAjCOyk95iClIBdGSOdkA
+beast      beast     rydin      AAAAC3NzaC1lZDI1NTE5AAAAIGgE0GjCLsOOdLNBCR5KKXguNoZCX0Mh7C3tZbQzCDQx  # SHA256:fc+q1NmEuZnNbsqKKVUh33w8Khh8tkTe6yo5laRKb0k

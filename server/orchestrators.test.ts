@@ -9,7 +9,7 @@ import { MachineManager, STANDING_CAP_NO_POOL, agentCap } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
-import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
+import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
@@ -223,7 +223,9 @@ test("routing: a worker's update goes to its requesters' own chats, never the di
   assert.deepEqual(sessions.get(id).info.requestedBy, BEN, 'the worker runs for the requester');
   await until('Ben hears the worker', () => heard(ben.id, '[worker update]').length === 1);
   assert.match(heard(ben.id, '[worker update]')[0].text, /\(requested by Ben\) in sandbox pc\/alpha finished a turn\. Its final message:\n\nEcho: Add a skip button/);
-  assert.match(heard(ben.id, '[dispatch]')[0].text, new RegExp(`^\\[dispatch\\] w1 "Make the tutorial skippable": started worker ${id} "Tutorial skip" in pc/alpha\\.`));
+  // Titled for its job (w575): the request id, then the dispatcher's description.
+  assert.equal(sessions.get(id).info.title, 'w1: Tutorial skip');
+  assert.match(heard(ben.id, '[dispatch]')[0].text, new RegExp(`^\\[dispatch\\] w1 "Make the tutorial skippable": started worker ${id} "w1: Tutorial skip" in pc/alpha\\.`));
   const w = store.work.get('w1')!;
   assert.equal(w.status, 'active');
   assert.deepEqual(w.sessionIds, [id]);
@@ -232,7 +234,7 @@ test("routing: a worker's update goes to its requesters' own chats, never the di
   assert.equal(heard(dispatcher().info.id, '[worker update]').length, 0);
   // A second worker for the same request needs a reason: the first is still on it.
   const again = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'again', title: 'Again', work_id: 'w1' });
-  assert.match(again.text, new RegExp(`^ERROR: w1 already has worker ${id} "Tutorial skip" in pc/alpha: send it there`));
+  assert.match(again.text, new RegExp(`^ERROR: w1 already has worker ${id} "w1: Tutorial skip" in pc/alpha: send it there`));
 });
 
 test("a machine worker's permission signal carries no request (the daemon drops it): its people hear the pending one", async (t) => {
@@ -272,8 +274,15 @@ test("w431: a worker another person started, linked to Ben's request, takes Ben'
   const v = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Look at the inventory UI', title: 'Inventory look', from: 'human', requestedBy: LOTH });
   const other = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Something else', title: 'Unlinked', from: 'human', requestedBy: LOTH });
   await call(ben, 'request_work', { title: 'Fix switch_branch refusals', brief: 'The caller is counted as mid-turn.' });
-  const sent = await call(dispatcher().info, 'message_agent', { session_id: v.info.id, text: 'Take w1 too.', work_id: 'w1' });
+  // Handed a request it is not on, a worker needs a title for it (w575), and is retitled.
+  const untitled = await call(dispatcher().info, 'message_agent', { session_id: v.info.id, text: 'Take w1 too.', work_id: 'w1' });
+  assert.equal(untitled.isError, true);
+  assert.match(untitled.text, /title: what the job is/);
+  assert.equal(v.info.title, 'Inventory look', 'nothing sent, nothing renamed');
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: v.info.id, text: 'Take w1 too.', work_id: 'w1', title: 'switch_branch refusals' });
   assert.equal(sent.isError, false, sent.text);
+  assert.equal(v.info.title, 'w1: switch_branch refusals');
+  assert.match(sent.text, /It is now "w1: switch_branch refusals"/);
   const said = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text);
   // Linked by the dispatcher's work_id: Ben's orchestrator may follow up, and the worker reads which request it is about.
   const r = await call(ben, 'message_agent', { session_id: v.info.id, text: 'Push it now, GitHub works again.' });
@@ -516,18 +525,54 @@ test('message_person: only a person’s own orchestrator sends, to someone else 
   assert.match((await call(loth, 'message_person', { to: 'ben', text: '   ' })).text, /^ERROR: the message is empty/);
   assert.throws(() => o.messagePerson(o.personalOf('lothsahn')!, { to: 'ben', text: 'x'.repeat(PERSON_MESSAGE_CHARS + 1) }), /keep it to 2000/);
   assert.throws(() => o.messagePerson(dispatcher(), { to: 'ben', text: 'hi' }), /only a person’s own orchestrator messages people/);
+  assert.equal(MESSAGES_PER_PERSON, 10);
   for (let i = 0; i < MESSAGES_PER_PERSON; i++) assert.equal((await call(loth, 'message_person', { to: 'ben', text: `ping ${i}` })).isError, false);
-  assert.match((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).text, /^ERROR: 3 messages to Ben since they last wrote to their orchestrator; wait for them to answer/);
+  assert.match((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).text, /^ERROR: 10 messages to Ben since Lothsahn or Ben last wrote to their orchestrator; ask Lothsahn before sending more/);
   // Ben answering: a reply is the same tool, and his own limit is separate.
   assert.equal((await call(ben, 'message_person', { to: 'lothsahn', text: 'Done, it is allowed now.' })).isError, false);
   assert.equal(heard(loth.id, '[person message]').length, 1);
-  // Lothsahn writing to his own chat does not free his messages to Ben; Ben writing to his does.
+  // w571: Lothsahn writing to his own chat frees his messages to Ben (his own words), and so does Ben writing to his.
   o.personWrote(loth.id);
-  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).isError, true);
+  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).isError, false);
   o.personWrote(ben.id);
   assert.equal(o.personalOf('ben')!.info.personMessages, undefined, 'writing to his chat reads it');
-  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).isError, false);
-  assert.equal(heard(ben.id, '[person message]').length, MESSAGES_PER_PERSON + 1);
+  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'and again' })).isError, false);
+  assert.equal(heard(ben.id, '[person message]').length, MESSAGES_PER_PERSON + 2);
+});
+
+test('message_person (w571): a person relays as much as they ask; two orchestrators answering each other stop at the cap', async (t) => {
+  const { o, chat, call, heard } = setup(t);
+  const ben = chat(BEN).info;
+  const loth = chat(LOTH).info;
+  // Ben's case: he asks his orchestrator for one message to Lothsahn at a time, many times, while Lothsahn is away.
+  for (let i = 0; i < 25; i++) {
+    o.personWrote(ben.id);
+    assert.equal((await call(ben, 'message_person', { to: 'lothsahn', text: `Ben's message ${i}` })).isError, false, `message ${i}`);
+  }
+  assert.equal(heard(loth.id, '[person message]').length, 25);
+  // The loop: each orchestrator answers the other's [person message] with no person writing. Both stop at the cap.
+  o.personWrote(ben.id);
+  o.personWrote(loth.id);
+  let sent = 0;
+  for (let i = 0; i < 50; i++) {
+    const a = await call(ben, 'message_person', { to: 'lothsahn', text: `bounce ${i}` });
+    const b = await call(loth, 'message_person', { to: 'ben', text: `bounce back ${i}` });
+    if (a.isError && b.isError) break;
+    sent += Number(!a.isError) + Number(!b.isError);
+  }
+  assert.equal(sent, 2 * MESSAGES_PER_PERSON);
+});
+
+test('loop guards: config orchestrator.* sets them, within 1-100, else the defaults', async (t) => {
+  const { o, chat, call, cfg } = setup(t);
+  assert.deepEqual(loopGuards({ orchestrator: {} as Config['orchestrator'] }), { filings: FILINGS_PER_MESSAGE, followUps: FOLLOW_UPS_PER_MESSAGE, messages: MESSAGES_PER_PERSON });
+  assert.deepEqual(loopGuards({ orchestrator: { messagesPerPerson: 0, filingsPerMessage: 101, followUpsPerMessage: 2.5 } as Config['orchestrator'] }), { filings: FILINGS_PER_MESSAGE, followUps: FOLLOW_UPS_PER_MESSAGE, messages: MESSAGES_PER_PERSON });
+  cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: 2 };
+  const loth = chat(LOTH).info;
+  for (let i = 0; i < 2; i++) assert.equal((await call(loth, 'message_person', { to: 'ben', text: `ping ${i}` })).isError, false);
+  assert.match((await call(loth, 'message_person', { to: 'ben', text: 'third' })).text, /^ERROR: 2 messages to Ben/);
+  o.personWrote(loth.id);
+  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'third' })).isError, false);
 });
 
 test('message_person: a message to an orchestrator mid-turn waits for that turn, then gets its own answer', async (t) => {
@@ -1088,4 +1133,63 @@ test('w527: Approve, the orchestrator in its person\'s own words, and Start now:
   st.bumpDelegation(d.id, LOTH);
   assert.equal(store.work.get('w1')!.priority, 'urgent');
   await until('the dispatcher hears Start now', () => heard(dispatcher().info.id, '[work update]').some((e) => e.text.includes('Lothsahn pressed "Start now"')));
+});
+
+test('w575: a worker is titled for each request it is handed (start, link) and keeps the title across a restart', async (t) => {
+  const { dir, store, sessions, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Install LothDesktop from scratch', brief: 'Wipe and reinstall the worker root.' });
+  await call(ben, 'request_work', { title: 'Fix the dashboard labels', brief: 'Titles follow the job.' });
+  // The dispatcher always names the job: no title, no start.
+  const untitled = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Reinstall', work_id: 'w1' });
+  assert.equal(untitled.isError, true);
+  assert.match(untitled.text, /title: what the job is/);
+  const tooLong = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Reinstall', work_id: 'w1', title: 'x'.repeat(90) });
+  assert.match(tooLong.text, /keep "w1: <description>" to 80/);
+  // A description that already starts with an id gets it once.
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Reinstall', work_id: 'w1', title: 'w1: LothDesktop fresh install, slot1..6' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  assert.equal(sessions.get(id).info.title, 'w1: LothDesktop fresh install, slot1..6');
+
+  // decide_work link names the job for the workers it links.
+  assert.match((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'link', note: 'Already on it.', session_ids: [id] })).text, /title: what the job is/);
+  assert.equal(sessions.get(id).info.title, 'w1: LothDesktop fresh install, slot1..6', 'a refused link renames nothing');
+  const linked = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'link', note: 'Already on it.', session_ids: [id], title: 'dashboard titles and fixed labels' });
+  assert.equal(linked.isError, false, linked.text);
+  assert.equal(sessions.get(id).info.title, 'w2: dashboard titles and fixed labels');
+
+  // Kept on disk: a restarted portal reads the same title.
+  store.flush();
+  assert.equal(new Store(dir).sessions.get(id)?.title, 'w2: dashboard titles and fixed labels');
+});
+
+test('w575: a sandbox label is its name and never changes: no set_label for workers, no set_sandbox_label, old labels give way', async (t) => {
+  const { cfg, store, sessions, agents, machines, dispatcher, call } = await setupOnMachine(t);
+  const m = store.machines.get('pc')!;
+  const sb = m.sandboxes!.find((s) => s.id === 'alpha')!;
+  assert.equal(sb.purpose, 'alpha');
+  assert.equal(agents.orchestratorBelt(dispatcher().info).some((x) => x.name === 'set_sandbox_label'), false, 'the dispatcher cannot relabel a sandbox');
+  const create = agents.orchestratorBelt(dispatcher().info).find((x) => x.name === 'create_sandbox')!;
+  assert.equal('purpose' in (create.schema as Record<string, unknown>), false, 'create_sandbox takes no label');
+
+  // A worker's tools: no set_label; one started before w575 that still calls it changes nothing.
+  const w = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Look around', title: 'Look', from: 'human' });
+  const spec = machines.hooks!.specFor(w.info, m);
+  assert.equal(spec.mcp?.tools.some((x) => x.name === 'set_label'), false);
+  assert.doesNotMatch(spec.append, /set_label|set it to `unused`/);
+  const said = await machines.hooks!.handlersFor(w.info, m).set_label!({ purpose: 'w554: waiting on Ben' });
+  assert.match(String(said), /never changes/);
+  assert.equal(store.machines.get('pc')!.sandboxes!.find((s) => s.id === 'alpha')!.purpose, 'alpha');
+
+  // A label stored before w575 gives way to the name when the portal starts.
+  const old = store.machines.get('pc')!;
+  old.sandboxes = old.sandboxes!.map((s) => ({ ...s, purpose: 'w554: waiting on Ben' }));
+  store.putMachine(old);
+  new MachineManager(cfg, store, sessions);
+  assert.equal(store.machines.get('pc')!.sandboxes!.find((s) => s.id === 'alpha')!.purpose, 'alpha');
+  // list_sandboxes shows no label: what a sandbox does is its agents' titles under it.
+  const listed = (await call(dispatcher().info, 'list_sandboxes', {})).text;
+  assert.match(listed, /- pc\/alpha( FREE)?: ready;/);
+  assert.doesNotMatch(listed, /w554/);
 });

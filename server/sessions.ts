@@ -36,6 +36,10 @@ export function othersMidTurn<T extends { readonly info: SessionInfo; readonly l
 export const midTurnRefusal = (busy: { info: SessionInfo }[], where: string) =>
   `agent(s) ${busy.map((s) => `"${s.info.title}"`).join(', ')} ${busy.length === 1 ? 'is' : 'are'} mid-turn in ${where}; wait for them (or stop them) first`;
 
+/** Who may reach the orchestration worker (w597): its gate in SessionManager.send. */
+export type OpsPass = 'orchestrator' | 'wake' | 'resume';
+export const OPS_SEND_REFUSED = "the orchestration worker takes messages only from Lothsahn's and Ben's own orchestrators (their ops_worker tool), not from people's chats, the dispatcher, workers, standing agents, the intake, FFBox or /mcp";
+
 /** A message waiting for a free running slot (w384): delivered in order once one frees. Kept in data/send-queue.json. */
 export interface QueuedSend {
   uuid: string;
@@ -852,7 +856,7 @@ export class SessionManager {
 
   /** Why a message to this session must wait for a free running slot, or undefined (it may go now). */
   private fullFor(s: SessionHandle): string | undefined {
-    if (s.info.kind === 'orchestrator' || isMidTurn(s.info)) return undefined;
+    if (s.info.kind === 'orchestrator' || s.info.kind === 'ops' || isMidTurn(s.info)) return undefined;
     return s.info.machineId ? this.placeFull?.(s) : undefined;
   }
 
@@ -943,8 +947,11 @@ export class SessionManager {
    * `hold` (w496: a worker's first prompt, its brief): what would refuse it now (a machine's daemon that is outdated or
    * offline, or its guard) queues it instead, and it goes as soon as it can, before any later message to the session.
    */
-  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean; requestedBy?: Requester; attachments?: DeliveredAttachment[]; hold?: boolean } = {}): string {
+  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean; requestedBy?: Requester; attachments?: DeliveredAttachment[]; hold?: boolean; ops?: OpsPass } = {}): string {
     const s = this.get(id);
+    // The orchestration worker (w597, server/opsWorker.ts) hears only Lothsahn's and Ben's own orchestrators (through
+    // OpsWorker.send), its own wake_me and a restart's resume: no other sender, a harness notice included, reaches it.
+    if (s.info.kind === 'ops' && !opts.ops) throw new Error(OPS_SEND_REFUSED);
     const queue = (why: string) =>
       this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), at: new Date().toISOString(), why });
     // ALL RUNNING SLOTS BUSY (w384): the message waits and goes when a turn ends, instead of being refused. So does any

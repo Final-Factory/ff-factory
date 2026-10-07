@@ -177,3 +177,29 @@ In the browser (Edge, fake mic, mocked agent):
 - the transcript is back 0.4-0.5 s after end-of-speech;
 - a reply's first audio starts 0.2 s after the reply arrives;
 - barge-in cuts playback ~0.4 s after the voice starts (the onset window plus one audio batch).
+
+## On the portal VM (no GPU, 2 vCPUs, 4 GB)
+
+The portal VM ([portal-on-ffbox-host.md](portal-on-ffbox-host.md), section 2.6) starts with voice off
+(`config.vm.example.json`). `sudo fffctl configure --voice base.en` turns dictation on: it sets
+`voice.enabled`, `model`, `device: "cpu"`, `cpuThreads` to the VM's `nproc`, `autoInstall`, and `tts: false`
+(Kokoro stays off: replies are read by the browser), then restarts the portal (w570). The server then installs
+uv, Python, faster-whisper and the model under `data/tools/whisper` in the background. With `device: "cpu"`
+the CUDA wheels are left out (`requirementsFor`, `server/voiceSetup.ts`), about 1 GB less. `--voice off`
+turns it off again; nothing else in config.json changes.
+
+Why `base.en`: the old host's `large-v3-turbo` is too slow there. Measured on BEAST's CPU held to the VM's
+limits (2 threads on 2 cores, CTranslate2 forced to AVX with `CT2_FORCE_CPU_ISA=AVX`, as the VM's Xeon
+E5-2680 v2 has no AVX2), int8, beam 5, the built-in hotwords, a 9.3 s spoken clip (w570, 2026-10-07):
+
+| model | transcription, 9.3 s clip | worker RAM | the clip's words |
+|---|---|---|---|
+| `tiny.en` | 0.5 s | ~190 MB | right but for "Sandboxes" for "sandbox's" and stray capitals |
+| `base.en` | 0.9-1.3 s | ~235 MB | right but for "Sandboxes" for "sandbox's" |
+| `small.en` | 2.4-2.8 s | ~420 MB | exact |
+| `distil-small.en` | 3.3 s | ~345 MB | not checked |
+| `large-v3-turbo` | 9.5 s | ~1 GB | not checked |
+
+The VM's cores are slower than BEAST's i9-14900KF (a guess: about 3x per core), so expect roughly 3x
+these times there; the measured VM latency is in w570's report. `small.en` is the next step up if `base.en`
+mishears too often.

@@ -28,6 +28,7 @@ import {
   cleanOutsideWatch,
   countDiffs,
   countsOf,
+  ffboxRelinkSteps,
   historyPlan,
   indexSpec,
   manifestDiff,
@@ -1459,7 +1460,7 @@ export class Migration {
     for (const id of want) this.say(`  ${seen.has(id) ? 'connected here' : 'NOT connected yet'}: ${id}${seen.has(id) ? '' : ' (it dials here for 10 minutes, then here and BEAST in turn; machine_daemon redeploy from here if it stays away)'}`);
     this.say('');
     this.say('Cut over. By hand now:');
-    this.say(`  1. Lothsahn: set FFBox's fff.url to ${publicUrl} (and the escalation base URL) and re-render the connector's unit; the FFBox card shows it connected.`);
+    for (const l of ffboxRelinkSteps(typeof beastCfg.publicUrl === 'string' ? beastCfg.publicUrl : undefined, publicUrl)) this.say(l);
     this.say(`  2. Everyone: open ${publicUrl}, sign in, add the phone app again and turn notifications on, and point /mcp at it.`);
     this.say(`BEAST's old portal folder and data stay as they were (its ${this.o.beastTask} task disabled, not removed) for the rollback (design 7.5). This VM's data from before: ${snap}.`);
     this.writeReport('cut-over');

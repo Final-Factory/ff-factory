@@ -47,10 +47,15 @@ export const PERSONAL_TOOLS: ReadonlySet<string> = new Set([
   'message_person',
   // its person's FFBox conversations (scoped in the handler: only the person's own linked requests)
   'reply_to_ffbox',
+  // the orchestration worker in the portal VM (w597): Lothsahn's and Ben's own orchestrators only (checked in the handler)
+  'ops_worker',
 ]);
 
+/** The orchestration worker's own belt (w597, docs/ops-worker.md): the portal's state, read-only, and its own check-ins. */
+export const OPS_TOOLS: ReadonlySet<string> = new Set(['list_machines', 'list_sandboxes', 'system_status', 'wake_me']);
+
 /** Tools that need a person's own orchestrator (its chat's budget, its person's requests, its person as the sender). */
-const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work', 'message_person', 'reply_to_ffbox']);
+const PERSONAL_ONLY: ReadonlySet<string> = new Set(['request_work', 'update_work', 'message_person', 'reply_to_ffbox', 'ops_worker']);
 
 /** The dispatcher has no heartbeat of its own: each person's wakes their own orchestrator. */
 const NOT_DISPATCHER: ReadonlySet<string> = new Set([...PERSONAL_ONLY, 'set_heartbeat']);
@@ -81,7 +86,7 @@ export const USER_ASKED_TOOLS: ReadonlySet<string> = new Set([
   'approve_delegation',
 ]);
 
-export type BeltRole = 'dispatcher' | 'personal' | 'remote';
+export type BeltRole = 'dispatcher' | 'personal' | 'remote' | 'ops';
 
 /**
  * The tools of a role. `guard` (dispatcher) is asked before a user_asked tool runs, with the work_id it was given;
@@ -89,6 +94,7 @@ export type BeltRole = 'dispatcher' | 'personal' | 'remote';
  */
 export function beltFor<T extends BeltTool>(role: BeltRole, all: readonly T[], guard?: (tool: string, workId: string | undefined) => string | undefined): T[] {
   if (role === 'personal') return all.filter((t) => PERSONAL_TOOLS.has(t.name));
+  if (role === 'ops') return all.filter((t) => OPS_TOOLS.has(t.name));
   if (role === 'remote') return all.filter((t) => !PERSONAL_ONLY.has(t.name) && !DISPATCHER_ONLY.has(t.name) && !NOT_REMOTE.has(t.name));
   return all
     .filter((t) => !NOT_DISPATCHER.has(t.name))

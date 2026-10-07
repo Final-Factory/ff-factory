@@ -91,7 +91,8 @@ export interface Sandbox {
   git?: GitStatus;
 }
 
-export type SessionKind = 'orchestrator' | 'worker' | 'standing';
+/** ops: the one orchestration worker in the portal VM (w597, docs/ops-worker.md). */
+export type SessionKind = 'orchestrator' | 'worker' | 'standing' | 'ops';
 
 /**
  * What an orchestrator is (docs/orchestrators.md): the portal's one dispatcher, which owns every tool that changes
@@ -148,7 +149,7 @@ export interface SessionInfo {
   machineId?: string;
   /** With machineId: the machine sandbox it works in (docs/machines.md, "Machine sandboxes"), not the machine's main clone. */
   machineSandbox?: string;
-  /** The last label this agent gave its sandbox or machine (set_label), restored when a helper there finishes. */
+  /** Retired (w575): the label an agent gave its sandbox or machine with set_label. Old records may still carry it. */
   label?: string;
   labelAt?: string;
   title: string;
@@ -392,8 +393,13 @@ export interface Machine {
   id: string;
   /** The id as it was typed when it has capitals, e.g. "LothDesktop" for lothdesktop: shown in its place. */
   name?: string;
-  /** ssh host alias this host deploys to. */
+  /** ssh host alias this host deploys to (user@host once its worker installer registered its ssh, w568). */
   host: string;
+  /**
+   * What its worker installer registered for the portal's ssh (w568, server/machineSsh.ts): the user and name the
+   * portal reaches it by, and its sshd's host keys, pinned in the portal's known_hosts2.
+   */
+  ssh?: { user: string; host: string; hostKeys: string[]; at: string };
   /** The label, like a sandbox's purpose line. */
   purpose: string;
   /** Deployment state; `online` says whether the daemon is connected right now. */
@@ -1066,8 +1072,10 @@ export interface CleanupSummary {
   freedBytes?: number;
   /** Entries skipped (in use, refused by the guard, or only partly removed). */
   failed?: number;
-  /** Free space after the pass on the fullest volume it watches. */
+  /** Free space after the pass on the fullest disk volume it watches (home, data, ...): never a RAM-backed one (w566). */
   freeBytes?: number;
+  /** Temp folders on a volume apart from that disk, each as RAM (a tmpfs) or a disk volume of its own: shown, never counted. */
+  temp?: { path: string; freeBytes?: number; totalBytes?: number; ram: boolean }[];
   softFreeGB: number;
   /** Still below the soft threshold after the pass. */
   belowSoft?: boolean;
@@ -1743,7 +1751,6 @@ export interface CreateSandboxRequest {
   branch?: string;
   /** Base ref for a new branch. Defaults to config.defaultBase. */
   base?: string;
-  purpose?: string;
   /** Copy the warm Library seed into the worktree (needed for a fast Unity start). Default true. */
   seedLibrary?: boolean;
   startUnity?: boolean;

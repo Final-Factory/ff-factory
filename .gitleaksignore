@@ -10,4 +10,4 @@ d41697a9e6214ca92c3738ff93b6f8027976712e:e2e/meters.spec.ts:generic-api-key:62
 # A word list in the worker-root layout ("gh token, ssh key, ffdiscord/..."), no secret; reworded in the next commit.
 a060765e066b7201e68c747c278bb988aec58262:docs/worker-root.md:generic-api-key:156
 # The portal unit's empty default credential (SetCredential=fff-vault-key:, docs/vault.md): systemd syntax, no secret.
-deploy/vm/guest/units/fff-portal.service:generic-api-key:38
+deploy/vm/guest/units/fff-portal.service:generic-api-key:40

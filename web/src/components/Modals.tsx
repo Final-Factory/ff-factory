@@ -19,7 +19,6 @@ export function NewSandboxModal({ app, onClose }: { app: AppState; onClose: () =
   const [name, setName] = useState('');
   const [branch, setBranch] = useState('');
   const [base, setBase] = useState('');
-  const [purpose, setPurpose] = useState('');
   const [seedLibrary, setSeedLibrary] = useState(true);
   const [startUnity, setStartUnity] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -35,7 +34,6 @@ export function NewSandboxModal({ app, onClose }: { app: AppState; onClose: () =
         name: slug,
         branch: branch.trim() || undefined,
         base: base.trim() || undefined,
-        purpose: purpose.trim() || undefined,
         seedLibrary,
         startUnity,
       }),
@@ -85,10 +83,6 @@ export function NewSandboxModal({ app, onClose }: { app: AppState; onClose: () =
             <input className="input mono" value={base} onChange={(e) => setBase(e.target.value)} placeholder={app.config.defaultBase} />
           </label>
         </div>
-        <label className="field">
-          <span>Purpose</span>
-          <textarea className="input" rows={2} value={purpose} onChange={(e) => setPurpose(e.target.value)} placeholder="spec 098, VFX pass, …" />
-        </label>
         <label className="check">
           <input type="checkbox" checked={seedLibrary} onChange={(e) => setSeedLibrary(e.target.checked)} />
           <span>

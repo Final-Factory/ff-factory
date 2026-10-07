@@ -51,8 +51,10 @@ write_file() {
 install_scripts() {
   local src=$1 f c=""
   run_cmd install -d -m 0755 "$FFF_LIB"
-  for f in lib.sh fff.conf.example config.vm.example.json; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
-  for f in fff-update fff-health fff-backup fff-base-refresh fff-migrate; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
+  for f in lib.sh fff.conf.example config.vm.example.json machines.ssh; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
+  for f in fff-update fff-health fff-backup fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
+  # The orchestration worker's PATH (w597): its ssh and fffctl, each one sudo call to a wrapper above.
+  for f in ssh fffctl; do [ -z "$(write_file "$FFF_LIB/ops-bin/$f" 0755 <"$src/ops-bin/$f")" ] || c+=" ops-bin/$f"; done
   [ -z "$(write_file /usr/local/sbin/fffctl 0755 <"$src/fffctl")" ] || c+=" fffctl"
   echo "${c# }"
 }

@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
-import type { Config } from './config.ts';
+import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { OptionsFactory, SessionHandle, SessionManager } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
@@ -53,12 +53,32 @@ const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permissio
 /** How much of a worker's DONE reports on a request is kept for a later re-check (WorkItem.done text, w515). */
 const DONE_TEXT_CHARS = 4000;
 
+/**
+ * The loop guards' defaults (docs/orchestrators.md, "Loops, limits and safety"). Each is a budget a person's own
+ * message starts again, so harness messages alone (another orchestrator's, a worker's, a timer's) cannot keep an
+ * orchestrator going; config `orchestrator.filingsPerMessage` / `followUpsPerMessage` / `messagesPerPerson` set them.
+ */
 /** Filings (request_work, update_work) a personal orchestrator may make between two messages of its person. */
 export const FILINGS_PER_MESSAGE = 3;
 /** Follow-ups a personal orchestrator may send one worker between two messages of its person. */
 export const FOLLOW_UPS_PER_MESSAGE = 3;
-/** Messages a personal orchestrator may send one person until that person writes to their own orchestrator. */
-export const MESSAGES_PER_PERSON = 3;
+/**
+ * Messages a personal orchestrator may send one person until either of the two writes to their own orchestrator.
+ * 3 until w571 (2026-10-07), and only the recipient's writing started it again, so Ben's orchestrator was refused the
+ * fourth message Ben himself asked it to relay to Lothsahn while Lothsahn was away. Now the sender's own message starts
+ * it again too, and 10 bounds two orchestrators answering each other with no person writing.
+ */
+export const MESSAGES_PER_PERSON = 10;
+
+/** The loop guards in force: config `orchestrator.*`, else the defaults above. */
+export function loopGuards(cfg: Pick<Config, 'orchestrator'>): { filings: number; followUps: number; messages: number } {
+  const n = (v: unknown, d: number) => (Number.isInteger(v) && (v as number) >= LOOP_GUARD_RANGE.min && (v as number) <= LOOP_GUARD_RANGE.max ? (v as number) : d);
+  return {
+    filings: n(cfg.orchestrator?.filingsPerMessage, FILINGS_PER_MESSAGE),
+    followUps: n(cfg.orchestrator?.followUpsPerMessage, FOLLOW_UPS_PER_MESSAGE),
+    messages: n(cfg.orchestrator?.messagesPerPerson, MESSAGES_PER_PERSON),
+  };
+}
 /** The longest message_person text. */
 export const PERSON_MESSAGE_CHARS = 2000;
 /** Notices to the dispatcher are gathered this long, so one burst of filings is one turn. */
@@ -320,7 +340,7 @@ export class Orchestrators {
   private readonly filed = new Map<string, number>();
   /** Per personal orchestrator and worker ("orch:worker"): follow-ups since the person last wrote. */
   private readonly followUps = new Map<string, number>();
-  /** Per sender and recipient ("from:to", user ids): messages since the recipient last wrote to their orchestrator. */
+  /** Per sender and recipient ("from:to", user ids): messages since either of them last wrote to their orchestrator. */
   private readonly messaged = new Map<string, number>();
   /** A person's orchestrator messaged another person (index.ts sends the recipient a push notification). */
   onPersonMessage?: (from: Requester, to: Requester, text: string) => void;
@@ -438,14 +458,16 @@ export class Orchestrators {
   }
 
   /**
-   * A person wrote to this chat themselves: its budgets start again (loops need a person's message to go on), others
-   * may message them again, and the messages from people it showed them are read.
+   * A person wrote to this chat themselves: its budgets start again (loops need a person's message to go on), they may
+   * message others again and others may message them again (w571: the sender's own words count, not only the
+   * recipient's answer), and the messages from people it showed them are read.
    */
   personWrote(sessionId: string) {
     this.filed.delete(sessionId);
     for (const k of [...this.followUps.keys()]) if (k.startsWith(`${sessionId}:`)) this.followUps.delete(k);
     const owner = this.ownerOf(this.sessions.sessions.get(sessionId)?.info ?? { kind: 'worker' });
-    if (owner) for (const k of [...this.messaged.keys()]) if (k.endsWith(`:${owner.userId.toLowerCase()}`)) this.messaged.delete(k);
+    const me = owner?.userId.toLowerCase();
+    if (me) for (const k of [...this.messaged.keys()]) if (k.startsWith(`${me}:`) || k.endsWith(`:${me}`)) this.messaged.delete(k);
     this.seen(sessionId);
   }
 
@@ -462,7 +484,8 @@ export class Orchestrators {
   /**
    * A person's orchestrator sends another person a message (message_person): it reaches their own orchestrator as a
    * [person message], which shows it to them and relays it, and is unread there until they open or write to their
-   * chat. At most MESSAGES_PER_PERSON to one person until that person writes to their own orchestrator.
+   * chat. At most loopGuards().messages to one person until the sender or that person writes to their own
+   * orchestrator: a person relaying their own words is not held back, two orchestrators answering each other are.
    */
   messagePerson(chat: SessionHandle, input: { to: string; text: string }): string {
     const owner = this.ownerOf(chat.info);
@@ -475,7 +498,8 @@ export class Orchestrators {
     if (text.length > PERSON_MESSAGE_CHARS) throw new Error(`the message is ${text.length} characters; keep it to ${PERSON_MESSAGE_CHARS}`);
     const key = `${owner.userId.toLowerCase()}:${to.userId.toLowerCase()}`;
     const n = this.messaged.get(key) ?? 0;
-    if (n >= MESSAGES_PER_PERSON) throw new Error(`${MESSAGES_PER_PERSON} messages to ${to.displayName} since they last wrote to their orchestrator; wait for them to answer`);
+    const max = loopGuards(this.d.cfg).messages;
+    if (n >= max) throw new Error(`${max} messages to ${to.displayName} since ${owner.displayName} or ${to.displayName} last wrote to their orchestrator; ask ${owner.displayName} before sending more`);
     const target = this.personalFor(to);
     // Sent as the harness's (a turn it starts is not the recipient's own), about the sender.
     this.sessions.send(target.info.id, personMessage(owner, to, text), 'system', undefined, { requestedBy: asRequester(owner) });
@@ -772,10 +796,11 @@ export class Orchestrators {
     return `Filed ${id} with the dispatcher.${overlap} You get a [dispatch] message with its decision.`;
   }
 
-  /** Count a filing against the chat's budget, refusing it past FILINGS_PER_MESSAGE since its person last wrote. */
+  /** Count a filing against the chat's budget, refusing it past loopGuards().filings since its person last wrote. */
   private spend(chatId: string, owner: Requester) {
     const n = this.filed.get(chatId) ?? 0;
-    if (n >= FILINGS_PER_MESSAGE) throw new Error(`${FILINGS_PER_MESSAGE} filings since ${owner.displayName} last wrote; ask them before filing more`);
+    const max = loopGuards(this.d.cfg).filings;
+    if (n >= max) throw new Error(`${max} filings since ${owner.displayName} last wrote; ask them before filing more`);
     this.filed.set(chatId, n + 1);
   }
 
@@ -2399,7 +2424,7 @@ export class Orchestrators {
 
   /**
    * Whether a personal orchestrator may send this worker a follow-up: it must work for its person (who started it, or
-   * one of their requests is on it: followUpItems), within FOLLOW_UPS_PER_MESSAGE since the person last wrote. Counts
+   * one of their requests is on it: followUpItems), within loopGuards().followUps since the person last wrote. Counts
    * it, and returns the person's requests it is about (for the message's `[about …]` line), newest first.
    */
   followUp(chat: SessionInfo, worker: SessionInfo): WorkItem[] {
@@ -2413,7 +2438,8 @@ export class Orchestrators {
     }
     const key = `${chat.id}:${worker.id}`;
     const n = this.followUps.get(key) ?? 0;
-    if (n >= FOLLOW_UPS_PER_MESSAGE) throw new Error(`${FOLLOW_UPS_PER_MESSAGE} follow-ups to ${worker.id} since ${owner.displayName} last wrote; ask them first`);
+    const max = loopGuards(this.d.cfg).followUps;
+    if (n >= max) throw new Error(`${max} follow-ups to ${worker.id} since ${owner.displayName} last wrote; ask them first`);
     this.followUps.set(key, n + 1);
     for (const w of this.itemsOf(worker.id)) {
       this.stamp(w, `${owner.displayName}'s orchestrator followed up with ${worker.id}`);

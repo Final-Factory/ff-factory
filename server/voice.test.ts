@@ -158,6 +158,27 @@ test('voice status: not installed, installed, turned off', async () => {
   assert.match(off.status().detail ?? '', /voice.enabled/);
 });
 
+test('voice setup on a CPU-only host (device cpu): no CUDA wheels, stamped apart from the full set', async () => {
+  const { requirementsFor } = await import('./voiceSetup.ts');
+  const cpu = requirementsFor({ device: 'cpu' });
+  assert.match(cpu, /^faster-whisper==/m);
+  assert.doesNotMatch(cpu, /nvidia-/);
+  assert.match(requirementsFor({ device: 'auto' }), /^nvidia-cublas-cu12/m);
+  assert.notEqual(requirementsHash({ device: 'cpu' }), requirementsHash({ device: 'auto' }));
+  assert.equal(requirementsHash({ device: 'cuda' }), requirementsHash());
+
+  // A CPU install's stamp is in place for device cpu; switching to auto (the GPU) reinstalls, with the CUDA wheels.
+  const { cfg } = voiceCfg({ device: 'cpu' });
+  const p = voicePaths(cfg.voice);
+  fs.mkdirSync(path.dirname(p.python), { recursive: true });
+  fs.writeFileSync(p.python, '');
+  fs.mkdirSync(modelDir(cfg.voice), { recursive: true });
+  fs.writeFileSync(path.join(modelDir(cfg.voice), 'model.bin'), '');
+  fs.writeFileSync(p.stamp, JSON.stringify({ requirements: requirementsHash(cfg.voice), model: 'tiny.en' }));
+  assert.equal(setupNeeded(cfg.voice), null);
+  assert.equal(setupNeeded({ ...cfg.voice, device: 'auto' }), 'requirements changed');
+});
+
 test('chooseEngine: auto prefers local Whisper, falls back to the browser, explains dead ends', async () => {
   const { chooseEngine } = await import('../shared/voice.ts');
   const all = { record: true, browser: true, secure: true };

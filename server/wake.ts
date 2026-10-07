@@ -123,7 +123,7 @@ export class Waker {
     const late = Math.round((this.now() - t.at) / 60_000);
     const when = late >= 2 ? ` (${late} min late: FF Factory was restarting)` : '';
     try {
-      this.sessions.send(sessionId, `[wake_me] Time is up${when}. Your note: ${t.note || '(none)'}`, 'system');
+      this.sessions.send(sessionId, `[wake_me] Time is up${when}. Your note: ${t.note || '(none)'}`, 'system', undefined, { ops: 'wake' });
     } catch (e) {
       // At the agent limit, the host guard says wait, or its machine is offline: try again in a minute, a few times.
       if (tries < RETRIES) return this.arm(sessionId, { at: t.at, note: t.note }, tries + 1, 60_000);

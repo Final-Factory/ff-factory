@@ -1,4 +1,4 @@
-import { MACHINE_ID, enrolledMachines, issueMachineToken, machineTokensFile, readMachineTokens, revokeMachineToken, tokenSha } from './machineTokens.ts';
+import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -23,6 +23,7 @@ import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuar
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
+import { writeKnownHosts, type MachineSsh } from './machineSsh.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
@@ -201,11 +202,13 @@ export function limitOptions(opts: SandboxLimits, prev: SandboxLimits | undefine
 
 /**
  * A machine's sandboxes after a daemon snapshot: the daemon's facts (folder, branch, status, editor, git) with the
- * portal's purpose and agents kept by id; `pending` gives the purpose of sandboxes just asked for. Exported for tests.
+ * portal's agents kept by id. The label is the sandbox's name and never changes (w575): slot1..N on a worker root,
+ * the old names (agent-mcp, shader-blackhole) elsewhere; what a sandbox is doing shows as its agents' titles. Exported
+ * for tests.
  */
-export function mergeSandboxes(prev: MachineSandbox[] | undefined, list: DaemonSandbox[], pending: ReadonlyMap<string, string> = new Map()): MachineSandbox[] {
+export function mergeSandboxes(prev: MachineSandbox[] | undefined, list: DaemonSandbox[]): MachineSandbox[] {
   const old = new Map((prev ?? []).map((s) => [s.id, s]));
-  return list.map((d) => ({ ...d, purpose: old.get(d.id)?.purpose ?? pending.get(d.id) ?? 'unused', sessionIds: old.get(d.id)?.sessionIds ?? [] }));
+  return list.map((d) => ({ ...d, purpose: d.id, sessionIds: old.get(d.id)?.sessionIds ?? [] }));
 }
 
 /** "lothdesktop/sb1" as a machine sandbox reference, or undefined for a plain (host) sandbox id. */
@@ -324,7 +327,49 @@ export class MachineManager {
       const text = `[machines] max_agents is gone (w536): workers run in sandboxes only and standing agents count against the machine's agent cap; dropped it from ${dropped.join(', ')}`;
       setImmediate(() => (this.report ? this.report(text) : console.log(text)));
     }
+    // Labels set before w575 (a worker's set_label, set_sandbox_label) give way to the sandbox's name.
+    for (const m of store.machines.values()) {
+      if (!m.sandboxes?.some((sb) => sb.purpose !== sb.id)) continue;
+      m.sandboxes = m.sandboxes.map((sb) => ({ ...sb, purpose: sb.id }));
+      store.putMachine(m);
+    }
     setInterval(() => this.heartbeat(), PING_MS).unref();
+  }
+
+  /** Whose ~/.ssh holds the pinned host keys: the portal account's home (tests point it at a folder of their own). */
+  sshHome?: string;
+
+  /**
+   * The portal's ~/.ssh/known_hosts2 from its machines' registered host keys (server/machineSsh.ts, w568). The pins
+   * live in the records (state.json), so the server writes the file again at start (index.ts): a rebuilt or moved
+   * portal keeps them.
+   */
+  pinHostKeys(home = this.sshHome) {
+    try {
+      const r = writeKnownHosts(this.list(), home);
+      if (r === 'not ours') console.warn("machines: ~/.ssh/known_hosts2 is not the portal's (no FF Factory header); the machines' host keys are not pinned there");
+    } catch (e) {
+      console.warn(`machines: could not write ~/.ssh/known_hosts2: ${(e as Error).message}`);
+    }
+  }
+
+  /** How the portal checks it gets in over ssh (tests replace it). */
+  sshCheck: (host: string) => Promise<{ reachable: boolean; detail: string }> = sshCheck;
+
+  /**
+   * A worker installer's ssh registration (POST /machine/ssh, w568): the user and name the portal reaches the machine
+   * by, and its sshd's host keys. Kept on the record, pinned in known_hosts2, and the record's ssh host becomes
+   * user@host; then a check that ssh gets in with the key the installer authorized there.
+   */
+  async registerSsh(id: string, ssh: MachineSsh): Promise<{ host: string; reachable: boolean; detail: string }> {
+    refuseInDryRun(`registering ${id}'s ssh`);
+    const m = this.require(id);
+    const host = `${ssh.user}@${ssh.host}`;
+    this.update(m.id, { ssh, host });
+    this.pinHostKeys();
+    const r = await this.sshCheck(host);
+    console.log(`machine ${m.id}: ssh registered as ${host} (${ssh.hostKeys.length} host key(s) pinned); ${r.reachable ? 'the portal gets in' : `the portal does not get in yet: ${r.detail}`}`);
+    return { host, ...r };
   }
 
   list() {
@@ -708,15 +753,16 @@ export class MachineManager {
 
   // ---------------------------------------------------------------- records and tokens
 
-  /** Add or replace a machine's record and mint its token (returned once; only the hash is kept). */
+  /**
+   * Add or replace a machine's record and mint its token (returned once; only the hash is kept). The token is staged
+   * beside the machine's current one, not in its place (w568): both work until the machine's daemon connects with one
+   * of them (attach), so a deploy that fails before the machine has the new token leaves it its old one.
+   */
   register(m: Omit<Machine, 'online' | 'sessionIds' | 'createdAt'> & Partial<Pick<Machine, 'sessionIds' | 'createdAt'>>): { machine: Machine; token: string } {
     if (!MACHINE_ID.test(m.id)) throw new Error(`machine id "${m.id}" must be lower-case letters, digits and dashes`);
     const prev = this.store.machines.get(m.id);
     const machine: Machine = { online: this.isOnline(m.id), sessionIds: prev?.sessionIds ?? [], createdAt: prev?.createdAt ?? new Date().toISOString(), ...m };
-    const token = issueMachineToken(this.cfg.dataDir, m.id);
-    // The portal's own re-issue (a redeploy) keeps the link it has, as before: the deploy replaces that daemon itself.
-    const link = this.links.get(m.id);
-    if (link) link.hash = tokenSha(token);
+    const token = stageMachineToken(this.cfg.dataDir, m.id);
     this.store.putMachine(machine);
     return { machine, token };
   }
@@ -770,6 +816,7 @@ export class MachineManager {
     revokeMachineToken(this.cfg.dataDir, m.id);
     this.links.get(m.id)?.ws.close(4001, 'machine removed');
     this.store.removeMachine(m.id);
+    if (m.ssh) this.pinHostKeys(); // its pinned host keys go with it (w568)
   }
 
   private tokens(): Record<string, string> {
@@ -786,6 +833,7 @@ export class MachineManager {
     const t = this.tokens();
     for (const [id, link] of this.links) {
       if (t[id] && (!link.hash || t[id] === link.hash)) continue;
+      if (link.hash && t[stagedKey(id)] === link.hash) continue; // connected with a deploy's staged credential (w568)
       console.warn(`machine ${id}: its credential was ${t[id] ? 'replaced' : 'revoked'}, dropping the connection`);
       link.ws.close(4001, 'machine credential revoked');
       this.detach(id);
@@ -794,11 +842,32 @@ export class MachineManager {
 
   /** The machine a bearer token belongs to, or undefined. Constant-time on the secret. */
   authenticate(header: string | undefined): string | undefined {
+    return this.credential(header)?.id;
+  }
+
+  /**
+   * The machine a bearer token belongs to, the hash it matched, and whether that is a deploy's staged credential (w568):
+   * the current one and a staged one both open the portal until the machine connects with one of them.
+   */
+  private credential(header: string | undefined): { id: string; hash: string; staged: boolean } | undefined {
     const m = /^Bearer\s+(ffm_([a-z0-9-]+)_[A-Za-z0-9_-]{40,})$/.exec(header ?? '');
     if (!m) return undefined;
-    const want = this.tokens()[m[2]];
-    if (!want) return undefined;
-    return timingSafeEqual(Buffer.from(want, 'hex'), createHash('sha256').update(m[1]).digest()) ? m[2] : undefined;
+    const t = this.tokens();
+    const got = createHash('sha256').update(m[1]).digest();
+    const same = (want: string | undefined) => !!want && timingSafeEqual(Buffer.from(want, 'hex'), got);
+    if (same(t[m[2]])) return { id: m[2], hash: t[m[2]], staged: false };
+    if (same(t[stagedKey(m[2])])) return { id: m[2], hash: t[stagedKey(m[2])], staged: true };
+    return undefined;
+  }
+
+  /**
+   * A daemon connected: the credential it has settles a deploy's two (w568). With the staged one, that becomes its only
+   * one. With the current one while a staged one waits and no deploy runs (the deploy failed, and the old daemon is the
+   * one running), the staged one goes.
+   */
+  private settleCredential(id: string, staged: boolean) {
+    if (staged) promoteStagedToken(this.cfg.dataDir, id);
+    else if (!this.deploying.has(id)) dropStagedToken(this.cfg.dataDir, id);
   }
 
   // ---------------------------------------------------------------- deploying (server/machineDeploy.ts)
@@ -818,6 +887,9 @@ export class MachineManager {
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
     if (this.deploying.has(id)) throw new Error(`${id} is already being deployed`);
     const prev = this.store.machines.get(id);
+    // A worker root install (w513) is installed and updated on its computer, never over ssh: add_machine changes only
+    // its settings (w576: "lower LothDesktop to 5"; a redeploy would have put an old-style daemon into its root).
+    if (prev?.root) return this.setRootSettings(prev, opts);
     const local = opts.local ?? prev?.local ?? false;
     if (prev && !!prev.local !== local) throw new Error(`${id} is ${prev.local ? "the portal's own host" : 'a machine reached over ssh'}; remove it first to change that`);
     if (local) {
@@ -870,6 +942,34 @@ export class MachineManager {
     // finds, which on BEAST could be the live game's checkout.
     void this.runDeploy(machine, token, opts.repoPath ?? (local ? machine.repoPath : undefined), prev?.appDir);
     return machine;
+  }
+
+  /**
+   * add_machine for a worker root install: its limits, label, protected paths and Library seed change on the record and
+   * reach its daemon in a new welcome (it applies them at once, machine/daemon.ts). Its folders, host, portal and
+   * sandbox count come from its installer (the count also sets its player-folder pairs and their firewall rules, w576),
+   * so changing one is refused.
+   */
+  private setRootSettings(m: Machine, opts: Parameters<MachineManager['deployMachine']>[0]): Machine {
+    if (opts.maxSandboxes !== undefined && opts.maxSandboxes !== m.maxSandboxes) {
+      throw new Error(`${m.id} is a worker root install (${m.root}): its sandbox count comes from its installer, which also makes the matching player folders (slotK-0, slotK-1) and their firewall rules. Run it again there with --max-sandboxes ${opts.maxSandboxes} (docs/worker-install.md, "Updating"); its next hello brings the count here`);
+    }
+    const fixed = (['host', 'portalUrl', 'repoPath', 'appDir', 'unityEditorRoot', 'unityPath', 'tempDir', 'sandboxRoot', 'local'] as const).filter(
+      (k) => opts[k] !== undefined && opts[k] !== (m as unknown as Record<string, unknown>)[k],
+    );
+    if (fixed.length) throw new Error(`${m.id} is a worker root install (${m.root}): its ${fixed.join(', ')} come from its installer; run it again there with the new value (docs/worker-install.md, "Updating")`);
+    const limits = limitOptions(opts, m);
+    Object.assign(m, limits, {
+      ...(opts.purpose !== undefined ? { purpose: normalizePurpose(opts.purpose) } : {}),
+      ...(opts.protectedPaths !== undefined ? { protectedPaths: opts.protectedPaths } : {}),
+      ...(opts.librarySeed !== undefined ? { librarySeed: opts.librarySeed === '' ? undefined : opts.librarySeed } : {}),
+      ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
+      ...(opts.librarySeedGB !== undefined ? { librarySeedGB: opts.librarySeedGB } : {}),
+      ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
+    });
+    this.store.putMachine(m);
+    this.links.get(m.id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
+    return m;
   }
 
   /** Tests only: allow a local machine on a host that is not Windows (the deploy itself is a fake there). */
@@ -930,6 +1030,8 @@ export class MachineManager {
 
   private async runDeploy(m: Machine, token: string, repoPath: string | undefined, previousAppDir: string | undefined) {
     this.deploying.add(m.id);
+    // Whether the machine may have the new token: only the install step writes it there (daemon.json, w568).
+    let reachedInstall = false;
     const { repoSlug } = await import('./machineDeploy.ts');
     const { ROOT } = await import('./config.ts');
     try {
@@ -937,7 +1039,10 @@ export class MachineManager {
       // The old daemon goes, and the new one starts, during the install step.
       let installAt = Date.now();
       const step = (s: string) => {
-        if (s === 'installing') installAt = Date.now();
+        if (s === 'installing') {
+          installAt = Date.now();
+          reachedInstall = true;
+        }
         this.update(m.id, { statusDetail: s });
       };
       const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : m.daemonExtras ? { extra: m.daemonExtras } : {}) });
@@ -958,6 +1063,9 @@ export class MachineManager {
           : { status: 'error', statusDetail: `installed, but the daemon has not connected to ${m.portalUrl}; see ${daemonLogPath(r.platform, m.appDir)} on ${m.host}` },
       );
     } catch (e) {
+      // Failed before the install step: the machine never got the new token, so it keeps the one it has (w568). Failed
+      // during it: it may have either, and both stay good until its daemon connects with one (settleCredential).
+      if (!reachedInstall) dropStagedToken(this.cfg.dataDir, m.id);
       // A daemon still connected (the old one kept running, or it came back) works: not an error alongside a live
       // link, but the failed redeploy stays in view.
       const live = this.isOnline(m.id) && this.hellos.has(m.id);
@@ -991,6 +1099,15 @@ export class MachineManager {
     }
     this.remove(m.id);
     return `Removed ${m.id}${note}. Its files stay in ${m.appDir ?? 'the .ff-factory folder in its home'} on the machine.`;
+  }
+
+  /**
+   * The machine's own word that its daemon stops on purpose now (POST /machine/stopping, a worker migration, w513): as
+   * after machine_daemon stop, the offline redeploy leaves it alone until a daemon says hello (which clears it).
+   */
+  stoppingOnPurpose(id: string): { ok: true } {
+    this.update(id, { daemonStopped: true });
+    return { ok: true };
   }
 
   /**
@@ -1133,8 +1250,8 @@ export class MachineManager {
     }
     const now = Date.now();
     const recent = (this.failures.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
-    const auth = this.authenticate(req.headers.authorization);
-    const id = auth && this.store.machines.has(auth) ? auth : undefined;
+    const cred = this.credential(req.headers.authorization);
+    const id = cred && this.store.machines.has(cred.id) ? cred.id : undefined;
     if (!id) {
       const locked = recent.length >= 10;
       if (!locked) recent.push(now);
@@ -1148,8 +1265,13 @@ export class MachineManager {
       return false;
     }
     this.failures.delete(ip);
-    const hash = this.tokens()[id];
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.attach(id, ws, hash));
+    const { hash, staged } = cred!;
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.attach(id, ws, hash);
+      // The token file is written (synchronously, fsynced) after this turn, so the daemon's 101 goes out first; the
+      // link keeps the hash it presented, which dropRevoked accepts while it is the staged one (w568).
+      setImmediate(() => this.settleCredential(id, staged));
+    });
     return true;
   }
 
@@ -1357,8 +1479,7 @@ export class MachineManager {
       }
       case 'sandboxes': {
         if (!Array.isArray(msg.list)) return;
-        m.sandboxes = mergeSandboxes(m.sandboxes, msg.list, this.pendingPurpose);
-        for (const sb of m.sandboxes) this.pendingPurpose.delete(sb.id);
+        m.sandboxes = mergeSandboxes(m.sandboxes, msg.list);
         if (msg.disk) this.disks.set(id, msg.disk);
         this.store.putMachine(m);
         return;
@@ -1483,8 +1604,6 @@ export class MachineManager {
   // ---------------------------------------------------------------- machine sandboxes (docs/machines.md, machine/sandboxes.ts)
 
   private readonly sandboxCalls = new Map<string, { resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
-  /** Purposes of sandboxes asked for and not yet in a snapshot. */
-  private readonly pendingPurpose = new Map<string, string>();
   /** Each machine's sandbox volume, as its daemon last reported it (memory only). */
   private readonly disks = new Map<string, { level: 'ok' | 'warn' | 'critical'; freeBytes?: number }>();
 
@@ -1532,26 +1651,23 @@ export class MachineManager {
   }
 
   /** Create a sandbox on a machine: a worktree of its main clone in its sandbox_root (returns once the daemon recorded it). */
-  async createSandbox(machineId: string, req: { name: string; purpose?: string; branch?: string; base?: string; seedLibrary?: boolean; startUnity?: boolean }): Promise<string> {
+  async createSandbox(machineId: string, req: { name: string; branch?: string; base?: string; seedLibrary?: boolean; startUnity?: boolean }): Promise<string> {
     const m = this.requireSandboxDaemon(machineId);
     const pool = poolSettingsOf(m);
     if (!pool) throw new Error(`${m.id} has no sandboxes: redeploy it with add_machine sandbox_root (e.g. "D:\\work\\ffsb")`);
-    const id = slugify(req.name);
-    if (!SANDBOX_ID.test(id)) throw new Error(`"${req.name}" does not make a usable sandbox name`);
-    if ((m.sandboxes ?? []).some((s) => s.id === id)) throw new Error(`sandbox "${id}" already exists on ${m.id}`);
+    const asked = slugify(req.name);
+    if (!SANDBOX_ID.test(asked)) throw new Error(`"${req.name}" does not make a usable sandbox name`);
     if ((m.sandboxes ?? []).length >= pool.maxSandboxes) throw new Error(`already ${m.sandboxes!.length} sandboxes on ${m.id} (max_sandboxes ${pool.maxSandboxes}); delete one first`);
-    const branch = req.branch?.trim() || `sandbox/${id}`;
+    // A worker root install (w513, lothsahn 2026-10-06) names its sandboxes slot1..slotN, N its sandbox limit: the first
+    // free one. The name asked for still names the branch, so a slot used again never inherits an old sandbox's branch.
+    const id = m.root ? slotName((m.sandboxes ?? []).map((s) => s.id), pool.maxSandboxes) : asked;
+    if (!id) throw new Error(`no free slot on ${m.id} (max_sandboxes ${pool.maxSandboxes}); delete one first`);
+    if ((m.sandboxes ?? []).some((s) => s.id === id)) throw new Error(`sandbox "${id}" already exists on ${m.id}`);
+    const branch = req.branch?.trim() || `sandbox/${asked}`;
     const problem = branchProblem(branch);
     if (problem) throw new Error(problem);
     const base = req.base?.trim() || this.cfg.defaultBase;
-    const purpose = req.purpose?.trim() ? normalizePurpose(req.purpose) : 'unused';
-    this.pendingPurpose.set(id, purpose);
-    try {
-      return await this.sandboxCall(m.id, { op: 'create', sandbox: id, branch, base, seedLibrary: req.seedLibrary ?? true, startUnity: req.startUnity ?? false }, 2 * 60_000);
-    } catch (e) {
-      this.pendingPurpose.delete(id);
-      throw e;
-    }
+    return await this.sandboxCall(m.id, { op: 'create', sandbox: id, branch, base, seedLibrary: req.seedLibrary ?? true, startUnity: req.startUnity ?? false }, 2 * 60_000);
   }
 
   /** Delete a machine sandbox (its editor, Library, worktree; the branch stays unless deleteBranch). Returns when it is gone. */
@@ -1562,15 +1678,6 @@ export class MachineManager {
     m.sandboxes = (m.sandboxes ?? []).filter((s) => s.id !== sb.id);
     this.store.putMachine(m);
     return text;
-  }
-
-  setSandboxPurpose(machineId: string, sandbox: string, purpose: string): MachineSandbox {
-    const m = this.require(machineId);
-    const sb = this.requireSandbox(m.id, sandbox);
-    if (sb.status === 'deleting') throw new Error(`sandbox ${m.id}/${sb.id} is being deleted`);
-    sb.purpose = normalizePurpose(purpose);
-    this.store.putMachine(m);
-    return sb;
   }
 
   sandboxLog(machineId: string, sandbox: string, lines: number): Promise<string> {
@@ -1728,6 +1835,14 @@ export async function sshReachable(host: string): Promise<boolean> {
 
 export const SSH_REACHABLE_ARGS = (host: string) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, 'exit', '0'];
 
+/** sshReachable with ssh's reason when it does not get in (its last line: host key, permission, timeout). */
+export async function sshCheck(host: string): Promise<{ reachable: boolean; detail: string }> {
+  const { run } = await import('./proc.ts');
+  const r = await run('ssh', SSH_REACHABLE_ARGS(host), { timeoutMs: 20_000 });
+  const last = `${r.stderr}`.trim().split(/\r?\n/).filter(Boolean).pop() ?? '';
+  return r.code === 0 ? { reachable: true, detail: 'ok' } : { reachable: false, detail: last || `ssh exited ${r.code}` };
+}
+
 /** Where a machine's daemon log is, for messages. */
 export function daemonLogPath(platform: MachinePlatform | undefined, appDir?: string): string {
   if (platform === 'win32') return `${appDir ?? '%USERPROFILE%\\.ff-factory'}\\logs\\daemon.log (and daemon.err.log, supervisor.log)`;
@@ -1779,7 +1894,11 @@ export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, 
       ...(pool.librarySeed && (moved || !m.librarySeed) ? { librarySeed: pool.librarySeed } : {}),
     });
   }
-  return m.sandboxRoot !== before;
+  // Its sandbox count is its installer's, every time (w576): the installer also makes that many player-folder pairs
+  // (players/slotK-0 and slotK-1) and their firewall rules, which the portal cannot.
+  const recount = !!pool && m.maxSandboxes !== pool.maxSandboxes;
+  if (pool && recount) m.maxSandboxes = pool.maxSandboxes;
+  return m.sandboxRoot !== before || recount;
 }
 
 /**
@@ -1795,6 +1914,13 @@ export function leaveRoot(m: Machine): boolean {
   delete m.preRoot;
   if (p) Object.assign(m, { appDir: p.appDir, repoPath: p.repoPath, tempDir: p.tempDir, sandboxRoot: p.sandboxRoot, librarySeed: p.librarySeed });
   return m.sandboxRoot !== before;
+}
+
+/** The first free sandbox slot name, slot1..slot<max>, or undefined when all are taken (w513). Exported for tests. */
+export function slotName(taken: string[], max: number): string | undefined {
+  const used = new Set(taken.map((t) => t.toLowerCase()));
+  for (let k = 1; k <= max; k++) if (!used.has(`slot${k}`)) return `slot${k}`;
+  return undefined;
 }
 
 export function dirOptions(opts: MachineDirs, prev: MachineDirs | undefined): MachineDirs {

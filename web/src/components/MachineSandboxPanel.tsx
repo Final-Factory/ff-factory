@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { AppState, Machine, MachineSandbox } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, sessionsByIds, toast, useStore } from '../store';
-import { displayName, fmtRelative, isUnused, machineSandboxGlance, navigate, unityLabel, unityTone, useNow } from '../util';
+import { displayName, fmtRelative, machineSandboxGlance, navigate, unityLabel, unityTone, useNow } from '../util';
 import { NewAgentModal } from './Modals';
 import { GitFacts, SwitchBranchModal } from './Git';
 import { UnityLogDrawer } from './UnityLogDrawer';
@@ -52,7 +52,7 @@ export function MachineSandboxPanel({ app, machine: m, sandbox: sb, sessionId, o
       <PanelHeader
         onBack={onClose}
         title={displayName(sb)}
-        titleClass={isUnused(sb.purpose) ? 'is-unused' : ''}
+        titleClass={glance.label === 'Free' ? 'is-unused' : ''}
         state={<StateText tone={glance.tone} label={glance.label} pulse={glance.tone === 'blue'} />}
         extra={
           <>

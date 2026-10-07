@@ -69,8 +69,9 @@ before redeploying by hand.
   noted, and a refused start (`failed`) does not move `lastActivityAt`. An agent stopped or interrupted on purpose
   (`stop_agent`, the UI) is marked `stoppedOnPurpose` (saved, and taken off any cut-off list already noted) and is
   never resumed, by a dropped link or a portal restart, until it is sent a message again.
-- **Tools.** Workers get the machine's `set_label` (same as a sandbox's) via a `machine` MCP server
-  whose calls go back to the portal. Unity is not managed in v1: agents use whatever editor and MCP
+- **Tools.** Workers get the machine's tools (`wake_me`, `unity`, …) via a `machine` MCP server
+  whose calls go back to the portal. They set no label: their title says what they are doing, and the dispatcher sets it
+  ([orchestrators.md](orchestrators.md#worker-titles-and-sandbox-labels), w575). Unity is not managed in v1: agents use whatever editor and MCP
   the Mac already has (the Mac's own user settings load).
 - **Guard.** The workers' guard runs in the daemon (the sandbox rules, [below](#machine-sandboxes)). The
   backup-before-discard rule for the user's own clone (2026-09-25: copy local changes to `ff-local-backups/` beside
@@ -384,7 +385,9 @@ sandbox agents in all), `max_unity: 2`.
   background (`list_sandboxes` shows the step), and `start_agent` can be called at once: the prompt waits until
   the sandbox is ready. The branch defaults to `sandbox/<name>` (`ffbox-f/<name>` when the dispatcher passes the `work_id` of a request that came from FFBox, docs/ffbox.md "How work leaves"); an existing local or remote branch is checked out
   (tracking origin); never master, main or develop.
-- `set_sandbox_label {sandbox: "lothdesktop/sb1", purpose}`, `delete_sandbox {sandbox: "lothdesktop/sb1", user_asked}`
+- A sandbox's label is its name (slot1..N on a worker root) and never changes (w575): there is no `set_sandbox_label`,
+  and `create_sandbox` takes no label.
+- `delete_sandbox {sandbox: "lothdesktop/sb1", user_asked}`
   (stops its agents and editor, removes the Library, the worktree and the folder; the branch stays),
   `unity {sandbox: "lothdesktop/sb1", action}` (status, start, stop, restart, log), `start_agent {sandbox:
   "lothdesktop/sb1", prompt, ...}`, `switch_branch {sandbox: "lothdesktop/sb1", branch}` (refused while its editor
@@ -393,11 +396,11 @@ sandbox agents in all), `max_unity: 2`.
   `server/sessions.ts`); neither counts the worker calling it, nor a "running" left by an agent whose process is gone,
   which the portal clears, w422).
 - `list_sandboxes` starts with the **Capacity** block (below, "Placing work"), then shows each machine's sandboxes,
-  grouped (this host's own daemon's among them; the portal holds none), with each group's limits and free count, one line per sandbox (a **FREE** flag when it is ready, labelled unused and has no live agent) and only
-  its live agents. An offline machine's sandboxes show as last reported.
+  grouped (this host's own daemon's among them; the portal holds none), with each group's limits and free count, one line per sandbox (a **FREE** flag when it is ready and has no live agent) and only
+  its live agents, with their titles: what the sandbox is doing. An offline machine's sandboxes show as last reported.
 
 **Agents in a machine sandbox** get their own brief (the worktree, their editor's instance name) and the `machine`
-tools `set_label` (the sandbox's label), `wake_me`, `unity` (their sandbox's editor), `switch_branch`, `fetch_attachment`, `publish_attachment` (a file of theirs as an attachment id another worker
+tools `wake_me`, `unity` (their sandbox's editor), `switch_branch`, `fetch_attachment`, `publish_attachment` (a file of theirs as an attachment id another worker
 gets, [attachments.md](attachments.md#agents-files)) and `publish_review` (review media to the
 portal's computer over the daemon's link, [review.md](review.md)). Their guard
 is the sandbox one: their worktree is theirs, the main clone and the daemon's

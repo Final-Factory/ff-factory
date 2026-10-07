@@ -324,6 +324,34 @@ test('unity slots: a crashed holder (process gone) or a silent one (no heartbeat
   assert.equal(slots.report()!.used, 0);
 });
 
+test('unity slots: a waiter whose request the arbiter dropped (silent while suspended) files it again and still gets its slot', { timeout: 10_000 }, async (t) => {
+  const { dir, slots } = arbiter(t, { staleMs: 200 });
+  await slots.tick();
+  const one = await acquire(client(dir, 111), { count: 1, label: 'build pr-fix', pollMs: 5, heartbeatMs: 20 });
+  const said: string[] = [];
+  const box: { second?: Awaited<ReturnType<typeof acquire>> } = {};
+  const waiting = acquire(client(dir, process.pid, said), { count: 1, label: 'warm slot1', pollMs: 5, heartbeatMs: 20 }).then((h) => (box.second = h));
+  let id = '';
+  for (let i = 0; i < 100 && !id; i++) {
+    id = fs.readdirSync(dir).map((f) => /^req-(.+)\.json$/.exec(f)?.[1] ?? '').find((x) => x && x !== one.id) ?? '';
+    await settle(5);
+  }
+  assert.ok(id, 'the waiter filed its request');
+  const first = JSON.parse(fs.readFileSync(reqFile(dir, id), 'utf8'));
+  // Suspended past the stale limit: the arbiter drops the request, the waiter (resumed) files it again.
+  const old = new Date(Date.now() - 1000);
+  fs.utimesSync(reqFile(dir, id), old, old);
+  for (let i = 0; i < 100 && !said.some((l) => /asked again/.test(l)); i++) await settle(5);
+  assert.match(said.join('\n'), new RegExp(`the request for 1 Unity slot\\(s\\) was gone from the mailbox; asked again \\(${id}\\)`));
+  assert.equal(JSON.parse(fs.readFileSync(reqFile(dir, id), 'utf8')).createdAt, first.createdAt, 'it keeps its place in the queue');
+  assert.equal(box.second === undefined, true, 'still waiting behind the holder');
+  one.stop();
+  await waiting;
+  assert.equal(box.second?.id, id);
+  assert.deepEqual(slots.report()!.granted.map((g) => g.label), ['warm slot1']);
+  box.second!.stop();
+});
+
 test('unity slots: a refused request ends the client with the reason; no arbiter on the machine means no gate', async (t) => {
   const { dir, slots } = arbiter(t, { limit: () => 2 });
   await slots.tick();

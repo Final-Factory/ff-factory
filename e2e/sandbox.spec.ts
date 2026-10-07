@@ -5,7 +5,7 @@ test('sandbox page: a worker agent’s prompt and reply', async ({ authed: page 
   const s = await startWorker(page.request, `hello ${tag}`, { title: `Worker ${tag}` });
   const panel = await openSandbox(page, ALPHA, s.id);
 
-  await expect(panel.locator('.ph-name')).toHaveText('E2E playground');
+  await expect(panel.locator('.ph-name')).toHaveText('alpha');
   await expect(panel.locator('.msg-user', { hasText: `hello ${tag}` })).toBeVisible();
   // The turn ended well: its time and cost are on the reply (shown on hover), no rule of their own.
   await expect(panel.locator('.msg-assistant[data-turn-end="ok"]', { hasText: `Echo: hello ${tag}` })).toBeVisible();
@@ -85,7 +85,7 @@ test('details sheet: opens with the sandbox, Unity and agent facts, and closes',
   const sheet = page.getByRole(isMobile(page) ? 'dialog' : 'region', { name: 'Details' });
   await expect(sheet).toBeVisible();
   // The name is the page's header; the sheet adds the slot, the folder and git.
-  await expect(panel.locator('.ph-name')).toHaveText('Visual baseline');
+  await expect(panel.locator('.ph-name')).toHaveText('gallery');
   await expect(sheet).toContainText('Slot pc/gallery');
   await expect(sheet.locator('.git-branch')).toHaveText('sandbox/gallery');
   await expect(sheet.locator('.sb-facts')).toContainText(/ffsb[\\/]gallery/);

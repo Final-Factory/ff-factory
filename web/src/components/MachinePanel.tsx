@@ -157,7 +157,7 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
             <div className="fl-sb-links">
               {m.sandboxes!.map((sb) => (
                 <button key={sb.id} className="btn btn-ghost btn-sm" onClick={() => navigate({ view: 'msandbox', machineId: m.id, sandboxId: sb.id })} title={`${m.id}/${sb.id} · ${sb.git?.branch ?? sb.branch}`}>
-                  <Icon name="folder" size={13} /> <span className="mono">{sb.id}</span> <span className={isUnused(sb.purpose) ? 'dim' : ''}>{displayName(sb)}</span>
+                  <Icon name="folder" size={13} /> <span className="mono">{sb.id}</span>
                 </button>
               ))}
             </div>

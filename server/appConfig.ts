@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, ROOT, TOKEN_FILE_ROLES, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
+import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, TOKEN_FILE_ROLES, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
 import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret, readTokenFile } from './secrets.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
@@ -77,6 +77,10 @@ export const SETTABLE_KEYS = [
   // tokens, and a turn's cost in USD. 0 turns either trigger off.
   'orchestrator.compactAtTokens',
   'orchestrator.compactAtTurnUsd',
+  // The orchestrators' loop guards (w571, server/orchestrators.ts loopGuards): budgets a person's own message starts again.
+  'orchestrator.filingsPerMessage',
+  'orchestrator.followUpsPerMessage',
+  'orchestrator.messagesPerPerson',
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
@@ -351,6 +355,13 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (!Number.isFinite(n) || (n !== 0 && (n < AUTO_COMPACT_LIMITS.minTurnUsd || n > AUTO_COMPACT_LIMITS.maxTurnUsd))) throw new Error(`orchestrator.compactAtTurnUsd is 0 (off) or a cost in USD from ${AUTO_COMPACT_LIMITS.minTurnUsd} to ${AUTO_COMPACT_LIMITS.maxTurnUsd}`);
       return n;
     }
+    case 'orchestrator.filingsPerMessage':
+    case 'orchestrator.followUpsPerMessage':
+    case 'orchestrator.messagesPerPerson': {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < LOOP_GUARD_RANGE.min || n > LOOP_GUARD_RANGE.max) throw new Error(`${key} is a whole number from ${LOOP_GUARD_RANGE.min} to ${LOOP_GUARD_RANGE.max}`);
+      return n;
+    }
     case 'attachments.retentionDays': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 1 || n > 3650) throw new Error('attachments.retentionDays is a whole number of days from 1 to 3650');
@@ -572,6 +583,9 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'hostGuard.cleanup.ageRules') cfg.hostGuard.cleanup.ageRules = (v as { path: string; olderThanDays: number }[] | undefined) ?? [];
   else if (key === 'orchestrator.compactAtTokens') cfg.orchestrator = { ...cfg.orchestrator, compactAtTokens: v as number | undefined };
   else if (key === 'orchestrator.compactAtTurnUsd') cfg.orchestrator = { ...cfg.orchestrator, compactAtTurnUsd: v as number | undefined };
+  else if (key === 'orchestrator.filingsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, filingsPerMessage: v as number | undefined };
+  else if (key === 'orchestrator.followUpsPerMessage') cfg.orchestrator = { ...cfg.orchestrator, followUpsPerMessage: v as number | undefined };
+  else if (key === 'orchestrator.messagesPerPerson') cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: v as number | undefined };
   else if (key === 'usagePollMinutes') cfg.usagePollMinutes = (v as number | undefined) ?? DEFAULT_USAGE_POLL_MINUTES;
   else if (key === 'hostGuard.cleanup.everyMinutes') cfg.hostGuard.cleanup.everyMinutes = (v as number | undefined) ?? DEFAULT_CLEANUP.everyMinutes;
   else if (key === 'hostGuard.cleanup.softFreeGB') cfg.hostGuard.cleanup.softFreeGB = (v as number | undefined) ?? DEFAULT_CLEANUP.softFreeGB;

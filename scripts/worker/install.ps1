@@ -15,6 +15,9 @@
 
 .PARAMETER CredentialFile
   A file holding the credential, for an unattended run (tests). Without it the credential is asked for, hidden.
+
+.PARAMETER SshHost
+  The name the portal reaches this PC by over ssh (default: its tailnet name). -NoSsh sets up no portal ssh (w568).
 #>
 param(
     [string]$Root = '',
@@ -31,7 +34,9 @@ param(
     [switch]$NoFirewall,
     [switch]$NoCleanup,
     [switch]$AbsoluteWorktrees,
-    [string]$UnitySlotsDir = ''
+    [string]$UnitySlotsDir = '',
+    [string]$SshHost = '',
+    [switch]$NoSsh
 )
 $ErrorActionPreference = 'Stop'
 
@@ -115,6 +120,8 @@ if ($NoFirewall) { $argv += '--no-firewall' }
 if ($NoCleanup) { $argv += '--no-cleanup' }
 if ($AbsoluteWorktrees) { $argv += '--absolute-worktrees' }
 if ($UnitySlotsDir) { $argv += @('--unity-slots-dir', $UnitySlotsDir) }
+if ($SshHost) { $argv += @('--ssh-host', $SshHost) }
+if ($NoSsh) { $argv += '--no-ssh' }
 try {
     $credential | & $node.Path @argv
     $code = $LASTEXITCODE

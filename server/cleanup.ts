@@ -591,11 +591,50 @@ export interface PassOptions {
   dryRun: boolean;
 }
 
+/**
+ * Linux filesystem types (statfs's f_type, linux/magic.h) that live in RAM: tmpfs and ramfs. Ubuntu 26.04 mounts /tmp as
+ * a tmpfs of half the RAM (its release notes): 1.9 GiB in the portal's 4 GiB VM, which the clean-up took for its disk and
+ * reported "only 1.9 GB free" while the disk had 101 GB (w566).
+ */
+export const RAM_FS_TYPES: ReadonlySet<number> = new Set([0x01021994, 0x858458f6]);
+
+/** One volume as the clean-up and the host guard read it. */
+export interface VolumeStat {
+  /** Bytes an unprivileged process may still write (bavail). */
+  free: number;
+  total: number;
+  /** The filesystem type (statfs f_type); RAM_FS_TYPES are RAM, not disk. */
+  type?: number;
+  /** The device (stat's dev): two paths with the same one are on the same volume. */
+  dev?: number;
+}
+
+export const isRamVolume = (s: Pick<VolumeStat, 'type'>) => s.type !== undefined && RAM_FS_TYPES.has(s.type);
+
+/** statfs and stat of `p`, or undefined when it cannot be read. */
+export async function volumeStat(p: string): Promise<VolumeStat | undefined> {
+  try {
+    const [s, st] = await Promise.all([fs.promises.statfs(p), fs.promises.stat(p)]);
+    return { free: s.bavail * s.bsize, total: s.blocks * s.bsize, type: s.type, dev: st.dev };
+  } catch {
+    return undefined;
+  }
+}
+
 export interface CleanupRunnerDeps {
   settings(): CleanupSettings;
-  /** The volumes clean-up can help (home, temp, and whatever else is watched). */
+  /**
+   * The disk clean-up keys off: the volumes that hold the home folder, the data and whatever else is watched. The fullest
+   * one is its free space, the soft threshold's and the low-space mode's measure; a RAM-backed one never counts (w566).
+   */
   diskPaths(): string[];
-  statfs(p: string): Promise<{ free: number; total: number } | undefined>;
+  /**
+   * Temp folders (the system's, the agents'): reported apart, labelled RAM or disk, and never taken for the disk: a tmpfs
+   * there is RAM, and a temp volume of its own says nothing about the disk the data is on (w566). One on a disk volume
+   * is not listed again.
+   */
+  tempPaths?(): string[];
+  statfs(p: string): Promise<VolumeStat | undefined>;
   /** One pass: plan and remove (`low`: below the soft threshold); `opts.dryRun`: plan only. */
   pass(low: boolean, opts: PassOptions): Promise<CleanupRun>;
   consumers(): Promise<{ path: string; bytes: number }[]>;
@@ -636,13 +675,30 @@ export class CleanupRunner {
     return this.d.now ? this.d.now() : Date.now();
   }
 
-  private async minFree(): Promise<number | undefined> {
-    const frees: number[] = [];
+  /** The disk's free space (its fullest volume, RAM never), and the temp volumes apart from it. */
+  private async volumes(): Promise<{ free?: number; temp: NonNullable<CleanupSummary['temp']> }> {
+    const disk: VolumeStat[] = [];
+    const temp: NonNullable<CleanupSummary['temp']> = [];
+    const read = (p: string) => this.d.statfs(p).catch(() => undefined);
     for (const p of [...new Set(this.d.diskPaths())]) {
-      const s = await this.d.statfs(p).catch(() => undefined);
-      if (s) frees.push(s.free);
+      const s = await read(p);
+      if (!s) continue;
+      if (isRamVolume(s)) temp.push({ path: p, freeBytes: s.free, totalBytes: s.total, ram: true });
+      else disk.push(s);
     }
-    return frees.length ? Math.min(...frees) : undefined;
+    for (const p of [...new Set(this.d.tempPaths?.() ?? [])]) {
+      const s = await read(p);
+      if (!s) continue;
+      const ram = isRamVolume(s);
+      // On a disk volume already counted (the same device; without one, the same size and free space): not listed again.
+      if (!ram && disk.some((d) => (s.dev !== undefined && d.dev !== undefined ? d.dev === s.dev : d.total === s.total && d.free === s.free))) continue;
+      if (!temp.some((t) => t.path === p)) temp.push({ path: p, freeBytes: s.free, totalBytes: s.total, ram });
+    }
+    return { free: disk.length ? Math.min(...disk.map((d) => d.free)) : undefined, temp };
+  }
+
+  private async minFree(): Promise<number | undefined> {
+    return (await this.volumes()).free;
   }
 
   /** Whether a pass is due now: `everyMinutes` since the last one, or LOW_PASS_MINUTES while below the soft threshold. */
@@ -682,7 +738,8 @@ export class CleanupRunner {
         }
       }
       const r = await this.d.pass(low, { stale: withStale, dryRun });
-      const after = await this.minFree();
+      const vols = await this.volumes();
+      const after = vols.free;
       const belowSoft = after !== undefined && after < s.softFreeGB * GB;
       const summary: CleanupSummary = {
         at: new Date(this.now()).toISOString(),
@@ -693,6 +750,7 @@ export class CleanupRunner {
         freeBytes: after,
         softFreeGB: s.softFreeGB,
         belowSoft,
+        ...(vols.temp.length ? { temp: vols.temp } : {}),
         top: [...r.removed].sort((a, b) => b.bytes - a.bytes).slice(0, 5),
         ...(withStale ? { stale: true } : {}),
         ...(dryRun ? { dryRun: true } : {}),
@@ -728,7 +786,7 @@ const gb = (b: number) => `${(b / GB).toFixed(1)} GB`;
 export function describeShortfall(s: CleanupSummary): string {
   const free = s.freeBytes === undefined ? '?' : gb(s.freeBytes);
   const biggest = s.consumers?.length ? ` Biggest remaining: ${s.consumers.map((c) => `${c.path} ${gb(c.bytes)}`).join(', ')}.` : '';
-  return `Clean-up freed ${gb(s.freedBytes ?? 0)} (${s.removed} item(s)) but only ${free} is free, below the soft threshold of ${s.softFreeGB} GB. What is left is not known-safe to remove automatically.${biggest}${staleLine(s)}`;
+  return `Clean-up freed ${gb(s.freedBytes ?? 0)} (${s.removed} item(s)) but only ${free} is free on disk, below the soft threshold of ${s.softFreeGB} GB. What is left is not known-safe to remove automatically.${biggest}${staleLine(s)}`;
 }
 
 /** The stale Unity Libraries, as a sentence (empty without any). */
@@ -739,10 +797,11 @@ function staleLine(s: CleanupSummary): string {
 
 /** One line about a summary, for system_status and the dashboard. */
 export function describeCleanup(s: CleanupSummary): string {
-  const free = s.freeBytes === undefined ? '' : `, ${gb(s.freeBytes)} free${s.belowSoft ? ` (below the soft ${s.softFreeGB} GB)` : ''}`;
+  const free = s.freeBytes === undefined ? '' : `, ${gb(s.freeBytes)} free on disk${s.belowSoft ? ` (below the soft ${s.softFreeGB} GB)` : ''}`;
+  const temp = s.temp?.length ? ` Temp, apart from the disk: ${s.temp.map((t) => `${t.path} ${t.freeBytes === undefined ? '?' : gb(t.freeBytes)} free of ${t.totalBytes === undefined ? '?' : gb(t.totalBytes)} (${t.ram ? 'RAM, tmpfs' : 'a disk volume of its own'})`).join(', ')}.` : '';
   const planned = s.planned?.length ? ` ${s.dryRun ? 'Would remove' : 'Stale output in dry-run mode, would remove'} ${s.planned.length} item(s), ${gb(s.plannedBytes ?? 0)}.` : '';
   const listed = s.listed?.length ? ` ${s.listed.length} stale-looking item(s) it could not attribute, kept for a person.` : '';
-  return `${s.at.slice(0, 16).replace('T', ' ')} (${s.trigger}${s.dryRun ? ', dry run' : ''}${s.stale ? ', with stale output' : ''}): ${s.removed} item(s), ${gb(s.freedBytes ?? 0)}${s.failed ? `, ${s.failed} skipped` : ''}${free}.${planned}${listed}${staleLine(s)}`;
+  return `${s.at.slice(0, 16).replace('T', ' ')} (${s.trigger}${s.dryRun ? ', dry run' : ''}${s.stale ? ', with stale output' : ''}): ${s.removed} item(s), ${gb(s.freedBytes ?? 0)}${s.failed ? `, ${s.failed} skipped` : ''}${free}.${temp}${planned}${listed}${staleLine(s)}`;
 }
 
 /** The newest passes of a cleanup-log.jsonl (appendCleanupLog), in full, for the cleanup_log tool. */

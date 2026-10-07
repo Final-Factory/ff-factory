@@ -10,6 +10,97 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **A worker's title is its job, and a sandbox's label is its name** (w575, Lothsahn: "Please update FFFactory so that
+  the dispatcher sets the agent title whenever it hands it a new job with a good description of what the job is
+  (starting with the workorder number). Please also make it so the sandbox label doesn't change--workers don't (and
+  can't) set it, and they get the slot numbers that they're installed in."). The dispatcher's `start_agent`,
+  `message_agent` with a new `work_id` and `decide_work link` take a required `title`, and the worker becomes
+  "wNNN: <title>" (`server/jobTitle.ts`), saved with the session. Sandbox labels are their names (slot1..N, or the old
+  names) and never change: workers lose `set_label` (a call from one started before changes nothing),
+  `set_sandbox_label` is gone, `create_sandbox` and the New sandbox form take no label, and stored labels give way to
+  the name. The dashboard's sandbox rows show the name, then their live agents' titles, Working first; FREE no longer
+  depends on a label. [docs/orchestrators.md](docs/orchestrators.md#worker-titles-and-sandbox-labels).
+
+### Added
+
+- **The orchestration worker** (w597, Lothsahn: "Let's give you a real worker--not with unity, and not with a
+  FinalFactory workspace, but with a claude so you can execute commands locally for orchestration."). Exactly one,
+  hardcoded (session `ops-worker`, kind `ops`), in the portal VM as its own Linux account `fff-ops`, and only Lothsahn's
+  and Ben's own orchestrators reach it, through `ops_worker` (send, status, interrupt, stop); a new job needs a turn
+  the person started. The portal starts it through `fff-ops.socket` (`spawnClaudeCodeProcess`), never as its own child:
+  the account has a 2 GiB `noexec` scratch file system as all it can write, a network of Anthropic's API and the tailnet
+  only, and two sudo wrappers, `fff-ops-ssh` (the portal's ssh to the machines, as `fff`, fixed options, pinned keys)
+  and `fff-ops-priv` (`fffctl status`, `state`, `logs`, `machine-ssh-check`, `credential list` and `credential issue ID
+  --to TARGET`, which writes a new machine credential straight into a file on the machine, and `update`, the portal
+  deploy, only with the one-use 15-minute grant the portal writes on `ops_worker deploy` in Lothsahn's or Ben's own
+  turn; the worker reports the commit before and after once the portal is back). The Claude credential
+  reaches it on a file descriptor, never its environment. Every command is in its transcript (read-only on the page,
+  its own sidebar row) and the journal, redacted; `list_sandboxes` and `list_machines` show it as a group of its own,
+  never game capacity. Transcripts now also redact machine credentials, Anthropic API keys, Tailscale keys, age
+  identities and private keys. [docs/ops-worker.md](docs/ops-worker.md).
+- **The worker install names a nightly lab task left on an old root** (w577, lothsahn: "make sure the new nightly e2e
+  lab runs out of D:\work\ffw\nightly like it should"). The nightly lab's Windows task `ff-nightly-e2e` names its root
+  on its command line, so w513's move left lothdesktop's task on the deleted `D:\work\ff-nightly`. At the end of an
+  install or migration the installer now reads the task and, when it does not run from `<root>\nightly`, prints a
+  WARNING with the command that re-points it (the game repo's `scripts/nightly/install_schedule.sh`). The
+  worker-install runbook says the same.
+- **Dictation on the portal VM** (w570, Ben: "I can no longer use voice on my phone even tho that was working before").
+  The VM started with voice off, as it has no GPU. `fffctl configure --voice base.en` turns local Whisper on there on the
+  CPU (`voice.device: "cpu"`, `cpuThreads` = the VM's vCPUs, no Kokoro) and restarts the portal; `--voice off` turns it
+  off. With `voice.device: "cpu"` the install leaves out the CUDA wheels (about 1 GB). Why `base.en`, with measurements:
+  [docs/voice.md](docs/voice.md), "On the portal VM".
+- **The worker installer sets up the portal's ssh itself** (w568, lothsahn: "Yes, we need the installer to be able to
+  do that"). Adding a machine is running its installer there, with nothing done by hand on the portal's host or in its
+  VM.
+  - **The portal's key:** `GET /machine/ssh`, with the machine's own credential, gives the portal's key line, restricted
+    to the portal's tailnet address. The installer puts it where that account's sshd reads keys. On Windows, an admin
+    account's goes in `administrators_authorized_keys`, in the install's one administrator step with the firewall rules
+    (ACL Administrators and SYSTEM). Anyone else's goes in `~/.ssh/authorized_keys`. Re-runs change nothing, and the
+    uninstall removes exactly that line.
+  - **The host keys:** `POST /machine/ssh` sends the machine's host keys, read from its own sshd over loopback, with its
+    ssh user and tailnet name. The portal keeps them on the record (its data, so a rebuilt VM keeps them), pins them in
+    its own `~/.ssh/known_hosts2`, and says at once whether its ssh gets in.
+  - **What it's for:** the ssh behind `machine_daemon start|stop|restart` and `remove_machine` for installed machines.
+  - **`deploy/vm/host/machine-ssh.sh`** stays as the repair and check tool for the machines from before; it keeps
+    nothing on the FFBox host.
+
+### Fixed
+
+- **A re-run of the root installer rewrites root.json's notes** (w600, lothsahn: "Let's add a 6th slot for
+  LothDesktop and increase agents by 2."). `noteOutside` kept the first note of an outside item, so the player-slots
+  firewall group's note still said "8 slots" after LothDesktop's re-runs at `--max-sandboxes 5`. An item already
+  listed now takes the new note and keeps its other fields (`existed`). Test: `scripts/worker-install.test.ts`.
+- **A redeploy whose ssh step fails no longer locks the machine out** (w568, found in w513). `register` replaced the
+  machine's token before the deploy's ssh step; when that failed, the machine kept its old token and its daemon's next
+  reconnect was refused. The new token is now staged beside the current one (`next:<id>` in `machine-tokens.json`):
+  both work until the machine's daemon connects with one of them, which then stays; a deploy that fails before its
+  install step drops the staged one. Tests: a failed ssh step (the old daemon reconnects), a successful redeploy (the
+  old token stops working once the new daemon has the new one), a failure during the install (the machine's next
+  connection settles it).
+- **A RAM-backed temp folder is no longer taken for the disk** (w566, Lothsahn: "Why are you reporting that fff-portal
+  only has 1.9GB free when it has 101GB free?"). The clean-up measured the fullest of the home folder's, the temp
+  folder's and `hostDiskPaths` volumes, and on the portal VM `/tmp` is a tmpfs of half the 4 GiB RAM (Ubuntu 26.04), so
+  `system_status`, the dashboard and the "cannot free enough disk space" notice said 1.9 GB free, below the 60 GB soft
+  threshold, and it ran its low-space mode every 15 minutes. Now the disk is the home folder's and the data folder's
+  volumes (and `hostDiskPaths`; on a machine, the clone's and the sandboxes'); a tmpfs or ramfs never counts, and the
+  temp folder is shown apart, labelled RAM or a disk volume of its own, unless it is on that disk. The host guard's warn
+  and critical levels already measured only the data volume and `hostDiskPaths`.
+- **The cut-over prints the exact FFBox commands that move its connector to the new portal** (w537). After the first
+  cut-over FFBox stayed offline: its connector still dialled BEAST's old URL (answering 502), because `fff.url` is
+  rendered into its unit by root on the FFBox host and the step was one line among others. `fffctl migrate --cut-over`
+  now ends with the `sed` of the old URL to the new, the `06-services.sh --check` that must name only
+  `fffconnector.service`, the `--install` and the check, each with what it should print; RUNBOOK section 5 has the same.
+- **The portal VM reaches its machines over ssh again** (w537). The cut-over left the VM without the machines' ssh
+  aliases and host keys, so every daemon redeploy failed on "Host key verification failed". `deploy/vm/guest/machines.ssh`
+  lists the machines (alias, MagicDNS name, ssh user) with each ed25519 host key pinned (checked on two paths from
+  BEAST); `fff-machine-ssh --fix` writes them into the portal account's `~/.ssh/config` (one managed block,
+  `StrictHostKeyChecking yes`) and `known_hosts`, refusing a machine that shows another key, and `--check` reports each
+  machine and prints the `authorized_keys` line for one that refuses the portal's key. The guest install runs it,
+  `fffctl update` runs it when `machines.ssh` changes, and `deploy/vm/host/machine-ssh.sh --check|--fix` runs it in a
+  VM from the host (RUNBOOK section 9).
+
 ### Removed
 
 - **Main-clone workers: every worker runs in a sandbox** (w536, Lothsahn on 2026-10-06: "I thought we're deleting the
@@ -82,6 +173,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **message_person no longer stops a person relaying their own words** (w571, Ben: "why do you have a 3 message
+  limit, please raise that"). A person's orchestrator could send another person 3 messages until that person wrote to
+  their own orchestrator, so Ben's fourth message to Lothsahn, asked for in his own words, was refused. Now the count
+  starts again when either of the two writes to their own orchestrator, and the cap is 10. Two orchestrators answering
+  each other with no person writing still stop there. The three loop guards are config settings, 1 to 100, settable
+  live: `orchestrator.messagesPerPerson` (default 10), `orchestrator.filingsPerMessage` and
+  `orchestrator.followUpsPerMessage` (default 3 each; those two already started again on every message of the person,
+  so they stay as they were).
+- **The portal VM keeps `/tmp` on its disk** (w537). Ubuntu 26.04 mounts `/tmp` as a tmpfs of half the RAM: 1.9 GiB
+  in the 4 GiB VM, with no swap, holding the agents' temp folders, and the portal's clean-up reported it as 1.9 GB of
+  free disk on the first day after the cut-over. The guest install masks `tmp.mount` (systemd's way back to the disk;
+  from the next boot), and the VM end-to-end test checks `/tmp` is on the root filesystem after the nightly reboot. A
+  VM installed before: RUNBOOK section 8.
 - **The nightly cold restart applies a size changed in `/etc/fff-vm/fff-vm.conf`** (w537, Lothsahn: "Can we make it do
   that during the update automatically?"). With the VM off, `fff-vm nightly` (and `--now`) defines the domain again
   from the settings, logs what changed, keeps libvirt's previous definition (`/etc/fff-vm/domain.libvirt-prev.xml`), and
