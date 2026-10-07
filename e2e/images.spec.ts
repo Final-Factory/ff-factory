@@ -10,6 +10,26 @@ async function expectLoaded(images: Locator) {
   await expect.poll(() => images.evaluateAll((els) => els.every((e) => (e as HTMLImageElement).complete && (e as HTMLImageElement).naturalWidth > 0))).toBe(true);
 }
 
+/**
+ * Scroll an orchestrator's reply into view, as its reader would: its images load lazily, once on screen. Other tests write
+ * to this orchestrator too, so a reply can be pushed out of view, and a click on an image scrolls the chat off the bottom,
+ * after which it no longer follows new messages. The streamed reply is replaced by the stored one: until it holds.
+ */
+async function onScreen(reply: Locator) {
+  await expect(async () => reply.scrollIntoViewIfNeeded({ timeout: 1_000 })).toPass();
+}
+
+/**
+ * Open the lightbox from `trigger`. A chat moves while a reply streams into it (its own, or in an orchestrator's chat
+ * another test's), so a click can land where the image was a moment before: click again until it opens.
+ */
+async function openLightbox(page: Page, trigger: Locator) {
+  await expect(async () => {
+    if (!(await page.locator('.lightbox').count())) await trigger.click({ timeout: 2_000 });
+    await expect(page.locator('.lightbox img').first()).toBeVisible({ timeout: 1_000 });
+  }).toPass();
+}
+
 async function workerPage(page: Page, prompt: string) {
   const tag = uniq('img');
   const s = await startWorker(page.request, `${prompt} ${tag}`, { title: `Images ${tag}` });
@@ -46,7 +66,7 @@ test('image paste: a thumbnail in the composer, then inline in the transcript, a
   await expect(panel.locator('.msg-assistant', { hasText: `Echo: look at this ${tag} (1 image)` })).toBeVisible();
 
   // A click opens the lightbox.
-  await bubble.locator('.img-thumb').click();
+  await openLightbox(page, bubble.locator('.img-thumb'));
   await expectLoaded(page.locator('.lightbox img'));
   await page.keyboard.press('Escape');
   await expect(page.locator('.lightbox')).toHaveCount(0);
@@ -71,16 +91,18 @@ test("the orchestrator's messages show images from any sandbox, markdown or bare
   await sendMessage(page.request, app.orchestratorId!, `before and after ![after](${shot}) ${tag}`);
   const reply = page.locator('.orch .msg-assistant', { hasText: tag });
   await expect(reply).toBeVisible();
+  await onScreen(reply);
   // The markdown image shows where it is in the text, not again in the strip.
   await expectLoaded(reply.locator('.md .md-img img'));
   await expect(reply.locator('.img-strip img')).toHaveCount(0);
-  await reply.locator('.md-img').first().click();
+  await openLightbox(page, reply.locator('.md-img').first());
   await expectLoaded(page.locator('.lightbox img'));
   await page.keyboard.press('Escape');
   await expect(page.locator('.lightbox')).toHaveCount(0);
 
   await sendMessage(page.request, app.orchestratorId!, `bare ${shot} ${tag}-bare`);
   const bare = page.locator('.orch .msg-assistant', { hasText: `${tag}-bare` });
+  await onScreen(bare);
   await expectLoaded(bare.locator('.img-strip img'));
   await expect(bare.locator('.md img')).toHaveCount(0);
   // Outside every root the orchestrator oversees: refused by the server.
@@ -115,6 +137,7 @@ test('inline images: a PNG and an SVG file, PNG and SVG data URIs, sanitised, ke
   const reply = page.locator('.orch .msg-assistant', { hasText: tag });
   const images = reply.locator('.md .md-img img');
   await expect(images).toHaveCount(4);
+  await onScreen(reply);
   await expectLoaded(images);
   await expect(reply.locator('.img-strip img')).toHaveCount(0);
 
@@ -128,7 +151,7 @@ test('inline images: a PNG and an SVG file, PNG and SVG data URIs, sanitised, ke
   expect(await served.text()).not.toMatch(/script|onload|foreignObject|example\.invalid/i);
 
   // A click opens it full size.
-  await images.nth(1).click();
+  await openLightbox(page, images.nth(1));
   await expectLoaded(page.locator('.lightbox img'));
   await page.keyboard.press('Escape');
 
@@ -140,6 +163,7 @@ test('inline images: a PNG and an SVG file, PNG and SVG data URIs, sanitised, ke
   await page.reload();
   const again = page.locator('.orch .msg-assistant', { hasText: tag }).locator('.md .md-img img');
   await expect(again).toHaveCount(4);
+  await onScreen(page.locator('.orch .msg-assistant', { hasText: tag }));
   await expectLoaded(again);
   expect(dialogs).toEqual([]);
 });
@@ -175,7 +199,7 @@ test('a mermaid block renders as a diagram, with its source a click away', async
   await expect(diagram).toBeVisible();
 
   // Full size in the lightbox.
-  await block.getByRole('button', { name: 'Open diagram large' }).click();
+  await openLightbox(page, block.getByRole('button', { name: 'Open diagram large' }));
   await expectLoaded(page.locator('.lightbox img'));
   await page.keyboard.press('Escape');
 

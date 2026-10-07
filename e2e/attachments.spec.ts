@@ -12,6 +12,10 @@ import { ALPHA, appState, expect, machineSandbox, openSandbox, startWorker, test
  * and copied into a worker's Inbox. The e2e server caps a file at 20 MB (e2e/server.ts), so a 9 MB file is two chunks.
  */
 
+// The app's service worker (web/public/sw.js, for push) takes the page's requests in WebKit, where page.route then never
+// sees them (measured 2026-10-07: the dropped chunk below was never dropped in WebKit). No test here needs it.
+test.use({ serviceWorkers: 'block' });
+
 const MB = 1024 * 1024;
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 /** `n` bytes that differ by `seed`, so no two tests' files share a hash. */
@@ -52,15 +56,19 @@ async function sendFrom(page: Page, scope: string, text: string) {
   await page.locator(`${scope} .composer`).getByRole('button', { name: 'Send' }).click();
 }
 
-test('orchestrator chat: a .zip and a .log through the paperclip upload with progress, resume a dropped chunk, and reach the orchestrator', async ({ authed: page, browserName }) => {
+test('orchestrator chat: a .zip and a .log through the paperclip upload with progress, resume a dropped chunk, and reach the orchestrator', async ({ authed: page }) => {
   const tag = uniq('att');
   const save = bytes(9 * MB, 1);
   const log = Buffer.from(`[Desync] heartbeat 1200 diverged ${tag}\n`);
-  // The zip's second chunk is cut off once on its way: the upload must pick up where the server says it got.
+  // The zip's second chunk is cut off once on its way: the upload must pick up where the server says it got. It is held
+  // until the test has seen the upload in progress, which on a fast machine is otherwise over before it is looked at.
   let cut = 0;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
   await page.route('**/api/attachments/uploads/*?offset=*', async (route) => {
     if (!cut && new URL(route.request().url()).searchParams.get('offset') === String(8 * MB)) {
       cut++;
+      await held;
       return route.abort('connectionreset');
     }
     return route.continue();
@@ -74,10 +82,9 @@ test('orchestrator chat: a .zip and a .log through the paperclip upload with pro
   await expect(page.locator('.orch .composer-file-bar').first()).toBeVisible();
   // While a file uploads, Send waits for it.
   await expect(page.locator('.orch .composer').getByRole('button', { name: 'Send' })).toBeDisabled();
+  release();
   await expect(page.locator('.orch .composer-file.done')).toHaveCount(2, { timeout: 20_000 });
-  // Playwright's WebKit did not route this page's requests at all on Windows (measured 2026-10-02: not even the JSON
-  // POST), so the cut is only certain in Chromium.
-  if (browserName === 'chromium') expect(cut, 'the dropped chunk was retried').toBe(1);
+  expect(cut, 'the dropped chunk was retried').toBe(1);
   await expect(chips.filter({ hasText: `Battleship-${tag}.zip` })).toContainText('9.0 MB');
 
   await sendFrom(page, '.orch', `look at these ${tag}`);
