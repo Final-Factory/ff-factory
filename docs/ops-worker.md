@@ -156,9 +156,9 @@ Lothsahn, 2026-10-07: "Yes, please modify the ops worker to update yourself." Af
 (his, by hand), later portal updates can go through the worker.
 
 1. Lothsahn or Ben tells their orchestrator to deploy. In that same turn, the orchestrator calls `ops_worker deploy`.
-   The server checks the turn is the person's own (`personTurn`, as for approvals: every message the turn answers is
-   theirs). It refuses check-ins, timers, relayed reports, FFBox and Discord text, workers' and standing agents'
-   reports, and a job's follow-ups.
+   The server checks the turn is the person's own (`personTurn`, as for approvals: the person's message opened it, and
+   a harness message delivered while it runs does not change that, w607). It refuses turns that check-ins, timers,
+   relayed reports, FFBox and Discord text, or workers' and standing agents' reports opened, and a job's follow-ups.
 2. The server writes `data/ops-deploy.grant`, `{by, at, expires}`, 15 minutes, owned by `fff` with mode 0600. It saves
    the deploy in `data/ops-worker.json` and sends the worker a `[deploy]` message with the steps.
 3. The worker runs `fffctl status`, then `fffctl update`. `fff-ops-priv` (root):
