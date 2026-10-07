@@ -479,7 +479,8 @@ export class OpsWorker {
   /**
    * A message from an orchestrator. `caller` is the orchestrator's session. Lothsahn's or Ben's own only. A job (a
    * `fresh` start, or the first message after the last job ended) needs a turn its person started themselves; within a
-   * job their orchestrator's harness turns (a check-in, a timer) may follow up for OPS_LIMITS.jobMs.
+   * job their orchestrator's harness turns (a check-in, a timer) may follow up for OPS_LIMITS.jobMs. Follow-ups are not
+   * counted (w627, lothsahn: "an infinite number of messages to each other and the portal worker").
    */
   send(caller: SessionInfo | undefined, text: string, fresh = false): string {
     const person = opsAllowedOrchestrator(caller);

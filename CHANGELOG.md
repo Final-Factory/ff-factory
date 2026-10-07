@@ -27,6 +27,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **Lothsahn's and Ben's orchestrators message each other with no count** (w627, lothsahn: "Please update FFFactory so
+  you and Ben's orchestrator can send an infinite number of messages to each other and the portal worker").
+  `message_person` between the two owners (`OPS_PEOPLE`, `ownersPair`) no longer stops at
+  `orchestrator.messagesPerPerson` (10). The loop guard left between them is a rate: in turns no person started (a
+  `[person message]`, a report, a timer), at most 60 messages an hour from one to the other
+  (`OWNER_LOOP_MESSAGES_PER_HOUR`), started again when either writes to their own orchestrator; a person's own turn is
+  never counted. Everyone else keeps the count, to and from the owners too. The `ops_worker` follow-ups were never
+  counted; its tool and [ops-worker.md](docs/ops-worker.md) now say so, and what ends a run of them (the job's 12
+  hours, the $25 process cap, the 2-hour turn limit). The new-job and deploy gates are unchanged.
 - **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
   that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
   and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,

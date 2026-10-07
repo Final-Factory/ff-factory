@@ -368,7 +368,7 @@ export interface Config {
     filingsPerMessage?: number;
     /** Follow-ups (message_agent) to one worker between two of the person's messages, default 3. */
     followUpsPerMessage?: number;
-    /** message_person messages to one person until the sender or the recipient writes to their own orchestrator, default 10. */
+    /** message_person messages to one person until the sender or the recipient writes to their own orchestrator, default 10. Not between the owners (w627, server/orchestrators.ts ownersPair). */
     messagesPerPerson?: number;
   };
   worker: {
