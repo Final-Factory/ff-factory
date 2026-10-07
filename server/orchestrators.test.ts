@@ -1104,7 +1104,7 @@ test('w536: every worker runs in a sandbox: start_agent with a machine alone is 
   const duty = machines.createSession('beast', { kind: 'standing', title: 'duty', model: 'opus', permissionMode: 'bypassPermissions' });
   duty.info.status = 'running';
   assert.match(machines.placeFull(next)!, /2 agents mid-turn on beast, in sandboxes and standing agents together \(its agent cap 2\)/);
-  assert.match(agents.standing.runNow(nightly.id), /^Waiting: waiting for an agent slot \(2\/2 in use\)/);
+  assert.match(agents.standing.runNow(nightly.id), /^Queued for an agent slot \(2\/2 in use\)/);
   duty.info.status = 'idle';
   assert.equal(machines.placeFull(next), undefined, 'an idle agent takes no slot');
 });

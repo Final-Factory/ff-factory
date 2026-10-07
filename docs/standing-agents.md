@@ -43,7 +43,8 @@ Stored in `data/state.json` (`StandingAgent` in `shared/types.ts`), in the porta
   `max_sandbox_agents`, else every sandbox full; 2 on a machine without sandboxes).
 - **No overlap.** An agent has at most one pending or active run. A schedule tick that comes due
   while a run is active is recorded as `skipped (previous run still going)`.
-- **Limit full.** A due run waits (dashboard: "waiting for an agent slot") until its machine has a free slot, for
+- **Limit full.** A due run is queued (dashboard: "Queued for a slot"; w643: capacity is Queued, its machine offline
+  is "Blocked on its machine") until its machine has a free slot, for
   at most 60 minutes or until the next scheduled occurrence, whichever is sooner. It is then
   recorded as `skipped (no free agent slot)`. Standing agents only take free slots; they never stop
   a worker.

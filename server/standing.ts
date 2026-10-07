@@ -437,7 +437,8 @@ export class StandingAgents {
       a.state = 'waiting';
       a.stateDetail = verdict.reason;
       this.store.putStanding(a);
-      return `Waiting: ${verdict.reason}.`;
+      // Its run waits for a slot (Queued) or for its machine (Blocked), w643: the reason says which.
+      return `${verdict.reason[0].toUpperCase()}${verdict.reason.slice(1)}.`;
     }
     a.pending = undefined;
     if (verdict.action === 'skip') {

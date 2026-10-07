@@ -420,7 +420,8 @@ export function standingGlance(a: StandingAgent, pendingDelegations: number, now
   const attention = pendingDelegations;
   if (pendingDelegations) return { tone: 'amber', label: 'Needs you', detail: `${pendingDelegations} request${pendingDelegations === 1 ? '' : 's'}`, attention };
   if (a.state === 'running') return { tone: 'blue', label: 'Running', attention };
-  if (a.state === 'waiting') return { tone: 'grey', label: 'Queued for a slot', attention };
+  // Its run waits (w643): for its machine, offline (Blocked), or for a free agent slot (Queued).
+  if (a.state === 'waiting') return /^blocked/.test(a.stateDetail ?? '') ? { tone: 'violet', label: 'Blocked on its machine', detail: a.stateDetail, attention } : { tone: 'grey', label: 'Queued for a slot', attention };
   const last = lastRun(a);
   if (last && (last.outcome === 'error' || last.outcome === 'budget' || last.outcome === 'timeout')) {
     return { tone: 'red', label: outcomeLabel[last.outcome], detail: a.state === 'paused' ? 'paused' : undefined, attention };
