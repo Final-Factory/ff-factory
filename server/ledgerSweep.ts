@@ -606,7 +606,8 @@ export class LedgerSweep {
    * unconfirmed when no worker is left to ask. Returns whether it acted.
    */
   private followUpStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]): boolean {
-    if (!isOpen(w) || w.question || w.flag) return false;
+    // A blocked request waits on its blocker (w643): the blocker watch unblocks, stalls or asks, not "Is it done?".
+    if (!isOpen(w) || w.question || w.flag || w.status === 'blocked') return false;
     const prs = w.prs ?? [];
     if (!prs.some((p) => p.state === 'merged') || prs.some((p) => p.state === 'open')) return false;
     const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));

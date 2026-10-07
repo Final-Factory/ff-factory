@@ -8,31 +8,37 @@
 // first ("CI on PR #1098 · check-in 06:10"), and tells a job apart from a timer alone. A stopped agent is never Waiting
 // (49c5dc06 and 6c4fe619 read "Waiting" while stopped, on check-ins they had set with "nothing to do" notes), and an
 // overdue check-in (one that should have fired) does not count.
+//
+// w643 (Lothsahn: Waiting is a person, Queued is capacity, Blocked is a thing): an agent alive between turns
+// (`between_turns`, w475's Waiting) is shown as Working when its own work is still going (a background job such as CI,
+// a check-in it set), Queued when a message to it waits for a free agent slot, and Blocked when that message waits for
+// its machine (offline, or its daemon outdated). Needs you is the one state where a person must act.
 import type { SessionInfo } from './types.ts';
 
-export type AgentState = 'working' | 'needs_you' | 'waiting' | 'idle' | 'error' | 'stopped';
+export type AgentState = 'working' | 'needs_you' | 'between_turns' | 'idle' | 'error' | 'stopped';
 
 export const AGENT_STATE_LABEL: Record<AgentState, string> = {
   working: 'Working',
   needs_you: 'Needs you',
-  waiting: 'Waiting',
+  /** Its own work goes on (a job, a check-in); a held message shows Queued or Blocked instead (agentState). */
+  between_turns: 'Working',
   idle: 'Idle',
   error: 'Error',
   stopped: 'Stopped',
 };
 
 /** The order agents are listed in (Lothsahn: "running at the top, waiting below them, and idle below them"). */
-export const AGENT_STATE_RANK: Record<AgentState, number> = { working: 0, needs_you: 0, waiting: 1, idle: 2, error: 3, stopped: 4 };
+export const AGENT_STATE_RANK: Record<AgentState, number> = { working: 0, needs_you: 0, between_turns: 1, idle: 2, error: 3, stopped: 4 };
 
-/** What a Waiting agent waits on: a job it started that is still running, a message queued for it, or only its check-in. */
+/** What an agent between turns waits on: a job it started that is still running, a message queued for it, or only its check-in. */
 export type WaitKind = 'job' | 'queued' | 'timer';
 
 export interface AgentStateView {
   state: AgentState;
   label: string;
-  /** Waiting: on what, e.g. "CI on PR #1098 · check-in 06:10 UTC", "a queued message (…)", "check-in 16:29 UTC: “merge #1083…”". */
+  /** Between turns: on what, e.g. "CI on PR #1098 · check-in 06:10 UTC", "a queued message (…)", "check-in 16:29 UTC: “merge #1083…”". */
   waitsOn?: string;
-  /** Waiting: a running job, a queued message, or a timer alone. */
+  /** Between turns: a running job, a queued message, or a timer alone. */
   kind?: WaitKind;
   /** Its check-in (ISO), when one is ahead. */
   until?: string;
@@ -44,7 +50,7 @@ export interface AgentStateView {
   released?: string;
 }
 
-type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeAt' | 'wakeNote' | 'queuedSend' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince' | 'placeReleased'>>;
+type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeAt' | 'wakeNote' | 'queuedSend' | 'queuedOn' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince' | 'placeReleased'>>;
 
 /**
  * How long an agent whose daemon went away under it keeps its sandbox (w613): a day, time for a person or its
@@ -82,9 +88,10 @@ function jobsText(s: AgentFacts): string | undefined {
 }
 
 /**
- * The agent's state. Waiting only while alive between turns (idle) with something real pending: a background job still
- * running (the SDK's live set; a restart ends them), a message queued for it, or a check-in still ahead. A stopped agent
- * is Stopped, with `resumes` when its check-in or a queued message will start it again.
+ * The agent's state. Between turns only while alive (idle) with something real pending: a background job still running
+ * (the SDK's live set; a restart ends them), a message queued for it, or a check-in still ahead; its label is Working,
+ * or Queued / Blocked for a queued message (w643). A stopped agent is Stopped, with `resumes` when its check-in or a
+ * queued message will start it again.
  */
 export function agentState(s: AgentFacts, time: (iso: string, now: number) => string = utcTime, now: number = Date.now()): AgentStateView {
   const v = (state: AgentState, more: Partial<AgentStateView> = {}): AgentStateView => ({ state, label: AGENT_STATE_LABEL[state], ...more });
@@ -101,32 +108,32 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
     return v('stopped', { ...(resumes ? { resumes } : {}), ...(held ? { held } : {}), ...(released ? { released } : {}) });
   }
   const jobs = jobsText(s);
-  if (jobs) return v('waiting', { kind: 'job', waitsOn: [jobs, checkIn].filter(Boolean).join(' · '), ...(wakeAhead ? { until: s.wakeAt } : {}) });
-  if (s.queuedSend) return v('waiting', { kind: 'queued', waitsOn: `a queued message (${s.queuedSend})` });
+  if (jobs) return v('between_turns', { kind: 'job', waitsOn: [jobs, checkIn].filter(Boolean).join(' · '), ...(wakeAhead ? { until: s.wakeAt } : {}) });
+  if (s.queuedSend) return { ...v('between_turns', { kind: 'queued', waitsOn: `a queued message (${s.queuedSend})` }), label: s.queuedOn === 'machine' ? 'Blocked' : 'Queued' };
   if (checkIn) {
     const note = firstWords(s.wakeNote);
-    return v('waiting', { kind: 'timer', waitsOn: note ? `${checkIn}: ${note}` : checkIn, until: s.wakeAt });
+    return v('between_turns', { kind: 'timer', waitsOn: note ? `${checkIn}: ${note}` : checkIn, until: s.wakeAt });
   }
   return v('idle');
 }
 
-/** "Waiting: CI on PR #1098 · check-in 06:10 UTC", "Stopped (resumes at check-in 16:29 UTC)", "Idle", …. */
+/** "Working: CI on PR #1098 · check-in 06:10 UTC", "Queued: a queued message (…)", "Stopped (resumes at check-in 16:29 UTC)", "Idle", …. */
 export const agentStateText = (s: AgentFacts, time?: (iso: string, now: number) => string, now?: number) => {
   const a = agentState(s, time, now);
   const released = a.released ? `; its sandbox is released (${a.released}): it is placed again when it resumes` : '';
   return a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes}${released})` : a.held ? `${a.label} (${a.held}; its sandbox is kept for it)` : a.released ? `${a.label} (its sandbox is released: ${a.released})` : a.label;
 };
 
-/** Whether the agent is alive between turns with something real pending (Waiting). */
-export const isWaitingAgent = (s: AgentFacts, now?: number) => agentState(s, undefined, now).state === 'waiting';
+/** Whether the agent is alive between turns with something real pending (w475's Waiting). */
+export const isBetweenTurns = (s: AgentFacts, now?: number) => agentState(s, undefined, now).state === 'between_turns';
 
 /**
- * Whether the agent will come back to its sandbox, so the sandbox is not free: Waiting, or stopped with a check-in ahead
- * or a message queued for it (it resumes there).
+ * Whether the agent will come back to its sandbox, so the sandbox is not free: between turns, or stopped with a check-in
+ * ahead or a message queued for it (it resumes there).
  */
 export const holdsItsPlace = (s: AgentFacts, now?: number) => {
   const a = agentState(s, undefined, now);
-  return a.state === 'waiting' || !!a.resumes || !!a.held;
+  return a.state === 'between_turns' || !!a.resumes || !!a.held;
 };
 
 /**
@@ -136,21 +143,21 @@ export const holdsItsPlace = (s: AgentFacts, now?: number) => {
  */
 export const holdsSandbox = (s: AgentFacts, now?: number) => holdsItsPlace(s, now) && !s.placeReleased;
 
-/** Agents in list order: Working (and Needs you), Waiting, Idle, Error, Stopped; the most recent activity first in each. */
+/** Agents in list order: Working mid-turn (and Needs you), between turns, Idle, Error, Stopped; the most recent first in each. */
 export function sortAgents<T extends AgentFacts & Pick<SessionInfo, 'lastActivityAt'>>(list: readonly T[], now?: number): T[] {
   return [...list].sort((a, b) => AGENT_STATE_RANK[agentState(a, undefined, now).state] - AGENT_STATE_RANK[agentState(b, undefined, now).state] || b.lastActivityAt.localeCompare(a.lastActivityAt));
 }
 
 /**
- * A place's rank for the lists of sandboxes (w509, Lothsahn: sort sandboxes by status): one with a Working agent (or one
- * that needs you) first, then Waiting, then Idle, then those with no live agent or unused. With its latest activity.
+ * A place's rank for the lists of sandboxes (w509, Lothsahn: sort sandboxes by status): one with an agent mid-turn (or
+ * one that needs you) first, then one between turns, then Idle, then those with no live agent or unused. With its latest activity.
  */
 export function placeRank(agents: readonly (AgentFacts & Pick<SessionInfo, 'lastActivityAt'>)[], now?: number): { rank: number; latest: string } {
   let rank = 3;
   let latest = '';
   for (const s of agents) {
     const st = agentState(s, undefined, now).state;
-    const r = st === 'working' || st === 'needs_you' ? 0 : st === 'waiting' ? 1 : st === 'idle' ? 2 : 3;
+    const r = st === 'working' || st === 'needs_you' ? 0 : st === 'between_turns' ? 1 : st === 'idle' ? 2 : 3;
     rank = Math.min(rank, r);
     if (s.lastActivityAt > latest) latest = s.lastActivityAt;
   }

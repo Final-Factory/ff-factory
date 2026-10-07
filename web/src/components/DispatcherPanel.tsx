@@ -4,6 +4,7 @@ import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../../../shared/workState';
+import { blockerName } from '../../../shared/blockers';
 import { FFBOX_LAN_LABEL, ffboxConversationHref, isFfboxConversationId } from '../../../shared/ffboxLinks';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
@@ -208,18 +209,19 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   );
 }
 
-/** A live state's tone: working blue, waiting amber, queued grey, merged with a follow-up green, stalled red. */
-const LIVE_TONE: Record<WorkLiveState, Tone> = { working: 'blue', pending: 'violet', waiting: 'amber', queued: 'grey', followup: 'green', stalled: 'red' };
+/** A live state's tone: working blue, waiting on input amber, queued grey, blocked violet, merged with a follow-up green, stalled red. */
+const LIVE_TONE: Record<WorkLiveState, Tone> = { working: 'blue', waiting: 'amber', queued: 'grey', blocked: 'violet', followup: 'green', stalled: 'red' };
 
 /**
  * What each open or stalled request is doing now (shared/workState.ts, w418), from the page's own sessions: it follows
- * them live. The server's send queue is not on the page, so a message held for a free slot shows only in list_work.
+ * them live. A message held in the send queue shows from the session's own copy (queuedSend), and a Queued request
+ * while a computer has room is flagged from the server's `room` (w643).
  */
 export function useWorkLive(app: AppState, work: readonly WorkItem[], now: number): Map<string, WorkLive> {
   return useMemo(() => {
     const byId = new Map(app.sessions.map((s) => [s.id, s]));
-    return workLiveAll(work, { session: (id) => byId.get(id), now });
-  }, [app.sessions, work, now]);
+    return workLiveAll(work, { session: (id) => byId.get(id), ...(app.room ? { room: app.room } : {}), now });
+  }, [app.sessions, app.room, work, now]);
 }
 
 /** The live states picked on one list, kept in this browser across reloads (w418, Lothsahn: "select multiple types"). */
@@ -513,6 +515,12 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
               <span className={`tone-${tone}`} title={live.why} data-testid={`live-${w.id}`}>
                 {WORK_LIVE_LABEL[live.state]}
                 {live.waitsOn?.length ? ` on ${live.waitsOn.join(', ')}` : ''}
+                {live.roomOn?.length ? (
+                  <span className="tone-red" data-testid={`room-${w.id}`}>
+                    {' '}
+                    · but {live.roomOn.join(', ')} {live.roomOn.length > 1 ? 'have' : 'has'} room
+                  </span>
+                ) : null}
                 <span className="dim"> · {statusText(w)}</span>
               </span>
             ) : (
@@ -609,6 +617,11 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
           {w.stalled && (
             <p className="small tone-amber" data-testid={`stalled-${w.id}`}>
               Stalled ({w.stalled.kind}): {w.stalled.reason}
+            </p>
+          )}
+          {w.status === 'blocked' && w.blocked && (
+            <p className="small tone-violet" data-testid={`blocked-${w.id}`}>
+              Blocked on {blockerName(w.blocked, now)}: {w.blocked.what} (set by {w.blocked.by}, {fmtRelative(w.blocked.at, now)}). It starts by itself when that clears.
             </p>
           )}
           {w.prs?.length ? (

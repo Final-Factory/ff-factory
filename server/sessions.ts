@@ -40,6 +40,9 @@ export const midTurnRefusal = (busy: { info: SessionInfo }[], where: string) =>
 export type OpsPass = 'orchestrator' | 'wake' | 'resume';
 export const OPS_SEND_REFUSED = "the orchestration worker takes messages only from Lothsahn's and Ben's own orchestrators (their ops_worker tool), not from people's chats, the dispatcher, workers, standing agents, the intake, FFBox or /mcp";
 
+/** A send-queue reason that names a machine away (placeAgain's "lothdesktop is offline: …"): Blocked, not Queued (w643). */
+const OFFLINE = /\bis offline\b/;
+
 /** A message waiting for a free running slot (w384): delivered in order once one frees. Kept in data/send-queue.json. */
 export interface QueuedSend {
   uuid: string;
@@ -52,6 +55,11 @@ export interface QueuedSend {
   bypassGate?: boolean;
   at: string;
   why: string;
+  /**
+   * What holds it (w643): `capacity`, no free agent slot or sandbox (Queued), or `machine`, its machine offline or its
+   * daemon outdated, the host guard (Blocked on that machine). Absent on messages queued before: capacity.
+   */
+  on?: 'capacity' | 'machine';
   /** The last error a delivery attempt threw (w496): it stays queued and is tried again, up to QUEUE_HOLD_MS. */
   lastError?: string;
 }
@@ -904,7 +912,7 @@ export class SessionManager {
   private enqueue(q: QueuedSend) {
     this.queue.push(q);
     this.saveQueue();
-    this.store.append(q.id, { kind: 'system', text: `A message is waiting for a free agent slot (${q.why}); it is delivered as soon as one frees.` });
+    this.store.append(q.id, { kind: 'system', text: q.on === 'machine' ? `A message is waiting for its machine (${q.why}); it is delivered as soon as it can go.` : `A message is waiting for a free agent slot (${q.why}); it is delivered as soon as one frees.` });
     console.log(`sessions: queued a message for ${q.id}: ${q.why}`);
     return q.uuid;
   }
@@ -970,24 +978,28 @@ export class SessionManager {
     // The orchestration worker (w597, server/opsWorker.ts) hears only Lothsahn's and Ben's own orchestrators (through
     // OpsWorker.send), its own wake_me and a restart's resume: no other sender, a harness notice included, reaches it.
     if (s.info.kind === 'ops' && !opts.ops) throw new Error(OPS_SEND_REFUSED);
-    const queue = (why: string) =>
-      this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), at: new Date().toISOString(), why });
+    const queue = (why: string, on: 'capacity' | 'machine') =>
+      this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), at: new Date().toISOString(), why, on });
     // ALL RUNNING SLOTS BUSY (w384): the message waits and goes when a turn ends, instead of being refused. So does any
     // later message to a session that already has one waiting, so its messages keep their order.
-    const full = this.fullFor(s) ?? (this.queue.some((q) => q.id === id) && !isMidTurn(s.info) ? 'an earlier message to it is still waiting' : undefined);
-    if (full) return queue(full);
+    const full = this.fullFor(s);
+    // A released worker's machine offline is a machine to wait for, not capacity (w643).
+    if (full) return queue(full, OFFLINE.test(full) ? 'machine' : 'capacity');
+    const earlier = isMidTurn(s.info) ? undefined : this.queue.find((q) => q.id === id);
+    if (earlier) return queue('an earlier message to it is still waiting', earlier.on ?? 'capacity');
+    // What refuses a held first prompt now (its machine's daemon outdated or offline, the host guard) is its machine.
     if (opts.hold) {
       try {
         this.checkStart(id, opts.bypassGate, from);
       } catch (e) {
-        return queue((e as Error).message);
+        return queue((e as Error).message, 'machine');
       }
     } else this.checkStart(id, opts.bypassGate, from);
     if (!opts.hold) return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     try {
       return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
     } catch (e) {
-      return queue((e as Error).message);
+      return queue((e as Error).message, 'machine');
     }
   }
 

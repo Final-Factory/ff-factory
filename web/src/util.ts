@@ -160,7 +160,7 @@ export function standingTone(a: StandingAgent): Tone {
 
 export const standingLabel: Record<StandingAgent['state'], string> = {
   asleep: 'Asleep',
-  waiting: 'Waiting for a slot',
+  waiting: 'Queued for a slot',
   running: 'Running',
   paused: 'Paused',
 };
@@ -234,8 +234,13 @@ export function fmtUntil(iso: string | undefined, now: number): string {
   return `in ${Math.round(h / 24)}d`;
 }
 
-/** An agent's state (shared/agentState.ts, w475) as the page shows it: its tone, its word, and what it waits on in the browser's time. */
-const STATE_TONE: Record<AgentState, Tone> = { working: 'blue', needs_you: 'amber', waiting: 'violet', idle: 'grey', error: 'red', stopped: 'grey' };
+/**
+ * An agent's state (shared/agentState.ts, w475) as the page shows it: its tone, its word, and what it waits on in the
+ * browser's time. Between turns (w643) it is Working (blue) on its own job or check-in, Queued (grey) for a free slot, or
+ * Blocked (violet) on its machine.
+ */
+const STATE_TONE: Record<AgentState, Tone> = { working: 'blue', needs_you: 'amber', between_turns: 'blue', idle: 'grey', error: 'red', stopped: 'grey' };
+const LABEL_TONE: Record<string, Tone> = { Queued: 'grey', Blocked: 'violet' };
 /** "06:10", "tomorrow 00:08" or a date: the browser's clock, with the day when it is not today (w509). */
 const localTime = (iso: string, now: number) => {
   const at = new Date(iso);
@@ -247,7 +252,7 @@ const localTime = (iso: string, now: number) => {
 export function agentView(s: SessionInfo): { tone: Tone; label: string; text: string; waitsOn?: string; kind?: WaitKind } {
   const a = agentState(s, localTime);
   const text = a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes})` : a.label;
-  return { tone: STATE_TONE[a.state], label: a.state === 'idle' && s.kind === 'worker' ? 'Idle (available)' : a.label, text, ...(a.waitsOn ? { waitsOn: a.waitsOn } : {}), ...(a.kind ? { kind: a.kind } : {}) };
+  return { tone: LABEL_TONE[a.label] ?? STATE_TONE[a.state], label: a.state === 'idle' && s.kind === 'worker' ? 'Idle (available)' : a.label, text, ...(a.waitsOn ? { waitsOn: a.waitsOn } : {}), ...(a.kind ? { kind: a.kind } : {}) };
 }
 
 export function isBusy(s: SessionInfo | undefined): boolean {
@@ -260,6 +265,7 @@ export const workLabel: Record<WorkStatus, string> = {
   new: 'New',
   question: 'Question',
   queued: 'Queued',
+  blocked: 'Blocked',
   active: 'Active',
   stalled: 'Stalled',
   merged: 'Merged',
@@ -271,11 +277,12 @@ export const workLabel: Record<WorkStatus, string> = {
 export function workTone(s: WorkStatus): Tone {
   if (s === 'active') return 'blue';
   if (s === 'question' || s === 'stalled') return 'amber';
+  if (s === 'blocked') return 'violet';
   if (s === 'done') return 'green';
   return 'grey';
 }
 
-export const isOpenWork = (w: Pick<WorkItem, 'status'>) => w.status === 'new' || w.status === 'question' || w.status === 'queued' || w.status === 'active';
+export const isOpenWork = (w: Pick<WorkItem, 'status'>) => w.status === 'new' || w.status === 'question' || w.status === 'queued' || w.status === 'blocked' || w.status === 'active';
 
 /** Whose orchestrator a session is (a person's own), or undefined for the dispatcher and every other session. */
 export const chatOwner = (s: SessionInfo | undefined) => (s?.kind === 'orchestrator' && s.orchestratorRole === 'personal' ? s.requestedBy : undefined);
@@ -291,6 +298,7 @@ export function dispatcherGlance(dispatcher: SessionInfo | undefined, work: Work
     [count('question'), 'question'],
     [count('active'), 'active'],
     [count('queued'), 'queued'],
+    [count('blocked'), 'blocked'],
     [count('new'), 'new'],
   ].filter(([n]) => n) as [number, string][];
   const busy = isBusy(dispatcher);
@@ -346,9 +354,12 @@ function agentsGlance(name: string, sessions: SessionInfo[], attention: number, 
   if (busy) return { tone: 'blue', label: 'Working', detail: about(busy), attention, sessionId: busy.id };
   const failed = sessions.findLast((s) => s.status === 'error');
   if (failed) return { tone: 'red', label: 'Agent error', detail: about(failed), attention, sessionId: failed.id };
-  // Between turns but coming back (w475): not free, not idle.
+  // Between turns but coming back (w475): not free, not idle. Working on its own job or check-in, else Queued or Blocked (w643).
   const coming = sessions.find((s) => agentView(s).waitsOn);
-  if (coming) return { tone: 'violet', label: 'Waiting', detail: agentView(coming).waitsOn, attention, sessionId: coming.id };
+  if (coming) {
+    const v = agentView(coming);
+    return { tone: v.tone, label: v.label, detail: v.waitsOn, attention, sessionId: coming.id };
+  }
   if (unity?.state === 'starting') return { tone: 'blue', label: 'Unity starting', attention };
   if (unused) return { tone: 'grey', label: 'Free', attention };
   const last = sessions.at(-1);
@@ -409,7 +420,7 @@ export function standingGlance(a: StandingAgent, pendingDelegations: number, now
   const attention = pendingDelegations;
   if (pendingDelegations) return { tone: 'amber', label: 'Needs you', detail: `${pendingDelegations} request${pendingDelegations === 1 ? '' : 's'}`, attention };
   if (a.state === 'running') return { tone: 'blue', label: 'Running', attention };
-  if (a.state === 'waiting') return { tone: 'blue', label: 'Waiting for a slot', attention };
+  if (a.state === 'waiting') return { tone: 'grey', label: 'Queued for a slot', attention };
   const last = lastRun(a);
   if (last && (last.outcome === 'error' || last.outcome === 'budget' || last.outcome === 'timeout')) {
     return { tone: 'red', label: outcomeLabel[last.outcome], detail: a.state === 'paused' ? 'paused' : undefined, attention };

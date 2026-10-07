@@ -7,11 +7,11 @@ import { holdsSandbox, placeRank, sortAgents } from './agentState.ts';
 
 /**
  * Agents with a process (working, waiting on someone, idle), and stopped ones their wake_me or a queued message will
- * resume (Waiting, w475), unless they released their sandbox (w640). Other stopped and failed ones are only counted.
+ * resume (w475), unless they released their sandbox (w640). Other stopped and failed ones are only counted.
  */
 export const isLiveAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'idle' || s.status === 'waiting_permission' || holdsSandbox(s);
 
-/** Agents in one place: the live ones (Working, then Waiting, then Idle; the most recent first in each, w475) and how many more have stopped or failed. */
+/** Agents in one place: the live ones (mid-turn, then between turns, then Idle; the most recent first in each, w475) and how many more have stopped or failed. */
 export interface PlaceAgents {
   live: SessionInfo[];
   stopped: number;
@@ -79,7 +79,7 @@ function agentsIn(ids: string[], byId: Map<string, SessionInfo>): PlaceAgents {
 const waiting = (a: PlaceAgents) => a.live.reduce((n, s) => n + s.pendingPermissions.length, 0);
 
 /**
- * Sandboxes by status (w509, Lothsahn): a Working agent first, then Waiting, then Idle, then those with no live agent,
+ * Sandboxes by status (w509, Lothsahn): an agent mid-turn first, then one between turns, then Idle, then those with no live agent,
  * free ones last; the most recent activity first within each; otherwise in the order they came.
  */
 const inUseFirst = (list: FleetSandbox[]) =>

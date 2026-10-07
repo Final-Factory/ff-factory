@@ -24,14 +24,14 @@ const osName = (p: string | undefined) => (!p ? '' : p.startsWith('win') ? 'Wind
 
 const ago = (iso: string, now: number) => fmtRelative(iso, now).replace(' ago', '').replace('just now', 'now');
 
-/** An agent in a few words: waiting on someone, busy, starting, waiting on a check-in or a task (w475), or idle. */
+/** An agent in a few words: needs you, busy, starting, between turns (w475: working on a check-in or a task, or queued or blocked, w643), or idle. */
 function agentState(s: SessionInfo): { word: string; tone: Tone; detail?: string } {
   if (s.pendingPermissions.length || s.status === 'waiting_permission') return { word: 'needs you', tone: 'amber' };
   if (s.status === 'running') return { word: 'busy', tone: 'blue' };
   if (s.status === 'starting') return { word: 'starting', tone: 'blue' };
   const v = agentView(s);
-  if (v.waitsOn) return { word: 'waiting', tone: 'violet', detail: v.waitsOn };
-  // Stopped, but its check-in or a queued message will resume it (w509): listed, not Waiting.
+  if (v.waitsOn) return { word: v.label.toLowerCase(), tone: v.tone, detail: v.waitsOn };
+  // Stopped, but its check-in or a queued message will resume it (w509): listed as Stopped.
   if (s.status === 'stopped') return { word: 'stopped', tone: 'grey', detail: v.text.replace(/^Stopped \(|\)$/g, '') };
   return { word: 'idle', tone: 'grey' };
 }

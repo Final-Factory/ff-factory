@@ -15,6 +15,7 @@ import { DevRequests } from './devRequests.ts';
 import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
+import { BlockerWatch } from './blockerWatch.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
 import { groupIntake } from '../shared/intake.ts';
@@ -443,6 +444,19 @@ const ledgerSweep = new LedgerSweep({
   limitsClear: (s) => limitsClearFor(s),
   intakeMerged: () => intake.checkMerged(false),
 }).start();
+// Blocked requests (w643, docs/orchestrators.md "Waiting, Queued, Blocked"): each starts by itself when its blocker clears.
+let nightlyAt: number | undefined;
+const blockerWatch = new BlockerWatch({
+  store,
+  orchestrators: agents.orchestrators,
+  portalSha: () => appVersion().sha,
+  daemonSha: (id) => agents.daemonSha?.(id),
+  online: (id) => (store.machines.has(id.toLowerCase()) ? machines.isOnline(id.toLowerCase()) : undefined),
+  usageClear: (account) => accountClear(account),
+  nightlyAt: () => nightlyAt,
+  room: () => agents.roomNow(),
+}).start();
+agents.blockerWatch = blockerWatch;
 // The orchestrators' base clone, kept on origin's newest code (w467, server/baseRefresh.ts; config repo.refreshMinutes).
 startBaseRefresh(cfg);
 max.onEvent = (ev) => intake.onMaxEvent(ev);
@@ -502,6 +516,7 @@ function appState(user: string | undefined): AppState {
     dispatcherId: agents.dispatcherId,
     me,
     work: agents.orchestrators.forPage(),
+    room: agents.roomNow(),
     intake: intake.summary(),
     ledger: ledgerSweep.state(),
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings },
@@ -1325,6 +1340,9 @@ const server = http.createServer(async (req, res) => {
       if (who.scope !== 'nightly') return send(res, 403, { error: 'a nightly-scoped key is required (node server/apikey.ts <name> --scope nightly)' });
       const parsed = parseNightlyReport(await readJson(req, 256 * 1024));
       if ('error' in parsed) return send(res, 400, { error: parsed.error });
+      // The nightly lab ran (and let go of its lab.lock): a lock blocker on it clears (w643).
+      nightlyAt = Date.now();
+      blockerWatch.kick();
       const results = intake.onNightly(parsed.report);
       if (!results) return send(res, 200, { enabled: false, note: 'the nightly intake is off (config intake.nightly.enabled)' });
       return send(res, 200, { enabled: true, results });
@@ -1543,6 +1561,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   max.close();
   intake.close();
   ledgerSweep.close();
+  blockerWatch.close();
   store.flush();
   process.exit(0);
 }
@@ -1604,6 +1623,13 @@ function accountSourceOf(s: SessionInfo) {
 function limitsClearFor(s: SessionInfo): boolean | undefined {
   const source = accountSourceOf(s);
   const u = accountsNow().find((a) => a.sources.includes(source))?.usage;
+  if (!u?.available) return undefined;
+  return [u.weekly, u.session, ...u.models].filter((m): m is NonNullable<typeof m> => !!m).every((m) => m.percent < 90);
+}
+/** Whether the Claude account named by its email, label or id has room again (w643: a usage blocker), or undefined when unknown. */
+function accountClear(name: string): boolean | undefined {
+  const n = name.trim().toLowerCase();
+  const u = accountsNow().find((a) => [a.id, a.label, a.email ?? ''].some((x) => x.toLowerCase() === n))?.usage;
   if (!u?.available) return undefined;
   return [u.weekly, u.session, ...u.models].filter((m): m is NonNullable<typeof m> => !!m).every((m) => m.percent < 90);
 }

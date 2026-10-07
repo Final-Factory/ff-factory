@@ -348,7 +348,7 @@ test('intake: a design question goes to the reviewers, who join the request; the
   assert.ok(attention.includes(`design ${w.id}`));
   const loth = o.personalFor(LOTH);
   assert.equal(heard(loth.info.id, '[intake question]').length, 1);
-  assert.match(o.intakeLine('lothsahn'), /1 design question\(s\) for you/);
+  assert.match(o.intakeLine('lothsahn'), /1 design question\(s\) waiting on input from you/);
   const answer = await call(loth.info, 'update_work', { id: w.id, note: 'Yes, alternate evenly.' });
   assert.equal(answer.isError, false, answer.text);
   assert.deepEqual([w.status, w.flag], ['new', undefined]);

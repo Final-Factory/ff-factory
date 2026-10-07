@@ -445,6 +445,7 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   a1.info.status = 'running';
   assert.match(mm.placeFull(a2) ?? '', /1 agents mid-turn in sandbox pc\/sb1 \(max_agents_per_sandbox 1\)/);
   assert.equal(sessions.isQueued(sessions.send(a2.info.id, 'x')), true, 'queued, not refused');
+  assert.equal(sessions.queued()[0].on, 'capacity', 'a slot: Queued, capacity (w643)');
   a1.info.status = 'idle';
   sessions.drain();
   await until('a2 delivered once a1 is idle', () => a2.live && !sessions.queued().length);

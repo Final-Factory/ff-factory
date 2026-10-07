@@ -111,7 +111,7 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
   if (live) {
     // Only a check-in pending: no job running, nothing queued, nothing unanswered (keepLive), no permission open.
     const st = agentState(s, undefined, f.now);
-    if (s.status !== 'idle' || st.state !== 'waiting' || st.kind !== 'timer' || s.pendingPermissions.length || f.keepLive) return undefined;
+    if (s.status !== 'idle' || st.state !== 'between_turns' || st.kind !== 'timer' || s.pendingPermissions.length || f.keepLive) return undefined;
     return keptWhy(s, sb, f) ? undefined : { do: 'stop', why: far };
   }
   if (s.status !== 'stopped' || heldNow(s, f.now)) return undefined;

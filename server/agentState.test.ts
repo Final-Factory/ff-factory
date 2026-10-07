@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { HOLD_PLACE_MS, agentState, agentStateText, holdsItsPlace, isWaitingAgent, sortAgents, sortPlaces, utcTime } from '../shared/agentState.ts';
+import { HOLD_PLACE_MS, agentState, agentStateText, holdsItsPlace, isBetweenTurns, sortAgents, sortPlaces, utcTime } from '../shared/agentState.ts';
 import { workLive } from '../shared/workState.ts';
 import { fleetOf } from '../shared/fleet.ts';
 import { Store } from './store.ts';
@@ -41,17 +41,20 @@ test('agent state: Working, Needs you, Error, Idle and Stopped as before', () =>
   assert.equal(st(s('a', { status: 'stopped' })).state, 'stopped');
 });
 
-test('w509: Waiting says on what: a running job first (with its check-in), a queued message, or a check-in and its note', () => {
+test('w509, w643: between turns says on what: a running job first (with its check-in), a queued message, or a check-in and its note; Working, Queued or Blocked', () => {
   const job = st(s('a', { backgroundTasks: 1, backgroundJobs: [{ type: 'local_bash', description: 'CI on PR #1098' }], wakeAt: iso(10), wakeNote: 'merge #1098 if green' }));
-  assert.deepEqual([job.state, job.kind, job.waitsOn], ['waiting', 'job', 'CI on PR #1098 · check-in 06:10 UTC']);
+  assert.deepEqual([job.state, job.label, job.kind, job.waitsOn], ['between_turns', 'Working', 'job', 'CI on PR #1098 · check-in 06:10 UTC']);
   const two = st(s('a', { backgroundTasks: 3, backgroundJobs: [{ type: 'local_bash', description: 'player build' }, { type: 'local_bash', description: 'nightly scenario' }] }));
   assert.equal(two.waitsOn, 'player build, nightly scenario (+1 more)');
   assert.equal(st(s('a', { backgroundTasks: 1 })).waitsOn, 'a background task', 'a daemon from before w509 sends no descriptions');
   const queued = st(s('a', { queuedSend: 'all 4 slots busy' }));
-  assert.deepEqual([queued.kind, queued.waitsOn], ['queued', 'a queued message (all 4 slots busy)']);
+  assert.deepEqual([queued.label, queued.kind, queued.waitsOn], ['Queued', 'queued', 'a queued message (all 4 slots busy)'], 'a slot: capacity');
+  const held = st(s('a', { queuedSend: 'lothdesktop is offline: it is placed again once its daemon is back', queuedOn: 'machine' }));
+  assert.equal(held.label, 'Blocked', 'its machine: a thing');
   const timer = st(s('a', { wakeAt: iso(30), wakeNote: 'check PR #1103 CI (Test in editmode); if green merge it, then publish' }));
-  assert.deepEqual([timer.kind, timer.waitsOn], ['timer', 'check-in 06:30 UTC: “check PR #1103 CI (Test in editmode);…”']);
-  assert.equal(agentStateText(s('a', { wakeAt: iso(30) }), undefined, NOW), 'Waiting: check-in 06:30 UTC', 'no note: the time alone');
+  assert.deepEqual([timer.label, timer.kind, timer.waitsOn], ['Working', 'timer', 'check-in 06:30 UTC: “check PR #1103 CI (Test in editmode);…”']);
+  assert.equal(agentStateText(s('a', { wakeAt: iso(30) }), undefined, NOW), 'Working: check-in 06:30 UTC', 'no note: the time alone');
+  for (const x of [job, two, queued, held, timer]) assert.notEqual(x.label, 'Waiting', 'never Waiting: no person must act (w643)');
 });
 
 test('w509: a stopped agent is never Waiting; it says what will resume it, and still holds its sandbox', () => {
@@ -60,7 +63,7 @@ test('w509: a stopped agent is never Waiting; it says what will resume it, and s
   assert.equal(st(a).state, 'stopped');
   assert.equal(agentStateText(a, undefined, NOW), 'Stopped (resumes at check-in 16:29 UTC)');
   assert.equal(agentStateText(s('6c4fe619', { status: 'stopped', wakeAt: '2026-10-07T00:08:26.319Z' }), undefined, NOW), 'Stopped (resumes at check-in tomorrow 00:08 UTC)');
-  assert.equal(isWaitingAgent(a, NOW), false);
+  assert.equal(isBetweenTurns(a, NOW), false);
   assert.equal(holdsItsPlace(a, NOW), true, 'the check-in resumes it in its sandbox');
   assert.equal(agentStateText(s('a', { status: 'stopped', queuedSend: 'slots busy' }), undefined, NOW), 'Stopped (resumes at a queued message)');
   assert.equal(st(s('a', { status: 'stopped', backgroundTasks: 1 })).state, 'stopped', 'a stop ends its background jobs');
@@ -68,7 +71,7 @@ test('w509: a stopped agent is never Waiting; it says what will resume it, and s
 });
 
 test('w509: a check-in that is overdue (it should have fired) is not pending: not Waiting, not resuming', () => {
-  assert.equal(st(s('a', { wakeAt: iso(-1) })).state, 'waiting', 'a minute late: firing now');
+  assert.equal(st(s('a', { wakeAt: iso(-1) })).state, 'between_turns', 'a minute late: firing now');
   assert.equal(st(s('a', { wakeAt: iso(-5) })).state, 'idle');
   assert.equal(st(s('a', { status: 'stopped', wakeAt: iso(-5) })).resumes, undefined);
   assert.equal(utcTime(iso(-60 * 24), NOW), `yesterday ${iso(-60 * 24).slice(11, 16)} UTC`);
@@ -107,11 +110,11 @@ test('w509: sandboxes by status: Working, Waiting, Idle, then empty or unused; t
   );
 });
 
-test("a request whose worker is Waiting shows Waiting with the worker's check-in, not Stalled", () => {
+test("a request whose worker is between turns on its own check-in shows Working with it, not Stalled or Waiting (w643)", () => {
   const w = { id: 'w448', title: 'x', brief: '', priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'active', createdAt: T, updatedAt: T, sessionIds: ['eb9632fd'], overlaps: [], asks: 0, log: [] } as WorkItem;
   const worker = s('eb9632fd', { wakeAt: iso(12) });
-  assert.deepEqual(workLive(w, { items: [w], session: () => worker, now: NOW }), { state: 'pending', why: "worker eb9632fd's check-in 06:12 UTC" });
-  assert.equal(workLive(w, { items: [w], session: () => s('eb9632fd', { status: 'stopped', wakeAt: iso(12) }), now: NOW })?.state, 'stalled', 'stopped: not Waiting (w509)');
+  assert.deepEqual(workLive(w, { items: [w], session: () => worker, now: NOW }), { state: 'working', why: 'eb9632fd between turns: check-in 06:12 UTC' });
+  assert.deepEqual(workLive(w, { items: [w], session: () => s('eb9632fd', { status: 'stopped', wakeAt: iso(12) }), now: NOW }), { state: 'working', why: 'eb9632fd stopped until its check-in 06:12 UTC' }, 'stopped until its check-in: it comes back by itself');
   assert.equal(workLive(w, { items: [w], session: () => s('eb9632fd'), now: NOW })?.state, 'stalled', 'Idle with nothing pending: stalled, as before');
 });
 
@@ -201,7 +204,7 @@ test('the server copies a pending wake_me (time and note) and a queued message o
   assert.equal(store.sessions.get('eb9632fd')?.queuedSend, undefined);
 });
 
-test('list_sandboxes: Waiting and on what, sandboxes by status, and a sandbox whose worker is Waiting is not free', async (t) => {
+test('list_sandboxes: between turns (Working) and on what, sandboxes by status, and a sandbox whose worker is between turns is not free', async (t) => {
   const { agents } = await setup(t);
   const waker = (agents as unknown as { waker: WakerLike }).waker;
   const before = agents.describeAllSandboxes();
@@ -211,7 +214,7 @@ test('list_sandboxes: Waiting and on what, sandboxes by status, and a sandbox wh
   waker.schedule('eb9632fd', 15, 'merge #1083 when CI is green');
   const text = agents.describeAllSandboxes();
   assert.doesNotMatch(text, /alpha FREE/, 'its worker will come back to it');
-  assert.match(text, /- eb9632fd "w448: merge #1083" \[Waiting: check-in [^\]]*: “merge #1083 when CI is green”, idle\]/);
+  assert.match(text, /- eb9632fd "w448: merge #1083" \[Working: check-in [^\]]*: “merge #1083 when CI is green”, between turns\]/);
   assert.ok(text.indexOf('- pc/alpha') < text.indexOf('- pc/beta'), 'the sandbox with a Waiting agent before the one with none live');
   assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1, 'the capacity block and placement do not count it free');
 });

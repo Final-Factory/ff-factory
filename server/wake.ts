@@ -168,7 +168,8 @@ export class Waker {
 /** One line per busy worker for the heartbeat: where, what, for how long, last word. */
 export function describeBusy(s: SessionInfo, where: { sandbox?: Sandbox; machine?: string }, now = Date.now()): string {
   const place = where.sandbox ? `in ${where.sandbox.id}` : where.machine ? `on ${where.machine}` : '';
-  const state = s.status === 'waiting_permission' ? 'WAITING FOR A PERMISSION' : `${s.status}${s.statusDetail ? ` (${s.statusDetail})` : ''}`;
+  // A person must act (w643): Waiting on input, the one wait a person answers.
+  const state = s.status === 'waiting_permission' ? 'WAITING ON INPUT (a permission)' : `${s.status}${s.statusDetail ? ` (${s.statusDetail})` : ''}`;
   return `${s.id} "${s.title}" ${place}: ${state}, ${activityLine(s, now)}, ${s.turns} turns, $${s.costUsd.toFixed(2)}`;
 }
 

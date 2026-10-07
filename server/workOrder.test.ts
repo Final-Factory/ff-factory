@@ -32,14 +32,14 @@ const LEDGER = [
   item('rejected', [LOTH], 13),
 ];
 
-test('the status groups keep their order for every viewer: question, new, queued, active, then the closed ones', () => {
+test('the status groups keep their order for every viewer: question, new, queued, blocked, active, then the closed ones', () => {
   const groups = (viewer: string | undefined) => ledgerOrder(LEDGER, viewer).map((w) => STATUS_RANK[w.status]);
   for (const viewer of [undefined, 'ben', 'lothsahn', 'nobody']) {
     const g = groups(viewer);
     assert.deepEqual(g, [...g].sort((a, b) => a - b), String(viewer));
     assert.deepEqual([...new Set(g)], [0, 1, 2, 3, 4], String(viewer));
   }
-  assert.deepEqual(Object.entries(STATUS_RANK).map(([s, r]) => `${s}:${r}`), ['question:0', 'new:1', 'queued:2', 'active:3', 'stalled:3.5', 'done:4', 'merged:4', 'rejected:4', 'cancelled:4']);
+  assert.deepEqual(Object.entries(STATUS_RANK).map(([s, r]) => `${s}:${r}`), ['question:0', 'new:1', 'queued:2', 'blocked:2.5', 'active:3', 'stalled:3.5', 'done:4', 'merged:4', 'rejected:4', 'cancelled:4']);
 });
 
 test('within each status group the viewer’s requests come first: Ben sees his first, Lothsahn his', () => {

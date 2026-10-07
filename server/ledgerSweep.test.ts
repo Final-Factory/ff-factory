@@ -885,3 +885,26 @@ test('w515: the one-time repair reads every PR the ledger holds as open, once, a
   await sweep.checkPrs();
   assert.deepEqual(world.viewed, []);
 });
+
+test('w643: a Blocked request whose blocker is open and progressing is never stalled, however quiet, nor asked "Is it done?"; a merged PR with nothing left still closes it', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  request('w633', { updatedAt: ago(1), sessionIds: ['s633'] });
+  worker('s633', { status: 'running', lastActivityAt: ago(0.1) });
+  // w634 waits on w633 for days with nothing touching it; w641 waits on the next portal deploy.
+  request('w634', { status: 'blocked', updatedAt: ago(100), blocked: { kind: 'request', ref: 'w633', what: "w633's timing table", at: ago(100), by: 'dispatcher' } });
+  request('w641', { status: 'blocked', updatedAt: ago(100), blocked: { kind: 'deploy', what: 'the next portal deploy', at: ago(100), by: 'dispatcher', sha: 'aaa1111' } });
+  // A blocked request with a merged PR and a step after the merge: no "Is it done?" while it is blocked.
+  request('w642', { status: 'blocked', brief: 'Fix it, then run the paired audit after the merge.', sessionIds: ['s642'], blocked: { kind: 'time', until: new Date(NOW + 3_600_000).toISOString(), what: 'after the nightly run', at: ago(20), by: 'dispatcher' } });
+  worker('s642', { lastActivityAt: ago(10) });
+  // A blocked request whose PR merged with nothing left closes as done, like any other.
+  request('w650', { status: 'blocked', sessionIds: ['s650'], blocked: { kind: 'machine', ref: 'm5', what: 'the M5 asleep', at: ago(5), by: 'dispatcher' } });
+  worker('s650', { lastActivityAt: ago(4), lastResult: 'Done: PR #65 merged and verified.' });
+  world.prs = [pr(64, { body: 'Request: w642', mergedAt: ago(8) }), pr(65, { body: 'Request: w650', mergedAt: ago(3) })];
+  await sweep.run();
+  assert.equal(get('w634').status, 'blocked', 'its blocker w633 is being worked');
+  assert.equal(get('w641').status, 'blocked');
+  assert.equal(get('w642').status, 'blocked');
+  assert.equal(get('w642').followUp, undefined, 'not asked "Is it done?" while blocked');
+  assert.deepEqual(world.resumed.map((r) => r.id), []);
+  assert.equal(get('w650').status, 'done', get('w650').log.join('\n'));
+});
