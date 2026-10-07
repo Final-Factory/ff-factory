@@ -12,7 +12,11 @@
  * - it fetches nothing of the game repo: the root clone's origin points nowhere and no credential helper answers;
  * - every setting tuned in daemon.json by hand is carried, and the credential file is the same bytes, never printed;
  * - a Mac's LaunchAgent PATH keeps its order;
- * - the daemon restarted (a new connection in its log) and the portal sees it online with the new code.
+ * - the daemon restarted (a new connection in its log) and the portal sees it online with the new code;
+ * - (w629) it runs with an ssh session's minimal PATH, with no Homebrew or Git folder on it: the installer finds git,
+ *   git-lfs and node in their standard places itself (m5's ssh PATH had no /opt/homebrew/bin);
+ * - (w629) an update refused by a prerequisite leaves the daemon untouched (no restart, its code as it was) and exits
+ *   non-zero with the reason.
  */
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -88,8 +92,18 @@ const portalUrl = `http://127.0.0.1:${port}`;
 const credential = fs.readFileSync(path.join(scratch, 'portal', 'credential.txt'), 'utf8').trim();
 const machine = async () => (await (await fetch(`http://127.0.0.1:${port + 1}/machine`)).json()) as { online?: boolean } | null;
 
-const run = (args: string[], input?: string) => {
-  const r = spawnSync(args[0], args.slice(1), { input, encoding: 'utf8', timeout: 20 * 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } });
+/**
+ * PATH as a non-interactive ssh session has it (w629): the system folders and the folder node is in, nothing else. m5's
+ * `ssh benryding@m5` PATH was /usr/bin:/bin:/usr/sbin:/sbin; Windows' OpenSSH gives the system PATH, here without Git's.
+ */
+const sshPath = isWin
+  ? [path.dirname(process.execPath), path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32'), process.env.SystemRoot ?? 'C:\\Windows', path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0'), path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'Wbem')].join(';')
+  : [path.dirname(process.execPath), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
+const run = (args: string[], input?: string, env: NodeJS.ProcessEnv = {}) => {
+  const base: NodeJS.ProcessEnv = { ...process.env };
+  // Windows spells it Path: one PATH only, or the child may read either.
+  if (env.PATH !== undefined) for (const k of Object.keys(base)) if (k.toLowerCase() === 'path') delete base[k];
+  const r = spawnSync(args[0], args.slice(1), { input, encoding: 'utf8', timeout: 20 * 60_000, env: { ...base, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...env } });
   process.stdout.write(r.stdout ?? '');
   process.stderr.write(r.stderr ?? '');
   return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
@@ -134,8 +148,22 @@ try {
   const wrapper = isWin
     ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(SRC, 'scripts', 'worker', 'install.ps1'), '-Update', '-Root', root, '-Source', SRC]
     : ['bash', path.join(SRC, 'scripts', 'worker', 'install.sh'), '--update', '--root', root, '--source', SRC];
-  const upd = run(wrapper);
-  check(upd.code === 0, `the update through ${isWin ? 'install.ps1 -Update' : 'install.sh --update'}, no terminal${elevated ? ', elevated' : ''}`, `exit ${upd.code}`);
+  // (w629) A prerequisite fails: the daemon is left as it is. An out-of-range limit is a refusal the preflight makes on
+  // any computer; it stands for m5's missing git-lfs.
+  const startsBefore = connects();
+  const versionFile = path.join(l.daemon, 'app', 'machine', 'VERSION');
+  const codeBefore = fs.readFileSync(versionFile, 'utf8');
+  const refused = run([...wrapper, ...(isWin ? ['-MaxSandboxes', '99'] : ['--max-sandboxes', '99'])], undefined, { PATH: sshPath });
+  check(refused.code === 2, 'an update a prerequisite refuses exits non-zero', `exit ${refused.code}`);
+  check(/Not updating: .*the daemon was not touched/.test(refused.out) && /--max-sandboxes must be a whole number/.test(refused.out), 'it says why, and that the daemon was not touched');
+  check(connects() === startsBefore, 'the refused update did not stop or restart the daemon', `${startsBefore} -> ${connects()}`);
+  check(fs.readFileSync(versionFile, 'utf8') === codeBefore, "the refused update left the daemon's code as it was");
+  check(!/The portal sees wupd online running/.test(refused.out), 'the refused update reports no success');
+
+  // 3b. The update itself, with an ssh session's minimal PATH (w629).
+  const upd = run(wrapper, undefined, { PATH: sshPath });
+  check(upd.code === 0, `the update through ${isWin ? 'install.ps1 -Update' : 'install.sh --update'}, no terminal${elevated ? ', elevated' : ''}, an ssh session's PATH`, `exit ${upd.code}`);
+  check(/the commit installed, not outdated/.test(upd.out), 'success only with the portal seeing the commit installed');
   check(!upd.out.includes(credential) && !/ffm_wupd_[A-Za-z0-9_-]{20,}/.test(upd.out), 'the credential is never printed');
   check(/Kept the root's clone of the game repo as it is \(no fetch/.test(upd.out), 'no fetch of the game repo');
   check(/Credential: the machine's own/.test(upd.out), 'it says the credential was reused');
