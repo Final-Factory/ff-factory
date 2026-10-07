@@ -76,7 +76,7 @@ check fails**, listing every problem with its fix:
 - someone is logged on (Windows: the daemon runs in the interactive session for the Claude login, the GPU and Unity).
 
 Then: the root and `root.json`; the credential into `secrets/`; a bare clone of the game repo (its own refspec, LFS on,
-relative worktree paths); the daemon's code from the installer's checkout, `npm ci`; `daemon.json`; the task or
+relative worktree paths; `--seed-from <clone>` seeds it from a local clone's origin branches instead of downloading, for a run with no GitHub credential such as an ssh session, LothDesktop 2026-10-07); the daemon's code from the installer's checkout, `npm ci`; `daemon.json`; the task or
 LaunchAgent, started; the firewall rules for `players\slot0..7\player\finalfactory.exe` and the Unity editors, plus the
 slot config (one UAC prompt); and it waits until the portal sees the machine online with its root. Re-running it
 updates the code and keeps everything else (that is also how a root install is **updated**: the portal never
