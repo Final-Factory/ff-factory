@@ -996,6 +996,34 @@ test("w402: an owner closes or reopens another person's request in their own tur
   assert.match((await call(ben.info, 'update_work', { id: 'w2', close: 'cancelled', note: 'Lothsahn dropped it this morning.' })).text, /^w2 \(Lothsahn's request\) is cancelled: cancelled by Ben\./);
 });
 
+test("w631: closes a person asks for in their own turn do not count toward the filings cap; anything else still does", async (t) => {
+  const { o, store, chat, call } = setup(t, { people: [{ ...BEN, role: 'owner' }, { ...LOTH, role: 'owner' }] });
+  const ben = chat(BEN);
+  const loth = chat(LOTH);
+  loth.lastFrom = 'human';
+  for (let i = 0; i < FILINGS_PER_MESSAGE; i++) await call(loth.info, 'request_work', { title: `Lothsahn's task ${i}`, brief: 'x' });
+  ben.lastFrom = 'human';
+  for (let i = 0; i < FILINGS_PER_MESSAGE + 3; i++) await call(ben.info, 'request_work', { title: `Ben's finished task ${i}`, brief: 'x' }), o.personWrote(ben.info.id);
+  // Ben's one "close everything that's done": more closes than the cap, his own requests and an owner's close of Lothsahn's.
+  const mine = [...store.work.values()].filter((w) => w.requestedBy.userId === 'ben').map((w) => w.id);
+  assert.ok(mine.length > FILINGS_PER_MESSAGE);
+  for (const id of mine) {
+    const r = await call(ben.info, 'update_work', { id, close: 'done', note: 'finished: its PR merged' });
+    assert.equal(r.isError, false, `${id}: ${r.text}`);
+  }
+  for (const id of ['w1', 'w2']) {
+    const r = await call(ben.info, 'update_work', { id, close: 'cancelled', note: 'Lothsahn dropped it' });
+    assert.equal(r.isError, false, `${id}: ${r.text}`);
+  }
+  // Notes in the same turn still count: the cap holds for anything but a close.
+  for (let i = 0; i < FILINGS_PER_MESSAGE; i++) assert.equal((await call(ben.info, 'request_work', { title: `New thing ${i}`, brief: 'x' })).isError, false);
+  const later = [...store.work.values()].filter((w) => w.requestedBy.userId === 'ben' && w.status === 'new').map((w) => w.id);
+  assert.match((await call(ben.info, 'update_work', { id: later[0], note: 'one more detail' })).text, /3 filings since Ben last wrote/);
+  // A close in a harness turn (a check-in, a relayed report) counts as before.
+  ben.lastFrom = 'system';
+  assert.match((await call(ben.info, 'update_work', { id: later[0], close: 'done', note: 'x' })).text, /3 filings since Ben last wrote/);
+});
+
 test("w402: a member cannot close or reopen another person's request, even in their own turn", async (t) => {
   const { store, chat, call } = setup(t);
   const ben = chat(BEN);

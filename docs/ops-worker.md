@@ -30,6 +30,18 @@ A person's own orchestrator (Lothsahn's or Ben's) has the `ops_worker` tool:
 When one of its turns ends, the orchestrator of the person whose job it is gets an `[ops worker] finished a turn: ...`
 message, the same way a worker's report arrives. `agent_transcript ops-worker` reads it at any time.
 
+**A job that is a request's last step** (w631: w605 waited on a portal deploy and w600 on a machine re-run, both done
+through this worker, and the ledger never heard). `send` and `deploy` take `work_ids`: the open or stalled requests
+("w605") whose step left after their merge this job is. The server checks they exist and are open, keeps them on the job
+(`data/ops-worker.json`, so they survive a deploy's restart; a follow-up adds to them), and adds to the worker's message
+how to close them: a line `DONE: <id>` for each request the job finishes, once done and verified (for a deploy, only in
+the report after the restart), or `<id>: still open: <what>`. At its turn's end those lines go to the ledger as a
+worker's would (`Orchestrators.opsTurnEnded`, with every check of a DONE: [orchestrators.md](orchestrators.md),
+"Ledger cleanup"), both the request's people and the job's person hear a close, and the `[ops worker]` message ends with
+what the ledger did (`[ledger] w605 closed as done on its DONE line`, or why a DONE was not accepted). A DONE for a
+request the job was not sent for is refused. A portal deploy or a machine update closes the requests that waited only on
+it even without this, once the portal or every connected daemon runs their merge (the PR pass's deploy re-check).
+
 In its shell, the worker types ordinary commands:
 
 ```bash

@@ -43,8 +43,9 @@ import {
 } from './work.ts';
 import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, parseMarkers, quoteUntrusted, sourceTag } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
-import { doneIdsIn, doneProblem, mergedMentionsIn } from './ledgerRules.ts';
-import { servedBy } from '../shared/workState.ts';
+import { LIMIT_END, doneIdsIn, doneProblem, mergedMentionsIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
+import { asksAPerson, servedBy } from '../shared/workState.ts';
+import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
 import type { AttachmentRef, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
@@ -54,6 +55,8 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trim
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** How much of a worker's DONE reports on a request is kept for a later re-check (WorkItem.done text, w515). */
 const DONE_TEXT_CHARS = 4000;
+/** A worker is asked how a request stands at most this often (askStatus, w631). */
+const STATUS_ASK_EVERY_MS = 6 * 3_600_000;
 
 /**
  * The loop guards' defaults (docs/orchestrators.md, "Loops, limits and safety"). Each is a budget a person's own
@@ -398,6 +401,8 @@ export class Orchestrators {
     for (const g of this.gathered.values()) clearTimeout(g.timer);
     this.gathered.clear();
     clearTimeout(this.capacityTimer);
+    for (const t of this.statusAsks) clearTimeout(t);
+    this.statusAsks.clear();
   }
 
   private get sessions() {
@@ -839,7 +844,7 @@ export class Orchestrators {
     w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(id));
     this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}${w.ledgerRead ? '; its workers may read the ledger' : ''}`);
     this.store.putWork(w);
-    this.store.dropWork(pruneIds(this.store.work.values()));
+    this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     this.gatherForDispatcher(owner, requestNotice(w));
     const overlap = w.overlaps.length ? ` Possible overlap: ${w.overlaps.slice(0, 3).map(overlapLine).join('; ')}. Tell ${owner.displayName}; the dispatcher decides.` : '';
     return `Filed ${id} with the dispatcher.${overlap} You get a [dispatch] message with its decision.`;
@@ -851,6 +856,16 @@ export class Orchestrators {
     const max = loopGuards(this.d.cfg).filings;
     if (n >= max) throw new Error(`${max} filings since ${owner.displayName} last wrote; ask them before filing more`);
     this.filed.set(chatId, n + 1);
+  }
+
+  /**
+   * Count an update_work against the budget, except a close (done or cancelled) in a turn its person started with their
+   * own message (w631: Lothsahn's one "close everything that's done" was refused after three closes). The cap stops
+   * loops, which run on harness turns; a person asking to close their finished work is no loop.
+   */
+  private spendUpdate(chat: SessionHandle, owner: Requester, input: { close?: 'done' | 'cancelled' }) {
+    if (input.close && (chat.turnFrom ?? chat.lastFrom) === 'human') return;
+    this.spend(chat.info.id, owner);
   }
 
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
@@ -889,7 +904,7 @@ export class Orchestrators {
     if (!note && !input.priority && !input.close && !input.reopen) throw new Error('give a note, a priority, close or reopen');
     const problem = updateProblem(w, input, this.now().getTime());
     if (problem) throw new Error(problem);
-    this.spend(chat.info.id, owner);
+    this.spendUpdate(chat, owner, input);
     // Someone whose request was merged into this one leaves it; it carries on for the others.
     if (input.close && !same(w.requestedBy.userId, owner.userId)) {
       w.requesters = w.requesters.filter((r) => !same(r.userId, owner.userId));
@@ -982,7 +997,7 @@ export class Orchestrators {
     if (!note) throw new Error(`say why in a note: ${names(w.requesters)} will be told who ${input.close ? 'closed' : 'reopened'} ${w.id} and why`);
     const problem = updateProblem(w, input, this.now().getTime());
     if (problem) throw new Error(problem);
-    this.spend(chat.info.id, by);
+    this.spendUpdate(chat, by, input);
     const verb = input.reopen ? 'reopened' : input.close === 'done' ? 'closed as done' : 'cancelled';
     // Like a person's own close or reopen, it is final: no automatic-close mark survives it (w370).
     settleByHand(w);
@@ -1160,7 +1175,7 @@ export class Orchestrators {
     };
     this.stamp(w, how);
     this.store.putWork(w);
-    this.store.dropWork(pruneIds(this.store.work.values()));
+    this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     return w.id;
   }
 
@@ -1179,18 +1194,112 @@ export class Orchestrators {
 
   /** A worker finished a turn: the requests it works on record its last word. */
   workerTurnEnded(s: SessionInfo, text: string) {
+    // What this turn was on, before its markers close any of it.
+    const served = servedBy(s.id, [...this.store.work.values()]);
     this.intakeMarkers(s, text);
     this.doneMarkers(s, text);
     this.mergedMentions(s, text);
     const wrapped = this.wrapUpAnswers(s, text);
+    const open = stillOpenIn(text);
     const line = clip(firstLine(text), 300);
     for (const w of this.itemsOf(s.id)) {
-      if (!line || wrapped.has(w.id)) continue;
-      w.outcome = line;
-      this.stamp(w, `worker ${s.id}: ${line}`);
+      if (wrapped.has(w.id)) continue;
+      // Its own status line ("w12: still open: …", w631) says more about it than the report's first line.
+      const latest = open.has(w.id) ? clip(open.get(w.id)!, 300) : line;
+      if (!latest) continue;
+      w.outcome = latest;
+      this.stamp(w, `worker ${s.id}: ${latest}`);
       this.store.putWork(w);
     }
+    this.askStatus(s, text, served);
     this.capacityMayHaveFreed(`worker ${s.id} "${clip(s.title, 60)}" finished a turn`);
+  }
+
+  /**
+   * The ops worker ended a turn of a job sent for requests (ops_worker send or deploy with work_ids, w631: w605 waited on
+   * a portal deploy and w600 on a machine re-run, done through the ops worker, and nothing told the ledger): its
+   * `DONE: <id>` lines for those requests close them as a worker's would, and its `<id>: still open:` lines become
+   * their latest word. Answers the lines its person hears with the ops worker's report (what closed, what was refused).
+   */
+  opsTurnEnded(s: SessionInfo, text: string, job: { workIds: readonly string[]; by: Requester }): string[] {
+    const ids = new Set(job.workIds.map((x) => x.toLowerCase()));
+    if (!ids.size) return [];
+    const lines: string[] = [];
+    const before = new Map([...ids].map((id) => [id, this.store.work.get(id)?.status]));
+    this.doneMarkers(s, text, { workIds: ids, by: job.by, tell: (l) => void lines.push(...l) });
+    for (const [id, line] of stillOpenIn(text)) {
+      const w = this.store.work.get(id);
+      if (!ids.has(id) || !w || !isOpen(w)) continue;
+      w.outcome = clip(line, 300);
+      this.stamp(w, `the orchestration worker: ${clip(line, 280)}`);
+      this.store.putWork(w);
+    }
+    for (const id of ids) if (before.get(id) !== 'done' && this.store.work.get(id)?.status === 'done') lines.push(`${id} closed as done on its DONE line`);
+    return lines;
+  }
+
+  /** When each worker was last asked how a request stands (askStatus), by "<session>:<request>". */
+  private readonly statusAsked = new Map<string, number>();
+
+  /**
+   * A worker ended a turn on requests without saying how they stand (w631: most of the requests stalled as "unsure" had a
+   * last report that read as finished, without the `DONE:` line, so nothing closed them and the cleanup stalled them a
+   * day later). While its context is fresh, it is asked once for one line per request: `DONE: <id>` (doneMarkers closes
+   * it, with every check a DONE has) or `<id>: still open: <what>` (the request's latest word). Not asked: a worker
+   * that is still going (a check-in, a background job, a queued message), whose report says itself that something is
+   * left or asks a person something (reportVerdict "more": it reads as unfinished already, and stays open), that a
+   * person is talking to, or that stopped on a usage limit; a request waiting on a question or an approval; and the
+   * same worker about the same request more than once in 6 hours, so an answer without the line is not asked again.
+   */
+  private askStatus(s: SessionInfo, text: string, served: ReadonlySet<string>) {
+    const body = text.trim();
+    if (!body || LIMIT_END.test(body) || asksAPerson(body) || reportVerdict(body) === 'more') return;
+    if (this.sessions.sessions.get(s.id)?.lastFrom === 'human') return;
+    const done = new Set(doneIdsIn(body));
+    const open = stillOpenIn(body);
+    const ids = [...served].filter((id) => !done.has(id) && !open.has(id));
+    if (!ids.length) return;
+    // A moment later, once the turn's end has settled (the send queue drains on it first): asked inside the turn's end,
+    // the question took the sandbox's slot ahead of a queued brief.
+    const t = setTimeout(() => {
+      this.statusAsks.delete(t);
+      this.sendStatusAsk(s, ids);
+    }, this.statusAskDelayMs);
+    t.unref?.();
+    this.statusAsks.add(t);
+  }
+
+  /** How long after a turn's end askStatus asks (tests set 0). */
+  statusAskDelayMs = 3000;
+  private readonly statusAsks = new Set<NodeJS.Timeout>();
+
+  private sendStatusAsk(s: SessionInfo, ids: readonly string[]) {
+    const live = this.store.sessions.get(s.id);
+    const now = this.now().getTime();
+    // Still between turns with nothing pending, and no one else's message waits for a slot: the question never takes one.
+    if (!live || live.status !== 'idle' || holdsItsPlace(live, now) || this.sessions.queued().length) return;
+    const ask = ids
+      .map((id) => this.store.work.get(id))
+      .filter((w): w is WorkItem => !!w && isOpen(w) && w.sessionIds.includes(s.id) && w.approval?.state !== 'pending' && !w.question && !w.flag)
+      .filter((w) => now - (this.statusAsked.get(`${s.id}:${w.id}`) ?? -Infinity) >= STATUS_ASK_EVERY_MS);
+    if (!ask.length) return;
+    for (const w of ask) {
+      this.statusAsked.set(`${s.id}:${w.id}`, now);
+      this.stamp(w, `asked worker ${s.id} how ${w.id} stands: its report had no DONE or still-open line`);
+      this.store.putWork(w);
+    }
+    const list = ask.map((w) => `${w.id} "${clip(w.title, 80)}"`).join(', ');
+    try {
+      this.sessions.send(
+        s.id,
+        `[ledger] Your report did not say how ${list} ${ask.length > 1 ? 'stand' : 'stands'}. Reply with one line per request and nothing more: \`DONE: <id>\` if every step of it is finished (the steps after the merge included; say how they went), or \`<id>: still open: <what is left>\`.`,
+        'system',
+        undefined,
+        { requestedBy: s.requestedBy },
+      );
+    } catch {
+      // it is at a limit: the requests' logs have the question
+    }
   }
 
   // ---------------------------------------------------------------- DONE: wNNN and the wrap-up (w419)
@@ -1219,8 +1328,11 @@ export class Orchestrators {
     });
   }
 
-  /** Close a request as done on its workers' DONE (doneMarkers, workerEnded), with the last report as its note. */
-  private closeOnDone(w: WorkItem, sid: string, report: string, how: string) {
+  /**
+   * Close a request as done on its workers' DONE (doneMarkers, workerEnded), with the last report as its note. `also`:
+   * people told besides its own (w631: the people of the request that took it over, or of the ops worker's job).
+   */
+  private closeOnDone(w: WorkItem, sid: string, report: string, how: string, also: readonly Requester[] = []) {
     settleByHand(w);
     w.status = 'done';
     w.stalled = undefined;
@@ -1228,7 +1340,22 @@ export class Orchestrators {
     const parts = Object.keys(w.done ?? {}).length > 1 ? ` (its workers ${Object.keys(w.done!).join(', ')} each said DONE)` : '';
     this.stamp(w, `closed as done: ${how}${parts}. Its report: ${report}`);
     this.store.putWork(w);
-    this.toPeople(w.requesters, `[ledger] ${w.id} "${clip(w.title, 100)}" closed as done: ${how}. Its report: "${clip(report, 200)}"`);
+    const audience = [...w.requesters, ...also.filter((r) => !isFor(w, r.userId))];
+    this.toPeople(audience, `[ledger] ${w.id} "${clip(w.title, 100)}" (${names(w.requesters)}'s) closed as done: ${how}. Its report: "${clip(report, 200)}"`);
+  }
+
+  /**
+   * The request of worker `sid`'s that names request `id` (w631): in its related ids, or by id in its title, brief,
+   * constraints or notes. A worker that took another request over, or finished it on the way, closes it with its own
+   * `DONE: <id>` because of that (w604 did Ben's w556 fully and its DONE was refused: not one of its workers).
+   */
+  private namedBy(sid: string, id: string): WorkItem | undefined {
+    const re = new RegExp(`\\b${id}\\b`, 'i');
+    const text = (x: WorkItem) => [x.title, x.brief, x.constraints ?? '', ...(x.notes ?? []).map((n) => n.text)].join('\n');
+    return [...this.store.work.values()]
+      .filter((x) => x.id !== id && x.sessionIds.includes(sid) && x.status !== 'merged')
+      .filter((x) => (x.relatedIds ?? []).some((r) => r.trim().toLowerCase() === id) || re.test(text(x)))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   }
 
   /**
@@ -1254,14 +1381,20 @@ export class Orchestrators {
    * (w434), and closes the request as done, with the report as its note, once no other worker is still on it (stillOn)
    * and nothing is missing (server/ledgerRules.ts doneProblem); else the worker is told what is missing, or who is still
    * on it. A request already closed stays as it is (a close by hand is final, w370).
+   *
+   * Besides its own workers (w631): a worker one of whose requests names this one (namedBy: a takeover), which then
+   * becomes one of its workers; and the ops worker for the requests its job was sent for (`ops`: OpsWorker's job), whose
+   * answers go to the person whose job it is rather than back to it. Both requests' people hear the close.
    */
-  private doneMarkers(s: SessionInfo, text: string) {
+  private doneMarkers(s: SessionInfo, text: string, ops?: { workIds: ReadonlySet<string>; by: Requester; tell: (lines: string[]) => void }) {
     const ids = doneIdsIn(text);
     if (!ids.length) return;
     const refused: string[] = [];
     const parts: string[] = [];
     const live: string[] = [];
+    const also = new Map<string, readonly Requester[]>();
     const report = clip(firstLine(text), 300);
+    const speaker = ops ? 'the orchestration worker' : `worker ${s.id}`;
     for (const id of ids) {
       const w = this.store.work.get(id);
       if (!w) {
@@ -1270,8 +1403,23 @@ export class Orchestrators {
       }
       if (!(isOpen(w) || w.status === 'stalled')) continue;
       if (!w.sessionIds.includes(s.id)) {
-        refused.push(`${id}: you are not one of its workers, so your DONE does not close it (tell the dispatcher in your report instead)`);
-        continue;
+        const by = ops ? undefined : this.namedBy(s.id, id);
+        if (ops?.workIds.has(id)) {
+          also.set(id, [ops.by]);
+          this.stamp(w, `the orchestration worker said DONE for it (the job ${ops.by.displayName} sent it for ${id})`);
+        } else if (by) {
+          w.sessionIds = [...w.sessionIds, s.id];
+          w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'linked' } };
+          also.set(id, by.requesters);
+          this.stamp(w, `worker ${s.id} said DONE for it from ${by.id} "${clip(by.title, 80)}" (${names(by.requesters)}'s), which names ${id}: now one of its workers`);
+        } else {
+          refused.push(
+            ops
+              ? `${id}: the job was not sent for it (ops_worker send with work_ids names the requests a job is a step of)`
+              : `${id}: you are not one of its workers and no request of yours names it, so your DONE does not close it (tell the dispatcher in your report instead)`,
+          );
+          continue;
+        }
       }
       // Its part is done, whatever else is left (w434: one worker's DONE closed w428 while another was still on it). The
       // reports' text is kept for a later re-check (recheckDone): each DONE of this worker's on it, newest last (w515).
@@ -1281,7 +1429,7 @@ export class Orchestrators {
       if (others.length) {
         const who = others.map((id) => this.workerLine(id)).join(', ');
         parts.push(`${id}: your part is recorded as done; ${id} stays open while ${who} ${others.length > 1 ? 'are' : 'is'} still on it, and closes once each has said DONE or ended`);
-        this.stamp(w, `worker ${s.id} said DONE for its part; still on it: ${others.join(', ')}`);
+        this.stamp(w, `${speaker} said DONE for its part; still on it: ${others.join(', ')}`);
         this.store.putWork(w);
         continue;
       }
@@ -1297,16 +1445,17 @@ export class Orchestrators {
         this.refuseDone(w, s, problem, refused);
         continue;
       }
-      this.closeOnDone(w, s.id, report, `worker ${s.id} said DONE: ${w.id}`);
+      this.closeOnDone(w, s.id, report, `${speaker} said DONE: ${w.id}`, also.get(id));
     }
-    if (parts.length) {
+    if (parts.length && ops) ops.tell(parts);
+    else if (parts.length) {
       try {
         this.sessions.send(s.id, `[ledger] ${parts.map((r) => `- ${r}`).join('\n')}`, 'system', undefined, { requestedBy: s.requestedBy });
       } catch {
         // it is at a limit: the requests' logs have it
       }
     }
-    if (!live.length) return this.tellRefused(s, refused);
+    if (!live.length) return this.tellRefused(s, refused, ops?.tell);
     void Promise.all(
       live.map(async (id) => {
         const before = (this.store.work.get(id)?.prs ?? []).filter((p) => p.state === 'open').map((p) => p.number);
@@ -1315,9 +1464,9 @@ export class Orchestrators {
         if (!w || !(isOpen(w) || w.status === 'stalled')) return;
         const problem = doneProblem(w, text, r.unverified);
         if (problem) return this.refuseDone(w, s, problem, refused);
-        this.closeOnDone(w, s.id, report, `worker ${s.id} said DONE: ${w.id} (its PR states read live from GitHub)`);
+        this.closeOnDone(w, s.id, report, `${speaker} said DONE: ${w.id} (its PR states read live from GitHub)`, also.get(id));
       }),
-    ).finally(() => this.tellRefused(s, refused));
+    ).finally(() => this.tellRefused(s, refused, ops?.tell));
   }
 
   /** A DONE refused: in its request's log, and in the list told back to the worker. */
@@ -1328,7 +1477,7 @@ export class Orchestrators {
   }
 
   /** Tell a worker which of its DONEs were not accepted and why, each reason at most once in 6 hours. */
-  private tellRefused(s: SessionInfo, refused: readonly string[]) {
+  private tellRefused(s: SessionInfo, refused: readonly string[], tell?: (lines: string[]) => void) {
     if (!refused.length) return;
     const now = this.now().getTime();
     const fresh = refused.filter((r) => {
@@ -1339,6 +1488,8 @@ export class Orchestrators {
       return true;
     });
     if (!fresh.length) return;
+    // The ops worker's are its person's to hear, in its report (w631).
+    if (tell) return tell(fresh.map((r) => `DONE not accepted: ${r}`));
     try {
       this.sessions.send(s.id, `[ledger] Your DONE was not accepted:\n${fresh.map((r) => `- ${r}`).join('\n')}\nFinish what is missing and end a later report with the DONE line again, or say in one line what is still open.`, 'system', undefined, { requestedBy: s.requestedBy });
     } catch {
@@ -1475,7 +1626,7 @@ export class Orchestrators {
     w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(id).filter((p) => p.ref !== f.delegationId));
     this.stamp(w, `filed for ${f.owner.displayName} from standing agent "${f.agentName}"'s delegation ${f.delegationId} (${how})`);
     this.store.putWork(w);
-    this.store.dropWork(pruneIds(this.store.work.values()));
+    this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     this.gatherForDispatcher(w.requestedBy, requestNotice(w));
     return { item: w, repeat: false };
   }
@@ -1692,7 +1843,7 @@ export class Orchestrators {
       Object.assign(w, { status: 'merged', mergedInto: target.id });
       this.stamp(w, `filed by the intake and merged into ${target.id} (${twin.why})`);
       this.store.putWork(w);
-      this.store.dropWork(pruneIds(this.store.work.values()));
+      this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
       // A worker already on it hears about the new thread.
       for (const sid of target.sessionIds) {
         const s = this.store.sessions.get(sid);
@@ -1723,7 +1874,7 @@ export class Orchestrators {
     w.approval = why ? { state: 'pending', why } : { state: 'approved', by: 'auto', at: now.toISOString() };
     this.stamp(w, `filed by the intake (${sourceTag(w)})${why ? `; waits for a person: ${why}` : ''}`);
     this.store.putWork(w);
-    this.store.dropWork(pruneIds(this.store.work.values()));
+    this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     if (why) this.onIntakeAttention?.(w, 'pending');
     else this.gatherForDispatcher(w.requestedBy, requestNotice(w), 'intake');
     return { item: w };
@@ -2205,7 +2356,7 @@ export class Orchestrators {
       this.stamp(w, `Possibly the same as ${candidates.map((x) => `${x.w.id} (${x.score}, ${x.why})`).join(', ')}: the dev request's ledger check found them. Merge it into one of them if so.`);
     }
     this.store.putWork(w);
-    this.store.dropWork(pruneIds(this.store.work.values()));
+    this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
     this.gatherForDispatcher(person, requestNotice(w));
     const ids = candidates.map((x) => x.w.id);
     const text = ids.length ? `Filed as ${id}; it may repeat ${ids.join(', ')}.` : `Filed as ${id}.`;

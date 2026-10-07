@@ -31,6 +31,7 @@ const PEOPLE: UserInfo[] = [
 const NOW = Date.parse('2026-10-03T12:00:00.000Z');
 const ago = (hours: number) => new Date(NOW - hours * 3_600_000).toISOString();
 const REPO = 'Final-Factory/FinalFactory';
+const APP = 'Final-Factory/ff-factory';
 
 async function until(what: string, cond: () => boolean, ms = 5000) {
   const end = Date.now() + ms;
@@ -63,7 +64,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
   const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
   agents.boot();
   const o = agents.orchestrators;
-  const world = { prs: [] as PrRecord[] | undefined, clear: true as boolean | undefined, resumed: [] as { id: string; text: string }[], view: undefined as ((number: number) => PrRecord | undefined) | undefined, viewed: [] as number[] };
+  const world = { prs: [] as PrRecord[] | undefined, clear: true as boolean | undefined, resumed: [] as { id: string; text: string }[], view: undefined as ((number: number) => PrRecord | undefined) | undefined, viewed: [] as number[], portal: undefined as string | undefined, daemons: [] as { id: string; sha?: string }[], ancestors: new Set<string>() };
   const sweep = new LedgerSweep({
     cfg,
     store,
@@ -76,6 +77,10 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
     },
     resume: (id, text) => void world.resumed.push({ id, text }),
     limitsClear: () => world.clear,
+    appRepo: async () => APP,
+    portalSha: () => world.portal,
+    daemons: () => world.daemons,
+    contains: async (sha, head) => world.ancestors.has(`${sha}:${head}`),
     now: () => NOW,
   });
   t.after(async () => {
@@ -907,4 +912,172 @@ test('w643: a Blocked request whose blocker is open and progressing is never sta
   assert.equal(get('w642').followUp, undefined, 'not asked "Is it done?" while blocked');
   assert.deepEqual(world.resumed.map((r) => r.id), []);
   assert.equal(get('w650').status, 'done', get('w650').log.join('\n'));
+});
+
+// ---------------------------------------------------------------- w631: finished requests close themselves
+
+test('w631: a request whose only step left after the merge is a portal deploy closes once the portal runs the merge, not before', async (t) => {
+  const { request, worker, pr, world, sweep, get, heard } = setup(t);
+  // w605 on 2026-10-07: merged, its worker waiting on the portal deploy, which the ops worker then did.
+  request('w1', { sessionIds: ['s1'], title: 'Portal update no longer blocks the workers' });
+  worker('s1', { lastResult: "Merged as #193. Waiting on the portal deploy, which needs lothsahn's own words." });
+  world.prs = [pr(193, { repo: APP, body: 'Request: w1', sha: 'a'.repeat(40) })];
+  world.portal = 'b0b0b0b';
+  await sweep.checkPrs();
+  assert.equal(get('w1').status, 'active', 'the portal does not run it yet');
+  assert.match(get('w1').log.join('\n'), /PR #193 merged; still open: its worker's last report says more is coming/);
+  // Deployed: the running portal contains the merge.
+  world.portal = 'c1c1c1c';
+  world.ancestors.add(`${'a'.repeat(40)}:c1c1c1c`);
+  assert.deepEqual(await sweep.checkPrs(), ['w1']);
+  const w = get('w1');
+  assert.equal(w.status, 'done');
+  assert.equal(w.autoClosed?.how, 'deploy');
+  assert.match(w.autoClosed!.text, /^merged as #193 \(aaaaaaaaaaaa\) on 2026-10-0\d; deployed since: the portal runs c1c1c1c$/);
+  await until('its person hears', () => heard().some((h) => /closed as done 1: w1/.test(h.text)));
+});
+
+test('w631: the deploy re-check is strict: another step left, a game-repo PR, a Part of: PR, machines not updated, or an unknown portal keep it open', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  const sha = (n: number) => String(n).padStart(2, '0').repeat(20);
+  world.portal = 'feedfee';
+  for (const n of [11, 12, 13, 14, 15]) world.ancestors.add(`${sha(n)}:feedfee`);
+  // Another step besides the deploy: the paired audit.
+  request('w1', { sessionIds: ['s1'], brief: 'Fix it, then run the paired determinism audit after the merge.' });
+  worker('s1', { lastResult: 'Merged. Waiting on the portal deploy.' });
+  // A game-repo PR: its "deploy" is not the portal's.
+  request('w2', { sessionIds: ['s2'] });
+  worker('s2', { lastResult: 'Merged. Waiting on the deploy.' });
+  // Part of: more follows.
+  request('w3', { sessionIds: ['s3'] });
+  worker('s3', { lastResult: 'Merged. Waiting on the portal deploy.' });
+  // Machine updates: each connected daemon must run it.
+  request('w4', { sessionIds: ['s4'] });
+  worker('s4', { lastResult: 'Merged as #14. Still to do: update the worker machines (beast, lothdesktop).' });
+  world.daemons = [{ id: 'beast', sha: 'beefbee' }, { id: 'lothdesktop', sha: 'd00d00d' }];
+  world.ancestors.add(`${sha(14)}:beefbee`);
+  world.prs = [pr(11, { repo: APP, body: 'Request: w1' }), pr(12, { body: 'Request: w2' }), pr(13, { repo: APP, body: 'Part of: w3' }), pr(14, { repo: APP, body: 'Request: w4' })];
+  await sweep.checkPrs();
+  assert.deepEqual(['w1', 'w2', 'w3', 'w4'].map((id) => get(id).status), ['active', 'active', 'active', 'active']);
+  // The last machine updates: w4 closes, naming each daemon.
+  world.daemons = [{ id: 'beast', sha: 'beefbee' }, { id: 'lothdesktop', sha: 'e0e0e0e' }];
+  world.ancestors.add(`${sha(14)}:e0e0e0e`);
+  assert.deepEqual(await sweep.checkPrs(), ['w4']);
+  assert.match(get('w4').autoClosed!.text, /deployed since: each connected machine's daemon runs it \(beast beefbee, lothdesktop e0e0e0e\)$/);
+  // A portal whose commit is unknown (no git, no FFSB_GIT_SHA) closes nothing.
+  request('w5', { sessionIds: ['s5'] });
+  worker('s5', { lastResult: 'Merged. Waiting on the portal deploy.' });
+  world.prs.push(pr(15, { repo: APP, body: 'Request: w5' }));
+  world.portal = undefined;
+  await sweep.checkPrs();
+  assert.equal(get('w5').status, 'active');
+});
+
+test('w631: a worker whose request names another (a takeover) closes that one with its DONE too, and both people hear it', async (t) => {
+  const { request, worker, o, get, store } = setup(t);
+  // w556 (Ben's) was left by its first worker; w604 (Lothsahn's) took it over and finished it.
+  request('w556', { title: 'Windows shader warm-up', sessionIds: ['s0'] });
+  worker('s0', { status: 'stopped' });
+  request('w604', { title: 'Finish the Windows warm-up', requestedBy: LOTH, requesters: [LOTH], brief: 'Resume w556 now that Blender is installed.', sessionIds: ['s1'], createdAt: ago(10) });
+  request('w7', { title: 'Unrelated', sessionIds: ['s9'] });
+  const s1 = worker('s1', { requestedBy: LOTH });
+  o.workerTurnEnded(s1, 'Warm-up lists merged as #1196 and checked in a Release player.\nDONE: w604\nDONE: w556\nDONE: w7');
+  assert.equal(get('w604').status, 'done');
+  assert.equal(get('w556').status, 'done', 'w604 names w556: its DONE closes it');
+  assert.ok(get('w556').sessionIds.includes('s1'));
+  assert.match(get('w556').log.join('\n'), /worker s1 said DONE for it from w604 "Finish the Windows warm-up" \(Lothsahn's\), which names w556: now one of its workers/);
+  assert.equal(get('w7').status, 'active', 'a request nothing of its names stays open');
+  await until('Ben hears w556 closed', () => told(store, o, BEN, '[ledger] w556').length === 1);
+  await until('Lothsahn hears it too', () => told(store, o, LOTH, '[ledger] w556').length === 1);
+  assert.match((told(store, o, LOTH, '[ledger] w556')[0] as { text: string }).text, /\(Ben's\) closed as done: worker s1 said DONE: w556/);
+  // Named by its related ids alone works the same.
+  request('w8', { sessionIds: ['s0'] });
+  request('w9', { requestedBy: LOTH, requesters: [LOTH], relatedIds: ['w8'], sessionIds: ['s2'], createdAt: ago(5) });
+  o.workerTurnEnded(worker('s2', { requestedBy: LOTH }), 'Both fixed.\nDONE: w9\nDONE: w8');
+  assert.equal(get('w8').status, 'done');
+});
+
+test('w631: a report without a DONE or still-open line is asked about once, a moment after the turn; one that says how things stand is not', async (t) => {
+  const { request, worker, o, get, sweep, world } = setup(t);
+  o.statusAskDelayMs = 0;
+  const asked = (id: string) => get(id).log.filter((l) => /asked worker \S+ how w\d+ stands/.test(l)).length;
+  // Reads finished, but no marker: asked.
+  request('w1', { sessionIds: ['s1'] });
+  const s1 = worker('s1');
+  o.workerTurnEnded(s1, 'All done: the fix is merged into develop and the fast suite is green.');
+  await until('w1 asked', () => asked('w1') === 1);
+  // Not again within 6 hours, even when the answer has no line either.
+  o.workerTurnEnded(s1, 'It is merged.');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(asked('w1'), 1);
+  // A status line, a question, a report that says something is left, and a worker with a check-in ahead: not asked.
+  request('w2', { sessionIds: ['s2'] });
+  o.workerTurnEnded(worker('s2'), 'Merged #12.\nw2: still open: the nightly comparison after the merge');
+  assert.equal(get('w2').outcome, 'w2: still open: the nightly comparison after the merge', 'its own line is its latest word');
+  request('w3', { sessionIds: ['s3'] });
+  o.workerTurnEnded(worker('s3'), 'Which of the two layouts do you want?');
+  request('w4', { sessionIds: ['s4'] });
+  o.workerTurnEnded(worker('s4'), 'Pushed; the remaining step is the 2-peer run.');
+  request('w5', { sessionIds: ['s5'] });
+  o.workerTurnEnded(worker('s5', { wakeAt: new Date(Date.now() + 20 * 60_000).toISOString() }), 'Build started; checking back in 20 minutes.');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(['w2', 'w3', 'w4', 'w5'].map(asked), [0, 0, 0, 0]);
+  // Never answered: the cleanup still stalls it a day later, quoting the worker's own line when it has one.
+  request('w6', { sessionIds: ['s6'], updatedAt: ago(30) });
+  worker('s6', { status: 'stopped', lastActivityAt: ago(30), lastResult: 'Merged #16.\nw6: still open: waiting for the portal deploy' });
+  world.prs = [];
+  await sweep.run();
+  assert.equal(get('w6').status, 'stalled');
+  assert.match(get('w6').stalled!.reason, /its worker said: "w6: still open: waiting for the portal deploy"$/);
+});
+
+test("w631: the ops worker's DONE closes the requests its job was sent for, and only those", async (t) => {
+  const { request, o, get, store } = setup(t);
+  request('w1', { brief: 'Fix it, then deploy the portal.', prs: [{ repo: APP, number: 191, state: 'merged', at: ago(5), via: 'line' }] });
+  request('w2', {});
+  const ops = { id: 'ops-worker', kind: 'ops', title: 'Orchestration worker', status: 'idle', requestedBy: LOTH } as SessionInfo;
+  const lines = o.opsTurnEnded(ops, 'Deployed: the portal runs c1c1c1c, verified by fffctl status.\nDONE: w1\nDONE: w2', { workIds: ['w1'], by: LOTH });
+  assert.equal(get('w1').status, 'done');
+  assert.match(get('w1').log.join('\n'), /closed as done: the orchestration worker said DONE: w1/);
+  assert.equal(get('w2').status, 'active', 'the job was not sent for w2');
+  assert.deepEqual(lines, ['DONE not accepted: w2: the job was not sent for it (ops_worker send with work_ids names the requests a job is a step of)', 'w1 closed as done on its DONE line']);
+  await until('Ben and Lothsahn hear it', () => told(store, o, BEN, '[ledger] w1').length === 1 && told(store, o, LOTH, '[ledger] w1').length === 1);
+  // A step after the merge the report does not cover is refused as for any worker.
+  request('w3', { brief: 'Fix it, then run the paired audit after the merge.', prs: [{ repo: APP, number: 192, state: 'merged', at: ago(5), via: 'line' }] });
+  assert.match(o.opsTurnEnded(ops, 'Deployed.\nDONE: w3', { workIds: ['w3'], by: LOTH }).join('\n'), /w3: its brief asks for a step after the merge/);
+  assert.equal(get('w3').status, 'active');
+});
+
+test('w631: the backlog: a stalled request whose PRs name it only in their titles closes on the next pass; a step-only title keeps it open', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  // Ben's w165 on 2026-10-07: every PR merged on 10-02 (no Request: line then), stalled as "unsure" for days.
+  request('w165', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'its last report does not say it is done' }, sessionIds: ['s1'], createdAt: ago(130) });
+  worker('s1', { status: 'stopped', lastActivityAt: ago(100), lastResult: 'Riders, Bats and beams are drawn on the ship; the two PRs are merged.' });
+  request('w170', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'x' }, createdAt: ago(130) });
+  request('w186', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'x' }, createdAt: ago(130) });
+  world.prs = [
+    pr(884, { title: 'Two players on one mobile station: riders, Bats and beams drawn on the ship (w165)', mergedAt: ago(120) }),
+    pr(915, { title: 'A player who rides a station is hidden to everyone (w165)', mergedAt: ago(110) }),
+    pr(883, { title: 'Desync report: show a construction bot\'s cargo (w170 diagnostics)', mergedAt: ago(120) }),
+    pr(903, { title: 'w186: smooth-motion architecture, research and plan (docs only, do not merge yet)', mergedAt: ago(120) }),
+  ];
+  await sweep.run();
+  assert.equal(get('w165').status, 'done');
+  assert.deepEqual(get('w165').prs?.map((p) => [p.number, p.via]), [[884, 'title'], [915, 'title']]);
+  assert.equal(get('w170').status, 'stalled', 'a request named inside other words is not linked');
+  assert.equal(get('w186').status, 'stalled', 'a plan PR is a step: the request stays');
+  assert.match(get('w186').log.join('\n'), /PR #903 merged; still open: PR #903 is one step of it/);
+});
+
+test('w631: a stalled request whose worker reported it delivered after the stall closes; one whose report predates the stall stays', async (t) => {
+  const { request, worker, world, sweep, get } = setup(t);
+  request('w1', { status: 'stalled', stalled: { at: ago(48), kind: 'idle', reason: 'no activity' }, sessionIds: ['s1'], updatedAt: ago(48) });
+  worker('s1', { status: 'stopped', lastActivityAt: ago(10), lastResult: 'Picked it up again: the fix is merged into develop and the fast suite is green. Nothing more to do.' });
+  request('w2', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'unclear' }, sessionIds: ['s2'], updatedAt: ago(48) });
+  worker('s2', { status: 'stopped', lastActivityAt: ago(60), lastResult: 'The fix is merged into develop. Nothing more to do.' });
+  world.prs = [];
+  await sweep.run();
+  assert.equal(get('w1').status, 'done');
+  assert.match(get('w1').autoClosed!.text, /its worker's final report says it is delivered/);
+  assert.equal(get('w2').status, 'stalled', 'its report was read before it stalled: a person decides');
 });

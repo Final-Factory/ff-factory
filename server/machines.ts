@@ -402,6 +402,17 @@ export class MachineManager {
     return this.links.has(id);
   }
 
+  /**
+   * Each connected machine and the commit its daemon runs (its hello's machine/VERSION), sha undefined when that is not
+   * a commit: the ledger cleanup closes a request whose last step was a machine update once each runs its merge (w631).
+   */
+  daemonVersions(): { id: string; sha?: string }[] {
+    return [...this.links.keys()].sort().map((id) => {
+      const d = this.hellos.get(id)?.daemon?.trim().toLowerCase();
+      return { id, ...(d && /^[0-9a-f]{7,40}$/.test(d) ? { sha: d } : {}) };
+    });
+  }
+
   /** Each online machine's load, as its daemon last reported it (protocol 4); kept in memory only. */
   private readonly stats = new Map<string, MachineStats>();
 

@@ -443,6 +443,8 @@ const ledgerSweep = new LedgerSweep({
   resume: (id, text) => void sessions.send(id, text, 'system'),
   limitsClear: (s) => limitsClearFor(s),
   intakeMerged: () => intake.checkMerged(false),
+  // A request whose last step is machine updates closes once each connected machine runs its merge (w631).
+  daemons: () => machines.daemonVersions(),
 }).start();
 // Blocked requests (w643, docs/orchestrators.md "Waiting, Queued, Blocked"): each starts by itself when its blocker clears.
 let nightlyAt: number | undefined;

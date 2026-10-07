@@ -30,8 +30,16 @@ export function limitsFor(source: WorkSource, overrides?: Partial<Record<Exclude
 }
 /** Questions the dispatcher may ask about one request. */
 export const MAX_ASKS = 3;
-/** Closed requests kept in data/work.json (open ones are always kept). */
+/** Closed requests kept in data/work.json (open ones are always kept): at least the newest this many, … */
 const KEEP_CLOSED = 300;
+/**
+ * … and every one closed within this long, the reopen window (updateProblem), however many that is (w631: at about a
+ * hundred requests a day, the newest 300 closed reached back about three days, so a request closed four days earlier
+ * could no longer be reopened, listed or named by id within its seven).
+ */
+export const KEEP_CLOSED_MS = 7 * 86_400_000;
+/** Never more closed ones than this, whatever their age: the file is rewritten on every change. */
+const MAX_CLOSED = 2000;
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 export const isOpen = (w: Pick<WorkItem, 'status'>) => WORK_OPEN.includes(w.status);
@@ -338,9 +346,10 @@ export const requestLineRule = (w: Pick<WorkItem, 'id'>) =>
 /**
  * The DONE marker (w419): how a worker closes its request itself once every step is finished, post-merge steps included.
  * The ledger refuses one while a PR is open or a step after the merge is not covered (server/ledgerRules.ts doneProblem).
+ * The status line otherwise (w631): `<id>: still open: <what>`, which the ledger records as the request's latest word.
  */
 export const doneRule = (w: Pick<WorkItem, 'id'>) =>
-  ` When every step of ${w.id} is finished, the steps after the merge included (a check, an audit, a release's notes), end your report with a line \`DONE: ${w.id}\` (one line per request, several allowed). The ledger closes it on that line, with your report as the note, and tells you what is missing instead while a PR of it is open or the report does not say how a step after the merge went. Never write it while something is left: say what is left instead.`;
+  ` When every step of ${w.id} is finished, the steps after the merge included (a check, an audit, a release's notes), end your report with a line \`DONE: ${w.id}\` (one line per request, several allowed). The ledger closes it on that line, with your report as the note, and tells you what is missing instead while a PR of it is open or the report does not say how a step after the merge went. Never write it while something is left: end with a line \`${w.id}: still open: <what is left>\` instead. If your work also finishes another request that ${w.id} names or takes over (another person's included), add a \`DONE:\` line for that one too: the ledger accepts it because ${w.id} names it, and tells its people.`;
 
 /** The message the dispatcher gets for a new request. */
 export function requestNotice(w: WorkItem): string {
@@ -409,10 +418,14 @@ export function dispatchNotice(w: WorkItem, what: string, note?: string): string
   return `[dispatch] ${w.id} "${clip(w.title, 120)}": ${what}.${tail}`;
 }
 
-/** Keep every open item and the newest closed ones; returns the ids to drop. */
-export function pruneIds(items: Iterable<WorkItem>, keepClosed = KEEP_CLOSED): string[] {
+/**
+ * Keep every open item, the newest `keepClosed` closed ones, and every one closed within KEEP_CLOSED_MS (MAX_CLOSED at
+ * most); returns the ids to drop.
+ */
+export function pruneIds(items: Iterable<WorkItem>, keepClosed = KEEP_CLOSED, now = Date.now()): string[] {
   const closed = [...items].filter((w) => !isOpen(w) && w.status !== 'stalled').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  return closed.slice(keepClosed).map((w) => w.id);
+  const recent = closed.filter((w) => now - (Date.parse(w.updatedAt) || 0) < KEEP_CLOSED_MS).length;
+  return closed.slice(Math.min(MAX_CLOSED, Math.max(keepClosed, recent))).map((w) => w.id);
 }
 
 /** Open items first (question, new, queued, blocked, active; by priority, then oldest), then closed ones, newest first. */

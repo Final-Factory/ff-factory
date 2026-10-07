@@ -414,6 +414,47 @@ test('the one session: only an allowed orchestrator reaches it, a job needs its 
   ops.close();
 });
 
+test('w631: a job sent for ledger requests: the ids are checked, the worker is told how to close them, and its turn end goes to the ledger', async () => {
+  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-w-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  const told: string[] = [];
+  const ended: { text: string; workIds: readonly string[]; by: string }[] = [];
+  const ops = new OpsWorker({
+    sessions,
+    store,
+    options: () => ({}),
+    tellOrchestrator: (p, t) => told.push(`${p.userId}: ${t}`),
+    personTurn: () => true,
+    file: path.join(dir, 'ops-worker.json'),
+    workProblem: (ids) => (ids.includes('w9') ? 'no request w9' : undefined),
+    workTurnEnded: (_i, text, job) => {
+      ended.push({ text, workIds: job.workIds, by: job.by.userId });
+      return ['w605 closed as done on its DONE line'];
+    },
+  });
+  const loth = orch('lo', LOTH);
+  assert.throws(() => ops.send(loth, 'update beast', false, ['w9']), /work_ids: no request w9/);
+  assert.throws(() => ops.send(loth, 'update beast', false, ['605']), /work_ids: request ids like "w605", not "605"/);
+  ops.send(loth, 'update beast', false, ['W605', 'w605']);
+  await new Promise((r) => setTimeout(r, 300));
+  const sent = store.readTranscript(OPS_ID, 20).find((e) => e.kind === 'user') as { text: string };
+  assert.match(sent.text, /^update beast\n\n\[ledger\] This job is the step left on w605\. When it is done and verified, end your report with a line `DONE: <id>`/);
+  assert.deepEqual(ended.map((e) => [e.workIds, e.by]), [[['w605'], 'lothsahn']]);
+  assert.ok(told.some((t) => /^lothsahn: \[ops worker\] finished a turn[\s\S]*\n\n\[ledger\] w605 closed as done on its DONE line$/.test(t)), told.join('\n'));
+  // A new job without work_ids hands the ledger nothing.
+  ops.send(loth, 'ssh m5 whoami', true);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(ended.length, 1);
+  // A deploy for requests: the DONE belongs in the report after the restart.
+  ops.deploy(loth, 'ship it', ['w605']);
+  await new Promise((r) => setTimeout(r, 300));
+  const deploy = store.readTranscript(OPS_ID, 80).filter((e) => e.kind === 'user' && e.text.startsWith('[deploy]')).at(-1) as { text: string };
+  assert.match(deploy.text, /This job is the step left on w605[\s\S]*Only in the report after the restart, once the new portal is verified/);
+  ops.close();
+});
+
 test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, and a report asked for after the restart', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-d-'));
