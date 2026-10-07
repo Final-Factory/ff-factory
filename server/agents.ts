@@ -705,8 +705,8 @@ export class Agents {
       }
       return o;
     };
-    // Agents on machines wait for their daemon: after an update it still runs the old code until it is
-    // redeployed (MachineManager.whenCurrent), and an old daemon may not understand a new agent's launch.
+    // Agents on machines wait for their daemon to be connected (MachineManager.whenCurrent). One from another commit that
+    // speaks a protocol this portal drives resumes them at once (w605); only an outdated protocol waits for a redeploy.
     const onMachine = new Map<string, ResumeFile['sessions']>();
     const local: ResumeFile['sessions'] = [];
     for (const e of f.sessions) {
@@ -720,7 +720,7 @@ export class Agents {
       // The orchestrators and the dispatcher: the only agents the portal runs itself (w510).
       for (const e of local) outcomes.push(resume(e));
       for (const [mid, es] of onMachine) {
-        for (const e of es) outcomes.push({ id: e.id, title: e.title, machineId: mid, ok: false, error: `waits for ${mid}'s daemon to be connected and current (redeployed if outdated); resumed after that, and you get a message` });
+        for (const e of es) outcomes.push({ id: e.id, title: e.title, machineId: mid, ok: false, error: `waits for ${mid}'s daemon to be connected (an update available is no reason to wait; only a protocol this portal no longer drives is, w605); resumed after that, and you get a message` });
       }
       const waiting = waitingOnWakeLine(this.waker.all(), (id) => this.sessions.sessions.get(id)?.info, new Set(f.sessions.map((e) => e.id)), Date.now());
       if (waiting) extra.push(waiting);
@@ -738,7 +738,7 @@ export class Agents {
         const running = es.filter((e) => this.sessions.sessions.get(e.id)?.live).map((e) => `"${e.title}" (${e.id})`);
         const ok = done.filter((o) => o.ok && !running.includes(`"${o.title}" (${o.id})`)).map((o) => `"${o.title}" (${o.id})`);
         const bad = done.filter((o) => !o.ok).map((o) => `"${o.title}" (${o.id}): ${o.error}`);
-        const line = `[machines] ${mid}${why ? '' : "'s daemon is current"}. ${ok.length ? `Resumed: ${ok.join(', ')}.` : ''} ${running.length ? `Still running there (not interrupted): ${running.join(', ')}.` : ''} ${bad.length ? `Not resumed: ${bad.join('; ')}. Resume them with message_agent once it is ready.` : ''}`.replace(/\s+/g, ' ').trim();
+        const line = `[machines] ${mid}${why ? '' : "'s daemon is connected"}. ${ok.length ? `Resumed: ${ok.join(', ')}.` : ''} ${running.length ? `Still running there (not interrupted): ${running.join(', ')}.` : ''} ${bad.length ? `Not resumed: ${bad.join('; ')}. Resume them with message_agent once it is ready.` : ''}`.replace(/\s+/g, ' ').trim();
         console.log(line);
         this.notifyDispatcher(line);
       });

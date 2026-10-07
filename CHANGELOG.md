@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **A portal update no longer blocks the workers** (w605, lothsahn: "Can we fix it so that workers don't require an
+  update after a portal update?"). Daemons are versioned by their protocol, not by commit. One from another commit whose
+  protocol the portal drives (`OLDEST_DAEMON_PROTOCOL` 7 to `PROTOCOL_VERSION` 8, either side one ahead) shows "update
+  available" and takes, starts and resumes agents as a current one does; only a protocol out of range is outdated. On
+  2026-10-07 every daemon (f3f19c0) was outdated against the updated portal (9ea8476) by commit alone, and five paused
+  agents waited for installer re-runs. `resumeCutOff` and a restart's resume now wait only for an outdated protocol.
+  `server/machineProtocol.test.ts` fingerprints the messages and the launch spec and fails until a change is decided
+  (a bump, or a new fingerprint). [docs/machines.md](docs/machines.md), "Versions".
 - **A worker's title is its job, and a sandbox's label is its name** (w575, Lothsahn: "Please update FFFactory so that
   the dispatcher sets the agent title whenever it hands it a new job with a good description of what the job is
   (starting with the workorder number). Please also make it so the sandbox label doesn't change--workers don't (and

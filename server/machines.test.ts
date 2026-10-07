@@ -9,8 +9,8 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { QUEUE_HOLD_MS, SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
 import { collectResume } from './restart.ts';
-import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonMismatch, enrolledMachines, issueMachineToken, revokeMachineToken } from './machines.ts';
-import { PROTOCOL_VERSION } from './machineProtocol.ts';
+import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, enrolledMachines, issueMachineToken, revokeMachineToken } from './machines.ts';
+import { OLDEST_DAEMON_PROTOCOL, PROTOCOL_VERSION, protocolProblem } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
@@ -440,13 +440,20 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   assert.ok(upgrades >= 3, `only ${upgrades} attempt(s) in 6 s`);
 });
 
-test('daemon versions: another protocol or another commit is outdated; unknown versions are not', () => {
+test('daemon versions (w605): only a protocol out of range is outdated; another commit is an update available; unknown versions are current', () => {
+  // The protocol: the previous one still works, older does not, and a newer daemon says how old a portal it serves.
+  assert.equal(protocolProblem({ protocol: PROTOCOL_VERSION }), undefined);
+  assert.equal(protocolProblem({ protocol: PROTOCOL_VERSION - 1 }), undefined, 'the previous protocol keeps working');
+  assert.match(protocolProblem({ protocol: OLDEST_DAEMON_PROTOCOL - 1 }) ?? '', new RegExp(`speaks protocol ${OLDEST_DAEMON_PROTOCOL - 1}, and this portal needs ${OLDEST_DAEMON_PROTOCOL} or later`));
+  assert.equal(protocolProblem({ protocol: PROTOCOL_VERSION + 1, oldestPortal: PROTOCOL_VERSION }), undefined, 'a daemon updated before its portal');
+  assert.match(protocolProblem({ protocol: PROTOCOL_VERSION + 2, oldestPortal: PROTOCOL_VERSION + 1 }) ?? '', /serves portals from protocol/);
+  assert.match(protocolProblem({ protocol: Number.NaN }) ?? '', /speaks protocol NaN/);
+  // The commit: information only.
   const head = '5b181de0123456789abcdef0123456789abcdef0';
-  assert.equal(daemonMismatch({ protocol: PROTOCOL_VERSION, daemon: '5b181de' }, head), undefined);
-  assert.match(daemonMismatch({ protocol: PROTOCOL_VERSION, daemon: 'dd72bd0' }, head) ?? '', /runs dd72bd0, this portal 5b181de01/);
-  assert.match(daemonMismatch({ protocol: PROTOCOL_VERSION - 1, daemon: '5b181de' }, head) ?? '', /protocol/);
-  assert.equal(daemonMismatch({ protocol: PROTOCOL_VERSION, daemon: `protocol ${PROTOCOL_VERSION}` }, head), undefined);
-  assert.equal(daemonMismatch({ protocol: PROTOCOL_VERSION, daemon: '5b181de' }, undefined), undefined);
+  assert.equal(daemonBehind({ daemon: '5b181de' }, head), undefined);
+  assert.match(daemonBehind({ daemon: 'dd72bd0' }, head) ?? '', /runs dd72bd0, this portal 5b181de01/);
+  assert.equal(daemonBehind({ daemon: `protocol ${PROTOCOL_VERSION}` }, head), undefined);
+  assert.equal(daemonBehind({ daemon: '5b181de' }, undefined), undefined);
 });
 
 test('machine: an outdated daemon is redeployed, and new agents get a clear refusal meanwhile, not a crash', async (t) => {
@@ -459,16 +466,17 @@ test('machine: an outdated daemon is redeployed, and new agents get a clear refu
   daemon();
   await until('online', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
   assert.equal(mm.outdated('mx'), undefined, 'this checkout has no machine/VERSION: current');
-  // The daemon a previous version deployed says hello (as after an app update).
+  // A daemon from long ago says hello: a protocol this portal no longer drives (w605: only that is outdated).
   mm.portalHead = '5b181de0123456789abcdef0123456789abcdef0';
+  const old = OLDEST_DAEMON_PROTOCOL - 1;
   const hello = (daemonVersion: string, protocol = PROTOCOL_VERSION) =>
     (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', { type: 'hello', protocol, home: '', live: [], info: { ...store.machines.get('mx')!.info, daemon: daemonVersion } });
-  hello('dd72bd0');
+  hello('dd72bd0', old);
   assert.deepEqual(deployed, ['mx'], 'redeployed at once: no agent runs there');
-  assert.match(reports.at(-1) ?? '', /mx's daemon is outdated \(it runs dd72bd0, this portal 5b181de01\); redeploying/);
+  assert.match(reports.at(-1) ?? '', new RegExp(`mx's daemon is outdated \\(it speaks protocol ${old}, and this portal needs ${OLDEST_DAEMON_PROTOCOL} or later\\); redeploying`));
   assert.match(store.machines.get('mx')!.statusDetail ?? '', /daemon outdated/);
   const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
-  assert.throws(() => sessions.send(s.info.id, 'hello'), /mx's daemon is outdated \(it runs dd72bd0.*Try again in a few minutes/);
+  assert.throws(() => sessions.send(s.info.id, 'hello'), new RegExp(`mx's daemon is outdated \\(it speaks protocol ${old}.*Try again in a few minutes`));
   // At most one automatic redeploy per 10 minutes.
   mm.checkOutdated();
   assert.equal(deployed.length, 1);
@@ -483,6 +491,59 @@ test('machine: an outdated daemon is redeployed, and new agents get a clear refu
   await until('turn end', () => turnEnds.length === 1);
   // Offline: whenCurrent gives up with why.
   assert.match((await mm.whenCurrent('nope', 50, 10)) ?? '', /no machine/);
+});
+
+test('w605: a daemon one commit behind the portal (same protocol) takes new agents, resumes its cut-off ones and only shows an update available', async (t) => {
+  const { store, sessions, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  RESUME_DELAY_MS.value = 50;
+  t.after(() => (RESUME_DELAY_MS.value = 3000));
+  const deployed: string[] = [];
+  mm.deployMachine = ((o: { id: string }) => (deployed.push(o.id), store.machines.get(o.id)!)) as typeof mm.deployMachine;
+  const reports: string[] = [];
+  mm.report = (text) => reports.push(text);
+  const users = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').length;
+  // 2026-10-07: the portal went to 9ea8476 while every daemon still ran f3f19c0, both on protocol 8. Every daemon this
+  // test starts says it runs f3f19c0.
+  mm.portalHead = '9ea84760123456789abcdef0123456789abcdef0';
+  const real = (mm as unknown as { onMessage(id: string, msg: { type: string; info?: object }): void }).onMessage.bind(mm);
+  (mm as unknown as { onMessage: typeof real }).onMessage = (id, msg) => real(id, msg.type === 'hello' ? { ...msg, info: { ...msg.info, daemon: 'f3f19c0' } } : msg);
+  const d1 = daemon();
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  assert.equal(mm.outdated('mx'), undefined, 'the same protocol: not outdated');
+  assert.match(mm.updateAvailable('mx') ?? '', /runs f3f19c0, this portal 9ea847601/);
+  assert.match(store.machines.get('mx')!.statusDetail ?? '', /^update available: it runs f3f19c0/);
+  assert.equal(await mm.whenCurrent('mx', 1000, 10), undefined, 'a restart resumes its agents at once');
+  // A daemon this portal deployed over ssh is redeployed while nothing runs there (the stub only records it).
+  assert.deepEqual(deployed, ['mx']);
+  assert.match(reports.at(-1) ?? '', /mx's daemon has an update available \(it runs f3f19c0, this portal 9ea847601\); redeploying it while no agent runs there/);
+
+  // An agent mid-turn there, and a new one started beside it: both run.
+  const busy = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'busy', permissionMode: 'default' });
+  sessions.send(busy.info.id, 'long build');
+  await until('mid-turn', () => busy.info.status === 'running' && busy.live);
+  const fresh = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'fresh', permissionMode: 'default' });
+  sessions.send(fresh.info.id, 'hello');
+  await until('the new agent answered', () => store.readTranscript(fresh.info.id).some((e) => e.kind === 'assistant'));
+  mm.checkOutdated(Date.now() + 30 * 60_000);
+  assert.deepEqual(deployed, ['mx'], 'never redeployed while its agents run');
+
+  // Its link drops while the agent is mid-turn; the daemon that comes back is still one commit behind: resumed at once.
+  d1.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  daemon();
+  await until('resumed', () => users(busy.info.id) === 2, 8000);
+  assert.match(reports.find((r) => /resumed 1 agent/.test(r)) ?? '', new RegExp(busy.info.id));
+  assert.equal(reports.filter((r) => /outdated|cannot start/.test(r)).length, 0, reports.join('\n'));
+
+  // A worker root install is told once that an update is available, and never redeployed over ssh.
+  Object.assign(store.machines.get('mx')!, { root: 'D:\\work\\ffw' });
+  mm.checkOutdated(Date.now() + 60 * 60_000);
+  mm.checkOutdated(Date.now() + 120 * 60_000);
+  const told = reports.filter((r) => /has an update available.*run its installer again/.test(r));
+  assert.equal(told.length, 1, told.join('\n'));
+  assert.match(told[0], /keeps taking, starting and resuming agents meanwhile; to update it, run its installer again there/);
+  assert.deepEqual(deployed, ['mx']);
 });
 
 test('launch: a tool this version does not know is left out, not fatal (a newer portal, an older daemon)', () => {
@@ -763,9 +824,9 @@ test('machine: redeploying an outdated daemon resumes only the agent live mid-tu
   onMessage({ type: 'session', info: { ...old[1].info, status: 'stopped', turnOpenSince: hoursAgo(13), lastActivityAt: new Date().toISOString() }, live: false });
   assert.equal(old[1].live, false);
 
-  // The daemon turns out to be outdated (the portal was updated): with an agent running, it waits.
+  // The daemon turns out to be outdated (a protocol the portal no longer drives): with an agent running, it waits.
   mm.portalHead = '5b181de0123456789abcdef0123456789abcdef0';
-  onMessage({ type: 'hello', protocol: PROTOCOL_VERSION, home: '', live: [busy.info.id], info: { ...store.machines.get('mx')!.info, daemon: 'dd72bd0' } });
+  onMessage({ type: 'hello', protocol: OLDEST_DAEMON_PROTOCOL - 1, home: '', live: [busy.info.id], info: { ...store.machines.get('mx')!.info, daemon: 'dd72bd0' } });
   assert.ok(mm.outdated('mx'));
   assert.deepEqual(deployed, [], 'not redeployed while an agent runs');
 
@@ -1090,11 +1151,11 @@ test("w496: a worker started while its machine's daemon is outdated gets its bri
   mm.deployMachine = ((o: { id: string }) => store.machines.get(o.id)!) as typeof mm.deployMachine;
   daemon();
   await until('online', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
-  // 02:31 UTC on 2026-10-06: LothDesktop's daemon still spoke protocol 7 after the deploy.
+  // 02:31 UTC on 2026-10-06: LothDesktop's daemon still spoke an older protocol after the deploy (here one out of range).
   mm.portalHead = '5b181de0123456789abcdef0123456789abcdef0';
-  const hello = (daemonVersion: string) =>
-    (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', { type: 'hello', protocol: PROTOCOL_VERSION, home: '', live: [], info: { ...store.machines.get('mx')!.info, daemon: daemonVersion } });
-  hello('dd72bd0');
+  const hello = (daemonVersion: string, protocol = PROTOCOL_VERSION) =>
+    (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', { type: 'hello', protocol, home: '', live: [], info: { ...store.machines.get('mx')!.info, daemon: daemonVersion } });
+  hello('dd72bd0', OLDEST_DAEMON_PROTOCOL - 1);
   assert.ok(mm.outdated('mx'));
   const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'lag-lead', permissionMode: 'default' });
   const BRIEF = 'BRIEF for w455: find the lag lead on the client.\n\nThe request as filed (w455) ...';

@@ -184,19 +184,40 @@ redeploy of outdated daemons updates it.
 
 **Worker root installs** (w513, [worker-install.md](worker-install.md)): a machine installed on the computer itself with
 `scripts/worker/install.ps1` or `install.sh` keeps everything under one root, reports it in its hello (`layout`), and is
-never redeployed over ssh: when it is outdated the portal says to re-run its installer there.
+never redeployed over ssh: when it is outdated, or has an update available, the portal says once to re-run its installer
+there.
 
-**Versions.** A deploy stamps the daemon with the portal's commit (`machine/VERSION`); its hello reports
-it, with the protocol number and the tools it can serve. A daemon from another commit or protocol is
-outdated (`MachineManager.outdated`): after an app update that is every Mac. The portal redeploys an
-outdated daemon by itself as soon as no agent runs there (checked on its hello and every 30 s, at most
-every 10 minutes per machine) and tells the orchestrator. Meanwhile a plain message that would start a new agent there
-is refused with "<id>'s daemon is outdated (...); redeploying it now. Try again in a few minutes.", but a worker's
-first prompt from `start_agent` (its brief) waits in the send queue and goes as soon as the daemon is current (w496,
-[orchestrators.md](orchestrators.md#agent-limits-and-idle-workers)). Agents already running carry on. After an app update, agents on a Mac are resumed only once its daemon is connected and
-current (`whenCurrent`, up to 12 minutes); the orchestrator gets a `[machines]` line saying which ones
-resumed. The daemon also leaves out any MCP tool its own code does not know, so a newer portal cannot
-crash an older daemon's launch.
+**Versions** (w605). A daemon is versioned by the protocol it speaks (`PROTOCOL_VERSION` in
+`server/machineProtocol.ts`), not by the commit it was installed from. Its hello reports the protocol, the oldest portal
+protocol it still serves (`oldestPortal`), the commit (`machine/VERSION`, stamped by a deploy or the installer) and the
+tools it can serve.
+
+- **Update available** (`MachineManager.updateAvailable`, `daemonBehind`): another commit, a protocol in range. This is
+  every machine right after a portal update. The machine shows "update available: it runs <commit>, this portal
+  <commit>" and works exactly like a current one: it takes new agents, starts them, and resumes paused and cut-off ones
+  (a restart's resume and `resumeCutOff`). Before w605 it counted as outdated, and after the update of 2026-10-07
+  (portal 280ce85 to 9ea8476, every daemon on f3f19c0) the portal would not resume five paused agents until each
+  installer was re-run. A worker root install is told once to re-run its installer when convenient. A daemon the portal
+  deployed over ssh is redeployed by the portal once nothing runs there: no live process, no agent mid-turn by its
+  record, none waiting to be resumed (checked on its hello and every 30 s, at most every 10 minutes per machine).
+- **Outdated** (`MachineManager.outdated`, `protocolProblem`): a protocol out of range. The portal drives daemons from
+  `OLDEST_DAEMON_PROTOCOL` (7) up, gating each newer feature on the daemon's own protocol (`SANDBOX_PROTOCOL`,
+  `ATTACHMENT_PROTOCOL`, `RELOCATE_PROTOCOL`), and a daemon says in `oldestPortal` how old a portal it serves (7), so
+  either side may be one protocol ahead. Only an outdated daemon refuses new agents and resumes. The portal redeploys
+  one by itself as soon as no agent runs there and tells the orchestrator. Meanwhile a plain message that would start a
+  new agent there is refused with "<id>'s daemon is outdated (...); redeploying it now. Try again in a few minutes.",
+  but a worker's first prompt from `start_agent` (its brief) waits in the send queue and goes as soon as the daemon can
+  take it (w496, [orchestrators.md](orchestrators.md#agent-limits-and-idle-workers)). Agents already running carry on.
+  After an app update, agents on a machine with an outdated daemon are resumed only once it is redeployed
+  (`whenCurrent`, up to 12 minutes); the orchestrator gets a `[machines]` line saying which ones resumed.
+
+**Changing the protocol.** `server/machineProtocol.test.ts` fingerprints what the two sides send each other (the
+messages in `machineProtocol.ts` and `LaunchSpec` in `launch.ts`, comments and spacing left out) and fails on any
+change until someone decides: a change both sides ignore safely (a new optional field, a message the other side drops)
+records the new fingerprint; one an older side would misread bumps `PROTOCOL_VERSION` and is gated on the daemon's
+protocol in the portal. Measured with it: between f3f19c0 and 9ea8476 the surface changed once, w536 dropping the
+optional `guard.ownCheckout`, which an older daemon reads as absent, so no bump. The daemon also leaves out any MCP tool
+its own code does not know, so a newer portal cannot crash an older daemon's launch.
 
 ## Windows machines
 

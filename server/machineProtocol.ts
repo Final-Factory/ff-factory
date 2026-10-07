@@ -7,11 +7,11 @@ import type { StaleContext } from './staleOutput.ts';
 import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
- * Bumped when either side must be redeployed to keep talking. 4: the daemon reports its Mac's load
- * (`stats`), its own Claude login's plan usage (`usage`) and its agents' rate limits (a `rateLimit`
- * signal). Nothing breaks either way (a portal ignores messages it does not know), but a protocol-3
- * daemon is outdated, like any daemon after an app update (it runs another commit): new agents wait
- * there until the portal redeploys it once idle, and until then its machine shows no numbers.
+ * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
+ * decides: a bump, or a new fingerprint for a change both sides ignore safely). Only a protocol outside the range
+ * both sides serve makes a daemon outdated (OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL; w605), never its commit.
+ * 4: the daemon reports its Mac's load (`stats`), its own Claude login's plan usage (`usage`) and its agents' rate
+ * limits (a `rateLimit` signal).
  * 5: machine sandboxes (docs/machines.md, "Machine sandboxes"): `sandbox` ops, `sandbox` on `switch` and `unity`, the
  * pool settings in `welcome`, and the daemon's `sandboxes` snapshots. A protocol-4 daemon would ignore the sandbox
  * field of a switch or unity message and act on the main clone, so the portal never sends one to it.
@@ -26,6 +26,31 @@ import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, I
  * sandbox drive, its disks, the browser reaper), and its `host_report` and `host_health` messages.
  */
 export const PROTOCOL_VERSION = 8;
+
+/**
+ * The oldest daemon protocol this portal still drives (w605). A daemon is versioned by this protocol, not by the commit
+ * it was installed from: one from another commit whose protocol is in range takes, starts and resumes agents like a
+ * current one, and the portal only says an update is available. The portal gates each newer feature on the daemon's
+ * own protocol (SANDBOX_PROTOCOL and the rest below), so at least the previous protocol keeps working: raise this only
+ * when the portal can no longer drive a daemon that old.
+ */
+export const OLDEST_DAEMON_PROTOCOL = 7;
+
+/**
+ * The oldest portal protocol a daemon still serves (w605), sent in its hello as `oldestPortal`: a daemon updated before
+ * its portal keeps working with it. Raise it only when the daemon needs something an older portal never sends.
+ */
+export const OLDEST_PORTAL_PROTOCOL = 7;
+
+/**
+ * Why a daemon and a portal speaking `portal` cannot work together, or undefined (w605): the daemon's protocol is older
+ * than the oldest the portal drives, or the daemon no longer serves a portal that old. Another commit is no reason.
+ */
+export function protocolProblem(daemon: { protocol: number; oldestPortal?: number }, portal = PROTOCOL_VERSION, oldestDaemon = OLDEST_DAEMON_PROTOCOL): string | undefined {
+  if (!(daemon.protocol >= oldestDaemon)) return `it speaks protocol ${daemon.protocol}, and this portal needs ${oldestDaemon} or later`;
+  if (daemon.oldestPortal !== undefined && daemon.oldestPortal > portal) return `it speaks protocol ${daemon.protocol} and serves portals from protocol ${daemon.oldestPortal}, and this portal speaks ${portal}`;
+  return undefined;
+}
 
 /** The oldest protocol that understands machine sandboxes. */
 export const SANDBOX_PROTOCOL = 5;
@@ -121,10 +146,15 @@ export type ToDaemon =
   | { type: 'usage_now' };
 
 export type FromDaemon =
-  /** `catalog`: the MCP tools this daemon can serve (protocol 3+); info.daemon is the commit it was deployed from. */
+  /**
+   * `catalog`: the MCP tools this daemon can serve (protocol 3+). info.daemon is the commit it was deployed from, which
+   * only tells the portal an update is available (w605). `oldestPortal` (w605): the oldest portal protocol it serves;
+   * an older daemon sends none.
+   */
   | {
       type: 'hello';
       protocol: number;
+      oldestPortal?: number;
       info: NonNullable<Machine['info']>;
       home: string;
       live: string[];

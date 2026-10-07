@@ -124,8 +124,8 @@ their transcripts; nine agents were reported "Still running there (not interrupt
 
 `machines.keepAgentsOnRestart: true` (config.json; not in `set_app_config`'s allowlist on purpose): a portal restart or
 update no longer asks daemon-hosted workers to wrap up (`Drainer` snapshot) and no longer stops them (`stopServer` →
-`sessions.stopAll` skips `RemoteSession`s). A daemon from another commit that speaks the portal's protocol still takes
-new agents (`MachineManager.incompatible`) and is redeployed once idle; after the restart, workers still running are
+`sessions.stopAll` skips `RemoteSession`s). A daemon from another commit that speaks a protocol the portal drives takes
+new agents and resumes them whatever this setting (w605: only an update available, [machines.md](machines.md), "Versions"); after the restart, workers still running are
 reported as "Still running there (not interrupted)" and the rest are resumed as today. The daemons already queue events
 while the portal is down (up to 20 000) and replay them on reconnect.
 

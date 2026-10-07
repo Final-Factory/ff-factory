@@ -82,7 +82,7 @@ Then: the root and `root.json`; the credential into `secrets/`; a bare clone of 
 relative worktree paths, `core.symlinks false` on Windows; `--seed-from <clone>` seeds it from a local clone's origin branches instead of downloading, for a run with no GitHub credential such as an ssh session, LothDesktop 2026-10-07); the daemon's code from the installer's checkout, `npm ci`; `daemon.json`; the task or
 LaunchAgent, started; the firewall rules for `players\slot1-0..slotN-1\player\finalfactory.exe` and the Unity editors, plus the
 slot config (one UAC prompt); and it waits until the portal sees the machine online with its root. Re-running it
-updates the code and keeps everything else (that is also how a root install is **updated**: the portal never
+updates the code and keeps everything else (that is also how a root install is **updated**, see "Updating" below: the portal never
 redeploys one over ssh, it says "re-run its installer" when the daemon is outdated).
 
 **Symlinks on Windows** (w596): the root's clone gets `core.symlinks false`. The daemon runs non-elevated, where
@@ -106,6 +106,19 @@ issue <id> --out /tmp/<id>.cred` writes one to a 0600 file and never prints it. 
 it to the installer with `-CredentialFile` / `--credential-file` (deleted by hand afterwards), or paste it at the hidden
 prompt. Everything else a worker needs (the Claude token, the GitHub token) comes from the vault with each run, so the
 installer asks for no other secret. A migration needs none: it keeps the token the old daemon already has.
+
+### Updating
+
+**A portal update does not need a worker update** (w605). The portal and the daemon are versioned by their protocol
+(`server/machineProtocol.ts`), not by commit: a daemon from another commit whose protocol the portal drives (7 and up
+today) shows "update available" and keeps taking, starting and resuming agents ([machines.md](machines.md),
+"Versions"). The portal says once, in a `[machines]` line, that an update is available. Only a protocol out of range
+(outdated) stops new agents there until the install is updated.
+
+To update a worker, re-run its installer as for the first install: it fetches the code, keeps the root, its
+credential, sandboxes and limits, restarts the daemon and waits until the portal sees it again. Re-running it stops
+the daemon together with the agents it runs (`Stop-FFDaemon`; Unity editors keep running), and the portal resumes the
+agents that were mid-turn once the new daemon says hello, so update while the machine is quiet.
 
 ### The portal's ssh (w568)
 
