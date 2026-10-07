@@ -21,6 +21,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   else it waits for the next one there, ahead of new work; its first message says where it is now. 30 minutes is about
   ten times what a move costs (a fetch, a switch, a warm editor start and a recompile, about 3 minutes, measured and
   sourced in docs/machines.md, "Placing work").
+- **CI's Playwright shards keep the browsers' system packages in the Actions cache** (w636, asked by lothsahn). Each
+  shard downloaded the same 126 MB from the Ubuntu mirror; apt now keeps them in `~/apt-archives`, which the cache
+  restores, and still resolves against fresh lists. The install step went from a median of 37-39 s to 20-33 s.
 
 ### Fixed
 
