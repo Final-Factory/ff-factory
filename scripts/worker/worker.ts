@@ -163,7 +163,7 @@ export interface InstallOptions {
   owner?: string;
   /** A test install beside a live one: its own firewall rule groups and no slot config. */
   firewallSuffix?: string;
-  /** A local clone of the game repo to seed the root's clone from (a migration's old clone): no download, no credential. */
+  /** A local clone of the game repo to seed the root's clone from (a migration's old clone, or install --seed-from): no download, no credential. */
   seedFrom?: string;
   /** daemon.json settings the old daemon had (a migration: its host guard, protected paths, MCP server, limits). */
   carry?: Record<string, unknown>;
@@ -1186,6 +1186,8 @@ const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <f
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
             [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
             [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
+            [--seed-from <a local clone of the game repo> (its origin branches seed the root's clone: no download, and no
+             GitHub credential, which an ssh session does not have)]
             [--unity-editor-root <dir>] [--unity-path <exe>]
             [--no-ssh] [--ssh-host <name the portal reaches it by>] [--ssh-user <user>] (the portal's ssh, w568)
   uninstall [--yes] [--force] [--keep-registration]
@@ -1221,6 +1223,7 @@ export async function main(argv = process.argv.slice(2)) {
       ssh: !flags.has('no-ssh'),
       sshHost: opts['ssh-host'],
       sshUser: opts['ssh-user'],
+      ...(opts['seed-from'] ? { seedFrom: opts['seed-from'] } : {}),
     });
   } else if (cmd === 'elevated') {
     // The install's one administrator step (elevatedSteps): run by an elevated copy of this script.
