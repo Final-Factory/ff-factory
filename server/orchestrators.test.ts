@@ -1136,13 +1136,44 @@ test("w467: an orchestrator's hooks refuse config.json, data/ and ~/.ssh, and le
     return 'pass';
   };
   assert.equal(await run('Read', { file_path: configPath() }), 'deny');
-  assert.equal(await run('Read', { file_path: path.join(cfg.dataDir, 'work.json') }), 'deny');
+  assert.equal(await run('Read', { file_path: path.join(cfg.dataDir, 'users.json') }), 'deny');
   assert.equal(await run('Read', { file_path: path.join(os.homedir(), '.ssh', 'id_ed25519') }), 'deny');
   assert.equal(await run('Grep', { pattern: 'sk-ant', path: cfg.dataDir }), 'deny');
   const memory = memoryDirFor(cfg, info);
   assert.equal(await run('Read', { file_path: path.join(memory, 'MEMORY.md') }), 'pass', 'its own memory folder');
   assert.equal(await run('Read', { file_path: path.join(cfg.dataDir, 'attachments', 'att_1-Player.log') }), 'pass', 'files people attached');
   assert.equal(await run('Read', { file_path: path.join(os.tmpdir(), 'some-repo', 'README.md') }), 'pass');
+});
+
+test("w650: Lothsahn's and Ben's orchestrators read data/'s reports and ledger, never its secrets or a write; the dispatcher and other people's keep w467's rules", async (t) => {
+  const { cfg, agents, chat, dispatcher } = setup(t, { people: WITH_CARA });
+  const hooksOf = (info: SessionInfo) => agents.orchestratorOptions(info).hooks!.PreToolUse![0].hooks;
+  const run = async (info: SessionInfo, tool: string, input: Record<string, unknown>) => {
+    for (const h of hooksOf(info)) {
+      const r = (await h({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input } as never, undefined, { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } };
+      if (r.hookSpecificOutput?.permissionDecision === 'deny') return 'deny';
+    }
+    return 'pass';
+  };
+  const data = (...p: string[]) => path.join(cfg.dataDir, ...p);
+  for (const who of [BEN, LOTH]) {
+    const info = chat(who).info;
+    for (const p of [data('w643-migration.md'), data('work.json'), data('ledger.json'), data('transcripts', 'x.jsonl'), data('orchestrator-memory', 'dispatcher', 'MEMORY.md')]) assert.equal(await run(info, 'Read', { file_path: p }), 'pass', `${who.userId}: ${p}`);
+    assert.equal(await run(info, 'Glob', { pattern: '*.md', path: cfg.dataDir }), 'pass', 'names only');
+    for (const p of [data('users.json'), data('auth-sessions.json'), data('api-keys.json'), data('machine-tokens.json'), data('vault.json'), data('vapid.json'), data('state.json'), data('send-queue.json')]) assert.equal(await run(info, 'Read', { file_path: p }), 'deny', `${who.userId}: ${p}`);
+    assert.equal(await run(info, 'Grep', { pattern: 'token', path: cfg.dataDir }), 'deny');
+    for (const [tool, input] of [['Write', { file_path: data('w643-migration.md'), content: 'x' }], ['Edit', { file_path: data('work.json'), old_string: 'a', new_string: 'b' }], ['Write', { file_path: data('orchestrator-memory', 'dispatcher', 'MEMORY.md'), content: 'x' }]] as const) {
+      assert.equal(await run(info, tool, input), 'deny', `${who.userId}: ${tool} ${input.file_path}`);
+    }
+    const o = agents.orchestratorOptions(info) as { tools: string[]; systemPrompt: { append: string } };
+    assert.deepEqual(o.tools, ['Read', 'Glob', 'Grep', 'Write', 'Edit'], 'no shell: no Bash path to data/');
+    assert.ok(o.systemPrompt.append.includes("## The portal's data folder"), 'the brief says what it may read');
+  }
+  for (const info of [dispatcher().info, chat(CARA).info]) {
+    assert.equal(await run(info, 'Read', { file_path: data('w643-migration.md') }), 'deny');
+    assert.equal(await run(info, 'Glob', { pattern: '*.md', path: cfg.dataDir }), 'deny');
+    assert.ok(!(agents.orchestratorOptions(info) as { systemPrompt: { append: string } }).systemPrompt.append.includes("## The portal's data folder"));
+  }
 });
 
 // ---------------------------------------------------------------- w496: every dispatched worker's first message is its brief
