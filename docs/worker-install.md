@@ -226,9 +226,11 @@ Claude Code agents on BEAST's own login:
 
 **An agent whose process did end keeps its sandbox** (w613). This covers the first update onto agent hosts, a computer
 restart, and a crash. The portal marks the agent `heldSince` when its daemon goes away under it, and `list_sandboxes`
-shows it "Stopped (its daemon restarted at …; its sandbox is kept for it)", not FREE. New work does not take that
-sandbox until the agent is messaged, `stop_agent` releases it, the new daemon takes the agent back alive, or a day
-passes (`HOLD_PLACE_MS`). On LothDesktop at 08:29 UTC on 2026-10-07, the update stopped Ben's 77956901, which had no
+shows it "Stopped (its daemon restarted at …; its sandbox is kept for it until …)", not FREE. New work does not take
+that sandbox until the agent is messaged, `stop_agent` releases it, the new daemon takes the agent back alive, or 30
+minutes pass (`HOLD_PLACE_MS`; a day until w656). After that the release pass releases the sandbox when the worktree is
+clean and places the agent again when it resumes (docs/machines.md, "Released sandboxes"). A dirty worktree keeps the
+sandbox held, and `list_sandboxes` says why. On LothDesktop at 08:29 UTC on 2026-10-07, the update stopped Ben's 77956901, which had no
 check-in, and slot2 showed FREE.
 
 

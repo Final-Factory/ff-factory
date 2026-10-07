@@ -9,8 +9,8 @@ import type { MaxManager } from './max.ts';
 import { eventsFileOf, maxEnv } from './maxEvents.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
-import { agentState, agentStateText, holdsItsPlace, sortAgents, sortPlaces } from '../shared/agentState.ts';
-import { PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
+import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
+import { HOLD_PLACE_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, occupies, releasedOn } from './placeAgain.ts';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { BLOCKER_KIND_HELP } from '../shared/blockers.ts';
 import { tokenPersonForWork } from './vault.ts';
@@ -322,6 +322,7 @@ export class Agents {
       note: (id, text) => void store.append(id, { kind: 'system', text }),
       drain: () => void sessions.drain(),
       report: (text) => machines.report?.(text),
+      freed: (what) => this.orchestrators.capacityMayHaveFreed(what),
     });
     machines.placeAgain = (info) => this.placeAgain.answer(info);
     const release = setInterval(() => this.placeAgain.tick(), 60_000);
@@ -513,6 +514,8 @@ export class Agents {
       const why = this.reapWhy(s, now);
       if (!why || this.keepIdle(s)) continue;
       this.store.append(s.info.id, { kind: 'system', text: `Stopped by FF Factory while idle: ${why}. Its history is kept: a message resumes it.` });
+      // Its sandbox stays its until the release pass releases it, its worktree clean, and places it again (w656).
+      if (s.info.machineSandbox) s.info.releaseDue = { at: new Date(now).toISOString(), why: `stopped while idle: ${why}` };
       s.stop(true);
       out.push(s.info.id);
       console.log(`agents: stopped idle worker ${s.info.id} (${why})`);
@@ -1260,14 +1263,15 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
     // Its state first (w475, w643): Working (mid-turn, or between turns and on what), Queued or Blocked (a held message),
     // Needs you, Idle (free for new work), Stopped.
     const kept = this.placeAgain.keptLine(s);
-    return `    - ${s.id} "${s.title}" [${agentStateText(s)}${agentState(s).state === 'between_turns' ? `, ${s.status === 'idle' ? 'between turns' : s.status}` : ''}${kept ? `; its sandbox stays held although its check-in is far: ${kept}` : ''}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`;
+    return `    - ${s.id} "${s.title}" [${agentStateText(s)}${agentState(s).state === 'between_turns' ? `, ${s.status === 'idle' ? 'between turns' : s.status}` : ''}${kept ? `; ${kept}` : ''}${s.pendingPermissions.length ? `, ${s.pendingPermissions.length} permission request(s) waiting` : ''}] ${activityLine(s)}, turns=${s.turns} cost=$${s.costUsd.toFixed(2)}`;
   }
 
   /** Live agents of a place (a process up or mid-turn), and how many earlier ones there were. */
   private liveAgents(ids: string[]): { live: SessionInfo[]; earlier: number } {
     const all = ids.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
-    // A stopped agent its check-in or a queued message will resume (w509: Stopped) is listed with the live ones.
-    const live = sortAgents(all.filter((s) => this.sessions.sessions.get(s.id)?.live || BUSY_STATUS.has(s.status) || s.pendingPermissions.length > 0 || holdsItsPlace(s)));
+    // A stopped agent its check-in or a queued message will resume (w509: Stopped) is listed with the live ones, and so
+    // is one that still holds its sandbox until the release pass releases it (w656).
+    const live = sortAgents(all.filter((s) => this.sessions.sessions.get(s.id)?.live || BUSY_STATUS.has(s.status) || s.pendingPermissions.length > 0 || holdsItsPlace(s) || holdsSandbox(s)));
     return { live, earlier: all.length - live.length };
   }
 
@@ -2826,7 +2830,7 @@ ${this.worldBrief(true)}
 - Worker updates, standing agents' delegation requests and \`[auto-delegation]\` news go to the orchestrators of the people concerned, not to you; list_work shows each request's latest outcome. People message each other directly, orchestrator to orchestrator (message_person): you neither relay nor see those messages.
 - Placement: prefer one sandbox per independent stream of work, on whichever computer has room: a machine's sandboxes ("lothdesktop/<name>") are sandboxes like this host's, and its sandbox_root is sandbox capacity like this host's (see "Where new work runs" below). Name each for the work ("spec-098", "tutorial-playtest", "discord-triage"). For spec work, use list_branches to find the spec's existing branch and check it out if there is one; otherwise create \`NNN-short-name\` from ${this.cfg.defaultBase}. Reuse an existing idle sandbox when the request refers to it or the work continues there. Work that never opens Unity (Discord reading, docs, planning) still needs a sandbox as its working directory; create it with seed_library=false, or reuse an idle one.
 - Titles (w575): a worker's title is its job, and the dashboard finds busy workers by it. Every time you hand a worker a request, give \`title\`: what the job is in a few plain words, written for a person scanning the dashboard ("LothDesktop fresh install, sandboxes slot1..6"), not the request's title cut short. The request id goes in front by itself ("w513: LothDesktop fresh install, sandboxes slot1..6"). start_agent always takes one; message_agent with a work_id takes one when the worker is not on that request yet; decide_work link takes one for the workers it links. set_agent_title renames a worker otherwise.
-- Sandbox labels are their names (slot1..N on a worker root, the older names elsewhere) and never change; nobody sets them. A sandbox is free when list_sandboxes marks it FREE (ready, no live agent, none waiting to come back); what one is doing is its agents' titles, listed under it. A worker stopped with its check-in more than ${RELEASE_AFTER_MS / 60_000} min away (or its request over) releases a clean sandbox (w640): it shows FREE and the worker's line says "its sandbox is released"; new work started there is switched to a fresh branch first, and the worker is placed again when it resumes (its own sandbox if still free, else another free one on its machine, on its branch). A sandbox marked "spoken for" is a resuming worker's: never new work there.
+- Sandbox labels are their names (slot1..N on a worker root, the older names elsewhere) and never change; nobody sets them. A sandbox is free when list_sandboxes marks it FREE (ready, no live agent, none waiting to come back); what one is doing is its agents' titles, listed under it. A worker stopped with its check-in more than ${RELEASE_AFTER_MS / 60_000} min away, its request over, ${HOLD_PLACE_MS / 60_000} min after its daemon restarted under it, or stopped by FF Factory after ${RELEASE_AFTER_MS / 60_000} min Idle with nothing pending, releases a clean sandbox (w640, w656): it shows FREE and the worker's line says "its sandbox is released"; new work started there is switched to a fresh branch first, and the worker is placed again when it resumes (its own sandbox if still free, else another free one on its machine, on its branch). A sandbox marked "spoken for" is a resuming worker's: never new work there.
 - Where new work runs (w416, w428): new game-repo work (code, tests, Unity, built players) goes where the last line of the Capacity block at the top of list_sandboxes (also in system_status) says: "Next new game-repo work: <computer> (why)". That line follows config placement first${this.placementLine()}: the first computer in placement.prefer with room, then the others not avoided, spread by room (ROOM n%: the free share of agent slots, sandboxes, RAM and editors against each one's own limits; BUSY: at its agent limit, RAM at ${RAM_BUSY_PCT}% or more, no sandbox to use or make; within ${Math.round(EVEN_MARGIN * 100)} points, fewer live agents, then taking turns), and an avoided computer only when nothing else has room. Put the work there, even when a sandbox elsewhere is free. Every worker runs in a sandbox (w536): start_agent with a machine alone is refused, and a machine without a sandbox_root takes no workers. Discord posting as Max goes to LothDesktop (only it has the ffdiscord config). A computer that is avoided or not next keeps only what needs it: ${pinnedWork(this.review?.root)}. A worker going on in its own sandbox stays there (message_agent), and a running worker is never moved. start_agent and create_sandbox add a note when new work goes to a computer other than the next one: follow it unless one of those reasons holds, and say which. People change the preference with set_app_config placement.prefer / placement.avoid (null clears, e.g. once BEAST is fixed).
 - A machine's main clone is its owner's: no agent works there, and unity and switch_branch act on sandboxes only.
 - Low disk on a computer (a \`[machine <id>] Clean-up cannot free enough disk space\` notice, DISK in list_machines, a worker saying so) is fixed by the machine, never by its owner (Ben, 2026-10-07, w626): run machine_cleanup on it (below the soft threshold its daemon also removes FF Factory's own leftovers: player slots nobody holds, pushed agent worktrees, finished agents' temp, unused Unity editors), and when that is not enough, start a clean-up worker there (a free sandbox on that machine) with the biggest consumers the notice names; its brief says to remove FF Factory's own leftovers itself and report what it removed and freed. Never ask the machine's owner or anyone else to free space or to approve removing FF Factory's leftovers; only a person's own files (documents, their own projects, saves) are theirs, and the worker lists those in its report.

@@ -608,7 +608,22 @@ LothDesktop and Beast, not just when BEAST is full").
   - **The rule.** A worker in a machine sandbox that is stopped with its check-in more than **30 minutes** away
     (`RELEASE_AFTER_MS`), or with a check-in still ahead for work that is over (its requests closed or handed to
     another worker, as the idle reaper reads them: w598's and w520's stale check-ins), releases its sandbox, checked
-    every minute. The sandbox shows FREE, counts among the computer's free sandboxes in the Capacity block, and takes
+    every minute. w656 (Lothsahn, 2026-10-07: "Yes. Do both", after every sandbox was held while BEAST had 3 of 6
+    agents and LothDesktop 3 of 10) adds four more (`releaseWhy` in `server/placeAgain.ts`):
+    - **its requests are closed** or handed on: released at once, whatever its check-in or w613 hold (w615's worker
+      held BEAST's slot4 after w615 was done);
+    - **its daemon went away under it** (`heldSince`, w613): released **30 minutes** later (`HOLD_PLACE_MS`, a day
+      before), unless a check-in within 30 minutes or a message resumes it first;
+    - **Idle with nothing pending** (alive, no check-in, no job, nothing queued or unanswered; w650 waiting for a
+      deploy): stopped after 30 minutes without activity, with a line in its transcript, and marked `releaseDue`;
+      the idle reaper's stops (an hour idle, or its request over) are marked the same way. A message resumes it;
+    - **several stopped workers in one sandbox**, each with its own release due, no longer keep it for each other
+      ("agent … works there too"): they release it together, and when they resume each is placed back on the shared
+      branch, the second joining the first.
+
+    A worker with its release due keeps its sandbox until the pass releases it (`holdsSandbox`), also past its hold,
+    so new work never starts on its branch or over its files; a released one is placed again when it resumes. Every
+    release tells the dispatcher that capacity may have freed (`capacityMayHaveFreed`), so queued work starts there. The sandbox shows FREE, counts among the computer's free sandboxes in the Capacity block, and takes
     new work. The worker's line says so ("Stopped (resumes at check-in tomorrow 08:37 UTC; its sandbox is released
     (…): it is placed again when it resumes)"). The ledger still counts it as coming back (`holdsItsPlace`), so its
     request reads Working, not Stalled (w643); only the sandbox is let go (`holdsSandbox`). A worker **between turns** whose only
@@ -628,8 +643,12 @@ LothDesktop and Beast, not just when BEAST is full").
   - **Nothing is lost** (decision 1). Only a clean worktree is released: no uncommitted change and no untracked file,
     read by git since the worker last worked, no Unity batch run of that sandbox in flight (`unity-slot run`, holder
     `sandbox:<id>`), and no other agent working there on the same branch. Anything else keeps the sandbox held, and its
-    line in `list_sandboxes` says why ("its sandbox stays held although its check-in is far: 2 uncommitted change(s)
-    there"). Committed work needs no push to survive: a machine's sandboxes are worktrees of one repository, so the
+    line in `list_sandboxes` says why ("its sandbox stays held although its check-in is 9.0 h away, at tomorrow 01:00
+    UTC: 2 uncommitted change(s) there"). Another stopped agent there whose own release is due does not count (w656).
+    **Why no hold for a running editor** (w656): the daemon cannot tell whether a scene has unsaved edits (Unity's
+    title bar shows no scene dirty mark, docs/unity-dialogs.md), and a hold on every running editor would keep most
+    sandboxes, since an editor stops only after 2 hours idle. Work lives in files and commits; a worker whose open
+    editor state matters keeps its check-in within 30 minutes, as the `wake_me` reply says. Committed work needs no push to survive: a machine's sandboxes are worktrees of one repository, so the
     worker's branch and its commits are in every sandbox there. Nothing is stashed or committed for a worker: a dirty
     worktree is the worker's to commit, and the `wake_me` reply and the brief tell it so before a long check-in.
   - **New work in a released sandbox** starts on its own branch. When the sandbox is still on the released worker's
@@ -665,8 +684,9 @@ LothDesktop and Beast, not just when BEAST is full").
   - **Mac and Windows** (decision 4). The same on both: the path in the note is the sandbox's own (`D:\…` on Windows),
     the editor is stopped through the daemon (on Windows with its process tree), and the resume lookup is Claude Code's
     own, the same code on both (measured on macOS only).
-  - **Restarts and the w613 hold** (decision 5). A worker whose daemon went away while it was mid-turn (`heldSince`,
-    w613) keeps its sandbox for its day whatever its check-in, since a cut-off turn may have half-written edits. A
+  - **Restarts and the w613 hold** (decision 5). A worker whose daemon went away under it (`heldSince`, w613) keeps its
+    sandbox for 30 minutes whatever its check-in (a day until w656), time for its orchestrator to resume it. After that
+    it is released like the others, and only with a clean worktree, so a cut-off turn's half-written edits keep it held. A
     released worker needs no hold: it is not running. A placement cut off by a portal restart is done again when the
     queued message is retried (the send queue is on disk); one whose switch had finished finds its branch already
     there. w631 (finished requests close themselves) only makes more check-ins stale, which releases their sandboxes

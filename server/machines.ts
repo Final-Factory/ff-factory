@@ -254,10 +254,12 @@ export class RemoteSession implements SessionHandle {
     if (requestedBy && from !== 'system') this.info.lastRequestedBy = requestedBy;
     this.link.dispatchSend(this, text, from, uuid, images, requestedBy, attachments);
     this.lastFrom = from;
-    // A new turn: the stop is over (as AgentSession.send), and so is the hold on its sandbox after its daemon went (w613).
-    if (this.info.stoppedOnPurpose || this.info.heldSince) {
+    // A new turn: the stop is over (as AgentSession.send), and so is the hold on its sandbox after its daemon went (w613)
+    // or the release due after FF Factory stopped it while idle (w656).
+    if (this.info.stoppedOnPurpose || this.info.heldSince || this.info.releaseDue) {
       delete this.info.stoppedOnPurpose;
       delete this.info.heldSince;
+      delete this.info.releaseDue;
       this.link.touch(this);
     }
     return uuid;
@@ -1576,7 +1578,7 @@ export class MachineManager {
         if (!s || s.info.machineId !== id) return;
         // The portal owns identity, naming and where it works (a worker placed again in another sandbox, w640: the
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host
