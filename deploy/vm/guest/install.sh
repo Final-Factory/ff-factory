@@ -35,7 +35,7 @@ load_conf
 [ -z "$REPO_URL" ] || FFF_REPO_URL=$REPO_URL
 [ "$DRY_RUN" = 1 ] && log "DRY RUN: nothing will be changed"
 
-log "1/9 preflight"
+log "1/10 preflight"
 # shellcheck disable=SC1091
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] || die "Ubuntu only (this is ${PRETTY_NAME:-unknown})"
@@ -53,7 +53,7 @@ if [ "$(systemctl is-enabled tmp.mount 2>/dev/null || true)" != masked ]; then
   if [ "$(findmnt -n -o FSTYPE /tmp 2>/dev/null || true)" = tmpfs ]; then log "/tmp is a tmpfs until the VM's next boot (fff-vm nightly restarts it every night)"; fi
 fi
 
-log "2/9 apt sources: NodeSource node_$NODE_MAJOR.x, GitHub CLI, Tailscale"
+log "2/10 apt sources: NodeSource node_$NODE_MAJOR.x, GitHub CLI, Tailscale"
 codename=${VERSION_CODENAME:?}
 key() { # URL DEST [dearmor]
   [ -s "$2" ] && return 0
@@ -80,9 +80,10 @@ Unattended-Upgrade::Origins-Pattern {
 };
 EOF
 
-log "3/9 packages"
+log "3/10 packages"
 # zstd and bzip2: fffctl migrate unpacks BEAST's copy with them (w517).
-pkgs=(nodejs git git-lfs gh openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades zstd bzip2)
+# e2fsprogs: the orchestration worker's scratch file system (w597).
+pkgs=(nodejs git git-lfs gh openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades zstd bzip2 e2fsprogs)
 missing=()
 for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | matches 'install ok installed' || missing+=("$p"); done
 if [ -n "$c" ] || [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q; fi
@@ -93,7 +94,7 @@ if [ "$DRY_RUN" != 1 ]; then
   log "node $(node --version), npm $(npm --version), git $(git --version | cut -d' ' -f3), gh $(gh --version | head -n 1 | cut -d' ' -f3), tailscale $(tailscale version | head -n 1)"
 fi
 
-log "4/9 the fff account and $FFF_ROOT"
+log "4/10 the fff account and $FFF_ROOT"
 if ! id "$FFF_USER" >/dev/null 2>&1; then
   # Its home is made below, inside $FFF_ROOT, which does not exist yet.
   run_cmd useradd --system --user-group --home-dir "$FFF_ROOT/home" --no-create-home --shell /bin/bash --comment 'FF Factory portal' "$FFF_USER"
@@ -132,7 +133,7 @@ fi
 # The server reads Max's Discord token from here (server/discordConfig.ts): the portal's own copy, never FFBox's.
 run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT/home/.config" "$FFF_ROOT/home/.config/ffbox"
 
-log "5/9 the VM's own firewall (table inet fff_guest)"
+log "5/10 the VM's own firewall (table inet fff_guest)"
 host_rule=""
 [ -z "$FFF_HOST_IP" ] || host_rule="ip saddr $FFF_HOST_IP tcp dport { 22, $FFF_PORT } accept comment \"the host's root: health check and fff-vm ssh\""
 fw=$(write_file /etc/fff/guest.nft 0600 <<EOF
@@ -172,7 +173,7 @@ EOF
 # Ubuntu 24.04 and later start sshd from ssh.socket: reload it only if it runs (a new one reads the file anyway).
 if [ -n "$sshd" ]; then run_cmd sshd -t && run_cmd systemctl try-reload-or-restart ssh.service; fi
 
-log "6/9 scripts: fffctl, fff-update, fff-health, fff-backup, fff-base-refresh, fff-migrate, fff-machine-ssh"
+log "6/10 scripts: fffctl, fff-update, fff-health, fff-backup, fff-base-refresh, fff-migrate, fff-machine-ssh, the orchestration worker's"
 install_scripts "$here" >/dev/null
 # The machines the portal deploys daemons to: their ssh aliases and pinned host keys (machines.ssh, w537). The cut-over
 # left a VM without them, and every daemon redeploy failed on "Host key verification failed".
@@ -182,7 +183,7 @@ else
   as_fff "$FFF_LIB/fff-machine-ssh" --fix || warn "fff-machine-ssh: not every machine answers yet (above); the aliases and pinned keys are written"
 fi
 
-log "7/9 ff-factory: the first release (fff-update init)"
+log "7/10 ff-factory: the first release (fff-update init)"
 if [ "$DRY_RUN" = 1 ]; then
   log "DRY-RUN would clone $FFF_REPO_URL into $FFF_ROOT/app/repo.git and build ${REF:-origin/$FFF_BRANCH} (npm ci, web build)"
 else
@@ -197,7 +198,7 @@ else
   as_fff bash -c 'cd ~ && curl -fsSL https://claude.ai/install.sh | bash' || warn "the Claude Code CLI did not install; fffctl claude-login needs it (rerun install.sh)"
 fi
 
-log "8/9 config.json"
+log "8/10 config.json"
 if [ -f "$FFF_ROOT/config/config.json" ]; then
   log "kept: $FFF_ROOT/config/config.json"
 else
@@ -207,7 +208,104 @@ fi
 url_changed=0
 if sync_public_url; then url_changed=1; fi
 
-log "9/9 systemd units"
+log "9/10 the orchestration worker (w597, docs/ops-worker.md): account $OPS_USER, ${OPS_DISK_MB} MB scratch, fff-ops.socket"
+# Its own account: no password, no ssh login (sshd's AllowUsers names the admin alone), a home on its scratch.
+if ! id "$OPS_USER" >/dev/null 2>&1; then
+  run_cmd useradd --system --user-group --home-dir "$OPS_ROOT/home" --no-create-home --shell /bin/bash --comment 'FF Factory orchestration worker (w597)' "$OPS_USER"
+fi
+run_cmd passwd -l "$OPS_USER" >/dev/null
+# The disk cap: everything it can write (its home, Claude Code's files, its scratch and temp) is one ext4 file system in
+# a file of OPS_DISK_MB, mounted nosuid,nodev,noexec. Full is full: nothing it writes reaches the VM's own disk.
+run_cmd install -d -m 0700 -o root -g root "$(dirname "$OPS_IMAGE")"
+if [ ! -f "$OPS_IMAGE" ]; then
+  run_cmd fallocate -l "${OPS_DISK_MB}M" "$OPS_IMAGE"
+  run_cmd chmod 0600 "$OPS_IMAGE"
+  run_cmd mkfs.ext4 -q -F -m 0 -L fff-ops "$OPS_IMAGE"
+elif [ "$DRY_RUN" != 1 ]; then
+  have_mb=$(($(stat -c %s "$OPS_IMAGE") / 1048576))
+  [ "$have_mb" -eq "$OPS_DISK_MB" ] || warn "the orchestration worker's scratch is $have_mb MB, not OPS_DISK_MB=$OPS_DISK_MB: docs/ops-worker.md says how to resize it"
+fi
+c=$(write_file /etc/systemd/system/fff-ops-scratch.service 0644 <<EOF
+[Unit]
+Description=FF Factory orchestration worker: its ${OPS_DISK_MB} MB scratch file system (w597)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/ops-worker.md
+RequiresMountsFor=$(dirname "$OPS_IMAGE") $(dirname "$OPS_ROOT")
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/bin/install -d -m 0755 $OPS_ROOT
+ExecStart=/bin/sh -c 'mountpoint -q $OPS_ROOT || mount -o loop,nosuid,nodev,noexec $OPS_IMAGE $OPS_ROOT'
+ExecStartPost=/bin/sh -c 'chown root:$OPS_USER $OPS_ROOT && chmod 0750 $OPS_ROOT && install -d -m 0700 -o $OPS_USER -g $OPS_USER $OPS_ROOT/home $OPS_ROOT/scratch $OPS_ROOT/tmp'
+ExecStop=/bin/umount $OPS_ROOT
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)
+# The network it may reach: Anthropic's API, the tailnet (the machines, MagicDNS), loopback and this VM's resolvers.
+resolvers=$(awk '$1 == "nameserver" {print $2}' /etc/resolv.conf 2>/dev/null | paste -sd' ' - || true)
+c+=$(write_file /etc/systemd/system/fff-ops@.service 0644 <<EOF
+[Unit]
+Description=FF Factory orchestration worker: Claude Code as $OPS_USER for the portal (w597)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/ops-worker.md
+Requires=fff-ops-scratch.service
+After=fff-ops-scratch.service network-online.target
+
+[Service]
+Type=simple
+User=$OPS_USER
+Group=$OPS_USER
+# One connection to fff-ops.socket: the portal's header, then Claude Code's stream on the same socket.
+ExecStart=$FFF_LIB/fff-ops-launch
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+SyslogIdentifier=fff-ops
+WorkingDirectory=$OPS_ROOT
+UMask=0077
+# sudo runs its two wrappers (/etc/sudoers.d/fff-ops), so no NoNewPrivileges, nor any setting that implies it.
+NoNewPrivileges=no
+# The whole file system read-only but its scratch; /srv/fff stays writable only for what sudo runs as root or fff there
+# (a machine credential): fff-ops itself cannot enter it (0700 fff). /tmp, /var/tmp and /dev/shm are small and its own.
+ProtectSystem=strict
+ProtectHome=tmpfs
+ReadWritePaths=$OPS_ROOT $FFF_ROOT -/run/fff -/run/sudo -/var/lib/sudo
+TemporaryFileSystem=/tmp:size=64M,mode=1777 /var/tmp:size=16M,mode=1777 /dev/shm:size=16M,mode=1777
+IPAddressDeny=any
+IPAddressAllow=localhost $OPS_ALLOW_NETS $resolvers
+MemoryMax=$OPS_MEMORY_MAX
+TasksMax=256
+CPUWeight=50
+# Its lifetime's backstop: the portal stops an idle process after 1 h and cuts a turn after 2 h.
+RuntimeMaxSec=$OPS_RUNTIME_MAX
+EOF
+)
+c+=$(write_file /etc/systemd/system/fff-ops.socket 0644 <"$here/units/fff-ops.socket")
+# sudo: the two wrappers, and nothing else. Checked with visudo before it is put in place.
+sudoers=$(mktemp)
+cat >"$sudoers" <<EOF
+# /etc/sudoers.d/fff-ops (deploy/vm/guest/install.sh, w597, docs/ops-worker.md): the orchestration worker's only rights.
+# Its fffctl: status, state, logs, machine-ssh-check, credential list and issue (fff-ops-priv decides).
+$OPS_USER ALL=(root) NOPASSWD: $FFF_LIB/fff-ops-priv
+# Its ssh, as the portal's account with the portal's key, fixed options (fff-ops-ssh).
+$OPS_USER ALL=($FFF_USER) NOPASSWD: $FFF_LIB/fff-ops-ssh
+Defaults:$OPS_USER !lecture, env_reset, secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EOF
+visudo -cqf "$sudoers" || die "the orchestration worker's sudoers does not parse (visudo -cf)"
+c+=$(write_file /etc/sudoers.d/fff-ops 0440 <"$sudoers")
+rm -f "$sudoers"
+[ -z "$c" ] || run_cmd systemctl daemon-reload
+run_cmd systemctl enable fff-ops-scratch.service fff-ops.socket
+run_cmd systemctl start fff-ops-scratch.service
+if [ "$DRY_RUN" != 1 ]; then
+  findmnt -n -o OPTIONS "$OPS_ROOT" | matches noexec || die "$OPS_ROOT is not the worker's noexec scratch file system"
+fi
+run_cmd systemctl restart fff-ops.socket
+# Its Claude Code: the portal's own Agent SDK binary (fff-portal.service runs this again at each start).
+run_cmd "$FFF_LIB/fff-ops-sync" || warn "fff-ops-sync failed: the orchestration worker cannot start until the portal's next start copies its Claude Code"
+
+log "10/10 systemd units"
 c=""
 for u in fff-portal.service fff-health.service fff-health.timer fff-update.path fff-update.service fff-backup.service fff-base-refresh.service fff-base-refresh.timer; do
   c+=$(write_file "/etc/systemd/system/$u" 0644 <"$here/units/$u")

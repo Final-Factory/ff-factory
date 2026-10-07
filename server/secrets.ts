@@ -41,6 +41,16 @@ const DISCORD_ASSIGNMENT = /\b((?:FF)?DISCORD(?:_APP)?_TOKEN)(\s*[=:]\s*\\?["']?
 
 const lastFour = (m: string) => m.slice(-4);
 
+/**
+ * What the orchestration worker's shell could meet in the portal VM (w597): a machine's /machine credential
+ * (ffm_<id>_<secret>), an Anthropic API key, a Tailscale key, an age identity and a private key block.
+ */
+const MACHINE_TOKEN_ANYWHERE = /(ffm_[A-Za-z0-9.-]{1,64}_)[A-Za-z0-9_-]{32,}/g;
+const API_KEY_ANYWHERE = /sk-ant-api\d\d-[A-Za-z0-9_-]{40,}/g;
+const TAILSCALE_KEY_ANYWHERE = /tskey-[a-z]+-[A-Za-z0-9-]{16,}/g;
+const AGE_KEY_ANYWHERE = /AGE-SECRET-KEY-1[0-9A-Z]{50,}/g;
+const PRIVATE_KEY_BLOCK = /-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----[\s\S]*?-----END \1PRIVATE KEY-----/g;
+
 /** A GitHub token (classic, OAuth, app, refresh or fine-grained), the vault's kind github (w512). */
 const GITHUB_TOKEN_ANYWHERE = /(?<![A-Za-z0-9_])(gh[pousr]_|github_pat_)[A-Za-z0-9_]{30,}/g;
 
@@ -63,7 +73,7 @@ export function addSecretValues(values: readonly string[]) {
 
 /** Whether `text` may hold a secret this module redacts (a cheap check before the regexes). */
 const maybeSecret = (text: string) =>
-  text.includes('sk-ant-oat01-') || text.includes('ffpv1_') || /DISCORD|\.[A-Za-z0-9_-]{6}\.|gh[pousr]_|github_pat_/.test(text) || knownValues.some((v) => text.includes(v));
+  text.includes('sk-ant-oat01-') || text.includes('ffpv1_') || /ffm_|sk-ant-api|tskey-|AGE-SECRET-KEY-|PRIVATE KEY-----/.test(text) || /DISCORD|\.[A-Za-z0-9_-]{6}\.|gh[pousr]_|github_pat_/.test(text) || knownValues.some((v) => text.includes(v));
 
 /**
  * `text` with its secrets replaced: a Claude OAuth token by "sk-ant-oat01-[redacted …abcd]", a Discord bot token
@@ -75,6 +85,11 @@ export function redactSecrets(text: string): string {
   for (const v of knownValues) if (out.includes(v)) out = out.split(v).join(`[redacted vault secret …${lastFour(v)}]`);
   return out
     .replace(OAUTH_TOKEN_ANYWHERE, (m) => `sk-ant-oat01-[redacted …${lastFour(m)}]`)
+    .replace(MACHINE_TOKEN_ANYWHERE, (m, prefix: string) => `${prefix}[redacted …${lastFour(m)}]`)
+    .replace(API_KEY_ANYWHERE, (m) => `sk-ant-api-[redacted …${lastFour(m)}]`)
+    .replace(TAILSCALE_KEY_ANYWHERE, (m) => `tskey-[redacted …${lastFour(m)}]`)
+    .replace(AGE_KEY_ANYWHERE, () => 'AGE-SECRET-KEY-[redacted]')
+    .replace(PRIVATE_KEY_BLOCK, (_m, kind: string) => `[redacted ${kind}private key]`)
     .replace(PROVIDER_TOKEN_ANYWHERE, (m) => `ffpv1_[redacted …${lastFour(m)}]`)
     .replace(GITHUB_TOKEN_ANYWHERE, (m, prefix: string) => `${prefix}[redacted …${lastFour(m)}]`)
     .replace(DISCORD_ASSIGNMENT, (_m, name: string, sep: string, value: string) => (value.startsWith('[redacted') ? _m : `${name}${sep}[redacted …${lastFour(value)}]`))
@@ -138,7 +153,8 @@ export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'> & Partial<Pick<C
 // ---------------------------------------------------------------- this host's agents (docs/accounts.md)
 
 /** The role config claudeAccounts knows a session of `kind` on this host by. */
-export const hostRole = (kind: SessionKind): HostRole => (kind === 'orchestrator' ? 'orchestrator' : 'workers');
+// The orchestration worker (w597) runs on the orchestrators' account: it works only for their people.
+export const hostRole = (kind: SessionKind): HostRole => (kind === 'orchestrator' || kind === 'ops' ? 'orchestrator' : 'workers');
 
 /**
  * The account this host's agents of `role` run on (config claudeAccounts; default the token; the dispatcher, unset:

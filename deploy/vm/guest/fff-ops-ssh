@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# fff-ops-ssh (w597, docs/ops-worker.md): the orchestration worker's ssh to the machines, run as the portal's account
+# (fff) through sudo, so it uses the portal's key without being able to read it. The worker types `ssh m5 'whoami'`; its
+# PATH's ssh (ops-bin/ssh) runs `sudo -n -u fff /usr/local/lib/fff/fff-ops-ssh m5 whoami`. sudoers lets fff-ops run this
+# one file as fff, and nothing else as fff.
+#
+#   fff-ops-ssh TARGET [COMMAND...]     TARGET: an alias from machines.ssh (m3, m5, beast, Loth2800) or user@host
+#
+# No ssh option passes through: a -o ProxyCommand or -F would run a command as fff, which holds the portal's secrets. The
+# options here are fixed: no forwarding of any kind, no local commands, no proxy, no shared connection, only pinned host
+# keys (known_hosts from fff-machine-ssh, known_hosts2 from the installers), never a password prompt. The remote command
+# is the machine's business: it runs there. Every call is logged to the journal (tag fff-ops-ssh).
+set -o errexit -o nounset -o pipefail
+export PATH=/usr/bin:/bin
+die() { echo "fff-ops-ssh: $*" >&2; exit 2; }
+WANT_USER=${FFF_OPS_SSH_USER:-fff}
+[ "$(id -un)" = "$WANT_USER" ] || die "run as the portal's account ($WANT_USER): the worker's ssh does it (sudo -n -u $WANT_USER $0 ...)"
+[ $# -ge 1 ] || die "usage: ssh TARGET [COMMAND...]  (TARGET: m3, m5, beast, Loth2800, or user@host from list_machines)"
+target=$1
+shift
+# A plain alias or user@host: letters, digits, dots and dashes (and the user's underscore). Never an option.
+[[ $target =~ ^([A-Za-z0-9._][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]] ||
+  die "not a machine: '${target:0:80}' (an alias like m5, or user@host; ssh options are not taken)"
+home=$(getent passwd "$WANT_USER" | cut -d: -f6)
+[ -n "$home" ] || die "no home for $WANT_USER"
+export HOME=$home
+cmdline="$*"
+logger -t fff-ops-ssh -- "ssh $target: ${cmdline:0:400}" 2>/dev/null || true
+exec "${FFF_OPS_SSH_BIN:-/usr/bin/ssh}" -T -e none \
+  -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no \
+  -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o PermitLocalCommand=no \
+  -o ProxyCommand=none -o ProxyJump=none -o ControlMaster=no -o ControlPath=none \
+  -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \
+  -- "$target" "$@"

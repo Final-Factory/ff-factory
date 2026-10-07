@@ -25,6 +25,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The orchestration worker** (w597, Lothsahn: "Let's give you a real worker--not with unity, and not with a
+  FinalFactory workspace, but with a claude so you can execute commands locally for orchestration."). Exactly one,
+  hardcoded (session `ops-worker`, kind `ops`), in the portal VM as its own Linux account `fff-ops`, and only Lothsahn's
+  and Ben's own orchestrators reach it, through `ops_worker` (send, status, interrupt, stop); a new job needs a turn
+  the person started. The portal starts it through `fff-ops.socket` (`spawnClaudeCodeProcess`), never as its own child:
+  the account has a 2 GiB `noexec` scratch file system as all it can write, a network of Anthropic's API and the tailnet
+  only, and two sudo wrappers, `fff-ops-ssh` (the portal's ssh to the machines, as `fff`, fixed options, pinned keys)
+  and `fff-ops-priv` (`fffctl status`, `state`, `logs`, `machine-ssh-check`, `credential list` and `credential issue ID
+  --to TARGET`, which writes a new machine credential straight into a file on the machine). The Claude credential
+  reaches it on a file descriptor, never its environment. Every command is in its transcript (read-only on the page,
+  its own sidebar row) and the journal, redacted; `list_sandboxes` and `list_machines` show it as a group of its own,
+  never game capacity. Transcripts now also redact machine credentials, Anthropic API keys, Tailscale keys, age
+  identities and private keys. [docs/ops-worker.md](docs/ops-worker.md).
 - **The worker install names a nightly lab task left on an old root** (w577, lothsahn: "make sure the new nightly e2e
   lab runs out of D:\work\ffw\nightly like it should"). The nightly lab's Windows task `ff-nightly-e2e` names its root
   on its command line, so w513's move left lothdesktop's task on the deleted `D:\work\ff-nightly`. At the end of an

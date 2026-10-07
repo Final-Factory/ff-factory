@@ -38,6 +38,7 @@ import { accountSource, dispatcherOwnAccount, hostAccount, hostProcessEnv, machi
 import { Identity, claudeEnvFor, forLine } from './identity.ts';
 import { loopGuards, Orchestrators, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { beltFor, type BeltRole } from './belts.ts';
+import { OPS_ID, OPS_LIMITS, OPS_PATHS, OPS_REFUSED, OpsWorker, opsAllowedOrchestrator, opsBrief, opsGuard, opsSpawner } from './opsWorker.ts';
 import { memoryDirFor, memoryGuard } from './orchestratorMemory.ts';
 import { portalSecretRules, secretFilesOf, secretReadGuard, type SecretRules } from './secretGuard.ts';
 import { DECISIONS, attachmentsNote, describeItem, isFor, isOpen, ledgerOrder, names, overlapLine, requestAsFiled, requestLineRule, startProblem } from './work.ts';
@@ -260,6 +261,8 @@ export class Agents {
   readonly identity: Identity;
   /** People's own orchestrators, the dispatcher and the work ledger (docs/orchestrators.md). */
   readonly orchestrators: Orchestrators;
+  /** The one orchestration worker in the portal VM (w597, server/opsWorker.ts, docs/ops-worker.md). */
+  readonly ops: OpsWorker;
   /** Commits that reached the base branch in the last 48 hours, for the ledger's overlap check; refreshed in the background. */
   private recentCommits: { sha: string; subject: string }[] = [];
 
@@ -295,6 +298,15 @@ export class Agents {
       options: this.orchestratorOptions,
       places: () => ({ machines: machines.list() }),
       recentCommits: () => this.recentCommits,
+    });
+    // The orchestration worker (w597): its turns' ends go to the orchestrator of the person whose job it is.
+    this.ops = new OpsWorker({
+      sessions,
+      store,
+      options: this.opsOptions,
+      tellOrchestrator: (person, text) => void this.sessions.send(this.orchestrators.personalFor(person).info.id, text, 'system', undefined, { requestedBy: person }),
+      personTurn: (id) => this.personTurn(id),
+      file: path.join(cfg.dataDir, 'ops-worker.json'),
     });
     this.standing = new StandingAgents({
       cfg,
@@ -531,9 +543,20 @@ export class Agents {
   boot(): SessionInfo[] {
     const cutOff = this.sessions.restore(
       // A worker of a host sandbox from before w510 has no process to come back to: it is not restored.
-      (info) => (info.kind === 'orchestrator' ? this.orchestratorOptions : info.kind === 'standing' ? this.standing.noMachineOptions : undefined),
+      (info) => (info.kind === 'orchestrator' ? this.orchestratorOptions : info.kind === 'ops' ? this.opsOptions : info.kind === 'standing' ? this.standing.noMachineOptions : undefined),
       (info) => this.machines.restore(info),
     );
+    // The orchestration worker is never resumed by itself after a restart: the person whose job it was hears it.
+    this.ops.start();
+    const opsCut = cutOff.find((i) => i.id === OPS_ID);
+    const opsBy = opsCut?.lastRequestedBy ?? opsCut?.requestedBy;
+    if (opsBy) setTimeout(() => {
+      try {
+        this.sessions.send(this.orchestrators.personalFor(opsBy).info.id, `[ops worker] The portal restarted while the orchestration worker (${OPS_ID}) was mid-turn; that turn was cut off and it was not resumed. Read its transcript (agent_transcript ${OPS_ID}) and message it with ops_worker to carry on.`, 'system', undefined, { requestedBy: opsBy });
+      } catch (e) {
+        console.warn('ops-worker: could not tell the orchestrator about the restart:', (e as Error).message);
+      }
+    }, 5000).unref?.();
     this.standing.boot();
     this.orchestrators.boot();
     void this.refreshRecentCommits();
@@ -1406,7 +1429,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       parts.push('', `## ${m.id} (${noun}, ${state}; ${limits}${total}${diskPart})`, ...(sbs.length ? sbs.map((s) => this.describeMachineSandbox(m, s)) : ['(none yet)']));
     }
     const cap = capacityLines(this.places(), this.lastPlaced, this.cfg.placement);
-    return [...cap, ...(cap.length ? [''] : []), ...parts].join('\n').replace(/^\n+/, '');
+    return [...cap, ...(cap.length ? [''] : []), ...parts, ...this.ops.groupLines()].join('\n').replace(/^\n+/, '');
   }
 
   private condensed(events: TranscriptEvent[]) {
@@ -1443,7 +1466,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   toolSpecs(from: 'orchestrator' | 'human' = 'orchestrator', actor: Actor = this.dispatcherActor, ctx: BeltCtx = { role: 'dispatcher' }): ToolSpec[] {
     const worker = (id: string) => {
       const w = this.sessions.get(id);
-      if (w.info.kind !== 'worker') throw new Error(`${id} is ${w.info.kind === 'standing' ? 'a standing agent (use run_standing_agent_now)' : 'the orchestrator'}, not a worker`);
+      if (w.info.kind !== 'worker') throw new Error(`${id} is ${w.info.kind === 'standing' ? 'a standing agent (use run_standing_agent_now)' : w.info.kind === 'ops' ? "the orchestration worker (Lothsahn's and Ben's own orchestrators reach it with ops_worker)" : 'the orchestrator'}, not a worker`);
       return w;
     };
     const tool: ToolMaker = (name, description, schema, handler) => ({ name, description, schema, handler: handler as ToolSpec['handler'] });
@@ -1687,6 +1710,22 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             const s = this.sessions.get(session_id);
             const head = `${s.info.title} [${s.info.status}${s.info.statusDetail ? `: ${s.info.statusDetail}` : ''}] turns=${s.info.turns} cost=$${s.info.costUsd.toFixed(2)}`;
             return `${head}\n${this.condensed(this.store.readTranscript(session_id, last ?? 60))}`;
+          }),
+        ),
+        tool(
+          'ops_worker',
+          `The orchestration worker (w597, docs/ops-worker.md): one Claude Code session with a real shell in the portal's VM, for Lothsahn's and Ben's own orchestrators only (anyone else's call is refused). It reaches the machines over ssh with the portal's key (beast, lothdesktop, m3, m5: run the worker installer there, stop a daemon, check a reinstall), reads the portal's state (fffctl status, logs; list_machines), and issues a machine credential straight into a file on that machine, so a token never passes through chat. It has no git, no downloads, no builds and no Unity: heavy work runs on the machine over ssh. It does not deploy or restart the portal, change settings, delete on the portal, touch Steam, or spend or publish: those stay a person's. action send (text: the job or a follow-up, in full: it knows nothing else; fresh: true starts a new conversation for a new job): a new job needs a turn your person started with their own message; within it (${OPS_LIMITS.jobMs / 3_600_000} h) your check-ins may follow up. Its turn's end comes back to you as an [ops worker] message. status: its state, job and last steps. interrupt: end its turn. stop: end its process (the conversation stays).`,
+          {
+            action: z.enum(['send', 'status', 'interrupt', 'stop']),
+            text: z.string().optional().describe('action send: what it should do, in full.'),
+            fresh: z.boolean().optional().describe('action send: a new conversation (a new job), dropping the last one\'s context.'),
+          },
+          wrap(async ({ action, text, fresh }) => {
+            const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
+            if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
+            if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true);
+            if (action === 'status') return `${this.ops.status()}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
+            return this.ops.control(caller, action);
           }),
         ),
         tool(
@@ -1998,7 +2037,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         'list_machines',
         "List the machines (the user's Macs and Windows PCs) agents can run on: platform, online state, label, repo and its branch/uncommitted files, and their agents. Workers there use the user's main clone, so check the uncommitted count before giving one work that needs a branch switch.",
         {},
-        wrap(async () => mm.list().map((m) => this.describeMachine(m)).join('\n\n') || 'No machines yet.'),
+        wrap(async () => [mm.list().map((m) => this.describeMachine(m)).join('\n\n') || 'No machines yet.', ...this.ops.groupLines()].join('\n')),
       ),
       tool(
         'ffbox_activity',
@@ -2823,6 +2862,32 @@ ${this.worldBrief(false)}
   orchestratorSecrets(memory: string): SecretRules {
     return portalSecretRules({ configFile: configPath(), appRoot: ROOT, dataDir: this.cfg.dataDir, secretFiles: secretFilesOf(this.cfg), allow: [memory, path.join(this.cfg.dataDir, 'attachments')] });
   }
+
+  /**
+   * The orchestration worker's process (w597, docs/ops-worker.md): Claude Code as the VM's fff-ops account, reached through
+   * fff-ops.socket (opsSpawner), never as a child of the portal. A shell and file tools that its guard keeps to its scratch
+   * folder, the portal's state read-only (list_machines, list_sandboxes, system_status) and its own wake_me, no plugins,
+   * skills, web tools or connectors, on the orchestrators' account, with a spend cap per process.
+   */
+  readonly opsOptions: OptionsFactory = (info: SessionInfo): Options => {
+    const belt = beltFor('ops', this.toolSpecs('orchestrator', this.dispatcherActor, { role: 'ops', sessionId: info.id }));
+    return {
+      cwd: OPS_PATHS.scratch,
+      model: info.model ?? OPS_LIMITS.model,
+      effort: info.effort ?? OPS_LIMITS.effort,
+      settingSources: [],
+      tools: ['Bash', 'Read', 'Glob', 'Grep', 'Write', 'Edit'],
+      allowedTools: ['Bash', 'Read', 'Glob', 'Grep', 'Write', 'Edit', 'mcp__portal'],
+      disallowedTools: ['WebFetch', 'WebSearch', 'Task', 'Agent', 'Skill', 'NotebookEdit'],
+      mcpServers: { portal: createSdkMcpServer({ name: 'portal', version: '1.0.0', tools: belt.map((t) => sdkTool(t.name, t.description, t.schema, t.handler)) }) },
+      settings: { autoMemoryEnabled: false, disableClaudeAiConnectors: true },
+      hooks: { PreToolUse: [{ hooks: [opsGuard()] }] },
+      maxBudgetUsd: OPS_LIMITS.budgetUsd,
+      env: hostProcessEnv(this.cfg, 'orchestrator'),
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: opsBrief(this.cfg.ownerName) },
+      spawnClaudeCodeProcess: opsSpawner(),
+    };
+  };
 
   readonly orchestratorOptions: OptionsFactory = (info: SessionInfo): Options => {
     const owner = this.orchestrators.ownerOf(info);
