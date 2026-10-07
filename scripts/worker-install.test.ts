@@ -12,13 +12,13 @@ import { installScript, taskName, uninstallScript } from '../server/machineDeplo
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
-import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, playerFolders, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
 import { runElevatedSteps } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
-const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', slots: 8, maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
+const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
 const GOOD: Facts = {
   platform: 'win32',
   elevated: false,
@@ -67,7 +67,9 @@ test('worker install: every missing prerequisite is named before anything change
   assert.match(bad({ credentialId: undefined }), /not a machine credential/);
   assert.match(bad({ serviceElsewhere: 'the FFFactoryDaemon task runs D:\\work\\.ff-factory' }), /move it into a root with migrate/);
   assert.match(bad({ loggedOn: false }), /nobody is logged on/);
-  assert.match(bad({}, { slots: 0 }), /--slots must be a whole number from 1 to 32/);
+  const four = { ok: true as const, me: { id: 'lothdesktop', online: true, agents: [], sandboxes: ['slot1', 'slot2', 'slot3', 'slot4'] } };
+  assert.match(bad({ portal: four }, { maxSandboxes: 3 }), /--max-sandboxes 3 is below the 4 sandboxes there \(slot1, slot2, slot3, slot4\): delete 1 first/);
+  assert.deepEqual(preflightProblems({ ...GOOD, portal: four }, { ...OPTS, maxSandboxes: 4 }), [], 'as many as there are is fine (w576)');
   assert.equal(preflightProblems({ ...GOOD, elevated: true, git: [2, 1], gitLfs: false }, OPTS).length, 3, 'all of them at once');
 });
 
@@ -139,7 +141,8 @@ test('worker portal record: a new root is the daemon\'s to say; a rollback gives
   assert.equal(m.root, 'F:\\ffw');
   assert.equal(m.sandboxRoot, 'F:\\ffw\\sandboxes');
   assert.equal(m.repoPath, 'F:\\ffw\\repo');
-  assert.equal(m.maxSandboxes, 5, 'the record\'s limits stay');
+  assert.equal(m.maxSandboxes, 3, "its sandbox count is its installer's (w576: the installer also makes the player-folder pairs)");
+  assert.equal(m.maxUnity, 2, 'a limit the record lacks comes from the daemon');
   assert.deepEqual(m.preRoot, { appDir: 'C:\\Users\\r\\.ff-factory', repoPath: 'C:\\ffsb\\_base', tempDir: undefined, sandboxRoot: 'F:\\ffsb', librarySeed: 'F:\\ffsb\\_seed\\Library' });
   m.sandboxRoot = 'G:\\elsewhere';
   assert.equal(adoptLayout(m, layout), false, 'the same root again: the record (add_machine) wins');
@@ -382,5 +385,30 @@ test('worker install: the key file itself: made with its folder, the key in once
     assert.equal(revokeIn(path.join(home, 'none'), BLOB), 0);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("worker install: each sandbox owns two player folders, and a new count adds or removes pairs (w576)", () => {
+  assert.deepEqual(playerFolders(2), ['slot1-0', 'slot1-1', 'slot2-0', 'slot2-1']);
+  assert.equal(playerFolders(5).length, 10);
+  const players = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-players-'));
+  try {
+    // LothDesktop before: the old pool slot0..slot7, one with a leftover build and its lease files.
+    for (let k = 0; k < 8; k++) fs.mkdirSync(path.join(players, `slot${k}`, 'leases'), { recursive: true });
+    fs.writeFileSync(path.join(players, 'slot0', 'slot.json'), '{}');
+    fs.writeFileSync(path.join(players, 'pool.lock'), '');
+    const lines: string[] = [];
+    const first = syncPlayerFolders(players, playerFolders(5), (l) => lines.push(l));
+    assert.equal(first.made.length, 10);
+    assert.deepEqual(first.removed.sort(), ['slot0', 'slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6', 'slot7']);
+    assert.deepEqual(fs.readdirSync(players).sort(), ['pool.lock', ...playerFolders(5)].sort(), 'other files stay');
+    // Lowered to 4 sandboxes: slot5's pair goes; the rest are kept as they are.
+    fs.writeFileSync(path.join(players, 'slot1-0', 'slot.json'), '{"sha":"a"}');
+    const second = syncPlayerFolders(players, playerFolders(4), (l) => lines.push(l));
+    assert.deepEqual([second.made, second.removed.sort(), second.kept], [[], ['slot5-0', 'slot5-1'], []]);
+    assert.equal(fs.readFileSync(path.join(players, 'slot1-0', 'slot.json'), 'utf8'), '{"sha":"a"}');
+    assert.deepEqual(lines, []);
+  } finally {
+    fs.rmSync(players, { recursive: true, force: true });
   }
 });

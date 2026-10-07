@@ -95,6 +95,7 @@ export interface Manifest {
   platform: 'win32' | 'darwin';
   /** The scheduled task (Windows) or LaunchAgent label (Mac) that runs the daemon. */
   service: string;
+  /** Player-folder pairs: one per sandbox (players/slotK-0 and slotK-1, K = 1..slots; w576). */
   slots: number;
   repoUrl: string;
   /** A test install's firewall group suffix (firewall.ps1 -GroupSuffix). */
@@ -146,7 +147,6 @@ export interface InstallOptions {
   maxSandboxes: number;
   maxAgentsPerSandbox: number;
   maxUnity: number;
-  slots: number;
   repoUrl: string;
   /** Windows task name or Mac LaunchAgent label; a second install on one computer (a test root) uses its own. */
   service: string;
@@ -333,7 +333,7 @@ export interface Facts {
 }
 
 /** Every reason the install cannot go ahead, from facts gathered without changing anything. Exported for tests. */
-export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'slots' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
+export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
   const p: string[] = [];
   if (f.platform !== 'win32' && f.platform !== 'darwin') p.push(`this tool installs on Windows and macOS, not ${f.platform}`);
   if (f.platform === 'win32' && f.elevated && !o.owner) p.push('run it from a normal (not administrator) PowerShell: files an elevated shell makes belong to Administrators, and git then refuses the clone; the one step that needs admin rights (the firewall rules) asks for them itself');
@@ -352,10 +352,14 @@ export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'po
   else if (!f.portal.ok) p.push(f.portal.error);
   else if (f.credentialId && f.portal.me.id !== f.credentialId) p.push(`the portal says this credential is machine ${f.portal.me.id}, not ${f.credentialId}`);
   if (!f.credentialId) p.push('the credential is not a machine credential (it starts ffm_<machine id>_)');
+  // The count sets the player-folder pairs (w576): lowering it below the sandboxes there would leave one without its pair.
+  const there = f.portal.ok ? f.portal.me.sandboxes : [];
+  if (there.length > o.maxSandboxes) {
+    p.push(`--max-sandboxes ${o.maxSandboxes} is below the ${there.length} sandboxes there (${there.join(', ')}): delete ${there.length - o.maxSandboxes} first (delete_sandbox)`);
+  }
   if (f.serviceElsewhere) p.push(`a daemon is already installed here (${f.serviceElsewhere}); move it into a root with migrate, or pick another --service for a second install`);
   if (f.platform === 'win32' && f.loggedOn === false) p.push('nobody is logged on to this PC\'s desktop: the daemon runs in the interactive session (the Claude login, the GPU Unity needs)');
   for (const [k, v, lo, hi] of [
-    ['slots', o.slots, 1, 32],
     ['max-sandboxes', o.maxSandboxes, 1, 20],
     ['max-agents-per-sandbox', o.maxAgentsPerSandbox, 1, 6],
     ['max-unity', o.maxUnity, 1, 8],
@@ -617,9 +621,49 @@ async function giveRoot(l: Layout, owner: string) {
 
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */
 /** firewall.ps1's arguments (the elevated step adds -LogFile). */
+/**
+ * The player folders of a worker root install: each sandbox slotK (K = 1..sandboxes) owns players/slotK-0 (peer 0,
+ * the host) and slotK-1 (peer 1, the client), and runs its built players only from those (lothsahn, w576; the firewall
+ * rules name exactly these paths; scripts/nightly/player_slots.py picks them from the sandbox it runs in). Exported for tests.
+ */
+export function playerFolders(sandboxes: number): string[] {
+  const out: string[] = [];
+  for (let k = 1; k <= sandboxes; k++) out.push(`slot${k}-0`, `slot${k}-1`);
+  return out;
+}
+
+/**
+ * Make the player folders `keep` and remove the other slot folders (slotN, slotN-P) under `players`: a smaller sandbox
+ * count, or the old slot0..7 pool. One a player still runs from cannot be moved aside and stays, said. Exported for tests.
+ */
+export function syncPlayerFolders(players: string, keep: string[], log: (line: string) => void = say): { made: string[]; removed: string[]; kept: string[] } {
+  const out = { made: [] as string[], removed: [] as string[], kept: [] as string[] };
+  fs.mkdirSync(players, { recursive: true });
+  for (const name of keep) {
+    if (!fs.existsSync(path.join(players, name))) out.made.push(name);
+    fs.mkdirSync(path.join(players, name), { recursive: true });
+  }
+  const want = new Set(keep.map((k) => k.toLowerCase()));
+  for (const e of fs.readdirSync(players, { withFileTypes: true })) {
+    if (!e.isDirectory() || !/^slot\d+(-\d+)?$/i.test(e.name) || want.has(e.name.toLowerCase())) continue;
+    const from = path.join(players, e.name);
+    const trash = path.join(players, `${e.name}.removed-${Date.now()}`);
+    try {
+      fs.renameSync(from, trash); // fails on Windows while a player runs from it, before anything is deleted
+    } catch (err) {
+      out.kept.push(e.name);
+      log(`Kept ${from}: ${(err as NodeJS.ErrnoException).code ?? 'in use'} (a player may still run from it); run the installer again once it ends.`);
+      continue;
+    }
+    fs.rmSync(trash, { recursive: true, force: true });
+    out.removed.push(e.name);
+  }
+  return out;
+}
+
 function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): string[] {
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
-  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Count', String(slots), ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
+  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Pairs', String(slots), ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
 }
 
 /**
@@ -757,7 +801,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     portalUrl: o.portalUrl,
     platform: isWin ? 'win32' : 'darwin',
     service: o.service,
-    slots: o.slots,
+    slots: o.maxSandboxes,
     repoUrl: o.repoUrl,
     ...(o.firewallSuffix ? { firewallSuffix: o.firewallSuffix } : {}),
     createdAt: prev?.createdAt ?? now,
@@ -765,7 +809,8 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     outside: prev?.outside ?? [],
   };
   writeManifest(l.root, m);
-  for (let k = 0; k < o.slots; k++) fs.mkdirSync(path.join(l.players, `slot${k}`), { recursive: true });
+  const pf = syncPlayerFolders(l.players, playerFolders(o.maxSandboxes));
+  say(`Player folders: ${playerFolders(o.maxSandboxes).length} (slot1-0..slot${o.maxSandboxes}-1)${pf.made.length ? `, ${pf.made.length} made` : ''}${pf.removed.length ? `; removed ${pf.removed.join(', ')}` : ''}${pf.kept.length ? `; still in use: ${pf.kept.join(', ')}` : ''}.`);
 
   // 2. The credential, owner-only.
   // The folder first: a file written after inherits its owner-only rights (and one from an earlier run gets them back).
@@ -813,11 +858,11 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   if (isWin && o.firewall) {
     const editors = unityEditors(f.probe.home);
     const sfx = o.firewallSuffix ? ` ${o.firewallSuffix}` : '';
-    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.slots} slots under ${l.players}` });
+    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.maxSandboxes} sandboxes' player folders (slot1-0..slot${o.maxSandboxes}-1) under ${l.players}` });
     if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP + sfx, note: editors.join('; ') });
     if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
-    steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.slots, editors, o.firewallSuffix) });
+    steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.maxSandboxes, editors, o.firewallSuffix) });
   } else if (isWin) say('Skipped the firewall rules (--no-firewall): players will prompt on first start.');
   if (steps.length) {
     say(`${steps.map((s) => (s.kind === 'firewall' ? 'Windows Firewall: adding the rules' : "the portal's ssh key into administrators_authorized_keys")).join(', and ')} (one administrator prompt)...`);
@@ -835,7 +880,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     // A Mac has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
     const cfg = macSlotConfig();
     fs.mkdirSync(path.dirname(cfg), { recursive: true });
-    fs.writeFileSync(cfg, JSON.stringify({ root: l.players, count: o.slots }, null, 2) + '\n');
+    fs.writeFileSync(cfg, JSON.stringify({ root: l.players, layout: 'sandbox-pairs', count: o.maxSandboxes }, null, 2) + '\n');
     noteOutside(m, { kind: 'file', name: cfg, note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
   }
@@ -1184,7 +1229,7 @@ async function readCredential(): Promise<string> {
 
 const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
-            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
+            [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
             [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
             [--seed-from <a local clone of the game repo> (its origin branches seed the root's clone: no download, and no
              GitHub credential, which an ssh session does not have)]
@@ -1209,7 +1254,6 @@ export async function main(argv = process.argv.slice(2)) {
       maxSandboxes: num('max-sandboxes', 3),
       maxAgentsPerSandbox: num('max-agents-per-sandbox', 2),
       maxUnity: num('max-unity', 2),
-      slots: num('slots', 8),
       repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
       service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
       firewall: !flags.has('no-firewall'),
@@ -1250,8 +1294,7 @@ export async function main(argv = process.argv.slice(2)) {
           maxSandboxes: num('max-sandboxes', 3),
           maxAgentsPerSandbox: num('max-agents-per-sandbox', 2),
           maxUnity: num('max-unity', 2),
-          slots: num('slots', 8),
-          repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
+              repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
           service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
           firewall: !flags.has('no-firewall'),
           noCleanup: flags.has('no-cleanup'),

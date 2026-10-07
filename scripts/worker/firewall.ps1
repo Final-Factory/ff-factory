@@ -3,12 +3,13 @@
   The worker install's Windows Firewall rules (w513, docs/worker-install.md): run elevated by scripts/worker/worker.ts.
 
 .DESCRIPTION
-  Built players run only from <Root>\slotK\player\finalfactory.exe (K = 0..Count-1; scripts/nightly/player_slots.py),
-  so each slot path needs its rules once. This adds, per slot, allow rules for inbound and outbound, TCP and UDP, on
+  Built players run only from <Root>\slotK-P\player\finalfactory.exe: each sandbox slotK (K = 1..Pairs) owns slotK-0
+  (peer 0, the host) and slotK-1 (peer 1, the client) (w576; scripts/nightly/player_slots.py, layout sandbox-pairs),
+  so each of those paths needs its rules once. This adds, per player folder, allow rules for inbound and outbound, TCP and UDP, on
   every profile, in the group "Final Factory player slots" (the group scripts/nightly/setup_player_slot_firewall.ps1
   uses too), after deleting rules an earlier prompt left for those exact paths (a dismissed prompt leaves Block rules,
   and a block outranks an allow). -UnityExe adds the same for the Unity editors (play mode's networking), in the
-  group "Final Factory Unity editors". It records Root and Count in %ProgramData%\FinalFactory\player-slots.json,
+  group "Final Factory Unity editors". It records Root, the layout and the count (Pairs) in %ProgramData%\FinalFactory\player-slots.json,
   where player_slots.py finds the slots outside the daemon (a CI runner, a person's shell).
 
   -Remove deletes both groups' rules, and the config file if it points at -Root.
@@ -16,7 +17,8 @@
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Root,
-    [int]$Count = 8,
+    # The machine's sandbox count: player folders slot1-0..slot<Pairs>-1.
+    [int]$Pairs = 1,
     [string]$UnityExe = '',
     [switch]$Remove,
     [string]$LogFile = '',
@@ -76,8 +78,10 @@ try {
         exit 0
     }
     $made = 0
-    for ($k = 0; $k -lt $Count; $k++) {
-        $made += Add-Allow (Join-Path $Root "slot$k\player\finalfactory.exe") "Final Factory player slot$k" $SlotGroup 'Worker player slot (scripts/nightly/player_slots.py, w513)'
+    for ($k = 1; $k -le $Pairs; $k++) {
+        foreach ($p in 0, 1) {
+            $made += Add-Allow (Join-Path $Root "slot$k-$p\player\finalfactory.exe") "Final Factory player slot$k-$p" $SlotGroup "Sandbox slot$k's player $p (scripts/nightly/player_slots.py, w576)"
+        }
     }
     $editors = 0
     foreach ($exe in @($UnityExe -split ';' | Where-Object { $_ })) {
@@ -86,9 +90,9 @@ try {
     }
     if (-not $GroupSuffix) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
-        [IO.File]::WriteAllText($Config, (@{ root = $Root; count = $Count } | ConvertTo-Json))
+        [IO.File]::WriteAllText($Config, (@{ root = $Root; layout = 'sandbox-pairs'; count = $Pairs } | ConvertTo-Json))
     }
-    Say "OK: $made allow rule(s): $Root\slot0..slot$($Count - 1)\player\finalfactory.exe and $editors Unity editor(s)$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
+    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1\player\finalfactory.exe ($(2 * $Pairs) player folders) and $editors Unity editor(s)$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
 } catch {
     Say "FAILED: $($_.Exception.Message)"
     exit 1
