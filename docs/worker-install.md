@@ -157,7 +157,8 @@ reinstalling beast and m5 on 2026-10-07, f3f19c0 → 9ea8476):
   against elevated runs stays: its purpose is that files an elevated shell makes belong to Administrators and the
   daemon's non-elevated git then refuses the clone. Giving them back to the task's user is what removes that risk.
   An administrator prompt nobody can answer (a session that is not elevated and has no console) is skipped: the
-  firewall rules and the portal's key that the install made stay.
+  firewall rules and the portal's key that the install made stay. The firewall rules and the portal's ssh are kept
+  as the install made them (`root.json` lists both); `--no-firewall` and `--no-ssh` leave them out.
 - **On a Mac, the PATH keeps its order.** The new LaunchAgent plist keeps the old plist's PATH entries first, in their
   order, and adds only folders that are new. m5's `~/.unity/bin` had moved to the end. On Windows the task carries no
   environment of its own (its XML has a user and an action only), so there is nothing there to keep. The task's user

@@ -530,6 +530,12 @@ test('worker update (w613): every tuned setting is carried unless a flag changes
   assert.ok(diff.includes('~ sandboxes.maxSandboxes: 3 -> 4'), diff.join('\n'));
   assert.ok(!diff.some((d) => /maxAgents\b|protectedPaths|librarySeed|editorPriority|blockClone|hostGuard/.test(d)), diff.join('\n'));
   assert.deepEqual(settingsDiff({ token: 'a', x: 1 }, { token: 'b', x: 1 }), [], 'a token is never shown, not even as changed');
+  // The firewall rules and the portal's ssh as the install made them (root.json's outside list), or as a flag says.
+  assert.deepEqual([o.firewall, o.ssh], [false, false], 'a test install with --no-firewall --no-ssh stays without them');
+  const made = { ...BEAST_ROOT, outside: [{ kind: 'firewall-group', name: 'Final Factory player slots' }, { kind: 'authorized-key', name: 'C:\\ProgramData\\ssh\\administrators_authorized_keys' }] } as Manifest;
+  const real = planUpdate(root, made, BEAST_CONFIG, BEAST_TOKEN, {});
+  assert.deepEqual([real.firewall, real.ssh], [true, true], 'a real install keeps its rules and its key');
+  assert.equal(planUpdate(root, made, BEAST_CONFIG, BEAST_TOKEN, { ssh: false }).ssh, false);
   // Elevated on Windows: the task's user gets what it makes.
   assert.equal(planUpdate(root, BEAST_ROOT, BEAST_CONFIG, BEAST_TOKEN, { owner: '*S-1-5-21-1' }).owner, '*S-1-5-21-1');
   assert.deepEqual(
