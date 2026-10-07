@@ -164,7 +164,7 @@ const pathKey = (p: string, platform: UnityPlatform) => (platform === 'win32' ? 
 /** A request for slots, as its file says and the arbiter found it. */
 export interface SlotRequest {
   id: string;
-  /** Who asks: "sandbox:<id>", "main", or "pid:<pid>". A holder's requests share its priority. */
+  /** Who asks: "sandbox:<id>" or "pid:<pid>". A holder's requests share its priority. */
   holder: string;
   count: number;
   /** The process that waits and holds (its Unity processes are found under it). */
@@ -179,7 +179,7 @@ export interface SlotRequest {
   denied?: string;
 }
 
-/** A place the daemon knows: a sandbox ("sandbox:<id>") or the main clone ("main"), and whether its editor is up. */
+/** A place the daemon knows: a sandbox ("sandbox:<id>"; no main-clone place since w536), and whether its editor is up. */
 export interface Place {
   holder: string;
   path: string;
@@ -213,7 +213,7 @@ export interface Assessment {
   unity: UnityProcess[];
   interactive: number;
   batch: number;
-  /** Unity processes no sandbox, main clone or slot holder accounts for: started outside the gate. */
+  /** Unity processes no sandbox or slot holder accounts for (a person's own editor among them): started outside the gate. */
   outside: UnityProcess[];
   players: number;
   overLimit: boolean;
@@ -240,7 +240,7 @@ function ancestorIn(ppid: number, byPid: Map<number, Proc>, wanted: Set<number>)
  * Count every Unity editor and decide which waiting requests get their slots now. Pure: the arbiter writes the files.
  *
  * Counting: each top-level Unity process belongs to the request whose process started it (its nearest requesting
- * ancestor, or a project the request named), else to the sandbox or main clone whose project it has open, else to
+ * ancestor, or a project the request named), else to the sandbox whose project it has open, else to
  * nobody (outside, 1 each). A request's process counts its granted slots or its Unity processes, whichever is larger;
  * a sandbox its running editor or its processes; so Unity started outside the gate always counts.
  *

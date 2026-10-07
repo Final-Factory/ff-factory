@@ -233,7 +233,7 @@ entirely, so `ff-local-backups` is no longer needed.
   `D:\work\FFFRepo\Library` (docs/machines.md "Warm Library"). Its installer copies that Library once, read-only, into
   `seed/Library`, or the first sandbox imports cold (many minutes, as the brief warns) and becomes the seed. The
   one-time script reimport after a copy stays (`machine/scriptReimport.ts`).
-- **Daemon code a person's clone no longer needs** (removal is M, after w510; see 5.2):
+- **Daemon code a person's clone no longer needs** (removed in w536, 2026-10-06; the line numbers below are from before; see 5.2):
   - `machine/daemon.ts`: main-clone limits (`:917-925`), its editor and watch (`MacUnity(cfg.repoPath)`, `:216`,
     `:228`), its Unity slot holder `main` (`:714-716`, `:1115-1118`), its MCP place `_main-clone` (`:371`;
     `machine/unityMcp.ts:13-14`), its git status (`:768`), its branch switch (`:1071-1072`), its stale-output place
@@ -503,7 +503,7 @@ its admin entry, which step 4 never removed. Everything copied was a copy.
 | 1 | The root as the daemon's one setting: `root.json`, derived defaults for `app_dir`, `sandbox_root`, `temp_dir`, the seed, slots, nightly, agents; the machine record and `list_machines` show the root | `machine/daemon.ts:43-90,123-126`, `shared/types.ts`, `server/machines.ts:69-113,733-793`, `server/machineDeploy*.ts` | M |
 | 2 | The env block in `run-daemon.ps1` and the plist | `server/machineDeployWin.ts:354-470`, `server/machineDeploy.ts:187-190` | S |
 | 3 | `repo/` as a bare clone; the pool's git against it; the seed as the Library source | `machine/sandboxes.ts:107-117,162-172,325-329,468-489` | M |
-| 4 | Remove the main-clone code (2.3 list). Done for the portal and the guard and for the daemon's start check (w536: no worker outside a sandbox, `max_agents` gone, one agent cap); the daemon's main-clone editor, watch, MCP place, slot place and git status follow | `machine/daemon.ts`, `machine/unityMcp.ts`, `server/guard.ts`, `server/machines.ts`, `server/standing.ts`, `server/placement.ts`, `server/agents.ts` | M |
+| 4 | Remove the main-clone code (2.3 list). Done (w536): the portal and the guard, the daemon's start check (no worker outside a sandbox, `max_agents` gone, one agent cap), and the daemon's main-clone editor, watch, MCP place, slot place, git status, branch switch, stale-output place and image gallery | `machine/daemon.ts`, `machine/unityMcp.ts`, `server/guard.ts`, `server/machines.ts`, `server/standing.ts`, `server/placement.ts`, `server/agents.ts` | M |
 | 5 | `unityMcpServer` written at install; `.claude.json` read from `CLAUDE_CONFIG_DIR` | `machine/unityMcp.ts:29-41` | S |
 | 6 | The token out of `daemon.json` into `secrets/`; `patchDaemonConfig` unchanged otherwise | `machine/daemon.ts:113,1229`, `server/machineDeploy.ts:416` | S |
 | 7 | Guards: protected paths and secrets from the root (`daemon/`, `secrets/`, `claude/`) instead of the `.ff-factory` spellings; the player-path rule (2.5) | `server/guard.ts`, `server/secretGuard.ts:167-177` | S-M |

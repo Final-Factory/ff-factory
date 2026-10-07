@@ -127,8 +127,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
     in `welcome.maxSessions` (the field kept, so an older daemon keeps working), and standing runs wait for it.
   - `max_agents` on an old machine record is dropped at start, with one notice for all of them; a `daemon.json` that
     still has `maxSessions` is logged as obsolete once, and deploys and worker installs no longer write it.
-  - The daemon's main-clone editor, watch, MCP place, slot place and git status stay for now (docs/worker-root.md
-    change 4 follows).
+  - The daemon manages nothing in the main clone either: its editor and hang/crash watch, its Unity MCP place
+    (`MAIN_CLONE`) and Unity slot place and holder (`main`), its git status report, its branch switch, its stale-output
+    place and its image gallery are gone; `unity` and `switch` without a sandbox are answered with a refusal, and a
+    standing agent gets no UnityMCP or slot holder. The machine page's Screenshots button (the main clone's gallery)
+    is gone, and its git line shows only what an older daemon sent.
 
 - **The portal no longer runs workers, sandboxes, Unity editors or standing agents itself; machine daemons do** (w510,
   asked by Lothsahn, 2026-10-06: "Let's just delete that and all the code around running portal processes directly

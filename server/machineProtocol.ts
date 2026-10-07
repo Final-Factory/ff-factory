@@ -84,6 +84,9 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
 /** rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner. */
 export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit';
 
+/** The refusal of unity and switch on a machine's main clone, by the portal and by the daemon (w536). */
+export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";
+
 export type ToDaemon =
   /**
    * First message after connecting: the portal's sessions on this machine and where their transcripts end.

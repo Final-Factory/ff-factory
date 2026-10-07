@@ -290,7 +290,12 @@ the next pass removes.
 `<temp>/ffa-<session>` (under the machine's `temp_dir` when it has one), as TMP, TEMP and TMPDIR. (`sessionTempEnv`, set by
 the daemon, `machine/daemon.ts`; the portal's orchestrators never had one, and its own workers, which did, are gone
 since w510.) It goes
-when the session is removed, and two hours after the session stopped otherwise. The worker and machine
+when the session is removed, and two hours after the session stopped otherwise. One exception on Windows (w603):
+the folder Git Bash maps `/tmp` to. Git for Windows mounts `/tmp` at the Windows temp folder of the user's first MSYS
+process and keeps that mount while any MSYS process of the user runs, so it is often some agent's `ffa-<session>`;
+removing it makes every bash print `could not find /tmp, please create!`. The daemon asks `cygpath -w /tmp` every
+5 minutes and before each clean-up pass, keeps that folder, and makes it again if anything removed it
+(`server/gitBashTmp.ts`). The worker and machine
 briefs tell agents to put builds, recordings and screenshot sets there and to delete them once reported.
 
 **Visibility.** Every pass appends one line to `cleanup-log.jsonl` (the app's `dataDir` on the host, the
