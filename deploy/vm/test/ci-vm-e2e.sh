@@ -397,13 +397,16 @@ out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
 printf '%s' "$out" | matches 'ran out' || fail "the worker's fffctl update took a grant that ran out: $out"
 g 'test ! -e /srv/fff/data/ops-deploy.grant' || fail "a grant that ran out was not removed"
 grant "$(date -u -d '+10 min' +%FT%TZ)"
+since=$(g 'date +%s')
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
 echo "$out"
 printf '%s' "$out" | matches "deploy asked for by ci; the portal runs .* at commit $want" || fail "the worker's deploy did not say what it started from: $out"
 g 'test ! -e /srv/fff/data/ops-deploy.grant' || fail "the deploy grant was not used up"
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
 printf '%s' "$out" | matches 'no deploy was asked for' || fail "a deploy grant worked twice: $out"
-wait_for 600 "the worker's update request finished (already up to date)" g 'test ! -e /srv/fff/data/update.wanted && ! systemctl is-active --quiet fff-update.service'
+# Finished means fff-update ran for it and ended, not only that it is idle now (the path unit may not have fired yet): a
+# request still running would answer the next step's update for it.
+wait_for 600 "the worker's update request finished (already up to date)" g "test ! -e /srv/fff/data/update.wanted && ! systemctl is-active --quiet fff-update.service && journalctl -u fff-update.service --since @$since -o cat --no-pager | grep -E 'Deactivated successfully|Finished|Failed with result' >/dev/null"
 wait_for 300 "the portal answers after the worker's update request" health
 [ "$(sha_of)" = "$want" ] || fail "the portal does not run $want after the worker's update request"
 g 'rm -f /tmp/fff-ops-sock.js'
