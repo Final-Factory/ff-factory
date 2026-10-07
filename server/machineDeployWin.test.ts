@@ -280,6 +280,10 @@ test('mac: start, stop, restart and uninstall of the LaunchAgent', () => {
   assert.doesNotMatch(macControlScript('stop'), /rm -f/, 'a stop keeps the plist: the daemon loads again at the next login');
   assert.match(macControlScript('restart'), /kickstart -k gui\/\$\(id -u\)\/com\.fffactory\.daemon/);
   assert.match(macControlScript('uninstall'), /rm -f "\$HOME\/Library\/LaunchAgents\/com\.fffactory\.daemon\.plist"/);
+  // w605: a stop or uninstall ends this daemon's agent hosts; a restart leaves them for the next daemon.
+  assert.match(macControlScript('stop', 'com.fffactory.daemon', "/Users/o'b/ffw/daemon/"), /pkill -f '\/Users\/o'\\''b\/ffw\/daemon\/app\/machine\/agentHost\.ts' 2>\/dev\/null \|\| true/);
+  assert.match(macControlScript('uninstall'), /pkill -f "\$HOME\/\.ff-factory\/app\/machine\/agentHost\.ts"/);
+  assert.doesNotMatch(macControlScript('restart'), /pkill/);
 });
 
 test('daemon: keeps the machine awake with caffeinate on a Mac, SetThreadExecutionState on Windows, nothing elsewhere', () => {

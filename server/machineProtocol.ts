@@ -158,6 +158,8 @@ export type FromDaemon =
       type: 'hello';
       protocol: number;
       oldestPortal?: number;
+      /** Its agents run in agent hosts that outlive it (w605, machine/agentHost.ts): a restart of it stops none. */
+      agentHosts?: boolean;
       info: NonNullable<Machine['info']>;
       home: string;
       live: string[];

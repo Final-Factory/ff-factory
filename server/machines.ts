@@ -585,7 +585,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean }>();
 
   /** Whether a connected machine's daemon runs the host guard (w466): its hello said so. */
   guards(id: string): boolean {
@@ -597,6 +597,11 @@ export class MachineManager {
   /** The commit this portal runs (a deploy stamps the daemon with the same): another one only means an update is available. */
   portalHead: string | undefined = gitHead(ROOT);
   private readonly reportedOutdated = new Map<string, string>();
+
+  /** Whether a connected daemon runs its agents in agent hosts that outlive it (w605): its hello said so. */
+  agentHostsOf(id: string): boolean {
+    return this.isOnline(id) && !!this.hellos.get(id)?.agentHosts;
+  }
 
   /** The protocol a connected daemon said hello with, or undefined. */
   protocolOf(id: string): number | undefined {
@@ -1133,7 +1138,9 @@ export class MachineManager {
     refuseInDryRun(`a daemon ${action} on ${m.id}`);
     if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
     const live = this.liveCount(m.id);
-    if (action !== 'start' && live > 0 && !force) throw new Error(`${m.id} has ${live} agent(s) running; a daemon ${action} stops them. Stop them first or pass force.`);
+    // A daemon whose agents run in agent hosts (w605) restarts without stopping them; a stop still ends them.
+    const keeps = action === 'restart' && this.agentHostsOf(m.id);
+    if (action !== 'start' && live > 0 && !force && !keeps) throw new Error(`${m.id} has ${live} agent(s) running; a daemon ${action} stops them. Stop them first or pass force.`);
     // A stop is on purpose: its agents stay stopped. A restart resumes the ones it cut off mid-turn.
     if (action !== 'start') this.expectDrop(m.id, action === 'stop' ? false : 'was restarted (machine_daemon restart)');
     const { controlDaemon } = await import('./machineDeploy.ts');
@@ -1389,7 +1396,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}) });
         if (!msg.guard) delete m.guard;
         // Its daemon runs and reached us: an install or connection error from before is over (a deploy in progress
         // settles the status itself). A 'deploying' left by a portal restart mid-deploy is over too.

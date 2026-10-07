@@ -110,6 +110,7 @@ test('w605: an agent mid-turn outlives its daemon being killed, the next daemon 
   sessions.events.on('turnEnd', (_s: SessionHandle, text: string) => turnEnds.push(text));
   const d1 = daemon();
   await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined, 60_000, logs);
+  assert.ok(mm.agentHostsOf('mx'), 'its hello says its agents outlive it');
 
   const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   const id = s.info.id;

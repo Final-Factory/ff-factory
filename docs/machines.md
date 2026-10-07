@@ -223,6 +223,47 @@ protocol in the portal. Measured with it: between f3f19c0 and 9ea8476 the surfac
 optional `guard.ownCheckout`, which an older daemon reads as absent, so no bump. The daemon also leaves out any MCP tool
 its own code does not know, so a newer portal cannot crash an older daemon's launch.
 
+### Agents outlive their daemon
+
+(w605, lothsahn: "can we make it so that the install doesn't require shutting down running jobs, and it can just attach
+back to them?") Each agent process runs in an **agent host** (`machine/agentHost.ts`): a node process of its own that
+the daemon starts detached, which runs the AgentSession (the Agent SDK's query, its permission prompts, the guard hooks)
+and so the `claude` process and everything it starts. A daemon restart, an update, a reinstall or a daemon crash leaves
+it running, mid-turn or idle. The next daemon takes it back.
+
+- **Why detached** (measured on BEAST, 2026-10-07, with a throwaway scheduled task): the daemon's whole tree runs
+  inside Task Scheduler's job object, whose limits are none (no kill on close), and `Stop-ScheduledTask` ends only the
+  task's own process. What ended the agents was node itself: a plain child of node is in node's own kill-on-close job and
+  dies with it, while a `detached` child lives on. On a Mac a detached child gets a session and process group of its
+  own (setsid), so launchd's stop of the daemon's process group does not reach it (`launchd.plist(5)`,
+  `AbandonProcessGroup`; the same way the Unity editor outlives a daemon restart there).
+- **Files, not pipes.** The two talk only through append-only files in `<appDir>/hosts/<session id>/`, one writer
+  each: `in.jsonl` (the daemon's numbered commands: send, interrupt, stop, mode, decide, tool answers, the editor's
+  state), `out.jsonl` (everything the session records, in order: its record, transcript events with their seq set in
+  the host, images, deltas, signals, tool calls), `daemon.offset` (how far the daemon forwarded `out.jsonl` to the
+  portal), `host.json` (pid, host protocol) with `beat` (its heartbeat every 3 s), `state.json` (its last record),
+  `place.json` (its folder and sandbox) and `host.log`. A new daemon forwards exactly what the last one had not, so the
+  portal's transcript has no gap and no event twice.
+- **No secrets on disk.** The launch spec holds the run's tokens (vault), so it reaches the host on its stdin at
+  start and is never written down. A host therefore lives exactly as long as its agent process: through idle time
+  between turns, until the process ends (a stop, the portal's idle reap, the agent's own end). The next message then
+  starts a new host that resumes the conversation. Everything a host writes passes `redactValue` first.
+- **Tools** (`wake_me`, `unity`, attachments...) are asked of the daemon through the files and answered by the portal
+  as before. A tool call the old daemon took but never answered is asked again of the next one (`attach`).
+- **Adoption.** At its start, before its hello, the daemon reads `hosts/`: a host whose pid exists and whose heartbeat
+  is fresh is taken back and listed live in the hello (so the portal's `resumeCutOff` leaves it alone). One that is
+  gone has what it recorded forwarded, and its session is not live: the portal resumes it with its conversation if it was
+  mid-turn (as for any agent cut off), and its next message starts a new host otherwise. A host of another host protocol
+  (`HOST_PROTOCOL`) is left running and not adopted.
+- **Stops.** `Stop-FFDaemon` (Windows) spares the agent hosts and what they run, as it spares Unity, unless `-Agents`:
+  a reinstall and a restart (`installScript`, `machine_daemon restart`) keep them, and a stop and the uninstall end them.
+  On a Mac `launchctl bootout` stops only the daemon; a stop and the uninstall then `pkill` this daemon's hosts. The
+  portal lets a daemon that says `agentHosts` in its hello restart while agents run (`controlDaemon`).
+- `agentHosts: false` in daemon.json runs agents inside the daemon as before (they end with it).
+- Tests: `server/agentHost.test.ts` runs a real daemon process and real hosts with the scripted fake agent, kills the
+  daemon mid-turn and starts another (Linux and Windows in the checks job, macOS in its own job), and kills a host to
+  see its agent resumed. `machineDeployWin.test.ts` runs the real `Stop-FFDaemon` against stand-in processes.
+
 ## Windows machines
 
 A Windows PC is a machine like a Mac: same daemon, same protocol, same guard, same tools. `add_machine`

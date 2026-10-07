@@ -710,6 +710,7 @@ export class Daemon {
       protocol: PROTOCOL_VERSION,
       // The oldest portal it serves (w605): a daemon updated before its portal keeps working with it.
       oldestPortal: OLDEST_PORTAL_PROTOCOL,
+      ...(this.hosted ? { agentHosts: true } : {}),
       home: HOME,
       live: [...this.entries.values()].filter((e) => e.s.live).map((e) => e.s.info.id),
       // Its host guard runs (w466): the portal's own leaves this computer's sandbox drive to it.
