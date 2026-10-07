@@ -274,7 +274,7 @@ ReadWritePaths=$OPS_ROOT $FFF_ROOT -/run/fff -/var/lib/sudo
 # /run/sudo: sudo's own time stamps, on a private tmpfs (/run is read-only here).
 TemporaryFileSystem=/tmp:size=64M,mode=1777 /var/tmp:size=16M,mode=1777 /dev/shm:size=16M,mode=1777 /run/sudo:size=1M,mode=0711
 IPAddressDeny=any
-IPAddressAllow=localhost $OPS_ALLOW_NETS $resolvers
+IPAddressAllow=127.0.0.0/8 ::1/128 $OPS_ALLOW_NETS $resolvers
 MemoryMax=$OPS_MEMORY_MAX
 TasksMax=256
 CPUWeight=50

@@ -332,7 +332,7 @@ if g 'sudo -u fff-ops node /tmp/fff-ops-sock.js' 2>/dev/null | matches '^OK'; th
 # Kept for the update step below: the worker's way in must survive the portal's restart.
 # The unit's own fences, as installed.
 unit=$(g 'systemctl cat fff-ops@.service' || true)
-for want in 'User=fff-ops' 'ProtectSystem=strict' 'IPAddressDeny=any' 'IPAddressAllow=localhost 160.79.104.0/23' 'TemporaryFileSystem=/tmp:size=64M' 'MemoryMax=' 'RuntimeMaxSec='; do
+for want in 'User=fff-ops' 'ProtectSystem=strict' 'IPAddressDeny=any' 'IPAddressAllow=127.0.0.0/8 ::1/128 160.79.104.0/23' 'TemporaryFileSystem=/tmp:size=64M' 'MemoryMax=' 'RuntimeMaxSec='; do
   printf '%s' "$unit" | matches -F "$want" || fail "fff-ops@.service has no $want"
 done
 # The same fences around a probe (the unit's own settings, as installed, on a transient unit): sudo's two wrappers work
