@@ -3,8 +3,10 @@
 **TL;DR:** A worker machine's daemon and everything its agents use live under one root folder, in any folder you pick.
 `scripts/worker/install.ps1` (Windows) or `install.sh` (macOS) installs it, `uninstall` removes it and proves nothing is
 left, and `migrate` moves a machine from today's scattered layout into a root (copy-first and verified, with rollback).
-Built players run only from the fixed slot paths `<root>/players/slotK/player/`, and Windows Firewall gets one rule
-set per slot, made once. The design and the inventory it rests on: [worker-root.md](worker-root.md). lothsahn's
+Built players run only from fixed player folders: each sandbox slotK owns `<root>/players/slotK-0/player/` (peer 0,
+the host) and `slotK-1/player/` (peer 1, the client), the nightly lab (no sandbox) owns `slotnightly-0` and
+`slotnightly-1`, and Windows Firewall gets one inbound rule per folder (w576).
+`--max-sandboxes N` makes the sandboxes' count and these N pairs together. The design and the inventory it rests on: [worker-root.md](worker-root.md). lothsahn's
 decisions of 2026-10-06 override it where they differ (listed at the end).
 
 ## The layout
@@ -18,7 +20,8 @@ decisions of 2026-10-06 override it where they differ (listed at the end).
   repo/                 the install's own bare clone of the game repo; every sandbox is a worktree of it
   sandboxes/<name>/     the sandboxes
   seed/Library/         the Library seed new sandboxes are warmed from
-  players/slot0..7/     the player slot pool (scripts/nightly/player_slots.py): FF_PLAYER_SLOT_ROOT for agents and scripts
+  players/slotK-0, -1/  each sandbox slotK's two player folders, K = 1..N, and slotnightly-0, -1 for the nightly lab
+                        (scripts/nightly/player_slots.py, layout sandbox-pairs, w576): FF_PLAYER_SLOT_ROOT for agents
   nightly/              the nightly lab: FF_NIGHTLY_ROOT
   scratch/              long-lived scratch; scratch/legacy/ holds what a migration archived
   tmp/                  agents' TMP, TEMP and TMPDIR (one ffa-<session> folder each)
@@ -77,10 +80,19 @@ check fails**, listing every problem with its fix:
 
 Then: the root and `root.json`; the credential into `secrets/`; a bare clone of the game repo (its own refspec, LFS on,
 relative worktree paths; `--seed-from <clone>` seeds it from a local clone's origin branches instead of downloading, for a run with no GitHub credential such as an ssh session, LothDesktop 2026-10-07); the daemon's code from the installer's checkout, `npm ci`; `daemon.json`; the task or
-LaunchAgent, started; the firewall rules for `players\slot0..7\player\finalfactory.exe` and the Unity editors, plus the
+LaunchAgent, started; the firewall rules for `players\slot1-0..slotN-1\player\finalfactory.exe` and the Unity editors, plus the
 slot config (one UAC prompt); and it waits until the portal sees the machine online with its root. Re-running it
 updates the code and keeps everything else (that is also how a root install is **updated**: the portal never
 redeploys one over ssh, it says "re-run its installer" when the daemon is outdated).
+
+**The supervisor is part of every install** (w576, lothsahn: "every worker should have a restart daemon--it should be
+the standard part of the install"). It is what starts the daemon again after a crash or an update. On Windows the task
+runs the root's `daemon\run-daemon.ps1`, which starts the daemon whenever it exits (backing off up to 5 minutes in a
+crash loop), and Task Scheduler restarts that script if it fails. On a Mac launchd does it, by the LaunchAgent's
+`KeepAlive`. The installer checks it after starting the daemon (`requireSupervisor`): the task or plist runs this root,
+restarts on failure, and, when someone is logged on, is running. It fails until all of that holds. A task registered for
+another folder that a non-administrator run could not replace counts as missing. Re-running the installer repairs it,
+the uninstall removes it, and `check` lists it.
 
 **The credential** is the machine's `/machine` token, `ffm_<machine id>_<secret>`: the only token on the box
 ([vault.md](vault.md), "Enrollment is the machine token", w512). In the portal's VM, `sudo fffctl machine-credential
@@ -278,9 +290,21 @@ its worktree entries for the moved sandboxes. The M3's nightly watchdog task (`f
 
 - `scripts/nightly/player_slots.py` (the pool, w350) is the one way a player starts: `launch`, `FF_LAUNCH` in bash,
   `slot_path`/`acquire_or_fallback` in Python. The daemon gives agents `FF_PLAYER_SLOT_ROOT=<root>/players`; scripts
-  outside it read the slot config the install writes.
-- The workers' guard refuses a shell command that starts `finalfactory.exe` or a `finalfactory.app` outside
-  `.../slotK/player/` (`server/guard.ts` `checkPlayerLaunch`), naming the slot launcher to use.
+  outside it read the slot config the install writes (`layout: sandbox-pairs`, `count`: the sandbox count).
+- **Each sandbox has its own pair** (lothsahn, w576): `player_slots.py` finds its sandbox (`FF_UNITY_HOLDER`, else the
+  working folder under `<root>/sandboxes/slotK`) and uses only `slotK-0` and `slotK-1`. A build already in one is
+  reused; a second, different build takes the other; `--peer 0|1` (or `FF_PLAYER_PEER`) picks one. So a 2-peer run of
+  one build shares `slotK-0` unless its client passes `--peer 1`, and a cross-build desync check (host on one build,
+  client on another) gets one folder each. A process outside every sandbox (the nightly lab's scheduled task, which
+  has no FF_* variables) uses `slotnightly-0` and `slotnightly-1`; the sandbox is `FF_SANDBOX_ID`, else
+  `FF_UNITY_HOLDER`, else the working folder.
+- The workers' guard refuses a shell command that starts `finalfactory.exe` or a `finalfactory.app` outside a slot
+  (`server/guard.ts` `checkPlayerLaunch`), naming the slot launcher to use; in sandbox slotK it also refuses another
+  sandbox's pair.
+- **Changing the sandbox count:** run the installer again with `--max-sandboxes N` (it refuses N below the sandboxes
+  there). It adds or removes pairs (a folder a player still runs from stays, said), replaces the firewall group, writes
+  the slot config, and the portal takes N from the daemon's next hello. `add_machine` on a root install changes its
+  other limits in place and refuses `max_sandboxes`.
 - Game repo (PR #1116): `lab.py`'s remote Windows peer refuses instead of starting from its build folder, and the mode2
   CI runner on BEAST turns the pool on (decision 8); ff-agents: the determinism-audit skill and its recipe launch through
   the slots.
@@ -324,7 +348,8 @@ What was run (2026-10-06):
 3. No HOME override: tools keep their files in the home folder, listed above.
 4. GitHub access through a token the portal hands out (w512), else the user's own gh login.
 5. The game's save and data folder stays where the game puts it.
-6. Slot names as today: `slot0..slotN-1/player/`.
+6. Slot names: `slotK-0` and `slotK-1` for sandbox slotK, K = 1..N, N the sandbox count (w576, replacing
+   `slot0..slotN-1`).
 7. Never `NotifyOnListen False`; the installer makes the slot rules once.
 8. BEAST's CI runner uses the slots.
 9. Sandboxes are renamed in place.

@@ -438,7 +438,7 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-502-'));
   const d = new Daemon(
-    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: null },
+    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, appDir: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: null },
     () => {
       throw new Error('no sessions here');
     },
@@ -612,6 +612,30 @@ test('machine: a daemon stopping on purpose (a worker migration, w513) is not re
   // The root's daemon (or the old one after a rollback) says hello: the hold ends.
   daemon();
   await until('back', () => mm.isOnline('mx') && store.machines.get('mx')!.daemonStopped === undefined);
+});
+
+test('machine: add_machine on a worker root install changes its settings in place, never redeploys, and leaves its sandbox count to its installer (w576)', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  daemon();
+  await until('online', () => mm.isOnline('mx'));
+  // LothDesktop after its fresh install: a root, six slots allowed, five left, 3 editors and 5 agents in all set before.
+  const m = store.machines.get('mx')!;
+  Object.assign(m, { root: 'D:\work\ffw', sandboxRoot: 'D:\work\ffw\sandboxes', maxSandboxes: 6, maxAgentsPerSandbox: 2, maxUnity: 3, maxSandboxAgents: 5 });
+  m.sandboxes = [1, 2, 3, 4, 5].map((k) => ({ id: `slot${k}`, path: `D:\work\ffw\sandboxes\slot${k}`, branch: `sandbox/slot${k}`, status: 'ready', purpose: 'unused', sessionIds: [] }) as unknown as NonNullable<typeof m.sandboxes>[number]);
+  (mm as unknown as { runDeploy: () => Promise<void> }).runDeploy = async () => assert.fail('a root install is never redeployed over ssh');
+  const sent: string[] = [];
+  const link = (mm as unknown as { links: Map<string, { ws: { send: (s: string) => void } }> }).links.get('mx')!;
+  const send = link.ws.send.bind(link.ws);
+  link.ws.send = (s: string) => (sent.push(s), send(s));
+  // Its sandbox count is its installer's (w576: the installer also makes the player-folder pairs and their rules).
+  assert.throws(() => mm.deployMachine({ id: 'mx', maxSandboxes: 5 }), /sandbox count comes from its installer.*--max-sandboxes 5/);
+  assert.equal(mm.deployMachine({ id: 'mx', maxSandboxes: 6 }).maxSandboxes, 6, 'the same count is no change');
+  const after = mm.deployMachine({ id: 'mx', maxUnity: 4 });
+  assert.deepEqual([after.maxSandboxes, after.maxAgentsPerSandbox, after.maxUnity, after.maxSandboxAgents, after.status], [6, 2, 4, 5, 'ready'], 'only max_unity changed');
+  const welcome = JSON.parse(sent.filter((x) => JSON.parse(x).type === 'welcome').at(-1)!);
+  assert.equal(welcome.sandboxes.maxUnity, 4, 'its daemon gets the new limit at once');
+  assert.throws(() => mm.deployMachine({ id: 'mx', sandboxRoot: 'E:\\sb' }), /worker root install .*sandboxRoot come from its installer/);
 });
 
 test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart are resumed when the daemon is back; a stop is not', async (t) => {

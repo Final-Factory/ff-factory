@@ -856,6 +856,9 @@ export class MachineManager {
     if (opts.maxSessions !== undefined && (!Number.isInteger(opts.maxSessions) || opts.maxSessions < 0 || opts.maxSessions > 8)) throw new Error('max_agents is a whole number from 0 (sandboxes only) to 8');
     if (this.deploying.has(id)) throw new Error(`${id} is already being deployed`);
     const prev = this.store.machines.get(id);
+    // A worker root install (w513) is installed and updated on its computer, never over ssh: add_machine changes only
+    // its settings (w576: "lower LothDesktop to 5"; a redeploy would have put an old-style daemon into its root).
+    if (prev?.root) return this.setRootSettings(prev, opts);
     const local = opts.local ?? prev?.local ?? false;
     if (prev && !!prev.local !== local) throw new Error(`${id} is ${prev.local ? "the portal's own host" : 'a machine reached over ssh'}; remove it first to change that`);
     if (local) {
@@ -909,6 +912,34 @@ export class MachineManager {
     // finds, which on BEAST could be the live game's checkout.
     void this.runDeploy(machine, token, opts.repoPath ?? (local ? machine.repoPath : undefined), prev?.appDir);
     return machine;
+  }
+
+  /**
+   * add_machine for a worker root install: its limits, label, protected paths and Library seed change on the record and
+   * reach its daemon in a new welcome (it applies them at once, machine/daemon.ts). Its folders, host, portal and
+   * sandbox count come from its installer (the count also sets its player-folder pairs and their firewall rules, w576),
+   * so changing one is refused.
+   */
+  private setRootSettings(m: Machine, opts: Parameters<MachineManager['deployMachine']>[0]): Machine {
+    if (opts.maxSandboxes !== undefined && opts.maxSandboxes !== m.maxSandboxes) {
+      throw new Error(`${m.id} is a worker root install (${m.root}): its sandbox count comes from its installer, which also makes the matching player folders (slotK-0, slotK-1) and their firewall rules. Run it again there with --max-sandboxes ${opts.maxSandboxes} (docs/worker-install.md, "Updating"); its next hello brings the count here`);
+    }
+    const fixed = (['host', 'portalUrl', 'repoPath', 'appDir', 'unityEditorRoot', 'unityPath', 'tempDir', 'sandboxRoot', 'maxSessions', 'local'] as const).filter(
+      (k) => opts[k] !== undefined && opts[k] !== (m as unknown as Record<string, unknown>)[k],
+    );
+    if (fixed.length) throw new Error(`${m.id} is a worker root install (${m.root}): its ${fixed.join(', ')} come from its installer; run it again there with the new value (docs/worker-install.md, "Updating")`);
+    const limits = limitOptions(opts, m);
+    Object.assign(m, limits, {
+      ...(opts.purpose !== undefined ? { purpose: normalizePurpose(opts.purpose) } : {}),
+      ...(opts.protectedPaths !== undefined ? { protectedPaths: opts.protectedPaths } : {}),
+      ...(opts.librarySeed !== undefined ? { librarySeed: opts.librarySeed === '' ? undefined : opts.librarySeed } : {}),
+      ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
+      ...(opts.librarySeedGB !== undefined ? { librarySeedGB: opts.librarySeedGB } : {}),
+      ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
+    });
+    this.store.putMachine(m);
+    this.links.get(m.id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
+    return m;
   }
 
   /** Tests only: allow a local machine on a host that is not Windows (the deploy itself is a fake there). */
@@ -1830,7 +1861,11 @@ export function adoptLayout(m: Machine, layout: NonNullable<Extract<FromDaemon, 
       ...(pool.librarySeed && (moved || !m.librarySeed) ? { librarySeed: pool.librarySeed } : {}),
     });
   }
-  return m.sandboxRoot !== before;
+  // Its sandbox count is its installer's, every time (w576): the installer also makes that many player-folder pairs
+  // (players/slotK-0 and slotK-1) and their firewall rules, which the portal cannot.
+  const recount = !!pool && m.maxSandboxes !== pool.maxSandboxes;
+  if (pool && recount) m.maxSandboxes = pool.maxSandboxes;
+  return m.sandboxRoot !== before || recount;
 }
 
 /**

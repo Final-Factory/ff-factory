@@ -97,7 +97,7 @@ export function sandboxGuard(opts: {
         checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity, ownMachine: !!opts.ownCheckout }) ??
         (opts.ownCheckout ? checkOwnCheckout(cmd, input.cwd || opts.sandboxPath, opts.ownCheckout.isClean ?? gitIsClean, ownBackup(opts.sandboxPath, opts.ownCheckout)) : undefined) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
-        checkPlayerLaunch(cmd);
+        checkPlayerLaunch(cmd, opts.sandboxId);
       if (reason) return deny(reason);
       const flat = cmd.replace(/\\/g, '/').toLowerCase();
       for (const s of spellings) {
@@ -140,8 +140,12 @@ const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
 
 /** A built Final Factory player (or server) binary: finalfactory.exe, a finalfactory .app bundle, or the binary inside one. */
 const PLAYER_BINARY = /(?:^|[\\/])finalfactory(?:\.exe|\.app(?:[\\/]contents[\\/]macos[\\/]finalfactory)?)$/i;
-/** A player slot (scripts/nightly/player_slots.py): <slot root>/slotK/player/finalfactory.exe or .app. */
-const SLOT_PLAYER = /[\\/]slot\d+[\\/]player[\\/]finalfactory(?:\.exe|\.app)(?:[\\/]|$)/i;
+/**
+ * A player slot (scripts/nightly/player_slots.py): <slot root>/slotK/player/finalfactory.exe or .app on a lab machine's
+ * pool, <slot root>/slotK-P/player/... on a worker root install, where sandbox slotK owns slotK-0 and slotK-1 and the
+ * nightly lab, outside every sandbox, owns slotnightly-0 and slotnightly-1 (w576).
+ */
+const SLOT_PLAYER = /[\\/]slot(\d+|nightly)(?:-([01]))?[\\/]player[\\/]finalfactory(?:\.exe|\.app)(?:[\\/]|$)/i;
 /** Words that start the next word as a program: a call operator, a launcher, or an environment prefix. */
 const LAUNCHERS = new Set(['&', '.', 'exec', 'nohup', 'time', 'env', 'start', 'start-process', 'saps', 'open', 'invoke-item', 'ii', 'cmd', 'cmd.exe', '/c', '/k']);
 
@@ -153,7 +157,8 @@ const LAUNCHERS = new Set(['&', '.', 'exec', 'nohup', 'time', 'env', 'start', 's
  * instead. Only the program position of a simple command counts (after a call operator, `start`, `Start-Process`,
  * `open`, `nohup`, `env` and VAR=value prefixes): copying, listing or hashing a build is fine. Exported for tests.
  */
-export function checkPlayerLaunch(cmd: string): string | undefined {
+export function checkPlayerLaunch(cmd: string, sandbox?: string): string | undefined {
+  const own = /^slot(\d+)$/i.exec(sandbox ?? '')?.[1];
   for (const seg of cmd.split(/&&|\|\||[;|\n]|&(?=\s|$)/)) {
     const words = seg.trim().match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
     for (const word of words) {
@@ -161,7 +166,17 @@ export function checkPlayerLaunch(cmd: string): string | undefined {
       const lower = w.toLowerCase();
       if (LAUNCHERS.has(lower) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || /^-/.test(w) || w === '""' || w === '') continue;
       // The program word: a player outside a slot is refused; anything else ends this simple command.
-      if (PLAYER_BINARY.test(w.replace(/[\\/]+$/, '')) && !SLOT_PLAYER.test(w + '/')) {
+      const isPlayer = PLAYER_BINARY.test(w.replace(/[\\/]+$/, ''));
+      const slot = SLOT_PLAYER.exec(w + '/');
+      // A sandbox's pair is its own (w576): sandbox slotK starts players only from slotK-0 and slotK-1.
+      if (isPlayer && slot?.[2] !== undefined && own !== undefined && slot[1] !== own) {
+        return (
+          `Refused: ${w} is ${/^nightly$/i.test(slot[1]) ? "the nightly lab's" : `sandbox slot${slot[1]}'s`} player folder; this is sandbox slot${own}, whose players run only from ` +
+          `slot${own}-0 and slot${own}-1. Start it with \`python scripts/nightly/player_slots.py launch <exe or build folder> -- <args>\`, ` +
+          "which picks this sandbox's pair (`--peer 1` for the second peer)."
+        );
+      }
+      if (isPlayer && !slot) {
         return (
           `Refused: ${w} would start a built player outside a player slot. Players run only from the fixed slot paths ` +
           '(<slot root>/slotK/player/), which Windows Firewall allows once per machine; any other path raises the firewall ' +

@@ -95,6 +95,7 @@ export interface Manifest {
   platform: 'win32' | 'darwin';
   /** The scheduled task (Windows) or LaunchAgent label (Mac) that runs the daemon. */
   service: string;
+  /** Player-folder pairs: one per sandbox (players/slotK-0 and slotK-1, K = 1..slots; w576). */
   slots: number;
   repoUrl: string;
   /** A test install's firewall group suffix (firewall.ps1 -GroupSuffix). */
@@ -146,7 +147,6 @@ export interface InstallOptions {
   maxSandboxes: number;
   maxAgentsPerSandbox: number;
   maxUnity: number;
-  slots: number;
   repoUrl: string;
   /** Windows task name or Mac LaunchAgent label; a second install on one computer (a test root) uses its own. */
   service: string;
@@ -333,7 +333,7 @@ export interface Facts {
 }
 
 /** Every reason the install cannot go ahead, from facts gathered without changing anything. Exported for tests. */
-export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'slots' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
+export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
   const p: string[] = [];
   if (f.platform !== 'win32' && f.platform !== 'darwin') p.push(`this tool installs on Windows and macOS, not ${f.platform}`);
   if (f.platform === 'win32' && f.elevated && !o.owner) p.push('run it from a normal (not administrator) PowerShell: files an elevated shell makes belong to Administrators, and git then refuses the clone; the one step that needs admin rights (the firewall rules) asks for them itself');
@@ -352,10 +352,14 @@ export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'po
   else if (!f.portal.ok) p.push(f.portal.error);
   else if (f.credentialId && f.portal.me.id !== f.credentialId) p.push(`the portal says this credential is machine ${f.portal.me.id}, not ${f.credentialId}`);
   if (!f.credentialId) p.push('the credential is not a machine credential (it starts ffm_<machine id>_)');
+  // The count sets the player-folder pairs (w576): lowering it below the sandboxes there would leave one without its pair.
+  const there = f.portal.ok ? f.portal.me.sandboxes : [];
+  if (there.length > o.maxSandboxes) {
+    p.push(`--max-sandboxes ${o.maxSandboxes} is below the ${there.length} sandboxes there (${there.join(', ')}): delete ${there.length - o.maxSandboxes} first (delete_sandbox)`);
+  }
   if (f.serviceElsewhere) p.push(`a daemon is already installed here (${f.serviceElsewhere}); move it into a root with migrate, or pick another --service for a second install`);
   if (f.platform === 'win32' && f.loggedOn === false) p.push('nobody is logged on to this PC\'s desktop: the daemon runs in the interactive session (the Claude login, the GPU Unity needs)');
   for (const [k, v, lo, hi] of [
-    ['slots', o.slots, 1, 32],
     ['max-sandboxes', o.maxSandboxes, 1, 20],
     ['max-agents-per-sandbox', o.maxAgentsPerSandbox, 1, 6],
     ['max-unity', o.maxUnity, 1, 8],
@@ -569,6 +573,86 @@ async function installDaemonMac(o: InstallOptions, l: Layout, id: string, probe:
   return { version, started: true };
 }
 
+/**
+ * The supervisor, as this computer has it (w576, lothsahn: "every worker should have a restart daemon--it should be the
+ * standard part of the install"). Windows: the task runs this root's run-daemon.ps1 (machineDeployWin supervisorScript),
+ * which starts the daemon again whenever it exits, and Task Scheduler restarts the supervisor itself if it fails.
+ * A Mac: launchd is the supervisor, by the LaunchAgent's KeepAlive.
+ */
+export interface SupervisorFacts {
+  /** The task, or the LaunchAgent plist. */
+  installed: boolean;
+  /** The task's action runs this root's run-daemon.ps1; the plist runs this root's daemon. */
+  here: boolean;
+  /** Task Scheduler's restart on failure; the plist's KeepAlive. */
+  restarts: boolean;
+  /** run-daemon.ps1 is in the daemon's folder (always true on a Mac). */
+  script: boolean;
+  /** Supervisors running from this root (Windows), or launchd running the daemon (a Mac). */
+  running: number;
+}
+
+/** What is wrong with the supervisor; `started` is whether it should run now (someone is logged on). Exported for tests. */
+export function supervisorProblems(f: SupervisorFacts, l: Pick<Layout, 'daemon'>, service: string, started: boolean, platform: 'win32' | 'darwin' = isWin ? 'win32' : 'darwin'): string[] {
+  const out: string[] = [];
+  if (platform === 'win32') {
+    const script = path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1');
+    if (!f.installed) return [`no ${service} task`];
+    if (!f.here) out.push(`the ${service} task does not run ${script} (a task registered for another folder was kept: registering it needs an administrator)`);
+    if (!f.restarts) out.push(`the ${service} task is not restarted on failure`);
+    if (!f.script) out.push(`${script} is missing`);
+    if (started && f.here && f.script && !f.running) out.push(`no supervisor runs from ${script}`);
+  } else {
+    if (!f.installed) return [`no ${service} LaunchAgent plist`];
+    if (!f.here) out.push(`the ${service} LaunchAgent does not run the daemon in ${l.daemon}`);
+    if (!f.restarts) out.push(`the ${service} LaunchAgent has no KeepAlive, so launchd does not start the daemon again`);
+    if (started && f.here && !f.running) out.push(`launchd does not run ${service}`);
+  }
+  return out;
+}
+
+async function supervisorFacts(l: Layout, service: string): Promise<SupervisorFacts> {
+  if (isWin) {
+    const out = await ps(
+      'checking the supervisor',
+      `$ErrorActionPreference = 'Continue'
+$s = Join-Path ${win.psq(win.winDir(l.daemon))} 'run-daemon.ps1'
+$t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
+"installed=$([bool]$t)"
+"here=$([bool]($t -and ([string]$t.Actions[0].Arguments).IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0))"
+"restarts=$([bool]($t -and $t.Settings.RestartCount -gt 0))"
+"script=$(Test-Path -LiteralPath $s)"
+"running=$(@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -Property CommandLine | Where-Object { ([string]$_.CommandLine).IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count)"
+`,
+    );
+    const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
+    return { installed: get('installed') === 'True', here: get('here') === 'True', restarts: get('restarts') === 'True', script: get('script') === 'True', running: Number(get('running')) || 0 };
+  }
+  const file = path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
+  const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const state = (await exec('launchctl', ['print', `gui/${process.getuid?.()}/${service}`])).stdout;
+  return {
+    installed: !!text,
+    here: text.includes(`${l.daemon}/app/machine/daemon.ts`),
+    restarts: /<key>KeepAlive<\/key>\s*<true\/>/.test(text),
+    script: true,
+    running: /^\s*state = running$/m.test(state) ? 1 : 0,
+  };
+}
+
+/** The supervisor is not optional: the install fails until it is in place, and re-running the installer repairs it. */
+async function requireSupervisor(l: Layout, service: string, started: boolean): Promise<void> {
+  let problems: string[] = [];
+  // Start-ScheduledTask and launchctl bootstrap return before the supervisor runs.
+  for (let i = 0; i < 30; i++) {
+    problems = supervisorProblems(await supervisorFacts(l, service), l, service, started);
+    if (!problems.length) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  if (problems.length) throw new Error(`the daemon's supervisor is not in place: ${problems.join('; ')}. Re-run the installer${isWin ? ' from an administrator PowerShell' : ''} to repair it`);
+  say(`Supervisor: ${isWin ? `the ${service} task runs ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}, which starts the daemon again whenever it exits` : `launchd starts the daemon again whenever it exits (KeepAlive)`}${started ? ', running' : ''}.`);
+}
+
 /** The Unity editors this computer has (the Hub's lists and its default folders): the firewall rules name them. */
 export function unityEditors(home = os.homedir()): string[] {
   const out = new Set<string>();
@@ -617,9 +701,51 @@ async function giveRoot(l: Layout, owner: string) {
 
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */
 /** firewall.ps1's arguments (the elevated step adds -LogFile). */
+/**
+ * The player folders of a worker root install: each sandbox slotK (K = 1..sandboxes) owns players/slotK-0 (peer 0,
+ * the host) and slotK-1 (peer 1, the client), and runs its built players only from those (lothsahn, w576; the firewall
+ * rules name exactly these paths; scripts/nightly/player_slots.py picks them from the sandbox it runs in). Exported for tests.
+ */
+export function playerFolders(sandboxes: number): string[] {
+  const out: string[] = [];
+  for (let k = 1; k <= sandboxes; k++) out.push(`slot${k}-0`, `slot${k}-1`);
+  // The nightly lab is no sandbox: its own pair (lothsahn, w576: "Let's use slotnightly-0 and slotnightly-1").
+  out.push('slotnightly-0', 'slotnightly-1');
+  return out;
+}
+
+/**
+ * Make the player folders `keep` and remove the other slot folders (slotN, slotN-P) under `players`: a smaller sandbox
+ * count, or the old slot0..7 pool. One a player still runs from cannot be moved aside and stays, said. Exported for tests.
+ */
+export function syncPlayerFolders(players: string, keep: string[], log: (line: string) => void = say): { made: string[]; removed: string[]; kept: string[] } {
+  const out = { made: [] as string[], removed: [] as string[], kept: [] as string[] };
+  fs.mkdirSync(players, { recursive: true });
+  for (const name of keep) {
+    if (!fs.existsSync(path.join(players, name))) out.made.push(name);
+    fs.mkdirSync(path.join(players, name), { recursive: true });
+  }
+  const want = new Set(keep.map((k) => k.toLowerCase()));
+  for (const e of fs.readdirSync(players, { withFileTypes: true })) {
+    if (!e.isDirectory() || !/^slot(\d+|nightly)(-\d+)?$/i.test(e.name) || want.has(e.name.toLowerCase())) continue;
+    const from = path.join(players, e.name);
+    const trash = path.join(players, `${e.name}.removed-${Date.now()}`);
+    try {
+      fs.renameSync(from, trash); // fails on Windows while a player runs from it, before anything is deleted
+    } catch (err) {
+      out.kept.push(e.name);
+      log(`Kept ${from}: ${(err as NodeJS.ErrnoException).code ?? 'in use'} (a player may still run from it); run the installer again once it ends.`);
+      continue;
+    }
+    fs.rmSync(trash, { recursive: true, force: true });
+    out.removed.push(e.name);
+  }
+  return out;
+}
+
 function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): string[] {
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
-  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Count', String(slots), ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
+  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Pairs', String(slots), ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
 }
 
 /**
@@ -757,7 +883,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     portalUrl: o.portalUrl,
     platform: isWin ? 'win32' : 'darwin',
     service: o.service,
-    slots: o.slots,
+    slots: o.maxSandboxes,
     repoUrl: o.repoUrl,
     ...(o.firewallSuffix ? { firewallSuffix: o.firewallSuffix } : {}),
     createdAt: prev?.createdAt ?? now,
@@ -765,7 +891,8 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     outside: prev?.outside ?? [],
   };
   writeManifest(l.root, m);
-  for (let k = 0; k < o.slots; k++) fs.mkdirSync(path.join(l.players, `slot${k}`), { recursive: true });
+  const pf = syncPlayerFolders(l.players, playerFolders(o.maxSandboxes));
+  say(`Player folders: ${playerFolders(o.maxSandboxes).length} (slot1-0..slot${o.maxSandboxes}-1 and slotnightly-0, -1)${pf.made.length ? `, ${pf.made.length} made` : ''}${pf.removed.length ? `; removed ${pf.removed.join(', ')}` : ''}${pf.kept.length ? `; still in use: ${pf.kept.join(', ')}` : ''}.`);
 
   // 2. The credential, owner-only.
   // The folder first: a file written after inherits its owner-only rights (and one from an earlier run gets them back).
@@ -790,6 +917,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   writeManifest(l.root, m);
   const d = isWin ? await installDaemonWin(o, l, id, f.probe) : await installDaemonMac(o, l, id, f.probe);
   say(`Daemon ${d.version} installed as ${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`}${d.started ? ' and started' : ' (it starts at the next logon)'}.`);
+  await requireSupervisor(l, o.service, d.started);
   // No Unity slots pointer: the mailbox stays at its standard place in the home folder (daemonJson), where the daemon,
   // its agents and scripts outside it (the nightly harness, a build by hand) all find it with no config (w469,
   // machine/unitySlots.ts slotsDir). One mailbox, so they can never disagree. The uninstall still removes a pointer
@@ -813,11 +941,11 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   if (isWin && o.firewall) {
     const editors = unityEditors(f.probe.home);
     const sfx = o.firewallSuffix ? ` ${o.firewallSuffix}` : '';
-    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.slots} slots under ${l.players}` });
+    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.maxSandboxes} sandboxes' player folders (slot1-0..slot${o.maxSandboxes}-1) and the nightly lab's (slotnightly-0, -1) under ${l.players}` });
     if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP + sfx, note: editors.join('; ') });
     if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
-    steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.slots, editors, o.firewallSuffix) });
+    steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.maxSandboxes, editors, o.firewallSuffix) });
   } else if (isWin) say('Skipped the firewall rules (--no-firewall): players will prompt on first start.');
   if (steps.length) {
     say(`${steps.map((s) => (s.kind === 'firewall' ? 'Windows Firewall: adding the rules' : "the portal's ssh key into administrators_authorized_keys")).join(', and ')} (one administrator prompt)...`);
@@ -835,7 +963,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     // A Mac has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
     const cfg = macSlotConfig();
     fs.mkdirSync(path.dirname(cfg), { recursive: true });
-    fs.writeFileSync(cfg, JSON.stringify({ root: l.players, count: o.slots }, null, 2) + '\n');
+    fs.writeFileSync(cfg, JSON.stringify({ root: l.players, layout: 'sandbox-pairs', count: o.maxSandboxes }, null, 2) + '\n');
     noteOutside(m, { kind: 'file', name: cfg, note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
   }
@@ -1104,8 +1232,10 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     const sfx = m?.firewallSuffix ? ` ${m.firewallSuffix}` : '';
     const ours = (g: string) => !!m?.outside.some((o) => o.kind === 'firewall-group' && o.name === g + sfx);
     const group = (g: string, n: string) => ({ what: `firewall group "${g}${sfx}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
+    const sup = await supervisorFacts(l, service);
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
+      { what: `the supervisor ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}`, present: sup.script || sup.running > 0, detail: `${sup.running} running` },
       group(SLOT_GROUP, get('slotRules')),
       group(UNITY_GROUP, get('unityRules')),
       { what: `firewall rules naming a path in the root`, present: Number(get('rootRules')) > 0, detail: `${get('rootRules')} rule(s)` },
@@ -1216,7 +1346,7 @@ async function readCredential(): Promise<string> {
 
 const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
-            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
+            [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
             [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
             [--seed-from <a local clone of the game repo> (its origin branches seed the root's clone: no download, and no
              GitHub credential, which an ssh session does not have)]
@@ -1241,7 +1371,6 @@ export async function main(argv = process.argv.slice(2)) {
       maxSandboxes: num('max-sandboxes', 3),
       maxAgentsPerSandbox: num('max-agents-per-sandbox', 2),
       maxUnity: num('max-unity', 2),
-      slots: num('slots', 8),
       repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
       service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
       firewall: !flags.has('no-firewall'),
@@ -1282,8 +1411,7 @@ export async function main(argv = process.argv.slice(2)) {
           maxSandboxes: num('max-sandboxes', 3),
           maxAgentsPerSandbox: num('max-agents-per-sandbox', 2),
           maxUnity: num('max-unity', 2),
-          slots: num('slots', 8),
-          repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
+              repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
           service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
           firewall: !flags.has('no-firewall'),
           noCleanup: flags.has('no-cleanup'),

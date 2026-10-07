@@ -8,17 +8,17 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { readToken, rootEnv, withRootDefaults } from '../machine/daemon.ts';
 import { macControlScript, macLabel, macReloadLines, plist } from '../server/machineDeploy.ts';
-import { installScript, taskName, uninstallScript } from '../server/machineDeployWin.ts';
+import { installScript, taskName, taskXml, uninstallScript } from '../server/machineDeployWin.ts';
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
-import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, nightlyTaskProblem, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
 import { runElevatedSteps } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
-const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', slots: 8, maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
+const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
 const GOOD: Facts = {
   platform: 'win32',
   elevated: false,
@@ -67,7 +67,9 @@ test('worker install: every missing prerequisite is named before anything change
   assert.match(bad({ credentialId: undefined }), /not a machine credential/);
   assert.match(bad({ serviceElsewhere: 'the FFFactoryDaemon task runs D:\\work\\.ff-factory' }), /move it into a root with migrate/);
   assert.match(bad({ loggedOn: false }), /nobody is logged on/);
-  assert.match(bad({}, { slots: 0 }), /--slots must be a whole number from 1 to 32/);
+  const four = { ok: true as const, me: { id: 'lothdesktop', online: true, agents: [], sandboxes: ['slot1', 'slot2', 'slot3', 'slot4'] } };
+  assert.match(bad({ portal: four }, { maxSandboxes: 3 }), /--max-sandboxes 3 is below the 4 sandboxes there \(slot1, slot2, slot3, slot4\): delete 1 first/);
+  assert.deepEqual(preflightProblems({ ...GOOD, portal: four }, { ...OPTS, maxSandboxes: 4 }), [], 'as many as there are is fine (w576)');
   assert.equal(preflightProblems({ ...GOOD, elevated: true, git: [2, 1], gitLfs: false }, OPTS).length, 3, 'all of them at once');
 });
 
@@ -139,7 +141,8 @@ test('worker portal record: a new root is the daemon\'s to say; a rollback gives
   assert.equal(m.root, 'F:\\ffw');
   assert.equal(m.sandboxRoot, 'F:\\ffw\\sandboxes');
   assert.equal(m.repoPath, 'F:\\ffw\\repo');
-  assert.equal(m.maxSandboxes, 5, 'the record\'s limits stay');
+  assert.equal(m.maxSandboxes, 3, "its sandbox count is its installer's (w576: the installer also makes the player-folder pairs)");
+  assert.equal(m.maxUnity, 2, 'a limit the record lacks comes from the daemon');
   assert.deepEqual(m.preRoot, { appDir: 'C:\\Users\\r\\.ff-factory', repoPath: 'C:\\ffsb\\_base', tempDir: undefined, sandboxRoot: 'F:\\ffsb', librarySeed: 'F:\\ffsb\\_seed\\Library' });
   m.sandboxRoot = 'G:\\elsewhere';
   assert.equal(adoptLayout(m, layout), false, 'the same root again: the record (add_machine) wins');
@@ -404,4 +407,56 @@ test('worker install: a nightly lab task left on an old root is named, with the 
   // No task, no line.
   assert.equal(nightlyTaskProblem(undefined, root), undefined);
   assert.equal(nightlyTaskProblem('', root), undefined);
+});
+
+test("worker install: each sandbox owns two player folders, and a new count adds or removes pairs (w576)", () => {
+  assert.deepEqual(playerFolders(2), ['slot1-0', 'slot1-1', 'slot2-0', 'slot2-1', 'slotnightly-0', 'slotnightly-1']);
+  assert.equal(playerFolders(5).length, 12, "5 sandboxes' pairs and the nightly lab's");
+  const players = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-players-'));
+  try {
+    // LothDesktop before: the old pool slot0..slot7, one with a leftover build and its lease files.
+    for (let k = 0; k < 8; k++) fs.mkdirSync(path.join(players, `slot${k}`, 'leases'), { recursive: true });
+    fs.writeFileSync(path.join(players, 'slot0', 'slot.json'), '{}');
+    fs.writeFileSync(path.join(players, 'pool.lock'), '');
+    const lines: string[] = [];
+    const first = syncPlayerFolders(players, playerFolders(5), (l) => lines.push(l));
+    assert.equal(first.made.length, 12);
+    assert.deepEqual(first.removed.sort(), ['slot0', 'slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6', 'slot7']);
+    assert.deepEqual(fs.readdirSync(players).sort(), ['pool.lock', ...playerFolders(5)].sort(), 'other files stay');
+    // Lowered to 4 sandboxes: slot5's pair goes; the rest are kept as they are.
+    fs.writeFileSync(path.join(players, 'slot1-0', 'slot.json'), '{"sha":"a"}');
+    const second = syncPlayerFolders(players, playerFolders(4), (l) => lines.push(l));
+    assert.deepEqual([second.made, second.removed.sort(), second.kept], [[], ['slot5-0', 'slot5-1'], []]);
+    assert.equal(fs.readFileSync(path.join(players, 'slot1-0', 'slot.json'), 'utf8'), '{"sha":"a"}');
+    assert.deepEqual(lines, []);
+  } finally {
+    fs.rmSync(players, { recursive: true, force: true });
+  }
+});
+
+test('worker install: the supervisor is required, and what the installer writes passes its check (w576)', () => {
+  const ok = { installed: true, here: true, restarts: true, script: true, running: 1 };
+  const winL = { daemon: String.raw`D:\work\ffw\daemon` };
+  assert.deepEqual(supervisorProblems(ok, winL, 'FFFactoryDaemon', true, 'win32'), []);
+  assert.deepEqual(supervisorProblems({ ...ok, installed: false }, winL, 'FFFactoryDaemon', true, 'win32'), ['no FFFactoryDaemon task']);
+  // A task an administrator registered for another folder, kept because this run could not register its own.
+  const kept = supervisorProblems({ ...ok, here: false, running: 0 }, winL, 'FFFactoryDaemon', true, 'win32');
+  assert.equal(kept.length, 1);
+  assert.ok(kept[0].includes(String.raw`does not run D:\work\ffw\daemon\run-daemon.ps1`), kept[0]);
+  assert.deepEqual(supervisorProblems({ ...ok, restarts: false, script: false }, winL, 'FFFactoryDaemon', true, 'win32').length, 2);
+  // Running is required only when someone is logged on (otherwise it starts at the next logon).
+  assert.deepEqual(supervisorProblems({ ...ok, running: 0 }, winL, 'FFFactoryDaemon', true, 'win32'), [String.raw`no supervisor runs from D:\work\ffw\daemon\run-daemon.ps1`]);
+  assert.deepEqual(supervisorProblems({ ...ok, running: 0 }, winL, 'FFFactoryDaemon', false, 'win32'), []);
+  const macL = { daemon: '/Users/b/ffw/daemon' };
+  assert.deepEqual(supervisorProblems(ok, macL, 'com.ff.daemon', true, 'darwin'), []);
+  assert.ok(supervisorProblems({ ...ok, restarts: false }, macL, 'com.ff.daemon', true, 'darwin')[0].includes('KeepAlive'));
+  assert.deepEqual(supervisorProblems({ ...ok, running: 0 }, macL, 'com.ff.daemon', true, 'darwin'), ['launchd does not run com.ff.daemon']);
+  // The task the installer registers runs that folder's run-daemon.ps1 and is restarted on failure.
+  const x = taskXml('S-1-5-21-1-2-3-1001', String.raw`C:\Users\loth`, winL.daemon);
+  assert.ok(x.includes(String.raw`-File "D:\work\ffw\daemon\run-daemon.ps1"`), x);
+  assert.match(x, /<RestartOnFailure>\s*<Interval>PT1M<\/Interval>\s*<Count>999<\/Count>/);
+  // The LaunchAgent runs the root's daemon with KeepAlive, the facts supervisorFacts reads from it.
+  const p = plist('/Users/b', '/opt/homebrew/bin/node', false, '', macL.daemon, 'com.ff.daemon');
+  assert.ok(p.includes(`${macL.daemon}/app/machine/daemon.ts`));
+  assert.match(p, /<key>KeepAlive<\/key>\s*<true\/>/);
 });
