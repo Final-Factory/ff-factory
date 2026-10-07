@@ -164,13 +164,17 @@ test('w605: a host that died with its agent is not taken back; the portal resume
   process.kill(pid, 'SIGKILL');
   await kill(d1);
   await until('the host gone', () => !pidAlive(pid));
+  const goneAt = Date.now();
   daemon();
   // The portal's resume after a dropped link (resumeCutOff), as for any agent cut off mid-turn.
   await until('resumed', () => said(id, 'user').length === 2, 60_000, logs);
   assert.match(said(id, 'user')[1], /daemon on this machine/);
   await until('the resume answered', () => turnEnds.some((t) => /^Echo: /.test(t)), 60_000, logs);
   assert.equal(s.info.sdkSessionId, conversation, 'the same conversation (claude --resume)');
-  assert.notEqual(hostPid(id), pid, 'in a new host');
+  // A new host: its record written by a process started after the old one died, and alive. Not told by its pid alone:
+  // Windows hands a freed pid out again, and the new host got the old one's (w636, CI: 6276 both times).
+  const rec = JSON.parse(fs.readFileSync(hostFiles(hostDir(id)).host, 'utf8')) as { startedAt: string };
+  assert.ok(Date.parse(rec.startedAt) >= goneAt, `in a new host (started ${rec.startedAt}, the old one gone at ${new Date(goneAt).toISOString()})`);
   assert.ok(hostAlive(hostDir(id)));
 });
 

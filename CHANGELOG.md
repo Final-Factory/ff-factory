@@ -27,6 +27,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A daemon with a bad token logs the portal's 401, not a parse error** (w636). The portal's refusal had bare LF line
+  ends, which the daemon's HTTP client could not parse ("Parse Error: Missing expected CR"); it now ends its lines with
+  CRLF and says Connection: close.
 - **A fresh job for the orchestration worker starts reliably** (w638, lothsahn: it crashed twice on 2026-10-07 with
   "Claude Code process exited with code 1" the moment a job came with `fresh: true` after a turn had ended). Starting
   the fresh conversation stopped the old process and connected for the new one at once, while the old one was still
@@ -37,6 +40,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   launcher's reason in the transcript instead of only "exited with code 1", and a stop followed at once by a new process
   no longer adds a false "Claude Code process aborted by user" error.
 
+- **Flaky unit tests wait for what they check, not a fixed time** (w636, asked by lothsahn). The background-save and
+  state-save tests, the unity-slots crashed-holder, waiter and CLI tests, the download-resume test and the agent-host
+  "new host" test (Windows reused the dead host's pid) failed on Windows runners; each now waits on the event it checks. The Mac dialog and Unity watch tests no longer ask the real
+  Mac (they failed on every Mac worker, and macUnity took 10 s there).
 - **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
   clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
   Whisper goes with a ping ahead of it: no answer within 2 s and the clip falls back, and the machine is skipped until it
@@ -44,6 +51,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   drop it; the heartbeat is unchanged). The machine has 10 s to return the text, upload included (was 3 s plus 0.05 s
   per second of audio). A clip that times out keeps the next ones off that machine for 2 minutes or until it re-offers
   its Whisper.
+- **The portal VM's end-to-end reboot checks have 20 s each, and the hang step looks for its own reset** (w636, asked
+  by lothsahn). Hang detection took 382-988 s in 6 of 61 runs; each check for a new boot id was an ssh with no limit
+  once connected. The watch's reset was matched anywhere in its journal, where a first-boot reset (32 of 62 runs) also
+  matched; now only since the step began.
 
 ### Added
 

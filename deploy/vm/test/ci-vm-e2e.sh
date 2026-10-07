@@ -39,16 +39,24 @@ g() { /usr/local/sbin/fff-vm ssh "$@"; }
 main_at_head() { [ "$(git -C "$ROOT" branch --show-current)" = main ] || git -C "$ROOT" branch -f main HEAD; }
 health() { curl -fsS -m 10 "http://$IP:8790/api/health"; }
 wait_for() { # SECONDS DESCRIPTION CMD...
-  local secs=$1 what=$2 t0
+  local secs=$1 what=$2 t0 p0
   shift 2
   t0=$(date +%s)
-  until "$@" >/dev/null 2>&1; do
+  until p0=$(date +%s); "$@" >/dev/null 2>&1; do
+    [ $(($(date +%s) - p0)) -lt 15 ] || echo "  $what: one check took $(($(date +%s) - p0)) s"
     [ $(($(date +%s) - t0)) -lt "$secs" ] || fail "$what: not within $secs s"
     sleep 5
   done
   echo "ok: $what ($(($(date +%s) - t0)) s)"
 }
 boot_id() { g cat /proc/sys/kernel/random/boot_id; }
+# rebooted_since BOOT_ID: the guest answers with another boot id. Each look has 20 s: an ssh that is open when the VM
+# is reset can hear nothing more and wait on TCP for minutes (hang detection took 382-988 s in 6 of 61 runs, against
+# 99-120 s in the rest; w636).
+rebooted_since() {
+  local now
+  now=$(timeout 20 /usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id 2>/dev/null) && [ -n "$now" ] && [ "$now" != "$1" ]
+}
 sha_of() { health | jq -r .sha; }
 
 step "host dry run before anything is installed"
@@ -582,12 +590,15 @@ echo "ok: a size libvirt cannot run is not kept; the VM runs its previous defini
 
 step "hang detection: neither the agent nor the portal answers -> reset"
 b1=$(boot_id)
+since=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 g 'sudo systemctl stop fff-health.timer fff-portal qemu-guest-agent' || true
-wait_for 900 "the watch reset the VM" bash -c "[ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" != '' ] && [ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id)\" != $b1 ]"
+wait_for 900 "the watch reset the VM" rebooted_since "$b1"
 # Read the whole journal first: grep -m1 stops at its match and journalctl, still writing, dies of SIGPIPE, which
-# pipefail turns into a failure (a 10 s watch writes enough lines for that; main run 37420115848).
-watch_log=$(journalctl -u fff-vm-watch --no-pager)
-grep -m1 'resetting' <<<"$watch_log" || fail "no reset in the watch's log"
+# pipefail turns into a failure (a 10 s watch writes enough lines for that; main run 37420115848). Only this step's
+# lines: a reset during the first boot is in the journal too.
+watch_log=$(journalctl -u fff-vm-watch --no-pager --since "$since")
+tail -n 30 <<<"$watch_log"
+grep -q 'resetting' <<<"$watch_log" || fail "no reset in the watch's log since $since"
 wait_for 300 "the portal answers after the reset" health
 
 step "watchdog device: a guest that stops petting it is reset"
@@ -597,7 +608,7 @@ systemctl stop fff-vm-watch.timer
 # PID 1 lets go of the device cleanly, then a process opens it and dies without the magic close: nobody pets it.
 g 'printf "[Manager]\nRuntimeWatchdogSec=off\n" | sudo tee /etc/systemd/system.conf.d/99-ci.conf >/dev/null && sudo systemctl daemon-reexec'
 g "sudo sh -c 'exec 3>/dev/watchdog; echo x >&3; kill -9 \$\$'" || true
-wait_for 300 "the watchdog reset the VM" bash -c "[ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" != '' ] && [ \"\$(/usr/local/sbin/fff-vm ssh cat /proc/sys/kernel/random/boot_id)\" != $b1 ]"
+wait_for 300 "the watchdog reset the VM" rebooted_since "$b1"
 events_log=$(journalctl -u fff-vm-events --no-pager)
 grep -m1 'watchdog fired' <<<"$events_log" || fail "fff-vm events did not see the watchdog"
 g 'sudo rm -f /etc/systemd/system.conf.d/99-ci.conf'
