@@ -48,6 +48,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **Lothsahn's and Ben's orchestrators message each other with no count** (w627, lothsahn: "Please update FFFactory so
+  you and Ben's orchestrator can send an infinite number of messages to each other and the portal worker").
+  `message_person` between the two owners (`OPS_PEOPLE`, `ownersPair`) no longer stops at
+  `orchestrator.messagesPerPerson` (10). The loop guard left between them is a rate: in turns no person started (a
+  `[person message]`, a report, a timer), at most 60 messages an hour from one to the other
+  (`OWNER_LOOP_MESSAGES_PER_HOUR`), started again when either writes to their own orchestrator; a person's own turn is
+  never counted. Everyone else keeps the count, to and from the owners too. The `ops_worker` follow-ups were never
+  counted; its tool and [ops-worker.md](docs/ops-worker.md) now say so, and what ends a run of them (the job's 12
+  hours, the $25 process cap, the 2-hour turn limit). The new-job and deploy gates are unchanged.
 - **The disk guard defaults to 20 / 10 GB free, from 50 / 20** (w628, Ben: "you dont need 50gb free to run unity
   editors, change that rule"). Measured on BEAST in a warm sandbox: an editor open and a forced script reimport grew
   the Library by under 10 MB, a development build wrote 2.1 GB plus 0.25 GB of Library, a release build 2.0 GB plus
