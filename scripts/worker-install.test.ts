@@ -12,7 +12,7 @@ import { installScript, taskName, taskXml, uninstallScript } from '../server/mac
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
-import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
 import { runElevatedSteps } from './worker/worker.ts';
@@ -459,4 +459,14 @@ test('worker install: the supervisor is required, and what the installer writes 
   const p = plist('/Users/b', '/opt/homebrew/bin/node', false, '', macL.daemon, 'com.ff.daemon');
   assert.ok(p.includes(`${macL.daemon}/app/machine/daemon.ts`));
   assert.match(p, /<key>KeepAlive<\/key>\s*<true\/>/);
+});
+
+test("worker install: a Mac's slot config names the root's players, the sandbox-pairs layout and the sandbox count (w596)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-maccfg-'));
+  try {
+    const file = writeMacSlotConfig('/Users/b/ffw/players', 1, path.join(dir, 'finalfactory', 'player-slots.json'));
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { root: '/Users/b/ffw/players', layout: 'sandbox-pairs', count: 1 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
