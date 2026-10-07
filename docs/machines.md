@@ -69,7 +69,7 @@ before redeploying by hand.
   noted, and a refused start (`failed`) does not move `lastActivityAt`. An agent stopped or interrupted on purpose
   (`stop_agent`, the UI) is marked `stoppedOnPurpose` (saved, and taken off any cut-off list already noted) and is
   never resumed, by a dropped link or a portal restart, until it is sent a message again.
-- **Tools.** Workers get the machine's tools (`wake_me`, `unity`, …) via a `machine` MCP server
+- **Tools.** Workers get the machine's tools (`wake_me`, `unity`, `read_work`, …) via a `machine` MCP server
   whose calls go back to the portal. They set no label: their title says what they are doing, and the dispatcher sets it
   ([orchestrators.md](orchestrators.md#worker-titles-and-sandbox-labels), w575).
 - **The main clone is the owner's** (w536): the daemon runs no editor, hang/crash watch, Unity MCP place, Unity slot
@@ -478,8 +478,10 @@ sandbox agents in all), `max_unity: 2`.
 
 **Agents in a machine sandbox** get their own brief (the worktree, their editor's instance name) and the `machine`
 tools `wake_me`, `unity` (their sandbox's editor), `switch_branch`, `fetch_attachment`, `publish_attachment` (a file of theirs as an attachment id another worker
-gets, [attachments.md](attachments.md#agents-files)) and `publish_review` (review media to the
-portal's computer over the daemon's link, [review.md](review.md)). Their guard
+gets, [attachments.md](attachments.md#agents-files)), `publish_review` (review media to the
+portal's computer over the daemon's link, [review.md](review.md)), `fetch_ffbox_report` ([ffbox.md](ffbox.md)) and
+`read_work` (the ledger, read-only: their own requests and the ones they name, the open and stalled ones with a grant;
+[orchestrators.md](orchestrators.md#workers-read-the-ledger)). Their guard
 is the sandbox one: their worktree is theirs, the main clone and the daemon's
 folder are protected, killing Unity by hand is refused (other sandboxes' editors share the machine), and a raw
 `git switch` is refused while their editor runs.

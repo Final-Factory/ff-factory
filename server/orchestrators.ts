@@ -262,6 +262,8 @@ export interface WorkInput {
   scope?: WorkScope;
   /** The Discord threads and player reports it is the work for (request_work subjects): their keys (w343). */
   subjects?: string[];
+  /** A ledger task (w642): its workers may list and read every open and stalled request (read_work all). */
+  ledger_read?: boolean;
 }
 
 /** An operator's ffdev turn FFBox handed over (server/devRequests.ts), its files already in the attachment store. */
@@ -783,12 +785,13 @@ export class Orchestrators {
       sessionIds: [],
       ...(input.attachments?.length ? { attachments: input.attachments } : {}),
       ...(scope ? { scope } : {}),
+      ...(input.ledger_read ? { ledgerRead: { by: owner.displayName, at: now.toISOString() } } : {}),
       overlaps: [],
       asks: 0,
       log: [],
     };
     w.overlaps = findOverlaps({ keys: w.keys, title: w.title }, this.pool(id));
-    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}`);
+    this.stamp(w, `filed by ${owner.displayName}${w.humanAsked ? '' : ' (not in a turn of theirs)'}${w.ledgerRead ? '; its workers may read the ledger' : ''}`);
     this.store.putWork(w);
     this.store.dropWork(pruneIds(this.store.work.values()));
     this.gatherForDispatcher(owner, requestNotice(w));
@@ -805,10 +808,16 @@ export class Orchestrators {
   }
 
   /** A requester's update (update_work): a note (an answer to a question reopens it), a priority, closing or reopening. */
-  update(chat: SessionHandle, input: { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[] }): string {
+  update(chat: SessionHandle, input: { id: string; note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; approve?: boolean; decline?: boolean; subjects?: string[]; ledger_read?: boolean }): string {
     const owner = this.ownerOf(chat.info);
     if (!owner) throw new Error('only a person’s own orchestrator updates its requests');
     const w = this.requireWork(input.id);
+    // LEDGER READING (w642): grant or take back; with nothing else asked, that is the whole update.
+    let readLine = '';
+    if (input.ledger_read !== undefined) {
+      readLine = this.setLedgerRead(owner, w, input.ledger_read);
+      if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline) return readLine;
+    }
     // SUBJECTS ADDED LATER (w502): the threads and reports a request turned out to be the work for, open or closed.
     // Add-only; with nothing else asked, that is the whole update.
     let subjectLine = '';
@@ -890,7 +899,22 @@ export class Orchestrators {
       const hint = input.close === 'cancelled' && live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
       this.gatherForDispatcher(owner, updateNotice(w, owner, `${what.join('; ')}.${hint}`));
     }
-    return `${subjectLine ? `${subjectLine} ` : ''}${w.id} is ${w.status}: ${what.join('; ')}.`;
+    return `${readLine ? `${readLine} ` : ''}${subjectLine ? `${subjectLine} ` : ''}${w.id} is ${w.status}: ${what.join('; ')}.`;
+  }
+
+  /**
+   * Grant or take back ledger reading on a request (w642, docs/orchestrators.md "Workers read the ledger"): its workers
+   * may then list and read every open and stalled request (read_work all). Its own person's orchestrator only, and never
+   * on a request from the intake, whose text is not a person's own. It widens reading only, so it needs no turn of theirs.
+   */
+  private setLedgerRead(owner: Requester, w: WorkItem, on: boolean): string {
+    if (!isFor(w, owner.userId)) throw new Error(`${w.id} is not ${owner.displayName}'s request: only its own people grant its workers ledger reading`);
+    if (on && w.source) throw new Error(`${w.id} came from the intake (${w.source.kind}): its workers read their own requests and the ones they name, never the whole ledger`);
+    if (on === !!w.ledgerRead) return `${w.id} ${on ? 'already grants' : 'does not grant'} ledger reading.`;
+    w.ledgerRead = on ? { by: owner.displayName, at: this.now().toISOString() } : undefined;
+    this.stamp(w, `${owner.displayName}: ${on ? 'its workers may read the ledger' : 'ledger reading taken back'}`);
+    this.store.putWork(w);
+    return `${w.id}: ${on ? 'its workers may now list and read every open and stalled request (read_work all)' : 'ledger reading taken back'}.`;
   }
 
   /**

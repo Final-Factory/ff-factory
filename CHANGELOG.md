@@ -22,6 +22,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Workers read the ledger, read-only** (w642, lothsahn: w631's worker had to judge which requests were finished without
+  being able to read their briefs). A worker's new machine tool `read_work` reads its own requests (the ones it is on)
+  and the ones they name (related ids, a wNNN in their title, brief, notes or PRs, a request merged into them), any
+  status, each with its person, status and live state, PRs, brief, latest report and log. Listing every open and stalled
+  request (`all`, filtered by status, state and person, paged with offset) needs a ledger-read grant on one of the
+  worker's open requests, which its person's orchestrator sets with `request_work`/`update_work ledger_read` (never on
+  an intake request). Everything else is refused, and nothing writes through it. Every text is fenced as data; players'
+  text carries the intake's untrusted header. A page holds at most 50 requests and 40,000 characters (Claude Code saves
+  MCP results over 50,000 characters to a file). Needs the portal and the machines updated.
+
 - **A machine removes FF Factory's own leftovers by itself when disk runs low** (w626, Ben: "no YOU free up disk space,
   like you are instructed to in this harness. stop making us tell you to do it."). Below the soft threshold, and in
   every `machine_cleanup`, the daemon's clean-up now also removes player slots nobody holds (every slot root the machine
