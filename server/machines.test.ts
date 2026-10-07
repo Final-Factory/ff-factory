@@ -562,16 +562,19 @@ test('machine: a lockout does not feed itself, and a good token gets through it'
   let clock = Date.now();
   t.mock.method(Date, 'now', () => clock);
   const answers: string[] = [];
+  let raw = '';
   const attempt = (tok: string) => {
     const out: string[] = [];
     const socket = { write: (s: string) => out.push(s), destroy: () => undefined } as unknown as import('node:stream').Duplex;
     const req = { headers: { authorization: `Bearer ${tok}` } } as unknown as http.IncomingMessage;
     const ok = mm.upgrade(req, socket, Buffer.alloc(0), '198.51.100.7');
     answers.push(ok ? 'ok' : (out[0]?.split(' ')[1] ?? '?'));
+    raw = out[0] ?? '';
     return ok;
   };
   for (let i = 0; i < 10; i++) attempt(bad);
   assert.deepEqual(answers.splice(0), [...Array(10).fill('401')]);
+  assert.match(raw, /^HTTP\/1\.1 401 Unauthorized\r\n(?:[^\r\n]+\r\n)*\r\n$/, 'a refusal an HTTP client can parse: CRLF line ends');
   // A daemon retrying about every 36 s for an hour: refused, but its refusals do not extend the lockout.
   for (let i = 0; i < 100; i++) {
     clock += 36_000;
