@@ -3,13 +3,13 @@
 // machine, each with its sandboxes and the agents in them (every worker runs in a sandbox, w536). Pure, so the server's
 // tests can check it and the browser can run it.
 import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
-import { holdsItsPlace, placeRank, sortAgents } from './agentState.ts';
+import { holdsSandbox, placeRank, sortAgents } from './agentState.ts';
 
 /**
  * Agents with a process (working, waiting on someone, idle), and stopped ones their wake_me or a queued message will
- * resume (Waiting, w475). Other stopped and failed ones are only counted.
+ * resume (Waiting, w475), unless they released their sandbox (w640). Other stopped and failed ones are only counted.
  */
-export const isLiveAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'idle' || s.status === 'waiting_permission' || holdsItsPlace(s);
+export const isLiveAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'idle' || s.status === 'waiting_permission' || holdsSandbox(s);
 
 /** Agents in one place: the live ones (Working, then Waiting, then Idle; the most recent first in each, w475) and how many more have stopped or failed. */
 export interface PlaceAgents {

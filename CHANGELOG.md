@@ -10,6 +10,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **A sandbox is not held for a worker that comes back much later** (w640, Lothsahn: "Can we not reserve slots for
+  workers that resume a long time from now?"). A worker stopped with its check-in more than 30 minutes away, or with a
+  stale check-in for work that is over, releases its sandbox when its worktree is clean (nothing uncommitted or
+  untracked, no Unity batch run): the sandbox shows FREE and takes new work, which starts on a fresh branch (the
+  sandbox is switched off the worker's branch first). A Waiting worker with only such a check-in is stopped first. When
+  it resumes it is placed again: its own sandbox if still free, else a free one on its machine switched to its branch,
+  else it waits for the next one there, ahead of new work; its first message says where it is now. 30 minutes is about
+  ten times what a move costs (a fetch, a switch, a warm editor start and a recompile, about 3 minutes, measured and
+  sourced in docs/machines.md, "Placing work").
+
 ### Fixed
 
 - **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
