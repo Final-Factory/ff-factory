@@ -290,7 +290,7 @@ button after a failure.
 | | GPU | CPU |
 |---|---|---|
 | Whisper, 6.5 s clip | 0.14-0.31 s | 5.5 s |
-| Whisper, 12.5 s clip (w615, through the daemon link) | 0.20-0.30 s | |
+| Whisper, 12.5 s clip (w615, through the daemon link) | 0.20-0.33 s | |
 | Whisper, 45.5 s clip | 0.61-0.95 s | 12.4 s |
 | Whisper load | 2.4-2.6 s with files cached; 12-15 s cold; 36 s once, the first load after a fresh install | 10.5 s |
 | Kokoro, one short sentence | 0.13-0.2 s | 1.4 s |
