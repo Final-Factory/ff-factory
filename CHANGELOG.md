@@ -27,6 +27,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The portal VM's end-to-end reboot checks have 20 s each, and the hang step looks for its own reset** (w636, asked
+  by lothsahn). Hang detection took 382-988 s in 6 of 61 runs; each check for a new boot id was an ssh with no limit
+  once connected. The watch's reset was matched anywhere in its journal, where a first-boot reset (32 of 62 runs) also
+  matched; now only since the step began.
 - **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
   that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
   and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,
