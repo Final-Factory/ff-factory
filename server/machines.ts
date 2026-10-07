@@ -10,6 +10,7 @@ import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
+import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import { ATTACHMENT_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
@@ -586,6 +587,49 @@ export class MachineManager {
 
   /** What each connected daemon said in its hello. */
   private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean }>();
+
+  /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
+  private readonly voices = new Map<string, RemoteVoiceStatus>();
+  private readonly transcribeCalls = new Map<string, { machine: string; resolve: (r: Extract<FromDaemon, { type: 'transcribe_result' }>) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+
+  /** The online machines whose daemon offers its GPU Whisper (w615), with its state; first the ones in `order`. */
+  voiceMachines(order: string[] = []): { machine: string; status: RemoteVoiceStatus }[] {
+    const rank = (id: string) => {
+      const i = order.findIndex((o) => o.toLowerCase() === id.toLowerCase());
+      return i < 0 ? order.length : i;
+    };
+    return [...this.voices]
+      .filter(([id]) => this.isOnline(id) && !this.outdated(id))
+      .map(([machine, status]) => ({ machine, status }))
+      .sort((a, b) => rank(a.machine) - rank(b.machine) || a.machine.localeCompare(b.machine));
+  }
+
+  /**
+   * Transcribe a clip on a machine's GPU Whisper (w615): resolves with its answer, rejects on its error, after
+   * `timeoutMs`, or at once when its link drops. Neither the audio nor the text is logged.
+   */
+  transcribeOn(machine: string, req: { audio: string; prompt?: string; language?: string | null }, timeoutMs: number): Promise<Extract<FromDaemon, { type: 'transcribe_result' }>> {
+    return new Promise((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.transcribeCalls.delete(id);
+        reject(new Error(`${machine} did not answer within ${(timeoutMs / 1000).toFixed(1)} s`));
+      }, timeoutMs);
+      this.transcribeCalls.set(id, { machine, resolve, reject, timer });
+      try {
+        this.post(machine, { type: 'transcribe', id, ...req });
+      } catch (e) {
+        clearTimeout(timer);
+        this.transcribeCalls.delete(id);
+        reject(e as Error);
+      }
+    });
+  }
+
+  /** A recording started: have the machine load its model now (w615). */
+  warmVoice(machine: string) {
+    if (this.voices.has(machine)) this.post(machine, { type: 'voice_warm' }, false);
+  }
 
   /** Whether a connected machine's daemon runs the host guard (w466): its hello said so. */
   guards(id: string): boolean {
@@ -1337,6 +1381,13 @@ export class MachineManager {
   private detach(id: string) {
     this.links.delete(id);
     this.hellos.delete(id);
+    this.voices.delete(id);
+    for (const [cid, c] of this.transcribeCalls) {
+      if (c.machine !== id) continue;
+      clearTimeout(c.timer);
+      this.transcribeCalls.delete(cid);
+      c.reject(new Error(`${id} went offline`));
+    }
     if (this.stats.delete(id)) emit({ type: 'machine_stats', id, stats: null });
     const m = this.store.machines.get(id);
     if (m) {
@@ -1398,6 +1449,8 @@ export class MachineManager {
       case 'hello': {
         this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}) });
         if (!msg.guard) delete m.guard;
+        if (msg.voice && typeof msg.voice === 'object') this.voices.set(id, msg.voice);
+        else this.voices.delete(id);
         // Its daemon runs and reached us: an install or connection error from before is over (a deploy in progress
         // settles the status itself). A 'deploying' left by a portal restart mid-deploy is over too.
         if (m.status === 'error' || (m.status === 'deploying' && !this.deploying.has(id))) Object.assign(m, { status: 'ready', statusDetail: undefined });
@@ -1524,6 +1577,18 @@ export class MachineManager {
         clearTimeout(p.timer);
         if (msg.ok) p.resolve();
         else p.reject(new Error(msg.error ?? 'refused'));
+        return;
+      }
+      case 'voice':
+        if (msg.status && typeof msg.status === 'object') this.voices.set(id, msg.status);
+        return;
+      case 'transcribe_result': {
+        const c = this.transcribeCalls.get(msg.id);
+        if (!c || c.machine !== id) return;
+        this.transcribeCalls.delete(msg.id);
+        clearTimeout(c.timer);
+        if (msg.ok) c.resolve(msg);
+        else c.reject(new Error(msg.error ?? 'failed'));
         return;
       }
       case 'host_report':

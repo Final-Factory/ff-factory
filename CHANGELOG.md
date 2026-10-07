@@ -10,6 +10,21 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Added
+
+- **Dictation on a worker's GPU, the portal's CPU as the fallback** (w615, lothsahn: "voice commands to the portal can
+  get handled by a dedicated process on beast ... If beast is down, the portal can fall back to doing local cpu
+  whisper"; "It should be part of the worker harness and configurable. It'll be off by default and we'll turn it on for
+  beast."). A daemon with daemon.json `voice.enabled` (the install's `--voice-whisper large-v3-turbo`, kept on a re-run)
+  installs faster-whisper and the model under `<root>/voice`, keeps it loaded on its GPU and transcribes the clips the
+  portal sends over its existing link (`transcribe`, `machine/voice.ts`). It loads only with 3 GB of VRAM free and
+  unloads an idle model under 1 GB, so the Unity editors keep their memory. The portal sends each clip to a machine that
+  offers it and falls back to its own Whisper when the machine is offline, short of VRAM, failing or slower than 3 s
+  plus 0.05 s per second of audio (`voice.remote`). The result, the mic's label and Settings say which engine answered,
+  and the dispatcher's line for the machine says how much VRAM Whisper holds. Measured on BEAST: a 12.5 s clip in
+  0.20-0.30 s on the GPU, 1158 MiB of VRAM, 656 MiB of RAM, 2.4 s from daemon start to loaded.
+  [docs/voice.md](docs/voice.md), "Whisper on a worker's GPU".
+
 ### Changed
 
 - **A worker reinstall or daemon restart no longer stops running agents** (w605, lothsahn: "can we make it so that the

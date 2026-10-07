@@ -25,6 +25,8 @@ decisions of 2026-10-06 override it where they differ (listed at the end).
   nightly/              the nightly lab: FF_NIGHTLY_ROOT
   scratch/              long-lived scratch; scratch/legacy/ holds what a migration archived
   tmp/                  agents' TMP, TEMP and TMPDIR (one ffa-<session> folder each)
+  voice/                only with --voice-whisper (w615): the GPU Whisper for the portal's mic, uv's Python, its venv,
+                        the model, setup.log (docs/voice.md "Whisper on a worker's GPU"); the daemon installs and updates it
   migration.json        only after a migration: its journal, read by rollback and cleanup
 ```
 

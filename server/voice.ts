@@ -12,7 +12,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import type { Config } from './config.ts';
 import { TTS_WORKER, WORKER, modelDir, setupNeeded, setupRunning, setupVoice, voicePaths } from './voiceSetup.ts';
-import type { TranscribeResult, TtsStatus, VoiceStatus } from '../shared/voice.ts';
+import { wavSeconds, type LastTranscription, type RemoteVoiceStatus, type TranscribeResult, type TtsStatus, type VoiceStatus } from '../shared/voice.ts';
 
 const REQUEST_TIMEOUT_MS = 120_000;
 const LOAD_TIMEOUT_MS = 180_000;
@@ -56,6 +56,10 @@ export class PyWorker {
   }
   get loading() {
     return !!this.proc && !this.device;
+  }
+  /** A request is in flight. */
+  get busy() {
+    return this.pending.size > 0;
   }
 
   /** Start (if needed) and wait until the model is loaded. */
@@ -116,6 +120,8 @@ export class PyWorker {
 
   private touch() {
     clearTimeout(this.idleTimer);
+    // 0: kept loaded (a worker machine's GPU Whisper, w615); the owner unloads it when VRAM is needed.
+    if (!(this.idleMinutes() > 0)) return;
     this.idleTimer = setTimeout(() => {
       if (this.proc && this.pending.size === 0) {
         console.log(`[voice] ${this.name} idle ${this.idleMinutes()} min: unloading`);
@@ -198,17 +204,31 @@ export class PyWorker {
   }
 }
 
+/** The worker machines' GPU Whisper (w615), as MachineManager offers it (index.ts); tests give a fake. */
+export interface RemoteVoice {
+  /** The online machines that offer it, those in `order` first. */
+  machines(order: string[]): { machine: string; status: RemoteVoiceStatus }[];
+  transcribe(machine: string, req: { audio: string; prompt?: string; language?: string | null }, timeoutMs: number): Promise<{ text?: string; audioSeconds?: number; seconds?: number; model?: string; device?: string; loadSeconds?: number }>;
+  warm(machine: string): void;
+}
+
+/** A remote engine that should take a clip now: loaded, or loading or idle with the VRAM to load. */
+const remoteUsable = (s: RemoteVoiceStatus) => s.state === 'ready' || ((s.state === 'idle' || s.state === 'loading') && !s.vramShort);
+
 export class VoiceService {
   private readonly cfg: Config;
   private installing = false;
   private installError?: string;
   private readonly prompt: () => string;
+  private readonly remote?: RemoteVoice;
+  private last?: LastTranscription;
   readonly stt: PyWorker;
   readonly tts: PyWorker;
 
-  constructor(cfg: Config, prompt: () => string) {
+  constructor(cfg: Config, prompt: () => string, remote?: RemoteVoice) {
     this.cfg = cfg;
     this.prompt = prompt;
+    this.remote = remote;
     const idle = () => this.v.idleMinutes;
     this.stt = new PyWorker(
       'Whisper',
@@ -233,7 +253,32 @@ export class VoiceService {
     return this.cfg.voice;
   }
 
+  /**
+   * The remote engine to try (w615): config voice.remote.machines (in order; empty: any), the first usable one, else the
+   * first that offers it at all (shown with why it is not used). Undefined: none, or voice.remote is off.
+   */
+  private remotePick(): { machine: string; status: RemoteVoiceStatus } | undefined {
+    const rc = this.v.remote;
+    if (!this.remote || !rc?.enabled) return undefined;
+    const named = rc.machines.map((m) => m.toLowerCase());
+    const offered = this.remote.machines(rc.machines).filter((r) => !named.length || named.includes(r.machine.toLowerCase()));
+    return offered.find((r) => r.status.state === 'ready') ?? offered.find((r) => remoteUsable(r.status)) ?? offered[0];
+  }
+
+  /** What the mic sees: a usable remote engine first, else this portal's own; both, and the last clip, for Settings. */
   status(): VoiceStatus {
+    const local = this.localStatus();
+    const r = this.remotePick();
+    const last = this.last ? { last: this.last } : {};
+    if (!r) return { ...local, ...last };
+    const remote = { ...r.status, machine: r.machine };
+    if (!remoteUsable(r.status)) return { ...local, remote, ...last };
+    const { tts, ...own } = local;
+    return { state: r.status.state, model: r.status.model, ...(r.status.device ? { device: r.status.device } : {}), tts, remote, local: own, ...last };
+  }
+
+  /** This portal's own Whisper. */
+  private localStatus(): VoiceStatus {
     const base = { model: this.v.model, tts: this.ttsStatus() };
     if (!this.v.enabled) return { ...base, state: 'unavailable', detail: 'turned off in config.json (voice.enabled)' };
     if (this.installing || setupRunning(this.v)) return { ...base, state: 'installing', detail: 'first-time setup: downloading Whisper and its model' };
@@ -289,21 +334,52 @@ export class VoiceService {
    * when voice mode is on (`tts`), since a reply will be read.
    */
   warm(opts: { tts?: boolean } = {}): VoiceStatus {
-    const s = this.status();
-    if (s.state === 'idle') this.stt.start().catch(() => {}); // the error shows in status and the next request
-    if (opts.tts && s.tts.state === 'idle') this.tts.start().catch(() => {});
+    const r = this.remotePick();
+    // A usable remote engine warms alone (w615): this portal's own loads only when it is needed, sparing the VM's RAM.
+    if (r && remoteUsable(r.status)) {
+      if (r.status.state !== 'ready') this.remote!.warm(r.machine);
+    } else if (this.localStatus().state === 'idle') this.stt.start().catch(() => {}); // the error shows in status and the next request
+    if (opts.tts && this.ttsStatus().state === 'idle') this.tts.start().catch(() => {});
     return this.status();
   }
 
+  /**
+   * A clip to text: on a worker machine's GPU when one offers it (w615), else, or when it fails or is too slow, on this
+   * portal's own Whisper. The result says which answered and why it fell back. Never logs the audio or the text.
+   */
   async transcribe(wav: Buffer): Promise<TranscribeResult> {
     const t0 = Date.now();
-    const s = this.status();
-    if (s.state === 'unavailable' || s.state === 'installing') throw new Error(`local Whisper is ${s.state}${s.detail ? `: ${s.detail}` : ''}`);
     if (this.v.keepAudio) this.keep(wav, t0);
-    const r = await this.stt.request({ audio: wav.toString('base64'), prompt: this.prompt(), language: this.v.language || null });
-    const text = String(r.text ?? '');
-    if (this.v.keepAudio) this.keep(Buffer.from(text, 'utf8'), t0, '.txt');
-    return { text, audioSeconds: Number(r.audioSeconds ?? 0), seconds: Number(r.seconds ?? 0), model: this.v.model, device: this.stt.device ?? '?', totalSeconds: (Date.now() - t0) / 1000 };
+    const audio = wav.toString('base64');
+    const prompt = this.prompt();
+    const language = this.v.language || null;
+    const clip = wavSeconds(wav) ?? 0;
+    let fallback: string | undefined;
+    const r = this.remotePick();
+    if (r && remoteUsable(r.status)) {
+      const rc = this.v.remote;
+      const timeoutMs = 1000 * (rc.timeoutSeconds + rc.perAudioSecond * clip + (r.status.state === 'ready' ? 0 : rc.loadSeconds));
+      try {
+        const a = await this.remote!.transcribe(r.machine, { audio, prompt, language }, timeoutMs);
+        return this.done(t0, { text: String(a.text ?? ''), audioSeconds: Number(a.audioSeconds ?? clip), seconds: Number(a.seconds ?? 0), model: a.model ?? r.status.model, device: a.device ?? '?', engine: 'remote', machine: r.machine });
+      } catch (e) {
+        fallback = `${r.machine}: ${(e as Error).message}`.slice(0, 300);
+      }
+    } else if (r) fallback = `${r.machine}: Whisper ${r.status.vramShort ? 'waiting for free VRAM' : r.status.state}${r.status.detail ? ` (${r.status.detail})` : ''}`.slice(0, 300);
+    const s = this.localStatus();
+    if (s.state === 'unavailable' || s.state === 'installing') throw new Error(`${fallback ? `${fallback}; and ` : ''}local Whisper is ${s.state}${s.detail ? `: ${s.detail}` : ''}`);
+    const l = await this.stt.request({ audio, prompt, language });
+    return this.done(t0, { text: String(l.text ?? ''), audioSeconds: Number(l.audioSeconds ?? 0), seconds: Number(l.seconds ?? 0), model: this.v.model, device: this.stt.device ?? '?', engine: 'local', ...(fallback ? { fallback } : {}) });
+  }
+
+  /** Finish a result: total time, the last-clip record and one log line (which engine, how long; never the words). */
+  private done(t0: number, r: Omit<TranscribeResult, 'totalSeconds'>): TranscribeResult {
+    const res: TranscribeResult = { ...r, totalSeconds: (Date.now() - t0) / 1000 };
+    if (this.v.keepAudio) this.keep(Buffer.from(res.text, 'utf8'), t0, '.txt');
+    this.last = { at: new Date().toISOString(), engine: res.engine, ...(res.machine ? { machine: res.machine } : {}), model: res.model, device: res.device, audioSeconds: res.audioSeconds, totalSeconds: res.totalSeconds, ...(res.fallback ? { fallback: res.fallback } : {}) };
+    const who = res.engine === 'remote' ? `${res.machine} ${res.device}` : `the portal's ${res.device}`;
+    console.log(`[voice] ${res.audioSeconds.toFixed(1)} s clip: ${who} ${res.model}, model ${res.seconds.toFixed(2)} s, total ${res.totalSeconds.toFixed(2)} s${res.fallback ? ` (fallback: ${res.fallback})` : ''}`);
+    return res;
   }
 
   /** Text -> a 16-bit mono WAV (24 kHz), plus timings. */

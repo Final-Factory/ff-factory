@@ -189,6 +189,32 @@ export interface InstallOptions {
   sshHost?: string;
   /** The ssh user the portal's key is authorized for (default: the account running the install). */
   sshUser?: string;
+  /**
+   * The GPU Whisper for the portal's mic (w615, docs/voice.md "Whisper on a worker's GPU"): a faster-whisper model name
+   * turns it on (daemon.json `voice`), "off" turns it off; unset keeps what daemon.json has (off on a new install).
+   */
+  voiceWhisper?: string;
+}
+
+/**
+ * daemon.json `voice` after an install (w615): `flag` a model name turns it on with that model, "off" turns it off (its
+ * other settings kept), unset keeps `had`. Undefined: no `voice` key (off). Exported for tests.
+ */
+export function voiceSetting(flag: string | undefined, had: unknown): Record<string, unknown> | undefined {
+  const before = had && typeof had === 'object' && !Array.isArray(had) ? (had as Record<string, unknown>) : undefined;
+  if (flag === undefined || flag === '') return before;
+  if (flag === 'off') return before ? { ...before, enabled: false } : undefined;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(flag)) throw new Error(`--voice-whisper is a faster-whisper model name (large-v3-turbo, small.en, ...) or off, not "${flag}"`);
+  return { ...before, enabled: true, model: flag };
+}
+
+/** The `voice` of the daemon.json already in the root, if any: a re-run keeps it (w615). */
+function existingVoice(l: Layout): unknown {
+  try {
+    return (JSON.parse(fs.readFileSync(path.join(l.daemon, 'daemon.json'), 'utf8')) as Record<string, unknown>).voice;
+  } catch {
+    return undefined;
+  }
 }
 
 /** A parsed command line: `--key value` options and `--flag`s. Exported for tests. */
@@ -466,8 +492,11 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     const { root: _pr, librarySeed: _ls, ...poolRest } = oldPool as Record<string, unknown>;
     Object.assign(sandboxes, { ...poolRest, root: sandboxes.root, ...(sandboxes.librarySeed ? { librarySeed: sandboxes.librarySeed } : {}) });
   }
+  const voice = voiceSetting(o.voiceWhisper, 'voice' in carried ? carried.voice : existingVoice(l));
+  delete carried.voice;
   return {
     ...carried,
+    ...(voice ? { voice } : {}),
     portalUrl: o.portalUrl,
     id,
     root: l.root,
@@ -1367,6 +1396,7 @@ const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <f
              GitHub credential, which an ssh session does not have)]
             [--unity-editor-root <dir>] [--unity-path <exe>]
             [--no-ssh] [--ssh-host <name the portal reaches it by>] [--ssh-user <user>] (the portal's ssh, w568)
+            [--voice-whisper <model>|off] (Whisper on this machine's GPU for the portal's mic, w615; kept on a re-run)
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
   migrate   [--from <old daemon folder>] [--from-service <its task or label>] [--old-slots <dir>]
@@ -1400,6 +1430,7 @@ export async function main(argv = process.argv.slice(2)) {
       sshHost: opts['ssh-host'],
       sshUser: opts['ssh-user'],
       ...(opts['seed-from'] ? { seedFrom: opts['seed-from'] } : {}),
+      ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
     });
   } else if (cmd === 'elevated') {
     // The install's one administrator step (elevatedSteps): run by an elevated copy of this script.

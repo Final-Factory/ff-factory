@@ -428,7 +428,33 @@ export interface VoiceConfig {
   ttsVoice: string;
   /** "auto": the GPU (CUDA execution provider) if it loads, else the CPU (about real time on this host: slow to start). */
   ttsDevice: 'auto' | 'cuda' | 'cpu';
+  /**
+   * A worker machine's GPU Whisper first, this portal's own Whisper (the settings above) as the fallback (w615,
+   * docs/voice.md "Whisper on a worker's GPU"). Each machine turns its own on (daemon.json `voice`).
+   */
+  remote: VoiceRemoteConfig;
 }
+
+export interface VoiceRemoteConfig {
+  /** Send clips to a machine whose daemon offers its GPU Whisper. Off: this portal's own Whisper only. */
+  enabled: boolean;
+  /** Machine ids to use, first choice first; empty: any machine that offers it. */
+  machines: string[];
+  /**
+   * How long a loaded remote model may take before this portal's own Whisper takes the clip: timeoutSeconds, plus
+   * perAudioSecond for each second of audio, plus loadSeconds when the machine had not loaded its model yet.
+   */
+  timeoutSeconds: number;
+  perAudioSecond: number;
+  loadSeconds: number;
+}
+
+/**
+ * The remote engine's defaults (w615). Measured on BEAST's RTX 4080 SUPER, large-v3-turbo: 0.19-0.28 s for a 12.5 s clip
+ * and 0.61-0.95 s for 45.5 s (0.02 s per audio second), a load of 2.3 s with its files cached and 12-15 s cold. The
+ * timeout allows 10x the measured time on top of the link, so a busy GPU still answers; a dead one costs a few seconds.
+ */
+export const VOICE_REMOTE_DEFAULTS: VoiceRemoteConfig = { enabled: true, machines: [], timeoutSeconds: 3, perAudioSecond: 0.05, loadSeconds: 20 };
 
 export const VOICE_DEFAULTS: Omit<VoiceConfig, 'toolsDir'> = {
   enabled: true,
@@ -443,6 +469,7 @@ export const VOICE_DEFAULTS: Omit<VoiceConfig, 'toolsDir'> = {
   tts: true,
   ttsVoice: 'af_heart',
   ttsDevice: 'auto',
+  remote: VOICE_REMOTE_DEFAULTS,
 };
 
 /** What config may set each of the orchestrators' loop guards to (orchestrator.filingsPerMessage etc., w571). */
@@ -644,7 +671,7 @@ export function withDefaults(raw: any): Config {
     worker: { ...DEFAULTS.worker, ...kept.worker },
     unity: { idleStopMinutes: 120, ...kept.unity },
     hostGuard: { ...HOST_GUARD_DEFAULTS, ...kept.hostGuard, cleanup: { ...DEFAULT_CLEANUP, ...kept.hostGuard?.cleanup } },
-    voice: { ...VOICE_DEFAULTS, toolsDir: '', ...kept.voice },
+    voice: { ...VOICE_DEFAULTS, toolsDir: '', ...kept.voice, remote: { ...VOICE_REMOTE_DEFAULTS, ...kept.voice?.remote } },
   };
 }
 

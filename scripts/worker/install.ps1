@@ -18,6 +18,10 @@
 
 .PARAMETER SshHost
   The name the portal reaches this PC by over ssh (default: its tailnet name). -NoSsh sets up no portal ssh (w568).
+
+.PARAMETER VoiceWhisper
+  Whisper on this PC's GPU for the portal's mic (w615, docs/voice.md): a model name (large-v3-turbo) turns it on, off
+  turns it off. Left out: a re-run keeps what the daemon has (a new install: off).
 #>
 param(
     [string]$Root = '',
@@ -36,7 +40,8 @@ param(
     [switch]$AbsoluteWorktrees,
     [string]$UnitySlotsDir = '',
     [string]$SshHost = '',
-    [switch]$NoSsh
+    [switch]$NoSsh,
+    [string]$VoiceWhisper = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -122,6 +127,7 @@ if ($AbsoluteWorktrees) { $argv += '--absolute-worktrees' }
 if ($UnitySlotsDir) { $argv += @('--unity-slots-dir', $UnitySlotsDir) }
 if ($SshHost) { $argv += @('--ssh-host', $SshHost) }
 if ($NoSsh) { $argv += '--no-ssh' }
+if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
 try {
     $credential | & $node.Path @argv
     $code = $LASTEXITCODE

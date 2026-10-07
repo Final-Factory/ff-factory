@@ -18,7 +18,7 @@ import {
 } from '../shared/voice.ts';
 import { VoiceService } from './voice.ts';
 import { modelDir, requirementsHash, setupNeeded, voicePaths } from './voiceSetup.ts';
-import type { Config, VoiceConfig } from './config.ts';
+import { VOICE_REMOTE_DEFAULTS, type Config, type VoiceConfig } from './config.ts';
 
 const empty: VocabularySource = { sandboxes: [], agentNames: [], machines: [], specs: [], extra: [] };
 
@@ -121,7 +121,7 @@ test('isEmptyTranscript: Whisper markers for silence count as nothing, words do 
 
 function voiceCfg(over: Partial<VoiceConfig> = {}): { cfg: Config; dir: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-voice-'));
-  const voice: VoiceConfig = { enabled: true, toolsDir: path.join(dir, 'tools'), model: 'tiny.en', device: 'auto', language: 'en', idleMinutes: 20, cpuThreads: 4, autoInstall: false, keepAudio: false, vocabulary: [], tts: false, ttsVoice: 'af_heart', ttsDevice: 'auto', ...over };
+  const voice: VoiceConfig = { enabled: true, toolsDir: path.join(dir, 'tools'), model: 'tiny.en', device: 'auto', language: 'en', idleMinutes: 20, cpuThreads: 4, autoInstall: false, keepAudio: false, vocabulary: [], tts: false, ttsVoice: 'af_heart', ttsDevice: 'auto', remote: { ...VOICE_REMOTE_DEFAULTS }, ...over };
   return { cfg: { dataDir: dir, voice } as Config, dir };
 }
 

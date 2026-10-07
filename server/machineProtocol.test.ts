@@ -16,7 +16,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
  *   daemon's protocol in the portal (as SANDBOX_PROTOCOL and the others are), and record both here. Raise
  *   OLDEST_DAEMON_PROTOCOL or OLDEST_PORTAL_PROTOCOL only when the other side can no longer be served at all.
  */
-const DECIDED = { protocol: 8, fingerprint: '27b3c7565dd89b12' };
+// w615 (no bump): the GPU Whisper's `voice` in the hello and its `voice`/`transcribe_result` messages, which an older
+// portal's onMessage drops (no default case), and `transcribe`/`voice_warm`, sent only to a daemon that offered it.
+const DECIDED = { protocol: 8, fingerprint: '2b44fd362dabbecd' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
