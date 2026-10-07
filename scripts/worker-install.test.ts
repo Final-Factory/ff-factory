@@ -8,11 +8,11 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { readToken, rootEnv, withRootDefaults } from '../machine/daemon.ts';
 import { macControlScript, macLabel, macReloadLines, plist } from '../server/machineDeploy.ts';
-import { installScript, taskName, uninstallScript } from '../server/machineDeployWin.ts';
+import { installScript, taskName, taskXml, uninstallScript } from '../server/machineDeployWin.ts';
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
-import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, nightlyTaskProblem, playerFolders, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
 import { runElevatedSteps } from './worker/worker.ts';
@@ -432,4 +432,31 @@ test("worker install: each sandbox owns two player folders, and a new count adds
   } finally {
     fs.rmSync(players, { recursive: true, force: true });
   }
+});
+
+test('worker install: the supervisor is required, and what the installer writes passes its check (w576)', () => {
+  const ok = { installed: true, here: true, restarts: true, script: true, running: 1 };
+  const winL = { daemon: String.raw`D:\work\ffw\daemon` };
+  assert.deepEqual(supervisorProblems(ok, winL, 'FFFactoryDaemon', true, 'win32'), []);
+  assert.deepEqual(supervisorProblems({ ...ok, installed: false }, winL, 'FFFactoryDaemon', true, 'win32'), ['no FFFactoryDaemon task']);
+  // A task an administrator registered for another folder, kept because this run could not register its own.
+  const kept = supervisorProblems({ ...ok, here: false, running: 0 }, winL, 'FFFactoryDaemon', true, 'win32');
+  assert.equal(kept.length, 1);
+  assert.ok(kept[0].includes(String.raw`does not run D:\work\ffw\daemon\run-daemon.ps1`), kept[0]);
+  assert.deepEqual(supervisorProblems({ ...ok, restarts: false, script: false }, winL, 'FFFactoryDaemon', true, 'win32').length, 2);
+  // Running is required only when someone is logged on (otherwise it starts at the next logon).
+  assert.deepEqual(supervisorProblems({ ...ok, running: 0 }, winL, 'FFFactoryDaemon', true, 'win32'), [String.raw`no supervisor runs from D:\work\ffw\daemon\run-daemon.ps1`]);
+  assert.deepEqual(supervisorProblems({ ...ok, running: 0 }, winL, 'FFFactoryDaemon', false, 'win32'), []);
+  const macL = { daemon: '/Users/b/ffw/daemon' };
+  assert.deepEqual(supervisorProblems(ok, macL, 'com.ff.daemon', true, 'darwin'), []);
+  assert.ok(supervisorProblems({ ...ok, restarts: false }, macL, 'com.ff.daemon', true, 'darwin')[0].includes('KeepAlive'));
+  assert.deepEqual(supervisorProblems({ ...ok, running: 0 }, macL, 'com.ff.daemon', true, 'darwin'), ['launchd does not run com.ff.daemon']);
+  // The task the installer registers runs that folder's run-daemon.ps1 and is restarted on failure.
+  const x = taskXml('S-1-5-21-1-2-3-1001', String.raw`C:\Users\loth`, winL.daemon);
+  assert.ok(x.includes(String.raw`-File "D:\work\ffw\daemon\run-daemon.ps1"`), x);
+  assert.match(x, /<RestartOnFailure>\s*<Interval>PT1M<\/Interval>\s*<Count>999<\/Count>/);
+  // The LaunchAgent runs the root's daemon with KeepAlive, the facts supervisorFacts reads from it.
+  const p = plist('/Users/b', '/opt/homebrew/bin/node', false, '', macL.daemon, 'com.ff.daemon');
+  assert.ok(p.includes(`${macL.daemon}/app/machine/daemon.ts`));
+  assert.match(p, /<key>KeepAlive<\/key>\s*<true\/>/);
 });

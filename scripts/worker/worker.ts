@@ -573,6 +573,86 @@ async function installDaemonMac(o: InstallOptions, l: Layout, id: string, probe:
   return { version, started: true };
 }
 
+/**
+ * The supervisor, as this computer has it (w576, lothsahn: "every worker should have a restart daemon--it should be the
+ * standard part of the install"). Windows: the task runs this root's run-daemon.ps1 (machineDeployWin supervisorScript),
+ * which starts the daemon again whenever it exits, and Task Scheduler restarts the supervisor itself if it fails.
+ * A Mac: launchd is the supervisor, by the LaunchAgent's KeepAlive.
+ */
+export interface SupervisorFacts {
+  /** The task, or the LaunchAgent plist. */
+  installed: boolean;
+  /** The task's action runs this root's run-daemon.ps1; the plist runs this root's daemon. */
+  here: boolean;
+  /** Task Scheduler's restart on failure; the plist's KeepAlive. */
+  restarts: boolean;
+  /** run-daemon.ps1 is in the daemon's folder (always true on a Mac). */
+  script: boolean;
+  /** Supervisors running from this root (Windows), or launchd running the daemon (a Mac). */
+  running: number;
+}
+
+/** What is wrong with the supervisor; `started` is whether it should run now (someone is logged on). Exported for tests. */
+export function supervisorProblems(f: SupervisorFacts, l: Pick<Layout, 'daemon'>, service: string, started: boolean, platform: 'win32' | 'darwin' = isWin ? 'win32' : 'darwin'): string[] {
+  const out: string[] = [];
+  if (platform === 'win32') {
+    const script = path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1');
+    if (!f.installed) return [`no ${service} task`];
+    if (!f.here) out.push(`the ${service} task does not run ${script} (a task registered for another folder was kept: registering it needs an administrator)`);
+    if (!f.restarts) out.push(`the ${service} task is not restarted on failure`);
+    if (!f.script) out.push(`${script} is missing`);
+    if (started && f.here && f.script && !f.running) out.push(`no supervisor runs from ${script}`);
+  } else {
+    if (!f.installed) return [`no ${service} LaunchAgent plist`];
+    if (!f.here) out.push(`the ${service} LaunchAgent does not run the daemon in ${l.daemon}`);
+    if (!f.restarts) out.push(`the ${service} LaunchAgent has no KeepAlive, so launchd does not start the daemon again`);
+    if (started && f.here && !f.running) out.push(`launchd does not run ${service}`);
+  }
+  return out;
+}
+
+async function supervisorFacts(l: Layout, service: string): Promise<SupervisorFacts> {
+  if (isWin) {
+    const out = await ps(
+      'checking the supervisor',
+      `$ErrorActionPreference = 'Continue'
+$s = Join-Path ${win.psq(win.winDir(l.daemon))} 'run-daemon.ps1'
+$t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
+"installed=$([bool]$t)"
+"here=$([bool]($t -and ([string]$t.Actions[0].Arguments).IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0))"
+"restarts=$([bool]($t -and $t.Settings.RestartCount -gt 0))"
+"script=$(Test-Path -LiteralPath $s)"
+"running=$(@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -Property CommandLine | Where-Object { ([string]$_.CommandLine).IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count)"
+`,
+    );
+    const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
+    return { installed: get('installed') === 'True', here: get('here') === 'True', restarts: get('restarts') === 'True', script: get('script') === 'True', running: Number(get('running')) || 0 };
+  }
+  const file = path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
+  const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const state = (await exec('launchctl', ['print', `gui/${process.getuid?.()}/${service}`])).stdout;
+  return {
+    installed: !!text,
+    here: text.includes(`${l.daemon}/app/machine/daemon.ts`),
+    restarts: /<key>KeepAlive<\/key>\s*<true\/>/.test(text),
+    script: true,
+    running: /^\s*state = running$/m.test(state) ? 1 : 0,
+  };
+}
+
+/** The supervisor is not optional: the install fails until it is in place, and re-running the installer repairs it. */
+async function requireSupervisor(l: Layout, service: string, started: boolean): Promise<void> {
+  let problems: string[] = [];
+  // Start-ScheduledTask and launchctl bootstrap return before the supervisor runs.
+  for (let i = 0; i < 30; i++) {
+    problems = supervisorProblems(await supervisorFacts(l, service), l, service, started);
+    if (!problems.length) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  if (problems.length) throw new Error(`the daemon's supervisor is not in place: ${problems.join('; ')}. Re-run the installer${isWin ? ' from an administrator PowerShell' : ''} to repair it`);
+  say(`Supervisor: ${isWin ? `the ${service} task runs ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}, which starts the daemon again whenever it exits` : `launchd starts the daemon again whenever it exits (KeepAlive)`}${started ? ', running' : ''}.`);
+}
+
 /** The Unity editors this computer has (the Hub's lists and its default folders): the firewall rules name them. */
 export function unityEditors(home = os.homedir()): string[] {
   const out = new Set<string>();
@@ -837,6 +917,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   writeManifest(l.root, m);
   const d = isWin ? await installDaemonWin(o, l, id, f.probe) : await installDaemonMac(o, l, id, f.probe);
   say(`Daemon ${d.version} installed as ${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`}${d.started ? ' and started' : ' (it starts at the next logon)'}.`);
+  await requireSupervisor(l, o.service, d.started);
   // No Unity slots pointer: the mailbox stays at its standard place in the home folder (daemonJson), where the daemon,
   // its agents and scripts outside it (the nightly harness, a build by hand) all find it with no config (w469,
   // machine/unitySlots.ts slotsDir). One mailbox, so they can never disagree. The uninstall still removes a pointer
@@ -1151,8 +1232,10 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     const sfx = m?.firewallSuffix ? ` ${m.firewallSuffix}` : '';
     const ours = (g: string) => !!m?.outside.some((o) => o.kind === 'firewall-group' && o.name === g + sfx);
     const group = (g: string, n: string) => ({ what: `firewall group "${g}${sfx}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
+    const sup = await supervisorFacts(l, service);
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
+      { what: `the supervisor ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}`, present: sup.script || sup.running > 0, detail: `${sup.running} running` },
       group(SLOT_GROUP, get('slotRules')),
       group(UNITY_GROUP, get('unityRules')),
       { what: `firewall rules naming a path in the root`, present: Number(get('rootRules')) > 0, detail: `${get('rootRules')} rule(s)` },

@@ -85,6 +85,15 @@ slot config (one UAC prompt); and it waits until the portal sees the machine onl
 updates the code and keeps everything else (that is also how a root install is **updated**: the portal never
 redeploys one over ssh, it says "re-run its installer" when the daemon is outdated).
 
+**The supervisor is part of every install** (w576, lothsahn: "every worker should have a restart daemon--it should be
+the standard part of the install"). It is what starts the daemon again after a crash or an update. On Windows the task
+runs the root's `daemon\run-daemon.ps1`, which starts the daemon whenever it exits (backing off up to 5 minutes in a
+crash loop), and Task Scheduler restarts that script if it fails. On a Mac launchd does it, by the LaunchAgent's
+`KeepAlive`. The installer checks it after starting the daemon (`requireSupervisor`): the task or plist runs this root,
+restarts on failure, and, when someone is logged on, is running. It fails until all of that holds. A task registered for
+another folder that a non-administrator run could not replace counts as missing. Re-running the installer repairs it,
+the uninstall removes it, and `check` lists it.
+
 **The credential** is the machine's `/machine` token, `ffm_<machine id>_<secret>`: the only token on the box
 ([vault.md](vault.md), "Enrollment is the machine token", w512). In the portal's VM, `sudo fffctl machine-credential
 issue <id> --out /tmp/<id>.cred` writes one to a 0600 file and never prints it. Move that file to the machine and give
