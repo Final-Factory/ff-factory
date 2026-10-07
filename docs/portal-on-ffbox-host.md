@@ -244,8 +244,8 @@ Six rules:
    *(sourced: Tailscale KB 1085, "Key expiry for tagged devices is disabled by default")*. An OAuth client secret would
    make the node ephemeral unless `?ephemeral=false` is added *(sourced: Tailscale KB 1215)*. Grants: people's devices
    and the four machines may reach `tag:fff-portal` on 443 (and Lothsahn's devices on 22, for ssh into the VM; Ben adds
-   it), and `tag:fff-portal` may reach the four machines on port
-   22, plus BEAST for backups; nothing else. **In place** since 2026-10-05: Ben replaced the default allow-all with
+   it), and `tag:fff-portal` may reach the machines on port
+   22 (the four, and biscuit since 2026-10-07: RUNBOOK section 1, "Adding a machine"), plus BEAST for backups; nothing else. **In place** since 2026-10-05: Ben replaced the default allow-all with
    these rules and checked them; the old policy is `deploy/vm/tailnet-policy-before-2026-10-05.hujson`. `nodeAttrs` gives `funnel` to `tag:fff-portal` only. Funnel needs MagicDNS,
    HTTPS certificates and that attribute, and listens only on 443, 8443 or 10000 *(sourced: Tailscale KB 1223)*.
 
