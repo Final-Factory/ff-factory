@@ -664,7 +664,9 @@ a Discord thread) could otherwise read a token and pass it on in a tool call. A 
 
 - `config.json` and its saved versions (`config.json.prev`, `.1`…), where `FFSB_CONFIG` puts it and beside the app;
 - `data/`, apart from an orchestrator's **own** memory folder and `data/attachments` (the files people attached, which
-  orchestrators are handed and read); other orchestrators' memory, transcripts, the ledger and state stay closed;
+  orchestrators are handed and read), and for Lothsahn's and Ben's own orchestrators the parts of `data/` listed below
+  (w650); for the dispatcher and other people's orchestrators, other orchestrators' memory, transcripts, the ledger and
+  state stay closed;
 - the secrets folder (`<app>/secrets`, and the portal VM's `/srv/fff/secrets` beside its config folder) and the files
   config `claudeTokenFile` and `anthropicApiKeyFile` name (their whole folder when it is called `secrets`);
 - FFBox's ffdiscord config and secrets (`FFBOX_CONFIG_DIR`, `FFBOX_SECRETS`);
@@ -677,6 +679,59 @@ them, so it is refused with the reason; the repo and the agent's own folders sea
 platform the agent runs on: on Windows without case, with `/c/x` (Git Bash) read as `c:/x`, and UNC and `\\?\` paths
 refused; on Linux as they are. Where a path really leads counts too (a link in the repo to `config.json` is refused).
 Writes stay `memoryGuard`'s (orchestrators) and `standingGuard`'s (standing agents).
+
+### What Lothsahn's and Ben's orchestrators read in `data/` (w650)
+
+Lothsahn asked (w650): "Please update FF so you can read, but not write, the portal data folder". After the w643 deploy
+his orchestrator could not read `data/w643-migration.md`. The two people `ops_worker` serves (`OPS_PEOPLE`,
+`opsAllowedOrchestrator` in `server/opsWorker.ts`) now read what `data/` holds that carries no secret. The dispatcher
+and other people's orchestrators keep the rules above: the request named Lothsahn's and Ben's, and the dispatcher reads
+players' text from the intake on its own turns, with no person behind them.
+
+It is an **allowlist** (`ownerDataReads`, `server/secretGuard.ts`): `data/` has secrets at the top level beside the
+state (`users.json`, `auth-sessions.json`, `api-keys.json`, `machine-tokens.json`, `vault.json`, `vapid.json`,
+`push-subscriptions.json`, `outside-watch.json`), each with durable copies (`.1`-`.3`, `.tmp`, `.damaged-…`) and temp
+files (`.<name>.XXXXXX`), and new files appear with new features. A denylist would open each new one by default. With an
+allowlist, an unlisted file stays closed.
+
+| Readable (Read; Grep a file or one of these folders) | What it is |
+|---|---|
+| `*.md` at the top | reports such as `w643-migration.md` |
+| `work.json`, `ledger.json`, `ledger-detach-*.json` | the ledger, its sweep, detach backups |
+| `intake.json`, `max.json`, `providers/` | the intake, Max's activity, the FFBox connector's state (a token's 12-hex fingerprint only) |
+| `usage.json`, `spend.json` | plan usage (account e-mail and organization, a token's 12-hex fingerprint) and spend |
+| `timers.json`, `wakes.json`, `ops-worker.json`, `orchestrator-inbox/` | timers, wakes, the ops worker's state, status notes |
+| `resume.json`, `update.result.json`, `update.prepared.json`, `update.verifying.json`, `relocate.result.json`, `restart.pending.json`, `alive.json`, `update.wanted`, `update.request`, `restart.request`, `drain.done`, `unclean-recovery.last`, `deelevate.last`, `*.pid` | the restart and update hand-off |
+| `cleanup-log.jsonl`, `cleanup-state.json`, `cleanup/` | the clean-up logs |
+| `transcripts/` | every session's transcript, which `search_transcripts` and `agent_transcript` already read for every orchestrator |
+| `orchestrator-memory/dispatcher`, `orchestrator-memory/person-*` | every orchestrator's memory, read-only (below) |
+| `attachments/` | as before |
+
+Each name with its durable copies (`work.json.1`, …). **Closed:** everything else, namely the secrets above;
+`state.json`, which carries config `unity.mcpServer.env` (`localDaemonExtras`, `server/machines.ts`) where a key could
+sit, and whose sessions and machines come through `list_sandboxes`, `list_machines` and `agent_transcript` anyway;
+`send-queue.json` (queued messages and images, unredacted); `uploads/`; `voice-debug/` (people's speech); `tools/`;
+the Windows host's `server.out.log`, `server.err.log` and `supervisor.log` (console output, not redacted); `ops-deploy.grant`; the memory's
+backups (`orchestrator-memory.backup/`) and its git folder.
+
+- **Other orchestrators' memory is readable, never writable.** All their conversations are already searchable
+  (`search_transcripts` reads every transcript, the dispatcher's and other people's orchestrators' included), and
+  `memoryGuard` keeps secrets out of memory files, so reading their memory exposes nothing new. `memoryGuard` still
+  refuses every write outside the orchestrator's own folder.
+- **Searches and listings.** `LS` and `Glob` list every name in `data/` (`mayList`; a listing shows names, never
+  contents, and must stay inside `data/` where the path really leads). `Grep` reads contents, so it may start only
+  from a readable folder or one readable file: a `Grep` of `data/` itself is refused, with or without a `glob` filter,
+  because it would read the closed files. A file pattern (`*.md`, `work.json*`) never opens a folder: a search from a
+  path it matches passes only when that path is a file (`isDir`); unknown is refused.
+- **Links and `..`.** `..` resolves first (`data/transcripts/../users.json` is `users.json`), and a link counts by where
+  it really leads: `data/notes.md` linked to `users.json`, or a link out to `/srv/fff/secrets`, is refused.
+- **No size or format limit of our own.** The readable files are text (JSON, JSONL, Markdown) apart from what people
+  attached. Claude Code's `Read` reads at most 2,000 lines at a time (offset and limit page through the rest), and
+  `Grep` returns matching lines, so a big transcript does not flood the context. The binary folders
+  (`uploads/`, `voice-debug/`, `tools/`) are closed anyway.
+- **No write path.** Orchestrators have no shell (`tools: Read, Glob, Grep, Write, Edit`, `orchestratorOptions`), and
+  `memoryGuard` refuses `Write` and `Edit` outside the orchestrator's own memory folder and every other write tool.
+  Tests: `server/secretGuard.test.ts` (w650), `server/orchestrators.test.ts` (w650, end to end).
 
 ## Timers
 

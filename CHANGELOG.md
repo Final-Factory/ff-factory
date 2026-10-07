@@ -12,6 +12,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **Lothsahn's and Ben's orchestrators read the portal's data folder, never write it** (w650, asked by lothsahn:
+  "Please update FF so you can read, but not write, the portal data folder"). After the w643 deploy his orchestrator
+  could not read `data/w643-migration.md`. They now read the reports (`*.md`), the ledger, the intake, usage and spend,
+  timers and wakes, the restart and update hand-off files, the clean-up logs, the transcripts, the FFBox connector's
+  state and every orchestrator's memory, and LS and Glob list all of `data/`. It is an allowlist (`ownerDataReads`,
+  `server/secretGuard.ts`): the logins, sessions, API keys, machine tokens, the vault, the push keys, `state.json`,
+  `send-queue.json`, uploads and anything not listed stay closed, a Grep of all of `data/` is refused, and links and
+  `..` count where they really lead. Writes are unchanged: only an orchestrator's own memory folder. The dispatcher and
+  other people's orchestrators keep w467's rules. Their briefs gain a paragraph listing what they may read
+  (docs/orchestrators.md, "What Lothsahn's and Ben's orchestrators read in `data/`").
 - **The ledger's three waits: Waiting on input is a person, Queued is capacity only, Blocked is a thing** (w643, asked
   by lothsahn: "Please cleanup the states. ... Make sure you consistently apply all 3 states in all cases"). w634 (held
   until w633's timing table and its lab.lock) and w641 (held until the next portal deploy) read "Queued (the dispatcher
