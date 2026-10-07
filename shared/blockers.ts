@@ -38,7 +38,7 @@ export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until'
     case 'request':
       return `${b.ref} ${b.on === 'report' ? 'reporting' : 'finishing'}`;
     case 'deploy':
-      return b.ref ? `${b.ref}'s update` : 'a portal deploy';
+      return b.ref === 'machines' ? "the machines' update" : b.ref ? `${b.ref}'s update` : 'a portal deploy';
     case 'machine':
       return `${b.ref} coming back online`;
     case 'usage':

@@ -48,6 +48,7 @@ import {
 } from './ledgerRules.ts';
 import type { LedgerCleanupState, Requester, SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
 import { servedBy } from '../shared/workState.ts';
+import { BLOCKER_STUCK_MS } from '../shared/blockers.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { appVersion } from './version.ts';
 
@@ -543,17 +544,66 @@ export class LedgerSweep {
     const reason = partOf ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
     // ONLY A DEPLOY LEFT, AND IT HAPPENED (w631): w605, w513, w537 and w600 waited on a portal deploy or machine updates,
     // which the ops worker or a person then did, and nothing told the ledger. What runs now is the evidence.
-    const deployed = reason && !partOf ? await this.deployedText(w, workers, merged) : undefined;
+    const step = reason && !partOf ? await this.appDeployStep(w, workers, merged) : undefined;
+    const deployed = step ? await this.deployedText(step, merged) : undefined;
     if (deployed) {
       this.closeAsDone(w, { how: 'deploy', pr: last.number, sha: last.sha, mergedAt: last.at, text: `${prMergedText(last)}; deployed since: ${deployed}` }, acts);
       return true;
     }
     if (reason) {
       note(last, `merged:${reason.slice(0, 40)}`, `PR #${last.number} merged; still open: ${reason}`);
+      // Only a deploy left, not yet run (w643): Blocked on that deploy, not "Merged, follow-up pending"; it closes above
+      // once what runs contains the merge, and a week without one stalls it.
+      if (this.deployBlock(w, step, reason, acts)) return false;
       acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `PR #${last.number} merged; ${reason}` });
       return false;
     }
     this.closeAsDone(w, { how: 'prs', pr: last.number, sha: last.sha, mergedAt: last.at, text: prMergedText(last) }, acts);
+    return true;
+  }
+
+  /**
+   * The deploy of this app that is a request's only step left after its merge (deployStep), when every merged PR of it is
+   * this app's own with its merge commit known (a game repo's "deploy" is not the portal's); else undefined.
+   */
+  private async appDeployStep(w: WorkItem, workers: readonly SessionInfo[], merged: readonly WorkPr[]): Promise<{ portal: boolean; machines: boolean } | undefined> {
+    const step = deployStep(w, workers.map((s) => s.lastResult ?? ''));
+    if (!step || !merged.length) return undefined;
+    const app = (await this.appSlug())?.toLowerCase();
+    if (!app || merged.some((p) => p.repo.toLowerCase() !== app || !p.sha)) return undefined;
+    return step;
+  }
+
+  /**
+   * A merged request whose only step left is a deploy of this app that has not run yet is Blocked on it (w643), by the
+   * cleanup (`by: ledger cleanup`): blocked once, unblocked back to its follow-up when another step turns out to be left,
+   * and stalled after BLOCKER_STUCK_MS.deploy without the deploy. A request the dispatcher blocked is its own. Returns
+   * whether the request is (still) blocked on the deploy.
+   */
+  private deployBlock(w: WorkItem, step: { portal: boolean; machines: boolean } | undefined, reason: string | undefined, acts: Action[]): boolean {
+    const mine = w.status === 'blocked' && w.blocked?.by === 'ledger cleanup';
+    if (w.status === 'blocked' && !mine) return false;
+    if (!step) {
+      if (mine) this.d.orchestrators.ledgerEdit(w.id, `unblocked by the ledger cleanup: a deploy is no longer the only step left${reason ? ` (still open: ${reason})` : ''}`, (x) => void (x.status = 'active'));
+      return false;
+    }
+    if (!isOpen(w)) return false;
+    const what = step.portal && step.machines ? "a portal deploy and the machines' update, after the merge" : step.portal ? 'a portal deploy, after the merge' : "the machines' update, after the merge";
+    if (!mine) {
+      const at = new Date(this.now()).toISOString();
+      const sha = step.portal ? (this.d.portalSha ?? (() => appVersion().sha))() : undefined;
+      this.d.orchestrators.ledgerEdit(w.id, `blocked by the ledger cleanup on ${what}: its only step left`, (x) => {
+        x.status = 'blocked';
+        x.blocked = { kind: 'deploy', ...(step.portal ? {} : { ref: 'machines' }), what, at, by: 'ledger cleanup', ...(sha ? { sha } : {}) };
+      });
+      acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `merged; blocked on ${what}` });
+      return true;
+    }
+    const age = this.now() - (Date.parse(w.blocked!.at) || this.now());
+    if (age >= BLOCKER_STUCK_MS.deploy!) {
+      this.stall(w, 'blocked', `blocked on ${what} for ${Math.floor(age / 86_400_000)} days: no deploy has run the merge`, acts);
+      return false;
+    }
     return true;
   }
 
@@ -566,11 +616,7 @@ export class LedgerSweep {
    * machines). Undefined otherwise: another step is left, a merged PR is not this app's (a game repo's "deploy" is not
    * the portal's), or what runs does not contain every merge yet, or cannot be told.
    */
-  private async deployedText(w: WorkItem, workers: readonly SessionInfo[], merged: readonly WorkPr[]): Promise<string | undefined> {
-    const step = deployStep(w, workers.map((s) => s.lastResult ?? ''));
-    if (!step || !merged.length) return undefined;
-    const app = (await this.appSlug())?.toLowerCase();
-    if (!app || merged.some((p) => p.repo.toLowerCase() !== app || !p.sha)) return undefined;
+  private async deployedText(step: { portal: boolean; machines: boolean }, merged: readonly WorkPr[]): Promise<string | undefined> {
     const runs = async (head: string) => {
       for (const p of merged) if ((await this.containsSha(p.sha!, head)) !== true) return false;
       return true;
@@ -680,7 +726,7 @@ export class LedgerSweep {
     return true;
   }
 
-  private stall(w: WorkItem, kind: 'idle' | 'cut-off' | 'superseded' | 'unsure', reason: string, acts: Action[], by?: string) {
+  private stall(w: WorkItem, kind: 'idle' | 'cut-off' | 'superseded' | 'unsure' | 'blocked', reason: string, acts: Action[], by?: string) {
     if (w.status === 'stalled') return;
     const at = new Date(this.now()).toISOString();
     this.d.orchestrators.ledgerEdit(w.id, `stalled by the ledger cleanup: ${reason}`, (x) => {

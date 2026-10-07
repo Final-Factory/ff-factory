@@ -459,6 +459,7 @@ const blockerWatch = new BlockerWatch({
   room: () => agents.roomNow(),
 }).start();
 agents.blockerWatch = blockerWatch;
+agents.daemonSha = (id) => machines.daemonVersions().find((d) => d.id === id.toLowerCase())?.sha;
 // The orchestrators' base clone, kept on origin's newest code (w467, server/baseRefresh.ts; config repo.refreshMinutes).
 startBaseRefresh(cfg);
 max.onEvent = (ev) => intake.onMaxEvent(ev);
