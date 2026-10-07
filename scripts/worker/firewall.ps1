@@ -42,7 +42,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 1
 }
 
-function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why) {
+function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [switch]$One) {
     # A Block rule an earlier, dismissed prompt left for this exact path (outside our groups) would win over ours.
     # Allow rules people made stay: an uninstall then leaves the path as it found it.
     $stale = @(Get-NetFirewallApplicationFilter -Program $exe -ErrorAction SilentlyContinue |
@@ -50,6 +50,13 @@ function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why) {
     if ($stale.Count) {
         Say "  ${name}: removing $($stale.Count) earlier Block rule(s) for $exe"
         $stale | Remove-NetFirewallRule
+    }
+    if ($One) {
+        # One rule per player folder (lothsahn, w576): inbound, any protocol, every profile. The prompt only ever asks
+        # about inbound (a listening player), and Windows allows outbound unless a rule blocks it.
+        New-NetFirewallRule -DisplayName $name -Group $group -Direction Inbound -Program $exe -Protocol Any `
+            -Action Allow -Profile Any -Description $why | Out-Null
+        return 1
     }
     $n = 0
     foreach ($dir in 'Inbound', 'Outbound') {
@@ -78,9 +85,11 @@ try {
         exit 0
     }
     $made = 0
-    for ($k = 1; $k -le $Pairs; $k++) {
+    # Each sandbox's pair, then the nightly lab's (lothsahn: "Let's use slotnightly-0 and slotnightly-1").
+    foreach ($k in @(1..$Pairs) + 'nightly') {
         foreach ($p in 0, 1) {
-            $made += Add-Allow (Join-Path $Root "slot$k-$p\player\finalfactory.exe") "Final Factory player slot$k-$p" $SlotGroup "Sandbox slot$k's player $p (scripts/nightly/player_slots.py, w576)"
+            $who = if ($k -eq 'nightly') { 'The nightly lab' } else { "Sandbox slot$k" }
+            $made += Add-Allow (Join-Path $Root "slot$k-$p\player\finalfactory.exe") "Final Factory player slot$k-$p" $SlotGroup "$who's player $p (scripts/nightly/player_slots.py, w576)" -One
         }
     }
     $editors = 0
@@ -92,7 +101,7 @@ try {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
         [IO.File]::WriteAllText($Config, (@{ root = $Root; layout = 'sandbox-pairs'; count = $Pairs } | ConvertTo-Json))
     }
-    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1\player\finalfactory.exe ($(2 * $Pairs) player folders) and $editors Unity editor(s)$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
+    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1 and slotnightly-0, -1 ($(2 * $Pairs + 2) player folders, one rule each) and $editors Unity editor(s)$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
 } catch {
     Say "FAILED: $($_.Exception.Message)"
     exit 1

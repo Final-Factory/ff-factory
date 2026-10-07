@@ -389,8 +389,8 @@ test('worker install: the key file itself: made with its folder, the key in once
 });
 
 test("worker install: each sandbox owns two player folders, and a new count adds or removes pairs (w576)", () => {
-  assert.deepEqual(playerFolders(2), ['slot1-0', 'slot1-1', 'slot2-0', 'slot2-1']);
-  assert.equal(playerFolders(5).length, 10);
+  assert.deepEqual(playerFolders(2), ['slot1-0', 'slot1-1', 'slot2-0', 'slot2-1', 'slotnightly-0', 'slotnightly-1']);
+  assert.equal(playerFolders(5).length, 12, "5 sandboxes' pairs and the nightly lab's");
   const players = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-players-'));
   try {
     // LothDesktop before: the old pool slot0..slot7, one with a leftover build and its lease files.
@@ -399,7 +399,7 @@ test("worker install: each sandbox owns two player folders, and a new count adds
     fs.writeFileSync(path.join(players, 'pool.lock'), '');
     const lines: string[] = [];
     const first = syncPlayerFolders(players, playerFolders(5), (l) => lines.push(l));
-    assert.equal(first.made.length, 10);
+    assert.equal(first.made.length, 12);
     assert.deepEqual(first.removed.sort(), ['slot0', 'slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6', 'slot7']);
     assert.deepEqual(fs.readdirSync(players).sort(), ['pool.lock', ...playerFolders(5)].sort(), 'other files stay');
     // Lowered to 4 sandboxes: slot5's pair goes; the rest are kept as they are.

@@ -50,3 +50,8 @@ test("w576: a sandbox's players run from its own pair, slotK-0 and slotK-1, neve
   assert.equal(checkPlayerLaunch('F:/ff-players/slot7/player/finalfactory.exe', 'slot3'), undefined);
   assert.match(checkPlayerLaunch('D:/work/ffw/sandboxes/slot3/Builds/w/finalfactory.exe', 'slot3') ?? '', /outside a player slot/);
 });
+
+test("w576: the nightly lab's pair, slotnightly-0 and -1, is a slot; a sandbox may not start from it", () => {
+  assert.equal(checkPlayerLaunch('D:/work/ffw/players/slotnightly-1/player/finalfactory.exe -x'), undefined, 'the nightly lab, outside any sandbox');
+  assert.match(checkPlayerLaunch('D:/work/ffw/players/slotnightly-0/player/finalfactory.exe', 'slot2') ?? '', /the nightly lab's player folder; this is sandbox slot2/);
+});

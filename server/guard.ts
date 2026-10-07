@@ -142,9 +142,10 @@ const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
 const PLAYER_BINARY = /(?:^|[\\/])finalfactory(?:\.exe|\.app(?:[\\/]contents[\\/]macos[\\/]finalfactory)?)$/i;
 /**
  * A player slot (scripts/nightly/player_slots.py): <slot root>/slotK/player/finalfactory.exe or .app on a lab machine's
- * pool, <slot root>/slotK-P/player/... on a worker root install, where sandbox slotK owns slotK-0 and slotK-1 (w576).
+ * pool, <slot root>/slotK-P/player/... on a worker root install, where sandbox slotK owns slotK-0 and slotK-1 and the
+ * nightly lab, outside every sandbox, owns slotnightly-0 and slotnightly-1 (w576).
  */
-const SLOT_PLAYER = /[\\/]slot(\d+)(?:-([01]))?[\\/]player[\\/]finalfactory(?:\.exe|\.app)(?:[\\/]|$)/i;
+const SLOT_PLAYER = /[\\/]slot(\d+|nightly)(?:-([01]))?[\\/]player[\\/]finalfactory(?:\.exe|\.app)(?:[\\/]|$)/i;
 /** Words that start the next word as a program: a call operator, a launcher, or an environment prefix. */
 const LAUNCHERS = new Set(['&', '.', 'exec', 'nohup', 'time', 'env', 'start', 'start-process', 'saps', 'open', 'invoke-item', 'ii', 'cmd', 'cmd.exe', '/c', '/k']);
 
@@ -170,7 +171,7 @@ export function checkPlayerLaunch(cmd: string, sandbox?: string): string | undef
       // A sandbox's pair is its own (w576): sandbox slotK starts players only from slotK-0 and slotK-1.
       if (isPlayer && slot?.[2] !== undefined && own !== undefined && slot[1] !== own) {
         return (
-          `Refused: ${w} is sandbox slot${slot[1]}'s player folder; this is sandbox slot${own}, whose players run only from ` +
+          `Refused: ${w} is ${/^nightly$/i.test(slot[1]) ? "the nightly lab's" : `sandbox slot${slot[1]}'s`} player folder; this is sandbox slot${own}, whose players run only from ` +
           `slot${own}-0 and slot${own}-1. Start it with \`python scripts/nightly/player_slots.py launch <exe or build folder> -- <args>\`, ` +
           "which picks this sandbox's pair (`--peer 1` for the second peer)."
         );
