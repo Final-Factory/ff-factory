@@ -635,9 +635,10 @@ test('w615: worker update --voice-whisper turns the GPU Whisper on; without it t
 test('worker update (w629): an ssh session\'s minimal PATH gets the standard tool folders, for the installer only', () => {
   // m5, 2026-10-07: `ssh benryding@m5` had /usr/bin:/bin:/usr/sbin:/sbin, and git-lfs 3.7.1 sat in /opt/homebrew/bin.
   const mac = (d: string) => ['/opt/homebrew/bin', '/usr/local/bin'].includes(d);
-  assert.equal(withStandardPaths('/usr/bin:/bin:/usr/sbin:/sbin', 'darwin', mac), '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'Homebrew first, as a shell has it');
-  assert.equal(withStandardPaths('/opt/homebrew/bin:/usr/bin:/bin', 'darwin', mac), '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin', 'a folder already there is not moved or repeated');
-  assert.equal(withStandardPaths('/usr/bin:/bin', 'darwin', () => false), '/usr/bin:/bin', 'only folders that exist');
+  assert.equal(withStandardPaths('/usr/bin:/bin:/usr/sbin:/sbin', 'darwin', mac, {}), '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'Homebrew first, as a shell has it');
+  assert.equal(withStandardPaths('/usr/bin:/bin', 'darwin', (d) => d === '/Users/b/.local/bin', { HOME: '/Users/b' }), '/usr/bin:/bin:/Users/b/.local/bin', "Claude Code's native install, after");
+  assert.equal(withStandardPaths('/opt/homebrew/bin:/usr/bin:/bin', 'darwin', mac, {}), '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin', 'a folder already there is not moved or repeated');
+  assert.equal(withStandardPaths('/usr/bin:/bin', 'darwin', () => false, {}), '/usr/bin:/bin', 'only folders that exist');
   const win = (d: string) => /Git\\cmd$|nodejs$/.test(d);
   const env = { ProgramFiles: 'C:\\Program Files' };
   assert.equal(
@@ -646,6 +647,11 @@ test('worker update (w629): an ssh session\'s minimal PATH gets the standard too
     "Git for Windows and Node.js after the system's",
   );
   assert.equal(withStandardPaths('C:\\program files\\git\\CMD\\;C:\\Windows', 'win32', win, env), 'C:\\program files\\git\\CMD\\;C:\\Windows;C:\\Program Files\\nodejs', 'case and a trailing slash do not repeat it');
+  // Claude Code: npm's shim (LothDesktop's) and the native install.
+  assert.equal(
+    withStandardPaths('C:\\Windows', 'win32', (d) => /npm$|\.local\\bin$/.test(d), { ...env, APPDATA: 'C:\\Users\\l\\AppData\\Roaming', USERPROFILE: 'C:\\Users\\l' }),
+    'C:\\Windows;C:\\Users\\l\\.local\\bin;C:\\Users\\l\\AppData\\Roaming\\npm',
+  );
 });
 
 test('worker update (w629): success only when the portal sees the daemon running the commit installed; else it says what it runs', () => {

@@ -165,12 +165,33 @@ reinstalling beast and m5 on 2026-10-07, f3f19c0 → 9ea8476):
   order, and adds only folders that are new. m5's `~/.unity/bin` had moved to the end. On Windows the task carries no
   environment of its own (its XML has a user and an action only), so there is nothing there to keep. The task's user
   stays.
-- **It restarts the daemon and checks.** The install stops the old daemon (its agents keep running in their hosts,
-  below), installs the new code and starts it. The update then waits until the portal sees the machine online with
-  the new code (`/machine/whoami` reports the daemon's commit and whether it is outdated, a portal from w613 on). If
-  the portal does not, it restarts the task or LaunchAgent once (the ops worker had to run that by hand on beast) and
-  waits again. It ends with what ran before and after: the daemon's commit, the settings changed, the credential
-  reused, and what the portal sees. Exit 0 only when the portal sees the new daemon online and not outdated.
+- **It checks every prerequisite before it touches anything** (w629). git, git-lfs, node, Claude Code, the portal,
+  the limits: all are checked before the code is fetched and before the daemon is stopped. On a failure the daemon
+  keeps running what it ran, untouched, and the update exits 2 with each problem and "the daemon was not touched".
+  On m5, on 2026-10-07, a run that found no git-lfs still restarted the daemon and then reported success.
+- **It finds the tools where they live, off an ssh session's PATH** (w629). A non-interactive ssh session's PATH is
+  short (m5's `ssh benryding@m5` had `/usr/bin:/bin:/usr/sbin:/sbin`, and git-lfs 3.7.1 was in `/opt/homebrew/bin`).
+  The installer adds the standard folders that exist and are missing, for its own run only:
+  - on a Mac, `/opt/homebrew/bin`, `/opt/homebrew/sbin` and `/usr/local/bin`, first, as a shell has them;
+  - on Windows, Git for Windows (`Git\cmd`, `Git\mingw64\bin`) and `nodejs` under Program Files, last.
+
+  This is `install.sh`, `install.ps1` and `worker.ts withStandardPaths`. The daemon's own PATH is not this: it is the
+  LaunchAgent plist's, from the user's login shell (kept in its order, above), and on Windows the user's logon
+  environment.
+- **It restarts the daemon, and succeeds only on the commit it installed.** The install stops the old daemon (its
+  agents keep running in their hosts, below), installs the new code and starts it. If the install stopped before the
+  new code was in place, nothing is restarted and the update fails, saying which code the daemon has. Otherwise it
+  waits until the portal sees the machine online running the commit installed (`/machine/whoami` reports the daemon's
+  commit and whether it is outdated, a portal from w613 on). If the portal does not, it restarts the task or
+  LaunchAgent once (the ops worker had to run that by hand on beast) and waits again. It ends with:
+  - what ran before and after;
+  - the settings changed;
+  - the credential reused;
+  - what the portal sees.
+
+  **Exit 0 only when the portal sees the daemon online, running that commit, and not outdated**
+  (`updateVerdict`). Anything else exits 1 and says what the daemon runs: "m5's daemon still runs 9ea8476, not
+  22b5f8b…". A portal that does not report the daemon's commit confirms nothing, so that also exits 1.
 
 **An update does not stop running work** (w605). Each agent process runs in an agent host of its own
 (`machine/agentHost.ts`), started detached from the daemon, so it outlives the daemon ([machines.md](machines.md),

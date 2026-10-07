@@ -1231,11 +1231,15 @@ export function withStandardPaths(current: string, platform: NodeJS.Platform = p
   if (platform === 'win32') {
     const pf = env.ProgramFiles || 'C:\\Program Files';
     const local = env.LOCALAPPDATA ? [`${env.LOCALAPPDATA}\\Programs\\Git\\cmd`, `${env.LOCALAPPDATA}\\Programs\\Git\\mingw64\\bin`] : [];
-    const add = missing([`${pf}\\Git\\cmd`, `${pf}\\Git\\mingw64\\bin`, `${pf}\\Git LFS`, `${pf}\\nodejs`, ...local]);
+    // Claude Code too: its native install (~\.local\bin) and npm's global shims (%APPDATA%\npm).
+    const claude = [...(env.USERPROFILE ? [`${env.USERPROFILE}\\.local\\bin`] : []), ...(env.APPDATA ? [`${env.APPDATA}\\npm`] : [])];
+    const add = missing([`${pf}\\Git\\cmd`, `${pf}\\Git\\mingw64\\bin`, `${pf}\\Git LFS`, `${pf}\\nodejs`, ...local, ...claude]);
     return [...have, ...add].join(sep);
   }
   const add = missing(['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin']);
-  return [...add, ...have].join(sep);
+  // Claude Code's native install, after what is there.
+  const after = missing(env.HOME ? [`${env.HOME}/.local/bin`] : []).filter((d) => !add.includes(d));
+  return [...add, ...have, ...after].join(sep);
 }
 
 /** Whether `a` and `b` name the same commit (one may be short). */

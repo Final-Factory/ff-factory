@@ -97,7 +97,7 @@ const machine = async () => (await (await fetch(`http://127.0.0.1:${port + 1}/ma
  * `ssh benryding@m5` PATH was /usr/bin:/bin:/usr/sbin:/sbin; Windows' OpenSSH gives the system PATH, here without Git's.
  */
 const sshPath = isWin
-  ? [path.dirname(process.execPath), path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32'), process.env.SystemRoot ?? 'C:\\Windows', path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0'), path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'Wbem')].join(';')
+  ? [path.dirname(process.execPath), ...(fs.existsSync(path.join(scratch, 'bin')) ? [path.join(scratch, 'bin')] : []), path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32'), process.env.SystemRoot ?? 'C:\\Windows', path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0'), path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'Wbem')].join(';')
   : [path.dirname(process.execPath), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
 const run = (args: string[], input?: string, env: NodeJS.ProcessEnv = {}) => {
   const base: NodeJS.ProcessEnv = { ...process.env };
