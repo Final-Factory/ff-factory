@@ -12,6 +12,23 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The ledger's three waits: Waiting on input is a person, Queued is capacity only, Blocked is a thing** (w643, asked
+  by lothsahn: "Please cleanup the states. ... Make sure you consistently apply all 3 states in all cases"). w634 (held
+  until w633's timing table and its lab.lock) and w641 (held until the next portal deploy) read "Queued (the dispatcher
+  queued it for capacity)" while LothDesktop had room. Now: `decide_work block` records a structured blocker (another
+  request finishing or reporting, a portal deploy or a machine update, a machine offline, a usage limit, a lock such as
+  lab.lock, a time, or CI on a PR), the request reads **Blocked on** it, and the blocker watch (`server/blockerWatch.ts`,
+  every minute) unblocks it by itself and tells the dispatcher to start it; a blocker that stalls or misses its time
+  stalls the request, and one closed without delivering asks its requester. `decide_work queue` is refused while a
+  computer that could take the request has room, and a request left queued while one has room is flagged (WRONG in
+  list_work, red on the page, a `[ledger] WRONG STATE` to the dispatcher). A merged request whose only step left is a
+  deploy reads Blocked on it (w631's deploy check). A worker between turns on its own CI watch or check-in, and its
+  request, read **Working**, never Waiting; a request not decided yet reads Working (with the dispatcher); a message held
+  for a slot is Queued, one held for its offline or outdated machine Blocked. `list_work`, `read_work` and the page take
+  `blocked`; the cleanup never stalls a Blocked request whose blocker is progressing. On its first start the portal
+  blocks the requests whose queue notes name what they wait on and gives the dispatcher the before and after of every
+  open and stalled request (`data/w643-migration.md`; `node scripts/ledger-states.ts <copy of data> --w643` shows it on
+  a copy). docs/orchestrators.md, "Waiting, Queued, Blocked", has the rule, every blocker kind and the audit table.
 - **`npm test` on a Mac takes half as long: a usage test no longer holds its process for a minute** (w636, asked by
   lothsahn). A test left a fake login request hanging with its 60 s deadline running; on a Mac (where the stored-login
   check lets that request start) the file's process lived 60 s, the longest of the suite. It now ends the request.

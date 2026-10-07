@@ -16,6 +16,7 @@ import { MaxManager } from './max.ts';
 import { IntakeManager } from './intake.ts';
 import { LedgerSweep } from './ledgerSweep.ts';
 import { BlockerWatch } from './blockerWatch.ts';
+import { runWaitsMigration } from './waitsMigration.ts';
 import { parseNightlyReport } from './nightlyRules.ts';
 import { parseEscalation } from './escalationRules.ts';
 import { groupIntake } from '../shared/intake.ts';
@@ -457,7 +458,7 @@ const blockerWatch = new BlockerWatch({
   usageClear: (account) => accountClear(account),
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
-}).start();
+});
 agents.blockerWatch = blockerWatch;
 agents.daemonSha = (id) => machines.daemonVersions().find((d) => d.id === id.toLowerCase())?.sha;
 // The orchestrators' base clone, kept on origin's newest code (w467, server/baseRefresh.ts; config repo.refreshMinutes).
@@ -493,6 +494,22 @@ if (cfg.hostGuard.pollSeconds > 0) {
 }
 if (!auth.hasUsers()) console.warn('No users yet. Create one on this machine: node server/user.ts <username>');
 const cutOff = agents.boot();
+// Once, on the first start with w643: requests queued with a note naming what they wait on become Blocked on it, and the
+// dispatcher gets the before and after of every open and stalled request (data/w643-migration.md).
+runWaitsMigration({
+  dataDir: cfg.dataDir,
+  items: () => [...store.work.values()],
+  block: (id, b, line) =>
+    void agents.orchestrators.ledgerEdit(id, line, (x) => {
+      x.status = 'blocked';
+      x.blocked = b;
+    }),
+  live: () => agents.workLive(),
+  portalSha: appVersion().sha,
+  machines: [...store.machines.keys()],
+  tell: (text) => agents.orchestrators.toDispatcher(text),
+});
+blockerWatch.start();
 
 let lastSystem: SystemStats | undefined;
 

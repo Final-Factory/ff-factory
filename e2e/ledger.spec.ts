@@ -57,7 +57,7 @@ test('a quiet request stalls on "Clean up now", shows under Stalled with its rea
   await expect(panel.getByTestId('stalled-list').getByTestId(`work-${id}`)).toHaveCount(0);
 });
 
-test('the Requests tab shows what each request is doing now, with counts per state and a filter (w418)', async ({ authed: page }) => {
+test('the Requests tab shows what each request is doing now, with counts per state and a filter (w418, w643)', async ({ authed: page }) => {
   const tag = uniq('states');
   const me = await appState(page.request);
   const file = async (title: string) => (await useTool(page.request, me.orchestratorId, 'request_work', { title: `${title} ${tag}`, brief: `For the live states ${tag}.` })).match(/Filed (w\d+)/)![1];
@@ -65,6 +65,11 @@ test('the Requests tab shows what each request is doing now, with counts per sta
   const stalled = await file('Stalled one');
   const waiting = await file('Waiting one');
   const followup = await file('Follow-up one');
+  const blocked = await file('Blocked one');
+  const fresh = await file('New one');
+  // Queued for capacity on a computer that is not there: a real shortage, so plain Queued (w643).
+  await patchWork(page.request, queued, { status: 'queued', queuedFor: { at: new Date().toISOString(), needs: ['nowhere'] } });
+  await patchWork(page.request, blocked, { status: 'blocked', blocked: { kind: 'request', ref: queued, what: `${queued}'s table ${tag}`, at: new Date().toISOString(), by: 'dispatcher' } });
   await patchWork(page.request, stalled, { status: 'active' });
   await patchWork(page.request, waiting, { status: 'question', question: { text: `Which save? ${tag}`, at: new Date().toISOString() } });
   await patchWork(page.request, followup, {
@@ -76,8 +81,13 @@ test('the Requests tab shows what each request is doing now, with counts per sta
   await go(page, '#/dispatcher');
   const panel = page.locator('.dispatcher-panel');
   const states = panel.getByTestId('ledger-states');
-  for (const s of ['queued', 'waiting', 'followup', 'stalled']) await expect(states.getByTestId(`ledger-state-${s}`)).toBeVisible();
+  for (const s of ['working', 'queued', 'waiting', 'blocked', 'followup', 'stalled']) await expect(states.getByTestId(`ledger-state-${s}`)).toBeVisible();
   await expect(panel.getByTestId(`live-${queued}`)).toContainText('Queued');
+  await expect(panel.getByTestId(`room-${queued}`)).toHaveCount(0);
+  await expect(panel.getByTestId(`live-${blocked}`)).toContainText(`Blocked on ${queued} finishing`);
+  await expect(panel.getByTestId(`live-${fresh}`)).toContainText('Working', { timeout: 10_000 });
+  await panel.getByTestId(`work-${blocked}`).getByRole('button', { name: new RegExp(`Blocked one ${tag}`) }).click();
+  await expect(panel.getByTestId(`blocked-${blocked}`)).toContainText(`Blocked on ${queued} finishing: ${queued}'s table ${tag} (set by dispatcher`);
   await expect(panel.getByTestId(`live-${stalled}`)).toContainText('Stalled');
   await expect(panel.getByTestId(`live-${waiting}`)).toContainText('Waiting on input on');
   await expect(panel.getByTestId(`live-${followup}`)).toContainText('Merged, follow-up pending');
