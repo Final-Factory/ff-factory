@@ -115,12 +115,64 @@ today) shows "update available" and keeps taking, starting and resuming agents (
 "Versions"). The portal says once, in a `[machines]` line, that an update is available. Only a protocol out of range
 (outdated) stops new agents there until the install is updated.
 
-To update a worker, re-run its installer as for the first install: it fetches the code, keeps the root, its
-credential, sandboxes and limits, restarts the daemon and waits until the portal sees it again.
+**To update a worker, run its update** (w613). It is one command. It asks nothing, so it runs the same at the machine and
+over ssh (the orchestration worker's path, [ops-worker.md](ops-worker.md)). It is as safe to re-run as the install:
 
-**A re-run does not stop running work** (w605). Each agent process runs in an agent host of its own
+```bash
+# a Mac, as the account the daemon runs as (locally, or over ssh with no keychain):
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root /Users/Shared/ffw
+# from a checkout of ff-factory instead:
+bash scripts/worker/install.sh --update --root /Users/Shared/ffw
+```
+
+```powershell
+# Windows, as the account the daemon's task runs as: a normal PowerShell, or an ssh session (elevated or not):
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root D:\ffw
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\worker\install.ps1 -Update -Root D:\ffw
+```
+
+Both run `node scripts/worker/worker.ts update --root <root>`. What it does (each from what the ops worker hit
+reinstalling beast and m5 on 2026-10-07, f3f19c0 → 9ea8476):
+
+- **It asks nothing and reads the install.** `root.json` gives the machine, the portal, the service name and the
+  repo, and `daemon.json` gives the settings. **The credential** is the machine's own `secrets/machine-token`: nothing is
+  asked for, issued or printed, and no `--credential-stdin` is needed. Before, a plain re-run needed the credential
+  piped in.
+- **It carries every setting.** The update uses the migration's `carry` (`planUpdate`, `daemonJson`): BEAST's 6-agent
+  total, protected paths, the Library seed and block clone, below-normal editors, the disk guard, cleanup, the Unity
+  paths and the test-install options. `--max-sandboxes`, `--max-agents-per-sandbox` and `--max-unity`
+  (`-MaxSandboxes`, …) change only what they name. It prints the settings that changed, `~ key: before -> after`.
+  Before, a plain re-run rewrote `daemon.json` and dropped the tuned settings.
+- **It fetches nothing of the game repo.** The root's clone is kept as it is, and the daemon fetches with the user's
+  own credentials when it next makes a sandbox. Over ssh a Mac's login keychain is out of reach, and the install's
+  `git fetch origin` failed on m5 for that reason.
+- **The daemon code** is ff-factory, which is public. It is fetched anonymously into the root's `daemon/src`, with no
+  credential helper and no prompt, at **the commit the portal runs** (`/api/health`), so the daemon matches its portal.
+  `--daemon-ref main` (`-DaemonRef`, or `--ref` for `worker.ts`) takes another ref. `--source <checkout>` (`-Source`)
+  installs from a local ff-factory checkout with no download at all. If the fetch fails, the update stops before it
+  changes anything and says so.
+- **On Windows, an elevated session is fine.** An administrator's ssh session is always elevated (BEAST's was). The
+  update gives what it makes to the user the daemon's task runs as (`icacls /setowner`, the install's `--owner`, as the
+  portal's ssh deploy does). It refuses when the task runs as another user than the session's. The install's guard
+  against elevated runs stays: its purpose is that files an elevated shell makes belong to Administrators and the
+  daemon's non-elevated git then refuses the clone. Giving them back to the task's user is what removes that risk.
+  An administrator prompt nobody can answer (a session that is not elevated and has no console) is skipped: the
+  firewall rules and the portal's key that the install made stay. The firewall rules and the portal's ssh are kept
+  as the install made them (`root.json` lists both); `--no-firewall` and `--no-ssh` leave them out.
+- **On a Mac, the PATH keeps its order.** The new LaunchAgent plist keeps the old plist's PATH entries first, in their
+  order, and adds only folders that are new. m5's `~/.unity/bin` had moved to the end. On Windows the task carries no
+  environment of its own (its XML has a user and an action only), so there is nothing there to keep. The task's user
+  stays.
+- **It restarts the daemon and checks.** The install stops the old daemon (its agents keep running in their hosts,
+  below), installs the new code and starts it. The update then waits until the portal sees the machine online with
+  the new code (`/machine/whoami` reports the daemon's commit and whether it is outdated, a portal from w613 on). If
+  the portal does not, it restarts the task or LaunchAgent once (the ops worker had to run that by hand on beast) and
+  waits again. It ends with what ran before and after: the daemon's commit, the settings changed, the credential
+  reused, and what the portal sees. Exit 0 only when the portal sees the new daemon online and not outdated.
+
+**An update does not stop running work** (w605). Each agent process runs in an agent host of its own
 (`machine/agentHost.ts`), started detached from the daemon, so it outlives the daemon ([machines.md](machines.md),
-"Agents outlive their daemon"). The re-run stops only the daemon and its supervisor (`Stop-FFDaemon` without `-Agents`
+"Agents outlive their daemon"). The update (and a re-run of the install) stops only the daemon and its supervisor (`Stop-FFDaemon` without `-Agents`
 on Windows, `launchctl` on a Mac). Agents mid-turn carry on: their shells, builds and players keep running, and so do
 idle agents' processes. Unity editors keep running as before. The new daemon finds the hosts in
 `<root>\daemon\hosts\`, takes them back, forwards to the portal whatever they recorded meanwhile, and their turns
@@ -147,6 +199,14 @@ Claude Code agents on BEAST's own login:
    logged "adopted: running, live". The command printed its line, and the agent answered "DONE-FOREGROUND" from the
    same host process. The transcript's 22 events are in order, none twice.
 5. The uninstall ended the host and left nothing of the install ("Nothing of the wtest install remains").
+
+**An agent whose process did end keeps its sandbox** (w613). This covers the first update onto agent hosts, a computer
+restart, and a crash. The portal marks the agent `heldSince` when its daemon goes away under it, and `list_sandboxes`
+shows it "Stopped (its daemon restarted at …; its sandbox is kept for it)", not FREE. New work does not take that
+sandbox until the agent is messaged, `stop_agent` releases it, the new daemon takes the agent back alive, or a day
+passes (`HOLD_PLACE_MS`). On LothDesktop at 08:29 UTC on 2026-10-07, the update stopped Ben's 77956901, which had no
+check-in, and slot2 showed FREE.
+
 
 ### The portal's ssh (w568)
 

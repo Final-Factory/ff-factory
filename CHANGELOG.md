@@ -50,6 +50,26 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **A one-command worker update, also over ssh** (w613, Lothsahn: fix every problem the ops worker hit reinstalling
+  beast and m5 on 2026-10-07). `install.sh --update --root <root>`, `install.ps1 -Update -Root <root>`, or
+  `worker.ts update`. It asks nothing:
+  - it carries every setting in `daemon.json` (BEAST's agent total, protected paths, the Library seed, below-normal
+    editors, the disk guard) unless a flag changes it, and prints what changed;
+  - it reuses the machine's own `secrets/machine-token`;
+  - it fetches nothing of the game repo (a Mac's keychain is out of reach over ssh);
+  - it takes ff-factory anonymously at the commit the portal runs;
+  - on Windows it runs from an elevated ssh session, giving what it makes to the task's user;
+  - on a Mac it keeps the LaunchAgent's PATH in its order;
+  - it keeps the install's firewall and ssh choices;
+  - it restarts the daemon (once more if the portal does not see it), then checks the portal sees the new code
+    online and not outdated (`/machine/whoami` now reports `daemon` and `outdated`).
+
+  **An agent whose daemon went away under it keeps its sandbox** (`heldSince`): new work does not take it until the
+  agent is messaged, `stop_agent` releases it, or a day passes. The throwaway test portal no longer runs the host
+  clean-up on the computer it tests on. A new CI workflow, `worker-update.yml`, runs the update end to end
+  (`scripts/worker/test/update-e2e.ts`) on Windows (elevated) and macOS runners.
+  [docs/worker-install.md](docs/worker-install.md) "Updating".
+
 - **The orchestration worker copies files with scp and sftp** (w612, Lothsahn: "Please add a task so that the
   orchestration worker can use scp"). Its `scp` and `sftp` move files between its scratch folder and beast, lothdesktop,
   m3 and m5 both ways, over the ssh it already had: the portal's key, pinned host keys, the same network. They run as

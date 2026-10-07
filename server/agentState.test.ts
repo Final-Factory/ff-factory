@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { agentState, agentStateText, holdsItsPlace, isWaitingAgent, sortAgents, sortPlaces, utcTime } from '../shared/agentState.ts';
+import { HOLD_PLACE_MS, agentState, agentStateText, holdsItsPlace, isWaitingAgent, sortAgents, sortPlaces, utcTime } from '../shared/agentState.ts';
 import { workLive } from '../shared/workState.ts';
 import { fleetOf } from '../shared/fleet.ts';
 import { Store } from './store.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
-import { MachineManager } from './machines.ts';
+import { MachineManager, type RemoteSession } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
@@ -214,4 +214,35 @@ test('list_sandboxes: Waiting and on what, sandboxes by status, and a sandbox wh
   assert.match(text, /- eb9632fd "w448: merge #1083" \[Waiting: check-in [^\]]*: “merge #1083 when CI is green”, idle\]/);
   assert.ok(text.indexOf('- pc/alpha') < text.indexOf('- pc/beta'), 'the sandbox with a Waiting agent before the one with none live');
   assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1, 'the capacity block and placement do not count it free');
+});
+
+test("w613: an agent whose daemon went away under it keeps its sandbox until it is messaged, stopped on purpose, or a day passes", async (t) => {
+  // LothDesktop, 2026-10-07 08:29 UTC: the worker update restarted the daemon, Ben's 77956901 (no check-in) stopped, and
+  // its slot2 showed FREE to the dispatcher.
+  const { store, sessions, agents } = await setup(t);
+  const alpha = sessions.get('eb9632fd') as unknown as RemoteSession;
+  alpha.liveFlag = true; // its process ran on the daemon, idle between turns
+  assert.doesNotMatch(agents.describeAllSandboxes(), /alpha FREE/, 'before: its live agent has it');
+  const detach = (id: string) => (agents.machines as unknown as { detach(id: string): void }).detach(id);
+  detach('pc');
+  const info = store.sessions.get('eb9632fd')!;
+  assert.equal(info.status, 'stopped');
+  assert.ok(info.heldSince, 'held: its daemon went away under it');
+  assert.equal(store.sessions.get('b1')!.heldSince, undefined, 'beta had no process: nothing to hold');
+  const text = agents.describeAllSandboxes();
+  assert.doesNotMatch(text, /alpha FREE/, 'its sandbox stays its');
+  assert.match(text, /- pc\/beta FREE/);
+  assert.match(agentStateText(info), /^Stopped \(its daemon restarted at .*; its sandbox is kept for it\)$/);
+  assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1, 'placement does not count it free');
+  assert.equal(holdsItsPlace(info, Date.parse(info.heldSince!) + HOLD_PLACE_MS + 1), false, 'a day later it is released');
+  // stop_agent (on purpose) releases it at once.
+  agents.machines.stoppedOnPurpose(alpha);
+  assert.equal(store.sessions.get('eb9632fd')!.heldSince, undefined);
+  assert.match(agents.describeAllSandboxes(), /- pc\/alpha FREE/);
+  // A daemon stopped on purpose (machine_daemon stop, a migration) holds nothing.
+  delete store.sessions.get('eb9632fd')!.stoppedOnPurpose;
+  alpha.liveFlag = true;
+  agents.machines.expectDrop('pc', false);
+  detach('pc');
+  assert.equal(store.sessions.get('eb9632fd')!.heldSince, undefined);
 });

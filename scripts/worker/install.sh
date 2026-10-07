@@ -11,9 +11,14 @@
 # Options (each is asked for when missing): --root DIR --portal-url URL --max-sandboxes N --max-agents-per-sandbox N
 # --max-unity N --slots N --service LABEL --source CHECKOUT --ref BRANCH --credential-file FILE (unattended tests)
 # --ssh-host NAME (the name the portal reaches this Mac by; default its tailnet name) --no-ssh (no portal ssh, w568)
+#
+# Update an install that is there (w613, docs/worker-install.md "Updating"), also over ssh with no keychain:
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root DIR
+# It asks nothing: every setting, the credential and the PATH come from the install. --max-sandboxes N,
+# --max-agents-per-sandbox N, --max-unity N change those; --daemon-ref REF (default: the commit the portal runs).
 set -euo pipefail
 
-ROOT="" PORTAL="" MAXSB="" MAXAG="" MAXU="" SLOTS=8 SERVICE=com.fffactory.daemon SOURCE="" REF=main CREDFILE="" EXTRA="" REPO=https://github.com/Final-Factory/FinalFactory.git
+ROOT="" PORTAL="" MAXSB="" MAXAG="" MAXU="" SLOTS=8 SERVICE=com.fffactory.daemon SOURCE="" REF=main CREDFILE="" EXTRA="" REPO=https://github.com/Final-Factory/FinalFactory.git UPDATE=0 DREF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT=$2; shift 2 ;;
@@ -31,6 +36,8 @@ while [ $# -gt 0 ]; do
     --no-ssh) EXTRA="$EXTRA --no-ssh"; shift ;;
     --ssh-host) EXTRA="$EXTRA --ssh-host $2"; shift 2 ;;
     --credential-file) CREDFILE=$2; shift 2 ;;
+    --update) UPDATE=1; shift ;;
+    --daemon-ref) DREF=$2; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -38,6 +45,11 @@ done
 ask() { local a; read -r -p "$1${2:+ [$2]} " a </dev/tty; echo "${a:-$2}"; }
 [ "$(id -u)" = 0 ] && { echo "Run this as yourself, not with sudo." >&2; exit 2; }
 
+if [ "$UPDATE" = 1 ]; then
+  # An update asks nothing (an ssh session has no terminal): the install that is there says everything else.
+  [ -n "$ROOT" ] || { echo "--update needs --root DIR (the root of the install to update)." >&2; exit 2; }
+  [ -f "$ROOT/root.json" ] || { echo "$ROOT holds no worker install (no root.json): install it first, without --update." >&2; exit 2; }
+else
 echo "FF Factory worker install. Everything this machine's worker uses goes in one folder (the root)."
 [ -n "$ROOT" ] || ROOT=$(ask "Root folder (any empty or new folder with 200+ GB free, e.g. /Users/Shared/ffw)" "")
 [ -n "$PORTAL" ] || PORTAL=$(ask "Portal URL" "https://")
@@ -46,6 +58,7 @@ echo "FF Factory worker install. Everything this machine's worker uses goes in o
 [ -n "$MAXU" ] || MAXU=$(ask "Unity editors at once" 2)
 if [ -n "$CREDFILE" ]; then CRED=$(head -n1 "$CREDFILE"); else read -r -s -p "Machine credential from the portal (ffm_..., hidden) " CRED </dev/tty; echo; fi
 [ -n "$ROOT" ] && [ -n "$PORTAL" ] && [ -n "$CRED" ] || { echo "The root, the portal URL and the credential are all needed." >&2; exit 2; }
+fi
 
 # The tools this script itself needs: node 22.6+ and git 2.48+ (the rest is checked by worker.ts).
 NODE="" ; BEST=0
@@ -67,12 +80,25 @@ if [ -z "$SOURCE" ]; then
 fi
 if [ -z "$SOURCE" ]; then
   TEMP=$(mktemp -d -t ff-worker-src)
-  git clone --quiet --depth 1 --branch "$REF" https://github.com/Final-Factory/ff-factory.git "$TEMP/src"
+  # ff-factory is public: no credential helper and no prompt, so a keychain out of reach over ssh is never asked (w613).
+  GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c credential.interactive=never clone --quiet --depth 1 --branch "$REF" https://github.com/Final-Factory/ff-factory.git "$TEMP/src" ||
+    { echo "Could not download the installer (an anonymous git clone of ff-factory failed): check the network, or run it from a local ff-factory checkout with --source DIR." >&2; exit 2; }
   SOURCE="$TEMP/src"
 fi
 trap '[ -n "$TEMP" ] && rm -rf "$TEMP"' EXIT
 
 FLAGS=(--disable-warning=ExperimentalWarning)
 [ "$BEST" -ge 23006 ] || FLAGS=(--experimental-strip-types "${FLAGS[@]}")
+if [ "$UPDATE" = 1 ]; then
+  UARGS=(update --root "$ROOT")
+  [ -z "$MAXSB" ] || UARGS+=(--max-sandboxes "$MAXSB")
+  [ -z "$MAXAG" ] || UARGS+=(--max-agents-per-sandbox "$MAXAG")
+  [ -z "$MAXU" ] || UARGS+=(--max-unity "$MAXU")
+  [ -z "$DREF" ] || UARGS+=(--ref "$DREF")
+  # A local checkout given with --source is the daemon code too: no download at all.
+  [ -z "$SOURCE" ] || [ -n "$TEMP" ] || UARGS+=(--source "$SOURCE")
+  "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" "${UARGS[@]}" </dev/null
+  exit $?
+fi
 printf '%s\n' "$CRED" | "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" install --root "$ROOT" --portal-url "$PORTAL" \
   --max-sandboxes "$MAXSB" --max-agents-per-sandbox "$MAXAG" --max-unity "$MAXU" --slots "$SLOTS" --service "$SERVICE" --repo-url "$REPO" --credential-stdin $EXTRA

@@ -18,6 +18,16 @@
 
 .PARAMETER SshHost
   The name the portal reaches this PC by over ssh (default: its tailnet name). -NoSsh sets up no portal ssh (w568).
+
+.PARAMETER Update
+  Update the install that is there (w613, docs/worker-install.md "Updating"), also from an ssh session, elevated or not:
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root D:\ffw
+  It asks nothing: every setting, the credential and the task's user come from the install. -MaxSandboxes,
+  -MaxAgentsPerSandbox, -MaxUnity change those; -DaemonRef (default: the commit the portal runs).
+
+.PARAMETER Owner
+  Elevated (an administrator's ssh session): the user what the install makes is given to. An update defaults to the
+  user the daemon's task runs as.
 #>
 param(
     [string]$Root = '',
@@ -36,7 +46,10 @@ param(
     [switch]$AbsoluteWorktrees,
     [string]$UnitySlotsDir = '',
     [string]$SshHost = '',
-    [switch]$NoSsh
+    [switch]$NoSsh,
+    [switch]$Update,
+    [string]$DaemonRef = '',
+    [string]$Owner = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -46,11 +59,19 @@ function Ask([string]$question, [string]$default) {
 }
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+# An elevated install would leave the root's files owned by Administrators, and the daemon's non-elevated git refuses
+# such a clone. An update (or -Owner) gives what it makes back to the task's user (icacls /setowner, as the portal's ssh
+# deploy does), so it may run elevated: an administrator's ssh session always is (BEAST, w613).
+if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -and -not $Update -and -not $Owner) {
     Write-Host 'Run this from a normal PowerShell, not as administrator: the one step that needs admin rights (the firewall rules) asks for them itself.'
     exit 2
 }
 
+if ($Update) {
+    # Asks nothing (an ssh session has no console to answer in): the install that is there says everything else.
+    if (-not $Root) { Write-Host '-Update needs -Root (the root of the install to update).'; exit 2 }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root 'root.json'))) { Write-Host "$Root holds no worker install (no root.json): install it first, without -Update."; exit 2 }
+} else {
 # --- the questions, all at the start
 Write-Host 'FF Factory worker install. Everything this machine''s worker uses goes in one folder (the root).'
 if (-not $Root) { $Root = Ask 'Root folder (any empty or new folder on a fast drive with 200+ GB free, e.g. D:\ffw)' '' }
@@ -65,6 +86,7 @@ if ($CredentialFile) {
     $credential = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
 }
 if (-not $Root -or -not $PortalUrl -or -not $credential) { Write-Host 'The root, the portal URL and the credential are all needed.'; exit 2 }
+}
 
 # --- the tools this script itself needs: node 22.6+ and git 2.48+ (the rest is checked by worker.ts)
 function Find-Node {
@@ -106,13 +128,32 @@ if (-not $Source -and $PSScriptRoot) {
 }
 if (-not $Source) {
     $temp = Join-Path $env:TEMP ("ff-worker-src-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
-    git clone --quiet --depth 1 --branch $Ref https://github.com/Final-Factory/ff-factory.git $temp
+    # ff-factory is public: no credential helper and no prompt (an ssh session cannot reach the credential manager, w613).
+    $env:GIT_TERMINAL_PROMPT = '0'; $env:GCM_INTERACTIVE = 'never'
+    git -c credential.helper= -c credential.interactive=never clone --quiet --depth 1 --branch $Ref https://github.com/Final-Factory/ff-factory.git $temp
     if ($LASTEXITCODE -ne 0) { Write-Host 'Could not download the installer (git clone ff-factory failed).'; exit 2 }
     $Source = $temp
 }
 
 $flags = @('--disable-warning=ExperimentalWarning')
 if ($node.Version -lt [version]'23.6') { $flags = @('--experimental-strip-types') + $flags }
+if ($Update) {
+    $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'update', '--root', $Root)
+    if ($MaxSandboxes) { $argv += @('--max-sandboxes', $MaxSandboxes) }
+    if ($MaxAgentsPerSandbox) { $argv += @('--max-agents-per-sandbox', $MaxAgentsPerSandbox) }
+    if ($MaxUnity) { $argv += @('--max-unity', $MaxUnity) }
+    if ($DaemonRef) { $argv += @('--ref', $DaemonRef) }
+    if ($Owner) { $argv += @('--owner', $Owner) }
+    # A local checkout given with -Source is the daemon code too: no download at all.
+    if ($Source -and -not $temp) { $argv += @('--source', $Source) }
+    try {
+        $null | & $node.Path @argv
+        $code = $LASTEXITCODE
+    } finally {
+        if ($temp) { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    exit $code
+}
 $argv = $flags + @((Join-Path $Source 'scripts\worker\worker.ts'), 'install', '--root', $Root, '--portal-url', $PortalUrl,
     '--max-sandboxes', $MaxSandboxes, '--max-agents-per-sandbox', $MaxAgentsPerSandbox, '--max-unity', $MaxUnity,
     '--slots', $Slots, '--service', $Service, '--repo-url', $RepoUrl, '--credential-stdin')
@@ -122,6 +163,7 @@ if ($AbsoluteWorktrees) { $argv += '--absolute-worktrees' }
 if ($UnitySlotsDir) { $argv += @('--unity-slots-dir', $UnitySlotsDir) }
 if ($SshHost) { $argv += @('--ssh-host', $SshHost) }
 if ($NoSsh) { $argv += '--no-ssh' }
+if ($Owner) { $argv += @('--owner', $Owner) }
 try {
     $credential | & $node.Path @argv
     $code = $LASTEXITCODE
