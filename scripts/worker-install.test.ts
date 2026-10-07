@@ -12,7 +12,7 @@ import { installScript, taskName, taskXml, uninstallScript } from '../server/mac
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
-import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, withPlistPath, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
 import { runElevatedSteps } from './worker/worker.ts';
@@ -628,4 +628,49 @@ test('w615: worker update --voice-whisper turns the GPU Whisper on; without it t
   assert.deepEqual(daemonJson(planUpdate(root, BEAST_ROOT, BEAST_CONFIG, BEAST_TOKEN, { voiceWhisper: 'large-v3-turbo' }), l, 'beast', undefined).voice, { enabled: true, model: 'large-v3-turbo' });
   assert.equal(daemonJson(planUpdate(root, BEAST_ROOT, withVoice, BEAST_TOKEN, { voiceWhisper: 'off' }), l, 'beast', undefined).voice?.constructor, Object);
   assert.equal((daemonJson(planUpdate(root, BEAST_ROOT, withVoice, BEAST_TOKEN, { voiceWhisper: 'off' }), l, 'beast', undefined).voice as { enabled: boolean }).enabled, false);
+});
+
+// ---------------------------------------------------------------- w629: an update over ssh finds its tools, and only succeeds on the target
+
+test('worker update (w629): an ssh session\'s minimal PATH gets the standard tool folders, for the installer only', () => {
+  // m5, 2026-10-07: `ssh benryding@m5` had /usr/bin:/bin:/usr/sbin:/sbin, and git-lfs 3.7.1 sat in /opt/homebrew/bin.
+  const mac = (d: string) => ['/opt/homebrew/bin', '/usr/local/bin'].includes(d);
+  assert.equal(withStandardPaths('/usr/bin:/bin:/usr/sbin:/sbin', 'darwin', mac, {}), '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'Homebrew first, as a shell has it');
+  assert.equal(withStandardPaths('/usr/bin:/bin', 'darwin', (d) => d === '/Users/b/.local/bin', { HOME: '/Users/b' }), '/usr/bin:/bin:/Users/b/.local/bin', "Claude Code's native install, after");
+  assert.equal(withStandardPaths('/opt/homebrew/bin:/usr/bin:/bin', 'darwin', mac, {}), '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin', 'a folder already there is not moved or repeated');
+  assert.equal(withStandardPaths('/usr/bin:/bin', 'darwin', () => false, {}), '/usr/bin:/bin', 'only folders that exist');
+  const win = (d: string) => /Git\\cmd$|nodejs$/.test(d);
+  const env = { ProgramFiles: 'C:\\Program Files' };
+  assert.equal(
+    withStandardPaths('C:\\Windows\\System32;C:\\Windows', 'win32', win, env),
+    'C:\\Windows\\System32;C:\\Windows;C:\\Program Files\\Git\\cmd;C:\\Program Files\\nodejs',
+    "Git for Windows and Node.js after the system's",
+  );
+  assert.equal(withStandardPaths('C:\\program files\\git\\CMD\\;C:\\Windows', 'win32', win, env), 'C:\\program files\\git\\CMD\\;C:\\Windows;C:\\Program Files\\nodejs', 'case and a trailing slash do not repeat it');
+  // Claude Code: npm's shim (LothDesktop's) and the native install.
+  assert.equal(
+    withStandardPaths('C:\\Windows', 'win32', (d) => /npm$|\.local\\bin$/.test(d), { ...env, APPDATA: 'C:\\Users\\l\\AppData\\Roaming', USERPROFILE: 'C:\\Users\\l' }),
+    'C:\\Windows;C:\\Users\\l\\.local\\bin;C:\\Users\\l\\AppData\\Roaming\\npm',
+  );
+});
+
+test('worker update (w629): success only when the portal sees the daemon running the commit installed; else it says what it runs', () => {
+  const target = '22b5f8b1c0ffee0000000000000000000000beef';
+  const ok = updateVerdict(target, '22b5f8b', { online: true, daemon: '22b5f8b' }, 'm5');
+  assert.equal(ok.ok, true);
+  assert.match(ok.line, /m5 online running 22b5f8b, the commit installed, not outdated/);
+  // m5, 2026-10-07: the refused run left 9ea8476 on disk and running, and was reported as current.
+  const notInstalled = updateVerdict(target, '9ea8476', { online: true, daemon: '9ea8476' }, 'm5');
+  assert.equal(notInstalled.ok, false);
+  assert.match(notInstalled.line, /code on disk is 9ea8476, not 22b5f8b1c0ff: the new code was not installed/);
+  const stillOld = updateVerdict(target, '22b5f8b', { online: true, daemon: '9ea8476' }, 'm5');
+  assert.equal(stillOld.ok, false);
+  assert.match(stillOld.line, /m5's daemon still runs 9ea8476, not 22b5f8b1c0ff/);
+  assert.match(updateVerdict(target, '22b5f8b', { online: false }, 'm5').line, /does not see m5 online/);
+  assert.match(updateVerdict(target, '22b5f8b', { online: true }, 'm5').line, /does not say which commit/, 'a portal that does not report it confirms nothing');
+  assert.match(updateVerdict(target, '22b5f8b', undefined, 'm5').line, /did not answer/);
+  const outdated = updateVerdict(target, '22b5f8b', { online: true, daemon: '22b5f8b', outdated: 'it speaks protocol 6, this portal 8' }, 'm5');
+  assert.equal(outdated.ok, false);
+  assert.match(outdated.line, /OUTDATED: it speaks protocol 6/);
+  assert.equal(updateVerdict(target, '22b5', { online: true, daemon: '22b5' }, 'm5').ok, false, 'too short to name a commit');
 });

@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
+  clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
+  Whisper goes with a ping ahead of it: no answer within 2 s and the clip falls back, and the machine is skipped until it
+  is heard from (before, a machine asleep or cut off took every clip's full timeout for the 45-65 s the heartbeat needs to
+  drop it; the heartbeat is unchanged). The machine has 10 s to return the text, upload included (was 3 s plus 0.05 s
+  per second of audio). A clip that times out keeps the next ones off that machine for 2 minutes or until it re-offers
+  its Whisper.
+
 ### Added
 
 - **Dictation on a worker's GPU, the portal's CPU as the fallback** (w615, lothsahn: "voice commands to the portal can
@@ -144,6 +154,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The worker update finds its tools over ssh, touches nothing when a check fails, and succeeds only on the commit it
+  installed** (w629, lothsahn: "Yes, fix the installer."). On m5, on 2026-10-07, `install.sh --update` over ssh found no
+  git-lfs: the ssh PATH had no `/opt/homebrew/bin`. The run then still restarted the daemon, and printed exit 0 and
+  "not outdated" on the old commit 9ea8476: `update()` read the refused install as "not seen yet" and restarted, and
+  then compared the portal's view with a VERSION file nothing had replaced.
+  - The installer adds the standard tool folders that exist to its own PATH (`withStandardPaths`; Homebrew and
+    `/usr/local` on a Mac, Git for Windows and Node.js on Windows). The daemon's PATH is unchanged.
+  - Every prerequisite is checked before the code is fetched or the daemon stopped. A failure exits 2 with the
+    daemon untouched.
+  - Success needs the portal to see the daemon running the commit installed (`updateVerdict`). Otherwise it exits 1
+    with the commit the daemon runs.
+  - The worker-update CI job now also runs the update with an ssh session's minimal PATH, and a refused update.
+    [docs/worker-install.md](docs/worker-install.md) "Updating".
 - **A harness message delivered mid-turn no longer strips a person's turn of their authority** (w607, Lothsahn:
   "Please fix whatever was causing the ops worker to refuse your instructions."). On 2026-10-07 `ops_worker` refused
   Lothsahn's own "Please drain and install on BEAST and m5" twice, and his "go" once: a `[worker update]` arrived while

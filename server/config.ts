@@ -441,20 +441,19 @@ export interface VoiceRemoteConfig {
   /** Machine ids to use, first choice first; empty: any machine that offers it. */
   machines: string[];
   /**
-   * How long a loaded remote model may take before this portal's own Whisper takes the clip: timeoutSeconds, plus
-   * perAudioSecond for each second of audio, plus loadSeconds when the machine had not loaded its model yet.
+   * How long the machine has to return the text, upload included, before this portal's own Whisper takes the clip
+   * (lothsahn, 2026-10-07: "Just set an upload timeout of 10s for the voice request").
    */
   timeoutSeconds: number;
-  perAudioSecond: number;
-  loadSeconds: number;
 }
 
 /**
- * The remote engine's defaults (w615). Measured on BEAST's RTX 4080 SUPER, large-v3-turbo: 0.19-0.28 s for a 12.5 s clip
- * and 0.61-0.95 s for 45.5 s (0.02 s per audio second), a load of 2.3 s with its files cached and 12-15 s cold. The
- * timeout allows 10x the measured time on top of the link, so a busy GPU still answers; a dead one costs a few seconds.
+ * The remote engine's defaults (w615). 10 s for the whole request is lothsahn's (2026-10-07), with clips of 30 s at most.
+ * Measured: BEAST's model takes about 0.02 s per audio second (0.6 s for 30 s), and the live link from the VM moved the
+ * clip at about 1.7 MB/s (0.19-0.30 s for 6-11 s clips), ~0.025 s per audio second: a 30 s clip needs ~1.5 s. A machine
+ * that went away costs one clip 2 s at most (server/machines.ts VOICE_PING_MS).
  */
-export const VOICE_REMOTE_DEFAULTS: VoiceRemoteConfig = { enabled: true, machines: [], timeoutSeconds: 3, perAudioSecond: 0.05, loadSeconds: 20 };
+export const VOICE_REMOTE_DEFAULTS: VoiceRemoteConfig = { enabled: true, machines: [], timeoutSeconds: 10 };
 
 export const VOICE_DEFAULTS: Omit<VoiceConfig, 'toolsDir'> = {
   enabled: true,
