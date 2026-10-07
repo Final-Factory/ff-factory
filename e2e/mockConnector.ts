@@ -211,7 +211,15 @@ export class MockConnector {
     for (;;) {
       const i = this.received.findIndex((m) => m.type === type);
       if (i >= 0) return this.received.splice(i, 1)[0];
-      if (Date.now() > deadline) throw new Error(`no "${type}" from the portal in ${timeoutMs} ms`);
+      if (Date.now() > deadline) {
+        // A portal in this same process (the unit tests) can hold the event loop past the deadline with synchronous work
+        // after it answered (a store flush with fsync on a turn's start: seconds on a loaded Windows runner, w636). Its
+        // answer is then in the socket, unread: the timer that brought us here runs before I/O. Let I/O run once.
+        await new Promise((r) => setImmediate(r));
+        const late = this.received.findIndex((m) => m.type === type);
+        if (late >= 0) return this.received.splice(late, 1)[0];
+        throw new Error(`no "${type}" from the portal in ${timeoutMs} ms`);
+      }
       if (this.ws.readyState === WebSocket.CLOSED) throw new Error(`the portal closed the connection (${JSON.stringify(await this.closed)})`);
       await new Promise((r) => setTimeout(r, 20));
     }
