@@ -41,6 +41,11 @@ export interface SandboxEditor {
 export interface PoolDeps {
   git(args: string[], opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<RunResult>;
   copyTree(src: string, dst: string, signal?: AbortSignal, mode?: 'robocopy' | 'clone'): Promise<void>;
+  /**
+   * Bytes a Library copy writes up front: the source's size when it is a full copy (robocopy on Windows), undefined
+   * when it block-clones (APFS `cp -c`, Copy-Item on a ReFS Dev Drive), where librarySeedGB stands (w628).
+   */
+  libraryCopyBytes?(src: string, mode?: 'robocopy' | 'clone'): Promise<number | undefined>;
   removeTree(dir: string): Promise<RunResult>;
   /** Free bytes on the volume holding `p`, or undefined when unknown. */
   freeBytes(p: string): Promise<number | undefined>;
@@ -158,6 +163,24 @@ export function idleSandboxEditors(sbs: { id: string; up: boolean; startedAt?: n
     .map((s) => s.id);
 }
 
+/** Bytes of the files under `dir` (links not followed); undefined when it cannot be read. Exported for tests. */
+export async function treeBytes(dir: string): Promise<number | undefined> {
+  let total = 0;
+  const walk = async (d: string): Promise<void> => {
+    for (const e of await fs.promises.readdir(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) await walk(p);
+      else if (e.isFile()) total += (await fs.promises.lstat(p).catch(() => undefined))?.size ?? 0;
+    }
+  };
+  try {
+    await walk(dir);
+    return total;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
 export function realPoolDeps(platform: 'darwin' | 'win32', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined): PoolDeps {
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
@@ -171,6 +194,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32', repoPath: string, whe
   return {
     git: (args, opts = {}) => run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: ENV }),
     copyTree: (src, dst, signal, mode) => copyTree(src, dst, { signal, mode }),
+    libraryCopyBytes: async (src, mode) => (platform === 'win32' && mode !== 'clone' ? treeBytes(src) : undefined),
     removeTree,
     freeBytes: async (p) => {
       try {
@@ -382,7 +406,11 @@ export class SandboxPool {
         const settings = this.need();
         const src = librarySource(this.o.repoPath, others, hasLibrary, settings.librarySeed);
         if (src) {
-          const gb = settings.librarySeedGB ?? this.o.librarySeedGB ?? 30;
+          // A full copy (robocopy onto NTFS) writes the whole Library, about 100 GB for a seed that has built players
+          // for a while (w628): with the guard at 20 GB, the flat 30 GB allowance would let it fill the disk.
+          step('measuring the Library to copy');
+          const full = await this.d.libraryCopyBytes?.(src, settings.librarySeedCopy);
+          const gb = Math.max(settings.librarySeedGB ?? this.o.librarySeedGB ?? 30, full === undefined ? 0 : Math.ceil(full / GB));
           step('checking disk space for the Library copy');
           await this.requireFreeSpace(gb, `the Library copy (~${gb} GB)`);
           step(`copying the warm Library from ${src} (a few minutes)`);

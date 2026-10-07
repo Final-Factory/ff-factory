@@ -21,6 +21,7 @@ import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
@@ -89,14 +90,14 @@ export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'libr
 /** The pool settings of a machine (its sandbox_root and limits, with defaults), or null when it has no sandbox_root. Exported for tests. */
 export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits & PoolExtras): SandboxPoolSettings | null {
   if (!m.sandboxRoot) return null;
-  const warn = m.diskWarnGB ?? 50;
+  const warn = m.diskWarnGB ?? DISK_WARN_GB_DEFAULT;
   return {
     root: m.sandboxRoot,
     maxSandboxes: m.maxSandboxes ?? 3,
     maxAgentsPerSandbox: m.maxAgentsPerSandbox ?? 2,
     maxUnity: m.maxUnity ?? 2,
     diskWarnGB: warn,
-    diskCriticalGB: Math.min(m.diskCriticalGB ?? 20, warn),
+    diskCriticalGB: Math.min(m.diskCriticalGB ?? DISK_CRITICAL_GB_DEFAULT, warn),
     ...(m.maxSandboxAgents !== undefined ? { maxAgents: m.maxSandboxAgents } : {}),
     ...(m.librarySeed ? { librarySeed: m.librarySeed } : {}),
     ...(m.librarySeedCopy ? { librarySeedCopy: m.librarySeedCopy } : {}),

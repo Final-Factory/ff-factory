@@ -97,8 +97,10 @@ export interface CleanupRun {
 // Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths and "/x" as POSIX paths on any OS (CI runs
 // on Linux and Windows).
 const P = (p: string) => (/^[a-zA-Z]:[\\/]|^\\\\/.test(p) ? path.win32 : p.startsWith('/') ? path.posix : path);
-const norm = (p: string) => P(p).resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-const within = (p: string, root: string) => norm(p) === norm(root) || norm(p).startsWith(norm(root) + '/');
+/** A path as compared: resolved, forward slashes, no trailing slash, lower case. */
+export const norm = (p: string) => P(p).resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+/** Whether `p` is `root` or inside it. */
+export const within = (p: string, root: string) => norm(p) === norm(root) || norm(p).startsWith(norm(root) + '/');
 const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i');
 
 /** Folder names that mark what is never removed, wherever they are. */
@@ -114,8 +116,12 @@ const SECRET_NAME = /secret|credential|password|\.pem$|\.key$|\.p12$|\.pfx$|^id_
 const SYSTEM_TOP_WIN = new Set(['windows', 'program files', 'program files (x86)', 'programdata', 'recovery', 'system volume information', '$recycle.bin']);
 const SYSTEM_TOP_POSIX = new Set(['applications', 'system', 'library', 'usr', 'bin', 'sbin', 'etc', 'opt', 'cores', 'volumes']);
 
-function protectedSegment(parts: string[]): string | undefined {
-  for (const s of parts) for (const [re, why] of PROTECTED_SEGMENTS) if (re.test(s)) return why;
+function protectedSegment(parts: string[], claudeWorktrees = false): string | undefined {
+  for (let i = 0; i < parts.length; i++) {
+    // Claude Code's own worktrees (<repo>/.claude/worktrees/<name>) are git worktrees, not its settings (w626).
+    if (claudeWorktrees && parts[i] === '.claude' && parts[i + 1] === 'worktrees' && i + 2 < parts.length) continue;
+    for (const [re, why] of PROTECTED_SEGMENTS) if (re.test(parts[i])) return why;
+  }
   return undefined;
 }
 
@@ -131,9 +137,10 @@ export function ruleDirAllowed(dir: string, g: CleanupGuard): boolean {
 /**
  * Why `p` must never be removed, or undefined. Pure (paths only), so it is the same on every computer and
  * testable with Windows paths anywhere; the file-system checks (a Unity install inside, a repo inside) are
- * in planCleanup.
+ * in planCleanup. `opts.claudeWorktrees`: an entry of `.claude/worktrees` is not Claude Code's settings (the
+ * worktree rule of server/ownLeftovers.ts, w626).
  */
-export function neverDelete(p: string, g: CleanupGuard): string | undefined {
+export function neverDelete(p: string, g: CleanupGuard, opts: { claudeWorktrees?: boolean } = {}): string | undefined {
   const Pp = P(p);
   const n = norm(p);
   const parts = n.split('/').filter(Boolean);
@@ -146,7 +153,7 @@ export function neverDelete(p: string, g: CleanupGuard): string | undefined {
   for (const k of g.keep) if (k && (within(p, k) || within(k, p))) return `kept (${k})`;
   for (const k of g.inUse) if (k && (within(p, k) || within(k, p))) return `in use by a running agent (${k})`;
   if (within(p, `${g.home}/torque`)) return 'torque';
-  const seg = protectedSegment(parts);
+  const seg = protectedSegment(parts, opts.claudeWorktrees);
   if (seg) return seg;
   const base = parts[parts.length - 1];
   if (/\.(vhdx?|avhdx)$/.test(base)) return 'a virtual disk';
@@ -242,11 +249,11 @@ export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRul
 // ---------------------------------------------------------------- planning
 
 /** Whether a clone has work that exists nowhere else: uncommitted changes or commits no remote has. Unknown counts as yes. */
-export async function hasLocalWork(dir: string): Promise<boolean> {
+export async function hasLocalWork(dir: string, timeoutMs = 15_000): Promise<boolean> {
   const git = (...a: string[]) =>
     new Promise<string>((resolve, reject) =>
       // --no-optional-locks: status must not rewrite .git/index, or the clone looks touched and never ages out.
-      execFile('git', ['--no-optional-locks', '-C', dir, ...a], { encoding: 'utf8', timeout: 15_000, windowsHide: true }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))),
+      execFile('git', ['--no-optional-locks', '-C', dir, ...a], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))),
     );
   try {
     if (await git('status', '--porcelain')) return true;
@@ -467,23 +474,33 @@ export async function runCleanup(items: CleanupItem[], guard: CleanupGuard): Pro
       out.failed.push({ path: it.path, why: `refused: ${no}` });
       continue;
     }
-    const bytes = await sizeOf(it.path);
-    const doomed = it.rule === 'leftover' ? it.path : `${it.path}.ffclean-${Date.now()}`;
-    try {
-      if (doomed !== it.path) await fs.promises.rename(it.path, doomed);
-    } catch (e) {
-      out.failed.push({ path: it.path, why: `in use (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})` });
-      continue;
-    }
-    try {
-      await fs.promises.rm(doomed, { recursive: true, force: true, maxRetries: 2 });
-      out.removed.push({ path: it.path, bytes, rule: it.rule, why: it.why });
-      out.bytes += bytes;
-    } catch (e) {
-      out.failed.push({ path: it.path, why: `partly removed (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the rest next pass` });
-    }
+    await removeRenamed(it, out);
   }
   return out;
+}
+
+/**
+ * Measure `it.path`, rename it to `<name>.ffclean-<n>` and delete that, adding the outcome to `out`. The rename
+ * fails on Windows while a file inside is open, so an entry in use is skipped whole. Returns whether it went.
+ */
+export async function removeRenamed(it: CleanupItem, out: CleanupRun): Promise<boolean> {
+  const bytes = await sizeOf(it.path);
+  const doomed = it.rule === 'leftover' ? it.path : `${it.path}.ffclean-${Date.now()}`;
+  try {
+    if (doomed !== it.path) await fs.promises.rename(it.path, doomed);
+  } catch (e) {
+    out.failed.push({ path: it.path, why: `in use (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})` });
+    return false;
+  }
+  try {
+    await fs.promises.rm(doomed, { recursive: true, force: true, maxRetries: 2 });
+    out.removed.push({ path: it.path, bytes, rule: it.rule, why: it.why });
+    out.bytes += bytes;
+    return true;
+  } catch (e) {
+    out.failed.push({ path: it.path, why: `partly removed (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the rest next pass` });
+    return false;
+  }
 }
 
 /**
@@ -786,7 +803,7 @@ const gb = (b: number) => `${(b / GB).toFixed(1)} GB`;
 export function describeShortfall(s: CleanupSummary): string {
   const free = s.freeBytes === undefined ? '?' : gb(s.freeBytes);
   const biggest = s.consumers?.length ? ` Biggest remaining: ${s.consumers.map((c) => `${c.path} ${gb(c.bytes)}`).join(', ')}.` : '';
-  return `Clean-up freed ${gb(s.freedBytes ?? 0)} (${s.removed} item(s)) but only ${free} is free on disk, below the soft threshold of ${s.softFreeGB} GB. What is left is not known-safe to remove automatically.${biggest}${staleLine(s)}`;
+  return `Clean-up freed ${gb(s.freedBytes ?? 0)} (${s.removed} item(s)) but only ${free} is free on disk, below the soft threshold of ${s.softFreeGB} GB. What is left is not on the clean-up's lists: file clean-up work for a worker on that computer to remove FF Factory's own leftovers among it and report what it freed; never ask its owner to free space (w626).${biggest}${staleLine(s)}`;
 }
 
 /** The stale Unity Libraries, as a sentence (empty without any). */

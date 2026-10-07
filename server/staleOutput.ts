@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import type { OwnLeftoverPlan } from './ownLeftovers.ts';
 import { hasLocalWork, neverDelete, runCleanup, sizeOf, sizePlan, touchedSince, type CleanupGuard, type CleanupItem, type CleanupRun, type PassOptions } from './cleanup.ts';
 
 /**
@@ -271,15 +272,26 @@ export async function cleanupPass(o: {
   mode: StaleOutputSettings['mode'];
   regular: () => Promise<CleanupItem[]>;
   stale: () => Promise<StalePlan>;
+  /** FF Factory's own leftovers (server/ownLeftovers.ts, w626): the caller passes them only while free space is low. */
+  own?: { plan(): Promise<OwnLeftoverPlan>; run(plan: OwnLeftoverPlan): Promise<CleanupRun> };
 }): Promise<CleanupRun> {
   const regular = await o.regular();
   const plan = o.opts.stale && o.mode !== 'off' ? await o.stale() : { items: [], listed: [] };
+  const none: OwnLeftoverPlan = { items: [], listed: [] };
+  // A failure there must not cost the regular pass: nothing of it is removed then.
+  const own = o.own ? await o.own.plan().catch(() => none) : none;
   const listed: NonNullable<CleanupRun['listed']> = [];
-  for (const l of plan.listed) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
+  for (const l of [...plan.listed, ...own.listed]) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
   listed.sort((a, b) => b.bytes - a.bytes);
-  if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items]), listed };
+  if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items, ...own.items]), listed };
   const live = o.mode === 'on' ? plan.items : [];
   const r = await runCleanup([...regular, ...live], o.guard);
+  if (o.own && own.items.length) {
+    const r2 = await o.own.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun);
+    r.removed.push(...r2.removed);
+    r.failed.push(...r2.failed);
+    r.bytes += r2.bytes;
+  }
   return { ...r, ...(o.mode === 'dry-run' && plan.items.length ? { planned: await sizePlan(plan.items) } : {}), listed };
 }
 

@@ -22,6 +22,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **A machine removes FF Factory's own leftovers by itself when disk runs low** (w626, Ben: "no YOU free up disk space,
+  like you are instructed to in this harness. stop making us tell you to do it."). Below the soft threshold, and in
+  every `machine_cleanup`, the daemon's clean-up now also removes player slots nobody holds (every slot root the machine
+  may have, the old `~/nevergames/ff-players` included), linked worktrees of its clone with everything pushed and
+  unused for 2 days (sandboxes, locked ones and ones with local work are kept; local work is listed), and Unity editor
+  versions that no sandbox's or the main clone's `ProjectVersion.txt` (nor origin/develop or master, nor a project of a
+  person's opened within 30 days) names and nothing runs. Each is checked again right before it goes and logged with
+  its size. Sandbox workers' briefs now carry their own clean-up before a request is done, and the dispatcher's and the
+  orchestrators' briefs say low disk is fixed by clean-up work, never by asking the machine's owner.
+  [docs/self-recovery.md](docs/self-recovery.md), "FF Factory's own leftovers".
+
 - **Dictation on a worker's GPU, the portal's CPU as the fallback** (w615, lothsahn: "voice commands to the portal can
   get handled by a dedicated process on beast ... If beast is down, the portal can fall back to doing local cpu
   whisper"; "It should be part of the worker harness and configurable. It'll be off by default and we'll turn it on for
@@ -46,6 +57,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   never counted. Everyone else keeps the count, to and from the owners too. The `ops_worker` follow-ups were never
   counted; its tool and [ops-worker.md](docs/ops-worker.md) now say so, and what ends a run of them (the job's 12
   hours, the $25 process cap, the 2-hour turn limit). The new-job and deploy gates are unchanged.
+- **The disk guard defaults to 20 / 10 GB free, from 50 / 20** (w628, Ben: "you dont need 50gb free to run unity
+  editors, change that rule"). Measured on BEAST in a warm sandbox: an editor open and a forced script reimport grew
+  the Library by under 10 MB, a development build wrote 2.1 GB plus 0.25 GB of Library, a release build 2.0 GB plus
+  2.5 GB of Temp, a whole day's sandbox session at most 7.6 GB. `DISK_WARN_GB_DEFAULT` / `DISK_CRITICAL_GB_DEFAULT`
+  (`shared/types.ts`) feed both the portal's `poolSettingsOf` and a fresh worker install's daemon.json; a machine's
+  own `disk_warn_gb` / `disk_critical_gb` still win. A full (robocopy) Library copy now needs `disk_warn_gb` + the
+  Library's measured size instead of a flat 30 GB, so the lower guard cannot let a 100 GB copy fill an NTFS disk.
 - **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
   that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
   and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,
