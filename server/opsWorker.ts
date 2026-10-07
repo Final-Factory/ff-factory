@@ -38,7 +38,7 @@ export const OPS_PATHS = {
   root: '/srv/fff-ops',
   home: '/srv/fff-ops/home',
   scratch: '/srv/fff-ops/scratch',
-  /** The wrappers on its PATH: ssh (fff-ops-ssh, as the portal's account) and fffctl (fff-ops-priv, the allowed subcommands). */
+  /** The wrappers on its PATH: ssh (fff-ops-ssh, as the portal's account), scp and sftp (as itself, over fff-ops-scp-ssh) and fffctl (fff-ops-priv, the allowed subcommands). */
   bin: '/usr/local/lib/fff/ops-bin',
 };
 
@@ -77,7 +77,7 @@ export function opsAllowedOrchestrator(info: Pick<SessionInfo, 'kind' | 'orchest
 /** Commands that fetch, install, build or change things locally, which the worker runs on the target machine instead. */
 const DENIED: Record<string, string> = Object.fromEntries([
   ...['git', 'gh', 'git-lfs'].map((c) => [c, 'no git here: clone and build on the target machine over ssh']),
-  ...['curl', 'wget', 'aria2c', 'scp', 'sftp', 'rsync', 'nc', 'ncat', 'netcat', 'socat', 'telnet', 'ftp'].map((c) => [c, 'no downloads or file transfers in the VM: fetch on the target machine over ssh']),
+  ...['curl', 'wget', 'aria2c', 'rsync', 'nc', 'ncat', 'netcat', 'socat', 'telnet', 'ftp'].map((c) => [c, 'no downloads in the VM: fetch on the target machine over ssh; copy files to and from the machines with scp or sftp']),
   ...['apt', 'apt-get', 'aptitude', 'dpkg', 'snap', 'pip', 'pip3', 'pipx', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'deno', 'cargo', 'go', 'gem', 'brew', 'make', 'docker', 'podman'].map((c) => [c, 'no installs or builds in the VM: run them on the target machine over ssh']),
   ...['python', 'python3', 'perl', 'ruby', 'node', 'php', 'lua'].map((c) => [c, 'no interpreters in the VM (they can fetch and install): use jq, or run the script on the target machine']),
   ...['env', 'printenv', 'export', 'declare', 'set'].map((c) => [c, 'the environment is not printed (it may hold a credential)']),
@@ -93,6 +93,47 @@ const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh']);
 
 /** The fffctl subcommands its fffctl wrapper (fff-ops-priv) runs: everything else is a person's. */
 export const OPS_FFFCTL = ['status', 'state', 'logs', 'machine-ssh-check', 'credential', 'update', 'help'];
+
+/** scp's and sftp's options that take a value (OpenSSH's getopt strings). */
+const COPY_VALUE_OPTS = { scp: 'cDFiJloPSX', sftp: 'BbcDFiJloPRSX' };
+/** The options that would change the ssh under them: fff-ops-scp-ssh refuses them as well. */
+const COPY_SSH_OPTS = 'DFiJoS';
+
+/**
+ * Why an scp or sftp command is refused (w612), or undefined: an option that changes its ssh, another port, or a local
+ * file of FF Factory's own as its source or destination. A remote path (m5:path, user@host:path) is the machine's.
+ */
+function copyProblem(name: 'scp' | 'sftp', args: string[], read: ReadCtx, rules: SecretRules): string | undefined {
+  const local: string[] = [];
+  let operands = 0;
+  let options = true;
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (options && a === '--') {
+      options = false;
+      continue;
+    }
+    if (options && a.length > 1 && a.startsWith('-')) {
+      for (let j = 1; j < a.length; j++) {
+        const o = a[j];
+        if (COPY_SSH_OPTS.includes(o)) return `${name} -${o}: its ssh is fixed (the portal's key, pinned host keys, port 22): give it the machine (m5:path, user@host:path) and nothing else`;
+        if (!COPY_VALUE_OPTS[name].includes(o)) continue;
+        const v = j + 1 < a.length ? a.slice(j + 1) : args[++k];
+        if (o === 'P' && v !== '22') return `${name} -P ${v}: the machines' ssh is on port 22`;
+        if (o === 'b' && v !== undefined) local.push(v);
+        break;
+      }
+      continue;
+    }
+    // scp: a path with a colon before any slash is the machine's. sftp: the machine first, then a local folder.
+    if (name === 'scp' ? !/^[^/]*:/.test(a) : operands > 0) local.push(a);
+    operands++;
+  }
+  for (const p of local) {
+    if (readProblem(p, 'file', rules, read)) return `${p}: not yours to copy (FF Factory's config, secrets, keys and data stay in the VM)`;
+  }
+  return undefined;
+}
 
 /** What it may not read: FF Factory's own files and secrets in the VM, and any process's environment. */
 export function opsSecretRules(): SecretRules {
@@ -135,6 +176,11 @@ export function checkOpsShell(cmd: string, read: ReadCtx, rules = opsSecretRules
     // `set -e` and `export X=1` are harmless; bare `set`, `export -p` print the environment.
     const harmless = (name === 'set' && /^[-+]/.test(words[i + 1] ?? '')) || (name === 'export' && words.slice(i + 1).length > 0 && words.slice(i + 1).every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)));
     if (DENIED[name] && !harmless) return `${name}: ${DENIED[name]}`;
+    if (name === 'scp' || name === 'sftp') {
+      if (first !== name) return `${first}: run ${name} from your PATH (its ${name} goes through the portal's ssh to the machines)`;
+      const why = copyProblem(name, words.slice(i + 1), read, rules);
+      if (why) return why;
+    }
     if (name === 'fffctl' && words[i + 1] !== undefined && !OPS_FFFCTL.includes(words[i + 1])) return `fffctl ${words[i + 1]} is a person's (deploys, restarts, settings, the vault, migrations): you have fffctl ${OPS_FFFCTL.join(', ')}`;
     if (SHELLS.has(name)) {
       const c = words.indexOf('-c', i + 1);
@@ -314,10 +360,11 @@ export function opsSpawner(socketPath = OPS_PATHS.socket, version = sdkVersion()
 export function opsBrief(ownerName: string | undefined): string {
   return `
 ## You are FF Factory's orchestration worker (w597, docs/ops-worker.md)
-You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux account fff-ops, with a real shell. You take jobs only from Lothsahn's and Ben's own orchestrators; each message says whose it is. ${ownerName ? `The portal's owner is ${ownerName}.` : ''} Your job is orchestration: reaching the machines (beast, lothdesktop, m3, m5) over ssh, reading the portal's state, and issuing machine credentials. Anything heavy runs on the target machine over ssh, never here.
+You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux account fff-ops, with a real shell. You take jobs only from Lothsahn's and Ben's own orchestrators; each message says whose it is. ${ownerName ? `The portal's owner is ${ownerName}.` : ''} Your job is orchestration: reaching the machines (beast, lothdesktop, m3, m5) over ssh and copying files to and from them with scp, reading the portal's state, and issuing machine credentials. Anything heavy runs on the target machine over ssh, never here.
 
 What you have:
 - \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root <root>"'\`. An update needs no new credential: never issue one for it.
+- \`scp\` and \`sftp\` (w612): files between your scratch folder and a machine, both ways, over the same ssh (the portal's key, pinned host keys, port 22): \`scp ./check.sh m5:/tmp/\`, \`scp m5:/tmp/install.log ./\`, \`sftp -b cmds m5\` (a batch file: there is no terminal). They run as you, so they copy only what you may read and write: never the portal's files. No ssh options (-o, -i, -F, -J, -S): the machine is all they take.
 - \`fffctl update\`: the portal deploy, only after a [deploy] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). Follow that message's steps.
 - \`fffctl status\`, \`fffctl state\`, \`fffctl logs [N]\` (the portal's journal), \`fffctl machine-ssh-check\`, \`fffctl credential list\`, and \`fffctl credential issue <machine id> --to <ssh target>\`: a new machine credential goes from this VM straight into a file on that machine (it prints the remote path and the last four characters, never the credential); then run the installer there with \`--credential-file\` / \`-CredentialFile\` and delete the file after. Issuing replaces the machine's credential: its running daemon is dropped within 20 s, so issue only for a machine being (re)installed.
 - list_machines, list_sandboxes and system_status: the portal's state, read-only. wake_me: be woken later (an install, a reboot).

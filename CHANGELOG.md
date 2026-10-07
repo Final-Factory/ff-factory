@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
+  that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
+  and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,
+  linked to w336, had Lothsahn's "is this fixed?" refused on 2026-10-07 (`bad_request`) and answered on FFBox instead. A
+  `dev_message` naming a request FF Factory does not have is now answered `dev_ack` `unknown_request`; FFBox drops the
+  stale link and hands the turn over again as a `dev_request` with the thread's keys, which joins open work, answers
+  "already fixed" or is filed new, and `dev_filed`'s `workId` becomes the thread's link (ffbox, the same day).
+  [docs/ffbox-connector-contract.md](docs/ffbox-connector-contract.md).
 - **A worker reinstall or daemon restart no longer stops running agents** (w605, lothsahn: "can we make it so that the
   install doesn't require shutting down running jobs, and it can just attach back to them?"). Each agent process runs
   in an agent host started detached from the daemon (`machine/agentHost.ts`); the two talk through append-only files in
@@ -62,6 +70,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   (`scripts/worker/test/update-e2e.ts`) on Windows (elevated) and macOS runners.
   [docs/worker-install.md](docs/worker-install.md) "Updating".
 
+- **The orchestration worker copies files with scp and sftp** (w612, Lothsahn: "Please add a task so that the
+  orchestration worker can use scp"). Its `scp` and `sftp` move files between its scratch folder and beast, lothdesktop,
+  m3 and m5 both ways, over the ssh it already had: the portal's key, pinned host keys, the same network. They run as
+  `fff-ops`, so the portal's config, data, secrets and keys cannot be a source (Unix permissions, and the guard says
+  why); `fff-ops-scp-ssh` lets only scp's own ssh settings through and `fff-ops-ssh --sftp` opens the machine's sftp
+  subsystem. CI copies both ways to an sshd in the guest and checks an unpinned host, an ssh option and the secrets are
+  refused. [docs/ops-worker.md](docs/ops-worker.md#what-it-may-do-and-what-enforces-it).
 - **The orchestration worker** (w597, Lothsahn: "Let's give you a real worker--not with unity, and not with a
   FinalFactory workspace, but with a claude so you can execute commands locally for orchestration."). Exactly one,
   hardcoded (session `ops-worker`, kind `ops`), in the portal VM as its own Linux account `fff-ops`, and only Lothsahn's
