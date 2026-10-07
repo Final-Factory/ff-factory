@@ -261,7 +261,7 @@ it running, mid-turn or idle. The next daemon takes it back.
   portal lets a daemon that says `agentHosts` in its hello restart while agents run (`controlDaemon`).
 - `agentHosts: false` in daemon.json runs agents inside the daemon as before (they end with it).
 - Tests: `server/agentHost.test.ts` runs a real daemon process and real hosts with the scripted fake agent, kills the
-  daemon mid-turn and starts another (Linux and Windows in the checks job, macOS in its own job), and kills a host to
+  daemon mid-turn and starts another (Linux and Windows in the checks job; CI has no macOS runner yet), and kills a host to
   see its agent resumed. `machineDeployWin.test.ts` runs the real `Stop-FFDaemon` against stand-in processes.
 
 ## Windows machines
