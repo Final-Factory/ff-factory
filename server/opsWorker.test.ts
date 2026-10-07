@@ -57,6 +57,13 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     'export LC_ALL=C',
     'jq .machines state.json | head -n 20',
     "ssh m5 'bash -s' < /srv/fff-ops/scratch/install.sh",
+    // w612: scp and sftp to and from the machines, with its own files
+    'scp ./check.sh m5:/tmp/',
+    'scp -r logs rydin@beast:C:/Temp/',
+    'scp m5:/tmp/install.log ./',
+    'scp -P 22 -O /srv/fff-ops/scratch/a.txt m3:a.txt',
+    'sftp -b cmds m5',
+    'sftp m5:/tmp/install.log /srv/fff-ops/scratch/',
   ]) assert.equal(shell(ok), undefined, ok);
   const refused: [string, RegExp][] = [
     ['git clone https://github.com/Final-Factory/FinalFactory', /no git here/],
@@ -80,6 +87,23 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     ['echo $(cat /srv/fff/secrets/x)', /substitution/],
     ['eval "$X"', /no eval/],
     ['steamcmd +login x', /Steam/],
+    ['rsync -a m5:/x .', /no downloads/],
+    // w612: scp and sftp take no ssh options and copy none of the portal's files, either way
+    ['scp -o ProxyCommand=id a m5:', /its ssh is fixed/],
+    ['scp -i /tmp/k a m5:', /its ssh is fixed/],
+    ['scp -rS/bin/sh a m5:', /its ssh is fixed/],
+    ['scp -F cfg a m5:', /its ssh is fixed/],
+    ['scp -J evil a m5:', /its ssh is fixed/],
+    ['sftp -oProxyCommand=id m5', /its ssh is fixed/],
+    ['scp -P 2222 a m5:', /port 22/],
+    ['scp /srv/fff/config/config.json m5:/tmp/', /not yours to copy/],
+    ['scp /etc/fff/vault.key m5:/tmp/', /not yours to copy/],
+    ['scp ../../fff/secrets/gh-token m5:/tmp/', /not yours to copy/],
+    ['scp -r /srv/fff/data m5:/tmp/', /not yours to copy/],
+    ['scp m5:/tmp/x /srv/fff/config/config.json', /not yours to copy/],
+    ['sftp -b /srv/fff/data/cmds m5', /not yours to copy/],
+    ['sftp m5:/tmp/x /etc/fff/', /not yours to copy/],
+    ['/usr/bin/scp a m5:', /from your PATH/],
   ];
   for (const [cmd, why] of refused) assert.match(shell(cmd) ?? 'ALLOWED', why, cmd);
 });

@@ -1,0 +1,4 @@
+#!/bin/sh
+# The orchestration worker's sftp (w612, docs/ops-worker.md): /usr/bin/sftp as the worker (fff-ops), its files only,
+# over fff-ops-scp-ssh to the machines' ssh as the portal's account. No terminal: give it a batch, `sftp -b cmds m5`.
+exec /usr/bin/sftp -S "${FFF_OPS_SCP_SSH:-/usr/local/lib/fff/fff-ops-scp-ssh}" "$@"

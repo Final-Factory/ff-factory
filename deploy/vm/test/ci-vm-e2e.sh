@@ -350,6 +350,66 @@ if probe '/usr/bin/curl -fsS -m 10 -o /dev/null https://example.com' >/dev/null 
 if probe '/usr/bin/touch /var/lib/fff-ops-probe' >/dev/null 2>&1; then fail "the worker wrote outside its scratch"; fi
 probe '/usr/bin/touch /srv/fff-ops/scratch/probe' || fail "the worker cannot write its scratch"
 g 'sudo rm -f /srv/fff-ops/scratch/probe'
+# scp and sftp (w612), inside the same fences, to a machine of CI's own: an sshd on the guest's loopback (port 2222, one
+# account, the portal's public key), its host key pinned and its alias written into the portal account's ssh files as an
+# enrolled machine's are. The same sshd under another name (its key not pinned for that name) is an unenrolled host.
+cat >/tmp/fff-ops-scp-setup.sh <<'SETUP'
+set -e
+useradd --create-home --shell /bin/bash ffci-scp
+usermod -p '*' ffci-scp
+install -d -m 0700 -o ffci-scp -g ffci-scp ~ffci-scp/.ssh
+install -m 0600 -o ffci-scp -g ffci-scp /srv/fff/home/.ssh/id_ed25519.pub ~ffci-scp/.ssh/authorized_keys
+cat >/etc/ssh/ci-scp.conf <<'EOF'
+Port 2222
+ListenAddress 127.0.0.1
+HostKey /etc/ssh/ssh_host_ed25519_key
+PidFile /run/ci-scp-sshd.pid
+AllowUsers ffci-scp
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+Subsystem sftp internal-sftp
+EOF
+install -d -m 0755 /run/sshd
+/usr/sbin/sshd -f /etc/ssh/ci-scp.conf
+printf '# w612-ci-begin\nHost ci-scp ci-unpinned\n  Port 2222\n  User ffci-scp\nHost ci-scp\n  HostName 127.0.0.1\nHost ci-unpinned\n  HostName localhost\n# w612-ci-end\n' >>/srv/fff/home/.ssh/config
+echo "[127.0.0.1]:2222 $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)" >>/srv/fff/home/.ssh/known_hosts
+echo down-ci >~ffci-scp/down.txt
+chown ffci-scp: ~ffci-scp/down.txt
+echo up-ci | sudo -u fff-ops tee /srv/fff-ops/scratch/up.txt >/dev/null
+printf 'put /srv/fff-ops/scratch/up.txt sftp.txt\nget down.txt /srv/fff-ops/scratch/sftp-down.txt\n' | sudo -u fff-ops tee /srv/fff-ops/scratch/batch >/dev/null
+SETUP
+g "echo $(base64 -w0 /tmp/fff-ops-scp-setup.sh) | base64 -d | sudo bash" || fail "could not set up CI's scp machine in the guest"
+scp_ops=/usr/local/lib/fff/ops-bin
+probe "$scp_ops/scp /srv/fff-ops/scratch/up.txt ci-scp:up.txt" || fail "the worker's scp to an enrolled machine failed"
+[ "$(g 'sudo cat ~ffci-scp/up.txt')" = up-ci ] || fail "the worker's scp did not copy its file to the machine"
+probe "$scp_ops/scp ci-scp:down.txt /srv/fff-ops/scratch/down.txt" || fail "the worker's scp from an enrolled machine failed"
+[ "$(g 'sudo cat /srv/fff-ops/scratch/down.txt')" = down-ci ] || fail "the worker's scp did not fetch the machine's file"
+probe "$scp_ops/scp -O /srv/fff-ops/scratch/up.txt ci-scp:legacy.txt" || fail "the worker's scp -O (legacy) failed"
+[ "$(g 'sudo cat ~ffci-scp/legacy.txt')" = up-ci ] || fail "the worker's scp -O did not copy"
+probe "$scp_ops/sftp -b /srv/fff-ops/scratch/batch ci-scp" >/dev/null || fail "the worker's sftp batch failed"
+[ "$(g 'sudo cat ~ffci-scp/sftp.txt /srv/fff-ops/scratch/sftp-down.txt' | paste -sd' ' -)" = 'up-ci down-ci' ] || fail "the worker's sftp did not put and get"
+g 'sudo journalctl -t fff-ops-ssh --no-pager -n 50' | matches -E 'sftp (ffci-scp@)?ci-scp' || fail "the worker's sftp is not in the journal (fff-ops-ssh)"
+echo "ok: the worker's scp (both ways, and scp -O) and sftp reach an enrolled machine with the portal's key"
+# Refused: a host whose key is not pinned, a host outside its network fence, an ssh option, and the portal's secrets.
+if out=$(probe "$scp_ops/scp /srv/fff-ops/scratch/up.txt ci-unpinned:unpinned.txt" 2>&1); then fail "scp to a host whose key is not pinned worked"; fi
+echo "MEASURE scp to an unpinned host: $out"
+printf '%s' "$out" | matches 'Host key verification failed' || fail "scp to an unpinned host failed, but not on its host key: $out"
+if out=$(probe "$scp_ops/scp /srv/fff-ops/scratch/up.txt example.com:x.txt" 2>&1); then fail "scp to example.com worked"; fi
+echo "MEASURE scp to example.com: $out"
+if out=$(probe "$scp_ops/scp -o ProxyCommand=id /srv/fff-ops/scratch/up.txt ci-scp:proxy.txt" 2>&1); then fail "scp -o ProxyCommand worked"; fi
+printf '%s' "$out" | matches 'is not taken' || fail "scp -o ProxyCommand failed, but not on the option: $out"
+for secret in /srv/fff/config/config.json /srv/fff/home/.ssh/id_ed25519 /etc/fff/vault.key; do
+  if out=$(probe "$scp_ops/scp $secret ci-scp:stolen" 2>&1); then fail "the worker's scp copied $secret"; fi
+  echo "MEASURE scp $secret: $out"
+  printf '%s' "$out" | matches -i 'permission denied' || fail "scp of $secret failed, but not on its permissions: $out"
+done
+for f in unpinned.txt x.txt proxy.txt stolen; do
+  if g "sudo test -e ~ffci-scp/$f"; then fail "a refused copy reached the machine: $f"; fi
+done
+echo "ok: the worker's scp refuses an unpinned host, a host outside its fences, an ssh option and the portal's secrets"
+g 'sudo kill "$(cat /run/ci-scp-sshd.pid)"; sudo sed -i "/^# w612-ci-begin/,/^# w612-ci-end/d" /srv/fff/home/.ssh/config; sudo -u fff ssh-keygen -R "[127.0.0.1]:2222" -f /srv/fff/home/.ssh/known_hosts >/dev/null 2>&1; sudo rm -f /srv/fff/home/.ssh/known_hosts.old /etc/ssh/ci-scp.conf /srv/fff-ops/scratch/up.txt /srv/fff-ops/scratch/down.txt /srv/fff-ops/scratch/batch /srv/fff-ops/scratch/sftp-down.txt; sudo userdel -r ffci-scp 2>/dev/null; true'
+rm -f /tmp/fff-ops-scp-setup.sh
 echo "ok: the orchestration worker: its own account, a 2 GiB noexec scratch that fills up alone, a socket only the portal opens, two sudo rights, and Claude Code through the launcher"
 
 step "update: build beside the running portal, drain, switch, verify"

@@ -33,6 +33,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The orchestration worker copies files with scp and sftp** (w612, Lothsahn: "Please add a task so that the
+  orchestration worker can use scp"). Its `scp` and `sftp` move files between its scratch folder and beast, lothdesktop,
+  m3 and m5 both ways, over the ssh it already had: the portal's key, pinned host keys, the same network. They run as
+  `fff-ops`, so the portal's config, data, secrets and keys cannot be a source (Unix permissions, and the guard says
+  why); `fff-ops-scp-ssh` lets only scp's own ssh settings through and `fff-ops-ssh --sftp` opens the machine's sftp
+  subsystem. CI copies both ways to an sshd in the guest and checks an unpinned host, an ssh option and the secrets are
+  refused. [docs/ops-worker.md](docs/ops-worker.md#what-it-may-do-and-what-enforces-it).
 - **The orchestration worker** (w597, Lothsahn: "Let's give you a real worker--not with unity, and not with a
   FinalFactory workspace, but with a claude so you can execute commands locally for orchestration."). Exactly one,
   hardcoded (session `ops-worker`, kind `ops`), in the portal VM as its own Linux account `fff-ops`, and only Lothsahn's

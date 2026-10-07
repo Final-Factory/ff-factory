@@ -5,6 +5,9 @@
 # one file as fff, and nothing else as fff.
 #
 #   fff-ops-ssh TARGET [COMMAND...]     TARGET: an alias from machines.ssh (m3, m5, beast, Loth2800) or user@host
+#   fff-ops-ssh --sftp TARGET           the machine's sftp subsystem, for the worker's scp and sftp (w612): they run as
+#                                       the worker (fff-ops), so their local files are what fff-ops may read and write,
+#                                       and fff-ops-scp-ssh hands only the machine to this.
 #
 # No ssh option passes through: a -o ProxyCommand or -F would run a command as fff, which holds the portal's secrets. The
 # options here are fixed: no forwarding of any kind, no local commands, no proxy, no shared connection, only pinned host
@@ -16,6 +19,12 @@ die() { echo "fff-ops-ssh: $*" >&2; exit 2; }
 WANT_USER=${FFF_OPS_SSH_USER:-fff}
 [ "$(id -un)" = "$WANT_USER" ] || die "run as the portal's account ($WANT_USER): the worker's ssh does it (sudo -n -u $WANT_USER $0 ...)"
 [ $# -ge 1 ] || die "usage: ssh TARGET [COMMAND...]  (TARGET: m3, m5, beast, Loth2800, or user@host from list_machines)"
+sftp=0
+if [ "$1" = --sftp ]; then
+  [ $# -eq 2 ] || die "usage: fff-ops-ssh --sftp TARGET (the worker's scp and sftp call it)"
+  sftp=1
+  shift
+fi
 target=$1
 shift
 # A plain alias or user@host: letters, digits, dots and dashes (and the user's underscore). Never an option.
@@ -25,10 +34,17 @@ home=$(getent passwd "$WANT_USER" | cut -d: -f6)
 [ -n "$home" ] || die "no home for $WANT_USER"
 export HOME=$home
 cmdline="$*"
-logger -t fff-ops-ssh -- "ssh $target: ${cmdline:0:400}" 2>/dev/null || true
+subsystem=()
+if [ "$sftp" = 1 ]; then
+  logger -t fff-ops-ssh -- "sftp $target" 2>/dev/null || true
+  subsystem=(-s)
+  set -- sftp
+else
+  logger -t fff-ops-ssh -- "ssh $target: ${cmdline:0:400}" 2>/dev/null || true
+fi
 exec "${FFF_OPS_SSH_BIN:-/usr/bin/ssh}" -T -e none \
   -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no \
   -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o PermitLocalCommand=no \
   -o ProxyCommand=none -o ProxyJump=none -o ControlMaster=no -o ControlPath=none \
   -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \
-  -- "$target" "$@"
+  ${subsystem[@]+"${subsystem[@]}"} -- "$target" "$@"
