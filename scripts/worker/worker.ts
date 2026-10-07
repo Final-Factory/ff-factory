@@ -518,6 +518,11 @@ export async function cloneRepo(l: Pick<Layout, 'repo'>, url: string, relative =
   await must('git config', 'git', ['-C', l.repo, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
   // Worktrees record relative paths (git 2.48+), so the root can be moved or renamed (absoluteWorktrees: git's default).
   await must('git config', 'git', ['-C', l.repo, 'config', 'worktree.useRelativePaths', relative ? 'true' : 'false']);
+  // The daemon runs non-elevated, where Windows refuses to make symlinks (no Developer Mode), so a checkout of the repo's
+  // symlinks (AGENTS.md) fails and the sandbox ends in error. Git for Windows' installer may set core.symlinks true for
+  // the whole system, and a clone made elevated (--owner, over ssh) does not get the local false a non-elevated one does
+  // (BEAST, w596): set it here, so symlinks check out as plain files the way a person's clone has them.
+  if (isWin) await must('git config', 'git', ['-C', l.repo, 'config', 'core.symlinks', 'false']);
   await must('git lfs install', 'git', ['-C', l.repo, 'lfs', 'install', '--local']);
   say('Fetching origin...');
   if (!seedFrom) return void (await must('git fetch', 'git', ['-C', l.repo, 'fetch', '--prune', '--progress', 'origin'], { live: true }));
