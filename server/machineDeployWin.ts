@@ -403,6 +403,10 @@ const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
  * the GPU and the desktop Unity needs), not elevated, normal priority (a task's default 7 would hand the
  * daemon's agents and Unity below-normal CPU, I/O and memory priority), no time limit, never stopped for
  * batteries or idleness, one instance, restarted by Task Scheduler if the supervisor itself fails.
+ * The supervisor runs under a headless console host (w603): an interactive task's console app gets a visible
+ * window, and where Windows Terminal is the default terminal powershell's -WindowStyle Hidden cannot hide it
+ * (LothDesktop, 2026-10-07: a "powershell.exe" Terminal window stayed open from the daemon's start, and closing it
+ * closes the supervisor's console). conhost --headless gives it a console with no window at all.
  */
 export function taskXml(sid: string, home: string, appDir?: string): string {
   if (!/^S-1-[\d-]+$/.test(sid)) throw new Error(`"${sid}" is not a Windows SID`);
@@ -450,8 +454,8 @@ export function taskXml(sid: string, home: string, appDir?: string): string {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>powershell.exe</Command>
-      <Arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${xml(f)}\\run-daemon.ps1"</Arguments>
+      <Command>conhost.exe</Command>
+      <Arguments>--headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${xml(f)}\\run-daemon.ps1"</Arguments>
       <WorkingDirectory>${xml(f)}</WorkingDirectory>
     </Exec>
   </Actions>

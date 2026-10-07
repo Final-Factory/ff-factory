@@ -71,8 +71,12 @@ before redeploying by hand.
   never resumed, by a dropped link or a portal restart, until it is sent a message again.
 - **Tools.** Workers get the machine's tools (`wake_me`, `unity`, …) via a `machine` MCP server
   whose calls go back to the portal. They set no label: their title says what they are doing, and the dispatcher sets it
-  ([orchestrators.md](orchestrators.md#worker-titles-and-sandbox-labels), w575). Unity is not managed in v1: agents use whatever editor and MCP
-  the Mac already has (the Mac's own user settings load).
+  ([orchestrators.md](orchestrators.md#worker-titles-and-sandbox-labels), w575).
+- **The main clone is the owner's** (w536): the daemon runs no editor, hang/crash watch, Unity MCP place, Unity slot
+  place or git status report for it. A `unity` or `switch` message without a sandbox (from an older portal) is answered
+  "a machine's main clone takes no agents (w536): give a sandbox", and `status_now` with nothing. A person's own editor
+  there still counts against `max_unity`, as started outside the gate. The machine record's `git` is only what a daemon
+  from before w536 last sent; `list_machines` and the machine page leave it out when there is none.
 - **Guard.** The workers' guard runs in the daemon (the sandbox rules, [below](#machine-sandboxes)). The
   backup-before-discard rule for the user's own clone (2026-09-25: copy local changes to `ff-local-backups/` beside
   the clone before setting any aside) went with main-clone workers (w536): no agent works there now, and the main
@@ -254,8 +258,9 @@ depends on which default shell is set.
 **What runs it.** The task starts at logon of that user (trigger and principal by SID), in their interactive
 session (the Claude login, the GPU and the desktop Unity needs), not elevated (`LeastPrivilege`), at normal
 priority (a task's default 7 would give every agent and Unity below-normal CPU, I/O and memory priority), with
-no time limit and no battery or idle conditions. Its action is `powershell.exe -WindowStyle Hidden -File
-run-daemon.ps1`, a supervisor like the portal's own `scripts/supervise.ps1`: it starts
+no time limit and no battery or idle conditions. Its action is `conhost.exe --headless powershell.exe -WindowStyle
+Hidden -File run-daemon.ps1` (headless since w603: with Windows Terminal as the default terminal, `-WindowStyle
+Hidden` alone left a Terminal window open on the desktop for as long as the daemon ran), a supervisor like the portal's own `scripts/supervise.ps1`: it starts
 `node machine/daemon.ts <daemon.json>` hidden, and again whenever it exits (10 s, doubling up to 5 minutes
 while it keeps dying within 5 minutes). Its output is in `logs\daemon.log` and `daemon.err.log` in its folder
 (the previous run's in `*.prev`), the supervisor's own lines in `supervisor.log`. Task Scheduler restarts the
@@ -284,8 +289,8 @@ log on again. A deploy while nobody is logged on installs everything and says so
   (the busiest engine, summed over the processes using it, as Task Manager shows it) and `\GPU Adapter
   Memory(*)\Dedicated Usage`, read with Get-Counter (their CIM classes on a Windows whose counter names are
   localized), with the adapter's name and memory from the registry (`WIN_GPU_SCRIPT`, `parseWinGpu`).
-- **Unity**: the `unity` tool and the hang/crash watch work as on a Mac (`machine/unity.ts` with platform
-  win32): the editor is `Unity.exe` with `-projectPath` of the clone, found as above ("Finding Unity":
+- **Unity**: a sandbox's `unity` tool and hang/crash watch work as on a Mac (`machine/unity.ts` with platform
+  win32): the editor is `Unity.exe` with `-projectPath` of the sandbox, found as above ("Finding Unity":
   `unity_path`, `unity_editor_root`, the editors the Hub lists, its chosen install location, Program Files); its
   log is
   `%LOCALAPPDATA%\Unity\Editor\Editor.log`. The editor is launched through `Start-Process` so that it is
@@ -441,8 +446,7 @@ folder is in the repo's `info/exclude`, so it never shows in `git status` or a c
 compile the script cannot run; it stays and runs at the next start that compiles.
 
 **Editors.** Each sandbox editor logs to its own `Logs/sandbox-editor.log` in the worktree (`-logFile`; the previous
-run's kept as `sandbox-editor-<time>.log`, the newest three), so its hang and crash watch (the same `MacUnityWatch` as
-the main clone's) reads its own log, not the shared `Editor.log`. The daemon looks every 30 s: the editor's state
+run's kept as `sandbox-editor-<time>.log`, the newest three), so its hang and crash watch (`MacUnityWatch`) reads its own log, not the shared `Editor.log`. The daemon looks every 30 s: the editor's state
 (starting until its MCP bridge is up), the watch (a hung or crashed editor restarted, at most 3 in 30 minutes, and
 its agents told), git status every 2 minutes, the disk guard, and the idle stop (an editor with no agent activity
 there for 2 hours, and no agent mid-turn, is stopped; `daemon.json` `sandboxIdleStopMinutes`).
@@ -459,9 +463,9 @@ editor, a **FREE** badge) with its live agents under it (no main-clone row: no a
 page (`#/overview`) shows the same as one card per computer. A machine sandbox has its own page,
 `#/machine/<machine>/sandbox/<id>`: its agents as tabs, its editor (start, stop, the log read through the daemon), its
 git state and a branch switch (`POST /api/machines/<machine>/sandboxes/<id>/unity`, `GET …/unity-log`,
-`POST …/switch-branch`). The machine's own page (from its Overview card) shows its daemon, clone and sandboxes, and
-its running agents against its agent cap; a machine's main clone takes no editor or branch command from the portal
-(`unity` and `switch_branch` with a machine alone are refused).
+`POST …/switch-branch`). The machine's own page (from its Overview card) shows its daemon, folders and sandboxes, and
+its running agents against its agent cap; a machine's main clone takes no editor, branch or gallery command from the
+portal (`unity` and `switch_branch` with a machine alone are refused, and the daemon lists no images there).
 
 ![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
 ![The Overview board](images/fleet-overview-desktop-chromium.png)
@@ -471,8 +475,9 @@ editor as `UnityMCP`: the portal marks the launch spec `unityMcp`, and the daemo
 (`machine/unityMcp.ts`). Claude Code registers that server per project folder, so a fresh worktree would otherwise have
 none (LothDesktop's sandbox agents fell back to Unity on the command line). The command is `daemon.json`
 `unityMcpServer` when set, else the `UnityMCP` entry the machine's own Claude Code has in `~/.claude.json`: the main
-clone's, then a user-wide one, then the one most of its projects use. Each agent's server gets its place's own
-`UNITY_MCP_STATUS_DIR` (`<app_dir>/unity-mcp/<sandbox>`, or `_main-clone`), which the daemon keeps every 5 s holding
+clone's, then a user-wide one, then the one most of its projects use. Each agent's server gets its sandbox's own
+`UNITY_MCP_STATUS_DIR` (`<app_dir>/unity-mcp/<sandbox>`; an agent outside a sandbox, a standing agent, gets no
+UnityMCP, w536), which the daemon keeps every 5 s holding
 only that editor's status file from `~/.unity-mcp` (and a fallback port file pointing at its port, 0 while it is
 down) (`readStatusFiles` and `syncStatusDir`, `server/unityMcp.ts`). So a pinned agent never lands on another sandbox's
 editor while its own restarts. A status file counts only if written since that editor started (for an editor already

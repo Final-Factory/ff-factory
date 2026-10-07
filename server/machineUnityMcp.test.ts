@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { MAIN_CLONE, McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp } from '../machine/unityMcp.ts';
+import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp } from '../machine/unityMcp.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { realPoolDeps } from '../machine/sandboxes.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
@@ -82,11 +82,11 @@ test("machine unity mcp: each place's folder holds only its own editor's status 
   status('bbbb', 'D:/work/ffsb/sb1', 6401, T - 3_600_000);
   status('cccc', 'D:/work/ffsb/sb2', 6402, T - 3_600_000);
   scopes.sync(app, [
-    { place: MAIN_CLONE, project: 'D:\\work\\FFFRepo', pid: 10 },
+    { place: 'sb0', project: 'D:\\work\\FFFRepo', pid: 10 },
     { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 11 },
     { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' },
   ], T);
-  assert.deepEqual(files(MAIN_CLONE), ['unity-mcp-port.json', 'unity-mcp-status-aaaa.json']);
+  assert.deepEqual(files('sb0'), ['unity-mcp-port.json', 'unity-mcp-status-aaaa.json']);
   assert.deepEqual(files('sb1'), ['unity-mcp-port.json', 'unity-mcp-status-bbbb.json']);
   assert.equal(port('sb1'), 6401);
   assert.deepEqual(files('sb2'), ['unity-mcp-port.json'], 'a stopped editor: nothing to find');
@@ -94,17 +94,17 @@ test("machine unity mcp: each place's folder holds only its own editor's status 
 
   // sb1's editor crashed and a new one started (pid 12) after the last look: its crashed predecessor's file is not
   // mirrored until the new editor writes its own.
-  scopes.sync(app, [{ place: MAIN_CLONE, project: 'D:\\work\\FFFRepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }, { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' }], T + 30_000);
+  scopes.sync(app, [{ place: 'sb0', project: 'D:\\work\\FFFRepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }, { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' }], T + 30_000);
   assert.deepEqual(files('sb1'), ['unity-mcp-port.json']);
   assert.equal(port('sb1'), 0);
   status('bbbb', 'D:/work/ffsb/sb1', 6403, T + 40_000);
-  scopes.sync(app, [{ place: MAIN_CLONE, project: 'D:\\work\\FFFRepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }, { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' }], T + 45_000);
+  scopes.sync(app, [{ place: 'sb0', project: 'D:\\work\\FFFRepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }, { place: 'sb2', project: 'D:\\work\\ffsb\\sb2' }], T + 45_000);
   assert.deepEqual(files('sb1'), ['unity-mcp-port.json', 'unity-mcp-status-bbbb.json']);
   assert.equal(port('sb1'), 6403);
-  assert.deepEqual(files(MAIN_CLONE), ['unity-mcp-port.json', 'unity-mcp-status-aaaa.json'], 'the main clone kept its own');
+  assert.deepEqual(files('sb0'), ['unity-mcp-port.json', 'unity-mcp-status-aaaa.json'], 'sb0 kept its own');
 
   // A deleted sandbox: its folder goes too.
-  scopes.sync(app, [{ place: MAIN_CLONE, project: 'D:\\work\\FFFRepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }], T + 60_000);
+  scopes.sync(app, [{ place: 'sb0', project: 'D:\\work\\FFFRepo', pid: 10 }, { place: 'sb1', project: 'D:\\work\\ffsb\\sb1', pid: 12 }], T + 60_000);
   assert.equal(fs.existsSync(mcpStatusDir(app, 'sb2')), false);
 });
 
@@ -129,8 +129,7 @@ test('machine unity mcp: the daemon gives an agent that asks for it the bridge o
   const sb = daemon.stdioMcpFor({ unityMcp: true, sandbox: 'sb1' })!;
   assert.deepEqual(sb.UnityMCP, { ...UVX, env: { UNITY_MCP_STATUS_DIR: mcpStatusDir(app, 'sb1') } });
   assert.equal(fs.existsSync(mcpStatusDir(app, 'sb1')), true, 'its folder exists before the server starts');
-  const main = daemon.stdioMcpFor({ unityMcp: true })!;
-  assert.equal(main.UnityMCP.env?.UNITY_MCP_STATUS_DIR, mcpStatusDir(app, MAIN_CLONE));
+  assert.equal(daemon.stdioMcpFor({ unityMcp: true }), undefined, 'outside a sandbox (a standing agent): none (w536)');
 
   const spec: LaunchSpec = { cwd: dir, settingSources: [], append: '', strictMcp: false, guard: { id: 'sb1', ownPath: dir, protectedPaths: [], gameRepos: [] }, stdioMcp: sb, mcp: { server: 'machine', tools: [{ name: 'set_label', description: 'd' }] } };
   const o = buildOptions(spec, {});
