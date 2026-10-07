@@ -23,7 +23,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LABEL, MIN_NODE, bundle, macControlScript, macProbeScript, macReloadLines, nodeSupport, parseMacProbe, parseWinProbe, plist } from '../../server/machineDeploy.ts';
 import * as win from '../../server/machineDeployWin.ts';
-import type { SandboxPoolSettings } from '../../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
@@ -490,8 +490,8 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     maxSandboxes: o.maxSandboxes,
     maxAgentsPerSandbox: o.maxAgentsPerSandbox,
     maxUnity: o.maxUnity,
-    diskWarnGB: 50,
-    diskCriticalGB: 20,
+    diskWarnGB: DISK_WARN_GB_DEFAULT,
+    diskCriticalGB: DISK_CRITICAL_GB_DEFAULT,
     ...(fs.existsSync(path.join(l.seed, 'Library')) ? { librarySeed: path.join(l.seed, 'Library') } : {}),
   };
   // A migration keeps the old daemon's settings (its host guard, protected paths, MCP server, idle stop); the root's
