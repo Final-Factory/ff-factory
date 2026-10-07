@@ -786,6 +786,8 @@ export class Daemon {
       ...(this.guard ? { guard: true } : {}),
       // Its GPU Whisper (w615): the portal sends clips only to a daemon that offers it.
       ...(this.voice ? { voice: this.voice.status() } : {}),
+      // It saves a sandbox's uncommitted work before the portal releases it (w656).
+      saveWork: true,
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
         ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null } }
@@ -1321,6 +1323,19 @@ export class Daemon {
         void this.pool.switch(msg.sandbox, msg.branch, msg.createFrom).then(
           (r) => this.send({ type: 'switch_result', id: msg.id, ok: true, ...r }),
           (err) => this.send({ type: 'switch_result', id: msg.id, ok: false, error: (err as Error).message }),
+        );
+        return;
+      }
+      case 'save_work': {
+        // Nothing may write there while it is committed: refused while an agent of that sandbox has a process (w656).
+        const up = [...this.entries.values()].filter((e) => e.spec?.sandbox === msg.sandbox && e.s.live).map((e) => e.s.info.id);
+        if (up.length) {
+          this.send({ type: 'save_result', id: msg.id, ok: false, error: `agent ${up.join(', ')} runs in sandbox ${msg.sandbox}` });
+          return;
+        }
+        void this.pool.saveWork(msg.sandbox, msg.branch, msg.message).then(
+          (r) => this.send({ type: 'save_result', id: msg.id, ok: true, ...r }),
+          (err) => this.send({ type: 'save_result', id: msg.id, ok: false, error: (err as Error).message }),
         );
         return;
       }

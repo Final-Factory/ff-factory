@@ -19,8 +19,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   only with a clean worktree, as before. Until then its sandbox stays its, also after the hold, so new work never lands
   on its branch or its uncommitted files, and `list_sandboxes` says why ("its sandbox stays held although its work is
   over: …: 2 uncommitted change(s) there"). A release tells the dispatcher that capacity may have freed. When the worker
-  resumes it is placed again, back on its branch, joining any agent already working there on that branch. Saving
-  uncommitted work automatically, so a dirty sandbox can be released too, comes next (it needs a daemon update).
+  resumes it is placed again, back on its branch, joining any agent already working there on that branch.
+- **Uncommitted work is saved before a release, so a dirty sandbox goes back to the pool too** (w656, part 2). The
+  daemon commits it on the worker's own branch and pushes it (`save_work`, `server/saveWork.ts`); the worker's next
+  message says so (`[saved]`, `git reset HEAD~1` undoes it). Untracked files over 500, over 10 MB each or 50 MB in all
+  (builds, captures) are refused, and the sandbox stays held with the reason shown. A worker stopped with `stop_agent`
+  is saved and released the same way, so its sandbox shows FREE a few minutes later instead of at once. Needs a daemon
+  update on each machine (no protocol bump: the hello's `saveWork` says a daemon can); older daemons keep dirty
+  sandboxes held as before.
 ### Changed
 
 - **Where FFBox posts an orchestrator's `reply_to_ffbox` is now said as it is** (w649, asked by lothsahn: "Please fix

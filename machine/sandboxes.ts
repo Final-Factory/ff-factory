@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { branchProblem, pickEditorLog, pruneEditorLogs, slugify, withBaseRepoLock } from '../server/sandboxes.ts';
 import { switchBranch } from '../server/switchBranch.ts';
+import { saveWork, type SaveResult } from '../server/saveWork.ts';
 import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeInfo } from '../server/unityHang.ts';
@@ -639,6 +640,19 @@ export class SandboxPool {
     });
     this.git.set(id, await this.d.gitStatus(r.path));
     this.changed(r, { branch: res.to });
+    return res;
+  }
+
+  /**
+   * Commit and push a sandbox's uncommitted work on `branch` before the portal releases it (w656, server/saveWork.ts).
+   * The editor may run: git reads the files, it does not rewrite them.
+   */
+  async saveWork(id: string, branch: string, message: string): Promise<SaveResult> {
+    const r = this.require(id);
+    if (r.status !== 'ready') throw new Error(`sandbox ${id} is ${r.status}`);
+    const res = await saveWork({ dir: r.path, branch, message });
+    this.git.set(id, await this.d.gitStatus(r.path));
+    this.changed(r);
     return res;
   }
 

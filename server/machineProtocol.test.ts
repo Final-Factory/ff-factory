@@ -18,7 +18,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
  */
 // w615 (no bump): the GPU Whisper's `voice` in the hello and its `voice`/`transcribe_result` messages, which an older
 // portal's onMessage drops (no default case), and `transcribe`/`voice_warm`, sent only to a daemon that offered it.
-const DECIDED = { protocol: 8, fingerprint: '2b44fd362dabbecd' };
+// w656 (no bump): `saveWork` in the hello, an optional field an older portal ignores, and `save_work`, sent only to a
+// daemon that offered it, answered by `save_result`, which an older portal never asks for and drops.
+const DECIDED = { protocol: 8, fingerprint: '2b4b66b70d4794a9' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

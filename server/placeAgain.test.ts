@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PlaceAgain, RELEASE_AFTER_MS, farWhy, keptWhy, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, type PlaceFacts } from './placeAgain.ts';
+import { PlaceAgain, RELEASE_AFTER_MS, farWhy, keptWhy, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, savedNote, type PlaceFacts } from './placeAgain.ts';
 import { agentStateText, holdsItsPlace, holdsSandbox } from '../shared/agentState.ts';
 import { isLiveAgent } from '../shared/fleet.ts';
 import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
@@ -340,4 +340,72 @@ test('w656: the release pass marks what it stops, releases, clears the holds, sa
   assert.equal(a.placeReleased?.why, 'idle for 40 min with no check-in');
   assert.equal(a.releaseDue, undefined);
   assert.deepEqual(freed, ['sandbox pc/slot2 released', 'sandbox pc/slot1 released']);
+});
+
+test('w656: a dirty sandbox is saved by its daemon first, then released for every stopped worker there; a failed save keeps it held', async () => {
+  const sb = sandbox('slot1', { sessionIds: ['a1', 'b2'] }, { dirty: 2, untracked: 1 });
+  const a = worker('a1', { heldSince: iso(NOW - 45 * MIN) });
+  const b = worker('b2', { wakeAt: iso(NOW + 5 * 3600_000) });
+  // What decides: an older daemon cannot save, a save that just failed says why, one that can goes ahead.
+  assert.match(keptWhy(a, sb, { ...facts([a, b]), canSave: false }) ?? '', /^2 uncommitted change\(s\) there \(FF Factory saves them before a release once this machine's daemon is updated\)$/);
+  assert.equal(keptWhy(a, sb, { ...facts([a, b]), canSave: true }), undefined);
+  assert.match(keptWhy(a, sb, { ...facts([a, b]), canSave: true, saveRefused: () => '41491 untracked files there' }) ?? '', /^its uncommitted work could not be saved: 41491 untracked files there$/);
+  assert.deepEqual(releaseStep(a, sb, { ...facts([a, b]), canSave: true }), { do: 'release', why: 'its daemon restarted at 15:15 UTC and it has not resumed within 30 min', branch: 'feature/slot1', save: true });
+
+  const machine = { id: 'pc', sandboxes: [sb] } as unknown as Machine;
+  let answer: () => Promise<{ sha?: string; files: number; pushed: boolean; notes: string[] }> = async () => {
+    throw new Error('41491 untracked files there, more than the 500 a save commits');
+  };
+  const saves: string[] = [];
+  const notes: string[] = [];
+  const freed: string[] = [];
+  const p = new PlaceAgain({
+    sessions: () => [a, b],
+    machine: () => machine,
+    isLive: () => false,
+    online: () => true,
+    unityHolders: () => [],
+    workOver: () => undefined,
+    keepLive: () => undefined,
+    queued: () => false,
+    stopLive: () => undefined,
+    stopEditor: async () => undefined,
+    switchBranch: async () => ({ notes: [] }),
+    save: () => undefined,
+    saveMachine: () => undefined,
+    note: (id, text) => void notes.push(`${id}: ${text}`),
+    drain: () => undefined,
+    freed: (what) => void freed.push(what),
+    canSave: () => true,
+    saveWork: async (m, s, branch, message) => (saves.push(`${m}/${s} ${branch}: ${message.split('\n')[0]}`), answer()),
+    now: () => NOW,
+  });
+  p.tick();
+  p.tick();
+  await Promise.all(p.pending);
+  assert.deepEqual(saves, ["pc/slot1 feature/slot1: FF Factory: saved a1's uncommitted work before releasing pc/slot1 (w656)"], 'one save at a time per sandbox');
+  assert.equal(a.placeReleased, undefined, 'a failed save keeps it held');
+  assert.equal(p.keptLine(a), 'its sandbox stays held although its daemon restarted at 15:15 UTC and it has not resumed within 30 min: its uncommitted work could not be saved: 41491 untracked files there, more than the 500 a save commits');
+  assert.equal(notes.length, 1);
+  p.tick();
+  await Promise.all(p.pending);
+  assert.equal(saves.length, 1, 'not tried again within RETRY_FAILED_MS');
+
+  // Saved: both stopped workers release it, each told what was saved; the dispatcher hears capacity may have freed.
+  answer = async () => ({ sha: 'abc1234', files: 3, pushed: true, notes: ['committed 3 file(s) on feature/slot1 as abc1234', 'pushed feature/slot1'] });
+  const later = new PlaceAgain({ ...(p as unknown as { d: ConstructorParameters<typeof PlaceAgain>[0] }).d });
+  later.tick();
+  await Promise.all(later.pending);
+  assert.equal(saves.length, 2);
+  for (const w of [a, b]) {
+    assert.equal(w.placeReleased?.branch, 'feature/slot1', w.id);
+    assert.deepEqual(w.savedWork, { sha: 'abc1234', files: 3, pushed: true, branch: 'feature/slot1', at: iso(NOW) });
+  }
+  assert.equal(a.heldSince, undefined);
+  assert.match(b.placeReleased!.why, /^its check-in is 5.0 h away/);
+  assert.deepEqual(freed, ['sandbox pc/slot1 released']);
+  assert.match(notes.at(-1)!, /^b2: Its uncommitted work in pc\/slot1 was saved \(committed 3 file\(s\) on feature\/slot1 as abc1234; pushed feature\/slot1\)/);
+  // It hears so when it resumes.
+  assert.match(savedNote(a.savedWork!), /^\[saved\] While you were stopped, FF Factory committed your uncommitted work \(3 file\(s\), new ones included\) on your branch `feature\/slot1` as abc1234, and pushed it/);
+  assert.match(savedNote(a.savedWork!), /`git reset HEAD~1` gives it back uncommitted/);
 });

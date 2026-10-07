@@ -27,6 +27,8 @@ import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, I
  * sandbox drive, its disks, the browser reaper), and its `host_report` and `host_health` messages.
  * Also (w615, no bump): a daemon's GPU Whisper, `voice` in the hello and `voice` status messages, which an older portal
  * ignores, and `transcribe`/`voice_warm`, which the portal sends only to a daemon that offered it.
+ * Also (w656, no bump): `saveWork` in the hello and `save_work`, sent only to a daemon that offered it, answered by
+ * `save_result`, which an older portal never asks for and drops.
  */
 export const PROTOCOL_VERSION = 8;
 
@@ -157,7 +159,13 @@ export type ToDaemon =
    */
   | { type: 'transcribe'; id: string; audio: string; prompt?: string; language?: string | null }
   /** A recording started on the portal: load the model now if it is not loaded (w615). */
-  | { type: 'voice_warm' };
+  | { type: 'voice_warm' }
+  /**
+   * Commit and push a sandbox's uncommitted work on `branch` before the portal releases it (w656, server/saveWork.ts),
+   * answered by save_result. Refused while an agent there has a process. Sent only to a daemon whose hello offered
+   * `saveWork`, so an older daemon never gets one.
+   */
+  | { type: 'save_work'; id: string; sandbox: string; branch: string; message: string };
 
 export type FromDaemon =
   /**
@@ -178,6 +186,8 @@ export type FromDaemon =
       guard?: boolean;
       /** Its GPU Whisper for the portal's mic (w615, daemon.json `voice`): absent when it is off. An older portal ignores it. */
       voice?: RemoteVoiceStatus;
+      /** It saves a sandbox's uncommitted work on request (w656, `save_work`). An older portal ignores it. */
+      saveWork?: boolean;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
       layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null };
     }
@@ -199,6 +209,8 @@ export type FromDaemon =
   /** An image a session produced (a tool result), stored by the portal under this id before the event naming it. */
   | { type: 'image'; sessionId: string; id: string; mediaType: string; data: string }
   | { type: 'switch_result'; id: string; ok: boolean; error?: string; from?: string; to?: string; notes?: string[] }
+  /** The answer to save_work (w656): the commit made (none when there was nothing to save), or why not. */
+  | { type: 'save_result'; id: string; ok: boolean; error?: string; sha?: string; files?: number; pushed?: boolean; notes?: string[] }
   /** The daemon took the new portal URL (kept in its daemon.json) and is about to dial it, or why not (protocol 8). */
   | { type: 'relocate_result'; id: string; ok: boolean; error?: string }
   | { type: 'fs_result'; id: string; ok: boolean; error?: string; mediaType?: string; data?: string; files?: ImageFile[] }
