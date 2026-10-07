@@ -38,9 +38,17 @@ export interface AgentStateView {
   until?: string;
   /** Stopped, but something will resume it: its check-in or a queued message ("check-in tomorrow 00:08 UTC"). */
   resumes?: string;
+  /** Stopped when its daemon went away (w613): its sandbox is kept for it ("its daemon restarted at 21:04 UTC"). */
+  held?: string;
 }
 
-type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeAt' | 'wakeNote' | 'queuedSend' | 'backgroundTasks' | 'backgroundJobs'>>;
+type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeAt' | 'wakeNote' | 'queuedSend' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince'>>;
+
+/**
+ * How long an agent whose daemon went away under it keeps its sandbox (w613): a day, time for a person or its
+ * orchestrator to resume it after a worker update. A message resumes it, and stop_agent releases it at once.
+ */
+export const HOLD_PLACE_MS = 24 * 3_600_000;
 
 /** A check-in this much past its time has fired or is failing to: it is not pending any more. */
 export const OVERDUE_MS = 2 * 60_000;
@@ -85,7 +93,9 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
   const checkIn = wakeAhead ? `check-in ${time(s.wakeAt!, now)}` : undefined;
   if (s.status === 'stopped') {
     const resumes = checkIn ?? (s.queuedSend ? 'a queued message' : undefined);
-    return v('stopped', resumes ? { resumes } : {});
+    const heldAt = s.heldSince ? Date.parse(s.heldSince) : NaN;
+    const held = heldAt && now - heldAt < HOLD_PLACE_MS ? `its daemon restarted at ${time(s.heldSince!, now)}` : undefined;
+    return v('stopped', { ...(resumes ? { resumes } : {}), ...(held ? { held } : {}) });
   }
   const jobs = jobsText(s);
   if (jobs) return v('waiting', { kind: 'job', waitsOn: [jobs, checkIn].filter(Boolean).join(' · '), ...(wakeAhead ? { until: s.wakeAt } : {}) });
@@ -100,7 +110,7 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
 /** "Waiting: CI on PR #1098 · check-in 06:10 UTC", "Stopped (resumes at check-in 16:29 UTC)", "Idle", …. */
 export const agentStateText = (s: AgentFacts, time?: (iso: string, now: number) => string, now?: number) => {
   const a = agentState(s, time, now);
-  return a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes})` : a.label;
+  return a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes})` : a.held ? `${a.label} (${a.held}; its sandbox is kept for it)` : a.label;
 };
 
 /** Whether the agent is alive between turns with something real pending (Waiting). */
@@ -112,7 +122,7 @@ export const isWaitingAgent = (s: AgentFacts, now?: number) => agentState(s, und
  */
 export const holdsItsPlace = (s: AgentFacts, now?: number) => {
   const a = agentState(s, undefined, now);
-  return a.state === 'waiting' || !!a.resumes;
+  return a.state === 'waiting' || !!a.resumes || !!a.held;
 };
 
 /** Agents in list order: Working (and Needs you), Waiting, Idle, Error, Stopped; the most recent activity first in each. */

@@ -140,7 +140,14 @@ worker when it ends (the worker exits when its stdin closes), so a daemon restar
 | `idleMinutes` | 0 | 0: kept loaded; otherwise unloaded after this long unused |
 
 The installer sets it: `install.ps1 -VoiceWhisper large-v3-turbo` (`worker.ts install --voice-whisper <model>`;
-`off` turns it off). A re-run or an update without the flag keeps what `daemon.json` has.
+`off` turns it off). A re-run or an update without the flag keeps what `daemon.json` has. On a machine already
+installed, w613's update turns it on in place (it restarts the daemon):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root F:fw -VoiceWhisper large-v3-turbo
+```
+
+The daemon log then says `voice: large-v3-turbo loaded on cuda, ~1160 MiB VRAM`.
 
 **VRAM and Unity.** BEAST's 16 GB is shared with up to two Unity editors. The model takes about 1.1 GB (measured
 below). The daemon checks the GPU's free memory (its 15 s `stats` probe, `nvidia-smi`) before it loads, and gives the

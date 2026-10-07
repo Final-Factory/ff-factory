@@ -45,6 +45,17 @@ fffctl machine-ssh-check                        # the portal's ssh to each machi
 fffctl credential issue m5 --to m5              # a new credential for m5, written into ~/.ff-factory/ on m5
 ```
 
+To update a machine's worker install, it runs the update there (w613, [worker-install.md](worker-install.md),
+"Updating"). The update asks nothing; keeps every setting, the machine's own credential and the PATH; restarts the
+daemon; and says what changed and what the portal sees:
+
+```bash
+ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root /Users/Shared/ffw'
+ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root C:\ffw"'
+```
+
+An update needs no new credential: never `fffctl credential issue` for one (issuing cuts the running daemon off).
+
 Its `ssh`, `scp`, `sftp` and `fffctl` are wrappers on its PATH (`/usr/local/lib/fff/ops-bin`). It also has `list_machines`,
 `list_sandboxes` and `system_status` (read only) and its own `wake_me`.
 

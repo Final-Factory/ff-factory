@@ -224,6 +224,12 @@ export interface SessionInfo {
    * Kept by the portal, never by the daemon: no dropped link or restart resumes it until it is sent a message again.
    */
   stoppedOnPurpose?: boolean;
+  /**
+   * Machine sessions (w613): its process ended because its daemon went away (a worker update, a restart, a crash) and
+   * not on purpose, at this time. Its sandbox stays its (holdsItsPlace, shared/agentState.ts) until it is messaged, stopped
+   * on purpose, or HOLD_PLACE_MS has passed, so new work does not take the sandbox it was in.
+   */
+  heldSince?: string;
 }
 
 /**
