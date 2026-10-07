@@ -70,6 +70,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The fffctl migrate tests run side by side** (w636, asked by lothsahn). Their five end-to-end tests, which ran one
+  after another for 145-192 s of the Linux unit job, are in four files that node runs in parallel; each world's fake
+  BEAST has a temp folder of its own.
 - **Lothsahn's and Ben's orchestrators message each other with no count** (w627, lothsahn: "Please update FFFactory so
   you and Ben's orchestrator can send an infinite number of messages to each other and the portal worker").
   `message_person` between the two owners (`OPS_PEOPLE`, `ownersPair`) no longer stops at
