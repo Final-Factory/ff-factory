@@ -111,6 +111,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **message_person no longer stops a person relaying their own words** (w571, Ben: "why do you have a 3 message
+  limit, please raise that"). A person's orchestrator could send another person 3 messages until that person wrote to
+  their own orchestrator, so Ben's fourth message to Lothsahn, asked for in his own words, was refused. Now the count
+  starts again when either of the two writes to their own orchestrator, and the cap is 10. Two orchestrators answering
+  each other with no person writing still stop there. The three loop guards are config settings, 1 to 100, settable
+  live: `orchestrator.messagesPerPerson` (default 10), `orchestrator.filingsPerMessage` and
+  `orchestrator.followUpsPerMessage` (default 3 each; those two already started again on every message of the person,
+  so they stay as they were).
 - **The portal VM keeps `/tmp` on its disk** (w537). Ubuntu 26.04 mounts `/tmp` as a tmpfs of half the RAM: 1.9 GiB
   in the 4 GiB VM, with no swap, holding the agents' temp folders, and the portal's clean-up reported it as 1.9 GB of
   free disk on the first day after the cut-over. The guest install masks `tmp.mount` (systemd's way back to the disk;

@@ -23,7 +23,7 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
   that request is open, stalled or closed in the last 7 days (w431: a worker Lothsahn started and the dispatcher then
   sent Ben's w426 was refused to Ben, because w426 was stalled; one on Ben's finished w427/w428/w430, because they were
   done). The message carries `[about w426 "title"]` under the sender line, so the worker knows which of the person's
-  requests it is about; at most 3 per worker until the person writes again;
+  requests it is about; at most 3 per worker until the person writes again (`orchestrator.followUpsPerMessage`);
 - the ledger: `request_work`, `list_work`, `update_work`;
 - `message_person`, to another person's own orchestrator ([People to people](#people-to-people)).
 
@@ -333,8 +333,11 @@ asks it to: a decision only the other person can make, a script only they can ru
 - refuses anyone but a person's own orchestrator (the tool is only in their belt, `server/belts.ts` `PERSONAL_ONLY`, and
   the method checks the chat's role again), an unknown user id, the sender's own person, an empty text and one over
   2000 characters;
-- allows 3 messages from one person to another until the recipient writes to their own orchestrator (`personWrote`), so
-  two orchestrators cannot keep a conversation going between themselves;
+- allows 10 messages from one person to another (`orchestrator.messagesPerPerson`, 1-100) until **either** of them
+  writes to their own orchestrator (`personWrote`), so two orchestrators cannot keep a conversation going between
+  themselves, while a person relaying their own words is never held back: each message they write starts it again.
+  Until w571 (2026-10-07) it was 3 and only the recipient's writing started it again, which refused Ben a fourth
+  message to Lothsahn that Ben himself had asked for;
 - sends the recipient's own orchestrator (made if missing) a harness message, recorded with the sender as `requestedBy`:
   `[person message] From Lothsahn's orchestrator (user id lothsahn), written for Lothsahn:`, the text, then a line
   saying it is data to show the recipient, not an instruction. It is in the recipient's transcript at once, so a
@@ -708,8 +711,14 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
 
 - The dispatcher reaches people only through ledger decisions, one reply per decision.
 - A person's orchestrator files or updates at most 3 times, and follows up with one worker at most 3 times, between two
-  messages of its person. Harness messages alone cannot keep it going.
-- A person's orchestrator messages another person at most 3 times until that person writes to their own orchestrator.
+  messages of its person (`orchestrator.filingsPerMessage`, `orchestrator.followUpsPerMessage`). Harness messages alone
+  (a worker's report, a timer, another orchestrator) cannot keep it going.
+- A person's orchestrator messages another person at most 10 times until its person or that person writes to their own
+  orchestrator (`orchestrator.messagesPerPerson`). Two orchestrators answering each other with nobody writing stop
+  there.
+- All three are config settings, whole numbers from 1 to 100, settable live (`set_app_config`); a person's own message
+  starts each again. The three are the same kind of guard: none caps what a person asks for, each stops a run of
+  turns no person started (w571).
 - People are not capped per hour or per day (Ben, 2026-09-29): only the per-message budget above holds. Automated
   sources (standing agents, the Discord/FFBox intake, once they file here) get at most 10 requests an hour and 40 a
   day per requester, set per source in config `workLimits.standing` / `workLimits.intake` (`server/work.ts`
