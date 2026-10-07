@@ -27,6 +27,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **CI's Playwright shards keep the browsers' system packages in the Actions cache** (w636, asked by lothsahn). Each
+  shard downloaded the same 126 MB from the Ubuntu mirror; apt now keeps them in `~/apt-archives`, which the cache
+  restores, and still resolves against fresh lists. The install step went from a median of 37-39 s to 20-33 s.
 - **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
   that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
   and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,
