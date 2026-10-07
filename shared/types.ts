@@ -231,13 +231,20 @@ export interface SessionInfo {
   stoppedOnPurpose?: boolean;
   /**
    * Machine sessions (w613): its process ended because its daemon went away (a worker update, a restart, a crash) and
-   * not on purpose, at this time. Its sandbox stays its (holdsItsPlace, shared/agentState.ts) until it is messaged, stopped
-   * on purpose, or HOLD_PLACE_MS has passed, so new work does not take the sandbox it was in.
+   * not on purpose, at this time. Its sandbox stays its (holdsSandbox, shared/agentState.ts) until it is messaged, stopped
+   * on purpose, or released: HOLD_PLACE_MS (30 min, w656) after this, the release pass (server/placeAgain.ts) releases
+   * it like a far check-in's, its worktree clean, so new work does not take the sandbox it was in before then.
    */
   heldSince?: string;
   /**
-   * Machine sandbox workers (w640): stopped with its check-in far away (more than RELEASE_AFTER_MS) or its requests
-   * over, its worktree clean, so its sandbox no longer counts as its (holdsSandbox, shared/agentState.ts) and may take
+   * Machine sandbox workers (w656): FF Factory stopped it while it was idle with nothing pending (no check-in, job or
+   * queued message), or its work over, and this is why. Its sandbox stays its (holdsSandbox) until the release pass
+   * releases it (placeReleased) or it is messaged, so new work never starts on its branch or over its uncommitted files.
+   */
+  releaseDue?: { at: string; why: string };
+  /**
+   * Machine sandbox workers (w640, w656): stopped with its check-in far away (more than RELEASE_AFTER_MS), its requests
+   * over, its w613 hold past, or stopped while idle (releaseDue), its worktree clean, so its sandbox no longer counts as its (holdsSandbox, shared/agentState.ts) and may take
    * other work. The branch it was on is kept here: when it resumes it is placed again on it (server/placeAgain.ts).
    */
   placeReleased?: { at: string; sandbox: string; branch: string; why: string };

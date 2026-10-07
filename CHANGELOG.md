@@ -10,6 +10,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Stopped, idle and finished workers give their sandbox back sooner** (w656, Lothsahn: "Yes. Do both", after every
+  sandbox was held on 2026-10-07 while BEAST had 3 of 6 agents and LothDesktop 3 of 10). The w640 release now also
+  covers: a worker whose daemon restarted under it, after **30 minutes** instead of a day (`HOLD_PLACE_MS`); a worker
+  whose requests are closed or handed on, **at once**, whatever its check-in or hold; a worker **Idle with nothing
+  pending** (no check-in, job or queued message) for 30 minutes, which is stopped first; a worker the idle reaper
+  stopped; and **several stopped workers sharing one sandbox**, which no longer keep it for each other. Each is released
+  only with a clean worktree, as before. Until then its sandbox stays its, also after the hold, so new work never lands
+  on its branch or its uncommitted files, and `list_sandboxes` says why ("its sandbox stays held although its work is
+  over: …: 2 uncommitted change(s) there"). A release tells the dispatcher that capacity may have freed. When the worker
+  resumes it is placed again, back on its branch, joining any agent already working there on that branch. Saving
+  uncommitted work automatically, so a dirty sandbox can be released too, comes next (it needs a daemon update).
 ### Changed
 
 - **Where FFBox posts an orchestrator's `reply_to_ffbox` is now said as it is** (w649, asked by lothsahn: "Please fix

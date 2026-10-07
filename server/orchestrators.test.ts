@@ -954,6 +954,12 @@ test('w384: the reaper stops idle workers whose request closed, moved on, or tha
   sessions.send(done.info.id, 'one more thing');
   await until('resumed', () => done.info.status === 'idle' && done.live);
   assert.equal(done.info.sdkSessionId === sdk || !!done.info.sdkSessionId, true);
+  // w656: once its sandbox is clean the worker there is stopped too, and its sandbox stays its until the release pass releases it.
+  m.sandboxes!.find((x) => x.id === 'alpha')!.git = { branch: 'x', dirty: 0, untracked: 0, at: T0 };
+  store.putMachine(m);
+  assert.ok(agents.reapIdle(now).includes(dirty.info.id));
+  assert.equal(dirty.info.releaseDue?.why, 'stopped while idle: its request is closed (w6 done)');
+  assert.equal(done.info.releaseDue, undefined, 'not in a machine sandbox: nothing to release');
 });
 
 

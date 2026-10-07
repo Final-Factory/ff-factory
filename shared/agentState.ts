@@ -46,17 +46,21 @@ export interface AgentStateView {
   resumes?: string;
   /** Stopped when its daemon went away (w613): its sandbox is kept for it ("its daemon restarted at 21:04 UTC"). */
   held?: string;
+  /** Until when that hold lasts (w656: "21:34 UTC"). */
+  heldUntil?: string;
   /** Stopped and its sandbox released for other work (w640): why ("its check-in is 9 h away"). */
   released?: string;
 }
 
-type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeAt' | 'wakeNote' | 'queuedSend' | 'queuedOn' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince' | 'placeReleased'>>;
+type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeAt' | 'wakeNote' | 'queuedSend' | 'queuedOn' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince' | 'placeReleased' | 'releaseDue'>>;
 
 /**
- * How long an agent whose daemon went away under it keeps its sandbox (w613): a day, time for a person or its
- * orchestrator to resume it after a worker update. A message resumes it, and stop_agent releases it at once.
+ * How long an agent whose daemon went away under it keeps its sandbox (w613) before the release pass may release it
+ * (server/placeAgain.ts): 30 minutes, time for a person or its orchestrator to resume it after a worker update. A day
+ * until w656 (Lothsahn, 2026-10-07: every sandbox held while BEAST and LothDesktop had agent slots free). A message
+ * resumes it, and stop_agent ends the hold at once.
  */
-export const HOLD_PLACE_MS = 24 * 3_600_000;
+export const HOLD_PLACE_MS = 30 * 60_000;
 
 /** A check-in this much past its time has fired or is failing to: it is not pending any more. */
 export const OVERDUE_MS = 2 * 60_000;
@@ -104,8 +108,9 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
     const resumes = checkIn ?? (s.queuedSend ? 'a queued message' : undefined);
     const heldAt = s.heldSince ? Date.parse(s.heldSince) : NaN;
     const held = heldAt && now - heldAt < HOLD_PLACE_MS ? `its daemon restarted at ${time(s.heldSince!, now)}` : undefined;
+    const heldUntil = held ? time(new Date(heldAt + HOLD_PLACE_MS).toISOString(), now) : undefined;
     const released = s.placeReleased ? s.placeReleased.why : undefined;
-    return v('stopped', { ...(resumes ? { resumes } : {}), ...(held ? { held } : {}), ...(released ? { released } : {}) });
+    return v('stopped', { ...(resumes ? { resumes } : {}), ...(held ? { held, heldUntil } : {}), ...(released ? { released } : {}) });
   }
   const jobs = jobsText(s);
   if (jobs) return v('between_turns', { kind: 'job', waitsOn: [jobs, checkIn].filter(Boolean).join(' · '), ...(wakeAhead ? { until: s.wakeAt } : {}) });
@@ -121,7 +126,7 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
 export const agentStateText = (s: AgentFacts, time?: (iso: string, now: number) => string, now?: number) => {
   const a = agentState(s, time, now);
   const released = a.released ? `; its sandbox is released (${a.released}): it is placed again when it resumes` : '';
-  return a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes}${released})` : a.held ? `${a.label} (${a.held}; its sandbox is kept for it)` : a.released ? `${a.label} (its sandbox is released: ${a.released})` : a.label;
+  return a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes}${released})` : a.held ? `${a.label} (${a.held}; its sandbox is kept for it until ${a.heldUntil})` : a.released ? `${a.label} (its sandbox is released: ${a.released})` : a.label;
 };
 
 /** Whether the agent is alive between turns with something real pending (w475's Waiting). */
@@ -139,9 +144,12 @@ export const holdsItsPlace = (s: AgentFacts, now?: number) => {
 /**
  * Whether the agent keeps its sandbox from other work (w640): it holds its place and has not released it. A worker
  * stopped with its check-in far away (server/placeAgain.ts) will still come back, as the ledger counts it
- * (holdsItsPlace), but is placed again when it does, so its sandbox is free meanwhile.
+ * (holdsItsPlace), but is placed again when it does, so its sandbox is free meanwhile. A stopped worker whose release
+ * is due (w656: its w613 hold past, or stopped while idle) keeps it until the release pass releases it, which it does
+ * only for a clean worktree: until then new work must not take it.
  */
-export const holdsSandbox = (s: AgentFacts, now?: number) => holdsItsPlace(s, now) && !s.placeReleased;
+export const holdsSandbox = (s: AgentFacts, now?: number) =>
+  !s.placeReleased && (holdsItsPlace(s, now) || (s.status === 'stopped' && (!!s.heldSince || !!s.releaseDue)));
 
 /** Agents in list order: Working mid-turn (and Needs you), between turns, Idle, Error, Stopped; the most recent first in each. */
 export function sortAgents<T extends AgentFacts & Pick<SessionInfo, 'lastActivityAt'>>(list: readonly T[], now?: number): T[] {

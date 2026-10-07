@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PlaceAgain, RELEASE_AFTER_MS, farWhy, keptWhy, movedNote, placeFor, releaseStep, releasedOn, type PlaceFacts } from './placeAgain.ts';
+import { PlaceAgain, RELEASE_AFTER_MS, farWhy, keptWhy, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, type PlaceFacts } from './placeAgain.ts';
 import { agentStateText, holdsItsPlace, holdsSandbox } from '../shared/agentState.ts';
 import { isLiveAgent } from '../shared/fleet.ts';
 import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
@@ -74,9 +74,9 @@ test('place again (w640): a stopped worker with a far check-in releases a clean 
   assert.match(keptWhy(w, sb, facts([w], { unityHolders: ['sandbox:slot1'] })) ?? '', /batch run/);
   const other = worker('o1', { status: 'idle' });
   assert.match(keptWhy(w, sb, facts([w, other], { liveIds: ['o1'] })) ?? '', /agent o1 works there too/);
-  // Its daemon went away while it was mid-turn (w613): that hold comes first.
-  assert.equal(releaseStep(worker('w1', { ...far, heldSince: iso(NOW - 3600_000) }), sb, facts([w])), undefined);
-  assert.ok(releaseStep(worker('w1', { ...far, heldSince: iso(NOW - 25 * 3600_000) }), sb, facts([w])), 'a hold past its day does not');
+  // Its daemon went away under it (w613): that hold comes first, for half an hour (w656).
+  assert.equal(releaseStep(worker('w1', { ...far, heldSince: iso(NOW - 20 * MIN) }), sb, facts([w])), undefined);
+  assert.ok(releaseStep(worker('w1', { ...far, heldSince: iso(NOW - 31 * MIN) }), sb, facts([w])), 'a hold past its half hour does not');
   // Its requests are over: a near check-in is stale too.
   assert.equal(releaseStep(worker('w1', { wakeAt: iso(NOW + 5 * MIN) }), sb, { ...facts([w]), workOver: 'its request is closed (w598 done)' })?.do, 'release');
 });
@@ -123,9 +123,12 @@ test('place again (w640): where a released worker resumes: its own sandbox, anot
   // A free sandbox already on its branch needs no switch.
   const onIt = sandbox('slot5', {}, { branch: 'feature/w1' });
   assert.equal((placeFor(w, m([taken, s3, onIt]), facts([w, n1], { liveIds: ['n1'] })) as { sandbox: MachineSandbox }).sandbox.id, 'slot5');
-  // Its branch held in a sandbox in use: git allows it in one worktree only, so it waits.
+  // Its branch held in a sandbox another agent works in on that branch: it shares it, as before it stopped (w656).
   const held = sandbox('slot1', { sessionIds: ['w1', 'n1'] }, { branch: 'feature/w1' });
-  assert.match((placeFor(w, m([held, s3]), facts([w, n1], { liveIds: ['n1'] })) as { wait: string }).wait, /its branch feature\/w1 is checked out in pc\/slot1, which is in use/);
+  assert.equal((placeFor(w, m([held, s3]), facts([w, n1], { liveIds: ['n1'] })) as { sandbox: MachineSandbox }).sandbox.id, 'slot1');
+  // Its branch held in a sandbox it cannot use (uncommitted changes there): git allows it in one worktree only, so it waits.
+  const dirtyHeld = sandbox('slot2', {}, { branch: 'feature/w1', dirty: 2 });
+  assert.match((placeFor(w, m([taken, dirtyHeld, s3]), facts([w, n1], { liveIds: ['n1'] })) as { wait: string }).wait, /its branch feature\/w1 is checked out in pc\/slot2, which is in use/);
   // Nothing free: it waits, ahead of new work.
   assert.match((placeFor(w, m([taken]), facts([w, n1], { liveIds: ['n1'] })) as { wait: string }).wait, /no sandbox on pc is free .*ahead of new work/);
   // A sandbox a new worker was just started in (its brief waits for it) is not free either.
@@ -217,4 +220,124 @@ test('place again (w640): a resume goes straight back to its own sandbox when th
   assert.equal(w.machineSandbox, 'slot1');
   assert.equal(w.movedFrom, undefined, 'not moved: no note');
   assert.equal(drained, 1);
+});
+
+// ---------------------------------------------------------------- w656: sandboxes go back to the pool sooner
+
+test('w656: after its daemon restarted under it, a worker keeps its sandbox half an hour, then a clean one is released', () => {
+  const sb = sandbox('slot1');
+  const held = (ago: number, over: Partial<SessionInfo> = {}) => worker('w1', { heldSince: iso(NOW - ago), ...over });
+  assert.equal(releaseWhy(held(20 * MIN), NOW), undefined, 'within the hold');
+  assert.equal(releaseStep(held(20 * MIN), sb, facts([held(20 * MIN)])), undefined);
+  assert.equal(holdsSandbox(held(20 * MIN), NOW), true);
+  const late = held(31 * MIN);
+  assert.equal(holdsSandbox(late, NOW), true, 'past the hold it still keeps its sandbox until it is released');
+  assert.deepEqual(releaseStep(late, sb, facts([late])), { do: 'release', why: 'its daemon restarted at 15:29 UTC and it has not resumed within 30 min', branch: 'feature/slot1' });
+  // A near check-in still resumes it there; a far one says so.
+  assert.equal(releaseStep(held(31 * MIN, { wakeAt: iso(NOW + 10 * MIN) }), sb, facts([late])), undefined);
+  assert.match(releaseWhy(held(31 * MIN, { wakeAt: iso(NOW + 3 * 3600_000) }), NOW) ?? '', /^its check-in is 3.0 h away/);
+  // Uncommitted work keeps it held, and list_sandboxes says why.
+  assert.equal(releaseStep(late, sandbox('slot1', {}, { dirty: 2 }), facts([late])), undefined);
+  assert.equal(holdsSandbox({ ...late, placeReleased: { at: iso(NOW), sandbox: 'slot1', branch: 'feature/slot1', why: 'x' } }, NOW), false, 'released: free');
+});
+
+test('w656: a worker whose requests are closed releases its sandbox at once, a fresh w613 hold or no check-in included', () => {
+  const sb = sandbox('slot1');
+  const over = 'its request is closed (w615 done)';
+  const held = worker('w1', { heldSince: iso(NOW - 2 * MIN) });
+  assert.deepEqual(releaseStep(held, sb, { ...facts([held]), workOver: over }), { do: 'release', why: 'its work is over: its request is closed (w615 done)', branch: 'feature/slot1' });
+  const due = worker('w1', { releaseDue: { at: iso(NOW), why: 'stopped while idle: x' } });
+  assert.equal(releaseStep(due, sb, { ...facts([due]), workOver: over })?.do, 'release');
+  // A stopped worker holding nothing (no check-in, no hold, nothing due) has nothing to release: its sandbox is free already.
+  assert.equal(releaseWhy(worker('w1'), NOW, over), undefined);
+  assert.equal(holdsSandbox(worker('w1'), NOW), false);
+  // A queued message resumes it now: no release.
+  assert.equal(releaseWhy(worker('w1', { heldSince: iso(NOW - 2 * MIN), queuedSend: 'slot' }), NOW, over), undefined);
+  // Alive and Idle with its work over: stopped at once, its sandbox released once it has stopped.
+  const idle = worker('w1', { status: 'idle', lastActivityAt: iso(NOW - MIN) });
+  assert.deepEqual(releaseStep(idle, sb, { ...facts([idle], { liveIds: ['w1'] }), workOver: over }), { do: 'stop', why: 'its work is over: its request is closed (w615 done)', due: true });
+});
+
+test('w656: stopped workers sharing a sandbox, each with a far check-in or its release due, release it together', () => {
+  const sb = sandbox('slot1', { sessionIds: ['a1', 'b2'] });
+  const a1 = worker('a1', { wakeAt: iso(NOW + 5 * 3600_000) });
+  const b2 = worker('b2', { wakeAt: iso(NOW + 2 * 3600_000) });
+  assert.equal(releaseStep(a1, sb, facts([a1, b2]))?.do, 'release', 'b2 is stopped with a far check-in too: it does not keep a1');
+  assert.equal(releaseStep(b2, sb, facts([a1, b2]))?.do, 'release');
+  const c3 = worker('c3', { releaseDue: { at: iso(NOW), why: 'stopped while idle: idle for 31 min with no check-in' } });
+  assert.equal(releaseStep(a1, sb, facts([a1, c3]))?.do, 'release');
+  // One whose check-in is near, or whose w613 hold still runs, keeps the sandbox for both.
+  const near = worker('b2', { wakeAt: iso(NOW + 10 * MIN) });
+  assert.match(keptWhy(a1, sb, facts([a1, near])) ?? '', /agent b2 works there too/);
+  const fresh = worker('b2', { heldSince: iso(NOW - 5 * MIN) });
+  assert.match(keptWhy(a1, sb, facts([a1, fresh])) ?? '', /agent b2 works there too/);
+  // Each is placed again on their shared branch: the second joins the first there.
+  const w = worker('b2', { placeReleased: { at: iso(NOW), sandbox: 'slot1', branch: 'feature/slot1', why: 'far' } });
+  const back = worker('a1', { status: 'idle' });
+  const p = placeFor(w, { id: 'pc', sandboxes: [sb, sandbox('slot2', {}, { dirty: 1 })] }, facts([w, back], { liveIds: ['a1'] }));
+  assert.equal((p as { sandbox: MachineSandbox }).sandbox.id, 'slot1');
+});
+
+test('w656: an Idle worker with nothing pending is stopped after half an hour, then its clean sandbox is released', () => {
+  const sb = sandbox('slot1');
+  const idle = (ago: number) => worker('w1', { status: 'idle', lastActivityAt: iso(NOW - ago) });
+  assert.equal(releaseStep(idle(20 * MIN), sb, facts([idle(20 * MIN)], { liveIds: ['w1'] })), undefined, 'recently active');
+  const w = idle(RELEASE_AFTER_MS + MIN);
+  assert.deepEqual(releaseStep(w, sb, facts([w], { liveIds: ['w1'] })), { do: 'stop', why: 'idle for 31 min with no check-in', due: true });
+  // Something keeps it: unanswered messages or background tasks, uncommitted changes (keepLive), a permission, a queued message.
+  assert.equal(releaseStep(w, sb, { ...facts([w], { liveIds: ['w1'] }), keepLive: 'its sandbox has 2 uncommitted change(s)' }), undefined);
+  assert.equal(releaseStep({ ...w, queuedSend: 'x' }, sb, facts([w], { liveIds: ['w1'] })), undefined);
+  assert.equal(releaseStep({ ...w, pendingPermissions: [{ requestId: 'r', toolName: 'Bash', input: {} } as unknown as SessionInfo['pendingPermissions'][number]] }, sb, facts([w], { liveIds: ['w1'] })), undefined);
+  // Stopped with its release due: its sandbox is its until the pass releases it.
+  const due = worker('w1', { releaseDue: { at: iso(NOW), why: 'idle for 31 min with no check-in' } });
+  assert.equal(holdsSandbox(due, NOW), true);
+  assert.equal(holdsItsPlace(due, NOW), false, 'nothing resumes it by itself: the ledger does not count it as coming back');
+  assert.deepEqual(releaseStep(due, sb, facts([due])), { do: 'release', why: 'idle for 31 min with no check-in', branch: 'feature/slot1' });
+  assert.equal(releaseStep(due, sandbox('slot1', {}, { untracked: 1 }), facts([due])), undefined, 'nothing is lost: untracked files keep it');
+});
+
+test('w656: the release pass marks what it stops, releases, clears the holds, says why one stays held, and tells the dispatcher', () => {
+  const a = worker('a1', { status: 'idle', lastActivityAt: iso(NOW - 40 * MIN) });
+  const b = worker('b2', { machineSandbox: 'slot2', heldSince: iso(NOW - 45 * MIN) });
+  const c = worker('c3', { machineSandbox: 'slot3', heldSince: iso(NOW - 45 * MIN) });
+  const machine = { id: 'pc', sandboxes: [sandbox('slot1', { sessionIds: ['a1'] }), sandbox('slot2', { sessionIds: ['b2'] }), sandbox('slot3', { sessionIds: ['c3'] }, { dirty: 3 })] } as unknown as Machine;
+  const live = new Set(['a1']);
+  const stopped: string[] = [];
+  const freed: string[] = [];
+  const notes: string[] = [];
+  const p = new PlaceAgain({
+    sessions: () => [a, b, c],
+    machine: () => machine,
+    isLive: (id) => live.has(id),
+    online: () => true,
+    unityHolders: () => [],
+    workOver: () => undefined,
+    keepLive: () => undefined,
+    queued: () => false,
+    stopLive: (id) => void stopped.push(id),
+    stopEditor: async () => undefined,
+    switchBranch: async () => ({ notes: [] }),
+    save: () => undefined,
+    saveMachine: () => undefined,
+    note: (_id, text) => void notes.push(text),
+    drain: () => undefined,
+    freed: (what) => void freed.push(what),
+    now: () => NOW,
+  });
+  const did = p.tick();
+  assert.deepEqual(stopped, ['a1']);
+  assert.equal(a.releaseDue?.why, 'idle for 40 min with no check-in');
+  assert.equal(b.placeReleased?.why, 'its daemon restarted at 15:15 UTC and it has not resumed within 30 min');
+  assert.equal(b.heldSince, undefined);
+  assert.equal(c.placeReleased, undefined, 'uncommitted changes keep it held');
+  assert.equal(p.keptLine(c), 'its sandbox stays held although its daemon restarted at 15:15 UTC and it has not resumed within 30 min: 3 uncommitted change(s) there');
+  assert.deepEqual(freed, ['sandbox pc/slot2 released']);
+  assert.equal(did.length, 2);
+  // a1 has stopped: the next pass releases its sandbox.
+  live.delete('a1');
+  a.status = 'stopped';
+  p.tick();
+  assert.equal(a.placeReleased?.why, 'idle for 40 min with no check-in');
+  assert.equal(a.releaseDue, undefined);
+  assert.deepEqual(freed, ['sandbox pc/slot2 released', 'sandbox pc/slot1 released']);
 });
