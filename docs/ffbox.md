@@ -298,6 +298,12 @@ for `covered`, which is the `workId` FF Factory already sends) and then takes th
 line, once per hand-over across FFBox restarts. When the fix's PR is ready, the thread hears "PR is up for the fix #N"
 (the number only), and when it merges, the merge notice ("Fixed in PR #N, coming in version <build> and later."). Nothing
 else is said in the thread between them: questions and `reply_to_ffbox` answers go to the operator by DM from Max (below).
+**Except an operator's own question in a chat channel (w649).** When the operator opened the conversation in a
+watch channel of kind `ask` (#ask-assistant), `reply_to_ffbox` answers, "already fixed" and the request's result
+("Done: ...", declined, cancelled) are posted there, in reply to the message that asked Max; questions still go by
+DM. Every line FFBox posts in a channel conversation replies to the newest message of the hand-over turn that
+spoke to Max (an @-mention or a reply to Max), not to the turn's last message: on 2026-10-07 "Queued as w648"
+answered the chat line after lothsahn's question.
 "Already fixed" at filing is posted as FF Factory wrote it. Where FFBox can say no "Queued as" (a review on GitHub, a shell
 or ffweb prompt), the 👀 stays until an outcome arrives (w415): the PR up, the request done, declined or cancelled, or its
 fix merged. FF Factory's side needs nothing new for this: `dev_filed` already carries `workId` and `dev_update` the `pr`
@@ -315,8 +321,9 @@ ffweb for the other sources), their own words relayed, and a busy worker on the 
 the harness's message, never as a turn of the person: tools that need the person's own turn (approving, deleting,
 settings) and the chat's filing budget still need them to write in FF Factory. The orchestrator answers with
 **`reply_to_ffbox`** `{ request?, conversation?, text }` (a person's own orchestrator only, for that person's own
-linked conversations), which sends a `dev_reply` FFBox gives the operator by DM from Max (w417; in the thread only when
-it has nobody to DM); it errors plainly, "FFBox's connector is offline; nothing was sent", while the link is down.
+linked conversations), which sends a `dev_reply` FFBox gives the operator by DM from Max (w417; in the thread when it has nobody
+to DM, or when the operator asked there in a chat channel, w649). The DM leads with the text and names the
+request and thread after it; it errors plainly, "FFBox's connector is offline; nothing was sent", while the link is down.
 
 **Following it to the result (w272).** Lothsahn: "when that branch closes out, FFBox will close the associated
 discord thread and reply to the user", and "we should not reply on discord with where things are going--just
