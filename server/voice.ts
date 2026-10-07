@@ -357,8 +357,7 @@ export class VoiceService {
     let fallback: string | undefined;
     const r = this.remotePick();
     if (r && remoteUsable(r.status)) {
-      const rc = this.v.remote;
-      const timeoutMs = 1000 * (rc.timeoutSeconds + rc.perAudioSecond * clip + (r.status.state === 'ready' ? 0 : rc.loadSeconds));
+      const timeoutMs = 1000 * this.v.remote.timeoutSeconds;
       try {
         const a = await this.remote!.transcribe(r.machine, { audio, prompt, language }, timeoutMs);
         return this.done(t0, { text: String(a.text ?? ''), audioSeconds: Number(a.audioSeconds ?? clip), seconds: Number(a.seconds ?? 0), model: a.model ?? r.status.model, device: a.device ?? '?', engine: 'remote', machine: r.machine });

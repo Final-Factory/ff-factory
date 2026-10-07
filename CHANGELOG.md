@@ -13,10 +13,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 ### Fixed
 
 - **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
-  clips must go straight to the CPU). A clip to a machine's GPU Whisper goes with a ping ahead of it: no answer within
-  2 s and the clip falls back, and the machine is skipped until it is heard from (before, a machine asleep or cut off
-  took every clip's full timeout for the 45-65 s the heartbeat needs to drop it). A clip that times out on a live link
-  keeps the next ones off that machine for 2 minutes or until it re-offers its Whisper.
+  clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
+  Whisper goes with a ping ahead of it: no answer within 2 s and the clip falls back, and the machine is skipped until it
+  is heard from (before, a machine asleep or cut off took every clip's full timeout for the 45-65 s the heartbeat needs to
+  drop it; the heartbeat is unchanged). The machine has 10 s to return the text, upload included (was 3 s plus 0.05 s
+  per second of audio). A clip that times out keeps the next ones off that machine for 2 minutes or until it re-offers
+  its Whisper.
 
 ### Added
 

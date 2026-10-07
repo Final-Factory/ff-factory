@@ -263,7 +263,7 @@ test('w615: a clip goes to the machine GPU over the daemon link; the result and 
 });
 
 test('w615: the portal falls back to its own CPU when the machine errors, times out or goes offline, and says why', async (t) => {
-  const s = await setup({ voice: { remote: { ...VOICE_REMOTE_DEFAULTS, timeoutSeconds: 0.3, perAudioSecond: 0 } } });
+  const s = await setup({ voice: { remote: { ...VOICE_REMOTE_DEFAULTS, timeoutSeconds: 0.3 } } });
   t.after(s.cleanup);
   await until('ready', () => s.service.status().state === 'ready');
 
@@ -407,7 +407,7 @@ test('w615: an abrupt drop (no close, no answer) costs one clip the ping wait, n
 });
 
 test('w615: a clip that timed out on a live link keeps the next ones off that machine until it re-offers or the retry time passes', async (t) => {
-  const s = await setup({ voice: { remote: { ...VOICE_REMOTE_DEFAULTS, timeoutSeconds: 0.3, perAudioSecond: 0 } } });
+  const s = await setup({ voice: { remote: { ...VOICE_REMOTE_DEFAULTS, timeoutSeconds: 0.3 } } });
   t.after(s.cleanup);
   await until('ready', () => s.service.status().state === 'ready');
   s.engine.mode = 'hang';
@@ -441,4 +441,26 @@ test('w615: a clip that timed out on a live link keeps the next ones off that ma
   assert.equal(s.mm.voiceMachines().length, 1, 'tried again after the retry time');
   r = await s.service.transcribe(clip());
   assert.equal(r.engine, 'remote');
+});
+
+test('w615: the machine has 10 s to return the text, whatever the clip and whether its model is loaded (lothsahn)', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-voicetimeout-'));
+  const cfg = { dataDir: tmp, voice: localVoice(tmp) } as unknown as Config;
+  assert.equal(cfg.voice.remote.timeoutSeconds, 10);
+  const waits: number[] = [];
+  let state: 'ready' | 'idle' = 'ready';
+  const svc = new VoiceService(cfg, () => '', {
+    machines: () => [{ machine: 'beast', status: { state, model: 'large-v3-turbo', device: 'cuda' } }],
+    transcribe: async (_m, _r, timeoutMs) => {
+      waits.push(timeoutMs);
+      return { text: 'x', audioSeconds: 30, seconds: 0.6, device: 'cuda' };
+    },
+    warm: () => {},
+  });
+  await svc.transcribe(clip(30));
+  state = 'idle';
+  await svc.transcribe(clip(30));
+  await svc.transcribe(clip(2));
+  assert.deepEqual(waits, [10_000, 10_000, 10_000]);
+  fs.rmSync(tmp, { recursive: true, force: true });
 });

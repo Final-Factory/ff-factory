@@ -178,9 +178,8 @@ ready, idle or loading (config `voice.remote.machines` limits and orders the cho
 own CPU worker when:
 - no machine offers it (offline, `enabled: false`, installing, failed), or its VRAM is short;
 - the machine answers with an error;
-- it does not answer within the timeout: `voice.remote.timeoutSeconds` plus `voice.remote.perAudioSecond` for each
-  second of audio, plus `voice.remote.loadSeconds` when the model was not loaded yet. The defaults come from the
-  measurements below.
+- it has not returned the text within `voice.remote.timeoutSeconds` (10 s, upload included; lothsahn: "Just set an
+  upload timeout of 10s for the voice request").
 **A machine that goes away** (lothsahn: later clips must go straight to the CPU, with no wait every time):
 - it disconnects cleanly: the portal drops it at once (`detach`), and a clip in flight falls back at once;
 - it sleeps, loses its network or crashes without closing the socket: each clip goes with a ping ahead of it, and with
@@ -201,17 +200,18 @@ fallback reason. The portal logs one line per clip with the engine and timings, 
 daemon logs only loads, unloads and errors.
 
 **Config on the portal.** `config.json` → `voice.remote`: `enabled` (default `true`: use a machine that offers it),
-`machines` (default `[]`: any), `timeoutSeconds` (3), `perAudioSecond` (0.05), `loadSeconds` (20). The VM's own CPU
+`machines` (default `[]`: any), `timeoutSeconds` (10). The VM's own CPU
 engine keeps its settings (`voice.enabled`, `model`, `device`, ...). With `voice.enabled` off on the portal, the remote
 engine still works; it just has no fallback. Nothing on the portal needs switching on: a deploy routes to any machine
 that offers it, and a machine offers it once its daemon.json says so.
 
-**The timeout, from the measurements.** BEAST answers a 12.5 s clip in 0.20-0.33 s and a 45.5 s clip in 0.61-0.95 s
-(below): about 0.02 s per second of audio. The wait before the fallback is 3 s plus 0.05 s per second of audio (3.6 s for
-a 12.5 s clip, 18 s for a 5-minute one): ten times the measured time plus room for the tailnet, so a GPU busy with an
-editor still answers, while a hung one costs a few seconds at most. A machine whose model is not loaded gets 20 s more
-(a load takes 2.3 s with its files cached and 12-15 s cold). A machine that is offline, short of VRAM or off costs
-nothing: the portal goes straight to its CPU.
+**The timeout.** 10 s for the whole request is lothsahn's call (2026-10-07), with dictations of 30 s at most. It fits
+the measurements: BEAST's model takes about 0.02 s per second of audio (below), and the live link from the VM moved
+clips at about 1.7 MB/s (0.19-0.30 s for 6-11 s clips), ~0.025 s per second of audio, so a 30 s clip needs ~1.5 s, a
+cold model load 2.3 s more. Nothing caps a clip at 30 s today: the mic and voice mode stop at `MAX_DICTATION_SECONDS`
+(300 s) and the server refuses more than 305 s. A clip over ~3 minutes (estimated: ~4.5 s of link and ~3.6 s of model
+for 3 minutes) can pass 10 s; it then falls back to the CPU, and BEAST is skipped for 2 minutes. The heartbeat that
+drops a dead link (45 s) is unchanged; a machine that went away costs one clip the 2 s ping, then is skipped.
 
 ### Measured (BEAST, 2026-10-07)
 
@@ -228,9 +228,18 @@ to a Daemon with voice on over a WebSocket on the same PC (`scripts/voice-e2e.ts
 | RAM, worker process | 656 MiB working set |
 | the fallback after the daemon stops (base.en, CPU, 2 threads, AVX only: the VM's limits) | 0.9-2.2 s (the first of each includes its ~1 s load), 9 runs, `engine: local` |
 
-Not measured here: the tailnet hop from the VM to BEAST (adds the upload of ~0.5 MB for 12.5 s and a round trip; a
-guess: 0.1-0.5 s), and the VM's own CPU, slower per core than BEAST's (a guess, w570: about 3x). The portal's log line
-per clip gives both once it is deployed.
+### Measured live (the portal's log, 2026-10-07)
+
+| time (UTC) | clip | engine | model time | total |
+|---|---|---|---|---|
+| 14:49:49 | 6.3 s | the VM's CPU, small.en, cold (load 15.6 s first, the first clip after the deploy's restart) | 24.0 s | 30.2 s |
+| 14:50:32 | 12.5 s | the VM's CPU, small.en, warm | 13.5 s | 13.6 s |
+| 14:57:17 | 6.3 s | BEAST, large-v3-turbo, CUDA | 0.61 s | 0.80 s |
+| 14:59:21 | 10.7 s | BEAST, large-v3-turbo, CUDA | 0.63 s | 0.93 s |
+
+So the VM's CPU runs small.en at about 1.1 s per second of audio when warm (it has run small.en since 01:38, not the
+`base.en` w570 measured); BEAST is 15-30x faster end to end. Estimated from these rates (linear in the audio): a
+1-minute dictation takes ~1.5 s on BEAST and ~65 s on the VM's CPU; 2.6 minutes, ~7.5 s and ~170 s.
 
 ## End-of-speech detection
 
