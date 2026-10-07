@@ -276,6 +276,82 @@ if printf '%s' "$out" | matches 'ci-dummy'; then fail "fffctl migrate printed th
 g 'test ! -e /srv/fff/migrate/dry-run.json' || fail "fffctl migrate --key changed something"
 echo "ok: fffctl migrate runs in the guest: it says when BEAST cannot be reached, with the key line to authorize"
 
+step "the orchestration worker (w597): its account, its capped scratch, its socket, its two sudo rights, its launcher"
+g 'id fff-ops' | matches 'fff-ops' || fail "no fff-ops account"
+g 'sudo passwd -S fff-ops' | matches ' L ' || fail "fff-ops has a usable password"
+mnt=$(g 'findmnt -n -o FSTYPE,OPTIONS /srv/fff-ops' || true)
+printf '%s' "$mnt" | matches '^ext4 .*nosuid.*nodev.*noexec' || fail "/srv/fff-ops is not its nosuid,nodev,noexec ext4 scratch: $mnt"
+size=$(g 'df -m --output=size /srv/fff-ops | tail -n 1' | tr -d ' ' || true)
+case "$size" in '' | *[!0-9]*) fail "no size for /srv/fff-ops: '$size'" ;; esac
+if [ "$size" -le 1500 ] || [ "$size" -gt 2048 ]; then fail "the scratch is $size MB, not about OPS_DISK_MB=2048"; fi
+# Full is full: a file bigger than the cap stops at the cap, and the VM's own disk is untouched.
+out=$(g 'sudo -u fff-ops dd if=/dev/zero of=/srv/fff-ops/scratch/fill bs=1M count=3000 2>&1; sudo rm -f /srv/fff-ops/scratch/fill' || true)
+printf '%s' "$out" | matches 'No space left on device' || fail "a 3 GB write into the scratch did not hit its cap: $out"
+[ "$(g 'sudo stat -c "%a %U %G" /run/fff-ops/claude.sock')" = "600 fff fff" ] || fail "the socket is not 0600 fff"
+g 'systemctl is-active fff-ops.socket' | matches -x active || fail "fff-ops.socket is not listening"
+for f in /srv/fff/config/config.json /srv/fff/home/.ssh/id_ed25519 /etc/fff/vault.key; do
+  if g "sudo -u fff-ops cat $f" >/dev/null 2>&1; then fail "fff-ops can read $f"; fi
+done
+# sudo: fff-ops-priv as root and fff-ops-ssh as fff, nothing else.
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl status' | matches '^portal: active' || fail "the worker's fffctl status does not work"
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl logs 5' >/dev/null || fail "the worker's fffctl logs does not work"
+for bad in 'sudo -n /usr/local/sbin/fffctl restart' 'sudo -n /usr/local/lib/fff/fff-ops-priv update' 'sudo -n /usr/local/lib/fff/fff-ops-priv vault list' \
+  'sudo -n -u fff /bin/cat /srv/fff/config/config.json' 'sudo -n -u fff /usr/local/lib/fff/fff-ops-ssh -oProxyCommand=id x' 'sudo -n apt-get install -y htop'; do
+  if g "sudo -u fff-ops $bad" >/dev/null 2>&1; then fail "fff-ops may run: $bad"; fi
+done
+# A credential for a machine that does not answer ssh is not issued at all (it would only cut that machine off).
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl credential issue ci-m2 --to nosuchhost.invalid 2>&1' || true)
+printf '%s' "$out" | matches 'does not answer ssh' || fail "credential issue to an unreachable machine: $out"
+if g 'sudo fffctl machine-credential list' | matches -x 'ci-m2'; then fail "a credential was issued for a machine that cannot get it"; fi
+# The launcher, through the socket, as the portal's account: the header, OK, then Claude Code itself (its --version needs
+# no credential to answer, but the launcher wants one: a dummy).
+# Its Claude credential lives only in claude's memory: Yama keeps the commands it runs from reading their parent's.
+[ "$(g 'cat /proc/sys/kernel/yama/ptrace_scope')" -ge 1 ] || fail "Yama's ptrace_scope is 0: a worker's command could read claude's memory"
+g 'test -x /usr/local/lib/fff/ops/claude && test -s /usr/local/lib/fff/ops/claude.version' || fail "fff-ops-sync did not give the worker its Claude Code"
+cat >/tmp/fff-ops-sock.js <<'EOF'
+const net = require('node:net');
+const fs = require('node:fs');
+const v = fs.readFileSync('/usr/local/lib/fff/ops/claude.version', 'utf8').trim();
+const s = net.createConnection({ path: '/run/fff-ops/claude.sock', allowHalfOpen: true });
+s.write(JSON.stringify({ v: 1, sdkVersion: process.argv[2] || v, args: ['--version'], env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-ci-dummy-not-a-token' } }) + '\n');
+s.end();
+let out = '';
+s.on('data', (d) => (out += d));
+s.on('close', () => process.stdout.write(out, () => process.exit(0)));
+s.on('error', (e) => process.stdout.write('ERROR ' + e.message, () => process.exit(0)));
+setTimeout(() => process.stdout.write(out + ' TIMEOUT', () => process.exit(0)), 30000).unref();
+EOF
+b64=$(base64 -w0 /tmp/fff-ops-sock.js)
+out=$(g "echo $b64 | base64 -d >/tmp/fff-ops-sock.js && sudo -u fff node /tmp/fff-ops-sock.js" || true)
+echo "$out"
+printf '%s\n' "$out" | head -n 1 | matches -x OK || fail "the launcher did not answer OK through the socket: $out"
+printf '%s' "$out" | matches 'Claude Code' || fail "Claude Code did not run as the worker: $out"
+out=$(g 'sudo -u fff node /tmp/fff-ops-sock.js 0.0.1' || true)
+printf '%s' "$out" | matches '^ERR .*0\.0\.1' || fail "the launcher took another SDK version: $out"
+if g 'sudo -u fff-ops node /tmp/fff-ops-sock.js' 2>/dev/null | matches '^OK'; then fail "fff-ops itself could connect to the socket"; fi
+# Kept for the update step below: the worker's way in must survive the portal's restart.
+# The unit's own fences, as installed.
+unit=$(g 'systemctl cat fff-ops@.service' || true)
+for want in 'User=fff-ops' 'ProtectSystem=strict' 'IPAddressDeny=any' 'IPAddressAllow=127.0.0.0/8 ::1/128 160.79.104.0/23' 'TemporaryFileSystem=/tmp:size=64M' 'MemoryMax=' 'RuntimeMaxSec='; do
+  printf '%s' "$unit" | matches -F "$want" || fail "fff-ops@.service has no $want"
+done
+# The same fences around a probe (the unit's own settings, as installed, on a transient unit): sudo's two wrappers work
+# inside them, the network reaches Anthropic's API and nothing else, and only its scratch is writable.
+props=$(printf '%s
+' "$unit" | grep -E '^(User|Group|NoNewPrivileges|ProtectSystem|ProtectHome|ReadWritePaths|TemporaryFileSystem|IPAddressDeny|IPAddressAllow|MemoryMax|TasksMax)=' | sed "s/.*/-p '&'/" | paste -sd' ' -)
+probe() { g "sudo systemd-run --quiet --wait --pipe --collect $props -- $1"; }
+probe '/usr/bin/sudo -n /usr/local/lib/fff/fff-ops-priv status' | matches '^portal: active' || fail "fffctl status does not work inside the worker's fences"
+probe '/usr/bin/sudo -n /usr/local/lib/fff/fff-ops-priv credential list' >/dev/null || fail "fffctl credential list does not work inside the worker's fences"
+out=$(probe '/usr/bin/sudo -n /usr/local/lib/fff/fff-ops-priv credential issue ci-m3 --to nosuchhost.invalid' 2>&1 || true)
+printf '%s' "$out" | matches 'does not answer ssh' || fail "the worker's ssh check does not run inside its fences: $out"
+code=$(probe '/usr/bin/curl -sS -m 20 -o /dev/null -w %{http_code} https://api.anthropic.com/v1/messages' 2>&1 || true)
+printf '%s' "$code" | matches -E '^[1-5][0-9][0-9]$' || fail "the worker cannot reach Anthropic's API: $code"
+if probe '/usr/bin/curl -fsS -m 10 -o /dev/null https://example.com' >/dev/null 2>&1; then fail "the worker reached example.com: downloads are not fenced"; fi
+if probe '/usr/bin/touch /var/lib/fff-ops-probe' >/dev/null 2>&1; then fail "the worker wrote outside its scratch"; fi
+probe '/usr/bin/touch /srv/fff-ops/scratch/probe' || fail "the worker cannot write its scratch"
+g 'sudo rm -f /srv/fff-ops/scratch/probe'
+echo "ok: the orchestration worker: its own account, a 2 GiB noexec scratch that fills up alone, a socket only the portal opens, two sudo rights, and Claude Code through the launcher"
+
 step "update: build beside the running portal, drain, switch, verify"
 before=$(sha_of)
 git -C "$ROOT" -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q --allow-empty -m "ci: an update to install"
@@ -307,6 +383,34 @@ echo "ok: $before -> $want"
 out=$(g 'sudo fffctl update --drain-minutes 0' 2>&1)
 echo "$out"
 printf '%s' "$out" | matches -E "^already up to date at $want" || fail "a second fffctl update did not say it was already up to date"
+# The orchestration worker (w597) after that restart: its socket still listens and Claude Code still starts through it.
+# Its process lives in fff-ops@.service, not in the portal's unit, so a portal restart ends only its connection.
+g 'systemctl is-active fff-ops.socket' | matches -x active || fail "fff-ops.socket did not survive the portal's update"
+g 'sudo -u fff node /tmp/fff-ops-sock.js' | head -n 1 | matches -x OK || fail "the worker's launcher does not answer after the portal's update"
+# Its deploy: fffctl update through its wrapper is refused without the grant the portal leaves on ops_worker deploy, and
+# with one that ran out; a fresh one is used once, asks for the update and is gone.
+grant() { g "echo $(printf '{"by":"ci","name":"CI","at":"%s","expires":"%s"}' "$(date -u +%FT%TZ)" "$1" | base64 -w0) | base64 -d | sudo -u fff tee /srv/fff/data/ops-deploy.grant >/dev/null"; }
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
+printf '%s' "$out" | matches 'no deploy was asked for' || fail "the worker's fffctl update ran without a grant: $out"
+grant 2020-01-01T00:00:00Z
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
+printf '%s' "$out" | matches 'ran out' || fail "the worker's fffctl update took a grant that ran out: $out"
+g 'test ! -e /srv/fff/data/ops-deploy.grant' || fail "a grant that ran out was not removed"
+grant "$(date -u -d '+10 min' +%FT%TZ)"
+since=$(g 'date +%s')
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
+echo "$out"
+printf '%s' "$out" | matches "deploy asked for by ci; the portal runs .* at commit $want" || fail "the worker's deploy did not say what it started from: $out"
+g 'test ! -e /srv/fff/data/ops-deploy.grant' || fail "the deploy grant was not used up"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
+printf '%s' "$out" | matches 'no deploy was asked for' || fail "a deploy grant worked twice: $out"
+# Finished means fff-update ran for it and ended, not only that it is idle now (the path unit may not have fired yet): a
+# request still running would answer the next step's update for it.
+wait_for 600 "the worker's update request finished (already up to date)" g "test ! -e /srv/fff/data/update.wanted && ! systemctl is-active --quiet fff-update.service && sudo journalctl -u fff-update.service --since @$since -o cat --no-pager | grep -E 'Deactivated successfully|Finished|Failed with result' >/dev/null"
+wait_for 300 "the portal answers after the worker's update request" health
+[ "$(sha_of)" = "$want" ] || fail "the portal does not run $want after the worker's update request"
+g 'rm -f /tmp/fff-ops-sock.js'
+echo "ok: the orchestration worker survives the portal's update, and deploys only with a fresh grant, once"
 
 step "a broken update is rolled back by itself"
 good=$want

@@ -26,6 +26,10 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
   requests it is about; at most 3 per worker until the person writes again (`orchestrator.followUpsPerMessage`);
 - the ledger: `request_work`, `list_work`, `update_work`;
 - `message_person`, to another person's own orchestrator ([People to people](#people-to-people)).
+- `ops_worker`, Lothsahn's and Ben's alone (refused for anyone else): the one orchestration worker in the portal VM, a
+  shell for ssh to the machines, the portal's state and machine credentials, with no git, downloads or Unity
+  ([ops-worker.md](ops-worker.md), w597). Its `deploy` updates the portal, only when the person asks in their own turn.
+  The dispatcher and `/mcp` do not have it.
 
 It cannot start, stop or change anything else. To get work done it files a request.
 

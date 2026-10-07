@@ -45,3 +45,17 @@ BACKUP_SSH_KEY=/etc/fff/backup_ed25519
 BACKUP_INCLUDE_REVIEW=no
 # UTC; before the host's nightly restart at 12:00 UTC.
 BACKUP_TIME=11:15
+
+# ---------------------------------------------------------------- the orchestration worker (w597, docs/ops-worker.md)
+OPS_USER=fff-ops
+# Its home, scratch and temp: one ext4 file system in OPS_IMAGE, mounted here (nosuid, nodev, noexec).
+OPS_ROOT=/srv/fff-ops
+OPS_IMAGE=/var/lib/fff-ops/scratch.img
+# The disk cap, in MB: all it can write. Claude Code's own files (its conversation, about 1-50 MB a job) live there too.
+OPS_DISK_MB=2048
+# Where it may connect: Anthropic's API (its published inbound ranges, platform.claude.com/docs/en/api/ip-addresses),
+# the tailnet (the machines, MagicDNS), besides loopback and this VM's resolvers. Nothing else: no downloads.
+OPS_ALLOW_NETS="160.79.104.0/23 2607:6bc0::/48 100.64.0.0/10 fd7a:115c:a1e0::/48"
+OPS_MEMORY_MAX=1536M
+# A process older than this is ended by systemd (the portal stops an idle one after 1 h, cuts a turn after 2 h).
+OPS_RUNTIME_MAX=8h

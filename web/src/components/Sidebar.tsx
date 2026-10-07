@@ -50,6 +50,8 @@ export function Sidebar({
   // The other people's own orchestrators (read only here), and the dispatcher with its open requests (docs/orchestrators.md).
   const others = app.sessions.filter((s) => s.id !== app.orchestratorId && chatOwner(s)).sort((a, b) => a.title.localeCompare(b.title));
   const dispatcher = app.dispatcherId ? sessionsById.get(app.dispatcherId) : undefined;
+  // The one orchestration worker in the portal VM (w597, docs/ops-worker.md): its own row, never game capacity.
+  const ops = app.sessions.find((s) => s.kind === 'ops');
   const ledger = dispatcherGlance(dispatcher, (app.work ?? []).filter(isOpenWork), app.me?.userId);
   const selection = selectionOf(route, sessionsById);
   const fleet = fleetFor(app);
@@ -126,6 +128,23 @@ export function Sidebar({
             sub={<span className={`tone-${ledger.tone}`}>{ledger.label}</span>}
             hint={ctxHint('Everyone’s requests for work and what became of them', dispatcher)}
             onClick={() => go({ view: 'dispatcher' })}
+          />
+        )}
+        {ops && (
+          <Row
+            active={route.view === 'session' && route.sessionId === ops.id}
+            icon="tools"
+            tone={agentView(ops).tone}
+            pulse={ops.status === 'running'}
+            title="Orchestration worker"
+            sub={
+              <>
+                <span className="row-prefix">Portal VM · </span>
+                <span className={`tone-${agentView(ops).tone}`}>{agentView(ops).text}</span>
+              </>
+            }
+            hint="The shell Lothsahn's and Ben's orchestrators run orchestration jobs with (ssh to the machines, portal state, machine credentials): every command it runs is in its transcript"
+            onClick={() => go({ view: 'session', sessionId: ops.id })}
           />
         )}
 

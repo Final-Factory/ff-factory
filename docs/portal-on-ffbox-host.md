@@ -62,6 +62,9 @@ trigger is rewritten or the zone is set to BEAST's.
 
 ### 1.1 What is hostile, and what the portal holds
 
+*Since w597 the VM also runs one orchestration worker, as its own account `fff-ops`: what that gives it and the fences
+around it are in [ops-worker.md](ops-worker.md), "Threat notes".*
+
 FFBox assumes its containers are hostile *(sourced: ffbox `docs/docker-security-model.md`, "The container is assumed
 hostile")*. They run on a rootless Docker daemon under an FFBox account *(sourced: [ffbox.md](ffbox.md), "Where")*.
 Code can end up running in one of them through:

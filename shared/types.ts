@@ -91,7 +91,8 @@ export interface Sandbox {
   git?: GitStatus;
 }
 
-export type SessionKind = 'orchestrator' | 'worker' | 'standing';
+/** ops: the one orchestration worker in the portal VM (w597, docs/ops-worker.md). */
+export type SessionKind = 'orchestrator' | 'worker' | 'standing' | 'ops';
 
 /**
  * What an orchestrator is (docs/orchestrators.md): the portal's one dispatcher, which owns every tool that changes

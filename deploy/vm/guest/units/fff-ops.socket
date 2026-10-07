@@ -1,0 +1,19 @@
+[Unit]
+Description=FF Factory orchestration worker: the portal's door to it (w597)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/ops-worker.md
+After=fff-ops-scratch.service
+Requires=fff-ops-scratch.service
+
+[Socket]
+# Only the portal's account connects (0600, fff). One connection at a time: there is exactly one orchestration worker.
+ListenStream=/run/fff-ops/claude.sock
+SocketUser=fff
+SocketGroup=fff
+SocketMode=0600
+DirectoryMode=0755
+Accept=yes
+MaxConnections=1
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

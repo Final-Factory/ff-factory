@@ -33,6 +33,7 @@ import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
+import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
@@ -290,6 +291,11 @@ function requesterOf(req: http.IncomingMessage) {
  * So one person's chat never gets the other's messages, and nobody spends someone else's Claude account.
  */
 function mayDrive(req: http.IncomingMessage, s: SessionInfo) {
+  // The orchestration worker (w597): only Lothsahn and Ben interrupt it from the page; nobody writes to it there.
+  if (s.kind === 'ops') {
+    if (!OPS_PEOPLE.includes(requesterOf(req).userId.toLowerCase())) throw new HttpError(403, OPS_REFUSED);
+    return;
+  }
   if (s.kind !== 'orchestrator') return;
   const me = requesterOf(req);
   const owner = agents.orchestrators.ownerOf(s);
@@ -708,6 +714,7 @@ route('POST', '/api/sessions/([\\w-]+)/message', async (req, [id]) => {
     return { note: agents.standing.runNow(s.info.standingId, 'message', need(text, 'text'), requesterOf(req)) };
   }
   if (!imgs.length && !files.length) need(text, 'text');
+  if (s.info.kind === 'ops') throw new HttpError(403, OPS_REFUSED);
   mayDrive(req, s.info);
   // `/compact [focus]` (w518) is no message: it compacts the conversation. Its wake_me check-in and budgets stay.
   const focus = s.info.kind === 'orchestrator' && !imgs.length && !files.length ? compactCommand(String(text ?? '')) : undefined;
@@ -910,6 +917,7 @@ route('POST', '/api/sessions/([\\w-]+)/title', async (req, [id]) => {
   const s = sessions.get(id);
   if (s.info.kind === 'standing') throw new HttpError(400, "a standing agent's conversation carries the agent's name; rename the agent instead");
   if (s.info.kind === 'orchestrator') throw new HttpError(400, "an orchestrator's name is its person's (or Dispatcher)");
+  if (s.info.kind === 'ops') throw new HttpError(400, 'the orchestration worker keeps its name');
   return { title: sessions.setTitle(id, need(title, 'title')) };
 });
 
@@ -932,6 +940,7 @@ route('POST', '/api/sessions/([\\w-]+)/mode', async (req, [id]) => {
   const { mode } = await readJson<{ mode: string }>(req);
   if (!['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'].includes(mode)) throw new HttpError(400, 'bad mode');
   const s = sessions.get(id);
+  if (s.info.kind === 'ops') throw new HttpError(400, "the orchestration worker's permission mode is fixed (its guard and the VM's fences hold it)");
   mayDrive(req, s.info);
   await s.setMode(mode as never);
   return {};
@@ -963,6 +972,7 @@ route('DELETE', '/api/sessions/([\\w-]+)', async (_r, [id]) => {
   const s = sessions.get(id);
   if (s.info.kind === 'orchestrator') throw new HttpError(400, 'reset the orchestrator instead');
   if (s.info.kind === 'standing') throw new HttpError(400, "this is a standing agent's conversation; delete the agent instead");
+  if (s.info.kind === 'ops') throw new HttpError(400, 'the orchestration worker is fixed: stop it instead (its conversation stays)');
   sessions.remove(id);
   return {};
 });

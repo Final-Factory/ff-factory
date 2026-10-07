@@ -281,6 +281,10 @@ for two weeks (its task disabled, not removed).
 
 ## 6. Updating the portal
 
+*The orchestration worker (w597, [docs/ops-worker.md](../../docs/ops-worker.md)) comes with an update: its account,
+its 2 GiB scratch, its sudo wrappers and `fff-ops.socket` are written by the guest `install.sh` that each update runs.
+After `fffctl update`: `systemctl is-active fff-ops.socket fff-ops-scratch.service` says `active` twice.*
+
 ```bash
 sudo fff-vm ssh
 sudo fffctl update

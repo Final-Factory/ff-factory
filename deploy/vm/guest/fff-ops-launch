@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# fff-ops-launch (w597, docs/ops-worker.md): the orchestration worker's Claude Code, started by fff-ops@.service for one
+# connection to fff-ops.socket, as the fff-ops account, inside that unit's sandbox. stdin and stdout are the socket.
+#
+# The portal (server/opsWorker.ts opsSpawner) sends one header line first:
+#   {"v":1,"sdkVersion":"0.3.284","args":["--output-format","stream-json",...],"env":{"CLAUDE_CODE_...":"..."}}
+# This answers "OK" and becomes claude (exec, so the socket is claude's stdin and stdout), or answers "ERR <why>" and
+# exits. The binary is ours (/usr/local/lib/fff/ops/claude, copied from the portal's release by fff-ops-sync), never one
+# the header names. The environment is built from nothing: our own paths, then only Claude Code's own settings from the
+# header. The Claude credential never enters the environment: it goes to claude on a pipe (fd 3,
+# CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR), so no command the worker runs can print it from its environment.
+set -o nounset -o pipefail
+umask 077
+export PATH=/usr/bin:/bin
+OPS_LIB=${OPS_LIB:-/usr/local/lib/fff/ops}
+OPS_ROOT=${OPS_ROOT:-/srv/fff-ops}
+answer_err() {
+  printf 'ERR %s\n' "$*"
+  echo "fff-ops-launch: refused: $*" >&2
+  exit 1
+}
+
+IFS= read -r -t 30 header || answer_err "no header from the portal within 30 s"
+printf '%s' "$header" | jq -e '.v == 1 and (.args | type) == "array" and (.env | type) == "object"' >/dev/null 2>&1 ||
+  answer_err "the header is not FF Factory's (v 1, args, env)"
+claude=$OPS_LIB/claude
+[ -x "$claude" ] || answer_err "no Claude Code binary at $claude: fff-ops-sync copies the portal's at its start (fffctl update, then the portal restarts)"
+want=$(printf '%s' "$header" | jq -r '.sdkVersion // ""')
+have=$(cat "$OPS_LIB/claude.version" 2>/dev/null || true)
+if [ -z "$want" ] || [ "$want" != "$have" ]; then
+  answer_err "the worker's Claude Code is ${have:-unknown} but the portal's Agent SDK is ${want:-unknown}: fff-ops-sync updates it when the portal restarts"
+fi
+
+args=()
+while IFS= read -r -d '' a; do args+=("$a"); done < <(printf '%s' "$header" | jq -j '.args[] | tostring | (. + "\u0000")')
+
+# Our own environment, then Claude Code's settings from the header. Never the portal's, never a loader or shell setting.
+envs=(HOME="$OPS_ROOT/home" USER=fff-ops LOGNAME=fff-ops SHELL=/bin/bash LANG=C.UTF-8
+  PATH=/usr/local/lib/fff/ops-bin:/usr/bin:/bin TMPDIR="$OPS_ROOT/tmp" CLAUDE_CONFIG_DIR="$OPS_ROOT/home/.claude"
+  DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1)
+while IFS= read -r -d '' kv; do
+  name=${kv%%=*}
+  case "$name" in
+    CLAUDE_CODE_OAUTH_TOKEN | ANTHROPIC_API_KEY | ANTHROPIC_AUTH_TOKEN | *_FILE_DESCRIPTOR | CLAUDE_CONFIG_DIR | CLAUDE_CODE_GIT_BASH_PATH) continue ;;
+  esac
+  [[ $name =~ ^(CLAUDE_CODE_[A-Z0-9_]+|ANTHROPIC_[A-Z0-9_]+|CLAUDE_AGENT_SDK_[A-Z0-9_]+|MCP_[A-Z0-9_]+|MAX_THINKING_TOKENS)$ ]] || continue
+  envs+=("$kv")
+done < <(printf '%s' "$header" | jq -j '.env | to_entries[] | select(.value | type == "string") | "\(.key)=\(.value)\u0000"')
+
+token=$(printf '%s' "$header" | jq -r '.env.CLAUDE_CODE_OAUTH_TOKEN // ""')
+apikey=$(printf '%s' "$header" | jq -r '.env.ANTHROPIC_API_KEY // ""')
+header=""
+if [ -n "$token" ]; then
+  envs+=(CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3)
+  exec 3< <(printf '%s' "$token")
+elif [ -n "$apikey" ]; then
+  envs+=(CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR=3)
+  exec 3< <(printf '%s' "$apikey")
+else
+  answer_err "the portal sent no Claude credential: the orchestrators' account must be a token (config claudeAccounts.orchestrator \"token\" or \"tokenfile\"), not this VM's login"
+fi
+token=""
+apikey=""
+if ! mkdir -p "$OPS_ROOT/tmp" "$OPS_ROOT/home/.claude" "$OPS_ROOT/scratch" || ! chmod 0700 "$OPS_ROOT/tmp" "$OPS_ROOT/home" "$OPS_ROOT/home/.claude" "$OPS_ROOT/scratch"; then
+  answer_err "cannot make its folders in $OPS_ROOT (is the scratch file system mounted?)"
+fi
+cd "$OPS_ROOT/scratch" || answer_err "no $OPS_ROOT/scratch"
+echo "fff-ops-launch: starting Claude Code $have for the portal (${#args[@]} arguments)" >&2
+printf 'OK\n'
+exec /usr/bin/env -i "${envs[@]}" "$claude" "${args[@]}"
