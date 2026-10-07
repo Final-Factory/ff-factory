@@ -12,6 +12,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **Where FFBox posts an orchestrator's `reply_to_ffbox` is now said as it is** (w649, asked by lothsahn: "Please fix
+  the bug where you responded to the wrong message"). On 2026-10-07 the orchestrator prompt said FFBox posts the reply
+  "in that thread", but FFBox DMed it to the operator (w351), so lothsahn's answer for a modder in #ask-assistant never
+  reached the channel. FFBox now (ffbox `w649`) posts replies and results in place, in reply to the message that asked
+  Max, when the operator asked in a chat channel; report threads keep the DM. The prompt, the tool description and
+  `docs/ffbox.md` say both cases.
 - **Lothsahn's and Ben's orchestrators read the portal's data folder, never write it** (w650, asked by lothsahn:
   "Please update FF so you can read, but not write, the portal data folder"). After the w643 deploy his orchestrator
   could not read `data/w643-migration.md`. They now read the reports (`*.md`), the ledger, the intake, usage and spend,
