@@ -39,7 +39,7 @@ import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from 
 import { prepareInbox } from '../server/attachments.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { attachmentLine } from '../shared/attachments.ts';
-import type { AttachmentRef, HostHealth, HostStats, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import { machinePlatformOf, type AttachmentRef, type HostHealth, type HostStats, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /** Portal base URL, e.g. https://<host>.<tailnet>.ts.net */
@@ -278,7 +278,7 @@ export class Daemon {
     this.cfg = cfg;
     this.guardEffects = guardEffects;
     this.probes = probes;
-    const platform = process.platform === 'win32' ? 'win32' : 'darwin';
+    const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
     const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line));
@@ -394,7 +394,7 @@ export class Daemon {
       const read = (p: string) => fs.readFileSync(p, 'utf8');
       const sandboxes = this.pool.list();
       const live = new Set([...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox).map((e) => e.spec!.sandbox!));
-      const up = platform === 'win32' ? 'win32' : 'darwin';
+      const up = machinePlatformOf(platform);
       const listed = hubListedEditors(up, process.env, HOME, read).map((e) => editorFolderOf(e.bin)).filter((x): x is string => !!x).map((f) => path.dirname(f));
       const procs = await this.procs().catch(() => undefined);
       return {
@@ -799,7 +799,7 @@ export class Daemon {
         node: process.version,
         claude: claude.code === 0 ? claude.stdout.trim().split(/\s+/)[0] : undefined,
         daemon: readVersion(),
-        platform: process.platform === 'win32' ? 'win32' : 'darwin',
+        platform: machinePlatformOf(process.platform),
       },
     });
     this.flush();
@@ -832,7 +832,8 @@ export class Daemon {
   private ramPct(): number | undefined {
     const l = this.lastStats;
     if (l && Date.now() - l.at < 60_000 && l.stats.memTotalBytes) return Math.round((100 * (l.stats.memUsedBytes ?? l.stats.memTotalBytes - l.stats.memFreeBytes)) / l.stats.memTotalBytes);
-    return process.platform === 'win32' ? Math.round((100 * (os.totalmem() - os.freemem())) / os.totalmem()) : undefined;
+    // Windows' own numbers; on Linux os.freemem() is MemAvailable (page cache counts as free), so the same sum holds.
+    return process.platform === 'win32' || process.platform === 'linux' ? Math.round((100 * (os.totalmem() - os.freemem())) / os.totalmem()) : undefined;
   }
 
   /** Every Unity editor here, counted now (unity status). */
@@ -1441,8 +1442,18 @@ function prepare(spec: LaunchSpec, tempDir?: string) {
   }
 }
 
-/** "Windows 11 Pro (10.0.26100)", or the kernel's type and release elsewhere. */
+/** "Windows 11 Pro (10.0.26100)", "Ubuntu 26.04.1 LTS (7.0.0-38-generic)", or the kernel's type and release elsewhere. */
 function osName() {
+  if (process.platform === 'linux') {
+    let release = '';
+    try {
+      release = fs.readFileSync('/etc/os-release', 'utf8');
+    } catch {
+      // no os-release
+    }
+    const pretty = /^PRETTY_NAME="?([^"\n]*)"?$/m.exec(release)?.[1];
+    return pretty ? `${pretty} (${os.release()})` : `${os.type()} ${os.release()}`;
+  }
   if (process.platform !== 'win32') return `${os.type()} ${os.release()}`;
   const [, , build] = os.release().split('.').map(Number);
   // os.version() says "Windows 10 ..." on Windows 11 too; builds from 22000 are Windows 11.
@@ -1457,6 +1468,8 @@ function osName() {
  */
 export function keepAwakeCommand(platform: NodeJS.Platform, pid: number): string[] | undefined {
   if (platform === 'darwin') return ['caffeinate', '-i', '-w', String(pid)];
+  // Linux: a logind inhibitor (no idle sleep or suspend) held while GNU tail waits for the daemon to exit.
+  if (platform === 'linux') return ['systemd-inhibit', '--what=idle:sleep', '--who=FF Factory', '--why=agents are running', '--mode=block', 'tail', `--pid=${Math.trunc(pid)}`, '-f', '/dev/null'];
   if (platform !== 'win32') return undefined;
   const ps = [
     `$t = Add-Type -Name FFAwake -Namespace FFFactory -PassThru -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'`,

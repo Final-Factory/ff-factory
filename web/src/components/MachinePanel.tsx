@@ -90,7 +90,7 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
               </button>
               <button
                 className="btn btn-ghost btn-sm"
-                title={m.daemonStopped ? 'Start the daemon again' : `Restart the daemon (${m.platform === 'win32' ? 'its scheduled task' : 'its LaunchAgent'}) without redeploying`}
+                title={m.daemonStopped ? 'Start the daemon again' : `Restart the daemon (${m.platform === 'win32' ? 'its scheduled task' : m.platform === 'linux' ? 'its systemd user service' : 'its LaunchAgent'}) without redeploying`}
                 disabled={m.status === 'deploying'}
                 onClick={() => (live ? setConfirmRestart(true) : void controlDaemon())}
               >

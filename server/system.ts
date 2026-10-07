@@ -155,6 +155,37 @@ export function parseWinGpu(out: string): HostStats['gpu'] {
   };
 }
 
+/**
+ * An AMD card on Linux (no nvidia-smi): the amdgpu driver's counters under /sys/class/drm/cardN/device, the card with
+ * the most VRAM. Exported for tests.
+ */
+export function linuxDrmGpu(read: (p: string) => string = (p) => fs.readFileSync(p, 'utf8'), list: () => string[] = () => fs.readdirSync('/sys/class/drm')): HostStats['gpu'] {
+  let best: HostStats['gpu'];
+  let cards: string[] = [];
+  try {
+    cards = list().filter((c) => /^card\d+$/.test(c));
+  } catch {
+    return undefined;
+  }
+  for (const c of cards) {
+    const num = (f: string) => {
+      try {
+        const n = Number(read(`/sys/class/drm/${c}/device/${f}`).trim());
+        return Number.isFinite(n) ? n : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const total = num('mem_info_vram_total');
+    const used = num('mem_info_vram_used');
+    const busy = num('gpu_busy_percent');
+    if (total === undefined || busy === undefined) continue;
+    const g = { name: 'AMD GPU', memTotalMiB: Math.round(total / 2 ** 20), memUsedMiB: Math.round((used ?? 0) / 2 ** 20), utilPct: Math.min(100, Math.round(busy)) };
+    if (!best || g.memTotalMiB > best.memTotalMiB) best = g;
+  }
+  return best;
+}
+
 async function gpu(memTotalBytes: number): Promise<HostStats['gpu']> {
   if (process.platform === 'darwin') {
     const r = await run('ioreg', ['-r', '-d', '1', '-c', 'IOAccelerator'], { timeoutMs: 5000 });
@@ -162,6 +193,7 @@ async function gpu(memTotalBytes: number): Promise<HostStats['gpu']> {
   }
   const r = await run('nvidia-smi', ['--query-gpu=name,memory.total,memory.used,utilization.gpu', '--format=csv,noheader,nounits'], { timeoutMs: 5000 });
   const nvidia = r.code === 0 ? parseNvidiaSmi(r.stdout) : undefined;
+  if (!nvidia && process.platform === 'linux') return linuxDrmGpu();
   if (nvidia || process.platform !== 'win32') return nvidia;
   // No nvidia-smi (an Intel or AMD card): Windows' own counters. Get-Counter takes a second or two.
   const w = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WIN_GPU_SCRIPT], { timeoutMs: 20_000 });

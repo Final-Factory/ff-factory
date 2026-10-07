@@ -54,6 +54,12 @@ test('worker install: every missing prerequisite is named before anything change
   assert.match(bad({ git: [2, 45] }), /git 2\.45 is too old: 2\.48 or newer.*winget upgrade --id Git\.Git/);
   assert.match(bad({ git: undefined }), /git is missing.*winget install --id Git\.Git/);
   assert.match(bad({ platform: 'darwin', git: [2, 46] }), /brew upgrade git/);
+  // Linux (biscuit): installs, with apt's hints.
+  const lin = { platform: 'linux' as const, claude: '/home/u/.local/bin/claude' };
+  assert.deepEqual(preflightProblems({ ...GOOD, ...lin }, { ...OPTS, root: '/home/u/ffw' }), []);
+  assert.match(bad({ ...lin, git: [2, 43] }, { root: '/home/u/ffw' }), /ppa:git-core\/ppa/);
+  assert.match(bad({ ...lin, gitLfs: false }, { root: '/home/u/ffw' }), /sudo apt install git-lfs/);
+  assert.match(bad({ platform: 'freebsd' }), /installs on Windows, macOS and Linux, not freebsd/);
   assert.match(bad({ gitLfs: false }), /git-lfs is missing/);
   assert.match(bad({ claude: undefined }), /Claude Code is missing/);
   assert.deepEqual(preflightProblems({ ...GOOD, claude: undefined, claudeShim: 'C:\\Users\\l\\AppData\\Roaming\\npm\\claude.cmd' }, OPTS), [], "an npm shim is enough: the SDK uses its own (as in the portal's deploy)");
@@ -458,6 +464,11 @@ test('worker install: the supervisor is required, and what the installer writes 
   assert.deepEqual(supervisorProblems(ok, macL, 'com.ff.daemon', true, 'darwin'), []);
   assert.ok(supervisorProblems({ ...ok, restarts: false }, macL, 'com.ff.daemon', true, 'darwin')[0].includes('KeepAlive'));
   assert.deepEqual(supervisorProblems({ ...ok, running: 0 }, macL, 'com.ff.daemon', true, 'darwin'), ['launchd does not run com.ff.daemon']);
+  const linL = { daemon: '/home/u/ffw/daemon' };
+  assert.deepEqual(supervisorProblems(ok, linL, 'com.ff.daemon', true, 'linux'), []);
+  assert.deepEqual(supervisorProblems({ ...ok, installed: false }, linL, 'com.ff.daemon', true, 'linux'), ['no com.ff.daemon.service systemd user unit']);
+  assert.ok(supervisorProblems({ ...ok, restarts: false }, linL, 'com.ff.daemon', true, 'linux')[0].includes('Restart=always with KillMode=process'));
+  assert.deepEqual(supervisorProblems({ ...ok, running: 0 }, linL, 'com.ff.daemon', true, 'linux'), ['systemd does not run com.ff.daemon']);
   // The task the installer registers runs that folder's run-daemon.ps1 and is restarted on failure.
   const x = taskXml('S-1-5-21-1-2-3-1001', String.raw`C:\Users\loth`, winL.daemon);
   assert.ok(x.includes(String.raw`-File "D:\work\ffw\daemon\run-daemon.ps1"`), x);
@@ -640,6 +651,9 @@ test('worker update (w629): an ssh session\'s minimal PATH gets the standard too
   assert.equal(withStandardPaths('/usr/bin:/bin', 'darwin', (d) => d === '/Users/b/.local/bin', { HOME: '/Users/b' }), '/usr/bin:/bin:/Users/b/.local/bin', "Claude Code's native install, after");
   assert.equal(withStandardPaths('/opt/homebrew/bin:/usr/bin:/bin', 'darwin', mac, {}), '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin', 'a folder already there is not moved or repeated');
   assert.equal(withStandardPaths('/usr/bin:/bin', 'darwin', () => false, {}), '/usr/bin:/bin', 'only folders that exist');
+  // Linux: no Homebrew; nodejs.org's node in ~/.local/node goes first (Ubuntu's own runs no TypeScript).
+  const lin = (d: string) => ['/usr/local/bin', '/home/u/.local/node/bin', '/home/u/.local/bin'].includes(d);
+  assert.equal(withStandardPaths('/usr/bin:/bin', 'linux', lin, { HOME: '/home/u' }), '/usr/local/bin:/home/u/.local/node/bin:/usr/bin:/bin:/home/u/.local/bin');
   const win = (d: string) => /Git\\cmd$|nodejs$/.test(d);
   const env = { ProgramFiles: 'C:\\Program Files' };
   assert.equal(

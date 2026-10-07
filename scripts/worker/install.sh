@@ -1,16 +1,16 @@
 #!/bin/bash
-# Install an FF Factory worker on this Mac, everything under one root folder (w513, docs/worker-install.md).
+# Install an FF Factory worker on this Mac or Linux PC, everything under one root folder (w513, docs/worker-install.md).
 #
 # Asks once for what it needs (the root folder, the portal's URL, this machine's credential, the limits), checks every
 # prerequisite and changes nothing if one is missing, then: creates the root, clones the game repo into it, installs
-# the daemon as a LaunchAgent with its folders in the root and waits for the portal to see the machine. Safe to run
+# the daemon as a LaunchAgent (a systemd user service on Linux) with its folders in the root and waits for the portal to see the machine. Safe to run
 # again. One command, from anywhere:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)"
 # or from a clone of ff-factory: bash scripts/worker/install.sh
 #
 # Options (each is asked for when missing): --root DIR --portal-url URL --max-sandboxes N --max-agents-per-sandbox N
 # --max-unity N --slots N --service LABEL --source CHECKOUT --ref BRANCH --credential-file FILE (unattended tests)
-# --ssh-host NAME (the name the portal reaches this Mac by; default its tailnet name) --no-ssh (no portal ssh, w568)
+# --ssh-host NAME (the name the portal reaches this machine by; default its tailnet name) --no-ssh (no portal ssh, w568)
 # --voice-whisper MODEL|off (Whisper on this machine's GPU for the portal's mic, w615; a Mac has none: leave it off)
 #
 # Update an install that is there (w613, docs/worker-install.md "Updating"), also over ssh with no keychain:
@@ -48,9 +48,11 @@ ask() { local a; read -r -p "$1${2:+ [$2]} " a </dev/tty; echo "${a:-$2}"; }
 # A non-interactive ssh session's PATH may lack Homebrew and /usr/local (w629: m5's had no /opt/homebrew/bin, so its
 # git-lfs was "missing"): put the ones that exist first, as a person's shell has them. This run's PATH only; the
 # daemon's comes from the login shell (worker.ts withStandardPaths does the same for itself).
-for d in /usr/local/bin /opt/homebrew/sbin /opt/homebrew/bin; do
+# On Linux, node from nodejs.org unpacked in ~/.local/node (Ubuntu's own nodejs package runs no TypeScript).
+for d in /usr/local/bin /opt/homebrew/sbin /opt/homebrew/bin "$HOME/.local/node/bin"; do
   case ":$PATH:" in *":$d:"*) ;; *) [ -d "$d" ] && PATH="$d:$PATH" ;; esac
 done
+LINUX=0; [ "$(uname -s)" = Linux ] && LINUX=1
 export PATH
 [ "$(id -u)" = 0 ] && { echo "Run this as yourself, not with sudo." >&2; exit 2; }
 
@@ -60,7 +62,7 @@ if [ "$UPDATE" = 1 ]; then
   [ -f "$ROOT/root.json" ] || { echo "$ROOT holds no worker install (no root.json): install it first, without --update." >&2; exit 2; }
 else
 echo "FF Factory worker install. Everything this machine's worker uses goes in one folder (the root)."
-[ -n "$ROOT" ] || ROOT=$(ask "Root folder (any empty or new folder with 200+ GB free, e.g. /Users/Shared/ffw)" "")
+[ -n "$ROOT" ] || ROOT=$(ask "Root folder (any empty or new folder with 200+ GB free, e.g. $([ "$LINUX" = 1 ] && echo "$HOME/ffw" || echo /Users/Shared/ffw))" "")
 [ -n "$PORTAL" ] || PORTAL=$(ask "Portal URL" "https://")
 [ -n "$MAXSB" ] || MAXSB=$(ask "Sandboxes at once" 3)
 [ -n "$MAXAG" ] || MAXAG=$(ask "Agents per sandbox" 2)
@@ -69,18 +71,28 @@ if [ -n "$CREDFILE" ]; then CRED=$(head -n1 "$CREDFILE"); else read -r -s -p "Ma
 [ -n "$ROOT" ] && [ -n "$PORTAL" ] && [ -n "$CRED" ] || { echo "The root, the portal URL and the credential are all needed." >&2; exit 2; }
 fi
 
-# The tools this script itself needs: node 22.6+ and git 2.48+ (the rest is checked by worker.ts).
+# The tools this script itself needs: node 22.6+ that runs TypeScript, and git 2.48+ (the rest is checked by worker.ts).
 NODE="" ; BEST=0
-for n in $(command -v -a node 2>/dev/null) /opt/homebrew/bin/node /usr/local/bin/node "$HOME"/.nvm/versions/node/*/bin/node; do
+TSCHECK=$(mktemp -d); printf 'const a: number = 1;\n' >"$TSCHECK/t.ts"
+for n in $(command -v -a node 2>/dev/null) /opt/homebrew/bin/node /usr/local/bin/node "$HOME"/.local/node/bin/node "$HOME"/.nvm/versions/node/*/bin/node; do
   [ -x "$n" ] || continue
   v=$("$n" -p 'process.versions.node' 2>/dev/null) || continue
+  # Ubuntu's nodejs is built without TypeScript (ERR_NO_TYPESCRIPT): a node that cannot run the daemon does not count.
+  "$n" --experimental-strip-types --disable-warning=ExperimentalWarning "$TSCHECK/t.ts" >/dev/null 2>&1 || continue
   num=$(echo "$v" | awk -F. '{printf "%d%03d", $1, $2}')
   if [ "$num" -gt "$BEST" ]; then NODE=$n; BEST=$num; fi
 done
+rm -rf "$TSCHECK"
 offer() { echo "$1 is needed. Install it with: $2   then run this installer again." >&2; exit 2; }
+if [ "$LINUX" = 1 ]; then
+  [ "$BEST" -ge 22006 ] || offer "Node.js 22.6 or newer that runs TypeScript (Ubuntu's nodejs package does not)" "the Linux x64 build from https://nodejs.org unpacked into ~/.local/node"
+  GITV=$(git --version 2>/dev/null | awk '{print $3}' | awk -F. '{printf "%d%03d", $1, $2}')
+  [ "${GITV:-0}" -ge 2048 ] || offer "git 2.48 or newer (found: $(git --version 2>/dev/null || echo none))" "sudo apt install git (older Ubuntus: sudo add-apt-repository ppa:git-core/ppa first)"
+else
 [ "$BEST" -ge 22006 ] || offer "Node.js 22.6 or newer" "brew install node"
 GITV=$(git --version 2>/dev/null | awk '{print $3}' | awk -F. '{printf "%d%03d", $1, $2}')
 [ "${GITV:-0}" -ge 2048 ] || offer "git 2.48 or newer (found: $(git --version 2>/dev/null || echo none))" "brew install git"
+fi
 
 TEMP=""
 if [ -z "$SOURCE" ]; then
@@ -88,7 +100,8 @@ if [ -z "$SOURCE" ]; then
   if [ -n "$HERE" ] && [ -f "$HERE/../../machine/daemon.ts" ]; then SOURCE=$(cd "$HERE/../.." && pwd); fi
 fi
 if [ -z "$SOURCE" ]; then
-  TEMP=$(mktemp -d -t ff-worker-src)
+  # A template with X's: GNU mktemp (Linux) refuses -t without them.
+  TEMP=$(mktemp -d "${TMPDIR:-/tmp}/ff-worker-src.XXXXXX")
   # ff-factory is public: no credential helper and no prompt, so a keychain out of reach over ssh is never asked (w613).
   GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c credential.interactive=never clone --quiet --depth 1 --branch "$REF" https://github.com/Final-Factory/ff-factory.git "$TEMP/src" ||
     { echo "Could not download the installer (an anonymous git clone of ff-factory failed): check the network, or run it from a local ff-factory checkout with --source DIR." >&2; exit 2; }

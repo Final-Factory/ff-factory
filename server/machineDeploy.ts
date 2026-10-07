@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { run } from './proc.ts';
 import * as win from './machineDeployWin.ts';
+import { linuxControlScript } from './machineDeployLinux.ts';
 import { platformNoun, type MachineGuardSettings, type MachinePlatform, type SandboxPoolSettings } from '../shared/types.ts';
 
 /**
@@ -85,26 +86,35 @@ export function repoSlug(url: string): string | undefined {
   return /[:/]([^/:\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(url.trim())?.[1];
 }
 
-/** The Mac probe script: `key=value` lines (scripts/worker runs it locally, probe() over ssh). Exported for them. */
+/**
+ * The Mac (and Linux) probe script: `key=value` lines (scripts/worker runs it locally, probe() over ssh). Exported for them.
+ * A node counts only if it runs TypeScript: Ubuntu's own nodejs package is built without it (ERR_NO_TYPESCRIPT, biscuit
+ * 2026-10-07), whatever its version.
+ */
 export function macProbeScript(slug = ''): string {
   if (slug && !/^[\w.-]+\/[\w.-]+$/.test(slug)) throw new Error(`"${slug}" is not an owner/name repo slug`);
   return `
 set -u
 echo "uid=$(id -u)"
 echo "home=$HOME"
-# The PATH the user's own terminal has (login + interactive zsh: ~/.zprofile and ~/.zshrc), so agents find
-# what they installed wherever it lives (~/bin/gh, Homebrew, a hand-installed node).
-upath=$(zsh -ilc 'print -r -- "__FFPATH__=$PATH"' </dev/null 2>/dev/null | sed -n 's/^__FFPATH__=//p' | tail -1)
+# The PATH the user's own terminal has (login + interactive zsh on a Mac: ~/.zprofile and ~/.zshrc; the user's own
+# shell where there is no zsh, as on Linux), so agents find what they installed wherever it lives (~/bin/gh, Homebrew,
+# a hand-installed node).
+ush=$(command -v zsh || echo "\${SHELL:-/bin/bash}")
+upath=$("$ush" -ilc 'printf "__FFPATH__=%s\\n" "$PATH"' </dev/null 2>/dev/null | sed -n 's/^__FFPATH__=//p' | tail -1)
 echo "path=$upath"
 best=""; bestn=0; bestv=""
 cands=""
 IFS=:; for d in $upath; do cands="$cands $d/node"; done; unset IFS
-for n in /opt/homebrew/bin/node /usr/local/bin/node "$HOME"/.nvm/versions/node/*/bin/node $cands; do
+tsdir=$(mktemp -d); printf 'const a: number = 1;\\n' >"$tsdir/t.ts"
+for n in /opt/homebrew/bin/node /usr/local/bin/node "$HOME"/.local/node/bin/node "$HOME"/.nvm/versions/node/*/bin/node /usr/bin/node $cands; do
   [ -x "$n" ] || continue
   v=$("$n" -p 'process.versions.node' 2>/dev/null) || continue
+  "$n" --experimental-strip-types --disable-warning=ExperimentalWarning "$tsdir/t.ts" >/dev/null 2>&1 || continue
   num=$(echo "$v" | awk -F. '{printf "%d%03d%03d", $1, $2, $3}')
   if [ "$num" -gt "$bestn" ]; then best="$n"; bestn="$num"; bestv="$v"; fi
 done
+rm -rf "$tsdir"
 echo "node=$best"
 echo "nodev=$bestv"
 c=$(PATH="$HOME/.local/bin:$upath:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" command -v claude || true)
@@ -274,7 +284,7 @@ export interface MachineDirs {
 export function checkDirs(dirs: MachineDirs | undefined, platform: MachinePlatform, host: string) {
   for (const [k, v] of Object.entries(dirs ?? {})) {
     if (!v) continue;
-    if (/^[a-zA-Z]:\\/.test(v) !== (platform === 'win32')) throw new Error(`${k} "${v}" is not a ${platform === 'win32' ? 'Windows' : 'Mac'} path, and ${host} is a ${platformNoun(platform)}`);
+    if (/^[a-zA-Z]:\\/.test(v) !== (platform === 'win32')) throw new Error(`${k} "${v}" is not a ${platform === 'win32' ? 'Windows' : platform === 'linux' ? 'Linux' : 'Mac'} path, and ${host} is a ${platformNoun(platform)}`);
   }
 }
 
@@ -288,6 +298,7 @@ export function platformOfUname(out: string, code: number): MachinePlatform | 'o
   if (/^(MINGW|MSYS|CYGWIN)|_NT-\d/i.test(s)) return 'win32';
   if (code !== 0) return undefined;
   if (/^Darwin$/i.test(s)) return 'darwin';
+  if (/^Linux$/i.test(s)) return 'linux';
   return s ? 'other' : undefined;
 }
 
@@ -300,8 +311,8 @@ export async function detectPlatform(host: string): Promise<MachinePlatform> {
   const r = await run('ssh', [...SSH, host, 'uname', '-s'], { timeoutMs: 30_000 });
   if (r.code === 255) throw new Error(`ssh ${host} failed: ${win.failureDetail(r)}`);
   const u = platformOfUname(r.stdout, r.code);
-  if (u === 'darwin' || u === 'win32') return u;
-  if (u === 'other') throw new Error(`${host} runs ${r.stdout.trim()}; machines are Macs or Windows PCs`);
+  if (u === 'darwin' || u === 'win32' || u === 'linux') return u;
+  if (u === 'other') throw new Error(`${host} runs ${r.stdout.trim()}; machines are Macs, Windows PCs or Linux PCs`);
   const w = await win.psScript(host, "'platform=' + [Environment]::OSVersion.Platform", { timeoutMs: 60_000 });
   if (w.code === 0 && /platform=Win32NT/.test(w.stdout)) return 'win32';
   throw new Error(`could not tell what ${host} runs: uname -s failed (${win.failureDetail(r)}) and PowerShell did not answer (${win.failureDetail(w)})`);
@@ -317,6 +328,8 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   }
   const platform = await detectPlatform(opts.host);
   opts.onPlatform?.(platform);
+  // A Linux PC is installed on the PC itself, as a worker root (scripts/worker/install.sh): no deploy over ssh.
+  if (platform === 'linux') throw new Error(`${opts.host} is a Linux PC: install its daemon there with scripts/worker/install.sh (docs/worker-install.md); the portal does not deploy Linux PCs over ssh`);
   return platform === 'win32' ? deployWindows(opts) : deployMac(opts);
 }
 
@@ -586,6 +599,10 @@ export async function controlDaemon(host: string, platform: MachinePlatform | un
       .filter(Boolean)
       .join('; ');
   }
+  if (pf === 'linux') {
+    await must(host, `daemon ${action}`, linuxControlScript(action, LABEL, appDir), 60_000);
+    return action === 'stop' ? 'stopped the systemd user service (it starts again with the next desktop session)' : action === 'start' ? 'started the systemd user service' : 'restarted the systemd user service';
+  }
   await must(host, `daemon ${action}`, macControlScript(action, LABEL, appDir), 60_000);
   return action === 'stop' ? 'unloaded the LaunchAgent (it loads again at the next login)' : action === 'start' ? 'loaded the LaunchAgent' : 'restarted the LaunchAgent';
 }
@@ -594,5 +611,6 @@ export async function controlDaemon(host: string, platform: MachinePlatform | un
 export async function undeploy(host: string, platform?: MachinePlatform, appDir?: string, local = false) {
   const pf = local ? 'win32' : (platform ?? (await detectPlatform(host)));
   if (pf === 'win32') await mustPs(local ? win.LOCAL : host, 'uninstall', win.uninstallScript(appDir), { timeoutMs: 2 * 60_000 });
+  else if (pf === 'linux') await must(host, 'uninstall', linuxControlScript('uninstall', LABEL, appDir), 60_000);
   else await must(host, 'uninstall', macControlScript('uninstall', LABEL, appDir), 60_000);
 }

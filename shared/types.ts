@@ -410,11 +410,14 @@ export interface MachineStats extends HostStats {
 
 export type MachineStatus = 'deploying' | 'ready' | 'error';
 
-/** What a machine runs: a Mac (LaunchAgent) or a Windows PC (Task Scheduler), docs/machines.md. */
-export type MachinePlatform = 'darwin' | 'win32';
+/** What a machine runs: a Mac (LaunchAgent), a Windows PC (Task Scheduler) or a Linux PC (a systemd user service), docs/machines.md. */
+export type MachinePlatform = 'darwin' | 'win32' | 'linux';
 
-/** "Mac" or "Windows PC", for sentences about a machine (a record from before platforms is a Mac). */
-export const platformNoun = (p: MachinePlatform | undefined) => (p === 'win32' ? 'Windows PC' : 'Mac');
+/** "Mac", "Windows PC" or "Linux PC", for sentences about a machine (a record from before platforms is a Mac). */
+export const platformNoun = (p: MachinePlatform | undefined) => (p === 'win32' ? 'Windows PC' : p === 'linux' ? 'Linux PC' : 'Mac');
+
+/** A Node `process.platform` as a machine platform (anything that is neither Windows nor Linux is taken for a Mac). */
+export const machinePlatformOf = (p: string): MachinePlatform => (p === 'win32' ? 'win32' : p === 'linux' ? 'linux' : 'darwin');
 
 /** A machine's daemon folder: its app_dir, else <home>/.ff-factory. */
 export const appDirOf = (m: Pick<Machine, 'appDir' | 'home'>) => m.appDir || `${m.home}/.ff-factory`;

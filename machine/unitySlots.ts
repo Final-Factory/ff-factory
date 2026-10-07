@@ -95,31 +95,36 @@ export function splitArgs(cmd: string): string[] {
 }
 
 const MAC_EDITOR = '/Unity.app/Contents/MacOS/Unity';
+const LINUX_EDITOR = '/Editor/Unity';
+/** The tail of the editor binary's path: Unity.app's on a Mac, <version>/Editor/Unity on Linux. */
+const editorTail = (platform: UnityPlatform) => (platform === 'linux' ? LINUX_EDITOR : MAC_EDITOR);
 
 /**
  * Whether a process is the Unity editor binary itself (not a script that names it in its arguments): on Windows its
- * image name, else the program of its command line; on a Mac a command line that starts with the path of
- * Unity.app's binary (a path may hold spaces, so the part before it may not hold " /" or " -", which a program's
- * arguments would).
+ * image name, else the program of its command line; on a Mac (and Linux) a command line that starts with the path of
+ * Unity.app's binary (<version>/Editor/Unity) (a path may hold spaces, so the part before it may not hold " /" or
+ * " -", which a program's arguments would).
  */
 export function isUnityBinary(p: Pick<Proc, 'cmd' | 'name'>, platform: UnityPlatform): boolean {
   if (platform === 'win32') {
     if (p.name) return /^unity\.exe$/i.test(p.name);
     return /^unity\.exe$/i.test(path.win32.basename(splitArgs(p.cmd)[0] ?? ''));
   }
-  const at = p.cmd.indexOf(MAC_EDITOR);
+  const tail = editorTail(platform);
+  const at = p.cmd.indexOf(tail);
   if (at < 0 || !p.cmd.startsWith('/')) return false;
-  const after = p.cmd[at + MAC_EDITOR.length];
+  const after = p.cmd[at + tail.length];
   if (after !== undefined && !/\s/.test(after)) return false;
   const before = p.cmd.slice(0, at);
   return !before.includes(' /') && !before.includes(' -');
 }
 
-/** The arguments after the program (a Mac's ps joins them with spaces, so they are split on whitespace there). */
+/** The arguments after the program (a Mac's and Linux's ps join them with spaces, so they are split on whitespace there). */
 function argsOf(cmd: string, platform: UnityPlatform): string[] {
   if (platform === 'win32') return splitArgs(cmd).slice(1);
-  const at = cmd.indexOf(MAC_EDITOR);
-  return cmd.slice(at + MAC_EDITOR.length).trim().split(/\s+/).filter(Boolean);
+  const tail = editorTail(platform);
+  const at = cmd.indexOf(tail);
+  return cmd.slice(at + tail.length).trim().split(/\s+/).filter(Boolean);
 }
 
 /** The value after a flag (case-insensitive); on a Mac a -projectPath with spaces runs to the next flag. */
@@ -151,9 +156,10 @@ export function unityProcesses(procs: Proc[], platform: UnityPlatform): UnityPro
   return out;
 }
 
-/** Built game players (FinalFactory.exe, FinalFactory.app): not editors, reported beside them. */
+/** Built game players (FinalFactory.exe, FinalFactory.app, a Linux build's FinalFactory.x86_64): not editors, reported beside them. */
 export function gamePlayers(procs: Proc[], platform: UnityPlatform): Proc[] {
   if (platform === 'win32') return procs.filter((p) => /^final ?factory.*\.exe$/i.test(p.name ?? path.win32.basename(splitArgs(p.cmd)[0] ?? '')));
+  if (platform === 'linux') return procs.filter((p) => /\/final ?factory[^/]*\.x86_64(\s|$)/i.test(p.cmd) && p.cmd.startsWith('/'));
   return procs.filter((p) => /\/final ?factory[^/]*\.app\/Contents\/MacOS\//i.test(p.cmd) && p.cmd.startsWith('/'));
 }
 
@@ -977,7 +983,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     const cur = readJson<ArbiterFile>(arbiterFile(dir));
     if (cur && Date.now() - Date.parse(cur.at) <= ARBITER_FRESH_MS && cur.pid !== process.pid && isAlive(cur.pid)) throw new Error(`an arbiter (pid ${cur.pid}) already serves ${dir}; give another --dir`);
     const { realDeps } = await import('./unity.ts');
-    const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : 'darwin';
+    const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
     const procs = realDeps(platform).procs;
     const limit = o.limit;
     const slots = new UnitySlots({

@@ -13,10 +13,12 @@ import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs,
  * and an automatic restart of a hung or crashed editor (MacUnityWatch). It only ever touches the editor that
  * has this clone open (and the processes that editor started), never git and never another project's editor.
  * Written for the Macs first (hence the names); a Windows PC (`platform` win32) gets the same, minus App Nap (its
- * dialog watch reads windows through scripts/unity-windows.ps1, as the host's does).
+ * dialog watch reads windows through scripts/unity-windows.ps1, as the host's does). A Linux PC (`linux`) gets the
+ * Mac's process handling with Linux paths (the editor is <version>/Editor/Unity, the Hub's settings in ~/.config),
+ * and no dialog watch.
  */
 
-export type UnityPlatform = 'darwin' | 'win32';
+export type UnityPlatform = 'darwin' | 'win32' | 'linux';
 
 export interface Proc {
   pid: number;
@@ -51,8 +53,12 @@ export function projectPathOf(cmd: string): string | undefined {
   return m ? norm(m[2] ?? m[3]) : undefined;
 }
 
-/** The Unity editor binary in a command line: Unity.app's on a Mac, Unity.exe on Windows (not "Unity Hub.exe"). */
-const isEditorCmd = (cmd: string, platform: UnityPlatform) => (platform === 'win32' ? /[\\/]Unity\.exe"?(\s|$)/i.test(cmd) : /\/Unity\.app\/Contents\/MacOS\/Unity(\s|$)/.test(cmd));
+/** The Unity editor binary in a command line: Unity.app's on a Mac, Unity.exe on Windows (not "Unity Hub.exe"), <version>/Editor/Unity on Linux. */
+const isEditorCmd = (cmd: string, platform: UnityPlatform) =>
+  platform === 'win32' ? /[\\/]Unity\.exe"?(\s|$)/i.test(cmd) : platform === 'linux' ? LINUX_EDITOR.test(cmd) : /\/Unity\.app\/Contents\/MacOS\/Unity(\s|$)/.test(cmd);
+
+/** The Linux editor's binary at the start of a command line: an absolute path ending in /Editor/Unity. */
+const LINUX_EDITOR = /^\s*\/\S*\/Editor\/Unity(\s|$)/;
 
 /**
  * The Unity editor with `repo` open: the Unity binary with that project path, not a -batchMode one (its
@@ -81,6 +87,7 @@ export function treeOf(procs: Proc[], root: number): number[] {
  */
 export function spareOnRestart(p: Proc, repo: string, platform: UnityPlatform = 'darwin'): string | undefined {
   if (platform === 'win32') return spareOnRestartWin(p, repo);
+  if (platform === 'linux') return spareOnRestartLinux(p, repo);
   const app = /\/([^/]+)\.app\/Contents\//.exec(p.cmd)?.[1];
   if (app && app !== 'Unity') return app === 'Unity Hub' ? 'Unity Hub' : `the ${app} app`;
   if (/\/Unity\.app\/Contents\/MacOS\/Unity(\s|$)/.test(p.cmd)) {
@@ -88,6 +95,23 @@ export function spareOnRestart(p: Proc, repo: string, platform: UnityPlatform = 
     if (proj && proj !== norm(repo)) return `another project's editor (${proj})`;
   }
   if (!/\/Unity\.app\//.test(p.cmd) && /(^|\/)(node|claude)(\s|$)/.test(p.cmd)) return 'node/claude';
+  return undefined;
+}
+
+/**
+ * spareOnRestart on Linux: Unity Hub, a game player (a Unity Linux build is <name>.x86_64), another project's editor,
+ * and node or claude. Everything else the editor started goes with it, as on a Mac.
+ */
+function spareOnRestartLinux(p: Proc, repo: string): string | undefined {
+  if (/(^|\/)unityhub(-bin)?(\s|$)/i.test(p.cmd)) return 'Unity Hub';
+  const player = /(?:^|\/)([^/\s]+)\.x86_64(\s|$)/.exec(p.cmd)?.[1];
+  if (player) return `the ${player} player`;
+  if (LINUX_EDITOR.test(p.cmd)) {
+    const proj = projectPathOf(p.cmd);
+    if (proj && proj !== norm(repo)) return `another project's editor (${proj})`;
+    return undefined;
+  }
+  if (/(^|\/)(node|claude)(\s|$)/.test(p.cmd)) return 'node/claude';
   return undefined;
 }
 
@@ -141,22 +165,25 @@ export function reportersFor(procs: Proc[], repo: string, platform: UnityPlatfor
   return procs.filter((p) => /Unity ?Bug ?Reporter|UnityCrashHandler/i.test(p.cmd) && p.cmd.includes(norm(repo)));
 }
 
-/** Unity Hub's settings folder: %APPDATA%\UnityHub on Windows, ~/Library/Application Support/UnityHub on a Mac. */
+/** Unity Hub's settings folder: %APPDATA%\UnityHub on Windows, ~/Library/Application Support/UnityHub on a Mac, ~/.config/UnityHub on Linux. */
 export function hubConfigDir(platform: UnityPlatform, env: NodeJS.ProcessEnv, home: string): string | undefined {
   if (platform === 'win32') return env.APPDATA ? path.win32.join(env.APPDATA, 'UnityHub') : undefined;
+  if (platform === 'linux') return path.posix.join(env.XDG_CONFIG_HOME || path.posix.join(home, '.config'), 'UnityHub');
   return path.posix.join(home, 'Library', 'Application Support', 'UnityHub');
 }
 
 /**
  * Unity Hub's editor folders, each holding <version>/...: the install location chosen in the Hub
  * (secondaryInstallPath.json, a JSON string; e.g. C:\Program Files\Unity\Editor), then the defaults (Program Files
- * on Windows, /Applications and ~/Applications on a Mac).
+ * on Windows, /Applications and ~/Applications on a Mac, ~/Unity/Hub/Editor on Linux).
  */
 export function hubEditorDirs(platform: UnityPlatform, env: NodeJS.ProcessEnv, home: string, read: (p: string) => string): string[] {
   const dirs =
     platform === 'win32'
       ? [env.ProgramFiles, env.ProgramW6432, 'C:\\Program Files'].filter((d): d is string => !!d).map((d) => path.win32.join(d, 'Unity', 'Hub', 'Editor'))
-      : ['/Applications/Unity/Hub/Editor', path.posix.join(home, 'Applications/Unity/Hub/Editor')];
+      : platform === 'linux'
+        ? [path.posix.join(home, 'Unity/Hub/Editor')]
+        : ['/Applications/Unity/Hub/Editor', path.posix.join(home, 'Applications/Unity/Hub/Editor')];
   const hub = hubConfigDir(platform, env, home);
   if (hub) {
     try {
@@ -185,7 +212,10 @@ export function hubListedEditors(platform: UnityPlatform, env: NodeJS.ProcessEnv
     const o = v as Record<string, unknown>;
     const locs = typeof o.location === 'string' ? [o.location] : Array.isArray(o.location) ? o.location.filter((l): l is string => typeof l === 'string') : [];
     if (typeof o.version === 'string' && locs.length) {
-      for (const l of locs) out.push({ version: o.version, bin: platform === 'darwin' && /\.app\/?$/.test(l) ? P.join(l, 'Contents/MacOS/Unity') : l });
+      for (const l of locs) {
+        const bin = platform === 'darwin' && /\.app\/?$/.test(l) ? P.join(l, 'Contents/MacOS/Unity') : platform === 'linux' && !/\/Unity$/.test(l) ? P.join(l, 'Editor/Unity') : l;
+        out.push({ version: o.version, bin });
+      }
     } else Object.values(o).forEach(visit);
   };
   for (const f of ['editors-v2.json', 'editors.json']) {
@@ -209,7 +239,7 @@ export interface UnityLocation {
 /**
  * The editor binary: the machine's unity_path, else the project's Unity version (ProjectSettings/ProjectVersion.txt)
  * in its unity_editor_root, then the editors Unity Hub lists, then the Hub's install folders (its chosen one first).
- * A folder of versions holds <version>\Editor\Unity.exe on Windows, <version>/Unity.app on a Mac.
+ * A folder of versions holds <version>\Editor\Unity.exe on Windows, <version>/Unity.app on a Mac, <version>/Editor/Unity on Linux.
  */
 export function editorBinary(repo: string, exists: (p: string) => boolean, read: (p: string) => string, home = os.homedir(), platform: UnityPlatform = 'darwin', env: NodeJS.ProcessEnv = process.env, where: UnityLocation = {}): string {
   if (where.unityPath) {
@@ -223,7 +253,8 @@ export function editorBinary(repo: string, exists: (p: string) => boolean, read:
     // no version file
   }
   if (!version) throw new Error(`no Unity version in ${repo}/ProjectSettings/ProjectVersion.txt`);
-  const inBase = (base: string) => (platform === 'win32' ? path.win32.join(base, version, 'Editor', 'Unity.exe') : path.posix.join(base, version, 'Unity.app/Contents/MacOS/Unity'));
+  const inBase = (base: string) =>
+    platform === 'win32' ? path.win32.join(base, version, 'Editor', 'Unity.exe') : platform === 'linux' ? path.posix.join(base, version, 'Editor', 'Unity') : path.posix.join(base, version, 'Unity.app/Contents/MacOS/Unity');
   const bases = [...(where.editorRoot ? [where.editorRoot] : []), ...hubEditorDirs(platform, env, home, read)];
   const listed = hubListedEditors(platform, env, home, read).filter((e) => e.version === version).map((e) => e.bin);
   for (const bin of [...(where.editorRoot ? [inBase(where.editorRoot)] : []), ...listed, ...bases.map(inBase)]) if (exists(bin)) return bin;
@@ -381,9 +412,13 @@ export function winLaunchScript(bin: string, args: string[], cwd: string): strin
   return `(Start-Process -FilePath ${q(bin)} -ArgumentList ${q(argLine)} -WorkingDirectory ${q(cwd)} -PassThru).Id`;
 }
 
-/** The real machine: ps, signals and a detached launch on a Mac; CIM, taskkill and Start-Process on Windows. */
+/** The real machine: ps, signals and a detached launch on a Mac (and Linux, without App Nap); CIM, taskkill and Start-Process on Windows. */
 export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
   const base = realDepsMac();
+  if (platform === 'linux') {
+    const { noAppNap: _n, ...linux } = base;
+    return linux;
+  }
   if (platform !== 'win32') return base;
   const ps = (script: string, timeoutMs: number) => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs });
   return {
@@ -498,9 +533,10 @@ export async function listWinDialogs(pid: number): Promise<{ dialogs: Dialog[]; 
   return { dialogs: findDialogs(wins), closable: findClosable(wins), mainTitle: main?.title, windows: wins.length };
 }
 
-/** The editor log Unity writes by default: ~/Library/Logs/Unity on a Mac, %LOCALAPPDATA%\Unity\Editor on Windows. */
+/** The editor log Unity writes by default: ~/Library/Logs/Unity on a Mac, %LOCALAPPDATA%\Unity\Editor on Windows, ~/.config/unity3d on Linux. */
 export function editorLogPath(platform: UnityPlatform, env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
   if (platform === 'win32') return path.win32.join(env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local'), 'Unity', 'Editor', 'Editor.log');
+  if (platform === 'linux') return path.posix.join(env.XDG_CONFIG_HOME || path.posix.join(home, '.config'), 'unity3d', 'Editor.log');
   return MAC_EDITOR_LOG;
 }
 
@@ -549,6 +585,7 @@ export class MacUnityWatch {
     this.report = report;
     this.opts = { max: 3, windowMinutes: 30, hang: DEFAULT_HANG, ...opts };
     const log = u.logFile ?? editorLogPath(u.platform);
+    // Linux takes the Mac's calls, which find no dialogs off a Mac: there is no dialog watch on Linux yet.
     const mac = u.platform !== 'win32';
     this.d = {
       logStat: () => {

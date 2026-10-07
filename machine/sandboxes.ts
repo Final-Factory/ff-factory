@@ -183,7 +183,7 @@ export async function treeBytes(dir: string): Promise<number | undefined> {
 }
 
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
-export function realPoolDeps(platform: 'darwin' | 'win32', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined): PoolDeps {
+export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined): PoolDeps {
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
   const base = realDeps(platform);
   let cached: { at: number; p: Promise<Proc[]> } | undefined;

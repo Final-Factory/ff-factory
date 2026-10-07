@@ -255,7 +255,7 @@ test('windows (real PowerShell): the probe survives a repo without an origin, an
   assert.ok(parseWinProbe(known.stdout).sid);
 });
 
-test('platform: uname tells a Mac; a Windows PC fails it, or answers MINGW/MSYS when Git\'s tools are on its PATH', () => {
+test('platform: uname tells a Mac or a Linux PC; a Windows PC fails it, or answers MINGW/MSYS when Git\'s tools are on its PATH', () => {
   assert.equal(platformOfUname('Darwin\n', 0), 'darwin');
   assert.equal(platformOfUname('MINGW64_NT-10.0-26100\n', 0), 'win32');
   assert.equal(platformOfUname('MSYS_NT-10.0-22631', 0), 'win32');
@@ -267,7 +267,8 @@ test('platform: uname tells a Mac; a Windows PC fails it, or answers MINGW/MSYS 
   assert.equal(platformOfUname('Darwin extra', 0), 'other', 'only an exact Darwin is a Mac');
   assert.equal(platformOfUname("'uname' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n", 1), undefined, 'cmd.exe: ask PowerShell next');
   assert.equal(platformOfUname('', 1), undefined);
-  assert.equal(platformOfUname('Linux\n', 0), 'other');
+  assert.equal(platformOfUname('Linux\n', 0), 'linux');
+  assert.equal(platformOfUname('FreeBSD\n', 0), 'other');
 });
 
 test('platform: ssh reachability runs "exit 0", which cmd.exe and PowerShell run too ("true" is not a command there)', () => {
@@ -286,9 +287,13 @@ test('mac: start, stop, restart and uninstall of the LaunchAgent', () => {
   assert.doesNotMatch(macControlScript('restart'), /pkill/);
 });
 
-test('daemon: keeps the machine awake with caffeinate on a Mac, SetThreadExecutionState on Windows, nothing elsewhere', () => {
+test('daemon: keeps the machine awake with caffeinate on a Mac, SetThreadExecutionState on Windows, a logind inhibitor on Linux, nothing elsewhere', () => {
   assert.deepEqual(keepAwakeCommand('darwin', 42), ['caffeinate', '-i', '-w', '42']);
-  assert.equal(keepAwakeCommand('linux', 42), undefined);
+  const l = keepAwakeCommand('linux', 42)!;
+  assert.equal(l[0], 'systemd-inhibit');
+  assert.ok(l.includes('--what=idle:sleep'));
+  assert.deepEqual(l.slice(-4), ['tail', '--pid=42', '-f', '/dev/null'], 'ends with the daemon, like caffeinate -w');
+  assert.equal(keepAwakeCommand('freebsd', 42), undefined);
   const w = keepAwakeCommand('win32', 42)!;
   assert.equal(w[0], 'powershell.exe');
   const ps = decode(w[w.indexOf('-EncodedCommand') + 1]).toString('utf16le');
