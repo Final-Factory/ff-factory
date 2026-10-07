@@ -126,8 +126,7 @@ A member keeps the rule above: their own requests only ("w234 is Ben's request, 
 reopens another person's request").
 
 The ledger is `data/work.json`: every open request and the newest 300 closed ones (stalled ones are kept like open
-ones). The page gets the open ones, the stalled ones and those closed in the last 3 days. Workers read their own entries and the
-ones those name with `read_work`, and the whole list only with a grant ([below](#workers-read-the-ledger)).
+ones). The page gets the open ones, the stalled ones and those closed in the last 3 days.
 
 ### What a request is doing now
 
