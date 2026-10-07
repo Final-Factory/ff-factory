@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { globBase, portalSecretRules, readProblem, readTargets, secretReadGuard, type ReadCtx, type ReadFs } from './secretGuard.ts';
+import { globBase, mayList, ownerDataReads, portalSecretRules, readProblem, readTargets, secretReadGuard, type ReadCtx, type ReadFs, type SecretRules } from './secretGuard.ts';
+import { memoryGuard } from './orchestratorMemory.ts';
 import { checkStandingShell, withHomeSecrets } from './standingGuard.ts';
 
 /**
@@ -116,10 +117,11 @@ test('w467: a link that leads to a secret is refused where it really leads', () 
 test('w467: what each read tool reads: Read and LS a path, Grep and Glob a tree from the fixed part of their pattern', () => {
   assert.deepEqual(readTargets('Read', { file_path: '/srv/fff/config/config.json' }), [{ path: '/srv/fff/config/config.json', kind: 'file' }]);
   assert.deepEqual(readTargets('Grep', { pattern: 'TOKEN' }), [{ path: '.', kind: 'search' }]);
-  assert.deepEqual(readTargets('Glob', { pattern: '/srv/fff/**/*.json' }), [{ path: '/srv/fff', kind: 'search' }]);
-  assert.deepEqual(readTargets('Glob', { pattern: 'C:/ff-sandboxes/data/*.json' }), [{ path: 'C:/ff-sandboxes/data', kind: 'search' }]);
-  assert.deepEqual(readTargets('Glob', { pattern: '**/*.ts', path: '/srv/fff/base' }), [{ path: '/srv/fff/base', kind: 'search' }]);
-  assert.deepEqual(readTargets('Glob', { pattern: '../config/*.json' }), [{ path: './../config', kind: 'search' }]);
+  assert.deepEqual(readTargets('Glob', { pattern: '/srv/fff/**/*.json' }), [{ path: '/srv/fff', kind: 'search', names: true }]);
+  assert.deepEqual(readTargets('Glob', { pattern: 'C:/ff-sandboxes/data/*.json' }), [{ path: 'C:/ff-sandboxes/data', kind: 'search', names: true }]);
+  assert.deepEqual(readTargets('Glob', { pattern: '**/*.ts', path: '/srv/fff/base' }), [{ path: '/srv/fff/base', kind: 'search', names: true }]);
+  assert.deepEqual(readTargets('Glob', { pattern: '../config/*.json' }), [{ path: './../config', kind: 'search', names: true }]);
+  assert.deepEqual(readTargets('LS', { path: '/srv/fff/data' }), [{ path: '/srv/fff/data', kind: 'file', names: true }]);
   assert.deepEqual(readTargets('Bash', { command: 'cat x' }), []);
   assert.equal(globBase('docs/*.md'), 'docs');
   assert.equal(globBase('README.md'), '');
@@ -166,4 +168,180 @@ test("w467: on Windows a standing agent's shell is held to the same, with drive 
   assert.match(checkStandingShell('cat /c/Users/ben/.ssh/id_ed25519', ctx) ?? '', /is FF Factory's own/);
   assert.match(checkStandingShell('grep -r token C:/ff-sandboxes', ctx) ?? '', /A search from/);
   assert.equal(checkStandingShell('cat notes.md', ctx), undefined);
+});
+
+// ---------------------------------------------------------------- w650: Lothsahn's and Ben's orchestrators read data/
+
+/** An owner orchestrator's rules, composed as server/agents.ts orchestratorSecrets does. */
+function ownerRules(base: SecretRules, dataDir: string, memoryRoot: string, platform: NodeJS.Platform): SecretRules {
+  const reads = ownerDataReads(dataDir, memoryRoot, platform);
+  return { ...base, allow: [...base.allow, ...reads.allow], list: reads.list };
+}
+
+const D = '/srv/fff/data';
+const ownerLinux = ownerRules(linuxRules, D, `${D}/orchestrator-memory`, 'linux');
+/** /srv/fff/data/<name> is a folder when its name is listed here; every other existing path is a file. */
+const folders = new Set([D, `${D}/transcripts`, `${D}/cleanup`, `${D}/orchestrator-memory`, `${D}/orchestrator-memory/person-ben`, `${D}/evil.md`]);
+const dataFs: ReadFs = { realpath: () => undefined, isDir: (p) => folders.has(p.replace(/\/+$/, '')) || !/\.[a-z0-9]+$/i.test(p) };
+const OWNER: ReadCtx = { ...LINUX, fsx: dataFs };
+const ownerFile = (p: string, c: ReadCtx = OWNER) => readProblem(p, 'file', ownerLinux, c);
+const ownerSearch = (p: string, c: ReadCtx = OWNER) => readProblem(p, 'search', ownerLinux, c);
+
+/** Every secret data/ holds (the audit for w650: server/auth.ts, machineTokens.ts, vault.ts, notify.ts, outsideWatch.ts). */
+const DATA_SECRETS = [
+  'users.json',
+  'users.json.1',
+  'auth-sessions.json',
+  'auth-sessions.json.tmp',
+  'api-keys.json',
+  'machine-tokens.json',
+  'machine-tokens.json.damaged-2026-10-07T00-00-00-000Z',
+  'vault.json',
+  'vault.json.2',
+  'vapid.json',
+  'push-subscriptions.json',
+  'outside-watch.json',
+  '.users.json.Ab12Cd',
+];
+
+test('w650: an owner orchestrator reads data/\'s reports, logs, ledger and history', () => {
+  for (const p of [
+    `${D}/w643-migration.md`,
+    `${D}/work.json`,
+    `${D}/work.json.1`,
+    `${D}/ledger.json`,
+    `${D}/ledger-detach-2026-10-01T00-00-00-000Z.json`,
+    `${D}/intake.json`,
+    `${D}/max.json`,
+    `${D}/usage.json`,
+    `${D}/spend.json`,
+    `${D}/timers.json`,
+    `${D}/wakes.json`,
+    `${D}/ops-worker.json`,
+    `${D}/update.result.json`,
+    `${D}/resume.json`,
+    `${D}/restart.request`,
+    `${D}/supervisor.pid`,
+    `${D}/cleanup-log.jsonl`,
+    `${D}/cleanup-log.jsonl.1`,
+    `${D}/cleanup/m3/cleanup-log.jsonl`,
+    `${D}/transcripts/5f1e.jsonl`,
+    `${D}/providers/ffbox.json`,
+    `${D}/orchestrator-inbox/note.txt`,
+    `${D}/attachments/att_1-Player.log`,
+    `${D}/orchestrator-memory/dispatcher/MEMORY.md`,
+    `${D}/orchestrator-memory/person-ben/MEMORY.md`,
+    `${D}/orchestrator-memory/person-ben/notes/deploys.md`,
+    '../data/w643-migration.md',
+  ]) assert.equal(ownerFile(p), undefined, p);
+  // Grep a readable folder, or one readable file.
+  for (const p of [`${D}/transcripts`, `${D}/cleanup`, `${D}/orchestrator-memory/person-ben`, `${D}/w643-migration.md`, `${D}/cleanup-log.jsonl`]) assert.equal(ownerSearch(p), undefined, p);
+});
+
+test('w650: an owner orchestrator still never reads a secret in data/, nor anything nobody listed (fail closed)', () => {
+  for (const name of [
+    ...DATA_SECRETS,
+    'state.json',
+    'state.json.1',
+    'send-queue.json',
+    'ops-deploy.grant',
+    'uploads/s1/1.png',
+    'voice-debug/clip.wav',
+    'tools/whisper/model.bin',
+    'server.err.log',
+    'supervisor.log',
+    'something-new.json',
+    'orchestrator-memory/.git/config',
+    'orchestrator-memory.backup/1/person-ben/MEMORY.md',
+    'orchestrator-memory/MEMORY.md',
+    'transcripts.json',
+  ]) assert.match(ownerFile(`${D}/${name}`) ?? '', /is FF Factory's own/, name);
+  // The rest of FF Factory's secrets as before.
+  for (const p of ['/srv/fff/config/config.json', '/srv/fff/secrets/claude-token', '/srv/fff/home/.ssh/id_ed25519', '/etc/fff/vault.key']) assert.match(ownerFile(p) ?? '', /is FF Factory's own/, p);
+  // "..", a readable file used as a folder, and a relative path all resolve to the secret.
+  for (const p of [`${D}/transcripts/../users.json`, `${D}/w643-migration.md/../vault.json`, `${D}/orchestrator-memory/person-ben/../../vapid.json`, '../data/api-keys.json', `${D}/./auth-sessions.json`]) {
+    assert.match(ownerFile(p) ?? '', /is FF Factory's own/, p);
+  }
+});
+
+test('w650: a Grep over all of data/ is refused; a pattern never lets a search into a folder', () => {
+  for (const p of [D, `${D}/`, '/srv/fff', '/srv', '/', `${D}/orchestrator-memory`, `${D}/uploads`, `${D}/evil.md`, `${D}/transcripts/..`]) assert.ok(ownerSearch(p), p);
+  assert.match(ownerSearch(D) ?? '', /is FF Factory's own/);
+  // A file pattern with no file behind it (nothing to tell a folder from a file) is refused for a search too.
+  assert.ok(readProblem(`${D}/w643-migration.md`, 'search', ownerLinux, LINUX), 'unknown: fail closed');
+});
+
+test('w650: a link out of a readable place is judged where it really leads', () => {
+  const links: Record<string, string> = {
+    [`${D}/notes.md`]: `${D}/users.json`,
+    [`${D}/transcripts/x.jsonl`]: '/srv/fff/secrets/claude-token',
+    [`${D}/transcripts/all`]: D,
+    [`${D}/orchestrator-memory/person-ben/key.md`]: '/srv/fff/home/.ssh/id_ed25519',
+  };
+  const fsx: ReadFs = { realpath: (p) => links[p], isDir: dataFs.isDir };
+  const c = { ...LINUX, fsx };
+  for (const p of Object.keys(links)) assert.match(readProblem(p, 'file', ownerLinux, c) ?? '', /is FF Factory's own/, p);
+  assert.ok(readProblem(`${D}/transcripts/all`, 'search', ownerLinux, c), 'a Grep through a link to data/ itself');
+  assert.equal(mayList(`${D}/transcripts/all`, ownerLinux, c), true, 'a listing of data/ through it shows names only');
+  assert.equal(mayList(`${D}/out`, ownerLinux, { ...LINUX, fsx: { realpath: (p) => (p === `${D}/out` ? '/srv/fff/config' : undefined) } }), false, 'a link out of data/ is not listed');
+});
+
+test('w650: LS and Glob list data/\'s names; a listing outside it keeps the old rules', async () => {
+  for (const p of [D, `${D}/uploads`, `${D}/orchestrator-memory`]) assert.equal(mayList(p, ownerLinux, OWNER), true, p);
+  for (const p of ['/srv/fff', `${D}/../config`, '/srv/fff/secrets', '~/.ssh']) assert.equal(mayList(p, ownerLinux, OWNER), false, p);
+  assert.equal(mayList(D, linuxRules, OWNER), false, 'nobody else lists it');
+  const call = (g: ReturnType<typeof secretReadGuard>, tool: string, input: Record<string, unknown>) =>
+    g({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input } as never, undefined, { signal: new AbortController().signal }) as Promise<{ hookSpecificOutput?: { permissionDecision?: string } }>;
+  const owner = secretReadGuard(ownerLinux, '/srv/fff/base', 'linux', dataFs, '/srv/fff/home');
+  const deny = async (tool: string, input: Record<string, unknown>) => (await call(owner, tool, input)).hookSpecificOutput?.permissionDecision === 'deny';
+  assert.equal(await deny('Read', { file_path: `${D}/w643-migration.md` }), false);
+  assert.equal(await deny('Grep', { pattern: 'before', path: `${D}/w643-migration.md` }), false);
+  assert.equal(await deny('Grep', { pattern: 'w612', path: `${D}/transcripts` }), false);
+  assert.equal(await deny('Glob', { pattern: '*.md', path: D }), false);
+  assert.equal(await deny('Glob', { pattern: `${D}/**/*` }), false);
+  assert.equal(await deny('LS', { path: D }), false);
+  assert.equal(await deny('Read', { file_path: `${D}/users.json` }), true);
+  assert.equal(await deny('Read', { file_path: `${D}/state.json` }), true);
+  assert.equal(await deny('Grep', { pattern: 'sk-ant', path: D }), true);
+  assert.equal(await deny('Grep', { pattern: 'sk-ant', path: D, glob: '*.md' }), true, 'a glob filter does not open a search of data/');
+  assert.equal(await deny('Glob', { pattern: '../config/*.json', path: D }), true, 'out of data/: the old rules');
+  assert.equal(await deny('Glob', { pattern: '/srv/fff/**/config.json' }), true);
+  // The dispatcher and other people's orchestrators keep w467's rules.
+  const other = secretReadGuard(linuxRules, '/srv/fff/base', 'linux', dataFs, '/srv/fff/home');
+  for (const [tool, input] of [['Read', { file_path: `${D}/w643-migration.md` }], ['Glob', { pattern: '*.md', path: D }], ['LS', { path: D }]] as const) {
+    assert.equal((await call(other, tool, input)).hookSpecificOutput?.permissionDecision, 'deny', tool);
+  }
+});
+
+test('w650: on Windows, the owner rules hold in every spelling', () => {
+  const W = 'C:\\ff-sandboxes\\data';
+  const rules = ownerRules(winRules, W, `${W}\\orchestrator-memory`, 'win32');
+  const c: ReadCtx = { ...WIN, fsx: { realpath: () => undefined, isDir: (p) => !/\.[a-z0-9]+$/i.test(p) } };
+  for (const p of [`${W}\\w643-migration.md`, 'c:/FF-Sandboxes/DATA/W643-Migration.MD', '/c/ff-sandboxes/data/work.json', `${W}\\Transcripts\\a.jsonl`, `${W}\\orchestrator-memory\\Person-Lothsahn\\MEMORY.md`]) {
+    assert.equal(readProblem(p, 'file', rules, c), undefined, p);
+  }
+  for (const p of [`${W}\\Users.JSON`, 'c:/ff-sandboxes/data/vault.json', `${W}\\state.json`, `${W}\\transcripts\\..\\api-keys.json`, '\\\\?\\C:\\ff-sandboxes\\data\\w643-migration.md']) {
+    assert.ok(readProblem(p, 'file', rules, c), p);
+  }
+  assert.ok(readProblem(W, 'search', rules, c));
+  assert.equal(mayList('C:/FF-SANDBOXES/data', rules, c), true);
+  assert.equal(mayList('\\\\localhost\\c$\\ff-sandboxes\\data', rules, c), false);
+});
+
+test('w650: every write to data/ stays refused, the owner orchestrators\' included; only its own memory folder takes one', async () => {
+  const own = `${D}/orchestrator-memory/person-ben`;
+  const hook = memoryGuard(own, () => true, 'linux', { realpath: () => undefined, lstat: () => undefined });
+  const decide = async (tool: string, input: Record<string, unknown>) =>
+    ((await hook({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input } as never, undefined, { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision;
+  for (const [tool, input] of [
+    ['Write', { file_path: `${D}/w643-migration.md`, content: 'x' }],
+    ['Edit', { file_path: `${D}/work.json`, old_string: 'a', new_string: 'b' }],
+    ['Write', { file_path: `${D}/transcripts/5f1e.jsonl`, content: 'x' }],
+    ['Write', { file_path: `${D}/orchestrator-memory/person-lothsahn/MEMORY.md`, content: 'x' }],
+    ['Write', { file_path: `${D}/orchestrator-memory/dispatcher/MEMORY.md`, content: 'x' }],
+    ['Write', { file_path: `${own}/../person-lothsahn/MEMORY.md`, content: 'x' }],
+    ['MultiEdit', { file_path: `${own}/MEMORY.md`, edits: [] }],
+    ['NotebookEdit', { notebook_path: `${D}/x.ipynb`, new_source: 'x' }],
+  ] as const) assert.equal(await decide(tool, input), 'deny', `${tool} ${JSON.stringify(input)}`);
+  assert.equal(await decide('Write', { file_path: `${own}/MEMORY.md`, content: '- deploys need Lothsahn\'s own "deploy"' }), 'allow');
 });
