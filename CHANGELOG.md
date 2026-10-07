@@ -60,6 +60,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   state-save tests, the unity-slots crashed-holder, waiter and CLI tests, the download-resume test and the agent-host
   "new host" test (Windows reused the dead host's pid) failed on Windows runners; each now waits on the event it checks. The Mac dialog and Unity watch tests no longer ask the real
   Mac (they failed on every Mac worker, and macUnity took 10 s there).
+- **A machine's sandboxes show their branch and editor at once after its daemon starts** (w636). The daemon's first
+  look at its sandboxes waited for its 30 s timer, so for the first 30 s every sandbox said "git status not read yet"
+  and its editor "stopped" (e2e/sandbox.spec.ts's details sheet failed on it); it looks at once now.
 - **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
   clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
   Whisper goes with a ping ahead of it: no answer within 2 s and the clip falls back, and the machine is skipped until it
