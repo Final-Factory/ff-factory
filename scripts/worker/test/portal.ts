@@ -59,6 +59,9 @@ fs.writeFileSync(
       voice: { enabled: false, autoInstall: false, tts: false },
       // The test daemon runs on a computer with other work on it: it cleans nothing there.
       machines: { cleanup: { everyMinutes: 0, softFreeGB: 0, staleOutput: { mode: 'off' } } },
+      // Nor does this portal: its host guard would run the host clean-up on the computer the test runs on (w613: a run on
+      // LothDesktop removed 40 old temp folders, 2.2 MB, by the clean-up's known-safe rules). No ticks, no clean-up.
+      hostGuard: { pollSeconds: 0 },
     },
     null,
     2,

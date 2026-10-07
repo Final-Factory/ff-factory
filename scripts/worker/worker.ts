@@ -1036,6 +1036,9 @@ export interface UpdateFlags {
   ref?: string;
   /** A local ff-factory checkout to install from instead, with no download at all. */
   source?: string;
+  /** Override what the install did: firewall rules (Windows) and the portal's ssh (--no-firewall, --no-ssh). */
+  firewall?: boolean;
+  ssh?: boolean;
 }
 
 /**
@@ -1058,7 +1061,10 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     maxUnity,
     repoUrl: m.repoUrl || DEFAULT_REPO,
     service: m.service,
-    firewall: true,
+    // As the install had them: firewall rules only if it made them, the portal's ssh only if it set it up (root.json's
+    // outside list records both), unless a flag says otherwise.
+    firewall: f.firewall ?? m.outside.some((x) => x.kind === 'firewall-group'),
+    ssh: f.ssh ?? m.outside.some((x) => x.kind === 'authorized-key'),
     ...(m.firewallSuffix ? { firewallSuffix: m.firewallSuffix } : {}),
     ...(typeof config.unitySlotsDir === 'string' ? { unitySlotsDir: config.unitySlotsDir } : {}),
     ...(f.absoluteWorktrees ? { absoluteWorktrees: true } : {}),
@@ -1610,7 +1616,7 @@ const USAGE = `node scripts/worker/worker.ts <install|update|uninstall|check> --
             [--no-ssh] [--ssh-host <name the portal reaches it by>] [--ssh-user <user>] (the portal's ssh, w568)
   update    [--max-sandboxes N] [--max-agents-per-sandbox N] [--max-unity N] (only to change them)
             [--ref portal|main|<commit> (the daemon code; default: the commit the portal runs)] [--source <checkout>]
-            [--owner <user> (Windows, elevated: default the user the daemon's task runs as)]
+            [--owner <user> (Windows, elevated: default the user the daemon's task runs as)] [--no-firewall] [--no-ssh]
             (this machine's own install, in place: every setting, the credential and the PATH carried; no game-repo
              fetch; restarts the daemon and checks the portal sees it; docs/worker-install.md, "Updating")
   uninstall [--yes] [--force] [--keep-registration]
@@ -1657,6 +1663,8 @@ export async function main(argv = process.argv.slice(2)) {
       ...(opts.owner ? { owner: opts.owner } : {}),
       ...(opts.ref ? { ref: opts.ref } : {}),
       ...(opts.source ? { source: opts.source } : {}),
+      ...(flags.has('no-firewall') ? { firewall: false } : {}),
+      ...(flags.has('no-ssh') ? { ssh: false } : {}),
     });
   } else if (cmd === 'elevated') {
     // The install's one administrator step (elevatedSteps): run by an elevated copy of this script.

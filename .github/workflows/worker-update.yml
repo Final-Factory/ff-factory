@@ -1,0 +1,64 @@
+name: Worker update end to end
+
+# w613: the worker update (scripts/worker/worker.ts update, install.sh --update, install.ps1 -Update) on a real
+# Windows and a real Mac, against the throwaway portal (scripts/worker/test/update-e2e.ts): no terminal and stdin
+# closed as over ssh, elevated on Windows (GitHub's Windows runner is), no game-repo fetch, every setting, the
+# credential and a Mac's PATH carried, the daemon restarted and seen online. docs/worker-install.md, "Updating".
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/worker/**'
+      - 'machine/**'
+      - 'server/machineDeploy.ts'
+      - 'server/machineDeployWin.ts'
+      - 'server/machines.ts'
+      - 'server/machineProtocol.ts'
+      - 'shared/types.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/worker-update.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/worker/**'
+      - 'machine/**'
+      - 'server/machineDeploy.ts'
+      - 'server/machineDeployWin.ts'
+      - '.github/workflows/worker-update.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: worker-update-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: Worker update (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: A git identity (the test's game repo commits)
+        run: |
+          git config --global user.name "FF Factory CI"
+          git config --global user.email "ci@users.noreply.github.com"
+      - run: npm ci --no-audit --no-fund
+      - name: Install a test root, tune it, update it as over ssh, and check what the update promises
+        run: node scripts/worker/test/update-e2e.ts "${{ runner.temp }}/w613-update" 8797
+      - name: The test daemon's log
+        if: always()
+        shell: bash
+        run: cat "${{ runner.temp }}/w613-update/root/daemon/logs/daemon.log" 2>/dev/null | tail -n 80 || true

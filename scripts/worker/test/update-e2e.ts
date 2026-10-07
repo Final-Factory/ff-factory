@@ -115,8 +115,12 @@ try {
   }
   // No game-repo fetch: its origin points nowhere and nothing could answer for a credential.
   git(l.repo, 'remote', 'set-url', 'origin', 'https://127.0.0.1:9/private/FinalFactory.git');
-  const logFile = path.join(l.logs, 'daemon.log');
-  const connects = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').split('\n').filter((x) => x.includes('connected to')).length : 0);
+  // A start of the daemon: launchd appends to daemon.log on a Mac; on Windows each start rewrites daemon.log and the
+  // supervisor appends "started the daemon" to its own log. So every log in the folder, both kinds of line.
+  const connects = () =>
+    fs.existsSync(l.logs)
+      ? fs.readdirSync(l.logs).reduce((n, f) => n + fs.readFileSync(path.join(l.logs, f), 'utf8').split('\n').filter((x) => /connected to|started the daemon/.test(x)).length, 0)
+      : 0;
   const before = connects();
 
   // 3. The update, as the ops worker runs it over ssh: the OS wrapper, no terminal, stdin closed, nothing asked.
