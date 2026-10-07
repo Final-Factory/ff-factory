@@ -648,9 +648,29 @@ LothDesktop and Beast, not just when BEAST is full").
     **Why no hold for a running editor** (w656): the daemon cannot tell whether a scene has unsaved edits (Unity's
     title bar shows no scene dirty mark, docs/unity-dialogs.md), and a hold on every running editor would keep most
     sandboxes, since an editor stops only after 2 hours idle. Work lives in files and commits; a worker whose open
-    editor state matters keeps its check-in within 30 minutes, as the `wake_me` reply says. Committed work needs no push to survive: a machine's sandboxes are worktrees of one repository, so the
-    worker's branch and its commits are in every sandbox there. Nothing is stashed or committed for a worker: a dirty
-    worktree is the worker's to commit, and the `wake_me` reply and the brief tell it so before a long check-in.
+    editor state matters keeps its check-in within 30 minutes, as the `wake_me` reply says. Committed work needs no
+    push to survive: a machine's sandboxes are worktrees of one repository, so the worker's branch and its commits are
+    in every sandbox there.
+  - **Uncommitted work is saved first** (w656, `server/saveWork.ts`, run by the daemon on `save_work`). A dirty
+    worktree whose release is due is committed on the worker's own branch (`git add -A`: changed, deleted and new
+    files; ignored ones such as `Library/` stay as they are) with a commit "FF Factory: saved <id>'s uncommitted work
+    before releasing <machine>/<slot> (w656)", and pushed. Then the sandbox is released for every stopped worker there
+    whose release is due. Each worker's next message starts with a `[saved]` line naming the commit; `git reset
+    HEAD~1` gives the work back uncommitted. Nothing is stashed: the stash list is shared by every worktree of a
+    repository, and a commit on its branch goes wherever the worker is placed again. A push that fails still leaves the
+    commit in the machine's repository, and the next switch away pushes it. The save is refused, and the sandbox stays
+    held with the reason in `list_sandboxes` ("its uncommitted work could not be saved: …", tried again after 10
+    minutes), when the worktree is not on the worker's branch, the branch is develop, master or main, an agent there
+    has a process, or the untracked files pass `SAVE_LIMITS`: more than 500 files, one over 10 MB, or 50 MB in all.
+    GitHub refuses a file over 100 MiB and warns from 50 MiB ("About large files on GitHub"), and a worker's new
+    scripts and `.meta` files are a few kB each; on the M3 on 2026-10-07 slot1 held 41,491 untracked files, about
+    10 GB of builds, clips and audit runs (measured), which belong in the temp folder, not on a branch. A daemon from
+    before w656 does not offer `saveWork` in its hello: its dirty sandboxes stay held as before, and the line says
+    the daemon needs an update. With a daemon that saves, uncommitted changes no longer keep an Idle worker's process
+    alive for the release pass (`keepIdle`'s `ignoreDirty`); the hourly idle reaper still leaves those alone.
+  - **`stop_agent`** (and a stop from the dashboard) marks a worker `releaseDue` ("it was stopped on purpose"): its
+    sandbox shows FREE once it is saved and released, within a few minutes (the daemon reads git every 2 minutes and
+    the pass runs every minute), not at once, so new work never starts over its files or on its branch.
   - **New work in a released sandbox** starts on its own branch. When the sandbox is still on the released worker's
     branch, `start_agent` (and a start from the dashboard) first stops its editor if it runs and switches it to a
     fresh branch, `sandbox/<slot>-<request id>` (`ffbox-f/…` for FFBox work) from origin/develop, so the new worker

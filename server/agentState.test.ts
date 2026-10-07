@@ -219,6 +219,22 @@ test('list_sandboxes: between turns (Working) and on what, sandboxes by status, 
   assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1, 'the capacity block and placement do not count it free');
 });
 
+test('w656: a worker stopped on purpose keeps its sandbox until the release pass saves and releases it', async (t) => {
+  const { store, sessions, agents } = await setup(t);
+  const alpha = sessions.get('eb9632fd') as unknown as RemoteSession;
+  alpha.liveFlag = true;
+  alpha.stop();
+  alpha.liveFlag = false;
+  const info = store.sessions.get('eb9632fd')!;
+  info.status = 'stopped';
+  assert.equal(info.releaseDue?.why, 'it was stopped on purpose');
+  assert.equal(holdsSandbox(info), true);
+  assert.doesNotMatch(agents.describeAllSandboxes(), /pc\/alpha FREE/, 'not FREE until released');
+  // A message resumes it: nothing is due any more.
+  alpha.send('go on');
+  assert.equal(store.sessions.get('eb9632fd')!.releaseDue, undefined);
+});
+
 test("w613, w656: an agent whose daemon went away under it keeps its sandbox until it is messaged, stopped on purpose, or released 30 min later", async (t) => {
   // LothDesktop, 2026-10-07 08:29 UTC: the worker update restarted the daemon, Ben's 77956901 (no check-in) stopped, and
   // its slot2 showed FREE to the dispatcher.

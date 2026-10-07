@@ -1711,7 +1711,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ),
         tool(
           'stop_agent',
-          'Stop a worker agent process. It keeps its history and resumes when messaged again.',
+          'Stop a worker agent process. It keeps its history and resumes when messaged again. In a machine sandbox, its uncommitted work is saved on its branch and the sandbox released within a few minutes (w656); it is placed again when it resumes.',
           { session_id: z.string() },
           wrap(async ({ session_id }) => {
             worker(session_id).stop();
