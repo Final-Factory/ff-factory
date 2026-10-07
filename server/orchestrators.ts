@@ -1090,6 +1090,8 @@ export class Orchestrators {
     // re-check at 05:30 on the stale mark of an earlier automatic close).
     if (statusAfter(input.action) !== w.status) settleByHand(w);
     w.status = statusAfter(input.action);
+    // Out of stalled by a decision (w643: block, a stalled request found to wait on something): no stale stall reason.
+    if (isOpen(w)) w.stalled = undefined;
     if (input.action === 'reject' || input.action === 'done') w.outcome = clip(note, 300);
     this.stamp(w, `dispatcher: ${what}: ${note}`);
     this.store.putWork(w);
