@@ -48,6 +48,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The portal VM's end-to-end reboot checks have 20 s each, and the hang step looks for its own reset** (w636, asked
+  by lothsahn). Hang detection took 382-988 s in 6 of 61 runs; each check for a new boot id was an ssh with no limit
+  once connected. The watch's reset was matched anywhere in its journal, where a first-boot reset (32 of 62 runs) also
+  matched; now only since the step began.
 - **The disk guard defaults to 20 / 10 GB free, from 50 / 20** (w628, Ben: "you dont need 50gb free to run unity
   editors, change that rule"). Measured on BEAST in a warm sandbox: an editor open and a forced script reimport grew
   the Library by under 10 MB, a development build wrote 2.1 GB plus 0.25 GB of Library, a release build 2.0 GB plus
@@ -55,11 +59,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   (`shared/types.ts`) feed both the portal's `poolSettingsOf` and a fresh worker install's daemon.json; a machine's
   own `disk_warn_gb` / `disk_critical_gb` still win. A full (robocopy) Library copy now needs `disk_warn_gb` + the
   Library's measured size instead of a flat 30 GB, so the lower guard cannot let a 100 GB copy fill an NTFS disk.
-- **The portal VM's end-to-end reboot checks have 20 s each, and the hang step looks for its own reset** (w636, asked
-  by lothsahn). Hang detection took 382-988 s in 6 of 61 runs; each check for a new boot id was an ssh with no limit
-  once connected. The watch's reset was matched anywhere in its journal, where a first-boot reset (32 of 62 runs) also
-  matched; now only since the step began.
-||||||| 22b5f8b
 - **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
   that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
   and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,
