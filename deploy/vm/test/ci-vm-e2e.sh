@@ -440,14 +440,14 @@ pub=$(g 'sudo cat /srv/fff/home/.ssh/id_ed25519.pub' | tr -d '\r' | awk '$1 == "
 echo "MEASURE the portal's public key: ${pub:0:30}...; --key: ${key:0:160}"
 [ -n "$pub" ] || fail "no public key in /srv/fff/home/.ssh/id_ed25519.pub"
 printf '%s' "$key" | matches -F " ssh-ed25519 $pub" || fail "--key is not the portal's public key ($pub): $key"
-secret=$(g 'sudo sed -n 2p /srv/fff/home/.ssh/id_ed25519' | tr -d '' | cut -c1-24)
+secret=$(g 'sudo sed -n 2p /srv/fff/home/.ssh/id_ed25519' | tr -d '\r' | cut -c1-24)
 [ ${#secret} = 24 ] || fail "no private key line to look for"
 if printf '%s\n%s' "$out" "$key" | matches -F -e 'PRIVATE KEY' -e "$secret"; then fail "fff-machine-ssh printed the private key"; fi
 for bad in '--fix' '--data /srv/fff-ops/scratch/m.ssh --check' '--pin x@localhost'; do
   if out=$(probe "$mssh $bad" 2>&1); then fail "the worker's fff-machine-ssh $bad worked"; fi
   printf '%s' "$out" | matches -F 'fffctl (orchestration worker)' || fail "fff-machine-ssh $bad was not refused by fff-ops-priv: $out"
 done
-fpr=$(g 'ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub' | tr -d '' | awk '{print $2}')
+fpr=$(g 'ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub' | tr -d '\r' | awk '{print $2}')
 if out=$(probe "$mssh --pin ffci-new@localhost SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" 2>&1); then fail "--pin took a wrong fingerprint"; fi
 printf '%s' "$out" | matches 'REFUSED: it shows' || fail "--pin of a wrong fingerprint was not refused for it: $out"
 out=$(probe "$mssh --pin ffci-new@localhost $fpr" 2>&1 || true)
