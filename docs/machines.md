@@ -119,7 +119,9 @@ before redeploying by hand.
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
 - **Clean-up.** The daemon cleans its machine's disk by itself (the continuous clean-up,
   [self-recovery.md](self-recovery.md#5-continuous-clean-up)): a pass every hour, every 15 minutes while
-  free space is below its soft threshold (80 GB by default), with the rules for its platform. Each agent
+  free space is below its soft threshold (80 GB by default), with the rules for its platform; below it, it also removes
+  FF Factory's own leftovers by itself (player slots nobody holds, pushed agent worktrees, unused Unity editors:
+  [self-recovery.md](self-recovery.md#ff-factorys-own-leftovers-w626), w626). Each agent
   gets its own temp folder (`ffa-<session>` under `temp_dir` or the system's temp), removed when the
   session is removed or two hours after it stopped. The portal sends the settings at connect and when they
   change (`cleanup_config`; config `machines.cleanup.everyMinutes` / `.softFreeGB`, per machine with
