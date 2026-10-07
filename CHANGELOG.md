@@ -48,6 +48,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   drop it; the heartbeat is unchanged). The machine has 10 s to return the text, upload included (was 3 s plus 0.05 s
   per second of audio). A clip that times out keeps the next ones off that machine for 2 minutes or until it re-offers
   its Whisper.
+- **The portal VM's end-to-end reboot checks have 20 s each, and the hang step looks for its own reset** (w636, asked
+  by lothsahn). Hang detection took 382-988 s in 6 of 61 runs; each check for a new boot id was an ssh with no limit
+  once connected. The watch's reset was matched anywhere in its journal, where a first-boot reset (32 of 62 runs) also
+  matched; now only since the step began.
 
 ### Added
 
