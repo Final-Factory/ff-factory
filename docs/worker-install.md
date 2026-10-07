@@ -1,7 +1,7 @@
 # Worker install: one root folder, one command to install, remove or migrate (w513)
 
 **TL;DR:** A worker machine's daemon and everything its agents use live under one root folder, in any folder you pick.
-`scripts/worker/install.ps1` (Windows) or `install.sh` (macOS) installs it, `uninstall` removes it and proves nothing is
+`scripts/worker/install.ps1` (Windows) or `install.sh` (macOS and Linux) installs it, `uninstall` removes it and proves nothing is
 left, and `migrate` moves a machine from today's scattered layout into a root (copy-first and verified, with rollback).
 Built players run only from fixed player folders: each sandbox slotK owns `<root>/players/slotK-0/player/` (peer 0,
 the host) and `slotK-1/player/` (peer 1, the client), the nightly lab (no sandbox) owns `slotnightly-0` and
@@ -47,7 +47,7 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 
 | What | Windows | macOS |
 |---|---|---|
-| The service | scheduled task `FFFactoryDaemon` (at logon, the user's interactive session, not elevated) | LaunchAgent `com.fffactory.daemon` (`~/Library/LaunchAgents`) |
+| The service | scheduled task `FFFactoryDaemon` (at logon, the user's interactive session, not elevated) | LaunchAgent `com.fffactory.daemon` (`~/Library/LaunchAgents`); on Linux the systemd user unit `~/.config/systemd/user/com.fffactory.daemon.service` |
 | Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile) and group "Final Factory Unity editors" (each Unity editor the Hub has) | none |
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
 | The Unity slots mailbox (`~/.ff-factory/unity-slots`, its standard place: no pointer is written, so the daemon, its agents and the nightly harness all use the same one, w469) | `%USERPROFILE%\.ff-factory\unity-slots` | `~/.ff-factory/unity-slots` |
@@ -68,6 +68,8 @@ On a Mac, as yourself (not sudo):
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)"
 ```
+
+On a Linux PC, the same command, as yourself; see [Linux](#linux) for what it needs first.
 
 It asks, all at the start: the root folder, the portal URL, the limits (sandboxes at once, agents per sandbox, Unity
 editors at once; defaults 3, 2, 2), and the machine's credential (hidden). Then it checks, and **changes nothing if any
@@ -275,6 +277,40 @@ only those four actions cannot reach it. `--no-ssh` / `-NoSsh` skips both steps.
 | The machines' host keys | the portal's data in the VM: each machine's record (`state.json`), written into `/srv/fff/home/.ssh/known_hosts2` at start and on each change | the portal checks it reaches the real machine; data, so a rebuilt VM keeps them |
 | Machines from before the installer did this | `deploy/vm/guest/machines.ssh` in git, written into the VM's `~/.ssh/config` and `known_hosts` by `fff-machine-ssh` (guest install, `fffctl update`) or the host's `deploy/vm/host/machine-ssh.sh` | kept as the repair and check tool until every machine runs an installer from w568 on |
 | The FFBox host (Loth2400) | nothing about the machines: only its own key to the VM's admin account (`/etc/fff-vm/ssh/`) | `machine-ssh.sh` ran there, but wrote into the VM over `fff-vm ssh` |
+
+### Linux
+
+A Linux PC (Ubuntu; biscuit, 2026-10-07) installs as a Mac does, with `install.sh`, into a root such as `~/ffw`. The
+daemon runs as a **systemd user service** (`server/machineDeployLinux.ts`), as the user who installs it:
+
+| | |
+|---|---|
+| The unit | `~/.config/systemd/user/com.fffactory.daemon.service`, enabled; `systemctl --user status com.fffactory.daemon`, log in `<root>/daemon/logs/daemon.log` |
+| Supervisor | `Restart=always` (10 s), the Mac's KeepAlive; `requireSupervisor` checks it and `KillMode=process` |
+| Agents through a restart | `KillMode=process`: a restart or an update stops the daemon only, so its agent hosts and Unity editors keep running (w605); systemd's default would kill everything in the unit's cgroup. A stop or an uninstall ends the agent hosts itself |
+| Display | `WantedBy=graphical-session.target`: the daemon starts with the desktop session and gets its `DISPLAY`/`WAYLAND_DISPLAY`, which Unity needs. Turn on automatic login for a PC nobody sits at. The installer says so when the user's manager has no display yet |
+| After a logout, over ssh | the installer runs `loginctl enable-linger`, so the user's manager (and the daemon) keeps running and `systemctl --user` works over ssh, which the portal's `machine_daemon` uses. If polkit refuses it, it says to run `sudo loginctl enable-linger <user>` |
+| Sleep | the daemon holds a logind inhibitor (`systemd-inhibit --what=idle:sleep`) while agents run; for a PC that must never sleep, also `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target` |
+
+**What it needs first** (the installer checks each and changes nothing until all pass):
+
+- **Node 22.6+ that runs TypeScript.** Ubuntu's own `nodejs` package is built without it (`ERR_NO_TYPESCRIPT`), whatever
+  its version, so the installer skips it. Unpack the Linux x64 build from nodejs.org into `~/.local/node` (the installer
+  and the probe look there) and put `~/.local/node/bin` on your PATH in `~/.bashrc`.
+- **git 2.48+ and git-lfs**: `sudo apt install git git-lfs` (Ubuntu 26.04 has git 2.53; 24.04 has 2.43, so add
+  `ppa:git-core/ppa` there first).
+- **Claude Code**, logged in: `curl -fsSL https://claude.ai/install.sh | bash`, then `claude` once.
+- **Unity**: Unity Hub for Linux, with the project's editor version; editors are found in `~/Unity/Hub/Editor/<version>/Editor/Unity`
+  and wherever the Hub lists them (`~/.config/UnityHub`). The editor's log is `~/.config/unity3d/Editor.log`.
+- **The portal's ssh**: `sudo apt install openssh-server`; the installer adds the portal's key to `~/.ssh/authorized_keys`
+  and registers this PC's host keys with its tailnet name, as on a Mac. The tailnet policy must let `tag:fff-portal`
+  reach it on 22 ([RUNBOOK](../deploy/vm/RUNBOOK.md) section 1, "Adding a machine").
+
+**Differences from a Mac:** built players are `FinalFactory.x86_64` (Unity's Linux build; the guard and the slots know
+them, and the slot config is `~/.config/finalfactory/player-slots.json`, as on a Mac); the game's save folder is
+`~/.config/unity3d/Never Games/finalfactory`. There is no Unity dialog watch on Linux yet, and the daemon's removal of
+old Unity editors leaves Linux editors alone. `add_machine` refuses a Linux PC (the portal never deploys one over ssh),
+and `migrate` refuses on Linux: there is no older layout to move.
 
 ## Uninstall
 

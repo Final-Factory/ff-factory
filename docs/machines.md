@@ -4,8 +4,9 @@ A machine is a whole computer the portal can run agents on. The portal itself ru
 dispatcher (w510, 2026-10-06): every worker, sandbox, Unity editor and standing agent runs under a machine's daemon,
 and the portal's own computer can be one too ([beast-machine.md](beast-machine.md)). Every worker runs in one of
 a machine's sandboxes, worktrees of its main game clone in its `sandbox_root` ([Machine sandboxes](#machine-sandboxes));
-no agent works in the main clone, the one the user uses (w536). Machines are Macs (the daemon is a LaunchAgent) or Windows PCs (the
-daemon is a scheduled task at the user's logon, [below](#windows-machines)), with ids such as `m5` or
+no agent works in the main clone, the one the user uses (w536). Machines are Macs (the daemon is a LaunchAgent), Windows PCs (the
+daemon is a scheduled task at the user's logon, [below](#windows-machines)) or Linux PCs (a systemd user service, installed on
+the PC with its worker installer only: [worker-install.md](worker-install.md#linux)), with ids such as `m5` or
 `lothdesktop`. Ids are lower-case letters, digits and dashes; one given with capitals (`LothDesktop`) is
 stored lower-case and shown as typed, and either spelling works in every tool.
 

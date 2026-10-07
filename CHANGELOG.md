@@ -131,6 +131,21 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Linux PCs can be workers** (biscuit, Ben's Ubuntu 26.04 PC, 2026-10-07). `scripts/worker/install.sh` installs on
+  Linux as on a Mac, into one root, and runs the daemon as a systemd user service
+  (`~/.config/systemd/user/<service>.service`, `server/machineDeployLinux.ts`): `Restart=always` is its supervisor,
+  `KillMode=process` keeps agents and editors running through a restart or an update (w605), it starts with the desktop
+  session so Unity gets a display, and lingering keeps it up after a logout. The installer looks only for a node that
+  runs TypeScript (Ubuntu's own nodejs is built without it: ERR_NO_TYPESCRIPT), gives apt's hints, and works with GNU
+  `mktemp`. Update, uninstall and the leaves-nothing-behind check know the unit; `migrate` refuses (nothing to move).
+  The daemon says `linux` in its hello; Unity is found at `<version>/Editor/Unity` (`~/Unity/Hub/Editor`, the Hub's
+  `~/.config/UnityHub`), its log in `~/.config/unity3d`, players are `FinalFactory.x86_64` (the guard and the slots
+  know them), an AMD card's load comes from amdgpu's counters, keep-awake is a logind inhibitor, and the guard blocks
+  agents stopping the service (`systemctl --user stop …fffactory`, `loginctl disable-linger`). The portal's
+  `machine_daemon` start, stop and restart reach it over ssh; `add_machine` refuses a Linux PC (install it there). Not
+  yet: the Unity dialog watch and the own-leftovers removal of old editors. No protocol bump; needs the portal from this
+  change for its words and ssh start/stop (an older portal takes it for a Mac).
+
 - **Workers read the ledger, read-only** (w642, lothsahn: w631's worker had to judge which requests were finished without
   being able to read their briefs). A worker's new machine tool `read_work` reads its own requests (the ones it is on)
   and the ones they name (related ids, a wNNN in their title, brief, notes or PRs, a request merged into them), any

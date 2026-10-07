@@ -1559,7 +1559,9 @@ export class MachineManager {
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
         else if (behind) Object.assign(m, { statusDetail: `update available: ${behind}` });
         else if (/^(daemon (speaks|outdated)|update available)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
-        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined, relocatedTo: undefined });
+        // Only a platform this portal knows: a newer daemon's unknown one keeps the record's.
+        const platform = msg.info?.platform && ['darwin', 'win32', 'linux'].includes(msg.info.platform) ? msg.info.platform : m.platform;
+        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform, daemonStopped: undefined, relocatedTo: undefined });
         // A worker root install (w513): its folders; a pool folder that changed goes back to it at once.
         const repool = msg.layout ? adoptLayout(m, msg.layout) : leaveRoot(m);
         this.store.putMachine(m);

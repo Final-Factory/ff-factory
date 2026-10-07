@@ -1,7 +1,8 @@
 // FF Factory worker install (w513; docs/worker-install.md, docs/worker-root.md): everything a worker machine's daemon
 // and its agents use lives under one root folder, installed, checked and removed by this one tool. The OS wrappers
 // (install.ps1 / install.sh, uninstall.ps1 / uninstall.sh) ask the questions, find node and pass the machine's
-// credential on stdin; this file does the work, the same way on Windows and on a Mac.
+// credential on stdin; this file does the work, the same way on Windows, on a Mac and on Linux (a systemd user service,
+// server/machineDeployLinux.ts).
 //
 //   install     check every prerequisite first and change nothing if one is missing; then create the root, clone the
 //               game repo into it (bare), install the daemon from this checkout with its folders in the root, add the
@@ -21,7 +22,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LABEL, MIN_NODE, bundle, macControlScript, macProbeScript, macReloadLines, nodeSupport, parseMacProbe, parseWinProbe, plist } from '../../server/machineDeploy.ts';
+import { LABEL, MIN_NODE, agentPath, bundle, macControlScript, macProbeScript, macReloadLines, nodeSupport, parseMacProbe, parseWinProbe, plist } from '../../server/machineDeploy.ts';
+import { linuxControlScript, linuxReloadLines, parseUnitShow, systemdUnit, unitFile, unitName, unitPathOf, withUnitPath } from '../../server/machineDeployLinux.ts';
 import * as win from '../../server/machineDeployWin.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
@@ -78,7 +80,7 @@ export function layoutOf(root: string): Layout {
 
 /** What the uninstall removes besides the root, recorded as the install makes it. */
 export interface OutsideItem {
-  kind: 'task' | 'launchagent' | 'firewall-group' | 'file' | 'authorized-key';
+  kind: 'task' | 'launchagent' | 'systemd-unit' | 'firewall-group' | 'file' | 'authorized-key';
   name: string;
   /** authorized-key: the key's base64 (the lines the uninstall removes). */
   note?: string;
@@ -92,8 +94,8 @@ export interface Manifest {
   layout: number;
   machineId: string;
   portalUrl: string;
-  platform: 'win32' | 'darwin';
-  /** The scheduled task (Windows) or LaunchAgent label (Mac) that runs the daemon. */
+  platform: 'win32' | 'darwin' | 'linux';
+  /** The scheduled task (Windows), LaunchAgent label (Mac) or systemd user unit (Linux, without .service) that runs the daemon. */
   service: string;
   /** Player-folder pairs: one per sandbox (players/slotK-0 and slotK-1, K = 1..slots; w576). */
   slots: number;
@@ -245,6 +247,9 @@ export function parseArgs(argv: string[]): { cmd: string; opts: Record<string, s
 // ---------------------------------------------------------------- running things
 
 const isWin = process.platform === 'win32';
+const isLinux = process.platform === 'linux';
+/** What runs the daemon here, for sentences: "the X task", "the X LaunchAgent", "the X systemd user service". */
+const serviceNoun = (service: string) => (isWin ? `the ${service} task` : isLinux ? `the ${service} systemd user service` : `the ${service} LaunchAgent`);
 const say = (line: string) => console.log(line);
 
 /** One line rewritten in place on a terminal (\r + ESC[K, no indent: w508), a plain line every 10 s otherwise. */
@@ -371,17 +376,20 @@ export interface Facts {
   /** The service name is taken by a daemon that runs from somewhere else (today's layout: migrate instead). */
   serviceElsewhere?: string;
   loggedOn?: boolean;
+  /** Linux: the user's systemd manager has a desktop session's DISPLAY or WAYLAND_DISPLAY (Unity editors need one). */
+  display?: boolean;
 }
 
 /** Every reason the install cannot go ahead, from facts gathered without changing anything. Exported for tests. */
 export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
   const p: string[] = [];
-  if (f.platform !== 'win32' && f.platform !== 'darwin') p.push(`this tool installs on Windows and macOS, not ${f.platform}`);
+  if (f.platform !== 'win32' && f.platform !== 'darwin' && f.platform !== 'linux') p.push(`this tool installs on Windows, macOS and Linux, not ${f.platform}`);
   if (f.platform === 'win32' && f.elevated && !o.owner) p.push('run it from a normal (not administrator) PowerShell: files an elevated shell makes belong to Administrators, and git then refuses the clone; the one step that needs admin rights (the firewall rules) asks for them itself');
   if (!nodeSupport(f.nodeVersion.replace(/^v/, '')).ok) p.push(`node ${MIN_NODE.join('.')} or newer is needed (this is ${f.nodeVersion})`);
-  if (!f.git) p.push(`git is missing: install git ${MIN_GIT.join('.')} or newer (${f.platform === 'win32' ? 'winget install --id Git.Git -e' : 'brew install git'})`);
-  else if (!versionAtLeast(f.git, MIN_GIT)) p.push(`git ${f.git.join('.')} is too old: ${MIN_GIT.join('.')} or newer is needed for relative worktree paths (${f.platform === 'win32' ? 'winget upgrade --id Git.Git -e' : 'brew upgrade git'})`);
-  if (!f.gitLfs) p.push(`git-lfs is missing (${f.platform === 'win32' ? 'it comes with Git for Windows: reinstall git' : 'brew install git-lfs && git lfs install'})`);
+  const linux = f.platform === 'linux';
+  if (!f.git) p.push(`git is missing: install git ${MIN_GIT.join('.')} or newer (${f.platform === 'win32' ? 'winget install --id Git.Git -e' : linux ? 'sudo apt install git' : 'brew install git'})`);
+  else if (!versionAtLeast(f.git, MIN_GIT)) p.push(`git ${f.git.join('.')} is too old: ${MIN_GIT.join('.')} or newer is needed for relative worktree paths (${f.platform === 'win32' ? 'winget upgrade --id Git.Git -e' : linux ? 'sudo add-apt-repository ppa:git-core/ppa && sudo apt install git' : 'brew upgrade git'})`);
+  if (!f.gitLfs) p.push(`git-lfs is missing (${f.platform === 'win32' ? 'it comes with Git for Windows: reinstall git' : linux ? 'sudo apt install git-lfs && git lfs install' : 'brew install git-lfs && git lfs install'})`);
   if (!f.claude && !f.claudeShim) p.push(`Claude Code is missing (${f.platform === 'win32' ? 'irm https://claude.ai/install.ps1 | iex' : 'curl -fsSL https://claude.ai/install.sh | bash'})`);
   // The path rules of the computer the root is for (a test judges a Windows path anywhere).
   const pp = f.platform === 'win32' ? path.win32 : path.posix;
@@ -444,9 +452,15 @@ async function serviceElsewhere(service: string, appDir: string): Promise<string
     const dir = out.trim();
     return dir && path.resolve(dir).toLowerCase() !== path.resolve(appDir).toLowerCase() ? `the ${service} task runs ${dir}` : undefined;
   }
-  const file = path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
+  const file = isLinux ? unitFile(os.homedir(), service) : path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
   if (!fs.existsSync(file)) return undefined;
-  return fs.readFileSync(file, 'utf8').includes(`${appDir}/app/`) ? undefined : `the ${service} LaunchAgent runs from elsewhere`;
+  return fs.readFileSync(file, 'utf8').includes(`${appDir}/app/`) ? undefined : `${serviceNoun(service)} runs from elsewhere`;
+}
+
+/** Linux: whether the user's systemd manager has a desktop session's display (it imports DISPLAY / WAYLAND_DISPLAY). */
+async function managerHasDisplay(): Promise<boolean | undefined> {
+  const r = await exec('systemctl', ['--user', 'show-environment'], { timeoutMs: 15_000 });
+  return r.code === 0 ? /^(DISPLAY|WAYLAND_DISPLAY)=./m.test(r.stdout) : undefined;
 }
 
 async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?: string; claude?: string; sid?: string; home: string; user?: string; uid?: string; path?: string } }> {
@@ -457,7 +471,7 @@ async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?:
     const p = parseWinProbe(await ps('probing this PC', win.probeScript('')));
     probe = { node: p.node, claude: p.claude, claudeShim: p.claudeShim, sid: p.sid, home: p.home, user: p.user, loggedOn: p.loggedOn };
   } else {
-    const p = parseMacProbe(await bash('probing this Mac', macProbeScript('')));
+    const p = parseMacProbe(await bash(isLinux ? 'probing this PC' : 'probing this Mac', macProbeScript('')));
     probe = { node: p.node, claude: p.claude, home: p.home, uid: p.uid, path: p.path };
   }
   const id = credentialId(o.token);
@@ -477,6 +491,7 @@ async function gatherFacts(o: InstallOptions): Promise<Facts & { probe: { node?:
     credentialId: id,
     serviceElsewhere: o.replacesService ? undefined : await serviceElsewhere(o.service, layoutOf(o.root).daemon),
     loggedOn: probe.loggedOn,
+    ...(isLinux ? { display: await managerHasDisplay() } : {}),
     probe,
   };
 }
@@ -630,10 +645,46 @@ async function installDaemonMac(o: InstallOptions, l: Layout, id: string, probe:
 }
 
 /**
+ * The daemon's code, npm ci and daemon.json, as on a Mac (installDaemonMac), with its own copy of that part. Then the
+ * systemd user unit (server/machineDeployLinux.ts), and lingering, so the user's manager keeps the daemon running
+ * after a logout and `systemctl --user` works over ssh.
+ */
+async function installDaemonLinux(o: InstallOptions, l: Layout, id: string, probe: { node?: string; claude?: string; home: string; path?: string }) {
+  const support = nodeSupport((await must('node --version', probe.node!, ['-p', 'process.versions.node'])).trim());
+  const newDir = path.join(l.daemon, 'app.new');
+  fs.rmSync(newDir, { recursive: true, force: true });
+  fs.mkdirSync(newDir, { recursive: true });
+  await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir]);
+  const version = (await must('git rev-parse', 'git', ['-C', l.src, 'rev-parse', '--short', 'HEAD'])).trim();
+  fs.writeFileSync(path.join(newDir, 'machine', 'VERSION'), version + '\n');
+  say('npm ci for the daemon...');
+  await must('npm ci', 'npm', ['ci', '--omit=dev', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: newDir, env: { ...process.env, PATH: `${path.dirname(probe.node!)}:${process.env.PATH}` }, timeoutMs: 10 * 60_000 });
+  const app = path.join(l.daemon, 'app');
+  const old = path.join(l.daemon, 'app.old');
+  fs.rmSync(old, { recursive: true, force: true });
+  if (fs.existsSync(app)) fs.renameSync(app, old);
+  fs.renameSync(newDir, app);
+  fs.mkdirSync(l.logs, { recursive: true });
+  fs.mkdirSync(path.join(l.daemon, 'agents'), { recursive: true });
+  fs.writeFileSync(path.join(l.daemon, 'daemon.json'), JSON.stringify(daemonJson(o, l, id, probe.claude), null, 2), { mode: 0o600 });
+  const file = unitFile(probe.home, o.service);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // An update keeps the PATH the daemon had, in its order (w613), and adds what is new.
+  const oldPath = o.update && fs.existsSync(file) ? unitPathOf(fs.readFileSync(file, 'utf8')) : undefined;
+  const text = systemdUnit({ home: probe.home, node: probe.node!, flag: support.flag, path: agentPath(probe.home, probe.node!, probe.path ?? ''), appDir: l.daemon, label: o.service });
+  fs.writeFileSync(file, oldPath ? withUnitPath(text, mergePath(oldPath, unitPathOf(text) ?? '')) : text);
+  const linger = await exec('loginctl', ['enable-linger'], { timeoutMs: 30_000 });
+  if (linger.code !== 0) say(`Lingering is off (loginctl enable-linger: ${(linger.stderr || linger.stdout).trim() || linger.code}): the daemon stops when you log out. Run \`sudo loginctl enable-linger ${os.userInfo().username}\` to keep it running.`);
+  await bash('starting the systemd user service', `set -e\n${linuxReloadLines(o.service)}`, 2 * 60_000);
+  return { version, started: true };
+}
+
+/**
  * The supervisor, as this computer has it (w576, lothsahn: "every worker should have a restart daemon--it should be the
  * standard part of the install"). Windows: the task runs this root's run-daemon.ps1 (machineDeployWin supervisorScript),
  * which starts the daemon again whenever it exits, and Task Scheduler restarts the supervisor itself if it fails.
- * A Mac: launchd is the supervisor, by the LaunchAgent's KeepAlive.
+ * A Mac: launchd is the supervisor, by the LaunchAgent's KeepAlive. Linux: the user's systemd manager, by the unit's
+ * Restart=always.
  */
 export interface SupervisorFacts {
   /** The task, or the LaunchAgent plist. */
@@ -649,7 +700,7 @@ export interface SupervisorFacts {
 }
 
 /** What is wrong with the supervisor; `started` is whether it should run now (someone is logged on). Exported for tests. */
-export function supervisorProblems(f: SupervisorFacts, l: Pick<Layout, 'daemon'>, service: string, started: boolean, platform: 'win32' | 'darwin' = isWin ? 'win32' : 'darwin'): string[] {
+export function supervisorProblems(f: SupervisorFacts, l: Pick<Layout, 'daemon'>, service: string, started: boolean, platform: 'win32' | 'darwin' | 'linux' = isWin ? 'win32' : isLinux ? 'linux' : 'darwin'): string[] {
   const out: string[] = [];
   if (platform === 'win32') {
     const script = path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1');
@@ -658,6 +709,11 @@ export function supervisorProblems(f: SupervisorFacts, l: Pick<Layout, 'daemon'>
     if (!f.restarts) out.push(`the ${service} task is not restarted on failure`);
     if (!f.script) out.push(`${script} is missing`);
     if (started && f.here && f.script && !f.running) out.push(`no supervisor runs from ${script}`);
+  } else if (platform === 'linux') {
+    if (!f.installed) return [`no ${unitName(service)} systemd user unit`];
+    if (!f.here) out.push(`the ${service} systemd user service does not run the daemon in ${l.daemon}`);
+    if (!f.restarts) out.push(`the ${service} systemd user service is not Restart=always with KillMode=process, so systemd does not start the daemon again (or ends its agents with it)`);
+    if (started && f.here && !f.running) out.push(`systemd does not run ${service}`);
   } else {
     if (!f.installed) return [`no ${service} LaunchAgent plist`];
     if (!f.here) out.push(`the ${service} LaunchAgent does not run the daemon in ${l.daemon}`);
@@ -684,6 +740,18 @@ $t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContin
     const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
     return { installed: get('installed') === 'True', here: get('here') === 'True', restarts: get('restarts') === 'True', script: get('script') === 'True', running: Number(get('running')) || 0 };
   }
+  if (isLinux) {
+    const file = unitFile(os.homedir(), service);
+    const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    const u = parseUnitShow((await exec('systemctl', ['--user', 'show', unitName(service), '-p', 'ActiveState,UnitFileState,Restart,KillMode'])).stdout);
+    return {
+      installed: !!text,
+      here: text.includes(`${l.daemon}/app/machine/daemon.ts`),
+      restarts: u.restart === 'always' && u.killMode === 'process',
+      script: true,
+      running: u.active ? 1 : 0,
+    };
+  }
   const file = path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
   const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
   const state = (await exec('launchctl', ['print', `gui/${process.getuid?.()}/${service}`])).stdout;
@@ -706,7 +774,7 @@ async function requireSupervisor(l: Layout, service: string, started: boolean): 
     await new Promise((r) => setTimeout(r, 1000));
   }
   if (problems.length) throw new Error(`the daemon's supervisor is not in place: ${problems.join('; ')}. Re-run the installer${isWin ? ' from an administrator PowerShell' : ''} to repair it`);
-  say(`Supervisor: ${isWin ? `the ${service} task runs ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}, which starts the daemon again whenever it exits` : `launchd starts the daemon again whenever it exits (KeepAlive)`}${started ? ', running' : ''}.`);
+  say(`Supervisor: ${isWin ? `the ${service} task runs ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}, which starts the daemon again whenever it exits` : isLinux ? 'systemd starts the daemon again whenever it exits (Restart=always)' : `launchd starts the daemon again whenever it exits (KeepAlive)`}${started ? ', running' : ''}.`);
 }
 
 /** The Unity editors this computer has (the Hub's lists and its default folders): the firewall rules name them. */
@@ -892,7 +960,7 @@ async function registerPortalSsh(o: InstallOptions) {
   const scan = await exec(isWin ? 'ssh-keyscan.exe' : 'ssh-keyscan', ['-T', '5', '-t', 'ed25519,ecdsa,rsa', '127.0.0.1'], { timeoutMs: 30_000 }).catch(() => undefined);
   const hostKeys = parseKeyscan(scan?.stdout ?? '');
   if (!hostKeys.length) {
-    say(`The portal's ssh: no sshd answers on this computer (${isWin ? 'the OpenSSH Server service' : 'Remote Login, in System Settings > General > Sharing'}), so the portal cannot start, stop or unload this daemon from afar. Turn it on and run this installer again.`);
+    say(`The portal's ssh: no sshd answers on this computer (${isWin ? 'the OpenSSH Server service' : isLinux ? 'sudo apt install openssh-server' : 'Remote Login, in System Settings > General > Sharing'}), so the portal cannot start, stop or unload this daemon from afar. Turn it on and run this installer again.`);
     return;
   }
   const host = (o.sshHost ?? (await tailnetName()) ?? hostnameFallback()).toLowerCase();
@@ -938,7 +1006,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     layout: LAYOUT_VERSION,
     machineId: id,
     portalUrl: o.portalUrl,
-    platform: isWin ? 'win32' : 'darwin',
+    platform: isWin ? 'win32' : isLinux ? 'linux' : 'darwin',
     service: o.service,
     slots: o.maxSandboxes,
     repoUrl: o.repoUrl,
@@ -970,10 +1038,14 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
 
   // 4. The daemon and its service. A test install cleans nothing: its settings are in place before it first starts.
   if (o.noCleanup) fs.writeFileSync(path.join(l.daemon, 'cleanup.json'), JSON.stringify({ everyMinutes: 0, softFreeGB: 0, staleOutput: { mode: 'off' } }));
-  noteOutside(m, isWin ? { kind: 'task', name: o.service, note: 'runs the daemon at logon' } : { kind: 'launchagent', name: o.service, note: '~/Library/LaunchAgents' });
+  noteOutside(
+    m,
+    isWin ? { kind: 'task', name: o.service, note: 'runs the daemon at logon' } : isLinux ? { kind: 'systemd-unit', name: o.service, note: '~/.config/systemd/user' } : { kind: 'launchagent', name: o.service, note: '~/Library/LaunchAgents' },
+  );
   writeManifest(l.root, m);
-  const d = isWin ? await installDaemonWin(o, l, id, f.probe) : await installDaemonMac(o, l, id, f.probe);
-  say(`Daemon ${d.version} installed as ${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`}${d.started ? ' and started' : ' (it starts at the next logon)'}.`);
+  const d = isWin ? await installDaemonWin(o, l, id, f.probe) : isLinux ? await installDaemonLinux(o, l, id, f.probe) : await installDaemonMac(o, l, id, f.probe);
+  say(`Daemon ${d.version} installed as ${serviceNoun(o.service)}${d.started ? ' and started' : ' (it starts at the next logon)'}.`);
+  if (isLinux && f.display === false) say("Note: no desktop session's display reaches the user's systemd manager yet, so Unity editors cannot open here. Log in to the desktop (the daemon also starts with each desktop login); turn on automatic login for an unattended PC.");
   await requireSupervisor(l, o.service, d.started);
   // No Unity slots pointer: the mailbox stays at its standard place in the home folder (daemonJson), where the daemon,
   // its agents and scripts outside it (the nightly harness, a build by hand) all find it with no config (w469,
@@ -1020,7 +1092,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     writeManifest(l.root, m);
   }
   if (!isWin) {
-    // A Mac has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
+    // A Mac (or Linux PC) has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
     // Its own block: as the else of the key step above it never ran on a Mac whose ssh key was set (m3, w596).
     const cfg = writeMacSlotConfig(l.players, o.maxSandboxes);
     noteOutside(m, { kind: 'file', name: cfg, note: 'the slot root for scripts outside the daemon' });
@@ -1236,7 +1308,8 @@ export function withStandardPaths(current: string, platform: NodeJS.Platform = p
     const add = missing([`${pf}\\Git\\cmd`, `${pf}\\Git\\mingw64\\bin`, `${pf}\\Git LFS`, `${pf}\\nodejs`, ...local, ...claude]);
     return [...have, ...add].join(sep);
   }
-  const add = missing(['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin']);
+  // Linux: node from nodejs.org unpacked in ~/.local/node (Ubuntu's own nodejs runs no TypeScript) and snaps' folder.
+  const add = missing(platform === 'linux' ? ['/usr/local/bin', ...(env.HOME ? [`${env.HOME}/.local/node/bin`] : []), '/snap/bin'] : ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin']);
   // Claude Code's native install, after what is there.
   const after = missing(env.HOME ? [`${env.HOME}/.local/bin`] : []).filter((d) => !add.includes(d));
   return [...add, ...have, ...after].join(sep);
@@ -1317,8 +1390,9 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   }
   const verdict = (v: Awaited<ReturnType<typeof portalView>>) => updateVerdict(code.commit, onDisk, v, m.machineId);
   if (!installed || !verdict(await portalView(portalUrl, token)).ok) {
-    say(`The portal does not see the new daemon yet: restarting it once (${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`})...`);
+    say(`The portal does not see the new daemon yet: restarting it once (${serviceNoun(o.service)})...`);
     if (isWin) await ps('restarting the daemon', win.controlScript('restart', l.daemon, { task: o.service, only: true }));
+    else if (isLinux) await bash('restarting the daemon', linuxControlScript('restart', o.service));
     else await bash('restarting the daemon', macControlScript('restart', o.service));
   }
   const p = new Progress();
@@ -1501,11 +1575,12 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
 
   // 3. The service, then whatever still runs from the root.
   if (isWin) await ps('removing the daemon task', win.uninstallScript(l.daemon, { task: m.service, only: true }));
+  else if (isLinux) await bash('removing the systemd user service', linuxControlScript('uninstall', m.service, l.daemon), 2 * 60_000);
   else {
     // bootout returns before the daemon has gone (it stops its agents first): wait until launchd no longer has it.
     await bash('unloading the LaunchAgent', `${macControlScript('uninstall', m.service)}i=0\nwhile launchctl print gui/$(id -u)/${m.service} >/dev/null 2>&1 && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done\n`, 2 * 60_000);
   }
-  say(`Removed the ${m.service} ${isWin ? 'task' : 'LaunchAgent'}.`);
+  say(`Removed ${serviceNoun(m.service)}.`);
   say(`Stopped ${await stopRootProcesses(l.root)} process(es) still running from the root.`);
 
   // 4. Firewall rules, the portal's ssh key (w568: exactly its lines, unless they were there before) and the slot config.
@@ -1593,6 +1668,18 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
       { what: 'processes whose command line names the root', present: Number(get('procs')) > 0, detail: get('procs') },
       { what: 'HKCU Run entries naming the root', present: Number(get('runKeys')) > 0, detail: get('runKeys') },
     );
+  } else if (isLinux) {
+    const file = unitFile(os.homedir(), service);
+    const u = parseUnitShow((await exec('systemctl', ['--user', 'show', unitName(service), '-p', 'ActiveState,UnitFileState'])).stdout);
+    const mine = await ancestors();
+    const procs = (await exec('pgrep', ['-f', l.root])).stdout.split('\n').filter((p) => p && !mine.has(Number(p))).length;
+    items.push(
+      { what: `systemd user unit ${file}`, present: fs.existsSync(file) },
+      { what: `systemd user service ${service} enabled or running`, present: u.enabled || u.active },
+      { what: 'processes whose command line names the root', present: procs > 0, detail: String(procs) },
+      { what: `slot config ${macSlotConfig()} pointing into the root`, present: !!slotConfigRoot(macSlotConfig())?.startsWith(l.root), detail: slotConfigRoot(macSlotConfig()) ?? 'none' },
+      slotsPointerItem(l.root),
+    );
   } else {
     const plistFile = path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
     const loaded = (await exec('launchctl', ['print', `gui/${process.getuid?.()}/${service}`])).code === 0;
@@ -1679,7 +1766,8 @@ export const LEFT_ON_PURPOSE = [
   'Unity Hub, its editors and Unity\'s licence: shared with the people who use this computer',
   'Git, node, Claude Code and gh, and their own files in the home folder (~/.claude, ~/.gitconfig, gh\'s login): tool dependencies, lothsahn 2026-10-06',
   'Claude Code\'s conversation files of this install\'s agents, under ~/.claude/projects/ (named after the sandbox folders): delete them by hand if wanted',
-  'The game\'s save and data folder (%USERPROFILE%\\AppData\\LocalLow\\Never Games\\finalfactory, ~/Library/Application Support/Never Games/finalfactory)',
+  'The game\'s save and data folder (%USERPROFILE%\\AppData\\LocalLow\\Never Games\\finalfactory, ~/Library/Application Support/Never Games/finalfactory, ~/.config/unity3d/Never Games/finalfactory)',
+  'Lingering for this user (loginctl enable-linger, Linux): `loginctl disable-linger` turns it off if nothing else needs it',
   'People\'s own game clones',
 ];
 
@@ -1774,6 +1862,8 @@ export async function main(argv = process.argv.slice(2)) {
     if (!opts.root) throw new Error(USAGE);
     await uninstall({ root: opts.root, yes: flags.has('yes'), force: flags.has('force'), keepRegistration: flags.has('keep-registration') });
   } else if (cmd === 'migrate') {
+    // There is no layout from before worker roots on Linux to move (Linux PCs started with the root install).
+    if (isLinux) throw new Error('migrate moves a Mac or a Windows PC into a root; a Linux PC is installed straight into one (install)');
     if (!opts.root) throw new Error(USAGE);
     const mig = await import('./migrate.ts');
     if (flags.has('rollback')) await mig.rollback(opts.root);

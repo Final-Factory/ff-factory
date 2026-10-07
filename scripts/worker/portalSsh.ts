@@ -100,11 +100,11 @@ export function tailnetNameOf(statusJson: string): string | undefined {
   }
 }
 
-/** The tailscale CLI's likely places: on PATH, the Mac app's, the Windows install's. */
+/** The tailscale CLI's likely places: on PATH, the Mac app's, the Windows install's, the Linux package's. */
 export function tailscaleCandidates(platform: NodeJS.Platform = process.platform): string[] {
   if (platform === 'darwin') return ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/usr/local/bin/tailscale', '/opt/homebrew/bin/tailscale'];
   if (platform === 'win32') return ['tailscale', path.win32.join(process.env.ProgramFiles || 'C:\\Program Files', 'Tailscale', 'tailscale.exe')];
-  return ['tailscale'];
+  return ['tailscale', '/usr/bin/tailscale'];
 }
 
 /** The name the portal reaches this machine by when Tailscale cannot say: the computer's own name, lower case. */

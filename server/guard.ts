@@ -129,14 +129,14 @@ export function sandboxGuard(opts: {
 
 const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
 
-/** A built Final Factory player (or server) binary: finalfactory.exe, a finalfactory .app bundle, or the binary inside one. */
-const PLAYER_BINARY = /(?:^|[\\/])finalfactory(?:\.exe|\.app(?:[\\/]contents[\\/]macos[\\/]finalfactory)?)$/i;
+/** A built Final Factory player (or server) binary: finalfactory.exe, a finalfactory .app bundle or the binary inside one, a Linux build's finalfactory.x86_64. */
+const PLAYER_BINARY = /(?:^|[\\/])finalfactory(?:\.exe|\.x86_64|\.app(?:[\\/]contents[\\/]macos[\\/]finalfactory)?)$/i;
 /**
  * A player slot (scripts/nightly/player_slots.py): <slot root>/slotK/player/finalfactory.exe or .app on a lab machine's
  * pool, <slot root>/slotK-P/player/... on a worker root install, where sandbox slotK owns slotK-0 and slotK-1 and the
  * nightly lab, outside every sandbox, owns slotnightly-0 and slotnightly-1 (w576).
  */
-const SLOT_PLAYER = /[\\/]slot(\d+|nightly)(?:-([01]))?[\\/]player[\\/]finalfactory(?:\.exe|\.app)(?:[\\/]|$)/i;
+const SLOT_PLAYER = /[\\/]slot(\d+|nightly)(?:-([01]))?[\\/]player[\\/]finalfactory(?:\.exe|\.x86_64|\.app)(?:[\\/]|$)/i;
 /** Words that start the next word as a program: a call operator, a launcher, or an environment prefix. */
 const LAUNCHERS = new Set(['&', '.', 'exec', 'nohup', 'time', 'env', 'start', 'start-process', 'saps', 'open', 'invoke-item', 'ii', 'cmd', 'cmd.exe', '/c', '/k']);
 
@@ -429,6 +429,10 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
   // portal's own host, whose daemon runs beside the portal (docs/beast-machine.md).
   const lc = cmd.toLowerCase();
   if (/launchctl\s+(bootout|unload|remove|kill|disable)\b[^;&|]*com\.fffactory/.test(lc)) return "Unloading the FF Factory daemon's LaunchAgent is blocked.";
+  // A Linux PC's systemd user service (server/machineDeployLinux.ts); `status` and `show` stay allowed.
+  if (/systemctl\s+[^;&|]*\b(stop|disable|kill|mask|restart|edit|revert|reload|try-restart|reload-or-restart|isolate)\b[^;&|]*fffactory/.test(lc)) return "Stopping, disabling or changing the FF Factory daemon's systemd service is blocked.";
+  if (/loginctl\s+[^;&|]*(disable-linger|terminate-user|kill-user)\b/.test(lc)) return "Ending this user's systemd manager (which runs the FF Factory daemon) is blocked.";
+  if (/\brm\b[^;&|]*systemd\/user\/[^;&|\s]*fffactory/.test(lc)) return "Removing the FF Factory daemon's systemd service is blocked.";
   if (/schtasks(\.exe)?\s+[^;&|]*\/(end|delete|change)\b[^;&|]*fffactory|schtasks(\.exe)?\s+[^;&|]*fffactory[^;&|]*\/(end|delete|change)\b/.test(lc)) return "Ending, changing or deleting the FF Factory daemon's scheduled task is blocked.";
   if (/(stop|disable|unregister|set)-scheduledtask\b[^;&]*fffactory|fffactory[^;&]*\|\s*(stop|disable|unregister|set)-scheduledtask\b/.test(lc)) return "Ending, changing or deleting the FF Factory daemon's scheduled task is blocked.";
   if (killer && all.some((w) => /unity|node|claude|powershell|pwsh|tailscale|supervise/.test(w))) {
