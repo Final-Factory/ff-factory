@@ -5,6 +5,8 @@
 #   fff-ops-launch: the header's arguments reach claude, the environment is rebuilt from nothing, the credential comes on
 #                   fd 3 and is in no environment, a version mismatch or a missing credential answers ERR.
 #   fff-ops-ssh:    a machine or user@host only; no ssh option passes through; its own options are fixed.
+#   scp and sftp:   real copies both ways (w612) through fff-ops-scp-ssh and fff-ops-ssh to a fake machine that runs a
+#                   real sftp-server; ssh options, another port and a command that is not a copy are refused.
 #   fff-ops-priv:   anything but its subcommands is refused before it does anything.
 set -o errexit -o nounset -o pipefail
 cd "$(dirname "$0")/../../.."
@@ -70,6 +72,71 @@ for bad in -oProxyCommand=sh -F/tmp/x '-o' 'm5;id' 'm5 x' '' '@m5' 'a@-b'; do
 done
 if FFF_OPS_SSH_USER=nobody-else FFF_OPS_SSH_BIN=$tmp/ssh bash $G/fff-ops-ssh m5 whoami >/dev/null 2>&1; then fail "ssh: runs as another account than the portal's"; fi
 echo "ok: fff-ops-ssh takes a machine or user@host, never an ssh option, and fixes its own"
+out=$(sshw --sftp rydin@beast)
+printf '%s' "$out" | matches -F '[-o][StrictHostKeyChecking=yes]' || fail "ssh --sftp: pinned host keys are not required: $out"
+printf '%s' "$out" | matches -F '[-s][--][rydin@beast][sftp]' || fail "ssh --sftp: not the sftp subsystem of the machine: $out"
+for bad in '--sftp' '--sftp m5 rm' '--sftp -oProxyCommand=sh'; do
+  # shellcheck disable=SC2086 # the words are the arguments
+  if sshw $bad >/dev/null 2>&1; then fail "ssh: '$bad' was taken"; fi
+done
+echo "ok: fff-ops-ssh --sftp opens only the machine's sftp subsystem, with the same fixed options"
+
+# ---- scp and sftp (w612): real copies through ops-bin/scp, ops-bin/sftp, fff-ops-scp-ssh and fff-ops-ssh, to a fake
+# machine: the fake ssh runs a real sftp-server (or scp's own sink and source, scp -O) in a folder of its own.
+sftp_server=""
+for f in /usr/lib/openssh/sftp-server /usr/libexec/sftp-server /usr/libexec/openssh/sftp-server; do [ -x "$f" ] && { sftp_server=$f; break; }; done
+if [ -z "$sftp_server" ] || [ ! -x /usr/bin/scp ] || [ ! -x /usr/bin/sftp ]; then
+  [ -z "${CI:-}" ] || fail "scp: no sftp-server, /usr/bin/scp or /usr/bin/sftp on this runner"
+  echo "SKIP: scp and sftp (no sftp-server here)"
+else
+  here=$PWD
+  remote=$tmp/machine
+  local_=$tmp/scratch
+  mkdir -p "$remote" "$local_"
+  cat >"$tmp/machine-ssh" <<MACHINE
+#!/bin/bash
+sub=0
+while [ \$# -gt 0 ]; do case \$1 in -s) sub=1; shift ;; --) shift; break ;; -o | -e) shift 2 ;; *) shift ;; esac; done
+echo "\$1" >>"$tmp/machine.log"
+shift
+cd "$remote"
+if [ \$sub = 1 ]; then exec "$sftp_server"; else exec sh -c "\$1"; fi
+MACHINE
+  cat >"$tmp/ops-ssh" <<OPSSSH
+#!/bin/sh
+FFF_OPS_SSH_USER=\$(id -un) FFF_OPS_SSH_BIN=$tmp/machine-ssh exec bash $here/$G/fff-ops-ssh "\$@"
+OPSSSH
+  chmod +x "$tmp/machine-ssh" "$tmp/ops-ssh"
+  # ops scp|sftp ARGS...: the worker's own wrapper, in its scratch folder.
+  ops() { (cd "$local_" && FFF_OPS_SCP_SSH=$here/$G/fff-ops-scp-ssh FFF_OPS_SSH_WRAPPER=$tmp/ops-ssh sh "$here/$G/ops-bin/$1" "${@:2}"); }
+  echo up >"$local_/up.txt"
+  echo down >"$remote/down.txt"
+  ops scp up.txt m5:up.txt 2>"$tmp/err" || fail "scp: a copy to the machine failed: $(cat "$tmp/err")"
+  [ "$(cat "$remote/up.txt" 2>/dev/null)" = up ] || fail "scp: the file did not reach the machine"
+  matches -x m5 "$tmp/machine.log" || fail "scp: did not go to m5: $(cat "$tmp/machine.log")"
+  ops scp rydin@beast:down.txt ./ 2>"$tmp/err" || fail "scp: a copy from the machine failed: $(cat "$tmp/err")"
+  [ "$(cat "$local_/down.txt" 2>/dev/null)" = down ] || fail "scp: the file did not come back from the machine"
+  matches -x rydin@beast "$tmp/machine.log" || fail "scp: the user@host did not reach fff-ops-ssh: $(cat "$tmp/machine.log")"
+  ops scp -O up.txt m5:legacy.txt 2>"$tmp/err" || fail "scp -O: a legacy copy failed: $(cat "$tmp/err")"
+  [ "$(cat "$remote/legacy.txt" 2>/dev/null)" = up ] || fail "scp -O: the file did not reach the machine"
+  printf 'put up.txt sftp.txt\nget down.txt sftp-down.txt\n' >"$local_/batch"
+  ops sftp -b batch m3 >/dev/null 2>"$tmp/err" || fail "sftp: a batch failed: $(cat "$tmp/err")"
+  [ "$(cat "$remote/sftp.txt" 2>/dev/null)" = up ] && [ "$(cat "$local_/sftp-down.txt" 2>/dev/null)" = down ] || fail "sftp: put or get did not copy"
+  echo "ok: scp both ways (sftp and scp -O) and sftp reach the machine through fff-ops-ssh"
+  : >"$tmp/machine.log"
+  for bad in '-o ProxyCommand=sh' '-oProxyJump=evil' '-F /tmp/cfg' '-i /tmp/key' '-J evil' '-P 2222' '-c aes128-ctr'; do
+    # shellcheck disable=SC2086 # the words are scp's options
+    if ops scp $bad up.txt m5:bad.txt >/dev/null 2>&1; then fail "scp: '$bad' was taken"; fi
+  done
+  if ops scp up.txt 'evil host:bad.txt' >/dev/null 2>&1; then fail "scp: a host with a space was taken"; fi
+  [ ! -e "$remote/bad.txt" ] || fail "scp: a refused copy reached the machine"
+  [ ! -s "$tmp/machine.log" ] || fail "scp: a refused copy reached ssh: $(cat "$tmp/machine.log")"
+  for bad in '-- m5 rm -rf /' '-- m5 id' '-s -- m5 shell' '-oProxyCommand=sh -- m5 sftp' '-l x;id -- m5 sftp'; do
+    # shellcheck disable=SC2086 # the words are the arguments scp would give its ssh
+    if FFF_OPS_SSH_WRAPPER=$tmp/ops-ssh bash $G/fff-ops-scp-ssh $bad >/dev/null 2>&1; then fail "fff-ops-scp-ssh: '$bad' was taken"; fi
+  done
+  echo "ok: scp's ssh options, another port, a bad host and a command that is not a copy are refused before ssh"
+fi
 
 # ---- fff-ops-priv refuses what is not its own (before anything else: it needs root for the rest)
 if [ "$(id -u)" -ne 0 ]; then
