@@ -16,7 +16,8 @@ import { daemonConfig } from './machineDeploy.ts';
 import { describeCleanupItems } from './cleanup.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { UnitySlots } from '../machine/unitySlots.ts';
-import { SandboxPool, deletable, idleSandboxEditors, librarySource, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
+import { SandboxPool, deletable, idleSandboxEditors, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
+import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
 import type { Config } from './config.ts';
@@ -56,11 +57,12 @@ function repos() {
 }
 
 /** Real git, copy and delete; a stand-in editor (no Unity), and free space the test sets. */
-function deps(repoPath: string, o: { free?: () => number | undefined } = {}) {
+function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?: number } = {}) {
   const running = new Set<string>();
   const d: PoolDeps = {
     git: (args, opts = {}) => run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }),
     copyTree: (src, dst, signal) => copyTree(src, dst, { signal }),
+    ...(o.copyBytes !== undefined ? { libraryCopyBytes: async () => o.copyBytes } : {}),
     removeTree,
     freeBytes: async () => (o.free ? o.free() : 500 * GB),
     procs: async () => [],
@@ -88,7 +90,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined } = {}) {
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   const { d, running } = deps(r.main, o);
   const p = new SandboxPool(
@@ -219,6 +221,53 @@ test('machine sandboxes: editors are limited by max_unity; a switch waits for th
   assert.equal(running.size, 0, 'an idle one is stopped');
 });
 
+test('machine sandboxes: the default disk guard (w628) starts an editor at 25 GB free; a full Library copy needs the Library', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let free: number | undefined = 25 * GB;
+  const defaults = { diskWarnGB: DISK_WARN_GB_DEFAULT, diskCriticalGB: DISK_CRITICAL_GB_DEFAULT };
+  const { p } = pool(r, { free: () => free, settings: defaults });
+  await p.create({ id: 'a', branch: 'sandbox/a', base: 'origin/develop', seedLibrary: false, startUnity: false });
+  await ready(p, 'a');
+  // The m3 of 2026-10-07: about 25 GB free, which the old 50 GB guard refused.
+  await p.tick();
+  assert.equal(p.diskState().level, 'ok');
+  assert.match(await p.unity('a', 'start'), /Started/);
+  free = 19 * GB;
+  await p.tick();
+  assert.equal(p.diskState().level, 'warn', 'below 20 GB no new editors');
+  free = 9 * GB;
+  await p.tick();
+  assert.equal(p.diskState().level, 'critical', 'below 10 GB idle editors stop');
+  free = 24 * GB;
+  await p.tick();
+  assert.equal(p.diskState().level, 'warn', 'hysteresis: not ok again until 25 GB');
+  free = 25 * GB;
+  await p.tick();
+  assert.equal(p.diskState().level, 'ok');
+
+  // A full copy (robocopy onto NTFS) of a 100 GB Library at 110 GB free: refused, where the flat 30 GB allowance passed.
+  const full = pool(r, { free: () => 110 * GB, copyBytes: 100 * GB, settings: defaults }).p;
+  await full.create({ id: 'b', branch: 'sandbox/b', base: 'origin/develop', seedLibrary: true, startUnity: false });
+  await until('b refused', () => full.list().find((x) => x.id === 'b')?.status === 'error');
+  assert.match(full.list().find((x) => x.id === 'b')!.statusDetail ?? '', /not enough disk for the Library copy \(~100 GB\): 110 GB free .* need 120 GB/);
+  await full.remove('b').catch(() => undefined);
+  // A block clone reports no size: the allowance stands.
+  const cloned = pool(r, { free: () => 110 * GB, settings: defaults }).p;
+  await cloned.create({ id: 'c', branch: 'sandbox/c', base: 'origin/develop', seedLibrary: true, startUnity: false });
+  await ready(cloned, 'c');
+});
+
+test('machine sandboxes: treeBytes sums the files under a folder', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-tree-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'a', 'b'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'one.bin'), Buffer.alloc(1000));
+  fs.writeFileSync(path.join(dir, 'a', 'b', 'two.bin'), Buffer.alloc(2345));
+  assert.equal(await treeBytes(dir), 3345);
+  assert.equal(await treeBytes(path.join(dir, 'missing')), undefined);
+});
+
 test('machine sandboxes: the idle-editor stop and a restarted daemon', async (t) => {
   const r = repos();
   t.after(r.cleanup);
@@ -285,7 +334,7 @@ test('machine sandboxes: where a Library comes from, and which editors are idle'
 
 test('machine sandboxes: settings, limits, references and snapshots on the portal', () => {
   assert.equal(poolSettingsOf({}), null, 'no sandbox_root, no sandboxes');
-  assert.deepEqual(poolSettingsOf({ sandboxRoot: 'D:\\work\\ffsb' }), { root: 'D:\\work\\ffsb', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 50, diskCriticalGB: 20 });
+  assert.deepEqual(poolSettingsOf({ sandboxRoot: 'D:\\work\\ffsb' }), { root: 'D:\\work\\ffsb', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 20, diskCriticalGB: 10 }, 'the disk guard defaults to 20/10 GB (w628)');
   assert.equal(poolSettingsOf({ sandboxRoot: '/x', diskWarnGB: 10 })!.diskCriticalGB, 10, 'critical never above warn');
 
   assert.deepEqual(limitOptions({ maxSandboxes: 3 }, { maxUnity: 2, maxSandboxes: 1 }), { maxSandboxes: 3, maxAgentsPerSandbox: undefined, maxUnity: 2, diskWarnGB: undefined, diskCriticalGB: undefined, maxSandboxAgents: undefined }, 'unset ones are kept');
@@ -313,7 +362,7 @@ test('machine sandboxes: settings, limits, references and snapshots on the porta
   assert.equal(machineForPath('D:/work/ffsb/sb1/Assets/Screenshots/a.png', [m]), m, "a sandbox's screenshot belongs to its machine");
 
   const cfg = JSON.parse(daemonConfig({ portalUrl: 'https://p', id: 'x', token: 't', repoPath: '/r', sandboxes: poolSettingsOf({ sandboxRoot: '/s', maxSandboxes: 3 }) }));
-  assert.deepEqual(cfg.sandboxes, { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 50, diskCriticalGB: 20 }, 'daemon.json keeps them');
+  assert.deepEqual(cfg.sandboxes, { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 20, diskCriticalGB: 10 }, 'daemon.json keeps them');
   assert.equal(JSON.parse(daemonConfig({ portalUrl: 'https://p', id: 'x', token: 't', repoPath: '/r' })).sandboxes, undefined);
 });
 

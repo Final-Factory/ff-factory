@@ -21,6 +21,7 @@ import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
@@ -28,6 +29,19 @@ import { writeKnownHosts, type MachineSsh } from './machineSsh.ts';
 
 const PING_MS = 20_000;
 const DEAD_MS = 45_000;
+/**
+ * A clip goes to a machine's GPU Whisper with a ping ahead of it (w615): no pong or message within this long and the
+ * link is taken for dead, so the clip falls back at once instead of waiting out its timeout, and later clips skip that
+ * machine until it is heard from again. The heartbeat alone drops a dead link only after DEAD_MS (45-65 s). BEAST to the
+ * portal VM measured 31 ms (tailscale ping, 2026-10-07). Tests shorten it.
+ */
+export const VOICE_PING_MS = { value: 2000 };
+/**
+ * After a clip to a machine timed out on a live link (its Whisper hung, say), the next clips go straight to the portal's
+ * own Whisper for this long, or until the machine re-offers its Whisper (a `voice` status or a new hello); then one clip
+ * tries it again (w615, lothsahn: later clips must not wait on it every time). Tests shorten it.
+ */
+export const VOICE_RETRY_MS = { value: 2 * 60_000 };
 /** Statuses of an agent in the middle of a turn. */
 const MID_TURN = new Set(['running', 'starting', 'waiting_permission']);
 /** Run-state fields the daemon clears (absent from its JSON report once cleared). */
@@ -76,14 +90,14 @@ export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'libr
 /** The pool settings of a machine (its sandbox_root and limits, with defaults), or null when it has no sandbox_root. Exported for tests. */
 export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits & PoolExtras): SandboxPoolSettings | null {
   if (!m.sandboxRoot) return null;
-  const warn = m.diskWarnGB ?? 50;
+  const warn = m.diskWarnGB ?? DISK_WARN_GB_DEFAULT;
   return {
     root: m.sandboxRoot,
     maxSandboxes: m.maxSandboxes ?? 3,
     maxAgentsPerSandbox: m.maxAgentsPerSandbox ?? 2,
     maxUnity: m.maxUnity ?? 2,
     diskWarnGB: warn,
-    diskCriticalGB: Math.min(m.diskCriticalGB ?? 20, warn),
+    diskCriticalGB: Math.min(m.diskCriticalGB ?? DISK_CRITICAL_GB_DEFAULT, warn),
     ...(m.maxSandboxAgents !== undefined ? { maxAgents: m.maxSandboxAgents } : {}),
     ...(m.librarySeed ? { librarySeed: m.librarySeed } : {}),
     ...(m.librarySeedCopy ? { librarySeedCopy: m.librarySeedCopy } : {}),
@@ -592,6 +606,21 @@ export class MachineManager {
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
+  /**
+   * Machines whose voice is taken as down (w615), skipped by voiceMachines: `silent`, its ping before a clip went
+   * unanswered, until anything is heard from it; `timeout`, a clip timed out on a live link, until it re-offers its
+   * Whisper or VOICE_RETRY_MS has passed.
+   */
+  private readonly voiceDown = new Map<string, { kind: 'silent' | 'timeout'; until: number }>();
+
+  /** Whether a machine's voice is taken as down now (an expired timeout mark is dropped here). */
+  private voiceIsDown(id: string): boolean {
+    const d = this.voiceDown.get(id);
+    if (!d) return false;
+    if (Date.now() < d.until) return true;
+    this.voiceDown.delete(id);
+    return false;
+  }
   private readonly transcribeCalls = new Map<string, { machine: string; resolve: (r: Extract<FromDaemon, { type: 'transcribe_result' }>) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
   /** The online machines whose daemon offers its GPU Whisper (w615), with its state; first the ones in `order`. */
@@ -601,30 +630,47 @@ export class MachineManager {
       return i < 0 ? order.length : i;
     };
     return [...this.voices]
-      .filter(([id]) => this.isOnline(id) && !this.outdated(id))
+      .filter(([id]) => this.isOnline(id) && !this.outdated(id) && !this.voiceIsDown(id))
       .map(([machine, status]) => ({ machine, status }))
       .sort((a, b) => rank(a.machine) - rank(b.machine) || a.machine.localeCompare(b.machine));
   }
 
   /**
    * Transcribe a clip on a machine's GPU Whisper (w615): resolves with its answer, rejects on its error, after
-   * `timeoutMs`, or at once when its link drops. Neither the audio nor the text is logged.
+   * `timeoutMs`, at once when its link drops, and after VOICE_PING_MS when the ping sent ahead of the clip is not
+   * answered (a machine asleep or cut off whose socket is not closed yet). Neither the audio nor the text is logged.
    */
   transcribeOn(machine: string, req: { audio: string; prompt?: string; language?: string | null }, timeoutMs: number): Promise<Extract<FromDaemon, { type: 'transcribe_result' }>> {
     return new Promise((resolve, reject) => {
       const id = randomUUID();
       const timer = setTimeout(() => {
         this.transcribeCalls.delete(id);
+        this.voiceDown.set(machine, { kind: 'timeout', until: Date.now() + VOICE_RETRY_MS.value });
+        console.warn(`machine ${machine}: a clip timed out after ${(timeoutMs / 1000).toFixed(1)} s; voice goes to the portal's own Whisper for ${Math.round(VOICE_RETRY_MS.value / 60_000)} min or until it offers its Whisper again`);
         reject(new Error(`${machine} did not answer within ${(timeoutMs / 1000).toFixed(1)} s`));
       }, timeoutMs);
       this.transcribeCalls.set(id, { machine, resolve, reject, timer });
+      const link = this.links.get(machine);
+      const sent = Date.now();
       try {
+        // The ping goes first, so its pong does not wait behind the clip's upload.
+        link?.ws.ping();
         this.post(machine, { type: 'transcribe', id, ...req });
       } catch (e) {
         clearTimeout(timer);
         this.transcribeCalls.delete(id);
         reject(e as Error);
+        return;
       }
+      setTimeout(() => {
+        const c = this.transcribeCalls.get(id);
+        if (!c || !link || link.lastPong >= sent) return;
+        clearTimeout(c.timer);
+        this.transcribeCalls.delete(id);
+        this.voiceDown.set(machine, { kind: 'silent', until: Infinity });
+        console.warn(`machine ${machine}: no answer to a ping in ${(VOICE_PING_MS.value / 1000).toFixed(1)} s; voice goes to the portal's own Whisper until it is heard from`);
+        c.reject(new Error(`${machine} did not answer a ping within ${(VOICE_PING_MS.value / 1000).toFixed(1)} s (its link looks dead)`));
+      }, VOICE_PING_MS.value).unref();
     });
   }
 
@@ -1354,9 +1400,13 @@ export class MachineManager {
     if (old) old.ws.close(4000, 'replaced by a newer connection');
     const link: { ws: WebSocket; lastPong: number; since: number; hash?: string } = { ws, lastPong: Date.now(), since: Date.now(), ...(hash ? { hash } : {}) };
     this.links.set(id, link);
-    ws.on('pong', () => (link.lastPong = Date.now()));
+    ws.on('pong', () => {
+      link.lastPong = Date.now();
+      if (this.links.get(id) === link && this.voiceDown.get(id)?.kind === 'silent') this.voiceDown.delete(id);
+    });
     ws.on('message', (data) => {
       link.lastPong = Date.now();
+      if (this.links.get(id) === link && this.voiceDown.get(id)?.kind === 'silent') this.voiceDown.delete(id);
       try {
         this.onMessage(id, JSON.parse(String(data)) as FromDaemon);
       } catch (e) {
@@ -1386,6 +1436,7 @@ export class MachineManager {
     this.links.delete(id);
     this.hellos.delete(id);
     this.voices.delete(id);
+    this.voiceDown.delete(id);
     for (const [cid, c] of this.transcribeCalls) {
       if (c.machine !== id) continue;
       clearTimeout(c.timer);
@@ -1458,6 +1509,7 @@ export class MachineManager {
         if (!msg.guard) delete m.guard;
         if (msg.voice && typeof msg.voice === 'object') this.voices.set(id, msg.voice);
         else this.voices.delete(id);
+        this.voiceDown.delete(id);
         // Its daemon runs and reached us: an install or connection error from before is over (a deploy in progress
         // settles the status itself). A 'deploying' left by a portal restart mid-deploy is over too.
         if (m.status === 'error' || (m.status === 'deploying' && !this.deploying.has(id))) Object.assign(m, { status: 'ready', statusDetail: undefined });
@@ -1594,6 +1646,8 @@ export class MachineManager {
       }
       case 'voice':
         if (msg.status && typeof msg.status === 'object') this.voices.set(id, msg.status);
+        // It re-offers its Whisper (a status change: loaded again, say): a timed-out mark is over.
+        this.voiceDown.delete(id);
         return;
       case 'transcribe_result': {
         const c = this.transcribeCalls.get(msg.id);

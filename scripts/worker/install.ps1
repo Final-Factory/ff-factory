@@ -57,6 +57,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# An ssh session's PATH may lack Git for Windows and Node.js (w629): add the standard folders that exist, after what is
+# there. This run's PATH only; the daemon's task runs in the user's own logon environment.
+foreach ($d in @((Join-Path $env:ProgramFiles 'Git\cmd'), (Join-Path $env:ProgramFiles 'Git\mingw64\bin'), (Join-Path $env:ProgramFiles 'nodejs'))) {
+    if ((Test-Path -LiteralPath $d) -and -not (($env:Path -split ';') -contains $d)) { $env:Path = "$env:Path;$d" }
+}
+
 function Ask([string]$question, [string]$default) {
     $a = Read-Host ($(if ($default) { "$question [$default]" } else { $question }))
     if ($a) { $a.Trim() } else { $default }

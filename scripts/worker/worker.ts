@@ -23,7 +23,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LABEL, MIN_NODE, bundle, macControlScript, macProbeScript, macReloadLines, nodeSupport, parseMacProbe, parseWinProbe, plist } from '../../server/machineDeploy.ts';
 import * as win from '../../server/machineDeployWin.ts';
-import type { SandboxPoolSettings } from '../../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
@@ -490,8 +490,8 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     maxSandboxes: o.maxSandboxes,
     maxAgentsPerSandbox: o.maxAgentsPerSandbox,
     maxUnity: o.maxUnity,
-    diskWarnGB: 50,
-    diskCriticalGB: 20,
+    diskWarnGB: DISK_WARN_GB_DEFAULT,
+    diskCriticalGB: DISK_CRITICAL_GB_DEFAULT,
     ...(fs.existsSync(path.join(l.seed, 'Library')) ? { librarySeed: path.join(l.seed, 'Library') } : {}),
   };
   // A migration keeps the old daemon's settings (its host guard, protected paths, MCP server, idle stop); the root's
@@ -912,12 +912,13 @@ async function confirm(question: string, yes: boolean): Promise<boolean> {
   return answer === 'y' || answer === 'yes';
 }
 
-export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'prepare' | 'finish' = 'all'): Promise<boolean> {
+export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'prepare' | 'finish' = 'all', facts?: Awaited<ReturnType<typeof gatherFacts>>): Promise<boolean> {
   const l = layoutOf(path.resolve(o.root));
   o.root = l.root;
   say(`FF Factory worker install into ${l.root}`);
   say('Checking prerequisites (nothing changes until they all pass)...');
-  const f = await gatherFacts(o);
+  // An update gathered them already, before it changed anything (w629).
+  const f = facts ?? (await gatherFacts(o));
   const problems = preflightProblems(f, o);
   if (problems.length) {
     say(`\nNot installing: ${problems.length} problem(s):`);
@@ -1215,6 +1216,51 @@ async function portalView(portalUrl: string, token: string) {
 }
 
 /**
+ * The folders the tools live in on this platform, which a non-interactive ssh session's PATH may lack (w629: m5's
+ * `ssh benryding@m5` PATH had no /opt/homebrew/bin, so git-lfs 3.7.1 there was "missing"). A Mac's Homebrew and
+ * /usr/local go first, as a person's shell has them (brew shellenv prepends); Windows' Git for Windows and Node.js
+ * folders go last. Only folders that exist and are not on PATH yet are added. For the installer's own process only:
+ * the daemon's PATH (a Mac's LaunchAgent plist, from the user's login shell) is not this. Exported for tests.
+ */
+export function withStandardPaths(current: string, platform: NodeJS.Platform = process.platform, exists: (d: string) => boolean = (d) => fs.existsSync(d), env: NodeJS.ProcessEnv = process.env): string {
+  const sep = platform === 'win32' ? ';' : ':';
+  const have = current.split(sep).filter(Boolean);
+  const key = (d: string) => (platform === 'win32' ? d.replace(/[\\/]+$/, '').toLowerCase() : d.replace(/\/+$/, ''));
+  const known = new Set(have.map(key));
+  const missing = (dirs: string[]) => dirs.filter((d) => d && !known.has(key(d)) && exists(d));
+  if (platform === 'win32') {
+    const pf = env.ProgramFiles || 'C:\\Program Files';
+    const local = env.LOCALAPPDATA ? [`${env.LOCALAPPDATA}\\Programs\\Git\\cmd`, `${env.LOCALAPPDATA}\\Programs\\Git\\mingw64\\bin`] : [];
+    // Claude Code too: its native install (~\.local\bin) and npm's global shims (%APPDATA%\npm).
+    const claude = [...(env.USERPROFILE ? [`${env.USERPROFILE}\\.local\\bin`] : []), ...(env.APPDATA ? [`${env.APPDATA}\\npm`] : [])];
+    const add = missing([`${pf}\\Git\\cmd`, `${pf}\\Git\\mingw64\\bin`, `${pf}\\Git LFS`, `${pf}\\nodejs`, ...local, ...claude]);
+    return [...have, ...add].join(sep);
+  }
+  const add = missing(['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin']);
+  // Claude Code's native install, after what is there.
+  const after = missing(env.HOME ? [`${env.HOME}/.local/bin`] : []).filter((d) => !add.includes(d));
+  return [...add, ...have, ...after].join(sep);
+}
+
+/** Whether `a` and `b` name the same commit (one may be short). */
+const sameCommit = (a: string | undefined, b: string | undefined) => !!a && !!b && a.length >= 7 && b.length >= 7 && (a.toLowerCase().startsWith(b.toLowerCase()) || b.toLowerCase().startsWith(a.toLowerCase()));
+
+/**
+ * Whether an update succeeded (w629): only when the portal sees the daemon online, running the commit the update
+ * installed, and not outdated. Anything else is a failure that says what the daemon runs. Exported for tests.
+ */
+export function updateVerdict(target: string, installed: string | undefined, view: Pick<WhoAmI, 'online' | 'daemon' | 'outdated'> | undefined, machine: string): { ok: boolean; line: string } {
+  const t = target.slice(0, 12);
+  if (!sameCommit(installed, target)) return { ok: false, line: `FAILED: the daemon's code on disk is ${installed ?? 'unknown'}, not ${t}: the new code was not installed` };
+  if (!view) return { ok: false, line: `FAILED: the portal did not answer, so nothing confirms ${machine} runs ${t}` };
+  if (!view.online) return { ok: false, line: `FAILED: the portal does not see ${machine} online` };
+  if (!view.daemon) return { ok: false, line: `FAILED: the portal does not say which commit ${machine}'s daemon runs (a portal from w613 on does), so nothing confirms it runs ${t}` };
+  if (!sameCommit(view.daemon, target)) return { ok: false, line: `FAILED: ${machine}'s daemon still runs ${view.daemon}, not ${t}` };
+  if (view.outdated) return { ok: false, line: `FAILED: ${machine} runs ${t}, but the portal says it is OUTDATED: ${view.outdated}` };
+  return { ok: true, line: `The portal sees ${machine} online running ${view.daemon}, the commit installed, not outdated` };
+}
+
+/**
  * `worker.ts update --root <root>` (w613): update this machine's install in place, as safe to re-run as the install.
  * Everything comes from what is there: root.json, daemon.json (every setting carried unless a flag changes it), the
  * machine's own credential (secrets/machine-token: nothing is issued, asked for or printed), the LaunchAgent's PATH, the
@@ -1235,8 +1281,6 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   const before = { version: daemonVersionIn(l), view: await portalView(portalUrl, token) };
   say(`FF Factory worker update of ${l.root} (machine ${m.machineId})`);
   say(`Before: daemon ${before.version ?? 'unknown'}; the portal sees it ${before.view?.online ? 'online' : 'offline'}${before.view?.agents.length ? `, ${before.view.agents.length} live agent(s): ${before.view.agents.map((a) => `${a.id}${a.sandbox ? ` in ${a.sandbox}` : ''}${a.midTurn ? ' (mid-turn)' : ''}`).join(', ')}` : ''}.`);
-  const code = await updateSource(l, f, portalUrl);
-  say(`The daemon code: ff-factory ${code.commit.slice(0, 12)}${f.source ? ` from ${f.source}` : f.ref && f.ref !== 'portal' ? ` (${f.ref})` : ' (the commit the portal runs)'}.`);
   let owner = f.owner;
   if (isWin && elevated() && !owner) {
     // Elevated (an administrator's ssh session, w613: BEAST's): what the update makes goes to the task's own user, as
@@ -1250,33 +1294,51 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   }
   const rel = (await exec('git', ['-C', l.repo, 'config', '--get', 'worktree.useRelativePaths'])).stdout.trim();
   const o = planUpdate(l.root, m, config, token, { ...f, absoluteWorktrees: rel === 'false', ...(owner ? { owner } : {}) });
-  let ok = await install(o, code.from);
-  const want = daemonVersionIn(l);
-  const current = (v: Awaited<ReturnType<typeof portalView>>) => !!v?.online && (!v.daemon || !want || v.daemon.startsWith(want) || want.startsWith(v.daemon));
-  if (!ok || !current(await portalView(portalUrl, token))) {
+  // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
+  // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
+  say('Checking prerequisites (nothing changes until they all pass)...');
+  const facts = await gatherFacts(o);
+  const problems = preflightProblems(facts, o);
+  if (problems.length) {
+    say(`\nNot updating: ${problems.length} problem(s); the daemon was not touched and still runs ${before.version ?? 'what it ran'}:`);
+    for (const p of problems) say(`- ${p}`);
+    process.exitCode = 2;
+    return false;
+  }
+  const code = await updateSource(l, f, portalUrl);
+  say(`The daemon code: ff-factory ${code.commit.slice(0, 12)}${f.source ? ` from ${f.source}` : f.ref && f.ref !== 'portal' ? ` (${f.ref})` : ' (the commit the portal runs)'}.`);
+  const installed = await install(o, code.from, 'all', facts);
+  const onDisk = daemonVersionIn(l);
+  if (!sameCommit(onDisk, code.commit)) {
+    // The install stopped before it swapped the code: the daemon was not restarted for it, and is not restarted now.
+    say(`\nFAILED: the install did not put ff-factory ${code.commit.slice(0, 12)} in place (the daemon's code is ${onDisk ?? 'unknown'}); nothing was restarted for it.`);
+    process.exitCode = 1;
+    return false;
+  }
+  const verdict = (v: Awaited<ReturnType<typeof portalView>>) => updateVerdict(code.commit, onDisk, v, m.machineId);
+  if (!installed || !verdict(await portalView(portalUrl, token)).ok) {
     say(`The portal does not see the new daemon yet: restarting it once (${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`})...`);
     if (isWin) await ps('restarting the daemon', win.controlScript('restart', l.daemon, { task: o.service, only: true }));
     else await bash('restarting the daemon', macControlScript('restart', o.service));
-    ok = false;
   }
   const p = new Progress();
   let view = await portalView(portalUrl, token);
-  for (let i = 0; i < 60 && !current(view); i++) {
-    p.update(`waiting for the portal to see daemon ${want ?? ''} online (${i * 2}s)`);
+  for (let i = 0; i < 60 && !verdict(view).ok; i++) {
+    p.update(`waiting for the portal to see daemon ${code.commit.slice(0, 12)} online (${i * 2}s)`);
     await new Promise((r) => setTimeout(r, 2000));
     view = await portalView(portalUrl, token);
   }
-  ok = current(view);
   p.done();
+  const v = verdict(view);
+  const ok = v.ok;
+  const want = onDisk;
   const after = JSON.parse(fs.readFileSync(configFile, 'utf8')) as Record<string, unknown>;
   const diff = settingsDiff(config, after);
   say(`\nAfter: daemon ${want ?? 'unknown'} (was ${before.version ?? 'unknown'}).`);
   say(diff.length ? `Settings changed (daemon.json; everything else carried):\n${diff.map((d) => `  ${d}`).join('\n')}` : 'Settings: none changed (every setting carried).');
   say(`Credential: the machine's own (${path.basename(l.token)}), reused; nothing issued or printed.`);
-  if (ok) {
-    say(`The portal sees ${m.machineId} online${view?.daemon ? ` running ${view.daemon}` : ''}${view?.outdated ? `, but OUTDATED: ${view.outdated}` : view?.daemon ? ', not outdated' : ' (this portal does not report the daemon\'s version yet)'}${view?.agents.length ? `; ${view.agents.length} live agent(s)` : ''}.`);
-    if (view?.outdated) ok = false;
-  } else say(`The portal does not see ${m.machineId} online with the new daemon. Its log: ${path.join(l.logs, 'daemon.log')}`);
+  say(`${v.line}${view?.agents.length ? `; ${view.agents.length} live agent(s)` : ''}.`);
+  if (!ok) say(`Its log: ${path.join(l.logs, 'daemon.log')}`);
   process.exitCode = ok ? 0 : 1;
   return ok;
 }
@@ -1661,6 +1723,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|uninstall|check> --
 The OS wrappers (scripts/worker/install.ps1, install.sh) ask for these and pipe the credential.`;
 
 export async function main(argv = process.argv.slice(2)) {
+  // An ssh session's PATH may lack where git, git-lfs and node live (w629); this process's PATH only.
+  process.env.PATH = withStandardPaths(process.env.PATH ?? '');
   const { cmd, opts, flags } = parseArgs(argv);
   const num = (k: string, d: number) => (opts[k] === undefined ? d : Number(opts[k]));
   if (cmd === 'install') {
