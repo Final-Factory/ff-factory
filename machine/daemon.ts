@@ -561,7 +561,9 @@ export class Daemon {
       this.voice.start();
     }
     // The sandboxes' editors (state, hang/crash watch), their git status, the disk guard and the idle-editor stop.
+    // A first look at once: until it, the portal shows every sandbox's git as "not read yet" (and its editor stopped).
     this.timers.push(setInterval(() => void this.pool.tick(), 30_000));
+    void this.pool.tick();
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
     try {
       this.slotBin = installShims(this.slots.dir);
