@@ -10,7 +10,28 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
+  clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
+  Whisper goes with a ping ahead of it: no answer within 2 s and the clip falls back, and the machine is skipped until it
+  is heard from (before, a machine asleep or cut off took every clip's full timeout for the 45-65 s the heartbeat needs to
+  drop it; the heartbeat is unchanged). The machine has 10 s to return the text, upload included (was 3 s plus 0.05 s
+  per second of audio). A clip that times out keeps the next ones off that machine for 2 minutes or until it re-offers
+  its Whisper.
+
 ### Added
+
+- **A machine removes FF Factory's own leftovers by itself when disk runs low** (w626, Ben: "no YOU free up disk space,
+  like you are instructed to in this harness. stop making us tell you to do it."). Below the soft threshold, and in
+  every `machine_cleanup`, the daemon's clean-up now also removes player slots nobody holds (every slot root the machine
+  may have, the old `~/nevergames/ff-players` included), linked worktrees of its clone with everything pushed and
+  unused for 2 days (sandboxes, locked ones and ones with local work are kept; local work is listed), and Unity editor
+  versions that no sandbox's or the main clone's `ProjectVersion.txt` (nor origin/develop or master, nor a project of a
+  person's opened within 30 days) names and nothing runs. Each is checked again right before it goes and logged with
+  its size. Sandbox workers' briefs now carry their own clean-up before a request is done, and the dispatcher's and the
+  orchestrators' briefs say low disk is fixed by clean-up work, never by asking the machine's owner.
+  [docs/self-recovery.md](docs/self-recovery.md), "FF Factory's own leftovers".
 
 - **Dictation on a worker's GPU, the portal's CPU as the fallback** (w615, lothsahn: "voice commands to the portal can
   get handled by a dedicated process on beast ... If beast is down, the portal can fall back to doing local cpu
@@ -27,9 +48,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The disk guard defaults to 20 / 10 GB free, from 50 / 20** (w628, Ben: "you dont need 50gb free to run unity
+  editors, change that rule"). Measured on BEAST in a warm sandbox: an editor open and a forced script reimport grew
+  the Library by under 10 MB, a development build wrote 2.1 GB plus 0.25 GB of Library, a release build 2.0 GB plus
+  2.5 GB of Temp, a whole day's sandbox session at most 7.6 GB. `DISK_WARN_GB_DEFAULT` / `DISK_CRITICAL_GB_DEFAULT`
+  (`shared/types.ts`) feed both the portal's `poolSettingsOf` and a fresh worker install's daemon.json; a machine's
+  own `disk_warn_gb` / `disk_critical_gb` still win. A full (robocopy) Library copy now needs `disk_warn_gb` + the
+  Library's measured size instead of a flat 30 GB, so the lower guard cannot let a 100 GB copy fill an NTFS disk.
 - **CI's Playwright shards keep the browsers' system packages in the Actions cache** (w636, asked by lothsahn). Each
   shard downloaded the same 126 MB from the Ubuntu mirror; apt now keeps them in `~/apt-archives`, which the cache
   restores, and still resolves against fresh lists. The install step went from a median of 37-39 s to 20-33 s.
+||||||| 22b5f8b
 - **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
   that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
   and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,
@@ -138,6 +167,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The worker update finds its tools over ssh, touches nothing when a check fails, and succeeds only on the commit it
+  installed** (w629, lothsahn: "Yes, fix the installer."). On m5, on 2026-10-07, `install.sh --update` over ssh found no
+  git-lfs: the ssh PATH had no `/opt/homebrew/bin`. The run then still restarted the daemon, and printed exit 0 and
+  "not outdated" on the old commit 9ea8476: `update()` read the refused install as "not seen yet" and restarted, and
+  then compared the portal's view with a VERSION file nothing had replaced.
+  - The installer adds the standard tool folders that exist to its own PATH (`withStandardPaths`; Homebrew and
+    `/usr/local` on a Mac, Git for Windows and Node.js on Windows). The daemon's PATH is unchanged.
+  - Every prerequisite is checked before the code is fetched or the daemon stopped. A failure exits 2 with the
+    daemon untouched.
+  - Success needs the portal to see the daemon running the commit installed (`updateVerdict`). Otherwise it exits 1
+    with the commit the daemon runs.
+  - The worker-update CI job now also runs the update with an ssh session's minimal PATH, and a refused update.
+    [docs/worker-install.md](docs/worker-install.md) "Updating".
 - **A harness message delivered mid-turn no longer strips a person's turn of their authority** (w607, Lothsahn:
   "Please fix whatever was causing the ops worker to refuse your instructions."). On 2026-10-07 `ops_worker` refused
   Lothsahn's own "Please drain and install on BEAST and m5" twice, and his "go" once: a `[worker update]` arrived while
