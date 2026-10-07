@@ -318,10 +318,8 @@ s.end();
 let out = '';
 s.on('data', (d) => (out += d));
 s.on('close', () => process.stdout.write(out, () => process.exit(0)));
-s.on('error', (e) => process.stdout.write('ERROR ' + e.message + '
-', () => process.exit(0)));
-setTimeout(() => process.stdout.write(out + ' TIMEOUT
-', () => process.exit(0)), 30000).unref();
+s.on('error', (e) => process.stdout.write('ERROR ' + e.message, () => process.exit(0)));
+setTimeout(() => process.stdout.write(out + ' TIMEOUT', () => process.exit(0)), 30000).unref();
 EOF
 b64=$(base64 -w0 /tmp/fff-ops-sock.js)
 out=$(g "echo $b64 | base64 -d >/tmp/fff-ops-sock.js && sudo -u fff node /tmp/fff-ops-sock.js" || true)
