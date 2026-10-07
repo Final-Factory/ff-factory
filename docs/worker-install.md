@@ -173,7 +173,8 @@ reinstalling beast and m5 on 2026-10-07, f3f19c0 → 9ea8476):
   short (m5's `ssh benryding@m5` had `/usr/bin:/bin:/usr/sbin:/sbin`, and git-lfs 3.7.1 was in `/opt/homebrew/bin`).
   The installer adds the standard folders that exist and are missing, for its own run only:
   - on a Mac, `/opt/homebrew/bin`, `/opt/homebrew/sbin` and `/usr/local/bin`, first, as a shell has them;
-  - on Windows, Git for Windows (`Git\cmd`, `Git\mingw64\bin`) and `nodejs` under Program Files, last.
+  - on Windows, Git for Windows (`Git\cmd`, `Git\mingw64\bin`) and `nodejs` under Program Files, last;
+  - Claude Code's own folders, last: `~/.local/bin`, and on Windows npm's `%APPDATA%\npm` too.
 
   This is `install.sh`, `install.ps1` and `worker.ts withStandardPaths`. The daemon's own PATH is not this: it is the
   LaunchAgent plist's, from the user's login shell (kept in its order, above), and on Windows the user's logon
