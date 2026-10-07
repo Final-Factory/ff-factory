@@ -56,6 +56,8 @@ const CHECK_EVERY_MS = 5 * 60_000;
 const RUN_WAIT_MS = 10 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
 const PRS_PER_REPO = 200;
+/** The full pass reads this many (w631): PRs named only by their titles, from before the `Request:` line, are older than 200. */
+const PRS_PER_REPO_FULL = 1000;
 /** Linked open PRs the list does not reach, read one by one: at most this many a pass (GitHub's rate limit: 5000 an hour). */
 const REFRESH_OLD_PRS = 30;
 
@@ -66,7 +68,7 @@ export interface LedgerSweepDeps {
   /** GitHub owner/name of the repos whose PRs are linked: the game repo and this app's own, besides config's. */
   repos?: () => Promise<string[]>;
   /** The newest PRs of those repos in every state (gh); undefined when gh could not say. */
-  prs?: (repos: string[]) => Promise<PrRecord[] | undefined>;
+  prs?: (repos: string[], limit: number) => Promise<PrRecord[] | undefined>;
   /** One PR by number, for a linked PR older than the list reaches. */
   viewPr?: (repo: string, number: number) => Promise<PrRecord | undefined>;
   /** Send a stopped worker a message, which resumes it. */
@@ -207,7 +209,7 @@ export class LedgerSweep {
     try {
       const backfill = !this.data.backfilledAt;
       const repair = !this.data.prRepairAt;
-      const prs = await this.loadPrs();
+      const prs = await this.loadPrs(full ? PRS_PER_REPO_FULL : PRS_PER_REPO);
       if (prs) await this.recheckClosed(prs, acts);
       if (prs) await this.refreshStates(prs, repair);
       const work = [...this.d.store.work.values()];
@@ -307,13 +309,13 @@ export class LedgerSweep {
     return this.appSlugCache ?? undefined;
   }
 
-  private async loadPrs(): Promise<PrRecord[] | undefined> {
+  private async loadPrs(limit: number): Promise<PrRecord[] | undefined> {
     const repos = await this.repoSlugs();
     if (!repos.length) return undefined;
-    if (this.d.prs) return this.d.prs(repos);
+    if (this.d.prs) return this.d.prs(repos, limit);
     const out: PrRecord[] = [];
     for (const repo of repos) {
-      const r = await runProc('gh', ['pr', 'list', '-R', repo, '--state', 'all', '--limit', String(PRS_PER_REPO), '--json', 'number,title,body,headRefName,baseRefName,state,createdAt,mergedAt,closedAt,mergeCommit,url'], { timeoutMs: 45_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+      const r = await runProc('gh', ['pr', 'list', '-R', repo, '--state', 'all', '--limit', String(limit), '--json', 'number,title,body,headRefName,baseRefName,state,createdAt,mergedAt,closedAt,mergeCommit,url'], { timeoutMs: limit > PRS_PER_REPO ? 180_000 : 45_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
       if (r.code !== 0) return undefined;
       try {
         out.push(...(JSON.parse(r.stdout) as GhPr[]).map((p) => fromGh(repo, p)));
@@ -631,11 +633,17 @@ export class LedgerSweep {
     return Math.max(Date.parse(w.updatedAt) || 0, ...workers.map((s) => Date.parse(s.lastActivityAt) || 0));
   }
 
-  /** A worker's final report states the work is done, nothing is open: close it (the report, not a guess). */
+  /**
+   * A worker's final report states the work is done, nothing is open: close it (the report, not a guess). A stalled
+   * request too, when that report came after the stall (w631: a worker that went back to a stalled request and finished
+   * it was never read again, so it stayed stalled).
+   */
   private deliveredStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]): boolean {
-    if (!isOpen(w) || !workers.length || w.question || w.flag) return false;
+    if (!workers.length || w.question || w.flag) return false;
     if ((w.prs ?? []).some((p) => p.state === 'open')) return false;
     const last = this.latest(workers);
+    const reportedSinceStall = w.status === 'stalled' && !!last && (Date.parse(last.lastActivityAt) || 0) > (Date.parse(w.stalled?.at ?? '') || Infinity);
+    if (!isOpen(w) && !reportedSinceStall) return false;
     if (!last || last.status === 'error' || this.now() - this.lastActivity(w, workers) < REPORT_QUIET_MS) return false;
     const release = isRelease(w);
     if (reportVerdict(last.lastResult, release) !== 'delivered') return false;

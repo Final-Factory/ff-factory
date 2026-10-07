@@ -1373,8 +1373,8 @@ export interface WorkPr {
   at?: string;
   /** The merge commit. */
   sha?: string;
-  /** The strong evidence that linked it (server/ledgerRules.ts prsOf): its Request line, its own worker opened it, or its head branch is the request's. Absent on links made before w340, which are checked again. */
-  via?: 'line' | 'worker' | 'branch';
+  /** The strong evidence that linked it (server/ledgerRules.ts prsOf): its Request line, its own worker opened it, its head branch is the request's, or its title names it (title, w631: titleIdsIn). Absent on links made before w340, which are checked again. */
+  via?: 'line' | 'worker' | 'branch' | 'title';
   /** Its description says `Part of: <id>` (w424): one step of the request, whose merge leaves it open for what follows. */
   partOf?: boolean;
   /** What the log already said about it, so a sweep notes a state once ("merged:release", "closed"). */

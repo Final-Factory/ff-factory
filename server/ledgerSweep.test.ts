@@ -1024,3 +1024,37 @@ test("w631: the ops worker's DONE closes the requests its job was sent for, and 
   assert.match(o.opsTurnEnded(ops, 'Deployed.\nDONE: w3', { workIds: ['w3'], by: LOTH }).join('\n'), /w3: its brief asks for a step after the merge/);
   assert.equal(get('w3').status, 'active');
 });
+
+test('w631: the backlog: a stalled request whose PRs name it only in their titles closes on the next pass; a step-only title keeps it open', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  // Ben's w165 on 2026-10-07: every PR merged on 10-02 (no Request: line then), stalled as "unsure" for days.
+  request('w165', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'its last report does not say it is done' }, sessionIds: ['s1'], createdAt: ago(130) });
+  worker('s1', { status: 'stopped', lastActivityAt: ago(100), lastResult: 'Riders, Bats and beams are drawn on the ship; the two PRs are merged.' });
+  request('w170', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'x' }, createdAt: ago(130) });
+  request('w186', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'x' }, createdAt: ago(130) });
+  world.prs = [
+    pr(884, { title: 'Two players on one mobile station: riders, Bats and beams drawn on the ship (w165)', mergedAt: ago(120) }),
+    pr(915, { title: 'A player who rides a station is hidden to everyone (w165)', mergedAt: ago(110) }),
+    pr(883, { title: 'Desync report: show a construction bot\'s cargo (w170 diagnostics)', mergedAt: ago(120) }),
+    pr(903, { title: 'w186: smooth-motion architecture, research and plan (docs only, do not merge yet)', mergedAt: ago(120) }),
+  ];
+  await sweep.run();
+  assert.equal(get('w165').status, 'done');
+  assert.deepEqual(get('w165').prs?.map((p) => [p.number, p.via]), [[884, 'title'], [915, 'title']]);
+  assert.equal(get('w170').status, 'stalled', 'a request named inside other words is not linked');
+  assert.equal(get('w186').status, 'stalled', 'a plan PR is a step: the request stays');
+  assert.match(get('w186').log.join('\n'), /PR #903 merged; still open: PR #903 is one step of it/);
+});
+
+test('w631: a stalled request whose worker reported it delivered after the stall closes; one whose report predates the stall stays', async (t) => {
+  const { request, worker, world, sweep, get } = setup(t);
+  request('w1', { status: 'stalled', stalled: { at: ago(48), kind: 'idle', reason: 'no activity' }, sessionIds: ['s1'], updatedAt: ago(48) });
+  worker('s1', { status: 'stopped', lastActivityAt: ago(10), lastResult: 'Picked it up again: the fix is merged into develop and the fast suite is green. Nothing more to do.' });
+  request('w2', { status: 'stalled', stalled: { at: ago(48), kind: 'unsure', reason: 'unclear' }, sessionIds: ['s2'], updatedAt: ago(48) });
+  worker('s2', { status: 'stopped', lastActivityAt: ago(60), lastResult: 'The fix is merged into develop. Nothing more to do.' });
+  world.prs = [];
+  await sweep.run();
+  assert.equal(get('w1').status, 'done');
+  assert.match(get('w1').autoClosed!.text, /its worker's final report says it is delivered/);
+  assert.equal(get('w2').status, 'stalled', 'its report was read before it stalled: a person decides');
+});

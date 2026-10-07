@@ -176,11 +176,17 @@ Each request is linked to the pull requests its workers open (`WorkItem.prs`: re
 - the request's own worker opened it: a `gh pr create` in the worker's transcript printed its URL, after the request was
   filed, while the worker was on this request (a worker that did several requests in a row owns each PR for the latest
   request filed by the time it ran the command, `ownerAt`); or
-- its head branch is the request's own branch (an intake request's `ffbox/...`).
+- its head branch is the request's own branch (an intake request's `ffbox/...`); or
+- its **title names it** (w631, `titleIdsIn`): a leading `w165: …`, `w604/w556: …` or `w605 (1): …`, or a title that ends
+  in its ids alone, `… (w184)`, `… (w197/w214)`. 407 of the 606 PRs of both repos name a request in their title, and the
+  PRs from before the `Request:` line only there: Ben's w150–w214 sat stalled for days with every PR merged. An id inside
+  other words is not one ("(w170 diagnostics)", "since w170", "(w165 follow-up)"). A title that marks a step (a numbered
+  part, a plan, docs only, a design, an investigation, diagnostics, a follow-up, a draft, "do not merge") links the PR as
+  a `Part of:` one: its merge leaves the request open.
 
 It is **never** linked from related ids, from a PR number the brief or a worker's report mentions, or from a worker or
 sandbox the request merely shares, and never when the PR merged before the request was filed. A PR whose description says it
-is for another request is not this one's. Links made before these rules (no `via`) are dropped unless the rules find them
+is for another request is not this one's, unless its title names this one too (`w604/w556: …`, a takeover). Links made before these rules (no `via`) are dropped unless the rules find them
 again, and an automatic close whose closing PR no longer qualifies is reopened by the next pass (active when a worker is on
 it, else new), with a line in its log and a note to its person (w340: w339 was closed on #988, an earlier request's PR), and a
 `ledger cleanup: reopened <id>` line in the server log; the first pass after a start also logs how many closes it checked
@@ -189,8 +195,10 @@ closes or reopens loses its `autoClosed` mark, its "closed automatically" outcom
 rules (`settleByHand`), and the re-check skips (and clears) a request whose log shows such a close after the cleanup's own:
 a person's close is final (w370: w50 was closed by hand at 06:33 and reopened by the re-check at 06:34). The PRs show on
 the request in the Requests tab and in `list_work`. The repos asked are the game repo's and this app's own (from their
-`origin`), or exactly `ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each, and
-`gh pr view` for a linked open PR older than that). When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
+`origin`), or exactly `ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each in
+the 5-minute pass, the 1,000 newest in the full pass so that old PRs named only by their titles are found, w631: 3 MB and
+7 s for the game repo, measured; and `gh pr view` for a linked open PR older than that). The PR rule runs on stalled
+requests too, so the first full pass after a deploy re-judges the stalled backlog. When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
 
 **How fresh a PR's state is** (w515: w443, w449, w454, w484 and w489 were refused "PR #N is still open" seconds after
 their PRs merged, and w443 still listed #1087 open after a person closed it). The states are a copy, refreshed:
@@ -277,7 +285,8 @@ stalled. Ben's requests are included. In this order, the first that fits applies
    is done ("All done", "is delivered", "nothing more to do", "fully merged to develop, so I'm idle", "is fixed and merged into
    develop", "nothing is open or pending") and says nothing is left, waiting or asked, with no open PR
    and no step after the merge, closes as done with that report quoted. A release's report must also link the patch
-   notes and say it is live. When the report is not clear, nothing closes.
+   notes and say it is live. When the report is not clear, nothing closes. A stalled request is read the same way when its
+   worker's report came after the stall (w631: a worker that went back to it and finished it left it stalled).
 3. **Cut off.** A worker that stopped on a usage or rate limit (also one whose turn simply ended with Claude's "You've hit
    your session/weekly limit" as its whole result), an app restart (its turn was still open) or a refused tool
    and never resumed. A limit or restart is resumed once (a message to the worker, recorded in `resumedBy`): a limit only

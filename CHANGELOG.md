@@ -51,7 +51,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   - a close a person asked for in their own turn counted toward the 3 filings per message: closes in their own turn are
     free now (harness turns still count);
   - the ledger kept only the newest 300 closed requests, about three days at a hundred a day, inside the seven-day reopen
-    window: it now keeps every one closed in the last 7 days too (2,000 at most).
+    window: it now keeps every one closed in the last 7 days too (2,000 at most);
+  - the backlog: PRs from before the `Request:` line named their request only in their title, so Ben's w150–w214 sat
+    stalled with every PR merged. A PR whose title starts with or ends in the request's id is linked now (`titleIdsIn`;
+    a plan, docs-only, diagnostics or follow-up title as a step), the full pass reads the 1,000 newest PRs of each repo,
+    and a stalled request whose worker reported it delivered after the stall closes. The first full pass after the deploy
+    re-judges every stalled request this way.
   [docs/orchestrators.md](docs/orchestrators.md), "Pull requests" and "Ledger cleanup"; [docs/ops-worker.md](docs/ops-worker.md).
 - **The disk guard defaults to 20 / 10 GB free, from 50 / 20** (w628, Ben: "you dont need 50gb free to run unity
   editors, change that rule"). Measured on BEAST in a warm sandbox: an editor open and a forced script reimport grew

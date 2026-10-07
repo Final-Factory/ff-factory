@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, ownerAt, partOfIdsIn, partOfReason, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, ownerAt, partOfIdsIn, partOfReason, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, titleIdsIn, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -232,4 +232,17 @@ test('w631: a deploy is the only step left when nothing else after the merge is:
   assert.equal(deployStep(item({ id: 'w5', question: { text: 'which one?', at: T } }), ['Waiting on the deploy.']), undefined);
   assert.equal(deployStep(w, ['Merged. Waiting on the portal deploy. The second PR is next.']), undefined);
   assert.equal(deployStep(w, ['Merged. After the deploy, run the nightly soak.']), undefined, 'a sentence naming another step is never set aside');
+});
+
+test('w631: a PR title names its request at its start or as its trailing ids only; a step is a part', () => {
+  assert.deepEqual(titleIdsIn('w604/w556: warm the shader variants at boot on Windows too'), { ids: ['w604', 'w556'], part: false });
+  assert.deepEqual(titleIdsIn('w605 (1): a portal update no longer blocks the workers'), { ids: ['w605'], part: true });
+  assert.deepEqual(titleIdsIn('Mass driver link highlight: 40% brighter (w184)'), { ids: ['w184'], part: false });
+  assert.deepEqual(titleIdsIn('KNN: a ship holds no neighbours (w197/w214)'), { ids: ['w197', 'w214'], part: false });
+  assert.deepEqual(titleIdsIn('w186: smooth-motion architecture, research and plan (docs only, do not merge yet)'), { ids: ['w186'], part: true });
+  for (const t of ['Desync report: a bot\'s cargo (w170 diagnostics)', 'Construction bots (deconstruction 15% slower since w170)', 'Load: remap item ids; w292 index-shift regression', 'Station ships change frame (w165 follow-up)', 'Revert "w551: Ringed Gas Giant" (#1161)']) assert.deepEqual(titleIdsIn(t).ids, [], t);
+  // prsOf links by the title, also when the description says it is another request's (a takeover).
+  const w = item({ id: 'w556', createdAt: '2026-10-01T00:00:00Z' });
+  const linked = prsOf(w, [pr({ number: 1196, title: 'w604/w556: warm the variants', body: 'Request: w604' }), pr({ number: 900, title: 'Desync report (w556 diagnostics)' })], { opened: [] });
+  assert.deepEqual(linked.map((p) => [p.number, p.via, p.partOf]), [[1196, 'title', false]]);
 });

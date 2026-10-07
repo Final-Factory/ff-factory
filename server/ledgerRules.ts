@@ -61,10 +61,29 @@ export function partOfIdsIn(text: string): string[] {
   return idsOn(text, /^\s*Part of:\s*(w\d+)\b/gim).filter((id) => !full.has(id));
 }
 
+/**
+ * The requests a PR's title names as its own (w631): a leading "w165: …", "w604/w556: …" or "w605 (1): …", or a title
+ * that ends in its ids alone, "… (w184)", "… (w197/w214)". 407 of the 606 PRs of both repos name a request in their
+ * title, and the PRs from before the `Request:` line (w293) only there: Ben's w150–w214 sat stalled for days with every
+ * PR merged. A request named inside other words ("(w170 diagnostics)", "since w170", "w292 index-shift regression") is
+ * not one. `part`: the title says it is a step, not the whole (a numbered part, a plan, docs only, diagnostics, a
+ * follow-up, a draft), so its merge leaves the request open like `Part of:`.
+ */
+export function titleIdsIn(title: string): { ids: string[]; part: boolean } {
+  const ids = new Set<string>();
+  const list = (s: string) => s.split(/\s*[/,&+]\s*/).map((x) => x.trim().toLowerCase());
+  const lead = /^\s*((?:w\d+\s*[/,&+]\s*)*w\d+)\s*(\(\s*\d+\s*\))?\s*:/i.exec(title);
+  if (lead) for (const id of list(lead[1])) ids.add(id);
+  const tail = /\(\s*((?:w\d+\s*[/,&+]\s*)*w\d+)\s*\)\s*$/i.exec(title);
+  if (tail) for (const id of list(tail[1])) ids.add(id);
+  const part = !!lead?.[2] || /\b(plan|docs only|design|investigation|diagnostics|follow-?up|draft|part \d|step \d|phase \d|do not merge)\b/i.test(title);
+  return { ids: [...ids], part };
+}
+
 /** Why a request stays open after a merge because its last merged PR said `Part of: <id>`, or undefined. */
 export function partOfReason(id: string, prs: readonly WorkPr[]): string | undefined {
   const last = prs.filter((p) => p.state === 'merged').sort((a, b) => (a.at ?? '').localeCompare(b.at ?? '')).at(-1);
-  return last?.partOf ? `PR #${last.number} is one step of it (its description says Part of: ${id}); more follows` : undefined;
+  return last?.partOf ? `PR #${last.number} is one step of it (${last.via === 'title' ? 'its title marks it a step' : `its description says Part of: ${id}`}); more follows` : undefined;
 }
 
 /** `https://github.com/<owner>/<name>/pull/<n>` links in text a worker wrote. */
@@ -109,7 +128,10 @@ export function prsOf(w: WorkItem, all: readonly PrRecord[], ctx: { opened: read
     if (says.length) via = says.some((id) => mine.has(id)) ? 'line' : undefined;
     else if (ctx.opened.some((o) => o.number === p.number && o.repo.toLowerCase() === p.repo.toLowerCase()) && p.createdAt >= w.createdAt) via = 'worker';
     else if (branch && p.head === branch) via = 'branch';
-    if (via) out.push({ ...p, via, partOf: via === 'line' && partOfIdsIn(p.body).some((id) => mine.has(id)) });
+    // Its title names it (w631): also when its description says it is for another request ("w604/w556: …", Request: w604).
+    const titled = via ? undefined : titleIdsIn(p.title);
+    if (titled?.ids.some((id) => mine.has(id))) via = 'title';
+    if (via) out.push({ ...p, via, partOf: via === 'title' ? titled!.part : via === 'line' && partOfIdsIn(p.body).some((id) => mine.has(id)) });
   }
   return out;
 }
