@@ -12,6 +12,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **`npm test` on a Mac takes half as long: a usage test no longer holds its process for a minute** (w636, asked by
+  lothsahn). A test left a fake login request hanging with its 60 s deadline running; on a Mac (where the stored-login
+  check lets that request start) the file's process lived 60 s, the longest of the suite. It now ends the request.
 - **A sandbox is not held for a worker that comes back much later** (w640, Lothsahn: "Can we not reserve slots for
   workers that resume a long time from now?"). A worker stopped with its check-in more than 30 minutes away, or with a
   stale check-in for work that is over, releases its sandbox when its worktree is clean (nothing uncommitted or
