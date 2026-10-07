@@ -439,8 +439,16 @@ change applies on the next reconnect; omitted on a redeploy: kept):
 | `max_agents_per_sandbox` | Agents that may be mid-turn at once in one sandbox; idle ones take no slot, and a message past it is queued | 2 |
 | `max_sandbox_agents` | The machine's agent cap: agents mid-turn at once on it, its sandboxes' and its standing agents together (w536) | `max_sandboxes` × `max_agents_per_sandbox` |
 | `max_unity` | Unity editors that may run at once on the machine: every top-level Unity process there counts, sandbox editors, the main clone's or its owner's own, `-batchmode` builds and test runs, peer-run editors, editors scripts start (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)); launches other than `unity start` wait in a queue for their slot (`unity-slot run`) | 2 |
-| `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors | 50 |
-| `disk_critical_gb` | Below this: idle sandbox editors stop, and agents mid-turn in sandboxes are asked to commit, push and end their turn | 20 |
+| `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors | 20 |
+| `disk_critical_gb` | Below this: idle sandbox editors stop, and agents mid-turn in sandboxes are asked to commit, push and end their turn | 10 |
+
+**Why 20 / 10 GB** (w628, measured on BEAST 2026-10-07 in a sandbox with a warm Library): opening the editor and
+force-reimporting all 4,169 scripts grew the Library by under 10 MB; a development player build wrote 2.1 GB of output
+and 0.25 GB of Library, a release build 2.0 GB of output and 2.5 GB of Temp (deleted when the editor closes); the
+sandbox's earlier day-long session (a develop merge, Burst recompiles, one build) wrote at most 7.6 GB. An editor
+needs about 10 GB, so `disk_warn_gb` is that above the 10 GB floor where idle editors stop. A machine whose agents
+build several players before the 7-day clean-up removes them, or runs `max_unity` editors that all build, wants
+2.5 GB more per extra build in flight.
 
 LothDesktop, for example: `sandbox_root: "D:\work\ffsb"`, `max_sandboxes: 3`, `max_agents_per_sandbox: 2` (six
 sandbox agents in all), `max_unity: 2`.
@@ -476,7 +484,9 @@ folder are protected, killing Unity by hand is refused (other sandboxes' editors
 
 **Warm Library.** A new sandbox's `Library` is copied from the main clone's, or, when that is empty (a clone that never
 opened Unity), from a ready sandbox's, preferring one whose editor is stopped: robocopy on Windows, an APFS clone
-(`cp -c`) on a Mac. It needs `disk_warn_gb` + 30 GB free first. `seed_library: false` skips it.
+(`cp -c`) on a Mac. It needs `disk_warn_gb` + 30 GB free first, or `disk_warn_gb` + the Library's own size for a full
+copy (robocopy on Windows without `library_seed_copy: "clone"`, w628: BEAST's seed is 99 GB, measured in 16 s).
+`seed_library: false` skips it.
 
 **The first start after a Library copy reimports the scripts.** A Library copied from another project path keeps
 stale script-to-class mappings: on LothDesktop's first sandboxes URP renderer features loaded as missing, the player

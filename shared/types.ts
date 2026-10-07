@@ -455,9 +455,9 @@ export interface Machine {
   maxAgentsPerSandbox?: number;
   /** Unity editors of its sandboxes that may run at once (default 2; the main clone's editor is not counted). */
   maxUnity?: number;
-  /** Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 50). */
+  /** Its disk guard: below this many GB free on the sandbox volume, no new sandboxes or sandbox editors (default 20, DISK_WARN_GB_DEFAULT). */
   diskWarnGB?: number;
-  /** Below this, idle sandbox editors are stopped and busy sandbox agents asked to checkpoint (default 20). */
+  /** Below this, idle sandbox editors are stopped and busy sandbox agents asked to checkpoint (default 10, DISK_CRITICAL_GB_DEFAULT). */
   diskCriticalGB?: number;
   /** Its sandboxes, as its daemon last reported them (portal-owned: purpose and sessionIds). */
   sandboxes?: MachineSandbox[];
@@ -516,6 +516,16 @@ export interface MachineSandboxUnity {
   detail?: string;
   logPath?: string;
 }
+
+/**
+ * The disk guard's defaults, in GB free on the sandbox volume (w628, measured on BEAST 2026-10-07 in a warm sandbox):
+ * opening the editor and force-reimporting every script grew its Library by under 10 MB, a development player build
+ * wrote 2.1 GB of output and 0.25 GB of Library, a release build 2.0 GB of output and 2.5 GB of Temp (gone when the
+ * editor closes), and a whole day's sandbox session (a develop merge, Burst recompiles, one build) at most 7.6 GB. So
+ * an editor needs about 10 GB on top of the 10 GB floor, where idle editors stop and busy agents checkpoint.
+ */
+export const DISK_WARN_GB_DEFAULT = 20;
+export const DISK_CRITICAL_GB_DEFAULT = 10;
 
 /** The pool settings the portal sends a daemon (welcome) and a deploy writes into daemon.json. */
 export interface SandboxPoolSettings {
