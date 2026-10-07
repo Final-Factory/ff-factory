@@ -83,7 +83,8 @@ echo "ok: fff-ops-ssh --sftp opens only the machine's sftp subsystem, with the s
 
 # ---- scp and sftp (w612): real copies through ops-bin/scp, ops-bin/sftp, fff-ops-scp-ssh and fff-ops-ssh, to a fake
 # machine: the fake ssh runs a real sftp-server (or scp's own sink and source, scp -O) in a folder of its own.
-sftp_server=$(ls /usr/lib/openssh/sftp-server /usr/libexec/sftp-server /usr/libexec/openssh/sftp-server 2>/dev/null | head -n 1 || true)
+sftp_server=""
+for f in /usr/lib/openssh/sftp-server /usr/libexec/sftp-server /usr/libexec/openssh/sftp-server; do [ -x "$f" ] && { sftp_server=$f; break; }; done
 if [ -z "$sftp_server" ] || [ ! -x /usr/bin/scp ] || [ ! -x /usr/bin/sftp ]; then
   [ -z "${CI:-}" ] || fail "scp: no sftp-server, /usr/bin/scp or /usr/bin/sftp on this runner"
   echo "SKIP: scp and sftp (no sftp-server here)"
