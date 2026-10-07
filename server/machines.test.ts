@@ -598,10 +598,12 @@ test('machine: a daemon stopping on purpose (a worker migration, w513) is not re
   const d = daemon();
   await until('online', () => mm.isOnline('mx'));
   // POST /machine/stopping, then the migration stops it: the offline watch leaves it alone while its sandboxes move
-  // (LothDesktop 2026-10-06: a redeploy 2 minutes in put the old daemon back and the move rolled back).
-  assert.deepEqual(mm.stoppingOnPurpose('mx'), { ok: true });
+  // (LothDesktop 2026-10-06: a redeploy 2 minutes in put the old daemon back and the move rolled back). Held once the
+  // test daemon is surely gone: a reconnect still in flight would say hello and end the hold (Windows CI, #180).
   d.shutdown();
   await until('offline', () => !mm.isOnline('mx'));
+  assert.deepEqual(mm.stoppingOnPurpose('mx'), { ok: true });
+  assert.equal(store.machines.get('mx')!.daemonStopped, true);
   const redeployed: string[] = [];
   mm.deployMachine = ((o: { id: string }) => (redeployed.push(o.id), store.machines.get(o.id)!)) as typeof mm.deployMachine;
   await mm.watchOffline(Date.now(), async () => true);
