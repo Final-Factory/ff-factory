@@ -48,6 +48,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **Flaky unit tests wait for what they check, not a fixed time** (w636, asked by lothsahn). The background-save and
+  state-save tests, the unity-slots crashed-holder, waiter and CLI tests, and the download-resume test failed on slow
+  Windows runners; each now waits on the event it checks. The Mac dialog and Unity watch tests no longer ask the real
+  Mac (they failed on every Mac worker, and macUnity took 10 s there).
 - **The disk guard defaults to 20 / 10 GB free, from 50 / 20** (w628, Ben: "you dont need 50gb free to run unity
   editors, change that rule"). Measured on BEAST in a warm sandbox: an editor open and a forced script reimport grew
   the Library by under 10 MB, a development build wrote 2.1 GB plus 0.25 GB of Library, a release build 2.0 GB plus
