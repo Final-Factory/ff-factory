@@ -22,7 +22,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   offers it and falls back to its own Whisper when the machine is offline, short of VRAM, failing or slower than 3 s
   plus 0.05 s per second of audio (`voice.remote`). The result, the mic's label and Settings say which engine answered,
   and the dispatcher's line for the machine says how much VRAM Whisper holds. Measured on BEAST: a 12.5 s clip in
-  0.20-0.30 s on the GPU, 1158 MiB of VRAM, 656 MiB of RAM, 2.4 s from daemon start to loaded.
+  0.20-0.33 s on the GPU, ~1160 MiB of VRAM, 656 MiB of RAM, 2.4-2.7 s from daemon start to loaded.
   [docs/voice.md](docs/voice.md), "Whisper on a worker's GPU".
 
 ### Changed

@@ -189,7 +189,7 @@ engine keeps its settings (`voice.enabled`, `model`, `device`, ...). With `voice
 engine still works; it just has no fallback. Nothing on the portal needs switching on: a deploy routes to any machine
 that offers it, and a machine offers it once its daemon.json says so.
 
-**The timeout, from the measurements.** BEAST answers a 12.5 s clip in 0.20-0.30 s and a 45.5 s clip in 0.61-0.95 s
+**The timeout, from the measurements.** BEAST answers a 12.5 s clip in 0.20-0.33 s and a 45.5 s clip in 0.61-0.95 s
 (below): about 0.02 s per second of audio. The wait before the fallback is 3 s plus 0.05 s per second of audio (3.6 s for
 a 12.5 s clip, 18 s for a 5-minute one): ten times the measured time plus room for the tailnet, so a GPU busy with an
 editor still answers, while a hung one costs a few seconds at most. A machine whose model is not loaded gets 20 s more
@@ -205,11 +205,11 @@ to a Daemon with voice on over a WebSocket on the same PC (`scripts/voice-e2e.ts
 | | measured |
 |---|---|
 | install (venv, faster-whisper and CUDA wheels, model) | 60 s; 3.6 GB on disk (model 1.6 GB, uv cache 1.9 GB) |
-| daemon start to model loaded (files in the OS cache) | 2.4 s |
-| a 12.5 s clip through the link, GPU | 0.20-0.31 s total (model 0.20-0.30 s), 10 runs in two sessions |
+| daemon start to model loaded (files in the OS cache) | 2.4-2.7 s, 3 runs |
+| a 12.5 s clip through the link, GPU | 0.20-0.33 s total (model 0.20-0.32 s), 15 runs in three sessions |
 | VRAM | +1158 to 1162 MiB (2801 to 3959 MiB in use) |
 | RAM, worker process | 656 MiB working set |
-| the fallback after the daemon stops (base.en, CPU, 2 threads, AVX only: the VM's limits) | 0.9-1.9 s (the first includes its 0.9 s load), 6 runs, `engine: local` |
+| the fallback after the daemon stops (base.en, CPU, 2 threads, AVX only: the VM's limits) | 0.9-2.2 s (the first of each includes its ~1 s load), 9 runs, `engine: local` |
 
 Not measured here: the tailnet hop from the VM to BEAST (adds the upload of ~0.5 MB for 12.5 s and a round trip; a
 guess: 0.1-0.5 s), and the VM's own CPU, slower per core than BEAST's (a guess, w570: about 3x). The portal's log line
