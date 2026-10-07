@@ -25,6 +25,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **The worker install names a nightly lab task left on an old root** (w577, lothsahn: "make sure the new nightly e2e
+  lab runs out of D:\work\ffw\nightly like it should"). The nightly lab's Windows task `ff-nightly-e2e` names its root
+  on its command line, so w513's move left lothdesktop's task on the deleted `D:\work\ff-nightly`. At the end of an
+  install or migration the installer now reads the task and, when it does not run from `<root>\nightly`, prints a
+  WARNING with the command that re-points it (the game repo's `scripts/nightly/install_schedule.sh`). The
+  worker-install runbook says the same.
 - **Dictation on the portal VM** (w570, Ben: "I can no longer use voice on my phone even tho that was working before").
   The VM started with voice off, as it has no GPU. `fffctl configure --voice base.en` turns local Whisper on there on the
   CPU (`voice.device: "cpu"`, `cpuThreads` = the VM's vCPUs, no Kokoro) and restarts the portal; `--voice off` turns it

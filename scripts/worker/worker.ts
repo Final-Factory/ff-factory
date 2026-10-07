@@ -851,6 +851,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     const w = await whoami(o.portalUrl, o.token);
     if (w.ok && w.me.online) {
       p.done(`The portal sees ${id} online${w.me.root ? ` with root ${w.me.root}` : ''}.`);
+      await nightlyTaskCheck(l);
       summary(l, m);
       return true;
     }
@@ -859,8 +860,39 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   }
   p.done(`The daemon has not connected yet. Its log: ${path.join(l.logs, 'daemon.log')}`);
   process.exitCode = 1;
+  await nightlyTaskCheck(l);
   summary(l, m);
   return false;
+}
+
+/** The nightly e2e lab's scheduled task on a Windows lab PC, made by the game repo's scripts/nightly/install_schedule.sh. */
+export const NIGHTLY_TASK = 'ff-nightly-e2e';
+
+/**
+ * w577: the nightly lab's schedule names its root on its command line (FF_NIGHTLY_ROOT=... bash <root>/FinalFactory/...),
+ * so a root move leaves it where it was: after w513, lothdesktop's task still ran the deleted D:\work\ff-nightly.
+ * The line to say when the task's definition (schtasks /xml) does not name this root's nightly/, in either path form;
+ * undefined when it does or there is no task. Exported for tests.
+ */
+export function nightlyTaskProblem(definition: string | undefined, nightly: string): string | undefined {
+  if (!definition?.trim()) return undefined;
+  const norm = (s: string) => s.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const want = norm(nightly);
+  const drive = /^([a-z]):\/(.*)$/.exec(want);
+  const forms = drive ? [want, `/${drive[1]}/${drive[2]}`] : [want];
+  const d = norm(definition);
+  if (forms.some((f) => d.includes(f))) return undefined;
+  const ran = /<Arguments>([^<]*)<\/Arguments>/.exec(definition)?.[1]?.replace(/&quot;/g, '"').trim();
+  return `The nightly lab's task ${NIGHTLY_TASK} does not run from ${nightly}${ran ? ` (it runs: ${ran})` : ''}. Re-point it from any game checkout: FF_NIGHTLY_ROOT="${nightly}" bash scripts/nightly/install_schedule.sh (it makes the nightly checkout there and replaces the task).`;
+}
+
+/** Say whether the nightly lab's task follows this root (Windows; the M3's LaunchAgent moves with its own runbook). */
+async function nightlyTaskCheck(l: Layout) {
+  if (!isWin) return;
+  const r = await exec('schtasks', ['/query', '/tn', NIGHTLY_TASK, '/xml'], { timeoutMs: 30_000 });
+  if (r.code !== 0) return; // no nightly lab on this machine
+  const problem = nightlyTaskProblem(r.stdout, l.nightly);
+  say(problem ? `\nWARNING: ${problem}` : `The nightly lab's task ${NIGHTLY_TASK} runs from ${l.nightly}.`);
 }
 
 function summary(l: Layout, m: Manifest) {
