@@ -280,7 +280,7 @@ paths, a machine's clone, daemon folder and Unity; anything that is or holds a g
 says otherwise (pushed agent clones, runner checkouts, this app's test scratch); `.claude` (settings,
 transcripts), `.ssh`, `.gnupg`, `.aws`, `.config`, keychains and names that look like secrets;
 `ff-local-backups`; `~/torque`; anything named like lab or audit artifacts (`DeterminismAudit`,
-`ff-audit-artifacts`, `lab`); Steam and Unity installs; `.vhdx`/`.vhd` files (the F: VHDX); and the temp
+`ff-audit-artifacts`, `lab`); Steam and Unity installs (a Unity version nothing uses goes by the own-leftovers rule below); `.vhdx`/`.vhd` files (the F: VHDX); and the temp
 folders of agents running now. **In use**: besides the age walk, each entry is renamed before it is
 deleted. On Windows a folder with a file open inside cannot be renamed, so an entry in use is skipped
 whole instead of half removed; a removal that fails after the rename leaves `<name>.ffclean-<n>`, which
@@ -295,8 +295,9 @@ the folder Git Bash maps `/tmp` to. Git for Windows mounts `/tmp` at the Windows
 process and keeps that mount while any MSYS process of the user runs, so it is often some agent's `ffa-<session>`;
 removing it makes every bash print `could not find /tmp, please create!`. The daemon asks `cygpath -w /tmp` every
 5 minutes and before each clean-up pass, keeps that folder, and makes it again if anything removed it
-(`server/gitBashTmp.ts`). The worker and machine
-briefs tell agents to put builds, recordings and screenshot sets there and to delete them once reported.
+(`server/gitBashTmp.ts`). Every sandbox worker's brief (`DISK_HYGIENE` in `server/agents.ts`, w626) tells it to put
+builds, recordings and screenshot sets there, and to remove everything it made (builds, Captures, recordings, extra
+worktrees and clones, save copies, the player slots nobody holds) before it reports a request done.
 
 **Visibility.** Every pass appends one line to `cleanup-log.jsonl` (the app's `dataDir` on the host, the
 daemon's folder on a machine): when, why, free space before and after, each entry removed with its size
@@ -359,6 +360,39 @@ the portal too (`data/cleanup/<machine>/cleanup-log.jsonl`); `cleanup_log` shows
 `off`), `everyHours` (24), `untouchedHours` (24), `shaBuildDays` (2), `runRetentionDays` (14), `logRetentionDays`
 (14), `tempHours` (6), `nightlyKeep` (2), `nightlyRoots`. Tests: `server/staleOutput.test.ts` (each keep and delete
 rule), `server/machineSandboxes.test.ts` (a dry run through a daemon).
+
+### FF Factory's own leftovers (w626)
+
+On 2026-10-07 the m3 drifted under its 50 GB guard holding about 78 GB of what FF Factory itself had left there: old
+player slots in `~/nevergames/ff-players`, an old agent worktree, and Unity editor versions no project used. A worker
+found them (w596) and asked people for a go instead of removing them, and the question reached Ben and Lothsahn. Ben:
+"no YOU free up disk space, like you are instructed to in this harness. stop making us tell you to do it." Now a
+machine's daemon removes these by itself (`server/ownLeftovers.ts`, wired in `machine/daemon.ts` `ownLeftovers`) in
+every pass while free space is below the soft threshold, in every pass asked for (`machine_cleanup`) and in dry runs.
+It reports what it removed in the pass's log like every other rule; it asks nobody.
+
+| What | Where it looks | Goes when |
+|---|---|---|
+| player slots (`scripts/nightly/player_slots.py` in the game repo) | every slot root the machine may have: `<root>/players` of a worker root, the root in the slot config (`%ProgramData%\FinalFactory\player-slots.json`, `~/.config/finalfactory/player-slots.json`), and the script's old defaults (`~/nevergames/ff-players`; `D:\workf-players`, `<D..J>:f-players`, `C:f-players`) | a `slot*` folder holding a player copy (or an earlier fill's `trash-*`) with no live lease (a lease lives as the script judges it: younger than 12 h and, on this host, its pid alive) and nothing inside changed for 24 h. The whole slot folder goes; the next launch makes it again at the same path, so the firewall rule that names it still fits |
+| agent worktrees | the linked worktrees of the machine's clone and a worker root's `repo/` (`git worktree list`) | not a sandbox nor holding one, not locked, not inside a sandbox an agent works in now, no process naming it, unused for 2 days (its git HEAD, index and reflog, its top-level entries, a Unity project's Library entries, Temp, Logs, UserSettings), and nothing uncommitted, untracked or on no remote. One with work of its own is **listed** for its owner, never removed. A Claude Code worktree (`<sandbox>/.claude/worktrees/<name>`) counts. After the removal `git worktree prune` drops git's record; the branch stays |
+| Unity editors | Unity Hub's editor folders (its chosen install path and the defaults), the machine's `unity_editor_root`, and the folders of the editors the Hub lists | a `<version>` folder holding `Editor/Unity.exe` or `Unity.app` whose version no sandbox's or the main clone's `ProjectSettings/ProjectVersion.txt` names, nor the clone's `HEAD`, `origin/develop` or `origin/master`, nor a Unity project up to three folders under the home folder opened within 30 days (a person's own), and that no process runs from. When no version could be read at all, none goes |
+| finished agents' temp folders | the temp folders (the regular `agent-temp` rule above) | two hours after the session stopped, never while it runs |
+
+**Checked again right before each removal**: a slot is planned again (a lease taken meanwhile keeps it), a worktree's
+last use and the processes are read again, and an editor that a process started from meanwhile stays. The process list
+failing means no worktree or editor is judged in that pass. Each entry is renamed before it is deleted, as above.
+Never: a sandbox, the clone itself, anything the guard keeps (`neverDelete`: protected paths, the daemon's folder,
+secrets, backups), a person's own files (only the exact shapes in the table are looked at). On Windows an editor under
+`Program Files` needs administrator rights the daemon does not have: its removal fails and the log says so (the
+editors on our machines are in a Hub folder the user owns, or `unity_editor_root`). The portal's own host as a machine
+cleans nothing itself (`machines.cleanupFor`); a `machine_cleanup` there still runs these rules. Tests:
+`server/ownLeftovers.test.ts` (each pick and each keep, removal and pruning with real git).
+
+**People are never asked to free disk.** A pass that cannot get back above the soft threshold says, in its notice to
+the dispatcher, to file clean-up work for that computer; the dispatcher's and the orchestrators' briefs say low disk is
+fixed by `machine_cleanup` and a clean-up worker on that machine, never by asking its owner (`server/agents.ts`), and
+every sandbox worker's brief carries the clean-up of its own leftovers before it reports a request done
+(`DISK_HYGIENE`). The worker's checklist is the ff-agents evidence-gate lesson `clean-up-after-yourself.md`.
 
 What clean-up cannot fix is reported, not removed: user data (OneDrive, Videos, Downloads), the audit
 artifacts, and on BEAST the Dev Drive VHDX, which grows but never shrinks by itself (634 GB for 334 GB used

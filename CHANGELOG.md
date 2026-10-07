@@ -12,6 +12,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **A machine removes FF Factory's own leftovers by itself when disk runs low** (w626, Ben: "no YOU free up disk space,
+  like you are instructed to in this harness. stop making us tell you to do it."). Below the soft threshold, and in
+  every `machine_cleanup`, the daemon's clean-up now also removes player slots nobody holds (every slot root the machine
+  may have, the old `~/nevergames/ff-players` included), linked worktrees of its clone with everything pushed and
+  unused for 2 days (sandboxes, locked ones and ones with local work are kept; local work is listed), and Unity editor
+  versions that no sandbox's or the main clone's `ProjectVersion.txt` (nor origin/develop or master, nor a project of a
+  person's opened within 30 days) names and nothing runs. Each is checked again right before it goes and logged with
+  its size. Sandbox workers' briefs now carry their own clean-up before a request is done, and the dispatcher's and the
+  orchestrators' briefs say low disk is fixed by clean-up work, never by asking the machine's owner.
+  [docs/self-recovery.md](docs/self-recovery.md), "FF Factory's own leftovers".
+
 - **Dictation on a worker's GPU, the portal's CPU as the fallback** (w615, lothsahn: "voice commands to the portal can
   get handled by a dedicated process on beast ... If beast is down, the portal can fall back to doing local cpu
   whisper"; "It should be part of the worker harness and configurable. It'll be off by default and we'll turn it on for
