@@ -20,12 +20,15 @@ and the Macs within reach of FFBox's `ffdev` containers (design 1.4, rule 1).
 
    ```jsonc
    "tagOwners": { "tag:fff-portal": ["autogroup:admin"] },
-   "hosts": { "beast": "100.x.x.x", "lothdesktop": "100.x.x.x", "m3": "100.x.x.x", "m5": "100.x.x.x" },
+   "hosts": { "beast": "100.x.x.x", "lothdesktop": "100.x.x.x", "m3": "100.x.x.x", "m5": "100.x.x.x", "biscuit": "100.x.x.x",
+             "loth2800": "100.x.x.x" },
    "grants": [
      // people's devices and the machines reach the portal's HTTPS (Funnel serves the public side by itself)
      { "src": ["autogroup:member"], "dst": ["tag:fff-portal"], "ip": ["tcp:443"] },
-     // the portal deploys and backs up to the four machines over ssh, and nothing else
-     { "src": ["tag:fff-portal"], "dst": ["beast", "lothdesktop", "m3", "m5"], "ip": ["tcp:22"] }
+     // the portal deploys and backs up to the machines over ssh, and nothing else
+     { "src": ["tag:fff-portal"], "dst": ["beast", "lothdesktop", "m3", "m5", "biscuit"], "ip": ["tcp:22"] },
+     // Lothsahn's ssh into a machine he helps run (a person's device: every device is on Ben's login, so name it)
+     { "src": ["loth2800"], "dst": ["biscuit"], "ip": ["tcp:22"] }
    ],
    "nodeAttrs": [ { "target": ["tag:fff-portal"], "attr": ["funnel"] } ]
    ```
@@ -33,6 +36,13 @@ and the Macs within reach of FFBox's `ffdev` containers (design 1.4, rule 1).
    **Done (Ben, 2026-10-05):** the tailnet runs these rules in place of the default allow-all, checked by Ben. The
    policy before the change is kept as [`tailnet-policy-before-2026-10-05.hujson`](tailnet-policy-before-2026-10-05.hujson):
    paste it back into the JSON editor and Save to roll back.
+
+   **Adding a machine** (biscuit, an Ubuntu PC, 2026-10-07): its name and tailnet address in `hosts`, its name in the
+   portal's `tcp:22` grant, and a grant from the devices of whoever needs a shell there. Every device in the tailnet is
+   on Ben's login, so `autogroup:member` cannot tell Lothsahn's devices from Ben's: name the device. Then, in Machines,
+   **Disable key expiry** on the new machine (an untagged node's key otherwise expires after 180 days and the machine
+   drops off the tailnet). Optionally guard the rules with `"tests": [{ "src": "tag:fff-portal", "accept":
+   ["biscuit:22"] }, { "src": "loth2800", "accept": ["biscuit:22"] }]`, which refuses a save that breaks them.
 2. **An auth key** (Settings, Keys, Generate auth key): **not** reusable, **not** ephemeral, **pre-approved**, tag
    `tag:fff-portal`, expiry 1 day. It only has to work once: after the join the node keeps its own identity. Ben sends
    it to Lothsahn privately, not in a chat the agents read. A rebuilt VM needs a fresh one.
