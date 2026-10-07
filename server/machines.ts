@@ -238,9 +238,10 @@ export class RemoteSession implements SessionHandle {
     if (requestedBy && from !== 'system') this.info.lastRequestedBy = requestedBy;
     this.link.dispatchSend(this, text, from, uuid, images, requestedBy, attachments);
     this.lastFrom = from;
-    // A new turn: the stop is over (as AgentSession.send).
-    if (this.info.stoppedOnPurpose) {
+    // A new turn: the stop is over (as AgentSession.send), and so is the hold on its sandbox after its daemon went (w613).
+    if (this.info.stoppedOnPurpose || this.info.heldSince) {
       delete this.info.stoppedOnPurpose;
+      delete this.info.heldSince;
       this.link.touch(this);
     }
     return uuid;
@@ -442,6 +443,7 @@ export class MachineManager {
    */
   stoppedOnPurpose(s: RemoteSession) {
     s.info.stoppedOnPurpose = true;
+    delete s.info.heldSince;
     delete s.info.turnOpenSince;
     delete s.info.backgroundTasks;
     delete s.info.backgroundJobs;
@@ -786,7 +788,9 @@ export class MachineManager {
     const agents = [...this.sessions.sessions.values()]
       .filter((s) => s.info.machineId === id && s.live)
       .map((s) => ({ id: s.info.id, title: s.info.title, sandbox: s.info.machineSandbox, midTurn: isMidTurn(s.info) }));
-    return { id: m.id, online: this.isOnline(id), root: m.root, agents, sandboxes: (m.sandboxes ?? []).map((sb) => sb.id) };
+    // The daemon's code and whether it is outdated (w613): worker.ts update checks the new one is what the portal sees.
+    const outdated = this.outdated(id);
+    return { id: m.id, online: this.isOnline(id), ...(this.hellos.get(id)?.daemon ? { daemon: this.hellos.get(id)!.daemon } : {}), ...(outdated ? { outdated } : {}), root: m.root, agents, sandboxes: (m.sandboxes ?? []).map((sb) => sb.id) };
   }
 
   /**
@@ -1336,6 +1340,9 @@ export class MachineManager {
       const was = s.liveFlag;
       s.liveFlag = false;
       s.seenLive = false;
+      // Its process ended because its daemon went away (an update, a restart, a crash), not on purpose (w613): its sandbox
+      // stays its, so new work does not take it, until it is messaged, stopped on purpose, or HOLD_PLACE_MS passes.
+      if (was && why !== false && !s.info.stoppedOnPurpose && s.info.machineSandbox) s.info.heldSince = new Date().toISOString();
       if (s.info.status !== 'stopped' && s.info.status !== 'error') {
         Object.assign(s.info, { status: 'stopped', statusDetail: `machine ${id} went offline`, pendingPermissions: [] });
         this.store.putSession(s.info);
