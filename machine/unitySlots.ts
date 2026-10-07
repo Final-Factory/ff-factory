@@ -790,6 +790,13 @@ export async function acquire(
         d.say(`granted ${opts.count} Unity slot(s) to "${opts.label}" (${id})`);
         return { id, count: opts.count, stop: release };
       }
+      // The arbiter dropped the request while this still waits (it found the heartbeat silent: the process was suspended,
+      // or the daemon came back after a gap): filed again under its first time, so it keeps its place. Without this the
+      // client waited for a grant that could never come, silently (LothDesktop, 2026-10-07: a run waited 4 h).
+      if (!fs.existsSync(file)) {
+        writeAtomic(file, JSON.stringify(body));
+        d.say(`the request for ${opts.count} Unity slot(s) was gone from the mailbox; asked again (${id})`);
+      }
       const now = d.now();
       const arb = arbiterNow(d.dir, now);
       if (!arb) {
