@@ -12,6 +12,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A fresh job for the orchestration worker starts reliably** (w638, lothsahn: it crashed twice on 2026-10-07 with
+  "Claude Code process exited with code 1" the moment a job came with `fresh: true` after a turn had ended). Starting
+  the fresh conversation stopped the old process and connected for the new one at once, while the old one was still
+  exiting: `fff-ops.socket` takes one connection at a time (`MaxConnections=1`), so systemd dropped the new one without a
+  word. The spawner now waits for the last process's connection to close (a stop interrupts its turn and ends its
+  input, so it exits), and tries a dropped connection again until it is free, for up to 60 s. Whether the last process
+  was idle, mid-turn, stopped after its idle hour or errored, the new one runs the job. A failed start now shows the
+  launcher's reason in the transcript instead of only "exited with code 1", and a stop followed at once by a new process
+  no longer adds a false "Claude Code process aborted by user" error.
+
 - **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
   clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
   Whisper goes with a ping ahead of it: no answer within 2 s and the clip falls back, and the machine is skipped until it

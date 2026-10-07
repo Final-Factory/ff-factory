@@ -432,10 +432,11 @@ export class AgentSession implements SessionHandle {
     this.q = runQuery({ prompt: this.input, options });
     // What this process runs on, whatever the config says later (the account meters, docs/accounts.md).
     this.update({ status: 'starting', account: accountKeyOf(options.env ?? process.env) });
-    void this.consume(this.q);
+    void this.consume(this.q, this.abort);
   }
 
-  private async consume(q: Query) {
+  /** `abort` is this query's own: a stop and a quick restart (a fresh job) replace this.abort before this one ends. */
+  private async consume(q: Query, abort: AbortController) {
     try {
       for await (const m of q) {
         // After stop() this query is no longer the session's: a buffered state event must not mark a stopped session idle.
@@ -445,7 +446,8 @@ export class AgentSession implements SessionHandle {
       if (this.q === q) this.update({ status: 'stopped', statusDetail: undefined });
     } catch (e) {
       const msg = (e as Error).message ?? String(e);
-      const aborted = this.abort?.signal.aborted;
+      // Its own controller (w638): the next process's, already started, would make this stop read as an error.
+      const aborted = abort.signal.aborted;
       if (!aborted) this.store.append(this.info.id, { kind: 'error', text: msg });
       if (this.q === q) this.update({ status: aborted ? 'stopped' : 'error', statusDetail: aborted ? undefined : clip(msg, 300) });
     } finally {

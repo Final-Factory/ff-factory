@@ -70,8 +70,8 @@ systemctl start "$unit.socket"
 status=0
 sudo -u "$user" env PATH="$PATH" node deploy/vm/test/fff-ops-socket.driver.ts "$tmp/claude.sock" "$version" || status=$?
 sleep 1
-echo "--- systemd's journal for the socket and its services"
-journalctl --no-pager -o short-precise --since "$since" -u "$unit.socket" -t "$unit" | grep -Ev 'Listening on|Closed|Stopped|Deactivated' || true
+echo "--- systemd's journal for the socket"
+journalctl --no-pager -o short-precise --since "$since" -u "$unit.socket" | grep 'Too many incoming connections' || true
 drops=$(journalctl --no-pager --since "$since" -u "$unit.socket" | grep -c 'Too many incoming connections' || true)
 echo "systemd dropped $drops connection(s) for MaxConnections=1"
 [ "$drops" -ge 1 ] || fail "systemd never logged a dropped connection: the mechanism check did not reach it"
