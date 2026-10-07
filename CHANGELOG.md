@@ -135,6 +135,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **The worker update finds its tools over ssh, touches nothing when a check fails, and succeeds only on the commit it
+  installed** (w629, lothsahn: "Yes, fix the installer."). On m5, on 2026-10-07, `install.sh --update` over ssh found no
+  git-lfs: the ssh PATH had no `/opt/homebrew/bin`. The run then still restarted the daemon, and printed exit 0 and
+  "not outdated" on the old commit 9ea8476: `update()` read the refused install as "not seen yet" and restarted, and
+  then compared the portal's view with a VERSION file nothing had replaced.
+  - The installer adds the standard tool folders that exist to its own PATH (`withStandardPaths`; Homebrew and
+    `/usr/local` on a Mac, Git for Windows and Node.js on Windows). The daemon's PATH is unchanged.
+  - Every prerequisite is checked before the code is fetched or the daemon stopped. A failure exits 2 with the
+    daemon untouched.
+  - Success needs the portal to see the daemon running the commit installed (`updateVerdict`). Otherwise it exits 1
+    with the commit the daemon runs.
+  - The worker-update CI job now also runs the update with an ssh session's minimal PATH, and a refused update.
+    [docs/worker-install.md](docs/worker-install.md) "Updating".
 - **A harness message delivered mid-turn no longer strips a person's turn of their authority** (w607, Lothsahn:
   "Please fix whatever was causing the ops worker to refuse your instructions."). On 2026-10-07 `ops_worker` refused
   Lothsahn's own "Please drain and install on BEAST and m5" twice, and his "go" once: a `[worker update]` arrived while
