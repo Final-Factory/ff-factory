@@ -9,7 +9,7 @@ import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
-import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
+import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
@@ -517,18 +517,54 @@ test('message_person: only a person’s own orchestrator sends, to someone else 
   assert.match((await call(loth, 'message_person', { to: 'ben', text: '   ' })).text, /^ERROR: the message is empty/);
   assert.throws(() => o.messagePerson(o.personalOf('lothsahn')!, { to: 'ben', text: 'x'.repeat(PERSON_MESSAGE_CHARS + 1) }), /keep it to 2000/);
   assert.throws(() => o.messagePerson(dispatcher(), { to: 'ben', text: 'hi' }), /only a person’s own orchestrator messages people/);
+  assert.equal(MESSAGES_PER_PERSON, 10);
   for (let i = 0; i < MESSAGES_PER_PERSON; i++) assert.equal((await call(loth, 'message_person', { to: 'ben', text: `ping ${i}` })).isError, false);
-  assert.match((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).text, /^ERROR: 3 messages to Ben since they last wrote to their orchestrator; wait for them to answer/);
+  assert.match((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).text, /^ERROR: 10 messages to Ben since Lothsahn or Ben last wrote to their orchestrator; ask Lothsahn before sending more/);
   // Ben answering: a reply is the same tool, and his own limit is separate.
   assert.equal((await call(ben, 'message_person', { to: 'lothsahn', text: 'Done, it is allowed now.' })).isError, false);
   assert.equal(heard(loth.id, '[person message]').length, 1);
-  // Lothsahn writing to his own chat does not free his messages to Ben; Ben writing to his does.
+  // w571: Lothsahn writing to his own chat frees his messages to Ben (his own words), and so does Ben writing to his.
   o.personWrote(loth.id);
-  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).isError, true);
+  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).isError, false);
   o.personWrote(ben.id);
   assert.equal(o.personalOf('ben')!.info.personMessages, undefined, 'writing to his chat reads it');
-  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).isError, false);
-  assert.equal(heard(ben.id, '[person message]').length, MESSAGES_PER_PERSON + 1);
+  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'and again' })).isError, false);
+  assert.equal(heard(ben.id, '[person message]').length, MESSAGES_PER_PERSON + 2);
+});
+
+test('message_person (w571): a person relays as much as they ask; two orchestrators answering each other stop at the cap', async (t) => {
+  const { o, chat, call, heard } = setup(t);
+  const ben = chat(BEN).info;
+  const loth = chat(LOTH).info;
+  // Ben's case: he asks his orchestrator for one message to Lothsahn at a time, many times, while Lothsahn is away.
+  for (let i = 0; i < 25; i++) {
+    o.personWrote(ben.id);
+    assert.equal((await call(ben, 'message_person', { to: 'lothsahn', text: `Ben's message ${i}` })).isError, false, `message ${i}`);
+  }
+  assert.equal(heard(loth.id, '[person message]').length, 25);
+  // The loop: each orchestrator answers the other's [person message] with no person writing. Both stop at the cap.
+  o.personWrote(ben.id);
+  o.personWrote(loth.id);
+  let sent = 0;
+  for (let i = 0; i < 50; i++) {
+    const a = await call(ben, 'message_person', { to: 'lothsahn', text: `bounce ${i}` });
+    const b = await call(loth, 'message_person', { to: 'ben', text: `bounce back ${i}` });
+    if (a.isError && b.isError) break;
+    sent += Number(!a.isError) + Number(!b.isError);
+  }
+  assert.equal(sent, 2 * MESSAGES_PER_PERSON);
+});
+
+test('loop guards: config orchestrator.* sets them, within 1-100, else the defaults', async (t) => {
+  const { o, chat, call, cfg } = setup(t);
+  assert.deepEqual(loopGuards({ orchestrator: {} as Config['orchestrator'] }), { filings: FILINGS_PER_MESSAGE, followUps: FOLLOW_UPS_PER_MESSAGE, messages: MESSAGES_PER_PERSON });
+  assert.deepEqual(loopGuards({ orchestrator: { messagesPerPerson: 0, filingsPerMessage: 101, followUpsPerMessage: 2.5 } as Config['orchestrator'] }), { filings: FILINGS_PER_MESSAGE, followUps: FOLLOW_UPS_PER_MESSAGE, messages: MESSAGES_PER_PERSON });
+  cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: 2 };
+  const loth = chat(LOTH).info;
+  for (let i = 0; i < 2; i++) assert.equal((await call(loth, 'message_person', { to: 'ben', text: `ping ${i}` })).isError, false);
+  assert.match((await call(loth, 'message_person', { to: 'ben', text: 'third' })).text, /^ERROR: 2 messages to Ben/);
+  o.personWrote(loth.id);
+  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'third' })).isError, false);
 });
 
 test('message_person: a message to an orchestrator mid-turn waits for that turn, then gets its own answer', async (t) => {

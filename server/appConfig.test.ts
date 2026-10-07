@@ -117,6 +117,20 @@ test('app config: orchestrator.compactAtTokens and compactAtTurnUsd (w535), live
   assert.equal(full.orchestrator.compactAtTurnUsd, undefined, 'null: back to the default ($1)');
 });
 
+test('app config: the orchestrators’ loop guards (w571), live, 1 to 100', (t) => {
+  const { file, cfg } = setup(t);
+  const full = { ...cfg, orchestrator: { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true } } as unknown as Config;
+  setAppConfig(file, full, 'orchestrator.messagesPerPerson', '20');
+  setAppConfig(file, full, 'orchestrator.filingsPerMessage', 5);
+  setAppConfig(file, full, 'orchestrator.followUpsPerMessage', 4);
+  assert.deepEqual(full.orchestrator, { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true, messagesPerPerson: 20, filingsPerMessage: 5, followUpsPerMessage: 4 }, 'applies at once, the rest kept');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).orchestrator, { messagesPerPerson: 20, filingsPerMessage: 5, followUpsPerMessage: 4 });
+  for (const key of ['orchestrator.messagesPerPerson', 'orchestrator.filingsPerMessage', 'orchestrator.followUpsPerMessage'] as const)
+    for (const bad of ['0', '101', '2.5', 'many']) assert.throws(() => setAppConfig(file, full, key, bad), /is a whole number from 1 to 100/, `${key} ${bad}`);
+  setAppConfig(file, full, 'orchestrator.messagesPerPerson', null);
+  assert.equal(full.orchestrator.messagesPerPerson, undefined, 'null: back to the default (10)');
+});
+
 test('app config: usagePollMinutes, live, 5 to 240 minutes, default 15', (t) => {
   const { file, cfg } = setup(t);
   const full = { ...cfg, usagePollMinutes: 15 } as unknown as Config;
