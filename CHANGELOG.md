@@ -53,6 +53,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A re-run of the root installer rewrites root.json's notes** (w600, lothsahn: "Let's add a 6th slot for
+  LothDesktop and increase agents by 2."). `noteOutside` kept the first note of an outside item, so the player-slots
+  firewall group's note still said "8 slots" after LothDesktop's re-runs at `--max-sandboxes 5`. An item already
+  listed now takes the new note and keeps its other fields (`existed`). Test: `scripts/worker-install.test.ts`.
 - **A redeploy whose ssh step fails no longer locks the machine out** (w568, found in w513). `register` replaced the
   machine's token before the deploy's ssh step; when that failed, the machine kept its old token and its daemon's next
   reconnect was refused. The new token is now staged beside the current one (`next:<id>` in `machine-tokens.json`):

@@ -119,9 +119,15 @@ function writeManifest(root: string, m: Manifest) {
   fs.renameSync(file + '.tmp', file);
 }
 
-/** Add an outside item once (by kind and name). Exported for tests. */
+/**
+ * Add an outside item once (by kind and name). One already there takes the new note, so a re-run with another
+ * --max-sandboxes rewrites the firewall group's slot count (w600: LothDesktop's root.json still said "8 slots" at 5).
+ * Exported for tests.
+ */
 export function noteOutside(m: Manifest, item: OutsideItem): Manifest {
-  if (!m.outside.some((o) => o.kind === item.kind && o.name.toLowerCase() === item.name.toLowerCase())) m.outside.push(item);
+  const had = m.outside.find((o) => o.kind === item.kind && o.name.toLowerCase() === item.name.toLowerCase());
+  if (!had) m.outside.push(item);
+  else if (item.note !== undefined) had.note = item.note;
   return m;
 }
 
