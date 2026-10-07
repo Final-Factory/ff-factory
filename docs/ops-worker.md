@@ -2,8 +2,8 @@
 
 **TL;DR:** one Claude Code session with a real shell, living in the portal VM (`fff` on Loth2400) as its own Linux
 account, `fff-ops`. Only Lothsahn's and Ben's own orchestrators can give it work, through their `ops_worker` tool. It
-reaches the machines over ssh with the portal's existing key, reads the portal's state, and issues a machine credential
-straight into a file on the machine. It has no git, no downloads, no package installs, no builds, no Unity and no game
+reaches the machines over ssh with the portal's existing key, copies files to and from them with scp and sftp over that
+same ssh (w612), reads the portal's state, and issues a machine credential straight into a file on the machine. It has no git, no downloads, no package installs, no builds, no Unity and no game
 workspace: heavy work runs on the target machine over ssh. The VM enforces this, not only its prompt: a 2 GiB `noexec`
 scratch file system is all it can write, it can reach only Anthropic's API and the tailnet, and its only sudo rights
 are two wrappers. It can also deploy the portal (`fffctl update`), but only after Lothsahn or Ben asks for that in a turn
@@ -36,13 +36,16 @@ In its shell, the worker types ordinary commands:
 ssh m5 whoami                                   # an alias from deploy/vm/guest/machines.ssh (m3, m5, beast, Loth2800)
 ssh rydin@beast 'powershell -NoProfile -Command Get-ScheduledTask ffsb*'   # user@host, as list_machines shows it
 ssh m5 'bash -s' < /srv/fff-ops/scratch/check.sh                           # a script it wrote, run on the machine
+scp ./install.ps1 rydin@beast:                  # a file from its scratch to a machine (its home folder there; w612)
+scp m5:/tmp/install.log ./                      # a log back into its scratch
+sftp -b cmds m5                                 # sftp with a batch of put/get lines (no terminal)
 fffctl status                                   # the portal: release, health, Tailscale, backups
 fffctl logs 300                                 # the portal's journal, secrets redacted
 fffctl machine-ssh-check                        # the portal's ssh to each machine, read only
 fffctl credential issue m5 --to m5              # a new credential for m5, written into ~/.ff-factory/ on m5
 ```
 
-Its `ssh` and `fffctl` are wrappers on its PATH (`/usr/local/lib/fff/ops-bin`). It also has `list_machines`,
+Its `ssh`, `scp`, `sftp` and `fffctl` are wrappers on its PATH (`/usr/local/lib/fff/ops-bin`). It also has `list_machines`,
 `list_sandboxes` and `system_status` (read only) and its own `wake_me`.
 
 ## How it runs
@@ -53,6 +56,7 @@ flowchart LR
   S -- "header + stream-json<br/>/run/fff-ops/claude.sock (0600 fff)" --> U["fff-ops@.service<br/>one connection at most"]
   U --> L["fff-ops-launch<br/>as fff-ops"] --> C["Claude Code<br/>cwd /srv/fff-ops/scratch"]
   C -- "ssh (sudo -u fff)" --> W1["fff-ops-ssh<br/>fixed options, pinned keys"] --> M["beast, lothdesktop, m3, m5"]
+  C -- "scp, sftp (as fff-ops)" --> W3["fff-ops-scp-ssh<br/>scp's own options only"] -- "sudo -u fff, --sftp" --> W1
   C -- "fffctl (sudo)" --> W2["fff-ops-priv<br/>status, logs, credential issue"]
 ```
 
@@ -79,6 +83,7 @@ process of the portal: it would get the portal's account and everything that acc
 |---|---|
 | ssh to the enrolled machines with the portal's key | `sudoers.d/fff-ops` lets it run `fff-ops-ssh` as `fff`, and nothing else as `fff`. That wrapper takes a machine (`m5`, `user@host`) and never an ssh option: `-o ProxyCommand` or `-F` would run a command as `fff`. Its options are fixed: `StrictHostKeyChecking=yes` (only host keys pinned in `known_hosts` or `known_hosts2`), no agent, X11 or port forwarding, no `LocalCommand`, no proxy, no shared connection, `BatchMode`. The tailnet policy lets the portal's tag reach only beast, lothdesktop, m3 and m5 on port 22 (RUNBOOK section 1) |
 | run the worker installer on a machine | ssh, above. The installer runs on the machine, with the machine's disk and network |
+| copy files to and from the machines with scp and sftp (w612) | `/usr/bin/scp` and `/usr/bin/sftp` run as `fff-ops` (its PATH's `scp` and `sftp` add `-S fff-ops-scp-ssh`), so the local side of a copy is only what `fff-ops` may read and write: its scratch, never `/srv/fff` or the vault key. `fff-ops-scp-ssh` takes the arguments scp and sftp give their ssh, lets through only their own fixed safe settings (no `-o ProxyCommand`, `-F`, `-i`, `-J`, `-S`, port 22 only) and hands the machine alone to `fff-ops-ssh --sftp TARGET`, the machine's sftp subsystem (or, for `scp -O`, scp's own `scp -t`/`scp -f` command). The machine side is the same ssh as above: the portal's key, pinned host keys, the same network. The guard refuses scp's ssh options and the portal's files as a source or destination, with a reason |
 | read the portal's state | `fff-ops-priv` (`status`, `state`, `logs N` redacted, `machine-ssh-check`, `credential list`) and the read-only tools `list_machines`, `list_sandboxes` and `system_status` |
 | issue a machine credential | `fffctl credential issue ID --to TARGET`: as root, it checks that TARGET answers ssh first (an issued credential replaces the machine's old one), issues to a root-only temp file, pipes it over ssh into `~/.ff-factory/machine-credential-ID` on the machine (Windows: `%USERPROFILE%\.ff-factory\`), and prints only that path and the last four characters. The token never passes through the worker, the transcript or chat |
 | write notes and scripts | its scratch folder `/srv/fff-ops/scratch` (the guard), on its own file system (the OS) |
@@ -88,7 +93,8 @@ process of the portal: it would get the portal's account and everything that acc
 | read the portal's config, data, secrets or keys | Unix permissions: `/srv/fff` is 0700 `fff`, and `/etc/fff/vault.key` is root's. The guard also refuses these paths with a reason, and refuses `/proc/*/environ` |
 | restart or roll back the portal; change settings; use the vault, tokens, migrations, backups or shutdown | `fff-ops-priv` has none of those subcommands, and sudoers allows nothing else as root. The guard refuses `fffctl restart` and the like with a reason |
 | deploy the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own | `fff-ops-priv update` runs only with the grant the portal writes into its data folder on `ops_worker deploy`, which the server allows only in the person's own turn. `fff-ops` cannot write that folder (0700 `fff`), so it cannot make a grant. The grant is good for 15 minutes and is removed before the update runs, so it works once |
-| git, downloads, package installs, builds, interpreters | The network: the unit allows only loopback, the VM's resolvers, Anthropic's API (`160.79.104.0/23`, `2607:6bc0::/48`, [Anthropic's published inbound ranges](https://platform.claude.com/docs/en/api/ip-addresses)) and the tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). The disk: everything it can write is on a 2 GiB `noexec` file system. sudo: no `apt`. The guard refuses `git`, `curl`, `wget`, `apt`, `npm`, `pip`, `python`, `node` and the like, so the worker learns why at once |
+| copy the portal's secrets or keys off the VM | scp and sftp run as `fff-ops`, which cannot read `/srv/fff` (0700 `fff`) or `/etc/fff/vault.key` (root's): CI copies each of them and gets "Permission denied". `fff-ops-ssh` runs as `fff` but never sees a local path: it only carries the stream. The guard refuses those paths in an scp or sftp command (relative ones too) |
+| git, downloads, package installs, builds, interpreters | The network: the unit allows only loopback, the VM's resolvers, Anthropic's API (`160.79.104.0/23`, `2607:6bc0::/48`, [Anthropic's published inbound ranges](https://platform.claude.com/docs/en/api/ip-addresses)) and the tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). The disk: everything it can write is on a 2 GiB `noexec` file system. sudo: no `apt`. The guard refuses `git`, `curl`, `wget`, `rsync`, `apt`, `npm`, `pip`, `python`, `node` and the like, so the worker learns why at once. scp and sftp reach only what ssh reaches: the machines whose host keys are pinned, over the tailnet. They add no address to the allowlist and no nft rule: the copy is the same ssh process, as `fff`, inside the same unit |
 | print a credential | The launcher keeps the Claude credential out of its environment (fd 3). The guard refuses `env`, `printenv`, `export -p` and `/proc/*/environ`. Transcripts and the audit log redact Claude, GitHub, FFBox, machine, Tailscale, API and private keys (`redactSecrets`) |
 | be reached by anyone else | `SessionManager.send` refuses a session of kind `ops` unless the message comes through `OpsWorker` (Lothsahn's or Ben's own orchestrator) or is its own `wake_me`. That covers the dispatcher, people's chats (HTTP 403), workers, standing agents, the intake, FFBox, `/mcp` and every harness notice. `ops_worker` is in neither the dispatcher's belt nor `/mcp`'s |
 | Steam, spending money, publishing | It has no Steam login, GitHub token or Discord token in the VM, and the network fence blocks those services. On a machine, the prompt and the audit trail are the fence: see the threat notes |
@@ -238,6 +244,10 @@ What living in the VM gives it, by design:
   its descendants).
 - **The tailnet.** It sits on the portal's node, so it reaches what the tailnet policy lets the portal reach: the four
   machines on port 22.
+- **Files both ways (w612).** scp and sftp can put any file the worker can read onto a machine, and write any file the
+  portal's account there may write: the same reach as `ssh m5 'cat > file' < file`, which it already had, now without
+  the workaround. What it can read in the VM is its own scratch and the world-readable system files; the portal's
+  config, data, secrets, keys and the vault key are not among them.
 
 What it does not get: the portal's `config.json`, `data/` (the ledger, transcripts, the vault, other machines'
 tokens), the `secrets` folder, the vault key, `gh`'s token, Max's Discord token, the backup key, the host
@@ -278,6 +288,9 @@ restarts with a drain. Check it:
    `active active` and an ext4 mount with `noexec`.
 2. From his orchestrator, in a turn of his own: "ops_worker send: run `fffctl status` and `ssh m5 whoami`". The
    `[ops worker]` report should show the portal active and `benryding`.
+3. After the w612 deploy (scp), the same way: "ops_worker send: write `hello` into `t.txt` in your scratch, `scp t.txt
+   m5:/tmp/w612.txt`, `scp m5:/tmp/w612.txt back.txt`, show `back.txt`, then `ssh m5 'rm /tmp/w612.txt'`". The report
+   should show `hello`.
 
 If it does not start, the transcript says why, in the launcher's words: a version mismatch (restart the portal once:
 `fff-ops-sync` runs at its start), no credential (the orchestrators' account is a login, not a token), or the socket
@@ -289,14 +302,16 @@ VM shows its side.
 - `server/opsWorker.ts`: the session, who may send, the guard, the spawner, the brief and the limits.
   `server/agents.ts`: `opsOptions`, the `ops_worker` tool, and the group in the lists. `server/belts.ts`: the
   `ops_worker` and `ops` belts. `server/sessions.ts`: the send gate. `server/index.ts`: the page's routes.
-- `deploy/vm/guest`: `fff-ops-launch`, `fff-ops-ssh`, `fff-ops-priv`, `fff-ops-sync`, `ops-bin/`,
+- `deploy/vm/guest`: `fff-ops-launch`, `fff-ops-ssh`, `fff-ops-scp-ssh`, `fff-ops-priv`, `fff-ops-sync`, `ops-bin/`,
   `units/fff-ops.socket`, and the install step (9/10) that writes `fff-ops@.service`, `fff-ops-scratch.service` and
   the sudoers file.
 - `server/opsWorker.test.ts`: who reaches it, the belts, the shell seatbelt, writes and reads, redaction, the header,
   the spawner against a fake socket, the one session with its job rule and lifetime, and a deploy (only in the
   person's own turn, the grant, the report after the restart).
 - `deploy/vm/test/fff-ops.test.sh` (run by `lint.sh`): the launcher against a fake claude (arguments, environment,
-  fd 3, refusals), the ssh wrapper against a fake ssh, and the root wrapper's subcommands.
+  fd 3, refusals), the ssh wrapper against a fake ssh, real scp and sftp copies both ways through the wrappers to a fake
+  machine running a real `sftp-server` (and the options, port, host and command they refuse), and the root wrapper's
+  subcommands.
 - `deploy/vm/test/ci-vm-e2e.sh`, "the orchestration worker" step, in a real guest:
   - the account, the scratch and its cap, and the socket's owner;
   - `fff-ops` cannot read the portal's secrets, and its two sudo rights are all it has;
@@ -304,6 +319,9 @@ VM shows its side.
   - Claude Code starts through the socket, and another SDK version is refused;
   - the unit's own fences on a probe: sudo works inside them, Anthropic's API is reachable, example.com is not, and
     only the scratch is writable;
+  - scp and sftp inside those fences (w612), to an sshd of CI's own on the guest's loopback with the portal's key and a
+    pinned host key: copies both ways (sftp and `scp -O`) arrive, and a host whose key is not pinned, example.com, an
+    `-o ProxyCommand` and the portal's config, ssh key and vault key are each refused, with nothing arriving;
   - and, in the update step: the worker's socket and launcher survive the portal's restart, and its `fffctl update` is
     refused with no grant or a grant that ran out, while a fresh grant works once.
 - Not tested in CI: a real Claude turn (CI has no token) and ssh to a real machine. Lothsahn's check above covers both.

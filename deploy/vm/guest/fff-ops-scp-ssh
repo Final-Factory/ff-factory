@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# fff-ops-scp-ssh (w612, docs/ops-worker.md): the ssh program of the orchestration worker's scp and sftp (ops-bin/scp,
+# ops-bin/sftp pass it as -S). It runs as the worker (fff-ops), as scp does, so the files scp reads and writes here are
+# only what fff-ops may: the portal's config, data, secrets and keys stay out of reach (/srv/fff is 0700 fff,
+# /etc/fff/vault.key is root's). It takes the arguments scp and sftp give their ssh, lets through only their own fixed
+# safe options, and hands the machine alone to fff-ops-ssh (as the portal's account, the portal's key, pinned host keys,
+# fixed options): the sftp subsystem, or the scp -t / scp -f command of a legacy (scp -O) copy.
+#
+# No other ssh option passes: -F, -i, -J, -S, -c, -o ProxyCommand and the like are refused, and the port is 22.
+set -o errexit -o nounset -o pipefail
+export PATH=/usr/bin:/bin
+die() { echo "scp/sftp (fff-ops-scp-ssh): $*" >&2; exit 2; }
+user="" subsystem=0 host="" cmd=()
+# One -o setting, as scp (-oKey=value) or sftp (-oKey value) writes it: only the safe values they set themselves.
+opt() {
+  local kv=$1 k v
+  k=${kv%%[= ]*}
+  v=${kv#"$k"}
+  v=${v#[= ]}
+  case "$(tr '[:upper:]' '[:lower:]' <<<"$k")=$(tr '[:upper:]' '[:lower:]' <<<"$v")" in
+    permitlocalcommand=no | clearallforwardings=yes | remotecommand=none | requesttty=no | controlmaster=no | forwardagent=no | forwardx11=no | batchmode=yes | port=22) ;;
+    *) die "the ssh option '${kv:0:80}' is not taken: the machine's ssh has fixed options (an alias like m5, or user@host)" ;;
+  esac
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    -x | -v | -vv | -vvv | -q | -C | -4 | -6 | -T) shift ;;
+    -s) subsystem=1; shift ;;
+    -l) [ $# -ge 2 ] || die "-l without a user"; user=$2; shift 2 ;;
+    -p) [ "${2:-}" = 22 ] || die "port ${2:-}: the machines are on port 22"; shift 2 ;;
+    -o) [ $# -ge 2 ] || die "-o without a setting"; opt "$2"; shift 2 ;;
+    -o*) opt "${1#-o}"; shift ;;
+    -*) die "the ssh option '${1:0:80}' is not taken: the machine's ssh has fixed options" ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || die "no machine"
+host=$1
+shift
+cmd=("$@")
+target=$host
+if [ -n "$user" ]; then target=$user@$host; fi
+if [ -n "${FFF_OPS_SSH_WRAPPER:-}" ]; then run=("$FFF_OPS_SSH_WRAPPER"); else run=(sudo -n -u fff /usr/local/lib/fff/fff-ops-ssh); fi
+if [ "$subsystem" = 1 ]; then
+  [ "${#cmd[@]}" -eq 1 ] && [ "${cmd[0]}" = sftp ] || die "only the sftp subsystem"
+  exec "${run[@]}" --sftp "$target"
+fi
+# A legacy copy (scp -O): scp's own sink or source on the machine, "scp [-r] [-p] [-d] -t|-f [--] PATH".
+[ "${#cmd[@]}" -eq 1 ] && [[ ${cmd[0]} =~ ^scp\ (-[a-zA-Z]+\ )*-[tf]\  ]] || die "only a copy: scp's sftp or its own scp -t / -f (an ssh command goes through ssh)"
+exec "${run[@]}" "$target" "${cmd[0]}"

@@ -1,0 +1,5 @@
+#!/bin/sh
+# The orchestration worker's scp (w612, docs/ops-worker.md): /usr/bin/scp as the worker (fff-ops), its files only, over
+# fff-ops-scp-ssh to the machines' ssh as the portal's account (fff-ops-ssh: the portal's key, pinned host keys).
+# `scp ./report.txt m5:/tmp/`, `scp beast:C:/ProgramData/ffsb/logs/daemon.log ./`.
+exec /usr/bin/scp -S "${FFF_OPS_SCP_SSH:-/usr/local/lib/fff/fff-ops-scp-ssh}" "$@"
