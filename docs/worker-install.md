@@ -104,6 +104,14 @@ restarts on failure, and, when someone is logged on, is running. It fails until 
 another folder that a non-administrator run could not replace counts as missing. Re-running the installer repairs it,
 the uninstall removes it, and `check` lists it.
 
+**A new machine needs its record first** (w676). The installer's check `GET /machine/whoami` answers 401 for a
+credential whose machine has no record ("no machine record has it"), and the daemon's link is refused the same way. A
+person adds it through the dispatcher: `add_machine <id> worker_install` (with `ssh_host user@host` when the portal
+will reach it over ssh) makes the record alone, with no ssh deploy and no credential, and it waits ("Setting up",
+"waiting for its worker installer") until the installer's daemon says hello. It is never redeployed over ssh while it
+waits. The orchestration worker can then do the rest from the portal's VM ([ops-worker.md](ops-worker.md), "A new
+machine").
+
 **The credential** is the machine's `/machine` token, `ffm_<machine id>_<secret>`: the only token on the box
 ([vault.md](vault.md), "Enrollment is the machine token", w512). In the portal's VM, `sudo fffctl machine-credential
 issue <id> --out /tmp/<id>.cred` writes one to a 0600 file and never prints it. Move that file to the machine and give
@@ -309,8 +317,8 @@ daemon runs as a **systemd user service** (`server/machineDeployLinux.ts`), as t
 **Differences from a Mac:** built players are `FinalFactory.x86_64` (Unity's Linux build; the guard and the slots know
 them, and the slot config is `~/.config/finalfactory/player-slots.json`, as on a Mac); the game's save folder is
 `~/.config/unity3d/Never Games/finalfactory`. There is no Unity dialog watch on Linux yet, and the daemon's removal of
-old Unity editors leaves Linux editors alone. `add_machine` refuses a Linux PC (the portal never deploys one over ssh),
-and `migrate` refuses on Linux: there is no older layout to move.
+old Unity editors leaves Linux editors alone. `add_machine` without `worker_install` refuses a Linux PC (the portal
+never deploys one over ssh), and `migrate` refuses on Linux: there is no older layout to move.
 
 ## Uninstall
 

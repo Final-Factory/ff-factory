@@ -3,7 +3,10 @@
 **TL;DR:** one Claude Code session with a real shell, living in the portal VM (`fff` on Loth2400) as its own Linux
 account, `fff-ops`. Only Lothsahn's and Ben's own orchestrators can give it work, through their `ops_worker` tool. It
 reaches the machines over ssh with the portal's existing key, copies files to and from them with scp and sftp over that
-same ssh (w612), reads the portal's state, and issues a machine credential straight into a file on the machine. It has no git, no downloads, no package installs, no builds, no Unity and no game
+same ssh (w612), reads the portal's state, prints the portal's ssh key line and pins a new machine's host key
+(`fff-machine-ssh`, w676), and issues a machine credential straight into a file on the machine. So it takes a new
+machine from nothing to online by itself, once a person has added its record and let the portal in ([A new
+machine](#a-new-machine)). It has no git, no downloads, no package installs, no builds, no Unity and no game
 workspace: heavy work runs on the target machine over ssh. The VM enforces this, not only its prompt: a 2 GiB `noexec`
 scratch file system is all it can write, it can reach only Anthropic's API and the tailnet, and its only sudo rights
 are two wrappers. It can also deploy the portal (`fffctl update`), but only after Lothsahn or Ben asks for that in a turn
@@ -53,7 +56,9 @@ scp m5:/tmp/install.log ./                      # a log back into its scratch
 sftp -b cmds m5                                 # sftp with a batch of put/get lines (no terminal)
 fffctl status                                   # the portal: release, health, Tailscale, backups
 fffctl logs 300                                 # the portal's journal, secrets redacted
-fffctl machine-ssh-check                        # the portal's ssh to each machine, read only
+fff-machine-ssh --check                         # the portal's ssh to each machine, then its key line (w676)
+fff-machine-ssh --key                           # only the portal's authorized_keys line, for a new machine
+fff-machine-ssh --pin ben-ryding@biscuit SHA256:NrEQ...   # pin a new machine's host key (its own fingerprint)
 fffctl credential issue m5 --to m5              # a new credential for m5, written into ~/.ff-factory/ on m5
 ```
 
@@ -68,8 +73,57 @@ ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblo
 
 An update needs no new credential: never `fffctl credential issue` for one (issuing cuts the running daemon off).
 
-Its `ssh`, `scp`, `sftp` and `fffctl` are wrappers on its PATH (`/usr/local/lib/fff/ops-bin`). It also has `list_machines`,
+Its `ssh`, `scp`, `sftp`, `fffctl` and `fff-machine-ssh` are wrappers on its PATH (`/usr/local/lib/fff/ops-bin`).
+`fffctl machine-ssh-check` still works: it is `fff-machine-ssh --check`. It also has `list_machines`,
 `list_sandboxes` and `system_status` (read only) and its own `wake_me`.
+
+## A new machine
+
+Lothsahn, 2026-10-07 (w676): "Make the op machine worker able to run fff-machine-ssh", then "And any other commands
+necessary to install a new worker". The motive: Ben's biscuit setup asked the worker for `fff-machine-ssh --check` and it
+answered `command not found`, so it read the key line out of m3's `authorized_keys` instead.
+
+The worker takes a new Mac, Windows PC or Linux PC from nothing to "online; ready". Four steps stay a person's, because
+each is a setting, a trust decision or a change on the machine before the portal can reach it:
+
+| Step | Who | How |
+|---|---|---|
+| 1. The machine's record | a person (Lothsahn or Ben) | asks the dispatcher in their own words, in its chat or a request they file: "add_machine biscuit, worker_install, ssh_host ben-ryding@biscuit". `add_machine` is a user-asked tool (`USER_ASKED_TOOLS`, `server/belts.ts`): it runs only for a person's own words. With `worker_install` it makes the record alone (`MachineManager.addInstallRecord`, `server/machines.ts`): no ssh deploy and no credential. The installer's credential check (`GET /machine/whoami`) and the daemon's link need it, and `fffctl credential issue` refuses a machine without one. The worker never adds it: it has no tool for it, and its `credential issue` says to ask |
+| 2. The tailnet | a person | the machine in the tailnet policy's `tcp:22` grant for `tag:fff-portal`, and its key expiry off ([RUNBOOK](../deploy/vm/RUNBOOK.md) section 1, "Adding a machine") |
+| 3. sshd and the portal's key on the machine | a person, on the machine | sshd on (Linux: `sudo apt install openssh-server`; Mac: Remote Login; Windows: OpenSSH Server). The line `fff-machine-ssh --key` prints goes into the ssh user's `~/.ssh/authorized_keys` (a Windows administrator: `C:\ProgramData\ssh\administrators_authorized_keys`). The worker can print the line and pass it on; it cannot put it there, because it cannot reach the machine yet |
+| 4. The host key's fingerprint | a person, on the machine | `ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub` (Windows: `C:\ProgramData\ssh\ssh_host_ed25519_key.pub`), sent to the worker with the job. It is what makes the pin trustworthy: the worker pins only a key that the machine itself shows to the person and the tailnet shows to the VM |
+
+The person's go reaches the worker the usual way: their own orchestrator sends the job (`ops_worker send`, in a turn the
+person started), with the machine id, its ssh target, its fingerprint and the install's answers (root, sandboxes, agents,
+editors). Then the worker, in its shell:
+
+1. `list_machines`: the record is there (status "Setting up", "waiting for its worker installer"). If not, it stops and
+   asks for step 1.
+2. `fff-machine-ssh --pin ben-ryding@biscuit SHA256:...`: pins the host key and writes the alias `biscuit`. Refused,
+   with nothing written, when the key the machine shows over the tailnet is not that fingerprint, when it does not answer
+   on port 22, or when anything already pins that host (`machines.ssh`, an earlier pin, or a worker installer's
+   registration in `known_hosts2`). A refusal goes back to the person: it never pins what it read from the network
+   itself. A machine already in `machines.ssh` (biscuit since PR #225) needs no pin: `fff-machine-ssh --check` shows it.
+3. `ssh ben-ryding@biscuit whoami`: the portal gets in. "Permission denied" means step 3 is missing:
+   `fff-machine-ssh --check` prints the line again.
+4. The machine's prerequisites, over ssh ([worker-install.md](worker-install.md), "Install" and "Linux"): node 22.6+, git
+   2.48+, git-lfs, Claude Code logged in, Unity. Installing a missing one there is the machine's business (`sudo` there
+   may need a person).
+5. `fffctl credential issue biscuit --to ben-ryding@biscuit`: the credential goes from the VM straight into
+   `~/.ff-factory/machine-credential-biscuit` on the machine; the worker sees only that path and its last four
+   characters.
+6. The installer, over ssh, with every answer as an option (ssh has no terminal for its questions): on a Mac or Linux PC
+   `ssh ben-ryding@biscuit 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --root ~/ffw --portal-url <the portal URL> --max-sandboxes 3 --max-agents-per-sandbox 2 --max-unity 2 --credential-file ~/.ff-factory/machine-credential-biscuit'`,
+   on Windows `install.ps1` with `-Root -PortalUrl -MaxSandboxes -MaxAgentsPerSandbox -MaxUnity -CredentialFile`. It
+   registers the machine's host keys with the portal itself (`known_hosts2`) and waits until the portal sees the daemon
+   online. A long one: `wake_me` and check back.
+7. Delete the credential file on the machine (the job's own file): `ssh ben-ryding@biscuit 'rm ~/.ff-factory/machine-credential-biscuit'`.
+8. `list_machines`: online and ready, its root and platform filled in; `fff-machine-ssh --check` shows the machine's
+   line with `ssh: ok`. Its report ends with what each step answered.
+
+What the worker may not do with these tools: pin a key it did not get from a person who read it on the machine, change
+or remove a pin (a reinstalled machine's new key is a person's: `machines.ssh` and a deploy), run `--fix` or `--data`,
+add or remove a machine record, issue a credential for a machine that is not being (re)installed, or change any setting.
 
 ## How it runs
 
@@ -115,8 +169,10 @@ process of the portal: it would get the portal's account and everything that acc
 | ssh to the enrolled machines with the portal's key | `sudoers.d/fff-ops` lets it run `fff-ops-ssh` as `fff`, and nothing else as `fff`. That wrapper takes a machine (`m5`, `user@host`) and never an ssh option: `-o ProxyCommand` or `-F` would run a command as `fff`. Its options are fixed: `StrictHostKeyChecking=yes` (only host keys pinned in `known_hosts` or `known_hosts2`), no agent, X11 or port forwarding, no `LocalCommand`, no proxy, no shared connection, `BatchMode`. The tailnet policy lets the portal's tag reach only the machines (beast, lothdesktop, m3, m5, biscuit) on port 22 (RUNBOOK section 1) |
 | run the worker installer on a machine | ssh, above. The installer runs on the machine, with the machine's disk and network |
 | copy files to and from the machines with scp and sftp (w612) | `/usr/bin/scp` and `/usr/bin/sftp` run as `fff-ops` (its PATH's `scp` and `sftp` add `-S fff-ops-scp-ssh`), so the local side of a copy is only what `fff-ops` may read and write: its scratch, never `/srv/fff` or the vault key. `fff-ops-scp-ssh` takes the arguments scp and sftp give their ssh, lets through only their own fixed safe settings (no `-o ProxyCommand`, `-F`, `-i`, `-J`, `-S`, port 22 only) and hands the machine alone to `fff-ops-ssh --sftp TARGET`, the machine's sftp subsystem (or, for `scp -O`, scp's own `scp -t`/`scp -f` command). The machine side is the same ssh as above: the portal's key, pinned host keys, the same network. The guard refuses scp's ssh options and the portal's files as a source or destination, with a reason |
-| read the portal's state | `fff-ops-priv` (`status`, `state`, `logs N` redacted, `machine-ssh-check`, `credential list`) and the read-only tools `list_machines`, `list_sandboxes` and `system_status` |
-| issue a machine credential | `fffctl credential issue ID --to TARGET`: as root, it checks that TARGET answers ssh first (an issued credential replaces the machine's old one), issues to a root-only temp file, pipes it over ssh into `~/.ff-factory/machine-credential-ID` on the machine (Windows: `%USERPROFILE%\.ff-factory\`), and prints only that path and the last four characters. The token never passes through the worker, the transcript or chat |
+| read the portal's state | `fff-ops-priv` (`status`, `state`, `logs N` redacted, `machine-ssh --check`, `credential list`) and the read-only tools `list_machines`, `list_sandboxes` and `system_status` |
+| see the portal's ssh to the machines and its public key line (w676) | `fff-machine-ssh --check` and `--key` (its PATH's `fff-machine-ssh` is `sudo -n fff-ops-priv machine-ssh`): `fff-ops-priv` runs `/usr/local/lib/fff/fff-machine-ssh` as `fff` with the installed `machines.ssh`. It prints `id_ed25519.pub` and never reads the private key; CI looks for the private key in its output |
+| pin a new machine's host key (w676) | `fff-machine-ssh --pin USER@HOST FINGERPRINT`, the same way. As `fff`, it writes the key into the portal account's `~/.ssh/known_hosts` and `~/.ssh/fff-pins.ssh` (0600 `fff`, which `fff-ops` cannot read or write) and the alias into the managed block of `~/.ssh/config`, only when the key HOST shows over the tailnet now is FINGERPRINT and nothing pins HOST yet (`machines.ssh`, an earlier pin, `known_hosts` or `known_hosts2`). `fff-ops-priv` passes only `--check`, `--key` and `--pin` with exactly two words: never `--fix` or `--data` (a file of the worker's would be pinned) |
+| issue a machine credential | `fffctl credential issue ID --to TARGET`: as root, it checks that TARGET answers ssh first (an issued credential replaces the machine's old one) and that the portal has a record for ID (w676: `state.json`, read as root), issues to a root-only temp file, pipes it over ssh into `~/.ff-factory/machine-credential-ID` on the machine (Windows: `%USERPROFILE%\.ff-factory\`), and prints only that path and the last four characters. The token never passes through the worker, the transcript or chat |
 | write notes and scripts | its scratch folder `/srv/fff-ops/scratch` (the guard), on its own file system (the OS) |
 
 | It may not | Enforced by |
@@ -297,6 +353,13 @@ Residual risks, and what bounds each:
 - **Remote commands are not fenced.** On a machine, the worker can do whatever the portal's account can do there,
   deleting included. That is inherent to "run the installer remotely". Bounds: its prompt (ask before deleting
   anything that is not the job's own), the audit trail, and the people who start it.
+- **A host key the worker pins (w676).** A pin decides which machine the portal's ssh trusts under that name. Bounds:
+  the fingerprint comes from a person who read it on the machine, and the key the machine shows over the tailnet (a
+  WireGuard link to that node, not the open network) must equal it; it pins only a host nothing pins yet, so it cannot
+  replace a known machine's key; the pin writes as `fff` into files `fff-ops` cannot touch; and each pin is in the
+  journal (`journalctl -t fff-ops-priv`) and the transcript. A worker that invented a fingerprint could pin only a key a
+  tailnet node really shows for that name, the same trust `machines.ssh`'s own keys were checked against (w537).
+  Removing a pin (`~/.ssh/fff-pins.ssh` and its `known_hosts` line) is a person's.
 - **Credential issue cuts a machine off.** Issuing replaces the old credential, and the machine's daemon drops within
   20 s. That is right for a reinstall and wrong otherwise. Bounds: it checks that the machine answers ssh before it
   issues, and the brief says to issue only for a machine being (re)installed. Revoking stays a person's.
@@ -310,6 +373,11 @@ Residual risks, and what bounds each:
 ## Deploying it
 
 Lothsahn deploys it (deploys are his). On Loth2400:
+
+w676 (`fff-machine-ssh` for the worker, `--pin`, the record check, `add_machine worker_install`) needs only a portal
+deploy (`fffctl update`, or `ops_worker deploy` on Lothsahn's or Ben's own word): the update installs the new
+release's scripts and its `ops-bin/fff-machine-ssh`, re-runs `fff-machine-ssh --fix` because the script changed, and
+restarts the portal on the new server code. The sudoers file and the units do not change, so no guest re-install.
 
 ```bash
 sudo fff-vm ssh 'sudo fffctl update'
@@ -338,7 +406,7 @@ VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
 - `server/opsWorker.ts`: the session, who may send, the guard, the spawner, the brief and the limits.
   `server/agents.ts`: `opsOptions`, the `ops_worker` tool, and the group in the lists. `server/belts.ts`: the
   `ops_worker` and `ops` belts. `server/sessions.ts`: the send gate. `server/index.ts`: the page's routes.
-- `deploy/vm/guest`: `fff-ops-launch`, `fff-ops-ssh`, `fff-ops-scp-ssh`, `fff-ops-priv`, `fff-ops-sync`, `ops-bin/`,
+- `deploy/vm/guest`: `fff-ops-launch`, `fff-ops-ssh`, `fff-ops-scp-ssh`, `fff-ops-priv`, `fff-ops-sync`, `fff-machine-ssh` (w676: `--key`, `--pin`), `ops-bin/`,
   `units/fff-ops.socket`, and the install step (9/10) that writes `fff-ops@.service`, `fff-ops-scratch.service` and
   the sudoers file.
 - `server/opsWorker.test.ts`: who reaches it, the belts, the shell seatbelt, writes and reads, redaction, the header,
@@ -352,17 +420,28 @@ VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
 - `deploy/vm/test/fff-ops.test.sh` (run by `lint.sh`): the launcher against a fake claude (arguments, environment,
   fd 3, refusals), the ssh wrapper against a fake ssh, real scp and sftp copies both ways through the wrappers to a fake
   machine running a real `sftp-server` (and the options, port, host and command they refuse), and the root wrapper's
-  subcommands.
+  subcommands; as root (CI's lint), `fff-ops-priv machine-ssh` against a fake `fff-machine-ssh`: `--check`, `--key`
+  and `--pin` pass, `--fix`, `--data` and anything else do not, and `credential issue` needs the record (w676).
+- `deploy/vm/test/fff-machine-ssh.test.sh` (run by `lint.sh`): `--key` prints the key line alone, and `--pin` pins a
+  new machine only when the fingerprint and the tailnet agree, once, keeps it through `--check` and `--fix`, and refuses
+  a wrong fingerprint, a host that does not answer, one already pinned in `machines.ssh` or `known_hosts2`, and bad
+  arguments, with nothing written (w676).
+- `server/machines.test.ts`: `add_machine worker_install` makes the record alone (no credential, no ssh deploy), refuses
+  folders and an existing ssh machine, is left alone by the offline watch and a portal restart, and its first hello
+  makes it ready (w676).
 - `deploy/vm/test/ci-vm-e2e.sh`, "the orchestration worker" step, in a real guest:
   - the account, the scratch and its cap, and the socket's owner;
   - `fff-ops` cannot read the portal's secrets, and its two sudo rights are all it has;
-  - a credential is not issued for an unreachable machine;
+  - a credential is not issued for an unreachable machine, nor for one with no record (w676);
   - Claude Code starts through the socket, and another SDK version is refused;
   - the unit's own fences on a probe: sudo works inside them, Anthropic's API is reachable, example.com is not, and
     only the scratch is writable;
   - scp and sftp inside those fences (w612), to an sshd of CI's own on the guest's loopback with the portal's key and a
     pinned host key: copies both ways (sftp and `scp -O`) arrive, and a host whose key is not pinned, example.com, an
     `-o ProxyCommand` and the portal's config, ssh key and vault key are each refused, with nothing arriving;
+  - the worker's `fff-machine-ssh` inside its fences (w676): `--check` and `--key` give the portal's public key line
+    and not the private key, `--pin` refuses a wrong fingerprint and pins the guest's own sshd (standing in for a new
+    machine) with its real one, once, logged in the journal, and `--fix` and `--data` are refused;
   - and, in the update step: the worker's socket and launcher survive the portal's restart, and its `fffctl update` is
     refused with no grant or a grant that ran out, while a fresh grant works once.
 - Not tested in CI: a real Claude turn (CI has no token) and ssh to a real machine. Lothsahn's check above covers both.

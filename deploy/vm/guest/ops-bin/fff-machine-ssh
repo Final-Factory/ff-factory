@@ -1,0 +1,6 @@
+#!/bin/sh
+# The orchestration worker's fff-machine-ssh (w676, docs/ops-worker.md): the portal's machine ssh tool, as the portal's
+# account, through fff-ops-priv: --check (each machine's alias, pinned key, tailnet key and ssh, then the portal's
+# authorized_keys line), --key (that line alone) and --pin USER@HOST FINGERPRINT (a new machine's host key). --fix,
+# --data and a changed key are a person's. `fff-machine-ssh --check`.
+exec sudo -n /usr/local/lib/fff/fff-ops-priv machine-ssh "$@"

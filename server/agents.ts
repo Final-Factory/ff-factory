@@ -2143,7 +2143,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       ),
       tool(
         'add_machine',
-        "Set up a machine over ssh from this host: a Mac or a Windows PC (found out over ssh; a Linux PC is installed only on itself, with scripts/worker/install.sh). On a worker root install (w513) it only changes settings (limits, label, protected paths, Library seed) and never redeploys: its folders and code come from its installer. Installs the FF Factory daemon that runs agents there and connects back here (a LaunchAgent on a Mac, a Task Scheduler task at the user's logon on Windows). Also redeploys an existing machine (same id) with this portal's current code; refused while agents run there unless forced. Returns at once; list_machines shows progress. Only when the user asked for it.",
+        "Set up a machine over ssh from this host: a Mac or a Windows PC (found out over ssh; a Linux PC is installed only on itself, with scripts/worker/install.sh: add it with worker_install). With worker_install it only makes the record a new machine's worker installer needs (w676): no ssh, no credential. On a worker root install (w513) it only changes settings (limits, label, protected paths, Library seed) and never redeploys: its folders and code come from its installer. Installs the FF Factory daemon that runs agents there and connects back here (a LaunchAgent on a Mac, a Task Scheduler task at the user's logon on Windows). Also redeploys an existing machine (same id) with this portal's current code; refused while agents run there unless forced. Returns at once; list_machines shows progress. Only when the user asked for it.",
         {
           id: z.string().describe('Short id: letters, digits and dashes, e.g. "m5". Stored lower-case ("LothDesktop" becomes lothdesktop and is shown as LothDesktop); either spelling works in every tool.'),
           ssh_host: z.string().optional().describe('ssh host alias this host uses (default: the id).'),
@@ -2171,6 +2171,12 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
               "This host itself, the portal's own computer (docs/beast-machine.md): no ssh; the daemon is installed and controlled here, runs as this server's user in its own scheduled task, and holds this host's sandboxes (the portal holds none of its own, w510). Its settings default to this server's config (base clone, sandbox root, protected paths, loopback portal URL); its limits and Library seed are the ones given here. Windows only; at most one machine.",
             ),
           force: z.boolean().optional().describe('Redeploy even though agents are running there (they stop).'),
+          worker_install: z
+            .boolean()
+            .optional()
+            .describe(
+              "Only the record, for a new machine whose worker installer runs on the machine itself (docs/worker-install.md; any Linux PC, or a new Mac or Windows PC): no ssh deploy and no credential. The installer's credential check and the daemon's link need it. Then the orchestration worker (or a person) pins its host key, issues its credential into a file there and runs its installer (docs/ops-worker.md, \"A new machine\"). Its folders and sandbox count come from the installer; ssh_host, portal_url, the label and the limits may be given.",
+            ),
         },
         wrap(async (a) => {
           const m = mm.deployMachine({
@@ -2195,7 +2201,9 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             unityBelowNormal: a.unity_below_normal,
             local: a.local,
             force: a.force,
+            workerInstall: a.worker_install,
           });
+          if (m.awaitingInstall) return `${m.id}: a record for its worker install (ssh target ${m.host}, portal ${m.portalUrl}), no daemon yet. Next, on that machine: the portal's ssh key and a host-key pin (fff-machine-ssh --key, --pin), its credential (fffctl credential issue ${m.id} --to ${m.host}), then its installer; the orchestration worker can do each (docs/ops-worker.md, "A new machine"). list_machines shows it online once its daemon connects.`;
           if (m.root) {
             const pool = poolSettingsOf(m);
             return `${m.id} is a worker root install (${m.root}): settings changed, no redeploy (it updates by its installer)${pool ? `; ${(m.sandboxes ?? []).length}/${pool.maxSandboxes} sandboxes, up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once` : ''}${mm.isOnline(m.id) ? '; its daemon has them now' : '; its daemon gets them when it connects'}.`;

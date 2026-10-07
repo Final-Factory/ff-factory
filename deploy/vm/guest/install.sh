@@ -287,7 +287,7 @@ c+=$(write_file /etc/systemd/system/fff-ops.socket 0644 <"$here/units/fff-ops.so
 sudoers=$(mktemp)
 cat >"$sudoers" <<EOF
 # /etc/sudoers.d/fff-ops (deploy/vm/guest/install.sh, w597, docs/ops-worker.md): the orchestration worker's only rights.
-# Its fffctl: status, state, logs, machine-ssh-check, credential list and issue (fff-ops-priv decides).
+# Its fffctl and fff-machine-ssh: status, state, logs, machine-ssh, credential list and issue (fff-ops-priv decides).
 $OPS_USER ALL=(root) NOPASSWD: $FFF_LIB/fff-ops-priv
 # Its ssh, as the portal's account with the portal's key, fixed options (fff-ops-ssh).
 $OPS_USER ALL=($FFF_USER) NOPASSWD: $FFF_LIB/fff-ops-ssh
