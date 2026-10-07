@@ -48,6 +48,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **CI's Playwright shards keep the browsers' system packages in the Actions cache** (w636, asked by lothsahn). Each
+  shard downloaded the same 126 MB from the Ubuntu mirror; apt now keeps them in `~/apt-archives`, which the cache
+  restores, and still resolves against fresh lists. The install step went from a median of 37-39 s to 20-33 s.
 - **The disk guard defaults to 20 / 10 GB free, from 50 / 20** (w628, Ben: "you dont need 50gb free to run unity
   editors, change that rule"). Measured on BEAST in a warm sandbox: an editor open and a forced script reimport grew
   the Library by under 10 MB, a development build wrote 2.1 GB plus 0.25 GB of Library, a release build 2.0 GB plus
@@ -55,10 +58,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   (`shared/types.ts`) feed both the portal's `poolSettingsOf` and a fresh worker install's daemon.json; a machine's
   own `disk_warn_gb` / `disk_critical_gb` still win. A full (robocopy) Library copy now needs `disk_warn_gb` + the
   Library's measured size instead of a flat 30 GB, so the lower guard cannot let a 100 GB copy fill an NTFS disk.
-- **CI's Playwright shards keep the browsers' system packages in the Actions cache** (w636, asked by lothsahn). Each
-  shard downloaded the same 126 MB from the Ubuntu mirror; apt now keeps them in `~/apt-archives`, which the cache
-  restores, and still resolves against fresh lists. The install step went from a median of 37-39 s to 20-33 s.
-||||||| 22b5f8b
 - **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
   that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
   and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,
