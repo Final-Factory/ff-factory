@@ -105,7 +105,7 @@ export interface TestMachineOptions {
   /** Machine id (default "pc"). */
   id?: string;
   /** Sandboxes made before the daemon starts (ready, from origin/develop, on sandbox/<name> unless given), with their labels. */
-  sandboxes?: (string | { name: string; purpose?: string; branch?: string })[];
+  sandboxes?: (string | { name: string; branch?: string })[];
   /** The portal's address when it already serves /machine (the e2e server); else the machine gets a stand-in portal of its own. */
   portalUrl?: string;
   /** Main-clone agents (max_agents, default 1) and the pool's limits. */
@@ -153,8 +153,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
   const appDir = path.join(repos.root, 'app');
   const settings: SandboxPoolSettings = { root: repos.sbRoot, maxSandboxes: o.maxSandboxes ?? 8, maxAgentsPerSandbox: o.maxAgentsPerSandbox ?? 4, maxUnity: o.maxUnity ?? 1, diskWarnGB: 50, diskCriticalGB: 20 };
   const { d: poolDeps, running } = fakePoolDeps(repos.main, { free: o.free });
-  const wanted = (o.sandboxes ?? []).map((s): { name: string; purpose?: string; branch?: string } => (typeof s === 'string' ? { name: s } : s));
-  const purposes = new Map(wanted.map((s) => [s.name, s.purpose ?? 'unused']));
+  const wanted = (o.sandboxes ?? []).map((s): { name: string; branch?: string } => (typeof s === 'string' ? { name: s } : s));
   // The daemon's own pool code makes them, into the state file the daemon reads when it starts.
   const pool = new SandboxPool({ repoPath: repos.main, stateFile: path.join(appDir, 'sandboxes.json'), settings, activity: () => ({ busy: false, lastActivityMs: 0 }), onChange: () => undefined, onEvent: () => undefined, idleStopMinutes: 0 }, poolDeps);
   for (const s of wanted) await pool.create({ id: s.name, branch: s.branch ?? `sandbox/${s.name}`, base: 'origin/develop', seedLibrary: false, startUnity: false });
@@ -191,7 +190,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
     ref: (name) => `${id}/${name}`,
     path: (name) => path.join(repos.sbRoot, name),
     record: (bySandbox = {}) => {
-      const sandboxes: MachineSandbox[] = mergeSandboxes([], pool.list()).map((sb) => ({ ...sb, purpose: purposes.get(sb.id) ?? 'unused', sessionIds: bySandbox[sb.id] ?? [] }));
+      const sandboxes: MachineSandbox[] = mergeSandboxes([], pool.list()).map((sb) => ({ ...sb, sessionIds: bySandbox[sb.id] ?? [] }));
       return { ...base(o.portalUrl ?? ''), online: false, createdAt: new Date(0).toISOString(), sessionIds: Object.values(bySandbox).flat(), sandboxes };
     },
     async connect(mm) {

@@ -217,9 +217,20 @@ editor start), then `-Cleanup`.
 powershell -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\ff-factory\scripts\worker\migrate.ps1 -Root D:\work\ffw -From D:\work\.ff-factory -OldSlots D:\work\ff-players -DryRun
 ```
 
-Leave `-Nightly` out unless the nightly lab's own scheduled task is re-pointed in the same sitting (re-run
-`scripts/nightly/install_schedule.sh` with `FF_NIGHTLY_ROOT=D:\work\ffw\nightly`); otherwise it keeps running from
-`D:\work\ff-nightly`. After cleanup, `D:\work\FFFRepo` is lothsahn's alone.
+Leave `-Nightly` out unless the nightly lab's own scheduled task is re-pointed in the same sitting; otherwise it keeps
+running from `D:\work\ff-nightly`. After cleanup, `D:\work\FFFRepo` is lothsahn's alone.
+
+**The nightly lab does not follow the root by itself** (w577): its task `ff-nightly-e2e` names its root on its command
+line. After the migration (and after any install on a machine that has the task), re-point it from a game checkout,
+which makes the nightly checkout in the root and replaces the task:
+
+```bash
+FF_NIGHTLY_ROOT=/d/work/ffw/nightly bash scripts/nightly/install_schedule.sh
+schtasks //query //tn ff-nightly-e2e //xml | grep Arguments   # names /d/work/ffw/nightly
+```
+
+The install and the migration print a WARNING naming the task while it runs from anywhere else. LothDesktop was
+re-pointed this way on 2026-10-06 (w577), after its old `D:\work\ff-nightly` had been deleted.
 
 **2. The M3** (measured: git **2.46**, below 2.48; **49 GB** free; nightly lab `~/nevergames/ff-nightly` run by its own
 LaunchAgent; slots `~/nevergames/ff-players`; no sandboxes today). First `brew upgrade git`. With 49 GB, one sandbox at

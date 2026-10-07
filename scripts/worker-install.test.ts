@@ -12,7 +12,7 @@ import { installScript, taskName, uninstallScript } from '../server/machineDeplo
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
-import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, playerFolders, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, nightlyTaskProblem, playerFolders, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
 import { runElevatedSteps } from './worker/worker.ts';
@@ -386,6 +386,27 @@ test('worker install: the key file itself: made with its folder, the key in once
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('worker install: a nightly lab task left on an old root is named, with the command that re-points it (w577)', () => {
+  // lothdesktop's task after w513, as schtasks /query /tn ff-nightly-e2e /xml printed it (2026-10-06).
+  const old = String.raw`<Actions Context="Author">
+    <Exec>
+      <Command>"C:\Program Files\Git\bin\bash.exe"</Command>
+      <Arguments>-lc "FF_NIGHTLY_ROOT="/d/work/ff-nightly" bash "/d/work/ff-nightly/FinalFactory/scripts/nightly/nightly.sh""</Arguments>
+    </Exec>
+  </Actions>`;
+  const root = String.raw`D:\work\ffw\nightly`;
+  const said = nightlyTaskProblem(old, root) ?? '';
+  assert.ok(said.includes(`does not run from ${root}`), said);
+  assert.ok(said.includes('(it runs: -lc "FF_NIGHTLY_ROOT="/d/work/ff-nightly" bash'), said);
+  assert.ok(said.includes(`FF_NIGHTLY_ROOT="${root}" bash scripts/nightly/install_schedule.sh`), said);
+  // Re-pointed: Git Bash's form or Windows' form of the root, any case, a trailing separator: nothing to say.
+  assert.equal(nightlyTaskProblem(old.replaceAll('/d/work/ff-nightly', '/d/work/ffw/nightly'), root), undefined);
+  assert.equal(nightlyTaskProblem(old.replaceAll('/d/work/ff-nightly', String.raw`D:\Work\FFW\nightly`), root + '/'), undefined);
+  // No task, no line.
+  assert.equal(nightlyTaskProblem(undefined, root), undefined);
+  assert.equal(nightlyTaskProblem('', root), undefined);
 });
 
 test("worker install: each sandbox owns two player folders, and a new count adds or removes pairs (w576)", () => {

@@ -82,7 +82,7 @@ http
         const machines = internals.agents.machines;
         if (req.method === 'POST' && req.url === '/sandbox') {
           const { name, base: b } = JSON.parse(body) as { name: string; base?: string };
-          const sb = await machines.createSandbox(id, { name, purpose: 'worker install test', base: b, seedLibrary: false, startUnity: false });
+          const sb = await machines.createSandbox(id, { name, base: b, seedLibrary: false, startUnity: false });
           res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(sb));
           return;
         }

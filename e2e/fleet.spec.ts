@@ -231,8 +231,9 @@ test('fleet: the sidebar groups every computer, with its sandboxes, their agents
   await expect(loth.getByTestId('fl-capacity')).toHaveText('2/3 sandboxes · 1/2 editors');
   await expect(loth.getByTestId('fl-agents-sum')).toHaveText('3 agents, 1 busy');
   const sb1 = loth.getByTestId('fl-sandbox-lothdesktop/sb1');
-  await expect(sb1.locator('.row-title')).toHaveText('Nightly e2e run');
-  await expect(sb1.locator('.row-sub')).toContainText('Working · feature/fleet-view');
+  // Its label is its name (w575); what it is doing is its live agents' titles, the Working one first.
+  await expect(sb1.locator('.row-title')).toHaveText('sb1');
+  await expect(sb1.locator('.row-sub')).toContainText('Working · Nightly e2e: Windows leg (+1) · feature/fleet-view');
   await expect(sb1.locator('.fl-unity')).toHaveAttribute('title', 'Unity running');
   // Working first, then Idle (w475).
   await expect(sb1.getByTestId('fl-agent')).toHaveText([/Nightly e2e: Windows leg\s*busy\s*2m/, /Review the nightly report\s*idle\s*25m/]);
