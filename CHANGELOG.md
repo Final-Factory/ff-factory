@@ -27,6 +27,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **The fffctl migrate tests run side by side** (w636, asked by lothsahn). Their five end-to-end tests, which ran one
+  after another for 145-192 s of the Linux unit job, are in four files that node runs in parallel; each world's fake
+  BEAST has a temp folder of its own.
 - **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
   that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
   and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,
