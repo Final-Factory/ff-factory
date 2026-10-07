@@ -614,6 +614,30 @@ test('machine: a daemon stopping on purpose (a worker migration, w513) is not re
   await until('back', () => mm.isOnline('mx') && store.machines.get('mx')!.daemonStopped === undefined);
 });
 
+test('machine: add_machine on a worker root install changes its settings in place and never redeploys (w576)', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  daemon();
+  await until('online', () => mm.isOnline('mx'));
+  // LothDesktop after its fresh install: a root, six slots allowed, five left, 3 editors and 5 agents in all set before.
+  const m = store.machines.get('mx')!;
+  Object.assign(m, { root: 'D:\work\ffw', sandboxRoot: 'D:\work\ffw\sandboxes', maxSandboxes: 6, maxAgentsPerSandbox: 2, maxUnity: 3, maxSandboxAgents: 5 });
+  m.sandboxes = [1, 2, 3, 4, 5].map((k) => ({ id: `slot${k}`, path: `D:\work\ffw\sandboxes\slot${k}`, branch: `sandbox/slot${k}`, status: 'ready', purpose: 'unused', sessionIds: [] }) as unknown as NonNullable<typeof m.sandboxes>[number]);
+  (mm as unknown as { runDeploy: () => Promise<void> }).runDeploy = async () => assert.fail('a root install is never redeployed over ssh');
+  const sent: string[] = [];
+  const link = (mm as unknown as { links: Map<string, { ws: { send: (s: string) => void } }> }).links.get('mx')!;
+  const send = link.ws.send.bind(link.ws);
+  link.ws.send = (s: string) => (sent.push(s), send(s));
+  const after = mm.deployMachine({ id: 'mx', maxSandboxes: 5 });
+  assert.equal(after.maxSandboxes, 5);
+  assert.deepEqual([after.maxAgentsPerSandbox, after.maxUnity, after.maxSandboxAgents, after.status], [2, 3, 5, 'ready'], 'everything else kept');
+  const welcome = JSON.parse(sent.find((x) => JSON.parse(x).type === 'welcome')!);
+  assert.equal(welcome.sandboxes.maxSandboxes, 5, 'its daemon gets the new limit at once');
+  assert.throws(() => mm.deployMachine({ id: 'mx', maxSandboxes: 4 }), /has 5 sandboxes; delete 1 before lowering max_sandboxes to 4/);
+  assert.throws(() => mm.deployMachine({ id: 'mx', sandboxRoot: 'E:\sb' }), /worker root install .*sandboxRoot come from its installer/);
+  assert.equal(store.machines.get('mx')!.maxSandboxes, 5);
+});
+
 test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart are resumed when the daemon is back; a stop is not', async (t) => {
   const { store, sessions, mm, daemon, cleanup } = await setup();
   t.after(cleanup);

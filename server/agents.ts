@@ -2103,7 +2103,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       ),
       tool(
         'add_machine',
-        "Set up a machine over ssh from this host: a Mac or a Windows PC (found out over ssh). Installs the FF Factory daemon that runs agents there and connects back here (a LaunchAgent on a Mac, a Task Scheduler task at the user's logon on Windows). Also redeploys an existing machine (same id) with this portal's current code; refused while agents run there unless forced. Returns at once; list_machines shows progress. Only when the user asked for it.",
+        "Set up a machine over ssh from this host: a Mac or a Windows PC (found out over ssh). On a worker root install (w513) it only changes settings (limits, label, protected paths, Library seed) and never redeploys: its folders and code come from its installer. Installs the FF Factory daemon that runs agents there and connects back here (a LaunchAgent on a Mac, a Task Scheduler task at the user's logon on Windows). Also redeploys an existing machine (same id) with this portal's current code; refused while agents run there unless forced. Returns at once; list_machines shows progress. Only when the user asked for it.",
         {
           id: z.string().describe('Short id: letters, digits and dashes, e.g. "m5". Stored lower-case ("LothDesktop" becomes lothdesktop and is shown as LothDesktop); either spelling works in every tool.'),
           ssh_host: z.string().optional().describe('ssh host alias this host uses (default: the id).'),
@@ -2158,6 +2158,10 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
             local: a.local,
             force: a.force,
           });
+          if (m.root) {
+            const pool = poolSettingsOf(m);
+            return `${m.id} is a worker root install (${m.root}): settings changed, no redeploy (it updates by its installer)${pool ? `; ${(m.sandboxes ?? []).length}/${pool.maxSandboxes} sandboxes, up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once` : ''}${mm.isOnline(m.id) ? '; its daemon has them now' : '; its daemon gets them when it connects'}.`;
+          }
           return `Deploying to ${m.id} (${m.local ? 'this host, no ssh' : `ssh ${m.host}`}, portal ${m.portalUrl}); list_machines shows progress.`;
         }),
       ),

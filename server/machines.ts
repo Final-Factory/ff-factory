@@ -848,6 +848,9 @@ export class MachineManager {
     if (opts.maxSessions !== undefined && (!Number.isInteger(opts.maxSessions) || opts.maxSessions < 0 || opts.maxSessions > 8)) throw new Error('max_agents is a whole number from 0 (sandboxes only) to 8');
     if (this.deploying.has(id)) throw new Error(`${id} is already being deployed`);
     const prev = this.store.machines.get(id);
+    // A worker root install (w513) is installed and updated on its computer, never over ssh: add_machine changes only
+    // its settings (w576: "lower LothDesktop to 5"; a redeploy would have put an old-style daemon into its root).
+    if (prev?.root) return this.setRootSettings(prev, opts);
     const local = opts.local ?? prev?.local ?? false;
     if (prev && !!prev.local !== local) throw new Error(`${id} is ${prev.local ? "the portal's own host" : 'a machine reached over ssh'}; remove it first to change that`);
     if (local) {
@@ -901,6 +904,32 @@ export class MachineManager {
     // finds, which on BEAST could be the live game's checkout.
     void this.runDeploy(machine, token, opts.repoPath ?? (local ? machine.repoPath : undefined), prev?.appDir);
     return machine;
+  }
+
+  /**
+   * add_machine for a worker root install: its limits, label, protected paths and Library seed change on the record and
+   * reach its daemon in a new welcome (it applies them at once, machine/daemon.ts). Its folders, host and portal come
+   * from its installer, so changing one is refused, and so is a sandbox limit below the sandboxes it has.
+   */
+  private setRootSettings(m: Machine, opts: Parameters<MachineManager['deployMachine']>[0]): Machine {
+    const fixed = (['host', 'portalUrl', 'repoPath', 'appDir', 'unityEditorRoot', 'unityPath', 'tempDir', 'sandboxRoot', 'maxSessions', 'local'] as const).filter(
+      (k) => opts[k] !== undefined && opts[k] !== (m as unknown as Record<string, unknown>)[k],
+    );
+    if (fixed.length) throw new Error(`${m.id} is a worker root install (${m.root}): its ${fixed.join(', ')} come from its installer; run it again there with the new value (docs/worker-install.md, "Updating")`);
+    const limits = limitOptions(opts, m);
+    const has = (m.sandboxes ?? []).length;
+    if (limits.maxSandboxes !== undefined && limits.maxSandboxes < has) throw new Error(`${m.id} has ${has} sandboxes; delete ${has - limits.maxSandboxes} before lowering max_sandboxes to ${limits.maxSandboxes}`);
+    Object.assign(m, limits, {
+      ...(opts.purpose !== undefined ? { purpose: normalizePurpose(opts.purpose) } : {}),
+      ...(opts.protectedPaths !== undefined ? { protectedPaths: opts.protectedPaths } : {}),
+      ...(opts.librarySeed !== undefined ? { librarySeed: opts.librarySeed === '' ? undefined : opts.librarySeed } : {}),
+      ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
+      ...(opts.librarySeedGB !== undefined ? { librarySeedGB: opts.librarySeedGB } : {}),
+      ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
+    });
+    this.store.putMachine(m);
+    this.links.get(m.id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
+    return m;
   }
 
   /** Tests only: allow a local machine on a host that is not Windows (the deploy itself is a fake there). */
