@@ -1383,8 +1383,8 @@ export interface WorkStalled {
 /** Why and how the intake closed a request on its own: its branch or PR merged, or the request it is linked to is done. */
 export interface WorkAutoClosed {
   at: string;
-  /** branch: a merged PR or commit names the branch; pr: the PR it names merged; thread: a merged PR carries its Discord thread; ancestor: every commit of the branch is on the base branch; linked: a linked request is done; prs: every pull request linked to it merged and nothing was left to do; report: its worker's final report said it was delivered. */
-  how: 'branch' | 'pr' | 'thread' | 'ancestor' | 'linked' | 'prs' | 'report';
+  /** branch: a merged PR or commit names the branch; pr: the PR it names merged; thread: a merged PR carries its Discord thread; ancestor: every commit of the branch is on the base branch; linked: a linked request is done; prs: every pull request linked to it merged and nothing was left to do; report: its worker's final report said it was delivered; deploy: its PRs merged and the deploy left after them is done (the portal, and the machines when asked, run the merge, w631). */
+  how: 'branch' | 'pr' | 'thread' | 'ancestor' | 'linked' | 'prs' | 'report' | 'deploy';
   /** The merging PR's number, the merge commit and when it merged (absent for a linked request). */
   pr?: number;
   sha?: string;

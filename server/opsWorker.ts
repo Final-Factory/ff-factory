@@ -389,6 +389,10 @@ export interface OpsDeps {
   personTurn: (orchestratorId: string) => boolean;
   /** Where the job record is kept (data/ops-worker.json). */
   file: string;
+  /** Why a job cannot be sent for these ledger requests (no such request, or closed), or undefined (w631). Unset: none are taken. */
+  workProblem?: (ids: readonly string[]) => string | undefined;
+  /** Its turn of a job sent for requests ended: the ledger reads its DONE and still-open lines; answers what it did (w631). */
+  workTurnEnded?: (info: SessionInfo, text: string, job: { workIds: readonly string[]; by: Requester }) => string[];
   now?: () => number;
 }
 
@@ -397,7 +401,13 @@ interface OpsJob {
   at: string;
   /** The person's first words, for status. */
   what: string;
+  /** The ledger requests whose step this job is (ops_worker work_ids, w631): its DONE lines for them close them. */
+  workIds?: string[];
 }
+
+/** What the worker is told about the requests a job is for (w631). */
+export const opsWorkRule = (ids: readonly string[]) =>
+  `\n\n[ledger] This job is the step left on ${ids.join(', ')}. When it is done and verified, end your report with a line \`DONE: <id>\` for each of them it finishes (one line each), and say in the report how you verified it. For one with something still left, end with a line \`<id>: still open: <what>\` instead.`;
 
 /** A deploy a person asked for (ops_worker deploy): reported after the portal's next start. */
 interface OpsDeploy {
@@ -452,7 +462,7 @@ export class OpsWorker {
       try {
         this.d.sessions.send(
           OPS_ID,
-          `[deploy] The portal has started again (${new Date(this.now()).toISOString()}), after the deploy ${dep.by.displayName} asked for at ${dep.at}: most likely the update's own restart. Run \`fffctl status\` and report to ${dep.by.displayName}: the commit before (what fffctl update printed), the commit running now, whether the update was verified or rolled back (\`fffctl logs 200\` says), and the status lines.`,
+          `[deploy] The portal has started again (${new Date(this.now()).toISOString()}), after the deploy ${dep.by.displayName} asked for at ${dep.at}: most likely the update's own restart. Run \`fffctl status\` and report to ${dep.by.displayName}: the commit before (what fffctl update printed), the commit running now, whether the update was verified or rolled back (\`fffctl logs 200\` says), and the status lines.${this.job?.workIds?.length ? opsWorkRule(this.job.workIds) : ''}`,
           'system',
           undefined,
           { requestedBy: dep.by, ops: 'resume' },
@@ -476,16 +486,28 @@ export class OpsWorker {
     }
   }
 
+  /** The ledger requests a job is sent for (work_ids, w631): lower case, no repeats, and refused when the ledger has a problem with them. */
+  private workIdsOf(ids: readonly string[]): string[] {
+    const out = [...new Set(ids.map((x) => x.trim().toLowerCase()).filter(Boolean))];
+    if (!out.length) return [];
+    const bad = out.find((x) => !/^w\d+$/.test(x));
+    if (bad) throw new Error(`work_ids: request ids like "w605", not "${bad}"`);
+    const problem = this.d.workProblem ? this.d.workProblem(out) : 'this portal does not link ops jobs to requests';
+    if (problem) throw new Error(`work_ids: ${problem}`);
+    return out;
+  }
+
   /**
    * A message from an orchestrator. `caller` is the orchestrator's session. Lothsahn's or Ben's own only. A job (a
    * `fresh` start, or the first message after the last job ended) needs a turn its person started themselves; within a
    * job their orchestrator's harness turns (a check-in, a timer) may follow up for OPS_LIMITS.jobMs.
    */
-  send(caller: SessionInfo | undefined, text: string, fresh = false): string {
+  send(caller: SessionInfo | undefined, text: string, fresh = false, workIds: readonly string[] = []): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
     const body = text.trim();
     if (!body) throw new Error('text: what the orchestration worker should do');
+    const ids = this.workIdsOf(workIds);
     const personTurn = this.d.personTurn(caller.id);
     const jobOpen = !!this.job && this.job.by.userId.toLowerCase() === person.userId.toLowerCase() && this.now() - Date.parse(this.job.at) < OPS_LIMITS.jobMs;
     const h = this.handle();
@@ -501,13 +523,17 @@ export class OpsWorker {
       this.d.store.append(OPS_ID, { kind: 'system', text: `A new job from ${person.displayName}'s orchestrator: a fresh conversation.` });
     }
     if (opening) {
-      this.job = { by: person, at: new Date(this.now()).toISOString(), what: body.replace(/\s+/g, ' ').slice(0, 120) };
+      this.job = { by: person, at: new Date(this.now()).toISOString(), what: body.replace(/\s+/g, ' ').slice(0, 120), ...(ids.length ? { workIds: ids } : {}) };
       this.save();
       h.info.requestedBy = person;
       this.d.store.putSession(h.info);
+    } else if (ids.length && this.job) {
+      // A follow-up within the job adds requests to it.
+      this.job.workIds = [...new Set([...(this.job.workIds ?? []), ...ids])];
+      this.save();
     }
-    console.log(`ops-worker: message from ${person.userId}'s orchestrator${opening ? ' (a new job)' : ''}: ${redactSecrets(body).replace(/\s+/g, ' ').slice(0, 300)}`);
-    this.d.sessions.send(OPS_ID, body, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
+    console.log(`ops-worker: message from ${person.userId}'s orchestrator${opening ? ' (a new job)' : ''}${ids.length ? ` for ${ids.join(', ')}` : ''}: ${redactSecrets(body).replace(/\s+/g, ' ').slice(0, 300)}`);
+    this.d.sessions.send(OPS_ID, `${body}${ids.length ? opsWorkRule(ids) : ''}`, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
     return `Sent to the orchestration worker (${OPS_ID})${opening ? ` as a new job of ${person.displayName}'s` : ''}. Its turn's end comes back to you as an [ops worker] message; its transcript is on the dashboard (Orchestration worker) and in agent_transcript ${OPS_ID}.`;
   }
 
@@ -518,15 +544,16 @@ export class OpsWorker {
    * OPS_LIMITS.deployGrantMs, which fff-ops-priv checks and removes before it runs `fffctl update`: without it the worker
    * cannot deploy, whatever it is told. Then tells the worker to do it and report.
    */
-  deploy(caller: SessionInfo | undefined, note = ''): string {
+  deploy(caller: SessionInfo | undefined, note = '', workIds: readonly string[] = []): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
     if (!this.d.personTurn(caller.id)) throw new Error(`a portal deploy needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report); ask them`);
+    const ids = this.workIdsOf(workIds);
     const at = new Date(this.now());
     const grant = { by: person.userId, name: person.displayName, at: at.toISOString(), expires: new Date(at.getTime() + OPS_LIMITS.deployGrantMs).toISOString() };
     fs.writeFileSync(path.join(path.dirname(this.d.file), OPS_GRANT), `${JSON.stringify(grant)}\n`, { mode: 0o600 });
     this.deploying = { by: person, at: at.toISOString() };
-    this.job = { by: person, at: at.toISOString(), what: 'deploy the portal (fffctl update)' };
+    this.job = { by: person, at: at.toISOString(), what: 'deploy the portal (fffctl update)', ...(ids.length ? { workIds: ids } : {}) };
     this.save();
     const h = this.handle();
     h.info.requestedBy = person;
@@ -536,7 +563,7 @@ export class OpsWorker {
 1. Run \`fffctl status\` and note the release and its commit.
 2. Run \`fffctl update\`, once. It is allowed until ${grant.expires} and only once, and it only asks for the update: the portal builds origin/main beside the running release, drains, restarts on the new one, verifies it and rolls back by itself if it does not answer. It prints the commit it starts from.
 3. End your turn with what it printed. Your process ends with the old portal; when the new one starts, FF Factory messages you to report. If no message comes within 20 minutes (already up to date, or the build failed), wake_me 20 before you end the turn covers it: then report from \`fffctl status\` and \`fffctl logs 200\`.
-Report to ${person.displayName}: the commit before, the commit after, whether it was verified or rolled back, and \`fffctl status\`.`;
+Report to ${person.displayName}: the commit before, the commit after, whether it was verified or rolled back, and \`fffctl status\`.${ids.length ? `${opsWorkRule(ids)} Only in the report after the restart, once the new portal is verified: never in the turn that starts the update.` : ''}`;
     this.d.sessions.send(OPS_ID, text, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
     return `Asked the orchestration worker (${OPS_ID}) to deploy the portal: it may run fffctl update once until ${grant.expires}. The portal will drain and restart; its report (commit before and after, fffctl status) comes back to you as an [ops worker] message after the restart.`;
   }
@@ -575,8 +602,17 @@ Report to ${person.displayName}: the commit before, the commit after, whether it
     if (s.info.kind !== 'ops') return;
     const who = s.info.lastRequestedBy ?? this.job?.by;
     if (!who) return;
+    // A job sent for ledger requests (w631): its DONE and still-open lines for them, and what the ledger did with them.
+    let ledger: string[] = [];
+    if (this.job?.workIds?.length && this.d.workTurnEnded) {
+      try {
+        ledger = this.d.workTurnEnded(s.info, text, { workIds: this.job.workIds, by: this.job.by });
+      } catch (e) {
+        console.warn('ops-worker: the ledger could not read its report:', (e as Error).message);
+      }
+    }
     try {
-      this.d.tellOrchestrator(who, `[ops worker] finished a turn${this.job ? ` (job: ${this.job.what})` : ''}:\n${redactSecrets(text || s.info.lastResult || '(no text)').slice(0, 4000)}`);
+      this.d.tellOrchestrator(who, `[ops worker] finished a turn${this.job ? ` (job: ${this.job.what})` : ''}:\n${redactSecrets(text || s.info.lastResult || '(no text)').slice(0, 4000)}${ledger.length ? `\n\n[ledger] ${ledger.join('; ')}` : ''}`);
     } catch (e) {
       console.warn('ops-worker: could not tell the orchestrator:', (e as Error).message);
     }

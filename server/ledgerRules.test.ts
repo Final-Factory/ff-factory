@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { afterMergeReason, cleanupSettings, cutOffOf, doneProblem, isRelease, mergedMentionsIn, mergePrs, ownerAt, partOfIdsIn, partOfReason, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, supersededBy, type PrRecord } from './ledgerRules.ts';
+import { afterMergeReason, cleanupSettings, cutOffOf, deployStep, doneProblem, isRelease, mergedMentionsIn, mergePrs, ownerAt, partOfIdsIn, partOfReason, prsOf, prUrlsIn, reportVerdict, requestIdsIn, stallCandidate, stillOpenIn, supersededBy, type PrRecord } from './ledgerRules.ts';
 import { reportClip } from './sessions.ts';
 import type { WorkItem } from '../shared/types.ts';
 
@@ -211,4 +211,25 @@ test('w515: an open PR gh could not read is "couldn\'t verify", not "still open"
   assert.deepEqual(mergedMentionsIn('https://github.com/o/r/pull/1089 merged', prs).map((p) => p.number), [1089]);
   assert.deepEqual(mergedMentionsIn('PR #1089 is open, waiting on CI.', prs), []);
   assert.deepEqual(mergedMentionsIn('PR #10890 merged.', prs), []);
+});
+
+test('w631: a status line says what is left ("w12: still open: …", "NOT DONE: w12 …"); a mention in a sentence or a DONE line is not one', () => {
+  const lines = stillOpenIn('Merged #12.\nw12: still open: the 2-peer check\n- **w13: still open** — the notes\nNOT DONE: w14: the deploy\nI said w15: still open earlier.\nDONE: w16');
+  assert.deepEqual([...lines.keys()], ['w12', 'w13', 'w14']);
+  assert.equal(lines.get('w12'), 'w12: still open: the 2-peer check');
+  assert.equal(lines.get('w14'), 'NOT DONE: w14: the deploy');
+});
+
+test('w631: a deploy is the only step left when nothing else after the merge is: the portal, the machines, or neither', () => {
+  const w = item({ id: 'w1' });
+  assert.equal(deployStep(w, ['Merged as #193.']), undefined, 'nothing is left at all');
+  assert.deepEqual(deployStep(w, ["Merged as #193. Waiting on the portal deploy, which needs lothsahn's own words."]), { portal: true, machines: false });
+  assert.deepEqual(deployStep(w, ['Merged. Still to do: update the worker machines (beast, lothdesktop).']), { portal: false, machines: true });
+  assert.deepEqual(deployStep(item({ id: 'w2', brief: 'Fix the daemon. Merge, then deploy the portal and update the machines.' }), ['Merged.']), { portal: true, machines: true });
+  // Something besides the deploy is left: an audit, a release, a question, a plan of PRs, or more work in the report.
+  assert.equal(deployStep(item({ id: 'w3', brief: 'Fix it, then run the paired determinism audit after the merge.' }), ['Merged. Waiting on the portal deploy.']), undefined);
+  assert.equal(deployStep(item({ id: 'w4', title: 'Release 0.50.0.80' }), ['Merged. Waiting on the deploy.']), undefined);
+  assert.equal(deployStep(item({ id: 'w5', question: { text: 'which one?', at: T } }), ['Waiting on the deploy.']), undefined);
+  assert.equal(deployStep(w, ['Merged. Waiting on the portal deploy. The second PR is next.']), undefined);
+  assert.equal(deployStep(w, ['Merged. After the deploy, run the nightly soak.']), undefined, 'a sentence naming another step is never set aside');
 });
