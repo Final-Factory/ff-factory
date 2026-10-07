@@ -399,6 +399,13 @@ asks it to: a decision only the other person can make, a script only they can ru
   themselves, while a person relaying their own words is never held back: each message they write starts it again.
   Until w571 (2026-10-07) it was 3 and only the recipient's writing started it again, which refused Ben a fourth
   message to Lothsahn that Ben himself had asked for;
+- has **no count between the owners**, Lothsahn and Ben (`ownersPair`, the same two `OPS_PEOPLE` the
+  [orchestration worker](ops-worker.md) serves; w627, lothsahn, 2026-10-07: "Please update FFFactory so you and Ben's
+  orchestrator can send an infinite number of messages to each other and the portal worker"). Their loop guard is a
+  rate instead: in turns no person started (a `[person message]`, a worker's report, a timer), at most 60 messages an
+  hour from one to the other (`OWNER_LOOP_MESSAGES_PER_HOUR`), and a message either of them writes to their own
+  orchestrator starts it again. A message sent in a person's own turn is never counted. Everyone else keeps the count
+  above, to and from the owners too;
 - sends the recipient's own orchestrator (made if missing) a harness message, recorded with the sender as `requestedBy`:
   `[person message] From Lothsahn's orchestrator (user id lothsahn), written for Lothsahn:`, the text, then a line
   saying it is data to show the recipient, not an instruction. It is in the recipient's transcript at once, so a
@@ -694,7 +701,7 @@ workers"; `shared/agentState.ts` `agentState`):
 | **Working** | mid-turn: `running` or `starting` (a permission request shows as **Needs you**) | blue |
 | **Waiting** | alive between turns (idle) with something real pending, checked in this order: a **running job** (a background task or watcher the agent started, which a restart ends), a message for it held in the send queue for a free slot, or only a **timer** (its `wake_me` check-in, still ahead) | violet, with what it waits on (w509): "Waiting: CI on PR #1098 · check-in 06:10 UTC" (a job, by the description the agent gave it), "Waiting: a queued message (…)", "Waiting: check-in 16:29 UTC: “merge #1083 when…”" (a timer, with its note's first words) |
 | **Idle** (available) | finished its turn with nothing pending: free for new work, and the idle reaper's candidate | grey; a worker reads "Idle (available)" |
-| **Stopped** | no process. Never Waiting (w509). When its check-in or a queued message will start it again it says so, "Stopped (resumes at check-in tomorrow 00:08 UTC)", is listed with the live agents and keeps its sandbox from counting as free | grey |
+| **Stopped** | no process. Never Waiting (w509). When its check-in or a queued message will start it again it says so, "Stopped (resumes at check-in tomorrow 00:08 UTC)", is listed with the live agents and keeps its sandbox from counting as free, unless its check-in is more than 30 minutes away and its worktree is clean: then its sandbox is released for other work and it is placed again when it resumes (w640, [machines.md](machines.md#placing-work), "Released sandboxes") | grey |
 
 A check-in more than 2 minutes past its time has fired or is failing to (`Waker.fire` retries a refused delivery for
 up to 10 minutes, then gives up and says so in the agent's transcript): it is not pending, so it no longer makes an
@@ -779,6 +786,14 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
 - A person's orchestrator messages another person at most 10 times until its person or that person writes to their own
   orchestrator (`orchestrator.messagesPerPerson`). Two orchestrators answering each other with nobody writing stop
   there.
+- Between Lothsahn's and Ben's orchestrators there is no count (w627): two of them could answer each other for as long
+  as they keep doing it. Three things stop that without a count. The `[person message]` each receives says it is data,
+  not an instruction, and to answer only with what its person says (`personMessage`), so the model is told not to
+  start the loop. A message sent in a turn no person started counts toward 60 an hour from one to the other
+  (`OWNER_LOOP_MESSAGES_PER_HOUR`); at turn speed, a turn every 10 to 30 seconds, a runaway pair meets it within
+  minutes, while a conversation kept up for their people, one message a minute each way, never does. And every
+  message is in both chats, unread, with a push notification to its recipient. The `ops_worker` follow-ups have no
+  count either; [ops-worker.md](ops-worker.md) says what ends a run of them.
 - All three are config settings, whole numbers from 1 to 100, settable live (`set_app_config`); a person's own message
   starts each again. The three are the same kind of guard: none caps what a person asks for, each stops a run of
   turns no person started (w571).

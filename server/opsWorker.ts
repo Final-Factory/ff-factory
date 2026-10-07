@@ -266,72 +266,140 @@ export function opsHeader(o: Pick<SpawnOptions, 'args' | 'env'>, version: string
 }
 
 /**
+ * Each socket's newest process, settled once its connection is closed at both ends (its Claude Code has exited, or the
+ * connection never got going). fff-ops.socket takes one connection at a time (MaxConnections=1) and drops any other the
+ * moment it arrives (systemd: "Too many incoming connections (1), dropping connection."), so a new process waits here
+ * for the last one first (w638: a fresh job started the new process while the old one was still exiting, and systemd
+ * dropped it).
+ */
+const opsSlots = new Map<string, Promise<void>>();
+
+/** How long a new process waits for the socket's one connection to be free, and how often it tries again meanwhile. */
+export const OPS_SLOT = { waitMs: 60_000, retryMs: 250 };
+
+/** The control request Claude Code's own SDK sends to end a turn (Query.interrupt): a stop sends it before the input ends. */
+const INTERRUPT = (id: string) => `${JSON.stringify({ type: 'control_request', request_id: id, request: { subtype: 'interrupt' } })}\n`;
+
+/**
  * Options.spawnClaudeCodeProcess for the worker: connect to fff-ops.socket (only the portal's account may), send the
  * header, wait for the launcher's "OK" (or its "ERR <why>", which becomes the error the transcript shows), then the
- * socket is claude's stdin and stdout. Closing stdin (the SDK's graceful stop) half-closes it; kill() drops it, and
- * systemd ends the unit's process with it.
+ * socket is claude's stdin and stdout.
+ *
+ * One process at a time (w638). A new one first waits for the last one's connection to close: a stop (kill, the SDK's
+ * abort, the idle stop, a fresh job) interrupts the turn and ends claude's input, and the far side closes when claude
+ * has exited. systemd frees the connection a moment after that (it stops the unit first), so a connection dropped
+ * without a word is tried again every OPS_SLOT.retryMs until OPS_SLOT.waitMs has passed. The SDK hears of a stop at
+ * once; the wait is the next process's.
  */
-export function opsSpawner(socketPath = OPS_PATHS.socket, version = sdkVersion(), connect: (p: string) => net.Socket = (p) => net.createConnection({ path: p, allowHalfOpen: true })) {
+export function opsSpawner(socketPath = OPS_PATHS.socket, version = sdkVersion(), connect: (p: string) => net.Socket = (p) => net.createConnection({ path: p, allowHalfOpen: true }), slot = OPS_SLOT) {
   return (o: SpawnOptions): SpawnedProcess => {
     const ev = new EventEmitter();
+    // The SDK writes at once; what it writes waits here until the launcher's OK, then flows to the socket.
+    const stdin = new PassThrough();
     const stdout = new PassThrough();
-    const sock = connect(socketPath);
-    // The header first, now: a socket keeps writes made before it connects in order, and the SDK writes at once.
-    sock.write(opsHeader(o, version));
+    const header = opsHeader(o, version);
+    let sock: net.Socket | undefined;
     let killed = false;
     let exitCode: number | null = null;
     let signalCode: NodeJS.Signals | null = null;
     let done = false;
     let acked = false;
-    let head = Buffer.alloc(0);
+    const before = opsSlots.get(socketPath) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((r) => (release = r));
+    opsSlots.set(socketPath, mine);
+    void mine.then(() => opsSlots.get(socketPath) === mine && opsSlots.delete(socketPath));
+    const deadline = Date.now() + slot.waitMs;
     const finish = (code: number | null, signal: NodeJS.Signals | null, err?: Error) => {
       if (done) return;
       done = true;
-      exitCode = code;
+      exitCode = err ? 1 : code;
       signalCode = signal;
-      if (err) ev.emit('error', err);
       stdout.end();
-      ev.emit('exit', code, signal);
+      if (!err) return void ev.emit('exit', code, signal);
+      ev.emit('error', err);
+      // No code with it: the SDK's exit handler would replace the reason with "Claude Code process exited with code 1"
+      // (a custom spawner has no stderr tail to add), and the transcript would say nothing more (w638).
+      ev.emit('exit', null, null);
     };
-    sock.on('data', (chunk: Buffer) => {
-      if (acked) return void stdout.write(chunk);
-      head = Buffer.concat([head, chunk]);
-      const nl = head.indexOf(10);
-      if (nl < 0) {
-        if (head.length > 4096) {
-          sock.destroy();
-          finish(1, null, new Error('the orchestration worker\'s launcher answered something other than OK'));
+    const attempt = () => {
+      if (killed) return release();
+      const s = connect(socketPath);
+      sock = s;
+      s.write(header);
+      let head = Buffer.alloc(0);
+      let heard = false;
+      let failed: Error | undefined;
+      s.on('data', (chunk: Buffer) => {
+        heard = true;
+        // After a stop, its last words (the interrupt's answer, the turn's end) are nobody's.
+        if (killed || done) return;
+        if (acked) return void stdout.write(chunk);
+        head = Buffer.concat([head, chunk]);
+        const nl = head.indexOf(10);
+        if (nl < 0) {
+          if (head.length > 4096) {
+            s.destroy();
+            finish(1, null, new Error('the orchestration worker\'s launcher answered something other than OK'));
+          }
+          return;
         }
-        return;
-      }
-      const line = head.subarray(0, nl).toString('utf8').trim();
-      const rest = head.subarray(nl + 1);
-      head = Buffer.alloc(0);
-      if (line !== 'OK') {
-        sock.destroy();
-        return finish(1, null, new Error(`the orchestration worker could not start: ${line.replace(/^ERR\s*/, '') || 'no answer'}`));
-      }
-      acked = true;
-      if (rest.length) stdout.write(rest);
+        const line = head.subarray(0, nl).toString('utf8').trim();
+        const rest = head.subarray(nl + 1);
+        head = Buffer.alloc(0);
+        if (line !== 'OK') {
+          s.destroy();
+          return finish(1, null, new Error(`the orchestration worker could not start: ${line.replace(/^ERR\s*/, '') || 'no answer'}`));
+        }
+        acked = true;
+        if (rest.length) stdout.write(rest);
+        stdin.pipe(s, { end: false });
+        stdin.on('end', () => hangUp(s));
+      });
+      s.on('error', (e: NodeJS.ErrnoException) => {
+        // systemd closes a connection it drops with our header unread, which Linux turns into a reset (CI, w638).
+        if (!heard && (e.code === 'ECONNRESET' || e.code === 'EPIPE')) return;
+        failed = new Error(e.code === 'ENOENT' || e.code === 'ECONNREFUSED' ? `no ${socketPath}: the orchestration worker runs only in the portal VM, after "fffctl update" installed it (docs/ops-worker.md)` : e.code === 'EACCES' ? `${socketPath}: only the portal's account may connect` : e.message);
+      });
+      // The far side ended (claude exited, or the launcher refused): close ours too.
+      s.on('end', () => s.destroy());
+      s.on('close', () => {
+        if (failed) finish(1, null, failed);
+        else if (!heard && !killed && !done) {
+          // Dropped without a word: systemd still holds the one connection for the last process, which is ending.
+          if (Date.now() + slot.retryMs < deadline) return void setTimeout(attempt, slot.retryMs);
+          finish(1, null, new Error(`the orchestration worker's socket still had its one process after ${Math.round(slot.waitMs / 1000)} s: the last one has not ended (ops_worker status; fffctl logs, journalctl -t fff-ops), or fff-ops@.service fails to start`));
+        } else finish(killed ? null : 0, killed ? 'SIGTERM' : null);
+        release();
+      });
+    };
+    // Its turn on the socket: after the last process's connection has closed (or the wait is up: then the drops say why).
+    let waited: NodeJS.Timeout | undefined;
+    void Promise.race([before, new Promise<void>((r) => (waited = setTimeout(r, slot.waitMs)))]).then(() => {
+      clearTimeout(waited);
+      attempt();
     });
-    sock.on('error', (e: NodeJS.ErrnoException) => {
-      const why = e.code === 'ENOENT' || e.code === 'ECONNREFUSED' ? `no ${socketPath}: the orchestration worker runs only in the portal VM, after "fffctl update" installed it (docs/ops-worker.md)` : e.code === 'EACCES' ? `${socketPath}: only the portal's account may connect` : e.message;
-      finish(1, null, new Error(why));
-    });
-    // The far side ended (claude exited, or the launcher refused): the half-open socket would otherwise wait for us.
-    sock.on('end', () => {
-      if (!acked && !killed) finish(1, null, new Error("the orchestration worker's socket closed before it answered: its one process may still be running (stop it with ops_worker stop), or fff-ops@.service failed (fffctl logs, journalctl -t fff-ops)"));
-      else finish(killed ? null : 0, killed ? 'SIGTERM' : null);
-      sock.destroy();
-    });
-    // Closed before the launcher's OK: systemd refused the connection (MaxConnections=1: its one process still runs).
-    sock.on('close', () => (acked || killed ? finish(killed ? null : 0, killed ? 'SIGTERM' : null) : finish(1, null, new Error('the orchestration worker\'s socket closed before it answered: its one process may still be running (stop it with ops_worker stop), or fff-ops@.service failed (fffctl logs, journalctl -t fff-ops)'))));
-    o.signal?.addEventListener('abort', () => {
+    // Its input ends (the SDK ends it only when the query closes: a stop) or it is killed: Claude Code is told to end its
+    // turn, then its input ends, so it exits. The socket stays open until it has (the next process waits for that), at
+    // most OPS_SLOT.waitMs.
+    const hangUp = (s: net.Socket) => {
+      if (s.writableEnded || s.destroyed) return;
+      stdin.unpipe(s);
+      s.end(INTERRUPT(`ops-stop-${Date.now()}`));
+      const t = setTimeout(() => s.destroy(), slot.waitMs);
+      t.unref?.();
+      s.once('close', () => clearTimeout(t));
+    };
+    // A stop: the SDK hears the exit now; the wait is the next process's.
+    const stop = (signal: NodeJS.Signals) => {
+      if (killed) return;
       killed = true;
-      sock.destroy();
-    });
+      finish(null, signal);
+      if (sock) acked ? hangUp(sock) : sock.destroy();
+    };
+    o.signal?.addEventListener('abort', () => stop('SIGTERM'));
     return {
-      stdin: sock,
+      stdin,
       stdout,
       get killed() {
         return killed;
@@ -343,9 +411,7 @@ export function opsSpawner(socketPath = OPS_PATHS.socket, version = sdkVersion()
         return signalCode;
       },
       kill(signal: NodeJS.Signals) {
-        killed = true;
-        sock.destroy();
-        finish(null, signal);
+        stop(signal);
         return true;
       },
       on: (e: string, l: (...a: unknown[]) => void) => void ev.on(e, l),
@@ -500,7 +566,8 @@ export class OpsWorker {
   /**
    * A message from an orchestrator. `caller` is the orchestrator's session. Lothsahn's or Ben's own only. A job (a
    * `fresh` start, or the first message after the last job ended) needs a turn its person started themselves; within a
-   * job their orchestrator's harness turns (a check-in, a timer) may follow up for OPS_LIMITS.jobMs.
+   * job their orchestrator's harness turns (a check-in, a timer) may follow up for OPS_LIMITS.jobMs. Follow-ups are not
+   * counted (w627, lothsahn: "an infinite number of messages to each other and the portal worker").
    */
   send(caller: SessionInfo | undefined, text: string, fresh = false, workIds: readonly string[] = []): string {
     const person = opsAllowedOrchestrator(caller);

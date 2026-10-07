@@ -46,6 +46,7 @@ import { LIMIT_END, doneIdsIn, doneProblem, mergedMentionsIn, reportVerdict, sti
 import { asksAPerson, servedBy } from '../shared/workState.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
+import { OPS_PEOPLE } from './opsWorker.ts';
 import type { AttachmentRef, Machine, WorkAutoClosed, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -72,6 +73,21 @@ export const FOLLOW_UPS_PER_MESSAGE = 3;
  * it again too, and 10 bounds two orchestrators answering each other with no person writing.
  */
 export const MESSAGES_PER_PERSON = 10;
+/**
+ * w627 (lothsahn, 2026-10-07: "Please update FFFactory so you and Ben's orchestrator can send an infinite number of
+ * messages to each other and the portal worker"): between the owners' own orchestrators (OPS_PEOPLE, Lothsahn and Ben)
+ * message_person has no count. What is left of the loop guard between them is a rate, not a count: in turns no person
+ * started (a [person message], a worker's report, a timer), at most this many messages an hour from one to the other,
+ * and a message either of them writes to their own orchestrator starts it again. A message sent in a person's own turn
+ * is never counted. Two orchestrators answering each other at turn speed (a turn every 10-30 s) stop within minutes; a
+ * conversation they keep up for their people, one message a minute in each direction, never meets it.
+ */
+export const OWNER_LOOP_MESSAGES_PER_HOUR = 60;
+
+/** Whether message_person from one person to the other has no count (w627): both are owners (OPS_PEOPLE). */
+export function ownersPair(from: string, to: string): boolean {
+  return OPS_PEOPLE.includes(from.toLowerCase()) && OPS_PEOPLE.includes(to.toLowerCase());
+}
 
 /** The loop guards in force: config `orchestrator.*`, else the defaults above. */
 export function loopGuards(cfg: Pick<Config, 'orchestrator'>): { filings: number; followUps: number; messages: number } {
@@ -345,6 +361,8 @@ export class Orchestrators {
   private readonly followUps = new Map<string, number>();
   /** Per sender and recipient ("from:to", user ids): messages since either of them last wrote to their orchestrator. */
   private readonly messaged = new Map<string, number>();
+  /** Between owners (w627), per sender and recipient ("from:to"): when each message sent in a turn no person started went, within the hour. */
+  private readonly ownerLoop = new Map<string, number[]>();
   /** A person's orchestrator messaged another person (index.ts sends the recipient a push notification). */
   onPersonMessage?: (from: Requester, to: Requester, text: string) => void;
   /** An intake request waits for a person's approval, or a worker raised a design question (index.ts notifies). */
@@ -472,7 +490,7 @@ export class Orchestrators {
     for (const k of [...this.followUps.keys()]) if (k.startsWith(`${sessionId}:`)) this.followUps.delete(k);
     const owner = this.ownerOf(this.sessions.sessions.get(sessionId)?.info ?? { kind: 'worker' });
     const me = owner?.userId.toLowerCase();
-    if (me) for (const k of [...this.messaged.keys()]) if (k.startsWith(`${me}:`) || k.endsWith(`:${me}`)) this.messaged.delete(k);
+    if (me) for (const m of [this.messaged, this.ownerLoop]) for (const k of [...m.keys()]) if (k.startsWith(`${me}:`) || k.endsWith(`:${me}`)) m.delete(k);
     this.seen(sessionId);
   }
 
@@ -491,6 +509,7 @@ export class Orchestrators {
    * [person message], which shows it to them and relays it, and is unread there until they open or write to their
    * chat. At most loopGuards().messages to one person until the sender or that person writes to their own
    * orchestrator: a person relaying their own words is not held back, two orchestrators answering each other are.
+   * Between the owners (ownersPair, w627) there is no count; only OWNER_LOOP_MESSAGES_PER_HOUR in turns no person started.
    */
   messagePerson(chat: SessionHandle, input: { to: string; text: string }): string {
     const owner = this.ownerOf(chat.info);
@@ -502,13 +521,24 @@ export class Orchestrators {
     if (!text) throw new Error('the message is empty');
     if (text.length > PERSON_MESSAGE_CHARS) throw new Error(`the message is ${text.length} characters; keep it to ${PERSON_MESSAGE_CHARS}`);
     const key = `${owner.userId.toLowerCase()}:${to.userId.toLowerCase()}`;
+    const now = this.now().getTime();
+    const owners = ownersPair(owner.userId, to.userId);
+    // Between owners only turns no person started count, and only within the hour (w627).
+    const loop = owners && chat.turnFrom !== 'human' ? (this.ownerLoop.get(key) ?? []).filter((at) => now - at < 3_600_000) : undefined;
+    if (loop && loop.length >= OWNER_LOOP_MESSAGES_PER_HOUR) {
+      throw new Error(
+        `${OWNER_LOOP_MESSAGES_PER_HOUR} messages to ${to.displayName} in the last hour in turns no person started (a [person message], a report, a timer): the loop guard between ${owner.displayName}'s and ${to.displayName}'s orchestrators (w627). ` +
+          `A message ${owner.displayName} or ${to.displayName} writes to their own orchestrator starts it again; otherwise the next fits at ${new Date(loop[0] + 3_600_000).toISOString()}`,
+      );
+    }
     const n = this.messaged.get(key) ?? 0;
     const max = loopGuards(this.d.cfg).messages;
-    if (n >= max) throw new Error(`${max} messages to ${to.displayName} since ${owner.displayName} or ${to.displayName} last wrote to their orchestrator; ask ${owner.displayName} before sending more`);
+    if (!owners && n >= max) throw new Error(`${max} messages to ${to.displayName} since ${owner.displayName} or ${to.displayName} last wrote to their orchestrator; ask ${owner.displayName} before sending more`);
     const target = this.personalFor(to);
     // Sent as the harness's (a turn it starts is not the recipient's own), about the sender.
     this.sessions.send(target.info.id, personMessage(owner, to, text), 'system', undefined, { requestedBy: asRequester(owner) });
-    this.messaged.set(key, n + 1);
+    if (loop) this.ownerLoop.set(key, [...loop, now]);
+    else if (!owners) this.messaged.set(key, n + 1);
     target.info.personMessages = [...(target.info.personMessages ?? []), { from: asRequester(owner), at: this.now().toISOString() }].slice(-20);
     this.store.putSession(target.info);
     this.onPersonMessage?.(asRequester(owner), asRequester(to), text);

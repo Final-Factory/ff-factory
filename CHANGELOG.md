@@ -10,7 +10,29 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **A sandbox is not held for a worker that comes back much later** (w640, Lothsahn: "Can we not reserve slots for
+  workers that resume a long time from now?"). A worker stopped with its check-in more than 30 minutes away, or with a
+  stale check-in for work that is over, releases its sandbox when its worktree is clean (nothing uncommitted or
+  untracked, no Unity batch run): the sandbox shows FREE and takes new work, which starts on a fresh branch (the
+  sandbox is switched off the worker's branch first). A Waiting worker with only such a check-in is stopped first. When
+  it resumes it is placed again: its own sandbox if still free, else a free one on its machine switched to its branch,
+  else it waits for the next one there, ahead of new work; its first message says where it is now. 30 minutes is about
+  ten times what a move costs (a fetch, a switch, a warm editor start and a recompile, about 3 minutes, measured and
+  sourced in docs/machines.md, "Placing work").
+
 ### Fixed
+
+- **A fresh job for the orchestration worker starts reliably** (w638, lothsahn: it crashed twice on 2026-10-07 with
+  "Claude Code process exited with code 1" the moment a job came with `fresh: true` after a turn had ended). Starting
+  the fresh conversation stopped the old process and connected for the new one at once, while the old one was still
+  exiting: `fff-ops.socket` takes one connection at a time (`MaxConnections=1`), so systemd dropped the new one without a
+  word. The spawner now waits for the last process's connection to close (a stop interrupts its turn and ends its
+  input, so it exits), and tries a dropped connection again until it is free, for up to 60 s. Whether the last process
+  was idle, mid-turn, stopped after its idle hour or errored, the new one runs the job. A failed start now shows the
+  launcher's reason in the transcript instead of only "exited with code 1", and a stop followed at once by a new process
+  no longer adds a false "Claude Code process aborted by user" error.
 
 - **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
   clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
@@ -21,6 +43,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   its Whisper.
 
 ### Added
+
+- **A machine removes FF Factory's own leftovers by itself when disk runs low** (w626, Ben: "no YOU free up disk space,
+  like you are instructed to in this harness. stop making us tell you to do it."). Below the soft threshold, and in
+  every `machine_cleanup`, the daemon's clean-up now also removes player slots nobody holds (every slot root the machine
+  may have, the old `~/nevergames/ff-players` included), linked worktrees of its clone with everything pushed and
+  unused for 2 days (sandboxes, locked ones and ones with local work are kept; local work is listed), and Unity editor
+  versions that no sandbox's or the main clone's `ProjectVersion.txt` (nor origin/develop or master, nor a project of a
+  person's opened within 30 days) names and nothing runs. Each is checked again right before it goes and logged with
+  its size. Sandbox workers' briefs now carry their own clean-up before a request is done, and the dispatcher's and the
+  orchestrators' briefs say low disk is fixed by clean-up work, never by asking the machine's owner.
+  [docs/self-recovery.md](docs/self-recovery.md), "FF Factory's own leftovers".
 
 - **Dictation on a worker's GPU, the portal's CPU as the fallback** (w615, lothsahn: "voice commands to the portal can
   get handled by a dedicated process on beast ... If beast is down, the portal can fall back to doing local cpu
@@ -58,6 +91,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
     and a stalled request whose worker reported it delivered after the stall closes. The first full pass after the deploy
     re-judges every stalled request this way.
   [docs/orchestrators.md](docs/orchestrators.md), "Pull requests" and "Ledger cleanup"; [docs/ops-worker.md](docs/ops-worker.md).
+- **The fffctl migrate tests run side by side** (w636, asked by lothsahn). Their five end-to-end tests, which ran one
+  after another for 145-192 s of the Linux unit job, are in four files that node runs in parallel; each world's fake
+  BEAST has a temp folder of its own.
+- **Lothsahn's and Ben's orchestrators message each other with no count** (w627, lothsahn: "Please update FFFactory so
+  you and Ben's orchestrator can send an infinite number of messages to each other and the portal worker").
+  `message_person` between the two owners (`OPS_PEOPLE`, `ownersPair`) no longer stops at
+  `orchestrator.messagesPerPerson` (10). The loop guard left between them is a rate: in turns no person started (a
+  `[person message]`, a report, a timer), at most 60 messages an hour from one to the other
+  (`OWNER_LOOP_MESSAGES_PER_HOUR`), started again when either writes to their own orchestrator; a person's own turn is
+  never counted. Everyone else keeps the count, to and from the owners too. The `ops_worker` follow-ups were never
+  counted; its tool and [ops-worker.md](docs/ops-worker.md) now say so, and what ends a run of them (the job's 12
+  hours, the $25 process cap, the 2-hour turn limit). The new-job and deploy gates are unchanged.
 - **The disk guard defaults to 20 / 10 GB free, from 50 / 20** (w628, Ben: "you dont need 50gb free to run unity
   editors, change that rule"). Measured on BEAST in a warm sandbox: an editor open and a forced script reimport grew
   the Library by under 10 MB, a development build wrote 2.1 GB plus 0.25 GB of Library, a release build 2.0 GB plus

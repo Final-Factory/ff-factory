@@ -16,7 +16,8 @@ scripts=(deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm
   deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh deploy/vm/guest/fff-migrate deploy/vm/guest/lib.sh deploy/vm/guest/fff.conf.example
   deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-machine-ssh.test.sh
   deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync
-  deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/test/fff-ops.test.sh)
+  deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/test/fff-ops.test.sh
+  deploy/vm/test/fff-ops-socket.test.sh)
 for f in "${scripts[@]}"; do bash -n "$f"; done
 echo "bash -n: ${#scripts[@]} files parse"
 shellcheck --version | sed -n 2p
@@ -26,7 +27,7 @@ echo "shellcheck: clean"
 for f in deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm-rollback.sh deploy/vm/host/fff-vm deploy/vm/guest/install.sh \
   deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh \
   deploy/vm/guest/fff-migrate deploy/vm/host/machine-ssh.sh deploy/vm/guest/fff-machine-ssh deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh \
-  deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-machine-ssh.test.sh deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv   deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/test/fff-ops.test.sh; do
+  deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-machine-ssh.test.sh deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv   deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/test/fff-ops.test.sh deploy/vm/test/fff-ops-socket.test.sh; do
   [ "$(git ls-files -s "$f" | cut -c1-6)" = 100755 ] || { echo "$f is not executable in git (git update-index --chmod=+x)"; exit 1; }
 done
 python3 -m json.tool deploy/vm/guest/config.vm.example.json >/dev/null && echo "config.vm.example.json: valid JSON"

@@ -17,6 +17,7 @@ import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
 import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
+import { movedNote } from './placeAgain.ts';
 import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
@@ -837,10 +838,20 @@ export class MachineManager {
     return `${m.id} runs workers in sandboxes only: start this one in ${use}`;
   }
 
+  /**
+   * A worker that released its sandbox while it waited (w640, server/placeAgain.ts): why its message waits to be placed
+   * again (another sandbox being switched to its branch, none free), or undefined when it may go. Wired by Agents.
+   */
+  placeAgain?: (info: SessionInfo) => string | undefined;
+
   /** Why a message to this machine session must wait for a free running slot, or undefined (SessionManager.placeFull). */
   placeFull(s: SessionHandle): string | undefined {
     const m = this.store.machines.get(s.info.machineId ?? '');
     if (!m) return undefined;
+    if (s.info.placeReleased && !s.live) {
+      const why = this.placeAgain?.(s.info);
+      if (why) return why;
+    }
     const sbId = s.info.machineSandbox;
     if (sbId) {
       const pool = poolSettingsOf(m);
@@ -1327,7 +1338,14 @@ export class MachineManager {
     // The daemon fetches each file into the place's Inbox (GET /machine/attachments/<id>), which this lets it do.
     if (attachments.length) this.attachments?.grant(m.id, attachments.map((a) => a.id));
     const files = attachments.map(({ path: _p, error: _e, ...ref }) => ref);
-    this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), ...(files.length ? { attachments: files } : {}) });
+    // Placed again in another sandbox while it was stopped (w640): its first message there says where it is now.
+    const moved = !s.live && s.info.movedFrom && sbId ? this.requireSandbox(m.id, sbId) : undefined;
+    const said = moved ? `${movedNote(m, s.info.movedFrom!, moved)}\n\n${text}` : text;
+    this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), ...(files.length ? { attachments: files } : {}) });
+    if (moved) {
+      delete s.info.movedFrom;
+      this.touch(s);
+    }
   }
 
   touch(s: RemoteSession) {
@@ -1557,8 +1575,9 @@ export class MachineManager {
       case 'session': {
         const s = this.handle(msg.info.id);
         if (!s || s.info.machineId !== id) return;
-        // The portal owns identity and naming; the daemon owns run state.
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, ...run } = msg.info;
+        // The portal owns identity, naming and where it works (a worker placed again in another sandbox, w640: the
+        // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host

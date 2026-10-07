@@ -949,6 +949,8 @@ route('POST', '/api/sessions/([\\w-]+)/mode', async (req, [id]) => {
 
 route('POST', '/api/sessions', async (req) => {
   const b = await readJson<StartSessionRequest>(req);
+  // A sandbox a waiting worker released on its own branch is switched to a fresh one first (w640).
+  await agents.prepareForNewWork(b.sandboxId || undefined, b.machineId || undefined);
   const s = agents.startWorker({
     sandbox: b.sandboxId || undefined,
     machine: b.machineId || undefined,

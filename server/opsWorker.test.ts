@@ -5,7 +5,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { OPS_GRANT, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner } from './opsWorker.ts';
-import { OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
 import { beltFor, PERSONAL_TOOLS } from './belts.ts';
 import { redactSecrets } from './secrets.ts';
@@ -178,7 +179,7 @@ async function fakeSocket(reply: (header: string) => string | undefined) {
 
 const spawnOpts = { command: 'claude', args: ['--input-format', 'stream-json'], env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-x' }, signal: new AbortController().signal };
 
-test('the spawner: header, then OK, then the stream both ways; stdin end half-closes', async () => {
+test('the spawner: header, then OK, then the stream both ways; stdin end interrupts its turn and half-closes', async () => {
   const s = await fakeSocket(() => 'OK\n{"type":"hello"}\n');
   const p = opsSpawner(s.path, '9.9.9')(spawnOpts);
   const out: string[] = [];
@@ -188,7 +189,8 @@ test('the spawner: header, then OK, then the stream both ways; stdin end half-cl
   await new Promise((r) => setTimeout(r, 100));
   p.stdin.end();
   assert.equal(await exited, 0);
-  assert.equal(out.join(''), '{"type":"hello"}\n{"type":"user"}\n');
+  // The SDK ends stdin only when its query closes (a stop): Claude Code is asked to end its turn first (w638).
+  assert.match(out.join(''), /^\{"type":"hello"\}\n\{"type":"user"\}\n\{"type":"control_request","request_id":"ops-stop-\d+","request":\{"subtype":"interrupt"\}\}\n$/);
   assert.equal(JSON.parse(s.headers[0]).sdkVersion, '9.9.9');
   await s.close();
 });
@@ -197,15 +199,169 @@ test('the spawner: the launcher\'s ERR, a refused connection and no socket becom
   const s = await fakeSocket(() => 'ERR the worker\'s Claude Code is 1 but the portal\'s Agent SDK is 2\n');
   const errOf = (sock: string) =>
     new Promise<string>((resolve) => {
-      const p = opsSpawner(sock, '2')(spawnOpts);
+      const p = opsSpawner(sock, '2', undefined, { waitMs: 600, retryMs: 50 })(spawnOpts);
       p.on('error', (e) => resolve(e.message));
     });
   assert.match(await errOf(s.path), /could not start: the worker's Claude Code is 1/);
   await s.close();
   const busy = await fakeSocket(() => undefined);
-  assert.match(await errOf(busy.path), /closed before it answered/);
+  // Every connection dropped without a word (systemd's MaxConnections=1 while another process holds it): tried again
+  // until the wait is up, then the error says so.
+  assert.match(await errOf(busy.path), /still had its one process after 1 s/);
+  assert.ok(busy.headers.length > 3, `tried ${busy.headers.length} times`);
   await busy.close();
   assert.match(await errOf(process.platform === 'win32' ? '\\\\.\\pipe\\ffsb-ops-none' : '/nonexistent/claude.sock'), /portal VM|ENOENT|no /);
+});
+
+/**
+ * A stand-in for fff-ops.socket as systemd runs it (Accept=yes, MaxConnections=1): a connection while another is open is
+ * dropped at once without a word ("Too many incoming connections (1), dropping connection."). Behind each accepted one,
+ * the launcher's OK and a small Claude Code that speaks the SDK's stream-json: it answers control requests, runs a turn
+ * per user message ("slow" holds it until an interrupt, "fail" makes the next start answer ERR), ends a turn on an
+ * interrupt, and exits `exitMs` after its input ends with no turn open; the unit frees the connection `unitLagMs` later.
+ */
+async function fakeSystemd(o: { exitMs: number; unitLagMs: number }) {
+  const p = process.platform === 'win32' ? `\\\\.\\pipe\\ffsb-ops-sd-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-')), 's.sock');
+  const log: string[] = [];
+  let open = 0;
+  let most = 0;
+  let n = 0;
+  let refuseNext = false;
+  const server = net.createServer({ allowHalfOpen: true }, (c) => {
+    const id = ++n;
+    c.on('error', () => {});
+    if (open >= 1) {
+      log.push(`${id} dropped`);
+      return void c.destroy();
+    }
+    most = Math.max(most, ++open);
+    log.push(`${id} accepted`);
+    let buf = '';
+    let started = false;
+    let turn = false;
+    let inputEnded = false;
+    let exiting = false;
+    const out = (m: object) => c.writable && c.write(`${JSON.stringify({ session_id: `s${id}`, uuid: `u${id}-${Math.random()}`, ...m })}\n`);
+    const exit = () => {
+      if (exiting) return;
+      exiting = true;
+      setTimeout(() => {
+        log.push(`${id} exited`);
+        c.destroy();
+        setTimeout(() => open--, o.unitLagMs);
+      }, o.exitMs);
+    };
+    const endTurn = (text: string) => {
+      turn = false;
+      out({ type: 'assistant', parent_tool_use_id: null, message: { id: 'm', role: 'assistant', content: [{ type: 'text', text }] } });
+      out({ type: 'result', subtype: 'success', is_error: false, result: text, total_cost_usd: 0.01, num_turns: 1, duration_ms: 5 });
+      out({ type: 'system', subtype: 'session_state_changed', state: 'idle' });
+      if (inputEnded) exit();
+    };
+    c.on('data', (d) => {
+      buf += d.toString();
+      for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!started) {
+          started = true;
+          if (refuseNext) {
+            refuseNext = false;
+            log.push(`${id} ERR`);
+            c.end('ERR the worker\'s Claude Code is 1 but the portal\'s Agent SDK is 2\n');
+            return exit();
+          }
+          c.write('OK\n');
+          continue;
+        }
+        const m = JSON.parse(line);
+        if (m.type === 'control_request') {
+          out({ type: 'control_response', response: { subtype: 'success', request_id: m.request_id, response: {} } });
+          if (m.request?.subtype === 'interrupt' && turn) endTurn('interrupted');
+        } else if (m.type === 'user') {
+          const text = String(m.message?.content ?? '');
+          log.push(`${id} runs: ${text.split('\n').pop()}`);
+          if (/fail/.test(text)) refuseNext = true;
+          turn = true;
+          out({ type: 'system', subtype: 'init', model: 'fake' });
+          out({ type: 'system', subtype: 'session_state_changed', state: 'running' });
+          if (!/slow/.test(text)) setTimeout(() => endTurn(`ran: ${text.split('\n').pop()}`), 20);
+        }
+      }
+    });
+    // Its input ended: it exits, once a turn it is in has ended (stream-json reads no more after the end).
+    c.on('end', () => {
+      inputEnded = true;
+      if (!turn) exit();
+    });
+  });
+  await new Promise<void>((r) => server.listen(p, r));
+  return { path: p, log, most: () => most, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+test('a fresh job starts a new process that runs it, from every state the last one can be in (w638)', async () => {
+  // The real Agent SDK, through opsSpawner, against the stand-in socket: the path a job takes in the portal VM.
+  setQueryForTesting(query);
+  const sd = await fakeSystemd({ exitMs: 300, unitLagMs: 100 });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-f-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  const told: string[] = [];
+  const ops = new OpsWorker({
+    sessions,
+    store,
+    options: () => ({ cwd: dir, settingSources: [], env: { ...process.env }, spawnClaudeCodeProcess: opsSpawner(sd.path, '1', undefined, { waitMs: 10_000, retryMs: 50 }) }),
+    tellOrchestrator: (_p, t) => told.push(t),
+    personTurn: () => true,
+    file: path.join(dir, 'ops-worker.json'),
+  });
+  const loth = orch('lo', LOTH);
+  const h = sessions.get(ops.handle().info.id);
+  const until = async (what: string, ok: () => boolean, ms = 8_000) => {
+    for (const end = Date.now() + ms; !ok(); await new Promise((r) => setTimeout(r, 20))) {
+      if (Date.now() > end) assert.fail(`${what}: not within ${ms} ms\n${sd.log.join('\n')}\n${JSON.stringify(store.readTranscript(OPS_ID, 30))}`);
+    }
+  };
+  const ran = (job: string) => until(`the worker ran "${job}"`, () => told.some((t) => t.includes(`ran: ${job}`)));
+  const errors = () => store.readTranscript(OPS_ID, 200).filter((e) => e.kind === 'error').map((e) => (e.kind === 'error' ? e.text : ''));
+
+  ops.send(loth, 'job one');
+  await ran('job one');
+  // 1. Right after a turn ended, its process idle and still running (both crashes on 2026-10-07).
+  ops.send(loth, 'job two', true);
+  await ran('job two');
+  // 2. Mid-turn: the old turn is interrupted, its process exits, and only then does the new one start.
+  ops.send(loth, 'slow job');
+  await until('the slow job is running', () => sd.log.some((l) => l.endsWith('runs: slow job')) && isMidTurn(h.info));
+  ops.send(loth, 'job three', true);
+  await ran('job three');
+  // 3. Stopped after its idle timeout.
+  ops.tick(Date.now() + OPS_LIMITS.idleStopMs + 60_000);
+  assert.equal(h.live, false);
+  ops.send(loth, 'job four', true);
+  await ran('job four');
+  // 4. Errored: the last start failed (the launcher's ERR). The transcript says why, not only "exited with code 1".
+  ops.send(loth, 'fail next');
+  await ran('fail next');
+  await ops.control(loth, 'stop');
+  ops.send(loth, 'job five');
+  await until('the start failed', () => h.info.status === 'error' && !h.live);
+  assert.match(errors().join('\n'), /could not start: the worker's Claude Code is 1 but the portal's Agent SDK is 2/);
+  assert.equal(errors().length, 1, errors().join('\n'));
+  ops.send(loth, 'job six', true);
+  await ran('job six');
+  // 5. Stopped by its person, then a follow-up (a resume, not fresh): the same wait.
+  await ops.control(loth, 'stop');
+  ops.send(loth, 'job seven');
+  await ran('job seven');
+
+  // Never two processes at once; every one of those stops was a stop, not an error ("aborted by user" was one).
+  assert.equal(sd.most(), 1);
+  assert.equal(errors().length, 1, errors().join('\n'));
+  assert.notEqual(h.info.status, 'error');
+  ops.close();
+  h.stop(true);
+  await sd.close();
 });
 
 test('the one session: only an allowed orchestrator reaches it, a job needs its person\'s turn, the harness cannot send', async () => {

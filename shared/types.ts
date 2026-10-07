@@ -230,6 +230,14 @@ export interface SessionInfo {
    * on purpose, or HOLD_PLACE_MS has passed, so new work does not take the sandbox it was in.
    */
   heldSince?: string;
+  /**
+   * Machine sandbox workers (w640): stopped with its check-in far away (more than RELEASE_AFTER_MS) or its requests
+   * over, its worktree clean, so its sandbox no longer counts as its (holdsSandbox, shared/agentState.ts) and may take
+   * other work. The branch it was on is kept here: when it resumes it is placed again on it (server/placeAgain.ts).
+   */
+  placeReleased?: { at: string; sandbox: string; branch: string; why: string };
+  /** Placed again in another sandbox than the one it stopped in (w640): its next message says where, then this goes. */
+  movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string };
 }
 
 /**
