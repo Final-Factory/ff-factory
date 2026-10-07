@@ -26,9 +26,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   restores, and still resolves against fresh lists. The install step went from a median of 37-39 s to 20-33 s.
 - **The slowest unit tests wait for events, not fixed sleeps** (w636, asked by lothsahn). machines.test.ts went from
   about 45 s to 10 s and orchestrators.test.ts from 46 s to 18 s, with the same tests: test-only settings for the
-  daemon's reconnect pace (\`RECONNECT_MS\`), the dispatcher's notice gathering (\`gatherMs\`) and the fake agent's
-  \`#slow\` replies, all defaulting to today's values; test machines copy one prepared repo instead of six git calls,
-  and stop once the portal sees them go. The portal's resume timer no longer keeps a process alive (\`unref\`).
+  daemon's reconnect pace (`RECONNECT_MS`), the dispatcher's notice gathering (`gatherMs`) and the fake agent's
+  `#slow` replies, all defaulting to today's values; test machines copy one prepared repo instead of six git calls,
+  and stop once the portal sees them go. The portal's resume timer no longer keeps a process alive (`unref`).
 
 ### Fixed
 
@@ -591,7 +591,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 - **`fffctl migrate`: the portal moves from BEAST into its VM with one command run in the VM** (w499, asked by Lothsahn:
   "I'd ideally like the new orchestrator to be able to connect to beast and just download everything directly"). It
-  pulls BEAST's `config.json`, `data\` (without `data\tools` and the supervisor's files) and the conversations the
+  pulls BEAST's `config.json`, `data` (without `data\tools` and the supervisor's files) and the conversations the
   orchestrators, the dispatcher and BEAST's standing agents resume (change 10, under their new folder names). It uses
   ssh with the portal's own key: `--key` prints the `from=` line to authorize on BEAST.
   - `--dry-run-copy` snapshots the VM's own portal, pulls (read-only on BEAST: it lists files and runs `tar`), and
