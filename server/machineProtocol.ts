@@ -4,6 +4,7 @@ import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
 import type { StaleContext } from './staleOutput.ts';
+import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachineSandbox, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
 
 /**
@@ -24,6 +25,8 @@ import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, I
  * 8: `relocate` (w466, docs/machines.md "Moving the portal"): a connected daemon is told the portal's new URL, keeps it
  * in its daemon.json and dials it, its agents running on; it falls back to the URL before if the new one never answers. * Also (w466, unreleased with it): `guard` in the hello, a daemon running the host guard (machine/hostGuard.ts: BEAST's
  * sandbox drive, its disks, the browser reaper), and its `host_report` and `host_health` messages.
+ * Also (w615, no bump): a daemon's GPU Whisper, `voice` in the hello and `voice` status messages, which an older portal
+ * ignores, and `transcribe`/`voice_warm`, which the portal sends only to a daemon that offered it.
  */
 export const PROTOCOL_VERSION = 8;
 
@@ -146,7 +149,15 @@ export type ToDaemon =
   /** How often the daemon polls its Mac's own Claude login's plan usage (config usagePollMinutes), at connect and when it changes. */
   | { type: 'usage_config'; config: { everyMinutes: number } }
   /** Poll that usage now (the usage meters' Refresh); answered by a `usage` report. A daemon before these ignores both. */
-  | { type: 'usage_now' };
+  | { type: 'usage_now' }
+  /**
+   * A dictation clip for this machine's GPU Whisper (w615, machine/voice.ts), answered by transcribe_result. Sent only to a
+   * daemon whose hello or `voice` status offered it, so an older daemon never gets one. `audio`: a 16-bit PCM WAV, 16 kHz
+   * mono, in base64 (300 s at most); `prompt`: Whisper's vocabulary. Neither is logged.
+   */
+  | { type: 'transcribe'; id: string; audio: string; prompt?: string; language?: string | null }
+  /** A recording started on the portal: load the model now if it is not loaded (w615). */
+  | { type: 'voice_warm' };
 
 export type FromDaemon =
   /**
@@ -165,6 +176,8 @@ export type FromDaemon =
       live: string[];
       catalog?: string[];
       guard?: boolean;
+      /** Its GPU Whisper for the portal's mic (w615, daemon.json `voice`): absent when it is off. An older portal ignores it. */
+      voice?: RemoteVoiceStatus;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
       layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null };
     }
@@ -211,4 +224,8 @@ export type FromDaemon =
   /** The answer to a `cleanup_now` with an id (w459). */
   | { type: 'cleanup_result'; id: string; ok: boolean; summary?: CleanupSummary; error?: string }
   /** A line the ffdiscord CLI appended to the Mac's Max events file (docs/max.md), forwarded as is; the portal validates it. */
-  | { type: 'max_event'; line: string };
+  | { type: 'max_event'; line: string }
+  /** Its GPU Whisper's state, when it changes (w615): loaded, unloaded for the editors' VRAM, installing. An older portal drops it. */
+  | { type: 'voice'; status: RemoteVoiceStatus }
+  /** The answer to a `transcribe` (w615): the text and timings, or why not (the portal then uses its own CPU). */
+  | { type: 'transcribe_result'; id: string; ok: boolean; error?: string; text?: string; audioSeconds?: number; seconds?: number; model?: string; device?: string; loadSeconds?: number };

@@ -152,3 +152,14 @@ test('w467: the note names the review folder where the portal runs, not BEAST\'s
   assert.match(hint, /the review folder \(\/srv\/fff\/review\), ssh to the M5 from a computer that has its key/);
   assert.doesNotMatch(hint, /F:\\ffsb|from BEAST/);
 });
+
+test('w615: a machine whose GPU Whisper is loaded says how much VRAM it holds; unloaded or unmeasured, nothing', async () => {
+  const { voiceVram } = await import('./placement.ts');
+  assert.deepEqual(voiceVram({ state: 'ready', vramMiB: 1161 }), { voiceVramMiB: 1161 });
+  assert.deepEqual(voiceVram({ state: 'idle', vramMiB: 1161 }), {});
+  assert.deepEqual(voiceVram({ state: 'ready' }), {});
+  assert.deepEqual(voiceVram(undefined), {});
+  const lines = capacityLines([{ ...BEAST, voiceVramMiB: 1161 }, LOTH]);
+  assert.match(lines[1], /; editors 2 of 3; Whisper holds ~1\.1 GB VRAM \(unloaded for the editors when VRAM runs short\)$/);
+  assert.doesNotMatch(lines[2], /Whisper/);
+});

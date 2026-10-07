@@ -26,7 +26,7 @@ import { CATALOG } from './launch.ts';
 import { AutoCompactor } from './autoCompact.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, pinnedWork, placementHint, type Computer } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, capacityLines, pinnedWork, placementHint, voiceVram, type Computer } from './placement.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
 import { isMidTurn, midTurnRefusal, othersMidTurn, snapshotOf, type OptionsFactory, type SessionHandle, type SessionManager } from './sessions.ts';
 import { WORK_OPEN, WORK_PRIORITIES, type AttachmentRef, type DeliveredAttachment, type ImageInput, type PermissionMode, type Requester, type Sandbox, type SessionInfo, type TranscriptEvent, type WorkItem, type WorkPriority, type WorkStatus } from '../shared/types.ts';
@@ -1255,6 +1255,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         editors: st?.unity?.used ?? sbs.filter((s) => s.unity.state === 'running' || s.unity.state === 'starting').length,
         maxEditors: pool.maxUnity,
         ...(st?.unity ? { editorsDetail: unitySlotsLine(st.unity).replace(/^editors \d+ of \S+: /, '') } : {}),
+        // Its GPU Whisper for the portal's mic, while loaded (w615): VRAM the editors share.
+        ...voiceVram(this.machines.voiceMachines().find((v) => v.machine === m.id)?.status),
       });
     }
     return out;

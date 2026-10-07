@@ -35,6 +35,7 @@ import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings,
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
+import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
 import { attachmentLine } from '../shared/attachments.ts';
 import type { AttachmentRef, HostHealth, HostStats, SandboxPoolSettings, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
@@ -104,6 +105,11 @@ export interface DaemonConfig {
    * from the portal's config for the portal's own host (and kept when it becomes an ssh machine); Windows only.
    */
   hostGuard?: MachineGuardSettings;
+  /**
+   * The GPU Whisper this machine runs for the portal's mic (w615, machine/voice.ts; docs/voice.md "Whisper on a worker's
+   * GPU"). Off unless `enabled`; the worker install sets it (`--voice-whisper`), and an update carries it.
+   */
+  voice?: DaemonVoiceSettings;
 }
 
 /** How long a relocated daemon dials only its new URL (tests shorten it). */
@@ -257,11 +263,14 @@ export class Daemon {
   /** Windows: the folder Git Bash maps /tmp to, never cleaned up and made again when missing (server/gitBashTmp.ts, w603). */
   private bashTmp?: string;
 
+  /** The GPU Whisper for the portal's mic (cfg.voice, w615), when it is on. */
+  readonly voice?: DaemonVoice;
+
   /** The host guard (cfg.hostGuard, Windows; tests give effects). */
   guard?: MachineGuard;
   private readonly guardEffects?: MachineGuardEffects;
 
-  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects) {
+  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>) {
     this.cfg = cfg;
     this.guardEffects = guardEffects;
     this.probes = probes;
@@ -307,6 +316,14 @@ export class Daemon {
     );
     this.makeSession = makeSession ?? ((info, sink, options, events) => new AgentSession(info, sink, options, events));
     this.hosted = cfg.agentHosts ?? !makeSession;
+    if (cfg.voice?.enabled) {
+      this.voice = new DaemonVoice(cfg.voice, cfg.root ?? appDirOfConfig(cfg), {
+        log: (s) => log(s),
+        stats: () => this.lastStats?.stats,
+        changed: () => this.voice && this.send({ type: 'voice', status: this.voice.status() }),
+        ...voiceDeps,
+      });
+    }
     if (cfg.maxSessions !== undefined) log(`daemon.json maxSessions (${cfg.maxSessions}) is obsolete (w536): workers run in sandboxes only, and the portal sends this machine's agent cap`);
     for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'] as SignalName[]) {
       this.events.on(name, (s: SessionHandle, arg?: unknown) => {
@@ -382,7 +399,7 @@ export class Daemon {
   private cleanupGuard(): CleanupGuard {
     const c = this.cfg;
     return {
-      keep: [c.repoPath, this.sandboxRoot(), appDirOfConfig(c), c.unityEditorRoot, c.unityPath, this.maxEventsFile && path.dirname(this.maxEventsFile), ...(this.currentPool()?.protectedPaths ?? [])].filter((x): x is string => !!x),
+      keep: [c.repoPath, this.sandboxRoot(), appDirOfConfig(c), this.voice?.v.toolsDir, c.unityEditorRoot, c.unityPath, this.maxEventsFile && path.dirname(this.maxEventsFile), ...(this.currentPool()?.protectedPaths ?? [])].filter((x): x is string => !!x),
       inUse: [
         ...[...this.entries.values()].filter((e) => e.s.live).map((e) => sessionTempDir(agentTempRoot(c.tempDir), e.s.info.id)),
         // Every bash of this user uses it as /tmp, whichever session's folder it was.
@@ -494,6 +511,11 @@ export class Daemon {
     }
     this.startGuard();
     this.connect();
+    // The GPU Whisper (w615): installs in the background if needed, then loads and stays loaded while VRAM allows.
+    if (this.voice) {
+      log(`voice: Whisper ${this.voice.v.model} on ${this.voice.v.device} for the portal's mic, tools in ${this.voice.v.toolsDir}`);
+      this.voice.start();
+    }
     // The sandboxes' editors (state, hang/crash watch), their git status, the disk guard and the idle-editor stop.
     this.timers.push(setInterval(() => void this.pool.tick(), 30_000));
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
@@ -563,6 +585,7 @@ export class Daemon {
       else e.s.stop(false);
     }
     this.caffeinate?.kill();
+    this.voice?.stop();
     this.ws?.close();
   }
 
@@ -715,6 +738,8 @@ export class Daemon {
       live: [...this.entries.values()].filter((e) => e.s.live).map((e) => e.s.info.id),
       // Its host guard runs (w466): the portal's own leaves this computer's sandbox drive to it.
       ...(this.guard ? { guard: true } : {}),
+      // Its GPU Whisper (w615): the portal sends clips only to a daemon that offers it.
+      ...(this.voice ? { voice: this.voice.status() } : {}),
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
         ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null } }
@@ -741,10 +766,13 @@ export class Daemon {
 
   /** This Mac's CPU, RAM, GPU and disk (the disk holding the clone), for the portal's meters (protocol 4), with its Unity editors (w469). */
   private async reportStats() {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    // The GPU Whisper gives its VRAM back to the editors even while the link is down (w615).
+    if (this.ws?.readyState !== WebSocket.OPEN && !this.voice) return;
     try {
       const stats = await this.probes.stats(fs.existsSync(this.cfg.repoPath) ? this.cfg.repoPath : HOME);
       this.lastStats = { stats, at: Date.now() };
+      this.voice?.onStats();
+      if (this.ws?.readyState !== WebSocket.OPEN) return;
       const unity = this.slots.report();
       this.send({ type: 'stats', stats, ...(unity ? { unity } : {}) });
     } catch (e) {
@@ -1136,6 +1164,22 @@ export class Daemon {
       case 'usage_config':
         this.usageMs = (msg.config.everyMinutes > 0 ? msg.config.everyMinutes : USAGE_DEFAULT_MINUTES) * 60_000;
         this.scheduleUsage();
+        return;
+      case 'transcribe': {
+        // A dictation clip from the portal (w615). Neither the audio nor the text is logged.
+        const id = msg.id;
+        if (!this.voice) {
+          this.send({ type: 'transcribe_result', id, ok: false, error: 'Whisper is off on this machine (daemon.json voice.enabled)' });
+          return;
+        }
+        this.voice.transcribe({ audio: msg.audio, prompt: msg.prompt, language: msg.language }).then(
+          (r) => this.send({ type: 'transcribe_result', id, ok: true, ...r }),
+          (e) => this.send({ type: 'transcribe_result', id, ok: false, error: (e as Error).message.slice(0, 300) }),
+        );
+        return;
+      }
+      case 'voice_warm':
+        this.voice?.warm();
         return;
       case 'usage_now':
         void this.reportUsage();

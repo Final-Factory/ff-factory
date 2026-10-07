@@ -477,6 +477,34 @@ test("worker install: a Mac's slot config names the root's players, the sandbox-
   }
 });
 
+test('w615: --voice-whisper turns the GPU Whisper on or off in daemon.json; a re-run or a migration without it keeps it', async () => {
+  const { voiceSetting } = await import('./worker/worker.ts');
+  assert.equal(voiceSetting(undefined, undefined), undefined, 'off by default: no voice key');
+  assert.deepEqual(voiceSetting('large-v3-turbo', undefined), { enabled: true, model: 'large-v3-turbo' });
+  assert.deepEqual(voiceSetting(undefined, { enabled: true, model: 'large-v3-turbo', minFreeVramMiB: 4096 }), { enabled: true, model: 'large-v3-turbo', minFreeVramMiB: 4096 });
+  assert.deepEqual(voiceSetting('off', { enabled: true, model: 'large-v3-turbo', minFreeVramMiB: 4096 }), { enabled: false, model: 'large-v3-turbo', minFreeVramMiB: 4096 });
+  assert.equal(voiceSetting('off', undefined), undefined);
+  assert.deepEqual(voiceSetting('small.en', { enabled: false, minFreeVramMiB: 4096 }), { enabled: true, model: 'small.en', minFreeVramMiB: 4096 });
+  assert.throws(() => voiceSetting('large v3; rm -rf', undefined), /faster-whisper model name/);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-voice-'));
+  try {
+    const l = layoutOf(root);
+    const o: InstallOptions = { ...OPTS, root, token: TOKEN, repoUrl: 'x', service: 'FFFactoryDaemon', firewall: true };
+    assert.equal('voice' in daemonJson(o, l, 'beast', undefined), false);
+    const on = daemonJson({ ...o, voiceWhisper: 'large-v3-turbo' }, l, 'beast', undefined);
+    assert.deepEqual(on.voice, { enabled: true, model: 'large-v3-turbo' });
+    // A plain re-run reads the daemon.json already there; a migration's carry wins over it.
+    fs.mkdirSync(l.daemon, { recursive: true });
+    fs.writeFileSync(path.join(l.daemon, 'daemon.json'), JSON.stringify(on));
+    assert.deepEqual(daemonJson(o, l, 'beast', undefined).voice, { enabled: true, model: 'large-v3-turbo' });
+    assert.deepEqual(daemonJson({ ...o, carry: { voice: { enabled: true, model: 'medium.en' } } }, l, 'beast', undefined).voice, { enabled: true, model: 'medium.en' });
+    assert.deepEqual(daemonJson({ ...o, voiceWhisper: 'off' }, l, 'beast', undefined).voice, { enabled: false, model: 'large-v3-turbo' });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------- w613: worker.ts update
 
 /** BEAST's daemon.json as it was tuned by hand before the 2026-10-07 reinstall (values from the ops worker's report). */
@@ -590,4 +618,14 @@ test('worker update (w613): refused clearly without an install, its daemon.json 
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
+});
+
+test('w615: worker update --voice-whisper turns the GPU Whisper on; without it the update carries daemon.json voice', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-voice-${process.pid}`);
+  const l = layoutOf(root);
+  const withVoice = { ...BEAST_CONFIG, voice: { enabled: true, model: 'large-v3-turbo', minFreeVramMiB: 4096 } };
+  assert.deepEqual(daemonJson(planUpdate(root, BEAST_ROOT, withVoice, BEAST_TOKEN, {}), l, 'beast', undefined).voice, withVoice.voice, 'carried');
+  assert.deepEqual(daemonJson(planUpdate(root, BEAST_ROOT, BEAST_CONFIG, BEAST_TOKEN, { voiceWhisper: 'large-v3-turbo' }), l, 'beast', undefined).voice, { enabled: true, model: 'large-v3-turbo' });
+  assert.equal(daemonJson(planUpdate(root, BEAST_ROOT, withVoice, BEAST_TOKEN, { voiceWhisper: 'off' }), l, 'beast', undefined).voice?.constructor, Object);
+  assert.equal((daemonJson(planUpdate(root, BEAST_ROOT, withVoice, BEAST_TOKEN, { voiceWhisper: 'off' }), l, 'beast', undefined).voice as { enabled: boolean }).enabled, false);
 });

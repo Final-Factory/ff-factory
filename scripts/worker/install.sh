@@ -11,6 +11,7 @@
 # Options (each is asked for when missing): --root DIR --portal-url URL --max-sandboxes N --max-agents-per-sandbox N
 # --max-unity N --slots N --service LABEL --source CHECKOUT --ref BRANCH --credential-file FILE (unattended tests)
 # --ssh-host NAME (the name the portal reaches this Mac by; default its tailnet name) --no-ssh (no portal ssh, w568)
+# --voice-whisper MODEL|off (Whisper on this machine's GPU for the portal's mic, w615; a Mac has none: leave it off)
 #
 # Update an install that is there (w613, docs/worker-install.md "Updating"), also over ssh with no keychain:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root DIR
@@ -35,6 +36,7 @@ while [ $# -gt 0 ]; do
     --no-cleanup) EXTRA="$EXTRA --no-cleanup"; shift ;;
     --no-ssh) EXTRA="$EXTRA --no-ssh"; shift ;;
     --ssh-host) EXTRA="$EXTRA --ssh-host $2"; shift 2 ;;
+    --voice-whisper) EXTRA="$EXTRA --voice-whisper $2"; VOICE=$2; shift 2 ;;
     --credential-file) CREDFILE=$2; shift 2 ;;
     --update) UPDATE=1; shift ;;
     --daemon-ref) DREF=$2; shift 2 ;;
@@ -95,6 +97,7 @@ if [ "$UPDATE" = 1 ]; then
   [ -z "$MAXAG" ] || UARGS+=(--max-agents-per-sandbox "$MAXAG")
   [ -z "$MAXU" ] || UARGS+=(--max-unity "$MAXU")
   [ -z "$DREF" ] || UARGS+=(--ref "$DREF")
+  [ -z "${VOICE:-}" ] || UARGS+=(--voice-whisper "$VOICE")
   # A local checkout given with --source is the daemon code too: no download at all.
   [ -z "$SOURCE" ] || [ -n "$TEMP" ] || UARGS+=(--source "$SOURCE")
   "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" "${UARGS[@]}" </dev/null

@@ -29,6 +29,8 @@ export interface Computer {
   maxEditors?: number;
   /** What they are: "1 interactive, 3 batch; 2 waiting (...)" (shared/fleet.ts unitySlotsLine). */
   editorsDetail?: string;
+  /** VRAM its GPU Whisper for the portal's mic holds now (w615, machine/voice.ts), MiB: the editors share that GPU. */
+  voiceVramMiB?: number;
 }
 
 /** config placement (w428): computers to try first, in order, and computers to keep work off, with why. */
@@ -51,6 +53,9 @@ export const RAM_BUSY_PCT = 85;
  * the one that did not take the last. A judgment: ten points is one agent of ten slots, or about 6 GB of 64.
  */
 export const EVEN_MARGIN = 0.1;
+
+/** A computer's `voiceVramMiB` from its GPU Whisper's status (w615): only while the model is loaded. */
+export const voiceVram = (s: { state: string; vramMiB?: number } | undefined): Pick<Computer, 'voiceVramMiB'> => (s?.state === 'ready' && s.vramMiB ? { voiceVramMiB: s.vramMiB } : {});
 
 /** A computer's id as placement compares it: machine ids are lower-case. */
 export const placeId = (id: string) => id.trim().toLowerCase();
@@ -135,7 +140,7 @@ const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.avoid ??
 const loadPart = (p: Computer) => {
   const pct = memPct(p);
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
-  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}`;
+  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}`;
 };
 
 /** Where the next piece of game-repo work should go, in a line, or undefined with fewer than two computers. */

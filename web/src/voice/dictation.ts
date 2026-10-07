@@ -126,7 +126,9 @@ export function useVoiceStatus(): VoiceStatus | undefined {
 export function engineLabel(engine: VoiceEngine | undefined, s: VoiceStatus | undefined): string {
   if (engine === 'browser') return 'Browser speech';
   if (!s) return 'Whisper';
-  if (s.state === 'ready') return `Whisper · ${s.device === 'cuda' ? 'GPU' : 'CPU'}`;
+  // A worker machine's GPU takes the clip (w615): name it; the portal's own engine is the fallback.
+  const where = s.local && s.remote ? `${s.remote.machine} ` : '';
+  if (s.state === 'ready') return `Whisper · ${where}${s.device === 'cuda' ? 'GPU' : 'CPU'}`;
   if (s.state === 'loading' || s.state === 'idle') return 'Whisper · loading model';
   return `Whisper · ${s.state}`;
 }
@@ -220,7 +222,8 @@ export function useDictation(onText: (text: string, opts: { autoSend: boolean })
         const r = await api.voiceTranscribe(toBase64(wav));
         if (g !== gen.current) return;
         lastClip.current = undefined;
-        if (status) setStatus({ ...status, state: 'ready', model: r.model, device: r.device });
+        // Which engine answered (w615) shows in Settings; the status is fetched again, not guessed from the result.
+        refreshVoiceStatus(0);
         go('idle');
         deliver(r.text);
       } catch (e) {

@@ -1156,7 +1156,12 @@ route('DELETE', '/api/machines/([\\w-]+)', async (_r, [id]) => ({ note: await ma
 
 // ---- voice input (server/voice.ts, docs/voice.md)
 
-const voice = new VoiceService(cfg, () => buildVoicePrompt(vocabulary()));
+// A worker machine's GPU Whisper first when one offers it, this portal's own as the fallback (w615).
+const voice = new VoiceService(cfg, () => buildVoicePrompt(vocabulary()), {
+  machines: (order) => machines.voiceMachines(order),
+  transcribe: (machine, req, timeoutMs) => machines.transcribeOn(machine, req, timeoutMs),
+  warm: (machine) => machines.warmVoice(machine),
+});
 voice.autoInstall();
 
 let specCache: { at: number; names: string[] } | undefined;

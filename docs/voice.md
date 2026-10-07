@@ -91,6 +91,137 @@ request:
 It is cut to ~600 characters. Timestamps stay on (without them a 45 s test clip lost a sentence at
 the 30 s window boundary), and `vad_filter` cuts silence, where Whisper otherwise invents text.
 
+## Whisper on a worker's GPU (w615)
+
+**TL;DR:** the portal VM has no GPU, so its CPU Whisper (`base.en`) is slow and less accurate. A worker machine with a
+GPU (BEAST) can run `large-v3-turbo` for it. The machine's daemon keeps the model loaded on its GPU, and the portal
+sends it the clip over the daemon's existing link and gets the text back. If that machine is offline, its Whisper is
+off, out of VRAM, slow or failing, the VM's own CPU Whisper answers as before. Off by default on every machine; one
+installer flag turns it on for BEAST.
+
+lothsahn asked for it on 2026-10-07: "voice commands to the portal can get handled by a dedicated process on beast. The
+portal should send over the audio data from the web, beast can run whisper on its gpu using the large model it was
+using, and send the text back to the portal. If beast is down, the portal can fall back to doing local cpu whisper."
+He settled where it lives: "It should be part of the worker harness and configurable. It'll be off by default and
+we'll turn it on for beast. It should live in the same folder as the rest of the worker stuff."
+
+```mermaid
+flowchart LR
+  B["phone / browser<br/>16 kHz WAV"] -- "POST /api/voice/transcribe" --> P["portal (VM)<br/>VoiceService"]
+  P -- "transcribe (WebSocket the daemon dialled,<br/>machine credential)" --> D["BEAST daemon<br/>machine/voice.ts"]
+  D -- "stdin JSON line" --> W["worker.py<br/>large-v3-turbo, CUDA"]
+  W --> D -- "transcribe_result" --> P
+  P -. "offline, off, no VRAM,<br/>timeout or error" .-> L["the VM's own worker.py<br/>base.en, CPU"]
+```
+
+**The model.** The same one voice ran on BEAST before the portal moved: faster-whisper `large-v3-turbo`, int8_float16
+on the GPU, with the same `server/voice/worker.py` (the "Engines" table; measured below). The daemon reuses the
+portal's `PyWorker` and `setupVoice`, so it is one code path, not a second engine.
+
+**Where it runs.** Inside the daemon (`machine/voice.ts`), as a child Python process, not a service of its own: it
+starts and stops with the daemon, needs no install step of its own beyond the folder, and is reached through the link
+the daemon already has. It is not an agent and not a Unity editor, so no agent or editor limit counts it. Its files
+live in the worker root: `<root>/voice` (`F:\ffw\voice` on BEAST): uv's Python, the venv with faster-whisper and the
+CUDA 12 wheels, the model, `setup.log`. The daemon installs or updates them in the background when they are missing or
+stale (the same stamps as the portal's), and the uninstall deletes them with the root. The daemon's process ends the
+worker when it ends (the worker exits when its stdin closes), so a daemon restart leaves nothing behind.
+
+**Turning it on.** `daemon.json` → `voice` (`machine/voice.ts`, `DaemonVoiceSettings`):
+
+| key | default | |
+|---|---|---|
+| `enabled` | `false` | off on every machine unless set |
+| `model` | `large-v3-turbo` | a faster-whisper model name |
+| `device` | `cuda` | GPU only: a worker's CPU belongs to its agents and builds, and the VM is the CPU fallback |
+| `computeType` | `int8_float16` on the GPU | |
+| `toolsDir` | `<root>/voice` | |
+| `minFreeVramMiB` | 3072 | it loads the model only with this much VRAM free (more than `yieldBelowMiB` plus the model, so an unload is not followed by a reload) |
+| `yieldBelowMiB` | 1024 | an idle loaded model is unloaded when free VRAM falls under this |
+| `idleMinutes` | 0 | 0: kept loaded; otherwise unloaded after this long unused |
+
+The installer sets it: `install.ps1 -VoiceWhisper large-v3-turbo` (`worker.ts install --voice-whisper <model>`;
+`off` turns it off). A re-run or an update without the flag keeps what `daemon.json` has. On a machine already
+installed, w613's update turns it on in place (it restarts the daemon):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root F:fw -VoiceWhisper large-v3-turbo
+```
+
+The daemon log then says `voice: large-v3-turbo loaded on cuda, ~1160 MiB VRAM`.
+
+**VRAM and Unity.** BEAST's 16 GB is shared with up to two Unity editors. The model takes about 1.1 GB (measured
+below). The daemon checks the GPU's free memory (its 15 s `stats` probe, `nvidia-smi`) before it loads, and gives the
+memory back when an editor needs it:
+- loading needs `minFreeVramMiB` free; if not, the request is refused at once ("not enough free VRAM") and the portal
+  uses its CPU;
+- a loaded model that is idle is unloaded when free VRAM drops under `yieldBelowMiB`; the next clip loads it again if
+  there is room, else the CPU answers;
+- a clip being transcribed is never cut off.
+Placement sees it: the daemon reports the model's state and its VRAM in its `voice` status, and the dispatcher's line
+for the machine (`list_sandboxes`, `system_status`) says "Whisper holds ~1.1 GB VRAM".
+
+**The link.** Two new messages on the portal↔daemon WebSocket (`server/machineProtocol.ts`): the portal sends
+`transcribe` (`id`, the WAV in base64, the vocabulary prompt, the language) and the daemon answers `transcribe_result`
+(text, timings, model, device, or an error). The daemon dials the portal and authenticates with its machine credential,
+so there is no new port, nothing listens on BEAST, and only the portal can send it a clip. A daemon advertises the
+engine in its `hello` and a `voice` status message; the portal sends `transcribe` only to a daemon that did, so an older
+daemon never sees one, and an older portal ignores both. The protocol number stays (the w605 rule: a change both sides
+ignore safely records a new fingerprint).
+
+**Formats.** The browser already records PCM through Web Audio and uploads a 16 kHz mono WAV ("Recording", below), on
+iPhone Safari and Android Chrome alike, so neither side meets webm/opus or mp4/aac and nothing is transcoded. A clip is
+at most `MAX_DICTATION_SECONDS` (300 s): 9.6 MB of WAV, 12.8 MB in base64, under the link's 16 MB frame limit; the
+daemon refuses a bigger one.
+
+**Fallback.** The portal (`VoiceService.transcribe`) picks a machine whose daemon is connected and says its Whisper is
+ready, idle or loading (config `voice.remote.machines` limits and orders the choice; empty: any). It falls back to its
+own CPU worker when:
+- no machine offers it (offline, `enabled: false`, installing, failed), or its VRAM is short;
+- the machine answers with an error;
+- it does not answer within the timeout: `voice.remote.timeoutSeconds` plus `voice.remote.perAudioSecond` for each
+  second of audio, plus `voice.remote.loadSeconds` when the model was not loaded yet. The defaults come from the
+  measurements below.
+The VM's own worker is the one w570 runs: `base.en` on 2 threads, ~235 MB, unloaded after 20 minutes idle. While a
+remote engine is ready, a recording warms only the remote one, so the VM loads its model only when it is needed.
+
+**Which engine answered.** Every result carries `engine` (`remote` or `local`), the `machine`, the device and the model,
+and `fallback` (why the remote engine was not used). The bar shows the engine while recording ("Whisper · beast GPU" or
+"Whisper · portal CPU"), and Settings → Voice input shows the last transcription: which engine, how long, and the
+fallback reason. The portal logs one line per clip with the engine and timings, never the audio or the text; the
+daemon logs only loads, unloads and errors.
+
+**Config on the portal.** `config.json` → `voice.remote`: `enabled` (default `true`: use a machine that offers it),
+`machines` (default `[]`: any), `timeoutSeconds` (3), `perAudioSecond` (0.05), `loadSeconds` (20). The VM's own CPU
+engine keeps its settings (`voice.enabled`, `model`, `device`, ...). With `voice.enabled` off on the portal, the remote
+engine still works; it just has no fallback. Nothing on the portal needs switching on: a deploy routes to any machine
+that offers it, and a machine offers it once its daemon.json says so.
+
+**The timeout, from the measurements.** BEAST answers a 12.5 s clip in 0.20-0.33 s and a 45.5 s clip in 0.61-0.95 s
+(below): about 0.02 s per second of audio. The wait before the fallback is 3 s plus 0.05 s per second of audio (3.6 s for
+a 12.5 s clip, 18 s for a 5-minute one): ten times the measured time plus room for the tailnet, so a GPU busy with an
+editor still answers, while a hung one costs a few seconds at most. A machine whose model is not loaded gets 20 s more
+(a load takes 2.3 s with its files cached and 12-15 s cold). A machine that is offline, short of VRAM or off costs
+nothing: the portal goes straight to its CPU.
+
+### Measured (BEAST, 2026-10-07)
+
+On BEAST (RTX 4080 SUPER, i9-14900KF), large-v3-turbo int8_float16 from `F:\ffw\voice`, a 12.5 s clip of synthetic
+speech (Windows SAPI, 16 kHz mono), Whisper's real vocabulary prompt; the portal's VoiceService and MachineManager talking
+to a Daemon with voice on over a WebSocket on the same PC (`scripts/voice-e2e.ts`; no Unity editor running):
+
+| | measured |
+|---|---|
+| install (venv, faster-whisper and CUDA wheels, model) | 60 s; 3.6 GB on disk (model 1.6 GB, uv cache 1.9 GB) |
+| daemon start to model loaded (files in the OS cache) | 2.4-2.7 s, 3 runs |
+| a 12.5 s clip through the link, GPU | 0.20-0.33 s total (model 0.20-0.32 s), 15 runs in three sessions |
+| VRAM | +1158 to 1162 MiB (2801 to 3959 MiB in use) |
+| RAM, worker process | 656 MiB working set |
+| the fallback after the daemon stops (base.en, CPU, 2 threads, AVX only: the VM's limits) | 0.9-2.2 s (the first of each includes its ~1 s load), 9 runs, `engine: local` |
+
+Not measured here: the tailnet hop from the VM to BEAST (adds the upload of ~0.5 MB for 12.5 s and a round trip; a
+guess: 0.1-0.5 s), and the VM's own CPU, slower per core than BEAST's (a guess, w570: about 3x). The portal's log line
+per clip gives both once it is deployed.
+
 ## End-of-speech detection
 
 `shared/vad.ts`, pure and shared by dictation and voice mode. Energy, not a model:
@@ -141,7 +272,8 @@ Server side, `config.json` → `voice` (`server/config.ts`):
 
 ## Install
 
-`npm run voice-setup` is idempotent; `-- --force` reinstalls. It puts everything under
+On a worker machine (w615) the daemon installs its own copy, speech-to-text only, under `<root>/voice` (above). On the
+portal: `npm run voice-setup` is idempotent; `-- --force` reinstalls. It puts everything under
 `voice.toolsDir` (default `data/tools/whisper`, ~5.6 GB). No admin, nothing system-wide; uv comes
 from PATH or is downloaded into the folder.
 
@@ -165,6 +297,7 @@ button after a failure.
 | | GPU | CPU |
 |---|---|---|
 | Whisper, 6.5 s clip | 0.14-0.31 s | 5.5 s |
+| Whisper, 12.5 s clip (w615, through the daemon link) | 0.20-0.33 s | |
 | Whisper, 45.5 s clip | 0.61-0.95 s | 12.4 s |
 | Whisper load | 2.4-2.6 s with files cached; 12-15 s cold; 36 s once, the first load after a fresh install | 10.5 s |
 | Kokoro, one short sentence | 0.13-0.2 s | 1.4 s |

@@ -117,18 +117,30 @@ function VoiceSettings() {
   const prefs = useVoicePrefs();
   const s = useVoiceStatus();
   const [installing, setInstalling] = useState(false);
-  const whisper =
-    !s
-      ? 'Local Whisper: status unknown (the server did not answer).'
-      : s.state === 'ready'
-        ? `Local Whisper (${s.model}): loaded on the ${s.device === 'cuda' ? 'GPU' : 'CPU'}.`
-        : s.state === 'idle'
-          ? `Local Whisper (${s.model}): installed; the model loads when you start talking and unloads when idle.`
-          : s.state === 'loading'
-            ? `Local Whisper (${s.model}): loading the model.`
-            : s.state === 'installing'
-              ? 'Local Whisper: first-time setup is downloading (a few minutes). Until then the browser’s speech recognition is used.'
-              : `Local Whisper: unavailable${s.detail ? ` (${s.detail})` : ''}.`;
+  const own = s?.local ?? s;
+  const ownLine = !own
+    ? 'Local Whisper: status unknown (the server did not answer).'
+    : own.state === 'ready'
+      ? `Local Whisper (${own.model}): loaded on the ${own.device === 'cuda' ? 'GPU' : 'CPU'}.`
+      : own.state === 'idle'
+        ? `Local Whisper (${own.model}): installed; the model loads when you start talking and unloads when idle.`
+        : own.state === 'loading'
+          ? `Local Whisper (${own.model}): loading the model.`
+          : own.state === 'installing'
+            ? 'Local Whisper: first-time setup is downloading (a few minutes). Until then the browser’s speech recognition is used.'
+            : `Local Whisper: unavailable${own.detail ? ` (${own.detail})` : ''}.`;
+  // A worker machine's GPU Whisper (w615, docs/voice.md): first choice when it is up; the portal's own is the fallback.
+  const r = s?.remote;
+  const remoteLine = !r
+    ? undefined
+    : s?.local
+      ? `Whisper on ${r.machine}’s GPU (${r.model}): ${r.state === 'ready' ? `loaded${r.vramMiB ? `, ${(r.vramMiB / 1024).toFixed(1)} GB of VRAM` : ''}` : r.state === 'loading' ? 'loading the model' : 'loads when you start talking'}. It takes your clips first.`
+      : `Whisper on ${r.machine}: ${r.vramShort ? 'waiting for free VRAM' : r.state}${r.detail ? ` (${r.detail})` : ''}. The portal’s own Whisper takes your clips meanwhile.`;
+  const last = s?.last;
+  const lastLine = last
+    ? `Last clip (${new Date(last.at).toLocaleTimeString()}): ${last.engine === 'remote' ? `${last.machine}’s ${last.device === 'cuda' ? 'GPU' : 'CPU'}` : `the portal’s own ${last.device === 'cuda' ? 'GPU' : 'CPU'}`} (${last.model}), ${last.totalSeconds.toFixed(1)} s for ${last.audioSeconds.toFixed(1)} s of audio${last.fallback ? `. Fell back because ${last.fallback}` : ''}.`
+    : undefined;
+  const whisper = [remoteLine, s?.local ? `Fallback: ${ownLine}` : ownLine, lastLine].filter(Boolean).join(' ');
   return (
     <div className="field">
       <span>Voice input</span>
@@ -152,7 +164,7 @@ function VoiceSettings() {
           Send automatically after dictation <small className="dim">off: the text waits in the box until you press Send</small>
         </span>
       </label>
-      <p className={`small ${s?.state === 'ready' || s?.state === 'idle' ? 'tone-green' : 'dim'}`}>
+      <p className={`small ${s?.state === 'ready' || s?.state === 'idle' ? 'tone-green' : 'dim'}`} data-testid="voice-engines">
         {whisper}
       </p>
       <label className="check">

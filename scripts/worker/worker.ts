@@ -195,6 +195,32 @@ export interface InstallOptions {
    * PATH kept in its order, the old Library seed kept, and no administrator prompt that nobody can answer.
    */
   update?: boolean;
+  /**
+   * The GPU Whisper for the portal's mic (w615, docs/voice.md "Whisper on a worker's GPU"): a faster-whisper model name
+   * turns it on (daemon.json `voice`), "off" turns it off; unset keeps what daemon.json has (off on a new install).
+   */
+  voiceWhisper?: string;
+}
+
+/**
+ * daemon.json `voice` after an install (w615): `flag` a model name turns it on with that model, "off" turns it off (its
+ * other settings kept), unset keeps `had`. Undefined: no `voice` key (off). Exported for tests.
+ */
+export function voiceSetting(flag: string | undefined, had: unknown): Record<string, unknown> | undefined {
+  const before = had && typeof had === 'object' && !Array.isArray(had) ? (had as Record<string, unknown>) : undefined;
+  if (flag === undefined || flag === '') return before;
+  if (flag === 'off') return before ? { ...before, enabled: false } : undefined;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(flag)) throw new Error(`--voice-whisper is a faster-whisper model name (large-v3-turbo, small.en, ...) or off, not "${flag}"`);
+  return { ...before, enabled: true, model: flag };
+}
+
+/** The `voice` of the daemon.json already in the root, if any: a re-run keeps it (w615). */
+function existingVoice(l: Layout): unknown {
+  try {
+    return (JSON.parse(fs.readFileSync(path.join(l.daemon, 'daemon.json'), 'utf8')) as Record<string, unknown>).voice;
+  } catch {
+    return undefined;
+  }
 }
 
 /** A parsed command line: `--key value` options and `--flag`s. Exported for tests. */
@@ -477,8 +503,11 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     // An update keeps the seed the daemon had (w613: BEAST's block-cloned Library) when the root holds none of its own.
     if (o.update && !sandboxes.librarySeed && typeof oldSeed === 'string' && oldSeed) sandboxes.librarySeed = oldSeed;
   }
+  const voice = voiceSetting(o.voiceWhisper, 'voice' in carried ? carried.voice : existingVoice(l));
+  delete carried.voice;
   return {
     ...carried,
+    ...(voice ? { voice } : {}),
     portalUrl: o.portalUrl,
     id,
     root: l.root,
@@ -1039,6 +1068,8 @@ export interface UpdateFlags {
   /** Override what the install did: firewall rules (Windows) and the portal's ssh (--no-firewall, --no-ssh). */
   firewall?: boolean;
   ssh?: boolean;
+  /** The GPU Whisper for the portal's mic (w615): a model name turns it on, "off" turns it off; unset carries daemon.json's. */
+  voiceWhisper?: string;
 }
 
 /**
@@ -1069,6 +1100,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(typeof config.unitySlotsDir === 'string' ? { unitySlotsDir: config.unitySlotsDir } : {}),
     ...(f.absoluteWorktrees ? { absoluteWorktrees: true } : {}),
     ...(f.owner ? { owner: f.owner } : {}),
+    ...(f.voiceWhisper !== undefined ? { voiceWhisper: f.voiceWhisper } : {}),
     carry: { ...config, sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     update: true,
   };
@@ -1619,6 +1651,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|uninstall|check> --
             [--owner <user> (Windows, elevated: default the user the daemon's task runs as)] [--no-firewall] [--no-ssh]
             (this machine's own install, in place: every setting, the credential and the PATH carried; no game-repo
              fetch; restarts the daemon and checks the portal sees it; docs/worker-install.md, "Updating")
+            [--voice-whisper <model>|off] (the GPU Whisper for the portal's mic, w615; default: as daemon.json has it)
+            [--voice-whisper <model>|off] (Whisper on this machine's GPU for the portal's mic, w615; kept on a re-run)
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
   migrate   [--from <old daemon folder>] [--from-service <its task or label>] [--old-slots <dir>]
@@ -1652,6 +1686,7 @@ export async function main(argv = process.argv.slice(2)) {
       sshHost: opts['ssh-host'],
       sshUser: opts['ssh-user'],
       ...(opts['seed-from'] ? { seedFrom: opts['seed-from'] } : {}),
+      ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
     });
   } else if (cmd === 'update') {
     if (!opts.root) throw new Error(USAGE);
@@ -1665,6 +1700,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(opts.source ? { source: opts.source } : {}),
       ...(flags.has('no-firewall') ? { firewall: false } : {}),
       ...(flags.has('no-ssh') ? { ssh: false } : {}),
+      ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
     });
   } else if (cmd === 'elevated') {
     // The install's one administrator step (elevatedSteps): run by an elevated copy of this script.

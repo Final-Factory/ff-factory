@@ -28,6 +28,9 @@
 .PARAMETER Owner
   Elevated (an administrator's ssh session): the user what the install makes is given to. An update defaults to the
   user the daemon's task runs as.
+.PARAMETER VoiceWhisper
+  Whisper on this PC's GPU for the portal's mic (w615, docs/voice.md): a model name (large-v3-turbo) turns it on, off
+  turns it off. Left out: a re-run keeps what the daemon has (a new install: off).
 #>
 param(
     [string]$Root = '',
@@ -49,7 +52,8 @@ param(
     [switch]$NoSsh,
     [switch]$Update,
     [string]$DaemonRef = '',
-    [string]$Owner = ''
+    [string]$Owner = '',
+    [string]$VoiceWhisper = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -144,6 +148,7 @@ if ($Update) {
     if ($MaxUnity) { $argv += @('--max-unity', $MaxUnity) }
     if ($DaemonRef) { $argv += @('--ref', $DaemonRef) }
     if ($Owner) { $argv += @('--owner', $Owner) }
+    if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
     # A local checkout given with -Source is the daemon code too: no download at all.
     if ($Source -and -not $temp) { $argv += @('--source', $Source) }
     try {
@@ -164,6 +169,7 @@ if ($UnitySlotsDir) { $argv += @('--unity-slots-dir', $UnitySlotsDir) }
 if ($SshHost) { $argv += @('--ssh-host', $SshHost) }
 if ($NoSsh) { $argv += '--no-ssh' }
 if ($Owner) { $argv += @('--owner', $Owner) }
+if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
 try {
     $credential | & $node.Path @argv
     $code = $LASTEXITCODE

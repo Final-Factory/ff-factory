@@ -14,6 +14,41 @@ export interface VoiceStatus {
   device?: string;
   /** Local text-to-speech (Kokoro) for voice mode. */
   tts: TtsStatus;
+  /**
+   * The worker machine whose GPU Whisper takes clips first (w615, docs/voice.md "Whisper on a worker's GPU"), when one
+   * offers it; `state` above is then the better of the two. Absent: the portal's own Whisper only.
+   */
+  remote?: RemoteVoiceStatus & { machine: string };
+  /** The portal's own Whisper, when a remote engine is shown above it (`state` is then the combined one). */
+  local?: { state: VoiceStatus['state']; model: string; device?: string; detail?: string };
+  /** The last clip transcribed: which engine answered and how fast (never what was said). */
+  last?: LastTranscription;
+}
+
+/** A worker machine's Whisper (w615), as its daemon reports it (machine/voice.ts). */
+export interface RemoteVoiceStatus {
+  /** ready: loaded on the GPU. idle: installed, loads on the next clip if VRAM allows. */
+  state: 'ready' | 'idle' | 'loading' | 'installing' | 'unavailable';
+  model: string;
+  device?: string;
+  /** VRAM the loaded model holds (the GPU's use before and after the load), MiB. */
+  vramMiB?: number;
+  /** Why it is unavailable, or what last went wrong. */
+  detail?: string;
+  /** It will not load now: the GPU has too little free memory (the editors need it). The portal goes straight to its CPU. */
+  vramShort?: boolean;
+}
+
+export interface LastTranscription {
+  at: string;
+  engine: TranscribeResult['engine'];
+  machine?: string;
+  model: string;
+  device: string;
+  audioSeconds: number;
+  /** The portal's time for the whole request (the remote try included when it fell back). */
+  totalSeconds: number;
+  fallback?: string;
 }
 
 export interface TtsStatus {
@@ -51,6 +86,12 @@ export interface TranscribeResult {
   seconds: number;
   /** Server time for the whole request, including a model load if it had to wait for one. */
   totalSeconds: number;
+  /** Which Whisper answered (w615): a worker machine's GPU, or the portal's own. */
+  engine: 'remote' | 'local';
+  /** The worker machine that answered (engine remote). */
+  machine?: string;
+  /** Why a remote engine did not answer, when the portal's own did (offline, timed out, its error). */
+  fallback?: string;
 }
 
 /** The rate Whisper works at; the browser downsamples to it before uploading. */
