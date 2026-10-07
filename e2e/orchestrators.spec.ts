@@ -213,7 +213,7 @@ test("worker updates go to the chats of the people the work is for, never to the
     expect((await heard(page.request, mate.orchestratorId, '[worker update]', `also the tooltips ${tag}`))[0]).toMatch(/Echo: \[about w\d+ "Inventory /);
     expect(await heard(page.request, me.orchestratorId, '[worker update]', `Inventory ${tag}`)).toEqual([]);
     // And the owner's orchestrator may not follow up on the teammate's worker.
-    expect(await useTool(page.request, me.orchestratorId, 'message_agent', { session_id: v.id, text: 'mine now' })).toBe(`ERROR: ${v.id} "Inventory ${tag}" is Team Mate's work: follow up only on tester's own workers; for anything else, request_work`);
+    expect(await useTool(page.request, me.orchestratorId, 'message_agent', { session_id: v.id, text: 'mine now' })).toBe(`ERROR: ${v.id} "Inventory ${tag}" is Team Mate's work: follow up only on tester's own workers and other owners' workers; for anything else, request_work`);
   } finally {
     await mateCtx.close();
   }
