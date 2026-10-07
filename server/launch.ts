@@ -7,6 +7,7 @@ import { standingGuard } from './standingGuard.ts';
 import { publicIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
 import type { StandingToolGroup } from '../shared/types.ts';
+import { WORK_LIVE_STATES, type WorkLiveState } from '../shared/workState.ts';
 import type { SecretRules } from './secretGuard.ts';
 
 /** A stdio MCP server the agent process starts (on a machine: the daemon's Unity MCP server, machine/unityMcp.ts). */
@@ -70,6 +71,9 @@ export interface LaunchSpec {
   init?: { files?: Record<string, string> };
 }
 
+/** A request's live state (shared/workState.ts), as read_work takes it. */
+const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
+
 /** The tools a spec can ask for, with their input schemas. Descriptions come with the spec. */
 export const CATALOG = {
   /** Retired (w575): sandbox labels are their names. Listed in no spec; kept so workers started before it get an answer. */
@@ -112,6 +116,19 @@ export const CATALOG = {
   fetch_ffbox_report: {
     id: z.string().max(64).describe('The FFBox report id, e.g. "20261003T101500Z-desync-3a9f01c2d4".'),
     file: z.string().max(260).optional().describe('One file inside the zip, exactly as the report lists it (e.g. "logs/Player.log"). Default: the whole zip.'),
+  },
+  /** docs/orchestrators.md, "Workers read the ledger" (w642). Read-only: the portal answers from the ledger (server/workRead.ts). */
+  read_work: {
+    id: z.string().max(16).optional().describe('One request in full, e.g. "w631": yours, one yours names, or (with a ledger-read grant) any open or stalled one.'),
+    all: z.boolean().optional().describe("List the ledger's open and stalled requests, not only yours and the ones they name. Needs a ledger-read grant on one of your open requests."),
+    status: z.enum(['open', 'stalled', 'open_and_stalled', 'any']).optional().describe('Default: any for your own list, open_and_stalled with all (any is refused there).'),
+    state: z
+      .union([LIVE_STATE, z.array(LIVE_STATE).min(1).max(WORK_LIVE_STATES.length)])
+      .optional()
+      .describe('Only requests in these live states: working, pending (its worker will come back to it), waiting (on input), queued, followup (merged, follow-up pending), stalled.'),
+    person: z.string().max(64).optional().describe('Only the requests of this person (user id or display name).'),
+    offset: z.number().int().min(0).optional().describe('Skip this many matching requests (the next page).'),
+    limit: z.number().int().min(1).max(50).optional().describe('Requests per page, default 20, at most 50; a page also stops at 40,000 characters.'),
   },
 } satisfies Record<string, z.ZodRawShape>;
 

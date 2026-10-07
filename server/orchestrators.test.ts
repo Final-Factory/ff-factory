@@ -1300,3 +1300,60 @@ test('w575: a sandbox label is its name and never changes: no set_label for work
   assert.match(listed, /- pc\/alpha( FREE)?: ready;/);
   assert.doesNotMatch(listed, /w554/);
 });
+
+test('w642: a worker reads its own request and the ones it names, is refused others until its person grants ledger reading, and writes nothing', async (t) => {
+  const { store, machines, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  const loth = chat(LOTH).info;
+  await call(loth, 'request_work', { title: 'Lothsahn belt work', brief: 'Belts.' });
+  await call(ben, 'request_work', { title: 'Something unrelated', brief: 'Other.' });
+  await call(ben, 'request_work', { title: 'List the finished requests', brief: 'Go through the ledger; w1 is one to check.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'List the finished requests', title: 'Finished requests', work_id: 'w3' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const m = store.machines.get('pc')!;
+  const info = store.sessions.get(id)!;
+  const spec = machines.hooks!.specFor(info, m);
+  assert.ok(spec.mcp?.tools.some((x) => x.name === 'read_work'), 'a worker has read_work');
+  assert.match(spec.append, /mcp__machine__read_work/);
+  const h = machines.hooks!.handlersFor(info, m);
+  for (const x of ['update_work', 'request_work', 'decide_work', 'start_agent', 'list_work']) assert.equal(x in h, false, `a worker has no ${x}`);
+  const read = (a: Record<string, unknown>) => h.read_work!(a);
+
+  // Its own request, and the one it names (Lothsahn's), with no grant.
+  assert.match(await read({}), /Yours: w3\. They name: w1\./);
+  assert.match(await read({ id: 'w3' }), /w3 \[active\][^\n]*: "List the finished requests"[\s\S]*Brief:\n~~~text\nGo through the ledger; w1 is one to check\.\n~~~/);
+  assert.match(await read({ id: 'w1' }), /"Lothsahn belt work"\nFor Lothsahn/);
+  // Refused: an unrelated request, and the ledger list.
+  await assert.rejects(read({ id: 'w2' }), /w2 is outside what you may read/);
+  await assert.rejects(read({ all: true }), /needs a ledger-read grant/);
+
+  // Only the request's own person grants it; Lothsahn cannot, and an intake request never gets it.
+  const refused = await call(loth, 'update_work', { id: 'w3', ledger_read: true });
+  assert.match(refused.text, /^ERROR: w3 is not Lothsahn's request/);
+  const granted = await call(ben, 'update_work', { id: 'w3', ledger_read: true });
+  assert.equal(granted.isError, false, granted.text);
+  assert.match(granted.text, /w3: its workers may now list and read every open and stalled request/);
+  assert.equal(store.work.get('w3')!.ledgerRead?.by, 'Ben');
+  assert.match(store.work.get('w3')!.log.at(-1)!, /Ben: its workers may read the ledger/);
+  assert.match((await call(ben, 'list_work', { id: 'w3' })).text, /Its workers may read the ledger \(read_work all; granted by Ben\)/);
+
+  // Granted: the filtered list, and an unrelated open request by id. Reading writes nothing.
+  const before = structuredClone([...store.work.values()]);
+  const all = await read({ all: true });
+  assert.match(all, /The ledger's open and stalled requests \(granted by w3\)\./);
+  for (const w of ['w1', 'w2', 'w3']) assert.match(all, new RegExp(`- ${w} \\[`));
+  assert.match(await read({ all: true, person: 'lothsahn' }), /- w1 \[[\s\S]*Shown 1-1 of 1\./);
+  assert.match(await read({ id: 'w2', close: 'done', note: 'closing it' }), /"Something unrelated"/);
+  assert.deepEqual([...store.work.values()], before, 'read_work changed nothing');
+  assert.equal(store.work.get('w2')!.status, 'new');
+
+  // Taken back: refused again. Filed with the grant, a request has it from the start.
+  assert.equal((await call(ben, 'update_work', { id: 'w3', ledger_read: false })).isError, false);
+  await assert.rejects(read({ id: 'w2' }), /outside what you may read/);
+  await call(ben, 'request_work', { title: 'Audit the stalled requests', brief: 'Which can close?', ledger_read: true });
+  assert.equal(store.work.get('w4')!.ledgerRead?.by, 'Ben');
+  const intake = { ...store.work.get('w2')!, id: 'w9', source: { kind: 'discord-bug', untrusted: true, channel: '#bugs' } } as WorkItem;
+  store.putWork(intake);
+  assert.match((await call(ben, 'update_work', { id: 'w9', ledger_read: true })).text, /^ERROR: w9 came from the intake/);
+});

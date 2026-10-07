@@ -1306,6 +1306,11 @@ export interface WorkItem {
   /** Questions the dispatcher asked about it (at most 3). */
   asks: number;
   /**
+   * Its workers may list and read every open and stalled request (w642, docs/orchestrators.md "Workers read the ledger"),
+   * for a ledger task: set by its person's orchestrator (request_work or update_work ledger_read), never by its text.
+   */
+  ledgerRead?: { by: string; at: string };
+  /**
    * The question it waits on, from the dispatcher (decide_work ask) to its requester, until a note answers it (w278:
    * FFBox posts it in the requester's thread). A design question is `flag` instead.
    */
