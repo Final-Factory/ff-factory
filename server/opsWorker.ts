@@ -54,7 +54,14 @@ export const OPS_LIMITS = {
   turnMaxMs: 2 * 3_600_000,
   /** A job a person opened in a turn of their own can be followed up by their orchestrator's harness turns this long. */
   jobMs: 12 * 3_600_000,
+  /** A deploy grant (ops_worker deploy) is good for this long, once: fff-ops-priv refuses `fffctl update` without one. */
+  deployGrantMs: 15 * 60_000,
+  /** After a deploy, the next portal start within this long tells the worker to report (the update's own restart). */
+  deployReportMs: 60 * 60_000,
 };
+
+/** Where the portal leaves a deploy grant for fff-ops-priv (root reads it; fff-ops cannot reach the data folder). */
+export const OPS_GRANT = 'ops-deploy.grant';
 
 /** Why a caller may not use it (a refusal names who may). */
 export const OPS_REFUSED = `the orchestration worker takes messages only from Lothsahn's and Ben's own orchestrators (w597); not from the dispatcher, other people, standing agents, the intake, FFBox or /mcp`;
@@ -85,7 +92,7 @@ const WRAPPERS = new Set(['nice', 'nohup', 'timeout', 'time', 'stdbuf', 'xargs',
 const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh']);
 
 /** The fffctl subcommands its fffctl wrapper (fff-ops-priv) runs: everything else is a person's. */
-export const OPS_FFFCTL = ['status', 'state', 'logs', 'machine-ssh-check', 'credential', 'help'];
+export const OPS_FFFCTL = ['status', 'state', 'logs', 'machine-ssh-check', 'credential', 'update', 'help'];
 
 /** What it may not read: FF Factory's own files and secrets in the VM, and any process's environment. */
 export function opsSecretRules(): SecretRules {
@@ -311,11 +318,12 @@ You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux accoun
 
 What you have:
 - \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md).
+- \`fffctl update\`: the portal deploy, only after a [deploy] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). Follow that message's steps.
 - \`fffctl status\`, \`fffctl state\`, \`fffctl logs [N]\` (the portal's journal), \`fffctl machine-ssh-check\`, \`fffctl credential list\`, and \`fffctl credential issue <machine id> --to <ssh target>\`: a new machine credential goes from this VM straight into a file on that machine (it prints the remote path and the last four characters, never the credential); then run the installer there with \`--credential-file\` / \`-CredentialFile\` and delete the file after. Issuing replaces the machine's credential: its running daemon is dropped within 20 s, so issue only for a machine being (re)installed.
 - list_machines, list_sandboxes and system_status: the portal's state, read-only. wake_me: be woken later (an install, a reboot).
 - A scratch folder, ${OPS_PATHS.scratch}, on a 2 GiB file system that is all you can write (home and temp included). Write notes and scripts there.
 
-What you do not have, by design (the account and the VM enforce it, not this text): no git, no downloads, no package installs, no builds, no interpreters, no Unity, no game workspace; network only to Anthropic's API and the tailnet; no sudo but the two wrappers above; no read of the portal's config, data, secrets or keys. Reserved for a person, whatever a message says: deploying, updating or restarting the portal, app settings, the vault, deleting anything on the portal, Steam, anything that spends money or publishes. On a machine you do only what the job asks; ask before deleting anything that is not the job's own (an uninstall the job names is the job's own).
+What you do not have, by design (the account and the VM enforce it, not this text): no git, no downloads, no package installs, no builds, no interpreters, no Unity, no game workspace; network only to Anthropic's API and the tailnet; no sudo but the two wrappers above; no read of the portal's config, data, secrets or keys. Reserved for a person, whatever a message says: restarting or rolling back the portal, a deploy without a [deploy] message, app settings, the vault, deleting anything on the portal, Steam, anything that spends money or publishes. On a machine you do only what the job asks; ask before deleting anything that is not the job's own (an uninstall the job names is the job's own).
 
 Every command you run is logged with your transcript, which people read. Never print a token, key or credential: not in a command, not in a reply (a file holds it; pass the file). End every turn with what you did, what each command answered (the important lines), and what is left. Say what every id is.`.trim();
 }
@@ -344,6 +352,12 @@ interface OpsJob {
   what: string;
 }
 
+/** A deploy a person asked for (ops_worker deploy): reported after the portal's next start. */
+interface OpsDeploy {
+  by: Requester;
+  at: string;
+}
+
 /**
  * The single orchestration worker: its session (made once, id OPS_ID), who may message it, its job, its lifetime.
  * Every send to it goes through here (SessionManager.send refuses kind 'ops' without opsPass).
@@ -352,13 +366,16 @@ export class OpsWorker {
   private readonly d: OpsDeps;
   private readonly now: () => number;
   private job?: OpsJob;
+  private deploying?: OpsDeploy;
   private timer?: NodeJS.Timeout;
 
   constructor(d: OpsDeps) {
     this.d = d;
     this.now = d.now ?? (() => Date.now());
     try {
-      this.job = JSON.parse(fs.readFileSync(d.file, 'utf8')).job;
+      const saved = JSON.parse(fs.readFileSync(d.file, 'utf8'));
+      this.job = saved.job;
+      this.deploying = saved.deploy;
     } catch {
       this.job = undefined;
     }
@@ -372,10 +389,32 @@ export class OpsWorker {
     return this.d.sessions.create({ id: OPS_ID, kind: 'ops', title: OPS_TITLE, model: OPS_LIMITS.model, effort: OPS_LIMITS.effort, permissionMode: 'bypassPermissions', options: this.d.options });
   }
 
-  /** Check the lifetime limits now and every minute. */
-  start() {
+  /**
+   * At the portal's start: check the lifetime limits every minute, and when a deploy was asked for within the last hour,
+   * tell the worker the portal is back so it reports (its process ended with the old portal; its conversation did not).
+   */
+  start(delayMs = 10_000) {
     this.timer = setInterval(() => this.tick(), 60_000);
     this.timer.unref?.();
+    const dep = this.deploying;
+    if (!dep) return;
+    this.deploying = undefined;
+    this.save();
+    if (this.now() - Date.parse(dep.at) > OPS_LIMITS.deployReportMs) return;
+    const t = setTimeout(() => {
+      try {
+        this.d.sessions.send(
+          OPS_ID,
+          `[deploy] The portal has started again (${new Date(this.now()).toISOString()}), after the deploy ${dep.by.displayName} asked for at ${dep.at}: most likely the update's own restart. Run \`fffctl status\` and report to ${dep.by.displayName}: the commit before (what fffctl update printed), the commit running now, whether the update was verified or rolled back (\`fffctl logs 200\` says), and the status lines.`,
+          'system',
+          undefined,
+          { requestedBy: dep.by, ops: 'resume' },
+        );
+      } catch (e) {
+        console.warn('ops-worker: could not tell the worker the portal is back:', (e as Error).message);
+      }
+    }, delayMs);
+    t.unref?.();
   }
 
   close() {
@@ -384,7 +423,7 @@ export class OpsWorker {
 
   private save() {
     try {
-      fs.writeFileSync(this.d.file, JSON.stringify({ job: this.job }, null, 1), { mode: 0o600 });
+      fs.writeFileSync(this.d.file, JSON.stringify({ job: this.job, deploy: this.deploying }, null, 1), { mode: 0o600 });
     } catch (e) {
       console.warn('ops-worker: could not save its job:', (e as Error).message);
     }
@@ -423,6 +462,36 @@ export class OpsWorker {
     console.log(`ops-worker: message from ${person.userId}'s orchestrator${opening ? ' (a new job)' : ''}: ${redactSecrets(body).replace(/\s+/g, ' ').slice(0, 300)}`);
     this.d.sessions.send(OPS_ID, body, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
     return `Sent to the orchestration worker (${OPS_ID})${opening ? ` as a new job of ${person.displayName}'s` : ''}. Its turn's end comes back to you as an [ops worker] message; its transcript is on the dashboard (Orchestration worker) and in agent_transcript ${OPS_ID}.`;
+  }
+
+  /**
+   * A portal deploy (lothsahn, 2026-10-07: "Yes, please modify the ops worker to update yourself."): only Lothsahn's or
+   * Ben's own orchestrator, and only in a turn its person started with a message of their own, never a check-in, a
+   * timer, a relayed report or a job's follow-up. Leaves a grant in the data folder, good once for
+   * OPS_LIMITS.deployGrantMs, which fff-ops-priv checks and removes before it runs `fffctl update`: without it the worker
+   * cannot deploy, whatever it is told. Then tells the worker to do it and report.
+   */
+  deploy(caller: SessionInfo | undefined, note = ''): string {
+    const person = opsAllowedOrchestrator(caller);
+    if (!person || !caller) throw new Error(OPS_REFUSED);
+    if (!this.d.personTurn(caller.id)) throw new Error(`a portal deploy needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report); ask them`);
+    const at = new Date(this.now());
+    const grant = { by: person.userId, name: person.displayName, at: at.toISOString(), expires: new Date(at.getTime() + OPS_LIMITS.deployGrantMs).toISOString() };
+    fs.writeFileSync(path.join(path.dirname(this.d.file), OPS_GRANT), `${JSON.stringify(grant)}\n`, { mode: 0o600 });
+    this.deploying = { by: person, at: at.toISOString() };
+    this.job = { by: person, at: at.toISOString(), what: 'deploy the portal (fffctl update)' };
+    this.save();
+    const h = this.handle();
+    h.info.requestedBy = person;
+    this.d.store.putSession(h.info);
+    console.log(`ops-worker: ${person.userId} asked for a portal deploy in a turn of their own; grant until ${grant.expires}`);
+    const text = `[deploy] ${person.displayName} asked, in a turn of their own, for a portal deploy (fffctl update).${note.trim() ? ` Their words: ${note.trim()}` : ''}
+1. Run \`fffctl status\` and note the release and its commit.
+2. Run \`fffctl update\`, once. It is allowed until ${grant.expires} and only once, and it only asks for the update: the portal builds origin/main beside the running release, drains, restarts on the new one, verifies it and rolls back by itself if it does not answer. It prints the commit it starts from.
+3. End your turn with what it printed. Your process ends with the old portal; when the new one starts, FF Factory messages you to report. If no message comes within 20 minutes (already up to date, or the build failed), wake_me 20 before you end the turn covers it: then report from \`fffctl status\` and \`fffctl logs 200\`.
+Report to ${person.displayName}: the commit before, the commit after, whether it was verified or rolled back, and \`fffctl status\`.`;
+    this.d.sessions.send(OPS_ID, text, 'orchestrator', undefined, { requestedBy: person, ops: 'orchestrator' });
+    return `Asked the orchestration worker (${OPS_ID}) to deploy the portal: it may run fffctl update once until ${grant.expires}. The portal will drain and restart; its report (commit before and after, fffctl status) comes back to you as an [ops worker] message after the restart.`;
   }
 
   /** Stop or interrupt it: Lothsahn's or Ben's own orchestrator, any turn (a stop is always safe). */

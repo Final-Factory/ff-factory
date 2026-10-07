@@ -33,7 +33,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   the account has a 2 GiB `noexec` scratch file system as all it can write, a network of Anthropic's API and the tailnet
   only, and two sudo wrappers, `fff-ops-ssh` (the portal's ssh to the machines, as `fff`, fixed options, pinned keys)
   and `fff-ops-priv` (`fffctl status`, `state`, `logs`, `machine-ssh-check`, `credential list` and `credential issue ID
-  --to TARGET`, which writes a new machine credential straight into a file on the machine). The Claude credential
+  --to TARGET`, which writes a new machine credential straight into a file on the machine, and `update`, the portal
+  deploy, only with the one-use 15-minute grant the portal writes on `ops_worker deploy` in Lothsahn's or Ben's own
+  turn; the worker reports the commit before and after once the portal is back). The Claude credential
   reaches it on a file descriptor, never its environment. Every command is in its transcript (read-only on the page,
   its own sidebar row) and the journal, redacted; `list_sandboxes` and `list_machines` show it as a group of its own,
   never game capacity. Transcripts now also redact machine credentials, Anthropic API keys, Tailscale keys, age

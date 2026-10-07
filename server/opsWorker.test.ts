@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner } from './opsWorker.ts';
+import { OPS_GRANT, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner } from './opsWorker.ts';
 import { OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
 import { beltFor, PERSONAL_TOOLS } from './belts.ts';
@@ -50,6 +50,8 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     'fffctl status',
     'fffctl logs 300',
     'fffctl credential issue m5 --to m5',
+    // allowed by the seatbelt: fff-ops-priv refuses it without the portal's deploy grant (ops_worker deploy)
+    'fffctl update',
     'ls -la /srv/fff-ops/scratch && cat notes.md',
     'set -e; ssh m5 uptime',
     'export LC_ALL=C',
@@ -67,7 +69,7 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     ['export -p', /environment is not printed/],
     ['cat /proc/1/environ', /environment/],
     ['sudo fffctl update', /no sudo/],
-    ['fffctl update', /a person's/],
+    ['fffctl rollback', /a person's/],
     ['fffctl restart --drain-minutes 5', /a person's/],
     ['fffctl vault list', /a person's/],
     ['systemctl restart fff-portal', /services are a person's/],
@@ -230,4 +232,47 @@ test('the one session: only an allowed orchestrator reaches it, a job needs its 
   assert.ok(h.info.sdkSessionId, 'the conversation is kept');
   assert.match(await ops.control(ben, 'stop'), /no process/);
   ops.close();
+});
+
+test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, and a report asked for after the restart', async () => {
+  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-d-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  let personTurn = false;
+  let now = Date.parse('2026-10-07T06:00:00Z');
+  const deps = { sessions, store, options: () => ({}), tellOrchestrator: () => {}, personTurn: () => personTurn, file: path.join(dir, 'ops-worker.json'), now: () => now };
+  const ops = new OpsWorker(deps);
+  const grant = path.join(dir, OPS_GRANT);
+  assert.throws(() => ops.deploy(orch('d', undefined, 'dispatcher')), /only from Lothsahn's and Ben's/);
+  assert.throws(() => ops.deploy(orch('co', { userId: 'carol', displayName: 'Carol' })), /only from Lothsahn's and Ben's/);
+  // A check-in, a timer or a relayed report of Lothsahn's own orchestrator: refused, even within an open job.
+  personTurn = true;
+  ops.send(orch('lo', LOTH), 'look at m5');
+  personTurn = false;
+  assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words in this turn/);
+  assert.ok(!fs.existsSync(grant), 'no grant without the person\'s turn');
+  personTurn = true;
+  assert.match(ops.deploy(orch('lo', LOTH), 'ship it'), /may run fffctl update once until 2026-10-07T06:15:00/);
+  const g = JSON.parse(fs.readFileSync(grant, 'utf8'));
+  assert.equal(g.by, 'lothsahn');
+  assert.equal(Date.parse(g.expires) - Date.parse(g.at), OPS_LIMITS.deployGrantMs);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok(store.readTranscript(OPS_ID, 50).some((e) => e.kind === 'user' && e.text.startsWith('[deploy] Lothsahn asked, in a turn of their own')));
+  ops.close();
+  // The portal restarts (the update's own restart): the worker is told to report, once.
+  sessions.get(OPS_ID).stop(false);
+  now += 6 * 60_000;
+  const after = new OpsWorker(deps);
+  after.start(0);
+  await new Promise((r) => setTimeout(r, 100));
+  const said = store.readTranscript(OPS_ID, 80).filter((e) => e.kind === 'user' && e.text.startsWith('[deploy] The portal has started again'));
+  assert.equal(said.length, 1);
+  assert.match(said[0].kind === 'user' ? said[0].text : '', /report to Lothsahn: the commit before/);
+  after.close();
+  const again = new OpsWorker(deps);
+  again.start(0);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(store.readTranscript(OPS_ID, 80).filter((e) => e.kind === 'user' && e.text.startsWith('[deploy] The portal has started again')).length, 1, 'reported once');
+  again.close();
 });

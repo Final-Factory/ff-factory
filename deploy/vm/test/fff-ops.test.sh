@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# the fixed strings matched in fff-ops-priv are single-quoted on purpose
+# shellcheck disable=SC2016
 # The orchestration worker's VM scripts (w597, docs/ops-worker.md), against fakes, no root and no VM: run by lint.sh.
 #   fff-ops-launch: the header's arguments reach claude, the environment is rebuilt from nothing, the credential comes on
 #                   fd 3 and is in no environment, a version mismatch or a missing credential answers ERR.
@@ -74,7 +76,9 @@ if [ "$(id -u)" -ne 0 ]; then
   out=$(bash $G/fff-ops-priv status 2>&1 || true)
   printf '%s' "$out" | matches 'run through sudo' || fail "priv: runs without root: $out"
 fi
-for sub in update restart rollback configure vault migrate backup claude-token gh-login prepare-shutdown; do
+for sub in restart rollback configure vault migrate backup claude-token gh-login prepare-shutdown; do
   matches -E "^  $sub\)" $G/fff-ops-priv && fail "priv: has a $sub subcommand"
 done
-echo "ok: fff-ops-priv has no update, restart, rollback, configure, vault, migrate, backup or token subcommand"
+matches -F 'grant=$DATA/ops-deploy.grant' $G/fff-ops-priv || fail "priv: update does not need the portal's deploy grant"
+matches -F '"$FFFCTL" update --no-wait' $G/fff-ops-priv || fail "priv: update is not the plain fffctl update"
+echo "ok: fff-ops-priv has no restart, rollback, configure, vault, migrate, backup or token subcommand, and update needs a grant"

@@ -6,13 +6,14 @@ reaches the machines over ssh with the portal's existing key, reads the portal's
 straight into a file on the machine. It has no git, no downloads, no package installs, no builds, no Unity and no game
 workspace: heavy work runs on the target machine over ssh. The VM enforces this, not only its prompt: a 2 GiB `noexec`
 scratch file system is all it can write, it can reach only Anthropic's API and the tailnet, and its only sudo rights
-are two wrappers.
+are two wrappers. It can also deploy the portal (`fffctl update`), but only after Lothsahn or Ben asks for that in a turn
+of their own: the portal then leaves a one-use, 15-minute grant that the root wrapper checks.
 
 Lothsahn asked for it on 2026-10-07: "Let's give you a real worker--not with unity, and not with a FinalFactory
 workspace, but with a claude so you can execute commands locally for orchestration." He settled three points: "You
 will get exactly one, it's hardcoded, and it's only to orchestrate stuff from you and ben", it runs in the portal VM,
 and "that worker has no access to unity, our workspace, git, etc? It has very limited disk space and should not
-download things."
+download things." Then he added the deploy: "Yes, please modify the ops worker to update yourself."
 
 ## Using it
 
@@ -21,6 +22,7 @@ A person's own orchestrator (Lothsahn's or Ben's) has the `ops_worker` tool:
 | action | what it does |
 |---|---|
 | `send` (`text`, `fresh`) | gives it a job or a follow-up. `fresh: true` starts a new conversation. A **new job** needs a turn the person started with a message of their own. Within that job (12 hours), the orchestrator's harness turns (a check-in, a timer) may follow up |
+| `deploy` (`text`: the person's words) | a portal deploy (`fffctl update`). Only in a turn the person started with their own message: never a check-in, a timer, a relayed report or a job's follow-up. See [Deploys](#deploys) |
 | `status` | its state, the job and whose it is, its limits, and its last 20 steps |
 | `interrupt` | ends its turn |
 | `stop` | ends its process (the conversation stays, and the next `send` resumes it) |
@@ -84,7 +86,8 @@ process of the portal: it would get the portal's account and everything that acc
 | It may not | Enforced by |
 |---|---|
 | read the portal's config, data, secrets or keys | Unix permissions: `/srv/fff` is 0700 `fff`, and `/etc/fff/vault.key` is root's. The guard also refuses these paths with a reason, and refuses `/proc/*/environ` |
-| deploy, update, restart or roll back the portal; change settings; use the vault, tokens, migrations, backups or shutdown | `fff-ops-priv` has none of those subcommands, and sudoers allows nothing else as root. The guard refuses `fffctl update` and the like with a reason |
+| restart or roll back the portal; change settings; use the vault, tokens, migrations, backups or shutdown | `fff-ops-priv` has none of those subcommands, and sudoers allows nothing else as root. The guard refuses `fffctl restart` and the like with a reason |
+| deploy the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own | `fff-ops-priv update` runs only with the grant the portal writes into its data folder on `ops_worker deploy`, which the server allows only in the person's own turn. `fff-ops` cannot write that folder (0700 `fff`), so it cannot make a grant. The grant is good for 15 minutes and is removed before the update runs, so it works once |
 | git, downloads, package installs, builds, interpreters | The network: the unit allows only loopback, the VM's resolvers, Anthropic's API (`160.79.104.0/23`, `2607:6bc0::/48`, [Anthropic's published inbound ranges](https://platform.claude.com/docs/en/api/ip-addresses)) and the tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). The disk: everything it can write is on a 2 GiB `noexec` file system. sudo: no `apt`. The guard refuses `git`, `curl`, `wget`, `apt`, `npm`, `pip`, `python`, `node` and the like, so the worker learns why at once |
 | print a credential | The launcher keeps the Claude credential out of its environment (fd 3). The guard refuses `env`, `printenv`, `export -p` and `/proc/*/environ`. Transcripts and the audit log redact Claude, GitHub, FFBox, machine, Tailscale, API and private keys (`redactSecrets`) |
 | be reached by anyone else | `SessionManager.send` refuses a session of kind `ops` unless the message comes through `OpsWorker` (Lothsahn's or Ben's own orchestrator) or is its own `wake_me`. That covers the dispatcher, people's chats (HTTP 403), workers, standing agents, the intake, FFBox, `/mcp` and every harness notice. `ops_worker` is in neither the dispatcher's belt nor `/mcp`'s |
@@ -147,6 +150,51 @@ goes on, with a line marking the new job and whose it is.
 - **The VM's journal**: `fff-ops-ssh` logs each ssh (`journalctl -t fff-ops-ssh`), `fff-ops-priv` each fffctl
   (`-t fff-ops-priv`), sudo each elevation, and the launcher each start (`-t fff-ops`).
 
+## Deploys
+
+Lothsahn, 2026-10-07: "Yes, please modify the ops worker to update yourself." After the first deploy of this feature
+(his, by hand), later portal updates can go through the worker.
+
+1. Lothsahn or Ben tells their orchestrator to deploy. In that same turn, the orchestrator calls `ops_worker deploy`.
+   The server checks the turn is the person's own (`personTurn`, as for approvals: every message the turn answers is
+   theirs). It refuses check-ins, timers, relayed reports, FFBox and Discord text, workers' and standing agents'
+   reports, and a job's follow-ups.
+2. The server writes `data/ops-deploy.grant`, `{by, at, expires}`, 15 minutes, owned by `fff` with mode 0600. It saves
+   the deploy in `data/ops-worker.json` and sends the worker a `[deploy]` message with the steps.
+3. The worker runs `fffctl status`, then `fffctl update`. `fff-ops-priv` (root):
+   - checks the grant is the portal's and still in time;
+   - removes it;
+   - prints the commit the portal runs;
+   - runs `fffctl update --no-wait`.
+
+   It takes no options, so there is no other ref and no drain setting. The update itself is `fff-update`'s, as for a
+   person: build `origin/main` beside the running release, drain, restart, verify, and roll back by itself when the
+   new release does not answer (RUNBOOK section 6).
+4. The worker ends its turn with the commit it started from, and sets `wake_me 20` as a fallback.
+5. **The restart.** The portal stops its sessions, so the worker's socket closes and its Claude Code exits:
+   `KillMode=control-group` ends anything it left in `fff-ops@.service`. The update itself runs on regardless,
+   because it is `fff-update.service`, started by `fff-update.path`, not a child of the worker. What carries the job
+   across the restart:
+   - its conversation, on its own scratch file system, which outlives the process;
+   - its session record;
+   - the deploy record in `data/ops-worker.json`.
+
+   When the new portal starts (within the hour), `OpsWorker.start` sends the worker `[deploy] The portal has started
+   again...`, once. A new `fff-ops@` instance resumes the conversation, and the worker reports to the person: the
+   commit before, the commit now, verified or rolled back, and `fffctl status`. If the update needed no restart
+   (already up to date) or the build failed, its `wake_me` brings it back to report from `fffctl status` and
+   `fffctl logs`. The wake is kept in `data/wakes.json` across restarts.
+
+CI checks the parts that need no Claude token, in a real guest, after the update step's own restart:
+- `fff-ops.socket` still listens, and the launcher still starts Claude Code;
+- `fffctl update` through the worker's wrapper is refused with no grant and with a grant that ran out;
+- a fresh grant works once and is gone;
+- the portal still runs the same commit afterwards.
+
+`server/opsWorker.test.ts` checks that the server gives a grant only in the person's own turn, and that the report
+message is sent once after a restart. A real deploy by the worker, with its report, is the first such use after this
+merges.
+
 ## In the portal
 
 - `list_sandboxes` and `list_machines` end with a group of their own: "Orchestration worker (the portal VM; not game
@@ -167,6 +215,24 @@ What living in the VM gives it, by design:
   address). It never reads the key itself, because `fff-ops-ssh` runs as `fff`.
 - **Root, narrowly**: the subcommands of `fff-ops-priv`. A bug there is root in the VM, so the script takes no
   free-form argument except a machine id and an ssh target, both pattern-checked, and runs no shell on its input.
+- **The portal deploy, on a person's word.** A worker that deploys the portal changes what every agent runs: the
+  orchestrators, the dispatcher, the guards, and this worker's own fences, which come with the release's guest
+  `install.sh`. What limits that:
+  - **What it deploys** is only `origin/main` as GitHub has it. `fff-ops-priv update` takes no ref or option, and the
+    worker has no git and cannot push. So it can deploy only what was already merged to main through a pull request
+    and its CI, by someone else's hands.
+  - **When** is only after Lothsahn or Ben asks in a turn of their own. The grant is the server's, written where
+    `fff-ops` cannot write, good for 15 minutes and used once. A prompt injection that reaches the worker, or a
+    harness turn of the orchestrator, cannot deploy.
+  - **How** is the person's own path: `fff-update` builds beside the running release, drains, verifies, and rolls
+    back by itself when the new release does not answer. The worker cannot roll back, restart or change settings.
+  - **Audit**: `ops-worker: <person> asked for a portal deploy` in the portal's journal, `fff-ops-priv` naming who and
+    the commit it started from (`journalctl -t fff-ops-priv`), fff-update's own log and `update.result.json`, and the
+    worker's report of the commits before and after.
+
+  The first deploy of this feature stays Lothsahn's by hand (`sudo fff-vm ssh 'sudo fffctl update'`). What is merged
+  to main still needs review: a merged change that loosened these fences would reach the VM through the next deploy,
+  whoever starts it.
 - **The Claude credential** of its process: Claude Code holds it in memory. It is not in any environment, and the
   Bash tool's children cannot read their parent's memory (Ubuntu's Yama `ptrace_scope` 1 lets a process trace only
   its descendants).
@@ -227,7 +293,8 @@ VM shows its side.
   `units/fff-ops.socket`, and the install step (9/10) that writes `fff-ops@.service`, `fff-ops-scratch.service` and
   the sudoers file.
 - `server/opsWorker.test.ts`: who reaches it, the belts, the shell seatbelt, writes and reads, redaction, the header,
-  the spawner against a fake socket, and the one session with its job rule and lifetime.
+  the spawner against a fake socket, the one session with its job rule and lifetime, and a deploy (only in the
+  person's own turn, the grant, the report after the restart).
 - `deploy/vm/test/fff-ops.test.sh` (run by `lint.sh`): the launcher against a fake claude (arguments, environment,
   fd 3, refusals), the ssh wrapper against a fake ssh, and the root wrapper's subcommands.
 - `deploy/vm/test/ci-vm-e2e.sh`, "the orchestration worker" step, in a real guest:
@@ -236,5 +303,7 @@ VM shows its side.
   - a credential is not issued for an unreachable machine;
   - Claude Code starts through the socket, and another SDK version is refused;
   - the unit's own fences on a probe: sudo works inside them, Anthropic's API is reachable, example.com is not, and
-    only the scratch is writable.
+    only the scratch is writable;
+  - and, in the update step: the worker's socket and launcher survive the portal's restart, and its `fffctl update` is
+    refused with no grant or a grant that ran out, while a fresh grant works once.
 - Not tested in CI: a real Claude turn (CI has no token) and ssh to a real machine. Lothsahn's check above covers both.

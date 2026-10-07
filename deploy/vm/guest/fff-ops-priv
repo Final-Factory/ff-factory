@@ -14,9 +14,14 @@
 #                                      %USERPROFILE%). Never printed: only the remote path and its last four characters.
 #                                      TARGET must answer ssh first; issuing replaces the machine's credential, so its
 #                                      running daemon is dropped within 20 s.
+#   fffctl update                      the portal deploy (fffctl update --no-wait: build origin/main beside, drain,
+#                                      restart, verify, roll back by itself), only with the grant the portal leaves in
+#                                      its data folder when Lothsahn or Ben asks for a deploy in a turn of their own
+#                                      (ops_worker deploy): good for 15 minutes, once, removed here before anything runs.
+#                                      No options: no other ref, no drain setting.
 #
-# Everything else fffctl does (update, restart, rollback, configure, the vault, tokens, migrate, backups, shutdown) is
-# a person's and is not here. Every call is logged to the journal (tag fff-ops-priv); sudo logs it too.
+# Everything else fffctl does (restart, rollback, configure, the vault, tokens, migrate, backups, shutdown) is a
+# person's and is not here. Every call is logged to the journal (tag fff-ops-priv); sudo logs it too.
 set -o errexit -o nounset -o pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 FFF_LIB=${FFF_LIB:-/usr/local/lib/fff}
@@ -86,6 +91,23 @@ case "${1:-help}" in
       *) refuse "credential list | credential issue ID --to TARGET (revoking is a person's: sudo fffctl machine-credential revoke)" ;;
     esac
     ;;
-  help | -h | --help) sed -n '5,17p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) refuse "fffctl $1 is a person's (deploys, restarts, settings, the vault, migrations). You have: status, state, logs [N], machine-ssh-check, credential list, credential issue ID --to TARGET" ;;
+  update)
+    if [ $# -ne 1 ]; then refuse "update takes no options: it builds origin/$FFF_BRANCH"; fi
+    grant=$DATA/ops-deploy.grant
+    [ -f "$grant" ] || refuse "no deploy was asked for: only Lothsahn or Ben ask for one, in a turn of their own, through their orchestrator's ops_worker deploy (good for 15 minutes, once)"
+    owner=$(stat -c %U "$grant")
+    by=$(jq -r '.by // ""' "$grant" 2>/dev/null || true)
+    expires=$(jq -r '.expires // ""' "$grant" 2>/dev/null || true)
+    # Used once, whatever follows.
+    rm -f "$grant"
+    [ "$owner" = "$FFF_USER" ] || refuse "the deploy grant is not the portal's ($owner): refused"
+    if [ -z "$by" ] || [ "$(date -d "$expires" +%s 2>/dev/null || echo 0)" -le "$(date +%s)" ]; then refuse "the deploy grant ran out (${expires:-no time}): ask your person to ask for the deploy again"; fi
+    before=$(release_sha "$(readlink -e "$CURRENT" 2>/dev/null || true)")
+    logger -t fff-ops-priv -- "deploy asked for by $by: fffctl update from ${before:-unknown}" 2>/dev/null || true
+    echo "deploy asked for by $by; the portal runs $(basename "$(readlink -e "$CURRENT" 2>/dev/null || echo none)") at commit ${before:-unknown}"
+    "$FFFCTL" update --no-wait
+    echo "asked for: the portal builds origin/$FFF_BRANCH beside the running release, drains, restarts on it, verifies it and rolls back by itself. Your process ends with the old portal; FF Factory messages you when the new one is up."
+    ;;
+  help | -h | --help) sed -n '5,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) refuse "fffctl $1 is a person's (restarts, rollbacks, settings, the vault, migrations). You have: status, state, logs [N], machine-ssh-check, credential list, credential issue ID --to TARGET, and update with a deploy grant" ;;
 esac

@@ -328,7 +328,7 @@ printf '%s' "$out" | matches 'Claude Code' || fail "Claude Code did not run as t
 out=$(g 'sudo -u fff node /tmp/fff-ops-sock.js 0.0.1')
 printf '%s' "$out" | matches '^ERR .*0\.0\.1' || fail "the launcher took another SDK version: $out"
 if g 'sudo -u fff-ops node /tmp/fff-ops-sock.js' 2>/dev/null | matches '^OK'; then fail "fff-ops itself could connect to the socket"; fi
-g 'rm -f /tmp/fff-ops-sock.js'
+# Kept for the update step below: the worker's way in must survive the portal's restart.
 # The unit's own fences, as installed.
 unit=$(g 'systemctl cat fff-ops@.service')
 for want in 'User=fff-ops' 'ProtectSystem=strict' 'IPAddressDeny=any' 'IPAddressAllow=localhost 160.79.104.0/23' 'TemporaryFileSystem=/tmp:size=64M' 'MemoryMax=' 'RuntimeMaxSec='; do
@@ -382,6 +382,31 @@ echo "ok: $before -> $want"
 out=$(g 'sudo fffctl update --drain-minutes 0' 2>&1)
 echo "$out"
 printf '%s' "$out" | matches -E "^already up to date at $want" || fail "a second fffctl update did not say it was already up to date"
+# The orchestration worker (w597) after that restart: its socket still listens and Claude Code still starts through it.
+# Its process lives in fff-ops@.service, not in the portal's unit, so a portal restart ends only its connection.
+g 'systemctl is-active fff-ops.socket' | matches -x active || fail "fff-ops.socket did not survive the portal's update"
+g 'sudo -u fff node /tmp/fff-ops-sock.js' | head -n 1 | matches -x OK || fail "the worker's launcher does not answer after the portal's update"
+# Its deploy: fffctl update through its wrapper is refused without the grant the portal leaves on ops_worker deploy, and
+# with one that ran out; a fresh one is used once, asks for the update and is gone.
+grant() { g "echo $(printf '{"by":"ci","name":"CI","at":"%s","expires":"%s"}' "$(date -u +%FT%TZ)" "$1" | base64 -w0) | base64 -d | sudo -u fff tee /srv/fff/data/ops-deploy.grant >/dev/null"; }
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
+printf '%s' "$out" | matches 'no deploy was asked for' || fail "the worker's fffctl update ran without a grant: $out"
+grant 2020-01-01T00:00:00Z
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
+printf '%s' "$out" | matches 'ran out' || fail "the worker's fffctl update took a grant that ran out: $out"
+g 'test ! -e /srv/fff/data/ops-deploy.grant' || fail "a grant that ran out was not removed"
+grant "$(date -u -d '+10 min' +%FT%TZ)"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1')
+echo "$out"
+printf '%s' "$out" | matches "deploy asked for by ci; the portal runs .* at commit $want" || fail "the worker's deploy did not say what it started from: $out"
+g 'test ! -e /srv/fff/data/ops-deploy.grant' || fail "the deploy grant was not used up"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
+printf '%s' "$out" | matches 'no deploy was asked for' || fail "a deploy grant worked twice: $out"
+wait_for 600 "the worker's update request finished (already up to date)" g 'test ! -e /srv/fff/data/update.wanted && ! systemctl is-active --quiet fff-update.service'
+wait_for 300 "the portal answers after the worker's update request" health
+[ "$(sha_of)" = "$want" ] || fail "the portal does not run $want after the worker's update request"
+g 'rm -f /tmp/fff-ops-sock.js'
+echo "ok: the orchestration worker survives the portal's update, and deploys only with a fresh grant, once"
 
 step "a broken update is rolled back by itself"
 good=$want
