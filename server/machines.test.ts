@@ -438,7 +438,7 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-502-'));
   const d = new Daemon(
-    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: null },
+    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, appDir: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: null },
     () => {
       throw new Error('no sessions here');
     },
