@@ -548,7 +548,8 @@ portal never sends it one: it says the daemon is being redeployed.
 A sandbox whose agent is **Waiting** (w475, w509; [orchestrators.md](orchestrators.md), "Agent states": alive between
 turns with a running job, a queued message or a check-in ahead, and the line says which), or whose stopped agent its
 check-in or a queued message will resume, is not free: it does not count among a computer's free sandboxes,
-`list_sandboxes` does not mark it FREE, and the dispatcher gives it no new work unless the request is its own.
+`list_sandboxes` does not mark it FREE, and the dispatcher gives it no new work unless the request is its own. The
+exception is a worker that comes back much later: it releases its sandbox (below, "Released sandboxes").
 `list_machines` and `list_sandboxes` show each agent's state first (Working, then Waiting, then Idle), and
 `list_sandboxes` lists each computer's sandboxes by status too: a Working agent first, then Waiting, then Idle, then
 none live or unused, the most recent activity first within each.
@@ -599,6 +600,76 @@ LothDesktop and Beast, not just when BEAST is full").
   LothDesktop (only it has the ffdiscord config). A computer that is avoided or not next keeps only what needs it: FF
   Factory's own repo or its deploys, `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it. A worker going on in its own sandbox stays
   there, and running workers are never moved.
+- **Released sandboxes** (w640, Lothsahn on 2026-10-07: "Can we not reserve slots for workers that resume a long time
+  from now?"; `server/placeAgain.ts`). That afternoon LothDesktop's slot1 counted as taken with no live agent, only two
+  stopped workers whose check-ins were the next day, and five more sandboxes on BEAST and LothDesktop were held the same
+  way while w635 and w637 waited for one.
+  - **The rule.** A worker in a machine sandbox that is stopped with its check-in more than **30 minutes** away
+    (`RELEASE_AFTER_MS`), or with a check-in still ahead for work that is over (its requests closed or handed to
+    another worker, as the idle reaper reads them: w598's and w520's stale check-ins), releases its sandbox, checked
+    every minute. The sandbox shows FREE, counts among the computer's free sandboxes in the Capacity block, and takes
+    new work. The worker's line says so ("Stopped (resumes at check-in tomorrow 08:37 UTC; its sandbox is released
+    (…): it is placed again when it resumes)"). The ledger still counts it as coming back (`holdsItsPlace`), so its
+    request reads Waiting, not Stalled; only the sandbox is let go (`holdsSandbox`). A **Waiting** worker whose only
+    pending thing is such a check-in (no job running, nothing queued or unanswered) is stopped first, with a line in its
+    transcript; its process would otherwise keep its memory and its folder.
+  - **Why 30 minutes.** It has to be well above what moving a worker costs when it comes back to a sandbox that went to
+    other work: an editor stop, at most 30 s (the `unity` tool's stop, sourced); a fetch, 2.0 s, and a switch of the
+    85 files (28 scripts) a typical worker branch differs from develop by, under a second (measured on the M3 in
+    slot1 on 2026-10-07, `git fetch --dry-run` timed and `git diff --name-only`); a warm editor start to a live MCP
+    bridge, 78-83 s on the real 22 GiB workspace (sourced: project memory `unitymcp-works-headless-in-a-container`,
+    2026-09-11/12); and a recompile of what differs, at most the 37.08 s a full compile of all 2,145 items took on the
+    M3 (measured: slot1's `Logs/sandbox-editor.log`, "Tundra build success (37.08 seconds)"). About 3 minutes in all;
+    30 minutes is ten times that, so at worst a move costs a tenth of the time the sandbox was free for, and a
+    check-in under it (a CI run, a short build) keeps its sandbox as before. When nobody takes the sandbox the worker
+    pays nothing: it is back in place, and 30 minutes before its check-in it takes the sandbox back while it is still
+    free and on its branch.
+  - **Nothing is lost** (decision 1). Only a clean worktree is released: no uncommitted change and no untracked file,
+    read by git since the worker last worked, no Unity batch run of that sandbox in flight (`unity-slot run`, holder
+    `sandbox:<id>`), and no other agent working there on the same branch. Anything else keeps the sandbox held, and its
+    line in `list_sandboxes` says why ("its sandbox stays held although its check-in is far: 2 uncommitted change(s)
+    there"). Committed work needs no push to survive: a machine's sandboxes are worktrees of one repository, so the
+    worker's branch and its commits are in every sandbox there. Nothing is stashed or committed for a worker: a dirty
+    worktree is the worker's to commit, and the `wake_me` reply and the brief tell it so before a long check-in.
+  - **New work in a released sandbox** starts on its own branch. When the sandbox is still on the released worker's
+    branch, `start_agent` (and a start from the dashboard) first stops its editor if it runs and switches it to a
+    fresh branch, `sandbox/<slot>-<request id>` (`ffbox-f/…` for FFBox work) from origin/develop, so the new worker
+    never commits on the other's branch. That switch pushes any commits of the old branch no remote has first
+    (`switch_branch`'s rule), and it frees the branch for checkout elsewhere (git allows a branch in one worktree only).
+    The tool's answer says it was handed over.
+  - **When it resumes** (its check-in, or anyone's message), it is placed again like new work: its own sandbox if that
+    is still free (switched back to its branch if someone switched it), else a free sandbox on the same machine whose
+    editor is not running first, stopped and switched to its branch (`switch_branch`, so a sandbox with uncommitted
+    changes is never taken), else its message waits in the send queue and the next sandbox to free there is its, ahead
+    of new work: `list_sandboxes` marks that sandbox "spoken for", `start_agent` refuses new work there, and the
+    Capacity block counts it out of the free ones ("1 released worker(s) wait to resume there"). The same machine only:
+    its conversation is in that machine's Claude Code folder and its branch in that machine's repository. A placement
+    that fails (a switch refused) is reported in the worker's transcript and the next free sandbox is tried; that one
+    is tried again after 10 minutes.
+  - **Its editor, its players** (decision 2). Releasing leaves the sandbox's editor as it is: it belongs to the sandbox,
+    and the idle stop (2 hours without agent activity) still applies. New work there, or a worker placed in a sandbox,
+    stops that sandbox's editor before the switch: a switch under a running editor makes Unity stop on "The open
+    scene(s) have been modified externally" on a Mac and fails on files the editor holds open on Windows, and the
+    daemon refuses it on both. A Unity batch run keeps the sandbox held (above). Built players run from the slot pool,
+    not from the sandbox, and are not touched. A worker whose editor or run must stay untouched keeps its check-in
+    within 30 minutes; the brief says so.
+  - **How it learns it moved** (decision 3). Its next message starts with a line from FF Factory: "[moved] While you
+    were stopped your sandbox lothdesktop/slot1 went to other work (…). You work in sandbox lothdesktop/slot3 now:
+    `D:\work\ffsb\slot3`, on your branch …; read mcpforunity://instances and set_active_instance again …", and its new
+    process gets that sandbox's brief (worktree, editor instance, guard). Claude Code finds a conversation by its id in
+    any project folder, so the move keeps its whole history (measured 2026-10-07 on the M3: a session started in one
+    folder resumed from another with the CLI 2.1.292 and with the Agent SDK's bundled 2.1.284, and remembered its
+    word). The portal keeps where a worker works: a daemon's report of a session never moves it back
+    (`machines.ts`, the `session` message).
+  - **Mac and Windows** (decision 4). The same on both: the path in the note is the sandbox's own (`D:\…` on Windows),
+    the editor is stopped through the daemon (on Windows with its process tree), and the resume lookup is Claude Code's
+    own, the same code on both (measured on macOS only).
+  - **Restarts and the w613 hold** (decision 5). A worker whose daemon went away while it was mid-turn (`heldSince`,
+    w613) keeps its sandbox for its day whatever its check-in, since a cut-off turn may have half-written edits. A
+    released worker needs no hold: it is not running. A placement cut off by a portal restart is done again when the
+    queued message is retried (the send queue is on disk); one whose switch had finished finds its branch already
+    there. w631 (finished requests close themselves) only makes more check-ins stale, which releases their sandboxes
+    sooner; it changes nothing else here.
 - **The numbers are judgments**: 85% RAM (BEAST at 86% was overloaded, LothDesktop at 47% had room; one more editor
   takes 8-12 GB, about 15% of 64 GB) and the 10-point margin (one agent of ten slots, or about 6 GB of 64). Live agents
   count, not only mid-turn ones, because an idle agent's process holds its memory too (docs/orchestrators.md, "Agent

@@ -9,7 +9,7 @@ import { MachineManager, STANDING_CAP_NO_POOL, agentCap } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
-import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
+import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
@@ -31,6 +31,9 @@ const PEOPLE: UserInfo[] = [
   { ...BEN, role: 'owner' },
   { ...LOTH, role: 'member' },
 ];
+/** Someone who is neither owner (w627: the message_person count still holds for her). */
+const CARA: Requester = { userId: 'cara', displayName: 'Cara' };
+const WITH_CARA: UserInfo[] = [...PEOPLE, { ...CARA, role: 'member' }];
 const T0 = '2026-09-28T09:00:00.000Z';
 
 async function until(what: string, cond: () => boolean, ms = 5000) {
@@ -92,7 +95,11 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { l
   /** Harness messages a session got carrying `tag` (notices gathered into one message each keep their tag at a line start). */
   const heard = (id: string, tag: string) =>
     store.readTranscript(id).filter((e): e is Extract<TranscriptEvent, { kind: 'user' }> => e.kind === 'user' && e.from === 'system' && e.text.split('\n').some((l) => l.startsWith(tag)));
-  return { dir, cfg, store, sessions, machines, closers, agents, o, dispatcher, chat, call, heard };
+  /** What a personal orchestrator is told about message_person: its tool's description and its brief. */
+  const toldAbout = (info: SessionInfo) =>
+    `${agents.orchestratorBelt(info).find((x) => x.name === 'message_person')!.description}
+${(agents as unknown as { personalBrief(r: Requester): string }).personalBrief(info.requestedBy!)}`;
+  return { dir, cfg, store, sessions, machines, closers, agents, o, dispatcher, chat, call, heard, toldAbout };
 }
 
 /** Sandbox alpha on a machine (pc/alpha, a worktree on its in-process daemon): the portal holds none of its own (w510). */
@@ -548,63 +555,131 @@ test("message_person: one person's orchestrator reaches another's chat as a tagg
   assert.equal(store.sessions.get(ben.id)?.personMessages, undefined);
 });
 
-test('message_person: only a person’s own orchestrator sends, to someone else who exists, briefly, a few times until they write', async (t) => {
-  const { o, dispatcher, chat, call, heard } = setup(t);
+test('message_person: only a person’s own orchestrator sends, to someone else who exists, briefly', async (t) => {
+  const { o, dispatcher, chat, call } = setup(t);
   const loth = chat(LOTH).info;
-  const ben = chat(BEN).info;
   assert.match((await call(loth, 'message_person', { to: 'lothsahn', text: 'hi' })).text, /^ERROR: Lothsahn is your own person: tell them here/);
   assert.match((await call(loth, 'message_person', { to: 'max', text: 'hi' })).text, /^ERROR: no person with user id "max"; the people are Ben \(ben\), Lothsahn \(lothsahn\)/);
   assert.match((await call(loth, 'message_person', { to: 'ben', text: '   ' })).text, /^ERROR: the message is empty/);
   assert.throws(() => o.messagePerson(o.personalOf('lothsahn')!, { to: 'ben', text: 'x'.repeat(PERSON_MESSAGE_CHARS + 1) }), /keep it to 2000/);
   assert.throws(() => o.messagePerson(dispatcher(), { to: 'ben', text: 'hi' }), /only a person’s own orchestrator messages people/);
-  assert.equal(MESSAGES_PER_PERSON, 10);
-  for (let i = 0; i < MESSAGES_PER_PERSON; i++) assert.equal((await call(loth, 'message_person', { to: 'ben', text: `ping ${i}` })).isError, false);
-  assert.match((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).text, /^ERROR: 10 messages to Ben since Lothsahn or Ben last wrote to their orchestrator; ask Lothsahn before sending more/);
-  // Ben answering: a reply is the same tool, and his own limit is separate.
-  assert.equal((await call(ben, 'message_person', { to: 'lothsahn', text: 'Done, it is allowed now.' })).isError, false);
-  assert.equal(heard(loth.id, '[person message]').length, 1);
-  // w571: Lothsahn writing to his own chat frees his messages to Ben (his own words), and so does Ben writing to his.
-  o.personWrote(loth.id);
-  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'ping again' })).isError, false);
-  o.personWrote(ben.id);
-  assert.equal(o.personalOf('ben')!.info.personMessages, undefined, 'writing to his chat reads it');
-  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'and again' })).isError, false);
-  assert.equal(heard(ben.id, '[person message]').length, MESSAGES_PER_PERSON + 2);
 });
 
-test('message_person (w571): a person relays as much as they ask; two orchestrators answering each other stop at the cap', async (t) => {
-  const { o, chat, call, heard } = setup(t);
+test('message_person: anyone but the two owners sends a few times until either writes, to and from an owner too', async (t) => {
+  const { o, chat, call, heard, toldAbout } = setup(t, { people: WITH_CARA });
+  const cara = chat(CARA).info;
   const ben = chat(BEN).info;
-  const loth = chat(LOTH).info;
-  // Ben's case: he asks his orchestrator for one message to Lothsahn at a time, many times, while Lothsahn is away.
+  assert.equal(MESSAGES_PER_PERSON, 10);
+  for (let i = 0; i < MESSAGES_PER_PERSON; i++) assert.equal((await call(cara, 'message_person', { to: 'ben', text: `ping ${i}` })).isError, false);
+  assert.match((await call(cara, 'message_person', { to: 'ben', text: 'ping again' })).text, /^ERROR: 10 messages to Ben since Cara or Ben last wrote to their orchestrator; ask Cara before sending more/);
+  // Ben answering: a reply is the same tool, and his own limit is separate (an owner to someone else is counted too).
+  for (let i = 0; i < MESSAGES_PER_PERSON; i++) assert.equal((await call(ben, 'message_person', { to: 'cara', text: `Done ${i}` })).isError, false);
+  assert.match((await call(ben, 'message_person', { to: 'cara', text: 'one more' })).text, /^ERROR: 10 messages to Cara since Ben or Cara last wrote/);
+  assert.equal(heard(cara.id, '[person message]').length, MESSAGES_PER_PERSON);
+  // w571: Cara writing to her own chat frees her messages to Ben (her own words), and so does Ben writing to his.
+  o.personWrote(cara.id);
+  assert.equal((await call(cara, 'message_person', { to: 'ben', text: 'ping again' })).isError, false);
+  o.personWrote(ben.id);
+  assert.equal(o.personalOf('ben')!.info.personMessages, undefined, 'writing to his chat reads it');
+  assert.equal((await call(cara, 'message_person', { to: 'ben', text: 'and again' })).isError, false);
+  assert.equal(heard(ben.id, '[person message]').length, MESSAGES_PER_PERSON + 2);
+  // A person's own turn is no exemption for her: the count holds in every turn.
+  chat(CARA).lastFrom = 'human';
+  for (let i = 0; i < MESSAGES_PER_PERSON - 1; i++) assert.equal((await call(cara, 'message_person', { to: 'ben', text: `more ${i}` })).isError, false);
+  assert.match((await call(cara, 'message_person', { to: 'ben', text: 'over' })).text, /^ERROR: 10 messages to Ben since/);
+  // The tool and the brief say she has the count, and nothing of the owners' exemption.
+  const said = toldAbout(cara);
+  assert.match(said, /At most 10 to one person until your person or they write to their own orchestrator/);
+  assert.doesNotMatch(said, /No limit/);
+});
+
+test('message_person (w571): a person relays as much as they ask; two orchestrators other than the owners answering each other stop at the cap', async (t) => {
+  const { o, chat, call, heard } = setup(t, { people: WITH_CARA });
+  const ben = chat(BEN).info;
+  const cara = chat(CARA).info;
+  // Ben's case: he asks his orchestrator for one message to Cara at a time, many times, while she is away.
   for (let i = 0; i < 25; i++) {
     o.personWrote(ben.id);
-    assert.equal((await call(ben, 'message_person', { to: 'lothsahn', text: `Ben's message ${i}` })).isError, false, `message ${i}`);
+    assert.equal((await call(ben, 'message_person', { to: 'cara', text: `Ben's message ${i}` })).isError, false, `message ${i}`);
   }
-  assert.equal(heard(loth.id, '[person message]').length, 25);
+  assert.equal(heard(cara.id, '[person message]').length, 25);
   // The loop: each orchestrator answers the other's [person message] with no person writing. Both stop at the cap.
   o.personWrote(ben.id);
-  o.personWrote(loth.id);
+  o.personWrote(cara.id);
   let sent = 0;
   for (let i = 0; i < 50; i++) {
-    const a = await call(ben, 'message_person', { to: 'lothsahn', text: `bounce ${i}` });
-    const b = await call(loth, 'message_person', { to: 'ben', text: `bounce back ${i}` });
+    const a = await call(ben, 'message_person', { to: 'cara', text: `bounce ${i}` });
+    const b = await call(cara, 'message_person', { to: 'ben', text: `bounce back ${i}` });
     if (a.isError && b.isError) break;
     sent += Number(!a.isError) + Number(!b.isError);
   }
   assert.equal(sent, 2 * MESSAGES_PER_PERSON);
 });
 
+test('message_person (w627): Lothsahn’s and Ben’s orchestrators have no count between them, whatever the config says', async (t) => {
+  const { chat, call, heard, cfg, toldAbout } = setup(t);
+  cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: 1 };
+  const loth = chat(LOTH);
+  const ben = chat(BEN);
+  // In their own turns: never counted, past any configurable count (1-100) and past the loop guard's 60.
+  for (let i = 0; i < 120; i++) {
+    loth.lastFrom = 'human';
+    assert.equal((await call(loth.info, 'message_person', { to: 'ben', text: `Lothsahn's ${i}` })).isError, false, `Lothsahn's ${i}`);
+  }
+  assert.equal(heard(ben.info.id, '[person message]').length, 120);
+  // In turns no person started (answering the other's [person message]): no count, only the hourly rate.
+  ben.lastFrom = 'system';
+  for (let i = 0; i < OWNER_LOOP_MESSAGES_PER_HOUR; i++) assert.equal((await call(ben.info, 'message_person', { to: 'lothsahn', text: `Ben's orchestrator ${i}` })).isError, false, `Ben's orchestrator ${i}`);
+  assert.equal(heard(loth.info.id, '[person message]').length, OWNER_LOOP_MESSAGES_PER_HOUR);
+  // The tool and the brief say so, naming the other owner.
+  const said = toldAbout(loth.info);
+  assert.match(said, /No limit to Ben \(w627\): only in turns no person started \(a \[person message\], a report, a timer\) at most 60 an hour/);
+  assert.match(said, /To anyone else, at most 1 to one person until/);
+  assert.match(toldAbout(ben.info), /No limit to Lothsahn \(w627\)/);
+});
+
+test('message_person (w627): two owners’ orchestrators answering each other with no person writing slow to 60 an hour each way', async (t) => {
+  const { o, chat, call } = setup(t);
+  assert.equal(OWNER_LOOP_MESSAGES_PER_HOUR, 60);
+  const loth = chat(LOTH);
+  const ben = chat(BEN);
+  loth.lastFrom = 'system';
+  ben.lastFrom = 'system';
+  const bounce = async (n: number) => {
+    let sent = 0;
+    for (let i = 0; i < n; i++) {
+      const a = await call(ben.info, 'message_person', { to: 'lothsahn', text: `bounce ${i}` });
+      const b = await call(loth.info, 'message_person', { to: 'ben', text: `bounce back ${i}` });
+      if (a.isError && b.isError) {
+        assert.match(a.text, /^ERROR: 60 messages to Lothsahn in the last hour in turns no person started \(a \[person message\], a report, a timer\): the loop guard between Ben's and Lothsahn's orchestrators \(w627\)\. A message Ben or Lothsahn writes to their own orchestrator starts it again; otherwise the next fits at /);
+        break;
+      }
+      sent += Number(!a.isError) + Number(!b.isError);
+    }
+    return sent;
+  };
+  assert.equal(await bounce(100), 2 * OWNER_LOOP_MESSAGES_PER_HOUR);
+  // A person writing starts it again, both ways (either of the two).
+  o.personWrote(loth.info.id);
+  loth.lastFrom = 'system';
+  assert.equal(await bounce(100), 2 * OWNER_LOOP_MESSAGES_PER_HOUR);
+  // An hour on, it has room again without anyone writing: a rate, not a count.
+  const later = Date.now() + 3_600_000 + 1000;
+  Object.assign(o, { now: () => new Date(later) });
+  assert.equal(await bounce(100), 2 * OWNER_LOOP_MESSAGES_PER_HOUR);
+  // (A person's own turn is never counted: the test above sends 120 in them.)
+});
+
 test('loop guards: config orchestrator.* sets them, within 1-100, else the defaults', async (t) => {
-  const { o, chat, call, cfg } = setup(t);
+  const { o, chat, call, cfg } = setup(t, { people: WITH_CARA });
   assert.deepEqual(loopGuards({ orchestrator: {} as Config['orchestrator'] }), { filings: FILINGS_PER_MESSAGE, followUps: FOLLOW_UPS_PER_MESSAGE, messages: MESSAGES_PER_PERSON });
   assert.deepEqual(loopGuards({ orchestrator: { messagesPerPerson: 0, filingsPerMessage: 101, followUpsPerMessage: 2.5 } as Config['orchestrator'] }), { filings: FILINGS_PER_MESSAGE, followUps: FOLLOW_UPS_PER_MESSAGE, messages: MESSAGES_PER_PERSON });
   cfg.orchestrator = { ...cfg.orchestrator, messagesPerPerson: 2 };
-  const loth = chat(LOTH).info;
-  for (let i = 0; i < 2; i++) assert.equal((await call(loth, 'message_person', { to: 'ben', text: `ping ${i}` })).isError, false);
-  assert.match((await call(loth, 'message_person', { to: 'ben', text: 'third' })).text, /^ERROR: 2 messages to Ben/);
-  o.personWrote(loth.id);
-  assert.equal((await call(loth, 'message_person', { to: 'ben', text: 'third' })).isError, false);
+  const cara = chat(CARA).info;
+  for (let i = 0; i < 2; i++) assert.equal((await call(cara, 'message_person', { to: 'ben', text: `ping ${i}` })).isError, false);
+  assert.match((await call(cara, 'message_person', { to: 'ben', text: 'third' })).text, /^ERROR: 2 messages to Ben/);
+  o.personWrote(cara.id);
+  assert.equal((await call(cara, 'message_person', { to: 'ben', text: 'third' })).isError, false);
 });
 
 test('message_person: a message to an orchestrator mid-turn waits for that turn, then gets its own answer', async (t) => {

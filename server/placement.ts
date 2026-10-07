@@ -31,6 +31,8 @@ export interface Computer {
   editorsDetail?: string;
   /** VRAM its GPU Whisper for the portal's mic holds now (w615, machine/voice.ts), MiB: the editors share that GPU. */
   voiceVramMiB?: number;
+  /** Workers that released their sandbox there while they waited and now wait to be placed again (w640): ahead of new work. */
+  resumesWaiting?: number;
 }
 
 /** config placement (w428): computers to try first, in order, and computers to keep work off, with why. */
@@ -140,7 +142,7 @@ const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.avoid ??
 const loadPart = (p: Computer) => {
   const pct = memPct(p);
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
-  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}`;
+  return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}${p.voiceVramMiB ? `; Whisper holds ~${(p.voiceVramMiB / 1024).toFixed(1)} GB VRAM (unloaded for the editors when VRAM runs short)` : ''}${p.resumesWaiting ? `; ${p.resumesWaiting} released worker(s) wait to resume there and take the next sandbox that frees` : ''}`;
 };
 
 /** Where the next piece of game-repo work should go, in a line, or undefined with fewer than two computers. */
