@@ -42,6 +42,14 @@ const stats = (loadPct: number, usedGB: number, totalGB: number, gpu: MachineSta
 
 const worker = (base: SessionInfo, id: string, title: string, status: SessionInfo['status'], ago: number, where: Partial<SessionInfo>): SessionInfo => ({
   ...base,
+  // None of the live orchestrator's own pending facts: a wake_me another test set on it (e2e/compact.spec.ts) makes a
+  // stopped copy one that resumes at its check-in, which holds its place and counts as live (shared/agentState.ts).
+  wakeAt: undefined,
+  wakeNote: undefined,
+  queuedSend: undefined,
+  backgroundTasks: undefined,
+  backgroundJobs: undefined,
+  heldSince: undefined,
   id,
   kind: 'worker',
   title,

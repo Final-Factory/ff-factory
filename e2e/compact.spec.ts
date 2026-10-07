@@ -1,4 +1,4 @@
-import type { APIRequestContext, Browser, BrowserContext, BrowserContextOptions } from '@playwright/test';
+import type { APIRequestContext, Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
 import { BOX, appState, boxText, expect, go, sendToChat, test, uniq } from './fixtures.ts';
 import type { TranscriptEvent } from '../shared/types.ts';
 
@@ -6,18 +6,21 @@ import type { TranscriptEvent } from '../shared/types.ts';
  * w518 (asked by Lothsahn): `/compact [focus]` typed in an orchestrator's chat compacts its conversation instead of
  * reaching the model as text, says so in the chat with the context before and after, and leaves its wake_me check-in
  * alone; the dispatcher, which nobody chats with, has an owner-only Compact conversation; `/clear` asks before starting
- * a new conversation. The fake agent answers "/compact" as the CLI does (e2e/fakeAgent.ts). The orchestrator is shared
- * by the tests on a server, so a compaction refused because another test's turn is running is tried again.
+ * a new conversation. The fake agent answers "/compact" as the CLI does (e2e/fakeAgent.ts). The owner's orchestrator is
+ * shared by the tests on a server, so a compaction refused because another test's turn is running is tried again.
  */
 
-async function mateContext(browser: Browser): Promise<BrowserContext> {
+/** A browser context with the project's device, signed in as `username` (e2e/server.ts seeds the logins). */
+async function loginContext(browser: Browser, username: string, password: string): Promise<BrowserContext> {
   const ctx = await browser.newContext(test.info().project.use as BrowserContextOptions);
   await expect(async () => {
-    const r = await ctx.request.post('/api/login', { data: { username: 'teammate', password: 'e2e-teammate-456' } });
+    const r = await ctx.request.post('/api/login', { data: { username, password } });
     expect(r.ok(), await r.text()).toBeTruthy();
   }).toPass({ intervals: [100, 200, 400, 800], timeout: 15_000 });
   return ctx;
 }
+
+const mateContext = (browser: Browser) => loginContext(browser, 'teammate', 'e2e-teammate-456');
 
 async function transcript(request: APIRequestContext, id: string): Promise<TranscriptEvent[]> {
   const r = await request.get(`/api/sessions/${id}/events?limit=500`);
@@ -31,7 +34,23 @@ async function wake(request: APIRequestContext, id: string, minutes: number) {
   expect(r.ok(), await r.text()).toBeTruthy();
 }
 
-test('/compact in your own chat compacts the conversation, says the context before and after, and keeps the wake_me check-in', async ({ authed: page }) => {
+/**
+ * The page of a login whose own orchestrator no other test writes to (e2e/server.ts): a person's message to an
+ * orchestrator cancels its wake_me (server/index.ts), so in the owner's, which every other chat test writes to, a
+ * check-in this test set could go with another test's message.
+ */
+const asCompactor = test.extend<{ solo: Page }>({
+  solo: async ({ browser }, use) => {
+    const ctx = await loginContext(browser, 'compactor', 'e2e-password-789');
+    const page = await ctx.newPage();
+    await page.goto('/');
+    await expect(page.locator('.sidebar')).toBeAttached();
+    await use(page);
+    await ctx.close();
+  },
+});
+
+asCompactor('/compact in your own chat compacts the conversation, says the context before and after, and keeps the wake_me check-in', async ({ solo: page }) => {
   const tag = uniq('compact');
   const me = await appState(page.request);
   const id = me.orchestratorId;
@@ -86,7 +105,7 @@ test('past its threshold the orchestrator compacts itself after the turn (w535):
   const tag = uniq('auto');
   const me = await appState(page.request);
   // The e2e server compacts at 900,000 tokens; the fake agent's "#ctx" sets the context its reply reports. It waits 3
-  // turns after any compaction, and the /compact test above shares this orchestrator: a big turn again until it has.
+  // turns after any compaction (a retry of this test's own, the other tests' turns): a big turn again until it has.
   const line = page.locator('.orch .sys-line', { hasText: /^Compacted: [\d,]+ → 18,000 tokens \(automatically: the context passed 900,000 tokens\)/ });
   let n = 0;
   await expect(async () => {
