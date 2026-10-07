@@ -221,13 +221,15 @@ function PlaceHead({ glance: g, title, unused, free, unity, sub, active, hint, o
 function SandboxItem({ sb, now, sel, variant, go }: { sb: FleetSandbox; now: number; sel: FleetSelection; variant: Variant; go: (r: Route) => void }) {
   const g = machineSandboxGlance(sb.machineSandbox!, sb.agents.live);
   const unityAbout = /^Unity/.test(g.label);
-  const title = displayName(sb);
+  // The label is the sandbox's name (w575); what it is doing is its live agents' titles, Working first.
+  const title = sb.id;
+  const doing = sb.doing.length ? `${sb.doing[0]}${sb.doing.length > 1 ? ` (+${sb.doing.length - 1})` : ''}` : '';
   return (
     <div className="fl-sb" data-testid={`fl-sandbox-${sb.key}`}>
       <PlaceHead
         glance={g}
         title={title}
-        unused={isUnused(sb.purpose)}
+        unused={sb.free}
         free={sb.free}
         unity={sb.status === 'ready' ? { tone: unityTone(sb.unity), label: unityLabel[sb.unity] } : undefined}
         sub={
@@ -235,6 +237,14 @@ function SandboxItem({ sb, now, sel, variant, go }: { sb: FleetSandbox; now: num
             {!sb.free && (
               <>
                 <span className={`tone-${g.tone}`}>{g.label}</span>
+                {doing && (
+                  <>
+                    {' · '}
+                    <span className="fl-doing" data-testid="fl-doing" title={sb.doing.join('\n')}>
+                      {doing}
+                    </span>
+                  </>
+                )}
                 {' · '}
               </>
             )}

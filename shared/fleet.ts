@@ -24,14 +24,17 @@ export interface FleetSandbox {
   id: string;
   /** Set for a machine sandbox. */
   machineId?: string;
+  /** Its label: the sandbox's name, fixed (w575). */
   purpose: string;
+  /** What it is doing: its live agents' titles ("w513: LothDesktop fresh install"), Working first (w575). */
+  doing: string[];
   /** The branch checked out now (git), else the one it was created on. */
   branch: string;
   status: SandboxStatus;
   statusDetail?: string;
   unity: UnityState;
   agents: PlaceAgents;
-  /** Unused label and no live agent: free to take. */
+  /** Ready with no live agent: free to take. */
   free: boolean;
   /** Permission requests waiting in it, plus a blocked editor. */
   attention: number;
@@ -66,12 +69,6 @@ export interface FleetComputer {
   busy: number;
   attention: number;
 }
-
-/** labels.ts isUnused, repeated: a shared module cannot import another's values (Node wants ".ts", the web build refuses it). */
-const isUnused = (purpose: string | undefined) => {
-  const p = (purpose ?? '').trim().toLowerCase();
-  return !p || p === 'unused';
-};
 
 const busyAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'waiting_permission';
 
@@ -132,12 +129,13 @@ export function fleetOf(app: Pick<AppState, 'sessions' | 'machines' | 'system' |
         id: sb.id,
         machineId: m.id,
         purpose: sb.purpose,
+        doing: agents.live.map((s) => s.title),
         branch: sb.git?.branch ?? sb.branch,
         status: sb.status,
         statusDetail: sb.statusDetail,
         unity: sb.unity.state,
         agents,
-        free: isUnused(sb.purpose) && agents.live.length === 0 && sb.status === 'ready',
+        free: agents.live.length === 0 && sb.status === 'ready',
         attention: waiting(agents),
         machineSandbox: sb,
       };
