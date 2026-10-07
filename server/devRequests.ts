@@ -642,7 +642,12 @@ export class DevRequests {
     const person = who.person;
     const o = this.d.orchestrators;
     const w = o.devTarget(m.request);
-    if (!w) return refuse('bad_request', `no request ${m.request} in FF Factory`, person.userId);
+    // A REQUEST FF FACTORY NO LONGER HAS (w611): the ledger keeps every open request but only the newest finished ones
+    // (pruneIds, KEEP_CLOSED), so an old thread's link can name nothing; conversation 591 was linked to w336. Not a bad
+    // request: FFBox drops the link and hands the same turn over again as a dev_request with the thread's keys (its
+    // thread, branch and PR), which joins open work, answers "already fixed" from finished work, or is filed new, and
+    // its dev_filed workId is the thread's link from then on.
+    if (!w) return refuse('unknown_request', `no request ${m.request} in FF Factory: hand the turn over as a dev_request with the conversation's keys, and dev_filed names the request it is linked to now`, person.userId);
     const links = o.devLinksOf(w).filter((x) => x.link.conversation === m.conversation);
     // A REQUEST FILED FROM FFBOX'S OWN REPORT OR ESCALATION (w278) has no dev link: its source names the conversation,
     // and any person it is for may answer in that thread.
