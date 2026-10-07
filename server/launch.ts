@@ -7,6 +7,7 @@ import { standingGuard } from './standingGuard.ts';
 import { publicIdentityEnv } from './publicGit.ts';
 import { usageEnv } from './usage.ts';
 import type { StandingToolGroup } from '../shared/types.ts';
+import { WORK_LIVE_STATES, type WorkLiveState } from '../shared/workState.ts';
 import type { SecretRules } from './secretGuard.ts';
 
 /** A stdio MCP server the agent process starts (on a machine: the daemon's Unity MCP server, machine/unityMcp.ts). */
@@ -70,6 +71,9 @@ export interface LaunchSpec {
   init?: { files?: Record<string, string> };
 }
 
+/** A request's live state (shared/workState.ts), as read_work takes it. */
+const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...WorkLiveState[]]);
+
 /** The tools a spec can ask for, with their input schemas. Descriptions come with the spec. */
 export const CATALOG = {
   /** Retired (w575): sandbox labels are their names. Listed in no spec; kept so workers started before it get an answer. */
@@ -119,7 +123,7 @@ export const CATALOG = {
     all: z.boolean().optional().describe("List the ledger's open and stalled requests, not only yours and the ones they name. Needs a ledger-read grant on one of your open requests."),
     status: z.enum(['open', 'stalled', 'open_and_stalled', 'any']).optional().describe('Default: any for your own list, open_and_stalled with all (any is refused there).'),
     state: z
-      .union([z.enum(['working', 'pending', 'waiting', 'queued', 'followup', 'stalled']), z.array(z.enum(['working', 'pending', 'waiting', 'queued', 'followup', 'stalled'])).min(1).max(6)])
+      .union([LIVE_STATE, z.array(LIVE_STATE).min(1).max(WORK_LIVE_STATES.length)])
       .optional()
       .describe('Only requests in these live states: working, pending (its worker will come back to it), waiting (on input), queued, followup (merged, follow-up pending), stalled.'),
     person: z.string().max(64).optional().describe('Only the requests of this person (user id or display name).'),
