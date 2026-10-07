@@ -12,7 +12,7 @@ import { installScript, taskName, taskXml, uninstallScript } from '../server/mac
 import { adoptLayout, leaveRoot } from '../server/machines.ts';
 import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
-import { cloneRepo, credentialId, daemonJson, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
+import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, withPlistPath, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
 import { runElevatedSteps } from './worker/worker.ts';
@@ -474,5 +474,114 @@ test("worker install: a Mac's slot config names the root's players, the sandbox-
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { root: '/Users/b/ffw/players', layout: 'sandbox-pairs', count: 1 });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- w613: worker.ts update
+
+/** BEAST's daemon.json as it was tuned by hand before the 2026-10-07 reinstall (values from the ops worker's report). */
+const BEAST_CONFIG = {
+  portalUrl: 'https://portal.example',
+  id: 'beast',
+  root: 'C:\\ffw',
+  tokenFile: 'C:\\ffw\\secrets\\machine-token',
+  repoPath: 'C:\\ffw\\repo',
+  appDir: 'C:\\ffw\\daemon',
+  tempDir: 'C:\\ffw\\tmp',
+  claude: 'C:\\Users\\rydin\\.local\\bin\\claude.exe',
+  protectedPaths: ['C:\\FinalFactory', 'D:\\live-coop'],
+  hostGuard: { warnFreeGB: 80, criticalFreeGB: 30 },
+  unityEditorRoot: 'C:\\Program Files\\Unity\\Hub\\Editor',
+  sandboxes: { root: 'C:\\ffw\\sandboxes', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, maxAgents: 6, diskWarnGB: 60, diskCriticalGB: 25, librarySeed: 'F:\\seed\\Library', blockClone: true, editorPriority: 'BelowNormal' },
+};
+const BEAST_ROOT: Manifest = { installId: 'i', layout: 1, machineId: 'beast', portalUrl: 'https://portal.example', platform: 'win32', service: 'FFFactoryDaemon', slots: 3, repoUrl: 'https://github.com/Final-Factory/FinalFactory.git', createdAt: 'x', updatedAt: 'x', outside: [] };
+const BEAST_TOKEN = `ffm_beast_${'B'.repeat(43)}`;
+
+test('worker update (w613): every tuned setting is carried unless a flag changes it, and the diff says what changed', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-${process.pid}`);
+  const l = layoutOf(root);
+  const o = planUpdate(root, BEAST_ROOT, BEAST_CONFIG, BEAST_TOKEN, {});
+  assert.equal(o.update, true);
+  assert.equal(o.token, BEAST_TOKEN, "the machine's own credential, from its secrets folder");
+  assert.equal(o.service, 'FFFactoryDaemon');
+  assert.deepEqual([o.maxSandboxes, o.maxAgentsPerSandbox, o.maxUnity], [3, 2, 2], 'the limits it had');
+  const j = daemonJson(o, l, 'beast', BEAST_CONFIG.claude);
+  const pool = j.sandboxes as Record<string, unknown>;
+  assert.equal(pool.maxAgents, 6, "beast's 6-agent total");
+  assert.equal(pool.librarySeed, 'F:\\seed\\Library', 'the Library seed (block clone)');
+  assert.equal(pool.blockClone, true);
+  assert.equal(pool.editorPriority, 'BelowNormal', 'below-normal editors');
+  assert.deepEqual([pool.diskWarnGB, pool.diskCriticalGB], [60, 25], "the disk guard's values");
+  assert.deepEqual(j.protectedPaths, BEAST_CONFIG.protectedPaths);
+  assert.deepEqual(j.hostGuard, BEAST_CONFIG.hostGuard);
+  assert.equal(j.unityEditorRoot, BEAST_CONFIG.unityEditorRoot);
+  assert.equal('token' in j, false);
+  // A plain re-run of the install (no carry) dropped them: what the update replaces.
+  const plain = daemonJson({ ...o, carry: undefined, update: undefined }, l, 'beast', BEAST_CONFIG.claude);
+  assert.equal((plain.sandboxes as Record<string, unknown>).maxAgents, undefined);
+  assert.equal(plain.protectedPaths, undefined);
+  // A flag changes only what it names (the one-root flags stay).
+  const four = planUpdate(root, BEAST_ROOT, BEAST_CONFIG, BEAST_TOKEN, { maxSandboxes: 4 });
+  const j4 = daemonJson(four, l, 'beast', BEAST_CONFIG.claude);
+  assert.equal((j4.sandboxes as Record<string, unknown>).maxSandboxes, 4);
+  assert.equal((j4.sandboxes as Record<string, unknown>).maxAgents, 6);
+  const same = { root: BEAST_CONFIG.root, tokenFile: BEAST_CONFIG.tokenFile, repoPath: BEAST_CONFIG.repoPath, appDir: BEAST_CONFIG.appDir, tempDir: BEAST_CONFIG.tempDir };
+  const diff = settingsDiff({ ...BEAST_CONFIG, sandboxes: { ...BEAST_CONFIG.sandboxes, root: l.sandboxes } }, { ...j4, ...same, maxEventsFile: undefined });
+  assert.ok(diff.includes('~ sandboxes.maxSandboxes: 3 -> 4'), diff.join('\n'));
+  assert.ok(!diff.some((d) => /maxAgents\b|protectedPaths|librarySeed|editorPriority|blockClone|hostGuard/.test(d)), diff.join('\n'));
+  assert.deepEqual(settingsDiff({ token: 'a', x: 1 }, { token: 'b', x: 1 }), [], 'a token is never shown, not even as changed');
+  // Elevated on Windows: the task's user gets what it makes.
+  assert.equal(planUpdate(root, BEAST_ROOT, BEAST_CONFIG, BEAST_TOKEN, { owner: '*S-1-5-21-1' }).owner, '*S-1-5-21-1');
+  assert.deepEqual(
+    preflightProblems({ ...GOOD, elevated: true, rootState: 'ours', credentialId: 'beast', portal: { ok: true, me: { id: 'beast', online: true, agents: [], sandboxes: [] } } }, { ...OPTS, owner: '*S-1-5-21-1' }),
+    [],
+    "an elevated update with the task's user is allowed",
+  );
+});
+
+test("worker update (w613): the LaunchAgent keeps the old PATH's order (m5's ~/.unity/bin) and gains only what is new", () => {
+  const oldPath = '/opt/homebrew/bin:/Users/b/.unity/bin:/Users/b/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+  const text = plist('/Users/b', '/opt/homebrew/bin/node', false, '/opt/homebrew/bin:/usr/bin:/bin:/Users/b/new-tool', '/Users/Shared/ffw/daemon', 'com.fffactory.daemon');
+  const fresh = plistPathOf(text)!;
+  assert.equal(fresh.indexOf('.unity/bin'), -1, 'the probe over ssh did not see it');
+  const merged = mergePath(oldPath, fresh);
+  assert.ok(merged.startsWith(oldPath), 'the old order first, unchanged');
+  assert.ok(merged.slice(oldPath.length).split(':').includes('/Users/b/new-tool'), 'a new folder after them');
+  const kept = withPlistPath(text, merged);
+  assert.equal(plistPathOf(kept), merged);
+  assert.equal(kept.replace(merged, ''), text.replace(fresh, ''), 'only PATH changed');
+});
+
+test('worker update (w613): the game repo is not fetched (no keychain over ssh); the install still fetches', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-nofetch-'));
+  try {
+    const repo = path.join(base, 'repo');
+    execFileSync('git', ['init', '--bare', '-q', repo]);
+    // An origin nobody can reach and no credential for it: what a Mac's ssh session met (m5, 2026-10-07).
+    const url = 'https://127.0.0.1:9/private/FinalFactory.git';
+    execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', url]);
+    await cloneRepo({ repo }, url, true, undefined, false);
+    assert.equal(execFileSync('git', ['-C', repo, 'config', 'remote.origin.fetch']).toString().trim(), '+refs/heads/*:refs/remotes/origin/*', 'configured as before');
+    await assert.rejects(cloneRepo({ repo }, url, true, undefined, true), /git fetch/, 'the install fetches, and would have failed here');
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('worker update (w613): refused clearly without an install, its daemon.json or its own credential; nothing is issued', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-upd-'));
+  try {
+    await assert.rejects(update(base, {}), /no worker install at .* \(no root\.json\): install it first/);
+    const l = layoutOf(base);
+    fs.writeFileSync(path.join(base, 'root.json'), JSON.stringify(BEAST_ROOT));
+    await assert.rejects(update(base, {}), /daemon\.json: this root's daemon was never installed/);
+    fs.mkdirSync(l.daemon, { recursive: true });
+    fs.writeFileSync(path.join(l.daemon, 'daemon.json'), JSON.stringify(BEAST_CONFIG));
+    await assert.rejects(update(base, {}), /no credential at .*machine-token: an update reuses the machine's own/);
+    fs.mkdirSync(l.secrets, { recursive: true });
+    fs.writeFileSync(l.token, `ffm_other_${'C'.repeat(43)}\n`);
+    await assert.rejects(update(base, {}), /does not hold machine beast's credential/);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
   }
 });

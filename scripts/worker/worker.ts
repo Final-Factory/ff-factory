@@ -1096,7 +1096,7 @@ export function plistPathOf(text: string): string | undefined {
 }
 
 /** The plist with its PATH replaced. */
-function withPlistPath(text: string, value: string): string {
+export function withPlistPath(text: string, value: string): string {
   const x = value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return text.replace(/(<key>PATH<\/key>\s*<string>)[^<]*(<\/string>)/, (_m, a: string, b: string) => `${a}${x}${b}`);
 }
