@@ -79,11 +79,17 @@ check fails**, listing every problem with its fix:
 - someone is logged on (Windows: the daemon runs in the interactive session for the Claude login, the GPU and Unity).
 
 Then: the root and `root.json`; the credential into `secrets/`; a bare clone of the game repo (its own refspec, LFS on,
-relative worktree paths; `--seed-from <clone>` seeds it from a local clone's origin branches instead of downloading, for a run with no GitHub credential such as an ssh session, LothDesktop 2026-10-07); the daemon's code from the installer's checkout, `npm ci`; `daemon.json`; the task or
+relative worktree paths, `core.symlinks false` on Windows; `--seed-from <clone>` seeds it from a local clone's origin branches instead of downloading, for a run with no GitHub credential such as an ssh session, LothDesktop 2026-10-07); the daemon's code from the installer's checkout, `npm ci`; `daemon.json`; the task or
 LaunchAgent, started; the firewall rules for `players\slot1-0..slotN-1\player\finalfactory.exe` and the Unity editors, plus the
 slot config (one UAC prompt); and it waits until the portal sees the machine online with its root. Re-running it
 updates the code and keeps everything else (that is also how a root install is **updated**: the portal never
 redeploys one over ssh, it says "re-run its installer" when the daemon is outdated).
+
+**Symlinks on Windows** (w596): the root's clone gets `core.symlinks false`. The daemon runs non-elevated, where
+Windows refuses to make a symlink without Developer Mode, and the game repo has one (`AGENTS.md`). Git for Windows'
+installer can set `core.symlinks true` system-wide, and a clone made elevated (`--owner` over ssh) does not get the
+local `false` a non-elevated one does, so every sandbox checkout failed on BEAST ("unable to create symlink AGENTS.md:
+Permission denied") and the pool marked them `error`. Symlinks now check out as plain files, as in a person's clone.
 
 **The supervisor is part of every install** (w576, lothsahn: "every worker should have a restart daemon--it should be
 the standard part of the install"). It is what starts the daemon again after a crash or an update. On Windows the task
