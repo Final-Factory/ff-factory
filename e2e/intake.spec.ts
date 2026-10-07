@@ -68,7 +68,7 @@ test('Discord reports and trusted requests land in the Intake tab, wait for a pe
   await expect(settings).toContainText('auto-approve off');
   await expect(settings).toContainText("#bug-reports, #dev-bug-reports: FFBox's, never filed from");
 
-  // Poll until both are filed (the button is rate limited to one check every 30 s; a retry may land inside that).
+  // Poll until both are filed (the button is rate limited, here to one check a second; a retry may land inside that).
   const find = async (pred: (w: WorkItem) => boolean) => (await appState(page.request)).work?.find(pred);
   await expect
     .poll(

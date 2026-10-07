@@ -35,6 +35,8 @@ export interface IntakeSettings {
     /** Discord user id -> FF Factory user id. */
     trusted: Record<string, string>;
     pollMinutes: number;
+    /** The least seconds between two "Check Discord now" polls. */
+    checkNowSeconds: number;
     dailyCap: number;
     perReporterPerDay: number;
     autoApprove: { enabled: boolean; maxPerDay: number; bugs: boolean; requests: boolean };
@@ -82,6 +84,7 @@ export function intakeSettings(cfg: Pick<Config, 'intake' | 'providers'>): Intak
       ffboxOwned: [...FFBOX_OWNED_CHANNELS],
       trusted,
       pollMinutes: int(d.pollMinutes, 5, 2, 120),
+      checkNowSeconds: int(d.checkNowSeconds, 30, 1, 600),
       dailyCap: int(d.dailyCap, 10, 0, 200),
       perReporterPerDay: int(d.perReporterPerDay, 2, 1, 50),
       autoApprove: {

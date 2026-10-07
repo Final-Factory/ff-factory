@@ -25,7 +25,8 @@
  *                      E2E_PROVIDER_TOKEN as its connector token. Off everywhere else, so no other page changes.
  *   intake             only with E2E_INTAKE=1 (the intake projects, e2e/intake.spec.ts): the Discord intake on, reading the
  *                      mock Discord, with Discord id INTAKE_TRUSTED trusted as tester; its cursors start at the server's
- *                      start, so only what a test posts is new. Off everywhere else.
+ *                      start, so only what a test posts is new; "Check Discord now" polls at most every second
+ *                      (30 s in production), so a test's second check need not wait. Off everywhere else.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -112,7 +113,8 @@ fs.writeFileSync(
       defaultModel: 'opus',
       // Worker updates reach people's own orchestrators (docs/orchestrators.md; e2e/orchestrators.spec.ts).
       // Automatic compaction (w535) only when a test asks for it ("#ctx 950000"): the fake's context grows 5k a message.
-      orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: true, compactAtTokens: 900_000, compactAtTurnUsd: 0 },
+      // It checks 200 ms after a turn's end, not 2 s: another test's turn ending meanwhile puts the check off again.
+      orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: true, compactAtTokens: 900_000, compactAtTurnUsd: 0, compactSettleMs: 200 },
       worker: { permissionMode: 'bypassPermissions', effort: 'low' },
       voice: { enabled: false, autoInstall: false, tts: false },
       // The machine "pc" never watches this host from outside (it would ping it and alert a phone).
@@ -120,7 +122,7 @@ fs.writeFileSync(
       // A 20 MB cap: e2e/attachments.spec.ts sends a 9 MB file (two chunks) and is refused a 21 MB one.
       attachments: { maxMB: 20 },
       max: { eventsFile: path.join(base, 'max-events.jsonl'), ffboxConfigDir: path.join(base, 'ffbox'), discordApi: `http://127.0.0.1:${discordPort}/api/v10`, inbound: { pollMinutes: 60 } },
-      ...(withIntake ? { intake: { discord: { enabled: true, bugChannels: ['beta_bugs', 'bug_reports'], trusted: { [INTAKE_TRUSTED]: 'tester' }, pollMinutes: 120 }, reviewers: ['tester'] } } : {}),
+      ...(withIntake ? { intake: { discord: { enabled: true, bugChannels: ['beta_bugs', 'bug_reports'], trusted: { [INTAKE_TRUSTED]: 'tester' }, pollMinutes: 120, checkNowSeconds: 1 }, reviewers: ['tester'] } } : {}),
       // The provider projects also take FFBox's ledger check and its fix branches (docs/intake.md; e2e/provider.spec.ts).
       ...(withProvider
         ? {

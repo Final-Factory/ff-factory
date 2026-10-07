@@ -284,7 +284,7 @@ export class Agents {
     this.machines = machines;
     this.identity = identity;
     this.waker = new Waker(sessions, store, path.join(cfg.dataDir, 'wakes.json'));
-    this.autoCompact = new AutoCompactor(sessions, cfg);
+    this.autoCompact = new AutoCompactor(sessions, cfg, { settleMs: cfg.orchestrator?.compactSettleMs });
     // IDLE WORKERS (w384): what keeps one from being stopped to make room, and the reaper of finished ones.
     sessions.keepIdle = (s) => this.keepIdle(s);
     // What each agent waits on between turns (w475): its wake_me and a queued message, on its session for the page.

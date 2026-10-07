@@ -45,6 +45,8 @@ export interface IntakeConfig {
     trusted?: Record<string, string>;
     /** Minutes between polls (>= 2, default 5). */
     pollMinutes?: number;
+    /** Tests only (e2e/server.ts): the least seconds between two "Check Discord now" polls (default 30). */
+    checkNowSeconds?: number;
     /** Intake requests filed from Discord per day, all channels (default 10). */
     dailyCap?: number;
     /** Bug reports filed per reporter per day (default 2). */
@@ -360,6 +362,8 @@ export interface Config {
      * 100,000 tokens or more, compacts the conversation after it. Default 1; 0 turns this trigger off.
      */
     compactAtTurnUsd?: number;
+    /** Tests only (e2e/server.ts): how long after a turn's end the automatic compaction checks, ms (default 2,000, SETTLE_MS). */
+    compactSettleMs?: number;
     /**
      * The loop guards (w571, server/orchestrators.ts loopGuards, docs/orchestrators.md "Loops, limits and safety"), each
      * a whole number from 1 to 100 that a person's own message starts again. Filings (request_work, update_work) a
