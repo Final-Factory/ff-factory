@@ -209,7 +209,7 @@ test('relocate: a new URL that never answers sends the daemon back to the one be
 
 test('relocate: refused for a bad URL, an offline machine and a daemon from before protocol 8; the offline watch leaves a relocated machine alone', async (t) => {
   const { store, mm, a, token } = await setup(t);
-  // No real deploy in a test: an outdated daemon's hello (protocol 7) asks for one at once (checkOutdated).
+  // No real deploy in a test: a protocol-7 daemon (still driven, w605) or an outdated one may ask for one (checkOutdated).
   const deployed: string[] = [];
   mm.deployer = async (o) => {
     deployed.push(o.id);

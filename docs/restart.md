@@ -67,10 +67,11 @@ drain message and stops nothing. While the portal is down the daemons queue thei
   `beast/shader-blackhole` and one on `lothdesktop/ghosts-fly` were mid-turn. Their 30-second calls went on every 30 s
   through the downtime. BEAST's daemon and all five of its agent processes kept their pids. Both transcripts hold the
   events from the downtime with no gap in their sequence numbers. The portal reported all nine machine agents as still running.
-- **An update leaves a daemon running the old code** until it has no live agent. It is then redeployed, and that
-  redeploy stops its agents (`Stop-FFDaemon`), so it waits for them (`MachineManager.checkOutdated`). Meanwhile it still
-  takes new agents if it speaks the portal's protocol (`incompatible`). After a protocol change it takes none until it
-  is redeployed.
+- **An update leaves a daemon running the old code**, which only means an update is available (w605,
+  [machines.md](machines.md), "Versions"): it takes, starts and resumes agents as before, whatever this setting. A
+  daemon the portal deployed over ssh is redeployed once nothing runs there; a worker root install is updated by
+  re-running its installer. Only a daemon whose protocol the portal no longer drives (`MachineManager.outdated`) takes
+  no new agent and resumes none until it is redeployed.
 - **Until a daemon reconnects** after the restart, its agents show `stopped` with "was running when the portal stopped;
   not heard from its daemon since (it may still be running there)" (`SessionManager.restore`). Its first report puts
   their real state back. Off (`false`), machine agents are drained and stopped with the portal, and resumed after.

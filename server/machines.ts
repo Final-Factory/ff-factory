@@ -10,7 +10,7 @@ import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
-import { ATTACHMENT_PROTOCOL, MAIN_CLONE_NO_AGENTS, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ATTACHMENT_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -454,7 +454,8 @@ export class MachineManager {
   /**
    * The daemon is back (hello): agents that were mid-turn when its link dropped and that it no longer runs (it
    * was redeployed, restarted or crashed; not a network blip, after which they are still live) get a resume
-   * message, as after a portal restart. An outdated daemon cannot start them: that waits for its redeploy.
+   * message, as after a portal restart. Only an outdated daemon (a protocol this portal no longer drives) cannot start
+   * them: that waits for its redeploy. One that merely has an update available resumes them at once (w605).
    */
   private resumeCutOff(machineId: string, live: Set<string>, now = Date.now()) {
     const c = this.cutOff.get(machineId);
@@ -584,7 +585,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; daemon?: string; catalog?: string[]; guard?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean }>();
 
   /** Whether a connected machine's daemon runs the host guard (w466): its hello said so. */
   guards(id: string): boolean {
@@ -593,7 +594,7 @@ export class MachineManager {
 
   /** A machine's host guard has news for people (wired by index.ts: as the portal's own guard reports). */
   hostReport?: (machineId: string, title: string, body: string) => void;
-  /** The commit this portal runs (a deploy stamps the daemon with the same), for the version check. */
+  /** The commit this portal runs (a deploy stamps the daemon with the same): another one only means an update is available. */
   portalHead: string | undefined = gitHead(ROOT);
   private readonly reportedOutdated = new Map<string, string>();
 
@@ -602,69 +603,82 @@ export class MachineManager {
     return this.isOnline(id) ? this.hellos.get(id)?.protocol : undefined;
   }
 
-  /** Why a connected machine's daemon does not match this portal (a redeploy fixes it), or undefined. */
+  /**
+   * Why a connected machine's daemon cannot work with this portal, or undefined: its protocol is outside the range
+   * both sides serve (protocolProblem, w605). Only this refuses new agents and resumes; a redeploy or a re-run of its
+   * installer fixes it.
+   */
   outdated(id: string): string | undefined {
     const h = this.hellos.get(id);
-    return h && this.isOnline(id) ? daemonMismatch(h, this.portalHead) : undefined;
+    return h && this.isOnline(id) ? protocolProblem(h) : undefined;
   }
 
   /**
-   * Why a daemon may not take a new agent, or undefined: it is outdated, except that with config
-   * machines.keepAgentsOnRestart (backlog step 2) one from another commit that speaks this protocol still may (its
-   * agents outlived the portal's update; it is redeployed once idle).
+   * A connected daemon installed from another commit than this portal's, which speaks a protocol both serve: an update
+   * is available, and nothing waits for it (w605: after a portal update every daemon was refused its paused agents).
    */
-  incompatible(id: string): string | undefined {
-    const why = this.outdated(id);
-    if (!why || this.cfg.machines?.keepAgentsOnRestart !== true) return why;
-    return this.hellos.get(id)?.protocol === PROTOCOL_VERSION ? undefined : why;
+  updateAvailable(id: string): string | undefined {
+    const h = this.hellos.get(id);
+    return h && this.isOnline(id) && !protocolProblem(h) ? daemonBehind(h, this.portalHead) : undefined;
   }
 
   /**
-   * Redeploy connected daemons that are outdated (after an app update the Macs still run the old code) as
-   * soon as no agent runs there: at most every 10 minutes per machine. Called on every hello and every 30 s.
+   * Redeploy connected daemons that are outdated (a protocol this portal no longer drives) as soon as no agent runs
+   * there: at most every 10 minutes per machine. A daemon that only has an update available keeps working; one this
+   * portal deployed over ssh is redeployed the same way once idle, and a worker root install is told about it once.
+   * Called on every hello and every 30 s.
    */
   checkOutdated(now = Date.now()): string[] {
     const done: string[] = [];
     if (dryRun()) return done;
     for (const m of this.list()) {
       const why = this.outdated(m.id);
-      if (!why) {
+      const behind = why ? undefined : this.updateAvailable(m.id);
+      const key = why ?? (behind ? `update: ${behind}` : undefined);
+      if (!key) {
         this.reportedOutdated.delete(m.id);
         continue;
       }
       if (this.deploying.has(m.id)) continue;
+      const once = (text: string) => {
+        if (this.reportedOutdated.get(m.id) === key) return;
+        this.reportedOutdated.set(m.id, key);
+        this.report?.(text);
+      };
       // A worker root install (w513) updates by running its installer again there: say so once, never redeploy over ssh.
       if (m.root) {
-        if (this.reportedOutdated.get(m.id) !== why) {
-          this.reportedOutdated.set(m.id, why);
-          this.report?.(`[machines] ${m.id}'s daemon is outdated (${why}). It is a worker root install (${m.root}): update it there by running its installer again (docs/worker-install.md, "Updating").`);
-        }
+        once(
+          why
+            ? `[machines] ${m.id}'s daemon is outdated (${why}). It is a worker root install (${m.root}): update it there by running its installer again (docs/worker-install.md, "Updating").`
+            : `[machines] ${m.id}'s daemon has an update available (${behind}). It keeps taking, starting and resuming agents meanwhile; to update it, run its installer again there (docs/worker-install.md, "Updating").`,
+        );
         continue;
       }
       const live = this.liveCount(m.id);
+      // Only an update: not while an agent there is mid-turn by its record or waits to be resumed (its daemon just came
+      // back), nor while any process runs.
+      if (!why && (this.cutOff.has(m.id) || [...this.sessions.sessions.values()].some((s) => s.info.machineId === m.id && (MID_TURN.has(s.info.status) || !!s.info.turnOpenSince)))) continue;
       if (live > 0) {
-        if (this.reportedOutdated.get(m.id) !== why) {
-          this.reportedOutdated.set(m.id, why);
-          this.report?.(`[machines] ${m.id}'s daemon is outdated (${why}); ${live} agent(s) still run there, so it is redeployed once they have stopped. New agents cannot start there until then.`);
-        }
+        if (why) once(`[machines] ${m.id}'s daemon is outdated (${why}); ${live} agent(s) still run there, so it is redeployed once they have stopped. New agents cannot start there until then.`);
         continue;
       }
       if (now - (this.lastAutoDeploy.get(m.id) ?? 0) < 10 * 60_000) continue;
       this.lastAutoDeploy.set(m.id, now);
+      const what = why ? `is outdated (${why})` : `has an update available (${behind})`;
       try {
         this.deployMachine({ id: m.id });
         done.push(m.id);
-        this.report?.(`[machines] ${m.id}'s daemon is outdated (${why}); redeploying it (as add_machine does).`);
+        this.report?.(`[machines] ${m.id}'s daemon ${what}; redeploying it while no agent runs there (as add_machine does).`);
       } catch (e) {
-        this.report?.(`[machines] ${m.id}'s daemon is outdated (${why}) and could not be redeployed: ${(e as Error).message}`);
+        this.report?.(`[machines] ${m.id}'s daemon ${what} and could not be redeployed: ${(e as Error).message}`);
       }
     }
     return done;
   }
 
   /**
-   * Wait until a machine is connected with a current daemon, redeploying an outdated one on the way.
-   * Resolves undefined when it is, else why not (after `timeoutMs`).
+   * Wait until a machine is connected with a daemon this portal can drive (an update available is fine, w605),
+   * redeploying an outdated one on the way. Resolves undefined when it is, else why not (after `timeoutMs`).
    */
   async whenCurrent(id: string, timeoutMs = 12 * 60_000, pollMs = 3000): Promise<string | undefined> {
     const until = Date.now() + timeoutMs;
@@ -672,7 +686,7 @@ export class MachineManager {
       const m = this.store.machines.get(id);
       if (!m) return `no machine "${id}"`;
       const online = this.isOnline(id) && this.hellos.has(id);
-      const why = this.incompatible(id);
+      const why = this.outdated(id);
       if (online && !why && !this.deploying.has(id)) return undefined;
       if (this.outdated(id)) this.checkOutdated();
       if (Date.now() >= until) {
@@ -1182,14 +1196,17 @@ export class MachineManager {
       if (why) throw new Error(why);
     }
     if (!this.hooks) throw new Error('machines are not wired up');
-    // A new agent process is built from the spec by the daemon's own code: an outdated daemon may not understand
-    // it (a tool it does not have). A live process only gets the text, so it carries on.
-    const why = s.live ? undefined : this.incompatible(m.id);
+    // A new agent process is built from the spec by the daemon's own code: a daemon whose protocol this portal no
+    // longer drives may not understand it. One from another commit in range does (w605). A live process only gets the
+    // text, so it carries on.
+    const why = s.live ? undefined : this.outdated(m.id);
     if (why) {
       this.checkOutdated();
       const busy = this.liveCount(m.id);
       throw new Error(`${m.id}'s daemon is outdated (${why}): ${this.deploying.has(m.id) ? 'it is being redeployed now' : busy ? `it is redeployed once its ${busy} running agent(s) stop` : 'redeploying it now'}. Try again in a few minutes.`);
     }
+    // Redeployed while idle (an update was available): its daemon is about to stop, so a new process waits for the new one.
+    if (!s.live && this.deploying.has(m.id)) throw new Error(`${m.id}'s daemon is being redeployed now. Try again in a few minutes.`);
     const spec = this.hooks.specFor(s.info, m);
     const catalog = this.hellos.get(m.id)?.catalog;
     if (spec.mcp && catalog) spec.mcp = { ...spec.mcp, tools: spec.mcp.tools.filter((t) => catalog.includes(t.name)) };
@@ -1372,14 +1389,17 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}) });
         if (!msg.guard) delete m.guard;
         // Its daemon runs and reached us: an install or connection error from before is over (a deploy in progress
         // settles the status itself). A 'deploying' left by a portal restart mid-deploy is over too.
         if (m.status === 'error' || (m.status === 'deploying' && !this.deploying.has(id))) Object.assign(m, { status: 'ready', statusDetail: undefined });
-        const why = daemonMismatch(this.hellos.get(id)!, this.portalHead);
+        // Outdated (a protocol out of range) blocks; another commit only offers an update (w605).
+        const why = protocolProblem(this.hellos.get(id)!);
+        const behind = why ? undefined : daemonBehind(this.hellos.get(id)!, this.portalHead);
         if (why) Object.assign(m, { statusDetail: `daemon outdated: ${why}` });
-        else if (/^daemon (speaks|outdated)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
+        else if (behind) Object.assign(m, { statusDetail: `update available: ${behind}` });
+        else if (/^(daemon (speaks|outdated)|update available)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
         Object.assign(m, { info: msg.info, home: msg.home || m.home, platform: msg.info?.platform ?? m.platform, daemonStopped: undefined, relocatedTo: undefined });
         // A worker root install (w513): its folders; a pool folder that changed goes back to it at once.
         const repool = msg.layout ? adoptLayout(m, msg.layout) : leaveRoot(m);
@@ -1392,7 +1412,7 @@ export class MachineManager {
           s.liveFlag = live.has(sid);
           if (s.liveFlag) s.seenLive = true;
         }
-        if (why) this.checkOutdated();
+        if (why || behind) this.checkOutdated();
         // After the daemon's own session reports (sent right after its hello), so a resume starts from its state.
         // Only for this connection: if it drops first, the next hello tries again.
         const link = this.links.get(id);
@@ -1953,11 +1973,11 @@ function gitHead(dir: string): string | undefined {
 }
 
 /**
- * Why a daemon does not match this portal, or undefined: another protocol, or deployed from another commit
- * (info.daemon is the short hash machineDeploy stamped into machine/VERSION). Unknown versions count as current.
+ * How a daemon from another commit than this portal's differs, or undefined (w605: an update is available, nothing
+ * else). info.daemon is the short hash machineDeploy or the installer stamped into machine/VERSION; unknown versions
+ * count as current. Whether the two can work together is protocolProblem's call alone.
  */
-export function daemonMismatch(h: { protocol: number; daemon?: string }, portalHead: string | undefined): string | undefined {
-  if (h.protocol !== PROTOCOL_VERSION) return `it speaks protocol ${h.protocol}, this portal ${PROTOCOL_VERSION}`;
+export function daemonBehind(h: { daemon?: string }, portalHead: string | undefined): string | undefined {
   const d = h.daemon?.trim().toLowerCase();
   const p = portalHead?.trim().toLowerCase();
   if (!d || !p || !/^[0-9a-f]{7,40}$/.test(d)) return undefined;

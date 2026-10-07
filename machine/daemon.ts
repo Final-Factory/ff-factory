@@ -14,7 +14,7 @@ import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
-import { MAIN_CLONE_NO_AGENTS, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
+import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
@@ -687,6 +687,8 @@ export class Daemon {
     this.send({
       type: 'hello',
       protocol: PROTOCOL_VERSION,
+      // The oldest portal it serves (w605): a daemon updated before its portal keeps working with it.
+      oldestPortal: OLDEST_PORTAL_PROTOCOL,
       home: HOME,
       live: [...this.entries.values()].filter((e) => e.s.live).map((e) => e.s.info.id),
       // Its host guard runs (w466): the portal's own leaves this computer's sandbox drive to it.
