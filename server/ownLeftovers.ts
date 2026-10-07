@@ -58,11 +58,31 @@ async function children(dir: string): Promise<fs.Dirent[]> {
   return fs.promises.readdir(dir, { withFileTypes: true }).catch(() => [] as fs.Dirent[]);
 }
 
+/**
+ * A Windows command line with its 8.3 short names (C:\Users\RUNNER~1\...) written long, so it compares with the long
+ * paths git reports: each path holding a `~` is resolved through its longest existing part. Elsewhere unchanged.
+ */
+export function expandShortNames(cmd: string): string {
+  if (!cmd.includes('~')) return cmd;
+  return cmd.replace(/[A-Za-z]:[\\/][^"'\s]*~[^"'\s]*/g, (t) => {
+    const tail: string[] = [];
+    let q = t;
+    while (!fs.existsSync(q)) {
+      const d = path.win32.dirname(q);
+      if (d === q) return t;
+      tail.unshift(path.win32.basename(q));
+      q = d;
+    }
+    return path.win32.join(real(q), ...tail);
+  });
+}
+
 /** Whether a command line names `p` or something inside it (not merely a longer name starting the same). */
 export function mentions(cmd: string, p: string): boolean {
-  const c = cmd.replace(/\\/g, '/').toLowerCase();
-  const n = norm(p);
-  for (let i = c.indexOf(n); i >= 0; i = c.indexOf(n, i + 1)) if (i + n.length === c.length || /["'\s/]/.test(c[i + n.length])) return true;
+  const c = expandShortNames(cmd).replace(/\\/g, '/').toLowerCase();
+  for (const n of new Set([norm(p), norm(real(p))])) {
+    for (let i = c.indexOf(n); i >= 0; i = c.indexOf(n, i + 1)) if (i + n.length === c.length || /["'\s/]/.test(c[i + n.length])) return true;
+  }
   return false;
 }
 
@@ -171,6 +191,18 @@ export interface WorktreeEntry {
   prunable?: boolean;
 }
 
+/** A Claude Code worktree: <repo or sandbox>/.claude/worktrees/<name>. */
+const CLAUDE_WORKTREE = /\/\.claude\/worktrees\/[^/]+$/;
+
+/** The real path (long names, links resolved), or the resolved one when it cannot be read. */
+export function real(p: string): string {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
 /** `git worktree list --porcelain`: the first entry is the main worktree (or the bare repository). */
 export function parseWorktreeList(text: string): WorktreeEntry[] {
   const out: WorktreeEntry[] = [];
@@ -253,13 +285,22 @@ export async function planWorktrees(o: {
     if (list.some((w) => w.prunable)) plan.prune.push(clone);
     for (const w of list.slice(1)) {
       const p = path.resolve(w.path);
-      if (w.bare || w.prunable || w.locked || seen.has(norm(p)) || !fs.existsSync(p)) continue;
-      seen.add(norm(p));
-      if (o.sandboxes.some((s) => within(s, p))) continue; // a sandbox, or a folder holding one
-      if (o.busy.some((b) => within(p, b))) continue; // inside a sandbox an agent works in now
-      if (o.procs?.some((c) => mentions(c, p))) continue; // a process runs from it (an editor)
-      const guard = { ...o.guard, keep: o.guard.keep.filter((k) => !(o.relax.some((r) => r && norm(r) === norm(k)) && within(p, k))) };
-      const no = neverDelete(p, guard, { claudeWorktrees: true });
+      if (w.bare || w.prunable || w.locked || !fs.existsSync(p)) continue;
+      // Git writes long paths; the pool's, a config's or os.tmpdir() may be another form of the same folder (an 8.3
+      // short name on Windows, a symlink on a Mac): every comparison is between real paths.
+      const rp = real(p);
+      if (seen.has(norm(rp))) continue;
+      seen.add(norm(rp));
+      if (o.sandboxes.some((s) => within(real(s), rp))) continue; // a sandbox, or a folder holding one
+      if (o.busy.some((b) => within(rp, real(b)))) continue; // inside a sandbox an agent works in now
+      if (o.procs?.some((c) => mentions(c, p) || mentions(c, rp))) continue; // a process runs from it (an editor)
+      // Inside the clone or the sandbox root only a Claude Code worktree (<x>/.claude/worktrees/<name>) is taken: a
+      // sandbox the pool does not list (being made, forgotten) is never mistaken for a leftover.
+      const relaxed = o.relax.filter((r) => r && within(rp, real(r)));
+      if (relaxed.length && !CLAUDE_WORKTREE.test(norm(rp))) continue;
+      // The guard in real paths too; the kept clone or sandbox root holding it no longer covers it (the shape rule above did).
+      const guard = { home: real(o.guard.home), inUse: o.guard.inUse.filter(Boolean).map(real), keep: o.guard.keep.filter(Boolean).map(real).filter((k) => !relaxed.some((r) => norm(real(r)) === norm(k))) };
+      const no = neverDelete(rp, guard, { claudeWorktrees: true });
       if (no) {
         plan.listed.push({ path: p, why: `a worktree of ${clone}, kept: ${no}` });
         continue;
@@ -439,8 +480,8 @@ export function ownRecheck(i: Pick<OwnLeftoverInputs, 'guard' | 'busy' | 'host' 
     if (!procs) return 'the process list could not be read';
     if (it.rule === 'unity-editor') return editorBlocked(it.path, i.guard, procs);
     // old-worktree
-    if (i.busy.some((b) => within(it.path, b))) return 'an agent works in its sandbox now';
-    if (procs.some((c) => mentions(c, it.path))) return 'a process runs from it';
+    if (i.busy.some((b) => within(real(it.path), real(b)))) return 'an agent works in its sandbox now';
+    if (procs.some((c) => mentions(c, it.path) || mentions(c, real(it.path)))) return 'a process runs from it';
     if (now - (await worktreeLastUsed(it.path)) < OWN_LEFTOVER_DEFAULTS.worktreeUnusedDays * DAY) return 'used since it was planned';
     return undefined;
   };

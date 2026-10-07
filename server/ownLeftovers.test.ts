@@ -184,7 +184,8 @@ test('worktrees: picks old, fully pushed agent worktrees; keeps sandboxes, local
   const running = r.add(r.main, path.join(root, 'agent-wt', 'w405'), 'w405');
   const claudeIdle = r.add(sb2, path.join(sb2, '.claude', 'worktrees', 'tidy'), 'claude-tidy');
   const claudeBusy = r.add(sb1, path.join(sb1, '.claude', 'worktrees', 'busy'), 'claude-busy');
-  for (const w of [sb1, sb2, old, unpushed, untracked, locked, running, claudeIdle, claudeBusy]) ageWorktree(w, 5 * D);
+  const forgotten = r.add(r.main, path.join(r.sbRoot, 'slot9'), 'sandbox/slot9'); // a sandbox the pool does not list
+  for (const w of [sb1, sb2, old, unpushed, untracked, locked, running, claudeIdle, claudeBusy, forgotten]) ageWorktree(w, 5 * D);
   ageWorktree(recent, 6 * H);
 
   const guard = guardFor(root, [r.main, r.sbRoot]);
@@ -197,7 +198,8 @@ test('worktrees: picks old, fully pushed agent worktrees; keeps sandboxes, local
     procs: [`"C:/Unity/Editor/Unity.exe" -projectPath ${running}`],
     now: NOW,
   });
-  const name = (p: string) => path.relative(root, p).replace(/\\/g, '/');
+  // The inputs keep the temp folder's own form (on Windows CI an 8.3 short name, RUNNER~1) while git reports long paths.
+  const name = (p: string) => path.relative(fs.realpathSync.native(root), fs.realpathSync.native(p)).replace(/\\/g, '/');
   assert.deepEqual(plan.items.map((i) => name(i.path)).sort(), ['agent-wt/w400', 'ffsb/slot2/.claude/worktrees/tidy']);
   assert.ok(plan.items.every((i) => i.rule === 'old-worktree' && i.clone === r.main && /everything in it pushed/.test(i.why)));
   assert.deepEqual(plan.listed.map((l) => name(l.path)).sort(), ['agent-wt/w401', 'agent-wt/w402']);
@@ -207,10 +209,10 @@ test('worktrees: picks old, fully pushed agent worktrees; keeps sandboxes, local
   assert.deepEqual(out.failed, []);
   assert.equal(out.removed.length, 2);
   assert.ok(!fs.existsSync(old) && !fs.existsSync(claudeIdle));
-  for (const w of [sb1, sb2, unpushed, untracked, recent, locked, running, claudeBusy]) assert.ok(fs.existsSync(w), w);
+  for (const w of [sb1, sb2, unpushed, untracked, recent, locked, running, claudeBusy, forgotten]) assert.ok(fs.existsSync(w), w);
   // Git's record is pruned; the branches stay (they are on origin anyway).
   const list = parseWorktreeList(r.git(r.main, 'worktree', 'list', '--porcelain'));
-  assert.ok(!list.some((w) => path.resolve(w.path) === path.resolve(old)));
+  assert.ok(!list.some((w) => /agent-wt\/w400$/.test(w.path.replace(/\\/g, '/'))));
   assert.ok(!list.some((w) => w.prunable));
   assert.match(r.git(r.main, 'branch', '--list', 'w400-fix'), /w400-fix/);
 });
