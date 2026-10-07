@@ -49,6 +49,8 @@ export function cutOffMidTurn(i: Pick<SessionInfo, 'kind' | 'status' | 'turnOpen
 const RESUME_WITHIN_MS = 6 * 3_600_000;
 /** How long after a daemon's hello the resume messages go out. */
 export const RESUME_DELAY_MS = { value: 3000 };
+/** The refusal of unity and switch_branch on a machine's main clone (w536). */
+export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
 
@@ -89,6 +91,21 @@ export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits &
     ...(m.unityBelowNormal ? { belowNormal: true } : {}),
     ...(m.protectedPaths?.length ? { protectedPaths: m.protectedPaths } : {}),
   };
+}
+
+/**
+ * Standing agents a machine without sandboxes may run at once (w536): it takes no workers, so this caps its standing
+ * agents alone, as the old main-clone default did.
+ */
+export const STANDING_CAP_NO_POOL = 2;
+
+/**
+ * A machine's one live-agent cap (w536): the agents mid-turn in its sandboxes and its standing agents together. With a
+ * pool it is max_sandbox_agents, else every sandbox full (max_sandboxes x max_agents_per_sandbox).
+ */
+export function agentCap(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits & PoolExtras): number {
+  const pool = poolSettingsOf(m);
+  return pool ? (pool.maxAgents ?? pool.maxSandboxes * pool.maxAgentsPerSandbox) : STANDING_CAP_NO_POOL;
 }
 
 /**
@@ -296,6 +313,19 @@ export class MachineManager {
       if (m.status !== 'deploying') continue;
       Object.assign(m, { status: 'error', statusDetail: `a portal restart interrupted its deploy${m.statusDetail ? ` (at: ${m.statusDetail})` : ''}` });
       store.putMachine(m);
+    }
+    // max_agents went with main-clone workers (w536): an old record's is dropped, and said once, after index.ts has
+    // wired report.
+    const dropped: string[] = [];
+    for (const m of store.machines.values() as Iterable<Machine & { maxSessions?: number }>) {
+      if (m.maxSessions === undefined) continue;
+      delete m.maxSessions;
+      store.putMachine(m);
+      dropped.push(m.id);
+    }
+    if (dropped.length) {
+      const text = `[machines] max_agents is gone (w536): workers run in sandboxes only and standing agents count against the machine's agent cap; dropped it from ${dropped.join(', ')}`;
+      setImmediate(() => (this.report ? this.report(text) : console.log(text)));
     }
     // Labels set before w575 (a worker's set_label, set_sandbox_label) give way to the sandbox's name.
     for (const m of store.machines.values()) {
@@ -659,35 +689,31 @@ export class MachineManager {
     return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && s.live).length;
   }
 
-  /** Live agents in one place of a machine: a sandbox, or (sandbox undefined) its main clone and standing agents. */
+  /** Live agents in one place of a machine: a sandbox, or (sandbox undefined) its standing agents. */
   liveIn(id: string, sandbox: string | undefined) {
     return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && s.info.machineSandbox === sandbox && s.live).length;
   }
 
   /**
-   * Mid-turn agents in one place of a machine (sandbox undefined: its main clone), or in all its sandboxes (sandbox
-   * '*'): what max_agents_per_sandbox, max_sandbox_agents and the main clone's max_agents count (w384). Idle agents,
-   * their process up or not, take no slot.
+   * Mid-turn agents in one place of a machine (sandbox undefined: its standing agents), or in all its sandboxes
+   * (sandbox '*'): what max_agents_per_sandbox and the machine's agent cap count (w384, w536). Idle agents, their
+   * process up or not, take no slot.
    */
   runningIn(id: string, sandbox: string | undefined | '*') {
     return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && (sandbox === '*' ? !!s.info.machineSandbox : s.info.machineSandbox === sandbox) && isMidTurn(s.info)).length;
   }
 
   /**
-   * Why an agent of this kind may never start outside a sandbox on `m`, or undefined: this host's own daemon's main clone
-   * is the base its sandboxes are worktrees of (workers only), and a machine with max_agents 0 takes agents in its
-   * sandboxes only (w477, Lothsahn on 2026-10-05), neither main-clone workers nor standing agents. Names its sandboxes.
+   * Why an agent of this kind may never start outside a sandbox on `m`, or undefined: every worker runs in a sandbox
+   * (w536, Lothsahn on 2026-10-06: "Can't we get rid of this code so the settings doesn't matter?"), since a main clone
+   * is a person's own or the base its sandboxes are worktrees of. Standing agents work in their own folder and are
+   * never refused here. Names its sandboxes.
    */
   mainCloneRefusal(m: Machine, kind?: SessionInfo['kind']): string | undefined {
+    if (kind === 'standing') return undefined;
     const sbs = (m.sandboxes ?? []).map((s) => `${m.id}/${s.id}`);
-    const use = sbs.length ? `one of its sandboxes (${sbs.join(', ')})` : `a sandbox there (it has none yet: create_sandbox with machine "${m.id}")`;
-    if (m.local && kind === 'worker') return `${m.id}'s main clone (${m.repoPath}) is the base its sandboxes are worktrees of: start agents in ${use}`;
-    // A machine with sandboxes takes workers in them only, whatever its max_agents (w536, lothsahn: "Can't we get rid of
-    // this code so the settings doesn't matter?"): its main clone is a person's own, or the base its sandboxes come from.
-    if (kind === 'worker' && poolSettingsOf(m)) return `${m.id} takes workers in its sandboxes only: start this one in ${use}`;
-    if (m.maxSessions !== 0) return undefined;
-    if (kind === 'standing') return `${m.id} takes agents in its sandboxes only (max_agents 0): a standing agent needs a computer with max_agents 1 or more; assign it elsewhere`;
-    return `${m.id} takes agents in its sandboxes only (max_agents 0): start this one in ${use}`;
+    const use = sbs.length ? `one of its sandboxes (${sbs.join(', ')})` : poolSettingsOf(m) ? `a sandbox there (it has none yet: create_sandbox with machine "${m.id}")` : 'a sandbox, on a computer that has a sandbox root (it has none)';
+    return `${m.id} runs workers in sandboxes only: start this one in ${use}`;
   }
 
   /** Why a message to this machine session must wait for a free running slot, or undefined (SessionManager.placeFull). */
@@ -700,13 +726,20 @@ export class MachineManager {
       const max = pool?.maxAgentsPerSandbox ?? 2;
       const here = this.runningIn(m.id, sbId);
       if (here >= max) return `${here} agents mid-turn in sandbox ${m.id}/${sbId} (max_agents_per_sandbox ${max})`;
-      const all = this.runningIn(m.id, '*');
-      if (pool?.maxAgents !== undefined && all >= pool.maxAgents) return `${all} agents mid-turn in ${m.id}'s sandboxes (max_sandbox_agents ${pool.maxAgents})`;
-      return undefined;
-    }
-    if (this.mainCloneRefusal(m, s.info.kind)) return undefined; // refused outright by dispatchSend: no queue for it
-    const main = this.runningIn(m.id, undefined);
-    return main >= m.maxSessions ? `${main} agents mid-turn in ${m.id}'s main clone (max_agents ${m.maxSessions})` : undefined;
+    } else if (this.mainCloneRefusal(m, s.info.kind)) return undefined; // refused outright by dispatchSend: no queue for it
+    return this.capFull(m);
+  }
+
+  /** Agents mid-turn on a machine, in its sandboxes and standing agents together: what its agent cap counts (w536). */
+  midTurnTotal(id: string) {
+    return this.runningIn(id, '*') + this.runningIn(id, undefined);
+  }
+
+  /** Why `m` is at its agent cap (agentCap), or undefined. */
+  capFull(m: Machine): string | undefined {
+    const all = this.midTurnTotal(m.id);
+    const cap = agentCap(m);
+    return all >= cap ? `${all} agents mid-turn on ${m.id}, in sandboxes and standing agents together (its agent cap ${cap})` : undefined;
   }
 
   /** Re-attach a persisted session on boot. */
@@ -847,13 +880,11 @@ export class MachineManager {
    * Add a machine, or redeploy one (same id): mint a token, install the daemon over ssh and wait for
    * it to connect. Returns at once; progress shows on the record (status/statusDetail).
    */
-  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; maxSessions?: number; purpose?: string; force?: boolean; local?: boolean } & MachineDirs & SandboxLimits & PoolExtras) {
+  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; purpose?: string; force?: boolean; local?: boolean } & MachineDirs & SandboxLimits & PoolExtras) {
     const typed = opts.id.trim();
     const id = typed.toLowerCase();
     refuseInDryRun(`deploying ${id}`);
     if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes (e.g. "m5")`);
-    // 0: sandboxes only (w477), no agents in its main clone.
-    if (opts.maxSessions !== undefined && (!Number.isInteger(opts.maxSessions) || opts.maxSessions < 0 || opts.maxSessions > 8)) throw new Error('max_agents is a whole number from 0 (sandboxes only) to 8');
     if (this.deploying.has(id)) throw new Error(`${id} is already being deployed`);
     const prev = this.store.machines.get(id);
     // A worker root install (w513) is installed and updated on its computer, never over ssh: add_machine changes only
@@ -896,7 +927,6 @@ export class MachineManager {
       repoPath: opts.repoPath ?? prev?.repoPath ?? '',
       home: prev?.home ?? '',
       portalUrl,
-      maxSessions: opts.maxSessions ?? prev?.maxSessions ?? 3,
       info: prev?.info,
       git: prev?.git,
       lastSeen: prev?.lastSeen,
@@ -924,7 +954,7 @@ export class MachineManager {
     if (opts.maxSandboxes !== undefined && opts.maxSandboxes !== m.maxSandboxes) {
       throw new Error(`${m.id} is a worker root install (${m.root}): its sandbox count comes from its installer, which also makes the matching player folders (slotK-0, slotK-1) and their firewall rules. Run it again there with --max-sandboxes ${opts.maxSandboxes} (docs/worker-install.md, "Updating"); its next hello brings the count here`);
     }
-    const fixed = (['host', 'portalUrl', 'repoPath', 'appDir', 'unityEditorRoot', 'unityPath', 'tempDir', 'sandboxRoot', 'maxSessions', 'local'] as const).filter(
+    const fixed = (['host', 'portalUrl', 'repoPath', 'appDir', 'unityEditorRoot', 'unityPath', 'tempDir', 'sandboxRoot', 'local'] as const).filter(
       (k) => opts[k] !== undefined && opts[k] !== (m as unknown as Record<string, unknown>)[k],
     );
     if (fixed.length) throw new Error(`${m.id} is a worker root install (${m.root}): its ${fixed.join(', ')} come from its installer; run it again there with the new value (docs/worker-install.md, "Updating")`);
@@ -1015,7 +1045,7 @@ export class MachineManager {
         }
         this.update(m.id, { statusDetail: s });
       };
-      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, maxSessions: m.maxSessions, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : m.daemonExtras ? { extra: m.daemonExtras } : {}) });
+      const r = await this.deployer({ host: m.host, id: m.id, portalUrl: m.portalUrl, token, root: ROOT, repoPath, repoSlug: repoSlug(this.cfg.repo.url), dirs, sandboxes: poolSettingsOf(m), previousAppDir, step, onPlatform: (platform) => this.update(m.id, { platform }), ...(m.local ? { local: true, extra: this.localExtras() } : m.daemonExtras ? { extra: m.daemonExtras } : {}) });
       const connected = () => this.deployedDaemonConnected(m.id, installAt, r.version);
       this.update(m.id, { repoPath: r.repoPath, home: r.home, platform: r.platform, statusDetail: `waiting for the daemon (${r.version}, node ${r.nodeVersion}) to connect` });
       if (r.started === false && !connected()) {
@@ -1148,6 +1178,7 @@ export class MachineManager {
       // The agent limits count mid-turn agents only and are waited for, not refused: SessionManager queues a message
       // until placeFull says a slot is free (w384).
     } else if (!s.live && !sbId) {
+      // A worker outside a sandbox is refused (w536); a standing agent waits for the agent cap (placeFull).
       const why = this.mainCloneRefusal(m, s.info.kind);
       if (why) throw new Error(why);
     }
@@ -1248,7 +1279,7 @@ export class MachineManager {
   private welcomeOf(m: Machine, sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }))) {
     // A worker root install (w513) whose record has no pool of its own yet keeps daemon.json's until its hello says it.
     const pool = m.sandboxRoot || !m.root ? poolSettingsOf(m) : undefined;
-    return { type: 'welcome' as const, machineId: m.id, maxSessions: m.maxSessions, sessions, sandboxes: pool };
+    return { type: 'welcome' as const, machineId: m.id, maxSessions: agentCap(m), sessions, sandboxes: pool };
   }
 
   /** Wire a connected daemon (exported for tests: any WebSocket works). */
@@ -1656,12 +1687,13 @@ export class MachineManager {
   /** A line from the Mac's Max events file (server/max.ts validates it). */
   maxEvent?: (machineId: string, line: string) => void;
 
-  /** Status, start, stop or restart the Unity editor of a machine's clone, on the machine (machine/unity.ts). */
+  /** Status, start, stop or restart the Unity editor of a machine's sandbox, on the machine (machine/unity.ts). */
   unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart', force?: boolean, sandbox?: string) {
     const m = this.require(machineId);
+    if (!sandbox) throw new Error(MAIN_CLONE_NO_AGENTS);
     if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline`);
     // Never a sandbox field to a daemon that would ignore it and act on the main clone.
-    const sb = sandbox ? (this.requireSandboxDaemon(m.id), this.requireSandbox(m.id, sandbox).id) : undefined;
+    const sb = (this.requireSandboxDaemon(m.id), this.requireSandbox(m.id, sandbox).id);
     return new Promise<string>((resolve, reject) => {
       const id = randomUUID();
       const timer = setTimeout(() => {
@@ -1670,7 +1702,7 @@ export class MachineManager {
       }, 3 * 60_000);
       this.unityCalls.set(id, { resolve, reject, timer });
       try {
-        this.post(m.id, { type: 'unity', id, action, force, ...(sb ? { sandbox: sb } : {}) });
+        this.post(m.id, { type: 'unity', id, action, force, sandbox: sb });
       } catch (e) {
         clearTimeout(timer);
         this.unityCalls.delete(id);
@@ -1736,9 +1768,10 @@ export class MachineManager {
 
   private readonly switchCalls = new Map<string, { resolve: (r: { from: string; to: string; notes: string[] }) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
-  /** Switch the branch of a machine's clone, on the machine (server/switchBranch.ts). callerSessionId: the agent asking, which its daemon does not count as busy. */
+  /** Switch the branch of a machine sandbox, on the machine (server/switchBranch.ts). callerSessionId: the agent asking, which its daemon does not count as busy. */
   switchBranch(machineId: string, branch: string, createFrom?: string, sandbox?: string, callerSessionId?: string) {
-    const sb = sandbox ? (this.requireSandboxDaemon(machineId), this.requireSandbox(machineId, sandbox).id) : undefined;
+    if (!sandbox) return Promise.reject(new Error(MAIN_CLONE_NO_AGENTS));
+    const sb = (this.requireSandboxDaemon(machineId), this.requireSandbox(machineId, sandbox).id);
     return new Promise<{ from: string; to: string; notes: string[] }>((resolve, reject) => {
       const id = randomUUID();
       const timer = setTimeout(() => {
@@ -1747,7 +1780,7 @@ export class MachineManager {
       }, 10 * 60_000);
       this.switchCalls.set(id, { resolve, reject, timer });
       try {
-        this.post(machineId, { type: 'switch', id, branch, createFrom, ...(sb ? { sandbox: sb } : {}), ...(callerSessionId ? { callerSessionId } : {}) });
+        this.post(machineId, { type: 'switch', id, branch, createFrom, sandbox: sb, ...(callerSessionId ? { callerSessionId } : {}) });
       } catch (e) {
         clearTimeout(timer);
         this.switchCalls.delete(id);

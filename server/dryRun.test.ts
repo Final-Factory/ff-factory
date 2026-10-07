@@ -232,7 +232,7 @@ test('dry run: the FFBox connector and every machine daemon are turned away, and
   const sessions = new SessionManager(cfg, store);
   const mm = new MachineManager(cfg, store, sessions);
   mm.deployer = async () => assert.fail('no deploy');
-  const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: dir, home: dir, portalUrl: 'http://127.0.0.1:1', maxSessions: 2 });
+  const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: dir, home: dir, portalUrl: 'http://127.0.0.1:1' });
   const m = fakeSocket();
   assert.equal(mm.upgrade(upgradeReq(`Bearer ${token}`), m.socket, Buffer.alloc(0), '127.0.0.1'), false, 'a valid token too');
   assert.match(m.said.join(''), /^HTTP\/1\.1 503 /);

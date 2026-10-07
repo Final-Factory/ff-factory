@@ -214,7 +214,7 @@ test("a daemon with the guard says so in its hello; its reports and state reach 
   server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const { token } = mm.register({ id: 'beast', host: 'beast', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url, maxSessions: 3 });
+  const { token } = mm.register({ id: 'beast', host: 'beast', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url });
   const drive = path.join(tmp, 'F');
   const { fx } = world({ drive: false });
   const daemonFx: MachineGuardEffects = { ...fx, exists: (p) => (p === drive ? false : fs.existsSync(p)) };
@@ -246,8 +246,8 @@ test("a daemon with the guard says so in its hello; its reports and state reach 
   assert.match(store.machines.get('beast')!.guard!.sandboxRoot, /missing|remounting/);
   const refusal = (d as unknown as { startRefusal(spec: { sandbox?: string; cwd: string }): string | undefined }).startRefusal({ sandbox: 'mp-r2', cwd: path.join(drive, 'mp-r2') });
   assert.match(refusal ?? '', /sandbox drive is offline/);
-  const mainClone = (d as unknown as { startRefusal(spec: { sandbox?: string; cwd: string }): string | undefined }).startRefusal({ cwd: tmp });
-  assert.equal(mainClone, undefined, 'its main clone is not on the drive: agents there are not held up');
+  const standing = (d as unknown as { startRefusal(spec: { sandbox?: string; cwd: string }): string | undefined }).startRefusal({ cwd: path.join(tmp, 'agents', 'st') });
+  assert.equal(standing, undefined, 'a standing agent is not on the drive: it is not held up');
 });
 
 test('the settings: the portal gives its own guard\'s to its own host\'s daemon at deploy, and convert_machine keeps them', async (t) => {

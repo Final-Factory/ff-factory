@@ -60,7 +60,11 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
 export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit';
 
 export type ToDaemon =
-  /** First message after connecting: the portal's sessions on this machine and where their transcripts end. */
+  /**
+   * First message after connecting: the portal's sessions on this machine and where their transcripts end.
+   * `maxSessions` (its name kept so an older daemon still reads it, w536): the machine's agent cap, which the daemon
+   * applies to agents outside sandboxes (standing agents) with its sandboxes' mid-turn agents counted in.
+   */
   | { type: 'welcome'; machineId: string; maxSessions: number; sessions: { id: string; lastSeq: number }[]; sandboxes?: SandboxPoolSettings | null }
   /**
    * Start the session's process if needed (from `spec`) and send it a message. `attachments` (protocol 7): files the

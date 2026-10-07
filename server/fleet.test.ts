@@ -41,7 +41,6 @@ const machine = (id: string, extra: Partial<Machine> = {}): Machine => ({
   repoPath: 'D:/work/FFFRepo',
   home: 'C:/Users/dev',
   portalUrl: 'https://portal.example',
-  maxSessions: 3,
   sessionIds: [],
   createdAt: T,
   ...extra,
@@ -49,12 +48,10 @@ const machine = (id: string, extra: Partial<Machine> = {}): Machine => ({
 
 const system = { hostname: 'BEAST', platform: 'win32 10.0.26100' } as SystemStats;
 
-test('fleet: the host first, then each machine, with sandboxes, live agents and the main clone', () => {
+test('fleet: the host first, then each machine, with sandboxes and their live agents (w536: no main-clone agents)', () => {
   const sessions = [
     session('ask', 'waiting_permission', { machineId: 'lothdesktop', machineSandbox: 'sb1', pendingPermissions: [{ requestId: 'r', toolName: 'Bash', input: {}, createdAt: T }] }),
-    session('main', 'idle', { machineId: 'lothdesktop' }),
     session('duty', 'running', { machineId: 'lothdesktop', kind: 'standing', standingId: 'st' }),
-    session('failed', 'error', { machineId: 'lothdesktop' }),
   ];
   const fleet = fleetOf({
     system,
@@ -65,7 +62,7 @@ test('fleet: the host first, then each machine, with sandboxes, live agents and 
         platform: 'win32',
         sandboxRoot: 'D:/work/ffsb',
         maxSandboxes: 3,
-        sessionIds: ['ask', 'main', 'duty', 'failed'],
+        sessionIds: ['ask', 'duty'],
         sandboxes: [machineSandbox('sb2', 'unused'), machineSandbox('sb1', 'Nightly e2e', ['ask'], 'running')],
       }),
       machine('m3', { online: false }),
@@ -90,15 +87,13 @@ test('fleet: the host first, then each machine, with sandboxes, live agents and 
   // A machine sandbox is keyed "<machine>/<id>" and shows the branch git reports; in-use sandboxes first.
   assert.deepEqual(loth.sandboxes.map((s) => [s.key, s.branch, s.free]), [['lothdesktop/sb1', 'feature/sb1', false], ['lothdesktop/sb2', 'feature/sb2', true]]);
   assert.equal(loth.sandboxes[0].attention, 1);
-  // The main clone: its own workers, not the sandbox's agents nor the standing agent; the failed one is counted.
-  assert.deepEqual(loth.main!.live.map((s) => s.id), ['main']);
-  assert.equal(loth.main!.stopped, 1);
   assert.equal(capacityLine(loth), '2/3 sandboxes · 1/2 editors');
-  assert.deepEqual([loth.live, loth.busy, loth.attention], [2, 1, 1]);
+  // Its sandboxes' agents; the standing agent has its own list.
+  assert.deepEqual([loth.live, loth.busy, loth.attention], [1, 1, 1]);
 
-  // No sandbox_root: the main clone only.
+  // No sandbox_root: it takes no workers (w536).
   assert.equal(m3.online, false);
-  assert.equal(capacityLine(m3), 'main clone only');
+  assert.equal(capacityLine(m3), 'no sandboxes');
 });
 
 test('fleet: a sandbox with a live agent is never free; its label says nothing about use (w575); what it does is its agents’ titles', () => {

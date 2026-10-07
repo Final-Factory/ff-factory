@@ -103,6 +103,25 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Removed
 
+- **Main-clone workers: every worker runs in a sandbox** (w536, Lothsahn on 2026-10-06: "I thought we're deleting the
+  main clone runners entirely. Can't we get rid of this code so the settings doesn't matter?"). `start_agent` with a
+  machine alone is refused on every machine, naming its sandboxes; `unity` and `switch_branch` with a machine alone are
+  refused ("a machine's main clone takes no agents"); the daemon refuses any agent whose folder is its main clone. A
+  machine without sandboxes takes no workers (it gets a sandbox root through its worker-root install, w513).
+  - Gone: the main-clone worker's brief and launch spec (`machineBrief`, `machineWorkerSpec`), the backup-before-discard
+    guard (`ownCheckout`, `checkOwnCheckout`, `backupRecipe`, `backupRootFor`, `hasRecentBackup`, `gitIsClean`, and the
+    kill-Unity-freely rule for main-clone workers), main-clone computers in the Capacity block and placement, the
+    main-clone rows of the sidebar, the Overview and a machine's page (its agent tabs, New agent and Branch buttons),
+    and `add_machine` `max_agents` with the Add machine form's "Max agents at once". Existing `ff-local-backups`
+    folders stay, and the clean-up still never deletes them.
+  - One agent cap per machine (`agentCap`): its sandboxes' agents and its standing agents mid-turn together, at most
+    `max_sandbox_agents`, else every sandbox full; 2 standing agents on a machine without sandboxes. The portal sends it
+    in `welcome.maxSessions` (the field kept, so an older daemon keeps working), and standing runs wait for it.
+  - `max_agents` on an old machine record is dropped at start, with one notice for all of them; a `daemon.json` that
+    still has `maxSessions` is logged as obsolete once, and deploys and worker installs no longer write it.
+  - The daemon's main-clone editor, watch, MCP place, slot place and git status stay for now (docs/worker-root.md
+    change 4 follows).
+
 - **The portal no longer runs workers, sandboxes, Unity editors or standing agents itself; machine daemons do** (w510,
   asked by Lothsahn, 2026-10-06: "Let's just delete that and all the code around running portal processes directly
   (except those necessary for the orchestrator and dispatcher). The new model is the portal runs the orchestrator and

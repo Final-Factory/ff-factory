@@ -240,7 +240,6 @@ const beastMachine = (over: Partial<Machine> = {}): Machine => ({
   repoPath: 'C:\\ffsb\\_base',
   home: 'C:\\Users\\rydin',
   portalUrl: 'http://127.0.0.1:8790',
-  maxSessions: 3,
   sessionIds: [],
   createdAt: T,
   platform: 'win32',
@@ -367,11 +366,11 @@ test('beast machine: add_machine local takes its settings from the config, deplo
   assert.equal(seen[1].repoPath, 'C:\\ffsb\\_base');
   assert.equal(seen[1].local, true);
   assert.throws(() => mm.deployMachine({ id: 'beast2', local: true }), /beast is already the portal's own host/);
-  mm.register({ id: 'm5', host: 'm5', purpose: 'unused', status: 'ready', repoPath: '/r', home: '/h', portalUrl: 'https://p', maxSessions: 3 });
+  mm.register({ id: 'm5', host: 'm5', purpose: 'unused', status: 'ready', repoPath: '/r', home: '/h', portalUrl: 'https://p' });
   assert.throws(() => mm.deployMachine({ id: 'm5', local: true }), /a machine reached over ssh; remove it first/);
   await assert.rejects(mm.cleanupNow('beast'), /cleaned by this host's guard/);
 
-  const json = JSON.parse(daemonConfig({ portalUrl: 'http://127.0.0.1:8790', id: 'beast', token: 't', repoPath: 'C:\\ffsb\\_base', maxSessions: 3, extra: o.extra }));
+  const json = JSON.parse(daemonConfig({ portalUrl: 'http://127.0.0.1:8790', id: 'beast', token: 't', repoPath: 'C:\\ffsb\\_base', extra: o.extra }));
   assert.deepEqual([json.maxEventsFile, json.unityMcpServer.command, json.sandboxIdleStopMinutes], [null, 'uvx.exe', 120]);
   assert.deepEqual(poolSettingsOf({ sandboxRoot: '/s' }), { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 50, diskCriticalGB: 20 }, 'a machine without the extras: as before');
 });
@@ -455,22 +454,31 @@ test('w469: a daemon gives its agents the Unity slots mailbox, their holder and 
   }
 });
 
-test('w477: a daemon with max_agents 0 refuses an agent outside its sandboxes, whatever the portal sent', () => {
+test('w536: a daemon refuses every agent in its main clone, and checks a standing agent against the agent cap the portal sends', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-d0-'));
   try {
-    const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: dir, appDir: dir, maxSessions: 0, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
-    const refusal = (spec: Record<string, unknown>) => (d as unknown as { startRefusal(s: unknown): string | undefined }).startRefusal({ cwd: dir, ...spec });
-    assert.match(refusal({})!, /takes agents in its sandboxes only \(max_agents 0\)/);
-    // A sandbox agent is judged by the sandbox rules (here: no such sandbox), not by max_agents.
-    assert.match(refusal({ sandbox: 'sb1' })!, /no sandbox "sb1" on this machine/);
-    const three = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'm5', token: 't', repoPath: dir, appDir: path.join(dir, 'x'), maxSessions: 3, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
-    assert.equal((three as unknown as { startRefusal(s: unknown): string | undefined }).startRefusal({ cwd: dir }), undefined, 'a main clone with room takes it');
-    // w536: a machine with sandboxes takes no worker in its main clone, whatever max_agents; a standing agent's folder is fine.
+    type Inside = { startRefusal(s: unknown): string | undefined; onMessage(m: unknown): void; entries: Map<string, unknown> };
+    const make = (id: string, extra: Record<string, unknown> = {}) =>
+      new Daemon({ portalUrl: 'http://127.0.0.1:1', id, token: 't', repoPath: dir, appDir: path.join(dir, id), maxEventsFile: null, ...extra }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES) as unknown as Inside;
+    // Without sandboxes (the m5), with them (LothDesktop), and with an old daemon.json max_agents of 3: the main clone is refused.
     const pool = { root: path.join(dir, 'ffsb'), maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 1, diskCriticalGB: 1 };
-    const sbx = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: dir, appDir: path.join(dir, 'y'), maxSessions: 3, maxEventsFile: null, sandboxes: pool }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
-    const refuse = (cwd: string) => (sbx as unknown as { startRefusal(s: unknown): string | undefined }).startRefusal({ cwd });
-    assert.match(refuse(dir)!, /takes workers in its sandboxes only/);
-    assert.equal(refuse(path.join(dir, 'y', 'agents', 'nightly-reader')), undefined, 'a standing agent in its own folder');
+    for (const d of [make('m5'), make('lothdesktop', { sandboxes: pool }), make('old', { maxSessions: 3 })]) {
+      assert.match(d.startRefusal({ cwd: dir })!, /this machine runs workers in sandboxes only/);
+      assert.match(d.startRefusal({ cwd: dir.toUpperCase() })!, /runs workers in sandboxes only/, 'compared without case');
+    }
+    // A sandbox agent is judged by the sandbox rules (here: no such sandbox).
+    assert.match(make('m3').startRefusal({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') })!, /no sandbox "sb1" on this machine/);
+    // A standing agent in its own folder: the machine's agents mid-turn, in sandboxes and standing together, against the cap.
+    const d = make('cap');
+    d.onMessage({ type: 'welcome', machineId: 'cap', maxSessions: 2, sessions: [] });
+    const standing = { cwd: path.join(dir, 'cap', 'agents', 'nightly-reader') };
+    assert.equal(d.startRefusal(standing), undefined);
+    const midTurn = (sandbox?: string) => ({ s: { info: { status: 'running' } }, spec: { cwd: dir, ...(sandbox ? { sandbox } : {}) }, seq: 0 });
+    d.entries.set('a', midTurn('sb1'));
+    d.entries.set('i', { s: { info: { status: 'idle' } }, spec: { cwd: dir, sandbox: 'sb1' }, seq: 0 });
+    assert.equal(d.startRefusal(standing), undefined, 'an idle agent takes no slot');
+    d.entries.set('b', midTurn());
+    assert.match(d.startRefusal(standing)!, /already 2 agents mid-turn on this machine, in its sandboxes and standing agents together \(its agent cap 2\)/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

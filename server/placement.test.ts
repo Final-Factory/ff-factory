@@ -103,57 +103,46 @@ test('w416: no note on the next one, none when nothing has room, and one compute
 
 // ---------------------------------------------------------------- w428: a recorded preference
 
-/** Ben, 2026-10-05: "favor using lothdesktop and the m5 and m3 because beast is having issues with its processor and keeps crashing". */
+/**
+ * Ben, 2026-10-05: "favor using lothdesktop and the m5 and m3 because beast is having issues with its processor and keeps
+ * crashing". The m5 and the m3 have no sandboxes, so since w536 they take no workers and are no computers here.
+ */
 const PREFS: PlacementPrefs = { prefer: ['lothdesktop', 'm5', 'm3'], avoid: { beast: 'BEAST unstable, 2026-10-05' } };
-const main = (id: string, live = 0): Computer => ({ id, online: true, mainClone: true, live, midTurn: 0, maxAgents: 3, sandboxes: 0, maxSandboxes: 0, freeSandboxes: 0, memUsedBytes: 12 * GB, memTotalBytes: 64 * GB });
 
-test('w428: with the preference set, LothDesktop first, then the m5, then the m3, and BEAST only when they are all full', () => {
+test('w428: with the preference set, LothDesktop first, and BEAST only when it is full', () => {
   // BEAST idle with the most room still comes last.
   const beast = idle('beast', 6);
-  let cs = [beast, idle('lothdesktop', 5), main('m5'), main('m3')];
+  let cs = [beast, idle('lothdesktop', 5)];
   assert.ok(roomOf(beast) >= roomOf(cs[1]));
   const first = pickComputer(cs, undefined, PREFS)!;
   assert.equal(first.pick.id, 'lothdesktop');
   assert.match(first.why, /^first with room in placement\.prefer \(lothdesktop > m5 > m3\)$/);
-  // LothDesktop full: the m5's main clone, then the m3's.
-  cs = [beast, { ...idle('lothdesktop', 5), live: 5 }, main('m5'), main('m3')];
-  assert.equal(pickComputer(cs, undefined, PREFS)!.pick.id, 'm5');
-  assert.match(preferLine(cs, undefined, PREFS)!, /^Next new game-repo work: m5's main clone: start_agent with machine "m5"; its worker backs up the owner's uncommitted work \(ff-local-backups\) before it sets any aside \(first with room in placement\.prefer .*lothdesktop is busy\)\.$/);
-  cs = [beast, { ...idle('lothdesktop', 5), live: 5 }, main('m5', 3), main('m3')];
-  assert.equal(pickComputer(cs, undefined, PREFS)!.pick.id, 'm3');
-  // All three full: BEAST, and the line says why.
-  cs = [beast, { ...idle('lothdesktop', 5), live: 5 }, main('m5', 3), { ...main('m3'), online: false }];
+  assert.match(preferLine(cs, undefined, PREFS)!, /^Next new game-repo work: lothdesktop \(first with room in placement\.prefer/);
+  // LothDesktop full: BEAST, and the line says why.
+  cs = [beast, { ...idle('lothdesktop', 5), live: 5 }];
   const last = pickComputer(cs, undefined, PREFS)!;
   assert.equal(last.pick.id, 'beast');
   assert.match(last.why, /^only avoided computers have room \(beast: BEAST unstable, 2026-10-05\)/);
 });
 
 test('w428: the capacity block tags each computer, and placing on an avoided BEAST says so', () => {
-  const cs = [idle('beast', 6), idle('lothdesktop', 5), main('m5'), main('m3')];
+  const cs = [idle('beast', 6), idle('lothdesktop', 5)];
   const lines = capacityLines(cs, undefined, PREFS);
   assert.match(lines[0], /^## Capacity \(placement\.prefer first, avoided last, the rest spread by room;/);
   assert.match(lines[1], /^- beast \[avoided: BEAST unstable, 2026-10-05\]: ROOM \d+%: 0 live agents of 6/);
   assert.match(lines[2], /^- lothdesktop \[preferred #1\]: ROOM \d+%/);
-  assert.match(lines[3], /^- m5 \[main clone; preferred #2\]: ROOM \d+%: 0 live agents of 3 \(0 mid-turn\) in its main clone; RAM 19% used$/);
-  assert.match(lines[4], /^- m3 \[main clone; preferred #3\]: ROOM/);
-  assert.match(lines[5], /^Next new game-repo work: lothdesktop \(first with room in placement\.prefer/);
+  assert.match(lines[3], /^Next new game-repo work: lothdesktop \(first with room in placement\.prefer/);
+  assert.equal(lines.length, 4);
   assert.match(placementHint('beast', cs, undefined, PREFS) ?? '', /^ Note: beast is avoided \(BEAST unstable, 2026-10-05\); the next new game-repo work goes to lothdesktop \(first with room in placement\.prefer/);
   assert.equal(placementHint('lothdesktop', cs, undefined, PREFS), undefined);
-  assert.match(placementHint('m5', cs, undefined, PREFS) ?? '', /^ Note: m5 has \d+% room; the next new game-repo work goes to lothdesktop/);
 });
 
-test('w428: without a preference, main clones come after the sandbox computers; avoid alone keeps BEAST last', () => {
-  const cs = [{ ...idle('beast', 6), live: 2 }, { ...idle('lothdesktop', 5), live: 1 }, main('m5')];
-  assert.ok(roomOf(cs[2]) > roomOf(cs[1]), 'the m5 has the most room');
-  assert.equal(pickComputer(cs)!.pick.id, 'lothdesktop', 'a sandbox computer still goes first');
-  assert.equal(pickComputer([cs[0], { ...cs[1], live: 5 }, cs[2]])!.pick.id, 'beast');
-  assert.equal(pickComputer([cs[0], { ...cs[1], live: 5, online: false }, cs[2]], undefined, {})!.pick.id, 'beast');
-  // Avoid alone: BEAST, with more room, waits behind LothDesktop and the m5.
+test('w428: avoid alone keeps BEAST last; "host" names this host\'s own pool', () => {
   const avoidOnly: PlacementPrefs = { avoid: { beast: 'unstable' } };
-  const roomy = [idle('beast', 6), { ...idle('lothdesktop', 5), live: 3 }, main('m5')];
+  const roomy = [idle('beast', 6), { ...idle('lothdesktop', 5), live: 3 }];
+  assert.ok(roomOf(roomy[0]) > roomOf(roomy[1]), 'BEAST has more room');
   assert.equal(pickComputer(roomy, undefined, avoidOnly)!.pick.id, 'lothdesktop');
-  assert.equal(pickComputer([roomy[0], { ...roomy[1], live: 5 }, roomy[2]], undefined, avoidOnly)!.pick.id, 'm5');
-  // "host" names this host's own pool.
+  assert.equal(pickComputer([roomy[0], { ...roomy[1], live: 5 }], undefined, avoidOnly)!.pick.id, 'beast');
   assert.equal(pickComputer([idle('this host', 6), idle('lothdesktop', 5)], undefined, { prefer: ['host'] })!.pick.id, 'this host');
 });
 

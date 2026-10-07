@@ -152,7 +152,7 @@ process.env.FFSB_CONFIG = configFile;
 // The machine "pc" and its sandboxes alpha and gallery, made before the portal boots so its record (with gallery1) is
 // there when the portal restores its sessions; its daemon connects once the portal listens.
 const { createTestMachine } = await import('../server/testMachine.ts');
-const pc = await createTestMachine({ id: 'pc', portalUrl: `http://127.0.0.1:${port}`, parent: base, prefix: 'machine-', maxSessions: 1, maxSandboxes: 4, maxAgentsPerSandbox: 50, sandboxes: ['alpha', 'gallery'] });
+const pc = await createTestMachine({ id: 'pc', portalUrl: `http://127.0.0.1:${port}`, parent: base, prefix: 'machine-', maxSandboxes: 4, maxAgentsPerSandbox: 50, sandboxes: ['alpha', 'gallery'] });
 for (const id of ['alpha', 'gallery']) fs.mkdirSync(path.join(pc.path(id), 'Screenshots'), { recursive: true });
 // A screenshot in a sandbox that the orchestrator mentions by path (e2e/images.spec.ts).
 fs.writeFileSync(path.join(pc.path('gallery'), 'Screenshots', 'orch-proof.png'), Buffer.from(RED_PNG, 'base64'));

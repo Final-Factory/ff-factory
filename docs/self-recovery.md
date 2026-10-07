@@ -316,7 +316,7 @@ Until 2026-10-05 a person asked for every clean-up of build output: w451 freed 4
 LothDesktop after its D: fell to the 50 GB guard and blocked new editors, and BEAST's sandboxes held about 39 GB in
 their `Builds/` folders. The same pass now removes that output by itself (`server/staleOutput.ts`), on this host's
 guard (its own daemon's sandboxes, and the base clone) and on every other machine's daemon (its sandboxes and its
-main clone): once a day (`everyHours`, the first turn a full day after the clean-up started, never right at a
+main clone, where no agent works since w536 but old output may lie): once a day (`everyHours`, the first turn a full day after the clean-up started, never right at a
 deploy), on every pass while free space is below the soft threshold, and on every pass asked for.
 
 **What goes**, and only these (an allowlist of folders in each place, then an attribution):

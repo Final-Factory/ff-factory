@@ -242,7 +242,7 @@ async function world(t: { after: (fn: () => unknown) => void }): Promise<World> 
   );
   const store = new Store(beastData);
   const mm = new MachineManager({ dataDir: beastData, limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config, store, new SessionManager({} as Config, store));
-  const { token: machineToken } = mm.register({ id: 'beast', host: 'localhost', local: true, purpose: 'unused', status: 'ready', repoPath: beastBase, home: path.join(base, 'beast'), portalUrl: `http://127.0.0.1:${beastPort}`, maxSessions: 2 });
+  const { token: machineToken } = mm.register({ id: 'beast', host: 'localhost', local: true, purpose: 'unused', status: 'ready', repoPath: beastBase, home: path.join(base, 'beast'), portalUrl: `http://127.0.0.1:${beastPort}` });
   store.flush();
   const item = (id: string, title: string) => ({ id, title, brief: title, priority: 'normal', keys: [], requestedBy: { userId: 'ben', displayName: 'Ben' }, requesters: [{ userId: 'ben', displayName: 'Ben' }], humanAsked: true, status: 'open', createdAt: at, updatedAt: at, sessionIds: [], overlaps: [] });
   fs.writeFileSync(path.join(beastData, 'work.json'), JSON.stringify({ seq: 2, items: [item('w1', 'one'), item('w2', 'two')] }));

@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process';
 import { repoIsPublic } from './publicGit.ts';
-import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -47,13 +46,6 @@ export function sandboxGuard(opts: {
   /** URLs or paths that name the game repo, whose master/main is off-limits. Empty: every repo counts. */
   gameRepos?: string[];
   remotes?: RemoteResolver;
-  /**
-   * The agent works in the user's own clone (a machine, docs/machines.md), not a disposable worktree:
-   * discarding, stashing or a dirty-tree switch only after a fresh backup (checkOwnCheckout), explicit
-   * paths only when staging. `isClean` defaults to `git status --porcelain`; `backupRoot` to
-   * ff-local-backups beside the clone; `hasBackup` to a folder there from the last 2 hours.
-   */
-  ownCheckout?: { isClean?: (dir: string) => boolean; backupRoot?: string; hasBackup?: () => boolean };
   /** Tool name prefixes to refuse, e.g. "mcp__ffsb__" (the portal's own MCP, which would let an agent launch agents). */
   denyToolPrefixes?: string[];
   /** Whether the sandbox's Unity editor is up right now: raw branch switches are refused then (checkEditorSwitch). */
@@ -94,8 +86,7 @@ export function sandboxGuard(opts: {
     if (tool === 'Bash' || tool === 'PowerShell') {
       const cmd = String(args.command ?? '');
       const reason =
-        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity, ownMachine: !!opts.ownCheckout }) ??
-        (opts.ownCheckout ? checkOwnCheckout(cmd, input.cwd || opts.sandboxPath, opts.ownCheckout.isClean ?? gitIsClean, ownBackup(opts.sandboxPath, opts.ownCheckout)) : undefined) ??
+        checkShell(cmd, { cwd: input.cwd || opts.sandboxPath, gameRepos: opts.gameRepos ?? [], remotes: opts.remotes ?? gitRemotes, publicIdentity: opts.publicIdentity }) ??
         (opts.editorRunning?.() ? checkEditorSwitch(cmd, input.cwd || opts.sandboxPath, opts.sandboxPath) : undefined) ??
         checkPlayerLaunch(cmd, opts.sandboxId);
       if (reason) return deny(reason);
@@ -191,98 +182,6 @@ export function checkPlayerLaunch(cmd: string, sandbox?: string): string | undef
   return undefined;
 }
 
-/** Whether `dir`'s work tree has no changes. Unknown (not a repo, git missing) counts as not clean. */
-export const gitIsClean = (dir: string): boolean => {
-  try {
-    const out = execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-    return out.trim() === '';
-  } catch {
-    return false;
-  }
-};
-
-/** Where agents back up the user's local changes before discarding them: beside the clone, outside the repo. */
-export const backupRootFor = (clone: string) => path.posix.join(path.posix.dirname(clone.replace(/\\/g, '/').replace(/\/+$/, '')), 'ff-local-backups');
-
-/** A backup folder made (or written to) within the last `withinMs` under `root`. */
-export function hasRecentBackup(root: string, withinMs = 2 * 3_600_000, now = Date.now()): boolean {
-  try {
-    return fs.readdirSync(root).some((n) => now - fs.statSync(path.join(root, n)).mtimeMs < withinMs);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The shell lines that back up everything a discard could lose (the recipe the refusals and the brief give). A
- * Bash line on both platforms: on Windows, Claude Code's Bash is Git Bash, which has no rsync, so the changed and
- * untracked files are copied with tar there (a deleted file in the list is skipped, not fatal).
- */
-export const backupRecipe = (root: string, platform: NodeJS.Platform = process.platform) =>
-  `b="${root}/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$b"; git diff > "$b/unstaged.patch"; git diff --cached > "$b/staged.patch"; ` +
-  (platform === 'win32'
-    ? `mkdir -p "$b/files"; git ls-files -z -m -o --exclude-standard | tar --null --ignore-failed-read -T - -cf - | tar -xf - -C "$b/files"; `
-    : `git ls-files -z -m -o --exclude-standard | rsync -a --from0 --files-from=- ./ "$b/files/"; `) +
-  `git stash list > "$b/stash-list.txt"; ls -R "$b" | head -50`;
-
-/**
- * Why a git command is refused in the user's own clone (a machine, docs/machines.md), or undefined.
- *
- * Standing permission from the user (Ben, 2026-09-25: "you always have my permission to do that"): to update
- * the clone, an agent MAY discard or set aside local changes (git stash, git restore / checkout -- <paths>,
- * git reset of files or --hard, git clean, a forced branch switch), as long as it FIRST copied them to a fresh
- * timestamped backup folder outside the repo (`backupRoot`, e.g. ~/nevergames/ff-local-backups/<time>/) and
- * then reports what it moved. So those are refused only while there is no backup from the last 2 hours
- * (`hasBackup`), with the recipe. Staging or committing everything stays refused (the user's work must not
- * end up in an agent's commit); force pushes and pushes to the game repo's master/main are checkShell's.
- */
-export function checkOwnCheckout(cmd: string, cwd: string | undefined, isClean: (dir: string) => boolean, backup?: { root: string; has: () => boolean }): string | undefined {
-  let dir = cwd;
-  const why = "The user's uncommitted work lives in this clone";
-  const needBackup = (what: string) =>
-    backup?.has()
-      ? undefined
-      : `${what} discards or sets aside the user's local changes. You may do it (the user's standing permission) once they are backed up: FIRST copy them to a fresh timestamped folder outside the repo, run from the clone: ${backupRecipe(backup?.root ?? '~/nevergames/ff-local-backups')} . Then run this again, and report what you moved and where.`;
-  for (const seg of cmd.split(/&&|\|\||[;|\n]/)) {
-    const raw = seg
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((w) => w.replace(/^["']|["']$/g, ''));
-    const lower = raw.map((w) => w.toLowerCase());
-    if (['cd', 'pushd', 'chdir', 'set-location', 'sl'].includes(lower[0] ?? '')) dir = resolveDir(dir, raw[1]);
-    const g = lower.findIndex((w) => w === 'git' || w.endsWith('/git') || w.endsWith('git.exe'));
-    if (g < 0) continue;
-    let gitDir = dir;
-    let i = g + 1;
-    while (i < raw.length && raw[i].startsWith('-')) {
-      if (raw[i] === '-C') gitDir = resolveDir(gitDir, raw[i + 1]);
-      i += raw[i] === '-C' || raw[i] === '-c' ? 2 : 1;
-    }
-    const sub = lower[i];
-    const rest = lower.slice(i + 1);
-    const has = (...f: string[]) => rest.some((w) => f.includes(w));
-    const shortFlag = (c: string) => rest.some((w) => /^-[a-z]+$/.test(w) && w.includes(c));
-    let refusal: string | undefined;
-    if (sub === 'stash' && !['list', 'show'].includes(rest[0] ?? '')) refusal = needBackup('git stash');
-    else if (sub === 'reset' && has('--hard', '--merge', '--keep')) refusal = needBackup(`git reset ${rest.find((w) => w.startsWith('--'))}`);
-    else if (sub === 'clean' && !has('-n', '--dry-run')) refusal = needBackup('git clean');
-    else if (sub === 'restore' && !(has('--staged', '-s') && !has('--worktree', '-w'))) refusal = needBackup('git restore of the work tree');
-    else if (sub === 'add' && (has('-a', '--all', '.', '-u', '--update', ':/', '*') || shortFlag('a'))) {
-      refusal = `Stage explicit paths (git add <file>…), never everything: ${why}, and it must not end up in your commit.`;
-    } else if (sub === 'commit' && (has('--all') || shortFlag('a'))) refusal = `git commit -a is blocked: ${why}. Stage your own files by path, then commit.`;
-    else if (sub === 'checkout' || sub === 'switch') {
-      if (has('--', '.', '-f', '--force', '--discard-changes', '-p', '--patch') || rest.some((w) => w.startsWith('--ours') || w.startsWith('--theirs'))) {
-        refusal = needBackup(`git ${sub} of paths (or --force)`);
-      } else if (!isClean(gitDir ?? '.')) {
-        refusal = needBackup(`Switching branches with uncommitted changes (the user's work in progress)`);
-      }
-    }
-    if (refusal) return refusal;
-  }
-  return undefined;
-}
-
 /**
  * Why a shell command is refused while the sandbox's editor runs, or undefined. Exported for tests. A branch
  * switch under a running editor rewrites open scene files and Unity stops on its "modified externally"
@@ -351,8 +250,6 @@ export function repoKey(url: string): string {
 
 export interface ShellContext {
   cwd?: string;
-  /** The agent works on one of the user's own machines (a Mac), not in a sandbox on the shared host. */
-  ownMachine?: boolean;
   gameRepos: string[];
   remotes: RemoteResolver;
   publicIdentity?: PublicIdentity;
@@ -534,24 +431,8 @@ export function checkShell(cmd: string, ctx?: ShellContext): string | undefined 
   if (/launchctl\s+(bootout|unload|remove|kill|disable)\b[^;&|]*com\.fffactory/.test(lc)) return "Unloading the FF Factory daemon's LaunchAgent is blocked.";
   if (/schtasks(\.exe)?\s+[^;&|]*\/(end|delete|change)\b[^;&|]*fffactory|schtasks(\.exe)?\s+[^;&|]*fffactory[^;&|]*\/(end|delete|change)\b/.test(lc)) return "Ending, changing or deleting the FF Factory daemon's scheduled task is blocked.";
   if (/(stop|disable|unregister|set)-scheduledtask\b[^;&]*fffactory|fffactory[^;&]*\|\s*(stop|disable|unregister|set)-scheduledtask\b/.test(lc)) return "Ending, changing or deleting the FF Factory daemon's scheduled task is blocked.";
-  if (ctx?.ownMachine) {
-    // A machine (one of the user's Macs or Windows PCs, docs/machines.md): its agents manage Unity like the user's
-    // own sessions there do, killing and relaunching editors, Hub and crash handlers freely. Only the FF Factory
-    // daemon (node, the .ff-factory folder) and Claude itself are off limits, as is unloading the daemon's
-    // LaunchAgent (Mac) or ending, disabling or deleting its scheduled task (Windows).
-    if (killer && all.some((w) => /^(node|claude)(\.exe)?$|claude|ff-?factory|daemon\.ts|com\.fffactory|run-daemon/.test(w.replace(/^["']|["']$/g, '')))) {
-      return "Killing node or claude processes is blocked on a machine: that would take down the FF Factory daemon or this agent. Unity, Unity Hub and crash handlers are fine to kill.";
-    }
-    return undefined;
-  }
   if (killer && all.some((w) => /unity|node|claude|powershell|pwsh|tailscale|supervise/.test(w))) {
     return 'Killing Unity, node, claude or PowerShell processes by hand is blocked: other sandboxes and the live co-op game share this machine. Use mcp__machine__unity (action restart; force: true for a frozen editor) to stop or restart your own editor.';
   }
   return undefined;
-}
-
-/** The backup rule's folder and check for the user's clone at `clone` (overridable for tests). */
-function ownBackup(clone: string, o: { backupRoot?: string; hasBackup?: () => boolean }) {
-  const root = o.backupRoot ?? backupRootFor(clone);
-  return { root, has: o.hasBackup ?? (() => hasRecentBackup(root)) };
 }

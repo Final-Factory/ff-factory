@@ -2,9 +2,9 @@
 
 A machine is a whole computer the portal can run agents on. The portal itself runs only the orchestrators and the
 dispatcher (w510, 2026-10-06): every worker, sandbox, Unity editor and standing agent runs under a machine's daemon,
-and the portal's own computer can be one too ([beast-machine.md](beast-machine.md)). By default
-agents work in the machine's main game clone, the one the user uses (no worktree unless a task truly needs
-one); a machine given a `sandbox_root` also holds its own pool of sandboxes ([Machine sandboxes](#machine-sandboxes)). Machines are Macs (the daemon is a LaunchAgent) or Windows PCs (the
+and the portal's own computer can be one too ([beast-machine.md](beast-machine.md)). Every worker runs in one of
+a machine's sandboxes, worktrees of its main game clone in its `sandbox_root` ([Machine sandboxes](#machine-sandboxes));
+no agent works in the main clone, the one the user uses (w536). Machines are Macs (the daemon is a LaunchAgent) or Windows PCs (the
 daemon is a scheduled task at the user's logon, [below](#windows-machines)), with ids such as `m5` or
 `lothdesktop`. Ids are lower-case letters, digits and dashes; one given with capitals (`LothDesktop`) is
 stored lower-case and shown as typed, and either spelling works in every tool.
@@ -73,15 +73,11 @@ before redeploying by hand.
   whose calls go back to the portal. They set no label: their title says what they are doing, and the dispatcher sets it
   ([orchestrators.md](orchestrators.md#worker-titles-and-sandbox-labels), w575). Unity is not managed in v1: agents use whatever editor and MCP
   the Mac already has (the Mac's own user settings load).
-- **Guard.** The workers' guard runs in the daemon, plus rules for the user's own clone. The user's
-  standing permission (2026-09-25): to update the clone an agent may set aside or discard local
-  changes (`git stash`, `restore`/`checkout -- <paths>`, `reset` of files or `--hard`, `clean`, a
-  forced or dirty-tree branch switch), but only after copying them to a fresh timestamped folder in
-  `ff-local-backups/` beside the clone (e.g. `~/nevergames/ff-local-backups/<time>/`: the patches, the
-  changed and untracked files, the stash list), and it reports what it moved. The guard refuses those
-  commands until a backup folder from the last 2 hours exists, and its refusal gives the backup recipe
-  (`backupRecipe` in `server/guard.ts`). Staging or committing everything (`add -A`/`.`, `commit -a`),
-  force pushes and pushes to the game repo's master/main stay refused. The daemon's own folder
+- **Guard.** The workers' guard runs in the daemon (the sandbox rules, [below](#machine-sandboxes)). The
+  backup-before-discard rule for the user's own clone (2026-09-25: copy local changes to `ff-local-backups/` beside
+  the clone before setting any aside) went with main-clone workers (w536): no agent works there now, and the main
+  clone is a protected path for sandbox workers. Existing `ff-local-backups` folders stay, and the clean-up never
+  deletes them. Force pushes and pushes to the game repo's master/main stay refused. The daemon's own folder
   (`~/.ff-factory`, or the machine's `app_dir`; it holds the token) is protected.
 - **Claude account.** With the token vault on for a machine (config `machines.claudeFromVault`), its runs get a vault
   token chosen per run by plan headroom, and the other secrets granted to that machine, in the same launch spec
@@ -92,7 +88,7 @@ before redeploying by hand.
   Agent SDK process only (it overrides the Mac's keychain login for that process). It is never written
   to disk on the Mac, the daemon log redacts tokens, and transcripts are redacted (server/secrets.ts).
   The user's own interactive Claude Code sessions on the Mac are unaffected: they keep the Mac's login.
-  `list_machines` and the machine brief show the source: "host token …abcd" or "Mac login". Config
+  `list_machines` and a sandbox worker's brief show the source: "host token …abcd" or "Mac login". Config
   `machines.useHostClaudeEnv` (default `true`) turns it off everywhere (`false`) or per machine
   (`{ "m3": false }`, with `"*"` for the machines not named); `set_app_config machines.useHostClaudeEnv`
   sets it, with `machine: "<id>"` for one machine. A Mac on its own login gets no token, and the daemon
@@ -101,15 +97,18 @@ before redeploying by hand.
   anyway. An agent working for someone with their own token (config `userClaudeEnv`,
   [identity.md](identity.md)) runs on that token instead, on any Mac. Every account switch, including the
   orchestrator's, the dispatcher's and this host's own daemon's workers': [accounts.md](accounts.md).
-- **Limits.** Each machine has its own limit for its main clone and standing agents (`max_agents`,
-  default 3), and each of its sandboxes its own (`max_agents_per_sandbox`, below). The portal has no worker
-  limit of its own: it runs none (`limits.maxSessions` and `limits.maxIdleAgents` are retired). **A machine with a
-  `sandbox_root` takes workers in its sandboxes only, whatever its `max_agents`** (w536, Lothsahn on 2026-10-06: "Can't we get rid of this
-  code so the settings doesn't matter?"): `start_agent` with the machine alone is refused, naming its sandboxes, the
-  Capacity block never lists its main clone, and the daemon refuses such a worker too (`mainCloneRefusal` in
-  `server/machines.ts`). There `max_agents` caps only its standing agents. Only a machine without sandboxes (the m3, the
-  m5 until their worker-root installs, docs/worker-root.md) still runs workers in its main clone. `max_agents: 0`
-  (w477) keeps every agent off a machine's main clone and standing agents off the machine. They count agents
+- **Limits.** **Workers run in sandboxes only** (w536, Lothsahn on 2026-10-06: "Can't we get rid of this code so the
+  settings doesn't matter?"): `start_agent` with a machine alone is refused, naming its sandboxes, the Capacity block
+  lists sandbox computers only, and the daemon refuses any agent whose folder is the main clone (`mainCloneRefusal` in
+  `server/machines.ts`, `startRefusal` in `machine/daemon.ts`). A machine without sandboxes (the m3, the m5) takes no
+  workers: it gets a sandbox root through its worker-root install ([worker-root.md](worker-root.md), w513). Each
+  machine has **one agent cap** (`agentCap`): its sandboxes' agents and its standing agents mid-turn together, at most
+  `max_sandbox_agents`, else every sandbox full (`max_sandboxes` × `max_agents_per_sandbox`); a machine without
+  sandboxes runs up to 2 standing agents (`STANDING_CAP_NO_POOL`). Each sandbox has its own limit too
+  (`max_agents_per_sandbox`, below). `max_agents` is gone: the portal drops it from an old record at start and says so
+  once, and a daemon whose `daemon.json` still has `maxSessions` logs that it is obsolete (the portal's `welcome` sends
+  the cap in that field, so an older daemon keeps working). The portal has no worker limit of its own: it runs none
+  (`limits.maxSessions` and `limits.maxIdleAgents` are retired). The limits count agents
   mid-turn only, and a message that finds them full waits in the portal's queue instead of being refused; the daemon's
   own start check counts the same way, and idle finished workers are stopped by the portal's reaper
   ([orchestrators.md](orchestrators.md#agent-limits-and-idle-workers), w384).
@@ -273,11 +272,9 @@ log on again. A deploy while nobody is logged on installs everything and says so
   `scripts/unity-windows.ps1` ([unity-dialogs.md](unity-dialogs.md#macs)). No App Nap.
 - **Guard**: the same rules. Killing `node.exe` or `claude.exe`, and ending, changing or deleting the
   `FFFactoryDaemon` task (`schtasks /End|/Change|/Delete`, `Stop-/Disable-/Unregister-/Set-ScheduledTask`) are
-  refused; Unity, Unity Hub and crash handlers are fine to kill. The daemon's folder (`.ff-factory`, or the
+  refused, and killing Unity by hand is refused as in every sandbox (the `unity` tool restarts an editor). The daemon's folder (`.ff-factory`, or the
   `app_dir`) is protected in every spelling (`C:\Users\x\.ff-factory`, `~/.ff-factory`, `%USERPROFILE%`,
-  `$env:USERPROFILE`, Git Bash's `/c/Users/...`; `D:\work\.ff-factory`, `D:/work/...`, `/d/work/...`). The backup-before-discard rule is the same, into `ff-local-backups` beside the clone (e.g.
-  `D:\ff-local-backups\<time>\`); the recipe is a Git Bash line that copies the changed and untracked files
-  with tar, since Git Bash has no rsync.
+  `$env:USERPROFILE`, Git Bash's `/c/Users/...`; `D:\work\.ff-factory`, `D:/work/...`, `/d/work/...`).
 
 ### Setting up a Windows PC (for its owner)
 
@@ -372,7 +369,8 @@ change applies on the next reconnect; omitted on a redeploy: kept):
 |---|---|---|
 | `sandbox_root` | Absolute folder for the sandboxes, e.g. `D:\work\ffsb`; unset: no sandboxes. Moving it is refused while sandboxes exist. | none |
 | `max_sandboxes` | Sandboxes that may exist at once | 3 |
-| `max_agents_per_sandbox` | Agents that may be mid-turn at once in one sandbox (apart from `max_agents`, the main clone's); idle ones take no slot, and a message past it is queued | 2 |
+| `max_agents_per_sandbox` | Agents that may be mid-turn at once in one sandbox; idle ones take no slot, and a message past it is queued | 2 |
+| `max_sandbox_agents` | The machine's agent cap: agents mid-turn at once on it, its sandboxes' and its standing agents together (w536) | `max_sandboxes` × `max_agents_per_sandbox` |
 | `max_unity` | Unity editors that may run at once on the machine: every top-level Unity process there counts, sandbox editors, the main clone's or its owner's own, `-batchmode` builds and test runs, peer-run editors, editors scripts start (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)); launches other than `unity start` wait in a queue for their slot (`unity-slot run`) | 2 |
 | `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors | 50 |
 | `disk_critical_gb` | Below this: idle sandbox editors stop, and agents mid-turn in sandboxes are asked to commit, push and end their turn | 20 |
@@ -405,7 +403,7 @@ sandbox agents in all), `max_unity: 2`.
 tools `wake_me`, `unity` (their sandbox's editor), `switch_branch`, `fetch_attachment`, `publish_attachment` (a file of theirs as an attachment id another worker
 gets, [attachments.md](attachments.md#agents-files)) and `publish_review` (review media to the
 portal's computer over the daemon's link, [review.md](review.md)). Their guard
-is the sandbox one, not the main clone's backup rules: their worktree is theirs, the main clone and the daemon's
+is the sandbox one: their worktree is theirs, the main clone and the daemon's
 folder are protected, killing Unity by hand is refused (other sandboxes' editors share the machine), and a raw
 `git switch` is refused while their editor runs.
 
@@ -436,16 +434,18 @@ main clone's own branch switch) take one lock in the daemon.
 **In the web UI.** The sidebar groups everything by computer: this host (its own daemon's sandboxes, or "orchestrators only" when it has no
 daemon), then each machine, each a collapsible group
 whose header shows its load and `sandboxes/max_sandboxes · editors/max_unity`, then one row per sandbox (label, branch,
-editor, a **FREE** badge) with its live agents under it, then the machine's main clone and its agents. The Overview
+editor, a **FREE** badge) with its live agents under it (no main-clone row: no agent works there, w536). The Overview
 page (`#/overview`) shows the same as one card per computer. A machine sandbox has its own page,
 `#/machine/<machine>/sandbox/<id>`: its agents as tabs, its editor (start, stop, the log read through the daemon), its
 git state and a branch switch (`POST /api/machines/<machine>/sandboxes/<id>/unity`, `GET …/unity-log`,
-`POST …/switch-branch`). The machine's own page keeps its main-clone agents.
+`POST …/switch-branch`). The machine's own page (from its Overview card) shows its daemon, clone and sandboxes, and
+its running agents against its agent cap; a machine's main clone takes no editor or branch command from the portal
+(`unity` and `switch_branch` with a machine alone are refused).
 
 ![The sidebar grouped by computer](images/fleet-sidebar-desktop-chromium.png)
 ![The Overview board](images/fleet-overview-desktop-chromium.png)
 
-**Unity MCP.** Every agent on a machine, in its main clone or in a sandbox, gets the Unity MCP bridge of its own
+**Unity MCP.** Every agent in a machine sandbox gets the Unity MCP bridge of its own
 editor as `UnityMCP`: the portal marks the launch spec `unityMcp`, and the daemon adds the MCP-for-Unity server
 (`machine/unityMcp.ts`). Claude Code registers that server per project folder, so a fresh worktree would otherwise have
 none (LothDesktop's sandbox agents fell back to Unity on the command line). The command is `daemon.json`
@@ -508,16 +508,11 @@ LothDesktop and Beast, not just when BEAST is full").
 
   `placement.prefer` names computers in order (machine ids; `this host` and `host` are refused by `set_app_config`,
   since the portal's host is no place for work: name its own daemon, `beast`): the next new work goes to the first of them with room. `placement.avoid` keeps a computer off unless nothing else
-  has room, with the reason shown beside it. The rest come between them, spread by room as above, sandbox computers
-  before main clones. `null` clears either (`set_app_config placement.avoid null` once BEAST is fixed). The Capacity
-  block tags each computer `[preferred #n]`, `[avoided: <why>]` or `[main clone]`, and its last line says why the next
+  has room, with the reason shown beside it. The rest come between them, spread by room as above. A name that is no
+  sandbox computer (the m5, the m3 since w536) is skipped. `null` clears either (`set_app_config placement.avoid null`
+  once BEAST is fixed). The Capacity block tags each computer `[preferred #n]` or `[avoided: <why>]`, and its last line says why the next
   one was picked ("first with room in placement.prefer (lothdesktop > m5 > m3)", "only avoided computers have room").
   The dispatcher's prompt shows the setting in force.
-- **Main-clone machines** (no `sandbox_root`: the m5, the m3) are candidates too, for work that can run in a main
-  clone: `start_agent` with `machine` alone (never one with `max_agents: 0`, which takes agents in its sandboxes only). Their line counts live agents in the main clone against the machine's
-  `max_agents` and its RAM. A worker there runs next to its owner's own uncommitted work and backs it up to
-  `ff-local-backups` before it sets any aside (the harness enforces the backup). This host's own daemon is never one:
-  its main clone is the base its sandboxes are worktrees of.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max goes to
   LothDesktop (only it has the ffdiscord config). A computer that is avoided or not next keeps only what needs it: FF

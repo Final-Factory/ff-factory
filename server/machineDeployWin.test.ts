@@ -9,7 +9,7 @@ import { WebSocketServer } from 'ws';
 import * as win from './machineDeployWin.ts';
 import { bundle, daemonConfig, macControlScript, parseWinProbe, pickRepo, platformOfUname, probeSlug } from './machineDeploy.ts';
 import { SSH_REACHABLE_ARGS, daemonLogPath, machineForPath } from './machines.ts';
-import { backupRecipe, checkShell } from './guard.ts';
+import { checkShell } from './guard.ts';
 import { keepAwakeCommand } from '../machine/daemon.ts';
 import { editorBinary, editorLogPath, editorTree, editorsFor, parseWinProcs, reportersFor, winLaunchScript } from '../machine/unity.ts';
 import { ROOT } from './config.ts';
@@ -67,7 +67,7 @@ test('windows: scripts are pure ASCII even for a user named Björn (the input ma
   assert.equal(win.psq('C:\\Users\\Björn\\n.exe'), "([string]'C:\\Users\\Bj' + [char]0x00F6 + 'rn\\n.exe')");
   assert.equal(win.psq('ü😀'), '([string][char]0x00FC + [char]0xD83D + [char]0xDE00)', 'beyond the BMP: both UTF-16 halves');
   const node = 'C:\\Users\\Björn\\nodejs\\node.exe';
-  const config = daemonConfig({ portalUrl: 'https://p.example', id: 'b', token: 't', repoPath: 'D:\\Spiele\\FinalFactory-ä', maxSessions: 1 });
+  const config = daemonConfig({ portalUrl: 'https://p.example', id: 'b', token: 't', repoPath: 'D:\\Spiele\\FinalFactory-ä' });
   for (const s of [win.npmScript(node, 'v'), win.installScript({ sid: SID, home: 'C:\\Users\\Björn', config, node, flag: false }), win.probeScript('a/b'), win.BOOTSTRAP]) {
     assert.match(s, /^[\x00-\x7f]*$/, 'a character beyond ASCII in a script');
   }
@@ -102,7 +102,7 @@ test('windows: the task runs at logon of this user, in their session, not elevat
 });
 
 test('windows: the install writes daemon.json without a BOM, the supervisor with one, and registers then starts the task', () => {
-  const config = daemonConfig({ portalUrl: 'https://beast.tail.ts.net', id: 'lothdesktop', token: 'ffm_lothdesktop_x', repoPath: 'D:\\Games\\FinalFactory', claude: 'C:\\Users\\L\\.local\\bin\\claude.exe', maxSessions: 3 });
+  const config = daemonConfig({ portalUrl: 'https://beast.tail.ts.net', id: 'lothdesktop', token: 'ffm_lothdesktop_x', repoPath: 'D:\\Games\\FinalFactory', claude: 'C:\\Users\\L\\.local\\bin\\claude.exe' });
   const s = win.installScript({ sid: SID, home: 'C:\\Users\\L', config, node: 'C:\\Program Files\\nodejs\\node.exe', flag: true });
   const b = blobs(s);
   assert.deepEqual(Object.keys(b).sort(), ['daemon.json', 'run-daemon.ps1']);
@@ -245,8 +245,8 @@ test('machines: a path under a Windows machine\'s clone or home is that machine\
   assert.match(daemonLogPath(undefined), /^~\/\.ff-factory\/logs\/daemon\.log$/);
 });
 
-test('guard on a Windows machine: its daemon (node.exe, the task) is off limits; Unity is not', () => {
-  const ctx = { cwd: 'C:/Users/Loth/FinalFactory', ownMachine: true, gameRepos: [], remotes: () => [] } as unknown as Parameters<typeof checkShell>[1];
+test('guard on a Windows machine: its daemon (node.exe, the task) is off limits', () => {
+  const ctx = { cwd: 'C:/Users/Loth/FinalFactory', gameRepos: [], remotes: () => [] } as unknown as Parameters<typeof checkShell>[1];
   for (const cmd of [
     'taskkill /IM node.exe /F',
     'taskkill /F /IM "claude.exe"',
@@ -259,18 +259,9 @@ test('guard on a Windows machine: its daemon (node.exe, the task) is off limits;
   ]) {
     assert.ok(checkShell(cmd, ctx), `should be refused: ${cmd}`);
   }
-  for (const cmd of ['taskkill /IM Unity.exe /F', 'Stop-Process -Name "Unity Hub"', 'taskkill /F /IM UnityCrashHandler64.exe', 'schtasks /Query /TN FFFactoryDaemon', 'Get-ScheduledTask FFFactoryDaemon']) {
+  for (const cmd of ['schtasks /Query /TN FFFactoryDaemon', 'Get-ScheduledTask FFFactoryDaemon']) {
     assert.equal(checkShell(cmd, ctx), undefined, `should be allowed: ${cmd}`);
   }
-});
-
-test('guard: the backup recipe copies with rsync on a Mac and with tar on Windows (Git Bash has no rsync)', () => {
-  const mac = backupRecipe('/Users/b/nevergames/ff-local-backups', 'darwin');
-  assert.match(mac, /rsync -a --from0/);
-  const w = backupRecipe('D:/Games/ff-local-backups', 'win32');
-  assert.doesNotMatch(w, /rsync/);
-  assert.match(w, /git ls-files -z -m -o --exclude-standard \| tar --null --ignore-failed-read -T - -cf - \| tar -xf - -C "\$b\/files"/);
-  for (const r of [mac, w]) for (const k of ['unstaged.patch', 'staged.patch', 'stash-list.txt']) assert.ok(r.includes(k));
 });
 
 // ---- Unity on a Windows machine (machine/unity.ts)
@@ -474,7 +465,7 @@ test('windows (real PowerShell): probe, unpack, npm ci, install into an app_dir,
     if (m.type === 'hello') resolve(m);
   })));
   const portalUrl = `http://127.0.0.1:${(wss.address() as AddressInfo).port}`;
-  const config = daemonConfig({ portalUrl, id: 'lothdesktop', token: 'ffm_lothdesktop_' + 'x'.repeat(43), repoPath: clone, claude: p.claude, maxSessions: 1, appDir });
+  const config = daemonConfig({ portalUrl, id: 'lothdesktop', token: 'ffm_lothdesktop_' + 'x'.repeat(43), repoPath: clone, claude: p.claude, appDir });
   const inst = await runPs(win.installScript({ sid: p.sid, home, config, node: p.node!, flag: false, appDir }), { env, timeoutMs: 3 * 60_000 });
   assert.equal(inst.code, 0, inst.stderr);
   assert.match(inst.stdout, /started=(True|False)/);

@@ -31,7 +31,6 @@ const beast = (over: Partial<Machine> = {}): Machine => ({
   repoPath: 'C:\\ffsb\\_base',
   home: 'C:\\Users\\rydin',
   portalUrl: 'http://127.0.0.1:8790',
-  maxSessions: 3,
   sessionIds: ['w1', 'w2'],
   createdAt: T,
   platform: 'win32',
@@ -64,7 +63,7 @@ test('convert_machine (record): BEAST to ssh keeps its sandboxes, agents, limits
   // What a later ssh redeploy writes into its daemon.json: the Unity MCP server and the idle stop it had. Not "no Max file"
   // or "no clean-up of its own": the portal no longer reads its Max file or cleans its disk once it is elsewhere.
   assert.deepEqual(ssh.daemonExtras, { unityMcpServer: EXTRAS.unityMcpServer, sandboxIdleStopMinutes: 120 });
-  for (const k of ['id', 'repoPath', 'home', 'sandboxRoot', 'maxSandboxes', 'maxAgentsPerSandbox', 'maxUnity', 'maxSandboxAgents', 'diskWarnGB', 'diskCriticalGB', 'librarySeed', 'librarySeedCopy', 'unityBelowNormal', 'protectedPaths', 'sandboxes', 'sessionIds', 'createdAt', 'platform', 'maxSessions'] as const) {
+  for (const k of ['id', 'repoPath', 'home', 'sandboxRoot', 'maxSandboxes', 'maxAgentsPerSandbox', 'maxUnity', 'maxSandboxAgents', 'diskWarnGB', 'diskCriticalGB', 'librarySeed', 'librarySeedCopy', 'unityBelowNormal', 'protectedPaths', 'sandboxes', 'sessionIds', 'createdAt', 'platform'] as const) {
     assert.deepEqual(ssh[k], m[k], `${k} kept`);
   }
   assert.equal(m.local, true, 'the record given is not changed');
@@ -209,7 +208,7 @@ test('convert_machine (live): BEAST becomes an ssh machine and back with its dae
   mm.convertMachine('beast', 'local', {});
 
   // Only one machine is the portal's own host, and only one whose clone is on this computer.
-  mm.register({ id: 'lothdesktop', host: 'lothdesktop', purpose: 'unused', status: 'ready', repoPath: 'D:\\work\\FFFRepo', home: 'C:\\Users\\Loth', portalUrl: 'https://fff.example.ts.net', maxSessions: 3 });
+  mm.register({ id: 'lothdesktop', host: 'lothdesktop', purpose: 'unused', status: 'ready', repoPath: 'D:\\work\\FFFRepo', home: 'C:\\Users\\Loth', portalUrl: 'https://fff.example.ts.net' });
   assert.throws(() => mm.convertMachine('lothdesktop', 'local'), /beast is already the portal's own host as a machine/);
   mm.convertMachine('beast', 'ssh', { sshHost: 'beast', portalUrl: 'https://fff.example.ts.net' });
   assert.throws(() => mm.convertMachine('lothdesktop', 'local'), /D:\\work\\FFFRepo is not on this computer/);
@@ -266,7 +265,6 @@ echo ok
     token: 'ffm_beast_secret',
     root: ROOT,
     repoPath: 'C:\\ffsb\\_base',
-    maxSessions: 3,
     repoSlug: 'Final-Factory/FinalFactory',
     dirs: { sandboxRoot: 'F:\\ffsb' },
     sandboxes: { root: 'F:\\ffsb', maxSandboxes: 5, maxAgentsPerSandbox: 6, maxUnity: 2, diskWarnGB: 80, diskCriticalGB: 40 },

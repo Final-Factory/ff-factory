@@ -14,10 +14,9 @@ import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
-import { backupRootFor, checkOwnCheckout, hasRecentBackup } from './guard.ts';
 import { agentPath, macReloadLines, nodeSupport, plist } from './machineDeploy.ts';
 import type { Config } from './config.ts';
-import type { HostStats, ImageInput, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import type { HostStats, ImageInput, MachineSandbox, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
 process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
@@ -110,18 +109,22 @@ async function setup() {
   const store = new Store(tmp);
   const sessions = new SessionManager(cfg, store);
   const mm = new MachineManager(cfg, store, sessions);
+  // Its workers are in sandbox "sb" (w536: none in the main clone). This daemon has no pool, so their spec names no
+  // sandbox and it runs them in that folder as it would a standing agent's, under the machine's agent cap.
+  const agentDir = path.join(tmp, 'sb');
   mm.hooks = {
-    specFor: (info) => ({ cwd: tmp, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: tmp, protectedPaths: [], gameRepos: [] }, model: info.model }),
+    specFor: (info) => ({ cwd: agentDir, settingSources: [], append: '', strictMcp: true, guard: { id: 'x', ownPath: agentDir, protectedPaths: [], gameRepos: [] }, model: info.model }),
     handlersFor: (_info, m) => ({ set_label: async (a) => mm.setPurpose(m.id, String(a.purpose)).purpose, wake_me: async (a) => `waking you in ${a.minutes} min: ${a.note}` }),
   };
   const server = http.createServer();
   server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url, maxSessions: 1 });
+  const sb: MachineSandbox = { id: 'sb', branch: 'sandbox/sb', base: 'origin/develop', path: agentDir, purpose: 'unused', status: 'ready', createdAt: '', unity: { state: 'stopped' }, sessionIds: [] };
+  const { token } = mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: url, sandboxes: [sb] });
   const daemons: Daemon[] = [];
   const daemon = (tok = token, agent: typeof FakeAgent = FakeAgent) => {
-    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, appDir: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: path.join(tmp, 'max-events.jsonl') }, (i, s, o, e) => new agent(i, s, o, e), FAKE_PROBES);
+    const d = new Daemon({ portalUrl: url, id: 'mx', token: tok, repoPath: tmp, appDir: tmp, claude: 'definitely-not-a-claude-binary', maxEventsFile: path.join(tmp, 'max-events.jsonl') }, (i, s, o, e) => new agent(i, s, o, e), FAKE_PROBES);
     daemons.push(d);
     d.start();
     return d;
@@ -138,11 +141,35 @@ async function setup() {
   return { store, sessions, mm, daemon, token, cleanup, tmp };
 }
 
+test('w536: a machine record that still has max_agents loses it on load, said once for all of them', async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-maxagents-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const cfg = { dataDir: tmp, limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
+  const old = new Store(tmp);
+  for (const [id, n] of [['m5', 3], ['lothdesktop', 0]] as const) old.putMachine({ id, host: id, purpose: 'unused', status: 'ready', online: false, repoPath: '/r', home: '/h', portalUrl: 'http://x', maxSessions: n, sessionIds: [], createdAt: '' } as never);
+  old.putMachine({ id: 'beast', host: 'beast', purpose: 'unused', status: 'ready', online: false, repoPath: '/r', home: '/h', portalUrl: 'http://x', sessionIds: [], createdAt: '' });
+  old.flush();
+  const load = async () => {
+    const store = new Store(tmp);
+    const mm = new MachineManager(cfg, store, new SessionManager(cfg, store));
+    const reports: string[] = [];
+    mm.report = (text) => reports.push(text);
+    await new Promise((r) => setImmediate(r));
+    store.flush();
+    return { store, reports };
+  };
+  const first = await load();
+  assert.deepEqual(first.reports, ["[machines] max_agents is gone (w536): workers run in sandboxes only and standing agents count against the machine's agent cap; dropped it from m5, lothdesktop"]);
+  for (const m of first.store.machines.values()) assert.equal('maxSessions' in m, false, m.id);
+  // Saved without it: the next start says nothing.
+  assert.deepEqual((await load()).reports, []);
+});
+
 test('machine: a revoked credential drops the link and keeps the daemon out; a new one lets it back (w512, docs/vault.md)', async (t) => {
   const { mm, daemon, cleanup, tmp } = await setup();
   t.after(cleanup);
   const d = daemon();
-  await until('online', () => mm.isOnline('mx'));
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   assert.equal(revokeMachineToken(tmp, 'mx'), true);
   mm.dropRevoked();
   await until('dropped', () => !mm.isOnline('mx'));
@@ -159,9 +186,9 @@ test('machine: a credential replaced from outside drops the old link; the portal
   const { mm, daemon, cleanup, tmp } = await setup();
   t.after(cleanup);
   const d = daemon();
-  await until('online', () => mm.isOnline('mx'));
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   // add_machine's redeploy re-issues through register: the link it has stays until the deploy replaces the daemon.
-  mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: 'http://x', maxSessions: 1 });
+  mm.register({ id: 'mx', host: 'mx', purpose: 'unused', status: 'ready', repoPath: tmp, home: tmp, portalUrl: 'http://x' });
   mm.dropRevoked();
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(mm.isOnline('mx'), true, 'kept');
@@ -226,7 +253,7 @@ test('machine: a daemon connects, runs a session, and everything it records land
 
   const turnEnds: string[] = [];
   sessions.events.on('turnEnd', (s: SessionHandle, text: string) => turnEnds.push(`${s.info.id}:${text}`));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   assert.ok(s instanceof RemoteSession);
   sessions.send(s.info.id, 'hello');
   await until('turn end', () => turnEnds.length === 1);
@@ -245,7 +272,7 @@ test('machine: a daemon connects, runs a session, and everything it records land
   assert.equal(mm.liveCount('mx'), 1);
 
   // The machine's own limit (1) counts mid-turn agents only (w384): the first is idle, so a second starts at once.
-  const s2 = mm.createSession('mx', { kind: 'worker', title: 'w2', permissionMode: 'default' });
+  const s2 = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w2', permissionMode: 'default' });
   assert.equal(mm.placeFull(s2), undefined, 'an idle agent takes no slot');
   assert.equal(sessions.isQueued(sessions.send(s2.info.id, 'second')), false);
   await until('second turn', () => turnEnds.length === 2);
@@ -262,8 +289,8 @@ test("machine: a Mac agent on its own login shows on that Mac's login, not this 
     }
   }
   daemon(undefined, OnLogin);
-  await until('online', () => mm.isOnline('mx'));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   s.send('hello');
   await until('reported', () => s.info.account !== undefined);
   assert.equal(s.info.account, 'login:mx');
@@ -273,8 +300,8 @@ test('machine: offline sessions show stopped and refuse messages; a reconnect re
   const { store, sessions, mm, daemon, cleanup } = await setup();
   t.after(cleanup);
   const d = daemon();
-  await until('online', () => mm.isOnline('mx'));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   const ended: string[] = [];
   sessions.events.on('ended', (h: SessionHandle) => ended.push(h.info.id));
   sessions.send(s.info.id, 'one');
@@ -288,7 +315,7 @@ test('machine: offline sessions show stopped and refuse messages; a reconnect re
   assert.throws(() => sessions.send(s.info.id, 'two'), /machine mx is offline/);
 
   daemon();
-  await until('online again', () => mm.isOnline('mx'));
+  await until('online again', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   sessions.send(s.info.id, 'three');
   await until('answered', () => store.readTranscript(s.info.id).length === 4);
   assert.deepEqual(
@@ -301,8 +328,8 @@ test('machine: images go to the agent with ids the portal already stored; images
   const { store, sessions, mm, daemon, cleanup } = await setup();
   t.after(cleanup);
   daemon();
-  await until('online', () => mm.isOnline('mx'));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'look', 'human', [{ mediaType: 'image/jpeg', data: '/9j/4AAQ' }]);
   await until('answered', () => store.readTranscript(s.info.id).some((e) => e.kind === 'assistant'));
   const user = store.readTranscript(s.info.id).find((e) => e.kind === 'user') as Extract<TranscriptEvent, { kind: 'user' }>;
@@ -329,8 +356,8 @@ test('machine: a bad token is refused; tool calls go back to the portal', async 
 
   const d = daemon();
   // Both ends: the portal's link and the daemon's own socket (a tool call before it is open is refused).
-  await until('online', () => mm.isOnline('mx') && d.connected);
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined && d.connected);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   type H = (a: Record<string, unknown>) => Promise<string>;
   const handlers = (d as unknown as { handlers(id: string): Record<string, H> }).handlers(s.info.id);
   assert.equal(await handlers.set_label({ purpose: 'shader pass' }), 'shader pass');
@@ -338,48 +365,6 @@ test('machine: a bad token is refused; tool calls go back to the portal', async 
   // Every portal tool is forwarded (wake_me and unity were left out once); the portal decides who may use which.
   assert.equal(await handlers.wake_me({ minutes: 20, note: 'check the build' }), 'waking you in 20 min: check the build');
   await assert.rejects(handlers.unity({ action: 'status' }), /unity is not available to this session/);
-});
-
-test("own checkout: discards need a fresh backup first (the user's standing permission); never stage or commit everything", (t) => {
-  const clean = () => true;
-  const dirty = () => false;
-  const none = { root: '/Users/b/nevergames/ff-local-backups', has: () => false };
-  const fresh = { ...none, has: () => true };
-  const discards = [
-    'git stash',
-    'git stash push -m x',
-    'git stash pop',
-    'git reset --hard origin/develop',
-    'git clean -fd',
-    'git checkout -- Assets/x.cs',
-    'git checkout .',
-    'git restore Assets/x.cs',
-    'cd sub && git switch -f other',
-  ];
-  for (const cmd of discards) {
-    const why = checkOwnCheckout(cmd, '/r', clean, none);
-    assert.match(why ?? '', /standing permission.*FIRST copy them.*\/Users\/b\/nevergames\/ff-local-backups\/\$\(date.*report what you moved/, cmd);
-    assert.equal(checkOwnCheckout(cmd, '/r', clean, fresh), undefined, `${cmd} after a backup`);
-  }
-  // Never everything into a commit, backup or not.
-  for (const cmd of ['git add -A', 'git add .', 'git add --all', 'git commit -am "x"', 'git commit -a -m x']) {
-    assert.ok(checkOwnCheckout(cmd, '/r', clean, fresh), cmd);
-  }
-  for (const cmd of ['git stash list', 'git reset HEAD Assets/x.cs', 'git restore --staged Assets/x.cs', 'git add Assets/x.cs', 'git commit -m x', 'git clean -n', 'git status', 'git checkout -b feature/x', 'git switch develop']) {
-    assert.equal(checkOwnCheckout(cmd, '/r', clean, none), undefined, cmd);
-  }
-  // A branch switch on a dirty tree: after a backup.
-  assert.match(checkOwnCheckout('git checkout develop', '/r', dirty, none)!, /uncommitted changes.*FIRST copy them/);
-  assert.equal(checkOwnCheckout('git -C /other switch -c x', '/r', dirty, fresh), undefined);
-  assert.equal(checkOwnCheckout('git commit -m x', '/r', dirty, none), undefined, 'committing your own staged files is fine on a dirty tree');
-  // The folder beside the clone, and "fresh" = a backup folder from the last 2 hours.
-  assert.equal(backupRootFor('/Users/b/nevergames/FinalFactory/'), '/Users/b/nevergames/ff-local-backups');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-local-backups-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  assert.equal(hasRecentBackup(root), false);
-  fs.mkdirSync(path.join(root, '20260925-101500'));
-  assert.equal(hasRecentBackup(root), true);
-  assert.equal(hasRecentBackup(root, 2 * 3_600_000, Date.now() + 3 * 3_600_000), false, 'three hours later it is stale');
 });
 
 test('deploy: node support and the LaunchAgent', () => {
@@ -438,7 +423,7 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-502-'));
   const d = new Daemon(
-    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, appDir: tmp, claude: 'definitely-not-a-claude-binary', maxSessions: 1, maxEventsFile: null },
+    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, appDir: tmp, claude: 'definitely-not-a-claude-binary', maxEventsFile: null },
     () => {
       throw new Error('no sessions here');
     },
@@ -482,7 +467,7 @@ test('machine: an outdated daemon is redeployed, and new agents get a clear refu
   assert.deepEqual(deployed, ['mx'], 'redeployed at once: no agent runs there');
   assert.match(reports.at(-1) ?? '', /mx's daemon is outdated \(it runs dd72bd0, this portal 5b181de01\); redeploying/);
   assert.match(store.machines.get('mx')!.statusDetail ?? '', /daemon outdated/);
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   assert.throws(() => sessions.send(s.info.id, 'hello'), /mx's daemon is outdated \(it runs dd72bd0.*Try again in a few minutes/);
   // At most one automatic redeploy per 10 minutes.
   mm.checkOutdated();
@@ -573,8 +558,8 @@ test('machine: stopping or restarting a daemon is refused while agents run unles
   const { store, sessions, mm, daemon, cleanup } = await setup();
   t.after(cleanup);
   const d = daemon();
-  await until('online', () => mm.isOnline('mx'));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'hello');
   await until('live', () => mm.liveCount('mx') === 1);
   await assert.rejects(mm.controlDaemon('mx', 'stop'), /mx has 1 agent\(s\) running; a daemon stop stops them/);
@@ -646,8 +631,8 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   const reports: string[] = [];
   mm.report = (text) => reports.push(text);
   const d1 = daemon();
-  await until('online', () => mm.isOnline('mx'));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'long build');
   await until('mid-turn', () => s.info.status === 'running');
   const users = () => store.readTranscript(s.info.id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text);
@@ -679,7 +664,7 @@ test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart 
   d2.shutdown();
   await until('offline again', () => !mm.isOnline('mx'));
   daemon();
-  await until('online again', () => mm.isOnline('mx'));
+  await until('online again', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(users().length, 3, `a stop is not undone: ${JSON.stringify(users())} ${reports.join(' | ')}`);
 });
@@ -709,14 +694,14 @@ test('machine: a dropped link resumes only agents mid-turn now, never finished o
   const reports: string[] = [];
   mm.report = (text) => reports.push(text);
   const d1 = daemon();
-  await until('online', () => mm.isOnline('mx'));
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   // A turn that finished: the daemon clears its mark, and the portal's copy must follow (JSON drops undefined fields).
-  const done = mm.createSession('mx', { kind: 'worker', title: 'done', permissionMode: 'default' });
+  const done = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'done', permissionMode: 'default' });
   sessions.send(done.info.id, 'quick');
   await until('finished', () => done.info.status === 'idle');
   assert.equal(done.info.turnOpenSince, undefined, 'the finished turn is not left marked');
   // An old agent as the portal's state has them after the bug: stopped days ago, the mark still set.
-  const old = mm.createSession('mx', { kind: 'worker', title: 'old', permissionMode: 'default' });
+  const old = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'old', permissionMode: 'default' });
   Object.assign(old.info, { status: 'stopped', turnOpenSince: '2026-09-20T10:00:00Z', lastActivityAt: '2026-09-20T10:05:00Z' });
   store.putSession(old.info);
   const users = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').length;
@@ -726,7 +711,7 @@ test('machine: a dropped link resumes only agents mid-turn now, never finished o
   await until('offline', () => !mm.isOnline('mx'));
   assert.equal(old.info.turnOpenSince, undefined, 'a drop clears marks, so the next drop cannot find them again');
   daemon();
-  await until('online again', () => mm.isOnline('mx'));
+  await until('online again', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   await new Promise((r) => setTimeout(r, 400));
   assert.equal(users(done.info.id), 1, 'a finished agent is not resumed');
   assert.equal(users(old.info.id), 0, 'an old agent is not resumed');
@@ -754,7 +739,7 @@ test('machine: redeploying an outdated daemon resumes only the agent live mid-tu
   const users = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').length;
 
   // The one agent really mid-turn on the daemon.
-  const busy = mm.createSession('mx', { kind: 'worker', title: 'busy', permissionMode: 'default' });
+  const busy = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'busy', permissionMode: 'default' });
   sessions.send(busy.info.id, 'long build');
   await until('mid-turn', () => busy.info.status === 'running' && busy.live);
 
@@ -763,7 +748,7 @@ test('machine: redeploying an outdated daemon resumes only the agent live mid-tu
   const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
   const refused = "already 3 agents running in this machine's main clone";
   const old = [0, 1, 2].map((n) => {
-    const h = mm.createSession('mx', { kind: 'worker', title: `old ${n}`, permissionMode: 'default' });
+    const h = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: `old ${n}`, permissionMode: 'default' });
     Object.assign(h.info, { status: 'error', statusDetail: refused, turnOpenSince: hoursAgo(13), lastActivityAt: hoursAgo(3), ...(n ? { backgroundTasks: 1 } : {}) });
     store.putSession(h.info);
     return h;
@@ -810,8 +795,8 @@ test('machine: an agent stopped with stop_agent is never resumed by a dropped li
 
   // 1. Stopped while online, but its process did not end (the daemon still reports it live and mid-turn).
   const d1 = daemon(undefined, StubbornAgent);
-  await until('online', () => mm.isOnline('mx'));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'w', permissionMode: 'default' });
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'long build');
   await until('mid-turn', () => s.info.status === 'running' && s.live);
   sessions.get(s.info.id).stop(); // what stop_agent does
@@ -826,7 +811,7 @@ test('machine: an agent stopped with stop_agent is never resumed by a dropped li
   d1.shutdown();
   await until('offline', () => !mm.isOnline('mx'));
   const d2 = daemon();
-  await until('online again', () => mm.isOnline('mx'));
+  await until('online again', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(users(s.info.id), 1, 'not resumed after its daemon was redeployed');
 
@@ -841,7 +826,7 @@ test('machine: an agent stopped with stop_agent is never resumed by a dropped li
   assert.deepEqual(cutOff.get('mx')?.sessions, [s.info.id], 'noted as cut off');
   sessions.get(s.info.id).stop();
   const d3 = daemon();
-  await until('back', () => mm.isOnline('mx'));
+  await until('back', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(users(s.info.id), 2, 'a stop after the drop still holds');
   assert.ok(!reports.some((r) => /resumed/.test(r)), reports.join('\n'));
@@ -1070,13 +1055,13 @@ test('machine: agents finished days ago and stopped again and again are not resu
   const reports: string[] = [];
   mm.report = (text) => reports.push(text);
   const d1 = daemon();
-  await until('online', () => mm.isOnline('mx'));
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   const users = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').length;
   const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
   // As on m3: finished days ago, the daemon (restarted since) does not hold them, the portal's mark never cleared,
   // refused resumes (05:43, 10:44) moved their activity time, and stop_agent was called on each, several times.
   const old = [0, 1, 2, 3].map((n) => {
-    const h = mm.createSession('mx', { kind: 'worker', title: `old ${n}`, permissionMode: 'default' });
+    const h = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: `old ${n}`, permissionMode: 'default' });
     Object.assign(h.info, { status: 'error', statusDetail: "already 3 agents running in this machine's main clone", turnOpenSince: hoursAgo(60), lastActivityAt: hoursAgo(4) });
     store.putSession(h.info);
     for (let i = 0; i < 3; i++) sessions.get(h.info.id).stop();
@@ -1091,7 +1076,7 @@ test('machine: agents finished days ago and stopped again and again are not resu
   await until('offline', () => !mm.isOnline('mx'));
   assert.equal((mm as unknown as { cutOff: Map<string, unknown> }).cutOff.has('mx'), false, 'nothing noted as cut off');
   daemon();
-  await until('back', () => mm.isOnline('mx'));
+  await until('back', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   await new Promise((r) => setTimeout(r, 300));
   for (const h of old) assert.equal(users(h.info.id), 0, `${h.info.title} is not resumed`);
   assert.ok(!reports.some((r) => /resume/.test(r)), reports.join('\n'));
@@ -1111,7 +1096,7 @@ test("w496: a worker started while its machine's daemon is outdated gets its bri
     (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', { type: 'hello', protocol: PROTOCOL_VERSION, home: '', live: [], info: { ...store.machines.get('mx')!.info, daemon: daemonVersion } });
   hello('dd72bd0');
   assert.ok(mm.outdated('mx'));
-  const s = mm.createSession('mx', { kind: 'worker', title: 'lag-lead', permissionMode: 'default' });
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'lag-lead', permissionMode: 'default' });
   const BRIEF = 'BRIEF for w455: find the lag lead on the client.\n\nThe request as filed (w455) ...';
   // start_agent's first prompt: held, not refused, not written only to the transcript.
   const uuid = sessions.send(s.info.id, BRIEF, 'orchestrator', undefined, { hold: true });

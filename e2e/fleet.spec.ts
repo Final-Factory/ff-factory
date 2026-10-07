@@ -3,7 +3,7 @@ import type { AppState, Machine, MachineSandbox, MachineStats, ServerEvent, Sess
 import { expect, isMobile, openSidebar, settle, signIn, test } from './fixtures.ts';
 
 // The sidebar's computers and the Overview board (web/src/components/Fleet.tsx, shared/fleet.ts): BEAST, then
-// each machine with its sandboxes, their live agents and its main clone. The page's WebSocket is intercepted and
+// each machine with its sandboxes and their live agents (w536: none in a main clone). The page's WebSocket is intercepted and
 // its state replaced with a fixed fleet, as in e2e/meters.spec.ts. The seeded worker "gallery1" stands in for an
 // agent in a machine sandbox, so its page has a real transcript.
 
@@ -74,7 +74,6 @@ const machine = (id: string, extra: Partial<Machine>): Machine => ({
   repoPath: 'D:/work/FFFRepo',
   home: 'C:/Users/dev',
   portalUrl: 'https://portal.example.ts.net',
-  maxSessions: 3,
   sessionIds: [],
   createdAt: min(9000),
   ...extra,
@@ -82,7 +81,7 @@ const machine = (id: string, extra: Partial<Machine>): Machine => ({
 
 /**
  * The fleet as the machines report it, before BEAST's sandboxes are put on its own daemon (onBeastsDaemon): BEAST's two
- * workers name their sandbox only. LothDesktop with a sandbox pool, the M5 with its main clone, an offline M3.
+ * workers name their sandbox only. LothDesktop with a sandbox pool, the M5 without one (so no workers, w536), an offline M3.
  */
 function fleetBase(s: AppState): AppState {
   const orch = s.sessions.find((x) => x.id === s.orchestratorId)!;
@@ -93,8 +92,6 @@ function fleetBase(s: AppState): AppState {
     worker(orch, 'b-old', 'Old build check', 'stopped', 400, { sandboxId: 'agent-a' }),
     { ...gallery, title: 'Nightly e2e: Windows leg', status: 'running' as const, lastActivityAt: min(2), sandboxId: undefined, machineId: 'lothdesktop', machineSandbox: 'sb1' },
     worker(orch, 'l-review', 'Review the nightly report', 'idle', 25, { machineId: 'lothdesktop', machineSandbox: 'sb1', requestedBy: { userId: 'lothsahn', displayName: 'Lothsahn' } }),
-    worker(orch, 'l-main', 'Spec 075 nightly e2e', 'idle', 12, { machineId: 'lothdesktop' }),
-    worker(orch, 'm5-host', 'Honest co-op: M5 host', 'running', 0, { machineId: 'm5' }),
   ];
   return {
     ...s,
@@ -112,11 +109,11 @@ function fleetBase(s: AppState): AppState {
         sandboxRoot: 'D:/work/ffsb',
         maxSandboxes: 3,
         maxUnity: 2,
-        sessionIds: ['l-review', 'gallery1', 'l-main'],
+        sessionIds: ['l-review', 'gallery1'],
         git: git('075-nightly-windows'),
         sandboxes: [machineSb('sb2', 'unused', [], 'stopped', 'sandbox/sb2'), machineSb('sb1', 'Nightly e2e run', ['l-review', 'gallery1'], 'running', 'feature/fleet-view')],
       }),
-      machine('m5', { platform: 'darwin', purpose: 'Honest co-op host', sessionIds: ['m5-host'], git: git('develop') }),
+      machine('m5', { platform: 'darwin', purpose: 'Honest co-op host', git: git('develop') }),
       machine('m3', { platform: 'darwin', online: false, lastSeen: min(180) }),
     ],
     machineStats: {
@@ -198,7 +195,7 @@ async function proof(page: Page, name: string) {
   await test.info().attach(name, { path: file, contentType: 'image/png' });
 }
 
-test('fleet: the sidebar groups every computer, with its sandboxes, their agents and the main clone', async ({ page }) => {
+test('fleet: the sidebar groups every computer, with its sandboxes and their agents (w536: no main clone)', async ({ page }) => {
   await fixedFleet(page);
   const sidebar = await openSidebar(page);
   const groups = sidebar.locator('.fl-group');
@@ -229,7 +226,7 @@ test('fleet: the sidebar groups every computer, with its sandboxes, their agents
   await expect(loth.locator('.fl-title')).toContainText('LothDesktop');
   await expect(loth.locator('.fl-title')).toContainText('Windows');
   await expect(loth.getByTestId('fl-capacity')).toHaveText('2/3 sandboxes · 1/2 editors');
-  await expect(loth.getByTestId('fl-agents-sum')).toHaveText('3 agents, 1 busy');
+  await expect(loth.getByTestId('fl-agents-sum')).toHaveText('2 agents, 1 busy');
   const sb1 = loth.getByTestId('fl-sandbox-lothdesktop/sb1');
   // Its label is its name (w575); what it is doing is its live agents' titles, the Working one first.
   await expect(sb1.locator('.row-title')).toHaveText('sb1');
@@ -238,15 +235,12 @@ test('fleet: the sidebar groups every computer, with its sandboxes, their agents
   // Working first, then Idle (w475).
   await expect(sb1.getByTestId('fl-agent')).toHaveText([/Nightly e2e: Windows leg\s*busy\s*2m/, /Review the nightly report\s*idle\s*25m/]);
   await expect(loth.getByTestId('fl-sandbox-lothdesktop/sb2').locator('.fl-free')).toBeVisible();
-  // The main clone: the machine's label and its own agents (not the sandbox's).
-  const main = loth.getByTestId('fl-main-lothdesktop');
-  await expect(main.locator('.row-title')).toHaveText('Spec 075 nightly e2e');
-  await expect(main.locator('.row-sub')).toContainText('main clone');
-  await expect(main.getByTestId('fl-agent')).toHaveText([/Spec 075 nightly e2e\s*idle\s*12m/]);
+  // No main-clone row (w536): a machine's places are its sandboxes.
+  await expect(sidebar.locator('[data-testid^="fl-main-"]')).toHaveCount(0);
 
-  // The M5 has no sandbox pool; the M3 is offline.
-  await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-capacity')).toHaveText('main clone only');
-  await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-agents-sum')).toHaveText('1 agent, 1 busy');
+  // The M5 has no sandbox pool, so no workers; the M3 is offline.
+  await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-capacity')).toHaveText('no sandboxes');
+  await expect(sidebar.getByTestId('fl-group-m5').getByTestId('fl-agents-sum')).toHaveCount(0);
   await expect(sidebar.getByTestId('fl-group-m3').locator('.fl-meters')).toHaveText('offline · seen 3h ago');
   if (!isMobile(page)) await proof(page, 'sidebar');
 });
@@ -278,11 +272,11 @@ test('fleet: the Overview board shows every computer as a card with its live age
   await fixedFleet(page, '#/overview');
   const board = page.getByTestId('overview');
   await expect(board.locator('.page-title')).toHaveText('Overview');
-  await expect(board.locator('.overview-sum')).toHaveText('5 agents live · 3 busy');
+  await expect(board.locator('.overview-sum')).toHaveText('3 agents live · 2 busy');
   await expect(board.locator('.board-card')).toHaveCount(4);
   const loth = board.getByTestId('board-lothdesktop');
   await expect(loth.getByTestId('fl-capacity')).toHaveText('2/3 sandboxes · 1/2 editors');
-  await expect(loth.getByTestId('fl-agents-sum')).toHaveText('3 agents, 1 busy');
+  await expect(loth.getByTestId('fl-agents-sum')).toHaveText('2 agents, 1 busy');
   // Free sandboxes are one line of chips on the board; the requester shows on each agent.
   await expect(loth.getByTestId('fl-free-line')).toHaveText(/FREE\s*sb2/);
   await expect(loth.getByTestId('fl-agent').filter({ hasText: 'Review the nightly report' })).toContainText('Lothsahn');

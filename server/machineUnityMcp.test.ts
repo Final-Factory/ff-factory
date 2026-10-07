@@ -138,7 +138,7 @@ test('machine unity mcp: the daemon gives an agent that asks for it the bridge o
   assert.ok(o.mcpServers?.machine, 'beside the in-process tools');
 });
 
-test('machine unity mcp: the portal asks for it for main-clone and sandbox agents on a machine', (t) => {
+test('machine unity mcp: the portal asks for it for sandbox agents on a machine; no worker runs in its main clone (w536)', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-mcpportal-'));
   const cfg = {
     dataDir: dir,
@@ -166,14 +166,12 @@ test('machine unity mcp: the portal asks for it for main-clone and sandbox agent
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
   const sb: MachineSandbox = { id: 'sb1', branch: 'sandbox/sb1', base: 'origin/develop', path: 'D:\\work\\ffsb\\sb1', createdAt: '2026-09-29T00:00:00Z', status: 'ready', purpose: 'unused', sessionIds: [], unity: { state: 'stopped' } };
-  const { machine } = machines.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: 'D:\\work\\FFFRepo', home: 'C:\\Users\\u', portalUrl: 'http://x', maxSessions: 2, platform: 'win32', sandboxes: [sb] } as never);
+  const { machine } = machines.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: 'D:\\work\\FFFRepo', home: 'C:\\Users\\u', portalUrl: 'http://x', platform: 'win32', sandboxes: [sb] } as never);
   const info = (over: Partial<SessionInfo>) => ({ id: 's1', kind: 'worker', title: 't', status: 'idle', permissionMode: 'default', createdAt: '', lastActivityAt: '', turns: 0, costUsd: 0, pendingPermissions: [], machineId: 'pc', ...over }) as SessionInfo;
-  const main = machines.hooks!.specFor(info({}), machine);
-  assert.equal(main.unityMcp, true);
-  assert.equal(main.stdioMcp, undefined, "the portal never sends commands: they are the machine's");
-  assert.equal(main.guard.id, 'FFFRepo', 'pinned to the main clone\'s instance');
+  assert.throws(() => machines.hooks!.specFor(info({}), machine), /workers run in sandboxes only/);
   const inSb = machines.hooks!.specFor(info({ machineSandbox: 'sb1' }), machine);
   assert.equal(inSb.unityMcp, true);
+  assert.equal(inSb.stdioMcp, undefined, "the portal never sends commands: they are the machine's");
   assert.equal(inSb.sandbox, 'sb1');
   assert.equal(inSb.guard.id, 'sb1');
 });

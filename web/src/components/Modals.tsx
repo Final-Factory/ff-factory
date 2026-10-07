@@ -99,8 +99,8 @@ export function NewSandboxModal({ app, onClose }: { app: AppState; onClose: () =
   );
 }
 
-/** Where a new worker runs: a sandbox, or a machine (docs/machines.md). */
-export type AgentTarget = { sandboxId: string; name: string } | { machineId: string; name: string };
+/** Where a new worker runs: a machine's sandbox ("m5/sb1"; never a main clone, w536, docs/machines.md). */
+export type AgentTarget = { sandboxId: string; name: string };
 
 export function NewAgentModal({ app, target, onClose }: { app: AppState; target: AgentTarget; onClose: () => void }) {
   const [prompt, setPrompt] = useState('');
@@ -118,7 +118,7 @@ export function NewAgentModal({ app, target, onClose }: { app: AppState; target:
     setBusy(true);
     const s = await attempt(
       api.startSession({
-        ...('machineId' in target ? { machineId: target.machineId } : { sandboxId: target.sandboxId }),
+        sandboxId: target.sandboxId,
         prompt: prompt.trim(),
         title: title.trim() || undefined,
         model: model || undefined,
@@ -140,7 +140,7 @@ export function NewAgentModal({ app, target, onClose }: { app: AppState; target:
     <Modal
       title={
         <>
-          New agent {'machineId' in target ? 'on' : 'in'} <span className="accent">{target.name}</span>
+          New agent in <span className="accent">{target.name}</span>
         </>
       }
       onClose={onClose}

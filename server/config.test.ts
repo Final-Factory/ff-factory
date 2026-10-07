@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, retiredConfigKeys, retiredKeysLine, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
-import { gitIsClean, gitRemotes } from './guard.ts';
+import { gitRemotes } from './guard.ts';
 import { appVersion, formatVersion, readSha, readVersion } from './version.ts';
 
 /** config.json loading, the app version, and the guard's two real git lookups. */
@@ -127,16 +127,12 @@ test('version: package.json and the checkout, with an override for builds withou
   assert.equal(formatVersion(undefined), 'unknown version');
 });
 
-test('guard git lookups: a clean tree, a dirty one, not a repo; push remotes', (t) => {
+test('guard git lookups: push remotes, none outside a repo', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-git-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  assert.equal(gitIsClean(dir), false); // not a repo: unknown counts as not clean
   assert.equal(gitRemotes(dir), undefined);
   const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
   git('init', '-q');
-  assert.equal(gitIsClean(dir), true);
-  fs.writeFileSync(path.join(dir, 'a.txt'), 'x');
-  assert.equal(gitIsClean(dir), false);
   git('remote', 'add', 'origin', 'https://example.test/game.git');
   git('remote', 'set-url', '--push', 'origin', 'git@example.test:game.git');
   git('remote', 'add', 'fork', 'https://example.test/fork.git');

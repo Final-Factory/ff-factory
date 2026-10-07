@@ -51,7 +51,6 @@ export interface LaunchSpec {
     ownPath: string;
     protectedPaths: string[];
     gameRepos: string[];
-    ownCheckout?: boolean;
     denyToolPrefixes?: string[];
     /** `secrets`: what it may not read (server/secretGuard.ts); the home secrets are added where it runs. */
     standing?: { folder: string; groups: StandingToolGroup[]; offLimits: string[]; secrets?: SecretRules };
@@ -163,7 +162,6 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       sandboxPath: g.ownPath,
       protectedPaths: g.protectedPaths,
       gameRepos: g.gameRepos,
-      ownCheckout: g.ownCheckout ? {} : undefined,
       denyToolPrefixes: g.denyToolPrefixes,
       publicIdentity: g.publicIdentity,
       editorRunning,

@@ -38,7 +38,9 @@ Stored in `data/state.json` (`StandingAgent` in `shared/types.ts`), in the porta
 - Each agent owns one Claude session (kind `standing`) for its whole life. A run resumes that
   session with a short `[run]` message (trigger, budget left, "read NOTES.md, do the job, update
   NOTES.md, end with a summary"). When the turn ends, the server stops the process. Between runs
-  the agent is asleep and does not count toward its machine's `max_agents`. During a run it does.
+  the agent is asleep and does not count toward its machine's agent cap. During a run it does: the cap counts the
+  machine's sandbox agents and standing agents mid-turn together (w536, `agentCap` in `server/machines.ts`:
+  `max_sandbox_agents`, else every sandbox full; 2 on a machine without sandboxes).
 - **No overlap.** An agent has at most one pending or active run. A schedule tick that comes due
   while a run is active is recorded as `skipped (previous run still going)`.
 - **Limit full.** A due run waits (dashboard: "waiting for an agent slot") until its machine has a free slot, for

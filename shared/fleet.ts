@@ -1,7 +1,7 @@
 // Every computer and what it is working on, grouped for the sidebar and the Overview board: the portal's own host
 // first (with its own daemon's sandboxes when it has one, as BEAST does; the portal itself holds none, w510), then each
-// machine, each with its sandboxes, the agents in them, and a machine's main-clone agents. Pure, so the server's tests
-// can check it and the browser can run it.
+// machine, each with its sandboxes and the agents in them (every worker runs in a sandbox, w536). Pure, so the server's
+// tests can check it and the browser can run it.
 import type { AppState, HostStats, Machine, MachineSandbox, MachinePlatform, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState } from './types.ts';
 import { holdsItsPlace, placeRank, sortAgents } from './agentState.ts';
 
@@ -61,9 +61,7 @@ export interface FleetComputer {
   /** Unity editors there: every one its daemon counts (w469), else the sandbox editors running or starting. */
   editors: number;
   editorLimit?: number;
-  /** A machine's main-clone agents (its workers not in a sandbox; standing agents have their own list). */
-  main?: PlaceAgents;
-  /** Live agents on this computer, in sandboxes and the main clone. */
+  /** Live agents in this computer's sandboxes (standing agents have their own list). */
   live: number;
   /** Busy agents (a turn in flight, or waiting on someone). */
   busy: number;
@@ -72,8 +70,8 @@ export interface FleetComputer {
 
 const busyAgent = (s: SessionInfo) => s.status === 'starting' || s.status === 'running' || s.status === 'waiting_permission';
 
-function agentsIn(ids: string[], byId: Map<string, SessionInfo>, keep: (s: SessionInfo) => boolean = () => true): PlaceAgents {
-  const all = ids.map((id) => byId.get(id)).filter((s): s is SessionInfo => !!s && keep(s));
+function agentsIn(ids: string[], byId: Map<string, SessionInfo>): PlaceAgents {
+  const all = ids.map((id) => byId.get(id)).filter((s): s is SessionInfo => !!s);
   const live = sortAgents(all.filter(isLiveAgent));
   return { live, stopped: all.length - live.length };
 }
@@ -91,10 +89,10 @@ const inUseFirst = (list: FleetSandbox[]) =>
     .map((x) => x.s);
 
 function summarize(c: Omit<FleetComputer, 'live' | 'busy' | 'attention'>): FleetComputer {
-  const places = [...c.sandboxes.map((s) => s.agents), ...(c.main ? [c.main] : [])];
+  const places = c.sandboxes.map((s) => s.agents);
   const live = places.reduce((n, p) => n + p.live.length, 0);
   const busy = places.reduce((n, p) => n + p.live.filter(busyAgent).length, 0);
-  const attention = c.sandboxes.reduce((n, s) => n + s.attention, 0) + (c.main ? waiting(c.main) : 0);
+  const attention = c.sandboxes.reduce((n, s) => n + s.attention, 0);
   return { ...c, live, busy, attention };
 }
 
@@ -156,7 +154,6 @@ export function fleetOf(app: Pick<AppState, 'sessions' | 'machines' | 'system' |
       sandboxLimit: m.sandboxRoot ? (m.maxSandboxes ?? 3) : undefined,
       editors: app.machineStats?.[m.id]?.unity?.used ?? sandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
       editorLimit: m.sandboxRoot ? (m.maxUnity ?? 2) : undefined,
-      main: agentsIn(m.sessionIds, byId, (s) => !s.machineSandbox && s.kind !== 'standing'),
     });
   });
 
@@ -167,7 +164,8 @@ export function fleetOf(app: Pick<AppState, 'sessions' | 'machines' | 'system' |
 export function capacityLine(c: FleetComputer): string {
   // The portal's own host without a daemon of its own: it runs the orchestrators and the dispatcher only (w510).
   if (c.host && !c.daemon) return 'orchestrators only';
-  if (!c.host && c.sandboxLimit === undefined) return 'main clone only';
+  // A machine without a sandbox root takes no workers (w536): it gets one through the worker installer (w513).
+  if (!c.host && c.sandboxLimit === undefined) return 'no sandboxes';
   // "1/3 sandboxes" counts against the limit, so it stays plural; "1 sandbox" without one does not.
   const n = (count: number, limit: number | undefined, one: string, many: string) => (limit !== undefined ? `${count}/${limit} ${many}` : `${count} ${count === 1 ? one : many}`);
   return `${n(c.sandboxes.length, c.sandboxLimit, 'sandbox', 'sandboxes')} · ${n(c.editors, c.editorLimit, 'editor', 'editors')}`;

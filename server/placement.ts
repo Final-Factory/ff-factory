@@ -2,20 +2,18 @@
  * Where new work has room (w416, Lothsahn: "make sure jobs are getting scheduled on LothDesktop", then "Game work should
  * be spread between LothDesktop and Beast, not just when BEAST is full"), and where it is preferred (w428, Ben: "favor
  * using lothdesktop and the m5 and m3 because beast is having issues with its processor and keeps crashing"). The
- * dispatcher picks the computer for each request itself (start_agent with a sandbox id, or a machine for its main
- * clone); this module gives it each computer's room where it decides (list_sandboxes, system_status), which one the
+ * dispatcher picks the computer for each request itself (start_agent with a sandbox id; every worker runs in a sandbox,
+ * w536); this module gives it each computer's room where it decides (list_sandboxes, system_status), which one the
  * next piece of game-repo work should go to, and a note when it places work elsewhere. It never moves or refuses
  * anything.
  */
 
-/** One computer that can take a worker: a machine's pool of sandboxes (BEAST's own daemon's, LothDesktop's), or a machine's main clone (the m5, the m3). */
+/** One computer that can take a worker: a machine's pool of sandboxes (BEAST's own daemon's, LothDesktop's). */
 export interface Computer {
   /** The machine id ("beast", "lothdesktop", "m5"). */
   id: string;
   online: boolean;
-  /** A machine without a sandbox root: work runs in its main clone, next to its owner's own uncommitted work. */
-  mainClone?: boolean;
-  /** Agent processes up (in its sandboxes, or in its main clone); an idle one holds its memory too. */
+  /** Agent processes up in its sandboxes; an idle one holds its memory too. */
   live: number;
   /** Of those, mid-turn (what its agent limit counts since w384). */
   midTurn: number;
@@ -67,7 +65,7 @@ export function busyReasons(p: Computer): string[] {
   if (p.live >= p.maxAgents) out.push(`${p.live} live agents of ${p.maxAgents}`);
   const pct = memPct(p);
   if (pct !== undefined && pct >= RAM_BUSY_PCT) out.push(`RAM ${pct}% used`);
-  if (!p.mainClone && !p.freeSandboxes && p.sandboxes >= p.maxSandboxes) out.push(`no free sandbox (${p.sandboxes} of ${p.maxSandboxes} made, all in use)`);
+  if (!p.freeSandboxes && p.sandboxes >= p.maxSandboxes) out.push(`no free sandbox (${p.sandboxes} of ${p.maxSandboxes} made, all in use)`);
   return out;
 }
 
@@ -82,10 +80,10 @@ export const hasRoom = (p: Computer) => busyReasons(p).length === 0;
 export function roomOf(p: Computer): number {
   if (!hasRoom(p)) return 0;
   const shares = [1 - p.live / p.maxAgents];
-  if (!p.mainClone) shares.push((p.freeSandboxes + Math.max(0, p.maxSandboxes - p.sandboxes)) / p.maxSandboxes);
+  shares.push((p.freeSandboxes + Math.max(0, p.maxSandboxes - p.sandboxes)) / p.maxSandboxes);
   const pct = memPct(p);
   if (pct !== undefined) shares.push(1 - pct / 100);
-  if (!p.mainClone && p.maxEditors) shares.push(Math.max(0, 1 - (p.editors ?? 0) / p.maxEditors));
+  if (p.maxEditors) shares.push(Math.max(0, 1 - (p.editors ?? 0) / p.maxEditors));
   return Math.max(0, Math.min(1, shares.reduce((a, b) => a + b, 0) / shares.length));
 }
 
@@ -109,8 +107,7 @@ function spread(open: Computer[], last?: string): { pick: Computer; why: string 
 
 /**
  * Where the next piece of new game-repo work goes, and why. In order: the first computer in prefs.prefer with room;
- * then the others not avoided, sandbox computers before main clones, spread by room (w416); then, only when nothing
- * else has room, an avoided one.
+ * then the others not avoided, spread by room (w416); then, only when nothing else has room, an avoided one.
  */
 export function pickComputer(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): { pick: Computer; why: string } | undefined {
   const open = places.filter(hasRoom);
@@ -124,10 +121,8 @@ export function pickComputer(places: readonly Computer[], last?: string, prefs: 
     if (p) return { pick: p, why: `first with room in placement.prefer (${prefer.join(' > ')})${tail}` };
   }
   const usable = open.filter((p) => !avoid.has(p.id));
-  const sandboxes = usable.filter((p) => !p.mainClone);
-  const pool = sandboxes.length ? sandboxes : usable;
-  if (pool.length) {
-    const s = spread(pool, last);
+  if (usable.length) {
+    const s = spread(usable, last);
     const why = prefer.length ? `none in placement.prefer has room; ${s.why}` : s.why;
     return { pick: s.pick, why: `${why}${tail}` };
   }
@@ -140,20 +135,15 @@ const avoidOf = (prefs: PlacementPrefs) => new Map(Object.entries(prefs.avoid ??
 const loadPart = (p: Computer) => {
   const pct = memPct(p);
   const ram = pct !== undefined ? `; RAM ${pct}% used` : '';
-  if (p.mainClone) return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn) in its main clone${ram}`;
   return `${p.live} live agents of ${p.maxAgents} (${p.midTurn} mid-turn); ${p.freeSandboxes} of ${p.maxSandboxes} sandboxes free${p.sandboxes < p.maxSandboxes ? ` (${p.maxSandboxes - p.sandboxes} more can be made)` : ''}${ram}${p.maxEditors ? `; editors ${p.editors ?? 0} of ${p.maxEditors}${p.editorsDetail ? `: ${p.editorsDetail}` : ''}` : ''}`;
 };
-
-/** How to place work on a computer: a sandbox there, or (a main clone) start_agent with the machine, and its rule. */
-const howTo = (p: Computer) =>
-  p.mainClone ? `${p.id}'s main clone: start_agent with machine "${p.id}"; its worker backs up the owner's uncommitted work (ff-local-backups) before it sets any aside` : p.id;
 
 /** Where the next piece of game-repo work should go, in a line, or undefined with fewer than two computers. */
 export function preferLine(places: readonly Computer[], last?: string, prefs: PlacementPrefs = {}): string | undefined {
   if (places.length < 2) return undefined;
   const p = pickComputer(places, last, prefs);
   if (!p) return 'No computer has room for new work now.';
-  return `Next new game-repo work: ${howTo(p.pick)} (${p.why}).`;
+  return `Next new game-repo work: ${p.pick.id} (${p.why}).`;
 }
 
 /** The capacity block list_sandboxes and system_status start with: one line per computer, then where the next goes. */
@@ -163,7 +153,7 @@ export function capacityLines(places: readonly Computer[], last?: string, prefs:
   const prefer = (prefs.prefer ?? []).map(placeId);
   const lines = places.map((p) => {
     const why = busyReasons(p);
-    const tags = [...(p.mainClone ? ['main clone'] : []), ...(prefer.includes(p.id) ? [`preferred #${prefer.indexOf(p.id) + 1}`] : []), ...(avoid.has(p.id) ? [`avoided: ${avoid.get(p.id)}`] : [])];
+    const tags = [...(prefer.includes(p.id) ? [`preferred #${prefer.indexOf(p.id) + 1}`] : []), ...(avoid.has(p.id) ? [`avoided: ${avoid.get(p.id)}`] : [])];
     return `- ${p.id}${tags.length ? ` [${tags.join('; ')}]` : ''}: ${why.length ? `BUSY (${why.join('; ')})` : `ROOM ${pctOf(roomOf(p))}`}: ${loadPart(p)}`;
   });
   const next = preferLine(places, last, prefs);
@@ -191,5 +181,5 @@ export function placementHint(target: string, places: readonly Computer[], last?
   const avoided = avoidOf(prefs).get(target);
   const busy = busyReasons(here).filter((w) => w !== 'offline');
   const state = avoided ? `${target} is avoided (${avoided})` : busy.length ? `${target} is busy (${busy.join('; ')})` : `${target} has ${pctOf(roomOf(here))} room`;
-  return ` Note: ${state}; the next new game-repo work goes to ${howTo(p.pick)} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, Max posting, which only LothDesktop has, or a worker going on in its own sandbox), put it there.`;
+  return ` Note: ${state}; the next new game-repo work goes to ${p.pick.id} (${p.why}; ${loadPart(p.pick)}). Unless this work needs ${target} (${pinnedWork(reviewRoot)}, Max posting, which only LothDesktop has, or a worker going on in its own sandbox), put it there.`;
 }
