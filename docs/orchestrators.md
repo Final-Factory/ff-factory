@@ -125,8 +125,11 @@ orchestrator close (done or cancelled) or reopen **another person's** request wi
 A member keeps the rule above: their own requests only ("w234 is Ben's request, not X's; only an owner closes or
 reopens another person's request").
 
-The ledger is `data/work.json`: every open request and the newest 300 closed ones (stalled ones are kept like open
-ones). The page gets the open ones, the stalled ones and those closed in the last 3 days.
+The ledger is `data/work.json`: every open request, every one closed in the last 7 days (the reopen window), and at least
+the newest 300 closed ones, 2,000 closed at most (`pruneIds`, `server/work.ts`; stalled ones are kept like open ones).
+Until w631 it kept only the newest 300 closed: at about a hundred requests a day that reached back about three days, so a
+request closed four days earlier could no longer be reopened, listed or named. The page gets the open ones, the stalled
+ones and those closed in the last 3 days.
 
 ### What a request is doing now
 
@@ -228,11 +231,17 @@ Each request is linked to the pull requests its workers open (`WorkItem.prs`: re
 - the request's own worker opened it: a `gh pr create` in the worker's transcript printed its URL, after the request was
   filed, while the worker was on this request (a worker that did several requests in a row owns each PR for the latest
   request filed by the time it ran the command, `ownerAt`); or
-- its head branch is the request's own branch (an intake request's `ffbox/...`).
+- its head branch is the request's own branch (an intake request's `ffbox/...`); or
+- its **title names it** (w631, `titleIdsIn`): a leading `w165: …`, `w604/w556: …` or `w605 (1): …`, or a title that ends
+  in its ids alone, `… (w184)`, `… (w197/w214)`. 407 of the 606 PRs of both repos name a request in their title, and the
+  PRs from before the `Request:` line only there: Ben's w150–w214 sat stalled for days with every PR merged. An id inside
+  other words is not one ("(w170 diagnostics)", "since w170", "(w165 follow-up)"). A title that marks a step (a numbered
+  part, a plan, docs only, a design, an investigation, diagnostics, a follow-up, a draft, "do not merge") links the PR as
+  a `Part of:` one: its merge leaves the request open.
 
 It is **never** linked from related ids, from a PR number the brief or a worker's report mentions, or from a worker or
 sandbox the request merely shares, and never when the PR merged before the request was filed. A PR whose description says it
-is for another request is not this one's. Links made before these rules (no `via`) are dropped unless the rules find them
+is for another request is not this one's, unless its title names this one too (`w604/w556: …`, a takeover). Links made before these rules (no `via`) are dropped unless the rules find them
 again, and an automatic close whose closing PR no longer qualifies is reopened by the next pass (active when a worker is on
 it, else new), with a line in its log and a note to its person (w340: w339 was closed on #988, an earlier request's PR), and a
 `ledger cleanup: reopened <id>` line in the server log; the first pass after a start also logs how many closes it checked
@@ -241,8 +250,10 @@ closes or reopens loses its `autoClosed` mark, its "closed automatically" outcom
 rules (`settleByHand`), and the re-check skips (and clears) a request whose log shows such a close after the cleanup's own:
 a person's close is final (w370: w50 was closed by hand at 06:33 and reopened by the re-check at 06:34). The PRs show on
 the request in the Requests tab and in `list_work`. The repos asked are the game repo's and this app's own (from their
-`origin`), or exactly `ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each, and
-`gh pr view` for a linked open PR older than that). When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
+`origin`), or exactly `ledger.cleanup.repos` when that is set; the data comes from `gh pr list` (the 200 newest of each in
+the 5-minute pass, the 1,000 newest in the full pass so that old PRs named only by their titles are found, w631: 3 MB and
+7 s for the game repo, measured; and `gh pr view` for a linked open PR older than that). The PR rule runs on stalled
+requests too, so the first full pass after a deploy re-judges the stalled backlog. When gh cannot answer, the PR rules wait and the rest of the cleanup still runs.
 
 **How fresh a PR's state is** (w515: w443, w449, w454, w484 and w489 were refused "PR #N is still open" seconds after
 their PRs merged, and w443 still listed #1087 open after a person closed it). The states are a copy, refreshed:
@@ -284,6 +295,26 @@ A worker's last report counts by its end, where workers write `<id>: still open:
 a long report's first 400 and last 800 characters (`reportClip`, `server/sessions.ts`). It used to keep only the first
 1200, so on 2026-10-05 w424 was closed twice, on #99 and #100, while its worker's reports ended "w424: still open".
 
+**When the only step left is a deploy, and it happened** (w631: w605, w513, w537 and w600 stayed open after their PRs
+merged, the brief or the last report naming a portal deploy or machine updates, which the ops worker or a person then did
+while nothing told the ledger). `deployStep` (`server/ledgerRules.ts`) sets aside the sentences about deploying this app
+(a deploy, `fffctl update`, a worker or machine update or reinstall) from the brief and the workers' last reports; when
+`afterMergeReason` then finds nothing left, the deploy is the only step. The PR pass closes the request (`autoClosed.how`
+`deploy`, "merged as #193 (…) on …; deployed since: the portal runs c1c1c1c") once what runs contains every merge:
+
+- every merged PR of it is in this app's own repo (a game repo's "deploy" is not the portal's) and none says `Part of:`;
+- a portal deploy: the commit the portal runs (`appVersion`, `server/version.ts`) contains each merge commit
+  (`git merge-base --is-ancestor` in its checkout, a release being a worktree of the portal's clone; else GitHub's
+  compare);
+- machine updates: every connected machine's daemon runs a commit that contains it (its hello's `machine/VERSION`,
+  `MachineManager.daemonVersions`). A daemon whose version is not a commit, or a portal whose commit is unknown, closes
+  nothing.
+
+A sentence that names another step too (an audit, a 2-peer run, a nightly, a soak, a release's notes) is never set aside,
+and a request that waits on a question, or is a release, is not a deploy-only one. A step done by hand that leaves no
+commit to read (w600's re-run with `--max-sandboxes 6`) still needs a `DONE:` line: from the ops worker when its job was
+sent for the request (below), or a person's close.
+
 A PR **closed without merging** never closes the request: the log says so once, and its person's orchestrator hears it
 when no other PR is open. Intake requests that wait for a reviewer are never closed here (the intake's own rule is in
 [intake.md](intake.md), "Closed when it merged").
@@ -309,7 +340,8 @@ stalled. Ben's requests are included. In this order, the first that fits applies
    is done ("All done", "is delivered", "nothing more to do", "fully merged to develop, so I'm idle", "is fixed and merged into
    develop", "nothing is open or pending") and says nothing is left, waiting or asked, with no open PR
    and no step after the merge, closes as done with that report quoted. A release's report must also link the patch
-   notes and say it is live. When the report is not clear, nothing closes.
+   notes and say it is live. When the report is not clear, nothing closes. A stalled request is read the same way when its
+   worker's report came after the stall (w631: a worker that went back to it and finished it left it stalled).
 3. **Cut off.** A worker that stopped on a usage or rate limit (also one whose turn simply ended with Claude's "You've hit
    your session/weekly limit" as its whole result), an app restart (its turn was still open) or a refused tool
    and never resumed. A limit or restart is resumed once (a message to the worker, recorded in `resumedBy`): a limit only
@@ -328,20 +360,45 @@ stalled. Ben's requests are included. In this order, the first that fits applies
 5. **Superseded.** A request nothing has touched for 24 hours whose work a finished request covers (a newer finished
    release, or a finished request that overlaps it strongly) is stalled with "probably superseded by w…".
 6. **Stalled.** A new, queued or active request with no running worker and no activity for 24 hours (its last update, and
-   its workers' last activity) is stalled with the reason: no worker ever started, or its last worker ended and its report
-   is not clear.
+   its workers' last activity) is stalled with the reason: no worker ever started, its last worker's own status line
+   ("its worker said: "w12: still open: the portal deploy"", w631), or its last worker ended and its report is not clear.
 
 **`DONE: wNNN`, the worker's word that a request is finished** (w419, asked by Lothsahn after w342 stayed open with its
 work done). Every worker brief for a request ends with the rule (`doneRule`, `server/work.ts`): when every step of a
 request is finished, the steps after the merge included, the worker ends its report with a line `DONE: wNNN` (one line
-per request, several allowed; a mention inside a sentence is not one). At the end of that turn the ledger closes the
+per request, several allowed; a mention inside a sentence is not one), and otherwise with a line `wNNN: still open:
+<what is left>` (w631; `NOT DONE: wNNN …` reads the same, `stillOpenIn`). At the end of that turn the ledger closes the
 request as done with the report's first line as its note, logs it, and tells its people (`[ledger] w342 … closed as
-done`). It counts only from one of the request's own workers, and it is refused, with the reason sent back to the
-worker (once per reason in 6 hours) and logged, while a PR of the request is still open, for a release whose report
-does not say it is live and link the posted notes, for a brief that asks for a step after the merge when the report
-does not say how it went (an audit, a check, a 2-peer run, a nightly…), or for a brief that plans several PRs when fewer
-than two merged and the report does not say they all did (`doneProblem`, `server/ledgerRules.ts`). A request already
-closed by hand stays closed (w370), and an owner's close of someone else's request (w402) is untouched.
+done`); a still-open line becomes the request's latest word. A DONE counts from one of the request's own workers, and
+(w631) from two more:
+
+- **a worker whose own request names it** (`namedBy`, `server/orchestrators.ts`: in its related ids, or by id in its
+  title, brief, constraints or notes). w604 (Lothsahn's) did Ben's w556 fully, and its `DONE: w556` was refused: not one
+  of its workers. Now that worker becomes one of w556's workers (logged: "worker … said DONE for it from w604 … which
+  names w556"), every check below applies, and both requests' people hear the close. The brief tells workers to add a
+  DONE line for a request theirs takes over. Related ids alone close nothing: only the worker's explicit DONE does;
+- **the ops worker, for the requests its job was sent for** (`ops_worker` `send` or `deploy` with `work_ids`,
+  [ops-worker.md](ops-worker.md)): its report's DONE lines for those close them (`opsTurnEnded`); what the ledger did,
+  closed or refused and why, follows its report to the person whose job it is.
+
+A DONE is refused, with the reason sent back to the worker (once per reason in 6 hours) and logged, while a PR of the
+request is still open, for a release whose report does not say it is live and link the posted notes, for a brief that
+asks for a step after the merge when the report does not say how it went (an audit, a check, a 2-peer run, a
+nightly…), or for a brief that plans several PRs when fewer than two merged and the report does not say they all did
+(`doneProblem`, `server/ledgerRules.ts`). A request already closed by hand stays closed (w370), and an owner's close of
+someone else's request (w402) is untouched.
+
+**A report that does not say how a request stands is asked about** (w631: most of the ~50 requests Ben had stalled as
+"unsure" ended on a report that read as finished, without the DONE line, so nothing closed them and the cleanup stalled
+them a day later). A few seconds after a worker's turn ends (`askStatus`, `server/orchestrators.ts`), for each request
+that turn was on with neither a `DONE:` nor a still-open line, the worker gets one message: "[ledger] Your report did not
+say how w12 … stands. Reply with one line per request and nothing more: `DONE: <id>` … or `<id>: still open: <what is
+left>`." Its answer is read like any report. It is not sent when the report itself says something is left or asks a
+person (`reportVerdict` "more", `asksAPerson`: it reads as unfinished already), when the worker is still going (a
+check-in, a background job, a queued message) or a person is talking to it, when it stopped on a usage limit, when the
+request waits on a question or an approval, when any message waits for a free agent slot (the question never takes
+one), or when the same worker was asked about the same request in the last 6 hours. Its answer is a system turn, so it
+is not relayed to anyone as a `[worker update]`; the request's log has it.
 
 A DONE on a request with a linked PR the ledger holds as open first reads that PR live (above), then decides on the
 fresh state. A DONE refused anyway is not forgotten (w515): `WorkItem.done` keeps the text of that worker's DONE
@@ -778,7 +835,9 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
 - The dispatcher reaches people only through ledger decisions, one reply per decision.
 - A person's orchestrator files or updates at most 3 times, and follows up with one worker at most 3 times, between two
   messages of its person (`orchestrator.filingsPerMessage`, `orchestrator.followUpsPerMessage`). Harness messages alone
-  (a worker's report, a timer, another orchestrator) cannot keep it going.
+  (a worker's report, a timer, another orchestrator) cannot keep it going. A close (done or cancelled, their own request
+  or, for an owner, another person's) in a turn the person started with their own message is not counted (w631:
+  Lothsahn's one "close everything that's done" was refused after three closes); a close in a harness turn still is.
 - A person's orchestrator messages another person at most 10 times until its person or that person writes to their own
   orchestrator (`orchestrator.messagesPerPerson`). Two orchestrators answering each other with nobody writing stop
   there.

@@ -181,7 +181,12 @@ test('ledger order and pruning: questions first, then by priority and age; every
   ];
   assert.deepEqual([...list].sort(ledgerOrder).map((w) => w.id), ['w4', 'w3', 'w2', 'w1', 'w6', 'w5']);
   const closed = Array.from({ length: 5 }, (_, i) => item(`c${i}`, { status: 'done', updatedAt: new Date(T0 + i * 1000).toISOString() }));
-  assert.deepEqual(pruneIds([...closed, item('open')], 3).sort(), ['c0', 'c1']);
+  const later = T0 + 30 * 86_400_000;
+  assert.deepEqual(pruneIds([...closed, item('open')], 3, later).sort(), ['c0', 'c1']);
+  // w631: every request closed within the reopen window stays, past the count; older ones go down to the count.
+  assert.deepEqual(pruneIds([...closed, item('open')], 3, T0 + 6 * 86_400_000), [], 'all closed within 7 days: none dropped');
+  const old = Array.from({ length: 4 }, (_, i) => item(`o${i}`, { status: 'done', updatedAt: new Date(T0 - (10 + i) * 86_400_000).toISOString() }));
+  assert.deepEqual(pruneIds([...closed, ...old], 3, T0 + 86_400_000).sort(), ['o0', 'o1', 'o2', 'o3'], 'the 5 recent ones kept, the 4 older than 7 days dropped');
 });
 
 test('lines: the dispatcher reads the request and the overlap check; people see the decision as a notice', () => {

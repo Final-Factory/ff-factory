@@ -1386,8 +1386,8 @@ export interface WorkPr {
   at?: string;
   /** The merge commit. */
   sha?: string;
-  /** The strong evidence that linked it (server/ledgerRules.ts prsOf): its Request line, its own worker opened it, or its head branch is the request's. Absent on links made before w340, which are checked again. */
-  via?: 'line' | 'worker' | 'branch';
+  /** The strong evidence that linked it (server/ledgerRules.ts prsOf): its Request line, its own worker opened it, its head branch is the request's, or its title names it (title, w631: titleIdsIn). Absent on links made before w340, which are checked again. */
+  via?: 'line' | 'worker' | 'branch' | 'title';
   /** Its description says `Part of: <id>` (w424): one step of the request, whose merge leaves it open for what follows. */
   partOf?: boolean;
   /** What the log already said about it, so a sweep notes a state once ("merged:release", "closed"). */
@@ -1406,8 +1406,8 @@ export interface WorkStalled {
 /** Why and how the intake closed a request on its own: its branch or PR merged, or the request it is linked to is done. */
 export interface WorkAutoClosed {
   at: string;
-  /** branch: a merged PR or commit names the branch; pr: the PR it names merged; thread: a merged PR carries its Discord thread; ancestor: every commit of the branch is on the base branch; linked: a linked request is done; prs: every pull request linked to it merged and nothing was left to do; report: its worker's final report said it was delivered. */
-  how: 'branch' | 'pr' | 'thread' | 'ancestor' | 'linked' | 'prs' | 'report';
+  /** branch: a merged PR or commit names the branch; pr: the PR it names merged; thread: a merged PR carries its Discord thread; ancestor: every commit of the branch is on the base branch; linked: a linked request is done; prs: every pull request linked to it merged and nothing was left to do; report: its worker's final report said it was delivered; deploy: its PRs merged and the deploy left after them is done (the portal, and the machines when asked, run the merge, w631). */
+  how: 'branch' | 'pr' | 'thread' | 'ancestor' | 'linked' | 'prs' | 'report' | 'deploy';
   /** The merging PR's number, the merge commit and when it merged (absent for a linked request). */
   pr?: number;
   sha?: string;

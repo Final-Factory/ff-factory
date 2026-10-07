@@ -117,6 +117,27 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **Finished requests close themselves** (w631, Lothsahn: "Close everything that's done. Figure out why stuff isn't
+  closing out when it's done and fix it."). Five causes, each fixed:
+  - a request whose only step left after its merge was a portal deploy or machine updates stayed open after that step
+    happened (w605, w513, w537, w600): the PR pass now closes it once the portal, and every connected machine's daemon
+    when the step names them, runs a commit containing every merge (`deployStep`, `LedgerSweep.deployedText`);
+    `ops_worker send`/`deploy` take `work_ids`, and the ops worker's `DONE:` lines for those requests close them;
+  - a worker's `DONE:` for a request its own request names or took over was refused as "not one of its workers" (w604
+    and Ben's w556): it is accepted now, and both requests' people hear the close;
+  - a report that read as finished without the `DONE:` line left the request to stall as "unsure" a day later: the worker
+    is asked once, a few seconds after its turn, for `DONE: <id>` or `<id>: still open: <what>`, and that line is the
+    request's latest word and the stall's reason;
+  - a close a person asked for in their own turn counted toward the 3 filings per message: closes in their own turn are
+    free now (harness turns still count);
+  - the ledger kept only the newest 300 closed requests, about three days at a hundred a day, inside the seven-day reopen
+    window: it now keeps every one closed in the last 7 days too (2,000 at most);
+  - the backlog: PRs from before the `Request:` line named their request only in their title, so Ben's w150–w214 sat
+    stalled with every PR merged. A PR whose title starts with or ends in the request's id is linked now (`titleIdsIn`;
+    a plan, docs-only, diagnostics or follow-up title as a step), the full pass reads the 1,000 newest PRs of each repo,
+    and a stalled request whose worker reported it delivered after the stall closes. The first full pass after the deploy
+    re-judges every stalled request this way.
+  [docs/orchestrators.md](docs/orchestrators.md), "Pull requests" and "Ledger cleanup"; [docs/ops-worker.md](docs/ops-worker.md).
 - **The fffctl migrate tests run side by side** (w636, asked by lothsahn). Their five end-to-end tests, which ran one
   after another for 145-192 s of the Linux unit job, are in four files that node runs in parallel; each world's fake
   BEAST has a temp folder of its own.

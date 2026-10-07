@@ -28,6 +28,7 @@ import {
   STALL_AFTER_MS,
   REPORT_QUIET_MS,
   afterMergeReason,
+  deployStep,
   partOfReason,
   cleanupSettings,
   followUpDecision,
@@ -40,6 +41,7 @@ import {
   prsOf,
   reportVerdict,
   stallCandidate,
+  stillOpenIn,
   supersededBy,
   type OpenedPr,
   type PrRecord,
@@ -47,12 +49,15 @@ import {
 import type { LedgerCleanupState, Requester, SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
 import { servedBy } from '../shared/workState.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
+import { appVersion } from './version.ts';
 
 const CHECK_EVERY_MS = 5 * 60_000;
 /** How long a full pass waits for a running pass to end before giving up this turn. */
 const RUN_WAIT_MS = 10 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
 const PRS_PER_REPO = 200;
+/** The full pass reads this many (w631): PRs named only by their titles, from before the `Request:` line, are older than 200. */
+const PRS_PER_REPO_FULL = 1000;
 /** Linked open PRs the list does not reach, read one by one: at most this many a pass (GitHub's rate limit: 5000 an hour). */
 const REFRESH_OLD_PRS = 30;
 
@@ -63,7 +68,7 @@ export interface LedgerSweepDeps {
   /** GitHub owner/name of the repos whose PRs are linked: the game repo and this app's own, besides config's. */
   repos?: () => Promise<string[]>;
   /** The newest PRs of those repos in every state (gh); undefined when gh could not say. */
-  prs?: (repos: string[]) => Promise<PrRecord[] | undefined>;
+  prs?: (repos: string[], limit: number) => Promise<PrRecord[] | undefined>;
   /** One PR by number, for a linked PR older than the list reaches. */
   viewPr?: (repo: string, number: number) => Promise<PrRecord | undefined>;
   /** Send a stopped worker a message, which resumes it. */
@@ -72,6 +77,15 @@ export interface LedgerSweepDeps {
   limitsClear?: (s: SessionInfo) => boolean | undefined;
   /** The intake's merged-branch rule (server/intake.ts checkMerged), run in a full pass; returns the ids it closed. */
   intakeMerged?: () => Promise<string[]>;
+  // A deploy after the merge (w631, deployStep): what the portal and the machines run now.
+  /** This app's own GitHub repo (owner/name), whose merges a deploy brings out. Default: its checkout's origin. */
+  appRepo?: () => Promise<string | undefined>;
+  /** The commit the portal runs (version.ts appVersion), or undefined when it is unknown. */
+  portalSha?: () => string | undefined;
+  /** The connected worker machines and the commit each one's daemon runs (sha undefined when its version is not one). */
+  daemons?: () => { id: string; sha?: string }[];
+  /** Whether commit `head` contains commit `sha`; undefined when that cannot be told. Default: git, then GitHub's compare. */
+  contains?: (sha: string, head: string) => Promise<boolean | undefined>;
   now?: () => number;
 }
 
@@ -195,7 +209,7 @@ export class LedgerSweep {
     try {
       const backfill = !this.data.backfilledAt;
       const repair = !this.data.prRepairAt;
-      const prs = await this.loadPrs();
+      const prs = await this.loadPrs(full ? PRS_PER_REPO_FULL : PRS_PER_REPO);
       if (prs) await this.recheckClosed(prs, acts);
       if (prs) await this.refreshStates(prs, repair);
       const work = [...this.d.store.work.values()];
@@ -281,20 +295,27 @@ export class LedgerSweep {
   private async repoSlugs(): Promise<string[]> {
     if (this.d.repos) return this.d.repos();
     if (this.repoCache) return this.repoCache;
-    const slug = async (dir: string) => /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec((await runProc('git', ['-C', dir, 'remote', 'get-url', 'origin'], { timeoutMs: 10_000 })).stdout.trim())?.[1];
-    const app = path.resolve(import.meta.dirname, '..');
     const given = this.settings.repos;
-    this.repoCache = given ?? [...new Set([await slug(this.d.cfg.repo.basePath), await slug(app)].filter((x): x is string => !!x))];
+    this.repoCache = given ?? [...new Set([await slugOf(this.d.cfg.repo.basePath), await this.appSlug()].filter((x): x is string => !!x))];
     return this.repoCache;
   }
 
-  private async loadPrs(): Promise<PrRecord[] | undefined> {
+  private appSlugCache?: string | null;
+
+  /** This app's own repo, owner/name (its checkout's origin), or undefined. */
+  private async appSlug(): Promise<string | undefined> {
+    if (this.d.appRepo) return this.d.appRepo();
+    if (this.appSlugCache === undefined) this.appSlugCache = (await slugOf(path.resolve(import.meta.dirname, '..')).catch(() => undefined)) ?? null;
+    return this.appSlugCache ?? undefined;
+  }
+
+  private async loadPrs(limit: number): Promise<PrRecord[] | undefined> {
     const repos = await this.repoSlugs();
     if (!repos.length) return undefined;
-    if (this.d.prs) return this.d.prs(repos);
+    if (this.d.prs) return this.d.prs(repos, limit);
     const out: PrRecord[] = [];
     for (const repo of repos) {
-      const r = await runProc('gh', ['pr', 'list', '-R', repo, '--state', 'all', '--limit', String(PRS_PER_REPO), '--json', 'number,title,body,headRefName,baseRefName,state,createdAt,mergedAt,closedAt,mergeCommit,url'], { timeoutMs: 45_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+      const r = await runProc('gh', ['pr', 'list', '-R', repo, '--state', 'all', '--limit', String(limit), '--json', 'number,title,body,headRefName,baseRefName,state,createdAt,mergedAt,closedAt,mergeCommit,url'], { timeoutMs: limit > PRS_PER_REPO ? 180_000 : 45_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
       if (r.code !== 0) return undefined;
       try {
         out.push(...(JSON.parse(r.stdout) as GhPr[]).map((p) => fromGh(repo, p)));
@@ -518,7 +539,15 @@ export class LedgerSweep {
       acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `PR #${last.number} merged, PR #${open[0].number} is still open` });
       return false;
     }
-    const reason = partOfReason(w.id, prs) ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
+    const partOf = partOfReason(w.id, prs);
+    const reason = partOf ?? afterMergeReason(w, workers.map((s) => s.lastResult ?? ''));
+    // ONLY A DEPLOY LEFT, AND IT HAPPENED (w631): w605, w513, w537 and w600 waited on a portal deploy or machine updates,
+    // which the ops worker or a person then did, and nothing told the ledger. What runs now is the evidence.
+    const deployed = reason && !partOf ? await this.deployedText(w, workers, merged) : undefined;
+    if (deployed) {
+      this.closeAsDone(w, { how: 'deploy', pr: last.number, sha: last.sha, mergedAt: last.at, text: `${prMergedText(last)}; deployed since: ${deployed}` }, acts);
+      return true;
+    }
     if (reason) {
       note(last, `merged:${reason.slice(0, 40)}`, `PR #${last.number} merged; still open: ${reason}`);
       acts.push({ id: w.id, title: w.title, who: w.requesters, kind: 'open', text: `PR #${last.number} merged; ${reason}` });
@@ -528,7 +557,62 @@ export class LedgerSweep {
     return true;
   }
 
-  private closeAsDone(w: WorkItem, how: { how: 'prs' | 'report'; pr?: number; sha?: string; mergedAt?: string; text: string }, acts: Action[]) {
+  /** Answers of `contains`, by "<sha>:<head>" (ancestry never changes; unknown answers are not kept). */
+  private readonly containsCache = new Map<string, boolean>();
+
+  /**
+   * When a request's only step left after its merge is a deploy of this app (deployStep), and it has happened, how:
+   * "the portal runs 1a2b3c4" (and "each connected machine's daemon runs it: beast 1a2b3c4, …" when the step names the
+   * machines). Undefined otherwise: another step is left, a merged PR is not this app's (a game repo's "deploy" is not
+   * the portal's), or what runs does not contain every merge yet, or cannot be told.
+   */
+  private async deployedText(w: WorkItem, workers: readonly SessionInfo[], merged: readonly WorkPr[]): Promise<string | undefined> {
+    const step = deployStep(w, workers.map((s) => s.lastResult ?? ''));
+    if (!step || !merged.length) return undefined;
+    const app = (await this.appSlug())?.toLowerCase();
+    if (!app || merged.some((p) => p.repo.toLowerCase() !== app || !p.sha)) return undefined;
+    const runs = async (head: string) => {
+      for (const p of merged) if ((await this.containsSha(p.sha!, head)) !== true) return false;
+      return true;
+    };
+    const parts: string[] = [];
+    if (step.portal) {
+      const head = (this.d.portalSha ?? (() => appVersion().sha))();
+      if (!head || !(await runs(head))) return undefined;
+      parts.push(`the portal runs ${head.slice(0, 12)}`);
+    }
+    if (step.machines) {
+      const ds = this.d.daemons?.() ?? [];
+      if (!ds.length) return undefined;
+      for (const d of ds) if (!d.sha || !(await runs(d.sha))) return undefined;
+      parts.push(`each connected machine's daemon runs it (${ds.map((d) => `${d.id} ${d.sha!.slice(0, 12)}`).join(', ')})`);
+    }
+    return parts.join(', and ');
+  }
+
+  private async containsSha(sha: string, head: string): Promise<boolean | undefined> {
+    const key = `${sha}:${head}`;
+    const known = this.containsCache.get(key);
+    if (known !== undefined) return known;
+    const r = await (this.d.contains ?? ((a: string, b: string) => this.gitContains(a, b)))(sha, head).catch(() => undefined);
+    if (r !== undefined) this.containsCache.set(key, r);
+    return r;
+  }
+
+  /** git merge-base --is-ancestor in this app's checkout (a release is a worktree of the portal's clone), else GitHub's compare. */
+  private async gitContains(sha: string, head: string): Promise<boolean | undefined> {
+    const app = path.resolve(import.meta.dirname, '..');
+    const g = await runProc('git', ['-C', app, 'merge-base', '--is-ancestor', sha, head], { timeoutMs: 15_000 });
+    if (g.code === 0) return true;
+    if (g.code === 1) return false;
+    const repo = await this.appSlug();
+    if (!repo) return undefined;
+    const r = await runProc('gh', ['api', `repos/${repo}/compare/${sha}...${head}`, '--jq', '.status'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+    const status = r.code === 0 ? r.stdout.trim() : '';
+    return status === 'ahead' || status === 'identical' ? true : status === 'behind' || status === 'diverged' ? false : undefined;
+  }
+
+  private closeAsDone(w: WorkItem, how: { how: 'prs' | 'report' | 'deploy'; pr?: number; sha?: string; mergedAt?: string; text: string }, acts: Action[]) {
     const at = new Date(this.now()).toISOString();
     this.d.orchestrators.ledgerEdit(w.id, `closed automatically by the ledger cleanup: ${how.text}`, (x) => {
       x.status = 'done';
@@ -549,11 +633,17 @@ export class LedgerSweep {
     return Math.max(Date.parse(w.updatedAt) || 0, ...workers.map((s) => Date.parse(s.lastActivityAt) || 0));
   }
 
-  /** A worker's final report states the work is done, nothing is open: close it (the report, not a guess). */
+  /**
+   * A worker's final report states the work is done, nothing is open: close it (the report, not a guess). A stalled
+   * request too, when that report came after the stall (w631: a worker that went back to a stalled request and finished
+   * it was never read again, so it stayed stalled).
+   */
   private deliveredStep(w: WorkItem, workers: readonly SessionInfo[], acts: Action[]): boolean {
-    if (!isOpen(w) || !workers.length || w.question || w.flag) return false;
+    if (!workers.length || w.question || w.flag) return false;
     if ((w.prs ?? []).some((p) => p.state === 'open')) return false;
     const last = this.latest(workers);
+    const reportedSinceStall = w.status === 'stalled' && !!last && (Date.parse(last.lastActivityAt) || 0) > (Date.parse(w.stalled?.at ?? '') || Infinity);
+    if (!isOpen(w) && !reportedSinceStall) return false;
     if (!last || last.status === 'error' || this.now() - this.lastActivity(w, workers) < REPORT_QUIET_MS) return false;
     const release = isRelease(w);
     if (reportVerdict(last.lastResult, release) !== 'delivered') return false;
@@ -641,6 +731,9 @@ export class LedgerSweep {
     if (y) return this.stall(w, 'superseded', `probably superseded by ${y.id} "${clip(y.title, 80)}", which is done`, acts, y.id);
     const last = this.latest(workers);
     const days = idle >= 2 * 86_400_000 ? `${Math.floor(idle / 86_400_000)} days` : `${Math.floor(idle / 3_600_000)} hours`;
+    // Its worker said what is left, in so many words (w631): that is the reason, not a guess from the report.
+    const said = last?.lastResult ? stillOpenIn(last.lastResult).get(w.id) : undefined;
+    if (said) return this.stall(w, 'idle', `no worker running and no activity for ${days}; its worker said: "${clip(oneLine(said), 160)}"`, acts);
     if (last && reportVerdict(last.lastResult) === 'unsure' && last.lastResult) {
       return this.stall(w, 'unsure', `no worker running and no activity for ${days}; its worker's last report does not say it is done: "${clip(oneLine(last.lastResult), 140)}"`, acts);
     }
@@ -704,4 +797,9 @@ export function summaryOf(acts: readonly { kind: Kind }[]): string {
   const n = (k: Kind) => acts.filter((a) => a.kind === k).length;
   const parts = [n('closed') && `closed ${n('closed')}`, n('resumed') && `resumed ${n('resumed')}`, n('asked') && `asked ${n('asked')} whether done`, n('stalled') && `stalled ${n('stalled')}`, n('open') && `${n('open')} left open with a reason`].filter(Boolean);
   return parts.length ? parts.join(', ') : 'nothing to do';
+}
+
+/** A checkout's GitHub repo, owner/name, from its origin's URL. */
+async function slugOf(dir: string): Promise<string | undefined> {
+  return /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec((await runProc('git', ['-C', dir, 'remote', 'get-url', 'origin'], { timeoutMs: 10_000 })).stdout.trim())?.[1];
 }

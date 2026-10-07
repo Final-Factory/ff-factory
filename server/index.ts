@@ -442,6 +442,8 @@ const ledgerSweep = new LedgerSweep({
   resume: (id, text) => void sessions.send(id, text, 'system'),
   limitsClear: (s) => limitsClearFor(s),
   intakeMerged: () => intake.checkMerged(false),
+  // A request whose last step is machine updates closes once each connected machine runs its merge (w631).
+  daemons: () => machines.daemonVersions(),
 }).start();
 // The orchestrators' base clone, kept on origin's newest code (w467, server/baseRefresh.ts; config repo.refreshMinutes).
 startBaseRefresh(cfg);

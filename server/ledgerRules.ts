@@ -61,10 +61,29 @@ export function partOfIdsIn(text: string): string[] {
   return idsOn(text, /^\s*Part of:\s*(w\d+)\b/gim).filter((id) => !full.has(id));
 }
 
+/**
+ * The requests a PR's title names as its own (w631): a leading "w165: …", "w604/w556: …" or "w605 (1): …", or a title
+ * that ends in its ids alone, "… (w184)", "… (w197/w214)". 407 of the 606 PRs of both repos name a request in their
+ * title, and the PRs from before the `Request:` line (w293) only there: Ben's w150–w214 sat stalled for days with every
+ * PR merged. A request named inside other words ("(w170 diagnostics)", "since w170", "w292 index-shift regression") is
+ * not one. `part`: the title says it is a step, not the whole (a numbered part, a plan, docs only, diagnostics, a
+ * follow-up, a draft), so its merge leaves the request open like `Part of:`.
+ */
+export function titleIdsIn(title: string): { ids: string[]; part: boolean } {
+  const ids = new Set<string>();
+  const list = (s: string) => s.split(/\s*[/,&+]\s*/).map((x) => x.trim().toLowerCase());
+  const lead = /^\s*((?:w\d+\s*[/,&+]\s*)*w\d+)\s*(\(\s*\d+\s*\))?\s*:/i.exec(title);
+  if (lead) for (const id of list(lead[1])) ids.add(id);
+  const tail = /\(\s*((?:w\d+\s*[/,&+]\s*)*w\d+)\s*\)\s*$/i.exec(title);
+  if (tail) for (const id of list(tail[1])) ids.add(id);
+  const part = !!lead?.[2] || /\b(plan|docs only|design|investigation|diagnostics|follow-?up|draft|part \d|step \d|phase \d|do not merge)\b/i.test(title);
+  return { ids: [...ids], part };
+}
+
 /** Why a request stays open after a merge because its last merged PR said `Part of: <id>`, or undefined. */
 export function partOfReason(id: string, prs: readonly WorkPr[]): string | undefined {
   const last = prs.filter((p) => p.state === 'merged').sort((a, b) => (a.at ?? '').localeCompare(b.at ?? '')).at(-1);
-  return last?.partOf ? `PR #${last.number} is one step of it (its description says Part of: ${id}); more follows` : undefined;
+  return last?.partOf ? `PR #${last.number} is one step of it (${last.via === 'title' ? 'its title marks it a step' : `its description says Part of: ${id}`}); more follows` : undefined;
 }
 
 /** `https://github.com/<owner>/<name>/pull/<n>` links in text a worker wrote. */
@@ -109,7 +128,10 @@ export function prsOf(w: WorkItem, all: readonly PrRecord[], ctx: { opened: read
     if (says.length) via = says.some((id) => mine.has(id)) ? 'line' : undefined;
     else if (ctx.opened.some((o) => o.number === p.number && o.repo.toLowerCase() === p.repo.toLowerCase()) && p.createdAt >= w.createdAt) via = 'worker';
     else if (branch && p.head === branch) via = 'branch';
-    if (via) out.push({ ...p, via, partOf: via === 'line' && partOfIdsIn(p.body).some((id) => mine.has(id)) });
+    // Its title names it (w631): also when its description says it is for another request ("w604/w556: …", Request: w604).
+    const titled = via ? undefined : titleIdsIn(p.title);
+    if (titled?.ids.some((id) => mine.has(id))) via = 'title';
+    if (via) out.push({ ...p, via, partOf: via === 'title' ? titled!.part : via === 'line' && partOfIdsIn(p.body).some((id) => mine.has(id)) });
   }
   return out;
 }
@@ -178,6 +200,47 @@ export function afterMergeReason(w: Pick<WorkItem, 'title' | 'brief' | 'constrai
   return undefined;
 }
 
+// ---------------------------------------------------------------- a deploy after the merge (w631)
+
+/** A sentence about deploying this app after the merge: the portal (fffctl update, ops_worker deploy) or the machines' daemons. */
+const DEPLOY_SENTENCE = /\b(re)?deploy(s|ed|ing|ment)?\b|\bfffctl update\b|\b(worker|machine|daemon)s?'? (update|install|reinstall)s?\b|\bupdate (the |each |every |all )?(worker |enrolled )?(machines?|workers?|daemons?)\b|\b(re)?install(ed|s)? on (the |each |every |all )?(machines?|workers?)\b/i;
+/** Steps that are not a deploy even when the same sentence names one: a sentence with these is never set aside. */
+const OTHER_STEP = /\b(audit(ed|s)?|2-peer|two-peer|paired|nightly|soak|release notes|patch notes|ci-release)\b/i;
+/** The deploy step names the worker machines (their daemons must run the merge too). */
+const MACHINE_STEP = /\b(worker|machine|daemon)s?'? (update|install|reinstall)s?\b|\bupdate (the |each |every |all )?(worker |enrolled )?(machines?|workers?|daemons?)\b|\b(re)?install(ed|s)? on (the |each |every |all )?(machines?|workers?)\b|--update\b|-Update\b/i;
+/** The deploy step names the portal itself. */
+const PORTAL_STEP = /\bportal\b|\bfffctl update\b|\bops_worker deploy\b|\bthe app\b/i;
+
+const sentences = (t: string) => t.split(/(?<=[.!?;])\s+|\n+/).filter((s) => s.trim());
+
+/**
+ * What deploys a request still waits on when a deploy is the only step left after its merge (w631: w605, w513, w537 and
+ * w600 stayed open after their PRs merged, the brief or the last report naming a portal deploy or machine updates, which
+ * then happened through the ops worker or by hand while nothing told the ledger), or undefined: nothing is left, or
+ * something besides a deploy is (afterMergeReason still finds a reason once the sentences about deploying are set aside).
+ * `portal`: this app's portal must run the merge; `machines`: every connected worker machine's daemon too.
+ */
+export function deployStep(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' | 'question' | 'flag'>, reports: readonly string[]): { portal: boolean; machines: boolean } | undefined {
+  if (w.question || w.flag || isRelease(w)) return undefined;
+  if (!afterMergeReason(w, reports)) return undefined;
+  const aside: string[] = [];
+  const strip = (t: string) =>
+    sentences(t)
+      .filter((s) => {
+        if (!DEPLOY_SENTENCE.test(s) || OTHER_STEP.test(s)) return true;
+        aside.push(s);
+        return false;
+      })
+      .join(' ');
+  const rest = { title: strip(w.title), brief: strip(w.brief), constraints: strip(w.constraints ?? '') };
+  // Each report as afterMergeReason reads it: its last 700 characters.
+  const tails = reports.map((r) => strip(r.slice(-700)));
+  if (!aside.length || afterMergeReason(rest, tails)) return undefined;
+  const text = aside.join(' ');
+  const machines = MACHINE_STEP.test(text);
+  return { portal: PORTAL_STEP.test(text) || !machines, machines };
+}
+
 /** "merged as #9 (abc123def456) on 2026-10-03", from the PR that merged last. */
 export function prMergedText(p: WorkPr): string {
   return mergedText({ number: p.number, sha: p.sha, at: p.at });
@@ -214,7 +277,7 @@ const REFUSED = /permission (was )?denied|was denied|denied by|refused|not allow
 export type CutOff = { kind: 'limit' | 'restart' | 'refused'; reason: string };
 
 /** A turn whose whole result is Claude's limit line ("You've hit your session limit · resets 7pm"). */
-const LIMIT_END = /^\W*(you'?ve (hit|reached) your (\w+[ -])?limit|(claude )?(usage|session|weekly) limit (reached|hit))/i;
+export const LIMIT_END = /^\W*(you'?ve (hit|reached) your (\w+[ -])?limit|(claude )?(usage|session|weekly) limit (reached|hit))/i;
 
 /**
  * Whether a worker that is not running stopped for a reason a resume could fix: a usage or rate limit, an app restart
@@ -245,6 +308,19 @@ export function doneIdsIn(text: string): string[] {
   const out = new Set<string>();
   for (const m of (text ?? '').matchAll(/^[\s*_>`-]*DONE:?\s+(w\d+)[\s.`*_]*$/gim)) out.add(m[1].toLowerCase());
   return [...out];
+}
+
+/**
+ * A worker's status lines for requests that are not finished (w631): `w342: still open: the 2-peer check`, also
+ * `NOT DONE: w342: …` (markdown around it allowed), by request id, the line as written.
+ */
+export function stillOpenIn(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of (text ?? '').matchAll(/^[\s*_>`-]*(?:NOT[ -]DONE:?\s*[*_`]*(w\d+)\b|(w\d+)[*_`]*\s*[:—–-]\s*[*_`]*\s*(?:still open|not done)\b).*$/gim)) {
+    const id = (m[1] ?? m[2]).toLowerCase();
+    if (!out.has(id)) out.set(id, m[0].replace(/^[\s*_>`-]+/, '').trim());
+  }
+  return out;
 }
 
 /** The PRs the ledger holds as open that a worker's report says merged (w515: "PR #1089 was merged", ".../pull/1089 merged"). */

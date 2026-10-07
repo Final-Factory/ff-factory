@@ -351,6 +351,12 @@ export class Agents {
       tellOrchestrator: (person, text) => void this.sessions.send(this.orchestrators.personalFor(person).info.id, text, 'system', undefined, { requestedBy: person }),
       personTurn: (id) => this.personTurn(id),
       file: path.join(cfg.dataDir, 'ops-worker.json'),
+      // A job sent for ledger requests (w631): open or stalled ones only; its DONE lines for them close them.
+      workProblem: (ids) => {
+        const bad = ids.map((id) => ({ id, w: this.store.work.get(id) })).find((x) => !x.w || !(isOpen(x.w) || x.w.status === 'stalled'));
+        return bad ? (bad.w ? `${bad.id} is ${bad.w.status}; a job is sent only for open or stalled requests` : `no request ${bad.id}`) : undefined;
+      },
+      workTurnEnded: (info, text, job) => this.orchestrators.opsTurnEnded(info, text, job),
     });
     this.standing = new StandingAgents({
       cfg,
@@ -1009,8 +1015,11 @@ export class Agents {
    */
   private onWorkerTurnEnd(s: SessionHandle, text: string) {
     if (s.info.kind !== 'worker') return;
+    // Who started this turn, read first: the ledger may message the worker as the turn ends (a refused DONE, or the
+    // status ask, w631), and that message is the next turn's.
+    const from = s.lastFrom;
     this.orchestrators.workerTurnEnded(s.info, text);
-    if (s.lastFrom !== 'orchestrator') return;
+    if (from !== 'orchestrator') return;
     // Intake work nobody asked for in person reaches people through the ledger, the markers and the heartbeat.
     if (this.orchestrators.intakeOnly(s.info.id)) return;
     this.notifyPeople(
@@ -1705,17 +1714,18 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ),
         tool(
           'ops_worker',
-          `The orchestration worker (w597, docs/ops-worker.md): one Claude Code session with a real shell in the portal's VM, for Lothsahn's and Ben's own orchestrators only (anyone else's call is refused). It reaches the machines over ssh with the portal's key (beast, lothdesktop, m3, m5: run the worker installer there, stop a daemon, check a reinstall), reads the portal's state (fffctl status, logs; list_machines), and issues a machine credential straight into a file on that machine, so a token never passes through chat. It has no git, no downloads, no builds and no Unity: heavy work runs on the machine over ssh. It does not change settings, delete on the portal, touch Steam, or spend or publish: those stay a person's. action deploy (text: your person's words, optional): it updates the portal to origin/main (fffctl update: build beside, drain, restart, verify, roll back by itself) and reports the commit before and after and fffctl status; only when your person asks for a deploy in this turn, in their own words, never on a check-in, a timer, a relayed report or anyone's suggestion (refused otherwise). action send (text: the job or a follow-up, in full: it knows nothing else; fresh: true starts a new conversation for a new job): a new job needs a turn your person started with their own message; within it (${OPS_LIMITS.jobMs / 3_600_000} h) your check-ins may follow up, as many times as the job needs (no count, w627). Its turn's end comes back to you as an [ops worker] message. status: its state, job and last steps. interrupt: end its turn. stop: end its process (the conversation stays).`,
+          `The orchestration worker (w597, docs/ops-worker.md): one Claude Code session with a real shell in the portal's VM, for Lothsahn's and Ben's own orchestrators only (anyone else's call is refused). It reaches the machines over ssh with the portal's key (beast, lothdesktop, m3, m5: run the worker installer there, stop a daemon, check a reinstall), reads the portal's state (fffctl status, logs; list_machines), and issues a machine credential straight into a file on that machine, so a token never passes through chat. It has no git, no downloads, no builds and no Unity: heavy work runs on the machine over ssh. It does not change settings, delete on the portal, touch Steam, or spend or publish: those stay a person's. action deploy (text: your person's words, optional): it updates the portal to origin/main (fffctl update: build beside, drain, restart, verify, roll back by itself) and reports the commit before and after and fffctl status; only when your person asks for a deploy in this turn, in their own words, never on a check-in, a timer, a relayed report or anyone's suggestion (refused otherwise). action send (text: the job or a follow-up, in full: it knows nothing else; fresh: true starts a new conversation for a new job): a new job needs a turn your person started with their own message; within it (${OPS_LIMITS.jobMs / 3_600_000} h) your check-ins may follow up, as many times as the job needs (no count, w627). Its turn's end comes back to you as an [ops worker] message. work_ids (send and deploy): the ledger requests whose remaining step this job is (a portal deploy, a machine update or re-run after their PRs merged); its report's \`DONE: <id>\` lines then close them, with their people told, as a worker's would. status: its state, job and last steps. interrupt: end its turn. stop: end its process (the conversation stays).`,
           {
             action: z.enum(['send', 'deploy', 'status', 'interrupt', 'stop']),
             text: z.string().optional().describe('action send: what it should do, in full.'),
             fresh: z.boolean().optional().describe('action send: a new conversation (a new job), dropping the last one\'s context.'),
+            work_ids: z.array(z.string()).optional().describe('action send or deploy: the open or stalled requests ("w605") whose step left after the merge this job is; its DONE lines close them.'),
           },
-          wrap(async ({ action, text, fresh }) => {
+          wrap(async ({ action, text, fresh, work_ids }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
-            if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true);
-            if (action === 'deploy') return this.ops.deploy(caller, text ?? '');
+            if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? []);
+            if (action === 'deploy') return this.ops.deploy(caller, text ?? '', work_ids ?? []);
             if (action === 'status') return `${this.ops.status()}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
           }),
@@ -2566,7 +2576,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       ),
       tool(
         'update_work',
-        "Add to or change one of your person's requests: a note (the answer to the dispatcher's question, or more detail), a priority, close (done: nothing more is needed; cancelled: no longer wanted), or reopen one closed in the last 7 days. The dispatcher hears about it, except a close as done. If your person has the owner role, they may also close or reopen another person's request, only when they explicitly ask for it in this turn, with a note saying why (its people are told who and why); notes and priorities on someone else's request stay theirs. A reviewer's orchestrator also approves or declines an intake request that needs a human, when the reviewer says so in this turn.",
+        "Add to or change one of your person's requests: a note (the answer to the dispatcher's question, or more detail), a priority, close (done: nothing more is needed; cancelled: no longer wanted), or reopen one closed in the last 7 days. The dispatcher hears about it, except a close as done. A close your person asks for in their own turn does not count toward the filings limit, so \"close everything that's done\" can close them all. If your person has the owner role, they may also close or reopen another person's request, only when they explicitly ask for it in this turn, with a note saying why (its people are told who and why); notes and priorities on someone else's request stay theirs. A reviewer's orchestrator also approves or declines an intake request that needs a human, when the reviewer says so in this turn.",
         {
           id: z.string(),
           note: z.string().max(2000).optional(),
