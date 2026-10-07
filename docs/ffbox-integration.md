@@ -388,8 +388,8 @@ The server picks the target. The first matching rule wins:
    ssh keys to the Macs. Changes to FF Factory itself or to BEAST's setup are the exception,
    because they have to run where they apply.
 4. **CPU-only → a BEAST sandbox when one is free, otherwise FFBox.** CPU-only covers code, EditMode
-   tests, two-peer pairs, reviews, specs and docs. Free means an `unused` sandbox with room under
-   `limits.maxSessions`, or room to create one. This is the policy as stated. Whether to prefer
+   tests, two-peer pairs, reviews, specs and docs. Free means a sandbox `list_sandboxes` marks FREE (ready, no live
+   agent; w575), or room to create one. This is the policy as stated. Whether to prefer
    FFBox even when a sandbox is free is open question 2.
    - **4a. Operator work may go to FFBox as requested, at any size.** Work an operator asks for
      runs on that operator's own Claude plan at full capability, so the orchestrator may send it

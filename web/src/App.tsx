@@ -339,6 +339,7 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
         <SessionView
           session={s}
           fullWidth
+          readOnly={s.kind === 'ops' ? "Only Lothsahn's and Ben's own orchestrators give the orchestration worker jobs (their ops_worker tool); nobody writes to it here. Every command it runs is in this transcript, with secrets redacted." : undefined}
           onBack={() =>
             navigate(
               s.machineId && s.machineSandbox

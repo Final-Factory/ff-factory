@@ -157,7 +157,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
   } as unknown as Config;
   const store = new Store(dir);
   // Sandboxes alpha and beta are on a machine (pc/alpha, pc/beta, on its in-process daemon), with the workers the portal kept there.
-  const pc = await createTestMachine({ sandboxes: ['alpha', { name: 'beta', purpose: 'w490' }] });
+  const pc = await createTestMachine({ sandboxes: ['alpha', 'beta'] });
   store.putMachine(pc.record({ alpha: ['eb9632fd'], beta: ['b1'] }));
   store.putSession(s('eb9632fd', { status: 'stopped', machineId: 'pc', machineSandbox: 'alpha', title: 'w448: merge #1083' }));
   store.putSession(s('b1', { status: 'stopped', machineId: 'pc', machineSandbox: 'beta', title: 'w490' }));
@@ -205,12 +205,13 @@ test('list_sandboxes: Waiting and on what, sandboxes by status, and a sandbox wh
   const { agents } = await setup(t);
   const waker = (agents as unknown as { waker: WakerLike }).waker;
   const before = agents.describeAllSandboxes();
-  assert.match(before, /- pc\/alpha FREE/, 'unused label and an idle agent with nothing pending: free');
-  assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1);
+  assert.match(before, /- pc\/alpha FREE/, 'an idle agent with nothing pending: free');
+  // Labels say nothing about use (w575): beta, with no live agent, is free too.
+  assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 2);
   waker.schedule('eb9632fd', 15, 'merge #1083 when CI is green');
   const text = agents.describeAllSandboxes();
   assert.doesNotMatch(text, /alpha FREE/, 'its worker will come back to it');
   assert.match(text, /- eb9632fd "w448: merge #1083" \[Waiting: check-in [^\]]*: “merge #1083 when CI is green”, idle\]/);
   assert.ok(text.indexOf('- pc/alpha') < text.indexOf('- pc/beta'), 'the sandbox with a Waiting agent before the one with none live');
-  assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 0, 'the capacity block and placement do not count it free');
+  assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1, 'the capacity block and placement do not count it free');
 });

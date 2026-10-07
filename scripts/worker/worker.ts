@@ -25,6 +25,7 @@ import { LABEL, MIN_NODE, bundle, macControlScript, macProbeScript, macReloadLin
 import * as win from '../../server/machineDeployWin.ts';
 import type { SandboxPoolSettings } from '../../shared/types.ts';
 import { slotsPointer } from '../../machine/unitySlots.ts';
+import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
 export const LAYOUT_VERSION = 1;
 export const DEFAULT_REPO = 'https://github.com/Final-Factory/FinalFactory.git';
@@ -77,9 +78,12 @@ export function layoutOf(root: string): Layout {
 
 /** What the uninstall removes besides the root, recorded as the install makes it. */
 export interface OutsideItem {
-  kind: 'task' | 'launchagent' | 'firewall-group' | 'file';
+  kind: 'task' | 'launchagent' | 'firewall-group' | 'file' | 'authorized-key';
   name: string;
+  /** authorized-key: the key's base64 (the lines the uninstall removes). */
   note?: string;
+  /** authorized-key: the line was there before this install, so the uninstall leaves it (w568). */
+  existed?: boolean;
 }
 
 /** <root>/root.json. */
@@ -91,6 +95,7 @@ export interface Manifest {
   platform: 'win32' | 'darwin';
   /** The scheduled task (Windows) or LaunchAgent label (Mac) that runs the daemon. */
   service: string;
+  /** Player-folder pairs: one per sandbox (players/slotK-0 and slotK-1, K = 1..slots; w576). */
   slots: number;
   repoUrl: string;
   /** A test install's firewall group suffix (firewall.ps1 -GroupSuffix). */
@@ -114,9 +119,15 @@ function writeManifest(root: string, m: Manifest) {
   fs.renameSync(file + '.tmp', file);
 }
 
-/** Add an outside item once (by kind and name). Exported for tests. */
+/**
+ * Add an outside item once (by kind and name). One already there takes the new note, so a re-run with another
+ * --max-sandboxes rewrites the firewall group's slot count (w600: LothDesktop's root.json still said "8 slots" at 5).
+ * Exported for tests.
+ */
 export function noteOutside(m: Manifest, item: OutsideItem): Manifest {
-  if (!m.outside.some((o) => o.kind === item.kind && o.name.toLowerCase() === item.name.toLowerCase())) m.outside.push(item);
+  const had = m.outside.find((o) => o.kind === item.kind && o.name.toLowerCase() === item.name.toLowerCase());
+  if (!had) m.outside.push(item);
+  else if (item.note !== undefined) had.note = item.note;
   return m;
 }
 
@@ -142,7 +153,6 @@ export interface InstallOptions {
   maxSandboxes: number;
   maxAgentsPerSandbox: number;
   maxUnity: number;
-  slots: number;
   repoUrl: string;
   /** Windows task name or Mac LaunchAgent label; a second install on one computer (a test root) uses its own. */
   service: string;
@@ -159,6 +169,8 @@ export interface InstallOptions {
   owner?: string;
   /** A test install beside a live one: its own firewall rule groups and no slot config. */
   firewallSuffix?: string;
+  /** A local clone of the game repo to seed the root's clone from (a migration's old clone, or install --seed-from): no download, no credential. */
+  seedFrom?: string;
   /** daemon.json settings the old daemon had (a migration: its host guard, protected paths, MCP server, limits). */
   carry?: Record<string, unknown>;
   /** A migration replaces the old daemon's service on purpose (worker.ts migrate). */
@@ -171,6 +183,12 @@ export interface InstallOptions {
   absoluteWorktrees?: boolean;
   unityEditorRoot?: string;
   unityPath?: string;
+  /** The portal's ssh (w568, scripts/worker/portalSsh.ts): false skips it (--no-ssh). */
+  ssh?: boolean;
+  /** The name the portal reaches this machine by (default: its tailnet name, else its computer name). */
+  sshHost?: string;
+  /** The ssh user the portal's key is authorized for (default: the account running the install). */
+  sshUser?: string;
 }
 
 /** A parsed command line: `--key value` options and `--flag`s. Exported for tests. */
@@ -270,6 +288,22 @@ export interface WhoAmI {
   sandboxes: string[];
 }
 
+/**
+ * POST /machine/stopping (server/index.ts, w513): the daemon stops on purpose now (a migration), so the portal's offline
+ * redeploy leaves the machine alone until a daemon says hello again. A portal without the route (404) is fine only if it
+ * was told another way: the daemon was stopped with machine_daemon stop, and none runs (the caller checks). Exported for tests.
+ */
+export async function holdRedeploys(portalUrl: string, token: string, fetcher: typeof fetch = fetch): Promise<{ ok: true } | { ok: false; error: string; tooOld?: boolean }> {
+  try {
+    const r = await fetcher(`${portalUrl}/machine/stopping`, { method: 'POST', headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) });
+    if (r.ok) return { ok: true };
+    if (r.status === 404) return { ok: false, tooOld: true, error: 'the portal is too old to hold its redeploys during a migration (no /machine/stopping)' };
+    return { ok: false, error: `the portal refused to hold its redeploys (HTTP ${r.status})` };
+  } catch (e) {
+    return { ok: false, error: `the portal did not answer (${(e as Error).message})` };
+  }
+}
+
 /** GET /machine/whoami (server/index.ts, w513). Exported for tests. */
 export async function whoami(portalUrl: string, token: string, fetcher: typeof fetch = fetch): Promise<{ ok: true; me: WhoAmI } | { ok: false; error: string }> {
   try {
@@ -305,7 +339,7 @@ export interface Facts {
 }
 
 /** Every reason the install cannot go ahead, from facts gathered without changing anything. Exported for tests. */
-export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'slots' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
+export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'portalUrl' | 'maxSandboxes' | 'maxAgentsPerSandbox' | 'maxUnity'> & { owner?: string }): string[] {
   const p: string[] = [];
   if (f.platform !== 'win32' && f.platform !== 'darwin') p.push(`this tool installs on Windows and macOS, not ${f.platform}`);
   if (f.platform === 'win32' && f.elevated && !o.owner) p.push('run it from a normal (not administrator) PowerShell: files an elevated shell makes belong to Administrators, and git then refuses the clone; the one step that needs admin rights (the firewall rules) asks for them itself');
@@ -324,10 +358,14 @@ export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'po
   else if (!f.portal.ok) p.push(f.portal.error);
   else if (f.credentialId && f.portal.me.id !== f.credentialId) p.push(`the portal says this credential is machine ${f.portal.me.id}, not ${f.credentialId}`);
   if (!f.credentialId) p.push('the credential is not a machine credential (it starts ffm_<machine id>_)');
+  // The count sets the player-folder pairs (w576): lowering it below the sandboxes there would leave one without its pair.
+  const there = f.portal.ok ? f.portal.me.sandboxes : [];
+  if (there.length > o.maxSandboxes) {
+    p.push(`--max-sandboxes ${o.maxSandboxes} is below the ${there.length} sandboxes there (${there.join(', ')}): delete ${there.length - o.maxSandboxes} first (delete_sandbox)`);
+  }
   if (f.serviceElsewhere) p.push(`a daemon is already installed here (${f.serviceElsewhere}); move it into a root with migrate, or pick another --service for a second install`);
   if (f.platform === 'win32' && f.loggedOn === false) p.push('nobody is logged on to this PC\'s desktop: the daemon runs in the interactive session (the Claude login, the GPU Unity needs)');
   for (const [k, v, lo, hi] of [
-    ['slots', o.slots, 1, 32],
     ['max-sandboxes', o.maxSandboxes, 1, 20],
     ['max-agents-per-sandbox', o.maxAgentsPerSandbox, 1, 6],
     ['max-unity', o.maxUnity, 1, 8],
@@ -462,18 +500,38 @@ async function lockDown(dir: string, sid?: string) {
   }
 }
 
-async function cloneRepo(l: Layout, url: string, relative = true) {
+/**
+ * The root's own bare clone. `seedFrom`, a local clone of the same repo (a migration's old clone): its origin branches
+ * are copied locally instead of downloaded, so no credential is needed. An ssh session on Windows cannot reach the
+ * user's GitHub credential (LothDesktop, measured 2026-10-06), while the daemon in the user's session can; the
+ * clone's remote is still `url`, and the fetch from it below is then only tried. Exported for tests.
+ */
+export async function cloneRepo(l: Pick<Layout, 'repo'>, url: string, relative = true, seedFrom?: string) {
   if (!fs.existsSync(path.join(l.repo, 'HEAD'))) {
-    say(`Cloning ${url} into ${l.repo} (bare; about 1.3 GB of history, git's progress below)...`);
-    await must('git clone', 'git', ['clone', '--bare', '--progress', url, l.repo], { live: true });
+    if (seedFrom) {
+      say(`Seeding ${l.repo} from ${seedFrom}'s origin branches (local, no download)...`);
+      await must('git init', 'git', ['init', '--bare', '--quiet', l.repo]);
+      await must('git remote add', 'git', ['-C', l.repo, 'remote', 'add', 'origin', url]);
+      await must('git fetch (seed)', 'git', ['-C', l.repo, 'fetch', '--no-tags', '--progress', seedFrom, '+refs/remotes/origin/*:refs/remotes/origin/*'], { live: true });
+    } else {
+      say(`Cloning ${url} into ${l.repo} (bare; about 1.3 GB of history, git's progress below)...`);
+      await must('git clone', 'git', ['clone', '--bare', '--progress', url, l.repo], { live: true });
+    }
   }
   // A bare clone has no fetch refspec: sandboxes' branches stay local, origin's go to refs/remotes/origin (docs/worker-root.md 2.3).
   await must('git config', 'git', ['-C', l.repo, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
   // Worktrees record relative paths (git 2.48+), so the root can be moved or renamed (absoluteWorktrees: git's default).
   await must('git config', 'git', ['-C', l.repo, 'config', 'worktree.useRelativePaths', relative ? 'true' : 'false']);
+  // The daemon runs non-elevated, where Windows refuses to make symlinks (no Developer Mode), so a checkout of the repo's
+  // symlinks (AGENTS.md) fails and the sandbox ends in error. Git for Windows' installer may set core.symlinks true for
+  // the whole system, and a clone made elevated (--owner, over ssh) does not get the local false a non-elevated one does
+  // (BEAST, w596): set it here, so symlinks check out as plain files the way a person's clone has them.
+  if (isWin) await must('git config', 'git', ['-C', l.repo, 'config', 'core.symlinks', 'false']);
   await must('git lfs install', 'git', ['-C', l.repo, 'lfs', 'install', '--local']);
   say('Fetching origin...');
-  await must('git fetch', 'git', ['-C', l.repo, 'fetch', '--prune', '--progress', 'origin'], { live: true });
+  if (!seedFrom) return void (await must('git fetch', 'git', ['-C', l.repo, 'fetch', '--prune', '--progress', 'origin'], { live: true }));
+  const r = await exec('git', ['-c', 'credential.interactive=never', '-C', l.repo, 'fetch', '--prune', 'origin'], { env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }, timeoutMs: 10 * 60_000 });
+  if (r.code !== 0) say(`(Could not fetch origin here: ${(r.stderr || r.stdout).trim().split('\n').pop()}. The seed is enough; the daemon fetches with the user's own credentials when it next makes a sandbox.)`);
 }
 
 /** The ff-factory checkout the daemon is installed from: a clone of `from` in <root>/daemon/src, updated on a re-run. */
@@ -524,6 +582,86 @@ async function installDaemonMac(o: InstallOptions, l: Layout, id: string, probe:
   return { version, started: true };
 }
 
+/**
+ * The supervisor, as this computer has it (w576, lothsahn: "every worker should have a restart daemon--it should be the
+ * standard part of the install"). Windows: the task runs this root's run-daemon.ps1 (machineDeployWin supervisorScript),
+ * which starts the daemon again whenever it exits, and Task Scheduler restarts the supervisor itself if it fails.
+ * A Mac: launchd is the supervisor, by the LaunchAgent's KeepAlive.
+ */
+export interface SupervisorFacts {
+  /** The task, or the LaunchAgent plist. */
+  installed: boolean;
+  /** The task's action runs this root's run-daemon.ps1; the plist runs this root's daemon. */
+  here: boolean;
+  /** Task Scheduler's restart on failure; the plist's KeepAlive. */
+  restarts: boolean;
+  /** run-daemon.ps1 is in the daemon's folder (always true on a Mac). */
+  script: boolean;
+  /** Supervisors running from this root (Windows), or launchd running the daemon (a Mac). */
+  running: number;
+}
+
+/** What is wrong with the supervisor; `started` is whether it should run now (someone is logged on). Exported for tests. */
+export function supervisorProblems(f: SupervisorFacts, l: Pick<Layout, 'daemon'>, service: string, started: boolean, platform: 'win32' | 'darwin' = isWin ? 'win32' : 'darwin'): string[] {
+  const out: string[] = [];
+  if (platform === 'win32') {
+    const script = path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1');
+    if (!f.installed) return [`no ${service} task`];
+    if (!f.here) out.push(`the ${service} task does not run ${script} (a task registered for another folder was kept: registering it needs an administrator)`);
+    if (!f.restarts) out.push(`the ${service} task is not restarted on failure`);
+    if (!f.script) out.push(`${script} is missing`);
+    if (started && f.here && f.script && !f.running) out.push(`no supervisor runs from ${script}`);
+  } else {
+    if (!f.installed) return [`no ${service} LaunchAgent plist`];
+    if (!f.here) out.push(`the ${service} LaunchAgent does not run the daemon in ${l.daemon}`);
+    if (!f.restarts) out.push(`the ${service} LaunchAgent has no KeepAlive, so launchd does not start the daemon again`);
+    if (started && f.here && !f.running) out.push(`launchd does not run ${service}`);
+  }
+  return out;
+}
+
+async function supervisorFacts(l: Layout, service: string): Promise<SupervisorFacts> {
+  if (isWin) {
+    const out = await ps(
+      'checking the supervisor',
+      `$ErrorActionPreference = 'Continue'
+$s = Join-Path ${win.psq(win.winDir(l.daemon))} 'run-daemon.ps1'
+$t = Get-ScheduledTask -TaskName ${win.psq(service)} -ErrorAction SilentlyContinue
+"installed=$([bool]$t)"
+"here=$([bool]($t -and ([string]$t.Actions[0].Arguments).IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0))"
+"restarts=$([bool]($t -and $t.Settings.RestartCount -gt 0))"
+"script=$(Test-Path -LiteralPath $s)"
+"running=$(@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -Property CommandLine | Where-Object { ([string]$_.CommandLine).IndexOf($s, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count)"
+`,
+    );
+    const get = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(out)?.[1]?.trim() ?? '';
+    return { installed: get('installed') === 'True', here: get('here') === 'True', restarts: get('restarts') === 'True', script: get('script') === 'True', running: Number(get('running')) || 0 };
+  }
+  const file = path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
+  const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const state = (await exec('launchctl', ['print', `gui/${process.getuid?.()}/${service}`])).stdout;
+  return {
+    installed: !!text,
+    here: text.includes(`${l.daemon}/app/machine/daemon.ts`),
+    restarts: /<key>KeepAlive<\/key>\s*<true\/>/.test(text),
+    script: true,
+    running: /^\s*state = running$/m.test(state) ? 1 : 0,
+  };
+}
+
+/** The supervisor is not optional: the install fails until it is in place, and re-running the installer repairs it. */
+async function requireSupervisor(l: Layout, service: string, started: boolean): Promise<void> {
+  let problems: string[] = [];
+  // Start-ScheduledTask and launchctl bootstrap return before the supervisor runs.
+  for (let i = 0; i < 30; i++) {
+    problems = supervisorProblems(await supervisorFacts(l, service), l, service, started);
+    if (!problems.length) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  if (problems.length) throw new Error(`the daemon's supervisor is not in place: ${problems.join('; ')}. Re-run the installer${isWin ? ' from an administrator PowerShell' : ''} to repair it`);
+  say(`Supervisor: ${isWin ? `the ${service} task runs ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}, which starts the daemon again whenever it exits` : `launchd starts the daemon again whenever it exits (KeepAlive)`}${started ? ', running' : ''}.`);
+}
+
 /** The Unity editors this computer has (the Hub's lists and its default folders): the firewall rules name them. */
 export function unityEditors(home = os.homedir()): string[] {
   const out = new Set<string>();
@@ -571,20 +709,151 @@ async function giveRoot(l: Layout, owner: string) {
 }
 
 /** Run scripts/worker/firewall.ps1 elevated (one UAC prompt): the slot rules, the editors' rules, the slot config. */
-async function firewall(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): Promise<string> {
+/** firewall.ps1's arguments (the elevated step adds -LogFile). */
+/**
+ * The player folders of a worker root install: each sandbox slotK (K = 1..sandboxes) owns players/slotK-0 (peer 0,
+ * the host) and slotK-1 (peer 1, the client), and runs its built players only from those (lothsahn, w576; the firewall
+ * rules name exactly these paths; scripts/nightly/player_slots.py picks them from the sandbox it runs in). Exported for tests.
+ */
+export function playerFolders(sandboxes: number): string[] {
+  const out: string[] = [];
+  for (let k = 1; k <= sandboxes; k++) out.push(`slot${k}-0`, `slot${k}-1`);
+  // The nightly lab is no sandbox: its own pair (lothsahn, w576: "Let's use slotnightly-0 and slotnightly-1").
+  out.push('slotnightly-0', 'slotnightly-1');
+  return out;
+}
+
+/**
+ * Make the player folders `keep` and remove the other slot folders (slotN, slotN-P) under `players`: a smaller sandbox
+ * count, or the old slot0..7 pool. One a player still runs from cannot be moved aside and stays, said. Exported for tests.
+ */
+export function syncPlayerFolders(players: string, keep: string[], log: (line: string) => void = say): { made: string[]; removed: string[]; kept: string[] } {
+  const out = { made: [] as string[], removed: [] as string[], kept: [] as string[] };
+  fs.mkdirSync(players, { recursive: true });
+  for (const name of keep) {
+    if (!fs.existsSync(path.join(players, name))) out.made.push(name);
+    fs.mkdirSync(path.join(players, name), { recursive: true });
+  }
+  const want = new Set(keep.map((k) => k.toLowerCase()));
+  for (const e of fs.readdirSync(players, { withFileTypes: true })) {
+    if (!e.isDirectory() || !/^slot(\d+|nightly)(-\d+)?$/i.test(e.name) || want.has(e.name.toLowerCase())) continue;
+    const from = path.join(players, e.name);
+    const trash = path.join(players, `${e.name}.removed-${Date.now()}`);
+    try {
+      fs.renameSync(from, trash); // fails on Windows while a player runs from it, before anything is deleted
+    } catch (err) {
+      out.kept.push(e.name);
+      log(`Kept ${from}: ${(err as NodeJS.ErrnoException).code ?? 'in use'} (a player may still run from it); run the installer again once it ends.`);
+      continue;
+    }
+    fs.rmSync(trash, { recursive: true, force: true });
+    out.removed.push(e.name);
+  }
+  return out;
+}
+
+function firewallArgs(action: 'add' | 'remove', l: Layout, slots: number, editors: string[], suffix?: string): string[] {
   const script = path.join(SRC, 'scripts', 'worker', 'firewall.ps1');
-  const log = path.join(os.tmpdir(), `ff-worker-firewall-${process.pid}.log`);
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Count', String(slots), '-LogFile', log, ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
-  say(`Windows Firewall: ${action === 'add' ? 'adding' : 'removing'} the rules (one administrator prompt)...`);
-  // Start-Process -Verb RunAs takes one argument string; it reaches PowerShell through the environment, unquoted by no shell.
-  const line = args.map((a) => (/[\s;]/.test(a) ? `"${a}"` : a)).join(' ');
-  const r = elevated()
-    ? await exec('powershell.exe', args)
-    : await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList $env:FFW_FIREWALL_ARGS; exit $p.ExitCode'], { env: { ...process.env, FFW_FIREWALL_ARGS: line } });
-  const text = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
-  fs.rmSync(log, { force: true });
-  if (r.code !== 0) throw new Error(`the firewall step failed or was declined (${r.code}): ${(text || r.stderr || r.stdout).trim().slice(-600)}`);
-  return text.trim();
+  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Root', l.players, '-Pairs', String(slots), ...(action === 'remove' ? ['-Remove'] : []), ...(editors.length ? ['-UnityExe', editors.join(';')] : []), ...(suffix ? ['-GroupSuffix', suffix] : [])];
+}
+
+/**
+ * What needs administrator rights on Windows, done in ONE elevated step (one UAC prompt): the firewall rules, and the
+ * portal's key in C:\ProgramData\ssh\administrators_authorized_keys for an admin account (w568), which a non-elevated
+ * admin cannot even read.
+ */
+export type ElevatedStep = { kind: 'firewall'; args: string[] } | { kind: 'authorize-key'; file: string; line: string } | { kind: 'revoke-key'; file: string; blob: string };
+
+/** Run the steps in this process when it is elevated, else in an elevated copy of this script (one prompt). Returns its log. */
+async function elevatedSteps(steps: ElevatedStep[]): Promise<string> {
+  if (!steps.length) return '';
+  const tag = `${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+  const log = path.join(os.tmpdir(), `ff-worker-elevated-${tag}.log`);
+  const file = path.join(os.tmpdir(), `ff-worker-elevated-${tag}.json`);
+  fs.writeFileSync(file, JSON.stringify(steps));
+  try {
+    let code = 0;
+    let out = '';
+    if (elevated()) code = await runElevatedSteps(steps, log);
+    else {
+      // Start-Process -Verb RunAs takes one argument string; it reaches PowerShell through the environment, unquoted by no shell.
+      const args = [...process.execArgv, path.join(SRC, 'scripts', 'worker', 'worker.ts'), 'elevated', '--steps', file, '--log', log];
+      const line = args.map((a) => (/[\s;]/.test(a) ? `"${a}"` : a)).join(' ');
+      const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$p = Start-Process $env:FFW_NODE -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList $env:FFW_ARGS; exit $p.ExitCode'], { env: { ...process.env, FFW_NODE: process.execPath, FFW_ARGS: line } });
+      code = r.code ?? 1;
+      out = `${r.stderr}${r.stdout}`;
+    }
+    const text = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+    if (code !== 0) throw new Error(`the administrator step failed or was declined (${code}): ${(text || out).trim().slice(-600)}`);
+    return text.trim();
+  } finally {
+    fs.rmSync(file, { force: true });
+    fs.rmSync(log, { force: true });
+  }
+}
+
+/** The elevated half (`worker.ts elevated`): each step in order, its words appended to `log`. Returns an exit code. */
+export async function runElevatedSteps(steps: ElevatedStep[], log: string): Promise<number> {
+  const note = (line: string) => fs.appendFileSync(log, `${line}\n`);
+  try {
+    for (const s of steps) {
+      if (s.kind === 'firewall') {
+        const r = await exec('powershell.exe', [...s.args, '-LogFile', log]);
+        if (r.code !== 0) throw new Error(`firewall.ps1 exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(-400)}`);
+      } else if (s.kind === 'authorize-key') {
+        const r = authorizeIn(s.file, s.line);
+        const acl = await exec('icacls', aclArgs(s.file, true));
+        if (acl.code !== 0) throw new Error(`icacls ${s.file} exited ${acl.code}: ${(acl.stderr || acl.stdout).trim().slice(-300)}`);
+        note(`The portal's ssh key: ${r.changed ? (r.existed ? 'updated in' : 'added to') : 'already in'} ${s.file} (Administrators and SYSTEM only).`);
+        note(`key-existed=${r.existed}`);
+      } else {
+        note(`The portal's ssh key: removed ${revokeIn(s.file, s.blob)} line(s) from ${s.file}.`);
+      }
+    }
+    return 0;
+  } catch (e) {
+    note(`FAILED: ${(e as Error).message}`);
+    return 1;
+  }
+}
+
+/** The portal's key line for this machine and where it goes (w568), or why not (the step is skipped, never fatal). */
+async function portalKeyPlan(o: InstallOptions, home: string): Promise<{ file: string; line: string; admin: boolean } | { skip: string }> {
+  if (o.ssh === false) return { skip: 'skipped (--no-ssh)' };
+  const k = await fetchPortalKey(o.portalUrl, o.token);
+  if (!k.ok) return { skip: k.error };
+  const admin = isWin && !o.sshUser && adminFromProbe(await ps('checking whether this account is an administrator', ADMIN_PROBE_PS));
+  return { file: authorizedKeysFile(process.platform, home, admin), line: k.key.authorizedKey, admin };
+}
+
+/** This computer's tailnet name (Tailscale's CLI), or undefined. */
+async function tailnetName(): Promise<string | undefined> {
+  for (const bin of tailscaleCandidates()) {
+    const r = await exec(bin, ['status', '--json'], { timeoutMs: 15_000 }).catch(() => undefined);
+    const name = r?.code === 0 ? tailnetNameOf(r.stdout) : undefined;
+    if (name) return name;
+  }
+  return undefined;
+}
+
+/**
+ * The portal's ssh, its second half (w568): this machine's host keys from its own sshd (loopback, no network in
+ * between), with its ssh user and the name the portal reaches it by, to POST /machine/ssh; the portal pins them and
+ * answers whether its ssh gets in. Never fatal: ssh is the portal's way to start, stop or unload this daemon from afar.
+ */
+async function registerPortalSsh(o: InstallOptions) {
+  const scan = await exec(isWin ? 'ssh-keyscan.exe' : 'ssh-keyscan', ['-T', '5', '-t', 'ed25519,ecdsa,rsa', '127.0.0.1'], { timeoutMs: 30_000 }).catch(() => undefined);
+  const hostKeys = parseKeyscan(scan?.stdout ?? '');
+  if (!hostKeys.length) {
+    say(`The portal's ssh: no sshd answers on this computer (${isWin ? 'the OpenSSH Server service' : 'Remote Login, in System Settings > General > Sharing'}), so the portal cannot start, stop or unload this daemon from afar. Turn it on and run this installer again.`);
+    return;
+  }
+  const host = (o.sshHost ?? (await tailnetName()) ?? hostnameFallback()).toLowerCase();
+  const user = o.sshUser ?? os.userInfo().username;
+  const r = await registerSsh(o.portalUrl, o.token, { user, host, hostKeys });
+  if (!r.ok) say(`The portal's ssh: could not register this machine's host keys (${r.error}).`);
+  else if (r.reachable) say(`The portal's ssh: it reaches this machine as ${r.host}, its host key pinned there.`);
+  else say(`The portal's ssh: registered as ${r.host} (host key pinned), but its ssh does not get in yet: ${r.detail}`);
 }
 
 /** Ask a yes/no question on the terminal; `yes` answers it. */
@@ -623,7 +892,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     portalUrl: o.portalUrl,
     platform: isWin ? 'win32' : 'darwin',
     service: o.service,
-    slots: o.slots,
+    slots: o.maxSandboxes,
     repoUrl: o.repoUrl,
     ...(o.firewallSuffix ? { firewallSuffix: o.firewallSuffix } : {}),
     createdAt: prev?.createdAt ?? now,
@@ -631,7 +900,8 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     outside: prev?.outside ?? [],
   };
   writeManifest(l.root, m);
-  for (let k = 0; k < o.slots; k++) fs.mkdirSync(path.join(l.players, `slot${k}`), { recursive: true });
+  const pf = syncPlayerFolders(l.players, playerFolders(o.maxSandboxes));
+  say(`Player folders: ${playerFolders(o.maxSandboxes).length} (slot1-0..slot${o.maxSandboxes}-1 and slotnightly-0, -1)${pf.made.length ? `, ${pf.made.length} made` : ''}${pf.removed.length ? `; removed ${pf.removed.join(', ')}` : ''}${pf.kept.length ? `; still in use: ${pf.kept.join(', ')}` : ''}.`);
 
   // 2. The credential, owner-only.
   // The folder first: a file written after inherits its owner-only rights (and one from an earlier run gets them back).
@@ -640,7 +910,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   await lockDown(l.secrets, f.probe.sid);
 
   // 3. The game repo, bare, and the installer's own checkout.
-  await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees);
+  await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees, o.seedFrom);
   await syncSource(l, from);
   if (o.owner) await giveRoot(l, o.owner);
 
@@ -656,31 +926,60 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   writeManifest(l.root, m);
   const d = isWin ? await installDaemonWin(o, l, id, f.probe) : await installDaemonMac(o, l, id, f.probe);
   say(`Daemon ${d.version} installed as ${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`}${d.started ? ' and started' : ' (it starts at the next logon)'}.`);
+  await requireSupervisor(l, o.service, d.started);
   // No Unity slots pointer: the mailbox stays at its standard place in the home folder (daemonJson), where the daemon,
   // its agents and scripts outside it (the nightly harness, a build by hand) all find it with no config (w469,
   // machine/unitySlots.ts slotsDir). One mailbox, so they can never disagree. The uninstall still removes a pointer
   // into its root (an install from before this), and slotsDir still honours one a person writes.
 
-  // 5. Windows Firewall: the fixed slot paths and the Unity editors, once.
+  // 5. The portal's key (w568): fetched with this machine's credential; on Windows an admin account's goes in the shared
+  //    administrators_authorized_keys, in the one administrator step below, any other account's in its own file now.
+  const key = await portalKeyPlan(o, f.probe.home);
+  const steps: ElevatedStep[] = [];
+  let keyExisted: boolean | undefined;
+  if ('skip' in key) say(`The portal's ssh key: not added (${key.skip}).`);
+  else if (isWin && key.admin) steps.push({ kind: 'authorize-key', file: key.file, line: key.line });
+  else {
+    const r = authorizeIn(key.file, key.line);
+    if (isWin) await must('setting the rights of authorized_keys', 'icacls', aclArgs(key.file, false, f.probe.sid ? `*${f.probe.sid}` : undefined));
+    keyExisted = r.existed;
+    say(`The portal's ssh key: ${r.changed ? (r.existed ? 'updated in' : 'added to') : 'already in'} ${key.file}.`);
+  }
+
+  // Windows Firewall: the fixed slot paths and the Unity editors, once; with the admin key, in the same prompt.
   if (isWin && o.firewall) {
     const editors = unityEditors(f.probe.home);
     const sfx = o.firewallSuffix ? ` ${o.firewallSuffix}` : '';
-    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.slots} slots under ${l.players}` });
+    noteOutside(m, { kind: 'firewall-group', name: SLOT_GROUP + sfx, note: `${o.maxSandboxes} sandboxes' player folders (slot1-0..slot${o.maxSandboxes}-1) and the nightly lab's (slotnightly-0, -1) under ${l.players}` });
     if (editors.length) noteOutside(m, { kind: 'firewall-group', name: UNITY_GROUP + sfx, note: editors.join('; ') });
     if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
-    say(await firewall('add', l, o.slots, editors, o.firewallSuffix));
+    steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.maxSandboxes, editors, o.firewallSuffix) });
   } else if (isWin) say('Skipped the firewall rules (--no-firewall): players will prompt on first start.');
-  else {
+  if (steps.length) {
+    say(`${steps.map((s) => (s.kind === 'firewall' ? 'Windows Firewall: adding the rules' : "the portal's ssh key into administrators_authorized_keys")).join(', and ')} (one administrator prompt)...`);
+    const text = await elevatedSteps(steps);
+    const existed = /^key-existed=(true|false)$/m.exec(text)?.[1];
+    if (existed) keyExisted = existed === 'true';
+    say(text.replace(/^key-existed=.*\n?/m, '').trim());
+  }
+  if (!('skip' in key) && keyExisted !== undefined) {
+    const blob = keyBlob(key.line)!;
+    if (!m.outside.some((x) => x.kind === 'authorized-key' && x.name.toLowerCase() === key.file.toLowerCase())) m.outside.push({ kind: 'authorized-key', name: key.file, note: blob, ...(keyExisted ? { existed: true } : {}) });
+    writeManifest(l.root, m);
+  }
+  if (!isWin) {
     // A Mac has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
-    const cfg = macSlotConfig();
-    fs.mkdirSync(path.dirname(cfg), { recursive: true });
-    fs.writeFileSync(cfg, JSON.stringify({ root: l.players, count: o.slots }, null, 2) + '\n');
+    // Its own block: as the else of the key step above it never ran on a Mac whose ssh key was set (m3, w596).
+    const cfg = writeMacSlotConfig(l.players, o.maxSandboxes);
     noteOutside(m, { kind: 'file', name: cfg, note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
   }
 
   if (o.owner) await giveRoot(l, o.owner);
+
+  // The portal's ssh, its second half (w568): this machine's host keys pinned there, and its ssh tried.
+  if (o.ssh !== false) await registerPortalSsh(o);
 
   // 6. The portal sees it.
   const p = new Progress();
@@ -688,6 +987,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     const w = await whoami(o.portalUrl, o.token);
     if (w.ok && w.me.online) {
       p.done(`The portal sees ${id} online${w.me.root ? ` with root ${w.me.root}` : ''}.`);
+      await nightlyTaskCheck(l);
       summary(l, m);
       return true;
     }
@@ -696,8 +996,39 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   }
   p.done(`The daemon has not connected yet. Its log: ${path.join(l.logs, 'daemon.log')}`);
   process.exitCode = 1;
+  await nightlyTaskCheck(l);
   summary(l, m);
   return false;
+}
+
+/** The nightly e2e lab's scheduled task on a Windows lab PC, made by the game repo's scripts/nightly/install_schedule.sh. */
+export const NIGHTLY_TASK = 'ff-nightly-e2e';
+
+/**
+ * w577: the nightly lab's schedule names its root on its command line (FF_NIGHTLY_ROOT=... bash <root>/FinalFactory/...),
+ * so a root move leaves it where it was: after w513, lothdesktop's task still ran the deleted D:\work\ff-nightly.
+ * The line to say when the task's definition (schtasks /xml) does not name this root's nightly/, in either path form;
+ * undefined when it does or there is no task. Exported for tests.
+ */
+export function nightlyTaskProblem(definition: string | undefined, nightly: string): string | undefined {
+  if (!definition?.trim()) return undefined;
+  const norm = (s: string) => s.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const want = norm(nightly);
+  const drive = /^([a-z]):\/(.*)$/.exec(want);
+  const forms = drive ? [want, `/${drive[1]}/${drive[2]}`] : [want];
+  const d = norm(definition);
+  if (forms.some((f) => d.includes(f))) return undefined;
+  const ran = /<Arguments>([^<]*)<\/Arguments>/.exec(definition)?.[1]?.replace(/&quot;/g, '"').trim();
+  return `The nightly lab's task ${NIGHTLY_TASK} does not run from ${nightly}${ran ? ` (it runs: ${ran})` : ''}. Re-point it from any game checkout: FF_NIGHTLY_ROOT="${nightly}" bash scripts/nightly/install_schedule.sh (it makes the nightly checkout there and replaces the task).`;
+}
+
+/** Say whether the nightly lab's task follows this root (Windows; the M3's LaunchAgent moves with its own runbook). */
+async function nightlyTaskCheck(l: Layout) {
+  if (!isWin) return;
+  const r = await exec('schtasks', ['/query', '/tn', NIGHTLY_TASK, '/xml'], { timeoutMs: 30_000 });
+  if (r.code !== 0) return; // no nightly lab on this machine
+  const problem = nightlyTaskProblem(r.stdout, l.nightly);
+  say(problem ? `\nWARNING: ${problem}` : `The nightly lab's task ${NIGHTLY_TASK} runs from ${l.nightly}.`);
 }
 
 function summary(l: Layout, m: Manifest) {
@@ -836,8 +1167,14 @@ export async function uninstall(o: UninstallOptions): Promise<void> {
   say(`Removed the ${m.service} ${isWin ? 'task' : 'LaunchAgent'}.`);
   say(`Stopped ${await stopRootProcesses(l.root)} process(es) still running from the root.`);
 
-  // 4. Firewall rules and the slot config (Windows).
-  if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) say(await firewall('remove', l, m.slots, [], m.firewallSuffix));
+  // 4. Firewall rules, the portal's ssh key (w568: exactly its lines, unless they were there before) and the slot config.
+  const steps: ElevatedStep[] = [];
+  if (isWin && m.outside.some((x) => x.kind === 'firewall-group')) steps.push({ kind: 'firewall', args: firewallArgs('remove', l, m.slots, [], m.firewallSuffix) });
+  for (const k of m.outside.filter((x) => x.kind === 'authorized-key' && !x.existed && x.note)) {
+    if (isWin && /administrators_authorized_keys$/i.test(k.name)) steps.push({ kind: 'revoke-key', file: k.name, blob: k.note! });
+    else say(`The portal's ssh key: removed ${revokeIn(k.name, k.note!)} line(s) from ${k.name}.`);
+  }
+  if (steps.length) say(await elevatedSteps(steps));
   if (!isWin && slotConfigRoot(macSlotConfig())?.startsWith(l.root)) {
     fs.rmSync(macSlotConfig(), { force: true });
     say(`Removed ${macSlotConfig()}.`);
@@ -903,8 +1240,10 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
     const sfx = m?.firewallSuffix ? ` ${m.firewallSuffix}` : '';
     const ours = (g: string) => !!m?.outside.some((o) => o.kind === 'firewall-group' && o.name === g + sfx);
     const group = (g: string, n: string) => ({ what: `firewall group "${g}${sfx}"${ours(g) ? '' : ' (not made by this install)'}`, present: ours(g) && Number(n) > 0, detail: `${n} rule(s)` });
+    const sup = await supervisorFacts(l, service);
     items.push(
       { what: `scheduled task ${service}`, present: get('task') === 'True' },
+      { what: `the supervisor ${path.win32.join(win.winDir(l.daemon), 'run-daemon.ps1')}`, present: sup.script || sup.running > 0, detail: `${sup.running} running` },
       group(SLOT_GROUP, get('slotRules')),
       group(UNITY_GROUP, get('unityRules')),
       { what: `firewall rules naming a path in the root`, present: Number(get('rootRules')) > 0, detail: `${get('rootRules')} rule(s)` },
@@ -925,6 +1264,18 @@ while ($id -and $mine.Add([int]$id)) { $id = ($all | Where-Object { $_.ProcessId
       { what: `slot config ${macSlotConfig()} pointing into the root`, present: !!slotConfigRoot(macSlotConfig())?.startsWith(l.root), detail: slotConfigRoot(macSlotConfig()) ?? 'none' },
       slotsPointerItem(l.root),
     );
+  }
+  // The portal's ssh key (w568): its lines, unless they were there before the install. Windows' admin file cannot be
+  // read without administrator rights: the uninstall's elevated step said what it removed.
+  for (const k of m?.outside.filter((x) => x.kind === 'authorized-key' && !x.existed && x.note) ?? []) {
+    if (isWin && /administrators_authorized_keys$/i.test(k.name) && !elevated()) continue;
+    let text = '';
+    try {
+      text = fs.readFileSync(k.name, 'utf8');
+    } catch {
+      // gone with its folder
+    }
+    items.push({ what: `the portal's ssh key in ${k.name}`, present: text.split(/\r?\n/).some((line) => keyBlob(line) === k.note) });
   }
   return items;
 }
@@ -963,6 +1314,13 @@ function slotsPointerItem(root: string) {
 
 /** A path as compared on this OS: case and either slash on Windows. */
 const pathKey = (p: string) => (process.platform === 'win32' ? p.replace(/\\/g, '/').toLowerCase() : p);
+
+/** A Mac's slot config for player_slots.py: the root's players, the sandbox-pairs layout, the sandbox count (w576). Exported for tests. */
+export function writeMacSlotConfig(players: string, sandboxes: number, file = macSlotConfig()): string {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ root: players, layout: 'sandbox-pairs', count: sandboxes }, null, 2) + '\n');
+  return file;
+}
 
 /** Where scripts/nightly/player_slots.py reads a Mac's slot root (its config_path()). */
 export const macSlotConfig = (home = os.homedir()) => path.join(home, '.config', 'finalfactory', 'player-slots.json');
@@ -1003,9 +1361,12 @@ async function readCredential(): Promise<string> {
 
 const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
-            [--slots 8] [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
+            [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
             [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
+            [--seed-from <a local clone of the game repo> (its origin branches seed the root's clone: no download, and no
+             GitHub credential, which an ssh session does not have)]
             [--unity-editor-root <dir>] [--unity-path <exe>]
+            [--no-ssh] [--ssh-host <name the portal reaches it by>] [--ssh-user <user>] (the portal's ssh, w568)
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
   migrate   [--from <old daemon folder>] [--from-service <its task or label>] [--old-slots <dir>]
@@ -1025,7 +1386,6 @@ export async function main(argv = process.argv.slice(2)) {
       maxSandboxes: num('max-sandboxes', 3),
       maxAgentsPerSandbox: num('max-agents-per-sandbox', 2),
       maxUnity: num('max-unity', 2),
-      slots: num('slots', 8),
       repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
       service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
       firewall: !flags.has('no-firewall'),
@@ -1036,7 +1396,15 @@ export async function main(argv = process.argv.slice(2)) {
       firewallSuffix: opts['firewall-suffix'],
       unityEditorRoot: opts['unity-editor-root'],
       unityPath: opts['unity-path'],
+      ssh: !flags.has('no-ssh'),
+      sshHost: opts['ssh-host'],
+      sshUser: opts['ssh-user'],
+      ...(opts['seed-from'] ? { seedFrom: opts['seed-from'] } : {}),
     });
+  } else if (cmd === 'elevated') {
+    // The install's one administrator step (elevatedSteps): run by an elevated copy of this script.
+    if (!opts.steps || !opts.log) throw new Error(USAGE);
+    process.exitCode = await runElevatedSteps(JSON.parse(fs.readFileSync(opts.steps, 'utf8')) as ElevatedStep[], opts.log);
   } else if (cmd === 'uninstall') {
     if (!opts.root) throw new Error(USAGE);
     await uninstall({ root: opts.root, yes: flags.has('yes'), force: flags.has('force'), keepRegistration: flags.has('keep-registration') });
@@ -1058,8 +1426,7 @@ export async function main(argv = process.argv.slice(2)) {
           maxSandboxes: num('max-sandboxes', 3),
           maxAgentsPerSandbox: num('max-agents-per-sandbox', 2),
           maxUnity: num('max-unity', 2),
-          slots: num('slots', 8),
-          repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
+              repoUrl: opts['repo-url'] ?? DEFAULT_REPO,
           service: opts.service ?? (isWin ? win.TASK_NAME : LABEL),
           firewall: !flags.has('no-firewall'),
           noCleanup: flags.has('no-cleanup'),
@@ -1067,6 +1434,9 @@ export async function main(argv = process.argv.slice(2)) {
           owner: opts.owner,
           firewallSuffix: opts['firewall-suffix'],
           unitySlotsDir: opts['unity-slots-dir'],
+          ssh: !flags.has('no-ssh'),
+          sshHost: opts['ssh-host'],
+          sshUser: opts['ssh-user'],
         },
       });
   } else if (cmd === 'check') {

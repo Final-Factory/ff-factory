@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { QUEUE_HOLD_MS, SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
 import { collectResume } from './restart.ts';
-import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonMismatch, issueMachineToken, revokeMachineToken } from './machines.ts';
+import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonMismatch, enrolledMachines, issueMachineToken, revokeMachineToken } from './machines.ts';
 import { PROTOCOL_VERSION } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
@@ -355,7 +355,8 @@ test('machine: a bad token is refused; tool calls go back to the portal', async 
   assert.equal(mm.authenticate('Bearer ffsb_whatever'), undefined);
 
   const d = daemon();
-  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  // Both ends: the portal's link and the daemon's own socket (a tool call before it is open is refused).
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined && d.connected);
   const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
   type H = (a: Record<string, unknown>) => Promise<string>;
   const handlers = (d as unknown as { handlers(id: string): Record<string, H> }).handlers(s.info.id);
@@ -422,7 +423,7 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-502-'));
   const d = new Daemon(
-    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, claude: 'definitely-not-a-claude-binary', maxEventsFile: null },
+    { portalUrl: url, id: 'mx', token: 't', repoPath: tmp, appDir: tmp, claude: 'definitely-not-a-claude-binary', maxEventsFile: null },
     () => {
       throw new Error('no sessions here');
     },
@@ -574,6 +575,52 @@ test('machine: stopping or restarting a daemon is refused while agents run unles
   assert.deepEqual(redeployed, []);
   mm.update('mx', { daemonStopped: undefined });
   assert.deepEqual(await mm.watchOffline(Date.now() + 20 * 60_000, async () => true), ['mx'], 'otherwise it is redeployed as before');
+});
+
+test('machine: a daemon stopping on purpose (a worker migration, w513) is not redeployed until a daemon says hello again', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  // POST /machine/stopping, then the migration stops it: the offline watch leaves it alone while its sandboxes move
+  // (LothDesktop 2026-10-06: a redeploy 2 minutes in put the old daemon back and the move rolled back). Held once the
+  // test daemon is surely gone: a reconnect still in flight would say hello and end the hold (Windows CI, #180).
+  d.shutdown();
+  await until('offline', () => !mm.isOnline('mx'));
+  assert.deepEqual(mm.stoppingOnPurpose('mx'), { ok: true });
+  assert.equal(store.machines.get('mx')!.daemonStopped, true);
+  const redeployed: string[] = [];
+  mm.deployMachine = ((o: { id: string }) => (redeployed.push(o.id), store.machines.get(o.id)!)) as typeof mm.deployMachine;
+  await mm.watchOffline(Date.now(), async () => true);
+  assert.deepEqual(await mm.watchOffline(Date.now() + 40 * 60_000, async () => true), []);
+  assert.deepEqual(redeployed, []);
+  // The root's daemon (or the old one after a rollback) says hello: the hold ends.
+  daemon();
+  await until('back', () => mm.isOnline('mx') && store.machines.get('mx')!.daemonStopped === undefined);
+});
+
+test('machine: add_machine on a worker root install changes its settings in place, never redeploys, and leaves its sandbox count to its installer (w576)', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  daemon();
+  await until('online', () => mm.isOnline('mx'));
+  // LothDesktop after its fresh install: a root, six slots allowed, five left, 3 editors and 5 agents in all set before.
+  const m = store.machines.get('mx')!;
+  Object.assign(m, { root: 'D:\work\ffw', sandboxRoot: 'D:\work\ffw\sandboxes', maxSandboxes: 6, maxAgentsPerSandbox: 2, maxUnity: 3, maxSandboxAgents: 5 });
+  m.sandboxes = [1, 2, 3, 4, 5].map((k) => ({ id: `slot${k}`, path: `D:\work\ffw\sandboxes\slot${k}`, branch: `sandbox/slot${k}`, status: 'ready', purpose: 'unused', sessionIds: [] }) as unknown as NonNullable<typeof m.sandboxes>[number]);
+  (mm as unknown as { runDeploy: () => Promise<void> }).runDeploy = async () => assert.fail('a root install is never redeployed over ssh');
+  const sent: string[] = [];
+  const link = (mm as unknown as { links: Map<string, { ws: { send: (s: string) => void } }> }).links.get('mx')!;
+  const send = link.ws.send.bind(link.ws);
+  link.ws.send = (s: string) => (sent.push(s), send(s));
+  // Its sandbox count is its installer's (w576: the installer also makes the player-folder pairs and their rules).
+  assert.throws(() => mm.deployMachine({ id: 'mx', maxSandboxes: 5 }), /sandbox count comes from its installer.*--max-sandboxes 5/);
+  assert.equal(mm.deployMachine({ id: 'mx', maxSandboxes: 6 }).maxSandboxes, 6, 'the same count is no change');
+  const after = mm.deployMachine({ id: 'mx', maxUnity: 4 });
+  assert.deepEqual([after.maxSandboxes, after.maxAgentsPerSandbox, after.maxUnity, after.maxSandboxAgents, after.status], [6, 2, 4, 5, 'ready'], 'only max_unity changed');
+  const welcome = JSON.parse(sent.filter((x) => JSON.parse(x).type === 'welcome').at(-1)!);
+  assert.equal(welcome.sandboxes.maxUnity, 4, 'its daemon gets the new limit at once');
+  assert.throws(() => mm.deployMachine({ id: 'mx', sandboxRoot: 'E:\\sb' }), /worker root install .*sandboxRoot come from its installer/);
 });
 
 test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart are resumed when the daemon is back; a stop is not', async (t) => {
@@ -828,6 +875,101 @@ test('machine: a daemon that connects during its own install counts as connected
   await until('failed', () => store.machines.get('mx')!.status !== 'deploying');
   assert.equal(store.machines.get('mx')!.status, 'ready');
   assert.match(store.machines.get('mx')!.statusDetail ?? '', /^the last redeploy failed, so the previous daemon is still the one running: install on mx failed/);
+});
+
+test('machine: a redeploy whose ssh step fails keeps the old credential: the daemon still gets back in after it (w568, found in w513)', async (t) => {
+  const { store, mm, daemon, token, cleanup, tmp } = await setup();
+  t.after(cleanup);
+  mm.deployWaitMs = { settle: 50, poll: 20 };
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  // ssh refuses before anything reaches the machine (LothDesktop, the m5, the m3 after the cut-over, 2026-10-06).
+  mm.deployer = async (o) => {
+    o.step?.('probing');
+    throw new Error('ssh mx failed: exit code 255; stderr: Host key verification failed.');
+  };
+  mm.deployMachine({ id: 'mx' });
+  await until('failed', () => store.machines.get('mx')!.status !== 'deploying');
+  assert.equal(mm.authenticate(`Bearer ${token}`), 'mx', 'the token the machine holds still opens the portal');
+  // Its next reconnect (a network blip, a reboot): the only token it has is still good.
+  (mm as unknown as { links: Map<string, { ws: { terminate(): void } }> }).links.get('mx')!.ws.terminate();
+  await until('dropped', () => !mm.isOnline('mx'));
+  await until('back with its own credential', () => mm.isOnline('mx'), 8000);
+  assert.deepEqual(enrolledMachines(tmp), ['mx']);
+  d.shutdown();
+});
+
+test('machine: a redeploy switches to the new credential once the new daemon has it; the old one stops working then (w568)', async (t) => {
+  const { store, mm, daemon, token, cleanup } = await setup();
+  t.after(cleanup);
+  mm.deployWaitMs = { settle: 50, poll: 20 };
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  const result = { platform: 'darwin' as const, home: '/Users/x', repoPath: '/Users/x/game', node: '/usr/local/bin/node', nodeVersion: 'v22', version: 'abc1234' };
+  let fresh = '';
+  mm.deployer = async (o) => {
+    o.step?.('copying code');
+    assert.equal(mm.authenticate(`Bearer ${token}`), 'mx', 'during the deploy the old credential still works');
+    o.step?.('installing');
+    fresh = o.token;
+    d.shutdown();
+    daemon(o.token);
+    await until('the new daemon connected', () => mm.isOnline('mx'));
+    return result;
+  };
+  mm.deployMachine({ id: 'mx' });
+  await until('settled', () => store.machines.get('mx')!.status !== 'deploying');
+  assert.equal(store.machines.get('mx')!.status, 'ready', String(store.machines.get('mx')!.statusDetail));
+  assert.equal(mm.authenticate(`Bearer ${fresh}`), 'mx');
+  assert.equal(mm.authenticate(`Bearer ${token}`), undefined, 'the old credential is gone once the new daemon has the new one');
+});
+
+test('machine: a redeploy that fails while installing leaves both credentials until the machine says which it has (w568)', async (t) => {
+  const { store, mm, daemon, token, cleanup } = await setup();
+  t.after(cleanup);
+  mm.deployWaitMs = { settle: 50, poll: 20 };
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  let fresh = '';
+  mm.deployer = async (o) => {
+    o.step?.('installing');
+    fresh = o.token;
+    throw new Error('install on mx failed: the connection closed');
+  };
+  mm.deployMachine({ id: 'mx' });
+  await until('failed', () => store.machines.get('mx')!.status !== 'deploying');
+  assert.equal(mm.authenticate(`Bearer ${token}`), 'mx', 'the old one, in case the install never wrote the new one');
+  assert.equal(mm.authenticate(`Bearer ${fresh}`), 'mx', 'the new one, in case it did');
+  // The old daemon was still the one running: its reconnect settles it, and the unused new credential goes.
+  (mm as unknown as { links: Map<string, { ws: { terminate(): void } }> }).links.get('mx')!.ws.terminate();
+  await until('dropped', () => !mm.isOnline('mx'));
+  await until('back', () => mm.isOnline('mx'), 8000);
+  assert.equal(mm.authenticate(`Bearer ${fresh}`), undefined);
+  assert.equal(mm.authenticate(`Bearer ${token}`), 'mx');
+  d.shutdown();
+});
+
+test('machine: a worker installer\'s ssh registration pins its host keys in the portal\'s known_hosts2 and becomes its ssh host; its removal takes the pin away (w568)', async (t) => {
+  const { store, mm, cleanup, tmp } = await setup();
+  t.after(cleanup);
+  mm.sshHome = tmp;
+  const tried: string[] = [];
+  mm.sshCheck = async (host) => (tried.push(host), { reachable: true, detail: 'ok' });
+  const ED = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJPzhFYZX4GtbGkBP2Fl8RqwkZaXjQ9fUWN9P+p+/OX3';
+  const r = await mm.registerSsh('mx', { user: 'benryding', host: 'm3', hostKeys: [ED], at: '2026-10-06T21:00:00.000Z' });
+  assert.deepEqual(r, { host: 'benryding@m3', reachable: true, detail: 'ok' });
+  assert.deepEqual(tried, ['benryding@m3'], 'the portal tries its ssh at once');
+  assert.equal(store.machines.get('mx')!.host, 'benryding@m3');
+  assert.deepEqual(store.machines.get('mx')!.ssh?.hostKeys, [ED]);
+  const file = path.join(tmp, '.ssh', 'known_hosts2');
+  assert.ok(fs.readFileSync(file, 'utf8').includes(`m3 ${ED} mx`));
+  // A rebuilt or moved portal (its data restored, no ~/.ssh): the pins come back from the record at start.
+  fs.rmSync(file);
+  mm.pinHostKeys();
+  assert.ok(fs.readFileSync(file, 'utf8').includes(`m3 ${ED} mx`));
+  // Its record goes (remove_machine, or the uninstaller's unenroll): so does its pin.
+  mm.remove('mx');
+  assert.equal(fs.existsSync(file), false);
 });
 
 test('machine: a deploy cut short by a portal restart is not left "deploying" (the offline watch would skip it forever)', async (t) => {

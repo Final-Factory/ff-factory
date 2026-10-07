@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { hostSoftFreeGB, type Config, type HostGuardConfig } from './config.ts';
-import { CleanupRunner, describeCleanupItems, type CleanupRun, type PassOptions } from './cleanup.ts';
+import { CleanupRunner, describeCleanupItems, type CleanupRun, type PassOptions, type VolumeStat } from './cleanup.ts';
 import { staleOutputSettings } from './staleOutput.ts';
 import type { HelperAction, HelperResult } from './privileged.ts';
 import type { DiskLevel, HostHealth, Sandbox, SessionInfo } from '../shared/types.ts';
@@ -59,7 +59,7 @@ export const volumeOf = (p: string) => {
 
 export interface HostDeps {
   cfg: Config;
-  statfs(p: string): Promise<{ free: number; total: number } | undefined>;
+  statfs(p: string): Promise<VolumeStat | undefined>;
   exists(p: string): boolean;
   mem(): { free: number; total: number };
   sandboxes(): Sandbox[];
@@ -78,7 +78,10 @@ export interface HostDeps {
     consumers(): Promise<{ path: string; bytes: number }[]>;
     stale?(): Promise<{ path: string; days: number }[]>;
     log(entry: object): void;
+    /** The disk the clean-up keys off (home, data); hostDiskPaths are added. */
     diskPaths(): string[];
+    /** Temp folders: reported apart, never counted as the disk (CleanupRunnerDeps.tempPaths, w566). */
+    tempPaths?(): string[];
     /** When the stale-output rules last had their turn, kept on disk (server/cleanup.ts staleAtFile). */
     staleAt?: { load(): number | undefined; save(at: number): void };
   };
@@ -128,6 +131,7 @@ export class HostHealthMonitor {
     this.cleaner = new CleanupRunner({
       settings: () => ({ everyMinutes: this.g().cleanup.everyMinutes, softFreeGB: hostSoftFreeGB(this.g()), staleOutput: staleOutputSettings(this.g().cleanup.staleOutput) }),
       diskPaths: () => [...deps.cleanup.diskPaths(), ...deps.cfg.hostDiskPaths],
+      tempPaths: () => deps.cleanup.tempPaths?.() ?? [],
       statfs: (p) => deps.statfs(p),
       pass: (low, opts) => deps.cleanup.pass(low, opts),
       consumers: () => deps.cleanup.consumers(),

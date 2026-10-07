@@ -62,6 +62,9 @@ trigger is rewritten or the zone is set to BEAST's.
 
 ### 1.1 What is hostile, and what the portal holds
 
+*Since w597 the VM also runs one orchestration worker, as its own account `fff-ops`: what that gives it and the fences
+around it are in [ops-worker.md](ops-worker.md), "Threat notes".*
+
 FFBox assumes its containers are hostile *(sourced: ffbox `docs/docker-security-model.md`, "The container is assumed
 hostile")*. They run on a rootless Docker daemon under an FFBox account *(sourced: [ffbox.md](ffbox.md), "Where")*.
 Code can end up running in one of them through:
@@ -233,12 +236,15 @@ Six rules:
    A rootful container would run as root and pass. FFBox has none, and adding one would
    break its own security model *(sourced: ffbox docker-security-model)*.
 5. **The guest has its own firewall** (`inet fff_guest`, `deploy/vm/guest`), which drops by default. It accepts the
-   host's address on 22 and 8790, `tailscale0` on 443 (Funnel and tailnet HTTPS), and Tailscale's UDP port.
+   host's address on 22 and 8790, `tailscale0` on 443 (Funnel and tailnet HTTPS) and 22 (ssh from the tailnet, for
+   whoever the tailnet policy lets reach `tag:fff-portal` on 22; not from the LAN, and never through Funnel), and
+   Tailscale's UDP port.
 6. **Tailnet policy** (Ben's tailnet admin, [D3](#8-risks-and-open-decisions)). The VM's node joins with a tag,
    `tag:fff-portal`, from a pre-approved, non-ephemeral auth key made for that tag. Tagged nodes' keys do not expire
    *(sourced: Tailscale KB 1085, "Key expiry for tagged devices is disabled by default")*. An OAuth client secret would
    make the node ephemeral unless `?ephemeral=false` is added *(sourced: Tailscale KB 1215)*. Grants: people's devices
-   and the four machines may reach `tag:fff-portal` on 443, and `tag:fff-portal` may reach the four machines on port
+   and the four machines may reach `tag:fff-portal` on 443 (and Lothsahn's devices on 22, for ssh into the VM; Ben adds
+   it), and `tag:fff-portal` may reach the four machines on port
    22, plus BEAST for backups; nothing else. **In place** since 2026-10-05: Ben replaced the default allow-all with
    these rules and checked them; the old policy is `deploy/vm/tailnet-policy-before-2026-10-05.hujson`. `nodeAttrs` gives `funnel` to `tag:fff-portal` only. Funnel needs MagicDNS,
    HTTPS certificates and that attribute, and listens only on 443, 8443 or 10000 *(sourced: Tailscale KB 1223)*.
@@ -389,6 +395,13 @@ account `fff` (locked password, no sudo), `0700`:
 The guest's settings (repository, branch, backup target, thresholds) are in `/etc/fff/fff.conf`, whose defaults are
 in [`fff.conf.example`](../deploy/vm/guest/fff.conf.example).
 
+`/tmp` is on the root disk (w537). Ubuntu 26.04 mounts it as a tmpfs by default *(sourced: its release notes)*, half
+the RAM in systemd's `tmp.mount` (`size=50%`): 1.9 GiB in the 4 GiB VM, which has no swap. The agents' temp folders
+(`TMPDIR=/tmp/ffa-<session>`) would take the portal's memory there, and the portal's clean-up, which counts the smaller
+of the home folder's and the temp folder's free space (`server/cleanup.ts`), reported 1.9 GB free on the first day
+(it no longer does: since w566 a RAM-backed filesystem never counts as the disk, and the temp folder is shown apart).
+The guest install masks `tmp.mount`, systemd's documented way back to the disk; it applies from the next boot.
+
 ### 2.4 Units in the guest
 
 | Unit | Does | Replaces on BEAST |
@@ -419,8 +432,8 @@ in [`fff.conf.example`](../deploy/vm/guest/fff.conf.example).
 Off at cut-over (`voice.enabled: false`). The host has no GPU, and with voice on the server installs uv, Python and
 CUDA wheels at startup (`server/config.ts:390-396`, `server/voice.ts:67-71`). The browser's own speech engines take
 over, as they already do when the local engine is missing *(sourced: [voice.md](voice.md), "fallbacks")*. Whisper on
-the CPU (`voice.device: "cpu"`, `voice.cpuThreads`) can be tried later within the VM's vCPUs, once someone measures its
-latency there.
+the CPU (`voice.device: "cpu"`, `voice.cpuThreads`) runs within the VM's vCPUs: `fffctl configure --voice base.en`
+turns it on, without the CUDA wheels (w570; measurements and the choice of model in [voice.md](voice.md), "On the portal VM").
 
 ## 3. Supervision, updates, hang detection and the nightly restart
 
@@ -544,7 +557,7 @@ BEAST's node name while BEAST still uses it (ssh aliases, and the game repo's ni
 | `/mcp` clients (`claude mcp add … /mcp`) | the old URL | `claude mcp add` again with the new URL; the API keys stay valid (`data/api-keys.json` moves) | each person |
 | Daemons on LothDesktop, M3, M5 | dial the portal's public URL *(sourced: [machines.md](machines.md): "The Macs reach it through its public URL, not a tailnet IP")*, stored per machine (`state.json` `machines[].portalUrl`, read first at `server/machines.ts:630`) and in the daemon's config (`server/machineDeploy.ts:414-417`) | the new URL, by a `relocate` message the old portal sends each connected daemon just before it stops (change 9): the daemon rewrites its config and reconnects, keeps its agents running and replays its queued events (up to 20,000 *(sourced: [beast-machine.md](beast-machine.md))*). Without change 9: rewrite `portalUrl` in the copied state, and the new portal redeploys over ssh each daemon that has not connected after 2 minutes *(sourced: [machines.md](machines.md))* | the migration script |
 | BEAST's daemon | the portal's own host: `local: true`, portal URL `http://127.0.0.1:<port>`, deployed without ssh (`server/machines.ts:98`) | an ordinary Windows machine deployed over ssh, at the new URL (change 3) | the migration script |
-| FFBox's connector | `fff.url` = BEAST's Funnel URL | the new URL. It is rendered into the connector's unit at install and needs root to change *(sourced: ffbox docker-security-model, "Where the token goes takes root to change")*. The token stays: FF Factory keeps its SHA-256 in `config.json`, which moves. FFBox's HTTP posts to `POST /api/intake/ffbox` (Max's escalations and intake diagnoses, [contract](ffbox-connector-contract.md)) go to the same portal: wherever FFBox's config names that base URL changes too, and the scoped API key stays valid | Lothsahn |
+| FFBox's connector | `fff.url` = BEAST's Funnel URL | the new URL. It is rendered into the connector's unit at install and needs root to change *(sourced: ffbox docker-security-model, "Where the token goes takes root to change")*; the cut-over prints the exact commands (RUNBOOK section 5, "By hand afterwards"), and missing them leaves FFBox offline (2026-10-06). The token stays: FF Factory keeps its SHA-256 in `config.json`, which moves. FFBox's HTTP posts to `POST /api/intake/ffbox` (Max's escalations and intake diagnoses, [contract](ffbox-connector-contract.md)) go to the same portal: wherever FFBox's config names that base URL changes too, and the scoped API key stays valid | Lothsahn |
 | The outside watchdog on the M5 | `GET <BEAST URL>/api/health` and a ping of BEAST | `outsideWatch.healthUrl` follows `publicUrl`; the M5's daemon gets the new config when it connects ([self-recovery.md](self-recovery.md), section 4). The ping reaches the VM's node, so "up, portal down" still means the VM is up and the portal is not. Lothsahn subscribes to the same ntfy topic, which the host's alerts also use | the migration script, Lothsahn |
 | Wake-on-LAN | the M5 wakes BEAST when BEAST and the portal are down | Not for the portal: its host is a server, and the VM autostarts with it. Clear `mac`, `ip` and `broadcast` in `outside-watch.json`: they are BEAST's (read through PowerShell, Windows only, `server/outsideWatch.ts:61-62`), and waking BEAST is the wrong answer to a dead portal. Waking BEAST as a worker machine needs the watch to take a second target with a fixed MAC (change 12, optional) | the migration script |
 
@@ -563,8 +576,18 @@ host)*.
   `~/.ssh/authorized_keys` on the Macs and, for a Windows account in Administrators,
   `C:\ProgramData\ssh\administrators_authorized_keys` *(sourced: [machines.md](machines.md), "Setting up a Windows PC",
   step 3)*. *(Guess: deploys work with those options; the dry run's check 5 tests one.)*
-- `~/.ssh/config` names `beast`, `lothdesktop`, `m3` and `m5` by their MagicDNS names, with `StrictHostKeyChecking
-  yes`. `known_hosts` is seeded from BEAST's entries for those hosts and checked against `ssh-keyscan` over the tailnet.
+- A machine installed with the worker installer from w568 on sets the portal's ssh up itself: the portal's key into
+  its `authorized_keys`, and its host keys to the portal, pinned in the portal's data and its `~/.ssh/known_hosts2`
+  ([worker-install.md](worker-install.md), "The portal's ssh"). Nothing on the host, nothing by hand in the VM.
+- For the machines from before that: `~/.ssh/config` names the machines by the aliases the portal deploys to (`m3`, `m5`, `Loth2800`, and `beast` for
+  `rydin@beast`), each with its MagicDNS name and ssh user, under `StrictHostKeyChecking yes`; `known_hosts` holds each
+  one's ed25519 host key, pinned, never accepted on first use. Both come from
+  [`deploy/vm/guest/machines.ssh`](../deploy/vm/guest/machines.ssh), whose keys were checked on two paths (w537:
+  BEAST's long-trusted entries, and BEAST's own sshd over loopback, each equal to a fresh `ssh-keyscan` over the
+  tailnet). `fff-machine-ssh --fix` writes them as the portal's account: the guest install runs it, `fffctl update`
+  runs it when `machines.ssh` changes, and the host's `deploy/vm/host/machine-ssh.sh --fix` streams it into a VM whose
+  copy is older. A machine whose key over the tailnet differs from the pinned one is refused. The cut-over had left
+  none of this in the VM, and the first daemon redeploy failed on "Host key verification failed" (2026-10-06).
 - The tailnet policy allows the tag only port 22 on those four (1.4, rule 6).
 - A separate backup key (`/etc/fff/backup_ed25519`, root's in the guest) goes only to the backup account
   ([D17](#8-risks-and-open-decisions)), so the portal's agents never hold it.

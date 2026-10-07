@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# fff-ops-sync (w597, docs/ops-worker.md): give the orchestration worker the Claude Code binary of the Agent SDK the
+# portal runs, where its account can run it (/usr/local/lib/fff/ops/claude, root's, 0755), with the SDK's version beside
+# it (claude.version: fff-ops-launch refuses a header of another version). The portal's own copy is under /srv/fff, which
+# fff-ops cannot enter. Run as root by fff-portal.service's ExecStartPre (after fff-update activate switched releases)
+# and by install.sh. Copies only when the file differs. A failure never stops the portal: the worker then says why.
+set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
+need_root
+load_conf
+dest=$FFF_LIB/ops
+cur=$(readlink -e "$CURRENT" 2>/dev/null || true)
+[ -n "$cur" ] || { log "fff-ops-sync: no current release yet: nothing to copy"; exit 0; }
+case "$(uname -m)" in
+  x86_64) arch=x64 ;;
+  aarch64 | arm64) arch=arm64 ;;
+  *) die "fff-ops-sync: no Agent SDK build for $(uname -m)" ;;
+esac
+sdk=$cur/node_modules/@anthropic-ai
+src=$sdk/claude-agent-sdk-linux-$arch/claude
+[ -f "$src" ] || src=$sdk/claude-agent-sdk-linux-$arch-musl/claude
+[ -f "$src" ] || die "fff-ops-sync: no Claude Code binary in $sdk (claude-agent-sdk-linux-$arch)"
+version=$(jq -r '.version // ""' "$sdk/claude-agent-sdk/package.json")
+[ -n "$version" ] || die "fff-ops-sync: no Agent SDK version in $sdk/claude-agent-sdk/package.json"
+install -d -m 0755 "$dest"
+if [ -f "$dest/claude" ] && cmp -s "$src" "$dest/claude" && [ "$(cat "$dest/claude.version" 2>/dev/null)" = "$version" ]; then exit 0; fi
+install -m 0755 -o root -g root "$src" "$dest/.claude.new"
+mv -f "$dest/.claude.new" "$dest/claude"
+printf '%s\n' "$version" >"$dest/.claude.version.new"
+chmod 0644 "$dest/.claude.version.new"
+mv -f "$dest/.claude.version.new" "$dest/claude.version"
+log "fff-ops-sync: the orchestration worker's Claude Code is now the Agent SDK $version's ($(basename "$(dirname "$src")"))"

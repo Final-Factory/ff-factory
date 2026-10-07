@@ -36,3 +36,22 @@ test('a player in a slot, the slot launcher and commands that only touch a build
     assert.equal(checkPlayerLaunch(cmd), undefined, cmd);
   }
 });
+
+test("w576: a sandbox's players run from its own pair, slotK-0 and slotK-1, never another sandbox's", () => {
+  // Sandbox slot3 on a worker root install owns players/slot3-0 (the host) and slot3-1 (the client).
+  for (const cmd of ['D:/work/ffw/players/slot3-0/player/finalfactory.exe -batchmode', '& "D:/work/ffw/players/slot3-1/player/finalfactory.exe" -x']) {
+    assert.equal(checkPlayerLaunch(cmd, 'slot3'), undefined, cmd);
+  }
+  const why = checkPlayerLaunch('D:/work/ffw/players/slot2-1/player/finalfactory.exe -x', 'slot3');
+  assert.match(why ?? '', /sandbox slot2's player folder; this is sandbox slot3, whose players run only from slot3-0 and slot3-1/);
+  assert.match(why ?? '', /--peer 1/);
+  // A pair path outside a slotK sandbox (a host sandbox, a main clone) and a lab pool's slotK stay as before.
+  assert.equal(checkPlayerLaunch('D:/work/ffw/players/slot2-1/player/finalfactory.exe', 'agent-mcp'), undefined);
+  assert.equal(checkPlayerLaunch('F:/ff-players/slot7/player/finalfactory.exe', 'slot3'), undefined);
+  assert.match(checkPlayerLaunch('D:/work/ffw/sandboxes/slot3/Builds/w/finalfactory.exe', 'slot3') ?? '', /outside a player slot/);
+});
+
+test("w576: the nightly lab's pair, slotnightly-0 and -1, is a slot; a sandbox may not start from it", () => {
+  assert.equal(checkPlayerLaunch('D:/work/ffw/players/slotnightly-1/player/finalfactory.exe -x'), undefined, 'the nightly lab, outside any sandbox');
+  assert.match(checkPlayerLaunch('D:/work/ffw/players/slotnightly-0/player/finalfactory.exe', 'slot2') ?? '', /the nightly lab's player folder; this is sandbox slot2/);
+});

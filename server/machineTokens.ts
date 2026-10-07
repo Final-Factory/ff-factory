@@ -75,14 +75,64 @@ export const readMachineTokens = (file: string) => readJsonDurable<Record<string
  */
 export function issueMachineToken(dataDir: string, id: string, owner?: string): string {
   if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes`);
-  const token = `ffm_${id}_${randomBytes(32).toString('base64url')}`;
+  const token = newMachineToken(id);
   const file = machineTokensFile(dataDir);
   withFileLock(file, () => {
     const t = readMachineTokens(file);
     t[id] = tokenSha(token);
+    delete t[stagedKey(id)];
     writeJsonOwned(file, t, owner);
   });
   return token;
+}
+
+const newMachineToken = (id: string) => `ffm_${id}_${randomBytes(32).toString('base64url')}`;
+
+/** Where a deploy's new credential for machine `id` waits (w568): a key no machine id can be (MACHINE_ID has no ':'). */
+export const stagedKey = (id: string) => `next:${id}`;
+
+/**
+ * A deploy's new credential for machine `id` (w568), returned once, kept BESIDE the current one rather than replacing
+ * it: both open the portal until the machine shows which one it has (promoteStagedToken, dropStagedToken). Replacing it
+ * up front locked a machine out when the deploy's ssh step failed: the machine kept the old token, the portal only knew
+ * the new one, and the daemon's next reconnect was refused (found in w513).
+ */
+export function stageMachineToken(dataDir: string, id: string, owner?: string): string {
+  if (!MACHINE_ID.test(id)) throw new Error(`machine id "${id}" must be lower-case letters, digits and dashes`);
+  const token = newMachineToken(id);
+  const file = machineTokensFile(dataDir);
+  withFileLock(file, () => {
+    const t = readMachineTokens(file);
+    t[stagedKey(id)] = tokenSha(token);
+    writeJsonOwned(file, t, owner);
+  });
+  return token;
+}
+
+/** The staged credential becomes machine `id`'s only one (its daemon connected with it). False when none was staged. */
+export function promoteStagedToken(dataDir: string, id: string, owner?: string): boolean {
+  const file = machineTokensFile(dataDir);
+  return withFileLock(file, () => {
+    const t = readMachineTokens(file);
+    const next = t[stagedKey(id)];
+    if (!next) return false;
+    t[id] = next;
+    delete t[stagedKey(id)];
+    writeJsonOwned(file, t, owner);
+    return true;
+  });
+}
+
+/** Forget machine `id`'s staged credential (the machine never got it, or kept the old one). False when none was staged. */
+export function dropStagedToken(dataDir: string, id: string, owner?: string): boolean {
+  const file = machineTokensFile(dataDir);
+  return withFileLock(file, () => {
+    const t = readMachineTokens(file);
+    if (!(stagedKey(id) in t)) return false;
+    delete t[stagedKey(id)];
+    writeJsonOwned(file, t, owner);
+    return true;
+  });
 }
 
 /** Revoke machine `id`'s credential: its daemon is refused from now on, and a connected one is dropped (MachineManager.dropRevoked). */
@@ -90,12 +140,13 @@ export function revokeMachineToken(dataDir: string, id: string, owner?: string):
   const file = machineTokensFile(dataDir);
   return withFileLock(file, () => {
     const t = readMachineTokens(file);
-    if (!(id in t)) return false;
+    if (!(id in t) && !(stagedKey(id) in t)) return false;
     delete t[id];
+    delete t[stagedKey(id)];
     writeJsonOwned(file, t, owner);
     return true;
   });
 }
 
 /** The machines that hold a credential now. */
-export const enrolledMachines = (dataDir: string) => Object.keys(readMachineTokens(machineTokensFile(dataDir))).sort();
+export const enrolledMachines = (dataDir: string) => Object.keys(readMachineTokens(machineTokensFile(dataDir))).filter((k) => MACHINE_ID.test(k)).sort();

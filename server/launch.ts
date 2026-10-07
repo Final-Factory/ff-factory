@@ -72,7 +72,8 @@ export interface LaunchSpec {
 
 /** The tools a spec can ask for, with their input schemas. Descriptions come with the spec. */
 export const CATALOG = {
-  set_label: { purpose: z.string().describe('One line on what this is being used for now.') },
+  /** Retired (w575): sandbox labels are their names. Listed in no spec; kept so workers started before it get an answer. */
+  set_label: { purpose: z.string().describe('Retired: labels no longer change.') },
   request_delegation: {
     title: z.string().describe('Short label, e.g. "Fix null ref in BeltSystem (Discord #412)".'),
     task: z.string().describe('The full brief for the worker.'),

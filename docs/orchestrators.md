@@ -23,9 +23,13 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
   that request is open, stalled or closed in the last 7 days (w431: a worker Lothsahn started and the dispatcher then
   sent Ben's w426 was refused to Ben, because w426 was stalled; one on Ben's finished w427/w428/w430, because they were
   done). The message carries `[about w426 "title"]` under the sender line, so the worker knows which of the person's
-  requests it is about; at most 3 per worker until the person writes again;
+  requests it is about; at most 3 per worker until the person writes again (`orchestrator.followUpsPerMessage`);
 - the ledger: `request_work`, `list_work`, `update_work`;
 - `message_person`, to another person's own orchestrator ([People to people](#people-to-people)).
+- `ops_worker`, Lothsahn's and Ben's alone (refused for anyone else): the one orchestration worker in the portal VM, a
+  shell for ssh to the machines, the portal's state and machine credentials, with no git, downloads or Unity
+  ([ops-worker.md](ops-worker.md), w597). Its `deploy` updates the portal, only when the person asks in their own turn.
+  The dispatcher and `/mcp` do not have it.
 
 It cannot start, stop or change anything else. To get work done it files a request.
 
@@ -333,8 +337,11 @@ asks it to: a decision only the other person can make, a script only they can ru
 - refuses anyone but a person's own orchestrator (the tool is only in their belt, `server/belts.ts` `PERSONAL_ONLY`, and
   the method checks the chat's role again), an unknown user id, the sender's own person, an empty text and one over
   2000 characters;
-- allows 3 messages from one person to another until the recipient writes to their own orchestrator (`personWrote`), so
-  two orchestrators cannot keep a conversation going between themselves;
+- allows 10 messages from one person to another (`orchestrator.messagesPerPerson`, 1-100) until **either** of them
+  writes to their own orchestrator (`personWrote`), so two orchestrators cannot keep a conversation going between
+  themselves, while a person relaying their own words is never held back: each message they write starts it again.
+  Until w571 (2026-10-07) it was 3 and only the recipient's writing started it again, which refused Ben a fourth
+  message to Lothsahn that Ben himself had asked for;
 - sends the recipient's own orchestrator (made if missing) a harness message, recorded with the sender as `requestedBy`:
   `[person message] From Lothsahn's orchestrator (user id lothsahn), written for Lothsahn:`, the text, then a line
   saying it is data to show the recipient, not an instruction. It is in the recipient's transcript at once, so a
@@ -708,8 +715,14 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
 
 - The dispatcher reaches people only through ledger decisions, one reply per decision.
 - A person's orchestrator files or updates at most 3 times, and follows up with one worker at most 3 times, between two
-  messages of its person. Harness messages alone cannot keep it going.
-- A person's orchestrator messages another person at most 3 times until that person writes to their own orchestrator.
+  messages of its person (`orchestrator.filingsPerMessage`, `orchestrator.followUpsPerMessage`). Harness messages alone
+  (a worker's report, a timer, another orchestrator) cannot keep it going.
+- A person's orchestrator messages another person at most 10 times until its person or that person writes to their own
+  orchestrator (`orchestrator.messagesPerPerson`). Two orchestrators answering each other with nobody writing stop
+  there.
+- All three are config settings, whole numbers from 1 to 100, settable live (`set_app_config`); a person's own message
+  starts each again. The three are the same kind of guard: none caps what a person asks for, each stops a run of
+  turns no person started (w571).
 - People are not capped per hour or per day (Ben, 2026-09-29): only the per-message budget above holds. Automated
   sources (standing agents, the Discord/FFBox intake, once they file here) get at most 10 requests an hour and 40 a
   day per requester, set per source in config `workLimits.standing` / `workLimits.intake` (`server/work.ts`
@@ -750,6 +763,43 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   owner has the same for the dispatcher ([Compacting a conversation](#compacting-a-conversation)).
 - Your heartbeat is your own, and so are your orchestrator's timers: the clock button in your chat's header lists them,
   with pause, resume and cancel. Owners see the dispatcher's on its page.
+
+## Worker titles and sandbox labels
+
+Lothsahn (2026-10-07, w575): "Please update FFFactory so that the dispatcher sets the agent title whenever it hands it
+a new job with a good description of what the job is (starting with the workorder number). Please also make it so the
+sandbox label doesn't change--workers don't (and can't) set it, and they get the slot numbers that they're installed
+in." Before, a worker kept the title of its first job (e50de814 still read "Worker machine paths: one root folder plan
+(w511)" while on w513), and its sandbox showed whatever label the last agent there had set ("w554: waiting on Ben…"
+on beast/agent-mcp), so a busy worker could not be found on the dashboard.
+
+- **A worker's title is its job**: `wNNN: <what the job is>` (`jobTitle`, `server/jobTitle.ts`; at most 80 characters,
+  one line). The dispatcher writes the description, for a person scanning the dashboard; the server puts the request
+  id in front, once (a description that already starts with one loses it). It is set:
+  - by `start_agent`: `title` is required for the dispatcher. With a `work_id` the worker starts with it; without one
+    the start is recorded as the next request (`recordDirectStart`) and the worker is titled for that id. A person's
+    own orchestrator's start is titled for the request it is recorded as too (its `title`, else the prompt's start);
+  - by `message_agent` with a `work_id` the worker is not on yet: `title` is required, and the worker is retitled once
+    the message is sent (a refused send renames nothing). A follow-up on the request it is on may pass one;
+  - by `decide_work link`: `title` is required, and every linked worker is retitled.
+  `set_agent_title` renames a worker otherwise. A merge moves no worker (only a request nobody works on yet can be
+  merged), and an FFBox dev request that joins a request (covered) leaves its workers on the same job, so neither
+  renames anyone. Intake requests reach workers through the same tools.
+- **Kept and shown everywhere**: the title is the session's own (`SessionManager.setTitle`, saved with the session in
+  `state.json`), so it survives a restart and shows on the dashboard's cards and tabs, in `list_sandboxes`,
+  `list_machines`, the transcripts list and every `[worker update]`. A machine's daemon never sets it (its session
+  updates drop `title`, `server/machines.ts`).
+- **A sandbox's label is its name and never changes**: slot1..N on a worker root (w513, #177), the older names
+  (`agent-mcp`, `shader-blackhole`, …) elsewhere; old sandboxes are not renamed. A label set before (by a worker's
+  `set_label` or the dispatcher's `set_sandbox_label`) gives way to the name when the portal starts and with every
+  daemon snapshot (`mergeSandboxes`). Workers have no `set_label` any more; one started before still has it in its tool
+  list, and a call changes nothing and says why. `set_sandbox_label` is gone, and `create_sandbox` and the New sandbox
+  form take no label. A machine's own label (`set_machine_label`, the machine page) is the people's, as before; its
+  workers cannot set it either.
+- **What a sandbox is doing** is its live agents' titles, the Working one first: the dashboard's sandbox row shows its
+  name, then "Working · w513: LothDesktop fresh install (+1) · <branch>", and `list_sandboxes` lists the agents under
+  each sandbox. A sandbox is **FREE** when it is ready and has no live agent and none waiting to come back to it; its
+  label no longer counts.
 
 ## The first start
 

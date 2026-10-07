@@ -256,13 +256,34 @@ sudo fffctl migrate --cut-over
 
 **By hand afterwards**, as the command's last lines say:
 
-1. Lothsahn sets FFBox's `fff.url` (and the escalation base URL) to the new URL and re-renders the connector's unit.
+1. **FFBox's link**: Lothsahn, on the FFBox host as FFBox's owner account. The connector's address is `fff.url` in
+   FFBox's config, rendered into its unit by root, so the migration cannot move it; until this is done FFBox shows
+   offline and its board checks, dev requests and intake hand-offs wait (2026-10-06: missed, BEAST's old URL answered
+   502). The cut-over prints these with both URLs filled in:
+
+   ```bash
+   sed -i 's|"url": "<BEAST URL>"|"url": "<new URL>"|' ~/.config/ffbox/config.json
+   grep -n '"url"' ~/.config/ffbox/config.json                  # "url": "<new URL>"
+   cd "$(cat ~/.config/ffbox/checkout)" && sh scripts/06-services.sh --check
+                                                                # units differ ...: fffconnector.service, and no other
+   sudo sh scripts/06-services.sh --install                     # restarted fffconnector.service
+   journalctl -u fffconnector -n 5 --no-pager                   # connected
+   ```
+
+   `--install` restarts only the units whose file changed and that were running, so `--check` must name
+   `fffconnector.service` alone: another unit there (drift from an earlier template change) would be restarted too,
+   which can cut a build or run in flight; wait for a quiet moment then. The token stays as it is. Max's escalations
+   post to the same `fff.url`.
 2. Everyone opens the new URL, signs in, adds the phone app again, turns notifications on, and points `/mcp` at it.
 
 Then the checks of design 7.4. A rollback after real use is design 7.5. BEAST's old portal is left exactly as it was
 for two weeks (its task disabled, not removed).
 
 ## 6. Updating the portal
+
+*The orchestration worker (w597, [docs/ops-worker.md](../../docs/ops-worker.md)) comes with an update: its account,
+its 2 GiB scratch, its sudo wrappers and `fff-ops.socket` are written by the guest `install.sh` that each update runs.
+After `fffctl update`: `systemctl is-active fff-ops.socket fff-ops-scratch.service` says `active` twice.*
 
 ```bash
 sudo fff-vm ssh
@@ -277,10 +298,12 @@ default), and prints the `journalctl` command for the details. Ctrl+C stops the 
 only asks for it, as `request_app_update` does. `fffctl restart` and `fffctl rollback` wait the same way until the portal
 answers again.
 
-Each update also installs `fffctl` and every helper script in `/usr/local/lib/fff` from the release it switches to (and
-from the older release on a rollback), so they stay as new as the portal; "already up to date" brings them up to the
-running release too. A changed systemd unit is not installed this way: the update's log says so, and the guest
-`install.sh` from a clone at that commit installs it.
+Each update also runs the new release's own guest `install.sh` (with `--no-start`), after the build and before the
+restart: the VM's firewall, systemd units, sshd settings, packages, folders, `fffctl` and its helper scripts all come
+with it, so a change to any of them reaches the VM by `fffctl update` alone. It changes only what differs (apt only for a
+missing package). If it fails, nothing restarts and the running version stays, as with a failed build. "Already up to
+date" runs it too, for the running release. A rollback goes back to the older code and its scripts but keeps the newer
+system setup.
 
 ## 7. Changing the VM's size
 
@@ -308,6 +331,47 @@ it says what the nightly will apply.
 A host installed before 2026-10-06 (w537) has the older `fff-vm`, which restarts the VM without applying anything:
 update the host's scripts once, `git -C ~/ff-factory pull && sudo ~/ff-factory/deploy/vm/host/install.sh --host-only
 --yes` (it leaves the running VM alone).
+
+## 8. /tmp on the VM's disk (a VM installed before 2026-10-06)
+
+Ubuntu 26.04 keeps `/tmp` in RAM, half of it: 1.9 GiB in the 4 GiB VM. The portal's clean-up counts that as its free
+disk space and reports it as low. The guest install now masks `tmp.mount`; for a VM installed before (w537):
+
+```bash
+sudo fff-vm ssh 'df -h / /tmp; findmnt -n -o FSTYPE,OPTIONS /tmp'
+                              # before: / about 118G; /tmp "tmpfs 1.9G"; "tmpfs rw,nosuid,nodev,size=...,usrquota"
+sudo fff-vm ssh 'sudo systemctl mask tmp.mount'
+                              # Created symlink '/etc/systemd/system/tmp.mount' -> '/dev/null'.
+                              # nothing changes until the VM's next boot: the nightly, or sudo fff-vm nightly --now
+sudo fff-vm ssh 'findmnt /tmp || echo "/tmp is on the root disk"; df -h /tmp'
+                              # after that boot: "/tmp is on the root disk", and /dev/vda1 about 118G
+```
+
+## 9. The portal's ssh to the machines
+
+A machine installed with the worker installer from w568 on sets this up itself. It puts the portal's key into its
+`authorized_keys`, and sends its host keys to the portal, which pins them in its data and its `~/.ssh/known_hosts2`
+([docs/worker-install.md](../../docs/worker-install.md), "The portal's ssh"). Nothing is done on this host or in the VM.
+
+For the machines from before that (`m3`, `m5`, `Loth2800`, `beast`, until each runs the new installer), the portal
+uses the aliases and pinned keys in [`guest/machines.ssh`](guest/machines.ssh). A VM installed or updated
+(`fffctl update`) after w537 writes them by itself. To repair or check them from the host, which writes into the VM
+over `fff-vm ssh` and keeps nothing here:
+
+```bash
+git -C ~/ff-factory pull --ff-only
+sudo ~/ff-factory/deploy/vm/host/machine-ssh.sh --check   # read only: one line per machine
+sudo ~/ff-factory/deploy/vm/host/machine-ssh.sh --fix     # write the aliases and pinned keys, then the same lines
+```
+
+After `--fix`, each line should read `<alias>: alias ok; known_hosts: pinned; tailnet: SHA256:... = pinned; ssh: ok`.
+`tailnet: ... DIFFERS` (and `REFUSED` from `--fix`): the machine shows another key than the pinned one; nothing is
+written for it: check the key on the machine itself (`ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub`, on Windows
+`C:\ProgramData\ssh\ssh_host_ed25519_key.pub`) and change `machines.ssh`. `ssh: ... Permission denied (publickey)`:
+that machine does not have the portal's key yet; the output ends with the `from="..."` line to add to that ssh user's
+`~/.ssh/authorized_keys` (a Windows admin account: `C:\ProgramData\ssh\administrators_authorized_keys`). Then
+redeploy one machine's daemon from the portal (an orchestrator: `machine_daemon` redeploy, the m3 first) and check it
+connects.
 
 ## If it must come off again
 

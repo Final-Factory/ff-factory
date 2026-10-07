@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { armScriptReimport } from '../../machine/scriptReimport.ts';
 import * as win from '../../server/machineDeployWin.ts';
 import { LABEL, macControlScript } from '../../server/machineDeploy.ts';
-import { Progress, exec, giveTo, install, layoutOf, readManifest, whoami, type InstallOptions, type Layout } from './worker.ts';
+import { Progress, exec, giveTo, holdRedeploys, install, layoutOf, readManifest, whoami, type InstallOptions, type Layout } from './worker.ts';
 
 const isWin = process.platform === 'win32';
 const say = (line: string) => console.log(line);
@@ -274,6 +274,27 @@ async function git(dir: string, args: string[], input?: string) {
   return r.stdout;
 }
 
+/**
+ * Append the old clone's info/exclude lines (shared by all its worktrees) that the root's clone lacks. Returns how many
+ * it added. Exported for tests.
+ */
+export function carryExclude(fromGitDir: string, toRepo: string): number {
+  let from = '';
+  try {
+    from = fs.readFileSync(path.join(fromGitDir, 'info', 'exclude'), 'utf8');
+  } catch {
+    return 0;
+  }
+  const file = path.join(toRepo, 'info', 'exclude');
+  const have = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const known = new Set(have.split(/\r?\n/).map((x) => x.trim()));
+  const add = [...new Set(from.split(/\r?\n/).map((x) => x.trim()))].filter((x) => x && !x.startsWith('#') && !known.has(x));
+  if (!add.length) return 0;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${have && !have.endsWith('\n') ? '\n' : ''}# FF Factory: carried from the old clone (scripts/worker/migrate.ts)\n${add.join('\n')}\n`);
+  return add.length;
+}
+
 /** What a worktree holds that must survive the move: its HEAD, branch, status and both diffs. */
 async function snapshot(dir: string) {
   return {
@@ -345,8 +366,12 @@ async function saveOldService(l: Layout, task: string): Promise<Journal['oldServ
   return { kind: 'launchagent', name: task, saved };
 }
 
-async function restoreOldService(s: NonNullable<Journal['oldService']>) {
+async function restoreOldService(s: NonNullable<Journal['oldService']>, appDir: string) {
   if (s.kind === 'task') {
+    // Whatever of the old daemon runs now goes first: re-registering a running task ends its supervisor but not the
+    // daemon under it, and that daemon ran on beside the restored one (LothDesktop 2026-10-06, w513: two daemons on one
+    // credential and one Unity slots mailbox).
+    await stopOld(appDir, s.name);
     const r = await win.psScript(win.LOCAL, `$x = Get-Content -Raw -LiteralPath ${win.psq(s.saved)}\nRegister-ScheduledTask -TaskName ${win.psq(s.name)} -Xml $x -Force | Out-Null\nStart-ScheduledTask -TaskName ${win.psq(s.name)}\n'ok'\n`, { timeoutMs: 60_000 });
     if (!/ok/.test(r.stdout)) throw new Error(`restoring the ${s.name} task failed: ${win.failureDetail(r)}; register it from ${s.saved} by hand`);
     return;
@@ -356,10 +381,34 @@ async function restoreOldService(s: NonNullable<Journal['oldService']>) {
   await exec('bash', ['-c', `launchctl bootout gui/$(id -u)/${s.name} 2>/dev/null; launchctl bootstrap gui/$(id -u) "${plistFile}"`]);
 }
 
-/** Stop the old daemon (its task or LaunchAgent, and only what runs from its own folder). */
-async function stopOld(old: OldLayout, service: string) {
-  if (isWin) await win.psScript(win.LOCAL, win.controlScript('stop', old.appDir, { task: service, only: true }), { timeoutMs: 3 * 60_000 });
-  else await exec('bash', ['-c', `launchctl bootout gui/$(id -u)/${service} 2>/dev/null || true`]);
+/** The Windows stop of the old daemon, then `left=<n>`: its processes still running (none, or the moves wait). Exported for tests. */
+export function stopOldScript(appDir: string, task: string): string {
+  return `${win.controlScript('stop', appDir, { task, only: true })}\n${leftScript(appDir)}`;
+}
+
+/** Prints `left=<n>`: the processes running from the old daemon's folder (its supervisor and its daemon). */
+function leftScript(appDir: string): string {
+  const marks = [path.win32.join(appDir, 'app', 'machine', 'daemon.ts'), path.win32.join(appDir, 'run-daemon.ps1')];
+  return `$marks = @(${marks.map(win.psq).join(', ')})
+$left = @(Get-CimInstance Win32_Process -Property ProcessId, CommandLine | Where-Object { $c = [string]$_.CommandLine; @($marks | Where-Object { $c.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count })
+'left=' + $left.Count
+`;
+}
+
+/** Whether the old daemon runs now (Windows: anything from its folder; Mac: its LaunchAgent is loaded). */
+async function oldDaemonRuns(appDir: string, service: string): Promise<boolean> {
+  if (!isWin) return (await exec('bash', ['-c', `launchctl print gui/$(id -u)/${service} >/dev/null 2>&1`])).code === 0;
+  const r = await win.psScript(win.LOCAL, leftScript(appDir), { timeoutMs: 60_000 });
+  return /left=(\d+)/.exec(r.stdout)?.[1] !== '0';
+}
+
+/** Stop the old daemon (its task or LaunchAgent, and only what runs from its own folder); throws if any of it still runs. */
+async function stopOld(appDir: string, service: string) {
+  if (!isWin) return void (await exec('bash', ['-c', `launchctl bootout gui/$(id -u)/${service} 2>/dev/null || true`]));
+  const r = await win.psScript(win.LOCAL, stopOldScript(appDir, service), { timeoutMs: 3 * 60_000 });
+  const left = /left=(\d+)/.exec(r.stdout);
+  if (!left) throw new Error(`stopping the old daemon failed: ${win.failureDetail(r)}`);
+  if (left[1] !== '0') throw new Error(`the old daemon still runs after its stop (${left[1]} process(es) from ${appDir})`);
 }
 
 // ---------------------------------------------------------------- the commands
@@ -381,7 +430,10 @@ export async function migrate(o: MigrateOptions) {
   const fromService = o.fromService ?? (isWin ? win.TASK_NAME : LABEL);
   if (!old.token) throw new Error(`the old daemon.json in ${old.appDir} has no token: this tool moves a working daemon`);
   const portalUrl = (o.install.portalUrl ?? String(old.config.portalUrl ?? '')).replace(/\/+$/, '');
-  const io: InstallOptions = { ...o.install, portalUrl, token: old.token, carry: old.config, replacesService: true };
+  // The root's clone is seeded from the old clone's origin branches: no download, and no GitHub credential, which an
+  // ssh session on Windows does not have.
+  const seedFrom = old.repoPath && fs.existsSync(path.join(old.repoPath, '.git')) ? old.repoPath : undefined;
+  const io: InstallOptions = { ...o.install, portalUrl, token: old.token, carry: old.config, replacesService: true, ...(seedFrom ? { seedFrom } : {}) };
   const items = plan(old, l);
   printPlan(items, l);
   if (o.dryRun) return say('\nDry run: nothing changed.');
@@ -399,6 +451,9 @@ export async function migrate(o: MigrateOptions) {
     fs.rmSync(journalFile(l), { force: true });
     throw new Error('the install into the root could not start (see above); nothing of the old layout was touched');
   }
+  // What the old clone hid from every worktree's status (agents' scratch folders) stays hidden in the root's clone:
+  // without it a moved sandbox shows thousands more untracked files and the move rolls back (LothDesktop, w513).
+  if (old.repoPath) carryExclude(path.join(old.repoPath, '.git'), l.repo);
 
   // 2. Copy pass one while the old daemon still runs: daemon state and Claude conversations.
   const p = new Progress();
@@ -417,9 +472,18 @@ export async function migrate(o: MigrateOptions) {
   if (!w.ok) throw new Error(`asking the portal which agents run there failed: ${w.error}`);
   const busy2 = w.me.agents.filter((a) => a.midTurn);
   if (busy2.length) throw new Error(`agents are mid-turn there: ${busy2.map((a) => `${a.title} (${a.id})`).join(', ')}; run again once they are idle (the root is ready; nothing moved yet)`);
+  // The portal redeploys a machine offline for 2 minutes over ssh (watchOffline): mid-move that put the old daemon back,
+  // which held a sandbox open (LothDesktop 2026-10-06, w513: EBUSY renaming barge-v4, a redeploy 2 minutes after the
+  // stop). Told first, it leaves the machine alone until a daemon says hello: the root's, or the old one after a rollback.
+  const held = await holdRedeploys(portalUrl, old.token);
+  // An older portal: fine once its daemon was stopped with machine_daemon stop, which holds them the same way.
+  if (!held.ok && (!held.tooOld || (await oldDaemonRuns(old.appDir, fromService)))) {
+    throw new Error(`${held.error}; nothing moved yet. Stop its daemon from the portal (machine_daemon stop), then run this again`);
+  }
   say('Stopping the old daemon...');
-  await stopOld(old, fromService);
   try {
+    // Inside the try: if the stop fails, the rollback starts the old daemon again.
+    await stopOld(old.appDir, fromService);
     for (const sb of old.sandboxes) {
       if (!fs.existsSync(sb.path)) continue;
       const to = path.join(l.sandboxes, sb.id);
@@ -489,7 +553,7 @@ export async function rollback(root: string) {
   for (const r of [...j.renamed].reverse()) if (fs.existsSync(r.to) && !fs.existsSync(r.from)) fs.renameSync(r.to, r.from);
   // The root's clone forgets the worktrees that went back.
   if (fs.existsSync(path.join(l.repo, 'HEAD'))) await exec('git', ['-C', l.repo, 'worktree', 'prune']);
-  if (j.oldService) await restoreOldService(j.oldService);
+  if (j.oldService) await restoreOldService(j.oldService, j.from);
   j.state = 'rolled-back';
   writeJournal(l, j);
   say(`Rolled back: the old daemon runs from ${j.from} again. The root ${l.root} can be uninstalled (--keep-registration: the machine's record is the old daemon's).`);

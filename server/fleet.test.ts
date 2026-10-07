@@ -96,19 +96,21 @@ test('fleet: the host first, then each machine, with sandboxes and their live ag
   assert.equal(capacityLine(m3), 'no sandboxes');
 });
 
-test('fleet: a labelled sandbox, or one with a live agent, is never free', () => {
+test('fleet: a sandbox with a live agent is never free; its label says nothing about use (w575); what it does is its agents’ titles', () => {
   const fleet = fleetOf({
     system,
-    sessions: [session('idle', 'idle', { machineId: 'lothdesktop', machineSandbox: 'spare' })],
+    sessions: [session('idle', 'idle', { machineId: 'lothdesktop', machineSandbox: 'spare', title: 'w513: LothDesktop fresh install' }), session('busy', 'running', { machineId: 'lothdesktop', machineSandbox: 'spare', title: 'w575: titles follow the job' })],
     machines: [
       machine('lothdesktop', {
         sandboxRoot: 'D:/work/ffsb',
-        sessionIds: ['idle'],
-        sandboxes: [machineSandbox('spare', 'unused', ['idle']), machineSandbox('named', 'Shader work'), machineSandbox('empty', '')],
+        sessionIds: ['idle', 'busy'],
+        sandboxes: [machineSandbox('spare', 'unused', ['idle', 'busy']), machineSandbox('named', 'Shader work'), machineSandbox('empty', '')],
       }),
     ],
   });
-  assert.deepEqual(fleet[1].sandboxes.map((s) => [s.key, s.free]), [['lothdesktop/spare', false], ['lothdesktop/named', false], ['lothdesktop/empty', true]]);
+  assert.deepEqual(fleet[1].sandboxes.map((s) => [s.key, s.free]).sort(), [['lothdesktop/empty', true], ['lothdesktop/named', true], ['lothdesktop/spare', false]]);
+  // The Working agent's title first.
+  assert.deepEqual(fleet[1].sandboxes.find((s) => s.id === 'spare')!.doing, ['w575: titles follow the job', 'w513: LothDesktop fresh install']);
 });
 
 test('fleet: the portal with no daemon of its own and no stats is "This host", running the orchestrators only (w510)', () => {

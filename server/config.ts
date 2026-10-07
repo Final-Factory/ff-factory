@@ -360,6 +360,16 @@ export interface Config {
      * 100,000 tokens or more, compacts the conversation after it. Default 1; 0 turns this trigger off.
      */
     compactAtTurnUsd?: number;
+    /**
+     * The loop guards (w571, server/orchestrators.ts loopGuards, docs/orchestrators.md "Loops, limits and safety"), each
+     * a whole number from 1 to 100 that a person's own message starts again. Filings (request_work, update_work) a
+     * person's orchestrator makes between two of their messages, default 3.
+     */
+    filingsPerMessage?: number;
+    /** Follow-ups (message_agent) to one worker between two of the person's messages, default 3. */
+    followUpsPerMessage?: number;
+    /** message_person messages to one person until the sender or the recipient writes to their own orchestrator, default 10. */
+    messagesPerPerson?: number;
   };
   worker: {
     permissionMode: PermissionMode;
@@ -435,6 +445,8 @@ export const VOICE_DEFAULTS: Omit<VoiceConfig, 'toolsDir'> = {
   ttsDevice: 'auto',
 };
 
+/** What config may set each of the orchestrators' loop guards to (orchestrator.filingsPerMessage etc., w571). */
+export const LOOP_GUARD_RANGE = { min: 1, max: 100 } as const;
 /** The default of config usagePollMinutes. */
 export const DEFAULT_USAGE_POLL_MINUTES = 15;
 
