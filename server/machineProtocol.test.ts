@@ -16,7 +16,7 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
  *   daemon's protocol in the portal (as SANDBOX_PROTOCOL and the others are), and record both here. Raise
  *   OLDEST_DAEMON_PROTOCOL or OLDEST_PORTAL_PROTOCOL only when the other side can no longer be served at all.
  */
-const DECIDED = { protocol: 8, fingerprint: '7e0818ce840ff051' };
+const DECIDED = { protocol: 8, fingerprint: '27b3c7565dd89b12' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

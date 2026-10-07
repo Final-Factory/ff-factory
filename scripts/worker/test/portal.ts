@@ -6,7 +6,9 @@
  *
  *   node scripts/worker/test/portal.ts <scratch folder> [port=8799] [machine id=wtest]
  *
- * A second http port (port + 1) drives it for the test: POST /sandbox {name} creates a sandbox on the machine, GET
+ * A second http port (port + 1) drives it for the test: POST /sandbox {name} creates a sandbox on the machine, POST
+ * /agent {sandbox, text} starts a worker there (w605), GET /agent/<id> shows it with its transcript, POST
+ * /agent/<id>/send {text} messages it, GET
  * /machine shows its record. Nothing here reaches the live portal, its data or its daemons.
  */
 import { createHash, randomBytes } from 'node:crypto';
@@ -87,6 +89,26 @@ http
           const { name, base: b } = JSON.parse(body) as { name: string; base?: string };
           const sb = await machines.createSandbox(id, { name, base: b, seedLibrary: false, startUnity: false });
           res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(sb));
+          return;
+        }
+        // w605: a worker in one of the machine's sandboxes, and its state and transcript. The daemon runs it as a real
+        // Claude Code session on the machine's own login (the fake agent here is only the portal's own orchestrators').
+        if (req.method === 'POST' && req.url === '/agent') {
+          const { sandbox, text, title = 'install test' } = JSON.parse(body) as { sandbox: string; text: string; title?: string };
+          const h = machines.createSession(id, { kind: 'worker', sandbox, title, permissionMode: 'bypassPermissions' });
+          internals.sessions.send(h.info.id, text, 'human');
+          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(h.info));
+          return;
+        }
+        const agent = /^\/agent\/([\w-]+)(\/send)?$/.exec(req.url ?? '');
+        if (agent && req.method === 'POST' && agent[2]) {
+          internals.sessions.send(agent[1], (JSON.parse(body) as { text: string }).text, 'human');
+          res.writeHead(200).end('sent');
+          return;
+        }
+        if (agent) {
+          const h = internals.sessions.sessions.get(agent[1]);
+          res.writeHead(h ? 200 : 404, { 'content-type': 'application/json' }).end(JSON.stringify(h ? { info: h.info, live: h.live, transcript: internals.store.readTranscript(agent[1]) } : null));
           return;
         }
         if (req.url === '/machine') {

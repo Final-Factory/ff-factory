@@ -163,22 +163,50 @@ reinstalling beast and m5 on 2026-10-07, f3f19c0 → 9ea8476):
   order, and adds only folders that are new. m5's `~/.unity/bin` had moved to the end. On Windows the task carries no
   environment of its own (its XML has a user and an action only), so there is nothing there to keep. The task's user
   stays.
-- **It restarts the daemon and checks.** The install stops the old daemon (its agents with it; Unity editors keep
-  running), installs the new code and starts it. The update then waits until the portal sees the machine online with
+- **It restarts the daemon and checks.** The install stops the old daemon (its agents keep running in their hosts,
+  below), installs the new code and starts it. The update then waits until the portal sees the machine online with
   the new code (`/machine/whoami` reports the daemon's commit and whether it is outdated, a portal from w613 on). If
   the portal does not, it restarts the task or LaunchAgent once (the ops worker had to run that by hand on beast) and
   waits again. It ends with what ran before and after: the daemon's commit, the settings changed, the credential
   reused, and what the portal sees. Exit 0 only when the portal sees the new daemon online and not outdated.
 
-**Agents across an update.**
-- An agent mid-turn: the portal resumes it once the new daemon says hello, as after any daemon restart.
-- An idle agent: it stops with its daemon. Its sandbox **stays its** (w613): the portal marks it `heldSince`, and
-  `list_sandboxes` shows it "Stopped (its daemon restarted at …; its sandbox is kept for it)", not FREE. New work does
-  not take that sandbox until the agent is messaged, `stop_agent` releases it, or a day passes (`HOLD_PLACE_MS`). On
-  LothDesktop at 08:29 UTC on 2026-10-07, the update stopped Ben's 77956901, which had no check-in, and slot2 showed
-  FREE. w605 (#191) re-adopts agents whose processes outlive the daemon. This hold covers the ones whose processes did
-  not.
-- Update while the machine is quiet all the same.
+**An update does not stop running work** (w605). Each agent process runs in an agent host of its own
+(`machine/agentHost.ts`), started detached from the daemon, so it outlives the daemon ([machines.md](machines.md),
+"Agents outlive their daemon"). The update (and a re-run of the install) stops only the daemon and its supervisor (`Stop-FFDaemon` without `-Agents`
+on Windows, `launchctl` on a Mac). Agents mid-turn carry on: their shells, builds and players keep running, and so do
+idle agents' processes. Unity editors keep running as before. The new daemon finds the hosts in
+`<root>\daemon\hosts\`, takes them back, forwards to the portal whatever they recorded meanwhile, and their turns
+report to the portal as if nothing happened. An agent whose host is gone (the computer restarted, it crashed) is resumed
+by the portal with its conversation (`claude --resume`) if it was mid-turn, and otherwise on its next message.
+
+- **The first update onto this version still stops running agents**: a daemon from before w605 runs its agents
+  inside its own process, so they end when it stops. The portal resumes the mid-turn ones as before; idle ones show
+  stopped and come back on their next message. Every update after that keeps them.
+- A stop (`machine_daemon stop`, or `Stop-FFDaemon -Agents`) and the uninstall still end the agents.
+
+Measured on BEAST (2026-10-07), with a throwaway install (`-Service FFW605Test`, a scratch root, a tiny game repo)
+against the throwaway portal (`scripts/worker/test/portal.ts`, which can now start a worker: `POST /agent`) and real
+Claude Code agents on BEAST's own login:
+
+1. Installed from ff-factory main at 7162d69 while the portal ran ca4a133 (same protocol 8): the machine showed
+   "update available: it runs 7162d69, this portal ca4a13329", and a new agent there started and answered.
+2. Re-ran the installer from ca4a133 (the first update onto agent hosts): it took 11 s, and the old daemon's idle agent
+   ended with it, as expected.
+3. A new agent started a 100 s command (Claude Code put it in the background). Re-running the installer took 12 s. The
+   new daemon logged "agent host 9658a61e (pid 58208) adopted: idle, live", and the command's end woke the agent in the
+   same process, which went on and reported "DONE-W605" to the portal with no resume message.
+4. The same agent ran a 100 s command in the foreground, and the installer ran again (9 s) during it. The new daemon
+   logged "adopted: running, live". The command printed its line, and the agent answered "DONE-FOREGROUND" from the
+   same host process. The transcript's 22 events are in order, none twice.
+5. The uninstall ended the host and left nothing of the install ("Nothing of the wtest install remains").
+
+**An agent whose process did end keeps its sandbox** (w613). This covers the first update onto agent hosts, a computer
+restart, and a crash. The portal marks the agent `heldSince` when its daemon goes away under it, and `list_sandboxes`
+shows it "Stopped (its daemon restarted at …; its sandbox is kept for it)", not FREE. New work does not take that
+sandbox until the agent is messaged, `stop_agent` releases it, the new daemon takes the agent back alive, or a day
+passes (`HOLD_PLACE_MS`). On LothDesktop at 08:29 UTC on 2026-10-07, the update stopped Ben's 77956901, which had no
+check-in, and slot2 showed FREE.
+
 
 ### The portal's ssh (w568)
 

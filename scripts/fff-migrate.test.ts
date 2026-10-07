@@ -538,7 +538,7 @@ test('fffctl migrate --cut-over: BEAST\'s portal drains, sends its daemon here a
   const configFile = path.join(daemonDir, 'daemon.json');
   const dc: DaemonConfig = { portalUrl: `http://127.0.0.1:${w.beastPortal.port}`, id: 'beast', token: w.machineToken, repoPath: w.beastBase, appDir: daemonDir, claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null };
   fs.writeFileSync(configFile, JSON.stringify(dc, null, 2));
-  const daemon = new Daemon({ ...dc, configFile }, undefined, PROBES);
+  const daemon = new Daemon({ ...dc, configFile, agentHosts: false }, undefined, PROBES);
   t.after(() => daemon.shutdown());
   daemon.start();
   await until("the daemon at BEAST's portal", () => /machine beast connected/.test(w.beastPortal.log()));

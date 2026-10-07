@@ -216,7 +216,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
       // Never this computer's own Unity MCP entry from ~/.claude.json: a command nothing runs (the fake SDK starts no stdio server).
       const busBefore = new Set(bus.listeners('event'));
       daemon = new Daemon(
-        { portalUrl: url, id, token, repoPath: repos.main, appDir, tempDir: path.join(repos.root, 'tmp'), unitySlotsDir: path.join(repos.root, 'slots'), claude: 'no-such-claude', maxEventsFile: null, sandboxes: settings, sandboxIdleStopMinutes: 0, cleanup: NO_CLEANUP, unityMcpServer: { command: 'no-such-unity-mcp', args: [] } },
+        { portalUrl: url, id, token, agentHosts: false, repoPath: repos.main, appDir, tempDir: path.join(repos.root, 'tmp'), unitySlotsDir: path.join(repos.root, 'slots'), claude: 'no-such-claude', maxEventsFile: null, sandboxes: settings, sandboxIdleStopMinutes: 0, cleanup: NO_CLEANUP, unityMcpServer: { command: 'no-such-unity-mcp', args: [] } },
         o.makeSession,
         FAKE_PROBES,
         poolDeps,

@@ -12,6 +12,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **A worker reinstall or daemon restart no longer stops running agents** (w605, lothsahn: "can we make it so that the
+  install doesn't require shutting down running jobs, and it can just attach back to them?"). Each agent process runs
+  in an agent host started detached from the daemon (`machine/agentHost.ts`); the two talk through append-only files in
+  `<appDir>/hosts/<session id>/`, and the next daemon takes running hosts back and forwards what they recorded
+  meanwhile. `Stop-FFDaemon` spares them unless `-Agents` (a stop, the uninstall); a Mac stop and uninstall `pkill`
+  them. Mid-turn and idle agents carry on. One whose host is gone is resumed with its conversation. The first update
+  onto this version still stops agents (the old daemon runs them in its own process). Measured on BEAST: node's plain
+  children die with it, `detached` ones do not, and `Stop-ScheduledTask` ends only the task's own process.
+  [docs/machines.md](docs/machines.md), "Agents outlive their daemon".
 - **A portal update no longer blocks the workers** (w605, lothsahn: "Can we fix it so that workers don't require an
   update after a portal update?"). Daemons are versioned by their protocol, not by commit. One from another commit whose
   protocol the portal drives (`OLDEST_DAEMON_PROTOCOL` 7 to `PROTOCOL_VERSION` 8, either side one ahead) shows "update
