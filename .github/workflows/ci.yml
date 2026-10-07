@@ -125,19 +125,37 @@ jobs:
       - run: npm ci --prefix web --no-audit --no-fund
       - name: Playwright version
         id: pw
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "image=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
       - name: Cache browsers
         id: browsers
         uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: Cache browser system packages
+        # The 181 packages Chromium and WebKit need took about 28 s to download from the Ubuntu mirror on every shard (w636).
+        # apt still resolves them against today's lists and fetches anything newer; this only saves the download.
+        uses: actions/cache@v6
+        with:
+          path: ~/apt-archives
+          key: playwright-apt-${{ steps.pw.outputs.image }}-${{ steps.pw.outputs.version }}
+          restore-keys: playwright-apt-
+      - name: apt keeps its downloads there
+        run: |
+          mkdir -p ~/apt-archives/partial
+          printf 'Dir::Cache::Archives "%s";\nAPT::Keep-Downloaded-Packages "true";\n' ~/apt-archives | sudo tee /etc/apt/apt.conf.d/99-ff-archives
       - name: Install browsers
         if: steps.browsers.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium webkit
       - name: Install browser system libraries
         if: steps.browsers.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium webkit
+      - name: The package cache readable for saving
+        run: |
+          sudo rm -f ~/apt-archives/lock && sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
+          echo "$(ls ~/apt-archives/*.deb 2>/dev/null | wc -l) packages, $(du -sh ~/apt-archives | cut -f1)"
       - name: Build the web UI
         run: npm --prefix web run build
       - name: Snapshot mode
