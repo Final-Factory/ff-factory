@@ -67,6 +67,10 @@ jobs:
         run: |
           set -o pipefail
           npm run test:coverage 2>&1 | tee coverage.txt
+      - name: The orchestration worker's socket under real systemd (w638)
+        # fff-ops.socket's settings, the real launcher and the portal's opsSpawner: a new process right after a stop runs.
+        if: runner.os == 'Linux'
+        run: sudo --preserve-env=PATH deploy/vm/test/fff-ops-socket.test.sh
       - name: Unit tests with coverage, ${{ matrix.shard == '1/2' && 'the three slowest files' || 'every other file' }}
         if: ${{ matrix.shard }}
         shell: bash
