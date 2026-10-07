@@ -133,17 +133,17 @@ export function cleanLine(s: string | undefined | null, max: number): string {
 }
 
 /**
- * A block of players' text, safe to quote in a brief: secrets redacted, invisible characters out, at most 60 lines
+ * A block of players' text, safe to quote in a brief: secrets redacted, invisible characters out, at most `lines` lines
  * and `max` characters, and no run of three backticks or tildes, so it cannot close the fence it is quoted in.
  */
-export function cleanBlock(s: string | undefined | null, max: number): string {
+export function cleanBlock(s: string | undefined | null, max: number, lines = 60): string {
   const text = redactSecrets(String(s ?? ''))
     .replace(/\r\n?/g, '\n')
     .replace(INVISIBLE, '')
     .replace(/[`~]{3,}/g, (m) => m.split('').join(' '))
     .split('\n')
     .map((l) => l.replace(/\s+$/, ''))
-    .slice(0, 60)
+    .slice(0, lines)
     .join('\n')
     .trim();
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;

@@ -21,9 +21,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   else it waits for the next one there, ahead of new work; its first message says where it is now. 30 minutes is about
   ten times what a move costs (a fetch, a switch, a warm editor start and a recompile, about 3 minutes, measured and
   sourced in docs/machines.md, "Placing work").
+- **CI's Playwright shards keep the browsers' system packages in the Actions cache** (w636, asked by lothsahn). Each
+  shard downloaded the same 126 MB from the Ubuntu mirror; apt now keeps them in `~/apt-archives`, which the cache
+  restores, and still resolves against fresh lists. The install step went from a median of 37-39 s to 20-33 s.
 
 ### Fixed
 
+- **A daemon with a bad token logs the portal's 401, not a parse error** (w636). The portal's refusal had bare LF line
+  ends, which the daemon's HTTP client could not parse ("Parse Error: Missing expected CR"); it now ends its lines with
+  CRLF and says Connection: close.
 - **A fresh job for the orchestration worker starts reliably** (w638, lothsahn: it crashed twice on 2026-10-07 with
   "Claude Code process exited with code 1" the moment a job came with `fresh: true` after a turn had ended). Starting
   the fresh conversation stopped the old process and connected for the new one at once, while the old one was still
@@ -34,6 +40,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   launcher's reason in the transcript instead of only "exited with code 1", and a stop followed at once by a new process
   no longer adds a false "Claude Code process aborted by user" error.
 
+- **The dev-request test reads the portal's answer before giving up** (w636). On Windows CI it failed with
+  'no "dev_ack" from the portal in 5000 ms' though the portal had acked at once: the portal's synchronous store flush,
+  in the same process, held the event loop past the deadline, and the fake connector's timer ran before its socket was
+  read. Past the deadline it now lets I/O run once before it says so.
+- **Flaky unit tests wait for what they check, not a fixed time** (w636, asked by lothsahn). The background-save and
+  state-save tests, the unity-slots crashed-holder, waiter and CLI tests, the download-resume test and the agent-host
+  "new host" test (Windows reused the dead host's pid) failed on Windows runners; each now waits on the event it checks. The Mac dialog and Unity watch tests no longer ask the real
+  Mac (they failed on every Mac worker, and macUnity took 10 s there).
 - **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
   clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
   Whisper goes with a ping ahead of it: no answer within 2 s and the clip falls back, and the machine is skipped until it
@@ -41,8 +55,22 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   drop it; the heartbeat is unchanged). The machine has 10 s to return the text, upload included (was 3 s plus 0.05 s
   per second of audio). A clip that times out keeps the next ones off that machine for 2 minutes or until it re-offers
   its Whisper.
+- **The portal VM's end-to-end reboot checks have 20 s each, and the hang step looks for its own reset** (w636, asked
+  by lothsahn). Hang detection took 382-988 s in 6 of 61 runs; each check for a new boot id was an ssh with no limit
+  once connected. The watch's reset was matched anywhere in its journal, where a first-boot reset (32 of 62 runs) also
+  matched; now only since the step began.
 
 ### Added
+
+- **Workers read the ledger, read-only** (w642, lothsahn: w631's worker had to judge which requests were finished without
+  being able to read their briefs). A worker's new machine tool `read_work` reads its own requests (the ones it is on)
+  and the ones they name (related ids, a wNNN in their title, brief, notes or PRs, a request merged into them), any
+  status, each with its person, status and live state, PRs, brief, latest report and log. Listing every open and stalled
+  request (`all`, filtered by status, state and person, paged with offset) needs a ledger-read grant on one of the
+  worker's open requests, which its person's orchestrator sets with `request_work`/`update_work ledger_read` (never on
+  an intake request). Everything else is refused, and nothing writes through it. Every text is fenced as data; players'
+  text carries the intake's untrusted header. A page holds at most 50 requests and 40,000 characters (Claude Code saves
+  MCP results over 50,000 characters to a file). Needs the portal and the machines updated.
 
 - **A machine removes FF Factory's own leftovers by itself when disk runs low** (w626, Ben: "no YOU free up disk space,
   like you are instructed to in this harness. stop making us tell you to do it."). Below the soft threshold, and in

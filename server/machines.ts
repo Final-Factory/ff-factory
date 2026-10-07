@@ -1399,9 +1399,8 @@ export class MachineManager {
       if (recent.length) this.failures.set(ip, recent);
       else this.failures.delete(ip);
       console.warn(`machine: refused a connection from ${ip}${locked ? ' (too many failures)' : ''}`);
-      socket.write(`HTTP/1.1 ${locked ? '429 Too Many Requests' : '401 Unauthorized'}
-
-`);
+      // CRLF as HTTP has it: a bare LF made the daemon's client fail to parse the refusal and log a parse error, not the 401.
+      socket.write(`HTTP/1.1 ${locked ? '429 Too Many Requests' : '401 Unauthorized'}\r\nConnection: close\r\n\r\n`);
       socket.destroy();
       return false;
     }
