@@ -189,6 +189,12 @@ export interface InstallOptions {
   sshHost?: string;
   /** The ssh user the portal's key is authorized for (default: the account running the install). */
   sshUser?: string;
+  /**
+   * An update of this machine's own install (worker.ts update, w613): no fetch of the game repo (the root's clone is
+   * reused; over ssh a Mac's keychain and a Windows user's credential manager are out of reach), the old LaunchAgent's
+   * PATH kept in its order, the old Library seed kept, and no administrator prompt that nobody can answer.
+   */
+  update?: boolean;
 }
 
 /** A parsed command line: `--key value` options and `--flag`s. Exported for tests. */
@@ -283,6 +289,9 @@ const bash = (what: string, script: string, timeoutMs = 5 * 60_000) => must(what
 export interface WhoAmI {
   id: string;
   online: boolean;
+  /** The commit the connected daemon runs, and why it is outdated (w613); absent from an older portal. */
+  daemon?: string;
+  outdated?: string;
   root?: string;
   agents: { id: string; title: string; sandbox?: string; midTurn: boolean }[];
   sandboxes: string[];
@@ -463,8 +472,10 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
   // folders and the credential file replace its own, the token never goes into daemon.json, and max_agents is gone (w536).
   const { token: _t, appDir: _a, tempDir: _d, repoPath: _r, sandboxes: oldPool, unitySlotsDir: _u, maxEventsFile: _m, configFile: _c, maxSessions: _ms, ...carried } = (o.carry ?? {}) as Record<string, unknown>;
   if (oldPool && typeof oldPool === 'object') {
-    const { root: _pr, librarySeed: _ls, ...poolRest } = oldPool as Record<string, unknown>;
+    const { root: _pr, librarySeed: oldSeed, ...poolRest } = oldPool as Record<string, unknown>;
     Object.assign(sandboxes, { ...poolRest, root: sandboxes.root, ...(sandboxes.librarySeed ? { librarySeed: sandboxes.librarySeed } : {}) });
+    // An update keeps the seed the daemon had (w613: BEAST's block-cloned Library) when the root holds none of its own.
+    if (o.update && !sandboxes.librarySeed && typeof oldSeed === 'string' && oldSeed) sandboxes.librarySeed = oldSeed;
   }
   return {
     ...carried,
@@ -506,7 +517,7 @@ async function lockDown(dir: string, sid?: string) {
  * user's GitHub credential (LothDesktop, measured 2026-10-06), while the daemon in the user's session can; the
  * clone's remote is still `url`, and the fetch from it below is then only tried. Exported for tests.
  */
-export async function cloneRepo(l: Pick<Layout, 'repo'>, url: string, relative = true, seedFrom?: string) {
+export async function cloneRepo(l: Pick<Layout, 'repo'>, url: string, relative = true, seedFrom?: string, fetchOrigin = true) {
   if (!fs.existsSync(path.join(l.repo, 'HEAD'))) {
     if (seedFrom) {
       say(`Seeding ${l.repo} from ${seedFrom}'s origin branches (local, no download)...`);
@@ -528,6 +539,9 @@ export async function cloneRepo(l: Pick<Layout, 'repo'>, url: string, relative =
   // (BEAST, w596): set it here, so symlinks check out as plain files the way a person's clone has them.
   if (isWin) await must('git config', 'git', ['-C', l.repo, 'config', 'core.symlinks', 'false']);
   await must('git lfs install', 'git', ['-C', l.repo, 'lfs', 'install', '--local']);
+  // An update (w613) fetches nothing: the clone is there, and the daemon fetches with the user's own credentials when it
+  // next makes a sandbox. Over ssh a Mac's keychain is out of reach and git fetch fails there (m5, 2026-10-07).
+  if (!fetchOrigin) return void say(`Kept the root's clone of the game repo as it is (no fetch: the daemon fetches with your own credentials when it next makes a sandbox).`);
   say('Fetching origin...');
   if (!seedFrom) return void (await must('git fetch', 'git', ['-C', l.repo, 'fetch', '--prune', '--progress', 'origin'], { live: true }));
   const r = await exec('git', ['-c', 'credential.interactive=never', '-C', l.repo, 'fetch', '--prune', 'origin'], { env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }, timeoutMs: 10 * 60_000 });
@@ -577,7 +591,11 @@ async function installDaemonMac(o: InstallOptions, l: Layout, id: string, probe:
   fs.writeFileSync(path.join(l.daemon, 'daemon.json'), JSON.stringify(daemonJson(o, l, id, probe.claude), null, 2), { mode: 0o600 });
   const agents = path.join(probe.home, 'Library', 'LaunchAgents');
   fs.mkdirSync(agents, { recursive: true });
-  fs.writeFileSync(path.join(agents, `${o.service}.plist`), plist(probe.home, probe.node!, support.flag, probe.path ?? '', l.daemon, o.service));
+  const plistFile = path.join(agents, `${o.service}.plist`);
+  // An update keeps the PATH the daemon had, in its order (w613: m5's ~/.unity/bin moved to the end), and adds what is new.
+  const oldPath = o.update && fs.existsSync(plistFile) ? plistPathOf(fs.readFileSync(plistFile, 'utf8')) : undefined;
+  const text = plist(probe.home, probe.node!, support.flag, probe.path ?? '', l.daemon, o.service);
+  fs.writeFileSync(plistFile, oldPath ? withPlistPath(text, mergePath(oldPath, plistPathOf(text) ?? '')) : text);
   await bash('loading the LaunchAgent', `set -e\n${macReloadLines(`gui/${probe.uid}`, o.service)}`, 2 * 60_000);
   return { version, started: true };
 }
@@ -910,7 +928,7 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
   await lockDown(l.secrets, f.probe.sid);
 
   // 3. The game repo, bare, and the installer's own checkout.
-  await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees, o.seedFrom);
+  await cloneRepo(l, o.repoUrl, !o.absoluteWorktrees, o.seedFrom, !o.update);
   await syncSource(l, from);
   if (o.owner) await giveRoot(l, o.owner);
 
@@ -956,7 +974,10 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     writeManifest(l.root, m);
     steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.maxSandboxes, editors, o.firewallSuffix) });
   } else if (isWin) say('Skipped the firewall rules (--no-firewall): players will prompt on first start.');
-  if (steps.length) {
+  if (steps.length && o.update && !elevated() && !process.stdin.isTTY) {
+    // Nobody can answer an administrator prompt here (an ssh session that is not elevated): what the install put there stays.
+    say(`Skipped ${steps.map((s) => (s.kind === 'firewall' ? 'the firewall rules' : "the portal's ssh key in administrators_authorized_keys")).join(' and ')}: this session is not elevated and nobody can answer a prompt; the ones the install made stay (an elevated or interactive update refreshes them).`);
+  } else if (steps.length) {
     say(`${steps.map((s) => (s.kind === 'firewall' ? 'Windows Firewall: adding the rules' : "the portal's ssh key into administrators_authorized_keys")).join(', and ')} (one administrator prompt)...`);
     const text = await elevatedSteps(steps);
     const existed = /^key-existed=(true|false)$/m.exec(text)?.[1];
@@ -1002,6 +1023,226 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
 }
 
 /** The nightly e2e lab's scheduled task on a Windows lab PC, made by the game repo's scripts/nightly/install_schedule.sh. */
+// ---------------------------------------------------------------- update (w613)
+
+/** What `worker.ts update` takes on its command line; every setting it does not name comes from the install there. */
+export interface UpdateFlags {
+  maxSandboxes?: number;
+  maxAgentsPerSandbox?: number;
+  maxUnity?: number;
+  /** Windows, elevated: who gets what the update makes (default: the user the daemon's task runs as). */
+  owner?: string;
+  /** The daemon code: "portal" (the commit the portal runs, the default), a branch or a commit of ff-factory. */
+  ref?: string;
+  /** A local ff-factory checkout to install from instead, with no download at all. */
+  source?: string;
+}
+
+/**
+ * The install options an update runs with (w613): the root's own root.json and daemon.json, every setting carried
+ * (beast's agent total, protected paths, the Library seed, the editors' priority, the disk guard, cleanup, the Unity
+ * paths), the limits from the flags only when given, and the machine's own credential. Exported for tests.
+ */
+export function planUpdate(root: string, m: Manifest, config: Record<string, unknown>, token: string, f: UpdateFlags & { absoluteWorktrees?: boolean }): InstallOptions {
+  const pool = (config.sandboxes && typeof config.sandboxes === 'object' ? config.sandboxes : {}) as Record<string, unknown>;
+  const pick = (flag: number | undefined, key: string, fallback: number) => (flag !== undefined ? flag : typeof pool[key] === 'number' ? (pool[key] as number) : fallback);
+  const maxSandboxes = pick(f.maxSandboxes, 'maxSandboxes', m.slots || 3);
+  const maxAgentsPerSandbox = pick(f.maxAgentsPerSandbox, 'maxAgentsPerSandbox', 2);
+  const maxUnity = pick(f.maxUnity, 'maxUnity', 2);
+  return {
+    root,
+    portalUrl: String(config.portalUrl || m.portalUrl).replace(/\/+$/, ''),
+    token,
+    maxSandboxes,
+    maxAgentsPerSandbox,
+    maxUnity,
+    repoUrl: m.repoUrl || DEFAULT_REPO,
+    service: m.service,
+    firewall: true,
+    ...(m.firewallSuffix ? { firewallSuffix: m.firewallSuffix } : {}),
+    ...(typeof config.unitySlotsDir === 'string' ? { unitySlotsDir: config.unitySlotsDir } : {}),
+    ...(f.absoluteWorktrees ? { absoluteWorktrees: true } : {}),
+    ...(f.owner ? { owner: f.owner } : {}),
+    carry: { ...config, sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    update: true,
+  };
+}
+
+/** Every setting as a dotted path and its value (JSON), for the diff an update prints. */
+function flatten(v: unknown, at = '', out: Record<string, string> = {}): Record<string, string> {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) flatten(x, at ? `${at}.${k}` : k, out);
+  } else if (at) out[at] = JSON.stringify(v);
+  return out;
+}
+
+/** What an update changed in daemon.json, one line a setting (never a token: daemon.json holds only its file's path). Exported for tests. */
+export function settingsDiff(before: Record<string, unknown>, after: Record<string, unknown>): string[] {
+  const a = flatten(before);
+  const b = flatten(after);
+  const lines: string[] = [];
+  for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
+    if (/token/i.test(k) && !/file/i.test(k)) continue;
+    if (a[k] === b[k]) continue;
+    lines.push(a[k] === undefined ? `+ ${k}: ${b[k]}` : b[k] === undefined ? `- ${k}: ${a[k]}` : `~ ${k}: ${a[k]} -> ${b[k]}`);
+  }
+  return lines;
+}
+
+/** The PATH a LaunchAgent plist gives the daemon, or undefined. Exported for tests. */
+export function plistPathOf(text: string): string | undefined {
+  const m = /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(text);
+  return m ? m[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&') : undefined;
+}
+
+/** The plist with its PATH replaced. */
+function withPlistPath(text: string, value: string): string {
+  const x = value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text.replace(/(<key>PATH<\/key>\s*<string>)[^<]*(<\/string>)/, (_m, a: string, b: string) => `${a}${x}${b}`);
+}
+
+/** The old PATH's folders in their order, then the new one's that it lacks. Exported for tests. */
+export function mergePath(old: string, now: string): string {
+  const a = old.split(':').filter(Boolean);
+  return [...a, ...now.split(':').filter((d) => d && !a.includes(d))].join(':');
+}
+
+/** The daemon code a root runs (its app's machine/VERSION), or undefined. */
+function daemonVersionIn(l: Layout): string | undefined {
+  try {
+    return fs.readFileSync(path.join(l.daemon, 'app', 'machine', 'VERSION'), 'utf8').trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** ff-factory, public: fetched with no credential helper and no prompt, so no keychain or credential manager is asked. */
+const FF_FACTORY = 'https://github.com/Final-Factory/ff-factory.git';
+const anonymousGit = ['-c', 'credential.helper=', '-c', 'core.askPass=', '-c', 'credential.interactive=never'];
+const anonymousEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_ASKPASS: '', SSH_ASKPASS: '' });
+
+/** The commit the portal runs (GET /api/health), or undefined. */
+async function portalSha(portalUrl: string, fetcher: typeof fetch = fetch): Promise<string | undefined> {
+  try {
+    const r = await fetcher(`${portalUrl}/api/health`, { signal: AbortSignal.timeout(15_000) });
+    const sha = r.ok ? ((await r.json()) as { sha?: string }).sha : undefined;
+    return sha && /^[0-9a-f]{7,40}$/i.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The daemon code for an update, in the root's installer checkout (<root>/daemon/src): `--source`, a local checkout, as
+ * it is; else ff-factory's public repo, fetched anonymously (no keychain, no credential manager, no prompt), at the
+ * portal's own commit by default, so the daemon is never newer or older than its portal. Returns the checkout and its commit.
+ */
+async function updateSource(l: Layout, f: UpdateFlags, portalUrl: string): Promise<{ from: string; commit: string }> {
+  if (f.source) {
+    if (!fs.existsSync(path.join(f.source, 'machine', 'daemon.ts'))) throw new Error(`--source ${f.source} is not an ff-factory checkout (no machine/daemon.ts)`);
+    return { from: f.source, commit: (await must('git rev-parse', 'git', ['-C', f.source, 'rev-parse', 'HEAD'])).trim() };
+  }
+  let want = f.ref ?? 'portal';
+  if (want === 'portal') {
+    const sha = await portalSha(portalUrl);
+    if (!sha) throw new Error(`the portal at ${portalUrl} does not say which commit it runs (GET /api/health): pass --ref main (or a commit), or --source <checkout>`);
+    want = sha;
+  }
+  if (!fs.existsSync(path.join(l.src, '.git'))) {
+    fs.mkdirSync(l.src, { recursive: true });
+    await must('git init (the installer checkout)', 'git', ['init', '--quiet', l.src]);
+  }
+  const env = anonymousEnv();
+  const fetched = await exec('git', [...anonymousGit, '-C', l.src, 'fetch', '--quiet', '--no-tags', FF_FACTORY, '+refs/heads/main:refs/remotes/github/main', ...(/^[0-9a-f]{40}$/i.test(want) || /^[0-9a-f]{7,39}$/i.test(want) ? [] : [`+refs/heads/${want}:refs/remotes/github/${want}`])], { env, timeoutMs: 10 * 60_000 });
+  if (fetched.code !== 0) throw new Error(`could not fetch ff-factory anonymously from ${FF_FACTORY} (${(fetched.stderr || fetched.stdout).trim().split('\n').pop()}): check this computer's network, or pass --source <a local ff-factory checkout>`);
+  const name = /^[0-9a-f]{7,40}$/i.test(want) ? want : `refs/remotes/github/${want}`;
+  const r = await exec('git', ['-C', l.src, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`]);
+  const commit = r.stdout.trim();
+  if (r.code !== 0 || !commit) throw new Error(`${f.ref ?? `the portal's commit ${want}`} is not on ff-factory's main (fetched from ${FF_FACTORY}): pass --ref main or --source <checkout>`);
+  await must('checking out the daemon code', 'git', ['-C', l.src, '-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--force', '--detach', commit]);
+  return { from: l.src, commit };
+}
+
+/** Windows: the user the daemon's task runs as (its principal), as icacls takes it (a SID as *S-1-...), or undefined. */
+async function taskUser(service: string): Promise<{ owner: string; sid?: string } | undefined> {
+  const out = (await ps('reading the daemon task\'s user', `$t = Get-ScheduledTask -TaskName ${win.psq(win.taskName({ task: service }))} -ErrorAction SilentlyContinue\nif ($t) { [string]$t.Principal.UserId }\n`).catch(() => '')).trim();
+  if (!out) return undefined;
+  return /^S-1-[\d-]+$/.test(out) ? { owner: `*${out}`, sid: out } : { owner: out };
+}
+
+/** The portal's view of the daemon now: online, and the code it runs (a portal from before w613 does not say). */
+async function portalView(portalUrl: string, token: string) {
+  const w = await whoami(portalUrl, token);
+  return w.ok ? w.me : undefined;
+}
+
+/**
+ * `worker.ts update --root <root>` (w613): update this machine's install in place, as safe to re-run as the install.
+ * Everything comes from what is there: root.json, daemon.json (every setting carried unless a flag changes it), the
+ * machine's own credential (secrets/machine-token: nothing is issued, asked for or printed), the LaunchAgent's PATH, the
+ * task's user. It fetches no game repo, takes ff-factory anonymously, restarts the daemon and checks the portal sees the
+ * new code online. Prints the commit and settings before and after. Returns whether the portal sees it.
+ */
+export async function update(root: string, f: UpdateFlags): Promise<boolean> {
+  const l = layoutOf(path.resolve(root));
+  const m = readManifest(l.root);
+  if (!m) throw new Error(`no worker install at ${l.root} (no root.json): install it first (docs/worker-install.md, "Install")`);
+  const configFile = path.join(l.daemon, 'daemon.json');
+  if (!fs.existsSync(configFile)) throw new Error(`no ${configFile}: this root's daemon was never installed; run the install instead`);
+  const config = JSON.parse(fs.readFileSync(configFile, 'utf8')) as Record<string, unknown>;
+  if (!fs.existsSync(l.token)) throw new Error(`no credential at ${l.token}: an update reuses the machine's own; without it, install again with a new one (sudo fffctl machine-credential issue ${m.machineId})`);
+  const token = fs.readFileSync(l.token, 'utf8').trim();
+  if (credentialId(token) !== m.machineId) throw new Error(`${l.token} does not hold machine ${m.machineId}'s credential`);
+  const portalUrl = String(config.portalUrl || m.portalUrl).replace(/\/+$/, '');
+  const before = { version: daemonVersionIn(l), view: await portalView(portalUrl, token) };
+  say(`FF Factory worker update of ${l.root} (machine ${m.machineId})`);
+  say(`Before: daemon ${before.version ?? 'unknown'}; the portal sees it ${before.view?.online ? 'online' : 'offline'}${before.view?.agents.length ? `, ${before.view.agents.length} live agent(s): ${before.view.agents.map((a) => `${a.id}${a.sandbox ? ` in ${a.sandbox}` : ''}${a.midTurn ? ' (mid-turn)' : ''}`).join(', ')}` : ''}.`);
+  const code = await updateSource(l, f, portalUrl);
+  say(`The daemon code: ff-factory ${code.commit.slice(0, 12)}${f.source ? ` from ${f.source}` : f.ref && f.ref !== 'portal' ? ` (${f.ref})` : ' (the commit the portal runs)'}.`);
+  let owner = f.owner;
+  if (isWin && elevated() && !owner) {
+    // Elevated (an administrator's ssh session, w613: BEAST's): what the update makes goes to the task's own user, as
+    // --owner does for the portal's ssh deploy, so the daemon's non-elevated git does not find Administrators' files.
+    const who = await taskUser(m.service);
+    if (!who) throw new Error(`this session is elevated and the ${m.service} task is missing, so there is no user to give the files to: pass --owner <user>, or run the install from that user's own session`);
+    const me = (await ps('reading this session\'s user', '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value')).trim();
+    if (who.sid && who.sid !== me) throw new Error(`the ${m.service} task runs as ${who.sid}, not this session's user ${me}: update from that user's session (ssh in as them), or pass --owner`);
+    owner = who.owner;
+    say(`Elevated session: what the update makes goes to ${owner}, the user the ${m.service} task runs as.`);
+  }
+  const rel = (await exec('git', ['-C', l.repo, 'config', '--get', 'worktree.useRelativePaths'])).stdout.trim();
+  const o = planUpdate(l.root, m, config, token, { ...f, absoluteWorktrees: rel === 'false', ...(owner ? { owner } : {}) });
+  let ok = await install(o, code.from);
+  const want = daemonVersionIn(l);
+  const current = (v: Awaited<ReturnType<typeof portalView>>) => !!v?.online && (!v.daemon || !want || v.daemon.startsWith(want) || want.startsWith(v.daemon));
+  if (!ok || !current(await portalView(portalUrl, token))) {
+    say(`The portal does not see the new daemon yet: restarting it once (${isWin ? `the ${o.service} task` : `the ${o.service} LaunchAgent`})...`);
+    if (isWin) await ps('restarting the daemon', win.controlScript('restart', l.daemon, { task: o.service, only: true }));
+    else await bash('restarting the daemon', macControlScript('restart', o.service));
+    ok = false;
+  }
+  const p = new Progress();
+  let view = await portalView(portalUrl, token);
+  for (let i = 0; i < 60 && !current(view); i++) {
+    p.update(`waiting for the portal to see daemon ${want ?? ''} online (${i * 2}s)`);
+    await new Promise((r) => setTimeout(r, 2000));
+    view = await portalView(portalUrl, token);
+  }
+  ok = current(view);
+  p.done();
+  const after = JSON.parse(fs.readFileSync(configFile, 'utf8')) as Record<string, unknown>;
+  const diff = settingsDiff(config, after);
+  say(`\nAfter: daemon ${want ?? 'unknown'} (was ${before.version ?? 'unknown'}).`);
+  say(diff.length ? `Settings changed (daemon.json; everything else carried):\n${diff.map((d) => `  ${d}`).join('\n')}` : 'Settings: none changed (every setting carried).');
+  say(`Credential: the machine's own (${path.basename(l.token)}), reused; nothing issued or printed.`);
+  if (ok) {
+    say(`The portal sees ${m.machineId} online${view?.daemon ? ` running ${view.daemon}` : ''}${view?.outdated ? `, but OUTDATED: ${view.outdated}` : view?.daemon ? ', not outdated' : ' (this portal does not report the daemon\'s version yet)'}${view?.agents.length ? `; ${view.agents.length} live agent(s)` : ''}.`);
+    if (view?.outdated) ok = false;
+  } else say(`The portal does not see ${m.machineId} online with the new daemon. Its log: ${path.join(l.logs, 'daemon.log')}`);
+  process.exitCode = ok ? 0 : 1;
+  return ok;
+}
+
 export const NIGHTLY_TASK = 'ff-nightly-e2e';
 
 /**
@@ -1359,7 +1600,7 @@ async function readCredential(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0].trim();
 }
 
-const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <folder> [options]
+const USAGE = `node scripts/worker/worker.ts <install|update|uninstall|check> --root <folder> [options]
   install   --portal-url <url> --credential-stdin [--max-sandboxes 3] [--max-agents-per-sandbox 2] [--max-unity 2]
             [--repo-url ${DEFAULT_REPO}] [--service <task or label>] [--no-firewall] [--no-cleanup] [--absolute-worktrees] [--unity-slots-dir <dir> (a test install)]
             [--owner <user> (Windows: run elevated, e.g. over ssh, and give what it makes to that user)]
@@ -1367,6 +1608,11 @@ const USAGE = `node scripts/worker/worker.ts <install|uninstall|check> --root <f
              GitHub credential, which an ssh session does not have)]
             [--unity-editor-root <dir>] [--unity-path <exe>]
             [--no-ssh] [--ssh-host <name the portal reaches it by>] [--ssh-user <user>] (the portal's ssh, w568)
+  update    [--max-sandboxes N] [--max-agents-per-sandbox N] [--max-unity N] (only to change them)
+            [--ref portal|main|<commit> (the daemon code; default: the commit the portal runs)] [--source <checkout>]
+            [--owner <user> (Windows, elevated: default the user the daemon's task runs as)]
+            (this machine's own install, in place: every setting, the credential and the PATH carried; no game-repo
+             fetch; restarts the daemon and checks the portal sees it; docs/worker-install.md, "Updating")
   uninstall [--yes] [--force] [--keep-registration]
   check     [--service <task or label>] (lists what of the install exists on this computer)
   migrate   [--from <old daemon folder>] [--from-service <its task or label>] [--old-slots <dir>]
@@ -1400,6 +1646,17 @@ export async function main(argv = process.argv.slice(2)) {
       sshHost: opts['ssh-host'],
       sshUser: opts['ssh-user'],
       ...(opts['seed-from'] ? { seedFrom: opts['seed-from'] } : {}),
+    });
+  } else if (cmd === 'update') {
+    if (!opts.root) throw new Error(USAGE);
+    const opt = (k: string) => (opts[k] === undefined ? undefined : Number(opts[k]));
+    await update(opts.root, {
+      maxSandboxes: opt('max-sandboxes'),
+      maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
+      maxUnity: opt('max-unity'),
+      ...(opts.owner ? { owner: opts.owner } : {}),
+      ...(opts.ref ? { ref: opts.ref } : {}),
+      ...(opts.source ? { source: opts.source } : {}),
     });
   } else if (cmd === 'elevated') {
     // The install's one administrator step (elevatedSteps): run by an elevated copy of this script.
