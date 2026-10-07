@@ -45,6 +45,13 @@ while [ $# -gt 0 ]; do
 done
 
 ask() { local a; read -r -p "$1${2:+ [$2]} " a </dev/tty; echo "${a:-$2}"; }
+# A non-interactive ssh session's PATH may lack Homebrew and /usr/local (w629: m5's had no /opt/homebrew/bin, so its
+# git-lfs was "missing"): put the ones that exist first, as a person's shell has them. This run's PATH only; the
+# daemon's comes from the login shell (worker.ts withStandardPaths does the same for itself).
+for d in /usr/local/bin /opt/homebrew/sbin /opt/homebrew/bin; do
+  case ":$PATH:" in *":$d:"*) ;; *) [ -d "$d" ] && PATH="$d:$PATH" ;; esac
+done
+export PATH
 [ "$(id -u)" = 0 ] && { echo "Run this as yourself, not with sudo." >&2; exit 2; }
 
 if [ "$UPDATE" = 1 ]; then

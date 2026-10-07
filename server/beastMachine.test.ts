@@ -372,7 +372,7 @@ test('beast machine: add_machine local takes its settings from the config, deplo
 
   const json = JSON.parse(daemonConfig({ portalUrl: 'http://127.0.0.1:8790', id: 'beast', token: 't', repoPath: 'C:\\ffsb\\_base', extra: o.extra }));
   assert.deepEqual([json.maxEventsFile, json.unityMcpServer.command, json.sandboxIdleStopMinutes], [null, 'uvx.exe', 120]);
-  assert.deepEqual(poolSettingsOf({ sandboxRoot: '/s' }), { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 50, diskCriticalGB: 20 }, 'a machine without the extras: as before');
+  assert.deepEqual(poolSettingsOf({ sandboxRoot: '/s' }), { root: '/s', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2, diskWarnGB: 20, diskCriticalGB: 10 }, 'a machine without the extras: as before');
 });
 
 test('beast machine: the local transport runs the same bootstrap without ssh; an existing task survives a non-elevated deploy', () => {

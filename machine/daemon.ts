@@ -33,6 +33,8 @@ import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageR
 import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
+import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
+import { hubEditorDirs, hubListedEditors } from './unity.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
@@ -227,6 +229,8 @@ export class Daemon {
   outsideWatch?: OutsideWatch;
   private ws?: WebSocket;
   private readonly entries = new Map<string, Entry>();
+  /** The processes running now (the pool's cached listing). */
+  private readonly procs: () => Promise<{ cmd: string }[]>;
   private readonly events = new EventEmitter();
   private readonly outbox: string[] = [];
   private readonly rpcs = new Map<string, { resolve: (t: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
@@ -278,6 +282,7 @@ export class Daemon {
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
     const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line));
+    this.procs = () => pd.procs();
     this.slots = new UnitySlots({
       dir: cfg.unitySlotsDir ?? path.join(appDirOfConfig(cfg), 'unity-slots'),
       platform,
@@ -360,6 +365,8 @@ export class Daemon {
           mode: settings.mode,
           regular: () => planCleanup({ rules, guard, low, libraries: { roots: [HOME], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
           stale: () => planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(process.platform, HOME), ctx: this.staleCtx, settings, guard }),
+          // FF Factory's own leftovers (w626): only while free space is below the soft threshold, or asked for.
+          ...(low || opts.dryRun ? { own: this.ownLeftovers(guard) } : {}),
         });
       },
       consumers: () => biggestConsumers(env),
@@ -375,6 +382,43 @@ export class Daemon {
         this.out({ type: 'cleanup', summary, notice });
       },
     });
+  }
+
+  /**
+   * FF Factory's own leftovers here (server/ownLeftovers.ts, w626): stale player slots, pushed agent worktrees of the
+   * clone, Unity editors nothing needs. Planned with the pool's sandboxes, the agents running now and the processes.
+   */
+  private ownLeftovers(guard: CleanupGuard) {
+    const inputs = async (): Promise<OwnLeftoverInputs> => {
+      const platform = process.platform;
+      const read = (p: string) => fs.readFileSync(p, 'utf8');
+      const sandboxes = this.pool.list();
+      const live = new Set([...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox).map((e) => e.spec!.sandbox!));
+      const up = platform === 'win32' ? 'win32' : 'darwin';
+      const listed = hubListedEditors(up, process.env, HOME, read).map((e) => editorFolderOf(e.bin)).filter((x): x is string => !!x).map((f) => path.dirname(f));
+      const procs = await this.procs().catch(() => undefined);
+      return {
+        platform,
+        home: HOME,
+        guard,
+        slotRoots: playerSlotRoots({ platform, home: HOME, workerRoot: this.cfg.root, env: process.env }),
+        host: os.hostname(),
+        alive: isAlive,
+        clones: [this.cfg.repoPath, ...(this.cfg.root ? [path.join(this.cfg.root, 'repo')] : [])],
+        sandboxes: sandboxes.map((s) => s.path),
+        busy: sandboxes.filter((s) => live.has(s.id)).map((s) => s.path),
+        relax: [this.cfg.repoPath, this.sandboxRoot()].filter((x): x is string => !!x),
+        editorDirs: [...(this.cfg.unityEditorRoot ? [this.cfg.unityEditorRoot] : []), ...hubEditorDirs(up, process.env, HOME, read), ...listed],
+        procs: procs?.map((p) => p.cmd),
+      };
+    };
+    return {
+      plan: async () => planOwnLeftovers(await inputs()),
+      run: async (plan: Awaited<ReturnType<typeof planOwnLeftovers>>) => {
+        const i = await inputs();
+        return runOwnLeftovers(plan, ownRecheck({ guard: i.guard, busy: i.busy, host: i.host, alive: i.alive, procs: async () => (await this.procs()).map((p) => p.cmd) }));
+      },
+    };
   }
 
   /** Where agents work here, for the stale-output rules: every ready sandbox, with its editor's state (w536: no main clone). */
