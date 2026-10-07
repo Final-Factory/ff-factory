@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { execFileSync } from 'node:child_process';
 import type { EventEmitter } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
@@ -20,6 +19,7 @@ import { SandboxPool, deletable, idleSandboxEditors, librarySource, treeBytes, t
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
+import { testRepos } from './testMachine.ts';
 import type { Config } from './config.ts';
 import type { ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo } from '../shared/types.ts';
 
@@ -37,24 +37,7 @@ const until = async (what: string, cond: () => boolean, ms = 60_000) => {
 };
 
 /** A bare origin and the machine's main clone of it (on develop), with a warm Library the clone never commits. */
-function repos() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-'));
-  const origin = path.join(root, 'origin.git');
-  const main = path.join(root, 'FinalFactory');
-  const git = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe' }).toString().trim();
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'develop', origin]);
-  execFileSync('git', ['clone', '-q', origin, main], { stdio: 'pipe' });
-  git(main, 'switch', '-q', '-c', 'develop');
-  fs.writeFileSync(path.join(main, '.gitignore'), 'Library/\nLogs/\nTemp/\n');
-  fs.writeFileSync(path.join(main, 'README.md'), 'game\n');
-  git(main, 'add', '.gitignore', 'README.md');
-  git(main, 'commit', '-q', '-m', 'base');
-  git(main, 'push', '-q', '-u', 'origin', 'develop');
-  fs.mkdirSync(path.join(main, 'Library', 'Artifacts'), { recursive: true });
-  fs.writeFileSync(path.join(main, 'Library', 'Artifacts', 'warm.bin'), 'imported');
-  const sbRoot = path.join(root, 'ffsb');
-  return { root, origin, main, sbRoot, git, cleanup: () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }) };
-}
+const repos = () => testRepos();
 
 /** Real git, copy and delete; a stand-in editor (no Unity), and free space the test sets. */
 function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?: number } = {}) {
@@ -432,8 +415,10 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   t.after(async () => {
     daemon.shutdown();
     server.close();
-    await new Promise((res) => setTimeout(res, 300));
+    // The link's close comes after the last update the daemon sent; then the saves land before the folders go.
+    await until('the daemon gone', () => !mm.isOnline('pc'), 5000).catch(() => undefined);
     store.flush();
+    await store.saved();
     r.cleanup();
   });
   daemon.start();
@@ -544,8 +529,10 @@ test('switch_branch on a machine sandbox: the calling worker alone switches, thr
     agents.orchestrators.close();
     daemon.shutdown();
     server.close();
-    await new Promise((res) => setTimeout(res, 300));
+    // The link's close comes after the last update the daemon sent; then the saves land before the folders go.
+    await until('the daemon gone', () => !mm.isOnline('pc'), 5000).catch(() => undefined);
     store.flush();
+    await store.saved();
     r.cleanup();
   });
   daemon.start();
@@ -632,8 +619,10 @@ test('stale output on a machine: the portal sends the ledger facts, a dry run co
   t.after(async () => {
     daemon.shutdown();
     server.close();
-    await new Promise((res) => setTimeout(res, 300));
+    // The link's close comes after the last update the daemon sent; then the saves land before the folders go.
+    await until('the daemon gone', () => !mm.isOnline('pc'), 5000).catch(() => undefined);
     store.flush();
+    await store.saved();
     r.cleanup();
   });
   daemon.start();

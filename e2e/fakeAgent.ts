@@ -40,10 +40,13 @@ let counter = 0;
 export interface FakeOptions {
   /** Pause between streamed pieces, ms (default 40). */
   stepMs?: number;
+  /** Pause between the 40 pieces of a "#slow" reply, ms (default 100: about 4 s). */
+  slowStepMs?: number;
 }
 
 export function fakeQuery(fake: FakeOptions = {}) {
   const step = fake.stepMs ?? 40;
+  const slowStep = fake.slowStepMs ?? 100;
   return ({ prompt, options }: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Options }): Query => {
     const sessionId = options?.resume ?? `fake-${process.pid}-${++counter}`;
     const abort = options?.abortController ?? new AbortController();
@@ -215,7 +218,7 @@ export function fakeQuery(fake: FakeOptions = {}) {
           const size = Math.ceil(reply.length / pieces);
           for (let i = 0; i < reply.length && !interrupted; i += size) {
             yield delta(reply.slice(i, i + size));
-            await sleep(/#slow\b/i.test(words) ? 100 : step);
+            await sleep(/#slow\b/i.test(words) ? slowStep : step);
           }
           if (interrupted) {
             // The interrupt ends this turn (an interrupt that came before it started ends it too).

@@ -25,6 +25,12 @@ import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 
 setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
 
+/** "#slow" turns of about 1 s (40 pieces 25 ms apart) instead of 4 s, for a test that waits for one to end. */
+function shortSlowTurns(t: { after: (fn: () => void) => void }) {
+  setQueryForTesting(fakeQuery({ stepMs: 1, slowStepMs: 25 }) as never);
+  t.after(() => setQueryForTesting(fakeQuery({ stepMs: 1 }) as never));
+}
+
 const BEN: Requester = { userId: 'ben', displayName: 'Ben' };
 const LOTH: Requester = { userId: 'lothsahn', displayName: 'Lothsahn' };
 const PEOPLE: UserInfo[] = [
@@ -44,7 +50,7 @@ async function until(what: string, cond: () => boolean, ms = 5000) {
   }
 }
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { legacy?: boolean; notify?: boolean; people?: UserInfo[]; hostAlpha?: boolean } = {}) {
+function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { legacy?: boolean; notify?: boolean; people?: UserInfo[]; hostAlpha?: boolean; gatherMs?: number } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-orch-'));
   const cfg = {
     dataDir: dir,
@@ -72,6 +78,8 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { l
   const machines = new MachineManager(cfg, store, sessions);
   const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => opts.people ?? PEOPLE));
   agents.boot();
+  // Notices to the dispatcher gather 1.5 s in production; 100 ms here, unless a test is about the gathering.
+  (agents.orchestrators as unknown as { d: { gatherMs: number } }).d.gatherMs = opts.gatherMs ?? 100;
   /** Run first at the end (a machine's daemon goes before the portal's folder). */
   const closers: (() => Promise<void>)[] = [];
   t.after(async () => {
@@ -151,7 +159,9 @@ test("tool belts: a person's orchestrator sees and files; the dispatcher acts; a
 });
 
 test('compact_conversation (w535): an orchestrator asks for it in a turn, and its conversation is compacted once that turn ends', async (t) => {
-  const { store, chat, sessions } = setup(t);
+  const { store, chat, sessions, agents } = setup(t);
+  // The check after a turn ends waits 2 s in production for a later turn end; a moment here.
+  (agents.autoCompact as unknown as { settleMs: number }).settleMs = 20;
   const ben = chat(BEN);
   sessions.send(ben.info.id, 'hello', 'human', undefined, { requestedBy: BEN });
   await until('the first turn', () => ben.info.status === 'idle');
@@ -355,7 +365,8 @@ test('nobody chats with the dispatcher, the owner included; the harness and the 
 });
 
 test('requests: a question goes to its filer, whose answer brings it back; closing as done does not wake the dispatcher', async (t) => {
-  const { store, dispatcher, chat, call, heard } = setup(t);
+  // Production's 1.5 s gathering: the filing and the answer to the question must fall in one window.
+  const { store, dispatcher, chat, call, heard } = setup(t, { gatherMs: 1500 });
   const loth = chat(LOTH).info;
   await call(loth, 'request_work', { title: 'Playtest the new tutorial', brief: 'Look for soft locks.' });
   await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'ask', note: 'Single-player or co-op?' });
@@ -683,6 +694,7 @@ test('loop guards: config orchestrator.* sets them, within 1-100, else the defau
 });
 
 test('message_person: a message to an orchestrator mid-turn waits for that turn, then gets its own answer', async (t) => {
+  shortSlowTurns(t);
   const { store, sessions, chat, call } = setup(t);
   const ben = chat(BEN);
   sessions.send(ben.info.id, '#slow what is running?', 'human', undefined, { requestedBy: BEN });
@@ -843,7 +855,7 @@ test('w340: the two report keys the w343 detach wrongly took (w197, w313) come b
 // ---------------------------------------------------------------- w362: timers
 
 test('w362: set_timer, list_timers, update_timer, cancel_timer are each orchestrator\'s own; a person writing cancels wake_me, never a timer', async (t) => {
-  const { agents, o, chat, call, dispatcher } = setup(t);
+  const { agents, store, o, chat, call, dispatcher } = setup(t);
   const ben = chat(BEN);
   const set = await call(ben.info, 'set_timer', { title: 'FFBox desync scan', note: 'Check FFBox for new desync PRs and tell Ben.', schedule: { every_minutes: 60 } });
   assert.equal(set.isError, false, set.text);
@@ -852,7 +864,9 @@ test('w362: set_timer, list_timers, update_timer, cancel_timer are each orchestr
   const wake = await call(ben.info, 'wake_me', { minutes: 30, note: 'check the belt fix' });
   assert.equal(wake.isError, false, wake.text);
   // Ben writes to his orchestrator (the remote path; the message route does the same: waker.cancel, personWrote, send).
-  await agents.askOrchestrator('How is it going?', 1, 'test', BEN);
+  // Not waiting in askOrchestrator (it looks every 1.5 s) but for the answer itself.
+  await agents.askOrchestrator('How is it going?', 0, 'test', BEN);
+  await until('Ben’s orchestrator answered', () => store.readTranscript(ben.info.id).some((e) => e.kind === 'assistant' && e.text.includes('How is it going?')));
   assert.equal(agents.waker.pending(ben.info.id), undefined, 'wake_me: cancelled by a person writing, as before');
   const listed = await call(ben.info, 'list_timers', {});
   assert.match(listed.text, new RegExp(`${id} "FFBox desync scan" \\[active\\] every 1 h, next `), 'the timer is untouched');
@@ -1104,6 +1118,7 @@ test("w467: an orchestrator's hooks refuse config.json, data/ and ~/.ssh, and le
 // ---------------------------------------------------------------- w496: every dispatched worker's first message is its brief
 
 test('w496: a worker started for a request gets the request as filed, its notes and the PR line in its first message, at once or queued at the cap', async (t) => {
+  shortSlowTurns(t);
   const { store, sessions, dispatcher, chat, call } = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 1 });
   const ben = chat(BEN);
   ben.lastFrom = 'human';

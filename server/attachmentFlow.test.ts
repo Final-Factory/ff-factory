@@ -67,6 +67,8 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { h
   machines.attachments = files;
   const alpha = path.join(dir, 'alpha');
   agents.boot();
+  // Notices to the dispatcher gather 1.5 s in production; 100 ms here.
+  (agents.orchestrators as unknown as { d: { gatherMs: number } }).d.gatherMs = 100;
   /** Run first at the end (a machine's daemon goes before the portal's folder). */
   const closers: (() => Promise<void>)[] = [];
   t.after(async () => {

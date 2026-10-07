@@ -183,7 +183,8 @@ test("prompts: every person's message names its sender, in every kind of session
 });
 
 test('w389: a worker reads who sent each message, typed in its chat, from an orchestrator, queued behind busy slots, or listed after a restart', async (t) => {
-  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  // Its "#slow" turn takes about 1 s here (40 pieces 25 ms apart), not 4 s.
+  setQueryForTesting(fakeQuery({ stepMs: 1, slowStepMs: 25 }) as never);
   const dir = tmpDir(t, 'ffsb-ident-', async () => {
     sessions.stopAll();
     await new Promise((res) => setTimeout(res, 50));

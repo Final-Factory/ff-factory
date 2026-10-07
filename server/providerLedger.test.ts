@@ -68,6 +68,8 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
   const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
   Object.defineProperty(agents, 'workerOptions', { value: () => ({ model: 'opus' }) });
   agents.boot();
+  // Notices to the dispatcher gather 1.5 s in production; 100 ms here.
+  (agents.orchestrators as unknown as { d: { gatherMs: number } }).d.gatherMs = 100;
   // The worker's sandbox is on a machine: pc/lag, a worktree on branch sandbox/lag-lead on its in-process daemon.
   const pc = await startTestMachine(machines, { sandboxes: [{ name: 'lag', branch: 'sandbox/lag-lead' }] });
   const o = agents.orchestrators;

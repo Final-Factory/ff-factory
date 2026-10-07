@@ -118,6 +118,8 @@ export interface OrchestratorsDeps {
   now?: () => Date;
   /** How long intake notices gather before they reach the dispatcher (tests shorten it). */
   intakeGatherMs?: number;
+  /** How long other notices gather before they reach the dispatcher (GATHER_MS; tests shorten it). */
+  gatherMs?: number;
 }
 
 /** A standing agent's approved delegation, for Orchestrators.fileDelegation (w527). */
@@ -564,7 +566,7 @@ export class Orchestrators {
     g.timer = setTimeout(() => {
       this.gathered.delete(key);
       this.toDispatcher(g.texts.join('\n\n---\n\n'), g.by);
-    }, lane ? (this.d.intakeGatherMs ?? INTAKE_GATHER_MS) : GATHER_MS);
+    }, lane ? (this.d.intakeGatherMs ?? INTAKE_GATHER_MS) : (this.d.gatherMs ?? GATHER_MS));
     g.timer.unref?.();
     this.gathered.set(key, g);
   }
