@@ -293,11 +293,11 @@ export class IntakeManager {
 
   private lastCheck = 0;
 
-  /** The Intake tab's "Check Discord now": a poll now, at most every 30 s. */
+  /** The Intake tab's "Check Discord now": a poll now, at most every 30 s (intake.discord.checkNowSeconds, tests only). */
   async checkNow(): Promise<{ ok: boolean; note?: string }> {
     if (!this.settings.discord.enabled) return { ok: false, note: 'the Discord intake is off (config intake.discord.enabled)' };
     const now = this.now();
-    if (now - this.lastCheck < 30_000) return { ok: false, note: `checked ${Math.round((now - this.lastCheck) / 1000)} s ago; try again in a moment` };
+    if (now - this.lastCheck < this.settings.discord.checkNowSeconds * 1000) return { ok: false, note: `checked ${Math.round((now - this.lastCheck) / 1000)} s ago; try again in a moment` };
     this.lastCheck = now;
     await this.pollDiscord();
     await this.checkMerged();
