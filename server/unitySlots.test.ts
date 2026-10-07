@@ -295,7 +295,9 @@ test('unity slots: a client waits in the queue for its slot and gets it when the
 });
 
 test('unity slots: a crashed holder (process gone) or a silent one (no heartbeat) has its slots freed and the orchestrator told', async (t) => {
-  const { dir, slots, events, dead } = arbiter(t, { staleMs: 200 });
+  // A stale limit no stall of a loaded runner reaches: with 200 ms the background tick freed the crash holder as silent
+  // before it was looked at (Windows CI, w636). The silent one is made stale by its file's time, not by waiting.
+  const { dir, slots, events, dead } = arbiter(t, { staleMs: 60_000 });
   await slots.tick();
   const crash = await (async () => {
     const p = acquire(client(dir, 4242), { count: 1, label: 'peer run', pollMs: 5, heartbeatMs: 60_000 });
@@ -316,7 +318,7 @@ test('unity slots: a crashed holder (process gone) or a silent one (no heartbeat
     await slots.tick();
     return p;
   })();
-  const old = new Date(Date.now() - 1000);
+  const old = new Date(Date.now() - 120_000);
   fs.utimesSync(reqFile(dir, silent.id!), old, old);
   await slots.tick();
   assert.equal(fs.existsSync(reqFile(dir, silent.id!)), false);
@@ -325,12 +327,15 @@ test('unity slots: a crashed holder (process gone) or a silent one (no heartbeat
 });
 
 test('unity slots: a waiter whose request the arbiter dropped (silent while suspended) files it again and still gets its slot', { timeout: 10_000 }, async (t) => {
-  const { dir, slots } = arbiter(t, { staleMs: 200 });
+  // The stale limit far above any stall (with 200 ms a loaded runner's stall freed the holder too), and the waiter's
+  // heartbeat off for the test (it is the one suspended): with a 20 ms heartbeat its touch could undo the aging below
+  // before the arbiter looked, and it never asked again (w636, 2 of 40 under load).
+  const { dir, slots } = arbiter(t, { staleMs: 60_000 });
   await slots.tick();
   const one = await acquire(client(dir, 111), { count: 1, label: 'build pr-fix', pollMs: 5, heartbeatMs: 20 });
   const said: string[] = [];
   const box: { second?: Awaited<ReturnType<typeof acquire>> } = {};
-  const waiting = acquire(client(dir, process.pid, said), { count: 1, label: 'warm slot1', pollMs: 5, heartbeatMs: 20 }).then((h) => (box.second = h));
+  const waiting = acquire(client(dir, process.pid, said), { count: 1, label: 'warm slot1', pollMs: 5, heartbeatMs: 600_000 }).then((h) => (box.second = h));
   let id = '';
   for (let i = 0; i < 100 && !id; i++) {
     id = fs.readdirSync(dir).map((f) => /^req-(.+)\.json$/.exec(f)?.[1] ?? '').find((x) => x && x !== one.id) ?? '';
@@ -339,7 +344,7 @@ test('unity slots: a waiter whose request the arbiter dropped (silent while susp
   assert.ok(id, 'the waiter filed its request');
   const first = JSON.parse(fs.readFileSync(reqFile(dir, id), 'utf8'));
   // Suspended past the stale limit: the arbiter drops the request, the waiter (resumed) files it again.
-  const old = new Date(Date.now() - 1000);
+  const old = new Date(Date.now() - 120_000);
   fs.utimesSync(reqFile(dir, id), old, old);
   for (let i = 0; i < 100 && !said.some((l) => /asked again/.test(l)); i++) await settle(5);
   assert.match(said.join('\n'), new RegExp(`the request for 1 Unity slot\\(s\\) was gone from the mailbox; asked again \\(${id}\\)`));
@@ -402,17 +407,34 @@ test('unity slots: the CLI: run waits, runs and releases; a second run waits for
   t.after(() => clearInterval(timer));
   const script = path.join(import.meta.dirname, '..', 'machine', 'unitySlots.ts');
   const log = path.join(dir, 'order.log');
+  const go = path.join(dir, 'go');
+  const lines = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => l.split(' ')) : []);
+  const waitFor = async (what: string, cond: () => boolean) => {
+    const end = Date.now() + 30_000;
+    while (!cond()) {
+      if (Date.now() > end) assert.fail(`timed out waiting for ${what}`);
+      await settle(20);
+    }
+  };
+  // Each job runs until the test says go (at most 60 s, should the test fail first). The second is started once the
+  // first runs (a fixed head start lost to a slow process start on Windows CI: the second asked first, w636), and the
+  // first ends only once the second waits for it.
   const job = (name: string) =>
     new Promise<number>((resolve) => {
-      const body = `const fs=require('fs');fs.appendFileSync(${JSON.stringify(log)},'${name} start '+Date.now()+'\\n');setTimeout(()=>{fs.appendFileSync(${JSON.stringify(log)},'${name} end '+Date.now()+'\\n')},400)`;
+      const body = `const fs=require('fs');fs.appendFileSync(${JSON.stringify(log)},'${name} start '+Date.now()+'\\n');const cap=Date.now()+60000;const i=setInterval(()=>{if(fs.existsSync(${JSON.stringify(go)})||Date.now()>cap){clearInterval(i);fs.appendFileSync(${JSON.stringify(log)},'${name} end '+Date.now()+'\\n')}},10)`;
       const c = spawn(process.execPath, [script, 'run', '--label', name, '--', process.execPath, '-e', body], { env: { ...process.env, FF_UNITY_SLOTS: dir }, stdio: 'ignore' });
       c.on('exit', (code) => resolve(code ?? -1));
     });
-  const [a, b] = await Promise.all([job('first'), new Promise<number>((r) => setTimeout(() => void job('second').then(r), 150))]);
-  assert.deepEqual([a, b], [0, 0]);
-  const lines = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => l.split(' '));
-  assert.deepEqual(lines.map((l) => `${l[0]} ${l[1]}`), ['first start', 'first end', 'second start', 'second end'], 'one after the other');
-  assert.ok(Number(lines[2][2]) >= Number(lines[1][2]));
+  const a = job('first');
+  await waitFor('the first run to start', () => lines().length > 0);
+  const b = job('second');
+  await waitFor('the second run to wait', () => slots.report()?.waiting.some((w) => w.label === 'second') ?? false);
+  assert.deepEqual(slots.report()!.granted.map((g) => g.label), ['first']);
+  fs.writeFileSync(go, '');
+  assert.deepEqual(await Promise.all([a, b]), [0, 0]);
+  const done = lines();
+  assert.deepEqual(done.map((l) => `${l[0]} ${l[1]}`), ['first start', 'first end', 'second start', 'second end'], 'one after the other');
+  assert.ok(Number(done[2][2]) >= Number(done[1][2]));
 });
 
 test('unity slots: CLI arguments, the shims and the mailbox folder', () => {
