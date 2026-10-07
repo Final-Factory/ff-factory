@@ -1,5 +1,5 @@
 // The Unity MCP bridge for a machine's agents (docs/machines.md, "Unity MCP"): the MCP-for-Unity server the machine's
-// own Claude Code runs, given to each agent confined to its place's editor (the main clone's, or its sandbox's), the
+// own Claude Code runs, given to each sandbox agent confined to its sandbox's editor (none in the main clone, w536), the
 // way the host confines its sandboxes' workers (server/unityMcp.ts).
 import fs from 'node:fs';
 import os from 'node:os';
@@ -9,9 +9,6 @@ import { normProject } from '../server/unityHang.ts';
 import type { StdioServer } from '../server/launch.ts';
 
 export type { StdioServer };
-
-/** The place key of the main clone (sandbox ids are slugs, so none can be this). */
-export const MAIN_CLONE = '_main-clone';
 
 /** The status folder of a place: the only editor its agents' Unity MCP server can find (UNITY_MCP_STATUS_DIR). */
 export const mcpStatusDir = (appDir: string, place: string) => path.join(appDir, 'unity-mcp', place);

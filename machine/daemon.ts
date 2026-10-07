@@ -14,21 +14,17 @@ import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
-import { PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
+import { MAIN_CLONE_NO_AGENTS, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
-import { MacUnity, MacUnityWatch, realDeps } from './unity.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
-import { MAIN_CLONE, McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
-import { withBaseRepoLock } from '../server/sandboxes.ts';
+import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, type StdioServer } from './unityMcp.ts';
 import { SECRET_ENV, addSecretValues, redactSecrets } from '../server/secrets.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
-import { listImages, readImage } from '../server/images.ts';
-import { readGitStatus } from '../server/gitStatus.ts';
-import { switchBranch } from '../server/switchBranch.ts';
+import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
@@ -210,10 +206,6 @@ const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a.map(
 
 export class Daemon {
   private readonly cfg: DaemonConfig;
-  /** The Unity editor of this machine's clone (machine/unity.ts). */
-  unity: MacUnity;
-  /** Its hang and crash watch (auto-restart), started with the daemon. */
-  unityWatch?: MacUnityWatch;
   /** The outside watchdog of the portal's host, when this machine is the watcher (machine/outsideWatch.ts). */
   outsideWatch?: OutsideWatch;
   private ws?: WebSocket;
@@ -260,7 +252,6 @@ export class Daemon {
     this.probes = probes;
     const platform = process.platform === 'win32' ? 'win32' : 'darwin';
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
-    this.unity = new MacUnity(cfg.repoPath, realDeps(platform), undefined, platform, where);
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
     const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line));
     this.slots = new UnitySlots({
@@ -270,10 +261,8 @@ export class Daemon {
       alive: isAlive,
       now: () => Date.now(),
       limit: () => this.currentPool()?.maxUnity,
-      places: () => [
-        ...this.pool.list().map((sb) => ({ holder: `sandbox:${sb.id}`, path: sb.path, editorUp: this.pool.editorUp(sb.id), priority: this.pool.stoppedWithin(sb.id, 5 * 60_000) })),
-        { holder: 'main', path: cfg.repoPath, editorUp: !!this.unityWatch?.editorPid },
-      ],
+      // The sandboxes' editors; any other (a person's own) counts as outside the gate (w536: no main-clone place).
+      places: () => this.pool.list().map((sb) => ({ holder: `sandbox:${sb.id}`, path: sb.path, editorUp: this.pool.editorUp(sb.id), priority: this.pool.stoppedWithin(sb.id, 5 * 60_000) })),
       ramPct: () => this.ramPct(),
       machine: cfg.id,
       log: (line) => log(line),
@@ -354,13 +343,12 @@ export class Daemon {
     });
   }
 
-  /** Where agents work here, for the stale-output rules: every ready sandbox (its editor's state) and the main clone. */
+  /** Where agents work here, for the stale-output rules: every ready sandbox, with its editor's state (w536: no main clone). */
   private stalePlaces(): StalePlace[] {
-    const sbs = this.pool.list().filter((s) => s.status === 'ready');
-    return [
-      ...sbs.map((s) => ({ id: s.id, path: s.path, kind: 'sandbox' as const, editorRunning: this.pool.editorKnownStopped(s.id) ? false : true })),
-      { id: 'main clone', path: this.cfg.repoPath, kind: 'clone' as const },
-    ];
+    return this.pool
+      .list()
+      .filter((s) => s.status === 'ready')
+      .map((s) => ({ id: s.id, path: s.path, kind: 'sandbox' as const, editorRunning: this.pool.editorKnownStopped(s.id) ? false : true }));
   }
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
@@ -388,15 +376,15 @@ export class Daemon {
   }
 
   /**
-   * The stdio MCP servers of an agent here: for spec.unityMcp, the machine's Unity MCP server confined to its place's
-   * editor (its sandbox's, else the main clone's). Never the portal's own commands. Exported through the class for tests.
+   * The stdio MCP servers of an agent here: for spec.unityMcp, the machine's Unity MCP server confined to its sandbox's
+   * editor; none outside a sandbox (a standing agent, w536). Never the portal's own commands. Exported through the class for tests.
    */
   stdioMcpFor(spec: Pick<LaunchSpec, 'unityMcp' | 'sandbox'>): LaunchSpec['stdioMcp'] {
-    if (!spec.unityMcp) return undefined;
+    if (!spec.unityMcp || !spec.sandbox) return undefined;
     const { server } = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
     if (!server) return undefined;
     const appDir = appDirOfConfig(this.cfg);
-    const place = spec.sandbox ?? MAIN_CLONE;
+    const place = spec.sandbox;
     fs.mkdirSync(mcpStatusDir(appDir, place), { recursive: true });
     this.syncMcpScopes();
     return { UnityMCP: scopedUnityMcp(server, appDir, place) };
@@ -413,10 +401,7 @@ export class Daemon {
         return (e as NodeJS.ErrnoException).code === 'EPERM' ? pid : undefined;
       }
     };
-    const places = [
-      { place: MAIN_CLONE, project: this.cfg.repoPath, pid: alive(this.unityWatch?.editorPid) },
-      ...this.pool.list().map((sb) => ({ place: sb.id, project: sb.path, pid: alive(sb.unity.pid) })),
-    ];
+    const places = this.pool.list().map((sb) => ({ place: sb.id, project: sb.path, pid: alive(sb.unity.pid) }));
     this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line));
   }
 
@@ -473,12 +458,6 @@ export class Daemon {
   start() {
     this.startGuard();
     this.connect();
-    // The editor of this clone: a hung or crashed one is restarted automatically (machine/unity.ts).
-    this.unityWatch = new MacUnityWatch(this.unity, (text, restarted) => {
-      log(`unity: ${text}`);
-      this.send({ type: 'unity_event', text, restarted });
-    });
-    this.timers.push(setInterval(() => void this.unityWatch?.tick(), 30_000));
     // The sandboxes' editors (state, hang/crash watch), their git status, the disk guard and the idle-editor stop.
     this.timers.push(setInterval(() => void this.pool.tick(), 30_000));
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
@@ -493,14 +472,11 @@ export class Daemon {
     const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
     log(mcp.server ? `unity mcp: ${mcp.server.command} ${mcp.server.args.join(' ')} (from ${mcp.source})` : `unity mcp: none (${mcp.source}); agents here get no Unity MCP bridge`);
     this.timers.push(setInterval(() => this.syncMcpScopes(), 5_000));
-    // App Nap off for Unity (takes effect at the editor's next launch; start() does it too).
-    if (process.platform === 'darwin') void this.unity.noAppNap().catch(() => undefined);
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
     const watch = readOutsideWatch(outsideWatchFile(appDirOfConfig(this.cfg)));
     if (watch) this.outsideWatch = new OutsideWatch(watch);
     this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
     this.timers.push(setInterval(() => this.heartbeat(), 20_000));
-    this.timers.push(setInterval(() => void this.reportStatus(), 60_000));
     this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
     this.timers.push(setInterval(() => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
@@ -708,7 +684,6 @@ export class Daemon {
     // The portal showed these stopped while the link was down; give it their real state.
     for (const e of this.entries.values()) this.send({ type: 'session', info: e.s.info, live: e.s.live });
     this.reportSandboxes();
-    void this.reportStatus();
     void this.reportStats();
     // The portal keeps the last report across a reconnect: a flapping link must not start a CLI each time.
     if (Date.now() - this.lastUsage > this.usageMs / 2) void this.reportUsage();
@@ -756,14 +731,12 @@ export class Daemon {
 
   /**
    * What an agent's processes need to take Unity slots (docs/unity-lifecycle.md, "Unity slots"): the mailbox, who they
-   * hold for (their sandbox, or the main clone, whose editor gives their launches priority), and `unity-slot` first on
-   * their PATH. Exported through the class for tests.
+   * hold for (their sandbox; a standing agent holds for itself, w536), and `unity-slot` first on their PATH. Exported
+   * through the class for tests.
    */
   slotEnv(spec: Pick<LaunchSpec, 'sandbox' | 'cwd'>): Record<string, string> {
     const env: Record<string, string> = { FF_UNITY_SLOTS: this.slots.dir };
-    const main = path.resolve(spec.cwd).toLowerCase() === path.resolve(this.cfg.repoPath).toLowerCase();
     if (spec.sandbox) env.FF_UNITY_HOLDER = `sandbox:${spec.sandbox}`;
-    else if (main) env.FF_UNITY_HOLDER = 'main';
     if (this.slotBin) {
       // Windows keeps it as "Path": the same key, or the agent would get two.
       const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
@@ -811,11 +784,6 @@ export class Daemon {
     } finally {
       this.usageInFlight = false;
     }
-  }
-
-  private async reportStatus() {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
-    this.send({ type: 'status', git: await readGitStatus(this.cfg.repoPath) });
   }
 
   /** Every sandbox, whenever one changes (protocol 5). Only when the machine has sandboxes, or had some. */
@@ -950,7 +918,7 @@ export class Daemon {
     return [...this.entries.values()].filter((e) => e.s.live).length;
   }
 
-  /** Live agents in one place: a sandbox, or the main clone (sandbox undefined). */
+  /** Live agents in one place: a sandbox, or outside sandboxes (standing agents, sandbox undefined). */
   private liveIn(sandbox: string | undefined) {
     return [...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox === sandbox).length;
   }
@@ -1119,27 +1087,27 @@ export class Daemon {
         return;
       }
       case 'switch': {
-        // Agents of the same place only: a sandbox's agents do not hold up the main clone, nor the other way round. The
-        // agent that called switch_branch is mid-turn in it by definition and never holds itself up (w422).
+        // An older portal may still ask for the main clone: no agent works there (w536).
+        if (!msg.sandbox) {
+          this.send({ type: 'switch_result', id: msg.id, ok: false, error: MAIN_CLONE_NO_AGENTS });
+          return;
+        }
+        // Agents of that sandbox only. The agent that called switch_branch is mid-turn in it by definition and never
+        // holds itself up (w422).
         const here = [...this.entries.values()].filter((e) => e.spec?.sandbox === msg.sandbox).map((e) => e.s);
         const { busy } = othersMidTurn(here, msg.callerSessionId);
         if (busy.length) {
-          this.send({ type: 'switch_result', id: msg.id, ok: false, error: midTurnRefusal(busy, msg.sandbox ? `sandbox ${msg.sandbox}` : "this machine's main clone") });
+          this.send({ type: 'switch_result', id: msg.id, ok: false, error: midTurnRefusal(busy, `sandbox ${msg.sandbox}`) });
           return;
         }
-        // The main clone's git is shared with its sandboxes' worktrees: the same lock as theirs.
-        const job = msg.sandbox ? this.pool.switch(msg.sandbox, msg.branch, msg.createFrom) : switchBranch({ dir: this.cfg.repoPath, branch: msg.branch, createFrom: msg.createFrom, lock: withBaseRepoLock });
-        void job.then(
-          (r) => {
-            this.send({ type: 'switch_result', id: msg.id, ok: true, ...r });
-            void this.reportStatus();
-          },
+        void this.pool.switch(msg.sandbox, msg.branch, msg.createFrom).then(
+          (r) => this.send({ type: 'switch_result', id: msg.id, ok: true, ...r }),
           (err) => this.send({ type: 'switch_result', id: msg.id, ok: false, error: (err as Error).message }),
         );
         return;
       }
       case 'status_now':
-        void this.reportStatus();
+        // An older portal's ask for the main clone's git status: none is sent (w536).
         return;
       case 'sandbox': {
         const reply = (p: Promise<string>) =>
@@ -1161,27 +1129,12 @@ export class Daemon {
         return;
       }
       case 'unity': {
-        if (msg.sandbox) {
-          const sb = msg.sandbox;
-          void this.pool.unity(sb, msg.action, msg.force).then(
-            (text) => this.send({ type: 'unity_result', id: msg.id, ok: true, text }),
-            (err) => this.send({ type: 'unity_result', id: msg.id, ok: false, text: (err as Error).message }),
-          );
+        // An older portal may still ask for the main clone's editor: the daemon manages none there (w536).
+        if (!msg.sandbox) {
+          this.send({ type: 'unity_result', id: msg.id, ok: false, text: MAIN_CLONE_NO_AGENTS });
           return;
         }
-        const u = this.unity;
-        const status = async () => [await u.status(), this.unityWatch?.describe(), await this.slotsNow()].filter(Boolean).join('\n');
-        // The main clone's editor takes a Unity slot too (w469); one already up keeps its own (a restart is not queued).
-        const gated = async (go: () => Promise<string>) => {
-          if (!u.editors(await u.procsNow()).length) {
-            const why = await this.slots.startRefusal('main');
-            if (why) throw new Error(why);
-          }
-          return go();
-        };
-        const act = msg.action === 'start' ? gated(() => u.start()) : msg.action === 'stop' ? u.stop({ force: msg.force }) : msg.action === 'restart' ? gated(() => u.restart({ force: msg.force })) : status();
-        if (msg.action === 'stop' || msg.action === 'restart') this.unityWatch?.expectExit();
-        void act.then(
+        void this.pool.unity(msg.sandbox, msg.action, msg.force).then(
           (text) => this.send({ type: 'unity_result', id: msg.id, ok: true, text }),
           (err) => this.send({ type: 'unity_result', id: msg.id, ok: false, text: (err as Error).message }),
         );
@@ -1210,16 +1163,17 @@ export class Daemon {
         this.entries.get(msg.sessionId)?.s.decide(msg.requestId, msg.allow, msg.message);
         return;
       case 'fs': {
-        // Only the clone, the sandboxes and the standing agents' folders (and, for one session's image, its own temp
-        // folder): the gallery and inline images, nothing else.
-        const roots = [this.cfg.repoPath, path.join(appDirOfConfig(this.cfg), 'agents'), ...this.pool.paths()];
+        // Only the sandboxes and the standing agents' folders (and, for one session's image, its own temp folder): inline
+        // images, nothing else. Not the main clone (w536): no agent works there.
+        const roots = [path.join(appDirOfConfig(this.cfg), 'agents'), ...this.pool.paths()];
         if (msg.op === 'read' && msg.sessionId) roots.push(sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId));
         try {
           if (msg.op === 'read') {
             const img = readImage(msg.path, roots);
             this.send({ type: 'fs_result', id: msg.id, ok: true, mediaType: img.mediaType, data: img.data.toString('base64') });
           } else {
-            this.send({ type: 'fs_result', id: msg.id, ok: true, files: listImages(this.cfg.repoPath, msg.dirs) });
+            // The machine's gallery was its main clone's: nothing to list since w536.
+            this.send({ type: 'fs_result', id: msg.id, ok: true, files: [] });
           }
         } catch (err) {
           this.send({ type: 'fs_result', id: msg.id, ok: false, error: (err as Error).message });

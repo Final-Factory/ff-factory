@@ -1902,7 +1902,8 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
       `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${accountSource(this.cfg, m)}`,
       `  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`,
       sandboxes,
-      `  ${describeGit(g)}`,
+      // Its main clone's git, from a daemon before w536 only (a current one reports none).
+      ...(g ? [`  ${describeGit(g)}`] : []),
       `  last clean-up: ${m.lastCleanup ? describeCleanup(m.lastCleanup) : 'none reported yet'}`,
       this.agentsPart(standing).replace(/^ {2}agents/, '  standing agents'),
     ].join('\n');

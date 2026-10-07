@@ -10,7 +10,7 @@ import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
-import { ATTACHMENT_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ATTACHMENT_PROTOCOL, MAIN_CLONE_NO_AGENTS, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -49,8 +49,7 @@ export function cutOffMidTurn(i: Pick<SessionInfo, 'kind' | 'status' | 'turnOpen
 const RESUME_WITHIN_MS = 6 * 3_600_000;
 /** How long after a daemon's hello the resume messages go out. */
 export const RESUME_DELAY_MS = { value: 3000 };
-/** The refusal of unity and switch_branch on a machine's main clone (w536). */
-export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";
+export { MAIN_CLONE_NO_AGENTS };
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
 
@@ -1200,11 +1199,6 @@ export class MachineManager {
     if (attachments.length) this.attachments?.grant(m.id, attachments.map((a) => a.id));
     const files = attachments.map(({ path: _p, error: _e, ...ref }) => ref);
     this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), ...(files.length ? { attachments: files } : {}) });
-  }
-
-  /** Ask a machine's daemon for its git status now. */
-  refreshGit(id: string) {
-    this.post(id, { type: 'status_now' }, false);
   }
 
   touch(s: RemoteSession) {

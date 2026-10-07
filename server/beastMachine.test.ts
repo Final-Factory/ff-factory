@@ -437,7 +437,7 @@ test('w469: a daemon gives its agents the Unity slots mailbox, their holder and 
     const slots = path.join(dir, 'slots');
     const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: dir, maxEventsFile: null, unitySlotsDir: slots }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
     assert.deepEqual(d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') }), { FF_UNITY_SLOTS: slots, FF_UNITY_HOLDER: 'sandbox:sb1' }, 'before start wrote the commands: no PATH change');
-    assert.equal(d.slotEnv({ cwd: path.join(dir, 'FinalFactory') }).FF_UNITY_HOLDER, 'main', "the main clone's agents hold for its editor");
+    assert.equal(d.slotEnv({ cwd: path.join(dir, 'FinalFactory') }).FF_UNITY_HOLDER, undefined, 'no holder for the main clone (w536)');
     assert.equal(d.slotEnv({ cwd: path.join(dir, 'agents', 'nightly') }).FF_UNITY_HOLDER, undefined, 'a standing agent holds for itself');
     (d as unknown as { slotBin: string }).slotBin = path.join(slots, 'bin');
     const env = d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') });
@@ -449,6 +449,38 @@ test('w469: a daemon gives its agents the Unity slots mailbox, their holder and 
     // Built without one (a test's daemon), its mailbox is its own, never the machine's real one.
     const plain = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: path.join(dir, 'mx'), maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
     assert.equal(plain.slots.dir, path.join(dir, 'mx', 'unity-slots'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('w536: a daemon manages nothing in its main clone: unity and switch there are refused, no git status, no slot place or holder, no Unity MCP outside a sandbox', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-dmain-'));
+  try {
+    const d = new Daemon(
+      { portalUrl: 'http://127.0.0.1:1', id: 'm5', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: dir, maxEventsFile: null, unitySlotsDir: path.join(dir, 'slots'), unityMcpServer: { command: 'uvx', args: ['mcp-for-unity'] } },
+      (i, s, o, e) => new FakeAgent(i, s, o, e),
+      PROBES,
+    );
+    const inside = d as unknown as { send(m: unknown): void; onMessage(m: unknown): void; slots: { d: { places(): { holder: string }[] } } };
+    const sent: { type: string; id?: string; ok?: boolean; text?: string; error?: string }[] = [];
+    inside.send = (m) => sent.push(m as (typeof sent)[number]);
+    inside.onMessage({ type: 'unity', id: 'u1', action: 'start' });
+    inside.onMessage({ type: 'switch', id: 's1', branch: 'feature/x' });
+    inside.onMessage({ type: 'status_now' });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(sent, [
+      { type: 'unity_result', id: 'u1', ok: false, text: "a machine's main clone takes no agents (w536): give a sandbox" },
+      { type: 'switch_result', id: 's1', ok: false, error: "a machine's main clone takes no agents (w536): give a sandbox" },
+    ], 'no git status either');
+    assert.equal('unity' in d || 'unityWatch' in d, false, "no editor or watch of the main clone");
+    assert.deepEqual(inside.slots.d.places().map((p) => p.holder), [], "no 'main' slot place");
+    // A standing agent: no holder and no UnityMCP, but the slots mailbox like every agent.
+    const standing = { cwd: path.join(dir, 'agents', 'nightly') };
+    assert.deepEqual(d.slotEnv(standing), { FF_UNITY_SLOTS: path.join(dir, 'slots') });
+    assert.equal(d.stdioMcpFor({ unityMcp: true }), undefined);
+    assert.ok(d.stdioMcpFor({ unityMcp: true, sandbox: 'sb1' })?.UnityMCP, 'a sandbox agent still gets its bridge');
+    d.shutdown();
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
