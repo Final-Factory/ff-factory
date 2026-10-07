@@ -21,7 +21,7 @@ A person's own orchestrator (Lothsahn's or Ben's) has the `ops_worker` tool:
 
 | action | what it does |
 |---|---|
-| `send` (`text`, `fresh`) | gives it a job or a follow-up. `fresh: true` starts a new conversation. A **new job** needs a turn the person started with a message of their own. Within that job (12 hours), the orchestrator's harness turns (a check-in, a timer) may follow up |
+| `send` (`text`, `fresh`) | gives it a job or a follow-up. `fresh: true` starts a new conversation. A **new job** needs a turn the person started with a message of their own. Within that job (12 hours), the orchestrator's harness turns (a check-in, a timer, its `[ops worker]` report) may follow up, with no count (w627) |
 | `deploy` (`text`: the person's words) | a portal deploy (`fffctl update`). Only in a turn the person started with their own message: never a check-in, a timer, a relayed report or a job's follow-up. See [Deploys](#deploys) |
 | `status` | its state, the job and whose it is, its limits, and its last 20 steps |
 | `interrupt` | ends its turn |
@@ -87,6 +87,14 @@ process of the portal: it would get the portal's account and everything that acc
 4. The binary is `/usr/local/lib/fff/ops/claude`, the same Claude Code as the Agent SDK the portal runs.
    `fff-ops-sync` copies it there (as root) at every portal start, because `fff-ops` cannot enter `/srv/fff`. The
    launcher refuses to run it when the header's SDK version differs.
+5. **One process at a time, in turn (w638).** While a connection is open, systemd drops any other the moment it
+   arrives, without a word ("Too many incoming connections (1), dropping connection." in the VM's journal). A stop
+   (`fresh: true`, `ops_worker stop`, the idle stop, the portal's) sends Claude Code the SDK's own interrupt and ends
+   its input, so it ends its turn and exits; the spawner keeps the socket until then. The next process waits for that
+   close, then connects, and tries again every 250 ms while systemd still drops it (it frees the connection a moment
+   after the process exits), for up to 60 s (`OPS_SLOT`). Before this, a fresh job connected while the old process was
+   still exiting, systemd dropped it, and the job failed with "Claude Code process exited with code 1" (twice on
+   2026-10-07). `deploy/vm/test/fff-ops-socket.test.sh` checks it under real systemd in CI.
 
 ## What it may do, and what enforces it
 
@@ -150,7 +158,7 @@ Fixed in `OPS_LIMITS` (`server/opsWorker.ts`), like the worker itself:
 | idle stop | 1 hour, then the process stops and the conversation stays | sourced: the same hour idle workers get (`IDLE_REAP_MS`), the prompt cache's lifetime |
 | turn limit | 2 hours, then FF Factory interrupts the turn | a guess: an install with its waits fits, and longer waits use `wake_me` |
 | process limit | 8 hours (`RuntimeMaxSec`), enforced by systemd | a guess: a backstop if the portal's checks fail |
-| a job | 12 hours of follow-ups from the orchestrator's harness turns after a person's own turn opened it | a guess: one evening's reinstall |
+| a job | 12 hours of follow-ups from the orchestrator's harness turns after a person's own turn opened it, as many as the job needs | a guess: one evening's reinstall. Follow-ups were never counted, and w627 (lothsahn, 2026-10-07: "an infinite number of messages to each other and the portal worker") keeps it so |
 | memory | 1536 MB (`MemoryMax`) | measured basis: an idle claude process used 100-300 MB resident and 450-650 MB committed (BEAST, 2026-10-04, orchestrators.md). The VM has 4 GiB |
 
 The session record stays for good, with its conversation. `fresh: true` starts a new conversation: the transcript
@@ -266,6 +274,10 @@ tokens), the `secrets` folder, the vault key, `gh`'s token, Max's Discord token,
 
 Residual risks, and what bounds each:
 
+- **An orchestrator and the worker answering each other.** Each `[ops worker]` report opens a harness turn of the
+  orchestrator, which may `send` a follow-up, which ends in another report. Follow-ups have no count (w627). What ends
+  such a run: the job's 12 hours (after them a `send` opens a new job, which needs the person's own turn), the $25 spend
+  cap of a process, the 2-hour turn limit, and every step in the dashboard's transcript.
 - **Prompt injection through an orchestrator.** A relayed report could ask Lothsahn's orchestrator to have the worker
   do something on a machine. Bounds: a new job needs the person's own turn, and harness turns can only follow up a job
   that turn opened. Every command is in the transcript and journal. The person's orchestrator relays the worker's
@@ -305,8 +317,9 @@ restarts with a drain. Check it:
 
 If it does not start, the transcript says why, in the launcher's words: a version mismatch (restart the portal once:
 `fff-ops-sync` runs at its start), no credential (the orchestrators' account is a login, not a token), or the socket
-missing (the update did not run the new `install.sh`). `journalctl -t fff-ops -t fff-ops-ssh -t fff-ops-priv` in the
-VM shows its side.
+missing (the update did not run the new `install.sh`). "still had its one process after 60 s" means the last process
+did not exit after its stop (see `ops_worker status`). `journalctl -t fff-ops -t fff-ops-ssh -t fff-ops-priv` in the
+VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
 
 ## Code and tests
 
@@ -317,8 +330,13 @@ VM shows its side.
   `units/fff-ops.socket`, and the install step (9/10) that writes `fff-ops@.service`, `fff-ops-scratch.service` and
   the sudoers file.
 - `server/opsWorker.test.ts`: who reaches it, the belts, the shell seatbelt, writes and reads, redaction, the header,
-  the spawner against a fake socket, the one session with its job rule and lifetime, and a deploy (only in the
-  person's own turn, the grant, the report after the restart).
+  the spawner against a fake socket, a fresh job from every state the last process can be in (just after a turn,
+  mid-turn, after the idle stop, after a failed start, a resume after a stop) through the real Agent SDK and a
+  stand-in for systemd's one-connection socket (w638), the one session with its job rule and lifetime, and a deploy
+  (only in the person's own turn, the grant, the report after the restart).
+- `deploy/vm/test/fff-ops-socket.test.sh` (CI's unit-test job on Linux, w638): `fff-ops.socket`'s own settings under
+  real systemd, the real launcher with a fake claude and the portal's `opsSpawner`: systemd drops a second connection
+  while one is open, and a new process started right after a stop runs, the last one idle or mid-turn.
 - `deploy/vm/test/fff-ops.test.sh` (run by `lint.sh`): the launcher against a fake claude (arguments, environment,
   fd 3, refusals), the ssh wrapper against a fake ssh, real scp and sftp copies both ways through the wrappers to a fake
   machine running a real `sftp-server` (and the options, port, host and command they refuse), and the root wrapper's

@@ -695,3 +695,112 @@ test('machine sandboxes: an editor start takes a Unity slot: batch builds starte
   assert.match(await p.unity('a', 'restart'), /Stopped \(fake\)\. Started \(fake\)/);
   assert.match(await p.unity('a', 'status'), /\nUnity on this machine: editors 3 of 2: 0 interactive, 2 batch, 1 granted not started yet; OVER LIMIT: nothing more starts until it drops/);
 });
+
+// ---------------------------------------------------------------- far check-ins release their sandbox (w640)
+
+test('w640: a worker stopped with a far check-in frees its sandbox; new work there starts on a fresh branch; the worker resumes in another sandbox on its branch, nothing lost', async (t) => {
+  const r = repos();
+  const cfg = {
+    dataDir: path.join(r.root, 'data'),
+    sandboxRoot: path.join(r.root, 'host-sb'),
+    standingRoot: path.join(r.root, '_agents'),
+    repo: { url: 'x', basePath: path.join(r.root, 'base') },
+    defaultBase: 'origin/develop',
+    models: ['opus'],
+    defaultModel: 'opus',
+    protectedPaths: [],
+    limits: { maxSessions: 6, maxUnity: 2, maxSandboxes: 4, minFreeGB: 0, minFreeRamGB: 0 },
+    orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false },
+    worker: { permissionMode: 'default', effort: 'low' },
+    unity: {},
+  } as unknown as Config;
+  fs.mkdirSync(cfg.dataDir, { recursive: true });
+  const store = new Store(cfg.dataDir);
+  const sessions = new SessionManager(cfg, store);
+  const mm = new MachineManager(cfg, store, sessions);
+  const agents = new Agents(cfg, store, sessions, mm, new Identity(cfg, () => []));
+  mm.hooks = {
+    specFor: (info, m) => {
+      const sb = mm.requireSandbox(m.id, info.machineSandbox!);
+      return { cwd: sb.path, sandbox: sb.id, settingSources: [], append: '', strictMcp: true, guard: { id: sb.id, ownPath: sb.path, protectedPaths: [], gameRepos: [] } };
+    },
+    handlersFor: () => ({}),
+  };
+  const server = http.createServer();
+  server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
+  await new Promise<void>((res) => server.listen(0, '127.0.0.1', res));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const { token } = mm.register({ id: 'pc', host: 'pc', purpose: 'unused', status: 'ready', repoPath: r.main, home: r.root, portalUrl: url, sandboxRoot: r.sbRoot, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1 });
+  const { d: poolDeps } = deps(r.main);
+  const daemon = new Daemon({ portalUrl: url, id: 'pc', token, repoPath: r.main, appDir: path.join(r.root, 'app'), claude: 'no-such-claude', maxSessions: 4, maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES, poolDeps);
+  t.after(async () => {
+    agents.orchestrators.close();
+    daemon.shutdown();
+    server.close();
+    await new Promise((res) => setTimeout(res, 300));
+    store.flush();
+    r.cleanup();
+  });
+  daemon.start();
+  await until('online with hello', () => mm.isOnline('pc') && !!store.machines.get('pc')?.info);
+  await mm.createSandbox('pc', { name: 'sb1', branch: 'feature/w1' });
+  await mm.createSandbox('pc', { name: 'sb2' });
+  const sbOf = (id: string) => store.machines.get('pc')?.sandboxes?.find((s) => s.id === id);
+  await until('both ready', () => sbOf('sb1')?.status === 'ready' && sbOf('sb2')?.status === 'ready');
+  const path1 = sbOf('sb1')!.path;
+  const path2 = sbOf('sb2')!.path;
+  // The portal's copy of a sandbox's git state, read now (the daemon reads it every 2 minutes).
+  const gitNow = async (id: string) => {
+    sbOf(id)!.git = await readGitStatus(sbOf(id)!.path);
+  };
+  const onDaemon = (id: string) => (daemon as unknown as { entries: Map<string, { spec?: { cwd: string } }> }).entries.get(id);
+
+  // A worker on feature/w1 commits work no remote has, then sets a check-in two hours out and ends its turn.
+  const w = mm.createSession('pc', { kind: 'worker', title: 'w1 work', permissionMode: 'default', sandbox: 'sb1' });
+  sessions.send(w.info.id, 'go');
+  await until('w live and idle', () => w.live && w.info.status === 'idle');
+  fs.writeFileSync(path.join(path1, 'work.txt'), 'w1');
+  r.git(path1, 'add', 'work.txt');
+  r.git(path1, 'commit', '-q', '-m', 'w1 work');
+  assert.match(agents.waker.schedule(w.info.id, 120, 'check CI'), /I will message you/);
+  assert.ok(w.info.wakeAt, 'its check-in is on the session');
+  await gitNow('sb1');
+
+  // Waiting with only a far check-in: stopped first, then its clean sandbox is released.
+  assert.match(agents.placeAgain.tick().join('\n'), /stopped .*its check-in is 2.0 h away/);
+  await until('w stopped', () => !w.live && w.info.status === 'stopped');
+  await gitNow('sb1');
+  assert.match(agents.placeAgain.tick().join('\n'), /released pc\/sb1/);
+  assert.deepEqual({ sandbox: w.info.placeReleased?.sandbox, branch: w.info.placeReleased?.branch }, { sandbox: 'sb1', branch: 'feature/w1' });
+  assert.match(agents.describeAllSandboxes(), /pc\/sb1 FREE/);
+  assert.match(agents.describeAllSandboxes(), /its sandbox is released/);
+
+  // New work there: the sandbox leaves w's branch first (its commit pushed on the way), so nothing lands on it.
+  const prep = await agents.prepareForNewWork('pc/sb1', undefined, 'W999');
+  assert.equal(prep.branch, 'sandbox/sb1-w999');
+  assert.match(prep.note, /pushed 1 unpushed commit\(s\) of feature\/w1 first/);
+  assert.equal(r.git(r.origin, 'log', '-1', '--format=%s', 'feature/w1'), 'w1 work', 'its work is on origin');
+  const n = agents.startWorker({ sandbox: 'pc/sb1', prompt: 'new work', from: 'orchestrator' });
+  await until('n live', () => n.live);
+  await gitNow('sb1');
+  assert.equal(sbOf('sb1')!.git?.branch, 'sandbox/sb1-w999');
+  // Nothing more to release, and new work is not given a sandbox a waiting resume has spoken for.
+  assert.deepEqual(agents.placeAgain.tick(), []);
+
+  // Its check-in comes: placed in sb2, switched to its branch, and its message says where it is now.
+  sessions.send(w.info.id, '[wake_me] Time is up. Your note: check CI', 'system');
+  await until('w resumed in sb2', () => w.live && w.info.machineSandbox === 'sb2', 30_000);
+  assert.equal(r.git(path2, 'branch', '--show-current'), 'feature/w1');
+  assert.equal(r.git(path2, 'log', '-1', '--format=%s'), 'w1 work');
+  assert.equal(onDaemon(w.info.id)?.spec?.cwd, path2, 'its process runs in sb2');
+  const said = store.readTranscript(w.info.id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text).at(-1) ?? '';
+  assert.match(said, /^\[moved\] While you were stopped your sandbox pc\/sb1 went to other work/);
+  assert.ok(said.includes(path2) && said.endsWith('[wake_me] Time is up. Your note: check CI'), said);
+  assert.equal(w.info.placeReleased, undefined);
+  assert.equal(w.info.movedFrom, undefined, 'said once');
+  assert.deepEqual(sbOf('sb2')!.sessionIds, [w.info.id]);
+  assert.ok(!sbOf('sb1')!.sessionIds.includes(w.info.id));
+  n.stop();
+  w.stop();
+  await until('both stopped', () => !n.live && !w.live);
+});

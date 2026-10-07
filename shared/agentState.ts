@@ -40,9 +40,11 @@ export interface AgentStateView {
   resumes?: string;
   /** Stopped when its daemon went away (w613): its sandbox is kept for it ("its daemon restarted at 21:04 UTC"). */
   held?: string;
+  /** Stopped and its sandbox released for other work (w640): why ("its check-in is 9 h away"). */
+  released?: string;
 }
 
-type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeAt' | 'wakeNote' | 'queuedSend' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince'>>;
+type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeAt' | 'wakeNote' | 'queuedSend' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince' | 'placeReleased'>>;
 
 /**
  * How long an agent whose daemon went away under it keeps its sandbox (w613): a day, time for a person or its
@@ -95,7 +97,8 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
     const resumes = checkIn ?? (s.queuedSend ? 'a queued message' : undefined);
     const heldAt = s.heldSince ? Date.parse(s.heldSince) : NaN;
     const held = heldAt && now - heldAt < HOLD_PLACE_MS ? `its daemon restarted at ${time(s.heldSince!, now)}` : undefined;
-    return v('stopped', { ...(resumes ? { resumes } : {}), ...(held ? { held } : {}) });
+    const released = s.placeReleased ? s.placeReleased.why : undefined;
+    return v('stopped', { ...(resumes ? { resumes } : {}), ...(held ? { held } : {}), ...(released ? { released } : {}) });
   }
   const jobs = jobsText(s);
   if (jobs) return v('waiting', { kind: 'job', waitsOn: [jobs, checkIn].filter(Boolean).join(' · '), ...(wakeAhead ? { until: s.wakeAt } : {}) });
@@ -110,7 +113,8 @@ export function agentState(s: AgentFacts, time: (iso: string, now: number) => st
 /** "Waiting: CI on PR #1098 · check-in 06:10 UTC", "Stopped (resumes at check-in 16:29 UTC)", "Idle", …. */
 export const agentStateText = (s: AgentFacts, time?: (iso: string, now: number) => string, now?: number) => {
   const a = agentState(s, time, now);
-  return a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes})` : a.held ? `${a.label} (${a.held}; its sandbox is kept for it)` : a.label;
+  const released = a.released ? `; its sandbox is released (${a.released}): it is placed again when it resumes` : '';
+  return a.waitsOn ? `${a.label}: ${a.waitsOn}` : a.resumes ? `${a.label} (resumes at ${a.resumes}${released})` : a.held ? `${a.label} (${a.held}; its sandbox is kept for it)` : a.released ? `${a.label} (its sandbox is released: ${a.released})` : a.label;
 };
 
 /** Whether the agent is alive between turns with something real pending (Waiting). */
@@ -124,6 +128,13 @@ export const holdsItsPlace = (s: AgentFacts, now?: number) => {
   const a = agentState(s, undefined, now);
   return a.state === 'waiting' || !!a.resumes || !!a.held;
 };
+
+/**
+ * Whether the agent keeps its sandbox from other work (w640): it holds its place and has not released it. A worker
+ * stopped with its check-in far away (server/placeAgain.ts) will still come back, as the ledger counts it
+ * (holdsItsPlace), but is placed again when it does, so its sandbox is free meanwhile.
+ */
+export const holdsSandbox = (s: AgentFacts, now?: number) => holdsItsPlace(s, now) && !s.placeReleased;
 
 /** Agents in list order: Working (and Needs you), Waiting, Idle, Error, Stopped; the most recent activity first in each. */
 export function sortAgents<T extends AgentFacts & Pick<SessionInfo, 'lastActivityAt'>>(list: readonly T[], now?: number): T[] {
