@@ -10,6 +10,7 @@
  *   "#slow"        streams for a few seconds (for the running state and interrupts)
  *   "#fail"        ends the turn with an error result
  *   "#die"         the agent process ends mid-turn (as when the server's process tree is stopped)
+ *   "#wait <s>"    stays mid-turn that many seconds, then says "Waited <s> s." (w605: a turn across a daemon restart)
  *   "#bg"          starts a background task (a background command, a watcher) and ends the turn
  *   "#whoami"      says the sender line the message came with: "Sender: [from …]", or "Sender: none" (w389)
  *   "/compact [focus]"  Claude Code's /compact, as the CLI answers it when the message is the command itself (w518):
@@ -194,6 +195,17 @@ export function fakeQuery(fake: FakeOptions = {}) {
           yield { type: 'system', subtype: 'background_tasks_changed', tasks: [{ id: `bg-${++msgId}`, ambient: false }], session_id: sessionId, uuid: `b${msgId}` } as never;
           yield text('Started the build in the background; it will wake me.');
           yield result(uuid, true, 'waiting on the background build');
+        } else if (/#wait\s+\d+/i.test(words)) {
+          const secs = Number(/#wait\s+(\d+)/i.exec(words)![1]);
+          yield text(`Working for ${secs} s...`);
+          const until = Date.now() + secs * 1000;
+          while (Date.now() < until && !interrupted) await sleep(50);
+          if (interrupted) {
+            interrupted = false;
+            continue;
+          }
+          yield text(`Waited ${secs} s.`);
+          yield result(uuid, true, `Waited ${secs} s.`);
         } else if (/#fail\b/i.test(words)) {
           yield text('Something went wrong.');
           yield result(uuid, false, 'failed');
