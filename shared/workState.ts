@@ -1,18 +1,24 @@
-// What a request is really doing now (w418, asked by Lothsahn): Working, Waiting on input, Queued, Merged with a
-// follow-up pending, or Stalled, derived live from its workers and its own fields. Shown by list_work and the
+// What a request is really doing now (w418, asked by Lothsahn): Working, Waiting on input, Queued, Blocked, Merged with a
+// follow-up pending, or Stalled, derived live from its workers and its own fields. Shown by list_work, read_work and the
 // Dispatcher page; it never changes a request. The stored status (and the cleanup's `stalled`, which still decides what
 // it closes or stalls, server/ledgerSweep.ts) stays as it is (docs/orchestrators.md, "Ledger").
+//
+// The three waits (w643, Lothsahn: "make sure you consistently apply all 3 states in all cases"): Waiting on input is a
+// PERSON who must act, and says on whom; Queued is capacity ONLY (no free machine, sandbox or agent slot), and a Queued
+// request while a computer that could take it has room is flagged; Blocked is a THING (another request, a deploy, a
+// machine, a usage limit, a lock, a time, CI) and names it. A worker between turns with its own work still going (a
+// background job such as CI, a check-in it set) is Working: it holds the request and comes back to it by itself.
 import type { SessionInfo, WorkItem } from './types.ts';
 import { agentState } from './agentState.ts';
+import { blockerName } from './blockers.ts';
 
-export type WorkLiveState = 'working' | 'pending' | 'waiting' | 'queued' | 'followup' | 'stalled';
-export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'pending', 'waiting', 'queued', 'followup', 'stalled'];
+export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'followup' | 'stalled';
+export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'blocked', 'followup', 'stalled'];
 export const WORK_LIVE_LABEL: Record<WorkLiveState, string> = {
   working: 'Working',
-  /** Its worker is between turns but will come back to it (w475): a check-in, a background task, a queued message. */
-  pending: 'Waiting',
   waiting: 'Waiting on input',
   queued: 'Queued',
+  blocked: 'Blocked',
   followup: 'Merged, follow-up pending',
   stalled: 'Stalled',
 };
@@ -21,21 +27,31 @@ export interface WorkLive {
   state: WorkLiveState;
   /** Why, in a few words: who works on it, what it waits for, why nothing is. */
   why: string;
-  /** Waiting: who it waits on (display names, or "a reviewer"). */
+  /** Waiting on input: who it waits on (display names, or "a reviewer"). Blocked: what it waits on ("w633 finishing"). */
   waitsOn?: string[];
+  /**
+   * Queued while a computer that could take it has room (w643): a bug the dispatcher must fix (start it, or block it on
+   * what it really waits for). Names the computers.
+   */
+  roomOn?: string[];
 }
 
 export interface WorkLiveFacts {
   session: (id: string) => SessionInfo | undefined;
   /** Every request (open ones are enough): which request a worker linked to several serves is decided across them. */
   items: readonly WorkItem[];
-  /** The server's send queue (w384): why a message to this worker waits for a free agent slot, if one does. */
+  /**
+   * The server's send queue (w384): why a message to this worker waits, if one does, and on what (w643). Default: the
+   * session's own copy (SessionInfo.queuedSend, queuedOn), which the page has too.
+   */
   queuedSend?: (sessionId: string) => string | undefined;
+  /** The computers with room for one more worker now (Agents.places, hasRoom); undefined when unknown. */
+  room?: readonly string[];
   now: number;
 }
 
 /** WORK_OPEN's statuses, and stalled: spelled out, since the web build takes only type imports from shared/types.ts. */
-const LIVE = new Set<WorkItem['status']>(['new', 'question', 'queued', 'active', 'stalled']);
+const LIVE = new Set<WorkItem['status']>(['new', 'question', 'queued', 'blocked', 'active', 'stalled']);
 const live = (w: WorkItem) => LIVE.has(w.status);
 const BUSY = new Set<SessionInfo['status']>(['running', 'starting']);
 
@@ -100,10 +116,6 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   }
   if (w.ffbox && (w.ffbox.state === 'sent' || w.ffbox.state === 'accepted')) return { state: 'working', why: `on FFBox${w.ffbox.conversation ? ` (conversation ${w.ffbox.conversation})` : ''}` };
 
-  // Waiting (w475): a worker on it is between turns but will come back to it, so it is not stalled.
-  const coming = mine.map((s) => ({ s, a: agentState(s, undefined, f.now) })).find((x) => x.a.state === 'waiting');
-  if (coming) return { state: 'pending', why: `worker ${coming.s.id}'s ${coming.a.waitsOn}` };
-
   // Waiting on input: a person must approve, answer, decide or allow something.
   if (w.approval?.state === 'pending') return { state: 'waiting', why: 'an intake request waiting for a reviewer to approve or decline it', waitsOn: ['a reviewer'] };
   if (w.question) return { state: 'waiting', why: `the dispatcher's question: ${w.question.text}`, waitsOn: names([w.requestedBy]) };
@@ -113,14 +125,35 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
     const p = asking.pendingPermissions[0];
     return { state: 'waiting', why: `${asking.id} waits for permission${p ? ` to use ${p.toolName}` : ''}`, waitsOn: names(asking.requestedBy ? [asking.requestedBy] : w.requesters) };
   }
+
+  // Working, between turns (w475, w643): a worker on it has its own work still going (a background job such as CI or a
+  // build, or a check-in it set) and comes back to it by itself, also when stopped until that check-in (w509, w640).
+  // Not Waiting: nobody else needs to act.
+  const coming = mine.map((s) => ({ s, a: agentState(s, undefined, f.now) })).find((x) => (x.a.state === 'between_turns' && x.a.kind !== 'queued') || x.a.resumes?.startsWith('check-in'));
+  if (coming) return { state: 'working', why: coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}` };
+
   const decide = mine.find((s) => asksAPerson(s.lastResult));
   if (decide) return { state: 'waiting', why: `${decide.id} stopped asking for a decision`, waitsOn: names(w.requesters) };
 
-  // Queued: not started yet, or held for a free agent slot.
-  const held = mine.map((s) => ({ s, why: f.queuedSend?.(s.id) })).find((x) => x.why);
+  // A message to one of its workers waits in the send queue: for a free slot (Queued) or for its machine (Blocked).
+  const held = mine.map((s) => ({ s, why: f.queuedSend?.(s.id) ?? s.queuedSend, on: s.queuedOn })).find((x) => x.why);
+  if (held?.on === 'machine') return { state: 'blocked', why: `a message to ${held.s.id} waits for its machine (${held.why})`, waitsOn: [held.s.machineId ?? 'its machine'] };
   if (held) return { state: 'queued', why: `a message to ${held.s.id} waits for a free agent slot (${held.why})` };
-  if (w.status === 'new') return { state: 'queued', why: 'waiting for the dispatcher to decide it' };
-  if (w.status === 'queued') return { state: 'queued', why: 'the dispatcher queued it for capacity' };
+
+  // Blocked on a thing (w643): the blocker it records.
+  if (w.status === 'blocked' && w.blocked) return { state: 'blocked', why: `${w.blocked.what} (since ${ago(w.blocked.at, f.now)}, set by ${w.blocked.by})`, waitsOn: [blockerName(w.blocked, f.now)] };
+
+  // Not decided yet: the dispatcher has it (its [work request] went out when it was filed or reopened).
+  if (w.status === 'new') return { state: 'working', why: `the dispatcher has it to decide, since ${ago(w.updatedAt, f.now)}` };
+
+  // Queued: capacity only. With a computer that could take it free, that is wrong, and says so (w643).
+  if (w.status === 'queued') {
+    const needs = w.queuedFor?.needs?.map((n) => n.toLowerCase());
+    const room = (f.room ?? []).filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
+    const what = `for capacity${needs?.length ? ` on ${needs.join(' or ')}` : ''}`;
+    if (room.length) return { state: 'queued', why: `queued ${what}, but ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} room: the dispatcher should start it, or block it on what it waits for`, roomOn: room };
+    return { state: 'queued', why: `queued ${what}${f.room ? ': no computer that could take it has room' : ''}` };
+  }
 
   // The cleanup stalled it: its own reason, which says more than anything derived here (w418: kept as it is).
   if (w.stalled) return { state: 'stalled', why: `${w.stalled.kind}: ${w.stalled.reason}` };
@@ -163,7 +196,7 @@ export function workLiveAll(items: readonly WorkItem[], f: Omit<WorkLiveFacts, '
   return out;
 }
 
-/** "3 working, 2 waiting on input, 1 stalled": the counts, in WORK_LIVE_STATES order, zeros left out. */
+/** "3 working, 2 waiting on input, 1 blocked": the counts, in WORK_LIVE_STATES order, zeros left out. */
 export function liveCounts(states: Iterable<WorkLive>): Record<WorkLiveState, number> {
   const n = Object.fromEntries(WORK_LIVE_STATES.map((s) => [s, 0])) as Record<WorkLiveState, number>;
   for (const l of states) n[l.state]++;

@@ -1199,6 +1199,8 @@ test("w496: a worker started while its machine's daemon is outdated gets its bri
   // A pass while it is still outdated: both stay, in order.
   assert.equal(sessions.drain(), 0);
   assert.deepEqual(sessions.queued().map((q) => q.uuid), [uuid, nudge]);
+  // Held for its machine, not for a slot (w643): both are Blocked on it, not Queued.
+  assert.deepEqual(sessions.queued().map((q) => q.on), ['machine', 'machine']);
   assert.match(store.readTranscript(s.info.id).at(-1)?.kind === 'system' ? (store.readTranscript(s.info.id).at(-1) as { text: string }).text : '', /could not be delivered yet \(mx's daemon is outdated/);
   // Redeployed and current: the next pass delivers the brief first.
   hello('5b181de');
@@ -1218,6 +1220,7 @@ test('w496: a queued message that cannot be delivered for a day is given up, wit
   (sessions.sessions as Map<string, unknown>).set('gone1', failing);
   const uuid = sessions.send('gone1', 'BRIEF', 'orchestrator', undefined, { hold: true });
   assert.equal(sessions.isQueued(uuid), true);
+  assert.equal(sessions.queued()[0].on, 'machine', 'its daemon refuses it: its machine, a thing (w643)');
   assert.equal(sessions.drain(), 0);
   assert.equal(sessions.isQueued(uuid), true, 'kept while it is young');
   assert.equal(sessions.drain(Date.now() + QUEUE_HOLD_MS + 1000), 0);

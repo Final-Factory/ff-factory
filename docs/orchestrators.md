@@ -82,7 +82,8 @@ task verbatim as the brief, with the overlap check and the automated sources' ca
 agent and who approved it ("w12 from Ben (standing agent "Nightly sentry", delegation 2c70e0fa, auto-approved under
 its rules)"), and the dispatcher queues, places and starts it like any request. The same agent asking again for an
 open request, or one finished in the last two days, with the same title is that request. A request the dispatcher
-queued for one waits for capacity however long it takes: the cleanup never stalls it. Start now on the dashboard
+queued for one waits for capacity however long it takes: the cleanup never stalls it (a computer with room still
+flags it, below). Start now on the dashboard
 makes it urgent and tells the dispatcher to start it ahead of the queue (`bumpWork`).
 
 The dispatcher then does one of these for each request:
@@ -92,8 +93,9 @@ The dispatcher then does one of these for each request:
 | start it | `start_agent` with `work_id`, or `message_agent` with `work_id` to a worker already on it | `active` |
 | merge it | `decide_work merge` into the open request it repeats; its people join that one | `merged` |
 | link it | `decide_work link` to workers already doing it | `active` |
-| queue it | `decide_work queue`, saying what it waits for | `queued` |
-| ask | `decide_work ask`, at most 3 questions per request | `question` |
+| queue it | `decide_work queue`: capacity only, no computer that could take it has room (`needs`: the computers that can, when only some can); refused while one of them has room | `queued` |
+| block it | `decide_work block` with `blocker`: the thing it waits on (another request, a deploy, a machine, a usage limit, a lock, a time, CI); it starts by itself when that clears | `blocked` |
+| ask | `decide_work ask`, at most 3 questions per request: what only a person can answer or decide | `question` |
 | reject it, or close it | `decide_work reject` / `done`, saying why | `rejected` / `done` |
 
 Where it runs is the dispatcher's choice: `list_sandboxes` starts with each computer's room (BUSY or ROOM n%, live
@@ -141,11 +143,92 @@ workers are working on vs which are waiting on input"). It is derived live from 
 | state | when | the line says |
 |---|---|---|
 | **Working** | a worker it serves is `running` or `starting` (in a long command too), or FFBox runs it (`ffbox` sent or accepted) | which worker, and the tool it has been in since when |
-| **Waiting** (w475) | a worker it serves is Waiting (below, "Agent states"): between turns, with a check-in, a background task or a queued message that will bring it back | "worker eb9632fd's check-in at 23:12 UTC" |
-| **Waiting on input** | an intake approval is pending, the dispatcher's question or a design question is open, a worker it serves waits for a permission, or a worker it serves stopped asking for a decision (its last report ends asking a person to decide, or with a question) | what, and on whom: "a reviewer", the requester, the design question's people, the worker's person |
-| **Queued** | not dispatched yet (`new`), queued by the dispatcher (`queued`), or a message to its worker waits for a free agent slot (the send queue; list_work only, the page does not have the queue) | which |
+| **Waiting on input** | a PERSON must act: an intake approval is pending, the dispatcher's question or a design question is open, a worker it serves waits for a permission | what, and on whom: "a reviewer", the requester, the design question's people, the worker's person |
+| **Working** (between turns) | a worker it serves is between turns with its own work still going: a background job (CI it watches, a build, a test run) or a check-in it set with `wake_me` (w475's Waiting, renamed by w643), also while it is stopped until that check-in | "ab12cd34 between turns: CI on PR #1098 · check-in 06:10 UTC" |
+| **Waiting on input** | a worker it serves stopped asking for a decision (its last report ends asking a person to decide, or with a question) | on its requesters |
+| **Blocked** | a message to a worker it serves waits in the send queue for its machine (offline, its daemon outdated, the host guard) | on that machine |
+| **Queued** | a message to a worker it serves waits in the send queue for a free agent slot or sandbox | the queue's reason |
+| **Blocked** | the dispatcher blocked it on a thing (status `blocked`, `blocked` below), or the cleanup did (a merged request whose only step left is a deploy) | on what ("w633 finishing", "a portal deploy", "lothdesktop coming back online", "CI on owner/repo#12"), what for, since when and who set it |
+| **Working** | not decided yet (`new`): the dispatcher has it, its `[work request]` went out when it was filed or reopened | since when |
+| **Queued** | queued for capacity (`queued`) | for which computers; and, flagged in red (`WRONG` in list_work), the computers that have room when one that could take it does |
 | **Merged, follow-up pending** | its PRs merged, none is open, and it is still open | the cleanup's own reason ("still open: its brief asks for a step after the merge"), or that the cleanup has not looked yet |
 | **Stalled** | anything else: nothing works on it and nothing waits on a person, as soon as that is true | why: the cleanup's stall reason, an open PR nobody is on, its worker moved on to another request, finished its turn or stopped (and when), or no worker was ever started |
+
+### Waiting, Queued, Blocked
+
+Three kinds of waiting, never mixed (w643, Lothsahn: "Please cleanup the states. ... Make sure you consistently apply
+all 3 states in all cases"; the rule he approved). w634 (held until w633's timing table exists and its lab.lock is free)
+and w641 (held until the next portal deploy) both read "Queued (the dispatcher queued it for capacity)" while LothDesktop
+had room, which read as "LothDesktop can take more work but the queue isn't moving".
+
+1. **Waiting on input**: a PERSON must act (a reviewer's approval, the dispatcher's question, a design decision, a
+   permission, a worker that stopped asking for a decision). It always says on whom.
+2. **Queued**: capacity ONLY: no free computer, sandbox, editor or agent slot for it. `decide_work queue` is refused
+   while a computer that could take it has room (all of them, or those its `needs` names), and a request left queued
+   at least 10 minutes while one has room is a bug, flagged loudly: the line says `WRONG` with the computers that have
+   room (red on the page), its log and the server log say so, and the dispatcher gets `[ledger] WRONG STATE: …` (at
+   most once an hour per request) to start it or block it (`Orchestrators.flagQueuedWithRoom`, run by the blocker
+   watch every minute). A message held in the send queue for a free slot is Queued too.
+3. **Blocked on <what>**: it waits on a THING, never a person and never capacity, and always names it. The dispatcher
+   records it with `decide_work block` and a structured `blocker` (`WorkItem.blocked`, status `blocked`):
+
+| kind | `ref` | clears (it starts by itself) | stuck after (it stalls, saying so) |
+|---|---|---|---|
+| `request` | the request it waits on ("w633"); `on`: `done` (default) or `report` | that request closes as done; with `on: report`, also when a worker on it finishes a turn with a report. Merges are followed. Declined or cancelled: it asks its requester (Waiting on input). Stalled: it stalls too | never by time: it follows that request, which the cleanup stalls by itself when nothing works on it |
+| `deploy` | none for the portal; a machine id for that machine's daemon update | a different commit runs there than when it was blocked (`version.ts` `appVersion`, the daemon's) | 7 days |
+| `machine` | the machine | it is online | 3 days |
+| `usage` | the Claude account (its email or label) | its meters are under 90% | 8 days |
+| `lock` | its name ("lab.lock"); `holder`: the request holding it; `until`: when to look again | the holder closes or reports, the nightly lab posts its next results (its run let go of the lock), or `until` passes | 1 day |
+| `time` | none; `until` | `until` passes | never |
+| `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed), or it merged or closed (`gh pr view`, at most every 5 minutes) | 6 hours |
+
+The stuck times are judgments (`shared/blockers.ts` `BLOCKER_STUCK_MS`): a CI run takes minutes to an hour; a lock held
+a day is a run that never ended; a machine away three days is down, not asleep; a weekly usage limit resets within 7
+days; a deploy is a person's call, and a week without one is worth their look.
+
+- **It unblocks by itself.** The blocker watch (`server/blockerWatch.ts`) looks at every blocked request each minute,
+  and at once when one is blocked or the nightly lab reports. When the blocker clears, the request goes back to the
+  dispatcher (`new`), which gets `[ledger] w634 "…" is unblocked: it waited on w633 finishing (…), and w633 closed as
+  done. Start it now: …`, and its people hear why. No person nudges it.
+- **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
+  (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
+  cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).
+- **The cleanup leaves a progressing Blocked request alone.** `stallCandidate` never takes a `blocked` request, and the
+  cleanup does not ask its worker "Is it done?" while it is blocked. A PR of it that merges with nothing left still
+  closes it, as for any request.
+- **Merged, follow-up pending, on a deploy** is Blocked on that deploy (w631's `deployStep`: the only step left after the
+  merge is a portal deploy or the machines' update). The cleanup records the blocker itself (`by: ledger cleanup`), and
+  closes the request once what runs there contains the merge (w631); with a week and no deploy, it stalls. Any other
+  step after the merge stays **Merged, follow-up pending**.
+- **Starting it, queueing it or any other decision ends the block** (`start_agent` / `message_agent` with its work_id,
+  `decide_work`): the blocker and the capacity note belong to their status only (`Orchestrators.stamp`).
+- **Workers between turns are Working** (w643's decision). A worker waiting for CI or a long run on a check-in it set,
+  or on a background job it started, holds the request and comes back to it by itself: nobody else must act, no place is
+  missing, and nothing outside it has to clear for it to go on, so it is neither Waiting nor Queued nor Blocked. The
+  same applies to the agent itself (below, "Agent states"). Blocked is for a request held back by something outside it,
+  which the ledger watches and clears; a worker's own check-in needs no unblocking.
+
+**Every place that produces one of these states** (the w643 audit; each line is what it says now):
+
+| where | what | state |
+|---|---|---|
+| `shared/workState.ts` `workLive` | approval pending / question / design flag / permission / worker asks a decision | Waiting on input, on whom |
+| `shared/workState.ts` `workLive` | a worker between turns on a job or its own check-in (was "Waiting", w475) | Working |
+| `shared/workState.ts` `workLive` | status `new`, the dispatcher deciding (was "Queued") | Working |
+| `shared/workState.ts` `workLive` | status `queued` (was "queued it for capacity", whatever the note said) | Queued; WRONG when a computer that could take it has room |
+| `shared/workState.ts` `workLive` | status `blocked` with its blocker | Blocked on the blocker |
+| `shared/workState.ts` `workLive`, `server/sessions.ts` `send` | a held message: agent cap or sandbox (`machines.ts` `placeFull`, `capFull`), placing again (`placeAgain.ts`) | Queued |
+| the same | a held message: machine offline (`placeAgain.ts` "is offline"), a held brief its daemon refuses (outdated, offline, guard) | Blocked on the machine |
+| `shared/agentState.ts` `agentState` | agent between turns: job, check-in (was "Waiting") / held message | Working / Queued or Blocked |
+| `server/orchestrators.ts` `decide` | `queue` (was free text "it waits (say for what)") | Queued, capacity only, refused with room |
+| `server/orchestrators.ts` `decide` | `block` (new) | Blocked |
+| `server/orchestrators.ts` `capacityMayHaveFreed`, `remindDispatcher` | queued requests listed for capacity; new ones to decide | Queued / Working (blocked ones are the watch's) |
+| `server/orchestrators.ts` `intakeLine` (heartbeat) | approvals and design questions | waiting on input |
+| `server/wake.ts` `describeBusy` (heartbeat) | a worker's permission request (was "WAITING FOR A PERMISSION") | WAITING ON INPUT |
+| `server/ledgerRules.ts` `stallCandidate` | `new`, `queued`, `active`; never `blocked` | (cleanup) |
+| `server/ledgerSweep.ts` `followUpStep` | no "Is it done?" while `blocked` | (cleanup) |
+| `web/src/util.ts` `standingLabel`, `standingGlance` | a standing agent's run due with no free slot (was "Waiting for a slot") | Queued for a slot |
+| `web/src/components/DispatcherPanel.tsx`, `Fleet.tsx`, `web/src/util.ts` | the live states and agent states above, tones: Working blue, Waiting on input amber, Queued grey, Blocked violet | as above |
 
 **A worker on several requests works only on the one it was last given** (and those linked to it since). Each request
 records when each worker was last given it (`links`: `sent` by `start_agent`/`message_agent` with its `work_id`,
@@ -159,9 +242,10 @@ The live state can say Stalled for a request whose status is `active` (a day bef
 Working for one the cleanup stalled whose worker picked it up again.
 
 Where it shows: `list_work` puts it after the status (`- w12 [active] Stalled (ab12 stopped 3 d ago,
-nothing waits on a person): "…"`), closes the list with the counts (`Now: 3 working, 2 waiting on input, 4 stalled.`),
-and takes `state`, one of working, waiting, queued, followup or stalled or a list of them (`["working", "waiting"]`), to
-list only those. The Dispatcher page's Requests tab, and the Intake tab's "In the ledger" list, have a toggle chip per
+nothing waits on a person): "…"`, `- w634 [blocked] Blocked on w633 finishing (…)`), closes the list with the counts
+(`Now: 3 working, 2 waiting on input, 1 blocked, 4 stalled.`), and takes `state`, one of working, waiting, queued,
+blocked, followup or stalled or a list of them (`["waiting", "blocked"]`), to list only those; `status` takes `blocked`
+too. `read_work` (w642) says the same, and a blocked request's facts name its blocker. The Dispatcher page's Requests tab, and the Intake tab's "In the ledger" list, have a toggle chip per
 state with its count above the list: any number can be on at once, and the list shows the requests in any of them;
 "All" or "Clear" turns them off. Each list's choice is kept in the browser (localStorage) across reloads (Lothsahn: "I'd
 like to be able to select multiple types"). Each row's state and reason follow its workers live.
@@ -746,46 +830,51 @@ but the question it labelled ("brighten the lamps after w478?") was kept.
 
 `/mcp` `ask_orchestrator` and `orchestrator_transcript` talk to the key's person's own orchestrator.
 
-## Agent states: Working, Waiting, Idle, Stopped
+## Agent states: Working, Needs you, Queued, Blocked, Idle, Stopped
 
 Every agent shows one of these (w475, asked by Lothsahn: "clear between 'available' workers (idle) and 'waiting'
-workers"; `shared/agentState.ts` `agentState`):
+workers"; `shared/agentState.ts` `agentState`). Since w643 the words follow the ledger's three waits ([Waiting,
+Queued, Blocked](#waiting-queued-blocked)): only a person makes an agent wait (Needs you); an agent between turns on its
+own job or check-in is Working; a message held for a slot is Queued, and one held for its machine is Blocked.
 
 | State | When | Shown as |
 |---|---|---|
-| **Working** | mid-turn: `running` or `starting` (a permission request shows as **Needs you**) | blue |
-| **Waiting** | alive between turns (idle) with something real pending, checked in this order: a **running job** (a background task or watcher the agent started, which a restart ends), a message for it held in the send queue for a free slot, or only a **timer** (its `wake_me` check-in, still ahead) | violet, with what it waits on (w509): "Waiting: CI on PR #1098 · check-in 06:10 UTC" (a job, by the description the agent gave it), "Waiting: a queued message (…)", "Waiting: check-in 16:29 UTC: “merge #1083 when…”" (a timer, with its note's first words) |
+| **Working** | mid-turn: `running` or `starting` | blue |
+| **Needs you** | a permission request waits for its person | amber |
+| **Working** (between turns, internal `between_turns`; w475's Waiting) | alive between turns (idle) with its own work still going, checked in this order: a **running job** (a background task or watcher the agent started, which a restart ends), or only a **timer** (its `wake_me` check-in, still ahead) | blue, with what it is on (w509): "Working: CI on PR #1098 · check-in 06:10 UTC" (a job, by the description the agent gave it), "Working: check-in 16:29 UTC: “merge #1083 when…”" (a timer, with its note's first words) |
+| **Queued** / **Blocked** (between turns) | a message for it held in the send queue: for a free agent slot or sandbox (Queued), or for its machine, offline or its daemon outdated (Blocked) | grey / violet: "Queued: a queued message (…)" |
 | **Idle** (available) | finished its turn with nothing pending: free for new work, and the idle reaper's candidate | grey; a worker reads "Idle (available)" |
-| **Stopped** | no process. Never Waiting (w509). When its check-in or a queued message will start it again it says so, "Stopped (resumes at check-in tomorrow 00:08 UTC)", is listed with the live agents and keeps its sandbox from counting as free, unless its check-in is more than 30 minutes away and its worktree is clean: then its sandbox is released for other work and it is placed again when it resumes (w640, [machines.md](machines.md#placing-work), "Released sandboxes") | grey |
+| **Stopped** | no process. Never between turns (w509); a request it will come back to at its check-in reads Working (w643). When its check-in or a queued message will start it again it says so, "Stopped (resumes at check-in tomorrow 00:08 UTC)", is listed with the live agents and keeps its sandbox from counting as free, unless its check-in is more than 30 minutes away and its worktree is clean: then its sandbox is released for other work and it is placed again when it resumes (w640, [machines.md](machines.md#placing-work), "Released sandboxes") | grey |
 
 A check-in more than 2 minutes past its time has fired or is failing to (`Waker.fire` retries a refused delivery for
-up to 10 minutes, then gives up and says so in the agent's transcript): it is not pending, so it no longer makes an
-agent Waiting or resuming. Times carry their day when it is not today ("tomorrow 00:08 UTC"): w509 started from two
+up to 10 minutes, then gives up and says so in the agent's transcript): it is not pending, so it no longer keeps an
+agent between turns or resuming. Times carry their day when it is not today ("tomorrow 00:08 UTC"): w509 started from two
 stopped workers listed as "Waiting: check-in at 16:29 UTC" that read like yesterday's. Measured on BEAST on 2026-10-06 at
 06:06 UTC, every wake in `data/wakes.json` was still ahead; those two had been set by the workers themselves with "Nothing
 to do; ignore this reminder" notes, so no past wake had failed to fire and no record was stale.
 
 - **Where the facts come from.** The server copies each session's pending `wake_me`, its note's start and a queued
-  message onto it (`SessionInfo.wakeAt`, `wakeNote`, `queuedSend`; `Agents.syncWaiting`, run whenever the wakes or the
+  message and what holds it onto it (`SessionInfo.wakeAt`, `wakeNote`, `queuedSend`, `queuedOn`; `Agents.syncWaiting`, run whenever the wakes or the
   send queue change and once at boot). The SDK's live set of background tasks gives `backgroundTasks` and, since w509,
   `backgroundJobs`: each one's description and kind (`server/sessions.ts`, `background_tasks_changed`), which a machine's
   daemon forwards too once it runs this version (until then: "a background task"). An editor or test job the agent
   started from a background command shows by that command's description; one it waits on otherwise is a `wake_me`.
-- **Where it shows.** The page: every agent list, the sandbox and machine glances ("Waiting"), the agent tabs and
-  pickers, the session header, and the sidebar and Overview, which list a place's agents **Working, then Waiting, then
-  Idle, then Stopped**, the most recent activity first within each (Lothsahn: "sort the running at the top, waiting below
+- **Where it shows.** The page: every agent list, the sandbox and machine glances, the agent tabs and pickers, the
+  session header, and the sidebar and Overview, which list a place's agents **mid-turn, then between turns, then Idle,
+  then Stopped**, the most recent activity first within each (Lothsahn: "sort the running at the top, waiting below
   them, and idle below them"). `list_sandboxes` and `list_machines` put the state first on each agent's line
-  (`[Waiting: check-in at 23:12 UTC, idle]`), in the same order, and list a stopped agent its wake will resume with the
-  live ones. The ledger's request states show a request whose worker is Waiting as **Waiting** (above), not Stalled.
-  The Overview board shows what a Waiting agent waits on beside its state (the full text on hover).
+  (`[Working: check-in 23:12 UTC: “…”, between turns]`), in the same order, and list a stopped agent its wake will
+  resume with the live ones. The ledger's request states show a request whose worker is between turns on its own work
+  as **Working** (above), not Stalled. The Overview board shows what such an agent is on beside its state (the full
+  text on hover).
 - **Sandboxes by status** (w509, Lothsahn). The Overview and the sidebar (per computer) and `list_sandboxes` (per
-  computer) list sandboxes with a Working agent (or one that needs you) first, then Waiting, then Idle, then those
-  with no live agent, unused ones last; the most recent activity first within each (`placeRank`, `sortPlaces`).
-- **What it changes.** A sandbox whose agent is Waiting is not free (the capacity block, placement, `list_sandboxes`'
-  FREE), nor is one whose stopped agent will resume there (`holdsItsPlace`). The dispatcher's brief says never to give
-  new work to a Waiting worker or its sandbox unless the request is its own. The ledger cleanup treats a Waiting worker,
-  and a stopped one its check-in will resume, as busy: its request is neither stalled nor asked "Is it done?"
-  (`server/ledgerSweep.ts`). The agents meter still counts agents mid-turn against the limit (w384), as Lothsahn asked. The idle reaper already kept such workers (`keepIdle`: a pending wake_me, a queued message,
+  computer) list sandboxes with an agent mid-turn (or one that needs you) first, then one between turns, then Idle,
+  then those with no live agent, unused ones last; the most recent activity first within each (`placeRank`, `sortPlaces`).
+- **What it changes.** A sandbox whose agent is between turns is not free (the capacity block, placement,
+  `list_sandboxes`' FREE), nor is one whose stopped agent will resume there (`holdsItsPlace`). The dispatcher's brief
+  says never to give new work to a worker between turns or its sandbox unless the request is its own. The ledger
+  cleanup treats a worker between turns, and a stopped one its check-in will resume, as busy: its request is neither
+  stalled nor asked "Is it done?" (`server/ledgerSweep.ts`). The agents meter still counts agents mid-turn against the limit (w384), as Lothsahn asked. The idle reaper already kept such workers (`keepIdle`: a pending wake_me, a queued message,
   background tasks).
 
 ## Agent limits and idle workers

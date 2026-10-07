@@ -2,9 +2,9 @@ import type { APIRequestContext } from '@playwright/test';
 import { ALPHA, appState, expect, go, isMobile, sandboxHash, startWorker, test, uniq } from './fixtures.ts';
 
 /**
- * An agent's state on the page (w475, asked by Lothsahn): Working, Waiting (a wake_me, a background task: violet, with
- * what it waits on), Idle (available), and the Overview lists a sandbox's agents in that order ("running at the top,
- * waiting below them, and idle below them").
+ * An agent's state on the page (w475, asked by Lothsahn): Working mid-turn, Working between turns (a wake_me, a
+ * background task, with what it is on; w643: never "Waiting", which is a person), Idle (available), and the Overview
+ * lists a sandbox's agents in that order ("running at the top, waiting below them, and idle below them").
  */
 
 async function hook(request: APIRequestContext, door: 'wake' | 'patch-session', data: Record<string, unknown>) {
@@ -13,7 +13,7 @@ async function hook(request: APIRequestContext, door: 'wake' | 'patch-session', 
   expect(r.ok(), await r.text()).toBeTruthy();
 }
 
-test('the Overview shows Working, Waiting and Idle agents in that order, Waiting in its own colour with what it waits on', async ({ authed: page }) => {
+test('the Overview shows agents mid-turn, between turns (Working, with what they are on) and Idle in that order', async ({ authed: page }) => {
   const tag = uniq('state');
   const idle = await startWorker(page.request, `idle one ${tag}`, { title: `Idle ${tag}` });
   const waits = await startWorker(page.request, `checks in later ${tag}`, { title: `Check-in ${tag}` });
@@ -28,13 +28,14 @@ test('the Overview shows Working, Waiting and Idle agents in that order, Waiting
   const board = page.getByTestId('overview');
   const lines = board.getByTestId('fl-agent');
   const line = (title: string) => lines.filter({ hasText: title });
-  await expect(line(`Check-in ${tag}`)).toContainText('waiting');
-  await expect(line(`Check-in ${tag}`).locator('.fl-agent-state')).toHaveClass(/tone-violet/);
-  await expect(line(`Check-in ${tag}`)).toHaveAttribute('title', /waiting \(check-in \d\d:\d\d.*: “e2e check-in”\)/);
+  await expect(line(`Check-in ${tag}`)).toContainText('working');
+  await expect(line(`Check-in ${tag}`)).not.toContainText('waiting');
+  await expect(line(`Check-in ${tag}`).locator('.fl-agent-state')).toHaveClass(/tone-blue/);
+  await expect(line(`Check-in ${tag}`)).toHaveAttribute('title', /working \(check-in \d\d:\d\d.*: “e2e check-in”\)/);
   // What it waits on, on the board itself (w509): the running job's description, or the check-in and its note.
   await expect(line(`Build ${tag}`).getByTestId('fl-agent-why')).toHaveText(`CI on PR #1098 ${tag}`);
   await expect(line(`Check-in ${tag}`).getByTestId('fl-agent-why')).toContainText('“e2e check-in”');
-  await expect(line(`Build ${tag}`)).toHaveAttribute('title', new RegExp(`waiting \\(CI on PR #1098 ${tag}\\)`));
+  await expect(line(`Build ${tag}`)).toHaveAttribute('title', new RegExp(`working \\(CI on PR #1098 ${tag}\\)`));
   await expect(line(`Idle ${tag}`)).toContainText('idle');
 
   // A working one goes to the top while its turn runs (#slow streams for a few seconds).
@@ -52,13 +53,13 @@ test('the Overview shows Working, Waiting and Idle agents in that order, Waiting
   await expect.poll(() => status(work.id), { timeout: 20_000 }).toBe('idle');
 });
 
-test("an agent's page says Waiting and on what", async ({ authed: page }) => {
+test("an agent's page says Working between turns, and on what (w643: not Waiting)", async ({ authed: page }) => {
   const tag = uniq('wait');
   const s = await startWorker(page.request, `checks in later ${tag}`, { title: `Waits ${tag}` });
   await expect.poll(async () => (await appState(page.request)).sessions.find((x) => x.id === s.id)?.status, { timeout: 15_000 }).toBe('idle');
   await hook(page.request, 'wake', { id: s.id, minutes: 30 });
   await go(page, sandboxHash(ALPHA, s.id));
   // Tabs on a wide screen, a picker on a phone: each names the state and what it waits on.
-  if (isMobile(page)) await expect(page.locator('option', { hasText: `Waits ${tag}` })).toHaveText(/Waits \S+ · Waiting: check-in \d\d:\d\d/);
-  else await expect(page.getByRole('tab', { name: new RegExp(`Waits ${tag}`) })).toHaveAttribute('title', /^Waits \S+: Waiting: check-in \d\d:\d\d/);
+  if (isMobile(page)) await expect(page.locator('option', { hasText: `Waits ${tag}` })).toHaveText(/Waits \S+ · Working: check-in \d\d:\d\d/);
+  else await expect(page.getByRole('tab', { name: new RegExp(`Waits ${tag}`) })).toHaveAttribute('title', /^Waits \S+: Working: check-in \d\d:\d\d/);
 });

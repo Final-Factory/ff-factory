@@ -211,6 +211,11 @@ export interface SessionInfo {
   /** Why a message to it waits in the send queue for a free slot (w475, w384), while one does. */
   queuedSend?: string;
   /**
+   * What holds that message (w643): `capacity` (no free agent slot or sandbox: Queued) or `machine` (its machine is
+   * offline or its daemon outdated: Blocked on that machine). Absent: capacity.
+   */
+  queuedOn?: 'capacity' | 'machine';
+  /**
    * The context its next model call reads, in tokens (w535): the last call's input, cached and uncached, plus its
    * output, as the SDK reported it; after a compaction, the size Claude Code measured. This host's sessions only.
    */
@@ -1227,11 +1232,13 @@ export interface AppSettings {
 // ---- the work ledger (docs/orchestrators.md) ----
 
 /**
- * Where a work request stands. The first four are open. `stalled` is not: the cleanup (docs/orchestrators.md, "Ledger
- * cleanup") moved it out of the active list because nothing is working on it; only its person closes or reopens it.
+ * Where a work request stands. The first five are open. `queued` waits for capacity only, `blocked` for a thing named in
+ * `blocked` (w643, docs/orchestrators.md "Waiting, Queued, Blocked"). `stalled` is not open: the cleanup
+ * (docs/orchestrators.md, "Ledger cleanup") moved it out of the active list because nothing is working on it; only its
+ * person closes or reopens it.
  */
-export type WorkStatus = 'new' | 'question' | 'queued' | 'active' | 'stalled' | 'merged' | 'done' | 'rejected' | 'cancelled';
-export const WORK_OPEN: readonly WorkStatus[] = ['new', 'question', 'queued', 'active'];
+export type WorkStatus = 'new' | 'question' | 'queued' | 'blocked' | 'active' | 'stalled' | 'merged' | 'done' | 'rejected' | 'cancelled';
+export const WORK_OPEN: readonly WorkStatus[] = ['new', 'question', 'queued', 'blocked', 'active'];
 
 export type WorkPriority = 'low' | 'normal' | 'high' | 'urgent';
 export const WORK_PRIORITIES: readonly WorkPriority[] = ['low', 'normal', 'high', 'urgent'];
@@ -1342,6 +1349,13 @@ export interface WorkItem {
   prs?: WorkPr[];
   /** Why the cleanup stalled it (status `stalled`). */
   stalled?: WorkStalled;
+  /**
+   * What it waits on (status `blocked`, w643): a thing, never a person and never capacity. It clears by itself
+   * (server/blockerWatch.ts) and the dispatcher is told to start it.
+   */
+  blocked?: WorkBlocker;
+  /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
+  queuedFor?: { at: string; needs?: string[] };
   /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
   followUp?: { at: string; sessionId: string };
   /** Workers the cleanup already resumed once after they were cut off, by session id: never a second time. */
@@ -1394,10 +1408,42 @@ export interface WorkPr {
   noted?: string;
 }
 
+/**
+ * What a blocked request waits on (w643; shared/blockers.ts says when each clears): another request finishing or
+ * reporting, a deploy of the portal or a machine's update, a machine coming back, a Claude account's usage limit, a lock
+ * (the nightly lab.lock), a time, or the CI checks of a pull request.
+ */
+export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci';
+export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci'];
+
+export interface WorkBlocker {
+  kind: WorkBlockerKind;
+  /**
+   * What it names. request: the request id ("w633"). deploy: a machine id for that machine's daemon update, absent for
+   * the portal. machine: the machine id. usage: the Claude account (its email or label). lock: the lock ("lab.lock").
+   * ci: the pull request ("owner/repo#123"). time: absent.
+   */
+  ref?: string;
+  /** request (and a lock some request holds): clears when that request closes as done (`done`, default) or reports. */
+  on?: 'done' | 'report';
+  /** lock: the request holding it, whose close or report frees it. */
+  holder?: string;
+  /** time: when it clears. lock: when to look again at the latest. */
+  until?: string;
+  /** What it waits for, in a few words: "w633's timing table", "the next portal deploy". */
+  what: string;
+  at: string;
+  /** Who set it: "dispatcher" or "ledger cleanup" (a merged request whose only step left is a deploy). */
+  by: string;
+  /** deploy: the commit the portal (or the machine's daemon) ran when it was set; a different one is the deploy. */
+  sha?: string;
+}
+
 /** Why a request is stalled, and what kind of stop it was. */
 export interface WorkStalled {
   at: string;
-  kind: 'idle' | 'cut-off' | 'superseded' | 'unsure';
+  /** blocked (w643): what it was blocked on stalled, closed without delivering, or did not clear in time. */
+  kind: 'idle' | 'cut-off' | 'superseded' | 'unsure' | 'blocked';
   reason: string;
   /** superseded: the finished request that probably covers it. */
   by?: string;
@@ -1698,6 +1744,8 @@ export interface AppState {
   me?: UserInfo;
   /** The work ledger: every open item, and the ones closed in the last 3 days (at most 100). */
   work?: WorkItem[];
+  /** The computers with room for one more worker now (w643: a Queued request while one has room is flagged). */
+  room?: string[];
   /** Discord and FFBox intake into the ledger (docs/intake.md); absent from a server older than this field. */
   intake?: IntakeSummary;
   /** The ledger cleanup (docs/orchestrators.md, "Ledger cleanup"): its switches and its last run. */

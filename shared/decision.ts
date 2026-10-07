@@ -28,6 +28,6 @@ export function decisionOf(w: Subject): Decision | undefined {
   if (a.state === 'approved') {
     return a.by === 'auto' ? { state: 'auto-approved', text: `auto-approved${utcStamp(a.at)}` } : { state: 'approved', text: `approved by ${a.by ? a.by.displayName : 'a reviewer'}${utcStamp(a.at)}` };
   }
-  if (w.status !== 'new' && w.status !== 'question' && w.status !== 'queued' && w.status !== 'active') return undefined;
+  if (w.status !== 'new' && w.status !== 'question' && w.status !== 'queued' && w.status !== 'blocked' && w.status !== 'active') return undefined;
   return { state: 'waiting', text: w.triage?.class === 'needs-human' ? 'needs a human' : 'awaiting approval' };
 }

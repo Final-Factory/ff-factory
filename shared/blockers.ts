@@ -1,0 +1,199 @@
+// What a Blocked request waits on, and when that clears (w643, asked by Lothsahn: "make sure you consistently apply all
+// 3 states in all cases"). Waiting on input is a person, Queued is capacity only, and Blocked is a thing: another
+// request finishing or reporting, a deploy, a machine, a usage limit, a lock, a time, or CI. Pure: the blocker watch
+// (server/blockerWatch.ts) reads the verdicts and unblocks, stalls or asks; list_work, read_work and the Dispatcher page
+// name the blocker (docs/orchestrators.md, "Waiting, Queued, Blocked").
+import type { WorkBlocker, WorkBlockerKind, WorkItem } from './types.ts';
+
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+
+/**
+ * How long a blocker may stay open before the request counts as stuck and the cleanup stalls it, by kind. Judgments
+ * (w643): a CI run takes minutes to an hour, so 6 hours is a hung run; a lock held a day is a run that never ended; a
+ * machine away three days is down, not asleep; a weekly usage limit resets within 7 days; a deploy is a person's call,
+ * and a week without one is worth their look. A request blocker has none: it follows that request, which the cleanup
+ * stalls by itself when nothing works on it. A time blocker clears at its time.
+ */
+export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
+  request: undefined,
+  deploy: 7 * DAY,
+  machine: 3 * DAY,
+  usage: 8 * DAY,
+  lock: DAY,
+  time: undefined,
+  ci: 6 * HOUR,
+};
+
+/** "16:29 UTC" or "10-08 16:29 UTC". */
+const utc = (iso: string | undefined, now: number) => {
+  if (!iso) return 'a time';
+  const day = (t: number) => Math.floor(t / DAY);
+  return day(Date.parse(iso)) === day(now) ? `${iso.slice(11, 16)} UTC` : `${iso.slice(5, 10)} ${iso.slice(11, 16)} UTC`;
+};
+
+/** What "Blocked on …" names: "w633 finishing", "a portal deploy", "lothdesktop coming back", "CI on PR #12". */
+export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until' | 'holder'>, now: number = Date.now()): string {
+  switch (b.kind) {
+    case 'request':
+      return `${b.ref} ${b.on === 'report' ? 'reporting' : 'finishing'}`;
+    case 'deploy':
+      return b.ref === 'machines' ? "the machines' update" : b.ref ? `${b.ref}'s update` : 'a portal deploy';
+    case 'machine':
+      return `${b.ref} coming back online`;
+    case 'usage':
+      return `${b.ref ?? 'a Claude account'}'s usage limit`;
+    case 'lock':
+      return `${b.ref ?? 'a lock'}${b.holder ? ` (held by ${b.holder})` : ''}`;
+    case 'time':
+      return utc(b.until, now);
+    case 'ci':
+      return `CI on ${b.ref}`;
+  }
+}
+
+/** What each kind waits on and when it clears, for the tool's description and the docs. */
+export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
+  request: 'another request (ref: its id, e.g. "w633"): clears when it closes as done, or with on "report" at its next report',
+  deploy: "a deploy (ref: a machine id for that machine's daemon update; none for the portal): clears when a different commit runs there",
+  machine: 'a machine offline or asleep (ref: its id): clears when it is online',
+  usage: "a Claude account's usage limit (ref: the account's email or label): clears when its meters are clear",
+  lock: 'a shared lock such as the nightly lab.lock (ref: its name; holder: the request holding it, if one does; until: when to look again): clears when the holder closes or reports, the nightly lab next reports, or at until',
+  time: 'a time (until: ISO): clears when it passes',
+  ci: 'CI or checks on a pull request (ref: "owner/repo#123"): clears when no check is still running, or the PR merged or closed',
+};
+
+export interface BlockerFacts {
+  now: number;
+  /** A request by id. */
+  work: (id: string) => WorkItem | undefined;
+  /** Whether a worker on `w` finished a turn (reported) after `since` (ms). */
+  reportedSince?: (w: WorkItem, since: number) => boolean;
+  /** The commit the portal runs now. */
+  portalSha?: string;
+  /** The commit a machine's daemon runs now, or undefined when unknown. */
+  daemonSha?: (machineId: string) => string | undefined;
+  /** Whether a machine is online; undefined for a machine this portal does not have. */
+  online?: (machineId: string) => boolean | undefined;
+  /** Whether a Claude account's meters are clear; undefined when unknown. */
+  usageClear?: (account: string) => boolean | undefined;
+  /** When the nightly lab last posted its results (ms), if ever. */
+  nightlyAt?: number;
+  /** A pull request's checks: done (none still running, or it merged or closed) and a line saying how. */
+  ci?: (ref: string) => { done: boolean; text: string } | undefined;
+}
+
+/**
+ * open: still waiting, and its blocker is still progressing. clear: it may go (the dispatcher is told to start it).
+ * stuck: the blocker stalled or did not clear in time (the request is stalled with this reason). decide: the blocker
+ * closed without delivering, so a person must say whether it is still wanted (the request waits on its requester).
+ */
+export type BlockerVerdict = { state: 'open' | 'clear' | 'stuck' | 'decide'; why: string };
+
+const STATUS_DONE_WORDS: Partial<Record<WorkItem['status'], string>> = { rejected: 'declined', cancelled: 'cancelled' };
+
+/** The request a merged one continues as (merges are followed a few steps). */
+function follow(id: string, f: BlockerFacts): WorkItem | undefined {
+  let t = f.work(id);
+  for (let i = 0; i < 5 && t?.status === 'merged' && t.mergedInto; i++) t = f.work(t.mergedInto);
+  return t;
+}
+
+const firstLine = (s: string | undefined) => (s ?? '').split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
+
+/** Whether a blocker has cleared, is still open, or is stuck, and why. */
+export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict {
+  const at = Date.parse(b.at) || f.now;
+  const age = f.now - at;
+  const since = (h: number) => (h < 2 * DAY ? `${Math.round(h / HOUR)} h` : `${Math.round(h / DAY)} days`);
+  const late = (open: string): BlockerVerdict => {
+    const max = BLOCKER_STUCK_MS[b.kind];
+    return max !== undefined && age >= max ? { state: 'stuck', why: `${open} for ${since(age)} (a ${b.kind} blocker is looked at after ${since(max)})` } : { state: 'open', why: open };
+  };
+  switch (b.kind) {
+    case 'request': {
+      const t = b.ref ? follow(b.ref, f) : undefined;
+      if (!t) return { state: 'stuck', why: `${b.ref ?? 'the request it waits on'} is not in the ledger` };
+      const name = t.id === b.ref ? t.id : `${b.ref} (merged into ${t.id})`;
+      if (t.status === 'done') return { state: 'clear', why: `${name} closed as done${t.outcome ? `: ${firstLine(t.outcome)}` : ''}` };
+      if (STATUS_DONE_WORDS[t.status]) return { state: 'decide', why: `${name} was ${STATUS_DONE_WORDS[t.status]} without delivering ${b.what}${t.outcome ? ` (${firstLine(t.outcome)})` : ''}` };
+      if (t.status === 'stalled') return { state: 'stuck', why: `${name}, which it waits on, stalled${t.stalled ? `: ${firstLine(t.stalled.reason)}` : ''}` };
+      if (b.on === 'report' && f.reportedSince?.(t, at)) return { state: 'clear', why: `${name}'s worker reported${t.outcome ? `: ${firstLine(t.outcome)}` : ''}` };
+      return { state: 'open', why: `${name} is ${t.status === 'blocked' ? 'itself blocked' : t.status}` };
+    }
+    case 'deploy': {
+      const now = b.ref ? f.daemonSha?.(b.ref) : f.portalSha;
+      const where = b.ref ? `${b.ref}'s daemon` : 'the portal';
+      if (now && b.sha && now !== b.sha) return { state: 'clear', why: `${where} runs ${now.slice(0, 12)} now (${b.sha.slice(0, 12)} when it was blocked)` };
+      return late(`${where} still runs ${(now ?? b.sha ?? 'an unknown commit').slice(0, 12)}`);
+    }
+    case 'machine': {
+      const on = b.ref ? f.online?.(b.ref) : undefined;
+      if (on === true) return { state: 'clear', why: `${b.ref} is online` };
+      if (on === undefined && f.online) return { state: 'stuck', why: `${b.ref ?? 'its machine'} is not a machine of this portal` };
+      return late(`${b.ref} is offline`);
+    }
+    case 'usage': {
+      if (b.ref && f.usageClear?.(b.ref) === true) return { state: 'clear', why: `${b.ref}'s usage meters are clear` };
+      return late(`${b.ref ?? 'the account'} is still at its limit`);
+    }
+    case 'lock': {
+      const h = b.holder ? follow(b.holder, f) : undefined;
+      if (h && !['new', 'question', 'queued', 'blocked', 'active'].includes(h.status)) return { state: 'clear', why: `${h.id}, which held ${b.ref ?? 'it'}, is ${h.status}` };
+      if (h && f.reportedSince?.(h, at)) return { state: 'clear', why: `${h.id}, which held ${b.ref ?? 'it'}, reported` };
+      if (f.nightlyAt && f.nightlyAt > at) return { state: 'clear', why: `the nightly lab reported since (${new Date(f.nightlyAt).toISOString().slice(0, 16).replace('T', ' ')} UTC)` };
+      if (b.until && f.now >= Date.parse(b.until)) return { state: 'clear', why: `time to look again at ${b.ref ?? 'the lock'} (${utc(b.until, f.now)})` };
+      return late(`${b.ref ?? 'the lock'} is held${h ? ` by ${h.id}` : ''}`);
+    }
+    case 'time': {
+      const t = Date.parse(b.until ?? '');
+      if (!Number.isFinite(t) || f.now >= t) return { state: 'clear', why: `it is past ${utc(b.until, f.now)}` };
+      return { state: 'open', why: `until ${utc(b.until, f.now)}` };
+    }
+    case 'ci': {
+      const c = b.ref ? f.ci?.(b.ref) : undefined;
+      if (c?.done) return { state: 'clear', why: c.text };
+      return late(c?.text ?? `CI on ${b.ref} is running`);
+    }
+  }
+}
+
+/** A pull request as a ci blocker names it: "owner/repo#123". */
+export const CI_REF = /^([\w.-]+\/[\w.-]+)#(\d+)$/;
+
+/** Why a blocker cannot be set as given, or undefined (decide_work block). */
+export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | 'on' | 'holder' | 'what'>, self: string, f: Pick<BlockerFacts, 'now' | 'work' | 'online'>): string | undefined {
+  if (!b.what.trim()) return 'say what it waits for (blocker.what), e.g. "w633\'s timing table"';
+  const until = b.until ? Date.parse(b.until) : undefined;
+  if (b.until && !Number.isFinite(until)) return `blocker.until "${b.until}" is not a time (ISO, e.g. 2026-10-08T06:00:00Z)`;
+  const req = (id: string | undefined, field: string) => {
+    if (!id) return `blocker.${field}: the request id, e.g. "w633"`;
+    if (id.toLowerCase() === self.toLowerCase()) return 'a request cannot be blocked on itself';
+    const t = follow(id, f as BlockerFacts);
+    if (!t) return `no request "${id}"`;
+    if (t.status === 'done' || t.status === 'rejected' || t.status === 'cancelled') return `${id} is ${t.status} already: start this one, or say what else it waits for`;
+    if (t.blocked?.kind === 'request' && t.blocked.ref?.toLowerCase() === self.toLowerCase()) return `${id} is itself blocked on ${self}: they would wait on each other`;
+    return undefined;
+  };
+  switch (b.kind) {
+    case 'request':
+      return req(b.ref, 'ref');
+    case 'lock':
+      return b.holder ? req(b.holder, 'holder') : !b.ref ? 'blocker.ref: the lock, e.g. "lab.lock"' : undefined;
+    case 'machine':
+      if (!b.ref) return 'blocker.ref: the machine id';
+      if (f.online?.(b.ref) === undefined) return `no machine "${b.ref}"`;
+      if (f.online(b.ref)) return `${b.ref} is online: start it there, or say what else it waits for`;
+      return undefined;
+    case 'deploy':
+      if (b.ref && f.online?.(b.ref) === undefined) return `no machine "${b.ref}" (leave ref out for a portal deploy)`;
+      return undefined;
+    case 'usage':
+      return b.ref ? undefined : "blocker.ref: the Claude account (its email or label)";
+    case 'time':
+      if (until === undefined) return 'blocker.until: when it may go (ISO)';
+      return until! <= f.now ? `${b.until} has passed: start it now` : undefined;
+    case 'ci':
+      return b.ref && CI_REF.test(b.ref) ? undefined : 'blocker.ref: the pull request, "owner/repo#123"';
+  }
+}

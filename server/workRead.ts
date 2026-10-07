@@ -6,7 +6,8 @@
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
 import { cleanBlock, cleanLine, sourceTag, UNTRUSTED_HEADER } from './intakeRules.ts';
-import { ledgerOrder, names } from './work.ts';
+import { ledgerOrder, liveLine, names } from './work.ts';
+import { blockerName } from '../shared/blockers.ts';
 
 /**
  * The most an answer holds, in characters. Claude Code warns once an MCP result passes 10,000 tokens and saves a result
@@ -162,7 +163,7 @@ function fence(w: WorkItem, text: string, max: number, lines: number): string {
 /** "w12 [active] Working (worker ab12…): "title"", the line both views start with. */
 function headLine(w: WorkItem, now?: WorkLive): string {
   const merged = w.mergedInto ? ` → ${w.mergedInto}` : '';
-  const state = now ? ` ${WORK_LIVE_LABEL[now.state]}${now.waitsOn?.length ? ` on ${now.waitsOn.join(', ')}` : ''} (${cleanLine(now.why, 200)})` : '';
+  const state = now ? ` ${cleanLine(liveLine(now), 320)}` : '';
   return `${w.id} [${w.status}${merged}${w.priority !== 'normal' ? `, ${w.priority}` : ''}]${state}: "${cleanLine(w.title, 200)}"`;
 }
 
@@ -179,6 +180,7 @@ function facts(w: WorkItem): string[] {
     w.sessionIds.length ? `Workers: ${w.sessionIds.join(', ')}` : 'Workers: none yet',
     w.relatedIds?.length ? `Related: ${w.relatedIds.map((r) => cleanLine(r, 60)).join(', ')}` : '',
     w.ledgerRead ? `Grants ledger reading to its workers (set by ${w.ledgerRead.by} ${w.ledgerRead.at.slice(0, 16).replace('T', ' ')}).` : '',
+    w.status === 'blocked' && w.blocked ? `Blocked on ${cleanLine(blockerName(w.blocked), 120)}: ${cleanLine(w.blocked.what, 200)} (set by ${w.blocked.by} ${w.blocked.at.slice(0, 16).replace('T', ' ')}; it starts by itself when that clears).` : '',
   ].filter(Boolean);
 }
 

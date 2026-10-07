@@ -28,7 +28,7 @@
   --blue: #4ea1ff;
   --grey: #6b7686;
   --red: #ff5f5f;
-  /* Waiting agents (w475): between turns, but something will wake them. */
+  /* Agents between turns (w475): something will wake them (w643: shown as Working, Queued or Blocked). */
   --violet: #b28dff;
   --violet-soft: rgba(178, 141, 255, 0.12);
   --red-soft: rgba(255, 95, 95, 0.1);
@@ -175,7 +175,7 @@ code,
 .tone-grey { color: var(--text-3); }
 .tone-red { color: var(--red); }
 .tone-violet { color: var(--violet); }
-/* What a Waiting agent waits on, beside its state on the Overview board (w509). */
+/* What an agent between turns is on, beside its state on the Overview board (w509). */
 .fl-agent-why { flex: 0 1 auto; color: var(--text-3); font-size: var(--fs-xs); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 22ch; }
 
 .show-phone {
@@ -5402,7 +5402,7 @@ body {
 
 .fl-agent-title {
   flex: 1;
-  /* Room for the title before what a Waiting agent waits on (w509). */
+  /* Room for the title before what an agent between turns is on (w509). */
   min-width: 12ch;
   overflow: hidden;
   text-overflow: ellipsis;

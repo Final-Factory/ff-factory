@@ -891,6 +891,29 @@ test('w515: the one-time repair reads every PR the ledger holds as open, once, a
   assert.deepEqual(world.viewed, []);
 });
 
+test('w643: a Blocked request whose blocker is open and progressing is never stalled, however quiet, nor asked "Is it done?"; a merged PR with nothing left still closes it', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  request('w633', { updatedAt: ago(1), sessionIds: ['s633'] });
+  worker('s633', { status: 'running', lastActivityAt: ago(0.1) });
+  // w634 waits on w633 for days with nothing touching it; w641 waits on the next portal deploy.
+  request('w634', { status: 'blocked', updatedAt: ago(100), blocked: { kind: 'request', ref: 'w633', what: "w633's timing table", at: ago(100), by: 'dispatcher' } });
+  request('w641', { status: 'blocked', updatedAt: ago(100), blocked: { kind: 'deploy', what: 'the next portal deploy', at: ago(100), by: 'dispatcher', sha: 'aaa1111' } });
+  // A blocked request with a merged PR and a step after the merge: no "Is it done?" while it is blocked.
+  request('w642', { status: 'blocked', brief: 'Fix it, then run the paired audit after the merge.', sessionIds: ['s642'], blocked: { kind: 'time', until: new Date(NOW + 3_600_000).toISOString(), what: 'after the nightly run', at: ago(20), by: 'dispatcher' } });
+  worker('s642', { lastActivityAt: ago(10) });
+  // A blocked request whose PR merged with nothing left closes as done, like any other.
+  request('w650', { status: 'blocked', sessionIds: ['s650'], blocked: { kind: 'machine', ref: 'm5', what: 'the M5 asleep', at: ago(5), by: 'dispatcher' } });
+  worker('s650', { lastActivityAt: ago(4), lastResult: 'Done: PR #65 merged and verified.' });
+  world.prs = [pr(64, { body: 'Request: w642', mergedAt: ago(8) }), pr(65, { body: 'Request: w650', mergedAt: ago(3) })];
+  await sweep.run();
+  assert.equal(get('w634').status, 'blocked', 'its blocker w633 is being worked');
+  assert.equal(get('w641').status, 'blocked');
+  assert.equal(get('w642').status, 'blocked');
+  assert.equal(get('w642').followUp, undefined, 'not asked "Is it done?" while blocked');
+  assert.deepEqual(world.resumed.map((r) => r.id), []);
+  assert.equal(get('w650').status, 'done', get('w650').log.join('\n'));
+});
+
 // ---------------------------------------------------------------- w631: finished requests close themselves
 
 test('w631: a request whose only step left after the merge is a portal deploy closes once the portal runs the merge, not before', async (t) => {
@@ -901,8 +924,9 @@ test('w631: a request whose only step left after the merge is a portal deploy cl
   world.prs = [pr(193, { repo: APP, body: 'Request: w1', sha: 'a'.repeat(40) })];
   world.portal = 'b0b0b0b';
   await sweep.checkPrs();
-  assert.equal(get('w1').status, 'active', 'the portal does not run it yet');
-  assert.match(get('w1').log.join('\n'), /PR #193 merged; still open: its worker's last report says more is coming/);
+  assert.equal(get('w1').status, 'blocked', 'the portal does not run it yet: Blocked on the deploy (w643)');
+  assert.deepEqual({ ...get('w1').blocked, at: undefined }, { kind: 'deploy', what: 'a portal deploy, after the merge', at: undefined, by: 'ledger cleanup', sha: 'b0b0b0b' });
+  assert.match(get('w1').log.join('\n'), /PR #193 merged; still open: its worker's last report says more is coming[^\n]*\n.*blocked by the ledger cleanup on a portal deploy, after the merge: its only step left/);
   // Deployed: the running portal contains the merge.
   world.portal = 'c1c1c1c';
   world.ancestors.add(`${'a'.repeat(40)}:c1c1c1c`);
@@ -935,7 +959,9 @@ test('w631: the deploy re-check is strict: another step left, a game-repo PR, a 
   world.ancestors.add(`${sha(14)}:beefbee`);
   world.prs = [pr(11, { repo: APP, body: 'Request: w1' }), pr(12, { body: 'Request: w2' }), pr(13, { repo: APP, body: 'Part of: w3' }), pr(14, { repo: APP, body: 'Request: w4' })];
   await sweep.checkPrs();
-  assert.deepEqual(['w1', 'w2', 'w3', 'w4'].map((id) => get(id).status), ['active', 'active', 'active', 'active']);
+  // w4's only step left is the machines' update: Blocked on it (w643); the others have more left, or are not this app's.
+  assert.deepEqual(['w1', 'w2', 'w3', 'w4'].map((id) => get(id).status), ['active', 'active', 'active', 'blocked']);
+  assert.equal(get('w4').blocked?.ref, 'machines');
   // The last machine updates: w4 closes, naming each daemon.
   world.daemons = [{ id: 'beast', sha: 'beefbee' }, { id: 'lothdesktop', sha: 'e0e0e0e' }];
   world.ancestors.add(`${sha(14)}:e0e0e0e`);
@@ -947,7 +973,8 @@ test('w631: the deploy re-check is strict: another step left, a game-repo PR, a 
   world.prs.push(pr(15, { repo: APP, body: 'Request: w5' }));
   world.portal = undefined;
   await sweep.checkPrs();
-  assert.equal(get('w5').status, 'active');
+  assert.equal(get('w5').status, 'blocked', 'not closed: Blocked on the portal deploy (w643)');
+  assert.equal(get('w5').blocked?.sha, undefined, 'no commit known to compare with');
 });
 
 test('w631: a worker whose request names another (a takeover) closes that one with its DONE too, and both people hear it', async (t) => {
@@ -1057,4 +1084,24 @@ test('w631: a stalled request whose worker reported it delivered after the stall
   assert.equal(get('w1').status, 'done');
   assert.match(get('w1').autoClosed!.text, /its worker's final report says it is delivered/);
   assert.equal(get('w2').status, 'stalled', 'its report was read before it stalled: a person decides');
+});
+
+test('w643: Merged, follow-up pending on a deploy is Blocked on it; another step turning up unblocks it back to its follow-up, and a week without the deploy stalls it', async (t) => {
+  const { request, worker, pr, world, sweep, get } = setup(t);
+  world.portal = 'b0b0b0b';
+  request('w1', { sessionIds: ['s1'] });
+  worker('s1', { lastResult: 'Merged as #193. Waiting on the portal deploy.' });
+  request('w2', { sessionIds: ['s2'], status: 'blocked', blocked: { kind: 'deploy', what: 'a portal deploy, after the merge', at: ago(24 * 8), by: 'ledger cleanup', sha: 'b0b0b0b' } });
+  worker('s2', { lastResult: 'Merged as #194. Waiting on the portal deploy.' });
+  world.prs = [pr(193, { repo: APP, body: 'Request: w1' }), pr(194, { repo: APP, body: 'Request: w2' })];
+  await sweep.checkPrs();
+  assert.equal(get('w1').status, 'blocked');
+  assert.equal(get('w2').status, 'stalled', 'eight days and no deploy');
+  assert.deepEqual([get('w2').stalled?.kind, get('w2').stalled?.reason], ['blocked', 'blocked on a portal deploy, after the merge for 8 days: no deploy has run the merge']);
+  // Its worker says the paired audit is left too: back to Merged, follow-up pending, for the cleanup's "Is it done?".
+  worker('s1', { lastResult: 'Merged as #193. Still to do after the deploy: run the paired determinism audit.' });
+  await sweep.checkPrs();
+  assert.equal(get('w1').status, 'active');
+  assert.equal(get('w1').blocked, undefined);
+  assert.match(get('w1').log.join('\n'), /unblocked by the ledger cleanup: a deploy is no longer the only step left/);
 });

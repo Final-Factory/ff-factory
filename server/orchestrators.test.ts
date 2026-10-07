@@ -13,6 +13,7 @@ import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, lo
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
+import { BlockerWatch } from './blockerWatch.ts';
 import type { Requester, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
@@ -524,12 +525,13 @@ test('list_work: open requests by default, one in full with its log', async (t) 
   const { dispatcher, chat, call } = setup(t);
   await call(chat(BEN).info, 'request_work', { title: 'Tidy the docs', brief: 'Fix the dead links in docs/.', priority: 'low' });
   const all = await call(dispatcher().info, 'list_work', {});
-  assert.match(all.text, /^- w1 \[new, low\] Queued \(waiting for the dispatcher to decide it\): "Tidy the docs" for Ben, /);
-  assert.match(all.text, /\nNow: 1 queued\.$/,'the counts per live state close the list (w418)');
-  assert.match((await call(dispatcher().info, 'list_work', { state: 'queued' })).text, /^- w1 /);
-  assert.equal((await call(dispatcher().info, 'list_work', { state: 'working' })).text, 'No requests working.');
+  // Not decided yet: the dispatcher has it (w643: Working, not Queued, which is capacity only).
+  assert.match(all.text, /^- w1 \[new, low\] Working \(the dispatcher has it to decide, since 0 min ago\): "Tidy the docs" for Ben, /);
+  assert.match(all.text, /\nNow: 1 working\.$/,'the counts per live state close the list (w418)');
+  assert.match((await call(dispatcher().info, 'list_work', { state: 'working' })).text, /^- w1 /);
+  assert.equal((await call(dispatcher().info, 'list_work', { state: 'queued' })).text, 'No requests queued.');
   assert.match((await call(dispatcher().info, 'list_work', { state: ['working', 'queued'] })).text, /^- w1 /, 'several states at once');
-  assert.equal((await call(dispatcher().info, 'list_work', { state: ['working', 'waiting'] })).text, 'No requests working or waiting on input.');
+  assert.equal((await call(dispatcher().info, 'list_work', { state: ['blocked', 'waiting'] })).text, 'No requests waiting on input or blocked.');
   const one = await call(chat(LOTH).info, 'list_work', { id: 'w1' });
   assert.match(one.text, /Fix the dead links in docs\/\./);
   assert.match(one.text, /Log:\n {2}\d\d:\d\d filed by Ben/);
@@ -1102,7 +1104,7 @@ test('w536: every worker runs in a sandbox: start_agent with a machine alone is 
   const duty = machines.createSession('beast', { kind: 'standing', title: 'duty', model: 'opus', permissionMode: 'bypassPermissions' });
   duty.info.status = 'running';
   assert.match(machines.placeFull(next)!, /2 agents mid-turn on beast, in sandboxes and standing agents together \(its agent cap 2\)/);
-  assert.match(agents.standing.runNow(nightly.id), /^Waiting: waiting for an agent slot \(2\/2 in use\)/);
+  assert.match(agents.standing.runNow(nightly.id), /^Queued for an agent slot \(2\/2 in use\)/);
   duty.info.status = 'idle';
   assert.equal(machines.placeFull(next), undefined, 'an idle agent takes no slot');
 });
@@ -1222,7 +1224,13 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   await until("Ben's orchestrator hears it", () => heard(chat(BEN).info.id, '[auto-delegation]').some((e) => e.text.includes('filed w1')));
   assert.match((await call(chat(BEN).info, 'list_work', {})).text, /w1/);
 
+  // Queued is capacity only (w643): while pc has room, queueing it is refused.
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'every place is busy' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /queue is for capacity only, and pc has room for w1 now: start it there/);
+  assert.equal(store.work.get('w1')!.status, 'new');
   // Every place is busy: the dispatcher queues it. Nothing expires while it waits.
+  agents.roomNow = () => [];
   await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'every place is busy' });
   assert.equal(store.work.get('w1')!.status, 'queued');
   st.tick();
@@ -1399,4 +1407,128 @@ test('w642: a worker reads its own request and the ones it names, is refused oth
   const intake = { ...store.work.get('w2')!, id: 'w9', source: { kind: 'discord-bug', untrusted: true, channel: '#bugs' } } as WorkItem;
   store.putWork(intake);
   assert.match((await call(ben, 'update_work', { id: 'w9', ledger_read: true })).text, /^ERROR: w9 came from the intake/);
+});
+
+// ---------------------------------------------------------------- w643: Waiting on input, Queued, Blocked
+
+test('w643: decide_work block records a structured blocker; the request reads Blocked on it; when the blocker clears it unblocks by itself and the dispatcher is told to start it', async (t) => {
+  const { store, agents, o, dispatcher, chat, call, heard } = setup(t);
+  agentsRoom(agents, ['lothdesktop']);
+  await call(chat(LOTH).info, 'request_work', { title: 'Timing table for the nightly lab', brief: 'Measure each scenario.' });
+  await call(chat(LOTH).info, 'request_work', { title: 'Speed up the nightly lab', brief: 'Use the timing table.' });
+  // w634 is held until w633's table exists: a thing, not capacity. Queueing it is refused while LothDesktop has room.
+  const q = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'until w1 reports its table' });
+  assert.equal(q.isError, true);
+  assert.match(q.text, /queue is for capacity only, and lothdesktop has room for w2 now: start it there .*, or, if it waits for something else, decide_work block/);
+  const refusedSelf = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'x', blocker: { kind: 'request', ref: 'w2', what: 'itself' } });
+  assert.match(refusedSelf.text, /cannot be blocked on itself/);
+  const r = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'It needs w1\'s timing table first.', blocker: { kind: 'request', ref: 'W1', on: 'report', what: "w1's timing table" } });
+  assert.equal(r.isError, false, r.text);
+  const w2 = store.work.get('w2')!;
+  assert.equal(w2.status, 'blocked');
+  assert.deepEqual({ ...w2.blocked, at: undefined }, { kind: 'request', ref: 'w1', on: 'report', what: "w1's timing table", at: undefined, by: 'dispatcher' });
+  const line = (await call(dispatcher().info, 'list_work', { state: 'blocked' })).text;
+  assert.match(line, /^- w2 \[blocked\] Blocked on w1 reporting \(w1's timing table \(since 0 min ago, set by dispatcher\)\): "Speed up the nightly lab"/);
+  assert.match((await call(dispatcher().info, 'list_work', { status: 'blocked' })).text, /^- w2 /);
+  assert.match((await call(dispatcher().info, 'list_work', {})).text, /Now: 1 working, 1 blocked\./, 'w1 is with the dispatcher; w2 blocked; nothing Queued');
+  await until("Lothsahn's orchestrator hears it is blocked", () => heard(chat(LOTH).info.id, '[dispatch] w2').some((e) => /blocked on w1 reporting \(w1's timing table\); it starts by itself when that clears/.test(e.text)));
+
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  assert.equal((await watch.tick()).size, 0, 'w1 has not reported: still blocked');
+  // w1's worker reports (a turn ends after the block): w2 unblocks, back to the dispatcher, which is told to start it.
+  store.putSession({ id: 'k1', kind: 'worker', title: 'w1: timing table', status: 'idle', permissionMode: 'default', createdAt: T0, lastActivityAt: new Date(Date.now() + 1000).toISOString(), turns: 2, costUsd: 1, pendingPermissions: [], lastResult: 'Timing table in specs/633/timing.md.' });
+  store.work.get('w1')!.sessionIds = ['k1'];
+  const did = await watch.tick();
+  assert.match(did.get('w2')!, /^clear: w1's worker reported/);
+  assert.equal(store.work.get('w2')!.status, 'new');
+  assert.equal(store.work.get('w2')!.blocked, undefined);
+  assert.match(store.work.get('w2')!.log.join('\n'), /unblocked: w1 reporting cleared \(w1's worker reported/);
+  const told = heard(dispatcher().info.id, '[ledger] w2').map((e) => e.text).join('\n');
+  assert.match(told, /\[ledger\] w2 "Speed up the nightly lab" \(Lothsahn, normal\) is unblocked: it waited on w1 reporting \(w1's timing table\), and w1's worker reported.*Start it now: start_agent with work_id "w2"/);
+  await until("Lothsahn's orchestrator hears it unblocked", () => heard(chat(LOTH).info.id, '[dispatch] w2').some((e) => /unblocked: it waited on w1 reporting/.test(e.text)));
+});
+
+/** The computers with room, as the dispatcher's tools see them (Agents.roomNow, read by Orchestrators' `room`). */
+function agentsRoom(agents: Agents, ids: string[]) {
+  agents.roomNow = () => ids;
+}
+
+test('w643: a blocker that stalls stalls the request with the reason; one closed without delivering asks its requester (Waiting on input); a deploy clears on a new commit', async (t) => {
+  const { store, agents, o, dispatcher, chat, call } = setup(t);
+  agentsRoom(agents, []);
+  // Five requests at once (filing through request_work is capped per message).
+  for (const n of [1, 2, 3, 4, 5]) store.putWork({ id: `w${n}`, title: `Request ${n}`, brief: 'Do it.', priority: 'normal', keys: [], requestedBy: BEN, requesters: [BEN], humanAsked: true, status: 'new', createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] });
+  store.workSeq = 5;
+  assert.ok(chat(BEN));
+  const block = (id: string, blocker: Record<string, unknown>) => call(dispatcher().info, 'decide_work', { id, action: 'block', note: 'held', blocker });
+  (o as unknown as { d: { deploySha: () => string } }).d.deploySha = () => 'aaa1111';
+  const b2 = await block('w2', { kind: 'request', ref: 'w1', what: "w1's fix" });
+  assert.equal(b2.isError, false, b2.text);
+  assert.equal((await block('w3', { kind: 'request', ref: 'w1', what: "w1's fix" })).isError, false);
+  const b4 = await block('w4', { kind: 'deploy', what: 'the next portal deploy' });
+  assert.equal(b4.isError, false, b4.text);
+  assert.equal(store.work.get('w4')!.blocked!.sha, 'aaa1111', 'what the portal ran when it was blocked');
+  assert.equal((await block('w5', { kind: 'ci', ref: 'Final-Factory/ff-factory#205', what: "#205's checks" })).isError, false);
+  let sha = 'aaa1111';
+  let ci = { done: false, text: '3 of 13 checks on Final-Factory/ff-factory#205 still running' };
+  let clock = Date.now();
+  const watch = new BlockerWatch({ store, orchestrators: o, portalSha: () => sha, ci: async () => ci, now: () => clock });
+  assert.equal((await watch.tick()).size, 0);
+
+  // w1 stalls: w2 stalls with it, saying so. Then w1 is cancelled: w3 asks Ben whether it is still needed.
+  store.work.get('w1')!.status = 'stalled';
+  store.work.get('w1')!.stalled = { at: T0, kind: 'idle', reason: 'no activity for 26 hours' };
+  await watch.tick();
+  assert.equal(store.work.get('w2')!.status, 'stalled');
+  assert.deepEqual([store.work.get('w2')!.stalled!.kind, store.work.get('w2')!.stalled!.reason], ['blocked', "blocked on w1 finishing (w1's fix): w1, which it waits on, stalled: no activity for 26 hours"]);
+  assert.equal(store.work.get('w3')!.status, 'stalled', 'the same for every request blocked on it');
+  // Revived by its person and blocked on w1 again; then w1 is cancelled.
+  Object.assign(store.work.get('w3')!, { status: 'blocked', stalled: undefined, blocked: { kind: 'request', ref: 'w1', what: "w1's fix", at: T0, by: 'dispatcher' } });
+  store.work.get('w1')!.status = 'cancelled';
+  await watch.tick();
+  const w3 = store.work.get('w3')!;
+  assert.equal(w3.status, 'question');
+  assert.match(w3.question!.text, /^It was blocked on w1 finishing \(w1's fix\), and w1 was cancelled without delivering w1's fix\. Is w3 still needed, and what should it wait for now\?/);
+  assert.equal(w3.asks, 0, "not one of the dispatcher's three questions");
+
+  // The portal is deployed (another commit runs): w4 goes back to the dispatcher. CI on #205 finishes: w5 too.
+  sha = 'bbb2222';
+  assert.match((await watch.tick()).get('w4')!, /^clear: the portal runs bbb2222 now \(aaa1111 when it was blocked\)/);
+  ci = { done: true, text: 'CI on Final-Factory/ff-factory#205 finished: all 13 checks passed or skipped' };
+  assert.equal((await watch.tick()).size, 0, 'the checks are read at most every 5 minutes');
+  clock += 5 * 60_000;
+  const did = await watch.tick();
+  assert.equal(store.work.get('w4')!.status, 'new', 'the deploy cleared it on the tick before');
+  assert.match(did.get('w5')!, /^clear: CI on Final-Factory\/ff-factory#205 finished/);
+  assert.deepEqual([store.work.get('w4')!.status, store.work.get('w5')!.status], ['new', 'new']);
+});
+
+test('w643: Queued only on a real capacity shortage: queue needs no room on a computer that could take it, a request left queued while one has room is flagged loudly, and any other decision ends a block', async (t) => {
+  const { store, agents, o, dispatcher, chat, call, heard } = setup(t);
+  agentsRoom(agents, ['lothdesktop']);
+  await call(chat(BEN).info, 'request_work', { title: 'Mac-only check', brief: 'Run it on the M5.' });
+  await call(chat(BEN).info, 'request_work', { title: 'Anything', brief: 'Do it.' });
+  // Only the M5 can take w1, and it is busy: queued, with what it needs.
+  const ok = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'queue', note: 'needs the M5, which is busy', needs: ['M5'] });
+  assert.equal(ok.isError, false, ok.text);
+  assert.deepEqual(store.work.get('w1')!.queuedFor?.needs, ['m5']);
+  assert.match((await call(dispatcher().info, 'list_work', { state: 'queued' })).text, /^- w1 \[queued\] Queued \(queued for capacity on m5: no computer that could take it has room\)/);
+  // Any computer can take w2, and LothDesktop has room: refused.
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'later' })).isError, true);
+  // The M5 frees and nobody starts w1: after the grace it is flagged, once, to the dispatcher and in its log.
+  agentsRoom(agents, ['m5']);
+  const later = Date.now() + 11 * 60_000;
+  (o as unknown as { now: () => Date }).now = () => new Date(later);
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Queued \[WRONG: m5 has room\]/);
+  assert.deepEqual(o.flagQueuedWithRoom(['m5']), ['w1']);
+  assert.deepEqual(o.flagQueuedWithRoom(['m5']), [], 'once an hour at most');
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[ledger] WRONG STATE').length > 0);
+  assert.match(heard(dispatcher().info.id, '[ledger] WRONG STATE')[0].text, /w1 "Mac-only check" \(Ben, normal; room on m5\)\. Queued means no free place\. Start each now/);
+  assert.match(store.work.get('w1')!.log.join('\n'), /flagged: queued for capacity while m5 has room/);
+  // A block, then a queue for capacity: the blocker goes with the status.
+  agentsRoom(agents, []);
+  await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'after the nightly run', blocker: { kind: 'time', until: new Date(later + 3_600_000).toISOString(), what: 'after the nightly run' } });
+  assert.equal(store.work.get('w2')!.status, 'blocked');
+  await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'every place is busy now' });
+  assert.deepEqual([store.work.get('w2')!.status, store.work.get('w2')!.blocked], ['queued', undefined]);
 });

@@ -65,6 +65,9 @@ test('admission: no overlap, daily budget, and the agent limit (wait, then skip 
   assert.equal(admit({ ...base, agent: { ...agent, spend: { day: '2026-09-23', usd: 4.99 } } }).action, 'skip', 'under MIN_RUN_USD left');
   assert.equal(admit({ ...base, liveAgents: 6 }).action, 'wait');
   assert.equal(admit({ ...base, liveAgents: 6, now: deadline }).action, 'skip');
+  // w643: no slot is capacity (Queued); its machine away is a thing (Blocked).
+  assert.deepEqual(admit({ ...base, liveAgents: 6 }), { action: 'wait', reason: 'queued for an agent slot (6/6 in use)' });
+  assert.deepEqual(admit({ ...base, unavailable: 'machine m5 is offline' }), { action: 'wait', reason: 'blocked: machine m5 is offline' });
 });
 
 test('wait deadline: the next scheduled slot, or an hour, whichever is sooner', () => {
@@ -251,7 +254,7 @@ test('manager: with every agent slot taken a run waits, starts when one frees, o
   const s = port.get(a.sessionId);
   port.others = 2; // the limit is 2
 
-  assert.match(st.runNow(a.id), /Waiting/);
+  assert.match(st.runNow(a.id), /^Queued for an agent slot/);
   assert.equal(st.require(a.id).state, 'waiting');
   assert.equal(s.live, false);
   assert.throws(() => st.runNow(a.id), /already has a run waiting/);

@@ -3,6 +3,7 @@
  * from a COPY of a portal's data folder: never point it at a live one while the server writes it.
  *
  *   node scripts/ledger-states.ts <data dir> [w342,w10]
+ *   node scripts/ledger-states.ts <data dir> --w643     the w643 migration's before and after, nothing written
  *
  * Reads <dir>/work.json, <dir>/state.json (its sessions) and <dir>/send-queue.json when present, runs the same
  * derivation list_work and the Dispatcher page use (shared/workState.ts), and prints the counts per state and one line
@@ -10,7 +11,9 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll } from '../shared/workState.ts';
+import { runWaitsMigration } from '../server/waitsMigration.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
 
 const read = <T>(file: string, fallback: T): T => (fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')) as T) : fallback);
@@ -27,6 +30,24 @@ export function ledgerStates(dir: string, now = Date.now()) {
 
 if (import.meta.url === `file:///${process.argv[1]?.replace(/\\/g, '/').replace(/^\//, '')}`) {
   const [dir, check] = process.argv.slice(2);
+  if (dir && check === '--w643') {
+    // On copies, in a scratch folder: the request files and the data folder stay as they are.
+    const { work, sessions } = ledgerStates(dir);
+    const byId = new Map(sessions.map((x) => [x.id, x]));
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'w643-'));
+    const machines = (read<{ machines?: { id: string }[] }>(path.join(dir, 'state.json'), {}).machines ?? []).map((m) => m.id);
+    runWaitsMigration({
+      dataDir: scratch,
+      items: () => work,
+      block: (id, b) => Object.assign(work.find((w) => w.id === id)!, { status: 'blocked', blocked: b }),
+      live: () => workLiveAll(work, { session: (id) => byId.get(id), now: Date.now() }),
+      machines,
+      tell: () => undefined,
+    });
+    console.log(fs.readFileSync(path.join(scratch, 'w643-migration.md'), 'utf8'));
+    fs.rmSync(scratch, { recursive: true, force: true });
+    process.exit(0);
+  }
   if (!dir) {
     console.error('usage: node scripts/ledger-states.ts <copy of a data dir> [w342,w10]');
     process.exit(2);

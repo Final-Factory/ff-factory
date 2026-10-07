@@ -90,11 +90,62 @@ test('workState: waiting on input, and on whom', () => {
   assert.equal(asksAPerson('Done: merged as #9, nothing left.'), false);
 });
 
-test('workState: queued: not dispatched, queued for capacity, or a message held for a free slot', () => {
-  assert.equal(one(item('w1', { status: 'new' }))?.why, 'waiting for the dispatcher to decide it');
-  assert.equal(one(item('w2', { status: 'queued' }))?.why, 'the dispatcher queued it for capacity');
+test('w643: Queued is capacity only: queued for capacity, or a message held for a free slot; not dispatched yet is Working (the dispatcher has it)', () => {
+  const fresh = one(item('w1', { status: 'new', updatedAt: ago(0.1) }));
+  assert.deepEqual([fresh?.state, fresh?.why], ['working', 'the dispatcher has it to decide, since 6 min ago']);
+  const q = one(item('w2', { status: 'queued' }));
+  assert.deepEqual([q?.state, q?.why, q?.roomOn], ['queued', 'queued for capacity', undefined]);
   const held = one(item('w3', { sessionIds: ['a'] }), [session('a', { status: 'stopped' })], [], { a: 'all 4 slots busy' });
   assert.deepEqual([held?.state, held?.why], ['queued', 'a message to a waits for a free agent slot (all 4 slots busy)']);
+  // The page has no send queue: the session's own copy says it (SessionInfo.queuedSend), and what holds it.
+  const w4 = item('w4', { sessionIds: ['a'] });
+  const own = workLive(w4, { items: [w4], session: () => session('a', { queuedSend: '4 agents mid-turn on lothdesktop' }), now: NOW });
+  assert.equal(own?.state, 'queued');
+});
+
+test('w643: a machine with room: nothing is wrongly Queued; a request queued anyway is flagged with the computers that have room', () => {
+  const w = item('w634', { status: 'queued', queuedFor: { at: ago(1) } });
+  const full = workLive(w, { items: [w], session: () => undefined, room: [], now: NOW });
+  assert.deepEqual([full?.state, full?.why, full?.roomOn], ['queued', 'queued for capacity: no computer that could take it has room', undefined], 'a real shortage: Queued, quietly');
+  const room = workLive(w, { items: [w], session: () => undefined, room: ['lothdesktop'], now: NOW });
+  assert.equal(room?.state, 'queued', 'the stored status stays; the line says it is wrong');
+  assert.deepEqual(room?.roomOn, ['lothdesktop']);
+  assert.match(room!.why, /but lothdesktop has room: the dispatcher should start it, or block it/);
+  // It needs a computer that is busy: the room elsewhere does not count.
+  const mac = { ...w, queuedFor: { at: ago(1), needs: ['m5'] } };
+  assert.deepEqual(workLive(mac, { items: [mac], session: () => undefined, room: ['lothdesktop'], now: NOW })?.roomOn, undefined);
+  assert.deepEqual(workLive(mac, { items: [mac], session: () => undefined, room: ['M5'], now: NOW })?.roomOn, ['M5']);
+  // Nothing else is ever Queued while there is room: every other open status reads another state.
+  const others = workLiveAll(
+    [item('a1', { status: 'new' }), item('a2', { status: 'blocked', blocked: { kind: 'deploy', what: 'the next portal deploy', at: ago(2), by: 'dispatcher' } }), item('a3', { status: 'question', question: { text: 'Which save?', at: ago(1) } }), item('a4'), item('a5', { status: 'new', approval: { state: 'pending' } })],
+    { session: () => undefined, room: ['lothdesktop'], now: NOW },
+  );
+  assert.deepEqual([...others.values()].map((l) => l.state), ['working', 'blocked', 'waiting', 'stalled', 'waiting']);
+});
+
+test('w643: Blocked names its blocker, for every kind; a message held for its machine is Blocked on that machine', () => {
+  const b = (blocked: WorkItem['blocked']) => one(item('w9', { status: 'blocked', blocked }));
+  const at = ago(2);
+  const cases: [WorkItem['blocked'], string][] = [
+    [{ kind: 'request', ref: 'w633', what: "w633's timing table", at, by: 'dispatcher' }, 'w633 finishing'],
+    [{ kind: 'request', ref: 'w633', on: 'report', what: "w633's timing table", at, by: 'dispatcher' }, 'w633 reporting'],
+    [{ kind: 'deploy', what: 'the next portal deploy', at, by: 'dispatcher', sha: 'abc1234' }, 'a portal deploy'],
+    [{ kind: 'deploy', ref: 'lothdesktop', what: 'the worker update', at, by: 'dispatcher' }, "lothdesktop's update"],
+    [{ kind: 'machine', ref: 'm5', what: 'the M5 asleep', at, by: 'dispatcher' }, 'm5 coming back online'],
+    [{ kind: 'usage', ref: 'ben@example.com', what: "Ben's weekly limit", at, by: 'dispatcher' }, "ben@example.com's usage limit"],
+    [{ kind: 'lock', ref: 'lab.lock', holder: 'w633', what: 'the nightly lab', at, by: 'dispatcher' }, 'lab.lock (held by w633)'],
+    [{ kind: 'time', until: '2026-10-05T09:30:00.000Z', what: 'after the nightly run', at, by: 'dispatcher' }, '09:30 UTC'],
+    [{ kind: 'ci', ref: 'Final-Factory/ff-factory#205', what: "#205's CI", at, by: 'dispatcher' }, 'CI on Final-Factory/ff-factory#205'],
+  ];
+  for (const [blocked, name] of cases) {
+    const l = b(blocked);
+    assert.deepEqual([l?.state, l?.waitsOn], ['blocked', [name]], blocked!.kind);
+    assert.match(l!.why, new RegExp(`^${blocked!.what.replace(/[()]/g, '.')} \\(since 2 h ago, set by dispatcher\\)$`));
+  }
+  const held = one(item('w3', { sessionIds: ['a'] }), [session('a', { status: 'stopped', machineId: 'lothdesktop', queuedSend: 'its daemon is outdated', queuedOn: 'machine' })]);
+  assert.deepEqual([held?.state, held?.waitsOn], ['blocked', ['lothdesktop']]);
+  // Its worker mid-turn on it wins: it is being worked.
+  assert.equal(one(item('w9', { status: 'blocked', blocked: cases[0][0], sessionIds: ['a'] }), [session('a', { status: 'running' })])?.state, 'working');
 });
 
 test('workState: merged, follow-up pending, with the cleanup\'s reason', () => {
@@ -124,5 +175,5 @@ test('workState: stalled at once when nothing works on it and nothing waits on a
 
 test('workState: counts per state', () => {
   const n = liveCounts([{ state: 'working', why: '' }, { state: 'stalled', why: '' }, { state: 'stalled', why: '' }]);
-  assert.deepEqual(n, { working: 1, pending: 0, waiting: 0, queued: 0, followup: 0, stalled: 2 });
+  assert.deepEqual(n, { working: 1, waiting: 0, queued: 0, blocked: 0, followup: 0, stalled: 2 });
 });

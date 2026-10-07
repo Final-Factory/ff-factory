@@ -7,6 +7,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
+import { blockerName, blockerProblem } from '../shared/blockers.ts';
 import type { OptionsFactory, SessionHandle, SessionManager } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -47,7 +48,7 @@ import { asksAPerson, servedBy } from '../shared/workState.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
 import { OPS_PEOPLE } from './opsWorker.ts';
-import type { AttachmentRef, Machine, WorkAutoClosed, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, Machine, WorkAutoClosed, WorkBlocker, ProviderConversation, Requester, Sandbox, SessionInfo, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -118,6 +119,12 @@ export interface OrchestratorsDeps {
   places: () => { machines: Machine[] };
   /** Commits that reached develop in the last 48 hours ("recent merges"); optional. */
   recentCommits?: () => { sha: string; subject: string }[];
+  /** The computers with room for one more worker now (w643: decide_work queue is for capacity only). */
+  room?: () => string[];
+  /** Whether a machine is online; undefined for a machine this portal does not have (w643: blockers). */
+  machineOnline?: (id: string) => boolean | undefined;
+  /** The commit the portal runs (no id), or a machine's daemon (w643: a deploy blocker clears when it changes). */
+  deploySha?: (machineId?: string) => string | undefined;
   now?: () => Date;
   /** How long intake notices gather before they reach the dispatcher (tests shorten it). */
   intakeGatherMs?: number;
@@ -143,6 +150,9 @@ export interface DelegationFiling {
   /** How long a finished request of the same agent and title still counts as the same work (default 2 days). */
   lookbackMs?: number;
 }
+
+/** How long a request may sit queued while a computer has room before it is flagged (w643; a judgment: two dispatcher turns). */
+export const ROOM_GRACE_MS = 10 * 60_000;
 
 /** A finished request still covers the same agent asking again with the same title this long (w527; a guess, tunable). */
 export const DELEGATION_LOOKBACK_MS = 2 * 86_400_000;
@@ -325,6 +335,7 @@ const STATUS_WORDS: Record<WorkItem['status'], string> = {
   new: 'not started yet',
   question: 'waiting on a question',
   queued: 'queued',
+  blocked: 'blocked: waiting on other work first',
   active: 'in progress',
   stalled: 'stalled: nothing is working on it',
   merged: 'merged into another request',
@@ -677,6 +688,9 @@ export class Orchestrators {
     const now = this.now();
     w.log = [...w.log, logLine(now, line)].slice(-40);
     w.updatedAt = now.toISOString();
+    // A blocker or a capacity note belongs to its status only (w643): any move out of it drops them.
+    if (w.status !== 'blocked' && w.blocked) w.blocked = undefined;
+    if (w.status !== 'queued' && w.queuedFor) w.queuedFor = undefined;
   }
 
   /** The branches checked out anywhere: the machines' main clones and their sandboxes. */
@@ -1007,7 +1021,7 @@ export class Orchestrators {
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[] }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'> }): string {
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
     const into = input.into ? this.requireWork(input.into) : undefined;
@@ -1039,13 +1053,45 @@ export class Orchestrators {
       w.asks++;
       w.question = { text: clip(note, 1000), at: this.now().toISOString() };
       what = 'a question';
-    } else if (input.action === 'queue') what = 'queued';
-    else if (input.action === 'reject') what = 'declined';
+    } else if (input.action === 'queue') {
+      // Queued is capacity only (w643): with a computer that could take it free, it is started or blocked, not queued.
+      const needs = [...new Set((input.needs ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean))];
+      const room = (this.d.room?.() ?? []).filter((id) => !needs.length || needs.includes(id.toLowerCase()));
+      if (room.length) {
+        throw new Error(
+          `queue is for capacity only, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} room for ${w.id} now: start it there (start_agent with work_id "${w.id}"), or, if it waits for something else, decide_work block with what it waits for${needs.length ? '' : ' (or queue with needs: the computers that can take it, when only busy ones can)'}`,
+        );
+      }
+      w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
+      what = `queued for capacity${needs.length ? ` on ${needs.join(' or ')}` : ''}`;
+    } else if (input.action === 'block') {
+      const b = input.blocker;
+      if (!b) throw new Error('block needs blocker: what it waits for (kind, ref, what; until for a time). A person it waits on is ask; capacity is queue.');
+      const now = this.now();
+      const problem = blockerProblem(b, w.id, { now: now.getTime(), work: (id) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) });
+      if (problem) throw new Error(problem);
+      const ref = b.kind === 'request' || b.kind === 'machine' || b.kind === 'deploy' ? b.ref?.trim().toLowerCase() : b.ref?.trim();
+      const sha = b.kind === 'deploy' ? this.d.deploySha?.(ref) : undefined;
+      w.blocked = {
+        kind: b.kind,
+        ...(ref ? { ref } : {}),
+        ...(b.on && (b.kind === 'request' || b.kind === 'lock') ? { on: b.on } : {}),
+        ...(b.holder && b.kind === 'lock' ? { holder: b.holder.trim().toLowerCase() } : {}),
+        ...(b.until ? { until: new Date(Date.parse(b.until)).toISOString() } : {}),
+        what: clip(b.what.trim(), 200),
+        at: now.toISOString(),
+        by: 'dispatcher',
+        ...(sha ? { sha } : {}),
+      };
+      what = `blocked on ${blockerName(w.blocked, now.getTime())} (${w.blocked.what}); it starts by itself when that clears`;
+    } else if (input.action === 'reject') what = 'declined';
     else what = 'done';
     // The dispatcher's decision is a hand close or reopen too (w370: w339, closed by it at 02:26, reopened by the
     // re-check at 05:30 on the stale mark of an earlier automatic close).
     if (statusAfter(input.action) !== w.status) settleByHand(w);
     w.status = statusAfter(input.action);
+    // Out of stalled by a decision (w643: block, a stalled request found to wait on something): no stale stall reason.
+    if (isOpen(w)) w.stalled = undefined;
     if (input.action === 'reject' || input.action === 'done') w.outcome = clip(note, 300);
     this.stamp(w, `dispatcher: ${what}: ${note}`);
     this.store.putWork(w);
@@ -1085,8 +1131,10 @@ export class Orchestrators {
     if (problem) throw new Error(problem);
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
     w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'sent' } };
+    // Started or sent to a worker: whatever held it is over (stamp drops a blocker or a capacity note).
+    const was = w.status === 'blocked' && w.blocked ? ` (it was blocked on ${blockerName(w.blocked)})` : '';
     w.status = 'active';
-    this.stamp(w, `dispatcher: ${what}`);
+    this.stamp(w, `dispatcher: ${what}${was}`);
     this.store.putWork(w);
     if (opts.reply !== false) this.toPeople(w.requesters, dispatchNotice(w, what));
   }
@@ -1966,11 +2014,13 @@ export class Orchestrators {
     const questions = open.filter((w) => w.flag?.for.some((r) => same(r.userId, userId))).length;
     const reviews = open.filter((w) => w.source!.kind === 'ffbox-branch' || w.source!.kind === 'ffbox-diagnosis').length;
     const active = open.filter((w) => w.status === 'active').length;
+    const blocked = open.filter((w) => w.status === 'blocked').length;
     const parts = [
-      pending ? `${pending} waiting for ${decider ? 'you or another reviewer' : 'a reviewer'} to approve (the Intake tab)` : '',
-      questions ? `${questions} design question(s) for you` : '',
+      pending ? `${pending} waiting on input from ${decider ? 'you or another reviewer' : 'a reviewer'} to approve (the Intake tab)` : '',
+      questions ? `${questions} design question(s) waiting on input from you` : '',
       reviews ? `${reviews} FFBox branch(es) to review` : '',
       active ? `${active} being worked` : '',
+      blocked ? `${blocked} blocked (each starts by itself when what it waits on clears)` : '',
     ].filter(Boolean);
     return parts.length ? `Intake (Discord and FFBox requests): ${parts.join(', ')}.` : '';
   }
@@ -2662,6 +2712,7 @@ export class Orchestrators {
   remindDispatcher(why: string) {
     const waiting = [...this.store.work.values()].filter((w) => (w.status === 'new' || w.status === 'queued') && w.approval?.state !== 'pending').sort(ledgerOrder);
     if (!waiting.length) return;
+    // Blocked ones are not listed (w643): each starts by itself when its blocker clears, and you are told then.
     this.toDispatcher(`[ledger] ${why}. Requests waiting for you: ${waiting.map((w) => `${w.id} [${w.status}] "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority})`).join('; ')}. list_work shows them in full.`);
   }
 
@@ -2679,6 +2730,89 @@ export class Orchestrators {
       this.store.putWork(w);
       this.gatherForDispatcher(w.requestedBy, updateNotice(w, w.requestedBy, `its ${this.workerLine(s.id)} failed (${why}). Start it again, queue it, or tell its people (decide_work).`));
     }
+  }
+
+  // ---------------------------------------------------------------- blocked and queued (w643)
+
+  /**
+   * A blocked request's blocker cleared (server/blockerWatch.ts): it goes back to the dispatcher (`new`), which is told
+   * at once to start it, and its people hear why. No person has to nudge it.
+   */
+  unblock(id: string, why: string) {
+    const w = this.store.work.get(id);
+    if (!w || w.status !== 'blocked' || !w.blocked) return;
+    const b = w.blocked;
+    const name = blockerName(b, this.now().getTime());
+    w.status = 'new';
+    this.stamp(w, `unblocked: ${name} cleared (${why})`);
+    this.store.putWork(w);
+    const worker = [...w.sessionIds].reverse().find((sid) => this.store.sessions.get(sid));
+    console.log(`ledger: unblocked ${w.id}: ${name} cleared (${why})`);
+    this.toPeople(w.requesters, dispatchNotice(w, `unblocked: it waited on ${name} (${b.what}), and ${why}; the dispatcher starts it next`));
+    this.toDispatcher(
+      `[ledger] ${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}) is unblocked: it waited on ${name} (${b.what}), and ${why}. Start it now: start_agent with work_id "${w.id}"${worker ? `, or message_agent with work_id to its worker ${worker}` : ''}. If no computer that can take it has room, decide_work queue it; if it still waits on something, decide_work block it on that.`,
+      w.requestedBy,
+    );
+  }
+
+  /** A blocked request's blocker stalled, or did not clear in time (w643): the request stalls, saying so, for its people. */
+  blockerStuck(id: string, why: string) {
+    const w = this.store.work.get(id);
+    if (!w || w.status !== 'blocked' || !w.blocked) return;
+    const reason = clip(`blocked on ${blockerName(w.blocked, this.now().getTime())} (${w.blocked.what}): ${why}`, 400);
+    const at = this.now().toISOString();
+    w.status = 'stalled';
+    w.stalled = { at, kind: 'blocked', reason };
+    this.stamp(w, `stalled by the ledger: ${reason}`);
+    this.store.putWork(w);
+    console.log(`ledger: stalled ${w.id}: ${reason}`);
+    this.toPeople(w.requesters, dispatchNotice(w, `stalled: ${reason}. Close it, or reopen it (update_work) once what it waits for is moving again`));
+  }
+
+  /**
+   * What a blocked request waited on closed without delivering (w643): a person must say whether it is still wanted, so
+   * it waits on its requester as a question (answered by a note, like the dispatcher's).
+   */
+  blockerDecide(id: string, why: string) {
+    const w = this.store.work.get(id);
+    if (!w || w.status !== 'blocked' || !w.blocked) return;
+    const text = clip(`It was blocked on ${blockerName(w.blocked, this.now().getTime())} (${w.blocked.what}), and ${why}. Is ${w.id} still needed, and what should it wait for now?`, 1000);
+    w.status = 'question';
+    w.question = { text, at: this.now().toISOString() };
+    this.stamp(w, `blocker closed without delivering: ${why}; asked ${w.requestedBy.displayName}`);
+    this.store.putWork(w);
+    this.toPeople([w.requestedBy], dispatchNotice(w, 'a question', text));
+  }
+
+  /** When each request was last flagged Queued while a computer had room (at most once an hour each). */
+  private readonly roomFlags = new Map<string, number>();
+
+  /**
+   * Queued is capacity only (w643): a request queued at least ROOM_GRACE_MS while a computer that could take it has room
+   * is a bug, flagged loudly: logged on it and in the server log, and the dispatcher is told to start it or block it.
+   * Returns the ids flagged.
+   */
+  flagQueuedWithRoom(room: readonly string[]): string[] {
+    const now = this.now().getTime();
+    const flagged: { w: WorkItem; on: string[] }[] = [];
+    for (const w of this.store.work.values()) {
+      if (w.status !== 'queued') continue;
+      const since = Date.parse(w.queuedFor?.at ?? w.updatedAt) || now;
+      if (now - since < ROOM_GRACE_MS || now - (this.roomFlags.get(w.id) ?? 0) < 3_600_000) continue;
+      const needs = w.queuedFor?.needs?.map((n) => n.toLowerCase());
+      const on = room.filter((id) => !needs?.length || needs.includes(id.toLowerCase()));
+      if (!on.length) continue;
+      this.roomFlags.set(w.id, now);
+      this.stamp(w, `flagged: queued for capacity while ${on.join(', ')} ${on.length > 1 ? 'have' : 'has'} room`);
+      this.store.putWork(w);
+      flagged.push({ w, on });
+    }
+    if (!flagged.length) return [];
+    console.warn(`ledger: queued while a computer has room: ${flagged.map((f) => `${f.w.id} (${f.on.join(', ')})`).join('; ')}`);
+    this.toDispatcher(
+      `[ledger] WRONG STATE: queued for capacity while a computer that could take it has room: ${flagged.map((f) => `${f.w.id} "${clip(f.w.title, 80)}" (${names(f.w.requesters)}, ${f.w.priority}; room on ${f.on.join(', ')})`).join('; ')}. Queued means no free place. Start each now (start_agent with its work_id), or decide_work block it on what it really waits for (another request, a deploy, a machine, a lock, a time, CI), or queue it again with needs naming the only computers that can take it.`,
+    );
+    return flagged.map((f) => f.w.id);
   }
 
   // ---------------------------------------------------------------- capacity
@@ -2703,7 +2837,7 @@ export class Orchestrators {
       const queued = [...this.store.work.values()].filter((w) => w.status === 'queued');
       if (!queued.length) return;
       this.capacityWakes.push(now);
-      this.toDispatcher(`[ledger] Capacity may have freed (${what}). Queued: ${queued.map((w) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority})`).join('; ')}. Start what fits now, or leave it queued.`);
+      this.toDispatcher(`[ledger] Capacity may have freed (${what}). Queued for capacity: ${queued.map((w) => `${w.id} "${clip(w.title, 80)}" (${names(w.requesters)}, ${w.priority}${w.queuedFor?.needs?.length ? `; needs ${w.queuedFor.needs.join(' or ')}` : ''})`).join('; ')}. Start what fits now; leave queued only what no computer with room can take, and block what waits on something else.`);
     };
     this.capacityTimer = setTimeout(fire, CAPACITY.quietMs);
     this.capacityTimer.unref?.();

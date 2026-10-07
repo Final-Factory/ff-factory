@@ -200,11 +200,11 @@ export function admit(opts: {
   if (cap < MIN_RUN_USD) return { action: 'skip', reason: `daily budget spent ($${spentToday(agent, now).toFixed(2)} of $${agent.budget.perDayUsd.toFixed(2)})` };
   if (opts.unavailable) {
     if (now.getTime() >= opts.deadline.getTime()) return { action: 'skip', reason: opts.unavailable };
-    return { action: 'wait', reason: `waiting: ${opts.unavailable}` };
+    return { action: 'wait', reason: `blocked: ${opts.unavailable}` };
   }
   if (opts.liveAgents >= opts.maxAgents) {
     if (now.getTime() >= opts.deadline.getTime()) return { action: 'skip', reason: `no free agent slot (all ${opts.maxAgents} in use)` };
-    return { action: 'wait', reason: `waiting for an agent slot (${opts.liveAgents}/${opts.maxAgents} in use)` };
+    return { action: 'wait', reason: `queued for an agent slot (${opts.liveAgents}/${opts.maxAgents} in use)` };
   }
   return { action: 'start', capUsd: cap };
 }

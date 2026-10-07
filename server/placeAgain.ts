@@ -5,7 +5,7 @@
  * as free and may take other work. When its check-in comes, or someone messages it, it is placed again like new work:
  * its own sandbox if that is still free and on its branch; otherwise a free sandbox on its machine, switched to its
  * branch; otherwise its message waits in the send queue, and the next sandbox to free there is claimed for it before any
- * new work. A Waiting worker with only a far check-in (its process up, nothing running) is stopped first, so the same
+ * new work. A worker between turns with only a far check-in (its process up, nothing running) is stopped first, so the same
  * applies to it. docs/machines.md, "Placing work".
  *
  * Nothing is lost: only a clean worktree (no uncommitted change, no untracked file) is released, its branch stays in the
@@ -111,7 +111,7 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
   if (live) {
     // Only a check-in pending: no job running, nothing queued, nothing unanswered (keepLive), no permission open.
     const st = agentState(s, undefined, f.now);
-    if (s.status !== 'idle' || st.state !== 'waiting' || st.kind !== 'timer' || s.pendingPermissions.length || f.keepLive) return undefined;
+    if (s.status !== 'idle' || st.state !== 'between_turns' || st.kind !== 'timer' || s.pendingPermissions.length || f.keepLive) return undefined;
     return keptWhy(s, sb, f) ? undefined : { do: 'stop', why: far };
   }
   if (s.status !== 'stopped' || heldNow(s, f.now)) return undefined;
@@ -249,7 +249,7 @@ export class PlaceAgain {
 
   /**
    * The release pass (every minute): release the sandboxes of stopped workers whose resume is far, stop the process of
-   * a Waiting worker with only a far check-in (the next pass releases it), and give a released worker its sandbox back
+   * a worker between turns with only a far check-in (the next pass releases it), and give a released worker its sandbox back
    * when its check-in nears and that is still free. Returns what it did, for the log and tests.
    */
   tick(): string[] {
