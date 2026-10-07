@@ -279,9 +279,10 @@ echo "ok: fffctl migrate runs in the guest: it says when BEAST cannot be reached
 step "the orchestration worker (w597): its account, its capped scratch, its socket, its two sudo rights, its launcher"
 g 'id fff-ops' | matches 'fff-ops' || fail "no fff-ops account"
 g 'sudo passwd -S fff-ops' | matches ' L ' || fail "fff-ops has a usable password"
-mnt=$(g 'findmnt -n -o FSTYPE,OPTIONS /srv/fff-ops')
+mnt=$(g 'findmnt -n -o FSTYPE,OPTIONS /srv/fff-ops' || true)
 printf '%s' "$mnt" | matches '^ext4 .*nosuid.*nodev.*noexec' || fail "/srv/fff-ops is not its nosuid,nodev,noexec ext4 scratch: $mnt"
-size=$(g 'df -m --output=size /srv/fff-ops | tail -n 1' | tr -d ' ')
+size=$(g 'df -m --output=size /srv/fff-ops | tail -n 1' | tr -d ' ' || true)
+case "$size" in '' | *[!0-9]*) fail "no size for /srv/fff-ops: '$size'" ;; esac
 if [ "$size" -le 1500 ] || [ "$size" -gt 2048 ]; then fail "the scratch is $size MB, not about OPS_DISK_MB=2048"; fi
 # Full is full: a file bigger than the cap stops at the cap, and the VM's own disk is untouched.
 out=$(g 'sudo -u fff-ops dd if=/dev/zero of=/srv/fff-ops/scratch/fill bs=1M count=3000 2>&1; sudo rm -f /srv/fff-ops/scratch/fill' || true)
@@ -316,21 +317,23 @@ s.write(JSON.stringify({ v: 1, sdkVersion: process.argv[2] || v, args: ['--versi
 s.end();
 let out = '';
 s.on('data', (d) => (out += d));
-s.on('close', () => process.stdout.write(out));
-s.on('error', (e) => { process.stdout.write('ERROR ' + e.message); });
-setTimeout(() => { process.stdout.write(out + ' TIMEOUT'); process.exit(1); }, 30000);
+s.on('close', () => process.stdout.write(out, () => process.exit(0)));
+s.on('error', (e) => process.stdout.write('ERROR ' + e.message + '
+', () => process.exit(0)));
+setTimeout(() => process.stdout.write(out + ' TIMEOUT
+', () => process.exit(0)), 30000).unref();
 EOF
 b64=$(base64 -w0 /tmp/fff-ops-sock.js)
-out=$(g "echo $b64 | base64 -d >/tmp/fff-ops-sock.js && sudo -u fff node /tmp/fff-ops-sock.js")
+out=$(g "echo $b64 | base64 -d >/tmp/fff-ops-sock.js && sudo -u fff node /tmp/fff-ops-sock.js" || true)
 echo "$out"
 printf '%s\n' "$out" | head -n 1 | matches -x OK || fail "the launcher did not answer OK through the socket: $out"
 printf '%s' "$out" | matches 'Claude Code' || fail "Claude Code did not run as the worker: $out"
-out=$(g 'sudo -u fff node /tmp/fff-ops-sock.js 0.0.1')
+out=$(g 'sudo -u fff node /tmp/fff-ops-sock.js 0.0.1' || true)
 printf '%s' "$out" | matches '^ERR .*0\.0\.1' || fail "the launcher took another SDK version: $out"
 if g 'sudo -u fff-ops node /tmp/fff-ops-sock.js' 2>/dev/null | matches '^OK'; then fail "fff-ops itself could connect to the socket"; fi
 # Kept for the update step below: the worker's way in must survive the portal's restart.
 # The unit's own fences, as installed.
-unit=$(g 'systemctl cat fff-ops@.service')
+unit=$(g 'systemctl cat fff-ops@.service' || true)
 for want in 'User=fff-ops' 'ProtectSystem=strict' 'IPAddressDeny=any' 'IPAddressAllow=localhost 160.79.104.0/23' 'TemporaryFileSystem=/tmp:size=64M' 'MemoryMax=' 'RuntimeMaxSec='; do
   printf '%s' "$unit" | matches -F "$want" || fail "fff-ops@.service has no $want"
 done
@@ -396,7 +399,7 @@ out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
 printf '%s' "$out" | matches 'ran out' || fail "the worker's fffctl update took a grant that ran out: $out"
 g 'test ! -e /srv/fff/data/ops-deploy.grant' || fail "a grant that ran out was not removed"
 grant "$(date -u -d '+10 min' +%FT%TZ)"
-out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1')
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl update 2>&1' || true)
 echo "$out"
 printf '%s' "$out" | matches "deploy asked for by ci; the portal runs .* at commit $want" || fail "the worker's deploy did not say what it started from: $out"
 g 'test ! -e /srv/fff/data/ops-deploy.grant' || fail "the deploy grant was not used up"

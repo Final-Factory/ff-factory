@@ -270,8 +270,9 @@ NoNewPrivileges=no
 # (a machine credential): fff-ops itself cannot enter it (0700 fff). /tmp, /var/tmp and /dev/shm are small and its own.
 ProtectSystem=strict
 ProtectHome=tmpfs
-ReadWritePaths=$OPS_ROOT $FFF_ROOT -/run/fff -/run/sudo -/var/lib/sudo
-TemporaryFileSystem=/tmp:size=64M,mode=1777 /var/tmp:size=16M,mode=1777 /dev/shm:size=16M,mode=1777
+ReadWritePaths=$OPS_ROOT $FFF_ROOT -/run/fff -/var/lib/sudo
+# /run/sudo: sudo's own time stamps, on a private tmpfs (/run is read-only here).
+TemporaryFileSystem=/tmp:size=64M,mode=1777 /var/tmp:size=16M,mode=1777 /dev/shm:size=16M,mode=1777 /run/sudo:size=1M,mode=0711
 IPAddressDeny=any
 IPAddressAllow=localhost $OPS_ALLOW_NETS $resolvers
 MemoryMax=$OPS_MEMORY_MAX
@@ -301,7 +302,9 @@ run_cmd systemctl start fff-ops-scratch.service
 if [ "$DRY_RUN" != 1 ]; then
   findmnt -n -o OPTIONS "$OPS_ROOT" | matches noexec || die "$OPS_ROOT is not the worker's noexec scratch file system"
 fi
-run_cmd systemctl restart fff-ops.socket
+# Only when something of it changed: a restart would cut the worker's own connection, and an update the worker asked
+# for runs this script too.
+if [ -n "$c" ] || ! systemctl is-active --quiet fff-ops.socket; then run_cmd systemctl restart fff-ops.socket; fi
 # Its Claude Code: the portal's own Agent SDK binary (fff-portal.service runs this again at each start).
 run_cmd "$FFF_LIB/fff-ops-sync" || warn "fff-ops-sync failed: the orchestration worker cannot start until the portal's next start copies its Claude Code"
 
