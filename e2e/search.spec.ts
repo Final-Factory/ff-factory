@@ -15,7 +15,7 @@ test('search: finds the seeded transcript, and a hit opens it at that message', 
   await expect(hit).toHaveCount(1);
   await expect(hit.locator('.search-hit-title')).toHaveText('Seeded worker');
   // Where it happened, by the sandbox's name.
-  await expect(hit.locator('.search-where')).toHaveText('Visual baseline');
+  await expect(hit.locator('.search-where')).toHaveText('gallery');
   await expect(hit.locator('mark')).toHaveText('zebrafish');
   // The query is in the address, so a reload or a shared link repeats it.
   await expect(page).toHaveURL(/#\/search\/zebrafish$/);

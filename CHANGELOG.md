@@ -10,6 +10,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+### Changed
+
+- **A worker's title is its job, and a sandbox's label is its name** (w575, Lothsahn: "Please update FFFactory so that
+  the dispatcher sets the agent title whenever it hands it a new job with a good description of what the job is
+  (starting with the workorder number). Please also make it so the sandbox label doesn't change--workers don't (and
+  can't) set it, and they get the slot numbers that they're installed in."). The dispatcher's `start_agent`,
+  `message_agent` with a new `work_id` and `decide_work link` take a required `title`, and the worker becomes
+  "wNNN: <title>" (`server/jobTitle.ts`), saved with the session. Sandbox labels are their names (slot1..N, or the old
+  names) and never change: workers lose `set_label` (a call from one started before changes nothing),
+  `set_sandbox_label` is gone, `create_sandbox` and the New sandbox form take no label, and stored labels give way to
+  the name. The dashboard's sandbox rows show the name, then their live agents' titles, Working first; FREE no longer
+  depends on a label. [docs/orchestrators.md](docs/orchestrators.md#worker-titles-and-sandbox-labels).
+
 ### Added
 
 - **Dictation on the portal VM** (w570, Ben: "I can no longer use voice on my phone even tho that was working before").

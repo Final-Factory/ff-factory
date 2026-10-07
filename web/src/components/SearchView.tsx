@@ -117,7 +117,7 @@ export function SearchView({ app, initial }: { app: AppState; initial?: string }
             {app.machines.flatMap((m) =>
               (m.sandboxes ?? []).map((s) => (
                 <option key={`${m.id}/${s.id}`} value={`sandbox:${m.id}/${s.id}`}>
-                  {displayName(s)} (slot {m.id}/{s.id})
+                  {m.id}/{s.id}
                 </option>
               )),
             )}

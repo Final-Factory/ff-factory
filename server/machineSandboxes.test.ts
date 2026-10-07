@@ -301,10 +301,11 @@ test('machine sandboxes: settings, limits, references and snapshots on the porta
   const next = mergeSandboxes(prev, [
     { id: 'a', branch: 'y', base: 'b', path: '/a', status: 'ready', createdAt: '', unity },
     { id: 'b', branch: 'z', base: 'b', path: '/b', status: 'creating', createdAt: '', unity },
-  ], new Map([['b', 'shaders']]));
+  ]);
+  // The label is the sandbox's name (w575): an old label gives way to it.
   assert.deepEqual(next.map((s) => [s.id, s.branch, s.purpose, s.sessionIds]), [
-    ['a', 'y', 'belts', ['s1']],
-    ['b', 'z', 'shaders', []],
+    ['a', 'y', 'a', ['s1']],
+    ['b', 'z', 'b', []],
   ]);
   assert.deepEqual(mergeSandboxes(prev, []), [], 'gone on the machine, gone here');
 
@@ -389,11 +390,11 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   daemon.start();
   await until('online with hello', () => mm.isOnline('pc') && !!store.machines.get('pc')?.info);
 
-  const text = await mm.createSandbox('pc', { name: 'sb1', purpose: 'belt work', seedLibrary: true });
+  const text = await mm.createSandbox('pc', { name: 'sb1', seedLibrary: true });
   assert.match(text, /Creating sandbox sb1 on branch sandbox\/sb1 from origin\/develop/);
   await until('ready on the portal', () => store.machines.get('pc')?.sandboxes?.find((s) => s.id === 'sb1')?.status === 'ready');
   const sb = mm.requireSandbox('pc', 'sb1');
-  assert.equal(sb.purpose, 'belt work', 'the purpose given at creation is kept across snapshots');
+  assert.equal(sb.purpose, 'sb1', 'its label is its name (w575)');
   assert.equal(fs.existsSync(path.join(sb.path, 'Library', 'Artifacts', 'warm.bin')), true);
   await assert.rejects(mm.createSandbox('pc', { name: 'sb1' }), /already exists on pc/);
 

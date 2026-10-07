@@ -148,7 +148,7 @@ export interface SessionInfo {
   machineId?: string;
   /** With machineId: the machine sandbox it works in (docs/machines.md, "Machine sandboxes"), not the machine's main clone. */
   machineSandbox?: string;
-  /** The last label this agent gave its sandbox or machine (set_label), restored when a helper there finishes. */
+  /** Retired (w575): the label an agent gave its sandbox or machine with set_label. Old records may still carry it. */
   label?: string;
   labelAt?: string;
   title: string;
@@ -1751,7 +1751,6 @@ export interface CreateSandboxRequest {
   branch?: string;
   /** Base ref for a new branch. Defaults to config.defaultBase. */
   base?: string;
-  purpose?: string;
   /** Copy the warm Library seed into the worktree (needed for a fast Unity start). Default true. */
   seedLibrary?: boolean;
   startUnity?: boolean;

@@ -760,6 +760,43 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
 - Your heartbeat is your own, and so are your orchestrator's timers: the clock button in your chat's header lists them,
   with pause, resume and cancel. Owners see the dispatcher's on its page.
 
+## Worker titles and sandbox labels
+
+Lothsahn (2026-10-07, w575): "Please update FFFactory so that the dispatcher sets the agent title whenever it hands it
+a new job with a good description of what the job is (starting with the workorder number). Please also make it so the
+sandbox label doesn't change--workers don't (and can't) set it, and they get the slot numbers that they're installed
+in." Before, a worker kept the title of its first job (e50de814 still read "Worker machine paths: one root folder plan
+(w511)" while on w513), and its sandbox showed whatever label the last agent there had set ("w554: waiting on Ben…"
+on beast/agent-mcp), so a busy worker could not be found on the dashboard.
+
+- **A worker's title is its job**: `wNNN: <what the job is>` (`jobTitle`, `server/jobTitle.ts`; at most 80 characters,
+  one line). The dispatcher writes the description, for a person scanning the dashboard; the server puts the request
+  id in front, once (a description that already starts with one loses it). It is set:
+  - by `start_agent`: `title` is required for the dispatcher. With a `work_id` the worker starts with it; without one
+    the start is recorded as the next request (`recordDirectStart`) and the worker is titled for that id. A person's
+    own orchestrator's start is titled for the request it is recorded as too (its `title`, else the prompt's start);
+  - by `message_agent` with a `work_id` the worker is not on yet: `title` is required, and the worker is retitled once
+    the message is sent (a refused send renames nothing). A follow-up on the request it is on may pass one;
+  - by `decide_work link`: `title` is required, and every linked worker is retitled.
+  `set_agent_title` renames a worker otherwise. A merge moves no worker (only a request nobody works on yet can be
+  merged), and an FFBox dev request that joins a request (covered) leaves its workers on the same job, so neither
+  renames anyone. Intake requests reach workers through the same tools.
+- **Kept and shown everywhere**: the title is the session's own (`SessionManager.setTitle`, saved with the session in
+  `state.json`), so it survives a restart and shows on the dashboard's cards and tabs, in `list_sandboxes`,
+  `list_machines`, the transcripts list and every `[worker update]`. A machine's daemon never sets it (its session
+  updates drop `title`, `server/machines.ts`).
+- **A sandbox's label is its name and never changes**: slot1..N on a worker root (w513, #177), the older names
+  (`agent-mcp`, `shader-blackhole`, …) elsewhere; old sandboxes are not renamed. A label set before (by a worker's
+  `set_label` or the dispatcher's `set_sandbox_label`) gives way to the name when the portal starts and with every
+  daemon snapshot (`mergeSandboxes`). Workers have no `set_label` any more; one started before still has it in its tool
+  list, and a call changes nothing and says why. `set_sandbox_label` is gone, and `create_sandbox` and the New sandbox
+  form take no label. A machine's own label (`set_machine_label`, the machine page) is the people's, as before; its
+  workers cannot set it either.
+- **What a sandbox is doing** is its live agents' titles, the Working one first: the dashboard's sandbox row shows its
+  name, then "Working · w513: LothDesktop fresh install (+1) · <branch>", and `list_sandboxes` lists the agents under
+  each sandbox. A sandbox is **FREE** when it is ready and has no live agent and none waiting to come back to it; its
+  label no longer counts.
+
 ## The first start
 
 The shared chat becomes the dispatcher and keeps its conversation, so it starts out knowing what is in flight. Every

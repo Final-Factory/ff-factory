@@ -185,11 +185,13 @@ export function limitOptions(opts: SandboxLimits, prev: SandboxLimits | undefine
 
 /**
  * A machine's sandboxes after a daemon snapshot: the daemon's facts (folder, branch, status, editor, git) with the
- * portal's purpose and agents kept by id; `pending` gives the purpose of sandboxes just asked for. Exported for tests.
+ * portal's agents kept by id. The label is the sandbox's name and never changes (w575): slot1..N on a worker root,
+ * the old names (agent-mcp, shader-blackhole) elsewhere; what a sandbox is doing shows as its agents' titles. Exported
+ * for tests.
  */
-export function mergeSandboxes(prev: MachineSandbox[] | undefined, list: DaemonSandbox[], pending: ReadonlyMap<string, string> = new Map()): MachineSandbox[] {
+export function mergeSandboxes(prev: MachineSandbox[] | undefined, list: DaemonSandbox[]): MachineSandbox[] {
   const old = new Map((prev ?? []).map((s) => [s.id, s]));
-  return list.map((d) => ({ ...d, purpose: old.get(d.id)?.purpose ?? pending.get(d.id) ?? 'unused', sessionIds: old.get(d.id)?.sessionIds ?? [] }));
+  return list.map((d) => ({ ...d, purpose: d.id, sessionIds: old.get(d.id)?.sessionIds ?? [] }));
 }
 
 /** "lothdesktop/sb1" as a machine sandbox reference, or undefined for a plain (host) sandbox id. */
@@ -293,6 +295,12 @@ export class MachineManager {
     for (const m of store.machines.values()) {
       if (m.status !== 'deploying') continue;
       Object.assign(m, { status: 'error', statusDetail: `a portal restart interrupted its deploy${m.statusDetail ? ` (at: ${m.statusDetail})` : ''}` });
+      store.putMachine(m);
+    }
+    // Labels set before w575 (a worker's set_label, set_sandbox_label) give way to the sandbox's name.
+    for (const m of store.machines.values()) {
+      if (!m.sandboxes?.some((sb) => sb.purpose !== sb.id)) continue;
+      m.sandboxes = m.sandboxes.map((sb) => ({ ...sb, purpose: sb.id }));
       store.putMachine(m);
     }
     setInterval(() => this.heartbeat(), PING_MS).unref();
@@ -1409,8 +1417,7 @@ export class MachineManager {
       }
       case 'sandboxes': {
         if (!Array.isArray(msg.list)) return;
-        m.sandboxes = mergeSandboxes(m.sandboxes, msg.list, this.pendingPurpose);
-        for (const sb of m.sandboxes) this.pendingPurpose.delete(sb.id);
+        m.sandboxes = mergeSandboxes(m.sandboxes, msg.list);
         if (msg.disk) this.disks.set(id, msg.disk);
         this.store.putMachine(m);
         return;
@@ -1535,8 +1542,6 @@ export class MachineManager {
   // ---------------------------------------------------------------- machine sandboxes (docs/machines.md, machine/sandboxes.ts)
 
   private readonly sandboxCalls = new Map<string, { resolve: (text: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
-  /** Purposes of sandboxes asked for and not yet in a snapshot. */
-  private readonly pendingPurpose = new Map<string, string>();
   /** Each machine's sandbox volume, as its daemon last reported it (memory only). */
   private readonly disks = new Map<string, { level: 'ok' | 'warn' | 'critical'; freeBytes?: number }>();
 
@@ -1584,7 +1589,7 @@ export class MachineManager {
   }
 
   /** Create a sandbox on a machine: a worktree of its main clone in its sandbox_root (returns once the daemon recorded it). */
-  async createSandbox(machineId: string, req: { name: string; purpose?: string; branch?: string; base?: string; seedLibrary?: boolean; startUnity?: boolean }): Promise<string> {
+  async createSandbox(machineId: string, req: { name: string; branch?: string; base?: string; seedLibrary?: boolean; startUnity?: boolean }): Promise<string> {
     const m = this.requireSandboxDaemon(machineId);
     const pool = poolSettingsOf(m);
     if (!pool) throw new Error(`${m.id} has no sandboxes: redeploy it with add_machine sandbox_root (e.g. "D:\\work\\ffsb")`);
@@ -1600,14 +1605,7 @@ export class MachineManager {
     const problem = branchProblem(branch);
     if (problem) throw new Error(problem);
     const base = req.base?.trim() || this.cfg.defaultBase;
-    const purpose = req.purpose?.trim() ? normalizePurpose(req.purpose) : id !== asked ? normalizePurpose(req.name) : 'unused';
-    this.pendingPurpose.set(id, purpose);
-    try {
-      return await this.sandboxCall(m.id, { op: 'create', sandbox: id, branch, base, seedLibrary: req.seedLibrary ?? true, startUnity: req.startUnity ?? false }, 2 * 60_000);
-    } catch (e) {
-      this.pendingPurpose.delete(id);
-      throw e;
-    }
+    return await this.sandboxCall(m.id, { op: 'create', sandbox: id, branch, base, seedLibrary: req.seedLibrary ?? true, startUnity: req.startUnity ?? false }, 2 * 60_000);
   }
 
   /** Delete a machine sandbox (its editor, Library, worktree; the branch stays unless deleteBranch). Returns when it is gone. */
@@ -1618,15 +1616,6 @@ export class MachineManager {
     m.sandboxes = (m.sandboxes ?? []).filter((s) => s.id !== sb.id);
     this.store.putMachine(m);
     return text;
-  }
-
-  setSandboxPurpose(machineId: string, sandbox: string, purpose: string): MachineSandbox {
-    const m = this.require(machineId);
-    const sb = this.requireSandbox(m.id, sandbox);
-    if (sb.status === 'deleting') throw new Error(`sandbox ${m.id}/${sb.id} is being deleted`);
-    sb.purpose = normalizePurpose(purpose);
-    this.store.putMachine(m);
-    return sb;
   }
 
   sandboxLog(machineId: string, sandbox: string, lines: number): Promise<string> {
