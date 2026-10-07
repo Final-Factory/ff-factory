@@ -24,6 +24,9 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A daemon with a bad token logs the portal's 401, not a parse error** (w636). The portal's refusal had bare LF line
+  ends, which the daemon's HTTP client could not parse ("Parse Error: Missing expected CR"); it now ends its lines with
+  CRLF and says Connection: close.
 - **A fresh job for the orchestration worker starts reliably** (w638, lothsahn: it crashed twice on 2026-10-07 with
   "Claude Code process exited with code 1" the moment a job came with `fresh: true` after a turn had ended). Starting
   the fresh conversation stopped the old process and connected for the new one at once, while the old one was still
@@ -41,9 +44,6 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   drop it; the heartbeat is unchanged). The machine has 10 s to return the text, upload included (was 3 s plus 0.05 s
   per second of audio). A clip that times out keeps the next ones off that machine for 2 minutes or until it re-offers
   its Whisper.
-- **A daemon with a bad token logs the portal's 401, not a parse error** (w636). The portal's refusal had bare LF line
-  ends, which the daemon's HTTP client could not parse ("Parse Error: Missing expected CR"); it now ends its lines with
-  CRLF and says Connection: close.
 
 ### Added
 
