@@ -35,8 +35,8 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   no longer adds a false "Claude Code process aborted by user" error.
 
 - **Flaky unit tests wait for what they check, not a fixed time** (w636, asked by lothsahn). The background-save and
-  state-save tests, the unity-slots crashed-holder, waiter and CLI tests, and the download-resume test failed on slow
-  Windows runners; each now waits on the event it checks. The Mac dialog and Unity watch tests no longer ask the real
+  state-save tests, the unity-slots crashed-holder, waiter and CLI tests, the download-resume test and the agent-host
+  "new host" test (Windows reused the dead host's pid) failed on Windows runners; each now waits on the event it checks. The Mac dialog and Unity watch tests no longer ask the real
   Mac (they failed on every Mac worker, and macUnity took 10 s there).
 - **Dictation never waits on a machine that went away** (w615, lothsahn: once the portal knows BEAST is offline, later
   clips must go straight to the CPU; "Just set an upload timeout of 10s for the voice request"). A clip to a machine's GPU
