@@ -30,10 +30,13 @@
 #                                       where the backups go (BACKUP_SSH_TARGET in /etc/fff/fff.conf) and the age public
 #                                       keys they are encrypted to (/etc/fff/backup-recipients.txt); --target "" turns
 #                                       them off
-#   fffctl configure [--owner-name NAME] [--public-url URL] [--claude-tokenfile]
+#   fffctl configure [--owner-name NAME] [--public-url URL] [--claude-tokenfile] [--voice MODEL|off]
 #                                       set config.json's ownerName, publicUrl, and the orchestrators and the dispatcher on
 #                                       the stored subscription token (claudeTokenFile, claudeAccounts "tokenfile"); the
-#                                       portal restarts when it changed
+#                                       portal restarts when it changed. --voice MODEL: local Whisper dictation on this
+#                                       VM's CPU (voice.enabled, model, device cpu, cpuThreads = nproc, autoInstall; no
+#                                       Kokoro TTS), installed by the portal in the background after the restart
+#                                       (docs/voice.md, "On the portal VM"); --voice off turns it off
 #   fffctl state                        what is set up, as JSON (the host's install.sh reads it to do only what is missing)
 #   fffctl vault list | add | rotate | grant | remove ...
 #                                       the token vault (docs/vault.md): secrets the portal hands worker runs. A value comes
@@ -441,12 +444,16 @@ cmd_state() {
 
 # config.json's ownerName, publicUrl and the token-file accounts, set by the host's install.sh; restarts if it changed.
 cmd_configure() {
-  local owner="" url="" tokenfile=0 set_owner=0 set_url=0 cfg=$FFF_ROOT/config/config.json tmp
+  local owner="" url="" tokenfile=0 set_owner=0 set_url=0 voice="" cfg=$FFF_ROOT/config/config.json tmp
   while [ $# -gt 0 ]; do
     case "$1" in
       --owner-name) owner=$2; set_owner=1; shift ;;
       --public-url) url=$2; set_url=1; shift ;;
       --claude-tokenfile) tokenfile=1 ;;
+      --voice)
+        voice=${2:-}
+        case "$voice" in "" | [!A-Za-z0-9]* | *[!A-Za-z0-9._-]*) die "--voice is a faster-whisper model name (base.en, small.en, ...) or off, not '$voice'" ;; esac
+        shift ;;
       *) die "unknown option $1" ;;
     esac
     shift
@@ -455,16 +462,19 @@ cmd_configure() {
   if [ "$tokenfile" = 1 ] && [ ! -s "$FFF_ROOT/secrets/claude-oauth-token" ]; then die "no stored subscription token: fffctl claude-token --file FILE first"; fi
   tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
   jq --arg owner "$owner" --argjson so "$set_owner" --arg url "$url" --argjson su "$set_url" --argjson tf "$tokenfile" \
-    --arg file "$FFF_ROOT/secrets/claude-oauth-token" \
+    --arg file "$FFF_ROOT/secrets/claude-oauth-token" --arg voice "$voice" --argjson threads "$(nproc)" \
     '(if $so == 1 then .ownerName = $owner else . end)
      | (if $su == 1 then .publicUrl = $url else . end)
-     | (if $tf == 1 then .claudeTokenFile = $file | .claudeAccounts = ((.claudeAccounts // {}) + {orchestrator: "tokenfile", dispatcher: "tokenfile"}) else . end)' \
+     | (if $tf == 1 then .claudeTokenFile = $file | .claudeAccounts = ((.claudeAccounts // {}) + {orchestrator: "tokenfile", dispatcher: "tokenfile"}) else . end)
+     | (if $voice == "off" then .voice = ((.voice // {}) + {enabled: false})
+        elif $voice != "" then .voice = ((.voice // {}) + {enabled: true, model: $voice, device: "cpu", cpuThreads: $threads, autoInstall: true, tts: false})
+        else . end)' \
     "$cfg" >"$tmp" || { rm -f "$tmp"; die "could not edit $cfg"; }
   chown "$FFF_USER:$FFF_USER" "$tmp"
   chmod 0600 "$tmp"
   if cmp -s "$tmp" "$cfg"; then rm -f "$tmp"; echo "config.json: unchanged"; return 0; fi
   mv -f "$tmp" "$cfg"
-  echo "config.json:$([ "$set_owner" = 0 ] || echo " ownerName $owner;")$([ "$set_url" = 0 ] || echo " publicUrl ${url:-(none)};")$([ "$tokenfile" = 0 ] || echo ' orchestrators and dispatcher on the subscription token;') restarting"
+  echo "config.json:$([ "$set_owner" = 0 ] || echo " ownerName $owner;")$([ "$set_url" = 0 ] || echo " publicUrl ${url:-(none)};")$([ "$tokenfile" = 0 ] || echo ' orchestrators and dispatcher on the subscription token;')$([ -z "$voice" ] || echo " voice $voice;") restarting"
   cmd_restart --drain-minutes 2
 }
 

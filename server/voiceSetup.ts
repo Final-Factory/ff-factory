@@ -82,7 +82,18 @@ function hashFile(file: string) {
   return crypto.createHash('sha256').update(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n')).digest('hex').slice(0, 16);
 }
 
-export const requirementsHash = () => hashFile(REQUIREMENTS);
+/**
+ * The requirements as installed for this config: `voice.device` "cpu" leaves out the CUDA runtime wheels (about 1 GB a
+ * CPU-only host such as the portal VM never loads), so it hashes apart from the full set and a switch either way reinstalls.
+ */
+export const requirementsHash = (v?: Pick<VoiceConfig, 'device'>) => hashFile(REQUIREMENTS) + (v?.device === 'cpu' ? '-cpu' : '');
+
+/** requirements.txt's lines for this config: without the `nvidia-*` CUDA wheels when voice.device is "cpu". */
+export function requirementsFor(v: Pick<VoiceConfig, 'device'>): string {
+  const text = fs.readFileSync(REQUIREMENTS, 'utf8').replace(/\r\n/g, '\n');
+  return v.device === 'cpu' ? text.split('\n').filter((l) => !/^\s*nvidia-/.test(l)).join('\n') : text;
+}
+
 export const ttsRequirementsHash = () => hashFile(TTS_REQUIREMENTS);
 
 function readStamp(v: VoiceConfig): Stamp | undefined {
@@ -100,7 +111,7 @@ export function setupNeeded(v: VoiceConfig, part?: VoicePart): string | null {
     if (!fs.existsSync(p.python)) return 'not installed';
     const stamp = readStamp(v);
     if (!stamp?.requirements) return 'install incomplete';
-    if (stamp.requirements !== requirementsHash()) return 'requirements changed';
+    if (stamp.requirements !== requirementsHash(v)) return 'requirements changed';
     if (stamp.model !== v.model || !fs.existsSync(path.join(modelDir(v), 'model.bin'))) return `model ${v.model} not downloaded`;
   }
   if (part !== 'stt' && v.tts) {
@@ -189,11 +200,13 @@ export async function setupVoice(v: VoiceConfig, log: (s: string) => void = cons
         log(`creating venv (Python ${PYTHON_VERSION})`);
         await must(uv, ['venv', '--python', PYTHON_VERSION, '--allow-existing', p.venv], long);
       }
-      log('installing faster-whisper and the CUDA runtime wheels');
-      await must(uv, ['pip', 'install', '--python', p.python, '-r', REQUIREMENTS], long);
+      log(v.device === 'cpu' ? 'installing faster-whisper (voice.device cpu: no CUDA wheels)' : 'installing faster-whisper and the CUDA runtime wheels');
+      const reqs = path.join(v.toolsDir, 'requirements-installed.txt');
+      fs.writeFileSync(reqs, requirementsFor(v));
+      await must(uv, ['pip', 'install', '--python', p.python, '-r', reqs], long);
       log(`downloading Whisper model ${v.model}`);
       await must(p.python, ['-c', 'import sys; from faster_whisper import download_model; download_model(sys.argv[1], output_dir=sys.argv[2])', v.model, modelDir(v)], long);
-      stamp({ requirements: requirementsHash(), model: v.model });
+      stamp({ requirements: requirementsHash(v), model: v.model });
     }
 
     if (v.tts && (force || setupNeeded(v, 'tts'))) {

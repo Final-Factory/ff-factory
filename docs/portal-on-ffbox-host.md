@@ -429,8 +429,8 @@ The guest install masks `tmp.mount`, systemd's documented way back to the disk; 
 Off at cut-over (`voice.enabled: false`). The host has no GPU, and with voice on the server installs uv, Python and
 CUDA wheels at startup (`server/config.ts:390-396`, `server/voice.ts:67-71`). The browser's own speech engines take
 over, as they already do when the local engine is missing *(sourced: [voice.md](voice.md), "fallbacks")*. Whisper on
-the CPU (`voice.device: "cpu"`, `voice.cpuThreads`) can be tried later within the VM's vCPUs, once someone measures its
-latency there.
+the CPU (`voice.device: "cpu"`, `voice.cpuThreads`) runs within the VM's vCPUs: `fffctl configure --voice base.en`
+turns it on, without the CUDA wheels (w570; measurements and the choice of model in [voice.md](voice.md), "On the portal VM").
 
 ## 3. Supervision, updates, hang detection and the nightly restart
 
