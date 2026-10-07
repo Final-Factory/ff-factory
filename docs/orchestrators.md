@@ -23,7 +23,8 @@ claude.ai connectors (Gmail, Google Drive and the rest; config `claudeAiConnecto
   that request is open, stalled or closed in the last 7 days (w431: a worker Lothsahn started and the dispatcher then
   sent Ben's w426 was refused to Ben, because w426 was stalled; one on Ben's finished w427/w428/w430, because they were
   done). The message carries `[about w426 "title"]` under the sender line, so the worker knows which of the person's
-  requests it is about; at most 3 per worker until the person writes again (`orchestrator.followUpsPerMessage`);
+  requests it is about; at most 3 per worker until the person writes again (`orchestrator.followUpsPerMessage`). An
+  owner's orchestrator may also message another owner's workers ([Owners across each other's work](#owners-across-each-others-work));
 - the ledger: `request_work`, `list_work`, `update_work`;
 - `message_person`, to another person's own orchestrator ([People to people](#people-to-people)).
 - `ops_worker`, Lothsahn's and Ben's alone (refused for anyone else): the one orchestration worker in the portal VM, a
@@ -109,23 +110,57 @@ for a request runs for the person who filed it, on their account. The requester'
 answers a question), change the priority, close the request, or reopen it within 7 days (`update_work`). Closing is the
 filer's: the others still on the request hear it. Someone whose request was merged into it only leaves it.
 
-**Owners close each other's requests when asked** (w402, Lothsahn: "ben and I can close each other's requests if we
-explicitly ask"). A person with the `owner` role (docs/identity.md; Ben and Lothsahn today) may have their own
-orchestrator close (done or cancelled) or reopen **another person's** request with `update_work`
-(`Orchestrators.closeForOther`, `server/orchestrators.ts`), under the guard approving an intake request uses:
+**Owners close each other's requests** (w402, Lothsahn: "ben and I can close each other's requests if we explicitly
+ask"; w677: "I don't want that guard between me and ben"). A person with the `owner` role (docs/identity.md; Ben and
+Lothsahn today) may have their own orchestrator close (done or cancelled) or reopen **another person's** request with
+`update_work` (`Orchestrators.closeForOther`, `server/orchestrators.ts`):
 
-- only in a turn the owner started with their own message; a turn a harness notice, a worker, a standing agent or
-  relayed FFBox or Discord text started is refused ("only Lothsahn, in their own words in this turn, closes or reopens
-  Ben's request w234: ask them");
-- only close or reopen, and only with a note saying why. A note alone or a priority change on someone else's request
-  stays refused: those are its people's to give (a note can answer the dispatcher's question for them);
-- the request's log says `closed as done by Lothsahn (Ben's request), in Lothsahn's own turn: <note>` (or cancelled,
-  reopened), and its people's orchestrators get a `[dispatch]` line naming who did it and why. A cancel or a reopen
-  reaches the dispatcher as a `[work update]`, as their own would. It does not change whose request it is, or
-  `humanAsked`: another owner's word is not its people's own.
+- **another owner's request** (its filer has the owner role) closes or reopens as the owner's own does: on the
+  orchestrator's own judgment that it is finished or wrongly closed, in any turn (a timer, a `[ledger cleanup]`
+  follow-up, a worker's report), with no need for the person to name it (w677). The role is the gate, never a list of
+  names;
+- **a non-owner's request** only in a turn the owner started with their own message, the guard approving an intake
+  request uses; a turn a harness notice, a worker, a standing agent or relayed FFBox or Discord text started is refused
+  ("only Lothsahn, in their own words in this turn, closes or reopens Cara's request w234: ask them");
+- only with a note saying why. A priority change on someone else's request stays refused: it is its people's to give.
+  A note alone is the next section's (another owner's request only);
+- the request's log says `closed as done by Lothsahn (Ben's request), in Lothsahn's own turn: <note>`, or `on
+  Lothsahn's orchestrator's judgment, not in a turn of theirs (owners, w677)`, and its people's orchestrators get a
+  `[dispatch]` line naming who did it and why. A cancel or a reopen reaches the dispatcher as a `[work update]`, as their
+  own would. It does not change whose request it is, or `humanAsked`: another owner's word is not its people's own.
 
 A member keeps the rule above: their own requests only ("w234 is Ben's request, not X's; only an owner closes or
-reopens another person's request").
+reopens another person's request, or adds a note to another owner's").
+
+### Owners across each other's work
+
+w677 (Lothsahn: "Fix FFFactory so I can send requests to Ben's workers and vice versa"): Lothsahn's orchestrator had
+measured Mac crash findings for the worker on Ben's w665, and `message_agent` refused it ("is ben's work: follow up only
+on lothsahn's own workers"), as did a note on w665; the only way left was `message_person` to Ben, to forward by hand.
+Between owners (the `owner` role, `Orchestrators.isOwnerRole`; non-owners keep the rules above, in both directions):
+
+- **`message_agent` to another owner's worker** (`Orchestrators.followUp`): a worker any of another owner's requests is
+  on (as for one's own: started, sent or linked, open, stalled or closed in the last 7 days), or one another owner
+  started. Attachments go as with any follow-up. The worker reads, under the sender line (`[from the orchestrator, for
+  Lothsahn]`), the `[about w665 "title"]` line and `crossOwnerLine`: the work stays Ben's, Ben's brief and decisions
+  govern, and new scope is not the worker's to start. The worker keeps its requester (`SessionInfo.requestedBy`) and so
+  its account (`machineSandboxSpec` runs it on its requester's and request's account, not the sender's). The request's
+  owner hears it in their own chat, `[from another owner] Lothsahn messaged your worker d558ba14 "…" on w665: <first
+  line>` (`Orchestrators.followedUpAcross`), and the request's log has it. The worker's answer reaches both as a
+  `[worker update]`: whoever a turn was for hears its end (`Agents.onWorkerTurnEnd` adds `lastRequestedBy`).
+- **New scope stays a request.** A follow-up from the other owner carries information and questions on that work:
+  findings, data, a correction, "did you try X". Changing what the request asks, adding work or redirecting the worker
+  is a `request_work` (related to it), which its owner and the dispatcher see; the worker is told to say so in its report
+  rather than start it. The request's owner decides what their own work is, and it runs on their account.
+- **A note on another owner's request** (`update_work` id and note, `Orchestrators.noteForOther`): kept with its notes
+  (so every worker handed it later reads it in the brief), sent at once to its workers running on it now (not a stopped
+  one), told to its people (`[from another owner] Lothsahn added a note to your w665 "…": <first line>`, then the whole
+  note) and to the dispatcher (`[work update]`, saying which workers have it already). It changes nothing else: no
+  status, no priority, no answer to a question asked of its people, no revival of a stalled request. Any turn will do,
+  and it counts toward the filings limit as a note on one's own does. A non-owner's request takes no other person's
+  notes.
+- **Limits stay per sender.** The follow-up count is per sender orchestrator and worker (`followUps`, keyed by the
+  sender's chat): Lothsahn's three to Ben's worker use none of Ben's, and only Lothsahn writing starts his again.
 
 The ledger is `data/work.json`: every open request, every one closed in the last 7 days (the reopen window), and at least
 the newest 300 closed ones, 2,000 closed at most (`pruneIds`, `server/work.ts`; stalled ones are kept like open ones).
@@ -978,7 +1013,8 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
 
 - The dispatcher reaches people only through ledger decisions, one reply per decision.
 - A person's orchestrator files or updates at most 3 times, and follows up with one worker at most 3 times, between two
-  messages of its person (`orchestrator.filingsPerMessage`, `orchestrator.followUpsPerMessage`). Harness messages alone
+  messages of its person (`orchestrator.filingsPerMessage`, `orchestrator.followUpsPerMessage`), counted per sender: an
+  owner's follow-ups to another owner's worker never use up that owner's own (w677). Harness messages alone
   (a worker's report, a timer, another orchestrator) cannot keep it going. A close (done or cancelled, their own request
   or, for an owner, another person's) in a turn the person started with their own message is not counted (w631:
   Lothsahn's one "close everything that's done" was refused after three closes); a close in a harness turn still is.

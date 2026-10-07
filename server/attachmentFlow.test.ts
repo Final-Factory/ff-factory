@@ -42,7 +42,7 @@ async function until(what: string, cond: () => boolean, ms = 8000) {
 
 type UserEv = Extract<TranscriptEvent, { kind: 'user' }>;
 
-function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { hostAlpha?: boolean } = {}) {
+function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { hostAlpha?: boolean; people?: UserInfo[] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-attflow-'));
   const cfg = {
     dataDir: dir,
@@ -61,7 +61,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { h
   const store = new Store(dir);
   const sessions = new SessionManager(cfg, store);
   const machines = new MachineManager(cfg, store, sessions);
-  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
+  const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => opts.people ?? PEOPLE));
   const files = new AttachmentStore(dir);
   agents.attachments = files;
   machines.attachments = files;
@@ -95,8 +95,8 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, opts: { h
 }
 
 /** Sandbox alpha on a machine (pc/alpha, a worktree on its in-process daemon): the portal holds none of its own (w510). */
-async function setupOnMachine(t: { after: (fn: () => void | Promise<void>) => void }) {
-  const env = setup(t, { hostAlpha: false });
+async function setupOnMachine(t: { after: (fn: () => void | Promise<void>) => void }, people?: UserInfo[]) {
+  const env = setup(t, { hostAlpha: false, people });
   const pc = await startTestMachine(env.machines, { sandboxes: ['alpha'] });
   env.closers.push(() => pc.stop());
   return { ...env, pc, alpha: pc.path('alpha') };
@@ -229,3 +229,19 @@ test('the orchestrators turn a review-folder file into an attachment, and only t
 
 });
 
+
+test("w677: an owner's follow-up on another owner's worker carries files too, into that worker's Inbox", async (t) => {
+  const owners: UserInfo[] = [...PEOPLE.filter((p) => p.userId !== 'lothsahn'), { ...LOTH, role: 'owner' }];
+  const { alpha, call, upload, dispatcher, chat, users } = await setupOnMachine(t, owners);
+  await call(chat({ userId: 'ben', displayName: 'Ben' }).info, 'request_work', { title: 'Mac GPU page fault', brief: 'x' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Find it.', title: 'GPU fault', work_id: 'w1' });
+  const worker = /Started agent (\w+)/.exec(started.text)![1];
+  await until('the brief went', () => users(worker).length > 0);
+  const a = await upload('m3-crash.ips', Buffer.from('EXC_BAD_ACCESS (SIGBUS) in MTLCompilerService'));
+  const r = await call(chat(LOTH).info, 'message_agent', { session_id: worker, text: 'The M3 crash report, measured.', attachments: [a.id] });
+  assert.equal(r.isError, false, r.text);
+  assert.match(r.text, /^Sent, for Lothsahn, with the attachment in its Inbox\/\. It is Ben's work/);
+  await until('the follow-up', () => users(worker).length > 1);
+  assert.deepEqual(users(worker)[1].attachments?.map((x) => x.id), [a.id]);
+  assert.equal(fs.readFileSync(path.join(alpha, 'Inbox', `${a.id}-m3-crash.ips`), 'utf8'), 'EXC_BAD_ACCESS (SIGBUS) in MTLCompilerService');
+});

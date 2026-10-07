@@ -980,19 +980,26 @@ export class Orchestrators {
 
   /**
    * An owner closes or reopens another person's request (w402: "ben and I can close each other's requests if we
-   * explicitly ask"). Only a login with the owner role, only in a turn its person started with their own message (the
-   * guard approve and decline use: never for a harness, worker, standing-agent or relayed FFBox/Discord text), only
-   * close or reopen, and only with a note saying why. A note alone or a priority change on someone else's request stays
-   * theirs. The request's people hear who did it and why; the dispatcher hears a cancel or a reopen, as for their own.
+   * explicitly ask"). Only a login with the owner role, only close or reopen, and only with a note saying why. Another
+   * owner's request (its filer's role) closes or reopens as one's own, in any turn (w677, Lothsahn: "I don't want that
+   * guard between me and ben"); a member's only in a turn the owner started with their own message (the guard approve
+   * and decline use: never for a harness, worker, standing-agent or relayed FFBox/Discord text). A priority change on someone else's request stays theirs; a note
+   * alone is noteForOther's (w677: another owner's request only). The request's people hear who did it and why; the
+   * dispatcher hears a cancel or a reopen, as for their own.
    */
   private closeForOther(chat: SessionHandle, by: Requester, w: WorkItem, input: { note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean }): string {
     const whose = `${names(w.requesters)}'s`;
     const refused = `${w.id} is ${whose} request, not ${by.displayName}'s`;
-    if (this.d.identity.get(by.userId)?.role !== 'owner') throw new Error(`${refused}; only an owner closes or reopens another person's request`);
-    if (!input.close && !input.reopen) throw new Error(`${refused}: another owner may close or reopen it (with a note saying why), not add notes or change its priority`);
-    if (input.close && input.reopen) throw new Error('close or reopen, not both');
+    if (!this.isOwnerRole(by.userId)) throw new Error(`${refused}; only an owner closes or reopens another person's request, or adds a note to another owner's`);
     if (input.priority) throw new Error(`${refused}: its priority stays its people's to change`);
-    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') throw new Error(`only ${by.displayName}, in their own words in this turn, closes or reopens ${whose} request ${w.id}: ask them`);
+    if (!input.close && !input.reopen) return this.noteForOther(chat, by, w, input.note);
+    if (input.close && input.reopen) throw new Error('close or reopen, not both');
+    // Between owners (w677, Lothsahn: "I don't want that guard between me and ben"): another owner's request closes or
+    // reopens as one's own does, on the orchestrator's judgment in any turn (a timer, a [ledger cleanup] follow-up). A
+    // member's request still needs the owner's own words in this turn.
+    const own = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    const betweenOwners = this.isOwnerRole(w.requestedBy.userId);
+    if (!own && !betweenOwners) throw new Error(`only ${by.displayName}, in their own words in this turn, closes or reopens ${whose} request ${w.id}: ask them`);
     const note = input.note?.trim();
     if (!note) throw new Error(`say why in a note: ${names(w.requesters)} will be told who ${input.close ? 'closed' : 'reopened'} ${w.id} and why`);
     const problem = updateProblem(w, input, this.now().getTime());
@@ -1009,15 +1016,70 @@ export class Orchestrators {
       w.outcome = clip(note, 300);
     }
     // humanAsked stays as its own people left it: another owner's word does not make it theirs.
-    this.stamp(w, `${verb} by ${by.displayName} (${whose} request), in ${by.displayName}'s own turn: ${note}`);
+    this.stamp(w, `${verb} by ${by.displayName} (${whose} request), ${own ? `in ${by.displayName}'s own turn` : `on ${by.displayName}'s orchestrator's judgment, not in a turn of theirs (owners, w677)`}: ${note}`);
     this.store.putWork(w);
-    this.toPeople(w.requesters, dispatchNotice(w, `${verb} by ${by.displayName}, who asked for it in their own words (it is your request)`, note));
+    const how = own ? `${by.displayName}, who asked for it in their own words` : `${by.displayName}'s orchestrator, on its own judgment (owners close each other's requests as their own, w677)`;
+    this.toPeople(w.requesters, dispatchNotice(w, `${verb} by ${how} (it is your request)`, note));
     if (input.close !== 'done') {
       const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
       const hint = input.close === 'cancelled' && live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
       this.gatherForDispatcher(by, updateNotice(w, by, `${verb} for ${names(w.requesters)} (an owner's close or reopen of another person's request): ${note}.${hint}`));
     }
     return `${w.id} (${whose} request) is ${w.status}: ${verb} by ${by.displayName}. ${names(w.requesters)}'s orchestrator is told who and why.`;
+  }
+
+  /**
+   * An owner adds a note to another owner's request (w677): kept with its notes (the workers' briefs), sent to its
+   * workers running now, and told to its people and the dispatcher. Only a note: it answers no question asked of its
+   * people, revives nothing and changes no status or priority (closing and reopening stay closeForOther's). Counts toward
+   * the filings limit, like a note on one's own request. A member's request (its filer's role) takes no other person's
+   * notes.
+   */
+  private noteForOther(chat: SessionHandle, by: Requester, w: WorkItem, text?: string): string {
+    const whose = `${names(w.requesters)}'s`;
+    const note = text?.trim();
+    if (!note) throw new Error(`${w.id} is ${whose} request, not ${by.displayName}'s: another owner may add a note to it, or close or reopen it (with a note saying why)`);
+    if (!this.isOwnerRole(w.requestedBy.userId)) throw new Error(`${w.id} is ${whose} request, not ${by.displayName}'s: an owner adds notes only to another owner's request; for anything else, request_work (related_ids: ["${w.id}"])`);
+    const problem = updateProblem(w, {}, this.now().getTime());
+    if (problem) throw new Error(problem);
+    this.spend(chat.info.id, by);
+    const own = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: by.displayName, text: note.slice(0, 2000) }].slice(-20);
+    this.stamp(w, `note by ${by.displayName} (an owner, on ${whose} request)${own ? '' : ' (not in a turn of theirs)'}: ${note}`);
+    this.store.putWork(w);
+    const sent = this.noteToWorkers(w, by, note);
+    const to = sent.length ? ` Its worker${sent.length > 1 ? 's' : ''} ${sent.join(', ')} got it already.` : '';
+    this.toPeople(
+      w.requesters,
+      `[from another owner] ${by.displayName} added a note to your ${w.id} "${clip(w.title, 80)}": ${clip(firstLine(note), 200)}
+` +
+        `${by.displayName} has the owner role, which lets them add notes to other owners' requests (w677). ${w.id} stays yours: its status, priority and questions are unchanged.${to} The whole note:
+${clip(note, 1000)}
+Tell them in a line; nothing to do unless they say so.`,
+    );
+    this.gatherForDispatcher(by, updateNotice(w, by, `a note on ${whose} request from ${by.displayName}, an owner (w677): ${note}
+It changes nothing else: it answers no question asked of ${names(w.requesters)} and starts nothing; act on it as ${names(w.requesters)}'s brief allows.${to}`));
+    return `Noted on ${w.id} (${whose} request). ${names(w.requesters)}'s orchestrator and the dispatcher are told.${to} It stays ${whose}: its status, priority and questions are theirs.`;
+  }
+
+  /** A note from another owner, to the workers on the request now (w677); a stopped one reads it in the request's notes when handed it again. */
+  private noteToWorkers(w: WorkItem, by: Requester, note: string): string[] {
+    const all = [...this.store.work.values()];
+    const out: string[] = [];
+    for (const sid of w.sessionIds) {
+      const s = this.store.sessions.get(sid);
+      if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || !servedBy(sid, all).has(w.id)) continue;
+      try {
+        this.sessions.send(sid, `[about ${w.id} "${clip(w.title, 80)}"]
+${crossOwnerLine(by, w.requesters)}
+A note ${by.displayName} added to ${w.id}:
+${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
+        out.push(sid);
+      } catch {
+        // gone or at a limit: the dispatcher hears the note and the request keeps it
+      }
+    }
+    return out;
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
@@ -2671,38 +2733,88 @@ export class Orchestrators {
    * orchestrator was refused. The ones the worker is on now first, then the newest.
    */
   followUpItems(workerId: string, userId: string): WorkItem[] {
+    return this.workerItems(workerId, (w) => isFor(w, userId));
+  }
+
+  /** followUpItems for any test of whose a request is: linked to the worker and recent enough, current ones first. */
+  private workerItems(workerId: string, pick: (w: WorkItem) => boolean): WorkItem[] {
     const since = this.now().getTime() - 7 * 86_400_000;
     const all = [...this.store.work.values()];
     const serving = servedBy(workerId, all);
     return all
-      .filter((w) => w.sessionIds.includes(workerId) && isFor(w, userId) && (isOpen(w) || w.status === 'stalled' || Date.parse(w.updatedAt) >= since))
+      .filter((w) => w.sessionIds.includes(workerId) && pick(w) && (isOpen(w) || w.status === 'stalled' || Date.parse(w.updatedAt) >= since))
       .sort((a, b) => Number(serving.has(b.id)) - Number(serving.has(a.id)) || Number(isOpen(b)) - Number(isOpen(a)) || b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** Whether this login has the owner role: the gate for working across owners (w677), never a list of names. */
+  isOwnerRole(userId: string): boolean {
+    return this.d.identity.get(userId)?.role === 'owner';
   }
 
   /**
    * Whether a personal orchestrator may send this worker a follow-up: it must work for its person (who started it, or
-   * one of their requests is on it: followUpItems), within loopGuards().followUps since the person last wrote. Counts
-   * it, and returns the person's requests it is about (for the message's `[about …]` line), newest first.
+   * one of their requests is on it: followUpItems), or, when its person has the owner role, for another owner (w677:
+   * Lothsahn's measured Mac findings could not reach the worker on Ben's w665). Within loopGuards().followUps per sender
+   * and worker since that sender's person last wrote. Counts it, and returns the requests it is about (for the message's
+   * `[about …]` line), newest first, and for another owner's worker whose work it is (`across`).
    */
-  followUp(chat: SessionInfo, worker: SessionInfo): WorkItem[] {
+  followUp(chat: SessionInfo, worker: SessionInfo): { about: WorkItem[]; across?: Requester[] } {
     const owner = this.ownerOf(chat);
-    if (!owner) return [];
-    const about = this.followUpItems(worker.id, owner.userId);
+    if (!owner) return { about: [] };
+    let about = this.followUpItems(worker.id, owner.userId);
+    let across: Requester[] | undefined;
     const theirs = (worker.requestedBy && same(worker.requestedBy.userId, owner.userId)) || about.length > 0;
     if (!theirs) {
-      const whose = worker.requestedBy ? `${worker.requestedBy.displayName}'s` : 'not yours';
-      throw new Error(`${worker.id} "${worker.title}" is ${whose} work: follow up only on ${owner.displayName}'s own workers; for anything else, request_work`);
+      const other = this.isOwnerRole(owner.userId) ? this.otherOwnersWork(worker, owner) : undefined;
+      if (!other) {
+        const whose = worker.requestedBy ? `${worker.requestedBy.displayName}'s` : 'not yours';
+        const scope = this.isOwnerRole(owner.userId) ? `${owner.displayName}'s own workers and other owners' workers` : `${owner.displayName}'s own workers`;
+        throw new Error(`${worker.id} "${worker.title}" is ${whose} work: follow up only on ${scope}; for anything else, request_work`);
+      }
+      ({ about, people: across } = other);
     }
+    // Per sender (this orchestrator) and worker: another owner's follow-ups never use up the worker's own person's.
     const key = `${chat.id}:${worker.id}`;
     const n = this.followUps.get(key) ?? 0;
     const max = loopGuards(this.d.cfg).followUps;
     if (n >= max) throw new Error(`${max} follow-ups to ${worker.id} since ${owner.displayName} last wrote; ask them first`);
     this.followUps.set(key, n + 1);
     for (const w of this.itemsOf(worker.id)) {
-      this.stamp(w, `${owner.displayName}'s orchestrator followed up with ${worker.id}`);
+      this.stamp(w, `${owner.displayName}'s orchestrator followed up with ${worker.id}${across ? ` (an owner, on ${names(across)}'s work)` : ''}`);
       this.store.putWork(w);
     }
-    return about;
+    return { about, ...(across ? { across } : {}) };
+  }
+
+  /**
+   * Another owner's work this worker is on (w677), for an owner's follow-up: the requests of other owners linked to it
+   * (as followUpItems), or none when another owner started it; and whose they are. Undefined when it is no other owner's.
+   */
+  private otherOwnersWork(worker: SessionInfo, sender: Requester): { about: WorkItem[]; people: Requester[] } | undefined {
+    const ownerOf = (r: Requester) => !same(r.userId, sender.userId) && this.isOwnerRole(r.userId);
+    const about = this.workerItems(worker.id, (w) => w.requesters.some(ownerOf));
+    const people = new Map<string, Requester>();
+    for (const w of about) for (const r of w.requesters) if (!same(r.userId, sender.userId)) people.set(r.userId.toLowerCase(), asRequester(r));
+    if (!people.size && worker.requestedBy && ownerOf(worker.requestedBy)) people.set(worker.requestedBy.userId.toLowerCase(), asRequester(worker.requestedBy));
+    return people.size ? { about, people: [...people.values()] } : undefined;
+  }
+
+  /**
+   * An owner's follow-up reached another owner's worker (w677): each person whose work it is hears it in their own chat,
+   * "Lothsahn messaged your worker d558ba14 on w665: <first line>", and the request's log has it.
+   */
+  followedUpAcross(sender: Requester, worker: SessionInfo, about: readonly WorkItem[], people: readonly Requester[], text: string) {
+    const said = clip(firstLine(text) || 'files only', 200);
+    for (const p of people) {
+      const theirs = about.filter((w) => isFor(w, p.userId)).map((w) => w.id);
+      const on = theirs.length ? ` on ${theirs.join(', ')}` : '';
+      this.toPeople(
+        [p],
+        `[from another owner] ${sender.displayName} messaged your worker ${worker.id} "${clip(worker.title, 80)}"${on}: ${said}
+` +
+          `${sender.displayName} has the owner role, which lets them follow up on other owners' workers (w677). The worker stays ${p.displayName}'s: it keeps ${theirs.length ? 'the request, ' : ''}its requester and its account, and its answer reaches you both as a [worker update]. Tell ${p.displayName} in a line; nothing to do unless they say so.`,
+      );
+    }
   }
 
   /**
@@ -2864,6 +2976,15 @@ export function scopeOf(given: WorkScope | undefined, listed: readonly string[])
 export function scopeLine(s: WorkScope): string {
   const window = [s.source, s.channel, s.since ? `since ${s.since.slice(0, 10)}` : '', s.until ? `until ${s.until.slice(0, 10)}` : ''].filter(Boolean).join(' ');
   return [s.threads?.length ? `${s.threads.length} thread(s)` : '', window].filter(Boolean).join('; ') || 'none';
+}
+
+/**
+ * What a worker reads under the sender line when an owner writes about another owner's work (w677): whose it stays, and
+ * that new scope from the sender is a request of its own, not the worker's to start.
+ */
+export function crossOwnerLine(sender: Requester, people: readonly Requester[]): string {
+  const them = names(people);
+  return `[${sender.displayName}, an owner, writes about ${them}'s work: it stays ${them}'s. ${them}'s brief and decisions govern, your reports reach ${sender.displayName} and ${them}, and you keep working for ${them}. Take this as information or a question on that work; new scope from ${sender.displayName} is not yours to start: say in your report that it needs a request of its own (request_work).]`;
 }
 
 /**
