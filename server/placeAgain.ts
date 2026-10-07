@@ -12,6 +12,8 @@
  *
  * Nothing is lost: only a clean worktree (no uncommitted change, no untracked file) is released, its branch stays in the
  * machine's repository (worktrees share it), and a switch away pushes commits no remote has first (switchBranch). A
+ * dirty one is first saved by its daemon (w656, server/saveWork.ts): committed on the worker's branch and pushed; one it
+ * cannot save (too many or too big untracked files, an older daemon) stays held, and list_sandboxes says why. A
  * moved worker resumes its own conversation (Claude Code finds a session by its id in any project folder: measured on
  * 2026-10-07 with the CLI 2.1.292 and the Agent SDK's 2.1.284) and its next message says where it is now.
  */
@@ -19,6 +21,7 @@ import { agentState, holdsSandbox, HOLD_PLACE_MS, OVERDUE_MS, utcTime } from '..
 
 export { HOLD_PLACE_MS };
 import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
+import type { SaveResult } from './saveWork.ts';
 
 /**
  * A stopped worker's check-in further away than this releases its sandbox. Moving it costs a few minutes when it comes
@@ -95,6 +98,10 @@ export interface PlaceFacts {
   now: number;
   /** Why an agent's work is over (Agents.workOver), for the others in a sandbox; none means not over. */
   over?: (s: SessionInfo) => string | undefined;
+  /** Its daemon saves uncommitted work before a release (w656); false: it cannot yet, undefined: not asked. */
+  canSave?: boolean;
+  /** Why the last save of a sandbox failed, while it is not tried again (RETRY_FAILED_MS), or undefined. */
+  saveRefused?: (sandbox: string) => string | undefined;
 }
 
 /**
@@ -109,13 +116,20 @@ export function keptWhy(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts): stri
   if (!g) return 'its git state is not known yet';
   if (Date.parse(g.at ?? '') < Date.parse(s.lastActivityAt)) return 'its git state has not been read since the worker last worked';
   if (g.branch === 'detached HEAD' || g.branch === '?') return 'it is not on a branch';
-  if (g.dirty > 0) return `${g.dirty} uncommitted change(s) there`;
-  if ((g.untracked ?? 0) > 0) return `${g.untracked} untracked file(s) there`;
   if (f.unityHolders.includes(`sandbox:${sb.id}`)) return 'a Unity batch run of that sandbox is in flight';
   const other = f.sessions.find((o) => o.id !== s.id && o.machineSandbox === sb.id && occupies(o, f.live(o.id), f.now) && !releasable(o, f));
   if (other) return `agent ${other.id} works there too, on the same branch`;
-  return undefined;
+  if (!dirtyOf(sb)) return undefined;
+  // Its daemon commits and pushes them first (w656), unless its last try failed a moment ago.
+  const refused = f.saveRefused?.(sb.id);
+  if (refused) return `its uncommitted work could not be saved: ${refused}`;
+  if (f.canSave) return undefined;
+  const later = f.canSave === false ? " (FF Factory saves them before a release once this machine's daemon is updated)" : '';
+  return g.dirty > 0 ? `${g.dirty} uncommitted change(s) there${later}` : `${g.untracked} untracked file(s) there${later}`;
 }
+
+/** Whether a sandbox's worktree has anything uncommitted or untracked, as its daemon last read it. */
+const dirtyOf = (sb: MachineSandbox) => (sb.git?.dirty ?? 0) > 0 || (sb.git?.untracked ?? 0) > 0;
 
 /**
  * What the release pass does for one worker: release its sandbox (stopped), stop its process first (alive with only
@@ -123,7 +137,7 @@ export function keptWhy(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts): stri
  * until released), take its sandbox back (its check-in is near again and the sandbox is still free and on its branch),
  * or nothing.
  */
-export type ReleaseStep = { do: 'release'; why: string; branch: string } | { do: 'stop'; why: string; due?: boolean } | { do: 'reclaim' } | undefined;
+export type ReleaseStep = { do: 'release'; why: string; branch: string; save?: boolean } | { do: 'stop'; why: string; due?: boolean } | { do: 'reclaim' } | undefined;
 
 export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: PlaceFacts & { workOver?: string; keepLive?: string; claimedBy?: string }): ReleaseStep {
   if (s.kind !== 'worker' || !s.machineId || !s.machineSandbox || !sb) return undefined;
@@ -154,7 +168,7 @@ export function releaseStep(s: SessionInfo, sb: MachineSandbox | undefined, f: P
   if (s.status !== 'stopped' || s.pendingPermissions.length) return undefined;
   const why = releaseWhy(s, f.now, f.workOver);
   if (!why || keptWhy(s, sb, f)) return undefined;
-  return { do: 'release', why, branch: sb.git!.branch };
+  return { do: 'release', why, branch: sb.git!.branch, ...(dirtyOf(sb) ? { save: true } : {}) };
 }
 
 /** Whether `sb` is on `branch`: an agent there works on that branch, as the released worker did with it (w656). */
@@ -195,6 +209,11 @@ export function placeFor(s: SessionInfo, m: Pick<Machine, 'id' | 'sandboxes'>, f
   return { wait: `no sandbox on ${m.id} is free (its own, ${r.sandbox}, took other work after it was released: ${r.why}); the next one to free there is its, ahead of new work` };
 }
 
+/** The line that tells a worker its uncommitted work was committed for it before its sandbox was released (w656). */
+export function savedNote(w: NonNullable<SessionInfo['savedWork']>): string {
+  return `[saved] While you were stopped, FF Factory committed your uncommitted work (${w.files} file(s), new ones included) on your branch \`${w.branch}\` as ${w.sha}, ${w.pushed ? 'and pushed it' : 'not pushed yet (the next switch away pushes it)'}, so your sandbox could take other work. \`git reset HEAD~1\` gives it back uncommitted if that commit is still on top; or keep it and go on.`;
+}
+
 /** The line that tells a moved worker where it is now, put before the message that resumes it. */
 export function movedNote(m: Pick<Machine, 'id'>, from: NonNullable<SessionInfo['movedFrom']>, to: Pick<MachineSandbox, 'id' | 'path'>): string {
   const branch = from.branch;
@@ -224,6 +243,10 @@ export interface PlaceAgainDeps {
   drain: () => void;
   /** Sandboxes were released: capacity may have freed for queued work (w656). */
   freed?: (what: string) => void;
+  /** Whether the machine's daemon saves uncommitted work (MachineManager.canSaveWork, w656). */
+  canSave?: (machineId: string) => boolean;
+  /** Commit and push a sandbox's uncommitted work on a branch, on its machine (MachineManager.saveWork, w656). */
+  saveWork?: (machineId: string, sandbox: string, branch: string, message: string) => Promise<SaveResult>;
   report?: (text: string) => void;
   now?: () => number;
 }
@@ -234,6 +257,12 @@ export class PlaceAgain {
   private readonly placing = new Map<string, { machine: string; sandbox: string }>();
   /** "<session>/<sandbox>" to when a placement there failed. */
   private readonly failed = new Map<string, number>();
+  /** "<machine>/<sandbox>" saves under way (w656). */
+  private readonly saving = new Set<string>();
+  /** "<machine>/<sandbox>" to when and why its last save failed. */
+  private readonly saveFailed = new Map<string, { at: number; why: string }>();
+  /** Saves under way, for tests to wait on. */
+  readonly pending = new Set<Promise<void>>();
 
   constructor(d: PlaceAgainDeps) {
     this.d = d;
@@ -244,7 +273,18 @@ export class PlaceAgain {
   }
 
   private facts(machineId: string): PlaceFacts {
-    return { sessions: [...this.d.sessions()].filter((s) => s.machineId === machineId && s.machineSandbox), live: this.d.isLive, unityHolders: this.d.unityHolders(machineId), now: this.now(), over: this.d.workOver };
+    return {
+      sessions: [...this.d.sessions()].filter((s) => s.machineId === machineId && s.machineSandbox),
+      live: this.d.isLive,
+      unityHolders: this.d.unityHolders(machineId),
+      now: this.now(),
+      over: this.d.workOver,
+      ...(this.d.canSave ? { canSave: this.d.canSave(machineId) } : {}),
+      saveRefused: (sandbox) => {
+        const x = this.saveFailed.get(`${machineId}/${sandbox}`);
+        return x && this.now() - x.at < RETRY_FAILED_MS ? x.why : undefined;
+      },
+    };
   }
 
   private failedIn(id: string) {
@@ -320,6 +360,16 @@ export class PlaceAgain {
         }
         this.d.stopLive(s.id, step.why);
         did.push(`stopped ${s.id} (${step.why}): its sandbox ${m.id}/${sb.id} is released once it has stopped`);
+      } else if (step.do === 'release' && step.save) {
+        const key = `${m.id}/${sb.id}`;
+        if (this.saving.has(key) || !this.d.saveWork) continue;
+        this.saving.add(key);
+        const p = this.saveThenRelease(s, m, sb, step).finally(() => {
+          this.saving.delete(key);
+          this.pending.delete(p);
+        });
+        this.pending.add(p);
+        did.push(`saving the uncommitted work in ${key} of ${s.id} before releasing it (${step.why})`);
       } else if (step.do === 'release') {
         s.placeReleased = { at: new Date(this.now()).toISOString(), sandbox: sb.id, branch: step.branch, why: step.why };
         delete s.releaseDue;
@@ -338,6 +388,40 @@ export class PlaceAgain {
     // Queued work may take them now: the dispatcher hears it (w656, Orchestrators.capacityMayHaveFreed).
     if (freed.size) this.d.freed?.(`sandbox${freed.size > 1 ? 's' : ''} ${[...freed].join(', ')} released`);
     return did;
+  }
+
+  /**
+   * Commit and push what is uncommitted in `sb` on the worker's branch (its daemon, w656), then release the sandbox for
+   * it and for every other stopped worker there whose release is due, each told what was saved. A save that fails
+   * keeps the sandbox held: list_sandboxes says why, and it is tried again after RETRY_FAILED_MS.
+   */
+  private async saveThenRelease(s: SessionInfo, m: Machine, sb: MachineSandbox, step: { why: string; branch: string }) {
+    const key = `${m.id}/${sb.id}`;
+    try {
+      const res = await this.d.saveWork!(m.id, sb.id, step.branch, `FF Factory: saved ${s.id}'s uncommitted work before releasing ${key} (w656)\n\nIts sandbox was released because ${step.why}. \`git reset HEAD~1\` gives the work back uncommitted.`);
+      this.saveFailed.delete(key);
+      const f = this.facts(m.id);
+      const group = f.sessions.filter((o) => o.machineSandbox === sb.id && (o.id === s.id || releasable(o, f)));
+      const at = new Date(this.now()).toISOString();
+      for (const o of group) {
+        if (f.live(o.id) || o.placeReleased || o.queuedSend) continue;
+        const why = releaseWhy(o, f.now, f.over?.(o)) ?? step.why;
+        o.placeReleased = { at, sandbox: sb.id, branch: step.branch, why };
+        if (res.sha) o.savedWork = { sha: res.sha, files: res.files, pushed: res.pushed, branch: step.branch, at };
+        delete o.releaseDue;
+        delete o.heldSince;
+        this.d.save(o);
+        this.d.note(o.id, `Its uncommitted work in ${key} was saved (${res.notes.join('; ')}) and the sandbox is released for other work while it waits: ${why}. When it resumes it is placed again on its branch ${step.branch}, back here if this sandbox is still free.`);
+      }
+      console.log(`place again: saved and released ${key} of ${group.map((o) => o.id).join(', ')} (${res.notes.join('; ')})`);
+      this.d.freed?.(`sandbox ${key} released`);
+    } catch (e) {
+      const why = (e as Error).message;
+      const was = this.saveFailed.get(key);
+      this.saveFailed.set(key, { at: this.now(), why });
+      if (was?.why !== why) this.d.note(s.id, `Its sandbox ${key} stays held: its uncommitted work could not be saved (${why}). Nothing was changed there; FF Factory tries again in ${RETRY_FAILED_MS / 60_000} min.`);
+      console.warn(`place again: saving ${key} of ${s.id} failed: ${why}`);
+    }
   }
 
   /**

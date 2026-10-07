@@ -304,9 +304,10 @@ export class Agents {
         return u ? [...u.granted, ...u.waiting].map((x) => x.holder) : [];
       },
       workOver: (info) => this.workOver(info),
+      // Uncommitted changes keep no process when its daemon saves them before the release (w656).
       keepLive: (id) => {
         const h = sessions.sessions.get(id);
-        return h ? this.keepIdle(h, true) : 'gone';
+        return h ? this.keepIdle(h, true, !!h.info.machineId && machines.canSaveWork(h.info.machineId)) : 'gone';
       },
       queued: (id) => sessions.queued().some((q) => q.id === id),
       stopLive: (id, why) => {
@@ -323,6 +324,8 @@ export class Agents {
       drain: () => void sessions.drain(),
       report: (text) => machines.report?.(text),
       freed: (what) => this.orchestrators.capacityMayHaveFreed(what),
+      canSave: (m) => machines.canSaveWork(m),
+      saveWork: (m, sb, branch, message) => machines.saveWork(m, sb, branch, message),
     });
     machines.placeAgain = (info) => this.placeAgain.answer(info);
     const release = setInterval(() => this.placeAgain.tick(), 60_000);
@@ -465,7 +468,7 @@ export class Agents {
    * permission, nor a worker whose sandbox has uncommitted changes (what it was doing there is in its process's context
    * and its history; nothing it holds in the worktree is lost by a stop, but the person may want it as it is).
    */
-  keepIdle(s: SessionHandle, ignoreWake = false): string | undefined {
+  keepIdle(s: SessionHandle, ignoreWake = false, ignoreDirty = false): string | undefined {
     const i = s.info;
     if (i.kind !== 'worker') return `a ${i.kind}`;
     if (isMidTurn(i)) return 'mid-turn';
@@ -475,7 +478,7 @@ export class Agents {
     if (!ignoreWake && this.waker.pending(i.id)) return 'its wake_me is pending';
     if (this.sessions.queued().some((q) => q.id === i.id)) return 'a message to it is queued';
     const git = i.machineId && i.machineSandbox ? this.store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox)?.git : undefined;
-    if (git && git.dirty > 0) return `its sandbox has ${git.dirty} uncommitted change(s)`;
+    if (git && git.dirty > 0 && !ignoreDirty) return `its sandbox has ${git.dirty} uncommitted change(s)`;
     return undefined;
   }
 

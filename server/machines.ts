@@ -1,6 +1,7 @@
 import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import type { SaveResult } from './saveWork.ts';
 import path from 'node:path';
 import type http from 'node:http';
 import type { Duplex } from 'node:stream';
@@ -17,7 +18,7 @@ import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
 import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
-import { movedNote } from './placeAgain.ts';
+import { movedNote, savedNote } from './placeAgain.ts';
 import { safeImage } from './images.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
@@ -278,6 +279,12 @@ export class RemoteSession implements SessionHandle {
 
   stop(onPurpose = true) {
     if (onPurpose) this.link.stoppedOnPurpose(this);
+    // A worker stopped on purpose (stop_agent, the UI) keeps its sandbox only until the release pass saves and releases
+    // it (w656): new work never starts on its branch or its files, and it is placed again when it resumes.
+    if (onPurpose && this.info.kind === 'worker' && this.info.machineSandbox && !this.info.releaseDue && !this.info.placeReleased) {
+      this.info.releaseDue = { at: new Date().toISOString(), why: 'it was stopped on purpose' };
+      this.link.touch(this);
+    }
     this.link.post(this.info.machineId!, { type: 'stop', sessionId: this.info.id }, false);
   }
 
@@ -616,7 +623,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1342,10 +1349,13 @@ export class MachineManager {
     const files = attachments.map(({ path: _p, error: _e, ...ref }) => ref);
     // Placed again in another sandbox while it was stopped (w640): its first message there says where it is now.
     const moved = !s.live && s.info.movedFrom && sbId ? this.requireSandbox(m.id, sbId) : undefined;
-    const said = moved ? `${movedNote(m, s.info.movedFrom!, moved)}\n\n${text}` : text;
+    // Its uncommitted work was committed before its sandbox was released (w656): it hears so first.
+    const saved = !s.live && s.info.savedWork ? savedNote(s.info.savedWork) : undefined;
+    const said = [moved ? movedNote(m, s.info.movedFrom!, moved) : undefined, saved, text].filter(Boolean).join('\n\n');
     this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), ...(files.length ? { attachments: files } : {}) });
-    if (moved) {
+    if (moved || saved) {
       delete s.info.movedFrom;
+      delete s.info.savedWork;
       this.touch(s);
     }
   }
@@ -1535,7 +1545,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}) });
         if (!msg.guard) delete m.guard;
         if (msg.voice && typeof msg.voice === 'object') this.voices.set(id, msg.voice);
         else this.voices.delete(id);
@@ -1578,7 +1588,7 @@ export class MachineManager {
         if (!s || s.info.machineId !== id) return;
         // The portal owns identity, naming and where it works (a worker placed again in another sandbox, w640: the
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, savedWork: _sw, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host
@@ -1695,6 +1705,15 @@ export class MachineManager {
       case 'host_health':
         if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });
         return;
+      case 'save_result': {
+        const p = this.saveCalls.get(msg.id);
+        if (!p) return;
+        this.saveCalls.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.ok) p.resolve({ ...(msg.sha ? { sha: msg.sha } : {}), files: msg.files ?? 0, pushed: !!msg.pushed, notes: msg.notes ?? [] });
+        else p.reject(new Error(msg.error ?? 'failed'));
+        return;
+      }
       case 'switch_result': {
         const p = this.switchCalls.get(msg.id);
         if (!p) return;
@@ -1968,6 +1987,33 @@ export class MachineManager {
       } catch (e) {
         clearTimeout(timer);
         this.switchCalls.delete(id);
+        reject(e as Error);
+      }
+    });
+  }
+
+  private readonly saveCalls = new Map<string, { resolve: (r: SaveResult) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+
+  /** Whether a machine's daemon is online and saves a sandbox's uncommitted work (w656: its hello offered `saveWork`). */
+  canSaveWork(machineId: string): boolean {
+    return this.isOnline(machineId) && !!this.hellos.get(machineId)?.saveWork;
+  }
+
+  /** Commit and push a sandbox's uncommitted work on `branch`, on the machine (w656, server/saveWork.ts). */
+  saveWork(machineId: string, sandbox: string, branch: string, message: string): Promise<SaveResult> {
+    if (!this.canSaveWork(machineId)) return Promise.reject(new Error(`${machineId}'s daemon does not save uncommitted work yet (it needs a daemon update)`));
+    return new Promise<SaveResult>((resolve, reject) => {
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.saveCalls.delete(id);
+        reject(new Error(`machine ${machineId} did not finish the save in 10 minutes`));
+      }, 10 * 60_000);
+      this.saveCalls.set(id, { resolve, reject, timer });
+      try {
+        this.post(machineId, { type: 'save_work', id, sandbox, branch, message });
+      } catch (e) {
+        clearTimeout(timer);
+        this.saveCalls.delete(id);
         reject(e as Error);
       }
     });
