@@ -12,6 +12,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Changed
 
+- **An FFBox thread linked to a request the ledger no longer has is filed again, not refused** (w611, Lothsahn: "file
+  that as a fix and make sure FFBox gets the new link to the new request as well"). The ledger keeps every open request
+  and only the newest 300 finished ones (`pruneIds`), so an old thread's link can name nothing: FFBox conversation 591,
+  linked to w336, had Lothsahn's "is this fixed?" refused on 2026-10-07 (`bad_request`) and answered on FFBox instead. A
+  `dev_message` naming a request FF Factory does not have is now answered `dev_ack` `unknown_request`; FFBox drops the
+  stale link and hands the turn over again as a `dev_request` with the thread's keys, which joins open work, answers
+  "already fixed" or is filed new, and `dev_filed`'s `workId` becomes the thread's link (ffbox, the same day).
+  [docs/ffbox-connector-contract.md](docs/ffbox-connector-contract.md).
 - **A worker reinstall or daemon restart no longer stops running agents** (w605, lothsahn: "can we make it so that the
   install doesn't require shutting down running jobs, and it can just attach back to them?"). Each agent process runs
   in an agent host started detached from the daemon (`machine/agentHost.ts`); the two talk through append-only files in

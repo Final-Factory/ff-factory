@@ -559,6 +559,40 @@ test("an operator's follow-up reaches their own orchestrator and the busy worker
   assert.match(String((await c.next('dev_ack')).detail), /not linked to FFBox conversation c-nope/);
 });
 
+test('w611: a follow-up linked to a request the ledger no longer has is answered unknown_request, never bad_request; handed over again, it is matched or filed and that request is its link', async (t) => {
+  const { connect, store } = await setup(t);
+  const c = await connect();
+  // A finished request that has the thread's PR and branch (conversation 591's case: PR #1010, its w336 pruned).
+  const thread = newThread();
+  seed(store, { id: 'w90', title: 'Mass driver Ctrl+click selects the whole chain', status: 'done', keys: ['pr:1010', 'branch:ffbox-f/massdriver-ctrl-click'], delivery: { releasedIn: '0.50.0.70' }, source: { kind: 'discord-bug', untrusted: true, pr: 1010 } });
+  const old = devRequest('dev-591', { thread, title: 'is this fixed?', brief: 'is this fixed?', keys: [`discord:${thread}`, 'pr:1010', 'branch:ffbox-f/massdriver-ctrl-click'] });
+  const conv = (old.conversation as { id: string }).id;
+  c.send({ type: 'dev_message', ref: 'devm-591-1026', request: 'w336', operator: { name: 'lothsahn' }, conversation: conv, text: 'is this fixed?' });
+  const unknown = await c.next('dev_ack');
+  assert.deepEqual([unknown.ok, unknown.error], [false, 'unknown_request']);
+  assert.match(String(unknown.detail), /^no request w336 in FF Factory: hand the turn over as a dev_request/);
+  c.send(old);
+  await c.next('dev_ack');
+  const fixed = await c.next('dev_filed');
+  assert.deepEqual([fixed.outcome, fixed.workId], ['fixed', 'w90'], 'matched by its PR and branch');
+  assert.match(String(fixed.text), /^Already fixed in 0\.50\.0\.70/);
+  assert.equal(store.work.size, 1, 'nothing filed');
+
+  // No match: filed new, and the thread's next follow-up reaches that request.
+  const other = newThread();
+  const lost = devRequest('dev-77', { thread: other, title: 'Hauler filter forgets its list', brief: 'The hauler filter list is empty after a reload.', keys: [`discord:${other}`] });
+  const conv2 = (lost.conversation as { id: string }).id;
+  c.send({ type: 'dev_message', ref: 'devm-77-1', request: 'w12', operator: { name: 'lothsahn' }, conversation: conv2, text: 'still broken' });
+  assert.equal((await c.next('dev_ack')).error, 'unknown_request');
+  c.send(lost);
+  await c.next('dev_ack');
+  const filed = await c.next('dev_filed');
+  assert.equal(filed.outcome, 'filed');
+  assert.ok(store.work.has(String(filed.workId)), 'a new request');
+  c.send({ type: 'dev_message', ref: 'devm-77-2', request: String(filed.workId), operator: { name: 'lothsahn' }, conversation: conv2, text: 'thanks' });
+  assert.equal((await c.next('dev_ack')).ok, true, 'the new link takes follow-ups');
+});
+
 test("w344: a follow-up's files join its request and reach the busy worker's Inbox/; its text does not wait for them", async (t) => {
   const { connect, store, chat, heard, call, dispatcher, work, alpha } = await setupOnMachine(t);
   const c = await connect();

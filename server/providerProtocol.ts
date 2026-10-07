@@ -645,7 +645,8 @@ export type DevChunkMessage = z.infer<typeof DevChunkSchema>;
 export type DevMessageMessage = z.infer<typeof DevMessageSchema>;
 export type DevReceivedMessage = z.infer<typeof DevReceivedSchema>;
 
-export type DevAckError = 'unknown_operator' | 'rate_limited' | 'too_large' | 'not_enabled' | 'bad_request';
+/** unknown_request (w611): a dev_message names a request the ledger no longer has; FFBox sends the turn again as a dev_request. */
+export type DevAckError = 'unknown_operator' | 'rate_limited' | 'too_large' | 'not_enabled' | 'bad_request' | 'unknown_request';
 export type DevFiledError = 'sha_mismatch' | 'too_large' | 'bad_request' | 'error';
 export type DevOutcome = 'filed' | 'covered' | 'fixed' | 'linked';
 
