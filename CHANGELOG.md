@@ -47,6 +47,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   'no "dev_ack" from the portal in 5000 ms' though the portal had acked at once: the portal's synchronous store flush,
   in the same process, held the event loop past the deadline, and the fake connector's timer ran before its socket was
   read. Past the deadline it now lets I/O run once before it says so.
+- **Playwright flakes fixed at their cause** (w636, asked by lothsahn). compact.spec's wake_me check-in was cancelled
+  by other tests' messages to the shared orchestrator (it now runs as a login of its own); fleet.spec's copied workers
+  kept the orchestrator's wake_me and counted as live; images.spec clicked images the chat had scrolled away from; and
+  in WebKit the app's service worker hid attachments.spec's uploads from the test's dropped chunk (blocked for that spec).
 - **Flaky unit tests wait for what they check, not a fixed time** (w636, asked by lothsahn). The background-save and
   state-save tests, the unity-slots crashed-holder, waiter and CLI tests, the download-resume test and the agent-host
   "new host" test (Windows reused the dead host's pid) failed on Windows runners; each now waits on the event it checks. The Mac dialog and Unity watch tests no longer ask the real

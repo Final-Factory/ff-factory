@@ -15,6 +15,9 @@
  *   login              tester / e2e-password-123 (the owner)
  *   second login       teammate / e2e-teammate-456, "Team Mate", a member (e2e/identity.spec.ts), with an /mcp API
  *                      key bound to it in <data folder>/../teammate-key.txt
+ *   third login        compactor / e2e-password-789, "Compact Tester", a member whose own orchestrator only
+ *                      e2e/compact.spec.ts writes to: a person's message cancels its orchestrator's wake_me, so the
+ *                      test that checks /compact keeps one cannot share the owner's with the other tests
  *   dispatcher turns   POST <port + 200> (e2e/fixtures.ts, sendToChat): the only way a test makes the dispatcher take a turn
  *   Max                a mock Discord on <port + 100> (e2e/mockDiscord.ts) with a bot token in a scratch ffbox config, and
  *                      five seeded events from the gallery worker (e2e/max.spec.ts)
@@ -38,6 +41,8 @@ export const USER = 'tester';
 export const PASSWORD = 'e2e-password-123';
 export const MATE = 'teammate';
 export const MATE_PASSWORD = 'e2e-teammate-456';
+export const COMPACTOR = 'compactor';
+export const COMPACTOR_PASSWORD = 'e2e-password-789';
 const withProvider = process.env.E2E_PROVIDER === '1';
 const withIntake = process.env.E2E_INTAKE === '1';
 /** The Discord user id the intake projects trust, mapped to tester (e2e/intake.spec.ts). */
@@ -190,6 +195,7 @@ const { Auth } = await import('../server/auth.ts');
 const auth = new Auth(dataDir, { trustProxy: false });
 await auth.setUser(USER, PASSWORD);
 await auth.setUser(MATE, MATE_PASSWORD, { displayName: 'Team Mate', role: 'member' });
+await auth.setUser(COMPACTOR, COMPACTOR_PASSWORD, { displayName: 'Compact Tester', role: 'member' });
 fs.writeFileSync(path.join(base, 'teammate-key.txt'), auth.createApiKey('teammate-laptop', MATE));
 // FFBox's key for Max's escalations (docs/intake.md), scoped to POST /api/intake/ffbox (e2e/provider.spec.ts).
 if (withProvider) fs.writeFileSync(path.join(base, 'ffbox-key.txt'), auth.createApiKey('ffbox', undefined, 'ffbox'));
