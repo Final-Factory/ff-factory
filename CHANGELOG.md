@@ -27,6 +27,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 - **CI's Playwright shards keep the browsers' system packages in the Actions cache** (w636, asked by lothsahn). Each
   shard downloaded the same 126 MB from the Ubuntu mirror; apt now keeps them in `~/apt-archives`, which the cache
   restores, and still resolves against fresh lists. The install step went from a median of 37-39 s to 20-33 s.
+- **The slowest unit tests wait for events, not fixed sleeps** (w636, asked by lothsahn). machines.test.ts went from
+  about 45 s to 10 s and orchestrators.test.ts from 46 s to 18 s, with the same tests: test-only settings for the
+  daemon's reconnect pace (`RECONNECT_MS`), the dispatcher's notice gathering (`gatherMs`) and the fake agent's
+  `#slow` replies, all defaulting to today's values; test machines copy one prepared repo instead of six git calls,
+  and stop once the portal sees them go. The portal's resume timer no longer keeps a process alive (`unref`).
 
 ### Fixed
 

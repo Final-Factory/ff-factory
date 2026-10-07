@@ -16,7 +16,8 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
  * reports, "#spend <usd>" what the turn costs, "/compact" compacts it to 18,000 tokens).
  */
 
-setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+// "#slow" turns take about 1 s here (40 pieces 25 ms apart), not 4 s.
+setQueryForTesting(fakeQuery({ stepMs: 1, slowStepMs: 25 }) as never);
 
 const LOTHSAHN: Requester = { userId: 'lothsahn', displayName: 'Lothsahn' };
 

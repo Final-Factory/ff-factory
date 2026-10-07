@@ -1557,7 +1557,7 @@ export class MachineManager {
         // After the daemon's own session reports (sent right after its hello), so a resume starts from its state.
         // Only for this connection: if it drops first, the next hello tries again.
         const link = this.links.get(id);
-        setTimeout(() => this.links.get(id) === link && this.resumeCutOff(id, live), RESUME_DELAY_MS.value);
+        setTimeout(() => this.links.get(id) === link && this.resumeCutOff(id, live), RESUME_DELAY_MS.value).unref();
         return;
       }
       case 'session': {

@@ -17,7 +17,8 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
  */
 
 const seen: { options: Options }[] = [];
-const fake = fakeQuery({ stepMs: 1 });
+// "#slow" turns take about 1 s here (40 pieces 25 ms apart), not 4 s.
+const fake = fakeQuery({ stepMs: 1, slowStepMs: 25 });
 setQueryForTesting(((args: { prompt: never; options: Options }) => {
   seen.push({ options: args.options });
   return fake(args);

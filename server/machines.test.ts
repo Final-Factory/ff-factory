@@ -13,7 +13,7 @@ import { MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBe
 import { OLDEST_DAEMON_PROTOCOL, PROTOCOL_VERSION, protocolProblem } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
-import { Daemon, type Probes } from '../machine/daemon.ts';
+import { Daemon, RECONNECT_MS, type Probes } from '../machine/daemon.ts';
 import { agentPath, macReloadLines, nodeSupport, plist } from './machineDeploy.ts';
 import type { Config } from './config.ts';
 import type { HostStats, ImageInput, MachineSandbox, PermissionMode, SessionInfo, TranscriptEvent } from '../shared/types.ts';
@@ -95,6 +95,12 @@ const FAKE_PROBES: Probes = {
   }),
 };
 
+/** A dropped daemon dials again after ~200 ms here, not ~2 s; `until` polls every 20 ms, so the drop is still seen. */
+const fastReconnect = (t: { after: (fn: () => void) => void }) => {
+  RECONNECT_MS.value = 200;
+  t.after(() => (RECONNECT_MS.value = 2000));
+};
+
 const until = async (what: string, cond: () => boolean, ms = 5000) => {
   const end = Date.now() + ms;
   while (!cond()) {
@@ -117,7 +123,11 @@ async function setup() {
     handlersFor: (_info, m) => ({ set_label: async (a) => mm.setPurpose(m.id, String(a.purpose)).purpose, wake_me: async (a) => `waking you in ${a.minutes} min: ${a.note}` }),
   };
   const server = http.createServer();
-  server.on('upgrade', (req, socket, head) => mm.upgrade(req, socket, head, '127.0.0.1'));
+  let upgrades = 0;
+  server.on('upgrade', (req, socket, head) => {
+    upgrades++;
+    mm.upgrade(req, socket, head, '127.0.0.1');
+  });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const sb: MachineSandbox = { id: 'sb', branch: 'sandbox/sb', base: 'origin/develop', path: agentDir, purpose: 'unused', status: 'ready', createdAt: '', unity: { state: 'stopped' }, sessionIds: [] };
@@ -133,12 +143,12 @@ async function setup() {
     for (const d of daemons) d.shutdown();
     await until('disconnect', () => !mm.isOnline('mx')).catch(() => undefined);
     server.close();
-    // Let the last session/machine updates (and their debounced saves) land before the folder goes.
-    await new Promise((r) => setTimeout(r, 400));
+    // The link closed after the last session/machine update it carried; their saves land before the folder goes.
     store.flush();
+    await store.saved();
     fs.rmSync(tmp, { recursive: true, force: true });
   };
-  return { store, sessions, mm, daemon, token, cleanup, tmp };
+  return { store, sessions, mm, daemon, token, cleanup, tmp, upgrades: () => upgrades };
 }
 
 test('w536: a machine record that still has max_agents loses it on load, said once for all of them', async (t) => {
@@ -166,15 +176,17 @@ test('w536: a machine record that still has max_agents loses it on load, said on
 });
 
 test('machine: a revoked credential drops the link and keeps the daemon out; a new one lets it back (w512, docs/vault.md)', async (t) => {
-  const { mm, daemon, cleanup, tmp } = await setup();
+  const { mm, daemon, cleanup, tmp, upgrades } = await setup();
   t.after(cleanup);
+  fastReconnect(t);
   const d = daemon();
   await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   assert.equal(revokeMachineToken(tmp, 'mx'), true);
   mm.dropRevoked();
   await until('dropped', () => !mm.isOnline('mx'));
-  // Its reconnects are refused: the record stays, offline.
-  await new Promise((r) => setTimeout(r, 2500));
+  // Its reconnects are refused: the record stays, offline. A third attempt means the two before it were turned away.
+  const before = upgrades();
+  await until('three reconnects', () => upgrades() >= before + 3);
   assert.equal(mm.isOnline('mx'), false);
   assert.ok(mm.list().some((m) => m.id === 'mx'), 'the record stays');
   d.shutdown();
@@ -230,9 +242,14 @@ test("machine: the daemon forwards the Mac's Max events file, older lines first,
   mm.maxEvent = (id, line) => lines.push([id, line]);
   const file = path.join(tmp, 'max-events.jsonl');
   fs.writeFileSync(file, '{"v":1,"n":1}\n');
+  // The daemon reads the file every 3 s: those polls are stepped here, not waited for.
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const poll = () => t.mock.timers.tick(3000);
   daemon();
+  poll();
   await until('the line written before the daemon started', () => lines.length === 1);
   fs.appendFileSync(file, '{"v":1,"n":2}\n{"v":1,"n":3');
+  poll();
   await until('the next complete line', () => lines.length === 2);
   assert.deepEqual(lines, [
     ['mx', '{"v":1,"n":1}'],
@@ -240,6 +257,7 @@ test("machine: the daemon forwards the Mac's Max events file, older lines first,
   ]);
   // The half-written third line waits for its newline; the offset is kept for a restart.
   fs.appendFileSync(file, '}\n');
+  poll();
   await until('the finished line', () => lines.length === 3);
   await until('the offset saved', () => fs.existsSync(`${file}.daemon-offset`) && Number(fs.readFileSync(`${file}.daemon-offset`, 'utf8')) === fs.statSync(file).size);
 });
@@ -434,10 +452,14 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
     server.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   });
+  // Attempts every ~100 ms here (jitter 75-125 ms), not ~2 s: a refused attempt that ends at once takes 3 well inside
+  // 6 s; one that hung until the 8 s handshake timeout would allow 1.
+  RECONNECT_MS.value = 100;
+  t.after(() => (RECONNECT_MS.value = 2000));
+  const start = Date.now();
   d.start();
-  await new Promise((r) => setTimeout(r, 6000));
-  // Attempts every ~2 s (jitter 1.5-2.5 s): at least 3 in 6 s. A hung attempt would allow 1.
-  assert.ok(upgrades >= 3, `only ${upgrades} attempt(s) in 6 s`);
+  await until('3 attempts', () => upgrades >= 3, 6000).catch(() => undefined);
+  assert.ok(upgrades >= 3, `only ${upgrades} attempt(s) in ${Date.now() - start} ms`);
 });
 
 test('daemon versions (w605): only a protocol out of range is outdated; another commit is an update available; unknown versions are current', () => {
@@ -690,6 +712,7 @@ test('machine: add_machine on a worker root install changes its settings in plac
 test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart are resumed when the daemon is back; a stop is not', async (t) => {
   const { store, sessions, mm, daemon, cleanup } = await setup();
   t.after(cleanup);
+  fastReconnect(t);
   RESUME_DELAY_MS.value = 50;
   t.after(() => (RESUME_DELAY_MS.value = 3000));
   const reports: string[] = [];
@@ -908,6 +931,7 @@ test('machine: an agent stopped with stop_agent is never resumed by a dropped li
 test('machine: a daemon that connects during its own install counts as connected, and a connected daemon is never shown in error (m5, 2026-09-29)', async (t) => {
   const { store, mm, daemon, cleanup } = await setup();
   t.after(cleanup);
+  fastReconnect(t);
   mm.deployWaitMs = { settle: 50, poll: 20 };
   const result = { platform: 'darwin' as const, home: '/Users/x', repoPath: '/Users/x/game', node: '/usr/local/bin/node', nodeVersion: 'v22', version: 'abc1234' };
 
@@ -944,6 +968,7 @@ test('machine: a daemon that connects during its own install counts as connected
 test('machine: a redeploy whose ssh step fails keeps the old credential: the daemon still gets back in after it (w568, found in w513)', async (t) => {
   const { store, mm, daemon, token, cleanup, tmp } = await setup();
   t.after(cleanup);
+  fastReconnect(t);
   mm.deployWaitMs = { settle: 50, poll: 20 };
   const d = daemon();
   await until('online', () => mm.isOnline('mx'));
@@ -991,6 +1016,7 @@ test('machine: a redeploy switches to the new credential once the new daemon has
 test('machine: a redeploy that fails while installing leaves both credentials until the machine says which it has (w568)', async (t) => {
   const { store, mm, daemon, token, cleanup } = await setup();
   t.after(cleanup);
+  fastReconnect(t);
   mm.deployWaitMs = { settle: 50, poll: 20 };
   const d = daemon();
   await until('online', () => mm.isOnline('mx'));

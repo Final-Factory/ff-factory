@@ -10,7 +10,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager, type SessionHandle } from './sessions.ts';
-import { MachineManager } from './machines.ts';
+import { MachineManager, RESUME_DELAY_MS } from './machines.ts';
 import { LineTail, hostAlive, hostFiles, pidAlive } from '../machine/agentHost.ts';
 import type { Config } from './config.ts';
 import type { MachineSandbox } from '../shared/types.ts';
@@ -84,8 +84,10 @@ async function setup() {
       }
     }
     server.close();
-    await new Promise((r) => setTimeout(r, 400));
+    // The link's close comes after the last update the daemon sent; then the saves land before the folder goes.
+    await until('the portal sees the daemon gone', () => !mm.isOnline('mx'), 20_000).catch(() => undefined);
     store.flush();
+    await store.saved();
     fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   };
   // What failed: the daemons' output, then each host's own log and files.
@@ -149,6 +151,10 @@ test('w605: an agent mid-turn outlives its daemon being killed, the next daemon 
 test('w605: a host that died with its agent is not taken back; the portal resumes the agent, and a new host carries on its conversation', { timeout: 180_000 }, async (t) => {
   const { sessions, mm, daemon, kill, hostDir, hostPid, said, cleanup, logs } = await setup();
   t.after(cleanup);
+  // The portal resumes a cut-off agent 3 s after the daemon's hello, so the daemon's session reports come first; they are
+  // sent right behind the hello, so 300 ms is plenty here.
+  RESUME_DELAY_MS.value = 300;
+  t.after(() => (RESUME_DELAY_MS.value = 3000));
   const turnEnds: string[] = [];
   sessions.events.on('turnEnd', (_s: SessionHandle, text: string) => turnEnds.push(text));
   const d1 = daemon();

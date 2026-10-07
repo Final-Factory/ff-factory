@@ -122,6 +122,8 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, intakeCfg
   const machines = new MachineManager(cfg, store, sessions);
   const agents = new Agents(cfg, store, sessions, machines, new Identity(cfg, () => PEOPLE));
   agents.boot();
+  // Notices to the dispatcher gather 1.5 s in production; 100 ms here.
+  (agents.orchestrators as unknown as { d: { gatherMs: number } }).d.gatherMs = 100;
   const o = agents.orchestrators;
   // Intake notices gather for a minute in production; a moment here.
   (o as unknown as { d: { intakeGatherMs: number } }).d.intakeGatherMs = 20;

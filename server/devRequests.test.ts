@@ -83,6 +83,8 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
   machines.attachments = files;
   let alpha = path.join(dir, 'alpha');
   agents.boot();
+  // Notices to the dispatcher gather 1.5 s in production; 100 ms here.
+  (agents.orchestrators as unknown as { d: { gatherMs: number } }).d.gatherMs = 100;
   // onMachine: sandbox alpha is on a machine instead (pc/alpha, a worktree on its in-process daemon).
   let pc: TestMachine | undefined;
   if (extra.onMachine) {

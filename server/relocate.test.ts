@@ -15,7 +15,7 @@ import { SessionManager, type SessionHandle, type SessionSink } from './sessions
 import { MachineManager } from './machines.ts';
 import { relocateProblem } from './machineProtocol.ts';
 import { Drainer, RELOCATE_RESULT_FILE, parseRestartRequest, type RestartRequest } from './restart.ts';
-import { Daemon, RELOCATE_FALLBACK_MS, dialUrl, patchDaemonConfig, type DaemonConfig, type Probes } from '../machine/daemon.ts';
+import { Daemon, RECONNECT_MS, RELOCATE_FALLBACK_MS, dialUrl, patchDaemonConfig, type DaemonConfig, type Probes } from '../machine/daemon.ts';
 import type { Config } from './config.ts';
 import type { PermissionMode, SessionInfo } from '../shared/types.ts';
 
@@ -107,6 +107,9 @@ async function setup(t: { after: (fn: () => unknown) => void }) {
   const written: DaemonConfig = { portalUrl: a.url, id: 'mx', token, repoPath: tmp, appDir: tmp, claude: 'no-such-claude', maxEventsFile: null };
   fs.writeFileSync(configFile, JSON.stringify(written, null, 2));
   const daemons: Daemon[] = [];
+  // A dropped or relocated daemon dials again after ~200 ms here, not ~2 s (the fallback window is set apart).
+  RECONNECT_MS.value = 200;
+  t.after(() => (RECONNECT_MS.value = 2000));
   /** A daemon as the entry point starts one: its daemon.json as it is on disk now, and where it is. */
   const daemon = () => {
     const d = new Daemon({ ...(JSON.parse(fs.readFileSync(configFile, 'utf8')) as DaemonConfig), configFile }, (i, s, o, e) => new LongAgent(i, s, o, e), PROBES);
@@ -118,8 +121,10 @@ async function setup(t: { after: (fn: () => unknown) => void }) {
     for (const d of daemons) d.shutdown();
     a.server.close();
     b.server.close();
-    await new Promise((r) => setTimeout(r, 300));
+    // The link's close comes after the last update the daemon sent; then the saves land before the folder goes.
+    await until('the daemon gone', () => !mm.isOnline('mx'), 5000).catch(() => undefined);
     store.flush();
+    await store.saved();
     fs.rmSync(tmp, { recursive: true, force: true });
   });
   return { tmp, store, sessions, mm, a, b, token, configFile, daemon, onDisk: () => JSON.parse(fs.readFileSync(configFile, 'utf8')) as DaemonConfig };
@@ -156,7 +161,8 @@ test('relocate: a daemon follows the portal to its new URL with an agent mid-tur
   const { store, sessions, mm, a, b, token, daemon, onDisk } = await setup(t);
   LongAgent.all = [];
   daemon();
-  await until('online at A', () => mm.isOnline('mx'));
+  // Its hello read, too: relocate needs the protocol it speaks (a link alone says 0).
+  await until('online at A, its hello read', () => mm.isOnline('mx') && (mm.protocolOf('mx') ?? 0) > 0);
   const s = mm.createSession('mx', { kind: 'standing', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'a long turn');
   await until('mid-turn', () => s.info.status === 'running' && LongAgent.all.length === 1);
@@ -193,7 +199,8 @@ test('relocate: a new URL that never answers sends the daemon back to the one be
   RELOCATE_FALLBACK_MS.value = 1500;
   t.after(() => (RELOCATE_FALLBACK_MS.value = saved));
   daemon();
-  await until('online at A', () => mm.isOnline('mx'));
+  // Its hello read, too: relocate needs the protocol it speaks (a link alone says 0).
+  await until('online at A, its hello read', () => mm.isOnline('mx') && (mm.protocolOf('mx') ?? 0) > 0);
   const s = mm.createSession('mx', { kind: 'standing', title: 'w', permissionMode: 'default' });
   sessions.send(s.info.id, 'a long turn');
   await until('mid-turn', () => s.info.status === 'running');

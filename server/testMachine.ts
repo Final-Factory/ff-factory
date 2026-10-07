@@ -40,25 +40,41 @@ export interface TestRepos {
   cleanup: () => void;
 }
 
+const gitIn = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe', windowsHide: true }).toString().trim();
+
+/** The first testRepos of this process, made with git; the others are copies of it (one git call instead of six). */
+let template: string | undefined;
+function repoTemplate(): string {
+  if (template && fs.existsSync(template)) return template;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-template-'));
+  const origin = path.join(root, 'origin.git');
+  const main = path.join(root, 'FinalFactory');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'develop', origin], { windowsHide: true });
+  execFileSync('git', ['clone', '-q', origin, main], { stdio: 'pipe', windowsHide: true });
+  gitIn(main, 'switch', '-q', '-c', 'develop');
+  fs.writeFileSync(path.join(main, '.gitignore'), 'Library/\nLogs/\nTemp/\n');
+  fs.writeFileSync(path.join(main, 'README.md'), 'game\n');
+  gitIn(main, 'add', '.gitignore', 'README.md');
+  gitIn(main, 'commit', '-q', '-m', 'base');
+  gitIn(main, 'push', '-q', '-u', 'origin', 'develop');
+  fs.mkdirSync(path.join(main, 'Library', 'Artifacts'), { recursive: true });
+  fs.writeFileSync(path.join(main, 'Library', 'Artifacts', 'warm.bin'), 'imported');
+  process.on('exit', () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  return (template = root);
+}
+
 /** A bare origin and the machine's main clone of it (on develop), with a warm Library the clone never commits. */
 export function testRepos(prefix = 'ff-msb-', parent = os.tmpdir()): TestRepos {
   fs.mkdirSync(parent, { recursive: true });
+  const from = repoTemplate();
   const root = fs.mkdtempSync(path.join(parent, prefix));
   const origin = path.join(root, 'origin.git');
   const main = path.join(root, 'FinalFactory');
-  const git = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe', windowsHide: true }).toString().trim();
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'develop', origin], { windowsHide: true });
-  execFileSync('git', ['clone', '-q', origin, main], { stdio: 'pipe', windowsHide: true });
-  git(main, 'switch', '-q', '-c', 'develop');
-  fs.writeFileSync(path.join(main, '.gitignore'), 'Library/\nLogs/\nTemp/\n');
-  fs.writeFileSync(path.join(main, 'README.md'), 'game\n');
-  git(main, 'add', '.gitignore', 'README.md');
-  git(main, 'commit', '-q', '-m', 'base');
-  git(main, 'push', '-q', '-u', 'origin', 'develop');
-  fs.mkdirSync(path.join(main, 'Library', 'Artifacts'), { recursive: true });
-  fs.writeFileSync(path.join(main, 'Library', 'Artifacts', 'warm.bin'), 'imported');
+  fs.cpSync(path.join(from, 'origin.git'), origin, { recursive: true });
+  fs.cpSync(path.join(from, 'FinalFactory'), main, { recursive: true });
+  gitIn(main, 'remote', 'set-url', 'origin', origin);
   const sbRoot = path.join(root, 'ffsb');
-  return { root, origin, main, sbRoot, git, cleanup: () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }) };
+  return { root, origin, main, sbRoot, git: gitIn, cleanup: () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }) };
 }
 
 /** Real git, copy and delete; a stand-in editor (no Unity), and free space the test sets. */
@@ -164,6 +180,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
 
   let server: http.Server | undefined;
   let daemon: Daemon | undefined;
+  let portal: MachineManager | undefined;
   const base = (portalUrl: string): Omit<Machine, 'online' | 'sessionIds' | 'createdAt'> => ({
     id,
     portalUrl,
@@ -192,6 +209,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
       return { ...base(o.portalUrl ?? ''), online: false, createdAt: new Date(0).toISOString(), sessionIds: Object.values(bySandbox).flat(), sandboxes };
     },
     async connect(mm) {
+      portal = mm;
       let url = o.portalUrl;
       if (!url) {
         // A stand-in portal: the /machine socket and the attachment downloads a daemon makes (as index.ts serves them).
@@ -239,8 +257,8 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
     async stop() {
       daemon?.shutdown();
       server?.close();
-      // Let the last session and machine updates land before the folders go.
-      await new Promise((r) => setTimeout(r, 300));
+      // The last session and machine updates have landed once the portal has the link's close: they came before it.
+      if (portal) await until(`machine ${id} offline`, () => !portal!.isOnline(id), 5000, 10).catch(() => undefined);
       repos.cleanup();
     },
   };

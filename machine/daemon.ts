@@ -1485,9 +1485,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   process.on('unhandledRejection', (e) => log('UNHANDLED REJECTION (kept running):', e));
 }
 
+/** The reconnect pace for the first two minutes down (tests shorten it). */
+export const RECONNECT_MS = { value: 2000 };
+
 /** How long to wait before the next connection attempt: ~2 s for the first two minutes down, then 1-30 s backoff. */
 export function reconnectDelayMs(downForMs: number, attempt: number, rand = Math.random()): number {
   const jitter = 0.75 + rand * 0.5;
-  if (downForMs < 120_000) return 2000 * jitter;
+  if (downForMs < 120_000) return RECONNECT_MS.value * jitter;
   return Math.min(30_000, 1000 * 2 ** attempt) * jitter;
 }
