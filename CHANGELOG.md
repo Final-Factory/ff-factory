@@ -68,6 +68,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Fixed
 
+- **A harness message delivered mid-turn no longer strips a person's turn of their authority** (w607, Lothsahn:
+  "Please fix whatever was causing the ops worker to refuse your instructions."). On 2026-10-07 `ops_worker` refused
+  Lothsahn's own "Please drain and install on BEAST and m5" twice, and his "go" once: a `[worker update]` arrived while
+  each turn ran, and the turn counted as the harness's whenever any message not yet answered was. Whose turn it is
+  (`turnFrom`) is now the sender of the message that opened it (or, when the CLI takes up a message that waited behind
+  it, that message's): a message folded in mid-turn changes nothing, so a turn the harness started still gains nothing
+  from a person's or a relayed message arriving later. One fix for every gate that reads it: `ops_worker` send and
+  deploy, `approve_delegation`, `update_work` approve, decline, close and reopen, `humanAsked` (the dispatcher's
+  destructive and admin tools), `set_app_config`'s owner keys, `for_user` attribution, and memory writes.
+  [docs/orchestrators.md](docs/orchestrators.md#loops-limits-and-safety).
 - **A re-run of the root installer rewrites root.json's notes** (w600, lothsahn: "Let's add a 6th slot for
   LothDesktop and increase agents by 2."). `noteOutside` kept the first note of an outside item, so the player-slots
   firewall group's note still said "8 slots" after LothDesktop's re-runs at `--max-sandboxes 5`. An item already
