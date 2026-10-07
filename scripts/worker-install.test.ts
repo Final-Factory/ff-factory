@@ -100,6 +100,11 @@ test('worker install: daemon.json keeps every folder in the root and no token; a
   noteOutside(m, { kind: 'task', name: 'FFFactoryDaemon' });
   noteOutside(m, { kind: 'task', name: 'fffactorydaemon' });
   assert.equal(m.outside.length, 1);
+  // A re-run with another sandbox count rewrites the note and keeps what else the item had (w600).
+  m.outside.push({ kind: 'firewall-group', name: 'Final Factory player slots', note: '8 slots under D:\ffw\players', existed: true });
+  noteOutside(m, { kind: 'firewall-group', name: 'final factory player slots', note: "6 sandboxes' player folders" });
+  assert.equal(m.outside.length, 2);
+  assert.deepEqual(m.outside[1], { kind: 'firewall-group', name: 'Final Factory player slots', note: "6 sandboxes' player folders", existed: true });
 });
 
 test('worker install: a second install uses its own task or LaunchAgent and stops only its own daemon', () => {
