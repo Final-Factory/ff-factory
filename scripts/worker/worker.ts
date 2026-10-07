@@ -959,11 +959,10 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     if (!m.outside.some((x) => x.kind === 'authorized-key' && x.name.toLowerCase() === key.file.toLowerCase())) m.outside.push({ kind: 'authorized-key', name: key.file, note: blob, ...(keyExisted ? { existed: true } : {}) });
     writeManifest(l.root, m);
   }
-  else {
+  if (!isWin) {
     // A Mac has no firewall rules to make; scripts outside the daemon (the nightly lab's LaunchAgent) find the slots here.
-    const cfg = macSlotConfig();
-    fs.mkdirSync(path.dirname(cfg), { recursive: true });
-    fs.writeFileSync(cfg, JSON.stringify({ root: l.players, layout: 'sandbox-pairs', count: o.maxSandboxes }, null, 2) + '\n');
+    // Its own block: as the else of the key step above it never ran on a Mac whose ssh key was set (m3, w596).
+    const cfg = writeMacSlotConfig(l.players, o.maxSandboxes);
     noteOutside(m, { kind: 'file', name: cfg, note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
   }
@@ -1306,6 +1305,13 @@ function slotsPointerItem(root: string) {
 
 /** A path as compared on this OS: case and either slash on Windows. */
 const pathKey = (p: string) => (process.platform === 'win32' ? p.replace(/\\/g, '/').toLowerCase() : p);
+
+/** A Mac's slot config for player_slots.py: the root's players, the sandbox-pairs layout, the sandbox count (w576). Exported for tests. */
+export function writeMacSlotConfig(players: string, sandboxes: number, file = macSlotConfig()): string {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ root: players, layout: 'sandbox-pairs', count: sandboxes }, null, 2) + '\n');
+  return file;
+}
 
 /** Where scripts/nightly/player_slots.py reads a Mac's slot root (its config_path()). */
 export const macSlotConfig = (home = os.homedir()) => path.join(home, '.config', 'finalfactory', 'player-slots.json');
