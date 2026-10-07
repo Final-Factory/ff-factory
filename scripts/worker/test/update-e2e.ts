@@ -55,6 +55,13 @@ git(work, 'commit', '-qm', 'init');
 git(scratch, 'clone', '-q', '--bare', work, game);
 
 // Claude Code is a prerequisite the install checks, never used here: a stand-in where the probe looks, when none is there.
+if (isWin && spawnSync('where', ['claude'], { stdio: 'ignore', windowsHide: true }).status !== 0) {
+  // The probe takes a claude on PATH as an npm shim (machineDeployWin probeScript): one in a folder first on this PATH.
+  const bin = path.join(scratch, 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'claude.cmd'), '@echo 0.0.0 (Claude Code stand-in, update-e2e)\r\n');
+  process.env.PATH = `${bin};${process.env.PATH}`;
+}
 if (!isWin) {
   const bin = path.join(os.homedir(), '.local', 'bin');
   const claude = path.join(bin, 'claude');
