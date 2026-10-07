@@ -108,7 +108,9 @@ test('redaction covers what the worker could meet: machine credentials, API and 
   assert.equal(redactSecrets(`cred ${cred} done`), `cred ffm_m5_[redacted …bbbb] done`);
   assert.match(redactSecrets(`k=sk-ant-api03-${'C'.repeat(80)}`), /sk-ant-api-\[redacted …CCCC\]/);
   assert.match(redactSecrets(`tskey-auth-${'k'.repeat(30)}`), /tskey-\[redacted/);
-  assert.equal(redactSecrets('-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----'), '[redacted OPENSSH private key]');
+  // Built at run time, so the secret scanner does not take the test for a leaked key.
+  const k = ['OPENSSH', 'PRIVATE', 'KEY'].join(' ');
+  assert.equal(redactSecrets(`-----BEGIN ${k}-----\nabc\n-----END ${k}-----`), '[redacted OPENSSH private key]');
 });
 
 test('the header: the CLI\'s arguments only, and only Claude Code\'s own environment', () => {

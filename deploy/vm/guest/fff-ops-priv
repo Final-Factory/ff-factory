@@ -20,8 +20,8 @@
 set -o errexit -o nounset -o pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 FFF_LIB=${FFF_LIB:-/usr/local/lib/fff}
-die() { echo "fffctl (orchestration worker): $*" >&2; exit 2; }
-[ "$(id -u)" -eq 0 ] || die "run through sudo (the worker's fffctl does it)"
+refuse() { echo "fffctl (orchestration worker): $*" >&2; exit 2; }
+[ "$(id -u)" -eq 0 ] || refuse "run through sudo (the worker's fffctl does it)"
 FFFCTL=/usr/local/sbin/fffctl
 # shellcheck source=lib.sh
 . "$FFF_LIB/lib.sh"
@@ -39,29 +39,29 @@ ssh_as_fff() { runuser -u "$FFF_USER" -- "$FFF_LIB/fff-ops-ssh" "$@"; }
 
 credential_issue() {
   local id=$1 target=$2 tmp platform remote enc ps out
-  [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "not a machine id: '${id:0:80}'"
+  [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || refuse "not a machine id: '${id:0:80}'"
   # Reach it first: a credential issued for a machine we then cannot write to would only cut its daemon off.
   out=$(ssh_as_fff "$target" uname -s </dev/null 2>/dev/null || true)
   case "$out" in
     Darwin* | Linux*) platform=posix ;;
     *)
-      out=$(ssh_as_fff "$target" 'echo %OS%' </dev/null 2>&1) || die "$target does not answer ssh: ${out:0:300}"
+      out=$(ssh_as_fff "$target" 'echo %OS%' </dev/null 2>&1) || refuse "$target does not answer ssh: ${out:0:300}"
       platform=windows
       ;;
   esac
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
-  "$FFFCTL" machine-credential issue "$id" --out "$tmp/cred" >"$tmp/issued" 2>&1 || die "fffctl machine-credential issue $id failed: $(redact <"$tmp/issued" | tail -n 3)"
+  "$FFFCTL" machine-credential issue "$id" --out "$tmp/cred" >"$tmp/issued" 2>&1 || refuse "fffctl machine-credential issue $id failed: $(redact <"$tmp/issued" | tail -n 3)"
   remote="machine-credential-$id"
   if [ "$platform" = posix ]; then
     out=$(ssh_as_fff "$target" "umask 077 && mkdir -p ~/.ff-factory && cat > ~/.ff-factory/$remote && chmod 600 ~/.ff-factory/$remote && echo stored ~/.ff-factory/$remote" <"$tmp/cred" 2>&1) ||
-      die "the credential was issued but could not be written on $target: ${out:0:300}. The machine's old credential no longer works; run this again"
+      refuse "the credential was issued but could not be written on $target: ${out:0:300}. The machine's old credential no longer works; run this again"
   else
     # Base64 UTF-16LE (-EncodedCommand) so cmd.exe or PowerShell as the ssh shell pass it on unchanged.
     ps="\$d = Join-Path \$env:USERPROFILE '.ff-factory'; New-Item -ItemType Directory -Force -Path \$d | Out-Null; \$f = Join-Path \$d '$remote'; [IO.File]::WriteAllText(\$f, [Console]::In.ReadToEnd().Trim()); 'stored ' + \$f"
     enc=$(printf '%s' "$ps" | iconv -t UTF-16LE | base64 -w0)
     out=$(ssh_as_fff "$target" "powershell -NoProfile -NonInteractive -EncodedCommand $enc" <"$tmp/cred" 2>&1) ||
-      die "the credential was issued but could not be written on $target: ${out:0:300}. The machine's old credential no longer works; run this again"
+      refuse "the credential was issued but could not be written on $target: ${out:0:300}. The machine's old credential no longer works; run this again"
   fi
   redact <"$tmp/issued" | sed -E 's/ is in [^ ]+ \(0600\)/ was issued/; s/ Move it to the machine, then delete [^ ]+\.$//'
   echo "on $target: $(printf '%s' "$out" | tr -d '\r' | tail -n 1) (give it to the worker installer with --credential-file / -CredentialFile, then delete it there)"
@@ -72,7 +72,7 @@ case "${1:-help}" in
   state) exec "$FFFCTL" state ;;
   logs)
     n=${2:-200}
-    if ! [[ $n =~ ^[0-9]{1,4}$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt 2000 ]; then die "logs [N]: N from 1 to 2000"; fi
+    if ! [[ $n =~ ^[0-9]{1,4}$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt 2000 ]; then refuse "logs [N]: N from 1 to 2000"; fi
     journalctl -u fff-portal.service -n "$n" --no-pager -o short-iso | redact
     ;;
   machine-ssh-check) runuser -u "$FFF_USER" -- env HOME="$FFF_ROOT/home" "$FFF_LIB/fff-machine-ssh" --check ;;
@@ -80,12 +80,12 @@ case "${1:-help}" in
     case "${2:-}" in
       list) exec "$FFFCTL" machine-credential list ;;
       issue)
-        if [ $# -ne 5 ] || [ "$4" != --to ]; then die "credential issue ID --to TARGET"; fi
+        if [ $# -ne 5 ] || [ "$4" != --to ]; then refuse "credential issue ID --to TARGET"; fi
         credential_issue "$3" "$5"
         ;;
-      *) die "credential list | credential issue ID --to TARGET (revoking is a person's: sudo fffctl machine-credential revoke)" ;;
+      *) refuse "credential list | credential issue ID --to TARGET (revoking is a person's: sudo fffctl machine-credential revoke)" ;;
     esac
     ;;
   help | -h | --help) sed -n '5,17p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "fffctl $1 is a person's (deploys, restarts, settings, the vault, migrations). You have: status, state, logs [N], machine-ssh-check, credential list, credential issue ID --to TARGET" ;;
+  *) refuse "fffctl $1 is a person's (deploys, restarts, settings, the vault, migrations). You have: status, state, logs [N], machine-ssh-check, credential list, credential issue ID --to TARGET" ;;
 esac
