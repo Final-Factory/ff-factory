@@ -11,7 +11,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
-import { MachineManager } from './machines.ts';
+import { MachineManager, VOICE_PING_MS, VOICE_RETRY_MS } from './machines.ts';
 import { VoiceService } from './voice.ts';
 import { VOICE_DEFAULTS, VOICE_REMOTE_DEFAULTS, type Config, type VoiceConfig } from './config.ts';
 import { modelDir, requirementsHash, voicePaths } from './voiceSetup.ts';
@@ -374,4 +374,71 @@ test('w615: a load that fails is retried by the stats tick only after a while', 
   } finally {
     RELOAD_AFTER_FAILURE_MS.value = was;
   }
+});
+
+test('w615: an abrupt drop (no close, no answer) costs one clip the ping wait, not the timeout; later clips go straight to the CPU', async (t) => {
+  const s = await setup({ voice: { remote: { ...VOICE_REMOTE_DEFAULTS, timeoutSeconds: 30 } } });
+  t.after(s.cleanup);
+  await until('ready', () => s.service.status().state === 'ready');
+  const was = VOICE_PING_MS.value;
+  VOICE_PING_MS.value = 300;
+  t.after(() => (VOICE_PING_MS.value = was));
+  // BEAST asleep or cut off: its socket stays open, but it reads nothing and answers nothing.
+  const sock = (s.d as unknown as { ws: { _socket: { pause(): void; resume(): void } } }).ws._socket;
+  sock.pause();
+  let t0 = Date.now();
+  let r = await s.service.transcribe(clip());
+  assert.equal(r.engine, 'local');
+  assert.match(r.fallback ?? '', /beast did not answer a ping within 0\.3 s/);
+  assert.ok(Date.now() - t0 < 2000, `the ping wait, not the 30 s timeout (${Date.now() - t0} ms)`);
+  assert.equal(s.mm.isOnline('beast'), true, 'the heartbeat has not dropped it yet');
+  // The next clip does not try it at all.
+  t0 = Date.now();
+  r = await s.service.transcribe(clip());
+  assert.equal(r.engine, 'local');
+  assert.equal(r.fallback, undefined, 'no machine is offered');
+  assert.ok(Date.now() - t0 < 200, `straight to the CPU (${Date.now() - t0} ms)`);
+  assert.equal(s.service.status().remote, undefined);
+  // It wakes: anything heard from it (the pong) and it takes clips again.
+  sock.resume();
+  await until('offered again', () => s.mm.voiceMachines().length === 1);
+  r = await s.service.transcribe(clip());
+  assert.equal(r.engine, 'remote');
+});
+
+test('w615: a clip that timed out on a live link keeps the next ones off that machine until it re-offers or the retry time passes', async (t) => {
+  const s = await setup({ voice: { remote: { ...VOICE_REMOTE_DEFAULTS, timeoutSeconds: 0.3, perAudioSecond: 0 } } });
+  t.after(s.cleanup);
+  await until('ready', () => s.service.status().state === 'ready');
+  s.engine.mode = 'hang';
+  let r = await s.service.transcribe(clip());
+  assert.equal(r.engine, 'local');
+  assert.match(r.fallback ?? '', /beast did not answer within 0\.3 s/);
+  // The pongs keep coming (its daemon is up), but its Whisper hung: the next clips do not wait on it.
+  const sent = s.engine.requests.length;
+  const t0 = Date.now();
+  for (let i = 0; i < 3; i++) assert.equal((await s.service.transcribe(clip())).engine, 'local');
+  assert.ok(Date.now() - t0 < 300, `three clips straight to the CPU (${Date.now() - t0} ms)`);
+  assert.equal(s.engine.requests.length, sent, 'nothing more was sent to it');
+
+  // It re-offers (its Whisper reloaded: a status change): back in use at once.
+  s.engine.mode = 'ok';
+  s.engine.unload('test');
+  s.d.voice!.onStats();
+  await until('offered again', () => s.mm.voiceMachines().length === 1);
+  await until('ready again', () => s.service.status().state === 'ready');
+  assert.equal((await s.service.transcribe(clip())).engine, 'remote');
+
+  // Without a re-offer, one clip tries it again after the retry time.
+  const was = VOICE_RETRY_MS.value;
+  VOICE_RETRY_MS.value = 300;
+  t.after(() => (VOICE_RETRY_MS.value = was));
+  s.engine.mode = 'hang';
+  assert.equal((await s.service.transcribe(clip())).engine, 'local');
+  assert.equal(s.mm.voiceMachines().length, 0);
+  s.engine.mode = 'ok';
+  await new Promise((r2) => setTimeout(r2, 350));
+  assert.equal(s.mm.voiceMachines().length, 1, 'tried again after the retry time');
+  r = await s.service.transcribe(clip());
+  assert.equal(r.engine, 'remote');
 });

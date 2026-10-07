@@ -181,6 +181,16 @@ own CPU worker when:
 - it does not answer within the timeout: `voice.remote.timeoutSeconds` plus `voice.remote.perAudioSecond` for each
   second of audio, plus `voice.remote.loadSeconds` when the model was not loaded yet. The defaults come from the
   measurements below.
+**A machine that goes away** (lothsahn: later clips must go straight to the CPU, with no wait every time):
+- it disconnects cleanly: the portal drops it at once (`detach`), and a clip in flight falls back at once;
+- it sleeps, loses its network or crashes without closing the socket: each clip goes with a ping ahead of it, and with
+  no pong or message within 2 s (`VOICE_PING_MS`; BEAST to the VM measured 31 ms) that clip falls back and the machine is
+  skipped until anything is heard from it. The heartbeat drops the link itself after 45-65 s;
+- a clip times out on a live link (its Whisper hung): the machine is skipped for 2 minutes (`VOICE_RETRY_MS`) or until
+  it re-offers its Whisper (a `voice` status change or a new hello); then one clip tries it again;
+- its Whisper is unloaded for the editors' VRAM: its `voice` status says `vramShort` within a stats tick (15 s), and the
+  portal skips it without sending; a clip that arrives in between is refused by the daemon at once.
+
 The VM's own worker is the one w570 runs: `base.en` on 2 threads, ~235 MB, unloaded after 20 minutes idle. While a
 remote engine is ready, a recording warms only the remote one, so the VM loads its model only when it is needed.
 
