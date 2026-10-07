@@ -12,6 +12,11 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ### Added
 
+- **Dictation on the portal VM** (w570, Ben: "I can no longer use voice on my phone even tho that was working before").
+  The VM started with voice off, as it has no GPU. `fffctl configure --voice base.en` turns local Whisper on there on the
+  CPU (`voice.device: "cpu"`, `cpuThreads` = the VM's vCPUs, no Kokoro) and restarts the portal; `--voice off` turns it
+  off. With `voice.device: "cpu"` the install leaves out the CUDA wheels (about 1 GB). Why `base.en`, with measurements:
+  [docs/voice.md](docs/voice.md), "On the portal VM".
 - **The worker installer sets up the portal's ssh itself** (w568, lothsahn: "Yes, we need the installer to be able to
   do that"). Adding a machine is running its installer there, with nothing done by hand on the portal's host or in its
   VM.
