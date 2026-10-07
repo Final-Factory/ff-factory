@@ -97,6 +97,8 @@ test('windows: the task runs at logon of this user, in their session, not elevat
   assert.match(x, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
   assert.match(x, /<RestartOnFailure>\s*<Interval>PT1M<\/Interval>/);
   assert.match(x, /-WindowStyle Hidden -File "C:\\Users\\A&amp;B\\\.ff-factory\\run-daemon\.ps1"<\/Arguments>/, 'the path is XML-escaped and has no doubled slash');
+  // w603: under Windows Terminal as the default terminal -WindowStyle Hidden leaves a window open; a headless conhost has none.
+  assert.match(x, /<Command>conhost\.exe<\/Command>\s*<Arguments>--headless powershell\.exe -NoProfile /);
   assert.match(x, /<WorkingDirectory>C:\\Users\\A&amp;B\\\.ff-factory<\/WorkingDirectory>/);
   assert.throws(() => win.taskXml('Ben', 'C:\\Users\\Ben'), /not a Windows SID/);
 });
