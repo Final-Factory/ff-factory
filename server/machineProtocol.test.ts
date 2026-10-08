@@ -23,7 +23,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // Linux workers (no bump): `info.platform` may be 'linux'; it is typed in shared/types.ts, outside this surface. An
 // older portal takes a Linux daemon for a Mac (its words say "Mac", and its ssh start/stop would try launchctl); nothing
 // on the wire is misread, and a portal from this change on keeps only the platforms it knows.
-const DECIDED = { protocol: 8, fingerprint: '2b4b66b70d4794a9' };
+// w691 (no bump): `reason: 'host_start'` on `failed`, an optional field an older portal ignores; the portal reads the
+// words of an older daemon's `failed` the same way. The `waiting_on_person` tool is in the catalog a daemon offers in its
+// hello, which filters what the portal gives its workers (a daemon without it is not offered the tool).
+const DECIDED = { protocol: 8, fingerprint: '85c2e1b151c51aac' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

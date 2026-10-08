@@ -10,6 +10,22 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The ledger shows a worker that waits on a person as Waiting on input, and a worker with a dead agent host as Blocked, not
+  Working** (w691, Lothsahn; the case was w665, Ben's Mac GPU page fault). Worker d558ba14 needed Ben to reboot and log in
+  to the m3 (FileVault) from 01:52 UTC on 2026-10-08; it set `wake_me` check-ins (2 h, then 6 h) and reported "w665: still
+  open: m3 reboot and login (a person), …", and the ledger counted the pending check-in as Working for about 10 hours.
+  At 11:24 the m3 answered a re-send with "could not start its agent host: the agent host did not start" and the ledger
+  went on showing the worker mid-turn: `HostedSession.send` marked the session running after the failed start, and the
+  daemon's next report put that on the portal. Now (1) workers get a `waiting_on_person` tool (who, what, optionally the
+  request) and a "Waiting on a person" section in their brief: declare it and end the turn, never poll for a person with
+  `wake_me`; the request derives as Waiting on input (on <who>) while a check-in of its own is pending, until the
+  worker's next message; (2) as a backstop, the `wNNN: still open:` line of a worker's report saying "(a person)",
+  "needs a person", "waiting for <Name> to …" or "needs <Name>'s approval" does the same, unless a background job such as
+  CI is still running; (3) a failed agent-host start (the daemon's new `failed` `reason: 'host_start'`, or its words from
+  an older daemon) records `SessionInfo.hostFailure`: the request is Blocked on that machine, the agent shows Blocked, and
+  the first event of a host that does start clears it by itself. The daemon no longer marks a session running when no host
+  started. Portal deploy for the ledger and the tool; a daemon update (a redeploy, or the installer for a root install)
+  for the daemon fix and for workers to be offered `waiting_on_person`. docs/orchestrators.md, "Ledger".
 - **The portal VM's firewall lets the tailnet reach ssh and 443, nothing broader** (w683, Lothsahn: "Why do we want to open
   up the firewall? I just want ssh and the portal and anything else needed by fffactory"). w681's rule that accepted any
   TCP port to the node's Tailscale addresses is gone before it was deployed: it rested on `Drop:` lines that are the

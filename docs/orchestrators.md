@@ -177,8 +177,10 @@ workers are working on vs which are waiting on input"). It is derived live from 
 
 | state | when | the line says |
 |---|---|---|
-| **Working** | a worker it serves is `running` or `starting` (in a long command too), or FFBox runs it (`ffbox` sent or accepted) | which worker, and the tool it has been in since when |
+| **Working** | a worker it serves is `running` or `starting` (in a long command too) and has an agent host (`hostFailure`, below), or FFBox runs it (`ffbox` sent or accepted) | which worker, and the tool it has been in since when |
 | **Waiting on input** | a PERSON must act: an intake approval is pending, the dispatcher's question or a design question is open, a worker it serves waits for a permission | what, and on whom: "a reviewer", the requester, the design question's people, the worker's person |
+| **Blocked** | a worker it serves has no agent host: its message found none to run in (`hostFailure`, w691) | on that machine; goes when its host's first event arrives |
+| **Waiting on input** | a worker it serves declared it waits on a person (`waiting_on_person`, w691), or its report's `wNNN: still open:` line says one must act (the backstop) | on the person named, or its requesters |
 | **Working** (between turns) | a worker it serves is between turns with its own work still going: a background job (CI it watches, a build, a test run) or a check-in it set with `wake_me` (w475's Waiting, renamed by w643), also while it is stopped until that check-in | "ab12cd34 between turns: CI on PR #1098 · check-in 06:10 UTC" |
 | **Waiting on input** | a worker it serves stopped asking for a decision (its last report ends asking a person to decide, or with a question) | on its requesters |
 | **Blocked** | a message to a worker it serves waits in the send queue for its machine (offline, its daemon outdated, the host guard) | on that machine |
@@ -197,7 +199,8 @@ and w641 (held until the next portal deploy) both read "Queued (the dispatcher q
 had room, which read as "LothDesktop can take more work but the queue isn't moving".
 
 1. **Waiting on input**: a PERSON must act (a reviewer's approval, the dispatcher's question, a design decision, a
-   permission, a worker that stopped asking for a decision). It always says on whom.
+   permission, a worker that stopped asking for a decision, a worker that declared it waits on a person). It always says on
+   whom.
 2. **Queued**: capacity ONLY: no free computer, sandbox, editor or agent slot for it. `decide_work queue` is refused
    while a computer that could take it has room (all of them, or those its `needs` names), and a request left queued
    at least 10 minutes while one has room is a bug, flagged loudly: the line says `WRONG` with the computers that have
@@ -242,12 +245,44 @@ days; a deploy is a person's call, and a week without one is worth their look.
   missing, and nothing outside it has to clear for it to go on, so it is neither Waiting nor Queued nor Blocked. The
   same applies to the agent itself (below, "Agent states"). Blocked is for a request held back by something outside it,
   which the ledger watches and clears; a worker's own check-in needs no unblocking.
+- **A worker that waits on a person is Waiting on input, never Working** (w691, Lothsahn; the case was w665, where a worker
+  that needed Ben to reboot and log in to the m3, after FileVault, set `wake_me` check-ins of 2 h and 6 h and the ledger
+  showed Working for about 10 hours). A check-in is for a machine or a job: it comes back to the work by itself, and no
+  wake-up moves a person. So the worker harness tells workers (the "Waiting on a person" section of their brief,
+  `Agents.machineSandboxBrief`) to call `waiting_on_person` (who, what, optionally the request) and end their turn with a
+  report naming that person and action, with a `wNNN: still open: waiting on <Name> to <do what>` line; the request then
+  derives as **Waiting on input (on <who>)**, also while a check-in of its own is pending (it may set one as a fallback).
+  Two signals, in this order (`workLive`):
+  1. **The declaration** (`SessionInfo.waitingOn` {who, what, at, request?}; `Agents.declareWaiting`): structured, kept by
+     the portal and never overwritten by the daemon's reports. A worker's next message ends it (`RemoteSession.send`): a new
+     turn, and it declares again if a person is still needed. A running worker is Working whatever it declared; the wait
+     shows once its turn ends.
+  2. **The backstop** (`personWaitIn`): the worker's last report has a `wNNN: still open:` (or `NOT DONE: wNNN`) line for this
+     request that says a person must act: "(a person)", "needs a person", "a human must …", "waiting for Ben to …", "needs
+     Ben's approval". Only that line, only those words: "waiting for CI to finish" is a machine. Unlike the declaration it
+     does not override a background job still running (CI, a build): work goes on meanwhile. It exists for workers that did
+     not declare (a daemon without the tool, an old brief), and is tested as a backstop (`server/workState.test.ts`).
+  A declared worker is still an idle worker to the placement code: its sandbox is released by the usual rules, and a
+  message (the person's answer) places it again.
+- **A dead agent host is Blocked on its machine** (w691; w665 again: the m3 answered "could not start its agent host: the
+  agent host did not start" and the ledger kept showing the worker mid-turn). The daemon marked such a session running even
+  though no host had started (`HostedSession.send`), and its next report put that back on the portal after the portal had
+  recorded the failure. Now the daemon leaves it in error and tells the portal why (`failed` with `reason: 'host_start'`),
+  the portal records `SessionInfo.hostFailure` {at, error} (from the reason, or from the daemon's words, for a daemon that
+  has not been updated; also from a session report that stopped with "its agent host did not start"), and from then
+  on, whatever the session's status says, the request is **Blocked** on that machine ("d558ba14: its agent host did not
+  start on m3 (…)"), the agent shows Blocked (`agentState`), and it is not counted as mid-turn. It unblocks by itself: the
+  first event or text of a host that did start clears `hostFailure` (`MachineManager.hostStarted`), which is what a
+  message to it triggers once the machine can run a host. The dispatcher is told the worker failed (`workerStatus`), as
+  before, to start it again.
 
 **Every place that produces one of these states** (the w643 audit; each line is what it says now):
 
 | where | what | state |
 |---|---|---|
 | `shared/workState.ts` `workLive` | approval pending / question / design flag / permission / worker asks a decision | Waiting on input, on whom |
+| `shared/workState.ts` `workLive` | a worker declared it waits on a person (`waiting_on_person`), or its `still open:` line says so (`personWaitIn`), also with a check-in pending | Waiting on input, on the person named |
+| `shared/workState.ts` `workLive`, `shared/agentState.ts` | a worker whose message found no agent host (`hostFailure`) | Blocked on its machine |
 | `shared/workState.ts` `workLive` | a worker between turns on a job or its own check-in (was "Waiting", w475) | Working |
 | `shared/workState.ts` `workLive` | status `new`, the dispatcher deciding (was "Queued") | Working |
 | `shared/workState.ts` `workLive` | status `queued` (was "queued it for capacity", whatever the note said) | Queued; WRONG when a computer that could take it has room |
@@ -929,7 +964,8 @@ own job or check-in is Working; a message held for a slot is Queued, and one hel
 
 | State | When | Shown as |
 |---|---|---|
-| **Working** | mid-turn: `running` or `starting` | blue |
+| **Working** | mid-turn: `running` or `starting`, unless its agent host never started (next row) | blue |
+| **Blocked** (internal `error`) | its message found no agent host to run in (`SessionInfo.hostFailure`, w691): checked first, whatever its status says (an older daemon went on reporting it mid-turn, w665) | violet: "Blocked: its agent host did not start on m3" |
 | **Needs you** | a permission request waits for its person | amber |
 | **Working** (between turns, internal `between_turns`; w475's Waiting) | alive between turns (idle) with its own work still going, checked in this order: a **running job** (a background task or watcher the agent started, which a restart ends), or only a **timer** (its `wake_me` check-in, still ahead) | blue, with what it is on (w509): "Working: CI on PR #1098 · check-in 06:10 UTC" (a job, by the description the agent gave it), "Working: check-in 16:29 UTC: “merge #1083 when…”" (a timer, with its note's first words) |
 | **Queued** / **Blocked** (between turns) | a message for it held in the send queue: for a free agent slot or sandbox (Queued), or for its machine, offline or its daemon outdated (Blocked) | grey / violet: "Queued: a queued message (…)" |

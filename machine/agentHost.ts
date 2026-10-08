@@ -300,8 +300,14 @@ export class HostedSession implements SessionHandle {
       ...(requestedBy ? { requestedBy } : {}),
       ...(attachments?.length ? { attachments } : {}),
     } as const;
-    if (!this.running) this.start(cmd);
-    else this.sends.push(this.command(cmd) as Extract<HostCommand, { op: 'send' }>);
+    if (!this.running) {
+      // No host started (w665, w691): nothing runs, so it is not mid-turn. Marking it so reported a worker running for
+      // hours that had nothing running, and the portal showed its request Working.
+      if (!this.start(cmd)) {
+        this.lastFrom = from;
+        return uuid;
+      }
+    } else this.sends.push(this.command(cmd) as Extract<HostCommand, { op: 'send' }>);
     this.lastFrom = from;
     // As AgentSession does, at once: what the agent limits count until the host's own record comes.
     this.liveNow = true;
@@ -351,7 +357,8 @@ export class HostedSession implements SessionHandle {
     if (!this.running) this.cleanup();
   }
 
-  private start(first: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>) {
+  /** Starts its host with `first`; false when no host process could be started (the portal is told, and the record says so). */
+  private start(first: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>): boolean {
     const f = this.files;
     fs.rmSync(f.dir, { recursive: true, force: true });
     fs.mkdirSync(f.dir, { recursive: true });
@@ -368,10 +375,17 @@ export class HostedSession implements SessionHandle {
     try {
       const pid = (this.deps.launch ?? launchHost)(f.dir, start);
       this.deps.log(`agent host for ${this.info.id} started, pid ${pid}`);
+      return true;
     } catch (e) {
+      const error = `could not start its agent host: ${(e as Error).message}`;
       this.running = false;
       this.liveNow = false;
-      this.deps.out({ type: 'failed', sessionId: this.info.id, error: `could not start its agent host: ${(e as Error).message}` });
+      clearInterval(this.timer);
+      this.timer = undefined;
+      Object.assign(this.info, { status: 'error', statusDetail: error });
+      this.deps.log(`agent ${this.info.id}: ${error}`);
+      this.deps.out({ type: 'failed', sessionId: this.info.id, error, reason: 'host_start' });
+      return false;
     }
   }
 
@@ -465,8 +479,7 @@ export class HostedSession implements SessionHandle {
           this.deps.log(`agent host ${id} closed with ${left.length} message(s) not delivered; starting a new one for them`);
           const [first, ...rest] = left;
           try {
-            this.start(withoutN(first));
-            for (const c of rest) this.sends.push(this.command(withoutN(c)) as Extract<HostCommand, { op: 'send' }>);
+            if (this.start(withoutN(first))) for (const c of rest) this.sends.push(this.command(withoutN(c)) as Extract<HostCommand, { op: 'send' }>);
           } catch (e) {
             this.deps.out({ type: 'failed', sessionId: id, error: `could not deliver a message: ${(e as Error).message}` });
           }

@@ -13,6 +13,9 @@
 // (`between_turns`, w475's Waiting) is shown as Working when its own work is still going (a background job such as CI,
 // a check-in it set), Queued when a message to it waits for a free agent slot, and Blocked when that message waits for
 // its machine (offline, or its daemon outdated). Needs you is the one state where a person must act.
+//
+// w691 (w665: a worker whose agent host never started was shown mid-turn for hours): an agent whose last message found no
+// agent host to run in (`hostFailure`) is Blocked on its machine, whatever its status says; nothing runs for it.
 import type { SessionInfo } from './types.ts';
 
 export type AgentState = 'working' | 'needs_you' | 'between_turns' | 'idle' | 'error' | 'stopped';
@@ -52,7 +55,7 @@ export interface AgentStateView {
   released?: string;
 }
 
-type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeAt' | 'wakeNote' | 'queuedSend' | 'queuedOn' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince' | 'placeReleased' | 'releaseDue'>>;
+type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'machineId' | 'hostFailure' | 'wakeAt' | 'wakeNote' | 'queuedSend' | 'queuedOn' | 'backgroundTasks' | 'backgroundJobs' | 'heldSince' | 'placeReleased' | 'releaseDue'>>;
 
 /**
  * How long an agent whose daemon went away under it keeps its sandbox (w613) before the release pass may release it
@@ -61,6 +64,12 @@ type AgentFacts = Pick<SessionInfo, 'status'> & Partial<Pick<SessionInfo, 'wakeA
  * resumes it, and stop_agent ends the hold at once.
  */
 export const HOLD_PLACE_MS = 30 * 60_000;
+
+/** Whether a status or error line says no agent host could be started (the daemon's words: "could not start its agent host: …", "its agent host did not start"). */
+export const hostStartFailed = (text: string | undefined) => !!text && /could not start its agent host|its agent host did not start/i.test(text);
+
+/** Why a dead agent host blocks an agent: "its agent host did not start on m3". */
+export const hostFailureText = (s: Pick<SessionInfo, 'machineId'>) => `its agent host did not start on ${s.machineId ?? 'its machine'}`;
 
 /** A check-in this much past its time has fired or is failing to: it is not pending any more. */
 export const OVERDUE_MS = 2 * 60_000;
@@ -99,6 +108,8 @@ function jobsText(s: AgentFacts): string | undefined {
  */
 export function agentState(s: AgentFacts, time: (iso: string, now: number) => string = utcTime, now: number = Date.now()): AgentStateView {
   const v = (state: AgentState, more: Partial<AgentStateView> = {}): AgentStateView => ({ state, label: AGENT_STATE_LABEL[state], ...more });
+  // Before the status: an older daemon went on reporting it mid-turn after its host failed to start (w665).
+  if (s.hostFailure) return { ...v('error', { waitsOn: hostFailureText(s) }), label: 'Blocked' };
   if (s.status === 'running' || s.status === 'starting') return v('working');
   if (s.status === 'waiting_permission') return v('needs_you');
   if (s.status === 'error') return v('error');

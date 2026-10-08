@@ -87,6 +87,12 @@ export const CATALOG = {
     minutes: z.number().int().min(1).max(1440).describe('How long until you are messaged again.'),
     note: z.string().describe('What to check or do when you wake: this comes back to you word for word.'),
   },
+  /** docs/orchestrators.md, "Waiting, Queued, Blocked" (w691): the worker says only a person can move it on. */
+  waiting_on_person: {
+    who: z.string().min(1).max(120).describe('Whose action it waits on: a name ("Ben"), several separated by commas, or "a reviewer".'),
+    what: z.string().min(1).max(400).describe('What they must do, in a line ("reboot the m3 and log in: FileVault asks for a password").'),
+    request: z.string().max(16).optional().describe('The request ("w665") it is about, when you serve several; default: all of them.'),
+  },
   unity: {
     action: z.enum(['status', 'start', 'stop', 'restart']),
     force: z.boolean().optional().describe('stop/restart: kill the editor at once instead of asking it to quit first (a frozen editor ignores that).'),
