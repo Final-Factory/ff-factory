@@ -127,7 +127,10 @@ graph_check() { # DIR: prints systemd-analyze's ordering-cycle lines for default
   done
   chmod -R a+rX "$dir"
   find "$dir" -type f -exec chmod 0644 {} +
-  SYSTEMD_UNIT_PATH="$dir:" systemd-analyze verify --man=no default.target 2>&1 | grep -i 'ordering cycle' || true
+  local verify
+  verify=$(SYSTEMD_UNIT_PATH="$dir:" systemd-analyze verify --man=no default.target 2>&1 || true)
+  # Only a cycle through one of ours: a throwaway runner's own units are not this test's business.
+  if grep -qi 'ordering cycle' <<<"$verify" && grep -q 'fff-' <<<"$verify"; then grep -iE 'ordering cycle|dependency on|deleted' <<<"$verify"; fi
 }
 if command -v systemd-analyze >/dev/null; then
   cyc=$(graph_check "$out")

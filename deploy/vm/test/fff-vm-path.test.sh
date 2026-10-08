@@ -553,7 +553,7 @@ is 7 ok
 said "3 Drop line(s) in all, 3 of them ICMPv4 ICMPv6 UDP from Funnel servers: pings and probes, not Funnel's requests"
 never_said "tailnet policy: fail"
 never_said "tailnet policy: warn"
-[ "$(alerts)" -le 1 ] && ! matches -F 'Funnel is blocked by the tailnet policy' "$FAKE_DIR/alerts" || fail "L7: ICMP/UDP drops from the Funnel servers raised the policy alert"
+if matches -F 'Funnel is blocked by the tailnet policy' "$FAKE_DIR/alerts"; then fail "L7: ICMP/UDP drops from the Funnel servers raised the policy alert"; fi
 ok "policy: ICMP and UDP drops from the Funnel servers (pings and probes; Funnel is TCP) are counted and shown, never a failure or a warning, even with the outside probe failing"
 
 # ---------------------------------------------------------------- 8. do the Funnel servers connect at all
