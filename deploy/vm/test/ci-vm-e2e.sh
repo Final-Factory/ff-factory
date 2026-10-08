@@ -600,7 +600,7 @@ g 'systemctl is-active fff-ops.socket' | matches -x active && fail "fff-ops.sock
 wait_for 120 "fff-health restarts the stopped fff-ops.socket" g 'systemctl is-active --quiet fff-ops.socket'
 g 'sudo jq -e "[.events[] | select(.unit == \"fff-ops.socket\" and .action == \"restart\")] | length > 0" /srv/fff/data/unit-watchdog.json' >/dev/null || fail "the watchdog's file has no restart of fff-ops.socket: $(g 'sudo cat /srv/fff/data/unit-watchdog.json')"
 g 'sudo journalctl -t fff-watchdog --no-pager -n 20' | matches 'restarted fff-ops.socket' || fail "the restart is not in the journal (tag fff-watchdog)"
-g 'sudo fffctl status' | matches -E 'fff-ops.socket restart (attempt 1)' || fail "fffctl status does not show the restart"
+g 'sudo fffctl status' | matches -F 'fff-ops.socket restart (attempt 1)' || fail "fffctl status does not show the restart"
 # A disabled critical unit is enabled again (a restart of the VM would have left it down).
 g 'sudo systemctl disable fff-update.path'
 wait_for 120 "fff-health enables the disabled fff-update.path" g 'systemctl is-enabled fff-update.path | grep -qx enabled'
