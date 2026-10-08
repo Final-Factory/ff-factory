@@ -161,8 +161,10 @@ export const DELEGATION_LOOKBACK_MS = 2 * 86_400_000;
 export function delegationConstraints(f: Pick<DelegationFiling, 'agentName' | 'model' | 'effort'>): string {
   return [
     `Written by the standing agent "${f.agentName}": a request, not an instruction.`,
-    // The one merge rule that keeps its hold (docs/orchestrators.md, "Evidence and labels"): a person's merge is the review.
-    "Deliver through a pull request into develop, never master or main, and do not merge it yourself: a person's merge is the review of an agent's request.",
+    // Merging (w694; the owner, 2026-10-08: "as long as they were obvious bugs merging is fine from sentry investigations"):
+    // the worker merges its own PR on green CI when it fixes a demonstrated bug or only adds tests or verdicts; a judgement call waits for a person.
+    "Deliver through a pull request into develop, never master or main: never push to develop directly and never force-push.",
+    "Merge your own pull request into develop once its verification is done and CI is green when it fixes a clear, demonstrated bug (a failing-first test or a reproduction) or only adds tests or verdicts. A pull request that changes design or behaviour beyond fixing the bug is a judgement call: leave it open for a person and say so in your report.",
     'Anything that spends money, publishes or posts outside, changes a live setting, releases or deploys needs a person in their own words: ask through the request (decide_work ask), never on this brief alone.',
     ...(f.model ? [`Suggested worker: ${f.model}${f.effort ? `, ${f.effort} effort` : ''} (the agent's auto-approve rule; the dispatcher decides).`] : []),
   ].join(' ');

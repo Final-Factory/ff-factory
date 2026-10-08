@@ -9,7 +9,7 @@ import { MachineManager, STANDING_CAP_NO_POOL, agentCap } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
-import { crossOwnerLine, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
+import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
@@ -1381,6 +1381,11 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   assert.deepEqual([w.title, w.brief, w.status, w.requestedBy, w.humanAsked], [title, task, 'new', BEN, false]);
   assert.deepEqual(w.delegation, { id: d.id, agentId: sentry.id, agentName: 'Nightly sentry', auto: true });
   assert.match(w.constraints!, /never master or main/);
+  // w694: the worker merges its own PR for an obvious bug or a tests-only change, and leaves a judgement call for a person.
+  assert.match(w.constraints!, /never push to develop directly and never force-push/);
+  assert.match(w.constraints!, /Merge your own pull request into develop once its verification is done and CI is green when it fixes a clear, demonstrated bug \(a failing-first test or a reproduction\) or only adds tests or verdicts/);
+  assert.match(w.constraints!, /changes design or behaviour beyond fixing the bug is a judgement call: leave it open for a person and say so in your report/);
+  assert.doesNotMatch(w.constraints!, /do not merge it yourself|person's merge is the review/i);
   assert.match(w.constraints!, /spends money, publishes or posts outside, changes a live setting, releases or deploys needs a person/);
   assert.ok(w.keys.includes('pr:1105') && w.keys.includes(`delegation:${d.id}`));
 
@@ -1415,14 +1420,16 @@ test("w527: a standing agent's delegation flows into the ledger and onto a worke
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: task, title: 'Regression check', work_id: 'w1' });
   assert.equal(started.isError, false, started.text);
   assert.equal(store.work.get('w1')!.status, 'active');
-  // The worker's brief carries the request as filed: the agent's words for Ben, and the merge rule that keeps its hold.
+  // The worker's brief carries the request as filed: the agent's words for Ben, and the merge rule (w694: its own PR for an obvious bug, a person's for a judgement call).
   const workerId = /Started agent (\w+)/.exec(started.text)![1];
   assert.deepEqual(store.sessions.get(workerId)!.requestedBy, BEN);
   const first = () => store.readTranscript(workerId).find((e): e is Extract<TranscriptEvent, { kind: 'user' }> => e.kind === 'user');
   await until("the worker's brief went", () => !!first());
   const brief = first()!.text;
   assert.match(brief, /this is what the standing agent "Nightly sentry" asked, filed for Ben\):/);
-  assert.match(brief, /do not merge it yourself: a person's merge is the review/);
+  assert.match(brief, /Merge your own pull request into develop once its verification is done and CI is green when it fixes a clear, demonstrated bug/);
+  assert.match(brief, /judgement call: leave it open for a person/);
+  assert.doesNotMatch(brief, /do not merge it yourself|a person's merge is the review/);
   const mine = await st.handlers(sentry.id).my_delegations!({});
   assert.ok(mine.startsWith(`- ${d.id} "Verify suspected`), mine);
   assert.match(mine, /" approved, asked [^\n]*\n {2}w1 \[active\]; last outcome/);
@@ -1741,4 +1748,17 @@ test('w691: a worker that needs a person declares it (waiting_on_person) and its
   // Its next message ends the declaration.
   sessions.send(id, 'the m3 is up', 'human', undefined, { requestedBy: BEN });
   await until('the next turn', () => info.waitingOn === undefined);
+});
+
+test('w694: a delegated request lets its worker merge a clear bug fix or a tests-only PR, keeps a judgement call for a person, and keeps the person-only gates', () => {
+  const c = delegationConstraints({ agentName: 'Nightly sentry', model: 'sonnet', effort: 'high' });
+  // Merge: an obvious, demonstrated bug (failing-first test or reproduction), or only tests or verdicts, on green CI.
+  assert.match(c, /Merge your own pull request into develop once its verification is done and CI is green when it fixes a clear, demonstrated bug \(a failing-first test or a reproduction\) or only adds tests or verdicts/);
+  // Hold: a design or behaviour change beyond the bug is left open for a person, and the report says so.
+  assert.match(c, /changes design or behaviour beyond fixing the bug is a judgement call: leave it open for a person and say so in your report/);
+  // No blanket ban on merging, and the other limits stay.
+  assert.doesNotMatch(c, /do not merge it yourself|person's merge is the review/i);
+  assert.match(c, /never master or main: never push to develop directly and never force-push/);
+  assert.match(c, /spends money, publishes or posts outside, changes a live setting, releases or deploys needs a person in their own words/);
+  assert.match(c, /Suggested worker: sonnet, high effort/);
 });

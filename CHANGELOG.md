@@ -10,6 +10,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A standing agent's delegated request no longer tells its worker "do not merge it yourself"** (w694, Ben; the cases
+  were w687, w688 and w689, the nightly regression sentry's auto-approved checks, whose green PRs #1252, #1254 and
+  #1255 waited hours for a person). The constraints `delegationConstraints` adds now say: merge your own PR into develop
+  on green CI and verification when it fixes a clear, demonstrated bug or only adds tests or verdicts (Ben,
+  2026-10-08: "as long as they were obvious bugs merging is fine from sentry investigations"); a judgement call (design
+  or behaviour beyond the bug) stays open for a person, said in the report. Never pushing to develop directly, never
+  force-pushing, and a person for money, publishing, live settings, releases and deploys are unchanged. Needs a portal
+  deploy.
+
 - **The ledger shows a worker that waits on a person as Waiting on input, and a worker with a dead agent host as Blocked, not
   Working** (w691, Lothsahn; the case was w665, Ben's Mac GPU page fault). Worker d558ba14 needed Ben to reboot and log in
   to the m3 (FileVault) from 01:52 UTC on 2026-10-08; it set `wake_me` check-ins (2 h, then 6 h) and reported "w665: still

@@ -650,9 +650,16 @@ one rule, and it is the agent's own to enforce (`server/evidenceRules.test.ts` p
 - **The dispatcher** carries that list into the worker's brief, and uses `decide_work ask` only for what the requester
   alone can answer. For both orchestrators done means merged: no brief ends at an open PR waiting for a person.
 
-One rule keeps its hold: a task a standing agent delegated is delivered as a pull request and never merged by its
-worker (the constraints every delegation's request carries, `delegationConstraints` in `server/orchestrators.ts`). Its
-text may come from outside the team, and a person's merge is the review.
+A task a standing agent delegated follows the same rule with one narrowing (w694; the owner, 2026-10-08: "as long as they
+were obvious bugs merging is fine from sentry investigations"). Its request's constraints (`delegationConstraints` in
+`server/orchestrators.ts`) say it is delivered as a pull request into develop, never pushed to develop or master
+directly and never force-pushed, and that its worker merges the PR itself once verified and CI is green when the PR fixes
+a clear, demonstrated bug (a failing-first test or a reproduction) or only adds tests or verdicts. A PR that changes
+design or behaviour beyond fixing the bug is a judgement call: the worker leaves it open for a person and says so in its
+report. Before w694 the constraints told the worker never to merge ("a person's merge is the review of an agent's
+request", because an agent's text may come from outside the team), and w687, w688 and w689 (the nightly regression
+sentry's auto-approved checks) held green PRs for hours. The gates that still need a person in their own words are
+money, publishing or posting outside, live settings, releases and deploys, which the constraints keep.
 
 The full rule, the checklists (visual changes, merges, releases) and the dated lessons are the `evidence-gate` skill of
 the `ff-agents` plugin (repo final-factory-agents). The briefs hold only what every agent needs without loading it.
