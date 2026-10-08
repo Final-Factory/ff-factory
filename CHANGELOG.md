@@ -25,6 +25,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Needs `install.sh --host-only` on the FFBox host (new `fff-vm` and `pathwatch.sh`), `fffctl update` in the VM
   (firewall rule, portal). Fixed on the way: the watch died with an arithmetic error the first time any of its alerts
   was due (`$(( now - ))` on a state key never set).
+- **Workers default to Sonnet 5.5** (w680, Ben, 2026-10-08: "is opus 5 still our implementor? sonnet 5.5 is out and its
+  amazing, we should switch to that"). `defaultModel` (what `start_agent` and a standing agent use when none is named)
+  is `sonnet`, the auto-approved delegation suggestion defaults to `sonnet` / `high`, and the standing-agent editor
+  offers it. `sonnet` is `claude-sonnet-5-5` on the Claude Code this repo pins (measured, 2.1.284 and 2.1.293). The
+  orchestrators, the dispatcher and the ops worker stay on Opus. A `config.json` that sets `defaultModel` itself keeps
+  its value, and standing agents keep the model they were saved with.
+
 - **The orchestration worker can install a new worker machine** (w676, Lothsahn: "Make the op machine worker able to
   run fff-machine-ssh", "And any other commands necessary to install a new worker"). Its PATH has `fff-machine-ssh`
   (through `fff-ops-priv machine-ssh`, as the portal's account): `--check` now always ends with the portal's
