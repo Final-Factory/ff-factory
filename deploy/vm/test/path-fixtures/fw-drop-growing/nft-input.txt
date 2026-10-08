@@ -1,0 +1,14 @@
+table inet fff_guest {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iif "lo" accept
+		ct state established,related accept
+		ct state invalid drop
+		meta l4proto { icmp, ipv6-icmp } accept
+		ip saddr 10.213.41.1 tcp dport { 22, 8790 } accept comment "the host's root: health check and fff-vm ssh"
+		iifname "tailscale0" tcp dport 443 counter packets 0 bytes 0 accept comment "tailnet HTTPS (tailscale serve) to the portal; tailscaled normally takes it before the kernel"
+		iifname "tailscale0" tcp dport 22 counter packets 0 bytes 0 accept comment "ssh from the tailnet only: the tailnet policy says who; Funnel never carries 22"
+		iifname "tailscale0" counter packets 37 bytes 2960 drop comment "everything else from the tailnet, counted"
+		udp dport 41641 accept comment "Tailscale's direct connections"
+	}
+}

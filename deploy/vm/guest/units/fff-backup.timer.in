@@ -1,0 +1,9 @@
+[Unit]
+Description=FF Factory portal: encrypted backup every day at @BACKUP_TIME@ UTC
+
+[Timer]
+OnCalendar=*-*-* @BACKUP_TIME@:00 UTC
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

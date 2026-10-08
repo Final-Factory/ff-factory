@@ -110,6 +110,8 @@ refresh_scripts() {
   esac
   for u in "$src"/units/*; do
     [ -f "$u" ] || continue
+    # Templates (*.in, rendered by install.sh) and drop-ins (*.conf) are not installed under their own names.
+    case $u in *.in | *.conf) continue ;; esac
     if ! cmp -s "$u" "/etc/systemd/system/$(basename "$u")"; then
       log "systemd units differ from $(basename "$1")'s (first: $(basename "$u")): kept as they are (an update's system setup installs a release's units)"
       break

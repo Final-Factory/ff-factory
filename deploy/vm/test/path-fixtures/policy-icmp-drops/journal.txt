@@ -1,0 +1,4 @@
+Oct 07 17:52:11 fff tailscaled[612]: magicsock: derp-9 connected; connGen=2
+Oct 07 18:04:02 fff tailscaled[612]: Drop: ICMPv4{100.100.3.13:0 > 100.64.0.5:0} 84 no rules matched
+Oct 07 18:04:12 fff tailscaled[612]: Drop: ICMPv6{[fd7a:115c:a1e0:ab12:4843:cd96:6001:1001]:0 > [fd7a:115c:a1e0::5a34:ac62]:0} 104 no rules matched
+Oct 07 18:05:21 fff tailscaled[612]: Drop: UDP{[fd7a:115c:a1e0:ab12:4843:cd96:6001:1001]:5353 > [fd7a:115c:a1e0::5a34:ac62]:5353} 76 no rules matched

@@ -425,11 +425,56 @@ The guest install masks `tmp.mount`, systemd's documented way back to the disk; 
 | Unit | Does | Replaces on BEAST |
 |---|---|---|
 | `fff-portal.service` | `node server/index.ts` in `app/current` as `fff`, with `FFSB_SUPERVISOR=systemd` and `FFSB_CONFIG`. `Restart=always` every 3 s, `StartLimitIntervalSec=0`. `KillMode=mixed`: SIGTERM to the server only, which records what to resume and stops its agents itself; whatever is left after 75 s is killed. `ExecStartPre=+fff-update activate` switches to a prepared release. `ExecCondition` keeps it stopped while `/run/fff/portal.hold` exists. Hardened: `NoNewPrivileges`, `ProtectSystem=full` | the `ffsb-server` task and `supervise.ps1` |
-| `fff-health.timer` (30 s) | `/api/health` from inside; 4 failures in a row after a 2-minute start grace restart the portal; verifies a fresh update (3) | the restart half of `supervise.ps1`, plus a hung-server check BEAST does not have |
+| `fff-health.timer` (30 s) | the unit watchdog (2.4a): restarts any critical unit that is failed or stopped; then `/api/health` from inside, 4 failures in a row after a 2-minute start grace restart the portal; verifies a fresh update (3) | the restart half of `supervise.ps1`, plus a hung-server check BEAST does not have |
 | `fff-update.path` → `.service` | starts the updater when `data/update.wanted` appears | `supervise.ps1`'s update step |
 | `fff-backup.timer` (11:15 UTC) | the encrypted backup (2.2) | none (new) |
 | `fff-base-refresh.timer` (15 min) | fetches the base clone and moves its detached HEAD to `origin/develop` when nothing there is modified | change 11, on the VM's side |
 | `fff-guest-firewall.service` | the `inet fff_guest` table (1.4, rule 5) | |
+
+### 2.4a Every critical unit starts at boot, and a failed one is restarted (w698)
+
+**What went wrong (2026-10-08).** `fff-ops.socket`, the orchestration worker's door, was inactive (dead) after the VM's
+cold restart and stayed so until Lothsahn ran `systemctl restart fff-ops.socket` and `fffctl update` by hand at 18:51Z.
+The nightly restart is `fff-vm nightly` on the FFBox host (12:00 UTC: `fffctl prepare-shutdown`, ACPI shutdown, snapshot,
+start); the guest's `unattended-upgrades` runs before it (11:00 UTC) and never reboots (`Automatic-Reboot "false"`). The unit
+had `After=` and `Requires=fff-ops-scratch.service`. A socket is ordered `Before=sockets.target`, `sockets.target` before
+`basic.target`, and a normal service `After=basic.target`, so the socket was ordered after a service that is itself after the
+socket's target: an **ordering cycle**. At boot systemd breaks one by deleting a job (`basic.target: Found ordering cycle on
+sockets.target/start … Job sockets.target/start deleted to break ordering cycle`), and the door was never started. Every
+`install.sh` run (each `fffctl update`) restarts it by hand (`systemctl restart` runs after boot, with no cycle to break),
+which is why it worked after each deploy and not after each reboot. *(Reproduced with the repository's own units under systemd 255:
+`systemd-analyze verify default.target` prints exactly those lines for the old socket and nothing for the new one, which
+`deploy/vm/test/fff-units.test.sh` now checks. What the VM's own journal said that night could not be read from the
+repository; the commands that would show it are in the w698 report.)* The same `Requires=` also stopped the socket whenever the
+scratch service was stopped or restarted.
+
+**The fixes.** `fff-ops.socket` orders and requires nothing (the scratch file system is the per-connection
+`fff-ops@.service`'s `Requires=`/`After=`). One list of critical units (`FFF_CRITICAL_UNITS` in `guest/lib.sh`) is read by
+`install.sh` (it enables all of them and fails if one is not enabled afterwards), the watchdog, `fffctl` and the tests:
+
+| Unit | WantedBy | Restarts by itself | The watchdog also checks |
+|---|---|---|---|
+| `fff-guest-firewall.service` | multi-user.target | `Restart=on-failure`, 5 starts / 10 min | the `inet fff_guest` table is loaded |
+| `tailscaled.service` | multi-user.target (Tailscale's package; `install.sh` enables it too) | drop-in `10-fff-restart.conf`: `Restart=on-failure`, `RestartSec=5s`, 10 starts / 10 min | |
+| `fff-ops-scratch.service` | multi-user.target | `Restart=on-failure`, 5 starts / 10 min | `/srv/fff-ops` is mounted |
+| `fff-ops.socket` | sockets.target | n/a (a socket) | `/run/fff-ops/claude.sock` exists |
+| `fff-portal.service` | multi-user.target | `Restart=always`, no start limit (as before) | not while held (`fffctl prepare-shutdown`) |
+| `fff-update.path`, `fff-health.timer`, `fff-backup.timer`, `fff-base-refresh.timer` | multi-user.target / timers.target | n/a | |
+
+**The unit watchdog** (`guest/fff-watchdog`, run by `fff-health` every 30 s, before the portal check). A critical unit that is
+`failed`, or `inactive` when it should run, or "active" without doing its job (the table, the mount, the socket file), is
+restarted (`reset-failed` first); a unit that is disabled is enabled (it would not come back after a reboot). It leaves alone
+a unit that is starting, stopping or has a job queued, the whole VM while it shuts down, the portal while it is held, and
+everything while `/run/fff/watchdog.pause` exists (`fffctl watchdog pause`; gone at the next boot). **Back-off:** the n-th
+restart in a row waits `WATCHDOG_BACKOFF_SEC` (30) `* 2^(n-1)` seconds, at most 900; after `WATCHDOG_MAX_ATTEMPTS` (6)
+restarts that did not hold it gives up on that unit, tells the dispatcher once, and stops (`fffctl watchdog reset` tries
+again); a unit that ran `WATCHDOG_HEALTHY_SEC` (600) starts over. A unit whose file is missing or that is masked is reported
+as given up, never restarted. **Every restart is logged** (`journalctl -t fff-watchdog`, and `fff-health.service`'s journal)
+and written, with the unit, the time and the reason, to `data/unit-watchdog.json`: `fffctl status` / `fffctl units` list the
+last five, and the portal shows them (a banner for a unit it gave up on, a dismissible one for the restarts of the last 24 h,
+and `system_status`). `fffctl units --check` exits 1 while a critical unit is down: the FFBox host's `fff-vm watch` asks it
+(layer `units`), so a watchdog that stopped, or a unit it gave up on, is seen from outside. The one thing nothing in the VM
+can restart is `fff-health.timer` itself; that check is the host's.
 
 ### 2.5 Health, restart and logs
 
@@ -545,12 +590,12 @@ when a repair did not fix it. Every repair is logged before and after.
 | 3 identity | `Self.Tags` has `PW_EXPECT_TAG`, `Self.CapMap` has `funnel` and `https` | none | tailnet admin (tagOwners, nodeAttrs, HTTPS on) |
 | 4 route | `tailscale serve status --json`: `Web["<dns>:443"]` `/` proxies `http://127.0.0.1:8790` and `AllowFunnel` is true | `tailscale funnel --bg http://127.0.0.1:8790` as `fffctl tailscale-join` does (10 min); never during a `fffctl migrate --dry-run-copy` (its Funnel is off on purpose: layers 4 to 9 are skipped) | ops |
 | 5 certificate | `curl --resolve <dns>:443:<100.x> https://<dns>/api/health` from inside the VM; also not expiring within 5 days | `tailscale cert <dns>` into a private temp folder, deleted after (30 min; not before the "retry after" time a Let's Encrypt rate limit gives; errors logged verbatim) | ops, or a tailnet admin (HTTPS certificates) |
-| 6 firewall | `nft list chain inet fff_guest input` accepts on `tailscale0` only TCP 22 and 443 (anything broader fails: a port outside those, no port, another protocol, such as the temporary 59343/59917 rule), and 22 is accepted while sshd listens on it (`ss -ltnp`). tailscaled's own listeners (peer API port, serve) are not checked: they never reach the kernel | none: the watch only verifies; `install.sh` has the rules | ops: re-run the guest install (`fffctl update`) |
-| 7 policy | no `Drop: ... no rules matched` line in `journalctl -u tailscaled --since -15min` whose source is a `tag:ingress` peer | none | tailnet admin: grant `tag:ingress` (or `*`) to `tag:fff-portal`; the alert is urgent and carries a sample line |
+| 6 firewall | `nft list chain inet fff_guest input` accepts on `tailscale0` only TCP 22 and 443 (anything broader fails: a port outside those, no port, another protocol, such as the temporary 59343/59917 rule), and 22 is accepted while sshd listens on it (`ss -ltnp`). tailscaled's own listeners (peer API port, serve) are not checked: install.sh's reading of tailscaled's source says they never reach the kernel. That is not measured with Funnel traffic, so the counter of the drop rule is in the evidence, and a warning (w698) when it grew since the last pass while the outside probe fails | none: the watch only verifies; `install.sh` has the rules | ops: re-run the guest install (`fffctl update`) |
+| 7 policy | no **TCP** `Drop: ... no rules matched` line in `journalctl -u tailscaled --since -15min` whose source is a `tag:ingress` peer (Funnel is TCP; ICMP and UDP drops from those peers are counted and shown, never judged, w698). While the outside probe passed in the pass before, a TCP drop is a warning listing the ports, not a failure | none | tailnet admin: grant `tag:ingress` (or `*`) to `tag:fff-portal`; the alert is urgent and carries a sample line |
 | 8 Funnel servers | a `tag:ingress` peer shows a handshake within `PW_FUNNEL_STALE_MIN` minutes, or the outside probe passed in the pass before | `systemctl restart tailscaled` once per incident, looked at again after 5 minutes | tailnet admin or ops |
 | 9 end to end | `curl https://<dns>/api/health` from the host (not on the tailnet: out and back through Funnel) says `ok:true`; on failure each Funnel server address from the name lookup is tried with `--resolve`, to tell one bad server from all | none | ops |
 
-Other single points of failure it also checks, cheap and safe: the VM's **disk** (below 2 GB free or 90% used is a warning,
+Other single points of failure it also checks, cheap and safe: the VM's **critical units** (`fffctl units --check` in the VM, 2.4a: two failing passes in a row are a banner and an alert naming the unit), the VM's **disk** (below 2 GB free or 90% used is a warning,
 below 512 MB or 97% a failure; repair: `journalctl --vacuum-size=200M` and `apt-get clean`, every 6 h), the VM's **clock**
 against the host's (past 60 s: restart the VM's time sync, never set by hand), the portal service **restarting in a loop**
 (5 restarts in 15 minutes; systemd keeps restarting it, so only a person can stop the cause), and the **alert channel**

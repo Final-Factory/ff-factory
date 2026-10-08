@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# fff-watchdog: the unit watchdog of the portal VM (w698; fff-health runs it every 30 s, as root; fffctl watchdog run does too).
+#
+# Every critical unit (FFF_CRITICAL_UNITS in lib.sh: the firewall, tailscaled, the orchestration worker's scratch and socket,
+# the portal, the update path, the timers) that is failed, or inactive when it should be active, or active without doing its
+# job (a firewall without its table, a scratch without its mount, a socket without its file), is restarted. A unit that is
+# disabled is enabled first: it would not come back after a reboot. Every restart is logged (journal tag fff-watchdog, and
+# fff-health.service's) and recorded in $DATA/unit-watchdog.json, which fffctl status and the portal show: which unit, when,
+# why. Rate limits: the n-th restart in a row waits WATCHDOG_BACKOFF_SEC * 2^(n-1) seconds, at most WATCHDOG_BACKOFF_MAX_SEC;
+# after WATCHDOG_MAX_ATTEMPTS restarts that did not hold it gives up on that unit and tells the dispatcher once (fffctl
+# watchdog reset tries again). A unit that has run WATCHDOG_HEALTHY_SEC without a failure starts from the first restart
+# again. Not while the VM shuts down, nor while a unit is starting or stopping or has a job queued, nor while
+# $RUN/watchdog.pause exists (fffctl watchdog pause; gone at the next boot). The portal is left alone while it is held until
+# the next boot (fffctl prepare-shutdown, the host's nightly restart).
+set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
+need_root
+load_conf
+RUN=${FFF_RUN_DIR:-/run/fff}
+HOLD=$RUN/portal.hold
+PAUSE=$RUN/watchdog.pause
+WD_DIR=$RUN/watchdog
+WD_FILE=$DATA/unit-watchdog.json
+NOW=${FFF_NOW:-$(date +%s)}
+install -d -m 0755 "$RUN" "$WD_DIR"
+
+iso() { date -u -d "@$1" +%FT%TZ; }
+# wd_log TEXT: the journal twice over: fff-health.service's, and the tag `journalctl -t fff-watchdog` finds.
+wd_log() {
+  log "watchdog: $*"
+  if command -v logger >/dev/null; then logger -t fff-watchdog -p daemon.warning -- "$*" 2>/dev/null || true; fi
+}
+
+# prop NAME: a property of the unit wd_unit is looking at (from its one `systemctl show`).
+PROPS=""
+prop() { sed -n "s/^$1=//p" <<<"$PROPS" | head -n 1; }
+
+# wd_probe UNIT: why a unit that systemd calls active is not doing its job; nothing when it is.
+wd_probe() {
+  case $1 in
+    fff-guest-firewall.service)
+      "${FFF_NFT:-nft}" list table inet fff_guest >/dev/null 2>&1 || echo "active, but the nftables table inet fff_guest is not loaded"
+      ;;
+    fff-ops-scratch.service)
+      "${FFF_MOUNTPOINT:-mountpoint}" -q "$OPS_ROOT" 2>/dev/null || echo "active, but $OPS_ROOT is not mounted"
+      ;;
+    fff-ops.socket)
+      [ -S "${FFF_OPS_SOCKET:-/run/fff-ops/claude.sock}" ] || echo "active, but ${FFF_OPS_SOCKET:-/run/fff-ops/claude.sock} does not exist"
+      ;;
+  esac
+  return 0
+}
+
+# wd_busy: the VM is going down; no restart helps then.
+wd_busy() {
+  [ "$(sc is-system-running 2>/dev/null || true)" = stopping ] && return 0
+  sc list-jobs --no-legend 2>/dev/null | matches -E '(shutdown|poweroff|reboot|halt|kexec)\.target|systemd-(poweroff|reboot|halt|kexec)' && return 0
+  return 1
+}
+
+EVENTS=$WD_DIR/events.new
+ROWS=$WD_DIR/rows.new
+: >"$EVENTS"
+: >"$ROWS"
+# wd_event UNIT ACTION WHY ATTEMPT OK(true|false)
+wd_event() {
+  jq -nc --arg at "$(iso "$NOW")" --arg unit "$1" --arg action "$2" --arg why "$3" --argjson attempt "$4" --argjson ok "$5" \
+    '{at: $at, unit: $unit, action: $action, why: $why, attempt: $attempt, ok: $ok}' >>"$EVENTS"
+}
+
+# wd_unit UNIT: look at one critical unit, act if it needs it, add its row.
+wd_unit() {
+  local u=$1 f=$WD_DIR/$1.json active load ufs result since status why="" bad=0 fixable=1 st=ok
+  local attempts=0 next_at=0 healthy_since=0 announced=false delay pending ok_now next_iso=""
+  PROPS=$(sc show -p ActiveState -p SubState -p Result -p LoadState -p UnitFileState -p InactiveEnterTimestamp -p ExecMainStatus "$u" 2>/dev/null || true)
+  active=$(prop ActiveState); result=$(prop Result); load=$(prop LoadState); ufs=$(prop UnitFileState)
+  since=$(prop InactiveEnterTimestamp); status=$(prop ExecMainStatus)
+  if [ -f "$f" ]; then
+    read -r attempts next_at healthy_since announced < <(jq -r '[.attempts // 0, .nextAt // 0, .healthySince // 0, (.announced // false)] | @tsv' "$f" 2>/dev/null || echo "0 0 0 false") || true
+  fi
+  # Looked at, not touched: paused by hand, the portal held until the next boot, a unit in the middle of a start or a stop.
+  if [ -e "$PAUSE" ]; then
+    st=paused
+  elif [ "$u" = fff-portal.service ] && [ -e "$HOLD" ]; then
+    st=held
+  else
+    case $active in activating | deactivating | reloading | refreshing | maintenance) bad=-1 ;; esac
+    if [ "$bad" = 0 ]; then
+      pending=$(sc list-jobs --no-legend 2>/dev/null | awk '{print $2}' | grep -xF "$u" || true)
+      if [ -n "$pending" ]; then bad=-1; fi
+    fi
+    if [ "$bad" = -1 ]; then healthy_since=0; fi
+  fi
+  if [ "$st" = ok ] && [ "$bad" = 0 ]; then
+    if [ "$load" = not-found ] || [ -z "$active" ]; then
+      bad=1; fixable=0; why="the unit file is not installed (deploy/vm/guest/install.sh writes it)"
+    elif [ "$load" = masked ]; then
+      bad=1; fixable=0; why="masked: a person did it, so the watchdog leaves it"
+    elif [ "$active" = failed ]; then
+      bad=1; why="failed (Result=${result:-?}, exit status ${status:-?})"
+    elif [ "$active" != active ]; then
+      bad=1
+      if [ -n "$since" ] && [ "$since" != "n/a" ]; then why="inactive (dead) since $since"; else why="inactive (dead), not started since this boot"; fi
+      if [ -n "$result" ] && [ "$result" != success ]; then why="$why (Result=$result)"; fi
+    else
+      why=$(wd_probe "$u")
+      if [ -n "$why" ]; then bad=1; fi
+    fi
+    # Disabled: it would not come back at the next boot. Enable it, whatever its state now.
+    if [ "$fixable" = 1 ] && ! enable_state_ok "$ufs"; then
+      if sc enable "$u" >/dev/null 2>&1; then
+        wd_log "enabled $u (it was $ufs and would not have started at boot)"
+        wd_event "$u" enable "was $ufs: it would not have started at boot" 0 true
+        ufs=enabled
+      else
+        wd_log "could not enable $u (it is $ufs)"
+        wd_event "$u" enable "was $ufs and enabling it failed" 0 false
+      fi
+    fi
+    if [ "$bad" = 0 ]; then
+      if [ "$healthy_since" = 0 ]; then healthy_since=$NOW; fi
+      if [ "$attempts" -gt 0 ] && [ $((NOW - healthy_since)) -ge "$WATCHDOG_HEALTHY_SEC" ]; then
+        wd_log "$u has run $((NOW - healthy_since)) s since its last restart: the restart count starts over"
+        attempts=0; next_at=0; announced=false
+      fi
+    else
+      healthy_since=0
+      if [ "$fixable" = 0 ] || { [ "$attempts" -ge "$WATCHDOG_MAX_ATTEMPTS" ] && [ "$NOW" -ge "$next_at" ]; }; then
+        st=gave-up
+        if [ "$announced" != true ]; then
+          announced=true
+          if [ "$fixable" = 0 ]; then wd_log "cannot repair $u: $why"; else wd_log "giving up on $u after $attempts restarts that did not hold: $why"; fi
+          wd_event "$u" gave-up "$why" "$attempts" false
+          tell_dispatcher "[watchdog] fff-health gave up on $u in the portal VM: $why$([ "$fixable" = 1 ] && echo " ($attempts restarts did not hold)" || true). Look: sudo fffctl status; journalctl -u $u. When the cause is fixed: sudo fffctl watchdog reset." || true
+        fi
+      elif [ "$NOW" -lt "$next_at" ]; then
+        st=backoff
+      else
+        attempts=$((attempts + 1))
+        delay=$((WATCHDOG_BACKOFF_SEC * (1 << (attempts - 1))))
+        if [ "$delay" -gt "$WATCHDOG_BACKOFF_MAX_SEC" ]; then delay=$WATCHDOG_BACKOFF_MAX_SEC; fi
+        next_at=$((NOW + delay))
+        sc reset-failed "$u" >/dev/null 2>&1 || true
+        # The portal's start can take minutes (an update built at start): never wait for it here.
+        if [ "$u" = fff-portal.service ]; then
+          if sc restart --no-block "$u" >/dev/null 2>&1; then ok_now=true; else ok_now=false; fi
+        elif timeout 60 "${FFF_SYSTEMCTL:-systemctl}" restart "$u" >/dev/null 2>&1; then
+          ok_now=true
+        else
+          ok_now=false
+        fi
+        wd_log "restarted $u (restart $attempts of $WATCHDOG_MAX_ATTEMPTS, the next not before ${delay} s): $why$([ "$ok_now" = true ] || echo '; the restart itself failed')"
+        wd_event "$u" restart "$why" "$attempts" "$ok_now"
+        # Back up and doing its job: healthy from now (the count stays until it has held WATCHDOG_HEALTHY_SEC). Otherwise it waits.
+        active=$(sc show -p ActiveState --value "$u" 2>/dev/null || echo "$active")
+        if [ "$active" = active ] && [ -z "$(wd_probe "$u")" ]; then st=ok; healthy_since=$NOW; else st=backoff; fi
+      fi
+    fi
+    active=$(sc show -p ActiveState --value "$u" 2>/dev/null || echo "$active")
+  fi
+  jq -nc --argjson a "$attempts" --argjson n "$next_at" --argjson h "$healthy_since" --argjson an "$announced" \
+    '{attempts: $a, nextAt: $n, healthySince: $h, announced: $an}' >"$f.new" && mv -f "$f.new" "$f"
+  if [ "$st" = backoff ] && [ "$next_at" -gt 0 ]; then next_iso=$(iso "$next_at"); fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$u" "${active:-unknown}" "${ufs:-unknown}" "$st" "$attempts" "$next_iso" >>"$ROWS"
+}
+
+# wd_publish: $DATA/unit-watchdog.json, for fffctl status and the portal: every unit's state and the last 50 events.
+wd_publish() {
+  local prev='[]' events json
+  if [ -f "$WD_FILE" ]; then prev=$(jq -c '.events // []' "$WD_FILE" 2>/dev/null || echo '[]'); fi
+  events=$(jq -cs --argjson prev "$prev" '($prev + .) | .[-50:]' "$EVENTS")
+  json=$(jq -n --arg rows "$(cat "$ROWS")" --argjson events "$events" --arg now "$(iso "$NOW")" --arg host "$(hostname -s)" '
+    {schema: 1, updatedAt: $now, host: $host,
+     units: ($rows | split("\n") | map(select(length > 0) | split("\t") | {unit: .[0], active: .[1], enabled: .[2], state: .[3], attempts: (.[4] | tonumber), nextTryAt: (.[5] // "")})),
+     events: $events}')
+  # Only when something changed, and at least every 2 minutes (the portal reads a silent file as a stopped watchdog).
+  if [ -f "$WD_FILE" ] && [ "$(jq -S 'del(.updatedAt)' "$WD_FILE" 2>/dev/null)" = "$(jq -S 'del(.updatedAt)' <<<"$json")" ] &&
+    [ $((NOW - $(stat -c %Y "$WD_FILE" 2>/dev/null || echo 0))) -lt 120 ]; then
+    return 0
+  fi
+  if [ -d "$DATA" ]; then printf '%s\n' "$json" | data_write unit-watchdog.json; fi
+}
+
+main() {
+  local u
+  if wd_busy; then return 0; fi
+  for u in "${FFF_CRITICAL_UNITS[@]}"; do wd_unit "$u"; done
+  wd_publish
+}
+main

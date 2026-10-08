@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# fff-health: one health check of the portal inside its VM (fff-health.timer, every 30 s; root). Replaces what
-# supervise.ps1 did beyond restarting a crashed server (systemd's Restart=always does that): a server that runs but
-# no longer answers is restarted after HEALTH_FAILS_BEFORE_RESTART checks in a row, and an update being verified is
-# confirmed or rolled back (fff-update verify).
+# fff-health: one health check of the portal inside its VM (fff-health.timer, every 30 s; root). First the unit watchdog
+# (fff-watchdog, w698: any critical unit that is failed or stopped is restarted). Then what supervise.ps1 did beyond restarting
+# a crashed server (systemd's Restart=always does that): a server that runs but no longer answers is restarted after
+# HEALTH_FAILS_BEFORE_RESTART checks in a row, and an update being verified is confirmed or rolled back (fff-update verify).
 set -o errexit -o nounset -o pipefail
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
@@ -10,6 +10,10 @@ need_root
 load_conf
 state=/run/fff/health.fails
 install -d -m 0755 /run/fff
+
+# The unit watchdog (w698; fff-watchdog): every critical unit that is failed or stopped is restarted, with a back-off. Its own
+# failure never keeps the portal check below from running. It looks even while the portal is held for the nightly restart.
+"$FFF_LIB/fff-watchdog" || warn "fff-watchdog failed (exit $?)"
 
 [ -e /run/fff/portal.hold ] && exit 0
 # Before the "is it running" check: a new release that crash-loops is rarely "active" when this looks.

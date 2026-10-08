@@ -1,7 +1,9 @@
 [Unit]
-Description=FF Factory portal: health check, update verification (fff-health)
+Description=FF Factory portal: health check, update verification, unit watchdog (fff-health)
 After=fff-portal.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/lib/fff/fff-health
+# A restart in the watchdog waits at most 60 s per unit; never let one pass hold the next (the timer waits for this to end).
+TimeoutStartSec=10min

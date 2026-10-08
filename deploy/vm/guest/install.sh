@@ -232,63 +232,11 @@ elif [ "$DRY_RUN" != 1 ]; then
   have_mb=$(($(stat -c %s "$OPS_IMAGE") / 1048576))
   [ "$have_mb" -eq "$OPS_DISK_MB" ] || warn "the orchestration worker's scratch is $have_mb MB, not OPS_DISK_MB=$OPS_DISK_MB: docs/ops-worker.md says how to resize it"
 fi
-c=$(write_file /etc/systemd/system/fff-ops-scratch.service 0644 <<EOF
-[Unit]
-Description=FF Factory orchestration worker: its ${OPS_DISK_MB} MB scratch file system (w597)
-Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/ops-worker.md
-RequiresMountsFor=$(dirname "$OPS_IMAGE") $(dirname "$OPS_ROOT")
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStartPre=/usr/bin/install -d -m 0755 $OPS_ROOT
-ExecStart=/bin/sh -c 'mountpoint -q $OPS_ROOT || mount -o loop,nosuid,nodev,noexec $OPS_IMAGE $OPS_ROOT'
-ExecStartPost=/bin/sh -c 'chown root:$OPS_USER $OPS_ROOT && chmod 0750 $OPS_ROOT && install -d -m 0700 -o $OPS_USER -g $OPS_USER $OPS_ROOT/home $OPS_ROOT/scratch $OPS_ROOT/tmp'
-ExecStop=/bin/umount $OPS_ROOT
-
-[Install]
-WantedBy=multi-user.target
-EOF
-)
+# Rendered from units/*.in (render_unit, lib.sh), so deploy/vm/test/fff-units.test.sh can lint what is installed.
+c=$(render_unit "$here/units/fff-ops-scratch.service.in" OPS_DISK_MB OPS_ROOT OPS_IMAGE OPS_USER "OPS_IMAGE_DIR=$(dirname "$OPS_IMAGE")" "OPS_ROOT_PARENT=$(dirname "$OPS_ROOT")" | write_file /etc/systemd/system/fff-ops-scratch.service 0644)
 # The network it may reach: Anthropic's API, the tailnet (the machines, MagicDNS), loopback and this VM's resolvers.
 resolvers=$(awk '$1 == "nameserver" {print $2}' /etc/resolv.conf 2>/dev/null | paste -sd' ' - || true)
-c+=$(write_file /etc/systemd/system/fff-ops@.service 0644 <<EOF
-[Unit]
-Description=FF Factory orchestration worker: Claude Code as $OPS_USER for the portal (w597)
-Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/ops-worker.md
-Requires=fff-ops-scratch.service
-After=fff-ops-scratch.service network-online.target
-
-[Service]
-Type=simple
-User=$OPS_USER
-Group=$OPS_USER
-# One connection to fff-ops.socket: the portal's header, then Claude Code's stream on the same socket.
-ExecStart=$FFF_LIB/fff-ops-launch
-StandardInput=socket
-StandardOutput=socket
-StandardError=journal
-SyslogIdentifier=fff-ops
-WorkingDirectory=$OPS_ROOT
-UMask=0077
-# sudo runs its two wrappers (/etc/sudoers.d/fff-ops), so no NoNewPrivileges, nor any setting that implies it.
-NoNewPrivileges=no
-# The whole file system read-only but its scratch; /srv/fff stays writable only for what sudo runs as root or fff there
-# (a machine credential): fff-ops itself cannot enter it (0700 fff). /tmp, /var/tmp and /dev/shm are small and its own.
-ProtectSystem=strict
-ProtectHome=tmpfs
-ReadWritePaths=$OPS_ROOT $FFF_ROOT -/run/fff -/var/lib/sudo
-# /run/sudo: sudo's own time stamps, on a private tmpfs (/run is read-only here).
-TemporaryFileSystem=/tmp:size=64M,mode=1777 /var/tmp:size=16M,mode=1777 /dev/shm:size=16M,mode=1777 /run/sudo:size=1M,mode=0711
-IPAddressDeny=any
-IPAddressAllow=127.0.0.0/8 ::1/128 $OPS_ALLOW_NETS $resolvers
-MemoryMax=$OPS_MEMORY_MAX
-TasksMax=256
-CPUWeight=50
-# Its lifetime's backstop: the portal stops an idle process after 1 h and cuts a turn after 2 h.
-RuntimeMaxSec=$OPS_RUNTIME_MAX
-EOF
-)
+c+=$(render_unit "$here/units/fff-ops@.service.in" OPS_USER FFF_LIB OPS_ROOT FFF_ROOT OPS_ALLOW_NETS "RESOLVERS=$resolvers" OPS_MEMORY_MAX OPS_RUNTIME_MAX | write_file /etc/systemd/system/fff-ops@.service 0644)
 c+=$(write_file /etc/systemd/system/fff-ops.socket 0644 <"$here/units/fff-ops.socket")
 # sudo: the two wrappers, and nothing else. Checked with visudo before it is put in place.
 sudoers=$(mktemp)
@@ -320,20 +268,22 @@ c=""
 for u in fff-portal.service fff-health.service fff-health.timer fff-update.path fff-update.service fff-backup.service fff-base-refresh.service fff-base-refresh.timer; do
   c+=$(write_file "/etc/systemd/system/$u" 0644 <"$here/units/$u")
 done
-c+=$(write_file /etc/systemd/system/fff-backup.timer 0644 <<EOF
-[Unit]
-Description=FF Factory portal: encrypted backup every day at $BACKUP_TIME UTC
-
-[Timer]
-OnCalendar=*-*-* $BACKUP_TIME:00 UTC
-RandomizedDelaySec=5min
-
-[Install]
-WantedBy=timers.target
-EOF
-)
+c+=$(render_unit "$here/units/fff-backup.timer.in" BACKUP_TIME | write_file /etc/systemd/system/fff-backup.timer 0644)
+# Tailscale's own unit gives up after 5 starts in 10 s; the portal is unreachable without it (w698).
+c+=$(write_file /etc/systemd/system/tailscaled.service.d/10-fff-restart.conf 0644 <"$here/units/tailscaled-restart.conf")
 [ -z "$c" ] || run_cmd systemctl daemon-reload
 run_cmd systemctl enable fff-portal.service fff-health.timer fff-update.path fff-backup.timer fff-base-refresh.timer
+# Every critical unit starts at boot (w698): enable is idempotent, and a unit that stays disabled is one that does not come
+# back after a reboot (the unit list is FFF_CRITICAL_UNITS in lib.sh, which fff-watchdog and deploy/vm/test/fff-units.test.sh
+# read too). tailscaled is the package's unit: its postinst enables it, but this does not rely on that.
+run_cmd systemctl enable "${FFF_CRITICAL_UNITS[@]}"
+if [ "$DRY_RUN" != 1 ]; then
+  for u in "${FFF_CRITICAL_UNITS[@]}"; do
+    enable_state_ok "$(systemctl is-enabled "$u" 2>/dev/null || true)" ||
+      die "$u is not enabled ($(systemctl is-enabled "$u" 2>&1 || true)) after systemctl enable: it would not start after a reboot"
+  done
+  log "enabled at boot: ${FFF_CRITICAL_UNITS[*]}"
+fi
 if [ "$START" = 1 ]; then
   run_cmd systemctl start fff-update.path fff-health.timer fff-backup.timer fff-base-refresh.timer
   if { [ -n "$c" ] || [ "$url_changed" = 1 ]; } && portal_active; then

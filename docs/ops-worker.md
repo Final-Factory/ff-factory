@@ -144,6 +144,9 @@ process of the portal: it would get the portal's account and everything that acc
    starts the session `ops-worker` (kind `ops`). Its options set `spawnClaudeCodeProcess` to `opsSpawner`.
 2. `opsSpawner` connects to `/run/fff-ops/claude.sock`. The socket belongs to `fff-ops.socket`: it is mode 0600 and
    owned by `fff`, so only the portal can connect. `Accept=yes` with `MaxConnections=1` means one process at a time.
+   The socket unit orders and requires no service (w698): a socket after a service is an ordering cycle at boot, and systemd
+   then drops the socket's start job, which left the door dead after the 2026-10-08 nightly restart. The scratch file
+   system is `fff-ops@.service`'s `Requires=`, and `fff-health` restarts the socket if it is ever found stopped.
    The spawner sends one header line: the CLI's arguments, Claude Code's own environment variables and the credential.
 3. systemd starts `fff-ops@.service` for the connection, as `fff-ops`, inside the unit's sandbox. `fff-ops-launch`
    reads the header and builds the environment from nothing. It passes the Claude credential on file descriptor 3
@@ -417,6 +420,9 @@ VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
 - `deploy/vm/test/fff-ops-socket.test.sh` (CI's unit-test job on Linux, w638): `fff-ops.socket`'s own settings under
   real systemd, the real launcher with a fake claude and the portal's `opsSpawner`: systemd drops a second connection
   while one is open, and a new process started right after a stop runs, the last one idle or mid-turn.
+- `deploy/vm/test/fff-units.test.sh` and `fff-watchdog.test.sh` (run by `lint.sh`, w698): every critical unit is enabled by
+  `install.sh` with the right `WantedBy`, a socket is never ordered after a service (and `systemd-analyze verify default.target`
+  catches the old one), and the unit watchdog restarts a stopped `fff-ops.socket` with a back-off, a log line and a record.
 - `deploy/vm/test/fff-ops.test.sh` (run by `lint.sh`): the launcher against a fake claude (arguments, environment,
   fd 3, refusals), the ssh wrapper against a fake ssh, real scp and sftp copies both ways through the wrappers to a fake
   machine running a real `sftp-server` (and the options, port, host and command they refuse), and the root wrapper's

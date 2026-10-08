@@ -14,8 +14,8 @@
 #   7     the tailnet policy does not drop Funnel servers' traffic      (an admin's: logged, urgent alert)
 #   8     Funnel servers connect at all                                  repair: restart tailscaled, check again in 5 min
 #   9     the portal answers from outside, through Funnel (curl on this host): the final pass or fail, always run
-#   disk  clock  loop  ntfy   other single points of failure: the VM's disk, its clock, the portal service restarting in a
-#                             loop, and the alert channel itself
+#   disk  clock  loop  units  ntfy   other single points of failure: the VM's disk, its clock, the portal service restarting in a
+#                             loop, the critical units (fffctl units --check), and the alert channel itself
 # A layer is a problem after PW_FAILS_BEFORE_ALERT failing passes in a row; one alert an hour per problem (ntfy), and an
 # alert when a repair did not fix it. Layers 2 to 8 reach the banner only while layer 9 fails too (a layer that fails while
 # the portal answers from outside is a warning). The state goes to the portal (PW_HEALTH_FILE in the VM, no secrets),
@@ -27,7 +27,7 @@
 : "${PW_TS_RESTART_MIN:=30}" "${PW_FUNNEL_STALE_MIN:=30}" "${PW_DISK_WARN_MB:=2048}" "${PW_DISK_FAIL_MB:=512}"
 : "${PW_CLOCK_SKEW_SEC:=60}" "${PW_HEALTH_FILE:=/run/fff/path-health.json}"
 
-PL_IDS="ssh 1 2 3 4 5 6 7 8 9 disk clock loop ntfy"
+PL_IDS="ssh 1 2 3 4 5 6 7 8 9 disk clock loop units ntfy"
 PL_POLICY_MSG="the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress (or *) → tag:fff-portal"
 # The VM's marker of a running migrate dry run (fffctl migrate --dry-run-copy): its Funnel is off on purpose.
 PL_DRYRUN_MARKER=${PL_DRYRUN_MARKER:-/srv/fff/migrate/dry-run.json}
@@ -48,6 +48,7 @@ pl_name() {
     disk) echo "VM disk" ;;
     clock) echo "VM clock" ;;
     loop) echo "portal restarts" ;;
+    units) echo "VM units" ;;
     ntfy) echo "alert channel" ;;
     *) echo "layer $1" ;;
   esac
@@ -68,6 +69,7 @@ pl_who() {
     disk) echo "ops: free disk space in the VM (sudo fff-vm ssh df -h)" ;;
     clock) echo "ops: the VM's clock is off and its time sync did not fix it (sudo fff-vm ssh timedatectl)" ;;
     loop) echo "ops: sudo fff-vm ssh sudo fffctl logs; the last update may need sudo fffctl rollback" ;;
+    units) echo "ops: sudo fff-vm ssh sudo fffctl status shows which critical unit is down and what the VM's own watchdog (fff-health) tried; journalctl -t fff-watchdog; after the cause is fixed sudo fffctl watchdog reset" ;;
     ntfy) echo "ops: this host cannot reach the ntfy server, so alerts do not arrive (the journal has them)" ;;
     *) echo "ops: sudo fff-vm watch status" ;;
   esac
@@ -383,27 +385,63 @@ path_l6() {
     pl_set 6 fail "sshd listens on 22 but tailscale0 does not accept 22 (accepted:${FW_PORTS:- none}): nobody can ssh in over the tailnet. Re-run the guest install"
     return 1
   fi
-  pl_set 6 ok "tailscale0 accepts only TCP${FW_PORTS:- none} (Funnel and serve are tailscaled's own and need no rule); processes reachable by address: [${kernel:-none}]"
+  # The counter of the rule that drops everything else from the tailnet (w698): install.sh's argument that Funnel never reaches
+  # the kernel is from tailscaled's source, not from a Funnel request through this chain. If the outside path fails and this
+  # counter grows, this firewall is dropping something that matters, and the evidence says so.
+  local drops prev delta="" note=""
+  drops=$(sed -nE 's/.*iifname "tailscale0" counter packets ([0-9]+) bytes [0-9]+ drop.*/\1/p' <<<"$rules" | head -n 1)
+  if [[ ${drops:-x} =~ ^[0-9]+$ ]]; then
+    prev=$(sget fw_drop_pkts "")
+    state_set fw_drop_pkts "$drops"
+    if [ -n "$prev" ] && [ "$drops" -ge "$prev" ]; then delta=$((drops - prev)); else delta=$drops; fi
+    if [ "$drops" -gt 0 ]; then note="; the rule that drops everything else from the tailnet has counted $drops packet(s), $delta since the last pass"; fi
+    if [ "$delta" -gt 0 ] && [ "$(sget L9_verdict none)" != ok ]; then
+      pl_set 6 warn "the VM's firewall dropped $delta packet(s) from the tailnet since the last pass while the outside probe does not pass$note. If they are Funnel's (sudo fff-vm ssh sudo nft list chain inet fff_guest input; sudo conntrack -L | grep -F ':59'), install.sh needs a rule for tailscaled's peer API port, which this layer's argument said it does not. Accepts only TCP${FW_PORTS:- none}"
+      return 0
+    fi
+  fi
+  pl_set 6 ok "tailscale0 accepts only TCP${FW_PORTS:- none} (Funnel and serve are tailscaled's own and need no rule); processes reachable by address: [${kernel:-none}]$note"
   return 0
 }
 
+# Funnel carries TCP only (its servers connect to this node's peer API port over the tailnet), so only dropped TCP from a
+# tag:ingress peer says the policy blocks Funnel. ICMP and UDP drops from the same peers (tailscaled logs ICMP with port 0)
+# are pings and probes the grant was never meant to let through; they are counted and shown, not judged (w698). And while the
+# outside probe passed in the pass before (layer 9 runs after this one), Funnel works end to end, so what was dropped is stray
+# traffic to look at, a warning, not a failure that stops the chain: the grant covers the ports Funnel really uses.
 path_l7() {
-  local ingress out n=0 sample="" line src total=0
+  local ingress out n=0 other=0 sample="" line src proto dport ports="" kinds="" total=0
+  # Drop: TCP{[fd7a:...]:41822 > [fd7a:...]:59343} 80 no rules matched: the protocol, the source, the destination port.
+  local re='Drop: ([A-Za-z0-9]+)\{\[?([0-9a-fA-F:.]+)\]?:[0-9]+ > \[?([0-9a-fA-F:.]+)\]?:([0-9]+)\}'
   ingress=$(jq -r '[.Peer[]? | select(((.Tags // []) | index("tag:ingress")) != null) | .TailscaleIPs[]?] | .[]' <<<"$TS")
   out=$(gx "journalctl -u tailscaled --since -15min --no-pager 2>&1 | grep 'Drop:.*no rules matched' | tail -n 300 || true") || true
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     total=$((total + 1))
-    if [[ $line =~ Drop:\ [A-Za-z0-9]+\{\[?([0-9a-fA-F:.]+)\]?:[0-9]+\ \> ]]; then
-      src=${BASH_REMATCH[1]}
-      if grep -qxF "$src" <<<"$ingress"; then n=$((n + 1)); sample=$line; fi
+    if [[ $line =~ $re ]]; then
+      proto=${BASH_REMATCH[1]}
+      src=${BASH_REMATCH[2]}
+      dport=${BASH_REMATCH[4]}
+      grep -qxF "$src" <<<"$ingress" || continue
+      if [ "$proto" = TCP ]; then
+        n=$((n + 1))
+        sample=$line
+        [[ " $ports " == *" $dport "* ]] || ports+="${ports:+ }$dport"
+      else
+        other=$((other + 1))
+        [[ " $kinds " == *" $proto "* ]] || kinds+="${kinds:+ }$proto"
+      fi
     fi
   done <<<"$out"
   if [ "$n" -gt 0 ]; then
+    if [ "$(sget L9_verdict none)" = ok ]; then
+      pl_set 7 warn "the tailnet policy dropped $n TCP packet(s) from Funnel servers (tag:ingress) in 15 min, to port(s) $ports, but the outside probe passes, so Funnel works: stray traffic, not Funnel's requests; check that the grant covers port(s) $ports if it should. Last: $sample"
+      return 0
+    fi
     pl_set 7 fail "$PL_POLICY_MSG. $n line(s) in 15 min, last: $sample"
     return 1
   fi
-  pl_set 7 ok "no Funnel server (tag:ingress) traffic dropped by the packet filter in 15 min (${total} other Drop line(s))"
+  pl_set 7 ok "no Funnel server (tag:ingress) TCP traffic dropped by the packet filter in 15 min (${total} Drop line(s) in all$([ "$other" -gt 0 ] && echo ", $other of them $kinds from Funnel servers: pings and probes, not Funnel's requests" || true))"
   return 0
 }
 
@@ -557,6 +595,21 @@ pl_loop() {
   return 0
 }
 
+# The VM's critical units (fffctl units --check, w698): the VM's own watchdog (fff-health, every 30 s) restarts a unit that is
+# down; this layer is the check on the watchdog, from outside it: a unit it gave up on, or a watchdog that stopped, leaves
+# something down for longer than a few passes.
+pl_units() {
+  local out rc
+  out=$(gx 'fffctl units --check 2>&1') && rc=0 || rc=$?
+  if [ "$rc" = 0 ]; then pl_set units ok "$out"; return 0; fi
+  if grep -F 'unknown command' <<<"$out" >/dev/null; then
+    pl_set units skip "the VM's fffctl predates 'fffctl units' (w698): not checked until its next update"
+    return 0
+  fi
+  pl_set units fail "a critical unit is down in the VM and its own watchdog has not brought it back: ${out:0:300}"
+  return 0
+}
+
 # The alert channel: when ntfy cannot be reached, alerts only reach the journal and the banner.
 pl_ntfy() {
   local base out
@@ -589,7 +642,7 @@ path_summary() {
     [ -z "$first" ] || PATH_PROBLEMS+=" $first"
     PATH_PROBLEMS+=" 9"
   fi
-  for id in disk clock loop ntfy; do pl_confirmed "$id" && PATH_PROBLEMS+=" $id"; done
+  for id in disk clock loop units ntfy; do pl_confirmed "$id" && PATH_PROBLEMS+=" $id"; done
   PATH_PROBLEMS=${PATH_PROBLEMS# }
   for id in $PATH_PROBLEMS; do
     # The outside probe fails because of the layer before it: one alert for the incident, from that layer.
@@ -662,9 +715,9 @@ path_watch() {
     pl_set 1 fail "http://$NET_VM_IP:$PORTAL_PORT/api/health does not answer (fff-vm watch alerts and resets on its own rules)"
   fi
   if ! pl_check_ssh; then
-    pl_skip "not checked: ssh to the VM fails" 2 3 4 5 6 7 8 disk clock loop
+    pl_skip "not checked: ssh to the VM fails" 2 3 4 5 6 7 8 disk clock loop units
   else
-    pl_disk; pl_clock; pl_loop
+    pl_disk; pl_clock; pl_loop; pl_units
     if [ "$portal" = yes ]; then
       pl_chain
     else

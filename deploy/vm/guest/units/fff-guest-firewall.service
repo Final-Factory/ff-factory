@@ -5,6 +5,9 @@ After=local-fs.target
 Before=network-pre.target fff-portal.service tailscaled.service shutdown.target
 Wants=network-pre.target
 Conflicts=shutdown.target
+# A failed load is tried again (w698): 5 times in 10 minutes, then fff-health (every 30 s) takes over with its back-off.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
 
 [Service]
 Type=oneshot
@@ -12,6 +15,8 @@ RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/fff/guest.nft
 ExecReload=/usr/sbin/nft -f /etc/fff/guest.nft
 ExecStop=-/usr/sbin/nft delete table inet fff_guest
+Restart=on-failure
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target

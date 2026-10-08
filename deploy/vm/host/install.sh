@@ -604,6 +604,16 @@ EOF
 [ -z "$changed" ] || run_cmd systemctl daemon-reload
 run_cmd systemctl enable fff-vm-watch.timer fff-vm-events.service
 if [ "$NIGHTLY_MODE" = off ]; then run_cmd systemctl disable --now fff-vm-nightly.timer; else run_cmd systemctl enable fff-vm-nightly.timer; fi
+# Every host unit starts at boot, and so does the VM (w698): checked, not assumed. The nightly timer is off only by NIGHTLY_MODE=off.
+if [ "$DRY_RUN" != 1 ]; then
+  for u in fff-vm-firewall.service fff-vm-watch.timer fff-vm-events.service $([ "$NIGHTLY_MODE" = off ] || echo fff-vm-nightly.timer); do
+    case $(systemctl is-enabled "$u" 2>/dev/null || true) in
+      enabled | enabled-runtime) ;;
+      *) die "$u is not enabled after systemctl enable ($(systemctl is-enabled "$u" 2>&1 || true)): it would not start after the host reboots" ;;
+    esac
+  done
+  [ "$(virsh --connect qemu:///system dominfo "$VM_NAME" 2>/dev/null | awk '/^Autostart:/ {print $2}')" = enable ] || die "$VM_NAME does not autostart with the host (virsh autostart $VM_NAME)"
+fi
 
 if [ "$START" = 1 ]; then
   [ "$(dom_state)" = running ] || run_cmd virsh --connect qemu:///system start "$VM_NAME"

@@ -158,7 +158,11 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   const disk = h && h.level !== 'ok';
   const path = host?.pathHealth;
   const pathShown = !!path?.problems.length || path?.silentMinutes !== undefined;
-  if (!host || (!host.elevated && !host.drain && !drive && !disk && !host.dryRun && !pathShown)) return null;
+  const wd = host?.unitWatchdog;
+  const gaveUp = wd?.units.filter((u) => u.state === 'gave-up') ?? [];
+  const restarts = (wd?.events ?? []).filter((e) => e.action !== 'gave-up' && Date.now() - Date.parse(e.at) <= 24 * 3_600_000);
+  const wdShown = gaveUp.length > 0 || wd?.silentMinutes !== undefined || restarts.length > 0;
+  if (!host || (!host.elevated && !host.drain && !drive && !disk && !host.dryRun && !pathShown && !wdShown)) return null;
   const low = h?.disks.filter((d) => d.level !== 'ok').map((d) => `${d.path} ${d.freeBytes === undefined ? '?' : fmtBytes(d.freeBytes)} free`).join(', ');
   const title = (id: string) => app.sessions.find((s) => s.id === id)?.title ?? id;
   const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string; fixed?: boolean }[] = [];
@@ -201,6 +205,36 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
       lead: `The portal's path watchdog has been silent for ${path.silentMinutes} minutes.`,
       rest: `Nobody is checking the path from the internet to this portal (fff-vm watch on ${path.host || 'the FFBox host'}; sudo fff-vm watch status).`,
       fixed: true,
+    });
+  }
+  // The VM's unit watchdog (fff-health): a critical systemd unit it gave up restarting needs a person; a silent watchdog restarts
+  // nothing; its restarts of the last 24 hours are one bar a person can dismiss (it returns when a new restart happens).
+  for (const g of gaveUp) {
+    const last = wd?.events.filter((e) => e.unit === g.unit).at(-1);
+    bars.push({
+      key: `unit-gaveup-${g.unit}`,
+      kind: 'error',
+      lead: `The VM watchdog gave up restarting ${g.unit}.`,
+      rest: `It restarted it ${g.attempts} time${g.attempts === 1 ? '' : 's'} and it did not stay up${last?.why ? ` (${last.why})` : ''}. A person must act: run sudo fffctl status on the VM.`,
+      fixed: true,
+    });
+  }
+  if (wd?.silentMinutes !== undefined) {
+    bars.push({
+      key: 'unit-silent',
+      kind: 'warn',
+      lead: `The VM's unit watchdog has been silent for ${wd.silentMinutes} minutes.`,
+      rest: `Nobody is restarting a critical unit that fails (fff-health${wd.host ? ` on ${wd.host}` : ''}; sudo fffctl status).`,
+      fixed: true,
+    });
+  }
+  if (restarts.length) {
+    const list = restarts.slice(-3).reverse().map((e) => `${e.unit} at ${fmtSince(e.at)}${e.why ? ` (${e.why})` : ''}`).join('; ');
+    bars.push({
+      key: 'unit-restarts',
+      kind: 'warn',
+      lead: `The VM watchdog restarted a critical unit ${restarts.length === 1 ? 'once' : `${restarts.length} times`} in the last 24 hours.`,
+      rest: `${list}${restarts.length > 3 ? `; ${restarts.length - 3} more` : ''}.`,
     });
   }
   if (host.drain) {

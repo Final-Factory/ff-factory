@@ -1,8 +1,15 @@
 [Unit]
 Description=FF Factory orchestration worker: the portal's door to it (w597)
 Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/ops-worker.md
-After=fff-ops-scratch.service
-Requires=fff-ops-scratch.service
+# No After= or Requires= on fff-ops-scratch.service, nor on any other service, on purpose (w698). A socket unit is ordered
+# Before=sockets.target, and sockets.target before basic.target; a regular service, the scratch one included, is ordered
+# After=basic.target. A socket ordered after a service closes that loop (basic.target > sockets.target > this socket > the
+# scratch service > basic.target): at every boot systemd deletes a job to break it ("basic.target: Job sockets.target/start
+# deleted to break ordering cycle") and this socket stays inactive (dead) until someone restarts it, which is what the
+# nightly restart did to the orchestration worker's door on 2026-10-08. Requires= would also stop this socket whenever the
+# scratch service is stopped or restarted. The scratch file system is the worker's process's: each connection's
+# fff-ops@.service Requires= and starts it (units/fff-ops@.service.in), and fff-ops-scratch.service is enabled in
+# multi-user.target as well. deploy/vm/test/fff-units.test.sh keeps a socket from ordering after a service again.
 
 [Socket]
 # Only the portal's account connects (0600, fff). One connection at a time: there is exactly one orchestration worker.

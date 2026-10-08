@@ -33,6 +33,7 @@ import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachmen
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealth.ts';
+import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './unitWatchdog.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
@@ -447,6 +448,31 @@ const pathHealth = new PathHealthMonitor({
 });
 setInterval(() => pathHealth.tick(), 15_000);
 setTimeout(() => pathHealth.tick(), 5000); // after the drainer (the banner broadcast reads it)
+// What the VM's unit watchdog (fff-health, every 30 s) restarted and why (server/unitWatchdog.ts).
+const unitWatchdog = new UnitWatchdogMonitor({
+  read: fileUnitWatchdog(process.env.FFF_UNIT_WATCHDOG_FILE || path.join(cfg.dataDir, UNIT_WATCHDOG_FILE)),
+  now: () => Date.now(),
+  changed: (u) => {
+    host.unitWatchdog = u;
+    broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
+  },
+  report: (title, body) => {
+    console.log(`unit watchdog: ${title}: ${body}`);
+    if (isDryRun) return;
+    notifier.host(title, body);
+    const orch = store.orchestratorId;
+    if (orch) {
+      try {
+        sessions.send(orch, `[host] ${title}. ${body}`, 'system');
+      } catch {
+        // the orchestrator is not there; the notification still went out
+      }
+    }
+  },
+  log: (line) => console.warn(line),
+});
+setInterval(() => unitWatchdog.tick(), 15_000);
+setTimeout(() => unitWatchdog.tick(), 5500);
 agents.providers = providers;
 agents.max = max;
 // The intake (docs/intake.md): Discord and FFBox into the work ledger. Everything in it is off unless config intake
@@ -1747,7 +1773,7 @@ agents.usagePollChanged = () => {
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...vaultLines(), ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {

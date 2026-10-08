@@ -10,6 +10,26 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Every critical unit in the portal VM starts after a reboot, and the health check restarts any that is down** (w698,
+  Lothsahn; the case: `fff-ops.socket`, the orchestration worker's door, was inactive (dead) after the nightly cold restart of
+  2026-10-08 until it was restarted by hand at 18:51Z). Root cause: the socket was ordered `After=`/`Requires=`
+  `fff-ops-scratch.service`, which closes an ordering cycle at boot (sockets.target is before basic.target, a normal service
+  after it), so systemd deleted a job to break it and never started the socket; every `fffctl update` restarted it by hand,
+  which hid the bug until a reboot. Now: the socket has no ordering on any service (reproduced and checked by
+  `systemd-analyze verify default.target` in `deploy/vm/test/fff-units.test.sh`); one list of critical units
+  (`FFF_CRITICAL_UNITS`) that `install.sh` enables and checks; `Restart=on-failure` with StartLimit on the firewall and
+  scratch units and a drop-in for `tailscaled`; the units that were written from install.sh are templates now
+  (`units/*.in`), so they are linted too. `fff-health` runs the new unit watchdog (`fff-watchdog`): a failed or stopped critical
+  unit (sockets included, and a firewall without its table or a scratch without its mount) is restarted, a disabled one is
+  enabled, with a back-off (30 s doubling to 15 min), a stop after 6 restarts that did not hold (the dispatcher is told once),
+  a log line for every restart (`journalctl -t fff-watchdog`) and `data/unit-watchdog.json`, which `fffctl status` /
+  `fffctl units` and the portal's banner and `system_status` show (which unit, when, why). `fffctl watchdog pause | resume |
+  reset`. The FFBox host's `fff-vm watch` has a new layer, `units` (`fffctl units --check`), so a unit the watchdog gave up
+  on, or a stopped watchdog, is seen from outside. `fffctl status` no longer prints a bare "not joined" after the tailnet
+  address: that was the `|| echo` fall-back of a failed pipe, now it reads Tailscale's backend state. `fff-vm watch` layer 7
+  counts only dropped TCP from the Funnel servers (ICMP and UDP are pings, not Funnel), and calls them a warning while the outside
+  probe passes; layer 6 shows the counter of the firewall rule that drops the rest of the tailnet and warns when it grows while the outside probe fails (the narrow tailscale0 rules of w683 rest on a reading of tailscaled's source, not on a Funnel request through them). Needs a portal deploy (`fffctl update`).
+
 - **A standing agent's delegated request no longer tells its worker "do not merge it yourself"** (w694, Ben; the cases
   were w687, w688 and w689, the nightly regression sentry's auto-approved checks, whose green PRs #1252, #1254 and
   #1255 waited hours for a person). The constraints `delegationConstraints` adds now say: merge your own PR into develop
