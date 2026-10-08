@@ -2324,7 +2324,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
         ),
       auto_max_per_run: z.number().int().min(1).max(20).optional().describe('Auto-approved requests per run (default 3).'),
       auto_max_per_day: z.number().int().min(1).max(20).optional().describe('Auto-approved requests per day (default 3).'),
-      auto_model: z.string().optional().describe('Model suggested to the dispatcher for auto-approved work (default opus).'),
+      auto_model: z.string().optional().describe('Model suggested to the dispatcher for auto-approved work (default sonnet).'),
       auto_effort: z.enum(EFFORT_LEVELS as [EffortLevel, ...EffortLevel[]]).optional().describe('Effort suggested with it (default high).'),
       owner: z.string().optional().describe("The user id of the person it works for: its delegations are filed as their requests. Default on create: whom this call is for."),
     };

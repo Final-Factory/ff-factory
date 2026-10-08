@@ -491,7 +491,8 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
   limits: { minFreeRamGB: 10 },
   hostDiskPaths: [],
   models: ['opus', 'sonnet', 'haiku', 'fable'],
-  defaultModel: 'opus',
+  // Sonnet 5.5 implements (Ben, 2026-10-08); the orchestrators, the dispatcher and the ops worker stay on Opus.
+  defaultModel: 'sonnet',
   orchestrator: { model: 'opus', effort: 'medium', notifyOnWorkerEvents: true },
   worker: { permissionMode: 'bypassPermissions', effort: 'high' },
 };

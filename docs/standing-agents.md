@@ -107,7 +107,7 @@ How a request is approved:
 
 - **Auto-approve** (per agent, `autoApprove` / the `auto_*` fields of create/update_standing_agent, and the editor):
   within `maxPerRun` and `maxPerDay` (default 3 and 3) a request is filed at once, with no click. `model` / `effort`
-  (default opus, high) are passed on to the dispatcher as a suggestion. The owner's orchestrator hears each one
+  (default sonnet, high) are passed on to the dispatcher as a suggestion. The owner's orchestrator hears each one
   (`[auto-delegation] "<agent>" filed w12 ...`), to mention to its person. The nightly regression sentry
   (`nightly-regression-sentry`) gets auto-approve on by default (`AUTO_BY_DEFAULT`, server/schedule.ts) unless a
   person set it either way.

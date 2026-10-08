@@ -93,16 +93,16 @@ function setup(t: { after: (fn: () => void) => void }, opts: { ledger?: boolean 
   return { st, store, filed, items, bumped, notes, agent, clock, events };
 }
 
-test('auto-approve: defaults are Opus, high effort, 3 per run and per day; the old placement fields are dropped', () => {
+test('auto-approve: defaults are Sonnet, high effort, 3 per run and per day; the old placement fields are dropped', () => {
   const a = normalizeAutoApprove({ enabled: true }, undefined, ['opus', 'sonnet']);
   assert.deepEqual(a, { ...DEFAULT_AUTO, enabled: true });
-  assert.equal(a.model, 'opus');
+  assert.equal(a.model, 'sonnet');
   assert.equal(a.effort, 'high');
   const old = { enabled: true, maxPerRun: 2, maxPerDay: 5, model: 'opus', effort: 'high', targets: 'sandboxes', expiryHours: 8, exclude: ['mp-r2'] } as never;
   assert.deepEqual(Object.keys(normalizeAutoApprove({}, old, ['opus'])).sort(), ['effort', 'enabled', 'maxPerDay', 'maxPerRun', 'model']);
-  assert.throws(() => normalizeAutoApprove({ effort: 'extreme' as never }, undefined, ['opus']), /effort/);
-  assert.throws(() => normalizeAutoApprove({ model: 'gpt' }, undefined, ['opus']), /model/);
-  assert.equal(normalizeAutoApprove({ maxPerRun: 9, maxPerDay: 2 }, undefined, ['opus']).maxPerRun, 2, 'per run never above per day');
+  assert.throws(() => normalizeAutoApprove({ effort: 'extreme' as never }, undefined, ['opus', 'sonnet']), /effort/);
+  assert.throws(() => normalizeAutoApprove({ model: 'gpt' }, undefined, ['opus', 'sonnet']), /model/);
+  assert.equal(normalizeAutoApprove({ maxPerRun: 9, maxPerDay: 2 }, undefined, ['opus', 'sonnet']).maxPerRun, 2, 'per run never above per day');
 });
 
 test('the person-only gate: money, publishing, settings, releases and master; not the words a regression brief uses', () => {
@@ -139,7 +139,7 @@ test("auto-approved: filed in the ledger at once for the agent's owner, its task
   assert.equal(d.workId, 'w1');
   assert.deepEqual(d.requestedBy, BEN);
   assert.equal(d.sandboxId, undefined, 'it picks no sandbox of its own');
-  assert.deepEqual({ ...filed[0] }, { delegationId: d.id, agentId: agent.id, agentName: 'Nightly sentry', title: 'Verify 1a2b3c', task, owner: BEN, approvedBy: undefined, model: 'opus', effort: 'high' });
+  assert.deepEqual({ ...filed[0] }, { delegationId: d.id, agentId: agent.id, agentName: 'Nightly sentry', title: 'Verify 1a2b3c', task, owner: BEN, approvedBy: undefined, model: 'sonnet', effort: 'high' });
   assert.match(d.log!.at(-1)!, /auto-approved: filed as w1 for Ben; the dispatcher queues and places it/);
   assert.deepEqual(notes.at(-1)!.by, BEN);
   assert.match(notes.at(-1)!.text, /^\[auto-delegation\] "Nightly sentry" filed w1 "Verify 1a2b3c" for Ben \(auto-approved under its rules\)/);
