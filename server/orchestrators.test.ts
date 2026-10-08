@@ -1700,3 +1700,45 @@ test('w643: Queued only on a real capacity shortage: queue needs no room on a co
   await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'every place is busy now' });
   assert.deepEqual([store.work.get('w2')!.status, store.work.get('w2')!.blocked], ['queued', undefined]);
 });
+
+test('w691: a worker that needs a person declares it (waiting_on_person) and its request reads Waiting on input (on who), also with a check-in pending', async (t) => {
+  const { store, machines, dispatcher, chat, call, sessions } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Mac GPU page fault', brief: 'Reproduce it on the m3.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Reproduce it on the m3', title: 'w1: Mac GPU page fault', work_id: 'w1' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const m = store.machines.get('pc')!;
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+
+  // The tool is in its spec and its brief says to use it instead of a check-in.
+  const spec = machines.hooks!.specFor(info, m);
+  const tool = spec.mcp?.tools.find((x) => x.name === 'waiting_on_person');
+  assert.ok(tool, 'a worker has waiting_on_person');
+  assert.match(tool!.description, /Do not poll with wake_me for a person/);
+  assert.match(spec.append, /## Waiting on a person[\s\S]*mcp__machine__waiting_on_person[\s\S]*Never poll for a person with `wake_me`/);
+  assert.match(spec.mcp!.tools.find((x) => x.name === 'wake_me')!.description, /Not for waiting on a person: use waiting_on_person/);
+
+  // Before it declares anything, an idle worker with a check-in pending is Working (a machine's job), as before.
+  const wake = (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+  assert.doesNotMatch(wake, /Waiting on input/);
+  const h = machines.hooks!.handlersFor(info, m);
+  await assert.rejects(h.waiting_on_person!({ who: '', what: 'x' }), /say whose action you wait on/);
+  const said = await h.waiting_on_person!({ who: 'Ben', what: 'reboot the m3 and log in (FileVault)', request: 'W1' });
+  assert.match(String(said), /Recorded: w1 wait on Ben \(reboot the m3 and log in \(FileVault\)\); the ledger shows Waiting on input\. End your turn now/);
+  assert.deepEqual({ who: info.waitingOn?.who, what: info.waitingOn?.what, request: info.waitingOn?.request }, { who: 'Ben', what: 'reboot the m3 and log in (FileVault)', request: 'w1' });
+  assert.equal(store.sessions.get(id)?.waitingOn?.who, 'Ben', 'kept with the session');
+
+  // A check-in pending (the w665 case): still Waiting on input, on Ben.
+  Object.assign(info, { wakeAt: new Date(Date.now() + 2 * 3_600_000).toISOString(), wakeNote: 'is the m3 back?' });
+  const listed = (await call(dispatcher().info, 'list_work', { id: 'w1' })).text;
+  assert.match(listed, /Waiting on input[^\n]*"Mac GPU page fault"/);
+  assert.match(listed, new RegExp(`${id} waits on Ben: reboot the m3 and log in \\(FileVault\\)`));
+  const read = await call(dispatcher().info, 'list_work', { state: 'waiting' });
+  assert.match(read.text, /w1/);
+
+  // Its next message ends the declaration.
+  sessions.send(id, 'the m3 is up', 'human', undefined, { requestedBy: BEN });
+  await until('the next turn', () => info.waitingOn === undefined);
+});

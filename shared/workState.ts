@@ -8,8 +8,13 @@
 // request while a computer that could take it has room is flagged; Blocked is a THING (another request, a deploy, a
 // machine, a usage limit, a lock, a time, CI) and names it. A worker between turns with its own work still going (a
 // background job such as CI, a check-in it set) is Working: it holds the request and comes back to it by itself.
+//
+// w691 (w665: a worker that needed a person to reboot a Mac set check-ins and showed Working for 10 hours): a worker that
+// says only a person can move it on is Waiting on input, check-in or not. Its own declaration (the waiting_on_person
+// tool, SessionInfo.waitingOn) comes first; the "still open:" line of its report is read as a backstop (personWaitIn).
+// And a worker whose agent host never started (SessionInfo.hostFailure) is Blocked on its machine, not mid-turn.
 import type { SessionInfo, WorkItem } from './types.ts';
-import { agentState } from './agentState.ts';
+import { agentState, hostFailureText } from './agentState.ts';
 import { blockerName } from './blockers.ts';
 
 export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'followup' | 'stalled';
@@ -81,6 +86,48 @@ const NEEDS_PERSON =
 /** Whether a worker's last report ends asking a person to decide (its tail, as the cleanup reads reports). */
 export const asksAPerson = (report: string | undefined) => !!report && NEEDS_PERSON.test(report.trim().slice(-600));
 
+/** Capitalised words after "waiting for" that are not a person. */
+const NOT_A_PERSON = new Set(['ci', 'steam', 'steamworks', 'unity', 'github', 'ffbox', 'claude', 'windows', 'mac', 'linux', 'discord', 'apple', 'xcode', 'metal', 'rosetta', 'tailscale', 'portal', 'beast', 'max', 'nightly', 'build', 'release', 'deploy', 'master', 'develop', 'main', 'the', 'this', 'that']);
+const WAITS = '(?:waiting (?:for|on)|waits (?:for|on)|blocked on|needs|requires)';
+const WHAT_THEY_GIVE = "(?:decision|input|approval|answer|call|go-?ahead|ok|confirmation|reply|choice|login|password|code|key)";
+/** "(a person)", "needs a person", "a human must …": a person, not named. */
+const A_PERSON = /\(\s*(?:a|the) (?:person|human)\s*\)|\b(?:needs?|requires?|waiting (?:for|on)|waits (?:for|on)|blocked on) (?:a|the) (?:person|human)\b|\b(?:a|the) (?:person|human) (?:must|needs to|has to|should|will need to)\b|\bhuman action\b/i;
+/** "waiting for Ben to …", "needs Lothsahn's approval": a capitalised first name. */
+const NAMED = new RegExp(`\\b${WAITS}\\s+([A-Z][a-z]{1,20})(?:\\s+to\\b|'s\\s+${WHAT_THEY_GIVE}\\b)`);
+const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The line of a worker's report about request `workId` that is not finished (w631: `w342: still open: …`, or `NOT DONE:
+ * w342 …`), as written. The grammar of server/ledgerRules.ts `stillOpenIn`, kept here because the web build takes only
+ * types from the server.
+ */
+function stillOpenLine(report: string, workId: string): string | undefined {
+  const id = workId.toLowerCase();
+  for (const m of report.matchAll(/^[\s*_>`-]*(?:NOT[ -]DONE:?\s*[*_`]*(w\d+)\b|(w\d+)[*_`]*\s*[:—–-]\s*[*_`]*\s*(?:still open|not done)\b).*$/gim)) {
+    if ((m[1] ?? m[2]).toLowerCase() === id) return m[0].replace(/^[\s*_>`-]+/, '').trim();
+  }
+  return undefined;
+}
+
+/**
+ * The backstop (w691): the worker's report says, on its "still open:" line for this request, that a person must act:
+ * "(a person)", "needs a person", "waiting for Ben to log in", "needs Ben's approval". Only that line, only those words
+ * ("waiting for CI to finish" is a machine, not a person), and only the report's tail, as asksAPerson reads it. `people`
+ * are display names that count as a person besides a capitalised first name. The explicit declaration (SessionInfo.waitingOn)
+ * is the real signal; this catches a worker that did not use it.
+ */
+export function personWaitIn(report: string | undefined, workId: string, people: readonly string[] = []): { who?: string; line: string } | undefined {
+  if (!report) return undefined;
+  const line = stillOpenLine(report.trim().slice(-2000), workId);
+  if (!line) return undefined;
+  const known = people.find((p) => new RegExp(`\\b${WAITS}\\s+${escapeRe(p)}(?:\\s+to\\b|'s\\s+${WHAT_THEY_GIVE}\\b)`, 'i').test(line));
+  if (known) return { who: known, line };
+  const named = NAMED.exec(line)?.[1];
+  if (named && !NOT_A_PERSON.has(named.toLowerCase())) return { who: named, line };
+  if (A_PERSON.test(line)) return { line };
+  return undefined;
+}
+
 /**
  * "PR #12 merged; still open: <why>", the cleanup's own line (server/ledgerSweep.ts), newest first. A line that says
  * another PR is open is out of date once no PR is (w74's "PR #1002 is open" after #1002 merged): it is passed over.
@@ -108,8 +155,9 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   const mine = workers.filter((s) => serves(s.id).has(w.id));
   const others = workers.filter((s) => !serves(s.id).has(w.id));
 
-  // Working: one of its workers is mid-turn on it, or FFBox runs it.
-  const busy = mine.filter((s) => BUSY.has(s.status));
+  // Working: one of its workers is mid-turn on it, or FFBox runs it. Not one whose agent host never started (w691): an
+  // older daemon went on reporting it mid-turn, and nothing runs.
+  const busy = mine.filter((s) => BUSY.has(s.status) && !s.hostFailure);
   if (busy.length) {
     const tool = busy.find((s) => s.activeTool)?.activeTool;
     return { state: 'working', why: `${busy.map((s) => s.id).join(', ')} ${busy[0].status === 'starting' ? 'starting' : 'mid-turn'}${tool ? `, in ${tool.name} since ${ago(tool.since, f.now)}` : ''}` };
@@ -126,10 +174,30 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
     return { state: 'waiting', why: `${asking.id} waits for permission${p ? ` to use ${p.toolName}` : ''}`, waitsOn: names(asking.requestedBy ? [asking.requestedBy] : w.requesters) };
   }
 
+  // Blocked on its machine (w691): a worker's message found no agent host to run in. Nothing runs for it, whatever its
+  // status says; it unblocks when a host starts (its first event), and the dispatcher is told it failed.
+  const dead = mine.find((s) => s.hostFailure);
+  if (dead) return { state: 'blocked', why: `${dead.id}: ${hostFailureText(dead)} (${dead.hostFailure!.error.slice(0, 120)}; ${ago(dead.hostFailure!.at, f.now)})`, waitsOn: [dead.machineId ?? 'its machine'] };
+
+  // Waiting on a person, declared (w691): the worker says only a person can move it on, and who. A check-in it set as
+  // well does not make it Working: no wake-up moves a person.
+  const declared = mine.find((s) => s.waitingOn && (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id.toLowerCase()));
+  if (declared) {
+    const d = declared.waitingOn!;
+    const who = d.who.split(/\s*(?:,|&|\band\b)\s*/i).map((x) => x.trim()).filter(Boolean);
+    return { state: 'waiting', why: `${declared.id} waits on ${d.who}: ${d.what} (since ${ago(d.at, f.now)})`, waitsOn: who.length ? who : names(w.requesters) };
+  }
+
   // Working, between turns (w475, w643): a worker on it has its own work still going (a background job such as CI or a
   // build, or a check-in it set) and comes back to it by itself, also when stopped until that check-in (w509, w640).
   // Not Waiting: nobody else needs to act.
   const coming = mine.map((s) => ({ s, a: agentState(s, undefined, f.now) })).find((x) => (x.a.state === 'between_turns' && x.a.kind !== 'queued') || x.a.resumes?.startsWith('check-in'));
+  // Its last report says a person must act (w691, the backstop): the check-in it set does not make it Working. A job
+  // still running (CI, a build) does: work goes on meanwhile.
+  const people = [...new Set([w.requestedBy, ...w.requesters].map((r) => r.displayName))];
+  const said = mine.map((s) => ({ s, p: personWaitIn(s.lastResult, w.id, people) })).find((x) => x.p);
+  if (said && !(coming && coming.a.kind === 'job')) return { state: 'waiting', why: `${said.s.id}'s report says a person must act: "${said.p!.line.slice(0, 160)}"`, waitsOn: said.p!.who ? [said.p!.who] : names(w.requesters) };
+
   if (coming) return { state: 'working', why: coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}` };
 
   const decide = mine.find((s) => asksAPerson(s.lastResult));

@@ -20,6 +20,7 @@ import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './m
 import { openPr } from './gitStatus.ts';
 import { movedNote, savedNote } from './placeAgain.ts';
 import { safeImage } from './images.ts';
+import { hostStartFailed } from '../shared/agentState.ts';
 import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
@@ -255,6 +256,11 @@ export class RemoteSession implements SessionHandle {
     if (requestedBy && from !== 'system') this.info.lastRequestedBy = requestedBy;
     this.link.dispatchSend(this, text, from, uuid, images, requestedBy, attachments);
     this.lastFrom = from;
+    // A new turn ends what it declared about the last one (w691): it says again if a person is still needed.
+    if (this.info.waitingOn) {
+      delete this.info.waitingOn;
+      this.link.touch(this);
+    }
     // A new turn: the stop is over (as AgentSession.send), and so is the hold on its sandbox after its daemon went (w613)
     // or the release due after FF Factory stopped it while idle (w656).
     if (this.info.stoppedOnPurpose || this.info.heldSince || this.info.releaseDue) {
@@ -1403,6 +1409,13 @@ export class MachineManager {
     }
   }
 
+  /** Its agent host produced something (w691): it started, so a failed start before is over. */
+  private hostStarted(s: RemoteSession) {
+    if (!s.info.hostFailure) return;
+    delete s.info.hostFailure;
+    this.store.putSession(s.info);
+  }
+
   touch(s: RemoteSession) {
     this.store.putSession(s.info);
   }
@@ -1633,13 +1646,15 @@ export class MachineManager {
         if (!s || s.info.machineId !== id) return;
         // The portal owns identity, naming and where it works (a worker placed again in another sandbox, w640: the
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, savedWork: _sw, ...run } = msg.info;
+        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, releaseDue: _rd, savedWork: _sw, ...run } = msg.info;
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
         // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host
         // it is this host's login, which the usage tracker already polls.
         if (run.account === HOST_LOGIN && !m.local) run.account = machineLogin(id);
         Object.assign(s.info, run);
+        // It ended before its host came up (w691): the same dead host as a start that threw.
+        if (run.status === 'stopped' && hostStartFailed(run.statusDetail)) s.info.hostFailure ??= { at: new Date().toISOString(), error: run.statusDetail! };
         // JSON drops a field the daemon cleared: take the absence as cleared, or a finished turn stays marked mid-turn.
         for (const k of CLEARABLE) if (!(k in run)) delete s.info[k];
         s.liveFlag = msg.live;
@@ -1649,13 +1664,17 @@ export class MachineManager {
         return;
       }
       case 'event':
-        if (this.handle(msg.sessionId)?.info.machineId === id) this.store.appendFull(msg.sessionId, msg.event);
+        if (this.handle(msg.sessionId)?.info.machineId === id) {
+          this.hostStarted(this.handle(msg.sessionId)!);
+          this.store.appendFull(msg.sessionId, msg.event);
+        }
         return;
       case 'amend':
         if (this.handle(msg.sessionId)?.info.machineId === id) this.store.amend(msg.sessionId, msg.seq, msg.patch);
         return;
       case 'delta':
         if (this.handle(msg.sessionId)?.info.machineId === id) {
+          this.hostStarted(this.handle(msg.sessionId)!);
           emit({ type: 'delta', sessionId: msg.sessionId, text: msg.text });
           this.store.noteActivity(msg.sessionId);
         }
@@ -1673,6 +1692,9 @@ export class MachineManager {
         const at = s.info.lastActivityAt;
         this.store.append(s.info.id, { kind: 'error', text: `On ${id}: ${msg.error}` });
         Object.assign(s.info, { status: 'error', statusDetail: msg.error, lastActivityAt: at });
+        // No agent host could be started for it (w691): the structured reason, or the words older daemons send.
+        // Nothing runs for it, whatever a daemon that went on reporting it mid-turn says (w665: Working for 10 hours).
+        if (msg.reason === 'host_start' || hostStartFailed(msg.error)) s.info.hostFailure = { at: new Date().toISOString(), error: msg.error };
         this.store.putSession(s.info);
         this.sessions.events.emit('ended', s);
         return;

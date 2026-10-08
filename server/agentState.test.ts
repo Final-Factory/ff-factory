@@ -268,3 +268,14 @@ test("w613, w656: an agent whose daemon went away under it keeps its sandbox unt
   detach('pc');
   assert.equal(store.sessions.get('eb9632fd')!.heldSince, undefined);
 });
+
+test('w691: an agent whose agent host did not start is Blocked on its machine, whatever its status says, and not mid-turn', () => {
+  const failed = { machineId: 'm3', hostFailure: { at: iso(-12), error: 'could not start its agent host: the agent host did not start' } };
+  for (const status of ['running', 'starting', 'error', 'idle', 'stopped'] as const) {
+    const a = st(s('a', { status, ...failed }));
+    assert.deepEqual([a.state, a.label, a.waitsOn], ['error', 'Blocked', 'its agent host did not start on m3'], status);
+  }
+  assert.equal(agentStateText(s('a', { status: 'running', ...failed }), undefined, NOW), 'Blocked: its agent host did not start on m3');
+  assert.equal(st(s('a', { status: 'running', machineId: 'm3' })).state, 'working', 'once the failure is cleared it is what its status says');
+  assert.equal(holdsItsPlace(s('a', { status: 'running', ...failed }), NOW), false, 'a dead host holds no place');
+});

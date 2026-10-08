@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { asksAPerson, liveCounts, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
+import { asksAPerson, liveCounts, personWaitIn, servedBy, workLive, workLiveAll, type WorkLiveFacts } from '../shared/workState.ts';
 import type { Requester, SessionInfo, WorkItem } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-05T06:00:00Z');
@@ -176,4 +176,87 @@ test('workState: stalled at once when nothing works on it and nothing waits on a
 test('workState: counts per state', () => {
   const n = liveCounts([{ state: 'working', why: '' }, { state: 'stalled', why: '' }, { state: 'stalled', why: '' }]);
   assert.deepEqual(n, { working: 1, waiting: 0, queued: 0, blocked: 0, followup: 0, stalled: 2 });
+});
+
+// ---- w691: a worker that waits on a person is Waiting on input, never Working; a dead agent host is Blocked ----
+
+/** w665's last report, as the ledger log holds it (worker d558ba14, 2026-10-08 01:52 UTC). */
+const W665_REPORT = "Nothing more to run until the m3 is back.\n\nw665: still open: m3 reboot and login (a person), then naming the faulting pass with `cbdiag` (run 9), the fix and regression test, the arm64 float-drift fix, Ben's launch-option decision";
+const BEN_ONLY = { requestedBy: BEN, requesters: [BEN] };
+
+test('w691: w665 as it was: idle with a check-in pending and "(a person)" on its still-open line is Waiting on input, not Working', () => {
+  const w = item('w665', { sessionIds: ['d'], ...BEN_ONLY });
+  const d = session('d', { status: 'idle', lastResult: W665_REPORT, wakeAt: new Date(NOW + 2 * 3_600_000).toISOString(), wakeNote: 'is the m3 back?' });
+  const l = one(w, [d]);
+  assert.deepEqual([l?.state, l?.waitsOn], ['waiting', ['Ben']]);
+  assert.match(l!.why, /^d's report says a person must act: "w665: still open: m3 reboot and login \(a person\)/);
+  // Without the backstop's words, the same worker is Working on its check-in (the case the declaration is for).
+  assert.equal(one(w, [{ ...d, lastResult: 'w665: still open: the m3 reboot and login' }])?.state, 'working');
+  // Stopped until the check-in is the same.
+  assert.equal(one(w, [{ ...d, status: 'stopped' }])?.state, 'waiting');
+});
+
+test('w691: a worker that declared it waits on a person is Waiting on input (on who), also with a check-in pending, with or without the words', () => {
+  const w = item('w665', { sessionIds: ['d'], ...BEN_ONLY });
+  const declared = session('d', { status: 'idle', lastResult: 'Done for now.', wakeAt: new Date(NOW + 6 * 3_600_000).toISOString(), waitingOn: { who: 'Ben', what: 'reboot the m3 and log in', at: ago(8) } });
+  const l = one(w, [declared]);
+  assert.deepEqual([l?.state, l?.waitsOn], ['waiting', ['Ben']]);
+  assert.equal(l!.why, 'd waits on Ben: reboot the m3 and log in (since 8 h ago)');
+  // Several people, and a running background job: the declaration still wins (the person is the next step).
+  const two = one(w, [{ ...declared, waitingOn: { ...declared.waitingOn!, who: 'Ben and Lothsahn' }, backgroundJobs: [{ type: 'bash', description: 'CI on PR #5' }] }]);
+  assert.deepEqual([two?.state, two?.waitsOn], ['waiting', ['Ben', 'Lothsahn']]);
+  // Mid-turn: working. A message ends the declaration; even before that, a running worker works.
+  assert.equal(one(w, [{ ...declared, status: 'running' }])?.state, 'working');
+  // A declaration for one request does not make the worker's other requests wait.
+  const a = item('w1', { sessionIds: ['d'], createdAt: ago(5) });
+  const b = item('w2', { sessionIds: ['d'], createdAt: ago(5), links: { d: { at: ago(4), how: 'linked' } } });
+  const scoped = { ...declared, waitingOn: { ...declared.waitingOn!, request: 'w2' } };
+  assert.equal(one(a, [scoped], [b])?.state, 'working', 'w1 is not the one it waits on');
+  assert.equal(one(b, [scoped], [a])?.state, 'waiting');
+});
+
+test('w691: the backstop reads the still-open line only, for this request, and only person words ("waiting for CI" is a machine)', () => {
+  const at = (line: string, people: string[] = []) => personWaitIn(`Did the work.\n${line}`, 'w7', people);
+  const yes: [string, string | undefined][] = [
+    ['w7: still open: the m3 reboot (a person)', undefined],
+    ['w7: still open: needs a person to log in to the m3', undefined],
+    ['w7: still open: a human must plug in the dongle', undefined],
+    ['w7: still open: waiting for Ben to reboot the m3', 'Ben'],
+    ['w7: still open: waiting on Lothsahn to approve the release', 'Lothsahn'],
+    ["w7: still open: needs Ben's approval of the launch option", 'Ben'],
+    ['**w7**: still open: blocked on Ben to reboot', 'Ben'],
+    ['NOT DONE: w7: waiting for Ben to answer', 'Ben'],
+  ];
+  for (const [line, who] of yes) assert.equal(at(line)?.who, who, line);
+  for (const line of ['w7: still open: waiting for CI to finish', 'w7: still open: waiting on Steam to process the build', 'w7: still open: the nightly run', 'w7: still open: a personal review of the diff', 'w7: still open: persons.json']) assert.equal(at(line), undefined, line);
+  // Another request's line, or a mention outside a still-open line, is not this request waiting on a person.
+  assert.equal(at('w8: still open: waiting for Ben to reboot'), undefined);
+  assert.equal(personWaitIn('Ben is a person who might look later. w7 is going well.', 'w7'), undefined);
+  assert.equal(personWaitIn(undefined, 'w7'), undefined);
+  // A requester's name that is not a plain first name still counts, as the requesters are the people.
+  assert.equal(at('w7: still open: waiting for ben-the-tester to log in', ['ben-the-tester'])?.who, 'ben-the-tester');
+  // A job still running (CI) outranks the backstop, not the declaration.
+  const w = item('w7', { sessionIds: ['a'], ...BEN_ONLY });
+  const report = 'w7: still open: merge, needs a person to click merge';
+  const job = session('a', { status: 'idle', lastResult: report, backgroundJobs: [{ type: 'bash', description: 'CI on PR #9' }] });
+  assert.equal(one(w, [job])?.state, 'working');
+  assert.equal(one(w, [{ ...job, backgroundJobs: undefined }])?.state, 'waiting');
+});
+
+test('w691: a worker whose agent host did not start is Blocked on its machine and not Working, even when a daemon reports it mid-turn; it is Working again once the failure clears', () => {
+  const w = item('w665', { sessionIds: ['d'], ...BEN_ONLY });
+  const err = 'could not start its agent host: the agent host did not start';
+  const failed = { machineId: 'm3', hostFailure: { at: ago(0.2), error: err } };
+  for (const status of ['error', 'running', 'starting', 'idle'] as const) {
+    const l = one(w, [session('d', { status, ...failed })]);
+    assert.deepEqual([l?.state, l?.waitsOn], ['blocked', ['m3']], status);
+    assert.match(l!.why, /^d: its agent host did not start on m3 \(could not start its agent host: the agent host did not start; 12 min ago\)$/);
+  }
+  // Another worker of the request that really runs keeps it Working.
+  const w2 = item('w5', { sessionIds: ['d', 'e'] });
+  assert.equal(one(w2, [session('d', { status: 'error', ...failed }), session('e', { status: 'running' })])?.state, 'working');
+  // Cleared (its host's first event): the same session is Working again.
+  assert.equal(one(w, [session('d', { status: 'running', machineId: 'm3' })])?.state, 'working');
+  // A declared wait on a person and a dead host: nothing can run, so Blocked on the machine says what the dispatcher must fix.
+  assert.equal(one(w, [session('d', { status: 'idle', ...failed, waitingOn: { who: 'Ben', what: 'reboot', at: ago(1) } })])?.state, 'blocked');
 });

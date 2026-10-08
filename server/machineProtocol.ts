@@ -201,8 +201,8 @@ export type FromDaemon =
   | { type: 'amend'; sessionId: string; seq: number; patch: Partial<TranscriptEvent> }
   | { type: 'delta'; sessionId: string; text: string }
   | { type: 'signal'; name: SignalName; sessionId: string; arg?: unknown }
-  /** A send the daemon could not carry out (limit, bad spec). */
-  | { type: 'failed'; sessionId: string; error: string }
+  /** A send the daemon could not carry out (limit, bad spec). `host_start` (w691): no agent host could be started for it. */
+  | { type: 'failed'; sessionId: string; error: string; reason?: 'host_start' }
   /** An MCP tool call to be answered by the portal. */
   | { type: 'rpc'; id: string; sessionId: string; method: CatalogTool; args: Record<string, unknown> }
   | { type: 'status'; git?: Machine['git'] }

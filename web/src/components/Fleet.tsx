@@ -27,6 +27,8 @@ const ago = (iso: string, now: number) => fmtRelative(iso, now).replace(' ago', 
 /** An agent in a few words: needs you, busy, starting, between turns (w475: working on a check-in or a task, or queued or blocked, w643), or idle. */
 function agentState(s: SessionInfo): { word: string; tone: Tone; detail?: string } {
   if (s.pendingPermissions.length || s.status === 'waiting_permission') return { word: 'needs you', tone: 'amber' };
+  // No agent host started for it (w691): blocked on its machine, whatever its status says.
+  if (s.hostFailure) return { word: 'blocked', tone: 'violet', detail: agentView(s).waitsOn };
   if (s.status === 'running') return { word: 'busy', tone: 'blue' };
   if (s.status === 'starting') return { word: 'starting', tone: 'blue' };
   const v = agentView(s);

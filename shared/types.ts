@@ -216,6 +216,19 @@ export interface SessionInfo {
    */
   queuedOn?: 'capacity' | 'machine';
   /**
+   * The worker declared that only a person can move it on (w691: the waiting_on_person tool): who, and what they must do.
+   * The ledger shows its requests Waiting on input (on <who>), also while a check-in of its own is pending, and the agent
+   * as Needs you. Kept by the portal, never by the daemon; gone with its next message (a new turn: it declares again if
+   * it still waits). `request` limits it to one request when the worker serves several.
+   */
+  waitingOn?: { who: string; what: string; at: string; request?: string };
+  /**
+   * Machine sessions (w691): a message to it found no agent host to run in ("could not start its agent host: …"). Nothing
+   * runs for it whatever its status says (an older daemon went on reporting it mid-turn): the ledger shows its request
+   * Blocked on its machine and the agent as Blocked. Kept by the portal; gone when its host's first event arrives.
+   */
+  hostFailure?: { at: string; error: string };
+  /**
    * The context its next model call reads, in tokens (w535): the last call's input, cached and uncached, plus its
    * output, as the SDK reported it; after a compaction, the size Claude Code measured. This host's sessions only.
    */
