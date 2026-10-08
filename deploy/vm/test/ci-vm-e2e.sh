@@ -588,7 +588,8 @@ step "after a cold restart every critical unit is up, and the watchdog brings ba
 # The cold restart above booted the guest: the units must have come up by themselves (fff-ops.socket did not, on 2026-10-08:
 # an ordering cycle at boot made systemd drop its start job), with no cycle in this boot's journal.
 wait_for 240 "every critical unit is active and enabled after the boot" g 'sudo fffctl units --check'
-out=$(g 'sudo journalctl -b --no-pager -g "ordering cycle" 2>&1' || true)
+# ("cyc[l]e": the pattern in the sudo log line of this very command must not match itself)
+out=$(g 'sudo journalctl -b --no-pager -g "ordering cyc[l]e" 2>&1' || true)
 if printf '%s' "$out" | matches -i 'ordering cycle'; then fail "systemd broke an ordering cycle at this boot: $out"; fi
 g 'systemctl is-active fff-ops.socket' | matches -x active || fail "fff-ops.socket is not active after the boot"
 g 'sudo fffctl status' | matches -F 'tailscale: ' || fail "fffctl status lacks the tailscale line"
