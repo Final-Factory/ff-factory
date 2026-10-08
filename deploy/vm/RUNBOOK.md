@@ -38,7 +38,8 @@ and the Macs within reach of FFBox's `ffdev` containers (design 1.4, rule 1).
 
    **Funnel needs one more grant (found 2026-10-07, not made by any script here):** Funnel's servers (peers named
    `funnel-ingress-node`, tag `tag:ingress`) deliver to the node's Tailscale peer API port, a random one, and the policy
-   above has no rule for that, so the VM's packet filter logs `Drop: TCP{<funnel-ingress-node address>:... >
+   above has no rule for that (tailscaled takes that traffic itself, before the kernel, so the VM's own firewall is not
+   involved: docs/portal-on-ffbox-host.md, 1.4), so the VM's packet filter logs `Drop: TCP{<funnel-ingress-node address>:... >
    [fd7a:...:ac62]:59343} 80 no rules matched` and the portal is unreachable from outside while it works on the tailnet.
    The fix is a tailnet admin's: `{ "src": ["tag:ingress"], "dst": ["tag:fff-portal"], "ip": ["*"] }` in `grants`
    *(sourced: the diagnosis of 2026-10-07; check it with the policy's `tests`, and after saving `sudo fff-vm watch status`

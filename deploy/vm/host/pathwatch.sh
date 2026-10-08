@@ -61,7 +61,7 @@ pl_who() {
     3) echo "tailnet admin: tag this node ${PW_EXPECT_TAG} and give that tag the funnel attribute (nodeAttrs), HTTPS on for the tailnet" ;;
     4) echo "ops: sudo fff-vm ssh sudo tailscale funnel --bg http://127.0.0.1:$PORTAL_PORT (Funnel must be allowed for this node: tailnet admin)" ;;
     5) echo "ops, or a tailnet admin: HTTPS certificates on for the tailnet; Let's Encrypt's rate limit passes by itself" ;;
-    6) echo "ops: re-run the guest install in the VM (sudo fffctl update): its firewall must accept TCP on tailscale0 to the node's own Tailscale addresses" ;;
+    6) echo "ops: re-run the guest install in the VM (sudo fffctl update): its firewall accepts TCP 22 and 443 from tailscale0 and nothing broader" ;;
     7) echo "tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy" ;;
     8) echo "tailnet admin or ops: Tailscale sends no Funnel traffic to this node; the admin console shows the node's Funnel and health" ;;
     9) echo "ops: every layer inside the VM passes but the outside path fails; check Tailscale's status page and the Funnel name's DNS" ;;
@@ -141,71 +141,31 @@ pl_ts_restart_mark() {
 # pl_dry_run: the VM runs a migrate dry run, whose Funnel is off on purpose.
 pl_dry_run() { gx "[ -e $PL_DRYRUN_MARKER ] || systemctl show -p Environment fff-portal.service 2>/dev/null | grep -q FFSB_DRY_RUN=1" >/dev/null 2>&1; }
 
-# ---------------------------------------------------------------- IP helpers (the firewall check)
-# hex_of ADDR: 8 hex digits for an IPv4 address, 32 for IPv6.
-hex_of() {
-  local a=$1 l r g out="" i
-  if [[ $a == *:* ]]; then
-    local -a L=() R=()
-    if [[ $a == *::* ]]; then
-      l=${a%%::*}; r=${a#*::}
-      IFS=: read -ra L <<<"$l"; IFS=: read -ra R <<<"$r"
-    else
-      IFS=: read -ra L <<<"$a"
-    fi
-    for g in "${L[@]}"; do out+=$(printf '%04x' "0x${g:-0}"); done
-    if [[ $a == *::* ]]; then
-      for ((i = ${#L[@]} + ${#R[@]}; i < 8; i++)); do out+="0000"; done
-      for g in "${R[@]}"; do out+=$(printf '%04x' "0x${g:-0}"); done
-    fi
-    echo "$out"
-  else
-    local b c d
-    IFS=. read -r l b c d <<<"$a"
-    printf '%02x%02x%02x%02x\n' "$l" "$b" "$c" "$d"
-  fi
-}
-# cidr_has ADDR NET[/BITS]: ADDR is in NET (a bare address is a /32 or /128).
-cidr_has() {
-  local addr=$1 net=${2%/*} bits ah nh n r
-  ah=$(hex_of "$addr"); nh=$(hex_of "$net")
-  [ "${#ah}" = "${#nh}" ] || return 1
-  if [[ $2 == */* ]]; then bits=${2#*/}; else bits=$((${#ah} * 4)); fi
-  n=$((bits / 4)); r=$((bits % 4))
-  [ "${ah:0:n}" = "${nh:0:n}" ] || return 1
-  [ "$r" = 0 ] || [ $((0x${ah:n:1} >> (4 - r))) = $((0x${nh:n:1} >> (4 - r))) ]
-}
-# port_in_spec PORT SPEC: SPEC is nft's "443", "1000-2000" or "{ 22, 59000-59999 }".
-port_in_spec() {
-  local port=$1 spec=${2//[\{\},]/ } e
-  for e in $spec; do
-    if [[ $e == *-* ]]; then [ "$port" -ge "${e%-*}" ] && [ "$port" -le "${e#*-}" ] && return 0
-    elif [ "$port" = "$e" ]; then return 0; fi
-  done
-  return 1
-}
-# fw_accepts FAMILY(4|6) ADDR PORT RULES: some rule for tailscale0 in RULES accepts TCP to ADDR:PORT.
-fw_accepts() {
-  local fam=$1 addr=$2 port=$3 rules=$4 rule daddr
+# ---------------------------------------------------------------- the firewall check
+# What tailscale0 may reach in this VM, by install.sh (w683): ssh and 443, nothing else. Funnel's servers and tailscale serve
+# talk to tailscaled, whose netstack takes them off the wire before the kernel (tailscaled source, wgengine/netstack
+# shouldProcessInbound), so no rule is needed for them, nor for tailscaled's random peer API port.
+PW_FW_ALLOWED="22 443"
+# fw_scan RULES: FW_PORTS is the TCP ports the accept rules for tailscale0 (RULES) name, from PW_FW_ALLOWED; FW_BROAD is each
+# rule that accepts more: a port outside it, no port at all, or another protocol.
+FW_PORTS="" FW_BROAD=""
+fw_scan() {
+  local rule spec e out allowed
+  FW_PORTS="" FW_BROAD=""
   while IFS= read -r rule; do
-    [ -n "$rule" ] || continue
     [[ $rule == *'iifname "tailscale0"'* && $rule == *accept* ]] || continue
-    # a rule for the other address family, or for another protocol, does not count
-    if [ "$fam" = 4 ] && [[ $rule == *' ip6 daddr '* ]]; then continue; fi
-    if [ "$fam" = 6 ] && [[ $rule == *' ip daddr '* ]]; then continue; fi
-    if [[ $rule == *' udp '* ]]; then continue; fi
-    if [[ $rule =~ (ip6?\ daddr\ )([^ ]+) ]]; then
-      daddr=${BASH_REMATCH[2]}
-      cidr_has "$addr" "$daddr" || continue
-    fi
+    out=$(tr -s ' \t' ' ' <<<"${rule%% comment *}")
+    allowed=1
     if [[ $rule =~ tcp\ dport\ (\{[^\}]*\}|[0-9-]+) ]]; then
-      port_in_spec "$port" "${BASH_REMATCH[1]}" && return 0
-      continue
+      spec=${BASH_REMATCH[1]}
+      for e in ${spec//[\{\},]/ }; do
+        if [[ " $PW_FW_ALLOWED " == *" $e "* ]]; then FW_PORTS+=" $e"; else allowed=0; fi
+      done
+    else
+      allowed=0
     fi
-    # no port in the rule: every TCP port, when the rule is about TCP
-    if [[ $rule == *'l4proto tcp'* || $rule == *' tcp accept'* ]]; then return 0; fi
-  done <<<"$rules"
-  return 1
+    [ "$allowed" = 1 ] || FW_BROAD+="${FW_BROAD:+; }${out# }"
+  done <<<"$1"
 }
 
 # ---------------------------------------------------------------- the layers
@@ -395,7 +355,7 @@ path_l5() {
 }
 
 path_l6() {
-  local ssout nftout rules listeners fam port bad="" line
+  local ssout nftout rules sshd="" kernel="" mine
   ssout=$(gx 'ss -ltnpH 2>&1') || true
   nftout=$(gx 'nft list chain inet fff_guest input 2>&1') || true
   if ! grep -F 'chain input' >/dev/null <<<"$nftout"; then
@@ -403,22 +363,27 @@ path_l6() {
     return 1
   fi
   rules=$(grep -F 'iifname "tailscale0"' <<<"$nftout" || true)
-  listeners=$(awk -v a4="$SELF4" -v a6="$SELF6" '
-    /"tailscaled"/ {
+  fw_scan "$rules"
+  # Processes other than tailscaled listening where the tailnet's packets can land: every address, or the node's own.
+  kernel=$(awk -v a4="$SELF4" -v a6="$SELF6" '
+    /users:/ && !/"tailscaled"/ {
       la = $4; port = la; sub(/.*:/, "", port); addr = la; sub(/:[0-9]+$/, "", addr); gsub(/[][]/, "", addr)
-      if (a4 != "" && addr == a4) print "4 " port
-      else if (a6 != "" && addr == a6) print "6 " port
-    }' <<<"$ssout" | sort -u)
-  while read -r fam port; do
-    [ -n "$port" ] || continue
-    if ! fw_accepts "$fam" "$([ "$fam" = 4 ] && echo "$SELF4" || echo "$SELF6")" "$port" "$rules"; then bad+=" $port(v$fam)"; fi
-  done <<<"$listeners"
-  line=$(printf '%s' "$listeners" | tr '\n' ' ')
-  if [ -n "$bad" ]; then
-    pl_set 6 fail "tailscaled listens on tailscale0 ports${bad} that the VM's firewall (inet fff_guest input) does not accept; Funnel's servers deliver to such a port, so the VM drops them. Listeners: [${line% }]"
+      if (addr == "0.0.0.0" || addr == "*" || addr == "::" || (a4 != "" && addr == a4) || (a6 != "" && addr == a6)) {
+        name = $0; sub(/.*\(\("/, "", name); sub(/".*/, "", name); print port "(" name ")"
+      }
+    }' <<<"$ssout" | sort -un | tr '\n' ' ')
+  kernel=${kernel% }
+  mine=" $(tr -d '\n' <<<"$FW_PORTS") "
+  [[ $kernel == *'22('* ]] && sshd=1
+  if [ -n "$FW_BROAD" ]; then
+    pl_set 6 fail "tailscale0 accepts more than ssh (22) and 443: ${FW_BROAD}. install.sh allows only those two: Funnel and tailscale serve are tailscaled's own and reach it before the kernel, so they need no rule. Re-run the guest install to load the narrow rules"
     return 1
   fi
-  pl_set 6 ok "the firewall accepts every tailscaled listener on ${SELF4:-?} / ${SELF6:-?} (listeners: [${line% }])"
+  if [ -n "$sshd" ] && [[ $mine != *" 22 "* ]]; then
+    pl_set 6 fail "sshd listens on 22 but tailscale0 does not accept 22 (accepted:${FW_PORTS:- none}): nobody can ssh in over the tailnet. Re-run the guest install"
+    return 1
+  fi
+  pl_set 6 ok "tailscale0 accepts only TCP${FW_PORTS:- none} (Funnel and serve are tailscaled's own and need no rule); processes reachable by address: [${kernel:-none}]"
   return 0
 }
 

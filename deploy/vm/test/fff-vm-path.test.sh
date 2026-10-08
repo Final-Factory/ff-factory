@@ -441,33 +441,60 @@ said "its certificate expires within 5 days"
 [ "$(calls 'tailscale cert')" = 1 ] || fail "L5: an expiring certificate was not renewed"
 ok "certificate: one that works but expires within 5 days is renewed ahead of time (a warning)"
 
-# ---------------------------------------------------------------- 6. the VM's firewall
-scen fw-old
-pass
-is 6 fail
-said "ports 59917(v4) 59343(v6) that the VM's firewall (inet fff_guest input) does not accept"
-is 7 skip
-only_reads_firewall
-[ "$(calls 'nft list chain inet fff_guest input')" -ge 1 ] || fail "L6: the chain was not read"
-ok "firewall: the rules before w681 do not accept Funnel's delivery ports: the failing ports are named, nothing is changed at runtime"
-scen fw-temp
-pass
-is 6 ok
+# ---------------------------------------------------------------- 6. the VM's firewall (w683: ssh and 443 on tailscale0, nothing broader)
 scen
 pass
 is 6 ok
-said "the firewall accepts every tailscaled listener on 100.64.0.5 / fd7a:115c:a1e0::5a34:ac62"
-ok "firewall: the temporary per-port rule and the permanent rule for the node's Tailscale addresses both pass"
+said "path L6 VM firewall: ok: tailscale0 accepts only TCP 443 22 (Funnel and serve are tailscaled's own and need no rule); processes reachable by address: [22(sshd) 8790(node)]"
+only_reads_firewall
+[ "$(calls 'nft list chain inet fff_guest input')" -ge 1 ] || fail "L6: the chain was not read"
+ok "firewall: install.sh's rules (ssh and 443 on tailscale0, counted, the rest dropped and counted) pass"
+scen fw-pre-w681
+pass
+is 6 ok
+ok "firewall: the rules from before w681 (the same ssh and 443, no counters) pass"
+scen fw-broad
+pass
+is 6 fail
+said 'tailscale0 accepts more than ssh (22) and 443: iifname "tailscale0" ip daddr 100.64.0.0/10 meta l4proto tcp accept; iifname "tailscale0" ip6 daddr fd7a:115c:a1e0::/48 meta l4proto tcp accept.'
+said "Re-run the guest install to load the narrow rules"
+is 7 skip
+only_reads_firewall
+ok "firewall: the any-port rule w681 first shipped (TCP to the node's Tailscale addresses) is flagged as broader than ssh and 443, nothing changed at runtime"
+scen fw-temp
+pass
+is 6 fail
+said 'tailscale0 accepts more than ssh (22) and 443: iifname "tailscale0" tcp dport { 59343, 59917 } accept.'
+ok "firewall: the temporary per-port rule for 59343 and 59917 is flagged too"
+scen fw-no22
+pass
+is 6 fail
+said "sshd listens on 22 but tailscale0 does not accept 22 (accepted: 443)"
+only_reads_firewall
+ok "firewall: sshd listening on 22 with no rule for it from the tailnet fails"
 (
   # shellcheck source=../host/pathwatch.sh
   . "$ROOT/deploy/vm/host/pathwatch.sh"
-  cidr_has 100.64.0.5 100.64.0.0/10 && cidr_has 100.127.255.254 100.64.0.0/10 && ! cidr_has 100.128.0.1 100.64.0.0/10 && ! cidr_has 10.0.0.1 100.64.0.0/10
-  cidr_has fd7a:115c:a1e0::5a34:ac62 fd7a:115c:a1e0::/48 && ! cidr_has fd7b:115c:a1e0::1 fd7a:115c:a1e0::/48 && ! cidr_has 100.64.0.5 fd7a:115c:a1e0::/48
-  cidr_has fd7a:115c:a1e0:ab12:4843:cd96:6001:1001 fd7a:115c:a1e0::/48
-  cidr_has 100.64.0.5 100.64.0.5
-  port_in_spec 59343 "{ 22, 59000-59999 }" && port_in_spec 443 443 && ! port_in_spec 8790 "{ 22, 443 }"
-) || fail "the firewall check's address and port helpers"
-ok "firewall: the address-range and port-set helpers (IPv4, IPv6, ranges)"
+  rule() { printf '\t\tiifname "tailscale0" %s accept comment "x"\n' "$1"; }
+  fw_scan "$(rule 'tcp dport 22'; rule 'tcp dport 443 counter packets 3 bytes 180')"
+  [ "$FW_PORTS" = " 22 443" ] && [ -z "$FW_BROAD" ]
+  fw_scan "$(rule 'tcp dport { 22, 443 }')"
+  [ "$FW_PORTS" = " 22 443" ] && [ -z "$FW_BROAD" ]
+  fw_scan "$(rule 'tcp dport { 22, 8790 }')"
+  [ "$FW_PORTS" = " 22" ] && [ "$FW_BROAD" = 'iifname "tailscale0" tcp dport { 22, 8790 } accept' ]
+  fw_scan "$(rule 'tcp dport 1-65535')"
+  [ -z "$FW_PORTS" ] && [ -n "$FW_BROAD" ]
+  fw_scan "$(rule 'meta l4proto tcp')"
+  [ -n "$FW_BROAD" ]
+  fw_scan "$(rule 'udp dport 41641')"
+  [ -n "$FW_BROAD" ]
+  fw_scan "$(rule '')"
+  [ -n "$FW_BROAD" ]
+  # a rule that is not for tailscale0, or that drops, says nothing
+  fw_scan "$(printf '\t\tudp dport 41641 accept\n\t\tiifname "tailscale0" counter drop\n\t\tiifname "eth0" tcp dport 80 accept\n')"
+  [ -z "$FW_PORTS" ] && [ -z "$FW_BROAD" ]
+) || fail "fw_scan: which accept rules on tailscale0 are within ssh and 443"
+ok "firewall: the rule scanner (port sets, ranges, no port, other protocols, other interfaces)"
 
 # ---------------------------------------------------------------- 7. the tailnet policy drops Funnel traffic
 scen policy-drop

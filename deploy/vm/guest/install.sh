@@ -150,13 +150,15 @@ table inet fff_guest {
     ct state invalid drop
     meta l4proto { icmp, ipv6-icmp } accept
     $host_rule
-    iifname "tailscale0" tcp dport 443 accept comment "Funnel and tailnet HTTPS (tailscale serve) to the portal"
-    iifname "tailscale0" tcp dport 22 accept comment "ssh from the tailnet only: the tailnet policy says who; Funnel never carries 22"
-    # Funnel's servers deliver to this node's Tailscale peer API port (a random one, not 443); the tailnet policy ("grants")
-    # decides who gets in, not ports hard-coded here. Only packets for this node's own Tailscale addresses (v4 100.64.0.0/10,
-    # v6 fd7a:115c:a1e0::/48) arrive on tailscale0 to be delivered locally; nothing else is let in or forwarded.
-    iifname "tailscale0" ip daddr 100.64.0.0/10 meta l4proto tcp accept comment "TCP to this node's own Tailscale address: Funnel's peer API delivery; the tailnet policy decides who"
-    iifname "tailscale0" ip6 daddr fd7a:115c:a1e0::/48 meta l4proto tcp accept comment "same, IPv6"
+    # What the tailnet may reach on this VM's own processes (w683): ssh, and 443. Nothing else is accepted on tailscale0.
+    # Not needed here, by tailscaled's source (wgengine/netstack shouldProcessInbound): Funnel's servers connect to tailscaled's
+    # peer API port (a random one per address, /v0/ingress) and tailscale serve's 443, and tailscaled's own netstack takes
+    # both off the wire before the kernel, so the packets never reach this chain. 443 stays, counted, as the portal's door
+    # should tailscaled ever hand it to the kernel; if its counter stays 0 under real traffic it can go.
+    # The counters answer "what does this chain see on tailscale0": sudo nft list chain inet fff_guest input
+    iifname "tailscale0" tcp dport 443 counter accept comment "tailnet HTTPS (tailscale serve) to the portal; tailscaled normally takes it before the kernel"
+    iifname "tailscale0" tcp dport 22 counter accept comment "ssh from the tailnet only: the tailnet policy says who; Funnel never carries 22"
+    iifname "tailscale0" counter drop comment "everything else from the tailnet, counted"
     udp dport 41641 accept comment "Tailscale's direct connections"
   }
 }

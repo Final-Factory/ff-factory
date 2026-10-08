@@ -237,11 +237,26 @@ Six rules:
    break its own security model *(sourced: ffbox docker-security-model)*.
 5. **The guest has its own firewall** (`inet fff_guest`, `deploy/vm/guest`), which drops by default. It accepts the
    host's address on 22 and 8790, `tailscale0` on 443 (Funnel and tailnet HTTPS) and 22 (ssh from the tailnet, for
-   whoever the tailnet policy lets reach `tag:fff-portal` on 22; not from the LAN, and never through Funnel), TCP to
-   the node's own Tailscale addresses on `tailscale0` (100.64.0.0/10 and fd7a:115c:a1e0::/48: Funnel's servers deliver
-   to the node's peer API port, a random one, so no port is hard-coded; the tailnet policy decides who gets in, w681),
-   and Tailscale's UDP port. The portal listens on every address, so this also lets the tailnet reach 8790 and the
-   other listeners if the policy ever grants those ports; today it grants 443 and 22 only.
+   whoever the tailnet policy lets reach `tag:fff-portal` on 22; not from the LAN, and never through Funnel), and
+   Tailscale's UDP port. Nothing else from `tailscale0`: a last rule drops and counts the rest (`sudo nft list chain
+   inet fff_guest input` shows what each rule and that drop saw). w683, **what reaches the kernel from the tailnet, and
+   what does not**: Funnel's servers connect to tailscaled's *peer API* port (a random one per address, `/v0/ingress`),
+   and `tailscale serve`'s 443 is tailscaled's own too. tailscaled takes both off the wire in its netstack before the
+   packet reaches the kernel, right after the tailnet policy's packet filter (a "Drop: ... no rules matched" line is that
+   filter, not nft), so neither passes this chain and neither needs a rule *(sourced: tailscale `wgengine/netstack`
+   `shouldProcessInbound`, which returns true for the peer API port and for `ShouldInterceptTCPPort` ports, i.e. serve's
+   and Tailscale SSH's, and `Create` installing it as `PostFilterPacketInboundFromWireGuard`; `ipn/ipnlocal/serve.go`
+   `RegisterPeerAPIHandler("/v0/ingress", ...)`; `peerapi.go`, "netstack intercepts the connections anyway, the kernel
+   listener isn't needed"; measured by another agent on 2026-10-07: tcpdump on `tailscale0` does not see :443 serve
+   traffic; and Funnel served this portal under rules for 443 and 22 only, until 18:04 on 2026-10-07)*. The peer API port
+   cannot be pinned (it is derived from the address, `crc32` of its last three bytes, then an ephemeral fallback), so a
+   fixed allowlist for it would be wrong anyway. 22 is the VM's own sshd (Tailscale SSH is off, so port 22 is not
+   intercepted). 443 is kept in case tailscaled ever hands it to the kernel; it is the only rule without a measured need,
+   and its counter says: 0 under real traffic means it can go. Nothing else of FF Factory's is reached from the tailnet:
+   the machines' daemons and people reach the portal at 443 (serve, then `127.0.0.1:8790`); the portal's other ports
+   (8790 is open to the host's address only), the orchestration worker (a unix socket), the guest agent (virtio) and the
+   backups (outbound, `established` replies) need no inbound rule. The w681 rule that accepted any TCP port to the
+   node's Tailscale addresses was never needed and was replaced before it was deployed.
 6. **Tailnet policy** (Ben's tailnet admin, [D3](#8-risks-and-open-decisions)). The VM's node joins with a tag,
    `tag:fff-portal`, from a pre-approved, non-ephemeral auth key made for that tag. Tagged nodes' keys do not expire
    *(sourced: Tailscale KB 1085, "Key expiry for tagged devices is disabled by default")*. An OAuth client secret would
@@ -530,7 +545,7 @@ when a repair did not fix it. Every repair is logged before and after.
 | 3 identity | `Self.Tags` has `PW_EXPECT_TAG`, `Self.CapMap` has `funnel` and `https` | none | tailnet admin (tagOwners, nodeAttrs, HTTPS on) |
 | 4 route | `tailscale serve status --json`: `Web["<dns>:443"]` `/` proxies `http://127.0.0.1:8790` and `AllowFunnel` is true | `tailscale funnel --bg http://127.0.0.1:8790` as `fffctl tailscale-join` does (10 min); never during a `fffctl migrate --dry-run-copy` (its Funnel is off on purpose: layers 4 to 9 are skipped) | ops |
 | 5 certificate | `curl --resolve <dns>:443:<100.x> https://<dns>/api/health` from inside the VM; also not expiring within 5 days | `tailscale cert <dns>` into a private temp folder, deleted after (30 min; not before the "retry after" time a Let's Encrypt rate limit gives; errors logged verbatim) | ops, or a tailnet admin (HTTPS certificates) |
-| 6 firewall | every port `tailscaled` listens on at the node's 100.x and fd7a addresses (`ss -ltnp`) is accepted on `tailscale0` by `nft list chain inet fff_guest input` | none: the watch only verifies; `install.sh` has the permanent rule | ops: re-run the guest install (`fffctl update`) |
+| 6 firewall | `nft list chain inet fff_guest input` accepts on `tailscale0` only TCP 22 and 443 (anything broader fails: a port outside those, no port, another protocol, such as the temporary 59343/59917 rule), and 22 is accepted while sshd listens on it (`ss -ltnp`). tailscaled's own listeners (peer API port, serve) are not checked: they never reach the kernel | none: the watch only verifies; `install.sh` has the rules | ops: re-run the guest install (`fffctl update`) |
 | 7 policy | no `Drop: ... no rules matched` line in `journalctl -u tailscaled --since -15min` whose source is a `tag:ingress` peer | none | tailnet admin: grant `tag:ingress` (or `*`) to `tag:fff-portal`; the alert is urgent and carries a sample line |
 | 8 Funnel servers | a `tag:ingress` peer shows a handshake within `PW_FUNNEL_STALE_MIN` minutes, or the outside probe passed in the pass before | `systemctl restart tailscaled` once per incident, looked at again after 5 minutes | tailnet admin or ops |
 | 9 end to end | `curl https://<dns>/api/health` from the host (not on the tailnet: out and back through Funnel) says `ok:true`; on failure each Funnel server address from the name lookup is tried with `--resolve`, to tell one bad server from all | none | ops |
