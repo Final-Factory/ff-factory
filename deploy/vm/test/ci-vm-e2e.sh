@@ -71,6 +71,8 @@ VM_TIMEZONE=America/Denver
 PORTAL_OWNER_NAME=CI
 GUEST_TAILSCALE=skip
 GUEST_GITHUB=skip
+# No Tailscale in CI, so nothing of the path from the internet to the portal can be checked here (fff-vm-path.test.sh does).
+PW_CHECKS=off
 GUEST_BACKUP_SSH_TARGET=
 # The sizes are the defaults (D12: 2 vCPUs, 4 GiB), so CI boots the size the FFBox host runs; only the disk is small.
 VM_DISK_GB=16

@@ -156,7 +156,9 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   const h = host?.health;
   const drive = h && h.sandboxRoot !== 'ok';
   const disk = h && h.level !== 'ok';
-  if (!host?.elevated && !host?.drain && !drive && !disk && !host?.dryRun) return null;
+  const path = host?.pathHealth;
+  const pathShown = !!path?.problems.length || path?.silentMinutes !== undefined;
+  if (!host || (!host.elevated && !host.drain && !drive && !disk && !host.dryRun && !pathShown)) return null;
   const low = h?.disks.filter((d) => d.level !== 'ok').map((d) => `${d.path} ${d.freeBytes === undefined ? '?' : fmtBytes(d.freeBytes)} free`).join(', ');
   const title = (id: string) => app.sessions.find((s) => s.id === id)?.title ?? id;
   const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string; fixed?: boolean }[] = [];
@@ -181,6 +183,26 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
       rest: `(${low}). New editors and agents wait until space is freed${h.level === 'critical' ? '; busy agents were asked to checkpoint, idle editors stopped, and known-safe junk is cleaned up' : ''}.`,
     });
   }
+  // The FFBox host's watchdog (fff-vm watch): what is broken on the path from the internet to this portal, which it could not
+  // repair, and who must act. Not dismissible: it stays until the check passes. It shows here even while Funnel is down.
+  for (const p of path?.problems ?? []) {
+    bars.push({
+      key: `path-${p.id}`,
+      kind: 'error',
+      lead: `Portal path problem: ${p.name} (layer ${p.id})${p.since ? ` since ${fmtSince(p.since)}` : ''}.`,
+      rest: `${p.line}${p.repair ? ` Last repair: ${p.repair}.` : ''} Who must act: ${p.who || 'see sudo fff-vm watch status on the FFBox host'}.`,
+      fixed: true,
+    });
+  }
+  if (path?.silentMinutes !== undefined) {
+    bars.push({
+      key: 'path-silent',
+      kind: 'warn',
+      lead: `The portal's path watchdog has been silent for ${path.silentMinutes} minutes.`,
+      rest: `Nobody is checking the path from the internet to this portal (fff-vm watch on ${path.host || 'the FFBox host'}; sudo fff-vm watch status).`,
+      fixed: true,
+    });
+  }
   if (host.drain) {
     const d = host.drain;
     bars.push({
@@ -201,6 +223,14 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
       ))}
     </>
   );
+}
+
+/** "14:05" for today, "Oct 7 14:05" for another day. */
+function fmtSince(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const time = fmtClock(iso);
+  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
 }
 
 function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactNode; layout: string; title: string } {

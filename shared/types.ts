@@ -1068,6 +1068,46 @@ export interface HostStatus {
   drain?: DrainStatus;
   /** Disks, the sandbox drive, memory, and what the guard is doing about them (server/hostHealth.ts). */
   health?: HostHealth;
+  /** The path from the internet through Funnel to this portal, as the FFBox host's watchdog reports it (server/pathHealth.ts). */
+  pathHealth?: PathHealth;
+}
+
+/** One layer of the path from the internet to the portal (deploy/vm/host/pathwatch.sh). */
+export interface PathLayer {
+  /** "ssh", "1" to "9", "disk", "clock", "loop", "ntfy". */
+  id: string;
+  /** "tailscaled", "Serve/Funnel route", "tailnet policy", ... */
+  name: string;
+  verdict: 'ok' | 'warn' | 'fail' | 'skip' | 'none';
+  /** When it got this verdict (ISO). */
+  since: string;
+  checkedAt: string;
+  /** The evidence: the log line. No secrets (the watchdog removes them). */
+  line: string;
+  /** Who must act, for a failure; empty otherwise. */
+  who: string;
+  /** The last repair the watchdog tried, and how it went. */
+  repair: string;
+}
+
+/**
+ * What the FFBox host's watchdog (fff-vm watch) found along the path from the internet through Tailscale Funnel to the
+ * portal, handed to the portal in a file in the VM. The banner shows `problems` (failures nobody has fixed, or that a
+ * repair did not fix); `warnings` are for system_status.
+ */
+export interface PathHealth {
+  /** When the watchdog wrote it (ISO). */
+  updatedAt: string;
+  /** The host that watches. */
+  host: string;
+  /** The portal's Funnel name. */
+  dns: string;
+  /** No problem needs a person. */
+  ok: boolean;
+  problems: PathLayer[];
+  warnings: PathLayer[];
+  /** Set by the portal when the watchdog has not reported for this many minutes: what is shown may be old. */
+  silentMinutes?: number;
 }
 
 export type DiskLevel = 'ok' | 'warn' | 'critical';

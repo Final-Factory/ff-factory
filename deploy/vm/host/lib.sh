@@ -87,14 +87,15 @@ manifest_set() {
   echo "$1=$2" >>"$FFF_VM_MANIFEST"
 }
 
-# notify TITLE MESSAGE: an ntfy push to the topic FF Factory's outside watch uses (NTFY_URL_FILE holds the whole URL).
-# The URL is a secret of sorts (anyone with it can read the alerts): never printed.
+# notify TITLE MESSAGE [PRIORITY]: an ntfy push to the topic FF Factory's outside watch uses (NTFY_URL_FILE holds the whole
+# URL); PRIORITY is ntfy's (default high; urgent for what cannot wait). The URL is a secret of sorts (anyone with it can
+# read the alerts): never printed.
 notify() {
-  local title=$1 msg=$2
+  local title=$1 msg=$2 prio=${3:-high}
   log "notify: $title: $msg"
   [ "$DRY_RUN" = 1 ] && return 0
   [ -r "${NTFY_URL_FILE:-}" ] || { warn "no $NTFY_URL_FILE; alert not sent"; return 0; }
-  curl -fsS -m 20 -o /dev/null -H "Title: $title" -H 'Priority: high' -H 'Tags: warning' --data-binary "$msg" "$(head -n 1 "$NTFY_URL_FILE")" ||
+  curl -fsS -m 20 -o /dev/null -H "Title: $title" -H "Priority: $prio" -H 'Tags: warning' --data-binary "$msg" "$(head -n 1 "$NTFY_URL_FILE")" ||
     warn "ntfy push failed"
 }
 

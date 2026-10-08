@@ -1,0 +1,172 @@
+{
+  "dns": "fff.example-tailnet.ts.net",
+  "host": "ffbox",
+  "layers": [
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "ssh",
+      "line": "ssh fffadmin@10.213.41.10 answers",
+      "name": "host-to-VM ssh",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "1",
+      "line": "http://10.213.41.10:8790/api/health answers",
+      "name": "portal in the VM",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "2",
+      "line": "BackendState=Running Online=true Health=none (tailscale 1.102.2)",
+      "name": "tailscaled",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "3",
+      "line": "tags=[tag:fff-portal] funnel+https capabilities=yes",
+      "name": "node identity",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "4",
+      "line": "fff.example-tailnet.ts.net:443 / → http://127.0.0.1:8790, AllowFunnel=true",
+      "name": "Serve/Funnel route",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "5",
+      "line": "https://fff.example-tailnet.ts.net/api/health answers from inside the VM (certificate valid)",
+      "name": "certificate",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "6",
+      "line": "the firewall accepts every tailscaled listener on 100.64.0.5 / fd7a:115c:a1e0::5a34:ac62 (listeners: [4 443 4 59917 6 443 6 59343])",
+      "name": "VM firewall",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "7",
+      "line": "the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress (or *) → tag:fff-portal. 3 line(s) in 15 min, last: Oct 07 18:04:05 fff tailscaled[612]: Drop: TCP{100.100.3.13:50112 > 100.64.0.5:59917} 60 no rules matched",
+      "name": "tailnet policy",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "fail",
+      "who": "tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy"
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "8",
+      "line": "not checked: layer 7 failed",
+      "name": "Funnel servers",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "skip",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "9",
+      "line": "https://fff.example-tailnet.ts.net/api/health from outside failed (curl exit 28): curl: (28) Operation timed out after 10002 milliseconds with 0 bytes received; 0 of 3 Funnel server address(es) from DNS answer, failing: 2001:db8:ffff::a 203.0.113.10 203.0.113.11",
+      "name": "end to end",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "fail",
+      "who": "ops: every layer inside the VM passes but the outside path fails; check Tailscale's status page and the Funnel name's DNS"
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "disk",
+      "line": "64800 MB free at the fullest of / and /srv/fff, 33% used",
+      "name": "VM disk",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "clock",
+      "line": "the VM's clock is 0s off this host's",
+      "name": "VM clock",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "loop",
+      "line": "fff-portal.service restarted 0 time(s) in the last 15 min (active)",
+      "name": "portal restarts",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "ntfy",
+      "line": "ntfy.example.test reports healthy",
+      "name": "alert channel",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    }
+  ],
+  "ok": false,
+  "problems": [
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "7",
+      "line": "the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress (or *) → tag:fff-portal. 3 line(s) in 15 min, last: Oct 07 18:04:05 fff tailscaled[612]: Drop: TCP{100.100.3.13:50112 > 100.64.0.5:59917} 60 no rules matched",
+      "name": "tailnet policy",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "fail",
+      "who": "tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy"
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "9",
+      "line": "https://fff.example-tailnet.ts.net/api/health from outside failed (curl exit 28): curl: (28) Operation timed out after 10002 milliseconds with 0 bytes received; 0 of 3 Funnel server address(es) from DNS answer, failing: 2001:db8:ffff::a 203.0.113.10 203.0.113.11",
+      "name": "end to end",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "fail",
+      "who": "ops: every layer inside the VM passes but the outside path fails; check Tailscale's status page and the Funnel name's DNS"
+    }
+  ],
+  "schema": 1,
+  "updatedAt": "2026-10-07T18:30:00Z",
+  "warnings": []
+}

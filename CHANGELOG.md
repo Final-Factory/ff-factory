@@ -10,6 +10,21 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The portal VM's watchdog checks the whole path from the internet to the portal, repairs what is safe, and puts
+  what it cannot on the banner** (w681, Lothsahn: "build or enhance the health check daemon and auto-repair whatever you
+  can ... If they can't be repaired, please update your banner ... and log the failures clearly"; Funnel had been
+  dropped by the tailnet policy since 2026-10-07 18:04). `fff-vm watch` (host) now checks, one journal line each per
+  pass: ssh into the VM, tailscaled (restart, capped), the node's tag and capabilities, the Serve/Funnel route (set
+  again), the certificate (`tailscale cert`, ACME's retry time respected), the VM's firewall against tailscaled's
+  listeners, packet-filter drops from Funnel's servers (the tailnet policy), whether the Funnel servers connect, and a
+  request from the host through Funnel as the final verdict; plus the VM's disk, clock, the portal restarting in a loop
+  and the ntfy channel. `fff-vm watch status` prints the last result of every layer. The VM's firewall now accepts TCP
+  on `tailscale0` to the node's own Tailscale addresses (Funnel delivers to a random peer API port), replacing the
+  temporary per-port rule. The portal reads the watchdog's file (`/run/fff/path-health.json`) and shows a banner (layer,
+  since when, the evidence, who must act) on every page, adds it to `system_status`, and tells the orchestrator once.
+  Needs `install.sh --host-only` on the FFBox host (new `fff-vm` and `pathwatch.sh`), `fffctl update` in the VM
+  (firewall rule, portal). Fixed on the way: the watch died with an arithmetic error the first time any of its alerts
+  was due (`$(( now - ))` on a state key never set).
 - **The orchestration worker can install a new worker machine** (w676, Lothsahn: "Make the op machine worker able to
   run fff-machine-ssh", "And any other commands necessary to install a new worker"). Its PATH has `fff-machine-ssh`
   (through `fff-ops-priv machine-ssh`, as the portal's account): `--check` now always ends with the portal's

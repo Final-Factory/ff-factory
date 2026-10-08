@@ -1,0 +1,3 @@
+Filesystem     1048576-blocks  Used Available Capacity Mounted on
+/dev/vda1               96000 31200     1500      98% /
+/dev/vda1               96000 31200     1500      98% /srv/fff

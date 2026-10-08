@@ -1,0 +1,9 @@
+203.0.113.10    STREAM fff.example-tailnet.ts.net
+203.0.113.10    DGRAM  
+203.0.113.10    RAW    
+203.0.113.11    STREAM 
+203.0.113.11    DGRAM  
+203.0.113.11    RAW    
+2001:db8:ffff::a STREAM 
+2001:db8:ffff::a DGRAM  
+2001:db8:ffff::a RAW    

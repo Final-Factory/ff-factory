@@ -36,6 +36,15 @@ and the Macs within reach of FFBox's `ffdev` containers (design 1.4, rule 1).
    policy before the change is kept as [`tailnet-policy-before-2026-10-05.hujson`](tailnet-policy-before-2026-10-05.hujson):
    paste it back into the JSON editor and Save to roll back.
 
+   **Funnel needs one more grant (found 2026-10-07, not made by any script here):** Funnel's servers (peers named
+   `funnel-ingress-node`, tag `tag:ingress`) deliver to the node's Tailscale peer API port, a random one, and the policy
+   above has no rule for that, so the VM's packet filter logs `Drop: TCP{<funnel-ingress-node address>:... >
+   [fd7a:...:ac62]:59343} 80 no rules matched` and the portal is unreachable from outside while it works on the tailnet.
+   The fix is a tailnet admin's: `{ "src": ["tag:ingress"], "dst": ["tag:fff-portal"], "ip": ["*"] }` in `grants`
+   *(sourced: the diagnosis of 2026-10-07; check it with the policy's `tests`, and after saving `sudo fff-vm watch status`
+   on the FFBox host should show layers 7 and 9 passing within a few minutes)*. `fff-vm watch` finds this by itself
+   (layer 7) and puts it on the portal's banner.
+
    **Adding a machine** (biscuit, an Ubuntu PC, 2026-10-07): its name and tailnet address in `hosts`, its name in the
    portal's `tcp:22` grant, and a line in the policy's `tests` (`"tag:fff-portal"` accepts `"biscuit:22"` and denies
    `"biscuit:443"`), which refuses a save that breaks them. People need no rule of their own: every device is on Ben's

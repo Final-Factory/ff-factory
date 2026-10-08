@@ -237,8 +237,11 @@ Six rules:
    break its own security model *(sourced: ffbox docker-security-model)*.
 5. **The guest has its own firewall** (`inet fff_guest`, `deploy/vm/guest`), which drops by default. It accepts the
    host's address on 22 and 8790, `tailscale0` on 443 (Funnel and tailnet HTTPS) and 22 (ssh from the tailnet, for
-   whoever the tailnet policy lets reach `tag:fff-portal` on 22; not from the LAN, and never through Funnel), and
-   Tailscale's UDP port.
+   whoever the tailnet policy lets reach `tag:fff-portal` on 22; not from the LAN, and never through Funnel), TCP to
+   the node's own Tailscale addresses on `tailscale0` (100.64.0.0/10 and fd7a:115c:a1e0::/48: Funnel's servers deliver
+   to the node's peer API port, a random one, so no port is hard-coded; the tailnet policy decides who gets in, w681),
+   and Tailscale's UDP port. The portal listens on every address, so this also lets the tailnet reach 8790 and the
+   other listeners if the policy ever grants those ports; today it grants 443 and 22 only.
 6. **Tailnet policy** (Ben's tailnet admin, [D3](#8-risks-and-open-decisions)). The VM's node joins with a tag,
    `tag:fff-portal`, from a pre-approved, non-ephemeral auth key made for that tag. Tagged nodes' keys do not expire
    *(sourced: Tailscale KB 1085, "Key expiry for tagged devices is disabled by default")*. An OAuth client secret would
@@ -504,6 +507,58 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
 4. **The watchdog is the second layer.** If the guest's kernel or PID 1 hangs, nobody pets `i6300esb` and QEMU resets
    the VM *(measured in CI: a guest that stops petting it is reset; `fff-vm-events` reports the watchdog event)*. A
    kernel panic goes to `pvpanic`, then `on_crash` restarts it.
+
+### The path watch (host, w681)
+
+Funnel stopped working on 2026-10-07 at 18:04 and nothing said where: the VM was up, the portal answered on the private
+network, and the only way in from outside was dead. After the hang checks above, `fff-vm watch` (same timer, same
+state file, `deploy/vm/host/pathwatch.sh`) now walks the path from the internet to the portal, one journal line per layer
+per pass (`journalctl -u fff-vm-watch`: `path L7 tailnet policy: fail: <evidence>`), and `sudo fff-vm watch status` prints
+the last result of every layer. Nothing runs during maintenance (the nightly window, or `touch /run/fff-vm/maintenance`);
+`PW_CHECKS=off` turns it off.
+
+Layers 2 to 8 run in order and the first that fails stops the rest. Layer 9 always runs and is the verdict: a layer
+that fails while the portal still answers from outside is a warning, not a banner. A layer is a problem after
+`PW_FAILS_BEFORE_ALERT` (2) failing passes in a row; one ntfy alert an hour per problem, one when it passes again, and one
+when a repair did not fix it. Every repair is logged before and after.
+
+| Layer | Passes when | Repair (cap) | Who must act when it stays broken |
+|---|---|---|---|
+| ssh | `ssh` into the VM answers | `systemctl restart ssh` through the guest agent (30 min) | ops |
+| 1 | the portal answers on the private network (the check above, recorded) | none here: the hang checks alert and reset | ops |
+| 2 tailscaled | `tailscale status --json`: `BackendState` Running, `Self.Online`, `Health` empty (logged verbatim) | `systemctl restart tailscaled` (30 min apart, 3 in 6 h, after 2 failing passes) | ops; a removed node needs a tailnet admin |
+| 3 identity | `Self.Tags` has `PW_EXPECT_TAG`, `Self.CapMap` has `funnel` and `https` | none | tailnet admin (tagOwners, nodeAttrs, HTTPS on) |
+| 4 route | `tailscale serve status --json`: `Web["<dns>:443"]` `/` proxies `http://127.0.0.1:8790` and `AllowFunnel` is true | `tailscale funnel --bg http://127.0.0.1:8790` as `fffctl tailscale-join` does (10 min); never during a `fffctl migrate --dry-run-copy` (its Funnel is off on purpose: layers 4 to 9 are skipped) | ops |
+| 5 certificate | `curl --resolve <dns>:443:<100.x> https://<dns>/api/health` from inside the VM; also not expiring within 5 days | `tailscale cert <dns>` into a private temp folder, deleted after (30 min; not before the "retry after" time a Let's Encrypt rate limit gives; errors logged verbatim) | ops, or a tailnet admin (HTTPS certificates) |
+| 6 firewall | every port `tailscaled` listens on at the node's 100.x and fd7a addresses (`ss -ltnp`) is accepted on `tailscale0` by `nft list chain inet fff_guest input` | none: the watch only verifies; `install.sh` has the permanent rule | ops: re-run the guest install (`fffctl update`) |
+| 7 policy | no `Drop: ... no rules matched` line in `journalctl -u tailscaled --since -15min` whose source is a `tag:ingress` peer | none | tailnet admin: grant `tag:ingress` (or `*`) to `tag:fff-portal`; the alert is urgent and carries a sample line |
+| 8 Funnel servers | a `tag:ingress` peer shows a handshake within `PW_FUNNEL_STALE_MIN` minutes, or the outside probe passed in the pass before | `systemctl restart tailscaled` once per incident, looked at again after 5 minutes | tailnet admin or ops |
+| 9 end to end | `curl https://<dns>/api/health` from the host (not on the tailnet: out and back through Funnel) says `ok:true`; on failure each Funnel server address from the name lookup is tried with `--resolve`, to tell one bad server from all | none | ops |
+
+Other single points of failure it also checks, cheap and safe: the VM's **disk** (below 2 GB free or 90% used is a warning,
+below 512 MB or 97% a failure; repair: `journalctl --vacuum-size=200M` and `apt-get clean`, every 6 h), the VM's **clock**
+against the host's (past 60 s: restart the VM's time sync, never set by hand), the portal service **restarting in a loop**
+(5 restarts in 15 minutes; systemd keeps restarting it, so only a person can stop the cause), and the **alert channel**
+(the ntfy server's `/v1/health` from the host, a failure after 5 passes: alerts then reach only the journal and the
+banner). Left out, on purpose: resetting the VM for any Tailscale-layer failure (a reset fixes none of them and loses
+state), changing the tailnet policy or the VM's firewall at runtime (an admin's, and `install.sh`'s), re-joining the
+tailnet with a new key (a person's secret), the host's own disk and memory (not on this path; the I/O-error pause is
+alerted above), the backups and the GitHub token (not on the path to the portal), and a second probe from another
+network (one vantage point, the host's, is what FFBox's connector sees too).
+
+**Telling the portal and the people.** At the end of every pass the host puts the state, with no secret in it (auth keys,
+login links and node keys are removed from every line), in `/run/fff/path-health.json` in the VM (root-owned, `0644`,
+replaced whole, over the same ssh the checks use). The portal reads it every 15 seconds (`server/pathHealth.ts`):
+
+- **The banner** at the top of every page, which people on the tailnet see while Funnel is down: the layer, since when,
+  the evidence, the last repair and who must act (for example "tailnet admin: grant tag:ingress → tag:fff-portal in the
+  tailnet policy"). It cannot be dismissed and clears when the check passes. A watchdog silent for 30 minutes shows a
+  warning bar of its own, and its old problems are not shown as current.
+- **`system_status`** adds the same lines for the orchestrators, who tell their person; and a problem that appears or
+  clears is pushed once to the host guard's channel (a notification and a message to the orchestrator). A standing
+  problem is not announced again at every portal restart.
+
+Both need the new portal (a deploy); the file is written whether or not the portal reads it yet.
 
 Alerts go to ntfy, to the topic FF Factory's outside watch already uses (`data/outside-watch.json`; `system_status`
 names it). The host reads the whole URL from `/etc/fff-vm/ntfy-url` (root, `0600`) and never prints it. Alerts cover

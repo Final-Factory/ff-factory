@@ -1,0 +1,277 @@
+{
+  "Version": "1.102.2-t6cac91817-g6ff0ddc72",
+  "TUN": true,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "TailscaleIPs": [
+    "100.64.0.5",
+    "fd7a:115c:a1e0::5a34:ac62"
+  ],
+  "Self": {
+    "PublicKey": "nodekey:f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+    "HostName": "fff",
+    "DNSName": "fff.example-tailnet.ts.net.",
+    "OS": "linux",
+    "TailscaleIPs": [
+      "100.64.0.5",
+      "fd7a:115c:a1e0::5a34:ac62"
+    ],
+    "AllowedIPs": [
+      "100.64.0.5/32",
+      "fd7a:115c:a1e0::5a34:ac62/128"
+    ],
+    "CurAddr": "",
+    "Relay": "sea",
+    "PeerRelay": "",
+    "RxBytes": 0,
+    "TxBytes": 0,
+    "LastWrite": "0001-01-01T00:00:00Z",
+    "LastSeen": "0001-01-01T00:00:00Z",
+    "LastHandshake": "0001-01-01T00:00:00Z",
+    "Online": true,
+    "ExitNode": false,
+    "ExitNodeOption": false,
+    "Active": false,
+    "TaildropTarget": 0,
+    "NoFileSharingReason": "",
+    "Capabilities": [
+      "default-auto-update",
+      "funnel",
+      "https",
+      "https://tailscale.com/cap/funnel-ports?ports=443,8443,10000",
+      "probe-udp-lifetime",
+      "store-appc-routes"
+    ],
+    "CapMap": {
+      "default-auto-update": [
+        true
+      ],
+      "funnel": null,
+      "https": null,
+      "https://tailscale.com/cap/funnel-ports?ports=443,8443,10000": null,
+      "probe-udp-lifetime": null,
+      "store-appc-routes": null
+    },
+    "InNetworkMap": true,
+    "InMagicSock": false,
+    "InEngine": false,
+    "Tags": [
+      "tag:fff-portal"
+    ]
+  },
+  "Health": [],
+  "MagicDNSSuffix": "example-tailnet.ts.net",
+  "CurrentTailnet": {
+    "Name": "example@example.com",
+    "MagicDNSSuffix": "example-tailnet.ts.net",
+    "MagicDNSEnabled": true
+  },
+  "CertDomains": [
+    "fff.example-tailnet.ts.net"
+  ],
+  "Peer": {
+    "nodekey:0101010101010101010101010101010101010101010101010101010101010101": {
+      "PublicKey": "nodekey:0101010101010101010101010101010101010101010101010101010101010101",
+      "HostName": "funnel-ingress-node",
+      "DNSName": "",
+      "OS": "",
+      "TailscaleIPs": [
+        "100.100.1.11",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6001:1001"
+      ],
+      "AllowedIPs": [
+        "100.100.1.11/32",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6001:1001/128"
+      ],
+      "Tags": [
+        "tag:ingress"
+      ],
+      "CurAddr": "",
+      "Relay": "par",
+      "PeerRelay": "",
+      "RxBytes": 48211,
+      "TxBytes": 96422,
+      "LastWrite": "@AGO:7240@",
+      "LastSeen": "@AGO:7240@",
+      "LastHandshake": "@AGO:7240@",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "TaildropTarget": 9,
+      "NoFileSharingReason": "",
+      "ShareeNode": true,
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": false
+    },
+    "nodekey:0202020202020202020202020202020202020202020202020202020202020202": {
+      "PublicKey": "nodekey:0202020202020202020202020202020202020202020202020202020202020202",
+      "HostName": "funnel-ingress-node",
+      "DNSName": "",
+      "OS": "",
+      "TailscaleIPs": [
+        "100.100.2.12",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6002:1002"
+      ],
+      "AllowedIPs": [
+        "100.100.2.12/32",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6002:1002/128"
+      ],
+      "Tags": [
+        "tag:ingress"
+      ],
+      "CurAddr": "",
+      "Relay": "par",
+      "PeerRelay": "",
+      "RxBytes": 9120,
+      "TxBytes": 18240,
+      "LastWrite": "@AGO:9000@",
+      "LastSeen": "@AGO:9000@",
+      "LastHandshake": "@AGO:9000@",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "TaildropTarget": 9,
+      "NoFileSharingReason": "",
+      "ShareeNode": true,
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": false
+    },
+    "nodekey:0303030303030303030303030303030303030303030303030303030303030303": {
+      "PublicKey": "nodekey:0303030303030303030303030303030303030303030303030303030303030303",
+      "HostName": "funnel-ingress-node",
+      "DNSName": "",
+      "OS": "",
+      "TailscaleIPs": [
+        "100.100.3.13",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6003:1003"
+      ],
+      "AllowedIPs": [
+        "100.100.3.13/32",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6003:1003/128"
+      ],
+      "Tags": [
+        "tag:ingress"
+      ],
+      "CurAddr": "",
+      "Relay": "lhr",
+      "PeerRelay": "",
+      "RxBytes": 5,
+      "TxBytes": 10,
+      "LastWrite": "@AGO:7300@",
+      "LastSeen": "@AGO:7300@",
+      "LastHandshake": "@AGO:7300@",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "TaildropTarget": 9,
+      "NoFileSharingReason": "",
+      "ShareeNode": true,
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": false
+    },
+    "nodekey:0404040404040404040404040404040404040404040404040404040404040404": {
+      "PublicKey": "nodekey:0404040404040404040404040404040404040404040404040404040404040404",
+      "HostName": "funnel-ingress-node",
+      "DNSName": "",
+      "OS": "",
+      "TailscaleIPs": [
+        "100.100.4.14",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6004:1004"
+      ],
+      "AllowedIPs": [
+        "100.100.4.14/32",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6004:1004/128"
+      ],
+      "Tags": [
+        "tag:ingress"
+      ],
+      "CurAddr": "",
+      "Relay": "syd",
+      "PeerRelay": "",
+      "RxBytes": 2210877,
+      "TxBytes": 4421754,
+      "LastWrite": "@AGO:12000@",
+      "LastSeen": "@AGO:12000@",
+      "LastHandshake": "@AGO:12000@",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "TaildropTarget": 9,
+      "NoFileSharingReason": "",
+      "ShareeNode": true,
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": false
+    },
+    "nodekey:1111111111111111111111111111111111111111111111111111111111111111": {
+      "PublicKey": "nodekey:1111111111111111111111111111111111111111111111111111111111111111",
+      "HostName": "member-1",
+      "DNSName": "member-1.example-tailnet.ts.net.",
+      "OS": "macOS",
+      "TailscaleIPs": [
+        "100.100.11.21",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6011:100b"
+      ],
+      "AllowedIPs": [
+        "100.100.11.21/32",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6011:100b/128"
+      ],
+      "CurAddr": "",
+      "Relay": "den",
+      "PeerRelay": "",
+      "RxBytes": 0,
+      "TxBytes": 0,
+      "LastWrite": "0001-01-01T00:00:00Z",
+      "LastSeen": "0001-01-01T00:00:00Z",
+      "LastHandshake": "0001-01-01T00:00:00Z",
+      "Online": false,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "TaildropTarget": 5,
+      "NoFileSharingReason": "",
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": false
+    },
+    "nodekey:1212121212121212121212121212121212121212121212121212121212121212": {
+      "PublicKey": "nodekey:1212121212121212121212121212121212121212121212121212121212121212",
+      "HostName": "member-2",
+      "DNSName": "member-2.example-tailnet.ts.net.",
+      "OS": "windows",
+      "TailscaleIPs": [
+        "100.100.12.22",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6012:100c"
+      ],
+      "AllowedIPs": [
+        "100.100.12.22/32",
+        "fd7a:115c:a1e0:ab12:4843:cd96:6012:100c/128"
+      ],
+      "CurAddr": "",
+      "Relay": "dfw",
+      "PeerRelay": "",
+      "RxBytes": 0,
+      "TxBytes": 0,
+      "LastWrite": "0001-01-01T00:00:00Z",
+      "LastSeen": "0001-01-01T00:00:00Z",
+      "LastHandshake": "0001-01-01T00:00:00Z",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "TaildropTarget": 1,
+      "NoFileSharingReason": "",
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": false
+    }
+  }
+}

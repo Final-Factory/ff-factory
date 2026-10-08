@@ -1,0 +1,2 @@
+Oct 07 18:01:07 fff tailscaled[612]: Drop: TCP{[fd7a:115c:a1e0:ab12:4843:cd96:6011:100b]:53320 > [fd7a:115c:a1e0::5a34:ac62]:8790} 60 no rules matched
+Oct 07 18:02:07 fff tailscaled[612]: Drop: TCP{100.100.12.22:53321 > 100.64.0.5:22} 60 no rules matched
