@@ -32,6 +32,7 @@ import { keepMessageImages } from './inlineImages.ts';
 import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachment, machineUploadHttp, publicRef } from './attachments.ts';
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
+import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealth.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
@@ -421,6 +422,31 @@ machines.hostReport = (id, title, body) => {
   }
 };
 agents.hostHealth = hostHealth;
+// The path from the internet through Funnel to this portal, as the FFBox host's watchdog reports it (w681, server/pathHealth.ts).
+const pathHealth = new PathHealthMonitor({
+  read: filePathHealth(process.env.FFF_PATH_HEALTH_FILE || PATH_HEALTH_FILE),
+  now: () => Date.now(),
+  changed: (h) => {
+    host.pathHealth = h;
+    broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
+  },
+  report: (title, body) => {
+    console.log(`path health: ${title}: ${body}`);
+    if (isDryRun) return;
+    notifier.host(title, body);
+    const orch = store.orchestratorId;
+    if (orch) {
+      try {
+        sessions.send(orch, `[host] ${title}. ${body}`, 'system');
+      } catch {
+        // the orchestrator is not there; the notification still went out
+      }
+    }
+  },
+  log: (line) => console.warn(line),
+});
+setInterval(() => pathHealth.tick(), 15_000);
+setTimeout(() => pathHealth.tick(), 5000); // after the drainer (the banner broadcast reads it)
 agents.providers = providers;
 agents.max = max;
 // The intake (docs/intake.md): Discord and FFBox into the work ledger. Everything in it is off unless config intake
@@ -1721,7 +1747,7 @@ agents.usagePollChanged = () => {
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...vaultLines(), ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...vaultLines(), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {

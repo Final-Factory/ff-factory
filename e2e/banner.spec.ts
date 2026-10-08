@@ -120,3 +120,63 @@ test('a dry run (FFSB_DRY_RUN=1) says so above every page, and cannot be dismiss
   await expect(bar.getByRole('button', { name: 'Dismiss' })).toHaveCount(0);
   await expectBelowBar(page);
 });
+
+/** The FFBox host's watchdog reported a failure on the path from the internet to the portal (server/pathHealth.ts), injected into the host status. */
+async function withPathHealth(page: Page, pathHealth: object | undefined) {
+  const patch = (h: object) => ({ ...h, pathHealth });
+  await page.route('**/api/state', async (route) => {
+    const res = await route.fetch();
+    const state = await res.json();
+    state.host = patch(state.host);
+    await route.fulfill({ response: res, json: state });
+  });
+  await page.routeWebSocket(/\/ws/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((m) => server.send(m));
+    server.onMessage((m) => {
+      try {
+        const ev = JSON.parse(String(m));
+        if (ev.type === 'state') ev.state.host = patch(ev.state.host);
+        else if (ev.type === 'host') ev.host = patch(ev.host);
+        ws.send(JSON.stringify(ev));
+      } catch {
+        ws.send(m);
+      }
+    });
+  });
+  await page.reload();
+}
+
+test('a failure on the path from the internet to the portal is on the banner: the layer, since when, the log line, who must act; it cannot be dismissed', async ({ authed: page }) => {
+  const line = 'the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress (or *) → tag:fff-portal. 3 line(s) in 15 min, last: Oct 07 18:04:05 fff tailscaled[612]: Drop: TCP{100.100.3.13:50112 > 100.64.0.5:59917} 60 no rules matched';
+  const layer = {
+    id: '7',
+    name: 'tailnet policy',
+    verdict: 'fail',
+    since: new Date(Date.now() - 3 * 3_600_000).toISOString(),
+    checkedAt: new Date().toISOString(),
+    line,
+    who: 'tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy',
+    repair: '',
+  };
+  await withPathHealth(page, { updatedAt: new Date().toISOString(), host: 'ffbox', dns: 'fff.example-tailnet.ts.net', ok: false, problems: [layer], warnings: [] });
+  const bar = page.locator('.gbar', { hasText: 'Portal path problem: tailnet policy (layer 7)' });
+  await expect(bar).toBeVisible();
+  await expect(bar).toHaveClass(/\bgbar-error\b/);
+  const title = await bar.locator('.gbar-text').getAttribute('title');
+  expect(title).toContain(line);
+  expect(title).toContain('Who must act: tailnet admin: grant tag:ingress → tag:fff-portal in the tailnet policy.');
+  expect(title).toMatch(/since [\d: A-Za-z]+\./);
+  await expect(bar.getByRole('button', { name: 'Dismiss' })).toHaveCount(0);
+  await expectBelowBar(page);
+});
+
+test('a silent path watchdog says so, and a healthy path shows nothing', async ({ authed: page }) => {
+  await withPathHealth(page, { updatedAt: new Date(Date.now() - 40 * 60_000).toISOString(), host: 'ffbox', dns: 'x', ok: false, problems: [], warnings: [], silentMinutes: 40 });
+  const bar = page.locator('.gbar', { hasText: 'path watchdog has been silent for 40 minutes' });
+  await expect(bar).toBeVisible();
+  await expect(bar).toHaveClass(/\bgbar-warn\b/);
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+  await withPathHealth(page, undefined);
+  await expect(page.locator('.gbar')).toHaveCount(0);
+});

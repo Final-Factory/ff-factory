@@ -61,6 +61,28 @@ PORTAL_DOWN_RESET_MIN=60
 # At most this many resets in 6 hours; past it, alerts only (a VM that keeps dying needs a person).
 WATCH_MAX_RESETS_6H=3
 
+# ---------------------------------------------------------------- the path from the internet to the portal (w681)
+# fff-vm watch also checks, repairs where that is safe, and reports every layer from the internet through Tailscale
+# Funnel to the portal (pathwatch.sh, docs/portal-on-ffbox-host.md "The path watch"). on | off.
+PW_CHECKS=on
+# 1: the portal is reached from outside through Funnel (layers 4 to 9 apply). 0: a tailnet-only install.
+PW_EXPECT_FUNNEL=1
+# The tag the portal's node must carry (fffctl tailscale-join --tag).
+PW_EXPECT_TAG=tag:fff-portal
+# A layer is a problem (alert, banner) after this many failing passes in a row (the timer runs one a minute).
+PW_FAILS_BEFORE_ALERT=2
+# At most one tailscaled restart this often (and three in 6 hours), whatever layer asks for it.
+PW_TS_RESTART_MIN=30
+# No Funnel server has connected for this long, while the outside probe fails: Tailscale stopped sending traffic.
+PW_FUNNEL_STALE_MIN=30
+# The VM's disk: a warning below this much free (or 90% used), a failure below the second (or 97%).
+PW_DISK_WARN_MB=2048
+PW_DISK_FAIL_MB=512
+# The VM's clock may differ from this host's by this much before it counts (TLS fails past a few minutes).
+PW_CLOCK_SKEW_SEC=60
+# Where, in the VM, the state is put for the portal's banner (fff-portal reads FFF_PATH_HEALTH_FILE, default the same).
+PW_HEALTH_FILE=/run/fff/path-health.json
+
 # ---------------------------------------------------------------- nightly reboot (fff-vm-nightly.timer)
 # always: a cold cycle (drain, shut down, snapshot, start) every night, which also picks up the host's QEMU updates.
 # if-required: only when the guest says /run/reboot-required or the host's QEMU binary is newer than the VM's process.

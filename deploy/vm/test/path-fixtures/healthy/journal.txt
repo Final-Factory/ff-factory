@@ -1,0 +1,4 @@
+Oct 07 17:52:11 fff tailscaled[612]: magicsock: derp-9 connected; connGen=2
+Oct 07 17:58:41 fff tailscaled[612]: wgengine: Reconfig: configuring userspace WireGuard config (with 6/6 peers)
+Oct 07 18:01:07 fff tailscaled[612]: Drop: TCP{[fd7a:115c:a1e0:ab12:4843:cd96:6011:100b]:53320 > [fd7a:115c:a1e0::5a34:ac62]:8790} 60 no rules matched
+Oct 07 18:03:50 fff tailscaled[612]: Accept: TCP{100.100.1.11:34211 > 100.64.0.5:443} 60 ok

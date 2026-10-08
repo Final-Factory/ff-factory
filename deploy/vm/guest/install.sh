@@ -152,6 +152,11 @@ table inet fff_guest {
     $host_rule
     iifname "tailscale0" tcp dport 443 accept comment "Funnel and tailnet HTTPS (tailscale serve) to the portal"
     iifname "tailscale0" tcp dport 22 accept comment "ssh from the tailnet only: the tailnet policy says who; Funnel never carries 22"
+    # Funnel's servers deliver to this node's Tailscale peer API port (a random one, not 443); the tailnet policy ("grants")
+    # decides who gets in, not ports hard-coded here. Only packets for this node's own Tailscale addresses (v4 100.64.0.0/10,
+    # v6 fd7a:115c:a1e0::/48) arrive on tailscale0 to be delivered locally; nothing else is let in or forwarded.
+    iifname "tailscale0" ip daddr 100.64.0.0/10 meta l4proto tcp accept comment "TCP to this node's own Tailscale address: Funnel's peer API delivery; the tailnet policy decides who"
+    iifname "tailscale0" ip6 daddr fd7a:115c:a1e0::/48 meta l4proto tcp accept comment "same, IPv6"
     udp dport 41641 accept comment "Tailscale's direct connections"
   }
 }
