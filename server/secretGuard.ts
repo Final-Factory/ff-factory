@@ -317,6 +317,7 @@ export function ownerDataReads(dataDir: string, memoryRoot: string, platform: No
     'resume.json*',
     'resume.done.json*',
     'update.result.json*',
+    'unit-watchdog.json*',
     'update.prepared.json*',
     'update.verifying.json*',
     'relocate.result.json*',

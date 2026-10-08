@@ -18,6 +18,15 @@ NODE_MAJOR=24
 # fff-health.timer checks /api/health every 30 s; this many failures in a row restart the portal.
 HEALTH_FAILS_BEFORE_RESTART=4
 HEALTH_START_GRACE_SEC=120
+# The unit watchdog (fff-health, w698; the units are FFF_CRITICAL_UNITS in lib.sh): a critical unit found failed, or stopped
+# when it should run, is restarted. The n-th restart in a row waits WATCHDOG_BACKOFF_SEC * 2^(n-1) seconds after the one
+# before (30, 60, 120, 240, 480, 900), at most WATCHDOG_BACKOFF_MAX_SEC; after WATCHDOG_MAX_ATTEMPTS restarts that did not hold
+# it stops trying and tells the dispatcher once (fffctl watchdog reset tries again). A unit that has run WATCHDOG_HEALTHY_SEC
+# without a failure starts again from the first restart.
+WATCHDOG_BACKOFF_SEC=30
+WATCHDOG_BACKOFF_MAX_SEC=900
+WATCHDOG_MAX_ATTEMPTS=6
+WATCHDOG_HEALTHY_SEC=600
 # A new version not healthy within this many minutes of its start is rolled back.
 UPDATE_VERIFY_MIN=5
 # The same in seconds, and it wins when set: only CI's fast test mode sets it (deploy/vm/test/ci-vm-e2e.sh).

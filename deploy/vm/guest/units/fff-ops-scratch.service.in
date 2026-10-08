@@ -1,0 +1,21 @@
+[Unit]
+Description=FF Factory orchestration worker: its @OPS_DISK_MB@ MB scratch file system (w597)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/ops-worker.md
+RequiresMountsFor=@OPS_IMAGE_DIR@ @OPS_ROOT_PARENT@
+# A failed mount is tried again (w698): 5 times in 10 minutes, then fff-health (every 30 s) takes over with its back-off.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/bin/install -d -m 0755 @OPS_ROOT@
+ExecStart=/bin/sh -c 'mountpoint -q @OPS_ROOT@ || mount -o loop,nosuid,nodev,noexec @OPS_IMAGE@ @OPS_ROOT@'
+ExecStartPost=/bin/sh -c 'chown root:@OPS_USER@ @OPS_ROOT@ && chmod 0750 @OPS_ROOT@ && install -d -m 0700 -o @OPS_USER@ -g @OPS_USER@ @OPS_ROOT@/home @OPS_ROOT@/scratch @OPS_ROOT@/tmp'
+# "-": a busy mount that will not go (the worker still has files open) must not leave the unit failed; the next start mounts again.
+ExecStop=-/bin/umount @OPS_ROOT@
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

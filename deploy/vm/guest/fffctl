@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # fffctl: the FF Factory portal inside its VM (deploy/vm/guest; /usr/local/sbin/fffctl). Root: run without sudo, it runs itself again through sudo.
 #
-#   fffctl status                       the portal, its release, health, Tailscale, the base clone, backups
+#   fffctl status                       the portal, its release, health, Tailscale, the critical units and what the watchdog restarted,
+#                                       the base clone, backups
+#   fffctl units [--check]              every critical unit: active, enabled, the watchdog's verdict, and the watchdog's last restarts
+#                                       (which unit, when, why); --check prints the ones that are down and exits 1 (the FFBox host asks)
+#   fffctl watchdog run | pause | resume | reset [UNIT]
+#                                       the unit watchdog (fff-health runs it every 30 s): run now; pause it (until the next boot) for
+#                                       maintenance that stops a critical unit; resume; reset its back-off and give-up for a unit or all
 #   fffctl logs [-f]                    the portal's journal
 #   fffctl restart [--no-drain] [--drain-minutes N]
 #                                       drain busy agents, restart, resume them (restart.ps1's job); waits until the
@@ -53,7 +59,7 @@
 #                                       over ssh (deploy/vm/RUNBOOK.md "Dry run" and "Cut-over"; fffctl migrate --help)
 set -o errexit -o nounset -o pipefail
 # Not root: the same command again through sudo (the VM's admin account has it without a password).
-if [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" "$@"; fi
+if [ "$(id -u)" -ne 0 ] && [ "${FFF_TEST_NOROOT:-}" != 1 ]; then exec sudo -- "$0" "$@"; fi
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
 need_root
@@ -130,6 +136,61 @@ wait_healthy() {
   return 1
 }
 
+# The unit watchdog (w698, fff-watchdog; fff-health runs it every 30 s): what it sees and what it restarted.
+WD_RUN=${FFF_RUN_DIR:-/run/fff}
+unit_watchdog_file() { echo "$DATA/unit-watchdog.json"; }
+# print_units: one row per critical unit (live from systemd, with the watchdog's verdict), then the watchdog's last restarts.
+print_units() {
+  local u active ufs st f
+  f=$(unit_watchdog_file)
+  printf '  %-26s %-11s %-9s %s\n' unit active enabled watchdog
+  for u in "${FFF_CRITICAL_UNITS[@]}"; do
+    active=$(unit_get "$u" ActiveState); ufs=$(unit_get "$u" UnitFileState)
+    st=$(jq -r --arg u "$u" '[.units[]? | select(.unit == $u) | .state][0] // "?"' "$f" 2>/dev/null || echo '?')
+    [ -n "$st" ] || st='?'
+    printf '  %-26s %-11s %-9s %s\n' "$u" "${active:-unknown}" "${ufs:-unknown}" "$st"
+  done
+  if [ -e "$WD_RUN/watchdog.pause" ]; then echo "  the watchdog is PAUSED until the next boot (fffctl watchdog resume)"; fi
+  if [ -f "$f" ]; then
+    local n
+    n=$(jq -r '.events | length' "$f" 2>/dev/null || echo 0)
+    if [ "${n:-0}" -gt 0 ]; then
+      echo "  the watchdog's last restarts (unit, when, why; ${n} on record):"
+      jq -r '.events[-5:][] | "    \(.at) \(.unit) \(.action) (attempt \(.attempt)): \(.why)\(if .ok then "" else " -> FAILED" end)"' "$f" 2>/dev/null || true
+    else
+      echo "  the watchdog has restarted nothing (last look $(jq -r '.updatedAt // "never"' "$f" 2>/dev/null || echo never))"
+    fi
+  else
+    echo "  the watchdog has not written its file yet ($f): fff-health runs it every 30 s"
+  fi
+}
+
+cmd_units() {
+  local u active ufs bad=""
+  if [ "${1:-}" != --check ]; then print_units; return 0; fi
+  for u in "${FFF_CRITICAL_UNITS[@]}"; do
+    active=$(unit_get "$u" ActiveState); ufs=$(unit_get "$u" UnitFileState)
+    case $active in active | activating | reloading) ;; *) bad+=" $u=${active:-unknown}" ;; esac
+    enable_state_ok "$ufs" || bad+=" $u=${ufs:-unknown}"
+  done
+  if [ -n "$bad" ]; then echo "down:${bad}"; return 1; fi
+  echo "every critical unit is active and enabled"
+}
+
+cmd_watchdog() {
+  local what=${1:-}
+  case $what in
+    run) exec "$FFF_LIB/fff-watchdog" ;;
+    pause) touch "$WD_RUN/watchdog.pause"; echo "the unit watchdog is paused until the next boot (fffctl watchdog resume); fff-health still checks the portal itself" ;;
+    resume) rm -f "$WD_RUN/watchdog.pause"; echo "the unit watchdog is on" ;;
+    reset)
+      if [ -n "${2:-}" ]; then rm -f "$WD_RUN/watchdog/$2.json"; echo "the watchdog's count for $2 is cleared: its next failure is restarted at once"
+      else rm -f "$WD_RUN"/watchdog/*.json; echo "the watchdog's counts are cleared: the next failures are restarted at once"; fi
+      ;;
+    *) die "fffctl watchdog run | pause | resume | reset [UNIT]" ;;
+  esac
+}
+
 cmd_status() {
   local cur prev h
   cur=$(readlink -e "$CURRENT" 2>/dev/null || echo none); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || echo none)
@@ -140,8 +201,24 @@ cmd_status() {
   [ ! -f "$DATA/update.verifying.json" ] || echo "  verifying an update: $(cat "$DATA/update.verifying.json")"
   [ ! -f "$DATA/update.result.json" ] || echo "  last update result: $(cat "$DATA/update.result.json")"
   echo "  data: $(du -sh "$DATA" 2>/dev/null | cut -f1); disk: $(df -h --output=avail,pcent "$FFF_ROOT" | tail -n 1 | xargs) free/used"
-  echo "tailscale: $(tailscale status --self --peers=false 2>/dev/null | head -n 1 || echo 'not joined')"
+  # "not joined" is for a node that has not joined, by its backend state. It used to be the `|| echo 'not joined'` after
+  # `tailscale status --self | head -n 1`, which also ran whenever that pipe failed under pipefail (tailscale exiting non-zero
+  # after it printed its line, or killed by SIGPIPE when head quit first), so a joined node printed its address and then a
+  # bare "not joined" (w698).
+  local ts_json ts_state ts_line
+  ts_json=$(tailscale status --json 2>/dev/null || true)
+  [ -n "$ts_json" ] || ts_json='{}'
+  ts_state=$(jq -r '.BackendState // "unknown"' <<<"$ts_json" 2>/dev/null || echo unknown)
+  ts_line=$(jq -r 'if .BackendState == "Running" then ((.Self.TailscaleIPs // [])[0] // "?") + " " + ((.Self.DNSName // "") | rtrimstr(".")) else "" end' <<<"$ts_json" 2>/dev/null || true)
+  case $ts_state in
+    Running) echo "tailscale: joined, Running: $ts_line" ;;
+    NeedsLogin | NeedsMachineAuth) echo "tailscale: NOT joined ($ts_state): fffctl tailscale-join --authkey-file FILE (a tailnet admin approves a machine that NeedsMachineAuth)" ;;
+    Stopped) echo "tailscale: joined but Stopped (tailscale up, or fff-watchdog's tailscaled check)" ;;
+    *) echo "tailscale: tailscaled does not answer ($ts_state): systemctl status tailscaled" ;;
+  esac
   echo "  funnel: $(tailscale funnel status 2>/dev/null | grep -m1 -o 'https://[^ ]*' || echo none)"
+  echo "units (the watchdog in fff-health restarts a failed or stopped one every 30 s):"
+  print_units
   echo "claude login: $([ -s "$FFF_ROOT/home/.claude/.credentials.json" ] && echo stored || echo 'none (fffctl claude-login)')"
   echo "base clone: $([ -d "$BASE_PATH/.git" ] && as_fff git -C "$BASE_PATH" log -1 --format='%h %cr' || echo 'none (fffctl base-clone)')"
   echo "backups: $([ -n "$BACKUP_SSH_TARGET" ] && echo "to $BACKUP_SSH_TARGET:$BACKUP_REMOTE_DIR" || echo off); last: $(journalctl -u fff-backup.service -n 1 --no-pager -o cat 2>/dev/null || true)"
@@ -503,6 +580,8 @@ cmd_backup_config() {
 
 case "${1:-status}" in
   status) cmd_status ;;
+  units) shift; cmd_units "$@" ;;
+  watchdog) shift; cmd_watchdog "$@" ;;
   logs) shift; exec journalctl -u fff-portal.service -u fff-update.service -u fff-health.service --no-pager -n 200 "$@" ;;
   restart) shift; cmd_restart "$@" ;;
   update) shift; cmd_update "$@" ;;

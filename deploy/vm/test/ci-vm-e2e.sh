@@ -584,6 +584,28 @@ if g 'findmnt -n /tmp' >/dev/null 2>&1; then fail "/tmp is still its own mount a
 [ "$(g 'df --output=target /tmp | tail -n 1')" = / ] || fail "/tmp is not on the root filesystem"
 echo "MEASURE /tmp after the nightly boot: $(g 'df -h --output=source,fstype,size,avail /tmp | tail -n 1')"
 
+step "after a cold restart every critical unit is up, and the watchdog brings back one that is stopped (w698)"
+# The cold restart above booted the guest: the units must have come up by themselves (fff-ops.socket did not, on 2026-10-08:
+# an ordering cycle at boot made systemd drop its start job), with no cycle in this boot's journal.
+wait_for 240 "every critical unit is active and enabled after the boot" g 'sudo fffctl units --check'
+out=$(g 'sudo journalctl -b --no-pager -g "ordering cycle" 2>&1' || true)
+if printf '%s' "$out" | matches -i 'ordering cycle'; then fail "systemd broke an ordering cycle at this boot: $out"; fi
+g 'systemctl is-active fff-ops.socket' | matches -x active || fail "fff-ops.socket is not active after the boot"
+g 'sudo fffctl status' | matches -F 'tailscale: ' || fail "fffctl status lacks the tailscale line"
+g 'sudo fffctl status' | matches -F 'fff-ops.socket' || fail "fffctl status lacks the unit table"
+# The watchdog: stop the worker's socket, the way it was found on 2026-10-08, and wait for fff-health (30 s; 10 s in the fast mode).
+g 'sudo systemctl stop fff-ops.socket'
+g 'systemctl is-active fff-ops.socket' | matches -x active && fail "fff-ops.socket did not stop"
+wait_for 120 "fff-health restarts the stopped fff-ops.socket" g 'systemctl is-active --quiet fff-ops.socket'
+g 'sudo jq -e "[.events[] | select(.unit == \"fff-ops.socket\" and .action == \"restart\")] | length > 0" /srv/fff/data/unit-watchdog.json' >/dev/null || fail "the watchdog's file has no restart of fff-ops.socket: $(g 'sudo cat /srv/fff/data/unit-watchdog.json')"
+g 'sudo journalctl -t fff-watchdog --no-pager -n 20' | matches 'restarted fff-ops.socket' || fail "the restart is not in the journal (tag fff-watchdog)"
+g 'sudo fffctl status' | matches -E 'fff-ops.socket restart (attempt 1)' || fail "fffctl status does not show the restart"
+# A disabled critical unit is enabled again (a restart of the VM would have left it down).
+g 'sudo systemctl disable fff-update.path'
+wait_for 120 "fff-health enables the disabled fff-update.path" g 'systemctl is-enabled fff-update.path | grep -qx enabled'
+g 'sudo fffctl watchdog reset'
+echo "ok: all critical units up after the boot, no ordering cycle; a stopped fff-ops.socket and a disabled fff-update.path are put right by fff-health, logged and shown by fffctl status"
+
 step "a size change in fff-vm.conf: install.sh leaves the running VM alone, the nightly applies it (w537)"
 mem_kib() { virsh dumpxml "$@" $VM | sed -n "s|.*<memory unit='KiB'>\([0-9]*\)</memory>.*|\1|p"; }
 [ "$(mem_kib --inactive)" = 4194304 ] || fail "the VM is not defined at the default 4096 MiB: $(mem_kib --inactive) KiB"

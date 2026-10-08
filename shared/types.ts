@@ -1083,6 +1083,8 @@ export interface HostStatus {
   health?: HostHealth;
   /** The path from the internet through Funnel to this portal, as the FFBox host's watchdog reports it (server/pathHealth.ts). */
   pathHealth?: PathHealth;
+  /** What the VM's unit watchdog (fff-health) did about critical systemd units (server/unitWatchdog.ts). */
+  unitWatchdog?: UnitWatchdog;
 }
 
 /** One layer of the path from the internet to the portal (deploy/vm/host/pathwatch.sh). */
@@ -1120,6 +1122,53 @@ export interface PathHealth {
   problems: PathLayer[];
   warnings: PathLayer[];
   /** Set by the portal when the watchdog has not reported for this many minutes: what is shown may be old. */
+  silentMinutes?: number;
+}
+
+/** One critical systemd unit the VM's watchdog keeps up (fff-health, every 30 s). */
+export interface UnitWatchdogUnit {
+  unit: string;
+  /** systemd's ActiveState: "active", "inactive", "failed", "activating", ... */
+  active: string;
+  /** systemd's unit file state: "enabled", "disabled", "static", "masked", ... */
+  enabled: string;
+  /**
+   * ok: healthy. backoff: failing, waiting before the next restart (nextTryAt). gave-up: restarted `attempts` times
+   * without staying up, the watchdog stopped trying and a person must act. paused: restarts switched off on purpose.
+   * held: the portal is held until reboot on purpose (fffctl prepare-shutdown): not a problem. unknown: a state this
+   * portal does not know.
+   */
+  state: 'ok' | 'backoff' | 'gave-up' | 'paused' | 'held' | 'unknown';
+  attempts: number;
+  /** When the next restart is tried (ISO), or empty. */
+  nextTryAt: string;
+}
+
+/** One thing the VM's watchdog did to a unit. */
+export interface UnitWatchdogEvent {
+  /** ISO. */
+  at: string;
+  unit: string;
+  action: 'restart' | 'enable' | 'gave-up';
+  /** Why: "inactive (dead) while it should be active". */
+  why: string;
+  attempt: number;
+  /** The action worked. */
+  ok: boolean;
+}
+
+/**
+ * What the VM's unit watchdog (fff-health) reports in <dataDir>/unit-watchdog.json. On HostStatus the server sends only
+ * the units that are not ok or held and the events of the last 24 hours.
+ */
+export interface UnitWatchdog {
+  /** When the watchdog wrote it (ISO). */
+  updatedAt: string;
+  host: string;
+  units: UnitWatchdogUnit[];
+  /** Newest last. */
+  events: UnitWatchdogEvent[];
+  /** Set by the portal when the watchdog has not written for this many minutes: the units shown may be old. */
   silentMinutes?: number;
 }
 

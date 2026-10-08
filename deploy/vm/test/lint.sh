@@ -17,7 +17,7 @@ scripts=(deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm
   deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-vm-path.test.sh deploy/vm/test/fff-machine-ssh.test.sh
   deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync
   deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/guest/ops-bin/fff-machine-ssh deploy/vm/test/fff-ops.test.sh
-  deploy/vm/test/fff-ops-socket.test.sh)
+  deploy/vm/test/fff-ops-socket.test.sh deploy/vm/guest/fff-watchdog deploy/vm/test/fff-watchdog.test.sh deploy/vm/test/fff-units.test.sh)
 for f in "${scripts[@]}"; do bash -n "$f"; done
 echo "bash -n: ${#scripts[@]} files parse"
 shellcheck --version | sed -n 2p
@@ -27,7 +27,7 @@ echo "shellcheck: clean"
 for f in deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm-rollback.sh deploy/vm/host/fff-vm deploy/vm/guest/install.sh \
   deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh \
   deploy/vm/guest/fff-migrate deploy/vm/host/machine-ssh.sh deploy/vm/guest/fff-machine-ssh deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh \
-  deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-vm-path.test.sh deploy/vm/test/fff-machine-ssh.test.sh deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv   deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/guest/ops-bin/fff-machine-ssh deploy/vm/test/fff-ops.test.sh deploy/vm/test/fff-ops-socket.test.sh; do
+  deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-vm-path.test.sh deploy/vm/test/fff-machine-ssh.test.sh deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv   deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/guest/ops-bin/fff-machine-ssh deploy/vm/test/fff-ops.test.sh deploy/vm/test/fff-ops-socket.test.sh deploy/vm/guest/fff-watchdog deploy/vm/test/fff-watchdog.test.sh deploy/vm/test/fff-units.test.sh; do
   [ "$(git ls-files -s "$f" | cut -c1-6)" = 100755 ] || { echo "$f is not executable in git (git update-index --chmod=+x)"; exit 1; }
 done
 python3 -m json.tool deploy/vm/guest/config.vm.example.json >/dev/null && echo "config.vm.example.json: valid JSON"
@@ -40,6 +40,11 @@ deploy/vm/test/fff-vm-path.test.sh
 deploy/vm/test/fff-machine-ssh.test.sh
 # The orchestration worker's launcher and wrappers (w597), against a fake claude and a fake ssh.
 deploy/vm/test/fff-ops.test.sh
+# The unit watchdog (w698): restarts, back-off, give-up, what it leaves alone, against a fake systemctl; needs jq and node.
+deploy/vm/test/fff-watchdog.test.sh
+# The units as a whole (w698): WantedBy and enable, Restart= and StartLimit, no socket ordered after a service (the boot-time
+# ordering cycle that left fff-ops.socket dead after a reboot), the boot graph through systemd-analyze when it is there.
+deploy/vm/test/fff-units.test.sh
 
 if command -v pwsh >/dev/null; then
   pwsh -NoProfile -Command '$e = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile("deploy/vm/measure/measure-portal.ps1", [ref]$null, [ref]$e); if ($e.Count) { $e; exit 1 }; "measure-portal.ps1: parses"'
@@ -53,8 +58,11 @@ if [ "$units" = 1 ]; then
   install -m 0755 deploy/vm/host/fff-vm /usr/local/sbin/fff-vm
   install -m 0755 deploy/vm/guest/fffctl /usr/local/sbin/fffctl
   tmp=$(mktemp -d)
-  cp deploy/vm/host/units/* deploy/vm/guest/units/* "$tmp/"
-  systemd-analyze verify --man=no "$tmp"/*.service "$tmp"/*.timer "$tmp"/*.path
+  id fff-ops >/dev/null 2>&1 || useradd --system --user-group fff-ops
+  # The guest's units as install.sh writes them (the templates rendered), then the host's.
+  FFF_UNITS_OUT=$tmp deploy/vm/test/fff-units.test.sh >/dev/null
+  cp deploy/vm/host/units/* "$tmp/"
+  systemd-analyze verify --man=no "$tmp"/*.service "$tmp"/*.socket "$tmp"/*.timer "$tmp"/*.path
   rm -rf "$tmp"
   echo "systemd-analyze verify: clean"
 fi

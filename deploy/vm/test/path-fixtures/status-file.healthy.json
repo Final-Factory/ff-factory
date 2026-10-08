@@ -75,7 +75,7 @@
     {
       "checkedAt": "2026-10-07T18:30:00Z",
       "id": "7",
-      "line": "no Funnel server (tag:ingress) traffic dropped by the packet filter in 15 min (1 other Drop line(s))",
+      "line": "no Funnel server (tag:ingress) TCP traffic dropped by the packet filter in 15 min (1 Drop line(s) in all)",
       "name": "tailnet policy",
       "repair": "",
       "since": "2026-10-07T18:30:00Z",
@@ -127,6 +127,16 @@
       "id": "loop",
       "line": "fff-portal.service restarted 0 time(s) in the last 15 min (active)",
       "name": "portal restarts",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "units",
+      "line": "every critical unit is active and enabled",
+      "name": "VM units",
       "repair": "",
       "since": "2026-10-07T18:30:00Z",
       "verdict": "ok",

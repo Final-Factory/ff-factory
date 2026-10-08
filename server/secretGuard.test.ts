@@ -219,6 +219,7 @@ test('w650: an owner orchestrator reads data/\'s reports, logs, ledger and histo
     `${D}/wakes.json`,
     `${D}/ops-worker.json`,
     `${D}/update.result.json`,
+    `${D}/unit-watchdog.json`,
     `${D}/resume.json`,
     `${D}/restart.request`,
     `${D}/supervisor.pid`,

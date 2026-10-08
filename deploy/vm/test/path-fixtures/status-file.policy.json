@@ -134,6 +134,16 @@
     },
     {
       "checkedAt": "2026-10-07T18:30:00Z",
+      "id": "units",
+      "line": "every critical unit is active and enabled",
+      "name": "VM units",
+      "repair": "",
+      "since": "2026-10-07T18:30:00Z",
+      "verdict": "ok",
+      "who": ""
+    },
+    {
+      "checkedAt": "2026-10-07T18:30:00Z",
       "id": "ntfy",
       "line": "ntfy.example.test reports healthy",
       "name": "alert channel",

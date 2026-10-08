@@ -1,0 +1,34 @@
+[Unit]
+Description=FF Factory orchestration worker: Claude Code as @OPS_USER@ for the portal (w597)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/ops-worker.md
+Requires=fff-ops-scratch.service
+After=fff-ops-scratch.service network-online.target
+
+[Service]
+Type=simple
+User=@OPS_USER@
+Group=@OPS_USER@
+# One connection to fff-ops.socket: the portal's header, then Claude Code's stream on the same socket.
+ExecStart=@FFF_LIB@/fff-ops-launch
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+SyslogIdentifier=fff-ops
+WorkingDirectory=@OPS_ROOT@
+UMask=0077
+# sudo runs its two wrappers (/etc/sudoers.d/fff-ops), so no NoNewPrivileges, nor any setting that implies it.
+NoNewPrivileges=no
+# The whole file system read-only but its scratch; /srv/fff stays writable only for what sudo runs as root or fff there
+# (a machine credential): fff-ops itself cannot enter it (0700 fff). /tmp, /var/tmp and /dev/shm are small and its own.
+ProtectSystem=strict
+ProtectHome=tmpfs
+ReadWritePaths=@OPS_ROOT@ @FFF_ROOT@ -/run/fff -/var/lib/sudo
+# /run/sudo: sudo's own time stamps, on a private tmpfs (/run is read-only here).
+TemporaryFileSystem=/tmp:size=64M,mode=1777 /var/tmp:size=16M,mode=1777 /dev/shm:size=16M,mode=1777 /run/sudo:size=1M,mode=0711
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8 ::1/128 @OPS_ALLOW_NETS@ @RESOLVERS@
+MemoryMax=@OPS_MEMORY_MAX@
+TasksMax=256
+CPUWeight=50
+# Its lifetime's backstop: the portal stops an idle process after 1 h and cuts a turn after 2 h.
+RuntimeMaxSec=@OPS_RUNTIME_MAX@

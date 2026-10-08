@@ -188,6 +188,15 @@ case "$*" in
   *) echo "fake systemctl: $* is not faked" >&2; exit 1 ;;
 esac
 EOF
+cat >"$T/gbin/fffctl" <<'EOF'
+#!/usr/bin/env bash
+D=$FAKE_DIR
+echo "fffctl $*" >>"$D/calls"
+case "$*" in
+  "units --check") cat "$D/live/units.out"; exit "$(cat "$D/live/units.rc")" ;;
+  *) echo "fake fffctl: $* is not faked" >&2; exit 1 ;;
+esac
+EOF
 cat >"$T/gbin/openssl" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
@@ -270,12 +279,12 @@ only_reads_firewall() { ! matches -E 'nft (-f|add|insert|delete|flush)' "$FAKE_D
 # ---------------------------------------------------------------- 1. healthy: every layer passes
 scen
 pass
-for l in ssh 1 2 3 4 5 6 7 8 9 disk clock loop ntfy; do is "$l" ok; done
+for l in ssh 1 2 3 4 5 6 7 8 9 disk clock loop units ntfy; do is "$l" ok; done
 said "path L2 tailscaled: ok: BackendState=Running Online=true Health=none"
 said "path L4 Serve/Funnel route: ok: fff.example-tailnet.ts.net:443 / → http://127.0.0.1:8790, AllowFunnel=true"
 said "path L9 end to end: ok: https://fff.example-tailnet.ts.net/api/health answers ok:true from outside"
 [ "$(banner .ok)" = true ] && [ "$(banner '.problems | length')" = 0 ] || fail "healthy: the status file shows a problem"
-[ "$(banner .schema)" = 1 ] && [ "$(banner '.layers | length')" = 14 ] || fail "healthy: the status file's shape"
+[ "$(banner .schema)" = 1 ] && [ "$(banner '.layers | length')" = 15 ] || fail "healthy: the status file's shape"
 [ "$(alerts)" = 0 ] || fail "healthy: an alert was sent"
 no_vm_reset
 check_recording status-file.healthy.json
@@ -499,13 +508,15 @@ ok "firewall: the rule scanner (port sets, ranges, no port, other protocols, oth
 # ---------------------------------------------------------------- 7. the tailnet policy drops Funnel traffic
 scen policy-drop
 pass 2
-is 7 fail
+# The first pass has no outside probe result yet: a failure, the chain stops. The second knows the probe passed: a warning.
 said "path L7 tailnet policy: fail: the tailnet policy drops Funnel traffic: a tailnet admin must grant tag:ingress (or *) → tag:fff-portal. 3 line(s) in 15 min, last: Oct 07 18:04:05 fff tailscaled[612]: Drop: TCP{100.100.3.13:50112 > 100.64.0.5:59917} 60 no rules matched"
-is 8 skip
+is 7 warn
+said "path L7 tailnet policy: warn: the tailnet policy dropped 3 TCP packet(s) from Funnel servers (tag:ingress) in 15 min, to port(s) 59343 59917, but the outside probe passes, so Funnel works"
+is 8 ok
 [ "$(calls 'systemctl restart')" = 0 ] || fail "L7: a repair was tried for a policy problem"
 only_reads_firewall
 [ "$(banner '.problems | length')" = 0 ] && [ "$(banner '.warnings | length')" -ge 1 ] && [ "$(alerts)" = 0 ] || fail "L7: with the outside probe passing it is a warning: no banner, no alert"
-ok "policy: Funnel servers' dropped packets are matched to the tag:ingress peers by address (IPv6 and IPv4) and logged with a sample line; no repair; a warning while the outside probe passes"
+ok "policy: Funnel servers' dropped TCP packets are matched to the tag:ingress peers by address (IPv6 and IPv4), logged with a sample line and the ports; no repair; a warning (not a failure) once the outside probe is known to pass"
 scen policy-drop e2e-timeout
 pass 2
 [ "$(banner .ok)" = false ] || fail "L7 with a failing outside probe: no banner"
@@ -521,8 +532,16 @@ ok "policy: with the outside probe failing too: the banner names layer 7 (since 
 scen policy-other-drops
 pass
 is 7 ok
-said "2 other Drop line(s)"
+said "2 Drop line(s) in all"
 ok "policy: drops from sources that are not Funnel servers are not counted"
+scen policy-icmp-drops e2e-timeout
+pass 3
+is 7 ok
+said "3 Drop line(s) in all, 3 of them ICMPv4 ICMPv6 UDP from Funnel servers: pings and probes, not Funnel's requests"
+never_said "tailnet policy: fail"
+never_said "tailnet policy: warn"
+[ "$(alerts)" -le 1 ] && ! matches -F 'Funnel is blocked by the tailnet policy' "$FAKE_DIR/alerts" || fail "L7: ICMP/UDP drops from the Funnel servers raised the policy alert"
+ok "policy: ICMP and UDP drops from the Funnel servers (pings and probes; Funnel is TCP) are counted and shown, never a failure or a warning, even with the outside probe failing"
 
 # ---------------------------------------------------------------- 8. do the Funnel servers connect at all
 scen funnel-silent e2e-timeout
@@ -617,6 +636,21 @@ is loop fail
 [ "$(banner '.problems | map(.id) | join(",")')" = loop ] || fail "loop: the banner"
 said "fff-portal.service restarted 211 times in the last 15 min"
 ok "portal restarts: a count that climbs by 5 or more within 15 minutes is a crash loop (alert and banner; systemd keeps restarting it by itself)"
+scen units-down
+pass 2
+is units fail
+said "path Lunits VM units: fail: a critical unit is down in the VM and its own watchdog has not brought it back: down: fff-ops.socket=inactive"
+[ "$(banner '.problems | map(.id) | join(",")')" = units ] || fail "units: the banner: $(banner '.problems | map(.id) | join(",")')"
+alert_has "fff-vm: portal path: VM units fails"
+alert_has "journalctl -t fff-watchdog"
+scen units-down
+pass
+[ "$(alerts)" = 0 ] && [ "$(banner '.problems | length')" = 0 ] || fail "units: one failing pass must not alert or show a banner (the VM's watchdog needs a moment)"
+scen units-old-guest
+pass
+is units skip
+said "predates 'fffctl units'"
+ok "VM units: fffctl units --check down for two passes is a banner and an alert naming the unit; one pass is not; an old guest without the command is skipped"
 scen ntfy-down
 pass 4
 is ntfy fail
