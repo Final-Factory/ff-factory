@@ -385,7 +385,22 @@ path_l6() {
     pl_set 6 fail "sshd listens on 22 but tailscale0 does not accept 22 (accepted:${FW_PORTS:- none}): nobody can ssh in over the tailnet. Re-run the guest install"
     return 1
   fi
-  pl_set 6 ok "tailscale0 accepts only TCP${FW_PORTS:- none} (Funnel and serve are tailscaled's own and need no rule); processes reachable by address: [${kernel:-none}]"
+  # The counter of the rule that drops everything else from the tailnet (w698): install.sh's argument that Funnel never reaches
+  # the kernel is from tailscaled's source, not from a Funnel request through this chain. If the outside path fails and this
+  # counter grows, this firewall is dropping something that matters, and the evidence says so.
+  local drops prev delta="" note=""
+  drops=$(sed -nE 's/.*iifname "tailscale0" counter packets ([0-9]+) bytes [0-9]+ drop.*/\1/p' <<<"$rules" | head -n 1)
+  if [[ ${drops:-x} =~ ^[0-9]+$ ]]; then
+    prev=$(sget fw_drop_pkts "")
+    state_set fw_drop_pkts "$drops"
+    if [ -n "$prev" ] && [ "$drops" -ge "$prev" ]; then delta=$((drops - prev)); else delta=$drops; fi
+    if [ "$drops" -gt 0 ]; then note="; the rule that drops everything else from the tailnet has counted $drops packet(s), $delta since the last pass"; fi
+    if [ "$delta" -gt 0 ] && [ "$(sget L9_verdict none)" != ok ]; then
+      pl_set 6 warn "the VM's firewall dropped $delta packet(s) from the tailnet since the last pass while the outside probe does not pass$note. If they are Funnel's (sudo fff-vm ssh sudo nft list chain inet fff_guest input; sudo conntrack -L | grep -F ':59'), install.sh needs a rule for tailscaled's peer API port, which this layer's argument said it does not. Accepts only TCP${FW_PORTS:- none}"
+      return 0
+    fi
+  fi
+  pl_set 6 ok "tailscale0 accepts only TCP${FW_PORTS:- none} (Funnel and serve are tailscaled's own and need no rule); processes reachable by address: [${kernel:-none}]$note"
   return 0
 }
 

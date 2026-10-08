@@ -28,7 +28,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   on, or a stopped watchdog, is seen from outside. `fffctl status` no longer prints a bare "not joined" after the tailnet
   address: that was the `|| echo` fall-back of a failed pipe, now it reads Tailscale's backend state. `fff-vm watch` layer 7
   counts only dropped TCP from the Funnel servers (ICMP and UDP are pings, not Funnel), and calls them a warning while the outside
-  probe passes. Needs a portal deploy (`fffctl update`).
+  probe passes; layer 6 shows the counter of the firewall rule that drops the rest of the tailnet and warns when it grows while the outside probe fails (the narrow tailscale0 rules of w683 rest on a reading of tailscaled's source, not on a Funnel request through them). Needs a portal deploy (`fffctl update`).
 
 - **A standing agent's delegated request no longer tells its worker "do not merge it yourself"** (w694, Ben; the cases
   were w687, w688 and w689, the nightly regression sentry's auto-approved checks, whose green PRs #1252, #1254 and

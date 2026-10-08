@@ -470,6 +470,19 @@ said "Re-run the guest install to load the narrow rules"
 is 7 skip
 only_reads_firewall
 ok "firewall: the any-port rule w681 first shipped (TCP to the node's Tailscale addresses) is flagged as broader than ssh and 443, nothing changed at runtime"
+scen fw-drop-growing e2e-timeout
+pass
+is 6 warn
+said "the VM's firewall dropped 37 packet(s) from the tailnet since the last pass while the outside probe does not pass; the rule that drops everything else from the tailnet has counted 37 packet(s), 37 since the last pass"
+pass
+never_said "dropped 0 packet(s)"
+is 6 ok
+scen fw-drop-growing
+pass
+pass 2
+is 6 ok
+said "the rule that drops everything else from the tailnet has counted 37 packet(s), 0 since the last pass"
+ok "firewall: the counter of the rule that drops the rest of the tailnet is in the evidence; growing while the outside probe fails is a warning that names the cause to check, not while the outside probe passes"
 scen fw-temp
 pass
 is 6 fail
