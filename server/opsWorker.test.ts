@@ -51,6 +51,12 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     'fffctl status',
     'fffctl logs 300',
     'fffctl credential issue m5 --to m5',
+    // w676: the portal's machine ssh tool, through fff-ops-priv (which takes only --check, --key and --pin)
+    'fff-machine-ssh --check',
+    'fff-machine-ssh --key',
+    'fff-machine-ssh --pin ben-ryding@biscuit SHA256:NrEQJtYSu4zczf0cdPDevBiTfH8XTtiDdkoVIH9zZvQ',
+    'fffctl machine-ssh --check',
+    'fffctl machine-ssh-check',
     // allowed by the seatbelt: fff-ops-priv refuses it without the portal's deploy grant (ops_worker deploy)
     'fffctl update',
     'ls -la /srv/fff-ops/scratch && cat notes.md',

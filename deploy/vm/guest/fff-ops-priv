@@ -6,12 +6,20 @@
 #   fffctl status                      the portal, its release, health, Tailscale, backups (fffctl status)
 #   fffctl state                       what is set up, as JSON (fffctl state)
 #   fffctl logs [N]                    the portal's last N journal lines (default 200, at most 2000), secrets redacted
-#   fffctl machine-ssh-check           the portal's ssh to each machine (fff-machine-ssh --check: read only)
+#   fffctl machine-ssh --check         the portal's ssh to each machine, then its authorized_keys line (fff-machine-ssh
+#                                      --check, read only; machine-ssh-check is the same). Its PATH's fff-machine-ssh
+#                                      (ops-bin/fff-machine-ssh) comes here too, so `fff-machine-ssh --check` works (w676)
+#   fffctl machine-ssh --key           only the portal's authorized_keys line, from="<its tailnet IP>",... (public)
+#   fffctl machine-ssh --pin USER@HOST FINGERPRINT
+#                                      pin a new machine's host key in the portal's ssh (w676): only when the key HOST
+#                                      shows over the tailnet is FINGERPRINT, read on the machine itself, and nothing
+#                                      pins HOST yet. A changed key (machines.ssh), --fix and --data stay a person's.
 #   fffctl credential list             the machines that hold a credential
 #   fffctl credential issue ID --to TARGET
 #                                      a new /machine credential for machine ID, written straight into a file on TARGET
 #                                      over the portal's ssh (~/.ff-factory/machine-credential-ID there; on Windows under
 #                                      %USERPROFILE%). Never printed: only the remote path and its last four characters.
+#                                      ID must have a machine record (adding one is a person's: add_machine, w676), and
 #                                      TARGET must answer ssh first; issuing replaces the machine's credential, so its
 #                                      running daemon is dropped within 20 s.
 #   fffctl update                      the portal deploy (fffctl update --no-wait: build origin/main beside, drain,
@@ -41,6 +49,9 @@ redact() {
 }
 
 ssh_as_fff() { runuser -u "$FFF_USER" -- "$FFF_LIB/fff-ops-ssh" "$@"; }
+# fff-machine-ssh as the portal's account, with the installed machines.ssh (it refuses root). It reads and writes only
+# the portal account's ~/.ssh; it prints the public key line, never the private key.
+machine_ssh() { runuser -u "$FFF_USER" -- env HOME="$FFF_ROOT/home" "$FFF_LIB/fff-machine-ssh" "$@"; }
 
 credential_issue() {
   local id=$1 target=$2 tmp platform remote enc ps out
@@ -54,6 +65,10 @@ credential_issue() {
       platform=windows
       ;;
   esac
+  # A record (w676): the installer's credential check (GET /machine/whoami) and the daemon's link need one, and
+  # adding it is a person's. Without this, the credential would be issued for nothing.
+  jq -e --arg id "${id,,}" 'any((.machines // [])[]; .id == $id)' "$DATA/state.json" >/dev/null 2>&1 ||
+    refuse "the portal has no machine record '${id,,}': adding one is a person's. Ask your person to have the dispatcher run add_machine ${id,,} with worker_install (docs/ops-worker.md, \"A new machine\"); list_machines shows it once it is there"
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   "$FFFCTL" machine-credential issue "$id" --out "$tmp/cred" >"$tmp/issued" 2>&1 || refuse "fffctl machine-credential issue $id failed: $(redact <"$tmp/issued" | tail -n 3)"
@@ -80,7 +95,15 @@ case "${1:-help}" in
     if ! [[ $n =~ ^[0-9]{1,4}$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt 2000 ]; then refuse "logs [N]: N from 1 to 2000"; fi
     journalctl -u fff-portal.service -n "$n" --no-pager -o short-iso | redact
     ;;
-  machine-ssh-check) runuser -u "$FFF_USER" -- env HOME="$FFF_ROOT/home" "$FFF_LIB/fff-machine-ssh" --check ;;
+  machine-ssh-check) [ $# -eq 1 ] || refuse "machine-ssh-check takes nothing more"; machine_ssh --check ;;
+  machine-ssh)
+    # Only these, never --fix (machines.ssh's, at a deploy) or --data (a file of the worker's would be pinned).
+    case "${2:-}" in
+      --check | --key) [ $# -eq 2 ] || refuse "machine-ssh $2 takes nothing more"; machine_ssh "$2" ;;
+      --pin) [ $# -eq 4 ] || refuse "machine-ssh --pin USER@HOST FINGERPRINT (SHA256:..., read on the machine itself)"; machine_ssh --pin "$3" "$4" ;;
+      *) refuse "machine-ssh --check | --key | --pin USER@HOST FINGERPRINT (--fix and a changed key are a person's: machines.ssh and a deploy)" ;;
+    esac
+    ;;
   credential)
     case "${2:-}" in
       list) exec "$FFFCTL" machine-credential list ;;
@@ -108,6 +131,6 @@ case "${1:-help}" in
     "$FFFCTL" update --no-wait
     echo "asked for: the portal builds origin/$FFF_BRANCH beside the running release, drains, restarts on it, verifies it and rolls back by itself. Your process ends with the old portal; FF Factory messages you when the new one is up."
     ;;
-  help | -h | --help) sed -n '5,22p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) refuse "fffctl $1 is a person's (restarts, rollbacks, settings, the vault, migrations). You have: status, state, logs [N], machine-ssh-check, credential list, credential issue ID --to TARGET, and update with a deploy grant" ;;
+  help | -h | --help) awk 'NR > 5 && /^#$/ {exit} NR > 5' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) refuse "fffctl $1 is a person's (restarts, rollbacks, settings, the vault, migrations). You have: status, state, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, and update with a deploy grant" ;;
 esac

@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The orchestration worker can install a new worker machine** (w676, Lothsahn: "Make the op machine worker able to
+  run fff-machine-ssh", "And any other commands necessary to install a new worker"). Its PATH has `fff-machine-ssh`
+  (through `fff-ops-priv machine-ssh`, as the portal's account): `--check` now always ends with the portal's
+  authorized_keys line, `--key` prints that line alone, and the new `--pin USER@HOST FINGERPRINT` pins a new machine's
+  host key in the VM without a deploy, only when the fingerprint a person read on the machine equals the key the
+  tailnet shows and nothing pins that host yet (kept in `~/.ssh/fff-pins.ssh`; `--fix` and `--check` include it).
+  `--fix` and `--data` stay a person's. `fffctl credential issue` now refuses a machine with no record, and
+  `add_machine` takes `worker_install`: the record alone for a machine whose installer runs on it (any Linux PC, or a
+  new Mac or Windows PC), which until now had no way to get one. docs/ops-worker.md, "A new machine", is the checklist.
+  Live after a portal deploy (`fffctl update`); no guest re-install.
 - **Stopped, idle and finished workers give their sandbox back sooner** (w656, Lothsahn: "Yes. Do both", after every
   sandbox was held on 2026-10-07 while BEAST had 3 of 6 agents and LothDesktop 3 of 10). The w640 release now also
   covers: a worker whose daemon restarted under it, after **30 minutes** instead of a day (`HOLD_PLACE_MS`); a worker

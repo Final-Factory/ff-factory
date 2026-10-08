@@ -709,6 +709,43 @@ test('machine: add_machine on a worker root install changes its settings in plac
   assert.throws(() => mm.deployMachine({ id: 'mx', sandboxRoot: 'E:\\sb' }), /worker root install .*sandboxRoot come from its installer/);
 });
 
+test('machine: add_machine worker_install makes only the record a new machine installs against, never deploys it over ssh, and its first hello settles it (w676)', async (t) => {
+  const { store, mm, cleanup } = await setup();
+  t.after(cleanup);
+  (mm as unknown as { runDeploy: () => Promise<void> }).runDeploy = async () => assert.fail('a worker_install record is never deployed over ssh');
+  const portal = store.machines.get('mx')!.portalUrl;
+  // biscuit, Ben's Linux PC (2026-10-07): the record alone, with its ssh target, no credential minted.
+  const m = mm.deployMachine({ id: 'Biscuit', host: 'ben-ryding@biscuit', portalUrl: portal, workerInstall: true, purpose: 'Linux worker', maxUnity: 1 });
+  assert.deepEqual([m.id, m.name, m.host, m.status, m.purpose, m.maxUnity], ['biscuit', 'Biscuit', 'ben-ryding@biscuit', 'deploying', 'Linux worker', 1]);
+  assert.match(m.statusDetail ?? '', /waiting for its worker installer/);
+  assert.ok(m.awaitingInstall);
+  assert.equal(enrolledMachines(store.machines.get('mx')!.home).includes('biscuit'), false, 'no credential: it is issued into a file on the machine');
+  // Its folders are its installer's; an ssh machine is not turned into one; nor is the portal's own host.
+  assert.throws(() => mm.deployMachine({ id: 'nb2', workerInstall: true, portalUrl: portal, sandboxRoot: '/home/x/sb' }), /sandboxRoot come from its installer/);
+  assert.throws(() => mm.deployMachine({ id: 'mx', workerInstall: true }), /already has a record .*migrate/);
+  assert.throws(() => mm.deployMachine({ id: 'nb3', workerInstall: true, portalUrl: portal, local: true }), /portal's own host/);
+  // add_machine again on the waiting record (with or without worker_install) changes it in place, still no deploy.
+  assert.equal(mm.deployMachine({ id: 'biscuit', maxUnity: 2 }).maxUnity, 2);
+  assert.ok(store.machines.get('biscuit')!.awaitingInstall);
+  // The offline watch leaves it alone, also after the 30 minutes that redeploy an ssh machine.
+  const redeployed: string[] = [];
+  const deploy = mm.deployMachine.bind(mm);
+  mm.deployMachine = ((o: { id: string }) => (redeployed.push(o.id), store.machines.get(o.id)!)) as typeof mm.deployMachine;
+  await mm.watchOffline(Date.now(), async () => true);
+  await mm.watchOffline(Date.now() + 40 * 60_000, async () => true);
+  assert.equal(redeployed.includes('biscuit'), false);
+  mm.deployMachine = deploy;
+  // A portal restart does not take it for an interrupted deploy.
+  const cfg2 = { dataDir: store.machines.get('mx')!.home, limits: { maxSessions: 6 }, repo: { url: 'x' }, worker: { effort: 'high' } } as unknown as Config;
+  const again = new MachineManager(cfg2, store, new SessionManager(cfg2, store));
+  assert.equal(store.machines.get('biscuit')!.status, 'deploying');
+  void again;
+  // Its installer's daemon connects with the credential issued for it: ready, no longer waiting.
+  (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('biscuit', { type: 'hello', protocol: PROTOCOL_VERSION, home: '/home/ben-ryding', live: [], info: { platform: 'linux' } });
+  const b = store.machines.get('biscuit')!;
+  assert.deepEqual([b.status, b.awaitingInstall, b.platform], ['ready', undefined, 'linux']);
+});
+
 test('machine: agents cut off mid-turn by a forced redeploy or a daemon restart are resumed when the daemon is back; a stop is not', async (t) => {
   const { store, sessions, mm, daemon, cleanup } = await setup();
   t.after(cleanup);

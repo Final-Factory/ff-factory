@@ -1,47 +1,91 @@
 #!/usr/bin/env bash
 # fff-machine-ssh (w537): the portal's ssh to the machines it deploys daemons to (BEAST, LothDesktop, the m3, the m5),
-# as the portal's account (fff). The machines, their ssh users and their pinned host keys are in machines.ssh beside it.
+# as the portal's account (fff). The machines, their ssh users and their pinned host keys are in machines.ssh beside it,
+# plus the new machines pinned with --pin (w676), kept in the portal account's ~/.ssh/fff-pins.ssh.
 # Run by the guest install and by fffctl update when machines.ssh changes; the host's deploy/vm/host/machine-ssh.sh
-# streams it into a VM whose own copy is older.
+# streams it into a VM whose own copy is older. The orchestration worker runs --check, --key and --pin through its
+# fffctl (fff-ops-priv machine-ssh, docs/ops-worker.md).
 #
-#   fff-machine-ssh --check   read only: each machine's alias, its key in known_hosts, the key this VM sees over the
-#                             tailnet, and whether ssh gets in; exit 1 when anything is missing or refused
+#   fff-machine-ssh --check   read only: each machine's alias, its key in known_hosts (or known_hosts2, where the worker
+#                             installers' pins go), the key this VM sees over the tailnet, and whether ssh gets in; then
+#                             the portal's authorized_keys line. Exit 1 when anything is missing or refused
+#   fff-machine-ssh --key     only the portal's authorized_keys line (public: from="<this VM's tailnet IP>",... ssh-ed25519)
 #   fff-machine-ssh --fix     write the aliases (one managed block at the top of ~/.ssh/config) and the pinned keys
 #                             (~/.ssh/known_hosts, replacing that host's lines), then check. A machine whose key over the
 #                             tailnet differs from the pinned one is refused: nothing is written for it.
+#   fff-machine-ssh --pin USER@HOST FINGERPRINT
+#                             pin a new machine's ed25519 host key (w676): FINGERPRINT (SHA256:..., or the base64 key) is
+#                             the one read on the machine itself (ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub;
+#                             Windows: C:\ProgramData\ssh\ssh_host_ed25519_key.pub). It is pinned only when the key HOST
+#                             shows over the tailnet now is that one, and only for a host nothing pins yet: a pinned
+#                             host whose key changed is a person's (machines.ssh). Adds the alias HOST (user USER).
 #   --data FILE               the machines (default /usr/local/lib/fff/machines.ssh)
 #
 # Never accepts a key on first use, and prints no private key: only the portal's public key, in the line a machine adds
-# to its authorized_keys when ssh is refused.
+# to its authorized_keys.
 set -o errexit -o nounset -o pipefail
 DATA=/usr/local/lib/fff/machines.ssh
 MODE=check
+PIN_TARGET="" PIN_WANT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) MODE=check ;;
     --fix) MODE=fix ;;
+    --key) MODE=key ;;
+    --pin)
+      [ $# -ge 3 ] || { echo "fff-machine-ssh: --pin USER@HOST FINGERPRINT (SHA256:... read on the machine itself)" >&2; exit 2; }
+      MODE=pin PIN_TARGET=$2 PIN_WANT=$3
+      shift 2
+      ;;
     --data) DATA=$2; shift ;;
-    *) echo "fff-machine-ssh: unknown option $1 (--check, --fix, --data FILE)" >&2; exit 2 ;;
+    *) echo "fff-machine-ssh: unknown option $1 (--check, --key, --fix, --pin USER@HOST FINGERPRINT, --data FILE)" >&2; exit 2 ;;
   esac
   shift
 done
 [ "$(id -u)" != 0 ] || { echo "fff-machine-ssh: run it as the portal's account: sudo -H -u fff fff-machine-ssh --$MODE" >&2; exit 2; }
-[ -r "$DATA" ] || { echo "fff-machine-ssh: no $DATA" >&2; exit 2; }
 SSH_DIR=$HOME/.ssh
 CFG=$SSH_DIR/config
 KH=$SSH_DIR/known_hosts
+KH2=$SSH_DIR/known_hosts2
+PINS=$SSH_DIR/fff-pins.ssh
 BEGIN='# >>> fff machines (written by fff-machine-ssh from machines.ssh: change it there) >>>'
 END='# <<< fff machines <<<'
-# "alias host user key", one machine a line.
-machines=$(sed -e 's/#.*//' "$DATA" | awk 'NF >= 4 {print $1, $2, $3, $4}')
-[ -n "$machines" ] || { echo "fff-machine-ssh: no machines in $DATA" >&2; exit 2; }
+
+# The portal's authorized_keys line: its public key, only from this VM's tailnet address, nothing forwarded (the same
+# line GET /machine/ssh gives a worker installer, server/machineSsh.ts authorizedKeyLine).
+key_line() {
+  local ip
+  ip=$({ tailscale ip -4 2>/dev/null || true; } | head -n 1)
+  echo "from=\"${ip:-<the tailnet IP of this VM>}\",no-agent-forwarding,no-port-forwarding,no-X11-forwarding $(cat "$SSH_DIR/id_ed25519.pub" 2>/dev/null || echo '<no ~/.ssh/id_ed25519.pub>')"
+}
+if [ "$MODE" = key ]; then
+  [ -r "$SSH_DIR/id_ed25519.pub" ] || { echo "fff-machine-ssh: no $SSH_DIR/id_ed25519.pub (the guest install makes it)" >&2; exit 2; }
+  key_line
+  exit 0
+fi
+
+[ -r "$DATA" ] || { echo "fff-machine-ssh: no $DATA" >&2; exit 2; }
+# "alias host user key", one machine a line: machines.ssh's, then the pinned ones whose alias and host it has not.
+reviewed=$(sed -e 's/#.*//' "$DATA" | awk 'NF >= 4 {print $1, $2, $3, $4}')
+[ -n "$reviewed" ] || { echo "fff-machine-ssh: no machines in $DATA" >&2; exit 2; }
+all_machines() {
+  printf '%s\n' "$reviewed"
+  [ -r "$PINS" ] || return 0
+  sed -e 's/#.*//' "$PINS" | awk 'NF >= 4 {print $1, $2, $3, $4}' | awk -v seen="$(awk '{printf "%s %s ", tolower($1), tolower($2)}' <<<"$reviewed")" '
+    BEGIN { n = split(seen, s, " "); for (i = 1; i <= n; i++) have[s[i]] = 1 }
+    !(tolower($1) in have) && !(tolower($2) in have) { print }'
+}
+machines=$(all_machines)
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 fp() { printf 'x ssh-ed25519 %s\n' "$1" | ssh-keygen -l -f - 2>/dev/null | awk '{print $2}'; }
 # The ed25519 key HOST shows over the network now (nothing when it does not answer).
 seen_key() { { ssh-keyscan -T 10 -t ed25519 "$1" 2>/dev/null || true; } | awk '$2 == "ssh-ed25519" {print $3; exit}'; }
-# The ed25519 keys known_hosts holds for HOST (hashed lines included).
-known_keys() { { ssh-keygen -F "$1" -f "$KH" 2>/dev/null || true; } | awk '$1 !~ /^#/ && $2 == "ssh-ed25519" {print $3}'; }
+# The ed25519 keys known_hosts and known_hosts2 hold for HOST (hashed lines included).
+known_keys() {
+  local f
+  for f in "$KH" "$KH2"; do { ssh-keygen -F "$1" -f "$f" 2>/dev/null || true; } | awk '$1 !~ /^#/ && $2 == "ssh-ed25519" {print $3}'; done
+}
 
 block() {
   local alias host user key
@@ -51,11 +95,24 @@ block() {
   echo "$END"
 }
 
-fix() {
-  local alias host user key h seen tmp
+# The managed block first in ~/.ssh/config: ssh takes the first value it finds for each setting.
+write_block() {
+  local tmp
+  tmp=$(mktemp "$SSH_DIR/.config.XXXXXX")
+  { block; awk -v b="$BEGIN" -v e="$END" '$0 == b {skip = 1} !skip {print} $0 == e {skip = 0}' "$CFG"; } >"$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CFG"
+}
+
+prepare() {
   install -d -m 0700 "$SSH_DIR"
   touch "$CFG" "$KH"
   chmod 600 "$CFG" "$KH"
+}
+
+fix() {
+  local alias host user key h seen
+  prepare
   while read -r alias host user key <&3; do
     h=$(lower "$host")
     seen=$(seen_key "$h")
@@ -70,16 +127,53 @@ fix() {
     fi
   done 3<<<"$machines"
   rm -f "$KH.old"
-  # The managed block first: ssh takes the first value it finds for each setting.
-  tmp=$(mktemp "$SSH_DIR/.config.XXXXXX")
-  { block; awk -v b="$BEGIN" -v e="$END" '$0 == b {skip = 1} !skip {print} $0 == e {skip = 0}' "$CFG"; } >"$tmp"
-  chmod 600 "$tmp"
-  mv "$tmp" "$CFG"
+  write_block
   echo "aliases written: $(awk '{print $1}' <<<"$machines" | paste -sd' ' -) ($CFG)"
 }
 
+# A new machine's host key (w676): what the person read on the machine, equal to what the tailnet shows, for a host
+# nothing pins yet. Refusals change nothing.
+pin() {
+  local user host h want seen known
+  [[ $PIN_TARGET =~ ^([A-Za-z0-9._][A-Za-z0-9._-]{0,63})@([A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)$ ]] ||
+    { echo "fff-machine-ssh: --pin USER@HOST: '${PIN_TARGET:0:80}' is not one (HOST: the machine's tailnet name, e.g. ben-ryding@biscuit)" >&2; return 2; }
+  user=${BASH_REMATCH[1]} host=${BASH_REMATCH[2]}
+  h=$(lower "$host")
+  want=$PIN_WANT
+  if [[ $want =~ ^AAAAC3NzaC1lZDI1NTE5[A-Za-z0-9+/]{40,}={0,2}$ ]]; then want=$(fp "$want"); fi
+  [[ $want =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] ||
+    { echo "fff-machine-ssh: --pin: '${PIN_WANT:0:80}' is not an ed25519 fingerprint (SHA256: and 43 characters, as ssh-keygen -l prints it) or key" >&2; return 2; }
+  if awk -v h="$h" 'tolower($1) == h || tolower($2) == h {found = 1} END {exit !found}' <<<"$machines"; then
+    echo "$h: REFUSED: already pinned ($(awk -v h="$h" 'tolower($1) == h || tolower($2) == h {print $1; exit}' <<<"$machines")). A changed key is a person's: check it on the machine and change machines.ssh" >&2
+    return 1
+  fi
+  known=$(known_keys "$h")
+  if [ -n "$known" ]; then
+    echo "$h: REFUSED: known_hosts or known_hosts2 already holds $(fp "$(head -n 1 <<<"$known")") for it (its worker installer registered it, or a person pinned it). A changed key is a person's" >&2
+    return 1
+  fi
+  seen=$(seen_key "$h")
+  if [ -z "$seen" ]; then
+    echo "$h: REFUSED: no answer on port 22 over the tailnet (is sshd on, and does the tailnet policy let the portal reach it?); nothing pinned" >&2
+    return 1
+  fi
+  if [ "$(fp "$seen")" != "$want" ]; then
+    echo "$h: REFUSED: it shows $(fp "$seen") over the tailnet, not $want read on the machine; nothing pinned. Read it again on the machine itself; if they still differ, tell a person" >&2
+    return 1
+  fi
+  prepare
+  touch "$PINS"
+  chmod 600 "$PINS"
+  printf '%s %s %s %s  # pinned with --pin %s\n' "$h" "$h" "$user" "$seen" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$PINS"
+  printf '%s ssh-ed25519 %s\n' "$h" "$seen" >>"$KH"
+  machines=$(all_machines)
+  write_block
+  machines=$(awk -v h="$h" '$1 == h' <<<"$machines")
+  echo "$h: pinned $want for $h, user $user (the same over the tailnet and on the machine); alias $h written"
+}
+
 check() {
-  local alias host user key h want got known seen out line ip bad=0 refused=0
+  local alias host user key h want got known seen out line bad=0 refused=0
   while read -r alias host user key <&3; do
     h=$(lower "$host")
     want="$user@$h"
@@ -99,12 +193,16 @@ check() {
     echo "$line"
   done 3<<<"$machines"
   if [ "$refused" = 1 ]; then
-    ip=$({ tailscale ip -4 2>/dev/null || true; } | head -n 1)
     printf '%s\n' "A machine that says Permission denied adds this line to the ssh user's ~/.ssh/authorized_keys (a Windows admin account: C:\\ProgramData\\ssh\\administrators_authorized_keys):"
-    echo "from=\"${ip:-<the tailnet IP of this VM>}\",no-agent-forwarding,no-port-forwarding,no-X11-forwarding $(cat "$SSH_DIR/id_ed25519.pub" 2>/dev/null || echo '<no ~/.ssh/id_ed25519.pub>')"
+  else
+    printf '%s\n' "The portal's key, for a new machine's ~/.ssh/authorized_keys (a Windows admin account: C:\\ProgramData\\ssh\\administrators_authorized_keys):"
   fi
+  key_line
   return "$bad"
 }
 
-if [ "$MODE" = fix ]; then fix; fi
+case "$MODE" in
+  fix) fix ;;
+  pin) pin || exit $? ;;
+esac
 check

@@ -335,7 +335,7 @@ export class MachineManager {
     // A deploy runs in this process: one still marked at boot was cut short by a restart. Left 'deploying', the
     // offline watch (redeployDue) would never redeploy it; its daemon's hello clears the error if it did start.
     for (const m of store.machines.values()) {
-      if (m.status !== 'deploying') continue;
+      if (m.status !== 'deploying' || m.awaitingInstall) continue; // a worker_install record waits for its installer, w676
       Object.assign(m, { status: 'error', statusDetail: `a portal restart interrupted its deploy${m.statusDetail ? ` (at: ${m.statusDetail})` : ''}` });
       store.putMachine(m);
     }
@@ -604,6 +604,7 @@ export class MachineManager {
       if (m.daemonStopped) continue; // stopped on purpose (machine_daemon stop): it stays down until started
       if (m.relocatedTo) continue; // sent to another portal (relocate): a redeploy from here would pull it back
       if (m.root) continue; // a worker root install (w513) is started and updated on its computer, never over ssh
+      if (m.awaitingInstall) continue; // a record waiting for its worker installer (add_machine worker_install, w676)
       const why = redeployDue({ status: m.status, deploying: this.deploying.has(m.id), liveAgents: this.liveCount(m.id) }, now - this.offlineSince.get(m.id)!, now - (this.lastAutoDeploy.get(m.id) ?? 0));
       if (!why) continue;
       // The portal's own host needs no ssh: it is always there when this code runs.
@@ -1023,7 +1024,7 @@ export class MachineManager {
    * Add a machine, or redeploy one (same id): mint a token, install the daemon over ssh and wait for
    * it to connect. Returns at once; progress shows on the record (status/statusDetail).
    */
-  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; purpose?: string; force?: boolean; local?: boolean } & MachineDirs & SandboxLimits & PoolExtras) {
+  deployMachine(opts: { id: string; host?: string; portalUrl?: string; repoPath?: string; purpose?: string; force?: boolean; local?: boolean; workerInstall?: boolean } & MachineDirs & SandboxLimits & PoolExtras) {
     const typed = opts.id.trim();
     const id = typed.toLowerCase();
     refuseInDryRun(`deploying ${id}`);
@@ -1033,6 +1034,7 @@ export class MachineManager {
     // A worker root install (w513) is installed and updated on its computer, never over ssh: add_machine changes only
     // its settings (w576: "lower LothDesktop to 5"; a redeploy would have put an old-style daemon into its root).
     if (prev?.root) return this.setRootSettings(prev, opts);
+    if (opts.workerInstall || prev?.awaitingInstall) return this.addInstallRecord(typed, prev, opts);
     const local = opts.local ?? prev?.local ?? false;
     if (prev && !!prev.local !== local) throw new Error(`${id} is ${prev.local ? "the portal's own host" : 'a machine reached over ssh'}; remove it first to change that`);
     if (local) {
@@ -1112,6 +1114,47 @@ export class MachineManager {
     });
     this.store.putMachine(m);
     this.links.get(m.id)?.ws.send(JSON.stringify(this.welcomeOf(m) satisfies ToDaemon));
+    return m;
+  }
+
+  /**
+   * add_machine with worker_install (w676): the record alone, for a machine whose worker installer runs on the machine
+   * itself (scripts/worker, docs/worker-install.md), a Linux PC or any new machine. No ssh deploy and no credential:
+   * the credential is issued into a file on the machine (fffctl credential issue, the orchestration worker's or a
+   * person's), and the installer's check (GET /machine/whoami) and the daemon's link need this record. Its folders,
+   * host keys and sandbox count come from the installer's hello (adoptLayout). Until then it waits: never redeployed
+   * over ssh. Again on a record still waiting: its label, host and limits change.
+   */
+  private addInstallRecord(typed: string, prev: Machine | undefined, opts: Parameters<MachineManager['deployMachine']>[0]): Machine {
+    const id = typed.toLowerCase();
+    if (prev && !prev.awaitingInstall) {
+      throw new Error(`${id} already has a record (a daemon deployed over ssh): move it into a worker root with its installer's migrate (docs/worker-install.md, "Migrating"), not worker_install`);
+    }
+    if (opts.local) throw new Error("worker_install is for another computer: the portal's own host is added with local");
+    const fixed = (['repoPath', 'appDir', 'unityEditorRoot', 'unityPath', 'tempDir', 'sandboxRoot'] as const).filter((k) => opts[k] !== undefined);
+    if (fixed.length) throw new Error(`worker_install: its ${fixed.join(', ')} come from its installer (--root, docs/worker-install.md), not from add_machine`);
+    const portalUrl = (opts.portalUrl ?? prev?.portalUrl ?? this.cfg.publicUrl ?? '').replace(/\/+$/, '');
+    if (!/^https?:\/\/[^/\s]+$/.test(portalUrl)) throw new Error('portal_url is required: the address the machine reaches this portal at, e.g. https://<host>.<tailnet>.ts.net (or set publicUrl in config.json)');
+    const m: Machine = {
+      ...(prev ?? { online: false, sessionIds: [], createdAt: new Date().toISOString() }),
+      id,
+      host: opts.host?.trim() || prev?.host || id,
+      purpose: opts.purpose !== undefined ? normalizePurpose(opts.purpose) : (prev?.purpose ?? 'unused'),
+      status: 'deploying',
+      statusDetail: `waiting for its worker installer to run on ${opts.host?.trim() || prev?.host || id} (docs/worker-install.md): no daemon yet`,
+      repoPath: prev?.repoPath ?? '',
+      home: prev?.home ?? '',
+      portalUrl,
+      awaitingInstall: prev?.awaitingInstall ?? new Date().toISOString(),
+      ...(typed !== id ? { name: typed } : {}),
+      ...limitOptions(opts, prev),
+      ...(opts.protectedPaths !== undefined ? { protectedPaths: opts.protectedPaths } : {}),
+      ...(opts.librarySeed !== undefined ? { librarySeed: opts.librarySeed === '' ? undefined : opts.librarySeed } : {}),
+      ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
+      ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
+    };
+    m.online = this.isOnline(id);
+    this.store.putMachine(m);
     return m;
   }
 
@@ -1561,7 +1604,7 @@ export class MachineManager {
         else if (/^(daemon (speaks|outdated)|update available)/.test(m.statusDetail ?? '')) m.statusDetail = undefined;
         // Only a platform this portal knows: a newer daemon's unknown one keeps the record's.
         const platform = msg.info?.platform && ['darwin', 'win32', 'linux'].includes(msg.info.platform) ? msg.info.platform : m.platform;
-        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform, daemonStopped: undefined, relocatedTo: undefined });
+        Object.assign(m, { info: msg.info, home: msg.home || m.home, platform, daemonStopped: undefined, relocatedTo: undefined, awaitingInstall: undefined });
         // A worker root install (w513): its folders; a pool folder that changed goes back to it at once.
         const repool = msg.layout ? adoptLayout(m, msg.layout) : leaveRoot(m);
         this.store.putMachine(m);

@@ -7,7 +7,9 @@
 # had trusted for weeks of deploys, beast against its own sshd over loopback, each equal to a fresh ssh-keyscan over the
 # tailnet. A machine reinstalled (a new host key) or a new machine: put its key here (ssh-keyscan -t ed25519 <host>,
 # checked on the machine itself with ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub), then fffctl update, or
-# deploy/vm/host/machine-ssh.sh --fix on the host.
+# deploy/vm/host/machine-ssh.sh --fix on the host. A new machine can also be pinned in the VM without a deploy, by the
+# orchestration worker or a person: fff-machine-ssh --pin USER@HOST FINGERPRINT (w676), which keeps it in the portal
+# account's ~/.ssh/fff-pins.ssh. A changed key always comes here.
 #
 # alias    host      user       ed25519 host key                                                     fingerprint
 m3         m3        benryding  AAAAC3NzaC1lZDI1NTE5AAAAIJPzhFYZX4GtbGkBP2Fl8RqwkZaXjQ9fUWN9P+p+/OX3  # SHA256:dNKSZKv7qWFocpDj+Fe2B2XbsPgdqDdbZ7m1dtk6H9c

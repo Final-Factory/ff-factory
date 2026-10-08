@@ -416,8 +416,49 @@ for f in unpinned.txt x.txt proxy.txt stolen; do
   if g "sudo test -e ~ffci-scp/$f"; then fail "a refused copy reached the machine: $f"; fi
 done
 echo "ok: the worker's scp refuses an unpinned host, a host outside its fences, an ssh option and the portal's secrets"
+# w676: a credential for a machine that answers ssh but has no record in the portal is not issued (adding one is a
+# person's: add_machine worker_install).
+out=$(probe '/usr/bin/sudo -n /usr/local/lib/fff/fff-ops-priv credential issue ci-norecord --to ci-scp' 2>&1 || true)
+echo "MEASURE credential issue without a record: $out"
+printf '%s' "$out" | matches "no machine record 'ci-norecord'" || fail "credential issue for a machine with no record: $out"
+if g 'sudo fffctl machine-credential list' | matches -x 'ci-norecord'; then fail "a credential was issued for a machine with no record"; fi
+echo "ok: the worker's credential issue needs the machine's record"
 g 'sudo kill "$(cat /run/ci-scp-sshd.pid)"; sudo sed -i "/^# w612-ci-begin/,/^# w612-ci-end/d" /srv/fff/home/.ssh/config; sudo -u fff ssh-keygen -R "[127.0.0.1]:2222" -f /srv/fff/home/.ssh/known_hosts >/dev/null 2>&1; sudo rm -f /srv/fff/home/.ssh/known_hosts.old /etc/ssh/ci-scp.conf /srv/fff-ops/scratch/up.txt /srv/fff-ops/scratch/down.txt /srv/fff-ops/scratch/batch /srv/fff-ops/scratch/sftp-down.txt; sudo userdel -r ffci-scp 2>/dev/null; true'
 rm -f /tmp/fff-ops-scp-setup.sh
+# w676: the worker's fff-machine-ssh, inside its fences, through fff-ops-priv as the portal's account: --check and --key
+# print the portal's public key line and never its private key; --pin pins the guest's own sshd (port 22 on localhost,
+# standing in for a new machine) only with the fingerprint read from the machine's key file, and --fix and --data are
+# refused.
+mssh=/usr/local/lib/fff/ops-bin/fff-machine-ssh
+out=$(probe "$mssh --check" 2>&1 || true)
+echo "$out" | tail -n 3
+printf '%s' "$out" | matches -F 'no-agent-forwarding,no-port-forwarding,no-X11-forwarding ssh-ed25519 ' || fail "the worker's fff-machine-ssh --check printed no key line: $out"
+printf '%s' "$out" | matches '^m5: alias ok; known_hosts: pinned' || fail "the worker's fff-machine-ssh --check does not list the machines: $out"
+key=$(probe "$mssh --key" 2>&1 || true)
+[ "$key" = "$(printf '%s' "$out" | tail -n 1)" ] || fail "--key is not --check's key line: $key"
+pub=$(g 'sudo cat /srv/fff/home/.ssh/id_ed25519.pub' | tr -d '\r' | awk '$1 == "ssh-ed25519" {print $2; exit}')
+echo "MEASURE the portal's public key: ${pub:0:30}...; --key: ${key:0:160}"
+[ -n "$pub" ] || fail "no public key in /srv/fff/home/.ssh/id_ed25519.pub"
+printf '%s' "$key" | matches -F " ssh-ed25519 $pub" || fail "--key is not the portal's public key ($pub): $key"
+secret=$(g 'sudo sed -n 2p /srv/fff/home/.ssh/id_ed25519' | tr -d '\r' | cut -c1-24)
+[ ${#secret} = 24 ] || fail "no private key line to look for"
+if printf '%s\n%s' "$out" "$key" | matches -F -e 'PRIVATE KEY' -e "$secret"; then fail "fff-machine-ssh printed the private key"; fi
+for bad in '--fix' '--data /srv/fff-ops/scratch/m.ssh --check' '--pin x@localhost'; do
+  if out=$(probe "$mssh $bad" 2>&1); then fail "the worker's fff-machine-ssh $bad worked"; fi
+  printf '%s' "$out" | matches -F 'fffctl (orchestration worker)' || fail "fff-machine-ssh $bad was not refused by fff-ops-priv: $out"
+done
+fpr=$(g 'ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub' | tr -d '\r' | awk '{print $2}')
+if out=$(probe "$mssh --pin ffci-new@localhost SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" 2>&1); then fail "--pin took a wrong fingerprint"; fi
+printf '%s' "$out" | matches 'REFUSED: it shows' || fail "--pin of a wrong fingerprint was not refused for it: $out"
+out=$(probe "$mssh --pin ffci-new@localhost $fpr" 2>&1 || true)
+echo "MEASURE --pin of the guest's own sshd: $out"
+printf '%s' "$out" | matches -F "localhost: pinned $fpr for localhost, user ffci-new" || fail "--pin did not pin the guest's own sshd: $out"
+g 'sudo -u fff ssh-keygen -F localhost -f /srv/fff/home/.ssh/known_hosts' | matches 'ssh-ed25519' || fail "--pin wrote no known_hosts line"
+[ "$(g 'sudo stat -c "%a %U" /srv/fff/home/.ssh/fff-pins.ssh')" = "600 fff" ] || fail "the pins file is not 0600 fff"
+if probe "$mssh --pin ffci-new@localhost $fpr" >/dev/null 2>&1; then fail "--pin pinned the same host twice"; fi
+g 'sudo journalctl -t fff-ops-priv --no-pager -n 50' | matches 'fffctl machine-ssh --pin ffci-new@localhost' || fail "the pin is not in the journal (fff-ops-priv)"
+g 'sudo rm -f /srv/fff/home/.ssh/fff-pins.ssh; sudo -u fff ssh-keygen -R localhost -f /srv/fff/home/.ssh/known_hosts >/dev/null 2>&1; sudo rm -f /srv/fff/home/.ssh/known_hosts.old; sudo -H -u fff /usr/local/lib/fff/fff-machine-ssh --fix >/dev/null 2>&1; true'
+echo "ok: the worker's fff-machine-ssh: --check and --key give the portal's public key line, --pin pins a new machine's key only with its own fingerprint, --fix and --data are refused"
 echo "ok: the orchestration worker: its own account, a 2 GiB noexec scratch that fills up alone, a socket only the portal opens, two sudo rights, and Claude Code through the launcher"
 
 step "update: build beside the running portal, drain, switch, verify"

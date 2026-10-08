@@ -7,7 +7,8 @@
 #   fff-ops-ssh:    a machine or user@host only; no ssh option passes through; its own options are fixed.
 #   scp and sftp:   real copies both ways (w612) through fff-ops-scp-ssh and fff-ops-ssh to a fake machine that runs a
 #                   real sftp-server; ssh options, another port and a command that is not a copy are refused.
-#   fff-ops-priv:   anything but its subcommands is refused before it does anything.
+#   fff-ops-priv:   anything but its subcommands is refused before it does anything; machine-ssh passes only --check,
+#                   --key and --pin (w676), and a credential needs the machine's record (as root only).
 set -o errexit -o nounset -o pipefail
 cd "$(dirname "$0")/../../.."
 G=deploy/vm/guest
@@ -149,3 +150,40 @@ done
 matches -F 'grant=$DATA/ops-deploy.grant' $G/fff-ops-priv || fail "priv: update does not need the portal's deploy grant"
 matches -F '"$FFFCTL" update --no-wait' $G/fff-ops-priv || fail "priv: update is not the plain fffctl update"
 echo "ok: fff-ops-priv has no restart, rollback, configure, vault, migrate, backup or token subcommand, and update needs a grant"
+
+# ---- fff-ops-priv machine-ssh and the credential's record check (w676), for real, as root (CI's lint runs as root):
+# a lib folder of fakes (lib.sh, fff-machine-ssh, fff-ops-ssh) and the portal's account taken as root.
+if [ "$(id -u)" -ne 0 ]; then
+  [ -z "${CI:-}" ] || fail "priv: CI runs this as root (sudo lint.sh)"
+  echo "SKIP: fff-ops-priv machine-ssh (needs root)"
+else
+  plib=$tmp/plib
+  mkdir -p "$plib" "$tmp/fffroot/data"
+  printf 'load_conf() { FFF_USER=root FFF_ROOT=%s DATA=%s/data; }\n' "$tmp/fffroot" "$tmp/fffroot" >"$plib/lib.sh"
+  printf '#!/bin/sh\nprintf "MSSH HOME=%%s:" "$HOME"; printf " [%%s]" "$@"; echo\n' >"$plib/fff-machine-ssh"
+  printf '#!/bin/sh\necho Linux\n' >"$plib/fff-ops-ssh"
+  chmod +x "$plib/fff-machine-ssh" "$plib/fff-ops-ssh"
+  priv() { FFF_LIB=$plib bash $G/fff-ops-priv "$@" 2>&1; }
+  [ "$(priv machine-ssh --check)" = "MSSH HOME=$tmp/fffroot/home: [--check]" ] || fail "priv: machine-ssh --check: $(priv machine-ssh --check)"
+  [ "$(priv machine-ssh-check)" = "MSSH HOME=$tmp/fffroot/home: [--check]" ] || fail "priv: machine-ssh-check is not --check"
+  [ "$(priv machine-ssh --key)" = "MSSH HOME=$tmp/fffroot/home: [--key]" ] || fail "priv: machine-ssh --key"
+  out=$(priv machine-ssh --pin ben-ryding@biscuit SHA256:NrEQJtYSu4zczf0cdPDevBiTfH8XTtiDdkoVIH9zZvQ)
+  [ "$out" = "MSSH HOME=$tmp/fffroot/home: [--pin] [ben-ryding@biscuit] [SHA256:NrEQJtYSu4zczf0cdPDevBiTfH8XTtiDdkoVIH9zZvQ]" ] || fail "priv: machine-ssh --pin: $out"
+  # The person's: --fix (machines.ssh's, at a deploy), --data (a file of the worker's would be pinned), anything else.
+  for bad in 'machine-ssh --fix' 'machine-ssh --data /srv/fff-ops/scratch/m.ssh --check' 'machine-ssh --check --data /tmp/x' 'machine-ssh' \
+    'machine-ssh --pin ben@biscuit' 'machine-ssh --pin ben@biscuit SHA256:x --data /tmp/x' 'machine-ssh-check --fix'; do
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(priv $bad || true)
+    if printf '%s' "$out" | matches MSSH; then fail "priv: '$bad' reached fff-machine-ssh: $out"; fi
+  done
+  # credential issue: refused for a machine the portal has no record of, after ssh reached it and before anything is
+  # issued (the person's add_machine worker_install comes first); with the record it goes on to issue (fffctl, absent here).
+  echo '{"machines": [{"id": "m5"}]}' >"$tmp/fffroot/data/state.json"
+  out=$(priv credential issue Biscuit --to ben-ryding@biscuit || true)
+  printf '%s' "$out" | matches -F "the portal has no machine record 'biscuit'" || fail "priv: a credential for a machine with no record: $out"
+  echo '{"machines": [{"id": "m5"}, {"id": "biscuit"}]}' >"$tmp/fffroot/data/state.json"
+  out=$(priv credential issue Biscuit --to ben-ryding@biscuit || true)
+  if printf '%s' "$out" | matches 'no machine record'; then fail "priv: a machine with a record was refused: $out"; fi
+  printf '%s' "$out" | matches 'machine-credential issue Biscuit failed' || fail "priv: with its record, the issue did not go on: $out"
+  echo "ok: fff-ops-priv machine-ssh runs --check, --key and --pin as the portal's account, refuses --fix and --data, and a credential needs a record"
+fi

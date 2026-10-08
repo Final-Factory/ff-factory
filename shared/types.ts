@@ -465,6 +465,11 @@ export interface Machine {
    * clone, sandboxes, player slots, nightly lab and temp. Reported in the daemon's hello; a redeploy keeps it.
    */
   root?: string;
+  /**
+   * When add_machine worker_install made this record (w676): a new machine waiting for its worker installer, which
+   * runs on the machine itself. Never deployed over ssh while set; its daemon's first hello clears it.
+   */
+  awaitingInstall?: string;
   /** Its folders before it moved into a root (w513 migration), restored if its daemon comes back without one (a rollback). */
   preRoot?: { appDir?: string; repoPath: string; tempDir?: string; sandboxRoot?: string; librarySeed?: string };
   /** The daemon's folder (code, logs, agents, daemon.json) when not the default <home>/.ff-factory (add_machine app_dir). */
