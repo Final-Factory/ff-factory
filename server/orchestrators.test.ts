@@ -4,12 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
-import { SessionManager, setQueryForTesting } from './sessions.ts';
+import { promptText, SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager, STANDING_CAP_NO_POOL, agentCap } from './machines.ts';
 import { Agents } from './agents.ts';
 import { Identity } from './identity.ts';
 import { PERSONAL_TOOLS, beltFor } from './belts.ts';
-import { DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
+import { crossOwnerLine, DispatcherChatRefused, DISPATCHER_CHAT_REFUSED, FILINGS_PER_MESSAGE, loopGuards, FOLLOW_UPS_PER_MESSAGE, MESSAGES_PER_PERSON, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS } from './orchestrators.ts';
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { requestAsFiled } from './work.ts';
@@ -274,7 +274,7 @@ test("follow-ups: a person's orchestrator messages only its person's own workers
   const loth = chat(LOTH).info;
   const ben = chat(BEN).info;
   const v = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Look at the inventory UI', title: 'Inventory look', from: 'human', requestedBy: LOTH });
-  assert.equal((await call(ben, 'message_agent', { session_id: v.info.id, text: 'hi' })).text, `ERROR: ${v.info.id} "Inventory look" is Lothsahn's work: follow up only on Ben's own workers; for anything else, request_work`);
+  assert.equal((await call(ben, 'message_agent', { session_id: v.info.id, text: 'hi' })).text, `ERROR: ${v.info.id} "Inventory look" is Lothsahn's work: follow up only on Ben's own workers and other owners' workers; for anything else, request_work`);
   const sent = await call(loth, 'message_agent', { session_id: v.info.id, text: 'Also check the tooltips' });
   assert.equal(sent.text, 'Sent, for Lothsahn.');
   // The turn the follow-up started is reported back to Lothsahn only (the first turn too, when it was still running).
@@ -323,9 +323,144 @@ test("w431: a worker another person started, linked to Ben's request, takes Ben'
   o.personWrote(ben.id);
   w.updatedAt = new Date(Date.now() - 8 * 86_400_000).toISOString();
   store.putWork(w);
-  assert.match((await call(ben, 'message_agent', { session_id: v.info.id, text: 'late' })).text, /is Lothsahn's work: follow up only on Ben's own workers/);
+  assert.match((await call(ben, 'message_agent', { session_id: v.info.id, text: 'late' })).text, /is Lothsahn's work: follow up only on Ben's own workers and other owners' workers/);
   // A worker with no request of Ben's on it: refused, as before.
-  assert.match((await call(ben, 'message_agent', { session_id: other.info.id, text: 'hi' })).text, /^ERROR: \w+ "Unlinked" is Lothsahn's work: follow up only on Ben's own workers; for anything else, request_work$/);
+  assert.match((await call(ben, 'message_agent', { session_id: other.info.id, text: 'hi' })).text, /^ERROR: \w+ "Unlinked" is Lothsahn's work: follow up only on Ben's own workers and other owners' workers; for anything else, request_work$/);
+});
+
+// ---------------------------------------------------------------- w677: owners work across each other's requests
+
+const OWNERS: UserInfo[] = [{ ...BEN, role: 'owner' }, { ...LOTH, role: 'owner' }, { ...CARA, role: 'member' }];
+type UserEv = Extract<TranscriptEvent, { kind: 'user' }>;
+
+test("w677: an owner follows up on another owner's worker: the worker reads who and whose, its owner is told, it keeps its requester", async (t) => {
+  const { store, sessions, o, agents, dispatcher, chat, call, heard } = await setupOnMachine(t, { people: OWNERS });
+  const ben = chat(BEN).info;
+  const loth = chat(LOTH).info;
+  await call(ben, 'request_work', { title: 'Mac GPU page fault', brief: 'The Mac player crashes with a GPU page fault.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Find the page fault', title: 'GPU page fault', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const v = sessions.get(id);
+  assert.deepEqual(v.info.requestedBy, BEN);
+  const said = () => store.readTranscript(id).filter((e): e is UserEv => e.kind === 'user');
+  await until('the brief went', () => said().length === 1);
+  // Lothsahn's orchestrator, in a turn it did not get from him (a relayed report): an owner's follow-up on Ben's worker goes through.
+  chat(LOTH).lastFrom = 'system';
+  const r = await call(loth, 'message_agent', { session_id: id, text: 'Measured on the M3: the fault is in the Metal shader cache.\nDetails below.' });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(r.text, "Sent, for Lothsahn. It is Ben's work: Ben's orchestrator is told, and the worker stays theirs.");
+  await until('the follow-up reached the worker', () => said().length === 2);
+  const m = said()[1];
+  // The sender line names Lothsahn; under it, the request it is about and whose it stays.
+  assert.equal(promptText('worker', m.text, m.from, m.requestedBy).split('\n').slice(0, 2).join('\n'), '[from the orchestrator, for Lothsahn]\n[about w1 "Mac GPU page fault"]');
+  assert.equal(m.text.split('\n')[1], crossOwnerLine(LOTH, [BEN]));
+  assert.match(m.text, /^\[about w1 "Mac GPU page fault"\]\n\[Lothsahn, an owner, writes about Ben's work: it stays Ben's\. .*new scope from Lothsahn is not yours to start: say in your report that it needs a request of its own \(request_work\)\.\]\nMeasured on the M3/);
+  // Ben's orchestrator hears it, in a line naming the sender, the worker, the request and the first line.
+  await until('Ben is told', () => heard(ben.id, '[from another owner]').length === 1);
+  const told = heard(ben.id, '[from another owner]')[0].text;
+  assert.ok(told.startsWith(`[from another owner] Lothsahn messaged your worker ${id} "${v.info.title}" on w1: Measured on the M3: the fault is in the Metal shader cache.\n`), told);
+  assert.match(told, /The worker stays Ben's: it keeps the request, its requester and its account/);
+  assert.equal(heard(loth.id, '[from another owner]').length, 0, 'the sender is not told about their own message');
+  // The worker keeps its requester (its account follows it, server/agents.ts machineSandboxSpec), and its answer reaches both.
+  assert.deepEqual(v.info.requestedBy, BEN);
+  assert.deepEqual(store.work.get('w1')!.requestedBy, BEN);
+  await until('Lothsahn hears the answer', () => heard(loth.id, '[worker update]').some((e) => e.text.includes('Metal shader cache')));
+  await until('Ben hears the answer', () => heard(ben.id, '[worker update]').some((e) => e.text.includes('Metal shader cache')));
+  assert.match(store.work.get('w1')!.log.join('\n'), new RegExp(`Lothsahn's orchestrator followed up with ${id} \\(an owner, on Ben's work\\)`));
+  // The cap is per sender: Lothsahn's three use none of Ben's, and only Lothsahn writing starts his again.
+  for (let i = 1; i < FOLLOW_UPS_PER_MESSAGE; i++) assert.equal((await call(loth, 'message_agent', { session_id: id, text: `more ${i}` })).isError, false);
+  assert.match((await call(loth, 'message_agent', { session_id: id, text: 'too many' })).text, new RegExp(`${FOLLOW_UPS_PER_MESSAGE} follow-ups to ${id} since Lothsahn last wrote`));
+  for (let i = 0; i < FOLLOW_UPS_PER_MESSAGE; i++) assert.equal((await call(ben, 'message_agent', { session_id: id, text: `Ben ${i}` })).isError, false, `Ben's own follow-up ${i}`);
+  assert.match((await call(ben, 'message_agent', { session_id: id, text: 'Ben too many' })).text, /since Ben last wrote/);
+  o.personWrote(ben.id);
+  assert.match((await call(loth, 'message_agent', { session_id: id, text: 'still capped' })).text, /since Lothsahn last wrote/, "Ben writing does not lift Lothsahn's cap");
+  assert.equal((await call(ben, 'message_agent', { session_id: id, text: 'Ben again' })).isError, false);
+  o.personWrote(loth.id);
+  assert.equal((await call(loth, 'message_agent', { session_id: id, text: 'after Lothsahn wrote' })).isError, false);
+  // A worker another owner started, with no request on it: the same, with no [about] line.
+  const own = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Profile the belts', title: 'Belt profile', from: 'human', requestedBy: BEN });
+  const s = await call(loth, 'message_agent', { session_id: own.info.id, text: 'Try the 0.50 save.' });
+  assert.equal(s.isError, false, s.text);
+  await until('Ben is told again', () => heard(ben.id, '[from another owner]').some((e) => e.text.startsWith(`[from another owner] Lothsahn messaged your worker ${own.info.id} "Belt profile": Try the 0.50 save.`)));
+});
+
+test("w677: a non-owner still follows up only on their own workers; an owner not on a non-owner's; the tool says which", async (t) => {
+  const { agents, dispatcher, chat, call, heard } = await setupOnMachine(t, { people: OWNERS });
+  const ben = chat(BEN).info;
+  const cara = chat(CARA).info;
+  await call(ben, 'request_work', { title: 'Mac GPU page fault', brief: 'x' });
+  const id = /Started agent (\w+)/.exec((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'x', title: 'GPU fault', work_id: 'w1' })).text)![1];
+  const r = await call(cara, 'message_agent', { session_id: id, text: 'hi' });
+  assert.equal(r.text, `ERROR: ${id} "w1: GPU fault" is Ben's work: follow up only on Cara's own workers; for anything else, request_work`);
+  const hers = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Look', title: 'Cara look', from: 'human', requestedBy: CARA });
+  assert.equal((await call(ben, 'message_agent', { session_id: hers.info.id, text: 'hi' })).text, `ERROR: ${hers.info.id} "Cara look" is Cara's work: follow up only on Ben's own workers and other owners' workers; for anything else, request_work`);
+  assert.equal(heard(ben.id, '[from another owner]').length, 0);
+  const desc = (info: SessionInfo) => agents.orchestratorBelt(info).find((x) => x.name === 'message_agent')!.description;
+  assert.match(desc(ben), /As an owner, Ben may also follow up on another owner's workers \(w677\), attachments included/);
+  assert.doesNotMatch(desc(cara), /another owner's workers/);
+  const brief = (p: Requester) => (agents as unknown as { personalBrief(r: Requester): string }).personalBrief(p);
+  assert.match(brief(BEN), /As an owner, Ben may follow up the same way on another owner's workers too \(w677\)/);
+  assert.doesNotMatch(brief(CARA), /another owner's workers too/);
+});
+
+test("w677: an owner's note on another owner's request reaches the dispatcher and its running worker, its owner is told, nothing else changes", async (t) => {
+  const { store, dispatcher, chat, call, heard } = await setupOnMachine(t, { people: OWNERS });
+  const ben = chat(BEN);
+  const loth = chat(LOTH);
+  await call(ben.info, 'request_work', { title: 'Mac GPU page fault', brief: 'x' });
+  const id = /Started agent (\w+)/.exec((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'x', title: 'GPU fault', work_id: 'w1' })).text)![1];
+  const said = () => store.readTranscript(id).filter((e): e is UserEv => e.kind === 'user');
+  await until('the worker is idle', () => store.sessions.get(id)?.status === 'idle');
+  const w = () => store.work.get('w1')!;
+  w().status = 'question';
+  w().question = { text: 'Which Mac?', at: T0 };
+  store.putWork(w());
+  // A harness turn of Lothsahn's: a note needs no words of his own.
+  loth.lastFrom = 'system';
+  const r = await call(loth.info, 'update_work', { id: 'w1', note: 'Measured on the M3: the crash is in the Metal cache.' });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(r.text, `Noted on w1 (Ben's request). Ben's orchestrator and the dispatcher are told. Its worker ${id} got it already. It stays Ben's: its status, priority and questions are theirs.`);
+  assert.deepEqual([w().status, w().question?.text, w().priority, w().requestedBy.userId], ['question', 'Which Mac?', 'normal', 'ben'], 'only the note: no answer, no status, no priority');
+  assert.deepEqual(w().notes!.at(-1), { at: w().notes!.at(-1)!.at, by: 'Lothsahn', text: 'Measured on the M3: the crash is in the Metal cache.' });
+  assert.match(w().log.at(-1)!, /note by Lothsahn \(an owner, on Ben's request\) \(not in a turn of theirs\): Measured on the M3/);
+  await until('the worker got it', () => said().some((e) => e.text.endsWith('A note Lothsahn added to w1:\nMeasured on the M3: the crash is in the Metal cache.')));
+  const m = said().at(-1)!;
+  assert.ok(m.text.startsWith(`[about w1 "Mac GPU page fault"]\n${crossOwnerLine(LOTH, [BEN])}\n`), m.text);
+  assert.deepEqual([m.from, m.requestedBy], ['orchestrator', LOTH]);
+  await until('Ben is told', () => heard(ben.info.id, '[from another owner]').some((e) => e.text.startsWith('[from another owner] Lothsahn added a note to your w1 "Mac GPU page fault": Measured on the M3: the crash is in the Metal cache.\n')));
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work update]').some((e) => /w1 "Mac GPU page fault" \(question\) from Lothsahn: a note on Ben's request from Lothsahn, an owner \(w677\): Measured on the M3/.test(e.text) && e.text.includes(`Its worker ${id} got it already.`)));
+  // A priority stays Ben's; a note on a member's request stays refused, and a member still adds none to anyone's.
+  assert.match((await call(loth.info, 'update_work', { id: 'w1', priority: 'urgent' })).text, /its priority stays its people's to change/);
+  await call(chat(CARA).info, 'request_work', { title: "Cara's thing", brief: 'x' });
+  assert.match((await call(loth.info, 'update_work', { id: 'w2', note: 'more' })).text, /^ERROR: w2 is Cara's request, not Lothsahn's: an owner adds notes only to another owner's request/);
+  assert.match((await call(chat(CARA).info, 'update_work', { id: 'w1', note: 'more' })).text, /^ERROR: w1 is Ben's request, not Cara's; only an owner closes or reopens another person's request, or adds a note to another owner's$/);
+  assert.equal(w().notes!.length, 1);
+});
+
+test("w677: owners close or reopen each other's requests as their own, in any turn; a member's still needs the owner's own words", async (t) => {
+  const { store, chat, call, heard } = setup(t, { people: OWNERS });
+  const ben = chat(BEN);
+  const loth = chat(LOTH);
+  await call(ben.info, 'request_work', { title: 'Tidy the ledger page', brief: 'x' });
+  await call(chat(CARA).info, 'request_work', { title: "Cara's thing", brief: 'x' });
+  // A timer turn: nobody named w1; Lothsahn's orchestrator judged it finished.
+  loth.lastFrom = 'system';
+  const r = await call(loth.info, 'update_work', { id: 'w1', close: 'done', note: 'Its PR #1040 merged and the page sorts newest first.' });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(store.work.get('w1')!.status, 'done');
+  assert.match(store.work.get('w1')!.log.at(-1)!, /closed as done by Lothsahn \(Ben's request\), on Lothsahn's orchestrator's judgment, not in a turn of theirs \(owners, w677\): Its PR #1040 merged/);
+  await until('Ben is told who and why', () => heard(ben.info.id, '[dispatch]').some((e) => /^\[dispatch\] w1 "Tidy the ledger page": closed as done by Lothsahn's orchestrator, on its own judgment \(owners close each other's requests as their own, w677\) \(it is your request\)\.\nIts PR #1040 merged/.test(e.text)));
+  // Still with a reason, and reopened the same way.
+  assert.match((await call(loth.info, 'update_work', { id: 'w1', reopen: true })).text, /say why in a note: Ben will be told who reopened w1 and why/);
+  assert.equal((await call(loth.info, 'update_work', { id: 'w1', reopen: true, note: 'The sort is back to oldest first.' })).isError, false);
+  assert.equal(store.work.get('w1')!.status, 'new');
+  // A member's request: an owner still needs their own words in this turn.
+  assert.match((await call(loth.info, 'update_work', { id: 'w2', close: 'done', note: 'looks done' })).text, /only Lothsahn, in their own words in this turn, closes or reopens Cara's request w2: ask them/);
+  assert.equal(store.work.get('w2')!.status, 'new');
+  // A member closes nobody else's, in any turn.
+  chat(CARA).lastFrom = 'human';
+  assert.match((await call(chat(CARA).info, 'update_work', { id: 'w1', close: 'done', note: 'x' })).text, /^ERROR: w1 is Ben's request, not Cara's; only an owner closes or reopens/);
+  assert.equal(store.work.get('w1')!.status, 'new');
 });
 
 test('the dispatcher acts for the request it serves, and runs destructive tools only for a person who asked', async (t) => {
@@ -972,14 +1107,10 @@ test("w402: an owner closes or reopens another person's request in their own tur
   ben.lastFrom = 'human';
   await call(ben.info, 'request_work', { title: 'Tidy the ledger page', brief: 'Sort the closed requests newest first.' });
   const w = () => store.work.get('w1')!;
-  // Not in a turn Lothsahn started with his own message (a harness notice, a worker, a relayed FFBox/Discord text): refused.
-  loth.lastFrom = 'system';
-  const outside = await call(loth.info, 'update_work', { id: 'w1', close: 'done', note: 'the cleanup says it shipped' });
-  assert.match(outside.text, /only Lothsahn, in their own words in this turn, closes or reopens Ben's request w1: ask them/);
-  assert.equal(w().status, 'new');
   loth.lastFrom = 'human';
-  // In his own turn, still only a close or a reopen, and only with a reason.
-  assert.match((await call(loth.info, 'update_work', { id: 'w1', note: 'add dark mode too' })).text, /w1 is Ben's request, not Lothsahn's: another owner may close or reopen it/);
+  // In his own turn (between owners any turn will do since w677: see below), only a close or a reopen, with a reason.
+  // A priority stays its people's (a note alone is w677's: see below).
+  assert.match((await call(loth.info, 'update_work', { id: 'w1', priority: 'high' })).text, /w1 is Ben's request, not Lothsahn's: its priority stays its people's to change/);
   assert.match((await call(loth.info, 'update_work', { id: 'w1', close: 'done', priority: 'high', note: 'x' })).text, /its priority stays its people's to change/);
   assert.match((await call(loth.info, 'update_work', { id: 'w1', close: 'done' })).text, /say why in a note: Ben will be told who closed w1 and why/);
   assert.equal(w().status, 'new', 'nothing changed yet');
@@ -1039,7 +1170,7 @@ test("w402: a member cannot close or reopen another person's request, even in th
   loth.lastFrom = 'human';
   const r = await call(loth.info, 'update_work', { id: 'w1', close: 'done', note: 'looks done to me' });
   assert.equal(r.isError, true);
-  assert.match(r.text, /^ERROR: w1 is Ben's request, not Lothsahn's; only an owner closes or reopens another person's request$/);
+  assert.match(r.text, /^ERROR: w1 is Ben's request, not Lothsahn's; only an owner closes or reopens another person's request, or adds a note to another owner's$/);
   assert.equal(store.work.get('w1')!.status, 'new');
   assert.equal(store.work.get('w1')!.log.some((l) => /Lothsahn/.test(l)), false, 'nothing logged');
 });
