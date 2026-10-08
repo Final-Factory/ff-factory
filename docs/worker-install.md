@@ -309,7 +309,7 @@ daemon runs as a **systemd user service** (`server/machineDeployLinux.ts`), as t
   `ppa:git-core/ppa` there first).
 - **Claude Code**, logged in: `curl -fsSL https://claude.ai/install.sh | bash`, then `claude` once.
 - **Unity**: Unity Hub for Linux, with the project's editor version; editors are found in `~/Unity/Hub/Editor/<version>/Editor/Unity`
-  and wherever the Hub lists them (`~/.config/UnityHub`). The editor's log is `~/.config/unity3d/Editor.log`.
+  and in any folder the Hub chose (its settings: `~/.config/unityhub`, lower case). The editor's log is `~/.config/unity3d/Editor.log`.
 - **The portal's ssh**: `sudo apt install openssh-server`; the installer adds the portal's key to `~/.ssh/authorized_keys`
   and registers this PC's host keys with its tailnet name, as on a Mac. The tailnet policy must let `tag:fff-portal`
   reach it on 22 ([RUNBOOK](../deploy/vm/RUNBOOK.md) section 1, "Adding a machine").

@@ -79,12 +79,12 @@ test('linux: the guard refuses a Linux player outside a slot and an agent stoppi
 
 test('linux: Unity Hub\'s folders, the editor binary <version>/Editor/Unity, and the editor log', () => {
   const home = '/home/u';
-  assert.equal(hubConfigDir('linux', {}, home), '/home/u/.config/UnityHub');
-  assert.equal(hubConfigDir('linux', { XDG_CONFIG_HOME: '/x' }, home), '/x/UnityHub');
+  assert.equal(hubConfigDir('linux', {}, home), '/home/u/.config/unityhub');
+  assert.equal(hubConfigDir('linux', { XDG_CONFIG_HOME: '/x' }, home), '/x/unityhub');
   assert.equal(editorLogPath('linux', {}, home), '/home/u/.config/unity3d/Editor.log');
   const files: Record<string, string> = {
     '/p/ProjectSettings/ProjectVersion.txt': 'm_EditorVersion: 6000.3.19f1\n',
-    '/home/u/.config/UnityHub/editors-v2.json': JSON.stringify({ data: [{ version: '6000.3.19f1', location: ['/opt/unity/6000.3.19f1'] }] }),
+    '/home/u/.config/unityhub/editors-v2.json': JSON.stringify({ data: [{ version: '6000.3.19f1', location: ['/opt/unity/6000.3.19f1'] }] }),
   };
   const read = (p: string) => {
     if (p in files) return files[p];

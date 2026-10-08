@@ -149,7 +149,7 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   runs TypeScript (Ubuntu's own nodejs is built without it: ERR_NO_TYPESCRIPT), gives apt's hints, and works with GNU
   `mktemp`. Update, uninstall and the leaves-nothing-behind check know the unit; `migrate` refuses (nothing to move).
   The daemon says `linux` in its hello; Unity is found at `<version>/Editor/Unity` (`~/Unity/Hub/Editor`, the Hub's
-  `~/.config/UnityHub`), its log in `~/.config/unity3d`, players are `FinalFactory.x86_64` (the guard and the slots
+  `~/.config/unityhub`), its log in `~/.config/unity3d`, players are `FinalFactory.x86_64` (the guard and the slots
   know them), an AMD card's load comes from amdgpu's counters, keep-awake is a logind inhibitor, and the guard blocks
   agents stopping the service (`systemctl --user stop …fffactory`, `loginctl disable-linger`). The portal's
   `machine_daemon` start, stop and restart reach it over ssh; `add_machine` refuses a Linux PC (install it there). Not

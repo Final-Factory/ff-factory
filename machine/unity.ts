@@ -165,10 +165,12 @@ export function reportersFor(procs: Proc[], repo: string, platform: UnityPlatfor
   return procs.filter((p) => /Unity ?Bug ?Reporter|UnityCrashHandler/i.test(p.cmd) && p.cmd.includes(norm(repo)));
 }
 
-/** Unity Hub's settings folder: %APPDATA%\UnityHub on Windows, ~/Library/Application Support/UnityHub on a Mac, ~/.config/UnityHub on Linux. */
+/** Unity Hub's settings folder: %APPDATA%\UnityHub on Windows, ~/Library/Application Support/UnityHub on a Mac, ~/.config/unityhub on Linux. */
 export function hubConfigDir(platform: UnityPlatform, env: NodeJS.ProcessEnv, home: string): string | undefined {
   if (platform === 'win32') return env.APPDATA ? path.win32.join(env.APPDATA, 'UnityHub') : undefined;
-  if (platform === 'linux') return path.posix.join(env.XDG_CONFIG_HOME || path.posix.join(home, '.config'), 'UnityHub');
+  // Linux: lower case (Hub 3.22 on biscuit, 2026-10-07); it keeps its editor list in hub.db there, and the lookup falls
+  // back to its default folder, ~/Unity/Hub/Editor.
+  if (platform === 'linux') return path.posix.join(env.XDG_CONFIG_HOME || path.posix.join(home, '.config'), 'unityhub');
   return path.posix.join(home, 'Library', 'Application Support', 'UnityHub');
 }
 
