@@ -10,6 +10,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The portal VM's firewall lets the tailnet reach ssh and 443, nothing broader** (w683, Lothsahn: "Why do we want to open
+  up the firewall? I just want ssh and the portal and anything else needed by fffactory"). w681's rule that accepted any
+  TCP port to the node's Tailscale addresses is gone before it was deployed: it rested on `Drop:` lines that are the
+  tailnet policy's packet filter, not nft, and tailscaled takes Funnel's connections (its peer API port, random per
+  address) and `tailscale serve`'s 443 in its netstack before the kernel (tailscale `wgengine/netstack`
+  `shouldProcessInbound`), so neither passes the VM's nft chain. `tailscale0` accepts TCP 22 (sshd) and 443 (kept, with a
+  counter, as the only rule without a measured need), then drops and counts the rest (`sudo nft list chain inet
+  fff_guest input`). Layer 6 of the path watch now fails on anything broader (a port outside 22 and 443, no port, another
+  protocol: the temporary 59343/59917 rule too) and when sshd listens but 22 is not accepted; it no longer expects
+  tailscaled's own listeners to be accepted. docs/portal-on-ffbox-host.md 1.4 has the sources. Live after `fffctl update`
+  in the VM (reloads the firewall) and the host's `install.sh --host-only` (the new layer 6); the tailnet policy still
+  needs the `tag:ingress` grant.
 - **The portal VM's watchdog checks the whole path from the internet to the portal, repairs what is safe, and puts
   what it cannot on the banner** (w681, Lothsahn: "build or enhance the health check daemon and auto-repair whatever you
   can ... If they can't be repaired, please update your banner ... and log the failures clearly"; Funnel had been

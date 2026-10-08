@@ -65,7 +65,7 @@
     {
       "checkedAt": "2026-10-07T18:30:00Z",
       "id": "6",
-      "line": "the firewall accepts every tailscaled listener on 100.64.0.5 / fd7a:115c:a1e0::5a34:ac62 (listeners: [4 443 4 59917 6 443 6 59343])",
+      "line": "tailscale0 accepts only TCP 443 22 (Funnel and serve are tailscaled's own and need no rule); processes reachable by address: [22(sshd) 8790(node)]",
       "name": "VM firewall",
       "repair": "",
       "since": "2026-10-07T18:30:00Z",
