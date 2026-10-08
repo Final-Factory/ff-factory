@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PathHealthMonitor, describeProblem, filePathHealth, parsePathHealth, SILENT_AFTER_MS } from './pathHealth.ts';
@@ -140,7 +141,7 @@ test('system_status lines: a problem in full for the orchestrator to relay, a he
 });
 
 test('the file reader: a missing file is "nothing", any other error is raised', () => {
-  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'ph-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ph-'));
   try {
     assert.equal(filePathHealth(path.join(dir, 'nope.json'))(), undefined);
     fs.writeFileSync(path.join(dir, 'a.json'), 'x');
