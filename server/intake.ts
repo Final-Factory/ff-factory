@@ -1347,7 +1347,8 @@ export class IntakeManager {
       const closed: { id: string; closed: WorkAutoClosed }[] = [];
       const done = [...this.d.store.work.values()];
       for (const w of candidates) {
-        let how = mergedBy(w, records) ?? (await this.branchInBase(w, targets));
+        // A reopened request closes only on a merge after the reopen (w731): the branch already in the base is the work it was reopened for.
+        let how = mergedBy(w, records) ?? (w.reopenedAt ? undefined : await this.branchInBase(w, targets));
         if (!how) {
           const y = linkedDone(w, done);
           if (y) how = linkedClosed(w, y);

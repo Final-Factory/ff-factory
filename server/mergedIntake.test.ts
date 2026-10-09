@@ -81,3 +81,11 @@ test('a linked request counts only when it is done', () => {
   assert.equal(linkedDone(item({ id: 'w1', keys: ['spec:098'] }), [item({ id: 'w6', status: 'done', keys: ['spec:098'] })]), undefined, 'a spec is not the same work');
   assert.equal(linkedDone(item({ id: 'w1', source: { kind: 'discord-bug', untrusted: true, threadId: '5555555555555555555' } }), [item({ id: 'w7', status: 'done', source: { kind: 'discord-bug', untrusted: true, alsoThreads: [{ threadId: '5555555555555555555' }] } })])?.id, 'w7');
 });
+
+test('w731: a reopened request counts only a merge, or a linked done request, from after the reopen', () => {
+  const w = item({ id: 'w1', reopenedAt: '2026-10-03T12:00:00.000Z', relatedIds: ['w2'], source: { kind: 'ffbox-branch', untrusted: false, branch: 'ffbox/x', pr: 12 } });
+  assert.equal(mergedBy(w, [rec({ number: 12, at: '2026-10-03T11:59:59+00:00' })]), undefined, 'merged before the reopen');
+  assert.equal(mergedBy(w, [rec({ number: 12, at: '2026-10-03T14:00:00+02:00' })])?.how, 'pr', 'after it (an offset time compared as a time)');
+  assert.equal(linkedDone(w, [item({ id: 'w2', status: 'done', updatedAt: '2026-10-03T11:00:00.000Z' })]), undefined, 'done before the reopen');
+  assert.equal(linkedDone(w, [item({ id: 'w2', status: 'done', updatedAt: '2026-10-03T13:00:00.000Z' })])?.id, 'w2');
+});

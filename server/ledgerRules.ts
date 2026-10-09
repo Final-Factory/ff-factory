@@ -4,6 +4,7 @@
 import type { SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
 import type { Config } from './config.ts';
 import { mergedText } from './mergedIntake.ts';
+import { afterReopen } from './work.ts';
 
 export interface CleanupSettings {
   enabled: boolean;
@@ -123,6 +124,8 @@ export function prsOf(w: WorkItem, all: readonly PrRecord[], ctx: { opened: read
   const out: LinkedPr[] = [];
   for (const p of all) {
     if (p.state === 'merged' && p.mergedAt && p.mergedAt < w.createdAt) continue;
+    // A reopened request (w731): a PR created before the reopen is not the reopened work's, whatever it says or who opened it.
+    if (!afterReopen(w, p.createdAt)) continue;
     const says = requestIdsIn(p.body);
     let via: LinkedPr['via'] | undefined;
     if (says.length) via = says.some((id) => mine.has(id)) ? 'line' : undefined;

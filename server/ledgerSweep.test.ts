@@ -1105,3 +1105,115 @@ test('w643: Merged, follow-up pending on a deploy is Blocked on it; another step
   assert.equal(get('w1').blocked, undefined);
   assert.match(get('w1').log.join('\n'), /unblocked by the ledger cleanup: a deploy is no longer the only step left/);
 });
+
+// ---------------------------------------------------------------- w731: a reopen invalidates every DONE and PR from before it
+
+/**
+ * w712 on 2026-10-09: its worker's DONE at 01:37 was refused (a PR was still open), the PR merged, a person reopened it for
+ * a new defect (the colour), and the cleanup closed it twice more on that old DONE while the worker was mid-fix.
+ */
+function reopenedAfterOldDone(t: Parameters<typeof setup>[0]) {
+  const s = setup(t);
+  const { request, worker, pr, world, sweep, o, get } = s;
+  request('w1', { sessionIds: ['s1'], prs: [{ repo: REPO, number: 1, state: 'open', via: 'line' }] });
+  const s1 = worker('s1');
+  // DONE while PR #1 is open: refused, and kept for the re-check.
+  o.workerTurnEnded(s1, 'The panel fits.\nDONE: w1');
+  assert.match(get('w1').log.join('\n'), /said DONE, refused: PR #1 is still open/);
+  // The PR merges; the cleanup closes it on that DONE (w515).
+  world.prs = [pr(1, { body: 'Request: w1', createdAt: ago(50), mergedAt: ago(40) })];
+  const closedFirst = sweep.checkPrs();
+  const reopen = async () => {
+    await closedFirst;
+    assert.equal(get('w1').status, 'done');
+    const ben = o.personalFor(BEN);
+    ben.lastFrom = 'human';
+    // The reopen, and the worker starts on the new defect.
+    o.update(ben, { id: 'w1', reopen: true, note: 'The panel turned dark navy: the colour fix.' });
+    worker('s1', { status: 'running' });
+  };
+  return { ...s, reopen, s1 };
+}
+
+test('w731: a reopened request is not closed again on its worker’s DONE from before the reopen, nor on a PR that merged before it; a new DONE closes it', async (t) => {
+  const { sweep, o, get, reopen, worker } = reopenedAfterOldDone(t);
+  await reopen();
+  const w = get('w1');
+  assert.equal(w.status, 'new');
+  assert.ok(w.reopenedAt);
+  assert.equal(w.done, undefined, 'the DONE from before the reopen is dropped');
+  assert.deepEqual(w.prs, [], 'and so are the PR links from before it');
+  assert.match(w.log.at(-1)!, /reopened \(its earlier PR #1 and DONEs no longer count/);
+  // The cleanup runs: no close (the 01:43 close of w712).
+  assert.deepEqual(await sweep.checkPrs(), []);
+  assert.equal(get('w1').status, 'new');
+  // Runs again with the old PR still merged and still saying Request: w1 (the 01:53 close): still no close, and no re-link.
+  assert.deepEqual(await sweep.checkPrs(), []);
+  assert.equal(get('w1').status, 'new');
+  assert.deepEqual(get('w1').prs, []);
+  await sweep.run();
+  assert.equal(get('w1').status, 'new', 'a full pass too');
+  // Not even with the worker gone: the old DONE and PR are not evidence of the reopened work.
+  worker('s1', { status: 'idle', lastResult: 'Working on the colour.' });
+  assert.deepEqual(await sweep.checkPrs(), []);
+  assert.equal(get('w1').status, 'new');
+  // A new DONE closes it.
+  o.workerTurnEnded(worker('s1', { status: 'idle' }), 'The colour is fixed.\nDONE: w1');
+  assert.equal(get('w1').status, 'done');
+  assert.match(get('w1').log.join('\n'), /closed as done: worker s1 said DONE: w1/);
+});
+
+test('w731: a reopened request closes on a PR opened after the reopen that merged', async (t) => {
+  const { world, pr, sweep, get, reopen, worker } = reopenedAfterOldDone(t);
+  await reopen();
+  assert.deepEqual(await sweep.checkPrs(), []);
+  // The worker opens the colour fix's PR and it merges; the old PR is still listed.
+  const now = new Date().toISOString();
+  world.prs = [pr(1, { body: 'Request: w1', createdAt: ago(50), mergedAt: ago(40) }), pr(2, { body: 'Request: w1', createdAt: now, mergedAt: now })];
+  worker('s1', { status: 'idle', lastResult: 'Merged the colour fix.' });
+  assert.deepEqual(await sweep.checkPrs(), ['w1']);
+  const w = get('w1');
+  assert.equal(w.status, 'done');
+  assert.deepEqual(w.prs?.map((p) => p.number), [2], 'only the PR opened after the reopen is its own');
+  assert.equal(w.autoClosed?.pr, 2);
+});
+
+test('w731: a request reopened twice counts only what came after its latest reopen', async (t) => {
+  const { world, pr, sweep, o, get, reopen, worker } = reopenedAfterOldDone(t);
+  await reopen();
+  const first = new Date().toISOString();
+  world.prs = [pr(2, { body: 'Request: w1', createdAt: first, mergedAt: first })];
+  worker('s1', { status: 'idle' });
+  assert.deepEqual(await sweep.checkPrs(), ['w1'], 'the first reopen: its new PR closes it');
+  await new Promise((r) => setTimeout(r, 5));
+  const ben = o.personalFor(BEN);
+  ben.lastFrom = 'human';
+  o.update(ben, { id: 'w1', reopen: true, note: 'Still wrong on the Deck.' });
+  worker('s1', { status: 'running' });
+  assert.ok(get('w1').reopenedAt! > first);
+  assert.deepEqual(await sweep.checkPrs(), [], 'PR #2 came before the second reopen');
+  assert.equal(get('w1').status, 'new');
+  await sweep.run();
+  assert.equal(get('w1').status, 'new');
+  // A PR after the second reopen closes it.
+  const later = new Date().toISOString();
+  world.prs.push(pr(3, { body: 'Request: w1', createdAt: later, mergedAt: later }));
+  worker('s1', { status: 'idle' });
+  assert.deepEqual(await sweep.checkPrs(), ['w1']);
+  assert.deepEqual(get('w1').prs?.map((p) => p.number), [3]);
+});
+
+test('w731: an idle reopened request is not closed on its worker’s old "delivered" report; one that reports again after the reopen is', async (t) => {
+  const { request, worker, sweep, o, get } = setup(t);
+  request('w1', { sessionIds: ['s1'], status: 'done', updatedAt: ago(5) });
+  worker('s1', { lastResult: 'All done. The copy is in Screenshots.', lastActivityAt: ago(5) });
+  const ben = o.personalFor(BEN);
+  ben.lastFrom = 'human';
+  o.update(ben, { id: 'w1', reopen: true, note: 'One more defect.' });
+  await sweep.run();
+  assert.equal(get('w1').status, 'new', 'the report predates the reopen');
+  worker('s1', { lastResult: 'All done. Fixed that too.', lastActivityAt: new Date(Date.now() + 1000).toISOString() });
+  await sweep.run();
+  // `now` of the sweep is fixed in the past, so this report is also "too recent": the quiet period rules, not the reopen.
+  assert.notEqual(get('w1').status, 'stalled');
+});

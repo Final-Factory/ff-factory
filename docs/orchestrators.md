@@ -561,6 +561,26 @@ closes on that DONE if `doneProblem` now finds nothing missing, nobody else is s
 running on it (`recheckDone`, `server/orchestrators.ts`). The log says "closed as done: worker … said DONE at 01:33 UTC
 and was refused then; PR #1089 merged since".
 
+**A reopen invalidates everything before it** (w731, after w712 on 2026-10-09: its worker's DONE at 01:37 was refused
+(a PR was open), the PR merged, a person reopened it for a new defect, and the cleanup closed it twice more on that old
+DONE, "refused then; its PRs have merged or closed since", while the worker was mid-fix). `update_work reopen` (a person's
+or an owner's, `reopenWork` in `server/work.ts`) stamps `WorkItem.reopenedAt`, drops the workers' DONEs (`WorkItem.done`)
+and the PR links made so far, and from then on every automatic close needs evidence from after that time; the latest
+reopen is the one that counts:
+
+- **DONE paths** (`recheckDone`, the 5-minute pass's re-check of a refused DONE, the last worker ending, the "which
+  workers are still on it" count): only a DONE given after `reopenedAt` counts (`doneOf`). A DONE kept from before is
+  ignored even if it is still on the request.
+- **PR rule** (`prsOf`, `server/ledgerRules.ts`): a PR created before `reopenedAt` is never the request's, whatever its
+  `Request:` line says and whoever opened it, so it neither links, nor closes it, nor keeps it open. Only a PR created after
+  the reopen that has merged closes it (and the usual after-the-merge rules apply to it).
+- **Delivered** (rule 2): the worker's report must come after the reopen (its `lastActivityAt`).
+- **The intake's merged rules** (`mergedBy`, `linkedDone`, `server/mergedIntake.ts`): a merge or a linked done request from
+  before the reopen is not evidence, and the branch already being in the base (`branchInBase`) is skipped.
+
+A request reopened by the cleanup itself because its closing PR was never its own (w340) is not a reopen in this sense:
+that was a wrong close, not new work.
+
 **A request with several workers closes on the last one's DONE** (w434, after w428 on 2026-10-05: worker 2092b20c's DONE,
 after only its hardware read, closed the request while the placement work it was for was still unpushed). Each DONE
 records that worker's part (`WorkItem.done`: session id, when, the report's first line), and the request closes only

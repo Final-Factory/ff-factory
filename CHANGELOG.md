@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A reopened request is no longer closed again by the ledger cleanup on its worker's DONE or PRs from before the reopen**
+  (w731; the case: w712, the Blueprints panel on the Steam Deck, 2026-10-09: its worker's DONE at 01:37 was refused, the PR merged,
+  a person reopened it for a new defect, and the cleanup closed it twice more, at 01:43 and 01:53, on that old DONE while the
+  worker was mid-fix). A reopen (`update_work reopen`, a person's or an owner's) now stamps `WorkItem.reopenedAt` and drops
+  the earlier DONEs and PR links; every automatic close then needs evidence from after that time: a DONE given after it, a
+  report after it, or a PR created after it that merged (a PR created before it never links to the request again). The latest
+  reopen counts. Covers the refused-DONE re-check, the PR rule, the delivered-report rule and the intake's merged rules. Test:
+  `server/ledgerSweep.test.ts` ("w731"). Docs: `docs/orchestrators.md`, "A reopen invalidates everything before it". Deploy: the
+  portal restarts to pick it up; w712 itself is still closed in the ledger data until its dispatcher reopens it after that.
+
 - **Every critical unit in the portal VM starts after a reboot, and the health check restarts any that is down** (w698,
   Lothsahn; the case: `fff-ops.socket`, the orchestration worker's door, was inactive (dead) after the nightly cold restart of
   2026-10-08 until it was restarted by hand at 18:51Z). Root cause: the socket was ordered `After=`/`Requires=`

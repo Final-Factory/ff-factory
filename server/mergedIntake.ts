@@ -3,6 +3,7 @@
 // other requests in the ledger. server/intake.ts gathers the evidence; Orchestrators.closeMerged applies it.
 import type { WorkAutoClosed, WorkItem } from '../shared/types.ts';
 import { WORK_OPEN } from '../shared/types.ts';
+import { afterReopen } from './work.ts';
 
 /** One merge on a base branch: a merged PR (from gh) or a commit (from git log): where its text names things. */
 export interface MergeRecord {
@@ -79,6 +80,8 @@ export function mergedBy(w: WorkItem, records: readonly MergeRecord[]): WorkAuto
   if (!s) return undefined;
   const threads = threadsOf(w);
   for (const r of records) {
+    // A reopened request (w731): only a merge after the reopen is evidence that its work merged.
+    if (!afterReopen(w, r.at)) continue;
     let how: WorkAutoClosed['how'] | undefined;
     if (s.pr && r.number === s.pr) how = 'pr';
     else if (s.branch && (r.head === s.branch || namesBranch(r.text, s.branch))) how = 'branch';
@@ -99,7 +102,7 @@ export function linkedDone(w: WorkItem, all: Iterable<WorkItem>): WorkItem | und
   const mine = threadsOf(w);
   const specific = w.keys.filter((k) => /^(pr|branch):/.test(k));
   for (const y of all) {
-    if (y.id === w.id || y.status !== 'done') continue;
+    if (y.id === w.id || y.status !== 'done' || !afterReopen(w, y.updatedAt)) continue;
     if ((w.relatedIds ?? []).some((r) => sameId(r, y.id)) || (y.relatedIds ?? []).some((r) => sameId(r, w.id))) return y;
     if (specific.some((k) => y.keys.includes(k))) return y;
     if (mine.length && threadsOf(y).some((t) => mine.includes(t))) return y;
