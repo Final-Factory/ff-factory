@@ -372,20 +372,23 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
   const machineIds = new Set(ctx.machines.map((m) => m.id));
   const sources = new Map<string, UsageEntry>();
   sources.set(HOST_LOGIN, entries.get(HOST_LOGIN) ?? { kind: 'login' });
-  if (ctx.token) sources.set(ctx.token.key, { label: ctx.token.label, ...entries.get(ctx.token.key), kind: 'token' });
+  // Every vault token is listed under its vault name (w777), even when it is also the host token, the token file or a person's
+  // own token: one account, one usage, named by the vault entry, the other roles noted on it (`alsoOn`).
+  const vaultByKey = new Map((ctx.vault ?? []).map((v) => [v.key, v]));
+  if (ctx.token && !vaultByKey.has(ctx.token.key)) sources.set(ctx.token.key, { label: ctx.token.label, ...entries.get(ctx.token.key), kind: 'token' });
   const whose = new Map<string, string>();
   // The token file's token (w464): its own account, named by the roles on it; the same token as the host's is one account.
   const fileRoles = ctx.tokenFile?.roles ?? [];
-  if (ctx.tokenFile && !sources.has(ctx.tokenFile.key)) sources.set(ctx.tokenFile.key, { label: ctx.tokenFile.label, ...entries.get(ctx.tokenFile.key), kind: 'token' });
+  if (ctx.tokenFile && !sources.has(ctx.tokenFile.key) && !vaultByKey.has(ctx.tokenFile.key)) sources.set(ctx.tokenFile.key, { label: ctx.tokenFile.label, ...entries.get(ctx.tokenFile.key), kind: 'token' });
   for (const p of ctx.people ?? []) {
-    if (sources.has(p.key)) continue; // the same token as the host's: one account
+    if (sources.has(p.key) || vaultByKey.has(p.key)) continue; // the same token as the host's or a vault entry's: one account
     sources.set(p.key, { label: p.label, ...entries.get(p.key), kind: 'token' });
     whose.set(p.key, p.displayName);
   }
   const vaultKeys = new Set<string>();
   for (const v of ctx.vault ?? []) {
-    if (sources.has(v.key)) continue; // the same token as another: one account
-    sources.set(v.key, { label: v.label, ...entries.get(v.key), kind: 'token' });
+    // The tracker keeps one entry per token and names it by the first holder (a person's, the token file's); the vault name wins here.
+    sources.set(v.key, { ...entries.get(v.key), label: v.label, kind: 'token' });
     vaultKeys.add(v.key);
   }
   for (const [key, e] of entries) {
@@ -404,12 +407,21 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
   const tokenUsers = [...hostOnToken, ...ctx.machines.filter((m) => m.usesToken).map((m) => m.id)];
   // An account nothing is set to use and no agent runs on now is left out (w748).
   const running = new Set(ctx.sessions.filter((x) => x.live).map((x) => x.source));
+  // What else a vault token is, for its subtext line like a Mac login's "m3 login" (w777): the host token, the token file, a person's own token.
+  const alsoOn = (key: string): string[] => [
+    ...(key === ctx.token?.key ? [tokenUsers.length ? `the agents' token on ${tokenUsers.join(', ')}` : 'the host token (no agent set to it)'] : []),
+    ...(key === ctx.tokenFile?.key ? [`${ctx.hostName}'s token file${fileRoles.length ? ` (${roleNames(fileRoles)})` : ''}`] : []),
+    ...(ctx.people ?? []).filter((p) => p.key === key).map((p) => `agents working for ${p.displayName}`),
+  ];
   const unused = (key: string): boolean => {
     const use = ctx.inUse;
     if (!use || running.has(key)) return false;
     if (key === HOST_LOGIN) return !use.hostLogin;
-    if (key === ctx.token?.key) return !use.hostToken;
-    if (vaultKeys.has(key)) return !use.vault;
+    // A token with several roles is unused only when every one of them is: a vault token that is also the token file or a person's own stays.
+    if (vaultKeys.has(key) || key === ctx.token?.key) {
+      if (key === ctx.tokenFile?.key || (ctx.people ?? []).some((p) => p.key === key)) return false;
+      return (key !== ctx.token?.key || !use.hostToken) && (!vaultKeys.has(key) || !use.vault);
+    }
     if (key.startsWith('login:')) {
       const m = ctx.machines.find((x) => x.id === key.slice(6));
       return !!m && (!!m.onVault || m.usesToken);
@@ -434,6 +446,7 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
     const a = out.get(id) ?? { id, kind: e.kind, label: e.kind === 'token' ? (e.label ?? 'a token') : (e.account?.email ?? where), email: e.account?.email, sources: [], where: [], sessionIds: [], usage: undefined };
     a.sources.push(key);
     if (where) a.where.push(where);
+    if (vaultKeys.has(key)) a.where.push(...alsoOn(key));
     a.usage = newer(a.usage, e.usage);
     out.set(id, a);
   }

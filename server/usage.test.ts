@@ -807,3 +807,89 @@ test('accounts (w748): a vault token is named by itself and the status line has 
   assert.match(lines[1], /^- lothsahn-1 …EAAA \[agents on it: w1\]: Claude plan .*usage, as of .*, from rate limits: Weekly 95% used/);
   assert.doesNotMatch(lines.join('\n'), /vault:|the token vault|headers/);
 });
+
+test('accounts (w777): a vault token is always listed under its vault name, once, with the other roles on its subtext when it is also another account', () => {
+  const T3 = 'sk-ant-oat01-' + 'c'.repeat(44);
+  const key = tokenKey(TOKEN2);
+  const vaultEntry = { key, label: 'vault-ben-2 …' + TOKEN2.slice(-4) };
+  // The tracker keeps one entry per token and names it by its first holder: the token file's name here.
+  const entries = (label: string) => new Map<string, UsageEntry>([[key, { kind: 'token', label, usage: usageOf(61), direct: true }]]);
+  const base = { hostName: 'fff-portal', machines: [], inUse: { hostLogin: false, hostToken: true, vault: true } };
+  const asRow = (a: { id: string; label: string; where: string[]; sessionIds: string[]; usage?: { weekly?: { percent: number } } }) => [a.id, a.label, a.where, a.sessionIds, a.usage?.weekly?.percent];
+
+  // equal to the token file: one row named by the vault entry, the file's roles noted, its agents listed, one usage
+  const fileAccounts = buildAccounts(entries('token file …' + TOKEN2.slice(-4)), {
+    ...base,
+    vault: [vaultEntry],
+    tokenFile: { key, label: 'token file …' + TOKEN2.slice(-4), roles: ['orchestrator'] },
+    sessions: [{ id: 'orch', source: key, live: true }],
+  });
+  assert.equal(fileAccounts.length, 1, 'one account, not two with the same usage');
+  assert.deepEqual(asRow(fileAccounts[0]), [key, 'vault-ben-2 …' + TOKEN2.slice(-4), ["fff-portal's token file (the orchestrator)"], ['orch'], 61]);
+
+  // equal to the host token: the vault name, the host token's use on the subtext
+  const hostAccounts = buildAccounts(entries('host token …' + TOKEN2.slice(-4)), {
+    ...base,
+    token: { key, label: 'host token …' + TOKEN2.slice(-4) },
+    vault: [vaultEntry],
+    machines: [{ id: 'm5', usesToken: true }],
+    sessions: [{ id: 'w1', source: key, live: true }],
+  });
+  assert.equal(hostAccounts.length, 1);
+  assert.deepEqual(asRow(hostAccounts[0]), [key, 'vault-ben-2 …' + TOKEN2.slice(-4), ["the agents' token on fff-portal, m5"], ['w1'], 61]);
+
+  // equal to a person's own token (userClaudeEnv)
+  const personAccounts = buildAccounts(entries('Ben\'s token …' + TOKEN2.slice(-4)), {
+    ...base,
+    people: [{ key, label: 'Ben\'s token …' + TOKEN2.slice(-4), displayName: 'Ben' }],
+    vault: [vaultEntry],
+    sessions: [{ id: 'b1', source: key, live: true }],
+  });
+  assert.equal(personAccounts.length, 1);
+  assert.deepEqual(asRow(personAccounts[0]), [key, 'vault-ben-2 …' + TOKEN2.slice(-4), ["agents working for Ben"], ['b1'], 61]);
+
+  // equal to the host token and the token file at once: both noted
+  const both = buildAccounts(entries('host token'), {
+    ...base,
+    token: { key, label: 'host token' },
+    tokenFile: { key, label: 'token file', roles: ['orchestrator'] },
+    vault: [vaultEntry],
+    sessions: [],
+  });
+  assert.equal(both.length, 1);
+  assert.equal(both[0].where.length, 2);
+
+  // system_status names it by the vault entry first
+  const line = accountLines(fileAccounts, new Map([['orch', { id: 'orch', kind: 'orchestrator' as const, status: 'running' as const }]]), new Date(AS_OF))[1];
+  assert.match(line, /^- vault-ben-2 …\w{4} \[fff-portal's token file \(the orchestrator\); agents on it: .*\]: /);
+  assert.doesNotMatch(line, /^- token file/);
+
+  // the host token and the vault token still count as in use through the vault alone
+  const notInUse = buildAccounts(entries('x'), { ...base, token: { key, label: 'host token' }, vault: [vaultEntry], inUse: { hostLogin: false, hostToken: false, vault: true }, sessions: [] });
+  assert.equal(notInUse.length, 1, 'the vault role keeps it');
+  const noneInUse = buildAccounts(entries('x'), { ...base, token: { key, label: 'host token' }, vault: [vaultEntry], inUse: { hostLogin: false, hostToken: false, vault: false }, sessions: [] });
+  assert.equal(noneInUse.length, 0, 'nothing uses either role');
+  // ...and a person's own token is never hidden
+  assert.equal(buildAccounts(entries('x'), { ...base, people: [{ key, label: 'x', displayName: 'Ben' }], vault: [vaultEntry], inUse: { hostLogin: false, hostToken: false, vault: false }, sessions: [] }).length, 1);
+
+  // distinct tokens are unchanged: each keeps its own row and name, with no "also"
+  const k1 = tokenKey(TOKEN);
+  const k3 = tokenKey(T3);
+  const distinct = buildAccounts(
+    new Map<string, UsageEntry>([[k1, { kind: 'token', label: 'host token', usage: usageOf(10) }], [k3, { kind: 'token', label: 'vault-ben-3 …cccc', usage: usageOf(20), direct: true }], [key, { kind: 'token', label: 'vault-ben-2', usage: usageOf(61), direct: true }]]),
+    { ...base, token: { key: k1, label: 'host token …9AAA' }, vault: [{ key: k3, label: 'vault-ben-3 …cccc' }, vaultEntry], sessions: [] },
+  );
+  assert.deepEqual(distinct.map((a) => a.label).sort(), ['host token', 'vault-ben-2 …' + TOKEN2.slice(-4), 'vault-ben-3 …cccc']);
+  assert.deepEqual(distinct.filter((a) => a.label.startsWith('vault-')).map((a) => a.where), [[], []], 'a vault token that is no other account has no subtext');
+  assert.deepEqual(distinct.find((a) => a.id === k1)?.where, ["the agents' token on fff-portal"], 'a host token in no vault entry keeps its own row and subtext');
+});
+
+test('accounts (w777): a token file or host token that is in no vault entry keeps its own row, beside the vault tokens', () => {
+  const kFile = tokenKey(TOKEN);
+  const kVault = tokenKey(TOKEN2);
+  const accounts = buildAccounts(
+    new Map<string, UsageEntry>([[kFile, { kind: 'token', label: 'token file …9AAA', usage: usageOf(40) }], [kVault, { kind: 'token', label: 'vault-ben-2', usage: usageOf(61), direct: true }]]),
+    { hostName: 'fff-portal', machines: [], tokenFile: { key: kFile, label: 'token file …9AAA', roles: ['orchestrator'] }, vault: [{ key: kVault, label: 'vault-ben-2 …7BBB' }], inUse: { hostLogin: false, hostToken: false, vault: true }, sessions: [] },
+  );
+  assert.deepEqual(accounts.map((a) => [a.label, a.where]).sort(), [['token file …9AAA', ["fff-portal's token file (the orchestrator)"]], ['vault-ben-2 …7BBB', []]]);
+});

@@ -184,6 +184,11 @@ only when something is set to use it, or an agent is running on it now:
 - **vault tokens** are left out while no machine is on the vault and no role is set to `"vault"`.
 Since w755 `system_status` names no "workers here" and shows no "<host> login (workers)" row or warning: the only roles are the
 orchestrator and the dispatcher (the dispatcher only when it has an account of its own).
+**Every vault token is its own row, named by its vault entry (w777).** When the host token, the token file or a person's
+`userClaudeEnv` token is the same token as a vault entry, that use goes on the vault row's subtext line, the way a Mac's "m3 login"
+is noted ("fff-portal's token file (the orchestrator)", "the agents' token on fff-portal, m5", "agents working for Ben"), with no
+row of its own and one usage. A host or token-file token in no vault entry keeps its own row. `system_status` carries the same
+row: "- vault-ben-2 …dAAA [fff-portal's token file (the orchestrator); agents on it: …]".
 A person's own token and the token file are always listed. A vault token is named by itself ("vault-ben-1 …abcd"), without a
 description; the line under a machine login still says where it is used ("m3 login").
 
