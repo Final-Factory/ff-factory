@@ -10,6 +10,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **`sudo fff-vm vault-sync` no longer removes the `claude-tokens/<name>` pool entries the installer just added** (w744,
+  Lothsahn; his host had only `people/ben/claude-tokens/{1,2}` and `lothsahn/claude-tokens/1`: `install.sh --guest-only` printed
+  "added host-ben-claude-1 …", then `fff-vm vault-sync` printed "removed host-ben-claude-1 (its file is gone …)" for all three).
+  Cause: `--guest-only` skips the host part of the installer, which is the step that copies `vault.sh` to
+  `/usr/local/lib/fff-vm`, so the installer's own sync ran the new `vault.sh` from the checkout while `fff-vm vault-sync` ran the
+  installed one from before the pool (#241), which only looks for `claude-token` and `github-token` and read every pool entry
+  as one whose file was gone. Fixed: every mode of `install.sh` copies `fff-vm`, `lib.sh`, `pathwatch.sh`, `vault.sh` and
+  `fff-vm.conf.example` (`install_host_scripts`); a sync names an entry as kept as soon as its file exists, even when the file
+  is not a token now; and a scan that finds no token file at all removes nothing unless `fff-vm vault-sync --prune`. New test
+  `deploy/vm/test/fff-vault-sync.test.sh` (a person with only `claude-tokens/`, the standalone path, the installer's path,
+  nothing removed whose file exists, the scripts follow the checkout). docs/vault.md: `bash -c`, not `sh -c`, for the hidden
+  token prompt (dash's `read` has no `-s`).
+
 - **Each person's runs use that person's own pool of Claude tokens, and their orchestrator and the ops worker run on it too** (w738,
   w739, Lothsahn). A person can have several tokens in the vault (host files `people/<id>/claude-token` and
   `claude-tokens/<name>`, loaded by `sudo fff-vm vault-sync`). The pick (`server/tokenPool.ts`): that person's tokens only (no shared
