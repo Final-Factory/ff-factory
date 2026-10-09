@@ -483,6 +483,19 @@ export class Vault {
     }, false);
   }
 
+  /**
+   * One entry's value. Besides a run's own environment, `fffctl vault export` (root, in the VM) is the only way out of the
+   * vault, for the FFBox host's nightly copy (docs/vault.md, section 12). No route, tool or listing calls it.
+   */
+  reveal(name: string): string {
+    this.reload();
+    const e = this.find(name);
+    const { key } = this.key();
+    const value = key ? this.open(key, e) : undefined;
+    if (value === undefined) throw new Error(`${name} cannot be opened with the vault key (rotate it, or put the right key back)`);
+    return value;
+  }
+
   private open(key: Buffer, e: VaultEntry): string | undefined {
     try {
       return unseal(key, e);

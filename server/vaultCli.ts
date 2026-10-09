@@ -9,6 +9,10 @@
 //                               add, or bring an entry to this value and these grants (the FFBox host's fff-vm vault-sync)
 //   node server/vaultCli.ts list --names                  the entries' names only, one per line
 //   node server/vaultCli.ts rotate NAME (--file FILE | --stdin)
+//   node server/vaultCli.ts export --manifest             every entry's name, kind, owner, grants, fingerprint and last four characters,
+//                                                         tab-separated, no value (the FFBox host's nightly copy, docs/vault.md section 12)
+//   node server/vaultCli.ts export NAME                   ONE VALUE to stdout, root only, never to a terminal: the host's copy of an entry
+//                                                         that exists only here. Not read-only; the ops worker is refused it
 //   node server/vaultCli.ts grant NAME [--owner USER] [--share owner|anyone] [--roles …] [--machines …] [--enable | --disable]
 //   node server/vaultCli.ts remove NAME
 //   node server/vaultCli.ts new-key FILE [--force]        a new key file (0600); --force replaces one (entries then need rotating)
@@ -41,6 +45,7 @@ const { values: o, positionals: args } = parseArgs({
     stdin: { type: 'boolean' },
     out: { type: 'string' },
     names: { type: 'boolean' },
+    manifest: { type: 'boolean' },
     force: { type: 'boolean' },
     enable: { type: 'boolean' },
     disable: { type: 'boolean' },
@@ -222,6 +227,20 @@ try {
       console.log(`${renamedFrom ? 'renamed' : rotated ? 'rotated' : regrant ? 'regranted' : 'unchanged'}: ${show(e)}${renamedFrom ? ` (was ${renamedFrom})` : ''}`);
       break;
     }
+    case 'export': {
+      // The one command that prints a value (docs/vault.md, section 12). Root-to-root: fffctl runs it as root, and the host
+      // asks over its ssh into the VM; stdout must be a pipe or a file, so a person cannot spill a value onto a screen.
+      if (o.manifest) {
+        const field = (x: string | undefined) => (x === undefined || x === '' ? '-' : x);
+        for (const e of vault.list()) console.log([e.name, e.kind, field(e.env), field(e.owner), e.share, e.roles.join(','), e.machines.join(','), e.fingerprint, e.last4, e.disabled ? '1' : '0'].join('\t'));
+        break;
+      }
+      if (!isRoot() && process.env.FFF_TEST_NOROOT !== '1') die('export is root only (sudo fffctl vault export NAME)');
+      if (process.stdout.isTTY) die('export writes a value: send it to a file or a pipe (the FFBox host does, over ssh), never to a screen');
+      const name = args[1] ?? die('export NAME | export --manifest');
+      process.stdout.write(`${vault.reveal(name)}\n`);
+      break;
+    }
     case 'rotate': {
       const e = vault.rotate(args[1] ?? die('rotate NAME'), readValue());
       console.log(`rotated: ${show(e)}; runs started from now get it${o.file ? `\nDelete ${o.file} now (shred -u).` : ''}`);
@@ -250,7 +269,7 @@ try {
       break;
     }
     default:
-      die(`unknown command ${cmd} (list, add, rotate, grant, rename, remove, new-key, machine-credential)`);
+      die(`unknown command ${cmd} (list, add, rotate, grant, rename, remove, export, new-key, machine-credential)`);
   }
 } catch (e) {
   die((e as Error).message);

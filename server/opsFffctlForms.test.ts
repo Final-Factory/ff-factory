@@ -62,7 +62,7 @@ test('the table: a form is either allowed or changing, never both; no vault form
   for (const [cmd, f] of Object.entries(FFFCTL_FORMS)) {
     for (const a of f.allowed) assert.ok(!f.changes.includes(a), `${cmd} ${a}`);
   }
-  for (const w of ['init', 'export-key', 'add', 'put', 'rotate', 'grant', 'remove', 'new-key']) assert.ok(FFFCTL_FORMS.vault.changes.includes(w) && !FFFCTL_FORMS.vault.allowed.some((a) => firstWord(a) === w), `vault ${w}`);
+  for (const w of ['init', 'export-key', 'add', 'add-claude', 'put', 'rotate', 'grant', 'remove', 'export', 'new-key']) assert.ok(FFFCTL_FORMS.vault.changes.includes(w) && !FFFCTL_FORMS.vault.allowed.some((a) => firstWord(a) === w), `vault ${w}`);
   assert.deepEqual(FFFCTL_FORMS.watchdog.allowed, [], 'every watchdog form runs, pauses, resumes or resets: none is read only');
 });
 

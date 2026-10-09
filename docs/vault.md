@@ -81,7 +81,9 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
 **Adding, rotating and removing.** There are two ways in, and neither goes through chat:
 
 - `sudo fffctl vault add|rotate|grant|remove|list` in the VM. A value is read from a file (`--file`) or stdin, never
-  the command line, where any process could read it. Root's writes are handed to the `fff` user.
+  the command line, where any process could read it. Root's writes are handed to the `fff` user. For a person's Claude
+  token there is a short form, `sudo fffctl vault add-claude <person> [<name>]` (hidden prompt or stdin; section 12.1), and
+  what is added in the VM is copied to the FFBox host at night (section 12.2).
 - The owner's settings dialog (Settings → Token vault), backed by owner-only routes (`/api/vault`). A member gets 403.
   An API key cannot reach them: `/api` takes only a signed-in browser session.
 
@@ -347,11 +349,13 @@ work is the risk; lothsahn decided each person's tokens serve only their own wor
 
 - **The FFBox host is where the tokens live** (lothsahn, 2026-10-06; [section 11](#11-the-tokens-on-the-ffbox-host)).
   The VM's vault is filled from there by `fff-vm vault-sync`, so a rebuilt or moved VM gets them back from the host.
+  What is added in the VM is copied to the host every night, so the host is the full backup ([section 12](#12-adding-in-the-vm-and-the-nightly-copy-to-the-host-w749)).
 - **Not in the VM's daily backup:** `fff-backup` leaves `data/vault.json` out (`--exclude='data/vault.json*'`), and the
   key was never in it (`/etc/fff` is not under `/srv/fff`).
 - **The key's spare copy** is `/etc/fff-vm/secrets/vault.key` on the host, kept in step with the VM's key by every
-  `fff-vm vault-sync` (the one before kept as `.prev`). Entries added by hand in the VM (Max's Discord token, say) open
-  again after a rebuild once root puts that copy back:
+  `fff-vm vault-sync` (the one before kept as `.prev`). Entries added by hand in the VM (Max's Discord token, say) are
+  copied to the host's `vault-extra/` at night and put back by the sync; they open again after a rebuild once root puts that
+  copy back:
   `sudo sh -c 'fff-vm ssh "sudo install -m 0600 /dev/stdin /etc/fff/vault.key" < /etc/fff-vm/secrets/vault.key' && sudo fff-vm ssh 'sudo fffctl vault init'`.
 
 ## 9. Follow-ups
@@ -414,7 +418,7 @@ their pool (section 4).
 over ssh's stdin to `fffctl vault put` in the VM, as the installer already sends the Claude and GitHub tokens
 (`push_secret`, `deploy/vm/host/guest.sh`). The entries are `vault-<user>` (claude-token), `vault-<user>-<name>` (claude-tokens/<name>) and `vault-<user>-github`, `share:
 owner`, for workers and standing agents on every machine. A second run changes nothing; a new value rotates its entry; a
-removed file removes its entry. Entries not named `vault-…` or `host-…` (added by hand) are left alone; two files that would make one name (a pool file called `github` beside a `github-token`) make one entry, the other is skipped with a warning. The installer's guest step
+removed file removes its entry. An entry that exists only in the VM (added with `fffctl vault add-claude`) is copied to the host first and so is never taken for one whose file is gone. Entries not named `vault-…` or `host-…` (added by hand) are left alone (and copied to the host first: [section 12](#12-adding-in-the-vm-and-the-nightly-copy-to-the-host-w749)); two files that would make one name (a pool file called `github` beside a `github-token`) make one entry, the other is skipped with a warning. The installer's guest step
 runs it too, so a re-run or a rebuilt VM is filled again.
 
 *Why not a read-only virtiofs share:* it needs a new device in the VM's libvirt definition and a cold restart of the
@@ -426,6 +430,150 @@ on the host and reuses a path the installer already uses and CI already tests.
 fine-grained (`github_pat_…`). A classic `ghp_` token is refused: lothsahn asked for fine-grained tokens, one per person,
 scoped to the Final-Factory repositories.
 
+## 12. Adding in the VM, and the nightly copy to the host (w749)
+
+lothsahn (2026-10-09): "I would also like a fffctl command that can be run in the VM that adds a key to the vault, and I
+would like to update the nightly host vm restart process to copy any vault keys that exist within the VM to the host."
+
+- **Code:** `vault_add_claude` in `deploy/vm/guest/fffctl` (the add), the `export` case in `server/vaultCli.ts` and
+  `Vault.reveal` in `server/vault.ts` (the only way a value leaves the VM), `vault_pull`, `vault_target`, `vault_fetch`,
+  `vault_restore_extras` and the changes to `vault_sync` in `deploy/vm/host/vault.sh`, `nightly_vault_copy` and
+  `fff-vm vault-pull` in `deploy/vm/host/fff-vm`. Tests: `deploy/vm/test/fff-vault-add.test.sh` (the add),
+  `fff-vault-sync.test.sh` (the copy, the sync after it, the conflict rule, removal), `fff-vm-nightly.test.sh` case 11 (the
+  copy comes before the drain), `ci-vm-e2e.sh` (all of it in a real guest), `server/vault.test.ts` (`export`).
+
+### 12.1 Adding a Claude token in the VM
+
+```bash
+# on the FFBox host (a hidden prompt: -t gives the VM a terminal):
+sudo fff-vm ssh -t 'sudo fffctl vault add-claude <person>'
+# or in the VM, as its admin account:
+sudo fffctl vault add-claude <person> [<name>]
+```
+
+`<person>` is the portal user id (`lothsahn`, `ben`). The token is typed at a prompt that does not echo it, or piped in on
+stdin (`printf '%s\n' "$T" | sudo fffctl vault add-claude ben`); it is never an argument, so it is not in `ps`, in the shell
+history or in a log, and a third word is refused for that reason. It must be one `sk-ant-oat01-…` token
+(`claude setup-token`); anything else is refused and not echoed.
+
+The entry is **`vault-<person>-<n>`**, where `<n>` is the next number no entry holds (a `host-<person>-claude-<n>` the host
+still has to rename counts as held), or `vault-<person>-<name>` when a `<name>` (1 to 16 of `a-z 0-9 . _ -`, lower-cased) is
+given. It is what `fff-vm vault-sync` makes from `claude-tokens/<n>`: the person's own (`share: owner`), for workers and
+standing agents on every machine, so it is in their pool at once (section 4). A name that exists is refused; replacing a
+token is `fffctl vault rotate`, and the host's file wins over that (12.4). A person with no entry before is said ("nobody
+had a vault entry for 'x'"), so a mistyped user id is noticed; `sudo fffctl vault remove <entry>` takes it back.
+
+**Other secrets** keep `sudo fffctl vault add --kind github|env … --file FILE` (or `--stdin`): the same rules (never the
+command line, never shown back), and the nightly copies them too (12.2). Only Claude tokens have the short form, because
+only they have a naming scheme the pool reads.
+
+### 12.2 The nightly copy to the host
+
+`fff-vm nightly` (12:00 UTC, `fff-vm-nightly.timer`) runs `nightly_vault_copy` **first**, while the VM is up and before it
+drains the portal: every vault entry that exists in the VM and has no file on the host is copied to the host. It runs every
+night whether or not the VM restarts tonight (`NIGHTLY_MODE=off` skips the whole nightly). It never holds the restart back
+and never fails it: a problem is logged and sent as an alert (names and last four characters only). The same copy is
+`sudo fff-vm vault-pull` by hand, and the first step of every `fff-vm vault-sync` and of the installer's own sync, so a sync
+**never removes an entry that only the VM has**; when the copy cannot run (the VM's portal is not updated yet) the sync
+removes nothing and says so.
+
+| The VM's entry | The host's file (`/etc/fff-vm/secrets/`, files 0600 root, folders 0700) |
+|---|---|
+| Claude, `vault-<person>` | `people/<person>/claude-token` |
+| Claude, `vault-<person>-<n>` (not `-github`) | `people/<person>/claude-tokens/<n>` |
+| GitHub, `vault-<person>-github`, a fine-grained token | `people/<person>/github-token` |
+| anything else: an `env` entry (Max's `max-discord`), a Settings-dialog entry, a classic `ghp_` token, a name that is none of the above | `vault-extra/<name>/value`, with its kind, variable and grants in `vault-extra/<name>/meta` |
+
+*Why the others go to `vault-extra/` and not into `people/`:* `people/<id>/` is what `vault_sync` reads and pushes, and its
+file names can say only a person's Claude or GitHub token. An env entry has a variable, a share and machine grants that a
+file name cannot carry, and a classic GitHub token is what the sync refuses by design (section 11). `vault-extra/` is a
+backup only: the sync never reads it into a person's pool. When the VM lacks an entry that has a copy there (a rebuilt VM),
+`vault_restore_extras` puts it back with its grants (`fffctl vault put`); it only ever creates, and an entry the VM has is
+never changed from the host.
+
+**What the VM lists is not trusted.** `fffctl vault export --manifest` lists each entry's name, kind, variable, owner,
+grants, fingerprint and last four characters, no value. The host checks every field against the pattern a vault entry can
+have before any of it becomes a path or part of a command (a `../` in a name or an owner, a `;` in the grants: skipped and
+said); fetches one value at a time with `fffctl vault export <name>`, straight into a 0600 file; checks its fingerprint
+against the listing and its shape against its kind; and only then links it into place.
+
+### 12.3 Security
+
+- **Root to root, over what is already there.** `fffctl vault export` is the one command that prints a value. It refuses a
+  caller that is not root and a standard output that is a terminal, so a value goes to a pipe or a file or nowhere
+  (`server/vaultCli.ts`, `export`). The FFBox host's root runs it over the same ssh key and pinned host key as `fff-vm ssh`
+  (`vssh`, `/etc/fff-vm/ssh/id_ed25519`, root's), and the value goes from ssh's output into a file made under `umask 077`.
+  It is never an argument, an environment variable, a log line or the journal. D2 already lets the host's root read the
+  VM's memory and disk (section 5); this copy puts the value in one more root-only place on that host and gives no one
+  else a way to it.
+- **Not read-only, and refused to everyone but a person.** `export` and `add-claude` are in `FFFCTL_FORMS.vault.changes`
+  (`server/opsWorker.ts`), not `allowed`: the server's shell guard refuses them to the ops worker with a reason,
+  `fff-ops-priv` has no case for them, and `server/opsFffctlForms.test.ts` fails if either is ever made allowed. w745's rule
+  that no read-only command prints a value stands. **No portal route, API, MCP tool or orchestrator access:** `Vault.reveal`
+  is called from `server/vaultCli.ts` only (`vault.test.ts` fails on a second caller, or one in the web app); no
+  `/api/vault` route returns a value (section 2).
+- **Logs carry names, the last four characters and fingerprints, nothing else.** The fingerprint is the 12 hex characters
+  `fffctl vault list` shows already. The nightly's alert says the same. Example, as `journalctl -u fff-vm-nightly` shows it
+  (the values here are made up):
+
+  ```text
+  fff-vm: vault: copied vault-ben-3 (…c2d8, fb5bd9bd1555) from the VM to /etc/fff-vm/secrets/people/ben/claude-tokens/3
+  fff-vm: vault: copied max-discord (…e7Qa, 91c0d2a4be07) from the VM to /etc/fff-vm/secrets/vault-extra/max-discord/value
+  fff-vm: vault: copy from the VM: 7 entries; 2 copied, 5 already here, 0 conflicts, 0 deleted here, not copied back, 0 old host-… names, 0 skipped
+  ```
+- **The VM is the less trusted side.** The copy only creates a file under a name the host has no file for (a hard link, so
+  a file that appears meanwhile is not replaced); it never changes a person's file (12.4). A VM that lies can add token
+  files for new names, as it could add entries; it cannot read a host file, overwrite one, or make the host run anything.
+- **Where the copies rest** (not measured): the host files are as exposed as the `claude-token` files already there
+  (root-only on the host, the same folder). Searched `deploy/` and `docs/` for a backup of `/etc/fff-vm`: none is
+  configured in this repo; whether the FFBox host has one of its own is not known here.
+
+### 12.4 When the host has a file and the VM has another value: the host file wins
+
+Chosen: **the host file wins.** The copy never changes it. It logs the conflict (the VM's and the host file's last four
+characters and fingerprints) and raises an alert, and the sync that follows rotates the VM entry to the host's value, as
+`vault-sync` always did. Reasons: *(sourced from the code)* the host file is the place the runbook has always said to
+rotate a token (Cut-over, "Rotating a token later"), and the sync has always made it win over the VM; *(reasoned)* a copy
+that can only create cannot be turned by a mistake or a compromised VM into an overwrite of the host's backup; and the host
+cannot tell which value is newer (a file's age and a VM entry's date come from two clocks).
+
+The one case that costs something: a person runs `fffctl vault rotate vault-ben-2` in the VM, as the old token expired,
+and the host still has the old one in its file. The nightly then logs and alerts the conflict, and the sync puts the old
+token back. To keep the new one, put it in the host file (`/etc/fff-vm/secrets/people/ben/claude-tokens/2`) and run
+`sudo fff-vm vault-sync`. `fffctl vault rotate` on a `vault-…` entry says this where it is done. **Extras are the other way
+round:** they have no editor but the VM, so a changed value there replaces the host copy (the old one kept as
+`value.prev`) and the VM wins.
+
+### 12.5 Removing a token for good
+
+The host's files are the backup, and a name the last sync found a file for is remembered (`vault-synced`, beside the keys):
+an entry whose file is gone is a deletion, and an entry nobody has a file for is a new one.
+
+- **A token with a host file** (made there, or copied by the nightly): delete the file, then `sudo fff-vm vault-sync`. The
+  entry leaves the VM, and a nightly in between does not bring the file back. Revoke the token where it was made, too.
+- **Added in the VM and not copied yet** (the same day, before 12:00 UTC): `sudo fffctl vault remove vault-<person>-<n>`
+  in the VM. If it was copied, the line above.
+- **Removed in the VM only:** it comes back at the next sync, from the host file. That is what the host copy is for.
+- **An extra:** `sudo fffctl vault remove <name>` in the VM, and `sudo rm -r /etc/fff-vm/secrets/vault-extra/<name>` on the
+  host (its value, `value.prev` and `meta`); otherwise the nightly copies it back or a rebuilt VM gets it back.
+- A host that has never run the sync with this change has no `vault-synced`: an entry with no file is then taken for a new
+  one and copied (the safe way round), until one sync has recorded the names.
+
+### 12.6 Install (nothing runs until lothsahn does it)
+
+On the FFBox host:
+
+```bash
+cd /opt/ff-factory && git pull
+sudo deploy/vm/host/install.sh --guest-only            # the new fffctl (add-claude) in the VM, and fff-vm, vault.sh on the host
+sudo fff-vm ssh 'sudo fffctl update'                   # the VM's portal release with `export` (the nightly copy needs it); this is the portal update
+sudo fff-vm vault-sync                                 # records what has a file; copies the VM-only entries (Max's token) to vault-extra/
+```
+
+`add-claude` works after `install.sh --guest-only` alone (it uses commands every release has). Until the portal is updated,
+`fff-vm vault-pull` says the VM cannot list its entries, the sync removes nothing, and the nightly alerts; nothing is
+lost. No VM reboot; the next nightly runs the copy.
+
 ## Decisions
 
 1. **Sharing across people:** no. Each person's own tokens for their own work (lothsahn, 2026-10-06; section 10).
@@ -433,6 +581,8 @@ scoped to the Final-Factory repositories.
    VM's daily backup (lothsahn, 2026-10-06; section 11).
 3. **The workers' GitHub token:** one fine-grained token per person, scoped to the Final-Factory repositories
    (lothsahn, 2026-10-06), in place of w511's single workers' token.
+4. **Entries made in the VM are copied to the host every night** (lothsahn, 2026-10-09, w749; section 12): root to root, a
+   person's file is only created, the host file wins a conflict, the ops worker and the portal have no way to a value.
 
 ## Cut-over
 
@@ -550,7 +700,9 @@ entirely: `sudo fff-vm ssh 'sudo fffctl machine-credential revoke <id>'`.
 ## Runbook
 
 **Add, rotate or remove a person's tokens:** the files under `/etc/fff-vm/secrets/people/<id>/`, then
-`sudo fff-vm vault-sync` (Cut-over, step 2).
+`sudo fff-vm vault-sync` (Cut-over, step 2). **Add one from the VM instead:** `sudo fff-vm ssh -t 'sudo fffctl vault add-claude <id>'`
+(a hidden prompt); the nightly copies it to the host, or now: `sudo fff-vm vault-pull` (section 12). **Remove for good:** delete the
+host file, then `sudo fff-vm vault-sync` (section 12.5).
 
 **Any other secret** (in the VM): `sudo fffctl vault add … --file FILE`, or Settings → Token vault → Add a token
 (owners only). The value is never shown again. `sudo fffctl vault rotate <name> --file FILE` replaces it; runs started

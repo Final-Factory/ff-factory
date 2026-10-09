@@ -10,6 +10,20 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Claude tokens can be added from inside the VM, and the host copies what only the VM has every night** (w749, lothsahn:
+  "I would also like a fffctl command that can be run in the VM that adds a key to the vault, and I would like to update
+  the nightly host vm restart process to copy any vault keys that exist within the VM to the host.").
+  - `sudo fffctl vault add-claude <person> [<name>]` reads the token at a hidden prompt or on stdin (never an argument),
+    checks the `sk-ant-oat01-` shape and makes `vault-<person>-<n>`, the next free number, in the person's pool.
+  - `fff-vm nightly` first runs the new `vault_pull` (also `sudo fff-vm vault-pull`, and the first step of every
+    `fff-vm vault-sync`): entries the VM has and the host has no file for are copied to `/etc/fff-vm/secrets/people/<id>/…`
+    (Claude pool, GitHub) or `vault-extra/<name>/` (everything else), 0600 in 0700 folders, over the host's own ssh,
+    logged by name, last four characters and fingerprint. The host file wins a conflict; a sync no longer removes an
+    entry only the VM has; deleting the host file and syncing removes a token for good. New VM command
+    `fffctl vault export` (root only, never to a terminal, refused to the ops worker). `docs/vault.md` section 12.
+  - Needs `install.sh --guest-only` on the host and `fffctl update` for the copy (the VM's release has `export`); the add
+    works after the installer alone. Tests: `deploy/vm/test/fff-vault-add.test.sh`, `fff-vault-sync.test.sh`,
+    `fff-vm-nightly.test.sh` case 11, `ci-vm-e2e.sh`, `server/vault.test.ts`.
 - **Unit tests on Windows no longer fail now and then on "EPERM, Permission denied" removing a test machine's folder, and
   the VM end-to-end test no longer fails on "Domain is already active"** (w759, lothsahn: "the Windows EPERM temp-folder
   failures hit different tests on each run ... A "Domain is already active" failure on #245 passed on rerun").

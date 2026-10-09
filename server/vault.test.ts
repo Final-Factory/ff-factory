@@ -528,3 +528,54 @@ test('vaultCli put (w748): a vault-… name takes over the host-… entry holdin
   const out = [renamed.stdout, renamed.stderr, cli(undefined, 'list').stdout].join('\n');
   assert.ok(!out.includes(A.slice(13, 40)) && !out.includes(B.slice(13, 40)), 'no token value on any output');
 });
+
+test('vaultCli export (w749): the manifest has no value; one value goes to a pipe for the FFBox host; a wrong key or an unknown name gives none', (t) => {
+  const { dir, data, keyFile } = setup(t);
+  const cfgFile = path.join(dir, 'config.json');
+  fs.writeFileSync(cfgFile, JSON.stringify({ dataDir: data, sandboxRoot: path.join(dir, 'sb'), repo: { url: 'https://example.test/g.git', basePath: path.join(dir, 'base') }, unity: { editorPath: 'x' } }));
+  const env = { ...process.env, FFSB_CONFIG: cfgFile, FFF_VAULT_KEY_FILE: keyFile, FFF_TEST_NOROOT: '1' };
+  const cli = (input: string | undefined, ...a: string[]) => spawnSync(process.execPath, ['server/vaultCli.ts', ...a], { env, encoding: 'utf8', input });
+  const add = (name: string, value: string, ...more: string[]) => cli(`${value}\n`, 'add', '--name', name, '--stdin', ...more);
+  assert.equal(add('vault-ben-2', A, '--kind', 'claude', '--owner', 'ben').status, 0);
+  assert.equal(add('max-discord', 'sekrit-discord-token-value', '--kind', 'env', '--env', 'FFDISCORD_APP_TOKEN', '--share', 'anyone', '--machines', 'lothdesktop', '--roles', 'workers').status, 0);
+  // the manifest: one tab-separated line per entry, grants and fingerprint and last four characters, never the value
+  const manifest = cli(undefined, 'export', '--manifest');
+  assert.equal(manifest.status, 0, manifest.stderr);
+  const lines = manifest.stdout.trim().split('\n').map((l) => l.split('\t'));
+  assert.deepEqual(lines[0], ['vault-ben-2', 'claude', '-', 'ben', 'owner', 'workers,standing', '*', fingerprintOf(A), A.slice(-4), '0']);
+  assert.deepEqual(lines[1], ['max-discord', 'env', 'FFDISCORD_APP_TOKEN', '-', 'anyone', 'workers', 'lothdesktop', fingerprintOf('sekrit-discord-token-value'), 'alue', '0']);
+  assert.ok(!manifest.stdout.includes(A.slice(13, 40)) && !manifest.stdout.includes('sekrit-discord'), 'no value in the manifest');
+  // one value, to a pipe (spawnSync's stdout is one), exactly once, with a newline
+  const one = cli(undefined, 'export', 'vault-ben-2');
+  assert.equal(one.status, 0, one.stderr);
+  assert.equal(one.stdout, `${A}\n`);
+  assert.equal(fingerprintOf(one.stdout.trim()), lines[0][7], 'the fingerprint the host checks the copy against');
+  // an unknown name, no name, and root-only (the test env lifts it; without it a non-root caller is refused)
+  const none = cli(undefined, 'export', 'vault-nobody-1');
+  assert.notEqual(none.status, 0);
+  assert.ok(none.stdout === '' && !none.stderr.includes(A.slice(13, 40)));
+  assert.notEqual(cli(undefined, 'export').status, 0);
+  if (process.getuid && process.getuid() !== 0) {
+    const refused = spawnSync(process.execPath, ['server/vaultCli.ts', 'export', 'vault-ben-2'], { env: { ...env, FFF_TEST_NOROOT: '' }, encoding: 'utf8' });
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /root only/);
+    assert.equal(refused.stdout, '');
+  }
+  // a vault sealed with another key opens nothing: the name is refused, no bytes of a value
+  fs.writeFileSync(keyFile, newKeyText(), { mode: 0o600 });
+  const wrong = cli(undefined, 'export', 'vault-ben-2');
+  assert.notEqual(wrong.status, 0);
+  assert.equal(wrong.stdout, '');
+  assert.match(wrong.stderr, /cannot be opened with the vault key/);
+});
+
+test('Vault.reveal (w749) has one caller: the root-only CLI export, never a route, a tool or the portal itself', () => {
+  const reveals = (file: string) => /\.reveal\(/.test(fs.readFileSync(file, 'utf8'));
+  const callers = fs
+    .readdirSync('server')
+    .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+    .filter((f) => reveals(path.join('server', f)));
+  assert.deepEqual(callers, ['vaultCli.ts']);
+  const web = fs.readdirSync('web/src', { recursive: true }).filter((f): f is string => typeof f === 'string' && /\.tsx?$/.test(f));
+  assert.ok(web.length > 0 && !web.some((f) => reveals(path.join('web/src', f))), 'the web app never reveals');
+});
