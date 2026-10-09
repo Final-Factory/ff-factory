@@ -107,6 +107,8 @@ export interface KeySource {
   /** Where the key is read from, or why there is none. */
   file?: string;
   why?: string;
+  /** Set when `file` is the systemd credential: the credentials folder it is in (readKey's credential rule applies to it alone). */
+  credentialsDir?: string;
 }
 
 /**
@@ -115,22 +117,71 @@ export interface KeySource {
  */
 export function keySource(cfg: { dataDir: string; vault?: { keyFile?: string } }, env: NodeJS.ProcessEnv = process.env): KeySource {
   const cred = env.CREDENTIALS_DIRECTORY ? path.join(env.CREDENTIALS_DIRECTORY, VAULT_CREDENTIAL) : undefined;
-  const file = cred && fs.existsSync(cred) ? cred : cfg.vault?.keyFile;
+  const fromCredential = !!cred && fs.existsSync(cred);
+  const file = fromCredential ? cred : cfg.vault?.keyFile;
   if (!file) return { why: `no vault key: neither the systemd credential ${VAULT_CREDENTIAL} nor config vault.keyFile` };
   const rel = path.relative(path.resolve(cfg.dataDir), path.resolve(file));
   if (!rel.startsWith('..') && !path.isAbsolute(rel)) return { why: `the vault key ${file} is inside the data folder; keep it outside (docs/vault.md)` };
-  return { file };
+  return { file, ...(fromCredential ? { credentialsDir: env.CREDENTIALS_DIRECTORY } : {}) };
 }
 
-/** The 32-byte key in `file` (base64), checked: never shown, and refused when other users may read it (POSIX). */
-export function readKey(file: string, platform: NodeJS.Platform = process.platform): Buffer {
+export interface ReadKeyOptions {
+  platform?: NodeJS.Platform;
+  /** The systemd credentials folder, when `file` is the credential in it (KeySource.credentialsDir). */
+  credentialsDir?: string;
+  /** The accounts that may own a credential: root and this process's own (tests set it). */
+  owners?: number[];
+}
+
+/**
+ * Why a systemd credential file is not private enough, or undefined when it is. systemd (exec-credential.c write_credential)
+ * writes it 0400, root-owned, and gives the service user read access by a POSIX ACL entry; stat then reports the ACL's
+ * mask in the group bits, so a file only the service user can read shows as 0440 (measured on Ubuntu with systemd 255:
+ * `setfacl -m u:nobody:r` on a 0400 root file gives mode 440, owner 0:0, `group::---`). Where the file system has no ACLs
+ * systemd chowns the file to the service user instead (0400). So in the credentials folder the group bits are not a
+ * grant to a group; "other" must be empty, nobody but root or this account may own the file, and no write bit may be set.
+ * The folder itself must be closed to others too. Anywhere else the strict rule applies (readKey).
+ */
+function credentialProblem(file: string, st: fs.Stats, dir: string, owners: number[]): string | undefined {
+  let real: string;
+  let realDir: string;
+  try {
+    real = fs.realpathSync(file);
+    realDir = fs.realpathSync(dir);
+  } catch {
+    return 'it cannot be resolved';
+  }
+  if (path.dirname(real) !== realDir) return 'it is not directly in the credentials folder';
+  if (!st.isFile()) return 'it is not a regular file';
+  if (st.mode & 0o007) return `other users can access it (mode ${(st.mode & 0o777).toString(8)})`;
+  if (st.mode & 0o022) return `it is writable by a group or others (mode ${(st.mode & 0o777).toString(8)})`;
+  if (!owners.includes(st.uid)) return `it is owned by uid ${st.uid}`;
+  const d = fs.statSync(realDir);
+  if (d.mode & 0o007) return `its folder is open to other users (mode ${(d.mode & 0o777).toString(8)})`;
+  if (!owners.includes(d.uid)) return `its folder is owned by uid ${d.uid}`;
+  return undefined;
+}
+
+/**
+ * The 32-byte key in `file` (base64), checked: never shown, and refused when other users may read it (POSIX): no group or
+ * other bits at all, except for systemd's own credential file in its credentials folder (credentialProblem).
+ */
+export function readKey(file: string, o: ReadKeyOptions = {}): Buffer {
+  const platform = o.platform ?? process.platform;
   let st: fs.Stats;
   try {
     st = fs.statSync(file);
   } catch (e) {
     throw new Error(`cannot read the vault key ${file}: ${(e as NodeJS.ErrnoException).code ?? 'unreadable'}`);
   }
-  if (platform !== 'win32' && st.mode & 0o077) throw new Error(`the vault key ${file} is readable by other users (mode ${(st.mode & 0o777).toString(8)}); chmod 600 it`);
+  if (platform !== 'win32' && st.mode & 0o077) {
+    const bad = o.credentialsDir ? credentialProblem(file, st, o.credentialsDir, o.owners ?? [0, process.getuid?.() ?? 0]) : undefined;
+    if (o.credentialsDir && bad === undefined) {
+      // systemd's credential: private to the unit (ACL mask in the group bits), nothing to fix.
+    } else {
+      throw new Error(`the vault key ${file} is readable by other users (mode ${(st.mode & 0o777).toString(8)})${bad ? `: ${bad}` : ''}; chmod 600 it`);
+    }
+  }
   const key = Buffer.from(fs.readFileSync(file, 'utf8').trim(), 'base64');
   if (key.length !== 32) throw new Error(`the vault key ${file} is not 32 bytes of base64 (fffctl vault init makes one); its content is not shown`);
   return key;
@@ -297,7 +348,7 @@ export class Vault {
     if (!src.file) return { status: { key: 'missing', why: src.why } };
     let key: Buffer;
     try {
-      key = readKey(src.file);
+      key = readKey(src.file, { credentialsDir: src.credentialsDir });
     } catch (e) {
       return { status: { key: 'unreadable', why: (e as Error).message, keyFile: src.file } };
     }

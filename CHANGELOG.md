@@ -30,6 +30,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   raise a meter between polls. `fffctl vault list` shows each pool; `system_status` shows each pool, its agents and the reserves; a
   banner shows a pool used up or over its caps. Needs a portal deploy and, on the FFBox host, the new `vault.sh` (`install.sh
   --guest-only` or `fff-vm` update).
+- **The portal's token vault opens its key in the VM** (w736, Lothsahn; `system_status` said "Token vault: 0 entries; key
+  unreadable (the vault key /run/credentials/fff-portal.service/fff-vault-key is readable by other users (mode 440); chmod 600
+  it)"). Cause: for a service that is not root, systemd writes a credential 0400 root-owned with an ACL entry for the service
+  user, and `stat` shows the ACL mask in the group bits, so the file reads 440; `readKey` refused any group or other bit. A
+  hand `chmod` would not survive a restart (systemd recreates the file), and `LoadCredential` has no mode setting. Fix in
+  code: for the key that comes from `$CREDENTIALS_DIRECTORY`, `readKey` accepts the group bits when the file is directly in
+  that folder, a regular file, has no other bits and no write bit for group or others, and file and folder are owned by root or
+  the portal's account; every other key file keeps the strict rule. The VM end to end runs the deployed `readKey` as `fff`
+  on the live credential after the install and after the cold restart. Needs a portal deploy.
+
 - **A worker's session holds one piece of work: related requests stay in it, unrelated ones get a fresh session** (w740, Lothsahn
   and Ben: "every time the dispatcher hands out a new work request to a worker, it should be in a new session … updates to an
   existing work request should go into the existing session"; then "related work stays in the session that did the earlier work").
