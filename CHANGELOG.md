@@ -10,6 +10,22 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A worker's session holds one piece of work: related requests stay in it, unrelated ones get a fresh session** (w740, Lothsahn
+  and Ben: "every time the dispatcher hands out a new work request to a worker, it should be in a new session … updates to an
+  existing work request should go into the existing session"; then "related work stays in the session that did the earlier work").
+  Worker 39a3e14b held w698 and w736 to w739 in one conversation, and workers have no auto-compaction. `message_agent` with a
+  `work_id` for a worker that is not on the request now reads concrete signals (`Orchestrators.relationTo`: the request names
+  one of the worker's requests in `related_ids`, is about its PR or branch, or the overlap check calls it a strong match). Related:
+  the worker's own session, with a `[session]` line saying why. Unrelated, the default: a NEW session in the same sandbox
+  (`Agents.startFreshSession`) whose first message carries the dispatcher's text, the request as filed and a handover
+  (`handoverNote`: the sandbox's branch and git state, the session that used it last, the requests it names with their status
+  and PRs, to read with `read_work`); the old session is stopped once it has nothing else in hand and left alone mid-turn
+  (`retireWhenFree`). `session` (`same`/`new`) with a required `session_reason` lets the dispatcher decide when it is ambiguous;
+  the reply and the request's log (`session choice: …`) say which way it went and why. `start_agent` adds the same handover.
+  `decide_work link` is refused for an unrelated request while the worker has another in hand. Updates to a request still go
+  to its session. Docs: `docs/orchestrators.md` "One session per request"; the dispatcher's prompt and tool texts match. Needs
+  a portal deploy.
+
 - **`set_app_config` says that `machines.claudeFromVault` takes a machine** (w737, Lothsahn: "update LothDesktop to take
   machines.claudeFromVault true"). The setting was always per machine (`appConfig.ts` `perMachine`, `nextPerMachine`;
   `machine: "lothdesktop"` writes `{ "lothdesktop": true }` and leaves BEAST, m3, m5 and biscuit off), but the tool's text

@@ -1118,6 +1118,15 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       for (const sid of ids) {
         const s = this.store.sessions.get(sid);
         if (!s || s.kind !== 'worker') throw new Error(`no worker "${sid}"`);
+        // Related work shares a session, unrelated work does not (w740): a worker with other requests in hand is linked only
+        // to one related to what it did.
+        const other = this.handsOf(sid).filter((h) => h.id !== w.id);
+        const rel = other.length ? this.relationTo(w, sid) : undefined;
+        if (rel && !rel.related) {
+          throw new Error(
+            `${this.workerLine(sid)} is on ${other.map((h) => `${h.id} "${clip(h.title, 60)}"`).join(', ')} and ${w.id} is not related to it: ${rel.why}. Unrelated work gets its own session (start_agent with work_id "${w.id}", or message_agent with work_id, which starts a new session in that worker's sandbox). Related work (a follow-up, a fix for what it shipped) is filed with related_ids naming that request, or sent with message_agent session "same" and a session_reason.`,
+          );
+        }
       }
       w.sessionIds = [...new Set([...w.sessionIds, ...ids])];
       const at = this.now().toISOString();
@@ -1172,6 +1181,33 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     // A question is for the person who asked; the rest is news for everyone the request is for.
     this.toPeople(input.action === 'ask' ? [w.requestedBy] : w.requesters, dispatchNotice(w, what, note));
     return `${w.id} ${w.status}: ${what}. ${input.action === 'ask' ? names([w.requestedBy]) : names(w.requesters)}'s orchestrator has your note.`;
+  }
+
+  /**
+   * Whether request `w` is related to work worker `sessionId` did or does (w740, Lothsahn: related work stays in the session
+   * that did the earlier work, unrelated work gets a fresh one), from concrete signals only: `w` names one of the worker's
+   * requests in its related ids; is about the PR (`PR 412`, `#412`, a /pull/ link) or the branch of one of them; or the
+   * server's overlap check calls it a strong match of one of them (or of the worker). Nothing tying them is "unrelated": the
+   * default is a fresh session. `why` names the signals, for the dispatcher's reply and the request's log.
+   */
+  relationTo(w: WorkItem, sessionId: string): { related: boolean; why: string } {
+    const mine = [...this.store.work.values()].filter((x) => x.id !== w.id && x.sessionIds.includes(sessionId));
+    const text = [w.title, w.brief, w.constraints ?? ''].join(' ').toLowerCase();
+    const why: string[] = [];
+    for (const m of mine) {
+      const tag = `${m.id} "${clip(m.title, 60)}"`;
+      if ((w.relatedIds ?? []).some((r) => same(r.trim(), m.id))) why.push(`it names ${tag} in related_ids`);
+      for (const pr of m.prs ?? []) {
+        if (w.keys.includes(`pr:${pr.number}`) || w.keys.includes(`ref:${pr.number}`)) why.push(`it is about PR #${pr.number}, which is ${tag}'s`);
+        const head = pr.head?.trim().toLowerCase();
+        if (head && head.length >= 6 && /[/\d-]/.test(head) && text.includes(head)) why.push(`it is about the branch ${pr.head}, which is ${tag}'s`);
+      }
+      const o = w.overlaps.find((x) => x.score >= STRONG && x.kind === 'work' && x.ref === m.id);
+      if (o && !why.some((x) => x.includes(m.id))) why.push(`the overlap check calls it a match of ${tag} (${o.why})`);
+    }
+    const sessionOverlap = w.overlaps.find((x) => x.score >= STRONG && x.kind === 'session' && x.ref === sessionId);
+    if (sessionOverlap) why.push(`the overlap check calls it a match of this worker's work (${sessionOverlap.why})`);
+    return { related: why.length > 0, why: why.length ? [...new Set(why)].join('; ') : `nothing ties it to what this worker did (no related_ids, PR or branch of its requests, and no strong overlap)` };
   }
 
   /** A request's overlaps as they are now (for the dispatcher's list_work): what else is in flight or recently done. */
@@ -1288,6 +1324,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       this.store.putWork(w);
     }
     this.askStatus(s, text, served);
+    this.retireCheck(s.id);
     this.capacityMayHaveFreed(`worker ${s.id} "${clip(s.title, 60)}" finished a turn`);
   }
 
@@ -1643,6 +1680,64 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       recorded.add(id);
     }
     return recorded;
+  }
+
+// ---------------------------------------------------------------- one session per request (w740)
+
+  /** Sessions a newer session took over a sandbox from (retireWhenFree): stopped as soon as they have nothing else in hand. */
+  private readonly retiring = new Set<string>();
+
+  /**
+   * The requests a worker still has in hand (w740): open ones it serves now (shared/workState.ts servedBy) and has not
+   * said DONE for. A worker with none has nothing a message to it would be about.
+   */
+  handsOf(sessionId: string): WorkItem[] {
+    const all = [...this.store.work.values()];
+    const serving = servedBy(sessionId, all);
+    return all.filter((w) => serving.has(w.id) && isOpen(w) && !doneOf(w)[sessionId]);
+  }
+
+  /**
+   * A new session took over a sandbox from `sessionId` (a request given to a worker not on it starts its own session, w740):
+   * the old one is stopped once it has nothing else in hand, never in the middle of a turn. Idle with nothing in hand: stopped
+   * now. Mid-turn, queued for a message, or still holding a request: left alone, and stopped by the turn end that finds it
+   * free (workerTurnEnded). Returns a line saying which.
+   */
+  retireWhenFree(sessionId: string): string {
+    const s = this.store.sessions.get(sessionId);
+    if (!s || s.status === 'stopped' || s.status === 'error') return `${sessionId} is already stopped`;
+    this.retiring.add(sessionId);
+    const hands = this.handsOf(sessionId);
+    if (BUSY.includes(s.status) || s.queuedSend || hands.length) {
+      const why = hands.length ? `still on ${hands.map((w) => w.id).join(', ')}` : 'mid-turn';
+      return `${sessionId} is left running (${why}); it is stopped when it has nothing else in hand`;
+    }
+    return this.stopRetired(sessionId);
+  }
+
+  /** The dispatcher's (or the server's) choice of session for a request handed to a worker it is not on, in the request's log. */
+  noteSessionChoice(w: WorkItem, worker: Pick<SessionInfo, 'id' | 'title'>, same: boolean, why: string) {
+    this.stamp(w, `session choice: ${same ? `sent to worker ${worker.id}'s session` : `a NEW session instead of worker ${worker.id}'s`}; ${why}`);
+    this.store.putWork(w);
+  }
+
+  /** Stop a retiring session that is idle, has no message waiting and no request in hand; else leave it retiring. */
+  private retireCheck(sessionId: string) {
+    if (!this.retiring.has(sessionId)) return;
+    const s = this.store.sessions.get(sessionId);
+    if (!s || s.status === 'stopped' || s.status === 'error') return void this.retiring.delete(sessionId);
+    if (BUSY.includes(s.status) || s.queuedSend || this.handsOf(sessionId).length) return;
+    this.stopRetired(sessionId);
+  }
+
+  private stopRetired(sessionId: string): string {
+    this.retiring.delete(sessionId);
+    try {
+      this.sessions.get(sessionId).stop();
+    } catch {
+      return `${sessionId} could not be stopped`;
+    }
+    return `${sessionId} is stopped (nothing else in hand)`;
   }
 
   // ---------------------------------------------------------------- standing agents' delegations (w527)
