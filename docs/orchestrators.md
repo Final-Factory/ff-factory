@@ -91,9 +91,9 @@ The dispatcher then does one of these for each request:
 
 | decision | how | status |
 |---|---|---|
-| start it | `start_agent` with `work_id`, or `message_agent` with `work_id` to a worker already on it | `active` |
+| start it | `start_agent` with `work_id`, or `message_agent` with `work_id` to a worker (a new session, or the worker's own when the request is related to what it did: [One session per request](#one-session-per-request)) | `active` |
 | merge it | `decide_work merge` into the open request it repeats; its people join that one | `merged` |
-| link it | `decide_work link` to workers already doing it | `active` |
+| link it | `decide_work link` to workers already doing it (a worker with another request in hand takes only a related one) | `active` |
 | queue it | `decide_work queue`: capacity only, no computer that could take it has room (`needs`: the computers that can, when only some can); refused while one of them has room | `queued` |
 | block it | `decide_work block` with `blocker`: the thing it waits on (another request, a deploy, a machine, a usage limit, a lock, a time, CI); it starts by itself when that clears | `blocked` |
 | ask | `decide_work ask`, at most 3 questions per request: what only a person can answer or decide | `question` |
@@ -303,7 +303,7 @@ days; a deploy is a person's call, and a week without one is worth their look.
 **A worker on several requests works only on the one it was last given** (and those linked to it since). Each request
 records when each worker was last given it (`links`: `sent` by `start_agent`/`message_agent` with its `work_id`,
 `linked` by `decide_work link`). A worker's current turn serves the request it was last *sent*, plus any *linked* to it
-after that (small reports sharing one worker). For links made before w418, the request's creation time stands in, so a
+after that (related requests sharing a worker, [One session per request](#one-session-per-request)). For links made before w418, the request's creation time stands in, so a
 worker that moved on to a newer request (w342's worker on w414) no longer makes the old one look worked on.
 
 **The cleanup still decides; this only shows.** The stored status, and the cleanup's own `stalled` with its reason and
@@ -593,7 +593,7 @@ request's first ("main") worker may close it, was not taken: at w428 the worker 
 first one started, and a request handed from worker to worker has no single main one, while who is still on it is
 already in the ledger (links, `servedBy`, session state).
 
-**The wrap-up** (w419). When the dispatcher sends a worker work for a request (`message_agent` with `work_id`) and the
+**The wrap-up** (w419). When the dispatcher sends a worker a related request that is not yet one of its own (`message_agent` with `work_id`, [One session per request](#one-session-per-request)) and the
 worker's current turn is on other requests (`servedBy`, [What a request is doing now](#what-a-request-is-doing-now)),
 the message starts with `[wrap-up]`: for each request it was on, end the reply with `DONE: <id>`, or one line
 `<id>: still open: <what>`, then carry on with the new work. Those requests' logs say so; the worker's next report closes
@@ -601,6 +601,41 @@ them on a DONE, or its line naming the request becomes that request's log entry 
 
 `scripts/ledger-dry-run.ts <copy of data>` prints what rules 1 and 4 would do now (close, ask, stall, or wait), and which
 refused DONEs would close now, changing nothing.
+
+**One session per request** (w740, Lothsahn and Ben, 2026-10-08). Workers have no auto-compaction, so a session that
+takes request after request carries every earlier one's context on every turn (worker 39a3e14b held w698 and w736 to w739
+in one conversation). The rule is: *related work stays in the session that did the earlier work, unrelated work gets a
+fresh session*, and an update to a request always goes to the session already on it.
+
+- **A request the worker is already on** (`update_work` notes, an orchestrator's follow-up, the answer to a question, the
+  cleanup's resumes, `message_agent` with the same `work_id`): that session, as before.
+- **A request the worker is not on** (`message_agent` with a `work_id`): `Orchestrators.relationTo` reads concrete signals,
+  nothing else: the request names one of the worker's requests in `related_ids`; it is about the PR (`PR 412`, `#412`, a
+  `/pull/` link) or the branch of one of them; or the overlap check calls it a strong match of one of them or of the
+  worker. A fix for a regression the worker just shipped, the next step of its feature and a correction to its PR all
+  carry one of these. **Related**: the message goes to that session, with the wrap-up and the request as filed, and a
+  `[session]` line saying why it came there. **Unrelated** (nothing ties them, the default): the portal starts a NEW worker
+  session in the same sandbox (`Agents.startFreshSession`): a new conversation and process on the same branch and files,
+  titled `<id>: <title>`. `start_agent` always starts a new session; into a sandbox the dispatcher picks it is a second
+  session there.
+- **The dispatcher decides when it is ambiguous**: `message_agent` takes `session` (`same` or `new`) and a required
+  `session_reason`, which overrule the server's reading either way. Without `session` the server's reading stands. The
+  reply says which way it went and why ("Same session (related: it names w1 …)", "Started a NEW session … because
+  unrelated: nothing ties it …") and so does the request's log (`session choice: …`), so the choice is visible.
+- **Linked requests** (a duplicate, or the dispatcher's "already on it"): a duplicate is `decide_work merge`, which moves no
+  worker. `decide_work link` to a worker that has another request in hand is refused unless the request is related to it
+  by the same signals; a worker with nothing in hand takes any link. So `related_ids` pointing at the worker's request is a
+  signal for the same session, and a request with none still gets a new session. Why: the user's rule is that only unrelated
+  work is isolated, and the signals are the ones a person can check; the override (`session` with a reason) is there for
+  the cases they miss and leaves a record.
+- **The old session** is left alone while it is mid-turn or still has a request in hand (open, served by it, no DONE of its
+  own); it is stopped as soon as it has nothing else (`Orchestrators.retireWhenFree`: at once when idle, at the turn end that
+  finds it free otherwise; the reply says which). The sandbox, branch and files stay.
+- **The handover**: a new session's first message is the dispatcher's text, the request as filed (title, brief, constraints,
+  related ids, every note), then `handoverNote` (`server/work.ts`): that it is a new session with no earlier conversation, the
+  sandbox's branch and git state now, which session used the sandbox last and the requests it keeps, and the requests this
+  one names with their status and PRs, to be read with `read_work` (`start_agent` adds the same). Then the intake rules and the
+  `Request:` line.
 
 **Stalled** is a status of its own (`WorkItem.stalled`: kind, reason, when): out of the open lists, behind the "N stalled"
 filter on the Requests tab and `list_work status stalled`, kept like an open request. The cleanup never closes one: its
@@ -1054,7 +1089,7 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   next pass (the transcript says why it waits), and given up only after 24 hours (`QUEUE_HOLD_MS`), with an error that
   quotes its start. Before, a throw dropped it.
 - **Every worker gets the request as filed** (w496): after the dispatcher's own brief, `start_agent` (and `message_agent`
-  with a `work_id` the worker is not on yet) adds "The request as filed": its title, brief, constraints, related ids
+  with a `work_id` the worker is not on yet, or linked to but never sent) adds "The request as filed": its title, brief, constraints, related ids
   and every `update_work` note (`requestAsFiled`, `server/work.ts`; notes are kept whole in `WorkItem.notes`, older ones
   are read back from the log), then the intake rules and the `Request:` line. Its attachments go with it as before.
 - **Idle processes.** An idle claude process holds memory: measured on BEAST (2026-10-04), 100-300 MB resident and
@@ -1166,8 +1201,9 @@ on beast/agent-mcp), so a busy worker could not be found on the dashboard.
   - by `start_agent`: `title` is required for the dispatcher. With a `work_id` the worker starts with it; without one
     the start is recorded as the next request (`recordDirectStart`) and the worker is titled for that id. A person's
     own orchestrator's start is titled for the request it is recorded as too (its `title`, else the prompt's start);
-  - by `message_agent` with a `work_id` the worker is not on yet: `title` is required, and the worker is retitled once
-    the message is sent (a refused send renames nothing). A follow-up on the request it is on may pass one;
+  - by `message_agent` with a `work_id` the worker is not on yet: `title` is required. A new session is titled with it; a
+    related request sent to the same session retitles the worker once the message is sent (a refused send renames nothing).
+    A follow-up on the request it is on may pass one;
   - by `decide_work link`: `title` is required, and every linked worker is retitled.
   `set_agent_title` renames a worker otherwise. A merge moves no worker (only a request nobody works on yet can be
   merged), and an FFBox dev request that joins a request (covered) leaves its workers on the same job, so neither
