@@ -96,7 +96,6 @@
     "criticalFreeGB": 40,
     "remountMinFreeGB": 30,
     "devDriveVhdx": "",
-    "compactWhenReclaimGB": 0,
     "cleanup": {
       "ageRules": []
     }

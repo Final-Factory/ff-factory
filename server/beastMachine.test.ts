@@ -290,16 +290,18 @@ const PROBES: Probes = {
   usage: async () => ({ account: {}, reply: { rate_limits_available: false } }),
 };
 
-test("beast machine: its agents keep the host workers' account (claudeAccounts.workers), unless the machine is named", () => {
+test("beast machine: its agents follow machines.useHostClaudeEnv like any machine's (claudeAccounts.workers is retired, w755)", () => {
   const token = 'sk-ant-oat01-' + 'x'.repeat(40) + 'WXYZ';
-  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: token, CLAUDE_CONFIG_DIR: 'C:\\claude-cfg' }, claudeAccounts: { workers: 'login' as const }, machines: { useHostClaudeEnv: { '*': true, lothdesktop: false } } };
+  const cfg = { claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: token, CLAUDE_CONFIG_DIR: 'C:\\claude-cfg' }, machines: { useHostClaudeEnv: { '*': true, lothdesktop: false } } };
   const beast = { id: 'beast', local: true };
-  assert.equal(usesHostClaudeEnv(cfg, beast), false, 'workers on the login: so are the daemon\'s');
-  assert.deepEqual(hostClaudeEnvFor(cfg, beast), { CLAUDE_CONFIG_DIR: 'C:\\claude-cfg' }, 'no credential, but the config dir stays (resumed sessions find their history)');
-  assert.equal(machineUsesLogin(cfg, beast), true);
-  assert.match(accountSource(cfg, beast), /login \(this host's stored Claude login/);
-  assert.equal(usesHostClaudeEnv({ ...cfg, claudeAccounts: { workers: 'token' } }, beast), true, 'workers on the token: so are they');
-  assert.match(accountSource({ ...cfg, claudeAccounts: { workers: 'token' } }, beast), /host token …WXYZ/);
+  assert.equal(usesHostClaudeEnv(cfg, beast), true, 'no entry naming it: the "*" rule, local or not');
+  assert.match(accountSource(cfg, beast), /host token …WXYZ/);
+  // An entry naming it: the host's own stored login, with the rest of claudeEnv kept.
+  const own = { ...cfg, machines: { useHostClaudeEnv: { beast: false } } };
+  assert.equal(usesHostClaudeEnv(own, beast), false);
+  assert.deepEqual(hostClaudeEnvFor(own, beast), { CLAUDE_CONFIG_DIR: 'C:\\claude-cfg' }, 'no credential, but the config dir stays (resumed sessions find their history)');
+  assert.equal(machineUsesLogin(own, beast), true);
+  assert.match(accountSource(own, beast), /login \(this host's stored Claude login/);
   assert.equal(usesHostClaudeEnv({ ...cfg, machines: { useHostClaudeEnv: { beast: true } } }, beast), true, 'an entry naming it wins');
   assert.equal(usesHostClaudeEnv(cfg, 'beast'), true, 'not known to be local: the "*" rule');
   assert.equal(usesHostClaudeEnv(cfg, 'lothdesktop'), false);

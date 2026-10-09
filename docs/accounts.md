@@ -16,22 +16,25 @@ Every agent the portal starts runs on one of three kinds of Claude credential:
 |---|---|---|---|
 | The orchestrator (and the ops worker working for a person) | `claudeAccounts.orchestrator` | `"token"`, `"login"` (this host's), `"tokenfile"` or `"vault"` (each person's own pool, an owner's setting; w738) | `"token"` |
 | The dispatcher (w464) | `claudeAccounts.dispatcher` | same; once set it also overrides the system payer's own token in `userClaudeEnv` | unset: the system payer's own token if any, else `claudeAccounts.orchestrator`'s |
-| Workers and standing agents on a Mac | `machines.useHostClaudeEnv` | `true` (host token) or `false` (the Mac's login); global, or per machine | `true` |
-| Workers and standing agents on this host's own daemon ([beast-machine.md](beast-machine.md)) | `claudeAccounts.workers`, unless `machines.useHostClaudeEnv` names the machine | `"token"` or `"login"`; "login" is this host's login, with the rest of `claudeEnv` (e.g. `CLAUDE_CONFIG_DIR`) kept | `"token"` |
+| Workers and standing agents on a machine (a Mac, a PC, BEAST, this host's own daemon) | `machines.useHostClaudeEnv` | `true` (host token) or `false` (the Mac's login); global, or per machine | `true` |
 
 The portal runs only the orchestrators and the dispatcher (w510, 2026-10-06), so those are the only agents whose
 account it picks itself; every worker and standing agent is on a machine. Until w510 `claudeAccounts.workers` also set
-the account of the portal's own sandbox workers, and `claudeAccounts.standing` that of the standing agents it ran. The
-`standing` key is retired: a config that sets it loads, names it once at startup and in `system_status`, and ignores it
-(`RETIRED_CONFIG_KEYS`, `server/config.ts`); `set_app_config` no longer takes it. A standing agent on a machine follows
-that machine's row above.
+the account of the portal's own sandbox workers, and `claudeAccounts.standing` that of the standing agents it ran; until
+w755 `workers` still set that of the workers of the portal's own host as a machine (`add_machine local`, a Windows
+portal's own daemon). Both keys are retired: a config that sets one loads (whatever its value), names it once at startup and in
+`system_status`, and ignores it (`RETIRED_CONFIG_KEYS`, `server/config.ts`); `set_app_config` no longer takes either. A worker or
+standing agent on any machine, the portal's own host's included, follows `machines.useHostClaudeEnv` (the row above): the
+entry naming the machine, else the global value or `"*"`, else the host token. A Windows portal that had
+`claudeAccounts.workers: "login"` and no entry for its own host's machine now sends that machine's agents the host token;
+set `machines.useHostClaudeEnv` to `false` for it to keep the host's stored login (`fff-migrate` writes that entry for BEAST).
 
 ### The token file (w464)
 
 `claudeAccounts.orchestrator` and `.dispatcher` also take `"tokenfile"`: those roles run on the
 long-lived OAuth token (`sk-ant-oat01-…`, from `claude setup-token`) in the file config `claudeTokenFile` names,
 e.g. `/srv/fff/secrets/claude-oauth-token` (docs/portal-on-ffbox-host.md, change 18). Workers never do: a config
-setting `claudeAccounts.workers` to it is refused at load, and `set_app_config` refuses it.
+setting any other role to it is refused at load, and `set_app_config` refuses it.
 
 - **Read at each session start** (`readTokenFile`, `server/secrets.ts`) and given to that process alone as
   `CLAUDE_CODE_OAUTH_TOKEN`, with every other Claude credential removed first (the server's own, `claudeEnv`'s token,
@@ -50,7 +53,7 @@ setting `claudeAccounts.workers` to it is refused at load, and `set_app_config` 
 `machines.useHostClaudeEnv` takes `true`/`false` or an object with one entry per machine id, plus `"*"` for
 the machines it does not name: `{ "m3": false, "m5": false }`, or `{ "*": false, "m5": true }`.
 
-`claudeAccounts.orchestrator`, `.dispatcher`, `.workers` and `machines.useHostClaudeEnv` are in `set_app_config`'s
+`claudeAccounts.orchestrator`, `.dispatcher` and `machines.useHostClaudeEnv` are in `set_app_config`'s
 allowlist, so the orchestrator can change them when the user asks:
 
 ```
@@ -109,8 +112,8 @@ The other `claudeEnv` variables, such as `CLAUDE_CONFIG_DIR`, stay.
   `Agents.orchestratorEnv` (`server/agents.ts`); `buildOptions` (`server/launch.ts`) drops the credentials of the
   environment it starts from.
 - Workers and standing agents on a machine (a Mac, a Windows PC, this host's own daemon): the portal sends the host
-  token in the launch spec only when the machine takes it (`hostClaudeEnvFor`; for this host's own daemon that is
-  `claudeAccounts.workers`, `usesHostClaudeEnv`), and sets `LaunchSpec.login` when it does not
+  token in the launch spec only when the machine takes it (`hostClaudeEnvFor`, `usesHostClaudeEnv`, from
+  `machines.useHostClaudeEnv`), and sets `LaunchSpec.login` when it does not
   (`machineUsesLogin`; `server/agents.ts`, and `place` in `server/standing.ts`), so a token left in the daemon's own
   environment cannot stand in for the machine's login either.
 - A person's own token is laid over all of these (`claudeEnvFor`, `server/identity.ts`).
@@ -164,7 +167,7 @@ Each session maps to an account source key (`sessionSource`, `server/usage.ts`):
    role is set to `"login"`, else the host token.
 
 The usage meters (`buildAccounts`) list which host roles share the token and which the login when they are
-split, for example "the agents' token on BEAST (the orchestrator, workers)" and "BEAST login (the
+split, for example "the agents' token on BEAST (the dispatcher)" and "BEAST login (the
 orchestrator)". `system_status` starts its account section with one line naming every role's account, the
 account of each machine's agents, and the people with their own token. It adds a warning when a role set
 to the login cannot use it.
@@ -179,11 +182,8 @@ only when something is set to use it, or an agent is running on it now:
 - **this host's stored login** is left out while no role (`claudeAccounts`) is set to `"login"` and a host token exists;
 - **the host token** is left out while no role and no machine uses it;
 - **vault tokens** are left out while no machine is on the vault and no role is set to `"vault"`.
-**The workers role is named only while a worker daemon runs on the portal's own host** (a machine added `local`, `docs/beast-machine.md`;
-`workersHere` in `server/secrets.ts`). Since w510 the portal runs no workers itself, so `claudeAccounts.workers` applies to nothing
-there: with no such daemon, `system_status` leaves "workers here: …" out of the per-agent line, drops the "WARNING: set to the
-<host> login (workers), which cannot run agents", and the accounts list drops the "<host> login (workers)" row. They return when
-a local machine is added again.
+Since w755 `system_status` names no "workers here" and shows no "<host> login (workers)" row or warning: the only roles are the
+orchestrator and the dispatcher (the dispatcher only when it has an account of its own).
 A person's own token and the token file are always listed. A vault token is named by itself ("vault-ben-1 …abcd"), without a
 description; the line under a machine login still says where it is used ("m3 login").
 

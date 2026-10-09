@@ -49,7 +49,6 @@ export const SETTABLE_KEYS = [
   'claudeAccounts.orchestrator',
   // The dispatcher's own (w464); unset, it follows the orchestrator's (and the system payer's own token).
   'claudeAccounts.dispatcher',
-  'claudeAccounts.workers',
   // The file holding the token the "tokenfile" roles run on (w464): a path, checked by reading it; its content is never shown.
   'claudeTokenFile',
   'machines.useHostClaudeEnv',
@@ -303,12 +302,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       return value.trim();
     }
     case 'claudeAccounts.orchestrator':
-    case 'claudeAccounts.dispatcher':
-    case 'claudeAccounts.workers': {
+    case 'claudeAccounts.dispatcher': {
       const v = typeof value === 'string' ? value.trim() : value;
       const role = key.slice('claudeAccounts.'.length);
       if (v === 'tokenfile') {
-        // w464, change 18: never for workers; only once the file reads as a token (never shown).
+        // w464, change 18: only once the file reads as a token (never shown).
         if (!TOKEN_FILE_ROLES.includes(role)) throw new Error(`${key} cannot be "tokenfile": only ${TOKEN_FILE_ROLES.join(', ')} run on the token file`);
         if (cfg) readTokenFile(cfg);
         return v;
@@ -577,7 +575,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (Object.keys(env).length) all[opts.user!] = env;
     else delete all[opts.user!];
     cfg.userClaudeEnv = all;
-  } else if (key === 'claudeAccounts.orchestrator' || key === 'claudeAccounts.dispatcher' || key === 'claudeAccounts.workers') {
+  } else if (key === 'claudeAccounts.orchestrator' || key === 'claudeAccounts.dispatcher') {
     const accounts = { ...cfg.claudeAccounts };
     const role = key.slice('claudeAccounts.'.length) as HostRole;
     if (v === undefined) delete accounts[role];
