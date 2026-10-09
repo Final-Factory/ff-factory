@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # fffctl: the FF Factory portal inside its VM (deploy/vm/guest; /usr/local/sbin/fffctl). Root: run without sudo, it runs itself again through sudo.
 #
+# A new command or form here: its read-only parts (no file write, no unit start or stop, no vault change, no pause or
+# reset, no secret printed) are allowed to the orchestration worker in the same PR: FFFCTL_FORMS in server/opsWorker.ts and
+# deploy/vm/guest/fff-ops-priv, with tests (docs/ops-worker.md, "A new fffctl command"; server/opsFffctlForms.test.ts fails
+# until the command is classified). The rest stays a person's.
+#
 #   fffctl status                       the portal, its release, health, Tailscale, the critical units and what the watchdog restarted,
 #                                       the base clone, backups
 #   fffctl units [--check]              every critical unit: active, enabled, the watchdog's verdict, and the watchdog's last restarts
