@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **`set_app_config` says that `machines.claudeFromVault` takes a machine** (w737, Lothsahn: "update LothDesktop to take
+  machines.claudeFromVault true"). The setting was always per machine (`appConfig.ts` `perMachine`, `nextPerMachine`;
+  `machine: "lothdesktop"` writes `{ "lothdesktop": true }` and leaves BEAST, m3, m5 and biscuit off), but the tool's text
+  named only `machines.useHostClaudeEnv` and `machines.cleanup.*` for `machine` and said nothing of the key, so it read as
+  global-only. The text now says it, and a test pins the behaviour (one machine, a second, taking one out, `true`/`false`
+  without a machine). No behaviour change. Needs a portal deploy.
+
 - **`fffctl credential issue` no longer exits 1 with "line 1: tmp: unbound variable" after it stored the credential** (w734, found
   installing biscuit, w693). `credential_issue` in `deploy/vm/guest/fff-ops-priv` set `trap 'rm -rf "$tmp"' EXIT` with a function-local
   `$tmp`; the single-quoted trap expanded it when the script ended, outside the function, and `set -u` failed. The trap now

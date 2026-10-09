@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SETTABLE_KEYS, checkReviewers, normalizeSetting, setAppConfig } from './appConfig.ts';
+import { claudeFromVault } from './secrets.ts';
 import type { Config } from './config.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
@@ -188,4 +189,34 @@ test('set_app_config: placement.prefer and placement.avoid (w428), live, cleared
   setAppConfig(file, cfg, 'placement.avoid', null);
   assert.deepEqual(cfg.placement, { prefer: ['beast', 'lothdesktop'] });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).placement, { prefer: ['beast', 'lothdesktop'] });
+});
+
+test('set_app_config: machines.claudeFromVault switches one machine alone, true and false still set them all (w737)', (t) => {
+  const { file, cfg } = setup(t);
+  const on = (id: string) => claudeFromVault(cfg, { id });
+  const saved = () => JSON.parse(fs.readFileSync(file, 'utf8')).machines?.claudeFromVault;
+  // One machine: the others (BEAST, m3, m5, biscuit) stay off, and a machine nobody named is off.
+  assert.deepEqual(setAppConfig(file, cfg, 'machines.claudeFromVault', true, { machine: 'lothdesktop' }), { before: undefined, after: { lothdesktop: true } });
+  assert.deepEqual(saved(), { lothdesktop: true });
+  assert.deepEqual([on('lothdesktop'), on('beast'), on('m3'), on('m5'), on('biscuit')], [true, false, false, false, false]);
+  // A second machine joins; the first stays.
+  setAppConfig(file, cfg, 'machines.claudeFromVault', true, { machine: 'm3' });
+  assert.deepEqual(saved(), { lothdesktop: true, m3: true });
+  // Taking one out leaves the other.
+  setAppConfig(file, cfg, 'machines.claudeFromVault', false, { machine: 'm3' });
+  assert.deepEqual([on('lothdesktop'), on('m3')], [true, false]);
+  // Without a machine the value is every machine not named (the "*" entry): the named one keeps its own.
+  setAppConfig(file, cfg, 'machines.claudeFromVault', false);
+  assert.deepEqual(saved(), { lothdesktop: true, m3: false, '*': false });
+  assert.deepEqual([on('lothdesktop'), on('m5')], [true, false]);
+  // Starting from the plain global value, as before w737.
+  const fresh = setup(t);
+  setAppConfig(fresh.file, fresh.cfg, 'machines.claudeFromVault', true);
+  assert.equal(JSON.parse(fs.readFileSync(fresh.file, 'utf8')).machines.claudeFromVault, true);
+  assert.equal(claudeFromVault(fresh.cfg, { id: 'm5' }), true);
+  setAppConfig(fresh.file, fresh.cfg, 'machines.claudeFromVault', false, { machine: 'beast' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(fresh.file, 'utf8')).machines.claudeFromVault, { '*': true, beast: false });
+  // A value that is not true or false, and a machine id that is not one, are refused.
+  assert.throws(() => setAppConfig(file, cfg, 'machines.claudeFromVault', 'maybe', { machine: 'm5' }), /machines\.claudeFromVault is true/);
+  assert.throws(() => setAppConfig(file, cfg, 'machines.claudeFromVault', true, { machine: 'loth desktop' }), /machine id/);
 });
