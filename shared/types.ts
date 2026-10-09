@@ -554,6 +554,11 @@ export interface MachineSandbox {
   unity: MachineSandboxUnity;
   sessionIds: string[];
   git?: GitStatus;
+  /**
+   * Old agent hosts whose process trees still run here while the daemon stops them (w799): the sandbox is not free
+   * until they are gone. Sent by daemons from w799 on; an older portal ignores it.
+   */
+  lingering?: { sessionId: string; pid: number; since: string }[];
 }
 
 export interface MachineSandboxUnity {

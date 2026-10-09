@@ -1442,8 +1442,10 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
    * A sandbox ready for new work: ready, with no live agent and none between turns to come back to it (w475). Its label is
    * its name and says nothing about use (w575).
    */
-  private free(x: { id: string; status: string; sessionIds: string[] }, machineId?: string) {
+  private free(x: { id: string; status: string; sessionIds: string[]; lingering?: unknown[] }, machineId?: string) {
     if (x.status !== 'ready') return false;
+    // An old agent host's tree still runs there while its daemon stops it (w799: one ran on beside the next worker).
+    if (x.lingering?.length) return false;
     // A worker that released its sandbox while it waits (w640) does not keep it; one placed again there does (claims).
     if (this.sessionsOf(x.sessionIds).some((s) => occupies(s, !!this.sessions.sessions.get(s.id)?.live))) return false;
     return !(machineId && this.placeAgain.claimedBy(machineId, x.id));
@@ -1489,7 +1491,7 @@ Stills, clips and notes for a review (the visual checklist, a playtest, a before
   private describeMachineSandbox(m: Machine, sb: MachineSandbox) {
     const u = sb.unity;
     return [
-      `- ${m.id}/${sb.id}${this.free(sb, m.id) ? ' FREE' : ''}${this.claimLine(m.id, sb.id)}: ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}; ${describeGit(sb.git) || `branch ${sb.branch}`}; unity ${u.state}${u.detail ? ` (${u.detail})` : ''}`,
+      `- ${m.id}/${sb.id}${this.free(sb, m.id) ? ' FREE' : ''}${this.claimLine(m.id, sb.id)}${lingeringLine(sb)}: ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}; ${describeGit(sb.git) || `branch ${sb.branch}`}; unity ${u.state}${u.detail ? ` (${u.detail})` : ''}`,
       this.agentsPart(sb.sessionIds),
     ].join('\n');
   }
@@ -3248,6 +3250,12 @@ function intakeLines(w: WorkItem): string {
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+/** " (old agent host … still being stopped)" for a sandbox an old host's tree still holds (w799), else "". Exported for tests. */
+export function lingeringLine(sb: Pick<MachineSandbox, 'lingering'>): string {
+  const l = sb.lingering ?? [];
+  return l.length ? ` (not free: the old agent host of ${l.map((x) => `${x.sessionId}, pid ${x.pid}`).join('; ')} still runs while its daemon stops it)` : '';
 }
 
 /** The host guard's state for system_status. */

@@ -14,7 +14,7 @@ import { Identity } from './identity.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
-import { createTestMachine } from './testMachine.ts';
+import { createTestMachine, until } from './testMachine.ts';
 
 /**
  * An agent's state (w475, w509): Working, Waiting (alive between turns with a running job, a queued message or a
@@ -179,7 +179,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   });
   await pc.connect(machines);
-  return { store, sessions, agents };
+  return { store, sessions, agents, pc };
 }
 
 type WakerLike = { schedule: (id: string, m: number, n: string) => string; cancel: (id: string) => boolean };
@@ -217,6 +217,31 @@ test('list_sandboxes: between turns (Working) and on what, sandboxes by status, 
   assert.match(text, /- eb9632fd "w448: merge #1083" \[Working: check-in [^\]]*: “merge #1083 when CI is green”, between turns\]/);
   assert.ok(text.indexOf('- pc/alpha') < text.indexOf('- pc/beta'), 'the sandbox with a Waiting agent before the one with none live');
   assert.equal(agents.places().find((p) => p.id === 'pc')?.freeSandboxes, 1, 'the capacity block and placement do not count it free');
+});
+
+test('w799: a sandbox where an old agent host still runs is not free: its daemon reports it, the portal counts it taken, and the daemon refuses a new agent there', async (t) => {
+  // BEAST, 2026-10-09: the daemon dropped worker 38a203f0's host while its tree ran on in slot1, and the portal gave
+  // slot1 to a new worker (6cc70ea1).
+  const { store, agents, pc } = await setup(t);
+  const d = pc.daemon as unknown as { setLingering(l: object, on: boolean): void; startRefusal(spec: object, id: string): string | undefined };
+  const beta = () => store.machines.get('pc')!.sandboxes!.find((x) => x.id === 'beta')!;
+  assert.match(agents.describeAllSandboxes(), /- pc\/beta FREE/);
+  const free = () => agents.places().find((p) => p.id === 'pc')?.freeSandboxes;
+  const before = free();
+  const old = { sessionId: '38a203f0', pid: 43380, sandbox: 'beta', since: '2026-10-09T20:01:56.098Z' };
+  d.setLingering(old, true);
+  await until('the portal has it from the daemon', () => (beta().lingering?.length ?? 0) === 1);
+  const text = agents.describeAllSandboxes();
+  assert.doesNotMatch(text, /pc\/beta FREE/);
+  assert.match(text, /- pc\/beta \(not free: the old agent host of 38a203f0, pid 43380 still runs while its daemon stops it\)/);
+  assert.equal(free(), before! - 1, 'placement does not count it free');
+  const spec = { cwd: beta().path, sandbox: 'beta' };
+  assert.match(d.startRefusal(spec, '6cc70ea1') ?? '', /the agent host of session 38a203f0 \(pid 43380\) that worked in sandbox beta is still being stopped/);
+  assert.doesNotMatch(d.startRefusal(spec, '38a203f0') ?? '', /still being stopped/, 'its own session waits for it instead');
+  d.setLingering(old, false);
+  await until('free again once the tree is gone', () => !beta().lingering);
+  assert.match(agents.describeAllSandboxes(), /- pc\/beta FREE/);
+  assert.equal(d.startRefusal(spec, '6cc70ea1'), undefined);
 });
 
 test('w656: a worker stopped on purpose keeps its sandbox until the release pass saves and releases it', async (t) => {

@@ -28,6 +28,8 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // hello, which filters what the portal gives its workers (a daemon without it is not offered the tool).
 // w791 (bump to 9): `clear_batch` as a `unity` action. A protocol-8 daemon would start the sandbox's editor on an action it
 // does not know, so the portal sends it only to a daemon of protocol 9 or later (BATCH_CLEAR_PROTOCOL) and refuses otherwise.
+// w799 (no bump): `lingering` on a sandbox (MachineSandbox in shared/types.ts, so DaemonSandbox), an optional field an older
+// portal ignores (it then may count that sandbox free, as before); an older daemon never sends it.
 const DECIDED = { protocol: 9, fingerprint: '4de6ece2bec4c717' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */

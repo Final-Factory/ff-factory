@@ -16,7 +16,8 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, relocateProblem, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
-import { HOST_PROTOCOL, HostedSession, hostAlive, hostFolders, hostPlace, hostsDir, readHostState } from './agentHost.ts';
+import { HOST_PROTOCOL, HostedSession, hostFolders, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { UnitySlots, installShims, isAlive, slotsDir } from './unitySlots.ts';
@@ -230,6 +231,15 @@ export class Daemon {
   outsideWatch?: OutsideWatch;
   private ws?: WebSocket;
   private readonly entries = new Map<string, Entry>();
+  /**
+   * Every agent host this daemon follows, by session (w799): kept while its host runs or its tree is being stopped,
+   * also after the portal dropped its session, so the host watch never takes one of them for an orphan.
+   */
+  private readonly hostSessions = new Map<string, HostedSession>();
+  /** Old agent hosts whose trees are being stopped (w799): their sandboxes are not free until they are gone. */
+  private readonly lingering = new Map<string, LingeringHost>();
+  /** The watch over host folders nobody follows: orphaned hosts stopped, gone hosts' folders removed (w799). */
+  private hostWatch?: HostWatch;
   /** The processes running now (the pool's cached listing). */
   private readonly procs: () => Promise<{ cmd: string }[]>;
   private readonly events = new EventEmitter();
@@ -592,6 +602,28 @@ export class Daemon {
     void this.slotTick();
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
     this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
+    // Agent hosts nobody follows (w799): an orphan is stopped, a gone host's folder removed after a while.
+    if (this.hosted) {
+      this.hostWatch = new HostWatch({
+        procs: realHostProcs(),
+        folders: () => hostFolders(this.hostsRoot),
+        protocol: HOST_PROTOCOL,
+        followed: (id) => !!this.hostSessions.get(id)?.followed,
+        sandboxOf: (dir) => hostPlace(dir)?.sandbox,
+        lastWrite: folderLastWrite,
+        removeDir: (dir) => removeHostDir(dir),
+        lingering: (l, on) => this.setLingering(l, on),
+        log: (line) => log(line),
+        event: (text, sandbox) => this.send({ type: 'sandbox_event', text, ...(sandbox ? { sandbox } : {}) }),
+        now: () => Date.now(),
+      });
+      this.timers.push(
+        setInterval(() => {
+          for (const [id, s] of this.hostSessions) if (!s.followed && this.entries.get(id)?.s !== s) this.hostSessions.delete(id);
+          void this.hostWatch!.tick().catch((e) => log(`agent hosts: the watch failed: ${(e as Error).message}`));
+        }, HOST_WATCH.LOOK_EVERY_MS),
+      );
+    }
     // Each agent's Unity MCP server finds only its own place's editor (machine/unityMcp.ts).
     const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
     log(mcp.server ? `unity mcp: ${mcp.server.command} ${mcp.server.args.join(' ')} (from ${mcp.source})` : `unity mcp: none (${mcp.source}); agents here get no Unity MCP bridge`);
@@ -935,7 +967,33 @@ export class Daemon {
   /** Every sandbox, whenever one changes (protocol 5). Only when the machine has sandboxes, or had some. */
   private reportSandboxes() {
     if (!this.pool.configured && !this.pool.list().length) return;
-    this.send({ type: 'sandboxes', list: this.pool.list(), disk: this.pool.diskState() });
+    // A sandbox where an old agent host's tree still runs is not free (w799): the portal sees it in `lingering`.
+    const lingering = this.lingeringHosts();
+    const list = this.pool.list().map((sb) => {
+      const here = lingering.filter((l) => l.sandbox === sb.id).map(({ sessionId, pid, since }) => ({ sessionId, pid, since }));
+      return here.length ? { ...sb, lingering: here } : sb;
+    });
+    this.send({ type: 'sandboxes', list, disk: this.pool.diskState() });
+  }
+
+  /**
+   * Old agent hosts whose process trees still run (w799): ones being stopped (a session that ended, an orphan the host
+   * watch found), and ones still closing after the portal dropped their session.
+   */
+  private lingeringHosts(): LingeringHost[] {
+    const out = new Map(this.lingering);
+    for (const [id, s] of this.hostSessions) {
+      if (out.has(id) || !s.followed || this.entries.get(id)?.s === s) continue;
+      const sandbox = hostPlace(s.dir)?.sandbox;
+      out.set(id, { sessionId: id, pid: s.hostPid ?? 0, ...(sandbox ? { sandbox } : {}), since: new Date().toISOString() });
+    }
+    return [...out.values()];
+  }
+
+  private setLingering(l: LingeringHost, on: boolean) {
+    if (on) this.lingering.set(l.sessionId, l);
+    else this.lingering.delete(l.sessionId);
+    this.reportSandboxes();
   }
 
   /** The agents of a sandbox, as the idle-editor stop sees them: one mid-turn, and the last activity there. */
@@ -1062,7 +1120,7 @@ export class Daemon {
 
   /** A session whose process runs in an agent host (w605): it outlives this daemon. */
   private hostedSession(info: SessionInfo, seq: number, holder: { e?: Entry }): HostedSession {
-    return new HostedSession(info, seq, {
+    const s = new HostedSession(info, seq, {
       root: this.hostsRoot,
       out: (m) => this.out(m),
       events: this.events,
@@ -1074,7 +1132,14 @@ export class Daemon {
       },
       changed: () => this.awake(),
       log: (line) => log(line),
+      // Its tree being stopped (w799): its sandbox is taken until it is gone.
+      stopping: (h, on) => {
+        const sandbox = holder.e?.spec?.sandbox ?? hostPlace(h.dir)?.sandbox;
+        this.setLingering({ sessionId: info.id, pid: h.hostPid ?? 0, ...(sandbox ? { sandbox } : {}), since: new Date().toISOString() }, on);
+      },
     });
+    this.hostSessions.set(info.id, s);
+    return s;
   }
 
   private entry(info: SessionInfo, lastSeq: number): Entry {
@@ -1117,8 +1182,15 @@ export class Daemon {
       }
       const state = readHostState(h.dir);
       if (!state) {
-        // Never got going (no record yet): nothing it did can be lost.
-        if (!h.record || !hostAlive(h.dir)) fs.rmSync(h.dir, { recursive: true, force: true });
+        // Never got going (no record yet): nothing it did can be lost. One whose process still runs, or a folder Windows
+        // still holds, is the host watch's (w799); a failure here never keeps the other hosts from being taken back.
+        if (!h.record || !pidAlive(h.record.pid)) {
+          try {
+            fs.rmSync(h.dir, { recursive: true, force: true });
+          } catch (e) {
+            log(`agent host ${h.sessionId}: could not remove its folder yet: ${(e as Error).message}`);
+          }
+        }
         continue;
       }
       const place = hostPlace(h.dir);
@@ -1174,10 +1246,16 @@ export class Daemon {
    * machine maxSessions (its agent cap) mid-turn in its sandboxes and standing agents together, each sandbox
    * maxAgentsPerSandbox, and a sandbox agent needs its sandbox ready at the folder the spec names.
    */
-  private startRefusal(spec: LaunchSpec): string | undefined {
+  private startRefusal(spec: LaunchSpec, sessionId: string): string | undefined {
     // The sandbox drive gone or disk space low on this machine (its host guard, w466): nothing new starts in a sandbox.
     const gate = spec.sandbox ? this.guard?.blockReason('agent') : undefined;
     if (gate) return gate;
+    // An old agent host's tree still runs there (w799): the sandbox is not free until it is gone.
+    const lingering = lingeringRefusal(spec.sandbox, sessionId, this.lingeringHosts());
+    if (lingering) return lingering;
+    // This session's own earlier host, dropped by the portal, still closing: its folder is in use until it is gone.
+    const old = this.hostSessions.get(sessionId);
+    if (old?.followed && this.entries.get(sessionId)?.s !== old) return `its previous agent host (pid ${old.hostPid ?? '?'}) is still being stopped; send again in a minute`;
     if (!spec.sandbox) {
       // No agent works in the main clone (w536); a standing agent works in its own folder, under the machine's cap.
       if (path.resolve(spec.cwd).toLowerCase() === path.resolve(this.cfg.repoPath).toLowerCase()) return "this machine runs workers in sandboxes only: start it in one of this machine's sandboxes";
@@ -1292,18 +1370,22 @@ export class Daemon {
           this.reportSandboxes();
         }
         const known = new Set(msg.sessions.map((s) => s.id));
+        let dropped = 0;
         for (const [id, e] of this.entries) {
           if (!known.has(id)) {
             e.s.stop();
             e.s.dispose?.();
             this.entries.delete(id);
+            dropped++;
           }
         }
+        // A dropped session's host closes in a moment; its sandbox is not free until it has (w799).
+        if (dropped) this.reportSandboxes();
         return;
       }
       case 'send': {
         const id = msg.info.id;
-        const refusal = () => (this.entries.get(id)?.s.live ? undefined : this.startRefusal(msg.spec));
+        const refusal = () => (this.entries.get(id)?.s.live ? undefined : this.startRefusal(msg.spec, id));
         const deliver = (attachments?: Awaited<ReturnType<typeof fetchAttachments>>) => {
           try {
             const why = refusal();

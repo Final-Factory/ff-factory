@@ -180,6 +180,8 @@ const sameBranch = (sb: MachineSandbox, branch: string) => sb.git?.branch === br
  */
 function usable(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts, taken: ReadonlyMap<string, string>, failed: (sandbox: string) => boolean): boolean {
   if (sb.status !== 'ready') return false;
+  // Another agent's old host still runs there while its daemon stops it (w799).
+  if (sb.lingering?.some((l) => l.sessionId !== s.id)) return false;
   const by = taken.get(sb.id);
   if (by && by !== s.id) return false;
   if ((sb.git?.dirty ?? 0) > 0 || f.unityHolders.includes(`sandbox:${sb.id}`) || failed(sb.id)) return false;

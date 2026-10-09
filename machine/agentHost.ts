@@ -29,6 +29,9 @@ import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHand
 import { SECRET_ENV, addSecretValues, redactValue } from '../server/secrets.ts';
 import type { FromDaemon, SignalName } from '../server/machineProtocol.ts';
 import type { DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo, TranscriptEvent } from '../shared/types.ts';
+import { HOST_WATCH, endHostTree, hostIdentity, pidAlive, realHostProcs, removeHostDir, type HostProcs } from './hostWatch.ts';
+
+export { pidAlive };
 
 /** Bumped when the files' messages change so that a daemon and a host of different versions would misread each other. */
 export const HOST_PROTOCOL = 1;
@@ -43,6 +46,12 @@ const IDLE_START_MS = 2 * 60_000;
 const CLOSE_GRACE_MS = 1500;
 /** How long a host may take to write host.json after it was started. */
 const START_MS = 60_000;
+/**
+ * How long a host waits for its daemon to answer a tool call before the call fails (w799): a daemon that dropped the
+ * session never answers, and the agent hung on it. The longest a daemon's own handler may take is 10 min (a Discord
+ * thread's files: fetch_discord_thread_files) plus the downloads; 20 min is a guess with margin over that.
+ */
+export const RPC_ANSWER_MS = 20 * 60_000;
 
 const SIGNALS: SignalName[] = ['turnEnd', 'permission', 'result', 'ended', 'rateLimit'];
 
@@ -153,28 +162,27 @@ const readJson = <T>(file: string): T | undefined => {
   }
 };
 
-/** Whether a process with this pid exists (a signal-0 probe; EPERM means it exists but is not ours). */
-export function pidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+/**
+ * How the host in `dir` looks: `starting` before it wrote host.json, `gone` when its pid is gone, `alive` with a fresh
+ * heartbeat, `stale` when its pid runs but its heartbeat is late. A stale host is NOT gone (w799): on BEAST two hosts
+ * missed 30 s of heartbeats together under load and beat on for hours after the daemon had dropped them. Whether a
+ * stale one is still the host (and not a reused pid) takes its start time (hostWatch.ts hostIdentity).
+ */
+export type HostLook = 'starting' | 'alive' | 'stale' | 'gone';
+export function hostLook(dir: string, now = Date.now()): HostLook {
+  const f = hostFiles(dir);
+  const rec = readJson<HostRecord>(f.host);
+  if (!rec) return 'starting';
+  if (!pidAlive(rec.pid)) return 'gone';
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM';
+    return now - fs.statSync(f.beat).mtimeMs < BEAT_STALE_MS ? 'alive' : 'stale';
+  } catch {
+    return 'stale';
   }
 }
 
-/** Whether the host in `dir` still runs: its pid exists and its heartbeat is fresh (a reused pid has none). */
-export function hostAlive(dir: string, now = Date.now()): boolean {
-  const f = hostFiles(dir);
-  const rec = readJson<HostRecord>(f.host);
-  if (!rec || !pidAlive(rec.pid)) return false;
-  try {
-    return now - fs.statSync(f.beat).mtimeMs < BEAT_STALE_MS;
-  } catch {
-    return false;
-  }
-}
+/** Whether the host in `dir` runs with a fresh heartbeat. */
+export const hostAlive = (dir: string, now = Date.now()): boolean => hostLook(dir, now) === 'alive';
 
 /** The node flags a host needs (type stripping, quiet warnings), from the daemon's own: never a test runner's. */
 export const hostNodeArgs = (execArgv = process.execArgv) => execArgv.filter((a) => /^--(experimental-strip-types|experimental-transform-types|disable-warning|no-warnings)/.test(a));
@@ -200,6 +208,12 @@ export interface HostDeps {
   log: (line: string) => void;
   /** Starts a host process; tests may replace it. Returns its pid. */
   launch?: (dir: string, start: HostStart) => number;
+  /** The machine's hands on host processes (start time, ending a tree); tests replace them. */
+  procs?: HostProcs;
+  /** Its host's tree is being stopped (true) or is gone (false): its sandbox is not free meanwhile (w799). */
+  stopping?: (s: HostedSession, on: boolean) => void;
+  /** How long a stale host may stay silent before it is stopped (HOST_WATCH.HUNG_MS); tests shorten it. */
+  hungMs?: number;
 }
 
 /** Start a host: detached (outside node's own kill-on-exit job on Windows, its own session on a Mac), output to host.log. */
@@ -207,8 +221,9 @@ export function launchHost(dir: string, start: HostStart, env: NodeJS.ProcessEnv
   const f = hostFiles(dir);
   const log = fs.openSync(f.log, 'a');
   try {
+    // Not in its own folder (w799): Windows refuses to delete a folder a live process works in, and the daemon removes it.
     const child = spawn(process.execPath, [...hostNodeArgs(), path.join(import.meta.dirname, 'agentHost.ts'), dir], {
-      cwd: dir,
+      cwd: path.dirname(dir),
       detached: true,
       stdio: ['pipe', log, log],
       windowsHide: true,
@@ -246,14 +261,44 @@ export class HostedSession implements SessionHandle {
   private timer?: NodeJS.Timeout;
   private savedOffset = -1;
   private disposed = false;
+  /** The host process's pid as launched (host.json says it too once written). */
+  private pid?: number;
+  /** Since when its heartbeat is late while its process runs (w799). */
+  private staleSince?: number;
+  private checking = false;
+  /** Its host's tree being stopped and its folder removed (w799); messages sent meanwhile wait in `waiting`. */
+  private stoppingNow?: Promise<void>;
+  private waiting: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>[] = [];
   private readonly files: ReturnType<typeof hostFiles>;
   private readonly deps: HostDeps;
+  private readonly procs: HostProcs;
 
   constructor(info: SessionInfo, seq: number, deps: HostDeps) {
     this.info = info;
     this.seq = seq;
     this.deps = deps;
     this.files = hostFiles(path.join(deps.root, info.id));
+    this.procs = deps.procs ?? realHostProcs();
+  }
+
+  /** A host process runs or starts for it, or its tree is being stopped: the host watch leaves its folder alone. */
+  get followed() {
+    return this.running || !!this.stoppingNow;
+  }
+
+  /** Its host's tree is being stopped (w799). */
+  get stopping() {
+    return !!this.stoppingNow;
+  }
+
+  /** The host's pid, as launched or as host.json says. */
+  get hostPid(): number | undefined {
+    return this.pid ?? readJson<HostRecord>(this.files.host)?.pid;
+  }
+
+  /** Resolves once its host's tree is gone and its folder removed (tests). */
+  settled(): Promise<void> {
+    return this.stoppingNow ?? Promise.resolve();
   }
 
   get live() {
@@ -275,7 +320,9 @@ export class HostedSession implements SessionHandle {
     if (state) this.applyState(state, false);
     const offset = Number(readFileOr(f.offset, '0')) || 0;
     this.n = countLines(f.in);
-    const alive = hostAlive(f.dir);
+    // Its process runs: taken back even with a late heartbeat (w799); the poll looks at it again.
+    const look = hostLook(f.dir);
+    const alive = look === 'alive' || look === 'stale';
     this.running = alive;
     this.follow(offset);
     if (!alive) {
@@ -300,7 +347,10 @@ export class HostedSession implements SessionHandle {
       ...(requestedBy ? { requestedBy } : {}),
       ...(attachments?.length ? { attachments } : {}),
     } as const;
-    if (!this.running) {
+    if (this.stoppingNow) {
+      // Its old host's tree is still being stopped (w799): the new host starts once it is gone, with this message.
+      this.waiting.push(cmd);
+    } else if (!this.running) {
       // No host started (w665, w691): nothing runs, so it is not mid-turn. Marking it so reported a worker running for
       // hours that had nothing running, and the portal showed its request Working.
       if (!this.start(cmd)) {
@@ -354,13 +404,19 @@ export class HostedSession implements SessionHandle {
   /** Removed for good: once its host has closed, its folder goes. */
   dispose() {
     this.disposed = true;
-    if (!this.running) this.cleanup();
+    this.waiting = [];
+    if (!this.running && !this.stoppingNow) void this.teardown(0);
   }
 
   /** Starts its host with `first`; false when no host process could be started (the portal is told, and the record says so). */
   private start(first: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>): boolean {
     const f = this.files;
-    fs.rmSync(f.dir, { recursive: true, force: true });
+    try {
+      fs.rmSync(f.dir, { recursive: true, force: true });
+    } catch (e) {
+      // A process still holds the folder (w799: an old host the daemon had lost; the host watch stops such a one).
+      throw new Error(`its agent host folder ${f.dir} is still in use (${(e as Error).message}); an old agent host may still run there and is stopped within minutes`);
+    }
     fs.mkdirSync(f.dir, { recursive: true });
     const spec = this.deps.spec();
     fs.writeFileSync(f.place, JSON.stringify({ cwd: spec.cwd, ...(spec.sandbox ? { sandbox: spec.sandbox } : {}) }));
@@ -371,9 +427,12 @@ export class HostedSession implements SessionHandle {
     const start: HostStart = { hostProtocol: HOST_PROTOCOL, info: { ...this.info, pendingPermissions: [] }, seq: this.seq, spec, editorUp: this.deps.editorUp() };
     this.running = true;
     this.launchedAt = Date.now();
+    this.staleSince = undefined;
+    this.pid = undefined;
     this.follow(0);
     try {
       const pid = (this.deps.launch ?? launchHost)(f.dir, start);
+      this.pid = pid;
       this.deps.log(`agent host for ${this.info.id} started, pid ${pid}`);
       return true;
     } catch (e) {
@@ -409,11 +468,55 @@ export class HostedSession implements SessionHandle {
     // A host that died without closing (a crash, the machine's power): what it recorded is forwarded above. Looked at
     // every 2 s. One that has not written host.json yet is still starting, for up to START_MS.
     if (++this.polls % 20 !== 0 || !this.running) return;
-    const started = fs.existsSync(this.files.host);
-    if (started ? !hostAlive(this.files.dir) : Date.now() - this.launchedAt > START_MS) {
-      this.tail.poll();
-      if (this.running) this.ended(started ? 'its agent host stopped unexpectedly' : `its agent host did not start (see ${this.files.log})`);
+    switch (hostLook(this.files.dir)) {
+      case 'alive':
+        if (this.staleSince !== undefined) this.deps.log(`agent host ${this.info.id}: its heartbeat is back after ${Math.round((Date.now() - this.staleSince) / 1000)} s`);
+        this.staleSince = undefined;
+        return;
+      case 'gone':
+        this.tail.poll();
+        if (this.running) this.ended('its agent host stopped unexpectedly');
+        return;
+      case 'starting':
+        if (Date.now() - this.launchedAt > START_MS) this.ended(`its agent host did not start (see ${this.files.log})`);
+        return;
+      case 'stale':
+        this.onStale();
+        return;
     }
+  }
+
+  /**
+   * Its process runs but its heartbeat is late (w799). It is kept, read and answered on: once such a host was dropped,
+   * and it ran on for half an hour that nobody read. A pid now another program's means the host is gone; a host silent
+   * for hungMs is stopped (its tree ended, then its folder removed).
+   */
+  private onStale() {
+    const now = Date.now();
+    const hungMs = this.deps.hungMs ?? HOST_WATCH.HUNG_MS;
+    const first = this.staleSince === undefined;
+    if (first) {
+      this.staleSince = now;
+      this.deps.log(`agent host ${this.info.id}: no heartbeat for ${BEAT_STALE_MS / 1000} s, but its process (pid ${this.hostPid}) still runs: kept; stopped if it stays silent ${Math.round(hungMs / 60_000)} min`);
+    }
+    const hung = now - this.staleSince! >= hungMs;
+    if (this.checking || !(first || hung)) return;
+    const pid = this.hostPid;
+    const rec = readJson<HostRecord>(this.files.host);
+    if (!pid || !rec) return;
+    this.checking = true;
+    void hostIdentity(this.procs, pid, rec.startedAt)
+      .then((who) => {
+        if (!this.running || this.stoppingNow) return;
+        if (who === 'gone' || who === 'other') {
+          this.tail?.poll();
+          this.ended(who === 'gone' ? 'its agent host stopped unexpectedly' : `its agent host is gone (pid ${pid} is another program now)`);
+        } else if (hung) {
+          this.tail?.poll();
+          this.ended(`its agent host gave no heartbeat for ${Math.round((Date.now() - this.staleSince!) / 60_000)} min while its process ran: stopped`);
+        }
+      })
+      .finally(() => (this.checking = false));
   }
 
   private saveOffset() {
@@ -461,28 +564,36 @@ export class HostedSession implements SessionHandle {
         return;
       case 'rpc': {
         const h = this.deps.handlers()[m.method];
-        const answer = (ok: boolean, text: string) => this.running && this.command({ op: 'rpc_result', id: m.id, ok, text });
+        // Every call is answered, a failure too (w799): a handler that throws at once, or an answer that cannot be
+        // written, is logged here and never leaves the agent waiting without a word.
+        const answer = (ok: boolean, text: string) => {
+          if (!this.running) return this.deps.log(`agent host ${id}: the answer to ${m.method} was not delivered: its host is gone`);
+          try {
+            this.command({ op: 'rpc_result', id: m.id, ok, text });
+          } catch (e) {
+            this.deps.log(`agent host ${id}: could not answer ${m.method}: ${(e as Error).message}`);
+          }
+        };
         if (!h) answer(false, `this machine's daemon has no tool ${m.method}`);
         else
-          void h(m.args).then(
-            (text) => answer(true, text),
-            (e) => answer(false, (e as Error).message),
-          );
+          void Promise.resolve()
+            .then(() => h(m.args))
+            .then(
+              (text) => answer(true, text),
+              (e) => answer(false, (e as Error)?.message ?? String(e)),
+            );
         return;
       }
       case 'closed': {
         this.running = false;
-        // Messages it was given after it decided to close: a new host carries them (sent again, in order).
+        // Messages it was given after it decided to close: a new host carries them (sent again, in order), once the old
+        // one has exited and its folder is gone (w799: removing it at once met the exiting host's handles).
         const left = this.sends.filter((c) => c.n > m.consumed);
         this.sends = [];
         if (left.length && !this.disposed) {
           this.deps.log(`agent host ${id} closed with ${left.length} message(s) not delivered; starting a new one for them`);
-          const [first, ...rest] = left;
-          try {
-            if (this.start(withoutN(first))) for (const c of rest) this.sends.push(this.command(withoutN(c)) as Extract<HostCommand, { op: 'send' }>);
-          } catch (e) {
-            this.deps.out({ type: 'failed', sessionId: id, error: `could not deliver a message: ${(e as Error).message}` });
-          }
+          this.waiting.push(...left.map(withoutN));
+          void this.teardown(HOST_WATCH.EXIT_WAIT_MS);
           return;
         }
         this.ended(undefined);
@@ -519,16 +630,58 @@ export class HostedSession implements SessionHandle {
       if (was) this.deps.events.emit('ended', this);
     }
     this.deps.changed();
-    this.cleanup();
+    // A host that closed by itself exits within moments; any other is ended (its whole tree) before its folder goes.
+    void this.teardown(why ? 0 : HOST_WATCH.EXIT_WAIT_MS);
   }
 
-  private cleanup() {
+  /**
+   * Its host is done (w799): its process tree ended (once it is known to be the host: pid and start time) and gone,
+   * then its folder removed, retrying while Windows still holds it. A host that cannot be stopped keeps its folder, and
+   * the host watch tries again. Messages sent meanwhile start a new host afterwards.
+   */
+  private teardown(waitExitMs: number): Promise<void> {
+    if (this.stoppingNow) return this.stoppingNow;
     clearInterval(this.timer);
     this.timer = undefined;
+    const id = this.info.id;
+    const pid = this.hostPid;
+    const recordStart = readJson<HostRecord>(this.files.host)?.startedAt ?? this.launchedAt;
+    this.deps.stopping?.(this, true);
+    const work = async () => {
+      if (pid && this.procs.alive(pid)) {
+        const r = await endHostTree(this.procs, pid, recordStart, waitExitMs);
+        if (r.what !== 'it exited') this.deps.log(`agent host ${id} (pid ${pid}): ${r.what}`);
+        if (!r.stopped) {
+          this.deps.log(`agent host ${id}: its folder stays while pid ${pid} runs; the host watch tries again`);
+          return;
+        }
+      }
+      const err = await removeHostDir(this.files.dir);
+      if (err) this.deps.log(`agent host ${id}: could not remove ${this.files.dir}: ${err}`);
+    };
+    this.stoppingNow = work()
+      .catch((e) => this.deps.log(`agent host ${id}: stopping it failed: ${(e as Error).message}`))
+      .finally(() => {
+        this.stoppingNow = undefined;
+        this.deps.stopping?.(this, false);
+        this.startWaiting();
+      });
+    return this.stoppingNow;
+  }
+
+  /** Messages that came while its old host was being stopped: a new host carries them, in order. */
+  private startWaiting() {
+    const [first, ...rest] = this.waiting;
+    this.waiting = [];
+    if (!first || this.disposed || this.running) return;
     try {
-      fs.rmSync(this.files.dir, { recursive: true, force: true });
+      if (this.start(first)) for (const c of rest) this.sends.push(this.command(c) as Extract<HostCommand, { op: 'send' }>);
     } catch (e) {
-      this.deps.log(`agent host ${this.info.id}: could not remove ${this.files.dir}: ${(e as Error).message}`);
+      this.running = false;
+      this.liveNow = false;
+      Object.assign(this.info, { status: 'error', statusDetail: `could not deliver a message: ${(e as Error).message}` });
+      this.deps.out({ type: 'failed', sessionId: this.info.id, error: `could not deliver a message: ${(e as Error).message}` });
+      this.deps.changed();
     }
   }
 }
@@ -596,7 +749,17 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
       (args: Record<string, unknown>) =>
         new Promise<string>((resolve, reject) => {
           const msg = { op: 'rpc', id: randomUUID(), method, args } as const;
-          asked.set(msg.id, { resolve, reject, msg });
+          // Never waits forever (w799): a daemon that lost this host never answers.
+          const timer = setTimeout(() => {
+            if (!asked.delete(msg.id)) return;
+            reject(new Error(`this machine's daemon did not answer ${method} in ${RPC_ANSWER_MS / 60_000} min (it may have lost this agent's host); try again, and say so in your report if it fails again`));
+          }, RPC_ANSWER_MS);
+          timer.unref();
+          asked.set(msg.id, {
+            resolve: (t) => (clearTimeout(timer), resolve(t)),
+            reject: (e) => (clearTimeout(timer), reject(e)),
+            msg,
+          });
           out(msg);
         }),
     ]),
