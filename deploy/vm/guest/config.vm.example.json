@@ -43,7 +43,6 @@
     "remountMinFreeGB": 5,
     "devDriveVhdx": "",
     "reapBrowsersAfterHours": 0,
-    "compactWhenReclaimGB": 0,
     "cleanup": {
       "ageRules": []
     }

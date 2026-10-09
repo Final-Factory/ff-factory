@@ -174,7 +174,7 @@ space on C: is what made Windows drop it.
   sandboxes from the seed there rather than copying them.
 - **Hand freed space back**: `ffsb-helper-trim` (online), then **compact**, both by hand at BEAST
   (`schtasks /run /tn ffsb-helper-trim`, then `ffsb-helper-compact`). Nothing detaches the drive automatically (since
-  2026-09-24; the old `hostGuard.compactWhenReclaimGB` idle policy is gone and the key is ignored). Until w510 these
+  2026-09-24; the old `hostGuard.compactWhenReclaimGB` idle policy is gone and the key is retired: a config that sets it loads and ignores it, w755). Until w510 these
   were `host_recovery` actions, which refused while any editor was up or any agent on the host was busy
   (`HostHealthMonitor.detachRefusal`) and told the guard that the drive was offline on purpose. Now only the helper
   checks: it refuses while a `Unity.exe` has a project on the drive. Nothing tells BEAST's daemon's guard, which by

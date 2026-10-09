@@ -10,27 +10,26 @@ import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts'
 import { checkPoolConfig, type PoolConfig } from './tokenPool.ts';
 
 
-/** What a portal-run agent runs on (docs/accounts.md): the computer's stored claude.ai login, or config claudeEnv's token. */
 /**
  * Which Claude account this host's agents of a role run on: config claudeEnv's token, this host's stored login, or
  * (w464, docs/portal-on-ffbox-host.md change 18) the OAuth token in config claudeTokenFile, read at each session start
- * and given to that process alone. "tokenfile" is for the orchestrator, dispatcher and standing roles, never workers.
+ * and given to that process alone. "tokenfile" is for the orchestrator and the dispatcher only.
  */
 export type ClaudeAccount = 'login' | 'token' | 'tokenfile' | 'vault';
 export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token', 'tokenfile', 'vault'];
 /** The role that may run on a person's own vault pool (w738): the orchestrators, each on its own person's tokens. */
 export const VAULT_ROLES_ACCOUNT: readonly string[] = ['orchestrator'];
-/** The roles that may run on the token file (TOKEN_FILE): never workers, which run on machines and other people's work. */
+/** The roles that may run on the token file (TOKEN_FILE). */
 export const TOKEN_FILE_ROLES: readonly string[] = ['orchestrator', 'dispatcher'];
-/** The roles config claudeAccounts picks an account for, on this host. */
 /**
- * The roles config claudeAccounts sets an account for. `dispatcher` (w464, docs/portal-on-ffbox-host.md change 6): when
- * set, the dispatcher runs on it, and not on the system payer's own token; unset, it follows `orchestrator` as before.
+ * The roles config claudeAccounts sets an account for: the only agents the portal runs itself (w510), every worker and
+ * standing agent being a machine's (machines.useHostClaudeEnv). `dispatcher` (w464, docs/portal-on-ffbox-host.md change
+ * 6): when set, the dispatcher runs on it, and not on the system payer's own token; unset, it follows `orchestrator`.
  */
-export type HostRole = 'orchestrator' | 'dispatcher' | 'workers';
-export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'dispatcher', 'workers'];
-const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator', dispatcher: 'the dispatcher', workers: 'workers' };
-/** Roles as people read them: "the orchestrator, workers". */
+export type HostRole = 'orchestrator' | 'dispatcher';
+export const HOST_ROLES: readonly HostRole[] = ['orchestrator', 'dispatcher'];
+const ROLE_NAMES: Record<HostRole, string> = { orchestrator: 'the orchestrator', dispatcher: 'the dispatcher' };
+/** Roles as people read them: "the orchestrator, the dispatcher". */
 export const roleNames = (roles: readonly HostRole[]) => roles.map((r) => ROLE_NAMES[r]).join(', ');
 
 /** config.json "intake" (docs/intake.md). Every switch defaults to off, every number to a small cap. */
@@ -193,8 +192,8 @@ export interface Config {
    * Which Claude account THIS host's agents run on, per role (docs/accounts.md): "token" (the default) is
    * claudeEnv's CLAUDE_CODE_OAUTH_TOKEN; "login" starts the process with no credential in its environment, so
    * Claude Code uses the claude.ai login stored on this host (the one the usage meters show as "<host> login").
-   * `workers`: sandbox workers; `standing`: standing agents on this host. Agents on a Mac follow
-   * machines.useHostClaudeEnv instead, and a person's own token (userClaudeEnv) wins for work they asked for.
+   * Only the orchestrator and the dispatcher run here (w510); workers and standing agents are on machines and follow
+   * machines.useHostClaudeEnv, and a person's own token (userClaudeEnv) wins for work they asked for.
    */
   claudeAccounts?: Partial<Record<HostRole, ClaudeAccount>>;
   /**
@@ -507,9 +506,10 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
 };
 
 /**
- * Config keys that fed the portal's own sandbox pool, editors and standing agents, all gone (w510: the portal runs only
- * the orchestrators and the dispatcher; every sandbox, editor and standing agent is a machine daemon's). A config that
- * still sets one loads; the key is named once at startup and in system_status, and ignored.
+ * Config keys that fed the portal's own sandbox pool, editors, workers and standing agents, all gone (w510: the portal
+ * runs only the orchestrators and the dispatcher; every sandbox, editor, worker and standing agent is a machine daemon's),
+ * and one that nothing has read for a while. A config that still sets one loads; the key is named once at startup and in
+ * system_status, and ignored (even a value the key no longer takes, such as claudeAccounts.workers "tokenfile").
  */
 export const RETIRED_CONFIG_KEYS: readonly string[] = [
   'hostSandboxes',
@@ -528,6 +528,10 @@ export const RETIRED_CONFIG_KEYS: readonly string[] = [
   'unity.autoRestart',
   // The account of the standing agents the portal ran itself; those on machines run on the machine's (machines.useHostClaudeEnv).
   'claudeAccounts.standing',
+  // The account of the workers of this host's own daemon (w755); they follow machines.useHostClaudeEnv like any machine's.
+  'claudeAccounts.workers',
+  // Ignored since 2026-09-24 (compacting the sandbox drive is manual only, host_recovery "compact"); nothing read it.
+  'hostGuard.compactWhenReclaimGB',
 ];
 
 /** The retired keys (RETIRED_CONFIG_KEYS) a raw config file sets. */
@@ -554,7 +558,7 @@ export function withoutRetiredKeys(raw: any): any {
 
 /** The startup line for retired keys, or undefined. */
 export function retiredKeysLine(keys: string[] | undefined): string | undefined {
-  return keys?.length ? `config.json sets ${keys.join(', ')}, which nothing reads any more: the portal runs no sandboxes, editors or standing agents of its own (w510). Ignored; remove them (config.example.json shows what is left).` : undefined;
+  return keys?.length ? `config.json sets ${keys.join(', ')}, which nothing reads any more: the portal runs no sandboxes, editors, workers or standing agents of its own (w510). Ignored; remove them (config.example.json shows what is left).` : undefined;
 }
 
 export interface CleanupPolicy {
@@ -641,8 +645,6 @@ export interface HostGuardConfig {
   remountMinFreeGB: number;
   /** The Dev Drive's VHDX file, for growth checks and compaction (empty: no Dev Drive). */
   devDriveVhdx: string;
-  /** Ignored since 2026-09-24: compacting (it detaches the drive) is manual only, host_recovery "compact". Kept so old config files load. */
-  compactWhenReclaimGB: number;
   /** Kill automation browsers (headless, temp profile, or Playwright's) running longer than this, and orphans. 0: never. */
   reapBrowsersAfterHours: number;
   /** How often the reaper looks (it also runs once at startup). */
@@ -657,7 +659,6 @@ const HOST_GUARD_DEFAULTS: HostGuardConfig = {
   hysteresisGB: 10,
   remountMinFreeGB: 30,
   devDriveVhdx: '',
-  compactWhenReclaimGB: 0,
   reapBrowsersAfterHours: 3,
   reapEveryMinutes: 15,
   cleanup: DEFAULT_CLEANUP,
@@ -793,9 +794,9 @@ export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machine
  * and Claude Docs' instructions were about 41,300 input tokens in every request (measured 2026-10-06), and orchestration
  * never uses them. On for workers and standing agents (Ben's creator outreach, w106 and w121, used Gmail).
  */
-/** The roles config claudeAiConnectors names: the account roles, and standing agents (which run on machines, w510). */
-export type ConnectorRole = HostRole | 'standing';
-export const CONNECTOR_ROLES: readonly ConnectorRole[] = [...HOST_ROLES, 'standing'];
+/** The roles config claudeAiConnectors names: the account roles, and workers and standing agents (which run on machines, w510). */
+export type ConnectorRole = HostRole | 'workers' | 'standing';
+export const CONNECTOR_ROLES: readonly ConnectorRole[] = [...HOST_ROLES, 'workers', 'standing'];
 export const CLAUDE_AI_CONNECTORS_DEFAULT: Readonly<Record<ConnectorRole, boolean>> = { orchestrator: false, dispatcher: false, workers: true, standing: true };
 
 export function claudeAiConnectorsFor(cfg: Pick<Config, 'claudeAiConnectors'>, role: ConnectorRole): boolean {

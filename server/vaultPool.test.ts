@@ -375,7 +375,7 @@ test('config: "vault" is the orchestrator account; the dispatcher and workers re
   checkAccountConfig({ claudeAccounts: { orchestrator: 'vault' } } as never);
   checkAccountConfig({ claudeAccounts: { orchestrator: 'vault', dispatcher: 'tokenfile' }, claudeTokenFile: '/x' } as never);
   assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'vault' } } as never), /claudeAccounts\.dispatcher cannot be "vault"/);
-  assert.throws(() => checkAccountConfig({ claudeAccounts: { workers: 'vault' } } as never), /claudeAccounts\.workers cannot be "vault"/);
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { workers: 'vault' } } as never), /claudeAccounts\.workers: no such role/, 'retired (w755): not a role any more');
   checkAccountConfig({ vault: { pool: { sessionHoldPercent: 70, reservePerDayPercent: 0 } } } as never);
   assert.throws(() => checkAccountConfig({ vault: { pool: { sessionHoldPercent: 101 } } } as never), /percent from 0 to 100/);
   assert.throws(() => checkAccountConfig({ vault: { pool: { onePerWeeklyPercent: 99.9 } } } as never), /above retireWeeklyPercent/);
@@ -385,7 +385,6 @@ test('config: "vault" is the orchestrator account; the dispatcher and workers re
 test('set_app_config: "vault" for the orchestrator only; the pool limits are anyone\'s, checked, applied live and cleared by null', (t) => {
   assert.equal(normalizeSetting('claudeAccounts.orchestrator', 'vault'), 'vault');
   assert.throws(() => normalizeSetting('claudeAccounts.dispatcher', 'vault'), /cannot be "vault"/);
-  assert.throws(() => normalizeSetting('claudeAccounts.workers', 'vault'), /cannot be "vault"/);
   // Not owner-only keys: the pool limits are one system-wide set that any person's orchestrator may change.
   for (const k of ['vault.pool.sessionHoldPercent', 'vault.pool.onePerWeeklyPercent', 'vault.pool.retireWeeklyPercent', 'vault.pool.reservePerDayPercent', 'vault.pool.reserveSessionPercent'] as const) {
     assert.equal(OWNER_ONLY_KEYS.has(k), false, k);

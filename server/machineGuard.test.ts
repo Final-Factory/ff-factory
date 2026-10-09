@@ -161,7 +161,7 @@ test("a guard that owns no drive (the portal's, w510: watchDrive no) never remou
   let drive = false;
   const helper: string[] = [];
   const deps: HostDeps = {
-    cfg: { sandboxRoot: 'F:\\ffsb', dataDir: 'C:\\fff\\data', hostDiskPaths: ['C:\\'], limits: { minFreeRamGB: 0 }, unity: { idleStopMinutes: 0 }, hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', compactWhenReclaimGB: 0, reapBrowsersAfterHours: 0, reapEveryMinutes: 15, cleanup: { everyMinutes: 0, softFreeGB: 0 } } } as unknown as Config,
+    cfg: { sandboxRoot: 'F:\\ffsb', dataDir: 'C:\\fff\\data', hostDiskPaths: ['C:\\'], limits: { minFreeRamGB: 0 }, unity: { idleStopMinutes: 0 }, hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', reapBrowsersAfterHours: 0, reapEveryMinutes: 15, cleanup: { everyMinutes: 0, softFreeGB: 0 } } } as unknown as Config,
     statfs: async () => ({ free: 500 * GB, total: 900 * GB }),
     exists: (p) => (p.startsWith('F') ? drive : true),
     mem: () => ({ free: 30 * GB, total: 64 * GB }),
@@ -252,7 +252,7 @@ test("a daemon with the guard says so in its hello; its reports and state reach 
 
 test('the settings: the portal gives its own guard\'s to its own host\'s daemon at deploy, and convert_machine keeps them', async (t) => {
   const cfg = {
-    hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: 'C:/ffsb-devdrive.vhdx', compactWhenReclaimGB: 0, reapBrowsersAfterHours: 3, reapEveryMinutes: 15, cleanup: { everyMinutes: 60, softFreeGB: 0 } },
+    hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: 'C:/ffsb-devdrive.vhdx', reapBrowsersAfterHours: 3, reapEveryMinutes: 15, cleanup: { everyMinutes: 60, softFreeGB: 0 } },
     hostDiskPaths: ['C:/'],
     limits: { minFreeRamGB: 10, maxSandboxes: 5, maxUnity: 2, maxSessions: 6 },
   } as unknown as Config;

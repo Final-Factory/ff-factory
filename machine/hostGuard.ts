@@ -54,7 +54,6 @@ export function machineGuardConfig(s: MachineGuardSettings, sandboxRoot: string)
     hysteresisGB: s.hysteresisGB,
     remountMinFreeGB: s.remountMinFreeGB,
     devDriveVhdx: '',
-    compactWhenReclaimGB: 0,
     reapBrowsersAfterHours: s.reapBrowsersAfterHours,
     reapEveryMinutes: s.reapEveryMinutes,
     cleanup: { ...DEFAULT_CLEANUP, everyMinutes: 0, softFreeGB: 0 },

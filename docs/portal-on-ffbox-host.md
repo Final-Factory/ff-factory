@@ -775,12 +775,14 @@ draws on his Max plan's 5-hour and weekly limits, with no per-token bill. Standi
 
 - The host token (`claudeEnv.CLAUDE_CODE_OAUTH_TOKEN`) moves with `config.json`. Machines with
   `machines.useHostClaudeEnv: true` keep receiving it in their launch spec *(sourced: [accounts.md](accounts.md))*.
-- **BEAST needs an explicit setting.** As the portal's own host it follows `claudeAccounts.workers` unless
-  `machines.useHostClaudeEnv` names it; as an ordinary machine it follows `machines.useHostClaudeEnv`, which defaults to
+- **BEAST needs an explicit setting.** As the portal's own host it followed `claudeAccounts.workers` unless
+  `machines.useHostClaudeEnv` named it; as an ordinary machine it follows `machines.useHostClaudeEnv`, which defaults to
   `true` *(sourced: [beast-machine.md](beast-machine.md), the "What changes" table; [accounts.md](accounts.md))*. Before
   the switch, set `machines.useHostClaudeEnv` for `beast`: `false` if `claudeAccounts.workers` is `"login"` today (BEAST's
   workers then keep BEAST's own stored login), `true` if it is `"token"`. Without that, BEAST's workers could change
-  account silently.
+  account silently. `fff-migrate` writes that entry (`rewriteConfig`, `server/vmMigration.ts`) from BEAST's old
+  `claudeAccounts.workers`. Since w755 the portal ignores `claudeAccounts.workers` altogether (retired, `RETIRED_CONFIG_KEYS`),
+  so after the switch the entry is the only thing that says it.
 - `claudeAccounts.standing: "login"`, if set today, would silently move standing agents from BEAST's login to
   Lothsahn's. It needs a decision ([D5](#8-risks-and-open-decisions)).
 

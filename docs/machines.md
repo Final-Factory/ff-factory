@@ -101,7 +101,7 @@ before redeploying by hand.
   running keeps its account until its process restarts; after an update the daemons are redeployed
   anyway. An agent working for someone with their own token (config `userClaudeEnv`,
   [identity.md](identity.md)) runs on that token instead, on any Mac. Every account switch, including the
-  orchestrator's, the dispatcher's and this host's own daemon's workers': [accounts.md](accounts.md).
+  orchestrator's and the dispatcher's: [accounts.md](accounts.md).
 - **Limits.** **Workers run in sandboxes only** (w536, Lothsahn on 2026-10-06: "Can't we get rid of this code so the
   settings doesn't matter?"): `start_agent` with a machine alone is refused, naming its sandboxes, the Capacity block
   lists sandbox computers only, and the daemon refuses any agent whose folder is the main clone (`mainCloneRefusal` in
