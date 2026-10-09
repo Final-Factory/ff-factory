@@ -389,7 +389,12 @@ case "${1:-status}" in
   vault-sync)
     # shellcheck source=vault.sh
     . "$LIB/vault.sh"
-    vault_sync
+    shift
+    case "${1:-}" in
+      "") vault_sync ;;
+      --prune) VAULT_PRUNE=1 vault_sync ;;
+      *) die "unknown option $1 (fff-vm vault-sync [--prune])" ;;
+    esac
     ;;
   -h | --help | help) sed -n '2,/^set -o/{/^#/p}' "$0" ;;
   *) die "unknown command $1 (fff-vm help)" ;;

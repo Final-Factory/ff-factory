@@ -443,7 +443,7 @@ through chat. It assumes the portal runs in the VM (w508's cut-over) and this ch
 
 ```bash
 cd ~/ff-factory && git pull
-sudo deploy/vm/host/install.sh --guest-only          # new fffctl, fff-portal.service, fff-backup; the VM's vault key; fff-vm vault-sync
+sudo deploy/vm/host/install.sh --guest-only          # new fffctl, fff-portal.service, fff-backup; the VM's vault key; fff-vm vault-sync; and, since w744, the host's fff-vm and vault.sh
 sudo fff-vm ssh 'sudo fffctl update'
 sudo fff-vm ssh 'sudo fffctl status'                 # until the release is main's newest and /api/health answers
 sudo fff-vm ssh 'sudo fffctl vault list'             # "key: loaded"
@@ -462,13 +462,14 @@ sudo fff-vm ssh 'sudo fffctl vault list'             # "key: loaded"
     Metadata: Read (automatic);
   - Expiration: up to a year; note the date. If the organization requires approval for fine-grained tokens, an owner
     approves it under the organization's Settings → Personal access tokens.
-- **Put them on the host** (`<id>` is your portal user id: `lothsahn`, `ben`). Each command reads the token from the
+- **Put them on the host** (`<id>` is your portal user id: `lothsahn`, `ben`). `bash -c`, not `sh -c`: on the host `sh` is
+  dash, whose `read` has no `-s` ("read: Illegal option -s"). Each command reads the token from the
   terminal without echoing it, so it is never on a command line, in shell history or in chat:
 
 ```bash
 sudo install -d -m 0700 /etc/fff-vm/secrets/people/<id>
-sudo sh -c 'umask 077; read -rs -p "Claude token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/claude-token'; echo
-sudo sh -c 'umask 077; read -rs -p "GitHub token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/github-token'; echo
+sudo bash -c 'umask 077; read -rs -p "Claude token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/claude-token'; echo
+sudo bash -c 'umask 077; read -rs -p "GitHub token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/github-token'; echo
 sudo fff-vm vault-sync                               # "added host-<id>-claude", "added host-<id>-github"; values never shown
 ```
 
@@ -481,7 +482,7 @@ through a channel that is not chat (in person, or a password manager's share).
 
 ```bash
 sudo install -d -m 0700 /etc/fff-vm/secrets/people/<id>/claude-tokens
-sudo sh -c 'umask 077; read -rs -p "Claude token (second): " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/claude-tokens/second'; echo
+sudo bash -c 'umask 077; read -rs -p "Claude token (second): " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/claude-tokens/second'; echo
 sudo fff-vm vault-sync                               # "added host-<id>-claude-second"; values never shown
 sudo fff-vm ssh 'sudo fffctl vault list'             # the pool section: both tokens, their state, meters and resets
 ```
@@ -517,6 +518,17 @@ token; one for Ben's request shows Ben's.
 
 **6. After a few days with no fallback warning in `system_status`**, retire each machine's own logins (section 6, step
 5).
+
+**The installed `fff-vm` and the installer's sync are one function (w744).** `sudo fff-vm vault-sync` runs
+`/usr/local/lib/fff-vm/vault.sh`; `install.sh --guest-only` runs `vault.sh` from the checkout for its own sync. Until w744
+`--guest-only` left the installed copy alone, so a host whose installed copy predated the pool (w739) added
+`people/<id>/claude-tokens/<name>` with the installer and then removed those entries with `fff-vm vault-sync`, which did
+not know the folder and read every `host-…` entry as one whose file was gone. Now every mode of `install.sh` (`--guest-only`
+included) copies `lib.sh`, `pathwatch.sh`, `vault.sh`, `fff-vm.conf.example` and `fff-vm` to `/usr/local/lib/fff-vm` and
+`/usr/local/sbin` (`install_host_scripts`, `deploy/vm/host/lib.sh`), so after any `git pull` and install run the two agree. A sync
+never removes an entry whose file exists (a file that is not a token now is warned about and its entry stays), and a scan that
+finds no token file at all while `host-…` entries exist removes none: `sudo fff-vm vault-sync --prune` says that every
+person's files really are gone. Run `install.sh` from the clone you pull in (`git -C <clone> pull`), not from another one.
 
 **Rotating a token later:** replace its file (step 2), then `sudo fff-vm vault-sync`. **Removing a person's:** delete
 their files, then `sudo fff-vm vault-sync`; revoke the tokens where they were made.
