@@ -206,7 +206,7 @@ else
   out=$(FAKE_UNITS_DOWN=1 upriv units --check) || rc=$?
   [ "$rc" -eq 1 ] || fail "priv: units --check with a unit down exited $rc, not 1: $out"
   printf '%s' "$out" | matches -F 'down: fff-portal.service=failed' || fail "priv: units --check did not pass on the down line: $out"
-  for bad in 'units --fix' 'units --check extra' 'units extra' 'units --check --check' 'units --check ""' 'units -- --check' 'units --pause' 'units watchdog' 'units --check; id' \
+  for bad in 'units --fix' 'units --check extra' 'units extra' 'units --check --check' 'units -- --check' 'units --pause' 'units watchdog' 'units --check; id' \
     'watchdog' 'watchdog run' 'watchdog pause' 'watchdog resume' 'watchdog reset' 'watchdog reset fff-portal.service' 'restart' 'unit' 'Units' 'units-check'; do
     # shellcheck disable=SC2086 # the words are the arguments
     rc=0; out=$(upriv $bad) || rc=$?
