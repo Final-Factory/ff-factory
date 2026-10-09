@@ -341,10 +341,24 @@ done
 # sudo: fff-ops-priv as root and fff-ops-ssh as fff, nothing else.
 g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl status' | matches '^portal: active' || fail "the worker's fffctl status does not work"
 g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl logs 5' >/dev/null || fail "the worker's fffctl logs does not work"
-for bad in 'sudo -n /usr/local/sbin/fffctl restart' 'sudo -n /usr/local/lib/fff/fff-ops-priv update' 'sudo -n /usr/local/lib/fff/fff-ops-priv vault list' \
+# The read-only forms of the vault and the rest (w745): the worker's fffctl lists the entries (name, last four characters,
+# fingerprint), never a value, and changes nothing.
+wl=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl vault list 2>&1') || fail "the worker's fffctl vault list does not work: $wl"
+printf '%s' "$wl" | matches 'key: loaded' || fail "the worker's vault list: the key is not loaded: $wl"
+printf '%s' "$wl" | matches -F '…QRST' || fail "the worker's vault list does not show an entry's last four characters: $wl"
+if printf '%s' "$wl" | matches -F 'ci-vault-secret'; then fail "the worker's vault list printed a value"; fi
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl vault list --names' | matches -x 'ci-env' || fail "the worker's vault list --names does not list ci-env"
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl vault help' | matches 'vaultCli\|vault' || fail "the worker's vault help does not work"
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl machine-credential list' >/dev/null || fail "the worker's machine-credential list does not work"
+# units --check exits 1 when a unit is down: only a refusal by the wrapper ("orchestration worker") is a failure here
+if g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl units --check 2>&1 || true' | matches 'orchestration worker'; then fail "the worker's fffctl units --check was refused"; fi
+for bad in 'sudo -n /usr/local/sbin/fffctl restart' 'sudo -n /usr/local/lib/fff/fff-ops-priv update' 'sudo -n /usr/local/lib/fff/fff-ops-priv vault rotate ci-env --stdin' \
+  'sudo -n /usr/local/lib/fff/fff-ops-priv vault export-key --out /tmp/ci-ops-key' 'sudo -n /usr/local/lib/fff/fff-ops-priv vault list --file /tmp/x' \
+  'sudo -n /usr/local/lib/fff/fff-ops-priv migrate --key' 'sudo -n /usr/local/lib/fff/fff-ops-priv watchdog pause' \
   'sudo -n -u fff /bin/cat /srv/fff/config/config.json' 'sudo -n -u fff /usr/local/lib/fff/fff-ops-ssh -oProxyCommand=id x' 'sudo -n apt-get install -y htop'; do
   if g "sudo -u fff-ops $bad" >/dev/null 2>&1; then fail "fff-ops may run: $bad"; fi
 done
+if g 'test -e /tmp/ci-ops-key'; then fail "fff-ops copied the vault key"; fi
 # A credential for a machine that does not answer ssh is not issued at all (it would only cut that machine off).
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl credential issue ci-m2 --to nosuchhost.invalid 2>&1' || true)
 printf '%s' "$out" | matches 'does not answer ssh' || fail "credential issue to an unreachable machine: $out"
