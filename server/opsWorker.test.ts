@@ -50,6 +50,10 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     'timeout 30 ssh m3 hostname',
     'fffctl status',
     'fffctl logs 300',
+    // w743: the critical units, read only (fff-ops-priv takes only these two forms)
+    'fffctl units',
+    'fffctl units --check',
+    'fffctl units --check 2>&1 | tail -n 2',
     'fffctl credential issue m5 --to m5',
     // w676: the portal's machine ssh tool, through fff-ops-priv (which takes only --check, --key and --pin)
     'fff-machine-ssh --check',
@@ -84,6 +88,8 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
     ['cat /proc/1/environ', /environment/],
     ['sudo fffctl update', /no sudo/],
     ['fffctl rollback', /a person's/],
+    ['fffctl watchdog pause', /a person's/],
+    ['sudo fffctl units --check', /no sudo/],
     ['fffctl restart --drain-minutes 5', /a person's/],
     ['fffctl vault list', /a person's/],
     ['systemctl restart fff-portal', /services are a person's/],

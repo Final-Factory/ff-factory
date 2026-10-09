@@ -5,6 +5,9 @@
 #
 #   fffctl status                      the portal, its release, health, Tailscale, backups (fffctl status)
 #   fffctl state                       what is set up, as JSON (fffctl state)
+#   fffctl units [--check]             the critical units: active, enabled, the watchdog's verdict and its last restarts (fffctl
+#                                      units). --check prints "down: ..." and exits 1 if one is not (w743); read only, and no
+#                                      other word: `fffctl watchdog` (run, pause, resume, reset) and the restarts stay a person's
 #   fffctl logs [N]                    the portal's last N journal lines (default 200, at most 2000), secrets redacted
 #   fffctl machine-ssh --check         the portal's ssh to each machine, then its authorized_keys line (fff-machine-ssh
 #                                      --check, read only; machine-ssh-check is the same). Its PATH's fff-machine-ssh
@@ -93,6 +96,14 @@ credential_issue() {
 case "${1:-help}" in
   status) exec "$FFFCTL" status ;;
   state) exec "$FFFCTL" state ;;
+  units)
+    # Read only (cmd_units): the table, or the check's exit status. Exactly these two forms; a unit's change is a person's.
+    case "${2:-}" in
+      "") [ $# -eq 1 ] || refuse "units takes nothing more"; exec "$FFFCTL" units ;;
+      --check) [ $# -eq 2 ] || refuse "units --check takes nothing more"; exec "$FFFCTL" units --check ;;
+      *) refuse "units | units --check (the watchdog, restarts and pauses are a person's: sudo fffctl watchdog)" ;;
+    esac
+    ;;
   logs)
     n=${2:-200}
     if ! [[ $n =~ ^[0-9]{1,4}$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt 2000 ]; then refuse "logs [N]: N from 1 to 2000"; fi
@@ -135,5 +146,5 @@ case "${1:-help}" in
     echo "asked for: the portal builds origin/$FFF_BRANCH beside the running release, drains, restarts on it, verifies it and rolls back by itself. Your process ends with the old portal; FF Factory messages you when the new one is up."
     ;;
   help | -h | --help) awk 'NR > 5 && /^#$/ {exit} NR > 5' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) refuse "fffctl $1 is a person's (restarts, rollbacks, settings, the vault, migrations). You have: status, state, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, and update with a deploy grant" ;;
+  *) refuse "fffctl $1 is a person's (restarts, rollbacks, settings, the vault, migrations). You have: status, state, units [--check], logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, and update with a deploy grant" ;;
 esac

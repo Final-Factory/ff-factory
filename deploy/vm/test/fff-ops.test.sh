@@ -8,7 +8,8 @@
 #   scp and sftp:   real copies both ways (w612) through fff-ops-scp-ssh and fff-ops-ssh to a fake machine that runs a
 #                   real sftp-server; ssh options, another port and a command that is not a copy are refused.
 #   fff-ops-priv:   anything but its subcommands is refused before it does anything; machine-ssh passes only --check,
-#                   --key and --pin (w676), and a credential needs the machine's record (as root only).
+#                   --key and --pin (w676), units only itself and --check (w743), and a credential needs the machine's
+#                   record (as root only).
 set -o errexit -o nounset -o pipefail
 cd "$(dirname "$0")/../../.."
 G=deploy/vm/guest
@@ -195,4 +196,24 @@ else
   if printf '%s' "$out" | matches 'unbound variable'; then fail "priv: the credential issue left a shell error: $out"; fi
   if printf '%s' "$out" | matches -F secret; then fail "priv: the credential was printed: $out"; fi
   echo "ok: fff-ops-priv machine-ssh runs --check, --key and --pin as the portal's account, refuses --fix and --data, and a credential needs a record and ends cleanly"
+  # units and units --check (w743): exactly these two reach fffctl, and --check's exit status (1: a unit is down) comes back.
+  printf '#!/bin/sh\nprintf "FFFCTL"; printf " [%%s]" "$@"; echo\n[ -z "${FAKE_UNITS_DOWN:-}" ] || { echo "down: fff-portal.service=failed"; exit 1; }\n' >"$plib/units-fffctl"
+  chmod +x "$plib/units-fffctl"
+  upriv() { FFFCTL=$plib/units-fffctl FFF_LIB=$plib bash $G/fff-ops-priv "$@" 2>&1; }
+  [ "$(upriv units)" = "FFFCTL [units]" ] || fail "priv: units: $(upriv units)"
+  [ "$(upriv units --check)" = "FFFCTL [units] [--check]" ] || fail "priv: units --check: $(upriv units --check)"
+  rc=0
+  out=$(FAKE_UNITS_DOWN=1 upriv units --check) || rc=$?
+  [ "$rc" -eq 1 ] || fail "priv: units --check with a unit down exited $rc, not 1: $out"
+  printf '%s' "$out" | matches -F 'down: fff-portal.service=failed' || fail "priv: units --check did not pass on the down line: $out"
+  for bad in 'units --fix' 'units --check extra' 'units extra' 'units --check --check' 'units --check ""' 'units -- --check' 'units --pause' 'units watchdog' 'units --check; id' \
+    'watchdog' 'watchdog run' 'watchdog pause' 'watchdog resume' 'watchdog reset' 'watchdog reset fff-portal.service' 'restart' 'unit' 'Units' 'units-check'; do
+    # shellcheck disable=SC2086 # the words are the arguments
+    rc=0; out=$(upriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
+  done
+  rc=0; out=$(upriv units '') || rc=$?
+  [ "$rc" -eq 2 ] || fail "priv: units with an empty word was not refused (exit $rc): $out"
+  echo "ok: fff-ops-priv units and units --check reach fffctl (and its exit status comes back); every other word, the watchdog included, is refused"
 fi

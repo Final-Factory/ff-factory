@@ -1,4 +1,4 @@
 #!/bin/sh
-# The orchestration worker's fffctl (w597, docs/ops-worker.md): only what fff-ops-priv allows (status, state, logs,
+# The orchestration worker's fffctl (w597, docs/ops-worker.md): only what fff-ops-priv allows (status, state, units [--check], logs,
 # machine-ssh-check, credential list and issue). Everything else fffctl does is a person's.
 exec sudo -n /usr/local/lib/fff/fff-ops-priv "$@"
