@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **`fffctl credential issue` no longer exits 1 with "line 1: tmp: unbound variable" after it stored the credential** (w734, found
+  installing biscuit, w693). `credential_issue` in `deploy/vm/guest/fff-ops-priv` set `trap 'rm -rf "$tmp"' EXIT` with a function-local
+  `$tmp`; the single-quoted trap expanded it when the script ended, outside the function, and `set -u` failed. The trap now
+  expands `$tmp` when it is set. `FFFCTL` can be overridden like `FFF_LIB` (sudo's env_reset drops it for the real worker) so
+  `deploy/vm/test/fff-ops.test.sh` runs an issue end to end with a fake fffctl and checks exit 0 and no shell error. Deploy: the
+  portal VM gets the fixed script at its next deploy; nothing to restart.
+
 - **A reopened request is no longer closed again by the ledger cleanup on its worker's DONE or PRs from before the reopen**
   (w731; the case: w712, the Blueprints panel on the Steam Deck, 2026-10-09: its worker's DONE at 01:37 was refused, the PR merged,
   a person reopened it for a new defect, and the cleanup closed it twice more, at 01:43 and 01:53, on that old DONE while the

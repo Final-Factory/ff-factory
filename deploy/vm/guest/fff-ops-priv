@@ -35,7 +35,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 FFF_LIB=${FFF_LIB:-/usr/local/lib/fff}
 refuse() { echo "fffctl (orchestration worker): $*" >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || refuse "run through sudo (the worker's fffctl does it)"
-FFFCTL=/usr/local/sbin/fffctl
+FFFCTL=${FFFCTL:-/usr/local/sbin/fffctl} # overridable like FFF_LIB; sudo's env_reset drops it for the real worker
 # shellcheck source=lib.sh
 . "$FFF_LIB/lib.sh"
 load_conf
@@ -70,7 +70,9 @@ credential_issue() {
   jq -e --arg id "${id,,}" 'any((.machines // [])[]; .id == $id)' "$DATA/state.json" >/dev/null 2>&1 ||
     refuse "the portal has no machine record '${id,,}': adding one is a person's. Ask your person to have the dispatcher run add_machine ${id,,} with worker_install (docs/ops-worker.md, \"A new machine\"); list_machines shows it once it is there"
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT
+  # $tmp is local: a single-quoted trap would expand it at exit, after this function returned, and `set -u` would end
+  # the script with "tmp: unbound variable" (exit 1) after the credential was already stored (w734).
+  trap "rm -rf -- '$tmp'" EXIT
   "$FFFCTL" machine-credential issue "$id" --out "$tmp/cred" >"$tmp/issued" 2>&1 || refuse "fffctl machine-credential issue $id failed: $(redact <"$tmp/issued" | tail -n 3)"
   remote="machine-credential-$id"
   if [ "$platform" = posix ]; then

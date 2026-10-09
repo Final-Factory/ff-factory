@@ -185,5 +185,14 @@ else
   out=$(priv credential issue Biscuit --to ben-ryding@biscuit || true)
   if printf '%s' "$out" | matches 'no machine record'; then fail "priv: a machine with a record was refused: $out"; fi
   printf '%s' "$out" | matches 'machine-credential issue Biscuit failed' || fail "priv: with its record, the issue did not go on: $out"
-  echo "ok: fff-ops-priv machine-ssh runs --check, --key and --pin as the portal's account, refuses --fix and --data, and a credential needs a record"
+  # A credential that is issued and stored ends with exit 0 and no shell error (w734: the EXIT trap read the function's
+  # local $tmp under `set -u` and the script exited 1 "tmp: unbound variable" after storing the credential).
+  printf '#!/bin/sh\nout=\nwhile [ $# -gt 0 ]; do [ "$1" = --out ] && out=$2; shift; done\necho secret >"$out"\necho "machine credential issued: $out (0600)"\n' >"$plib/fffctl"
+  chmod +x "$plib/fffctl"
+  rc=0
+  out=$(FFFCTL=$plib/fffctl FFF_LIB=$plib bash $G/fff-ops-priv credential issue biscuit --to ben-ryding@biscuit 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "priv: an issued credential ended with exit $rc: $out"
+  if printf '%s' "$out" | matches 'unbound variable'; then fail "priv: the credential issue left a shell error: $out"; fi
+  if printf '%s' "$out" | matches -F secret; then fail "priv: the credential was printed: $out"; fi
+  echo "ok: fff-ops-priv machine-ssh runs --check, --key and --pin as the portal's account, refuses --fix and --data, and a credential needs a record and ends cleanly"
 fi
