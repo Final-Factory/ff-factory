@@ -105,7 +105,7 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   help: { allowed: [''], changes: [] },
   units: { allowed: ['', '--check'], changes: [] },
   logs: { allowed: ['', 'N'], changes: ['-f'] },
-  vault: { allowed: ['list', 'list --names', 'help'], changes: ['init', 'export-key', 'add', 'put', 'rotate', 'grant', 'remove', 'new-key'] },
+  vault: { allowed: ['list', 'list --names', 'help'], changes: ['init', 'export-key', 'add', 'put', 'rotate', 'grant', 'remove', 'rename', 'new-key'] },
   'machine-credential': { allowed: ['list'], changes: ['issue', 'revoke'] },
   migrate: { allowed: ['--help'], changes: ['--key', '--dry-run-copy', '--rollback-dry-run', '--cut-over'] },
   watchdog: { allowed: [], changes: ['run', 'pause', 'resume', 'reset'] },
