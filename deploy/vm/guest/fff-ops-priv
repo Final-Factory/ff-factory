@@ -72,6 +72,7 @@ credential_issue() {
   tmp=$(mktemp -d)
   # $tmp is local: a single-quoted trap would expand it at exit, after this function returned, and `set -u` would end
   # the script with "tmp: unbound variable" (exit 1) after the credential was already stored (w734).
+  # shellcheck disable=SC2064 # expanded now, on purpose
   trap "rm -rf -- '$tmp'" EXIT
   "$FFFCTL" machine-credential issue "$id" --out "$tmp/cred" >"$tmp/issued" 2>&1 || refuse "fffctl machine-credential issue $id failed: $(redact <"$tmp/issued" | tail -n 3)"
   remote="machine-credential-$id"
