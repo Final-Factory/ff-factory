@@ -10,8 +10,10 @@
 #                                      other word: `fffctl watchdog` (run, pause, resume, reset) and the restarts stay a person's
 #   fffctl vault list [--names]        the token vault's entries (name, kind, env, last four characters, fingerprint, grants), the
 #                                      Claude pools' meters, or only the names (w745). Never a value. `vault help` prints the
-#                                      vault command's own usage. `vault init`, `export-key`, `add`, `put`, `rotate`, `grant`,
-#                                      `remove` and `new-key` change the vault or copy its key: a person's.
+#                                      vault command's own usage. `vault init`, `export-key`, `add`, `add-claude`, `put`, `rotate`, `grant`,
+#                                      `remove`, `rename`, `new-key` and `export` (the one form that prints a value, for the FFBox
+#                                      host's nightly copy, root to root: docs/vault.md section 12) change the vault or copy a
+#                                      secret: a person's.
 #   fffctl machine-credential list     the same as `credential list`, under fffctl's own name (w745)
 #   fffctl migrate --help              migrate's usage (w745); `--key` (it trusts a new host key), `--dry-run-copy`,
 #                                      `--rollback-dry-run` and `--cut-over` change state: a person's
@@ -120,7 +122,7 @@ case "${1:-help}" in
         exec "$FFFCTL" vault list --names
         ;;
       help) [ $# -eq 2 ] || refuse "vault help takes nothing more"; exec "$FFFCTL" vault help ;;
-      *) refuse "vault list [--names] | vault help (init, export-key, add, put, rotate, grant, remove and new-key change the vault or copy its key: a person's, sudo fffctl vault ...)" ;;
+      *) refuse "vault list [--names] | vault help (init, export-key, add, add-claude, put, rotate, grant, remove, rename, export and new-key change the vault or copy a secret: a person's, sudo fffctl vault ...)" ;;
     esac
     ;;
   machine-credential)

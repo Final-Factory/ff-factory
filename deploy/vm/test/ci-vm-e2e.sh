@@ -310,6 +310,29 @@ g 'sudo fffctl vault list --names' | matches -E '^vault-ci(-|$)' || fail "an emp
 /usr/local/sbin/fff-vm vault-sync --prune >/dev/null 2>&1 || true
 if g 'sudo fffctl vault list --names' | matches -E '^vault-ci(-|$)'; then fail "a removed person's entries stayed in the vault"; fi
 echo "ok: fff-vm vault-sync: per-person tokens in, never printed, a classic GitHub token refused, removals follow, the key copied"
+# A token added in the VM (w749, docs/vault.md section 12), with the real fffctl and vaultCli in the guest: it comes in on stdin and
+# is never printed; the host's copy puts it in people/<id>/claude-tokens/<n> (0600 in a 0700 folder); a sync keeps the entry; one
+# value goes out only to a pipe, over the host's ssh; and deleting the host file then syncing removes it for good.
+ca="sk-ant-oat01-$(rnd 44)"
+out=$(printf '%s\n' "$ca" | g 'sudo fffctl vault add-claude ci3' 2>&1) || fail "fffctl vault add-claude failed: $out"
+echo "$out"
+if printf '%s' "$out" | matches -F "${ca:13:24}"; then fail "fffctl vault add-claude printed the token"; fi
+g 'sudo fffctl vault list --names' | matches -x 'vault-ci3-1' || fail "add-claude did not make vault-ci3-1"
+if printf 'not-a-token\n' | g 'sudo fffctl vault add-claude ci3' >/dev/null 2>&1; then fail "add-claude took a token of the wrong shape"; fi
+out=$(/usr/local/sbin/fff-vm vault-pull 2>&1) || fail "fff-vm vault-pull failed: $out"
+echo "$out"
+if printf '%s' "$out" | matches -F "${ca:13:24}"; then fail "fff-vm vault-pull printed the token"; fi
+printf '%s' "$out" | matches -F 'copied vault-ci3-1 (…' || fail "the nightly copy did not log the entry: $out"
+f=/etc/fff-vm/secrets/people/ci3/claude-tokens/1
+[ "$(stat -c '%a %U' "$f")" = "600 root" ] && [ "$(stat -c '%a' "$(dirname "$f")")" = 700 ] || fail "the copied token file or its folder has the wrong mode"
+[ "$(tr -d '[:space:]' <"$f")" = "$ca" ] || fail "the copied file does not hold the token that was added"
+/usr/local/sbin/fff-vm vault-sync >/dev/null 2>&1 || true
+g 'sudo fffctl vault list --names' | matches -x 'vault-ci3-1' || fail "a sync removed an entry that was added in the VM"
+rm -f "$f"
+/usr/local/sbin/fff-vm vault-sync --prune >/dev/null 2>&1 || true
+if g 'sudo fffctl vault list --names' | matches -x 'vault-ci3-1'; then fail "deleting the host file and syncing did not remove the entry"; fi
+rm -rf /etc/fff-vm/secrets/people/ci3
+echo "ok: fffctl vault add-claude from stdin, the host's copy (0600, logged by name and last four characters), a sync keeps the entry, delete + sync removes it"
 # fffctl migrate (w499) in a real guest: the wrapper, node in the release, ssh as fff with the portal's key. No BEAST here,
 # so it cannot connect: it says so, prints the line that authorizes the key, and changes nothing. (The modes themselves
 # run end to end against a synthetic BEAST in the unit tests: scripts/fff-migrate.test.ts.)

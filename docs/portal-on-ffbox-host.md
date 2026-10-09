@@ -627,7 +627,9 @@ outage, a first boot that does not finish, and a nightly restart that does not c
 
 ### The nightly restart (host)
 
-`fff-vm nightly`, from `fff-vm-nightly.timer` at **12:00 UTC**:
+`fff-vm nightly`, from `fff-vm-nightly.timer` at **12:00 UTC**. First, every night and before anything stops, it copies the
+vault entries that exist only in the VM to the host's root-only files (w749, `nightly_vault_copy`; [vault.md section 12](vault.md#12-adding-in-the-vm-and-the-nightly-copy-to-the-host-w749));
+a failure there alerts and never holds the restart. Then:
 
 1. Marks maintenance, so the watch does not count the downtime.
 2. **Drains through FF Factory's own drain.** Through the guest agent it runs `fffctl prepare-shutdown --drain-minutes

@@ -13,7 +13,11 @@
 #   fff-vm snapshots         the disk's snapshots
 #   fff-vm notify-test       send a test alert to the ntfy topic
 #   fff-vm vault-sync        each person's tokens in /etc/fff-vm/secrets/people/<user id>/ into the VM's vault, and the
-#                            vault key's spare copy back here (docs/vault.md, "Whose tokens"); values never printed
+#                            vault key's spare copy back here (docs/vault.md, "Whose tokens"); values never printed. It copies
+#                            what only the VM has to this host first (vault-pull)
+#   fff-vm vault-pull        the vault entries that exist in the VM and not here (added with fffctl vault add-claude, say) to
+#                            this host's files, so this host is the full backup. The nightly does it before the VM stops
+#                            (docs/vault.md, section 12); values never printed, only names, last four characters, fingerprints
 set -o errexit -o nounset -o pipefail
 LIB=${FFF_VM_LIB:-/usr/local/lib/fff-vm}
 # shellcheck source=lib.sh
@@ -262,11 +266,26 @@ wait_up() {
   return 1
 }
 
+# nightly_vault_copy: the vault entries only the VM has, to this host (w749), while the VM is up and before anything stops. It
+# never holds the restart up and never fails it: a problem is logged and sent as an alert (names and last four characters).
+nightly_vault_copy() {
+  local rc=0
+  # shellcheck source=vault.sh
+  . "$LIB/vault.sh"
+  vault_pull || rc=$?
+  if [ "$rc" != 0 ] || [ -n "${VAULT_PULL_NEWS:-}" ]; then
+    notify "fff-vm: vault copy" "The nightly copy of the VM's vault entries to $(hostname -s) needs a look: ${VAULT_PULL_NEWS:-see the log} (journalctl -u fff-vm-nightly; sudo fff-vm vault-pull runs it again)."
+  fi
+  return 0
+}
+
 cmd_nightly() {
   local force=${1:-} t0 out rc reason="" pid err up=yes
   t0=$(now)
   if [ "$NIGHTLY_MODE" = off ] && [ "$force" != --now ]; then log "NIGHTLY_MODE=off"; return 0; fi
   [ "$(dom_state)" = running ] || { log "$VM_NAME is $(dom_state); nothing to do"; return 0; }
+  # Every night, whether or not the VM restarts: the host is the vault's backup (docs/vault.md, section 12).
+  nightly_vault_copy
   if [ "$NIGHTLY_MODE" = if-required ] && [ "$force" != --now ]; then
     out=$(guest_exec 30 /bin/sh -c 'test -e /run/reboot-required && echo guest' || true)
     [ -z "$out" ] || reason="the guest needs a reboot (/run/reboot-required)"
@@ -395,6 +414,11 @@ case "${1:-status}" in
       --prune) VAULT_PRUNE=1 vault_sync ;;
       *) die "unknown option $1 (fff-vm vault-sync [--prune])" ;;
     esac
+    ;;
+  vault-pull)
+    # shellcheck source=vault.sh
+    . "$LIB/vault.sh"
+    vault_pull
     ;;
   -h | --help | help) sed -n '2,/^set -o/{/^#/p}' "$0" ;;
   *) die "unknown command $1 (fff-vm help)" ;;

@@ -53,6 +53,15 @@
 #                                       the token vault (docs/vault.md): secrets the portal hands worker runs. A value comes
 #                                       from --file FILE or --stdin, never the command line, and is never shown back
 #                                       (fffctl vault help)
+#   fffctl vault add-claude PERSON [NAME]
+#                                       one Claude token (sk-ant-oat01-...) into PERSON's pool as vault-<person>-<NAME>, the next
+#                                       free number when NAME is left out. The token is typed at a hidden prompt, or piped in
+#                                       on stdin; never an argument. The FFBox host copies it to its own files that night, or
+#                                       now with 'fff-vm vault-pull' there (docs/vault.md, section 12)
+#   fffctl vault export --manifest | NAME
+#                                       what the FFBox host's nightly copy reads over its ssh into this VM, as root: the entries
+#                                       without their values, or one value to a pipe. Not read-only: a person's, never the ops
+#                                       worker's (docs/vault.md, section 12)
 #   fffctl vault init [--new-key]       make the vault key ($FFF_VAULT_KEY) if missing and restart the portal to load it;
 #                                       --new-key replaces it (the old one kept beside it; every entry then needs rotating)
 #   fffctl vault export-key --out FILE  a copy of the key for safekeeping (0600, root): docs/vault.md, open decision 2
@@ -468,6 +477,42 @@ vault_cli() {
   (cd "$CURRENT" && FFF_VAULT_KEY_FILE=$FFF_VAULT_KEY FFSB_CONFIG=$FFF_ROOT/config/config.json node server/vaultCli.ts "$@")
 }
 
+# vault_add_claude PERSON [NAME]: one Claude token into a person's pool (docs/vault.md, section 12). The pool's entries are named
+# vault-<person>-<n> (w748), owned by the person, for their workers and standing agents on every machine: what the FFBox host's
+# 'fff-vm vault-sync' makes from people/<id>/claude-tokens/<n>. The token comes from a hidden prompt on a terminal, else from
+# stdin, never from the command line, and is never printed.
+vault_add_claude() {
+  local person=${1:-} slot=${2:-} lower name t="" names n=1 have
+  [ -n "$person" ] && [ $# -le 2 ] || die "fffctl vault add-claude PERSON [NAME]   (the token is typed at the prompt or piped in on stdin, never an argument)"
+  [[ "$person" =~ ^[A-Za-z0-9._-]{1,30}$ ]] || die "PERSON is a portal user id (letters, digits . _ -), not '$person'"
+  lower=$(tr '[:upper:]' '[:lower:]' <<<"$person")
+  names=$(vault_cli list --names)
+  if [ -n "$slot" ]; then
+    slot=$(tr '[:upper:]' '[:lower:]' <<<"$slot")
+    [[ "$slot" =~ ^[a-z0-9][a-z0-9._-]{0,15}$ ]] || die "NAME is 1 to 16 of a-z 0-9 . _ - and starts with a letter or digit"
+  else
+    # The next free number: not taken by an entry (nor by one the host still has to rename, host-<person>-claude-<n>).
+    while grep -qxF -e "vault-$lower-$n" -e "host-$lower-claude-$n" <<<"$names"; do n=$((n + 1)); done
+    slot=$n
+  fi
+  name=vault-$lower-$slot
+  [ ${#name} -le 40 ] || die "$name is longer than 40 characters: a shorter PERSON or NAME"
+  ! grep -qxF "$name" <<<"$names" || die "$name exists. 'sudo fffctl vault rotate $name' replaces its token; the FFBox host's file wins over it at the next sync (docs/vault.md, section 12)"
+  if [ -t 0 ]; then
+    read -rs -p "Claude token for $person (sk-ant-oat01-..., typed without echo): " t
+    echo >&2
+  else
+    IFS= read -r t || true
+  fi
+  t=${t//[[:space:]]/}
+  [[ "$t" =~ ^sk-ant-oat01-[A-Za-z0-9_-]{40,}$ ]] || die "that is not one Claude token from 'claude setup-token' (sk-ant-oat01-... then at least 40 more characters); nothing was added (its content is not shown)"
+  have=$(grep -cE "^(vault-${lower//./\.}(-.*)?|host-${lower//./\.}-claude.*)$" <<<"$names" || true)
+  printf '%s\n' "$t" | vault_cli add --name "$name" --kind claude --owner "$person" --share owner --roles workers,standing --machines '*' --stdin
+  t=""
+  [ "$have" != 0 ] || echo "note: nobody had a vault entry for '$person' before; if that is not the portal user id you meant, 'sudo fffctl vault remove $name' and add it again"
+  echo "In $person's pool now (docs/vault.md, section 4). The FFBox host copies it to /etc/fff-vm/secrets/people/$person/claude-tokens/$slot tonight, or now: sudo fff-vm vault-pull (on the host)."
+}
+
 cmd_vault() {
   case "${1:-list}" in
     init)
@@ -493,7 +538,13 @@ cmd_vault() {
       install -m 0600 -o root -g root "$FFF_VAULT_KEY" "$3"
       echo "a copy of the vault key in $3 (0600, root). Keep it where docs/vault.md (open decision 2) says, then delete $3."
       ;;
-    help | -h | --help) sed -n '2,15p' "$CURRENT/server/vaultCli.ts" ;;
+    add-claude) shift; vault_add_claude "$@" ;;
+    rotate)
+      vault_cli "$@"
+      # The FFBox host's file for a pool entry wins at the next sync (docs/vault.md, section 12): say so where it is done.
+      case "${2:-}" in vault-* | host-*) echo "note: if the FFBox host has a file for ${2:-}, the host's file wins: the next 'fff-vm vault-sync' there rotates this entry back to it. Put the new token in that file to keep it (docs/vault.md, section 12)." >&2 ;; esac
+      ;;
+    help | -h | --help) sed -n '2,\#^// The key#p' "$CURRENT/server/vaultCli.ts" ;;
     *) vault_cli "$@" ;;
   esac
 }

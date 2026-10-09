@@ -287,4 +287,64 @@ st=$(FAKE_NO_DOMAIN=1 bash -c '. "$FFF_VM_LIB/lib.sh"; load_conf "$FFF_VM_CONF";
 [ "$st" = missing ] || fail "10: no domain read as $(printf %q "$st")"
 ok "dom_state: one line, whenever virsh writes its blank line; missing when virsh finds no domain"
 
+# 11. The nightly copies the VM's own vault entries to the host first (w749), while the VM is still up, and a copy that fails
+# alerts and never holds the restart back. The VM is the fake ssh below: one entry (vault-ben-2) the host has no file for.
+host VM_MEMORY_MB=8192 VM_VCPUS=2 "NTFY_URL_FILE=$T/ntfy-url"
+echo http://ntfy.invalid/topic >"$T/ntfy-url"
+mkdir -p "$T/etc/ssh"
+: >"$T/etc/ssh/id_ed25519"
+tokn="sk-ant-oat01-$(head -c 96 /dev/urandom | base64 -w0 | tr -dc 'A-Za-z0-9' | head -c 44)"
+printf '%s\n' "$tokn" >"$FAKE_DIR/value"
+export FAKE_FP FAKE_L4
+FAKE_FP=$(printf %s "$tokn" | sha256sum | cut -c1-12)
+FAKE_L4=${tokn: -4}
+cat >"$T/bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+D=$FAKE_DIR
+while [ $# -gt 0 ]; do case "$1" in -i | -o) shift 2 ;; *@*) shift; break ;; *) shift ;; esac; done
+echo "ssh $*" >>"$D/calls"
+case "$*" in
+  'sudo fffctl vault export --manifest')
+    [ -z "${FAKE_SSH_FAIL:-}" ] || exit 255
+    printf 'vault-ben-2\tclaude\t-\tben\towner\tworkers,standing\t*\t%s\t%s\t0\n' "$FAKE_FP" "$FAKE_L4" ;;
+  'sudo fffctl vault export vault-ben-2') cat "$D/value" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$T/bin/ssh"
+# curl stands in for ntfy too: a push is a call it records
+cat >"$T/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+D=$FAKE_DIR
+case "$*" in
+  */api/health*)
+    [ "$(cat "$D/state")" = running ] || exit 7
+    m=$(awk -F"[<>]" '$2 ~ /^memory( |$)/ {print int($3 / 1024)}' "$D/live.xml")
+    [ "$m" -ge "${FAKE_PORTAL_MIN_MB:-1024}" ] || exit 7
+    echo '{"ok":true}' ;;
+  *ntfy.invalid*) echo "ntfy $*" >>"$D/calls" ;;
+  *) exit 7 ;;
+esac
+EOF
+chmod +x "$T/bin/curl"
+nightly
+[ "$rc" = 0 ] || fail "11: exit $rc"
+f=$T/etc/secrets/people/ben/claude-tokens/2
+[ "$(cat "$f" 2>/dev/null)" = "$tokn" ] || fail "11: the VM's entry was not copied to $f"
+matches -F "copied vault-ben-2 (…${tokn: -4}, " "$T/out" || fail "11: the copy is not logged with its name and last four characters"
+! matches -F "${tokn:13:30}" "$T/out" || fail "11: a token value reached the nightly's log"
+awk '/^ssh sudo fffctl vault export --manifest/ {s = NR} /^qemu-agent-command/ && !a {a = NR} END {exit !(s && a && s < a)}' "$FAKE_DIR/calls" || fail "11: the copy did not come before the first guest command (the drain)"
+matches 'the portal is up' "$T/out" || fail "11: the restart did not finish"
+! matches '^ntfy' "$FAKE_DIR/calls" || fail "11: a clean copy alerted"
+# the VM cannot be reached for the copy: logged, alerted with the reason, and the restart goes on
+host VM_MEMORY_MB=8192 VM_VCPUS=2 "NTFY_URL_FILE=$T/ntfy-url"
+mkdir -p "$T/etc/ssh"
+: >"$T/etc/ssh/id_ed25519"
+FAKE_SSH_FAIL=1 nightly
+[ "$rc" = 0 ] || fail "11: a failing copy made the nightly exit $rc"
+matches 'the portal is up' "$T/out" || fail "11: a failing copy held the restart"
+[ "$(cat "$FAKE_DIR/boots")" = 2 ] || fail "11: a failing copy stopped the cold restart"
+matches -F 'vault copy' "$FAKE_DIR/calls" || matches '^ntfy' "$FAKE_DIR/calls" || fail "11: a failing copy sent no alert: $(grep -n 'vault' "$T/out")"
+ok "nightly: the VM's vault entries are copied to the host before the drain; a failing copy alerts and the restart goes on"
+
 echo "fff-vm-nightly.test.sh: $PASS passed"
