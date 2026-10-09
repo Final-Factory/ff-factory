@@ -893,3 +893,29 @@ test('accounts (w777): a token file or host token that is in no vault entry keep
   );
   assert.deepEqual(accounts.map((a) => [a.label, a.where]).sort(), [['token file …9AAA', ["fff-portal's token file (the orchestrator)"]], ['vault-ben-2 …7BBB', []]]);
 });
+
+test('accounts (w785): a vault token shows the account email a person recorded on its subtext, before its other uses; none recorded shows nothing', () => {
+  const key = tokenKey(TOKEN2);
+  const entries = new Map<string, UsageEntry>([[key, { kind: 'token', label: 'token file …7BBB', usage: usageOf(61), direct: true }]]);
+  const base = { hostName: 'fff-portal', machines: [], inUse: { hostLogin: false, hostToken: false, vault: true }, sessions: [{ id: 'w1', source: key, live: true }] };
+  const label = 'vault-ben-2 …7BBB';
+  // an email recorded: it is the subtext, as "m3 login" is for a Mac
+  const withEmail = buildAccounts(entries, { ...base, vault: [{ key, label, email: 'ben@example.com' }] });
+  assert.deepEqual(withEmail.map((a) => [a.label, a.where]), [[label, ['ben@example.com']]]);
+  // none recorded: nothing is shown and nothing is invented
+  const without = buildAccounts(entries, { ...base, vault: [{ key, label }] });
+  assert.deepEqual(without.map((a) => [a.label, a.where]), [[label, []]]);
+  // set after the token was added: the same token, the next list carries it
+  const later = buildAccounts(entries, { ...base, vault: [{ key, label, email: 'later@example.com' }] });
+  assert.deepEqual(later[0].where, ['later@example.com']);
+  // beside another use of the same token: the email first, then the other use
+  const alsoFile = buildAccounts(entries, { ...base, vault: [{ key, label, email: 'ben@example.com' }], tokenFile: { key, label: 'token file', roles: ['orchestrator'] } });
+  assert.deepEqual(alsoFile[0].where, ['ben@example.com', "fff-portal's token file (the orchestrator)"]);
+  // a login's own email is its label as before; a host token (not a vault entry) gets none
+  const host = buildAccounts(new Map<string, UsageEntry>([[tokenKey(TOKEN), { kind: 'token', label: 'host token …9AAA' }]]), { ...base, sessions: [], inUse: { hostLogin: false, hostToken: true, vault: false }, token: { key: tokenKey(TOKEN), label: 'host token …9AAA' }, vault: [{ key, label, email: 'ben@example.com' }] });
+  assert.deepEqual(host.map((a) => a.label), ['host token …9AAA']);
+  // system_status carries it on the same line
+  const lines = accountLines(withEmail, new Map([['w1', { id: 'w1', kind: 'worker' as const, status: 'running' as const }]]), new Date(AS_OF));
+  assert.match(lines[1], /^- vault-ben-2 …7BBB \[ben@example\.com; agents on it: w1\]: /);
+  assert.match(accountLines(without, new Map(), new Date(AS_OF))[1], /^- vault-ben-2 …7BBB \[agents on it: /);
+});

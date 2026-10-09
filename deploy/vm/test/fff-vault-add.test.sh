@@ -122,6 +122,23 @@ add "$t2"; [ "$rc" != 0 ] || fail "no PERSON was accepted"
 [ "$(names)" = "vault-ben-a" ] || fail "something was added by a refused call: $(names)"
 ok "an existing name, a bad token, an empty one, a bad NAME or PERSON, and a token typed as an argument are refused; nothing added, nothing shown"
 
+# ---------------------------------------------------------------- w785: the account email, recorded by a person, never read from the token
+fresh
+t4=$(tok)
+add "$t4" ben --email ben@example.com; noleak "$t4"
+[ "$rc" = 0 ] || fail "add-claude with --email failed: $out"
+matches -F -e '--email ben@example.com' "$tmp/add-vault-ben-1.args" || fail "the email did not reach vaultCli add: $(cat "$tmp/add-vault-ben-1.args")"
+add "$(tok)" ben second; [ "$rc" = 0 ] || fail "add without an email failed: $out"
+if matches -F -e '--email' "$tmp/add-vault-ben-second.args"; then fail "an email was invented when none was given"; fi
+add "$(tok)" ben third --email=Ben.Two@Example.com; [ "$rc" = 0 ] || fail "--email=ADDRESS form failed: $out"
+matches -F -e '--email Ben.Two@Example.com' "$tmp/add-vault-ben-third.args" || fail "the --email= form did not reach vaultCli add"
+before=$(names)
+add "$(tok)" ben fourth --email 'not an address'; [ "$rc" != 0 ] || fail "a bad email was accepted"
+printf '%s' "$out" | matches 'is not one address' || fail "a bad email gave no reason: $out"
+[ "$(names)" = "$before" ] || fail "a refused email still added an entry"
+add "$(tok)" ben fifth --email; [ "$rc" != 0 ] || fail "--email with no address was accepted"
+ok "--email is passed to vaultCli add, none is invented without it, a bad address is refused before anything is added"
+
 # ---------------------------------------------------------------- the prompt is a hidden read, and nothing else reads the value
 # shellcheck disable=SC2016
 grep -q 'read -rs -p "Claude token for' "$G/fffctl" || fail "the terminal prompt must be 'read -rs' (no echo)"

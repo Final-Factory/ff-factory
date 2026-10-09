@@ -13,7 +13,7 @@
 //                                                         tab-separated, no value (the FFBox host's nightly copy, docs/vault.md section 12)
 //   node server/vaultCli.ts export NAME                   ONE VALUE to stdout, root only, never to a terminal: the host's copy of an entry
 //                                                         that exists only here. Not read-only; the ops worker is refused it
-//   node server/vaultCli.ts grant NAME [--owner USER] [--share owner|anyone] [--roles …] [--machines …] [--enable | --disable]
+//   node server/vaultCli.ts grant NAME [--email ADDRESS | --email ''] [--owner USER] [--share owner|anyone] [--roles …] [--machines …] [--enable | --disable]
 //   node server/vaultCli.ts remove NAME
 //   node server/vaultCli.ts new-key FILE [--force]        a new key file (0600); --force replaces one (entries then need rotating)
 //   node server/vaultCli.ts machine-credential list
@@ -38,6 +38,7 @@ const { values: o, positionals: args } = parseArgs({
     kind: { type: 'string' },
     env: { type: 'string' },
     owner: { type: 'string' },
+    email: { type: 'string' },
     share: { type: 'string' },
     roles: { type: 'string' },
     machines: { type: 'string' },
@@ -77,7 +78,7 @@ function readValue(): string {
 }
 
 const show = (e: VaultEntryMeta) =>
-  `${e.name.padEnd(20)} ${e.kind.padEnd(6)} ${(e.env ?? '').padEnd(20)} …${e.last4}  ${e.fingerprint}  ${e.share === 'owner' ? `owner ${e.owner}` : `anyone${e.owner ? ` (owner ${e.owner})` : ''}`}; ${e.roles.join(',')} on ${e.machines.join(',')}${e.disabled ? ' (DISABLED)' : ''}`;
+  `${e.name.padEnd(20)} ${e.kind.padEnd(6)} ${(e.env ?? '').padEnd(20)} …${e.last4}  ${e.fingerprint}  ${e.email ? `${e.email}  ` : ''}${e.share === 'owner' ? `owner ${e.owner}` : `anyone${e.owner ? ` (owner ${e.owner})` : ''}`}; ${e.roles.join(',')} on ${e.machines.join(',')}${e.disabled ? ' (DISABLED)' : ''}`;
 
 const cfg = loadConfig();
 const cmd = args[0];
@@ -182,6 +183,7 @@ try {
         value: readValue(),
         env: o.env,
         owner: o.owner,
+        email: o.email,
         share: o.share as VaultShare | undefined,
         roles: list(o.roles) as VaultRole[] | undefined,
         machines: list(o.machines),
@@ -214,7 +216,7 @@ try {
         }
       }
       if (!was) {
-        const e = vault.add({ name, kind, value, env: o.env, ...grants });
+        const e = vault.add({ name, kind, value, env: o.env, ...grants, email: o.email });
         console.log(`added: ${show(e)}`);
         break;
       }
@@ -223,8 +225,9 @@ try {
       if (rotated) vault.rotate(name, value);
       const same = (a: string[], b: string[]) => a.join() === b.join();
       const regrant = (grants.owner ?? '') !== (was.owner ?? '') || grants.share !== was.share || !same(grants.roles, was.roles) || !same(grants.machines.map((m) => m.toLowerCase()), was.machines) || was.disabled;
-      const e = regrant ? vault.update(name, { ...grants, owner: grants.owner ?? '', disabled: false }) : vault.list().find((x) => x.name === name)!;
-      console.log(`${renamedFrom ? 'renamed' : rotated ? 'rotated' : regrant ? 'regranted' : 'unchanged'}: ${show(e)}${renamedFrom ? ` (was ${renamedFrom})` : ''}`);
+      const emailChange = o.email !== undefined && o.email.trim() !== (was.email ?? '');
+      const e = regrant || emailChange ? vault.update(name, { ...grants, owner: grants.owner ?? '', disabled: false, ...(o.email !== undefined ? { email: o.email } : {}) }) : vault.list().find((x) => x.name === name)!;
+      console.log(`${renamedFrom ? 'renamed' : rotated ? 'rotated' : regrant || emailChange ? 'regranted' : 'unchanged'}: ${show(e)}${renamedFrom ? ` (was ${renamedFrom})` : ''}`);
       break;
     }
     case 'export': {
@@ -251,6 +254,7 @@ try {
       const e = vault.update(args[1] ?? die('grant NAME'), {
         ...(o.owner !== undefined ? { owner: o.owner } : {}),
         ...(o.share !== undefined ? { share: o.share as VaultShare } : {}),
+        ...(o.email !== undefined ? { email: o.email } : {}),
         ...(o.roles !== undefined ? { roles: (list(o.roles) ?? []) as VaultRole[] } : {}),
         ...(o.machines !== undefined ? { machines: list(o.machines) ?? [] } : {}),
         ...(o.enable ? { disabled: false } : o.disable ? { disabled: true } : {}),

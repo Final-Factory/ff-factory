@@ -53,3 +53,39 @@ test('vault: add a secret in the settings sheet; it shows only its last four, ne
   await row.getByRole('button', { name: 'Really remove?' }).click();
   await expect(row).toHaveCount(0);
 });
+
+test('vault (w785): a Claude token takes the account email at add time; it can be set, changed and cleared afterwards without the token; absent shows "email not recorded"', async ({ authed: page }) => {
+  const name = `vault-e2e-${uniq('c').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8)}`;
+  const value = `sk-ant-oat01-${randomBytes(40).toString('base64url')}`;
+  const sidebar = await openSidebar(page);
+  await sidebar.getByRole('button', { name: 'Settings' }).click();
+  const vault = page.locator('.modal').getByTestId('vault');
+  await vault.getByRole('button', { name: 'Add a token' }).click();
+  await vault.getByLabel('name').fill(name);
+  await vault.getByLabel('kind').selectOption('claude');
+  await vault.getByLabel('share').selectOption('anyone');
+  await vault.getByLabel('account email').fill('e2e.one@example.com');
+  await vault.getByLabel('value').fill(value);
+  const added = page.waitForResponse((r) => r.url().endsWith('/api/vault') && r.request().method() === 'POST');
+  await vault.getByRole('button', { name: 'Add', exact: true }).click();
+  expect((await added).ok()).toBeTruthy();
+  const row = vault.getByTestId(`vault-${name}`);
+  await expect(row.getByTestId(`vault-email-${name}`)).toHaveText('e2e.one@example.com');
+  // changed afterwards through Grant: the same entry, no token typed again
+  await row.getByRole('button', { name: 'Grant' }).click();
+  await row.getByLabel('account email').fill('e2e.two@example.com');
+  await row.getByRole('button', { name: 'Save' }).click();
+  await expect(row.getByTestId(`vault-email-${name}`)).toHaveText('e2e.two@example.com');
+  // cleared: nothing is invented
+  await row.getByRole('button', { name: 'Grant' }).click();
+  await row.getByLabel('account email').fill('');
+  await row.getByRole('button', { name: 'Save' }).click();
+  await expect(row.getByTestId(`vault-email-${name}`)).toHaveText('email not recorded');
+  // a bad address is refused by the server and changes nothing
+  const bad = await page.request.patch(`/api/vault/${name}`, { data: { email: 'not an address' } });
+  expect(bad.status()).toBe(400);
+  expect(await (await page.request.get('/api/vault')).text()).not.toContain(value);
+  await row.getByRole('button', { name: 'Remove' }).click();
+  await row.getByRole('button', { name: 'Really remove?' }).click();
+  await expect(row).toHaveCount(0);
+});

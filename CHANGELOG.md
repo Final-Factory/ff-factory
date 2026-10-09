@@ -10,6 +10,13 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The Claude account email of a vault token on the accounts list** (w785, Lothsahn: "can we show the email address associated with the key on ffportal?").
+  A `claude setup-token` token reveals no account (inference scope only; the profile and usage calls need `user:profile`; `/status` and
+  `oauthAccount` stay empty under `CLAUDE_CODE_OAUTH_TOKEN`; the one owner header is an organisation id), so the email is recorded on the
+  vault entry by a person: `fffctl vault add-claude <person> [<name>] --email <address>` (a prompt on a terminal), `fffctl vault grant NAME
+  --email <address>` / `put --email` for the existing entries without the token, and Settings, Token vault (Add a token; Grant). It shows on the
+  vault token's subtext line, before the other uses of the token, on the dashboard and in `system_status`; none recorded shows nothing.
+  docs/vault.md 12.0.
 - **A vault token is always listed under its vault name, even when the host token, the token file or a person's own token is the same token**
   (w777, Lothsahn: `vault-ben-2 …dAAA` showed only as "token file …dAAA"). `buildAccounts` no longer drops the vault entry because
   another source holds the token: it is one row, one usage, named by the vault entry, and the other uses are on its subtext line

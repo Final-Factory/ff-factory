@@ -189,6 +189,8 @@ orchestrator and the dispatcher (the dispatcher only when it has an account of i
 is noted ("fff-portal's token file (the orchestrator)", "the agents' token on fff-portal, m5", "agents working for Ben"), with no
 row of its own and one usage. A host or token-file token in no vault entry keeps its own row. `system_status` carries the same
 row: "- vault-ben-2 …dAAA [fff-portal's token file (the orchestrator); agents on it: …]".
+A vault token's subtext also carries the Claude account email a person recorded on the entry (w785, docs/vault.md 12.0), first,
+then the other uses; with none recorded it carries only those, and nothing is guessed.
 A person's own token and the token file are always listed. A vault token is named by itself ("vault-ben-1 …abcd"), without a
 description; the line under a machine login still says where it is used ("m3 login").
 
