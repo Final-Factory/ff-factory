@@ -13,10 +13,10 @@ import { Daemon, type Probes, type SessionFactory } from '../machine/daemon.ts';
 import { SandboxPool, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { mergeSandboxes, type MachineManager } from './machines.ts';
 import { machineAttachment } from './attachments.ts';
-import { copyTree, removeTree, run } from './proc.ts';
+import { copyTree, removeTree, run, type RunResult } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { bus } from './store.ts';
-import type { Machine, MachineSandbox, SandboxPoolSettings } from '../shared/types.ts';
+import type { GitStatus, Machine, MachineSandbox, SandboxPoolSettings } from '../shared/types.ts';
 
 export const GB = 1024 ** 3;
 
@@ -77,13 +77,34 @@ export function testRepos(prefix = 'ff-msb-', parent = os.tmpdir()): TestRepos {
   return { root, origin, main, sbRoot, git: gitIn, cleanup: () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }) };
 }
 
-/** Real git, copy and delete; a stand-in editor (no Unity), and free space the test sets. */
+/**
+ * Real git, copy and delete; a stand-in editor (no Unity), and free space the test sets. `close()` refuses new ones and
+ * waits for those still running (w759): the daemon's pool reads a sandbox's git status on its tick, after a switch or a
+ * save, and the daemon's own stop waits for none of it. That `git -C <worktree>` has the worktree as its current folder,
+ * and Windows refuses to delete a folder a live process is in (EPERM "Permission denied", ERROR_ACCESS_DENIED), so a
+ * machine's clean-up that ran while one was still going failed, in whichever test stopped a machine at that moment.
+ */
 export function fakePoolDeps(repoPath: string, o: { free?: () => number | undefined } = {}) {
   const running = new Set<string>();
+  const inflight = new Set<Promise<unknown>>();
+  let closed = false;
+  /** Per worktree: what the git look finds besides git's own answer (an open PR: gh is not there in tests). */
+  const gitExtra = new Map<string, Partial<GitStatus>>();
+  const track = <T>(start: () => Promise<T>, whenClosed: () => Promise<T>): Promise<T> => {
+    if (closed) return whenClosed();
+    const p = start();
+    inflight.add(p);
+    p.then(
+      () => inflight.delete(p),
+      () => inflight.delete(p),
+    );
+    return p;
+  };
+  const stopped: RunResult = { code: 1, stdout: '', stderr: 'the test machine is stopping' };
   const d: PoolDeps = {
-    git: (args, opts = {}) => run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }),
-    copyTree: (src, dst, signal) => copyTree(src, dst, { signal }),
-    removeTree,
+    git: (args, opts = {}) => track(() => run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }), async () => stopped),
+    copyTree: (src, dst, signal) => track(() => copyTree(src, dst, { signal }), () => Promise.reject(new Error(stopped.stderr))),
+    removeTree: (dir) => track(() => removeTree(dir), async () => stopped),
     freeBytes: async () => (o.free ? o.free() : 500 * GB),
     procs: async () => [],
     editor: (sb, logFile): SandboxEditor => ({
@@ -102,10 +123,22 @@ export function fakePoolDeps(repoPath: string, o: { free?: () => number | undefi
       },
     }),
     bridgeUp: (p) => running.has(p),
-    gitStatus: readGitStatus,
+    gitStatus: (dir) =>
+      track(
+        async () => {
+          const g = await readGitStatus(dir);
+          const extra = gitExtra.get(path.resolve(dir));
+          return g && extra ? { ...g, ...extra } : g;
+        },
+        async () => undefined,
+      ),
     now: () => Date.now(),
   };
-  return { d, running };
+  const close = async () => {
+    closed = true;
+    while (inflight.size) await Promise.allSettled([...inflight]);
+  };
+  return { d, running, close, gitExtra };
 }
 
 /** A Windows PC with nothing on its own Claude login. */
@@ -154,6 +187,12 @@ export interface TestMachine {
   connect(mm: MachineManager): Promise<void>;
   /** The connected daemon. */
   daemon?: Daemon;
+  /**
+   * From now on the daemon's git look at sandbox `name` also finds `extra` (an open PR, which gh would find), and it looks
+   * now: its report reaches the portal like any other. A test that wrote git into the portal's record instead lost it to
+   * the daemon's next report, whenever that came (w759).
+   */
+  gitLook(name: string, extra: Partial<GitStatus>): Promise<void>;
   /** Shut the daemon down, close the stand-in portal and remove every folder. */
   stop(): Promise<void>;
 }
@@ -167,7 +206,7 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
   const repos = testRepos(o.prefix, o.parent);
   const appDir = path.join(repos.root, 'app');
   const settings: SandboxPoolSettings = { root: repos.sbRoot, maxSandboxes: o.maxSandboxes ?? 8, maxAgentsPerSandbox: o.maxAgentsPerSandbox ?? 4, maxUnity: o.maxUnity ?? 1, diskWarnGB: 50, diskCriticalGB: 20 };
-  const { d: poolDeps, running } = fakePoolDeps(repos.main, { free: o.free });
+  const { d: poolDeps, running, close: closePoolDeps, gitExtra } = fakePoolDeps(repos.main, { free: o.free });
   const wanted = (o.sandboxes ?? []).map((s): { name: string; branch?: string } => (typeof s === 'string' ? { name: s } : s));
   // The daemon's own pool code makes them, into the state file the daemon reads when it starts.
   const pool = new SandboxPool({ repoPath: repos.main, stateFile: path.join(appDir, 'sandboxes.json'), settings, activity: () => ({ busy: false, lastActivityMs: 0 }), onChange: () => undefined, onEvent: () => undefined, idleStopMinutes: 0 }, poolDeps);
@@ -204,6 +243,13 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
     settings,
     ref: (name) => `${id}/${name}`,
     path: (name) => path.join(repos.sbRoot, name),
+    async gitLook(name, extra) {
+      gitExtra.set(path.resolve(repos.sbRoot, name), extra);
+      const p = (daemon as unknown as { pool: { lastGitAt: number; tick(): Promise<void> } } | undefined)?.pool;
+      if (!p) throw new Error(`machine ${id} is not connected`);
+      p.lastGitAt = 0;
+      await p.tick();
+    },
     record: (bySandbox = {}) => {
       const sandboxes: MachineSandbox[] = mergeSandboxes([], pool.list()).map((sb) => ({ ...sb, sessionIds: bySandbox[sb.id] ?? [] }));
       return { ...base(o.portalUrl ?? ''), online: false, createdAt: new Date(0).toISOString(), sessionIds: Object.values(bySandbox).flat(), sandboxes };
@@ -259,6 +305,8 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
       server?.close();
       // The last session and machine updates have landed once the portal has the link's close: they came before it.
       if (portal) await until(`machine ${id} offline`, () => !portal!.isOnline(id), 5000, 10).catch(() => undefined);
+      // No git still running in a sandbox when its folder goes (fakePoolDeps).
+      await closePoolDeps();
       repos.cleanup();
     },
   };

@@ -20,7 +20,7 @@ import { SETTABLE_KEYS, checkDevRequests } from './appConfig.ts';
 import { LEDGER } from './boardMatch.fixtures.ts';
 import { MockConnector } from '../e2e/mockConnector.ts';
 import type { Config } from './config.ts';
-import type { Machine, Requester, ServerEvent, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
+import type { GitStatus, Requester, ServerEvent, SessionInfo, TranscriptEvent, UserInfo, WorkItem } from '../shared/types.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachine } from './testMachine.ts';
 
@@ -158,16 +158,21 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
   const heard = (id: string) => store.readTranscript(id).filter((e): e is UserEv => e.kind === 'user' && e.from === 'system');
   const chat = (r: Requester) => o.personalFor(r);
   const work = () => [...store.work.values()];
-  return { dir, cfg, store, sessions, machines, agents, o, files, alpha, prs, pm: () => pm, connect, restart, call, heard, chat, work, dispatcher: () => sessions.get(agents.dispatcherId) };
+  return { dir, cfg, store, sessions, machines, agents, o, files, alpha, pc, prs, pm: () => pm, connect, restart, call, heard, chat, work, dispatcher: () => sessions.get(agents.dispatcherId) };
 }
 
 const setupOnMachine = (t: { after: (fn: () => void | Promise<void>) => void }, extra: Parameters<typeof setup>[1] = {}) => setup(t, { ...extra, onMachine: true });
 
-/** A machine sandbox's PR, as its daemon's next git look would report it. */
-function setMachinePr(store: Store, sandbox: string, git: NonNullable<NonNullable<Machine['sandboxes']>[number]['git']>) {
-  const m = store.machines.get('pc')!;
-  m.sandboxes!.find((x) => x.id === sandbox)!.git = git;
-  store.putMachine(m);
+/**
+ * A machine sandbox's branch and PR, as its daemon's git look reports them; back once the portal has them. Written into
+ * the portal's record instead, the daemon's next report of the sandbox took them away again (w759).
+ */
+async function setMachinePr(pc: TestMachine | undefined, store: Store, sandbox: string, git: { branch: string; pr: NonNullable<GitStatus['pr']> }) {
+  await pc!.gitLook(sandbox, git);
+  await until(`PR ${git.pr.number} on ${sandbox} in the portal`, () => {
+    const g = store.machines.get('pc')!.sandboxes!.find((x) => x.id === sandbox)!.git;
+    return g?.branch === git.branch && JSON.stringify(g.pr) === JSON.stringify(git.pr);
+  });
 }
 
 /** A dev_request's body, with what a test changes. */
@@ -708,7 +713,7 @@ async function settleWorker(store: Store, started: string, wid: string) {
 }
 
 test('w272: the request is followed to its result with dev_updates (branch and PR, merge, release), never a routing line, resent until dev_received', async (t) => {
-  const { connect, chat, call, pm, store, o, dispatcher } = await setupOnMachine(t);
+  const { connect, chat, call, pm, pc, store, o, dispatcher } = await setupOnMachine(t);
   const c = await connect();
   const req = devRequest('dev-done');
   const conversation = (req.conversation as { id: string }).id;
@@ -722,7 +727,7 @@ test('w272: the request is followed to its result with dev_updates (branch and P
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
   assert.equal(started.isError, false, started.text);
   await settleWorker(store, started.text, wid);
-  setMachinePr(store, 'alpha', { branch: 'sandbox/filter', dirty: 0, untracked: 0, pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: false }, at: T0 });
+  await setMachinePr(pc, store, 'alpha', { branch: 'sandbox/filter', pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: false } });
   pm().dev!.recheck();
   u = await nextUpdate(c, (x) => (x.watch as { pr?: number } | undefined)?.pr === 901 && !x.question);
   assert.equal(u.status, 'open');
@@ -832,7 +837,7 @@ test('w278: summaries and questions for a Discord thread carry results, never in
 });
 
 test('w278: a fix up on a PR sends its summary once the PR is ready, once; a draft sends nothing', async (t) => {
-  const { connect, store, prs, pm, call, dispatcher } = await setupOnMachine(t);
+  const { connect, store, prs, pm, pc, call, dispatcher } = await setupOnMachine(t);
   const c = await connect();
   c.send(devRequest('dev-pr'));
   await c.next('dev_ack');
@@ -841,7 +846,7 @@ test('w278: a fix up on a PR sends its summary once the PR is ready, once; a dra
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Build the filter.', title: 'Filter', work_id: wid });
   assert.equal(started.isError, false, started.text);
   await settleWorker(store, started.text, wid);
-  setMachinePr(store, 'alpha', { branch: 'sandbox/filter', dirty: 0, untracked: 0, pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: true }, at: T0 });
+  await setMachinePr(pc, store, 'alpha', { branch: 'sandbox/filter', pr: { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter', draft: true } });
   // A draft: the PR is followed, nothing to say yet.
   prs.set(901, { number: 901, url: 'https://github.com/Final-Factory/FinalFactory/pull/901', title: 'Filter fix', body: PR_BODY, draft: true, autoMerge: false });
   pm().dev!.recheck();

@@ -107,13 +107,13 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     const r = await tool.handler(args);
     return { text: r.content.map((c) => c.text).join('\n'), isError: !!r.isError };
   };
-  return { store, agents, o, intake, pm, connect, dispatcher, call };
+  return { store, agents, o, intake, pm, pc, connect, dispatcher, call };
 }
 
 const conv = (o: Partial<ProviderConversation>): ProviderConversation => ({ id: '41', source: 'discord', opener: 'player', title: 'Belts stop', state: 'idle', agentClass: 'ffagent', createdAt: T0, updatedAt: T0, ...o });
 
 test('ledger check both ways: handshake, exact thread keys, what to watch, and the answer pushed as it changes', async (t) => {
-  const { store, o, intake, pm, connect, dispatcher, call } = await setup(t);
+  const { store, o, intake, pm, pc, connect, dispatcher, call } = await setup(t);
   const ben = o.personalFor(BEN);
   ben.lastFrom = 'human';
   // Ben's request is the work for the thread (its subjects, w343); an older one (filed before discord keys existed) names
@@ -148,11 +148,10 @@ test('ledger check both ways: handshake, exact thread keys, what to watch, and t
   // A worker starts on it in sandbox/lag-lead, and opens PR 812: the answer is pushed again, with the branch to watch.
   const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/lag', prompt: 'Fix the lag.', title: 'Lag', work_id: a.id });
   assert.equal(started.isError, false, started.text);
-  // Its PR, as the daemon's next git look would report it.
-  const m = store.machines.get('pc')!;
-  const sb = m.sandboxes!.find((x) => x.id === 'lag')!;
-  sb.git = { branch: 'sandbox/lag-lead', dirty: 0, untracked: 0, pr: { number: 812, url: 'https://github.com/Final-Factory/FinalFactory/pull/812', title: 'Lag', draft: false }, at: T0 };
-  store.putMachine(m);
+  // Its PR, as the daemon's git look reports it. Written into the portal's record instead, the daemon's next report of
+  // the sandbox took it away again, and the answer was pushed a second time (w759).
+  await pc.gitLook('lag', { pr: { number: 812, url: 'https://github.com/Final-Factory/FinalFactory/pull/812', title: 'Lag', draft: false } });
+  await until('the PR in the portal', () => store.machines.get('pc')!.sandboxes!.find((x) => x.id === 'lag')!.git?.pr?.number === 812, 10_000);
   assert.equal(intake.recheckBoards(), 1, 'only the answer that changed goes');
   board = (await c.next('board')) as typeof board;
   assert.equal(board.update, true);

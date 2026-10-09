@@ -34,6 +34,17 @@ Tests live next to the code as `*.test.ts` and use `node:test`. A few (`updateSt
 Windows. `server/agentSession.test.ts` shows how to test session behaviour without Claude: it swaps
 the Agent SDK's `query()` for the scripted fake in `e2e/fakeAgent.ts` (`setQueryForTesting`).
 
+Tests with a machine (`server/testMachine.ts`, a real daemon with git worktrees) share two rules (w759):
+
+- **A sandbox's git is what the daemon's git look reports**: set it with `TestMachine.gitLook(name, { branch, pr })` and
+  wait for the portal to have it. Written straight into the portal's machine record, the daemon's next report of the
+  sandbox takes it away again, whenever that comes (on Windows under load, often mid-test).
+- **Nothing still runs in a folder that is being deleted.** `TestMachine.stop()` waits for the git the daemon's pool
+  started (a `git -C <worktree>` sits in that folder, and Windows refuses to delete a folder a live process is in:
+  `EPERM, Permission denied`). `rmSync`'s `maxRetries` does not cover it on Node before 24.21 / 26.8: those retry
+  EBUSY, ENOTEMPTY and EPERM but not Windows' access-denied (`std::errc::permission_denied`), and wait 0 ms between tries
+  (nodejs/node#64698). CI runs Node 24.21 or later; a Windows PC with an older Node shows the failures CI does not.
+
 ### End-to-end tests (Playwright)
 
 ```bash
