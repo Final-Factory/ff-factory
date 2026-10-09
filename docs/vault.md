@@ -149,27 +149,100 @@ expire. When the portal is back, the next start gets current values, so a rotate
 
 ## 4. Which Claude token a run gets
 
-`pickClaude` (`server/vault.ts`) chooses among the `claude` entries:
+A person's runs use **that person's own tokens, their pool, and nobody else's** (lothsahn, 2026-10-08: "each operator is
+only going to use its own pool going forward--except for the dispatcher"). The pick is `pickPool` (`server/tokenPool.ts`,
+pure functions), called from `Vault.forRun` (`server/vault.ts`) at every process start, resumes included.
 
-1. **Eligible:** enabled, granted to the run's role and machine, and either shared or owned by the person the run is
-   for. A run nobody asked for counts as the system payer's (config `systemPayer`, else the owner).
-2. **The person's own first:** an entry the run's person owns ranks above the shared ones.
-3. **Room left:** an entry whose 5-hour or weekly meter is at 95% or more ranks below every entry with room. Among the
-   rest, the most headroom first, `100 - max(session %, weekly %)`, from the numbers the usage meters already poll for
-   each vault token (`UsageTracker`, every `usagePollMinutes`). An entry with no numbers yet counts as 50%.
-4. **Spread:** then the fewest live sessions on that token, then the name.
-5. **Sticky per session:** a session keeps its token while it stays eligible and under 95%, so a resumed process does
-   not hop accounts. The choice is made at each process start, never mid-process.
+**Whose pool.** The run's person: its requester, else the system payer (config `systemPayer`, else the owner) for work
+nobody asked for by name; `vault.unattributed` (section 10) names whose pool intake, FFBox and nightly work use. A Claude
+entry with no owner (`share: anyone`, added by hand before the pool) is in nobody's pool and is never handed out:
+`fffctl vault list` names it as "not in any pool". A shared Claude token was **retired** from the pick; GitHub and env
+entries are unchanged. A worker or standing agent also needs the entry granted to its role and machine (`roles`,
+`machines`); the ops worker takes the workers' grants on no machine; a person's orchestrator takes no grant (the
+account setting is its consent).
 
-One token can serve several machines at once. The meters show its 5-hour and weekly use across all of them, because
-those limits are per account (section 7).
+**The order.** The token whose **weekly** window resets soonest first (it is the capacity that would otherwise be lost
+at the reset), the 5-hour reset as the tie-break, then the name. A token with no reset time yet goes last. The 5-hour
+window refills every five hours whatever is done, so ranking by it would save nothing; weekly is the default key.
+The meters are the ones `UsageTracker` polls (section 4a).
 
-**Order with the existing switches.** A person's own token in config `userClaudeEnv` still wins for their work, as
-before. Next comes the vault, on machines `machines.claudeFromVault` names (owner-only in `set_app_config`). With no
-eligible entry, or no key, the run falls back to what the machine had without the vault, the host token or its own login
-(`machines.useHostClaudeEnv`), and `system_status` shows a warning for 24 hours. A vault token is given with
-`LaunchSpec.login` set, so the daemon drops its own environment's credentials (an `ANTHROPIC_API_KEY` there would
-outrank the token) and the token is the process's only one.
+**The limits** (one system-wide set, config `vault.pool.*`, percent 0 to 100, defaults below; **anyone** may change them
+with `set_app_config`, not only an owner; the one-at-a-time limit may not be above the retire limit; each change is
+logged in the portal journal with who made it; they apply at the next process start, no restart):
+
+| Key | Default | A token at or past it |
+|---|---|---|
+| `vault.pool.sessionHoldPercent` | 80 | its **5-hour** meter: no new process on it until that window resets |
+| `vault.pool.onePerWeeklyPercent` | 95 | its **weekly** meter: **one** live process at a time |
+| `vault.pool.retireWeeklyPercent` | 99 | its weekly meter: **retired**, handed to nobody until the weekly window resets |
+| (at 100) | | either meter: **used up**, handed to nobody until it resets (a rejection by the API counts as 100) |
+
+A token with no numbers yet counts as 50% on both meters, so it passes every rule and ranks last. "Live" counts the
+sessions whose process started on the token, not the asking session itself, and a pick made in the last 20 seconds before
+its process shows (two starts cannot both take the last slot).
+
+**Sticky per session.** A session keeps its token only while the token still passes these checks; otherwise it moves to
+the next. The choice is made at each process start, never mid-process.
+
+**When the pool has no token that may serve the run** (every one held, one-at-a-time with a process running, retired or
+used up):
+
+| Role | What happens |
+|---|---|
+| A worker, a standing agent, the ops worker for them | **Held** with the reason ("lothsahn's Claude token pool is held: 2 tokens: all over their caps or used up, the first frees up Fri 14:00Z"): a worker's first prompt queues and is tried again, a standing agent's run ends "Could not start: <reason>" and the next scheduled run tries again; no fallback to the host token, the machine's login, the dispatcher's token or anyone else's |
+| A person's own **orchestrator** (`claudeAccounts.orchestrator = "vault"`) | **Uses the pool up**: while some token is only past its caps (held, one-at-a-time, retired) but not used up, it runs on the one with the most room (the soonest reset on a tie), and the one-at-a-time rule does not bind it. Once every token is used up it **stops** with the reason and the next reset on the dashboard; there is no override and no fallback |
+| The **dispatcher** | Never on a pool: it keeps the shared token file (or whatever `claudeAccounts.dispatcher` names) and is never held |
+
+**The transition.** A person with **no** Claude token in the vault keeps today's account, so nothing stops at deploy:
+the machine's login or the host token for their workers (`machines.useHostClaudeEnv`), the token file for their
+orchestrator and for the ops worker working for them. `system_status` warns ("no vault Claude token for a workers run
+on m3 for sam; it runs on host token …abcd instead") for 24 hours. The same fallback applies when the vault cannot open
+their tokens (no key, a wrong key): nothing the person can wait for. The moment a person has one token, only their pool
+is used.
+
+**The dispatcher's reserve.** The credential the dispatcher runs on (`claudeAccounts.dispatcher`, resolved from config
+at each look: the token file today, else the host token or this host's login) and the host token
+(`claudeEnv.CLAUDE_CODE_OAUTH_TOKEN`, which biscuit's agents and any person without a pool run on) keep a buffer for
+their own roles: **5% of the weekly window for each day left until that window resets** (35% with seven days to go, 5%
+with one, 0 at the reset; `vault.pool.reservePerDayPercent`) and **20% of the 5-hour window**
+(`vault.pool.reserveSessionPercent`). The reserve is the dispatcher's: it may always run into it, up to 100%, and
+nothing checks it before the dispatcher starts. Nothing else is *refused* by it, because after the pool change nothing
+else lands on these credentials except a person with no vault token yet (their orchestrator, the ops worker for them),
+who has no other account; `system_status` shows each reserve ("the dispatcher's token file …dAAA: weekly 41%, reserve
+25% (5 days to reset); 5-hour 12%, reserve 20%") and, while a meter is inside the buffer with such runs on the credential,
+the dashboard shows a warning. Until a credential's first reading arrives it counts as inside its reserve. One token is
+one account: two tokens of one Claude account are not matched, so such a token would have its own meters and its own
+reserve.
+
+**Order with the existing switches.** A person's own token in config `userClaudeEnv` still wins for their work on a
+machine, as before. Then the vault, on machines `machines.claudeFromVault` names (owner-only in `set_app_config`;
+per machine with `machine: "<id>"`, section 6). A vault token is given with `LaunchSpec.login` set, so the daemon
+drops its own environment's credentials (an `ANTHROPIC_API_KEY` there would outrank the token) and the token is the
+process's only one. A person's orchestrator on `"vault"` and the ops worker work the same way, in the portal: the one
+token as `CLAUDE_CODE_OAUTH_TOKEN`, every other Claude credential removed first.
+
+### 4a. Where the numbers come from, and how stale they are
+
+- **The usage endpoint** (`/api/oauth/usage`) needs the `user:profile` scope. A token from `claude setup-token` has only
+  `user:inference` and answers **403** *(sourced: community reports of the same 403, e.g. claude-code issues 22450,
+  24200; measured on the dispatcher's token file by lothsahn, 2026-10-09)*. Re-issuing cannot add the scope: it is fixed
+  in the CLI's authorization URL, and an interactive `/login` token that has it rotates its refresh token, so it does not
+  suit unattended use.
+- **The rate-limit headers** of any `/v1/messages` reply (`anthropic-ratelimit-unified-5h-*`, `-7d-*`: utilization as a
+  fraction, reset as epoch seconds) carry the same two windows and need only `user:inference`. FFBox reads usage this
+  way for its setup-tokens (*sourced:* `scripts/claude_keys.py` in Final-Factory/ffbox, commit 57c35a5b4b, which says
+  the 403 was "measured 2026-09-04" and the headers answer; it takes them from a one-token Haiku call and from a 429
+  reply too). `fetchTokenLimits` does the same here. It already ran when the endpoint answered 429; it now also runs on
+  **403**, and the endpoint is not asked again for that token for six hours. It costs one Haiku request with one output
+  token. Not measured here with an inference-only token: the first poll after the deploy logs `via the API's rate-limit
+  headers` for it.
+- **The SDK's `rate_limit_event`** (from the same headers on a running session's own requests) raises a token's meter
+  between polls and never lowers it (a guess at its frequency and scale; it is a floor, the next poll replaces it).
+- **How stale:** the regular poll is every `usagePollMinutes` (15). A token near a limit (5-hour at 60% or more, weekly
+  at 90% or more, or with no numbers) is also polled alone every **2 minutes**. How far a token can overshoot a limit in
+  an interval depends on the work on it and was **not measured** (no poll history existed to measure from): every poll
+  logs the percentages (`usage: … Weekly 41%, Session 33%`), so a week of the journal gives the largest rise per interval.
+  Between polls a pick can be a few percent stale; the caps leave 20% of the 5-hour window and 1% of the week for it.
 
 ## 5. Security review
 
@@ -267,9 +340,12 @@ work is the risk; lothsahn decided each person's tokens serve only their own wor
 
 ## 9. Follow-ups
 
-- The orchestrators and the dispatcher on vault tokens (a `"vault"` value for `claudeAccounts`), retiring
-  `claudeTokenFile`. The workers do not need it; it would put D4's token in the vault too.
-- The meters attribute a stopped vault session by the current config rather than the token it ran on, as for every
+- **Built (w738, w739):** the orchestrators on vault tokens, a `"vault"` value for `claudeAccounts.orchestrator`: each
+  person's orchestrator, and the ops worker working for them, runs on that person's pool (section 4); the token file stays
+  the dispatcher's and the fallback for a person with no vault token. Retiring `claudeTokenFile` entirely would put the
+  dispatcher's token in the vault too: not done.
+- The meters attribute a stopped vault session of an orchestrator by the token it ran on last (`Vault.lastPickOf`,
+  this portal run); a worker's stopped session by the current config rather than the token it ran on, as for every
   account (`sessionSource`); live sessions are exact.
 - A dedicated OS user for the portal's own agents would make the key boundary real rather than a seatbelt (section 5).
 - The seal authenticates a value with its entry's id and kind, not its grants: someone who can write `data/` (the
@@ -309,13 +385,18 @@ the vault gets nobody else's: it runs as it did before the vault (the machine's 
 ```text
 /etc/fff-vm/secrets/                     0700 root
   people/<user id>/claude-token          0600: one 'claude setup-token' token (sk-ant-oat01-...)
+  people/<user id>/claude-tokens/<name>  0600: more of them, one token per file: the person's pool (w739); 0700 folder
   people/<user id>/github-token          0600: one fine-grained GitHub token (github_pat_...)
   vault.key                              0600: the spare copy of the VM's vault key
 ```
 
+`claude-token` stays and is a pool of one. A `<name>` is 1 to 16 of `a-z 0-9 . _ -`, starting with a letter or digit
+(upper case is read as lower). Each file is an entry `host-<user>-claude-<name>`; all of a person's Claude entries are
+their pool (section 4).
+
 **How the VM gets them: pushed in, not shared.** `sudo fff-vm vault-sync` (`deploy/vm/host/vault.sh`) sends each file
 over ssh's stdin to `fffctl vault put` in the VM, as the installer already sends the Claude and GitHub tokens
-(`push_secret`, `deploy/vm/host/guest.sh`). The entries are `host-<user>-claude` and `host-<user>-github`, `share:
+(`push_secret`, `deploy/vm/host/guest.sh`). The entries are `host-<user>-claude`, `host-<user>-claude-<name>` and `host-<user>-github`, `share:
 owner`, for workers and standing agents on every machine. A second run changes nothing; a new value rotates its entry; a
 removed file removes its entry. Entries not named `host-…` (added by hand) are left alone. The installer's guest step
 runs it too, so a re-run or a rebuilt VM is filled again.
@@ -379,9 +460,36 @@ Ben is not on the FFBox host: lothsahn runs the same commands there, and Ben typ
 (the two can share one ssh session to the host, for instance with `tmux`), or Ben hands the two values to lothsahn
 through a channel that is not chat (in person, or a password manager's share).
 
+**2a. More than one Claude token for a person (w739):** the same, one file per token, in the pool folder (each its own
+`claude setup-token` from a different Claude account, or the same account's second login):
+
+```bash
+sudo install -d -m 0700 /etc/fff-vm/secrets/people/<id>/claude-tokens
+sudo sh -c 'umask 077; read -rs -p "Claude token (second): " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/claude-tokens/second'; echo
+sudo fff-vm vault-sync                               # "added host-<id>-claude-second"; values never shown
+sudo fff-vm ssh 'sudo fffctl vault list'             # the pool section: both tokens, their state, meters and resets
+```
+
+From then on only the person's pool serves their runs (section 4). Someone with no token in the vault is unchanged
+until they add one.
+
 **3. Check:** `sudo fff-vm ssh 'sudo fffctl vault list'` shows `host-lothsahn-claude`, `host-lothsahn-github`,
 `host-ben-claude`, `host-ben-github`, each with its last four characters; within a minute the usage meters show
 "vault: host-<id>-claude …abcd" accounts.
+
+**3a. The pool works** (after the deploy and a `vault-sync`): `sudo fff-vm ssh 'sudo fffctl vault list'` ends with a "Claude
+token pools" section, one line per token: its last four characters, its state (`ok`, `held`, `one-at-a-time`, `retired`,
+`exhausted`), its 5-hour and weekly percent with their resets, and how many agents ran on it at the portal's last save.
+`system_status` has a "Claude token pool, <person>" line per person with the same, the agents running on each token, and
+a verdict, plus a line per reserved credential ("the dispatcher's token file …dAAA: weekly 41%, reserve 25% (5 days to
+reset)…"). A token whose line says "no numbers yet" has not been polled: wait for the next poll (2 to 15 minutes).
+
+**3b. The orchestrators on their own pool** (lothsahn; owner-only): once a person's tokens are in, `set_app_config
+claudeAccounts.orchestrator "vault"`. It applies to the next session start of each orchestrator (a running one keeps its
+token until its process restarts, so restart them from the dashboard or wait for the next idle stop), and the ops worker
+picks the pool of whichever person's orchestrator gave it the job, at the start of every job. `system_status`'s "Claude
+account per agent" line then says "each person's own vault pool", and each pool line names the orchestrator's token.
+Rollback: `set_app_config claudeAccounts.orchestrator "tokenfile"`.
 
 **4. Max's Discord token, for the posting machine only** (in the VM; unchanged):
 `sudo fffctl vault add --kind env --env FFDISCORD_APP_TOKEN --name max-discord --share anyone --machines lothdesktop --file /tmp/d && shred -u /tmp/d`.
@@ -397,7 +505,8 @@ token; one for Ben's request shows Ben's.
 **Rotating a token later:** replace its file (step 2), then `sudo fff-vm vault-sync`. **Removing a person's:** delete
 their files, then `sudo fff-vm vault-sync`; revoke the tokens where they were made.
 
-**Rollback, any time:** `set_app_config machines.claudeFromVault false machine: "<id>"`. A machine to cut off
+**Rollback, any time:** `set_app_config machines.claudeFromVault false machine: "<id>"` (the workers), `claudeAccounts.orchestrator
+"tokenfile"` (the orchestrators and the ops worker). A machine to cut off
 entirely: `sudo fff-vm ssh 'sudo fffctl machine-credential revoke <id>'`.
 
 ## Runbook

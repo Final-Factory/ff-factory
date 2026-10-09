@@ -479,9 +479,12 @@ export const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 /** A token's usage request that failed. `retryAfterMs`: how long the endpoint asked us to wait (HTTP 429). */
 export class UsageFetchError extends Error {
   readonly retryAfterMs?: number;
-  constructor(message: string, retryAfterMs?: number) {
+  /** The HTTP status of the failed request, when there was a reply (403: the token lacks user:profile). */
+  readonly status?: number;
+  constructor(message: string, retryAfterMs?: number, status?: number) {
     super(message);
     this.retryAfterMs = retryAfterMs;
+    this.status = status;
   }
 }
 
@@ -518,7 +521,7 @@ export async function fetchTokenUsage(token: string, fetchImpl: typeof fetch = f
       : res.status === 403 ? 'the token may not read usage'
       : retryAfterMs ? `the usage endpoint rate-limits this token, next try in ${Math.ceil(retryAfterMs / 60_000)} min`
       : 'the usage endpoint failed';
-    throw new UsageFetchError(`${what} (HTTP ${res.status}${detail ? `: ${scrub(detail).slice(0, 150)}` : ''})`, retryAfterMs);
+    throw new UsageFetchError(`${what} (HTTP ${res.status}${detail ? `: ${scrub(detail).slice(0, 150)}` : ''})`, retryAfterMs, res.status);
   }
   let body: UsageReply['rate_limits'];
   try {
@@ -591,6 +594,12 @@ const brief = (u: PlanUsage) =>
 const ANSWER_MS = 75_000;
 /** A poll still marked running after this long is taken as stuck: the next one goes ahead (it cannot happen while ANSWER_MS holds). */
 const STUCK_MS = 5 * 60_000;
+/** A token the endpoint refused for its scope is asked again after this long (a re-issued token may carry it). */
+const NO_SCOPE_RETRY_MS = 6 * 3_600_000;
+/** A token near a pool limit is polled alone this often, between the regular polls (w739): 5-hour at 60% or weekly at 90%. */
+export const NEAR_POLL_MS = 2 * 60_000;
+export const NEAR_SESSION_PERCENT = 60;
+export const NEAR_WEEKLY_PERCENT = 90;
 /** A new token (set_app_config) is polled this soon, and a manual refresh no sooner than this after the last poll. */
 const SOON_MS = 5_000;
 
@@ -642,6 +651,13 @@ export class UsageTracker {
   private readonly answerMs: number;
   /** Per token key: no request before this time (epoch ms), the endpoint's Retry-After. */
   private readonly retryAt = new Map<string, number>();
+  /**
+   * Per token key: when the usage endpoint answered 403 (the token lacks the user:profile scope, as every `claude
+   * setup-token` token does), epoch ms. Such a token is read from the API's rate-limit headers (FFBox does the same,
+   * ffbox scripts/claude_keys.py), and the endpoint is asked again only after NO_SCOPE_RETRY_MS.
+   */
+  private readonly noScope = new Map<string, number>();
+  private nearTimer?: NodeJS.Timeout;
 
   constructor(cfg: Config, changed: () => void, deps: UsageDeps = {}) {
     this.cfg = cfg;
@@ -706,11 +722,53 @@ export class UsageTracker {
     setInterval(() => {
       if (this.tokensKey() !== this.tokenSeen) this.poke();
     }, 10_000).unref();
+    // A token near a pool limit is read more often than the regular poll (w739): the meters are the pool's only eyes.
+    this.nearTimer = setInterval(() => void this.refreshNear(), NEAR_POLL_MS);
+    this.nearTimer.unref?.();
+  }
+
+  /** The tokens that are near a pool limit now (5-hour at NEAR_SESSION_PERCENT or weekly at NEAR_WEEKLY_PERCENT), or have no numbers. */
+  nearTokens(): { token: string; label: string }[] {
+    return this.tokens().filter((x) => {
+      const u = this.entries.get(tokenKey(x.token))?.usage;
+      return !u?.available || (u.session?.percent ?? 0) >= NEAR_SESSION_PERCENT || (u.weekly?.percent ?? 0) >= NEAR_WEEKLY_PERCENT;
+    });
+  }
+
+  /** One poll of just the near tokens, between the regular polls; skipped while a regular poll runs. */
+  async refreshNear() {
+    if (this.inFlightSince) return;
+    const near = this.nearTokens().filter((x) => this.entries.has(tokenKey(x.token)));
+    if (!near.length) return;
+    await Promise.all(near.map((x) => this.refreshToken(x.token, x.label)));
+    this.save();
+    this.changed();
+  }
+
+  /**
+   * A running session's rate_limit_event (the SDK's, from the API's rate-limit headers on its own requests): raises the
+   * token's meter at once, never lowers it (the next poll replaces it). `account` is the session's recorded account key.
+   * `utilization` is a fraction (the header's scale; a value above 1 is read as a percent). A guess at the event's
+   * frequency: it is not relied on, only used as a floor between polls.
+   */
+  noteRateLimit(account: string | undefined, info: { rateLimitType?: string; utilization?: number; resetsAt?: number }) {
+    if (!account?.startsWith('token:')) return;
+    const entry = this.entries.get(account);
+    const u = entry?.usage;
+    if (!entry || !u?.available || typeof info.utilization !== 'number' || !Number.isFinite(info.utilization) || info.utilization < 0) return;
+    const field = info.rateLimitType === 'five_hour' ? 'session' : info.rateLimitType === 'seven_day' ? 'weekly' : undefined;
+    const meter = field ? u[field] : undefined;
+    if (!field || !meter) return;
+    const percent = info.utilization <= 1 ? info.utilization * 100 : info.utilization;
+    if (percent <= meter.percent) return;
+    u[field] = { ...meter, percent: Math.round(percent * 100) / 100, ...(info.resetsAt ? { resetsAt: new Date(info.resetsAt * 1000).toISOString() } : {}) };
+    this.changed();
   }
 
   /** Stop the timers (tests, shutdown). */
   stop() {
     this.started = false;
+    clearInterval(this.nearTimer);
     clearTimeout(this.next);
     clearTimeout(this.soon);
     this.soon = undefined;
@@ -868,6 +926,9 @@ export class UsageTracker {
     const reason = (e: unknown) => scrub(e instanceof Error ? e.message : String(e)).slice(0, 200);
     // The usage endpoint's answer, or why it rate-limits this token (now, or still within its Retry-After).
     const endpoint = async (): Promise<PlanUsage | { limited: string }> => {
+      const refused = this.noScope.get(key);
+      if (refused && Date.now() - refused < NO_SCOPE_RETRY_MS) return { limited: 'the usage endpoint needs the user:profile scope, which this token lacks' };
+      this.noScope.delete(key);
       const wait = this.retryAt.get(key);
       if (wait && wait > Date.now()) return { limited: `the usage endpoint rate-limits this token until ${new Date(wait).toISOString()}` };
       this.retryAt.delete(key);
@@ -876,6 +937,11 @@ export class UsageTracker {
         if (!u.available) u.why = `the usage endpoint gave no plan limits for this token (${u.why ?? 'unknown'})`;
         return u;
       } catch (e) {
+        // 403: no user:profile scope (a setup-token): the headers answer instead, and the endpoint is not asked every poll.
+        if (e instanceof UsageFetchError && e.status === 403) {
+          this.noScope.set(key, Date.now());
+          return { limited: reason(e) };
+        }
         const after = e instanceof UsageFetchError ? e.retryAfterMs : undefined;
         if (!after) return { available: false, asOf, models: [], why: `usage unknown: ${reason(e)}` };
         this.retryAt.set(key, Date.now() + after);

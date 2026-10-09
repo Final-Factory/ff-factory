@@ -162,7 +162,8 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   const gaveUp = wd?.units.filter((u) => u.state === 'gave-up') ?? [];
   const restarts = (wd?.events ?? []).filter((e) => e.action !== 'gave-up' && Date.now() - Date.parse(e.at) <= 24 * 3_600_000);
   const wdShown = gaveUp.length > 0 || wd?.silentMinutes !== undefined || restarts.length > 0;
-  if (!host || (!host.elevated && !host.drain && !drive && !disk && !host.dryRun && !pathShown && !wdShown)) return null;
+  const tokenWarnings = host?.tokenWarnings ?? [];
+  if (!host || (!host.elevated && !host.drain && !drive && !disk && !host.dryRun && !pathShown && !wdShown && !tokenWarnings.length)) return null;
   const low = h?.disks.filter((d) => d.level !== 'ok').map((d) => `${d.path} ${d.freeBytes === undefined ? '?' : fmtBytes(d.freeBytes)} free`).join(', ');
   const title = (id: string) => app.sessions.find((s) => s.id === id)?.title ?? id;
   const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string; fixed?: boolean }[] = [];
@@ -236,6 +237,11 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
       lead: `The VM watchdog restarted a critical unit ${restarts.length === 1 ? 'once' : `${restarts.length} times`} in the last 24 hours.`,
       rest: `${list}${restarts.length > 3 ? `; ${restarts.length - 3} more` : ''}.`,
     });
+  }
+  // The Claude token pools (w739): a person's tokens used up or over their caps, and runs inside the dispatcher's reserve.
+  // The text names no token but its last four characters; a banner returns when its text changes.
+  for (const w of tokenWarnings) {
+    bars.push({ key: `token-${w.id}`, kind: w.kind === 'exhausted' ? 'error' : 'warn', lead: w.kind === 'reserve' ? 'The dispatcher\'s Claude token buffer is in use.' : w.kind === 'exhausted' ? 'A Claude token pool is used up.' : 'A Claude token pool is over its caps.', rest: w.text });
   }
   if (host.drain) {
     const d = host.drain;

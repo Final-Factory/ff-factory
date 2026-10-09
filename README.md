@@ -167,7 +167,7 @@ which is set per role and per machine ([docs/accounts.md](docs/accounts.md)): co
 puts the orchestrators, the dispatcher or this host's own daemon's workers on this host's login instead of the token, and
 `machines.useHostClaudeEnv` puts a Mac's agents on that Mac's login. The token vault
 ([docs/vault.md](docs/vault.md)) holds Claude tokens and the workers' other secrets on the portal and hands each
-machine run what it may have, picking the Claude token by plan headroom. A login is shown by
+machine run what it may have, picking the Claude token from the person's own pool by plan meters. A login is shown by
 its email and one login signed in on several computers is one account; a token by its last 4
 characters, never its value. Each account lists where it is used and which agents run on it, and an
 agent's details name its account when there is more than one. The collapsed footer shows the

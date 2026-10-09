@@ -14,7 +14,7 @@ Every agent the portal starts runs on one of three kinds of Claude credential:
 
 | Agents | Config | Values | Default |
 |---|---|---|---|
-| The orchestrator | `claudeAccounts.orchestrator` | `"token"` or `"login"` (this host's) | `"token"` |
+| The orchestrator (and the ops worker working for a person) | `claudeAccounts.orchestrator` | `"token"`, `"login"` (this host's), `"tokenfile"` or `"vault"` (each person's own pool, an owner's setting; w738) | `"token"` |
 | The dispatcher (w464) | `claudeAccounts.dispatcher` | same; once set it also overrides the system payer's own token in `userClaudeEnv` | unset: the system payer's own token if any, else `claudeAccounts.orchestrator`'s |
 | Workers and standing agents on a Mac | `machines.useHostClaudeEnv` | `true` (host token) or `false` (the Mac's login); global, or per machine | `true` |
 | Workers and standing agents on this host's own daemon ([beast-machine.md](beast-machine.md)) | `claudeAccounts.workers`, unless `machines.useHostClaudeEnv` names the machine | `"token"` or `"login"`; "login" is this host's login, with the rest of `claudeEnv` (e.g. `CLAUDE_CONFIG_DIR`) kept | `"token"` |
@@ -68,12 +68,31 @@ the access token and the refresh token have both expired (`hostLoginProblem`, `s
 without the `user:profile` scope is accepted: agents need only `user:inference`, and only the usage meters
 need `user:profile`. On macOS a missing file proves nothing, because the login is in the Keychain.
 
-### The token vault (w512)
+### The token vault (w512) and the pools (w738, w739)
+
+`claudeAccounts.orchestrator` also takes `"vault"` (an owner's switch in `set_app_config`): a person's orchestrator
+starts with `CLAUDE_CODE_OAUTH_TOKEN` set to a token of **that person's pool** (their Claude entries in the vault,
+`people/<id>/claude-token` and `claude-tokens/<name>` on the FFBox host), read at each session start so a new token
+applies to the next session with no restart, and every other Claude credential removed first, as for the token file
+(`poolRunEnv`, `server/secrets.ts`). Which of their tokens, and what happens when they are over their caps or used up:
+[vault.md](vault.md) section 4. The orchestration worker works the same way, on the pool of the person whose orchestrator
+gave it the job, and starts a fresh conversation and process for every new job and every change of caller
+([ops-worker.md](ops-worker.md)). **The dispatcher never takes `"vault"`:** it keeps the shared token file (a dispatcher
+that inherits `"vault"` from the orchestrator's setting is on the token file, else the host token), and that
+credential and the host token keep a reserve for their own roles. A person with no vault token yet falls back to the
+token file, as before. `system_status` names the account per role ("each person's own vault pool (token file …dAAA for a
+person with no vault token)"), each person's pool with each token's state, and the reserves. The pool limits are config
+`vault.pool.*`, one set for everyone, which any person's orchestrator may change: `sessionHoldPercent` 80,
+`onePerWeeklyPercent` 95, `retireWeeklyPercent` 99, `reservePerDayPercent` 5, `reserveSessionPercent` 20.
+
+The meters: a session on a pool token shows on that token's account (a live session by the account its process started
+on; a stopped orchestrator by the last token it was handed).
+
+#### Machine runs
 
 Machine runs (workers and standing agents on a machine) can take their Claude token from the portal's token vault
 instead: config `machines.claudeFromVault` (`true`, `false`, or per machine with `"*"`; default `false`; owner-only in
-`set_app_config`, with `machine: "<id>"` for one machine alone) names the machines. Each run then gets one vault token, chosen by plan headroom with the run's
-person's own token first, as `CLAUDE_CODE_OAUTH_TOKEN` alone (`LaunchSpec.login` drops the daemon's own credentials). A
+`set_app_config`, with `machine: "<id>"` for one machine alone) names the machines. Each run then gets one vault token from its person's pool (docs/vault.md section 4), as `CLAUDE_CODE_OAUTH_TOKEN` alone (`LaunchSpec.login` drops the daemon's own credentials). A
 person's own token in `userClaudeEnv` still wins for their work. With no eligible vault token the run falls back to
 what this page describes. The vault, its other secrets and the cut-over: [vault.md](vault.md).
 

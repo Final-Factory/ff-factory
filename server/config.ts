@@ -7,6 +7,7 @@ import path from 'node:path';
 import type { PermissionMode } from '../shared/types.ts';
 import { checkObject, dataRecoveries, readJsonDurable } from './durable.ts';
 import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
+import { checkPoolConfig, type PoolConfig } from './tokenPool.ts';
 
 
 /** What a portal-run agent runs on (docs/accounts.md): the computer's stored claude.ai login, or config claudeEnv's token. */
@@ -15,8 +16,10 @@ import { staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts'
  * (w464, docs/portal-on-ffbox-host.md change 18) the OAuth token in config claudeTokenFile, read at each session start
  * and given to that process alone. "tokenfile" is for the orchestrator, dispatcher and standing roles, never workers.
  */
-export type ClaudeAccount = 'login' | 'token' | 'tokenfile';
-export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token', 'tokenfile'];
+export type ClaudeAccount = 'login' | 'token' | 'tokenfile' | 'vault';
+export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['login', 'token', 'tokenfile', 'vault'];
+/** The role that may run on a person's own vault pool (w738): the orchestrators, each on its own person's tokens. */
+export const VAULT_ROLES_ACCOUNT: readonly string[] = ['orchestrator'];
 /** The roles that may run on the token file (TOKEN_FILE): never workers, which run on machines and other people's work. */
 export const TOKEN_FILE_ROLES: readonly string[] = ['orchestrator', 'dispatcher'];
 /** The roles config claudeAccounts picks an account for, on this host. */
@@ -165,7 +168,7 @@ export interface Config {
     useHostClaudeEnv?: boolean | Record<string, boolean>;
     /**
      * The token vault (docs/vault.md, w512; default false): a machine's runs take their Claude token from the vault,
-     * chosen per run by plan headroom, instead of the host token or the machine's own login. Same shape as
+     * taken per run from the run person's pool (docs/vault.md section 4), instead of the host token or the machine's own login. Same shape as
      * useHostClaudeEnv: true, false, or per machine with "*" for the rest. A person's own token still wins for their work.
      */
     claudeFromVault?: boolean | Record<string, boolean>;
@@ -221,6 +224,12 @@ export interface Config {
      * the nightly regression sentry and its delegations). Portal user ids; defaults in server/vault.ts UNATTRIBUTED_DEFAULTS.
      */
     unattributed?: Partial<Record<'intake' | 'ffbox' | 'nightly', string>>;
+    /**
+     * The Claude token pool's limits (w739, docs/vault.md section 4), one system-wide set that anyone can change with
+     * set_app_config: sessionHoldPercent (80), onePerWeeklyPercent (95), retireWeeklyPercent (99), reservePerDayPercent
+     * (5: the dispatcher's token keeps this per day left until its weekly reset) and reserveSessionPercent (20).
+     */
+    pool?: PoolConfig;
   };
   /**
    * Providers (docs/ffbox-integration.md): FFBox, whose connector dials out to /provider. `enabled` (default
@@ -754,13 +763,16 @@ export function windowsPathsOffWindows(cfg: Pick<Config, 'sandboxRoot' | 'dataDi
  * Throws when config claudeAccounts or machines.useHostClaudeEnv is malformed: a typo there would otherwise
  * quietly run agents on another account than the one meant.
  */
-export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machines'> & Partial<Pick<Config, 'claudeTokenFile'>>) {
+export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machines'> & Partial<Pick<Config, 'claudeTokenFile' | 'vault'>>) {
+  const poolProblem = checkPoolConfig(cfg.vault?.pool);
+  if (poolProblem) throw new Error(poolProblem);
   const a: unknown = cfg.claudeAccounts;
   if (a !== undefined) {
     if (typeof a !== 'object' || a === null || Array.isArray(a)) throw new Error('config claudeAccounts is an object, e.g. { "orchestrator": "login" }');
     for (const [role, v] of Object.entries(a)) {
       if (!HOST_ROLES.includes(role as HostRole)) throw new Error(`config claudeAccounts.${role}: no such role (${HOST_ROLES.join(', ')})`);
-      if (!CLAUDE_ACCOUNTS.includes(v as ClaudeAccount)) throw new Error(`config claudeAccounts.${role} is "login" or "token" (or "tokenfile" for ${TOKEN_FILE_ROLES.join(', ')})`);
+      if (!CLAUDE_ACCOUNTS.includes(v as ClaudeAccount)) throw new Error(`config claudeAccounts.${role} is "login" or "token" (or "tokenfile" for ${TOKEN_FILE_ROLES.join(', ')}, "vault" for ${VAULT_ROLES_ACCOUNT.join(', ')})`)
+      if (v === 'vault' && !VAULT_ROLES_ACCOUNT.includes(role)) throw new Error(`config claudeAccounts.${role} cannot be "vault": only ${VAULT_ROLES_ACCOUNT.join(', ')} run on a person's own vault tokens (the dispatcher stays on the token file)`);;
       if (v === 'tokenfile' && !TOKEN_FILE_ROLES.includes(role)) throw new Error(`config claudeAccounts.${role} cannot be "tokenfile": only ${TOKEN_FILE_ROLES.join(', ')} run on the token file`);
       if (v === 'tokenfile' && !(cfg as Partial<Pick<Config, 'claudeTokenFile'>>).claudeTokenFile) throw new Error(`config claudeAccounts.${role} is "tokenfile" but config claudeTokenFile names no file`);
     }

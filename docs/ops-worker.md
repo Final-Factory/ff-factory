@@ -24,7 +24,7 @@ A person's own orchestrator (Lothsahn's or Ben's) has the `ops_worker` tool:
 
 | action | what it does |
 |---|---|
-| `send` (`text`, `fresh`) | gives it a job or a follow-up. `fresh: true` starts a new conversation. A **new job** needs a turn the person started with a message of their own. Within that job (12 hours), the orchestrator's harness turns (a check-in, a timer, its `[ops worker]` report) may follow up, with no count (w627) |
+| `send` (`text`, `fresh`) | gives it a job or a follow-up. **Every new job starts a fresh conversation and a fresh process** (w738): `fresh: true` asks for it explicitly, and a new job is also the first message after the last job ended (12 hours), a message from the other person's orchestrator, and a deploy. Nothing, no context and no token, carries over from one job to the next. A **new job** needs a turn the person started with a message of their own. Within that job (12 hours), the orchestrator's harness turns (a check-in, a timer, its `[ops worker]` report) may follow up, with no count (w627) |
 | `deploy` (`text`: the person's words) | a portal deploy (`fffctl update`). Only in a turn the person started with their own message: never a check-in, a timer, a relayed report or a job's follow-up. See [Deploys](#deploys) |
 | `status` | its state, the job and whose it is, its limits, and its last 20 steps |
 | `interrupt` | ends its turn |
@@ -224,7 +224,7 @@ Fixed in `OPS_LIMITS` (`server/opsWorker.ts`), like the worker itself:
 | Setting | Value | Basis |
 |---|---|---|
 | model, effort | `opus`, `medium` | sourced: the game repo's CLAUDE.md drops the driver to medium "for purely operational sessions" |
-| account | the orchestrators' (`claudeAccounts.orchestrator`): in the VM, the subscription token file | sourced: D4 / design 5.2 put the orchestrators on it, and the worker works only for their people. The account must be a token: the VM's claude.ai login belongs to `fff`, which `fff-ops` cannot read, so the launcher refuses with "no Claude credential" |
+| account | the orchestrators' (`claudeAccounts.orchestrator`): in the VM, the subscription token file, or with `"vault"` (w738) **the Claude token pool of the person whose orchestrator gave it the job**, picked at the start of every job by the pool rules in docs/vault.md section 4: the caps hold it ("held" with the reason and the next reset, like that person's other workers), and it never falls to the dispatcher's token. A caller with no vault token yet keeps the token file. A new job from the other person's orchestrator starts a fresh process on that person's token. | sourced: D4 / design 5.2 put the orchestrators on it, and the worker works only for their people. The account must be a token: the VM's claude.ai login belongs to `fff`, which `fff-ops` cannot read, so the launcher refuses with "no Claude credential" |
 | spend cap | $25 per process (the SDK's `maxBudgetUsd`, which the CLI enforces) | a guess: a runaway guard. On the subscription token, the cost is plan usage, and the dollar figure is the SDK's estimate |
 | idle stop | 1 hour, then the process stops and the conversation stays | sourced: the same hour idle workers get (`IDLE_REAP_MS`), the prompt cache's lifetime |
 | turn limit | 2 hours, then FF Factory interrupts the turn | a guess: an install with its waits fits, and longer waits use `wake_me` |
@@ -233,7 +233,7 @@ Fixed in `OPS_LIMITS` (`server/opsWorker.ts`), like the worker itself:
 | memory | 1536 MB (`MemoryMax`) | measured basis: an idle claude process used 100-300 MB resident and 450-650 MB committed (BEAST, 2026-10-04, orchestrators.md). The VM has 4 GiB |
 
 The session record stays for good, with its conversation. `fresh: true` starts a new conversation: the transcript
-goes on, with a line marking the new job and whose it is.
+goes on, with a line marking the new job and whose it is. Every new job does this (w738), not only `fresh: true`; a follow-up within the job keeps the conversation and the process, and with them the token it started on.
 
 ## Audit
 

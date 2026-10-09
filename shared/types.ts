@@ -1085,6 +1085,17 @@ export interface HostStatus {
   pathHealth?: PathHealth;
   /** What the VM's unit watchdog (fff-health) did about critical systemd units (server/unitWatchdog.ts). */
   unitWatchdog?: UnitWatchdog;
+  /** Claude token pools that need a person's eye, and the dispatcher's reserve in use (server/index.ts tokenWarnings, w739). */
+  tokenWarnings?: TokenWarning[];
+}
+
+/** One banner about the Claude token pools. No token, only its last four characters. */
+export interface TokenWarning {
+  /** "pool:<person>" or "reserve:<credential>": a banner's identity, so a dismissed one returns when its text changes. */
+  id: string;
+  /** exhausted: the person's orchestrator has stopped; held: workers wait; reserve: runs are inside the dispatcher's buffer. */
+  kind: 'exhausted' | 'held' | 'reserve';
+  text: string;
 }
 
 /** One layer of the path from the internet to the portal (deploy/vm/host/pathwatch.sh). */

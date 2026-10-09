@@ -23,6 +23,8 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { loadConfig } from './config.ts';
 import { enrolledMachines, issueMachineToken, machineTokensFile, revokeMachineToken } from './machineTokens.ts';
+import type { PlanUsage } from '../shared/types.ts';
+import { clock, poolLimits } from './tokenPool.ts';
 import { VAULT_FILE, Vault, fingerprintOf, keySource, newKeyText, type VaultEntryMeta, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 
 const { values: o, positionals: args } = parseArgs({
@@ -107,6 +109,44 @@ if (cmd === 'machine-credential') {
   process.exit(0);
 }
 
+/**
+ * Each person's Claude pool as the portal's rules read it (w739, docs/vault.md section 4): per token its last four
+ * characters, the plan meters the portal last polled (data/usage.json) with their resets, the state (ok, held,
+ * one-at-a-time, retired, exhausted) and how many agents ran on it when the portal last saved its state (state.json). Read
+ * only, no token and no key needed. The portal's own system_status is the live view.
+ */
+function poolSection() {
+  let usageFile: { entries?: Record<string, { usage?: PlanUsage }> } = {};
+  try {
+    usageFile = JSON.parse(fs.readFileSync(path.join(cfg.dataDir, 'usage.json'), 'utf8')) as typeof usageFile;
+  } catch {
+    // the portal has not polled yet
+  }
+  let sessions: { account?: string; status?: string }[] = [];
+  try {
+    sessions = (JSON.parse(fs.readFileSync(path.join(cfg.dataDir, 'state.json'), 'utf8')) as { sessions?: typeof sessions }).sessions ?? [];
+  } catch {
+    // no state file
+  }
+  const live = (fp: string) => sessions.filter((x) => x.account === `token:${fp}` && x.status !== 'stopped' && x.status !== 'error').length;
+  const pools = vault.pools({ usageOf: (fp) => usageFile.entries?.[`token:${fp}`]?.usage, liveOn: (fp) => live(fp), limits: () => poolLimits(cfg) });
+  // A Claude entry with no owner is in nobody's pool: the portal no longer hands out a shared Claude token (w739).
+  const orphans = vault.list().filter((e) => e.kind === 'claude' && !e.disabled && !e.owner);
+  if (orphans.length) console.log(`
+not in any pool (a Claude token with no owner is used by nobody; grant it to a person with --owner): ${orphans.map((e) => `${e.name} …${e.last4}`).join(', ')}`);
+  if (!pools.size) return;
+  const lim = poolLimits(cfg);
+  console.log(`
+Claude token pools (5-hour >= ${lim.sessionHold}%: held; weekly >= ${lim.onePerWeekly}%: one at a time; >= ${lim.retireWeekly}%: retired; soonest weekly reset first):`);
+  for (const [person, list] of [...pools].sort((a, b) => a[0].localeCompare(b[0]))) {
+    console.log(`  ${person}`);
+    for (const t of list.sort((a, b) => (a.view.weeklyResetsAt ?? '9').localeCompare(b.view.weeklyResetsAt ?? '9'))) {
+      const v = t.view;
+      console.log(`    ${t.entry.name.padEnd(24)} …${t.entry.last4}  ${v.state.padEnd(13)} 5-hour ${v.known ? Math.round(v.session) + '%' : '?'}${v.sessionResetsAt ? ` (resets ${clock(v.sessionResetsAt)})` : ''}, weekly ${v.known ? Math.round(v.weekly) + '%' : '?'}${v.weeklyResetsAt ? ` (resets ${clock(v.weeklyResetsAt)})` : ''}; ${t.live} agent${t.live === 1 ? '' : 's'} running`);
+    }
+  }
+}
+
 const keyFile = process.env.FFF_VAULT_KEY_FILE;
 const vault = new Vault({
   file: path.join(cfg.dataDir, VAULT_FILE),
@@ -126,6 +166,7 @@ try {
       console.log(`key: ${s.key}${s.keyFile ? ` (${s.keyFile})` : ''}${s.why ? `: ${s.why}` : ''}`);
       const all = vault.list();
       console.log(all.length ? all.map(show).join('\n') : 'no entries');
+      poolSection();
       break;
     }
     case 'add': {
