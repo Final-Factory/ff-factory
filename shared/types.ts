@@ -1093,8 +1093,10 @@ export interface HostStatus {
 export interface TokenWarning {
   /** "pool:<person>" or "reserve:<credential>": a banner's identity, so a dismissed one returns when its text changes. */
   id: string;
-  /** exhausted: the person's orchestrator has stopped; held: workers wait; reserve: runs are inside the dispatcher's buffer. */
+  /** exhausted: every token of the person is used up; held: every token is at a limit (new work waits); reserve: runs are inside the dispatcher's buffer. */
   kind: 'exhausted' | 'held' | 'reserve';
+  /** The user id whose pool it is: only that person's pages show it (server/index.ts hostForUser). Absent: for everyone. */
+  person?: string;
   text: string;
 }
 

@@ -22,6 +22,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   `deploy/vm/test/fff-vault-sync.test.sh` (a person with only `claude-tokens/`, the standalone path, the installer's path,
   nothing removed whose file exists, the scripts follow the checkout). docs/vault.md: `bash -c`, not `sh -c`, for the hidden
   token prompt (dash's `read` has no `-s`).
+- **The "over its caps" banner shows only to its own person, and only when none of their tokens can take new work** (w747,
+  Lothsahn: his single token at 95% weekly, still good for 4% more, was reported "over cap"; Ben saw it too). A pool banner
+  carries `person` and the server sends each page only its own (`hostForUser` in `server/index.ts`, `warningsForUser`);
+  `system_status` and the accounts page still show every pool to owners. It appears only when every token is held, retired or
+  used up, and says plainly that new work waits until the first one frees up. A token at 95% to 99% weekly is `one-at-a-time`
+  and says "one job at a time until 99%: 4% left before it stops; the slot is taken now (1 running)" / "the slot is free" in
+  `system_status`, `fffctl vault list`, the banner and the queue's "held" reason (`poolKind`, `poolBanner`, `heldReason` in
+  `server/tokenPool.ts`). A pool whose only usable token is busy with its one job shows no top banner. The dispatcher /
+  host-token reserve banner (no `person`) is unchanged: every logged-in person sees it.
 
 - **Each person's runs use that person's own pool of Claude tokens, and their orchestrator and the ops worker run on it too** (w738,
   w739, Lothsahn). A person can have several tokens in the vault (host files `people/<id>/claude-token` and

@@ -125,20 +125,46 @@ export function clock(iso: string | undefined): string {
   return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getUTCDay()]} ${d.toISOString().slice(11, 16)}Z`;
 }
 
+/** A percent for a sentence: whole, but never "100%" for a meter still under 100 (99.5 reads 99.5). */
+const pc = (n: number) => (n < 100 && Math.round(n) >= 100 ? n.toFixed(1) : String(Math.round(n)));
+
 /** The state of a token under the limits, for a worker, a standing agent or the ops worker (the strictest reading). */
 export function judge(t: PoolToken, limits: PoolLimits): PoolView {
   const m = metersOf(t.usage);
   const base = { session: m.session, weekly: m.weekly, known: m.known, sessionResetsAt: m.sessionResetsAt, weeklyResetsAt: m.weeklyResetsAt };
-  const numbers = `5-hour ${Math.round(m.session)}%, weekly ${Math.round(m.weekly)}%`;
+  const numbers = `5-hour ${pc(m.session)}%, weekly ${pc(m.weekly)}%`;
   if (m.weekly >= 100 || m.session >= 100) {
     const until = m.weekly >= 100 ? m.weeklyResetsAt : m.sessionResetsAt;
     return { ...base, state: 'exhausted', why: `${numbers}: used up until ${clock(until)}`, ...(until ? { until } : {}) };
   }
-  if (m.weekly >= limits.retireWeekly) return { ...base, state: 'retired', why: `weekly ${Math.round(m.weekly)}% (>= ${limits.retireWeekly}): retired until ${clock(m.weeklyResetsAt)}`, ...(m.weeklyResetsAt ? { until: m.weeklyResetsAt } : {}) };
-  if (m.session >= limits.sessionHold) return { ...base, state: 'held', why: `5-hour ${Math.round(m.session)}% (>= ${limits.sessionHold}): held until ${clock(m.sessionResetsAt)}`, ...(m.sessionResetsAt ? { until: m.sessionResetsAt } : {}) };
-  if (m.weekly >= limits.onePerWeekly && t.others >= 1) return { ...base, state: 'one-at-a-time', why: `weekly ${Math.round(m.weekly)}% (>= ${limits.onePerWeekly}): one process at a time, ${t.others} running` };
-  return { ...base, state: 'ok', why: m.known ? numbers : 'no numbers yet (counted as 50%)' };
+  if (m.weekly >= limits.retireWeekly) return { ...base, state: 'retired', why: `weekly ${pc(m.weekly)}% (>= ${limits.retireWeekly}): retired until ${clock(m.weeklyResetsAt)}`, ...(m.weeklyResetsAt ? { until: m.weeklyResetsAt } : {}) };
+  if (m.session >= limits.sessionHold) return { ...base, state: 'held', why: `5-hour ${pc(m.session)}% (>= ${limits.sessionHold}): held until ${clock(m.sessionResetsAt)}`, ...(m.sessionResetsAt ? { until: m.sessionResetsAt } : {}) };
+  // From onePerWeekly up to retireWeekly a token still works, one job at a time (w747: it is not over its cap, and says so):
+  // how much is left before it stops, and whether its one slot is taken now.
+  const left = Math.max(0, Math.round((limits.retireWeekly - m.weekly) * 10) / 10);
+  const oneJob = m.weekly >= limits.onePerWeekly ? `one job at a time until ${limits.retireWeekly}%: ${left}% left before it stops` : '';
+  if (oneJob && t.others >= 1) {
+    return { ...base, state: 'one-at-a-time', why: `weekly ${pc(m.weekly)}%, ${oneJob}; the slot is taken now (${t.others} running)` };
+  }
+  return { ...base, state: 'ok', why: m.known ? `${numbers}${oneJob ? `; ${oneJob}; the slot is free` : ''}` : 'no numbers yet (counted as 50%)' };
 }
+
+/**
+ * What a pool can do for a new job, from its tokens' states: `serving` (some token is ok: under every limit, or in its
+ * one-job-at-a-time zone with the slot free), `slot-taken` (none is ok, but a token that still works is busy with its one
+ * job: a new job starts when that finishes), `over` (every token is held, retired or used up: new work waits for a reset) and
+ * `used-up` (every token is at 100). Only `over` and `used-up` are "over the caps" (the dashboard banner, w747).
+ */
+export type PoolKind = 'serving' | 'slot-taken' | 'over' | 'used-up';
+export function poolKind(views: readonly PoolView[]): PoolKind {
+  if (!views.length || views.some((v) => v.state === 'ok')) return 'serving';
+  if (views.every((v) => v.state === 'exhausted')) return 'used-up';
+  if (views.some((v) => v.state === 'one-at-a-time')) return 'slot-taken';
+  return 'over';
+}
+
+/** The earliest time a limit lifts on its own (ISO), among the views that have one. */
+export const firstFree = (views: readonly PoolView[]): string | undefined => views.map((v) => v.until).filter((x): x is string => !!x).sort((a, b) => ms(a) - ms(b))[0];
 
 const ms = (iso: string | undefined) => {
   const t = iso ? Date.parse(iso) : NaN;
@@ -198,11 +224,46 @@ export function pickPool(tokens: readonly PoolToken[], o: { orchestrator: boolea
 /** Why no token of a non-empty pool serves a run, and when the first frees up. */
 export function heldReason(tokens: readonly PoolToken[], views: ReadonlyMap<string, PoolView>): { why: string; next?: string } {
   const list = tokens.map((t) => views.get(t.id)!);
-  const nexts = list.map((v) => v.until).filter((x): x is string => !!x).sort((a, b) => ms(a) - ms(b));
-  const next = nexts[0];
-  const states = [...new Set(list.map((v) => v.state))];
-  const all = states.length === 1 && states[0] === 'exhausted' ? 'all used up' : 'all over their caps or used up';
-  return { why: `${tokens.length === 1 ? 'its token is' : `${tokens.length} tokens:`} ${all}${next ? `, the first frees up ${clock(next)}` : ''}`, ...(next ? { next } : {}) };
+  const next = firstFree(list);
+  const kind = poolKind(list);
+  const each = tokens.map((t) => `${t.name}: ${views.get(t.id)!.why}`).join('; ');
+  // "Over its caps" only when every token is held, retired or used up; a token busy with its one job is not over anything (w747).
+  const head = kind === 'used-up' ? 'every token is used up' : kind === 'over' ? 'every token is at a limit' : 'no token is free for a new job right now';
+  const when =
+    kind === 'slot-taken'
+      ? `a new job starts when the running one finishes${next ? `, or when the first limit lifts ${clock(next)}` : ''}`
+      : next
+        ? `the first frees up ${clock(next)}`
+        : 'no reset time is known yet';
+  return { why: `${head} (${each}): ${when}`, ...(next ? { next } : {}) };
+}
+
+/**
+ * The dashboard banner for one person's pool, or undefined (w747): only when EVERY token is over its caps (held, retired or
+ * used up), so that new work waits for a reset. A pool with a token that can take a job, or one busy with its one job at a time,
+ * shows nothing at the top (the status line says how things stand). `who` is "your" on the person's own page. The text
+ * names the tokens by name and last four characters, what each is at, and when the first frees up.
+ */
+export function poolBanner(tokens: readonly { name: string; last4: string; view: PoolView }[], who: string, orchestratorOnVault: boolean): { kind: 'exhausted' | 'held'; text: string } | undefined {
+  const views = tokens.map((t) => t.view);
+  const kind = poolKind(views);
+  if (kind !== 'over' && kind !== 'used-up') return undefined;
+  const next = firstFree(views);
+  const each = tokens.map((t) => `${t.name} …${t.last4}: ${t.view.why}`).join('; ');
+  const wait = `New work waits${next ? ` until the first one frees up (${clock(next)})` : ' (no reset time is known yet)'}`;
+  if (kind === 'used-up') {
+    return { kind: 'exhausted', text: `${who === 'your' ? 'All your' : `All of ${who}'s`} Claude tokens are used up (${each}). ${wait}${orchestratorOnVault ? ' and the orchestrator is stopped; there is no override' : ''}.` };
+  }
+  return { kind: 'held', text: `${who === 'your' ? 'Every one of your' : `Every one of ${who}'s`} Claude tokens is at a limit (${each}). ${wait}${orchestratorOnVault ? '; the orchestrator keeps running on the token with the most room until it is used up' : ''}.` };
+}
+
+/**
+ * The banners one person's page shows (w747): those about the whole system (no `person`) and those about their own pool
+ * only. Ben never sees lothsahn's pool banner and lothsahn never sees Ben's. Undefined when none is left.
+ */
+export function warningsForUser<T extends { person?: string }>(all: readonly T[] | undefined, user: string): T[] | undefined {
+  const mine = (all ?? []).filter((w) => !w.person || w.person.toLowerCase() === user.toLowerCase());
+  return mine.length ? mine : undefined;
 }
 
 // ---------------------------------------------------------------- the dispatcher's reserve

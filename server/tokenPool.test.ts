@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { POOL_DEFAULTS, bySoonestReset, checkPoolConfig, clock, heldReason, judge, metersOf, pickPool, poolLimits, reserveOf, type PoolToken } from './tokenPool.ts';
+import { POOL_DEFAULTS, bySoonestReset, checkPoolConfig, clock, heldReason, judge, metersOf, pickPool, poolBanner, poolKind, poolLimits, reserveOf, warningsForUser, type PoolToken } from './tokenPool.ts';
 import type { PlanUsage } from '../shared/types.ts';
 
 const NOW = Date.parse('2026-10-09T12:00:00Z');
@@ -54,7 +54,7 @@ test('judge: ok, held at the 5-hour limit, one at a time at 95% weekly, retired 
   assert.equal(judge(tok('a', { weekly: 95, others: 0 }), L).state, 'ok', 'one at a time: the first process is fine');
   const one = judge(tok('a', { weekly: 95, others: 1 }), L);
   assert.equal(one.state, 'one-at-a-time');
-  assert.match(one.why, /1 running/);
+  assert.equal(one.why, 'weekly 95%, one job at a time until 99%: 4% left before it stops; the slot is taken now (1 running)');
   assert.equal(judge(tok('a', { weekly: 99, weeklyDays: 2 }), L).state, 'retired');
   assert.equal(judge(tok('a', { weekly: 99 }), L).until, undefined);
   assert.equal(judge(tok('a', { weekly: 100, weeklyDays: 2 }), L).state, 'exhausted');
@@ -125,7 +125,7 @@ test('pickPool: every token capped holds a worker with the reason and the first 
   const b = tok('b', { session: 85, sessionHours: 4, weekly: 30, weeklyDays: 5 });
   const worker = pickPool([a, b], { orchestrator: false, limits: L });
   assert.equal(worker.token, undefined);
-  assert.match(worker.held?.why ?? '', /2 tokens: all over their caps or used up, the first frees up \w{3} \d\d:\d\dZ/);
+  assert.match(worker.held?.why ?? '', /^every token is at a limit \(a: 5-hour 90% \(>= 80\): held until Fri 14:00Z; b: .*\): the first frees up Fri 14:00Z$/);
   assert.equal(worker.held?.next, iso(NOW + 2 * 3_600_000), 'the first token to free up');
   // The orchestrator still runs: the token with the most room (b: max meter 85 vs a: 90), over its cap.
   const orch = pickPool([a, b], { orchestrator: true, limits: L });
@@ -149,14 +149,14 @@ test('pickPool: used up is used up for everyone; a pool with one token left serv
   for (const orchestrator of [false, true]) {
     const p = pickPool([dead, dead2], { orchestrator, limits: L });
     assert.equal(p.token, undefined, `orchestrator=${orchestrator}`);
-    assert.match(p.held?.why ?? '', /all used up/);
+    assert.match(p.held?.why ?? '', /^every token is used up \(/);
     assert.equal(p.held?.next, iso(NOW + 1 * 3_600_000), 'the 5-hour window frees first');
   }
   const capped = tok('capped', { session: 91, sessionHours: 1 });
   assert.equal(pickPool([dead, capped], { orchestrator: true, limits: L }).token?.name, 'capped');
   assert.equal(pickPool([dead, capped], { orchestrator: false, limits: L }).token, undefined);
   assert.equal(pickPool([], { orchestrator: true, limits: L }).token, undefined, 'no tokens: the caller decides (the transition)');
-  assert.match(heldReason([dead], new Map([[dead.id, judge(dead, L)]])).why, /its token is all used up/);
+  assert.match(heldReason([dead], new Map([[dead.id, judge(dead, L)]])).why, /^every token is used up \(dead: /);
   assert.equal(clock(undefined), 'its next reset');
   assert.equal(clock('2026-10-09T14:05:00Z'), 'Fri 14:05Z');
 });
@@ -185,4 +185,77 @@ test("the dispatcher's reserve: 5% a day to the weekly reset and 20% of the 5-ho
   assert.equal(none.inReserve, true);
   // The per-day figure is the config's.
   assert.equal(reserveOf(u(41, 12, 5), { ...L, reservePerDay: 2 }, NOW).weekly, 10);
+});
+
+test("w747: a token at 95% weekly is NOT over its cap: it works one job at a time until 99%, and says how much is left", () => {
+  const free = judge(tok('a', { weekly: 95, others: 0, session: 10 }), L);
+  assert.equal(free.state, 'ok', 'with its slot free it takes a job');
+  assert.equal(free.why, '5-hour 10%, weekly 95%; one job at a time until 99%: 4% left before it stops; the slot is free');
+  const taken = judge(tok('a', { weekly: 95, others: 1 }), L);
+  assert.equal(taken.state, 'one-at-a-time');
+  assert.match(taken.why, /4% left before it stops; the slot is taken now \(1 running\)/);
+  assert.equal(judge(tok('a', { weekly: 98.2, others: 2 }), L).why, 'weekly 98%, one job at a time until 99%: 0.8% left before it stops; the slot is taken now (2 running)');
+  assert.doesNotMatch(taken.why + free.why, /over|cap|wait until|reset/i, 'no "over cap" or "wait until reset" for a token that still works');
+  // Under the one-job limit nothing changes.
+  assert.equal(judge(tok('a', { weekly: 94, others: 3 }), L).why, '5-hour 10%, weekly 94%');
+  // The limits are the config's: the "until" is the retire limit.
+  assert.match(judge(tok('a', { weekly: 90, others: 1 }), { ...L, onePerWeekly: 90, retireWeekly: 96 }).why, /one job at a time until 96%: 6% left before it stops/);
+});
+
+test('w747: poolKind and poolBanner: the banner only when every token is held, retired or used up', () => {
+  const v = (t: PoolToken) => judge(t, L);
+  const lab = (name: string, t: PoolToken) => ({ name, last4: name.slice(-4), view: v(t) });
+  // lothsahn's pool on 2026-10-09: one token, 95% weekly, one agent running: busy with its one job, not over any cap.
+  const lothsahn = [lab('host-lothsahn-claude-1', tok('t1', { weekly: 95, others: 1 }))];
+  assert.equal(poolKind(lothsahn.map((x) => x.view)), 'slot-taken');
+  assert.equal(poolBanner(lothsahn, 'your', false), undefined, 'no top banner for it');
+  // the same token with its slot free serves
+  assert.equal(poolKind([v(tok('t1', { weekly: 95, others: 0 }))]), 'serving');
+  assert.equal(poolBanner([lab('t1', tok('t1', { weekly: 95 }))], 'your', false), undefined);
+  // one ok token among capped ones: never a banner
+  const mixed = [lab('aaaa', tok('a', { session: 90, sessionHours: 2 })), lab('bbbb', tok('b', { weekly: 99.5, weeklyDays: 2 })), lab('cccc', tok('c'))];
+  assert.equal(poolKind(mixed.map((x) => x.view)), 'serving');
+  assert.equal(poolBanner(mixed, 'your', false), undefined);
+  // a held token and one busy with its one job: new work waits for the running one, or a reset: still not "over"
+  const busy = [lab('aaaa', tok('a', { session: 90, sessionHours: 2 })), lab('bbbb', tok('b', { weekly: 96, others: 1 }))];
+  assert.equal(poolKind(busy.map((x) => x.view)), 'slot-taken');
+  assert.equal(poolBanner(busy, 'your', false), undefined);
+  // every token held or retired: the banner, in plain words, with the first reset
+  const over = [lab('aaaa', tok('a', { session: 90, sessionHours: 2, weekly: 30 })), lab('bbbb', tok('b', { weekly: 99.5, weeklyDays: 2 }))];
+  assert.equal(poolKind(over.map((x) => x.view)), 'over');
+  const b = poolBanner(over, 'your', false)!;
+  assert.equal(b.kind, 'held');
+  assert.match(b.text, /^Every one of your Claude tokens is at a limit \(aaaa …aaaa: 5-hour 90% \(>= 80\): held until Fri 14:00Z; bbbb …bbbb: weekly 99\.5% \(>= 99\): retired until .*\)\. New work waits until the first one frees up \(Fri 14:00Z\)\.$/);
+  assert.match(poolBanner(over, 'ben', true)!.text, /^Every one of ben's Claude tokens is at a limit .*the orchestrator keeps running on the token with the most room until it is used up\.$/);
+  // every token used up: the other kind
+  const dead = [lab('aaaa', tok('a', { weekly: 100, weeklyDays: 2 })), lab('bbbb', tok('b', { session: 100, sessionHours: 1 }))];
+  assert.equal(poolKind(dead.map((x) => x.view)), 'used-up');
+  const d = poolBanner(dead, 'your', true)!;
+  assert.equal(d.kind, 'exhausted');
+  assert.match(d.text, /^All your Claude tokens are used up .*New work waits until the first one frees up \(Fri 13:00Z\) and the orchestrator is stopped; there is no override\.$/);
+  assert.equal(poolKind([]), 'serving', 'no tokens is the transition, never a banner');
+  assert.equal(poolBanner([], 'your', false), undefined);
+});
+
+test('w747: the held reason of a busy one-job token says it is not over anything', () => {
+  const t = tok('a', { weekly: 96, others: 1 });
+  const r = heldReason([t], new Map([[t.id, judge(t, L)]]));
+  assert.equal(r.why, 'no token is free for a new job right now (a: weekly 96%, one job at a time until 99%: 3% left before it stops; the slot is taken now (1 running)): a new job starts when the running one finishes');
+  assert.doesNotMatch(r.why, /every token is at a limit|over its caps|used up/);
+  // with a held neighbour the reset is named as the other way out
+  const h = tok('h', { session: 90, sessionHours: 2 });
+  assert.match(heldReason([t, h], new Map([[t.id, judge(t, L)], [h.id, judge(h, L)]])).why, /a new job starts when the running one finishes, or when the first limit lifts Fri 14:00Z$/);
+});
+
+test('w747: a pool banner is for its own person only; the whole-system banners are for everyone', () => {
+  const all = [
+    { id: 'pool:lothsahn', person: 'lothsahn', text: 'x' },
+    { id: 'pool:ben', person: 'ben', text: 'y' },
+    { id: 'reserve:k', text: 'the dispatcher token' },
+  ];
+  assert.deepEqual(warningsForUser(all, 'ben')?.map((w) => w.id), ['pool:ben', 'reserve:k'], 'ben never sees lothsahn\'s');
+  assert.deepEqual(warningsForUser(all, 'Lothsahn')?.map((w) => w.id), ['pool:lothsahn', 'reserve:k'], 'user ids compare without case; lothsahn never sees ben\'s');
+  assert.deepEqual(warningsForUser(all, 'carol')?.map((w) => w.id), ['reserve:k'], 'someone with no pool sees none of them');
+  assert.equal(warningsForUser(all.slice(0, 2), 'carol'), undefined);
+  assert.equal(warningsForUser(undefined, 'ben'), undefined);
 });

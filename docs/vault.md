@@ -189,9 +189,25 @@ used up):
 
 | Role | What happens |
 |---|---|
-| A worker, a standing agent, the ops worker for them | **Held** with the reason ("lothsahn's Claude token pool is held: 2 tokens: all over their caps or used up, the first frees up Fri 14:00Z"): a worker's first prompt queues and is tried again, a standing agent's run ends "Could not start: <reason>" and the next scheduled run tries again; no fallback to the host token, the machine's login, the dispatcher's token or anyone else's |
+| A worker, a standing agent, the ops worker for them | **Held** with the reason ("lothsahn's Claude token pool is held: every token is at a limit (a: 5-hour 90% (>= 80): held until Fri 14:00Z; b: …): the first frees up Fri 14:00Z"): a worker's first prompt queues and is tried again, a standing agent's run ends "Could not start: <reason>" and the next scheduled run tries again; no fallback to the host token, the machine's login, the dispatcher's token or anyone else's |
 | A person's own **orchestrator** (`claudeAccounts.orchestrator = "vault"`) | **Uses the pool up**: while some token is only past its caps (held, one-at-a-time, retired) but not used up, it runs on the one with the most room (the soonest reset on a tie), and the one-at-a-time rule does not bind it. Once every token is used up it **stops** with the reason and the next reset on the dashboard; there is no override and no fallback |
 | The **dispatcher** | Never on a pool: it keeps the shared token file (or whatever `claudeAccounts.dispatcher` names) and is never held |
+
+**What a token at the one-at-a-time limit is (w747).** A token at 95% weekly is not over its cap: it still works, one
+process at a time, until 99%. Its line says so with the room left and whether the slot is free: `weekly 95%, one job at a
+time until 99%: 4% left before it stops; the slot is taken now (1 running)` (or `...; the slot is free`, and then it is
+`ok`: a new job takes it). The same words are in `system_status`, `fffctl vault list` and the queue's "held" reason. "At a
+limit" and "wait until the reset" are said only when every token is held or retired; "used up" only when every token is at
+100% or rejected.
+
+**The banner at the top of the dashboard (w747).** A pool warning is shown only to the person whose pool it is (the server
+sends each connected page only its own: `warningsForUser`, `hostForUser`); the owners still see every pool in
+`system_status` and on the accounts page. It appears only when **no** token of that person can take new work: every one held
+or retired ("Every one of your Claude tokens is at a limit (...). New work waits until the first one frees up (Fri 14:00Z).")
+or every one used up ("All your Claude tokens are used up (...) ... and the orchestrator is stopped; there is no override.").
+A token that is merely busy with its one job (`slot-taken`) shows no banner: the next job starts when the running one
+finishes, which the queue's "held" reason says. The banner about the dispatcher / host-token reserve (`reserve:…`, no person)
+is for **everyone logged in**, as before.
 
 **The transition.** A person with **no** Claude token in the vault keeps today's account, so nothing stops at deploy:
 the machine's login or the host token for their workers (`machines.useHostClaudeEnv`), the token file for their
