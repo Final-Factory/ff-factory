@@ -1704,7 +1704,12 @@ test('w643: Queued only on a real capacity shortage: queue needs no room on a co
   agentsRoom(agents, []);
   await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'after the nightly run', blocker: { kind: 'time', until: new Date(later + 3_600_000).toISOString(), what: 'after the nightly run' } });
   assert.equal(store.work.get('w2')!.status, 'blocked');
-  await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'every place is busy now' });
+  // A gated request is not waiting for capacity (w754): queueing it is refused, and it stays blocked.
+  const refused = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'every place is busy now' });
+  assert.match(refused.text, /w2 is gated on .* It waits for those, not for capacity: leave it blocked/);
+  assert.equal(store.work.get('w2')!.status, 'blocked');
+  // Ended by a person's own word (override_gate), the block goes with the status.
+  await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'queue', note: 'every place is busy now', override_gate: 'Ben: forget the nightly run, queue it' });
   assert.deepEqual([store.work.get('w2')!.status, store.work.get('w2')!.blocked], ['queued', undefined]);
 });
 
@@ -1977,4 +1982,171 @@ test('w740: decide_work link is the same-work mark: refused for an unrelated req
   assert.equal(sent.isError, false, sent.text);
   assert.doesNotMatch(sent.text, /NEW session/);
   await until('w3 reached the same session', () => store.readTranscript(id).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('The request as filed (w3')));
+});
+
+// ---------------------------------------------------------------- w754: gates outlive a hold, several gates, no polling
+
+/** Requests as the ledger holds them, filed directly (filing through request_work is capped per message). */
+function putRequests(store: Store, rows: { id: string; status?: WorkItem['status']; by?: Requester }[]) {
+  for (const r of rows) {
+    const by = r.by ?? LOTH;
+    store.putWork({ id: r.id, title: `Request ${r.id}`, brief: 'Do it.', priority: 'normal', keys: [], requestedBy: by, requesters: [by], humanAsked: true, status: r.status ?? 'new', createdAt: T0, updatedAt: T0, sessionIds: [], overlaps: [], asks: 0, log: [] });
+  }
+  store.workSeq = Math.max(store.workSeq, ...rows.map((r) => Number(r.id.slice(1))));
+}
+
+test('w754: w750 as it happened: block on A, a hold, the hold lifted with A still open stays blocked; start is refused; gate B joins; each clears in turn and only then does it start', async (t) => {
+  const { store, agents, o, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  // w1 stands for w727 (Deck screens), w2 for w752 (the Technology label fix), w3 for w750 (the release), w4 for another release.
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', status: 'active' }, { id: 'w3' }, { id: 'w4' }]);
+  const loth = chat(LOTH).info;
+  const decide = (id: string, a: Record<string, unknown>) => call(dispatcher().info, 'decide_work', { id, note: 'because', ...a });
+
+  // 06:57 the dispatcher blocks the release on w727.
+  assert.equal((await decide('w3', { action: 'block', blocker: { kind: 'request', ref: 'w1', what: 'the Deck screens merged' } })).isError, false);
+  assert.equal(store.work.get('w3')!.status, 'blocked');
+  // 07:19 a hold (ask), which used to drop the gate: it stays.
+  assert.equal((await decide('w3', { action: 'ask', note: 'Held on lothsahn: a potential bug.' })).isError, false);
+  assert.equal(store.work.get('w3')!.status, 'question');
+  assert.equal(store.work.get('w3')!.blocked?.ref, 'w1', 'the hold did not drop the gate');
+  // 07:27 "You can unblock the release": the hold is lifted and w1 is still open: it goes back to Blocked, not to the dispatcher.
+  const go = await call(loth, 'update_work', { id: 'w3', note: "GO: you can unblock the release. I've verified it's not an issue." });
+  assert.equal(go.isError, false, go.text);
+  const w3 = store.work.get('w3')!;
+  assert.equal(w3.status, 'blocked');
+  assert.equal(w3.blocked?.ref, 'w1');
+  assert.match(w3.log.join('\n'), /still blocked on w1 finishing: a lifted hold does not lift a gate/);
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w3' })).text, /Blocked on w1 finishing/);
+  // The dispatcher starting it anyway (what happened at 07:27) is refused, and nothing started.
+  const start = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Release it', title: 'w3: release', work_id: 'w3' });
+  assert.equal(start.isError, true);
+  assert.match(start.text, /w3 is gated on w1 finishing \(the Deck screens merged\), which has not cleared\. A hold lifted or a "go" does not lift a gate/);
+  assert.deepEqual([store.work.get('w3')!.status, store.work.get('w3')!.sessionIds], ['blocked', []]);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'queue', note: 'x' })).isError, true, 'queueing it would drop the gate too');
+  // 07:40 gate B (w752) is added to the same block.
+  assert.equal((await decide('w3', { action: 'block', add_blocker: true, blocker: { kind: 'request', ref: 'w2', what: 'the Technology label fix merged' } })).isError, false);
+  assert.deepEqual([store.work.get('w3')!.blocked?.ref, store.work.get('w3')!.alsoBlocked?.map((g) => g.ref)], ['w1', ['w2']]);
+  const line = (await call(dispatcher().info, 'list_work', { id: 'w3' })).text;
+  assert.match(line, /Blocked on w1 finishing, w2 finishing/);
+  assert.match(line, /the Deck screens merged; also the Technology label fix merged/);
+  // Blocking again with no blocker keeps both (the dispatcher cannot lose a gate by re-blocking).
+  assert.equal((await decide('w3', { action: 'block' })).isError, false);
+  assert.deepEqual([store.work.get('w3')!.blocked?.ref, store.work.get('w3')!.alsoBlocked?.map((g) => g.ref)], ['w1', ['w2']]);
+  // A gate cannot wait on itself.
+  assert.match((await decide('w3', { action: 'block', blockers: [{ kind: 'request', ref: 'w3', what: 'itself' }] })).text, /cannot be blocked on itself/);
+
+  // A person's own word lets the dispatcher start a gated request: a different request, so w3 stays gated for the rest.
+  assert.equal((await decide('w4', { action: 'block', blocker: { kind: 'request', ref: 'w2', what: 'w2 first' } })).isError, false);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Do w4', title: 'w4: do it', work_id: 'w4', override_gate: 'lothsahn: start w4 now, w2 does not matter for it' });
+  assert.equal(started.isError, false, started.text);
+  assert.equal(store.work.get('w4')!.status, 'active');
+  assert.equal(store.work.get('w4')!.blocked, undefined, 'the start dropped its gates');
+  assert.match(store.work.get('w4')!.log.join('\n'), /\(gate overridden: "lothsahn: start w4 now, w2 does not matter for it"\)/);
+
+  // The watch: w1 closes, the first gate goes and it stays Blocked on w2; w2 closes, and only then is it unblocked and the dispatcher told.
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  assert.equal((await watch.tick()).has('w3'), false, 'both still open');
+  store.work.get('w1')!.status = 'done';
+  assert.match((await watch.tick()).get('w3')!, /^clear: w1 closed as done/);
+  const half = store.work.get('w3')!;
+  assert.deepEqual([half.status, half.blocked?.ref, half.alsoBlocked], ['blocked', 'w2', undefined]);
+  assert.match(half.log.join('\n'), /w1 finishing cleared \(w1 closed as done\); still blocked on w2 finishing/);
+  assert.equal(heard(dispatcher().info.id, '[ledger] w3').length, 0, 'not told to start it while a gate is open');
+  store.work.get('w2')!.status = 'done';
+  await watch.tick();
+  assert.deepEqual([store.work.get('w3')!.status, store.work.get('w3')!.blocked], ['new', undefined]);
+  await until('the dispatcher is told to start it', () => heard(dispatcher().info.id, '[ledger] w3').some((e) => /is unblocked: it waited on w2 finishing/.test(e.text)));
+  // Now it starts without an override.
+  const ok = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Release it', title: 'w3: release', work_id: 'w3', override_duplicate: 'not a repeat of w4' });
+  assert.equal(ok.isError, false, ok.text);
+});
+
+test('w754: a gate that stalls stalls the request, naming that gate; one closed without delivering asks the requester, with no gate kept through the question', async (t) => {
+  const { store, agents, o, dispatcher, call } = setup(t);
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2', status: 'active' }, { id: 'w3' }, { id: 'w4' }, { id: 'w5', status: 'active' }]);
+  await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'block', note: 'x', blockers: [{ kind: 'request', ref: 'w1', what: 'w1 first' }, { kind: 'request', ref: 'w2', what: 'w2 first' }] });
+  await call(dispatcher().info, 'decide_work', { id: 'w4', action: 'block', note: 'x', blockers: [{ kind: 'request', ref: 'w1', what: 'w1 first' }, { kind: 'request', ref: 'w5', what: 'w5 first' }] });
+  const watch = new BlockerWatch({ store, orchestrators: o });
+  store.work.get('w2')!.status = 'stalled';
+  store.work.get('w2')!.stalled = { at: T0, kind: 'idle', reason: 'no activity for 26 hours' };
+  await watch.tick();
+  assert.equal(store.work.get('w3')!.status, 'stalled');
+  assert.match(store.work.get('w3')!.stalled!.reason, /^blocked on w2 finishing \(w2 first\): w2, which it waits on, stalled/);
+  assert.equal(store.work.get('w3')!.blocked, undefined, 'a stalled request keeps no gates');
+  assert.equal(store.work.get('w4')!.status, 'blocked', 'w4 does not wait on w2');
+  // w4: its first gate is cancelled instead.
+  store.work.get('w1')!.status = 'cancelled';
+  await watch.tick();
+  const w4 = store.work.get('w4')!;
+  assert.equal(w4.status, 'question');
+  assert.match(w4.question!.text, /^It was blocked on w1 finishing \(w1 first\), and w1 was cancelled/);
+  assert.deepEqual([w4.blocked, w4.alsoBlocked], [undefined, undefined]);
+});
+
+test('w754: a worker whose request waits only on a PR and another request calls blocked_on: Blocked, its check-in cancelled, no polling; cancel_wake and decide_work block cancel check-ins too; the gates clear one by one and resume it', async (t) => {
+  const { store, machines, agents, o, dispatcher, call, heard } = await setupOnMachine(t);
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2' }]);
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Release it', title: 'w2: release', work_id: 'w2' });
+  assert.equal(started.isError, false, started.text);
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  const info = store.sessions.get(id)!;
+  await until('its first turn', () => info.status === 'idle');
+  const m = store.machines.get('pc')!;
+  const h = machines.hooks!.handlersFor(info, m);
+  const spec = machines.hooks!.specFor(info, m);
+  for (const name of ['blocked_on', 'cancel_wake']) assert.ok(spec.mcp?.tools.find((x) => x.name === name), `a worker has ${name}`);
+  assert.match(spec.mcp!.tools.find((x) => x.name === 'blocked_on')!.description, /Never poll for them with wake_me and gh pr view/);
+  assert.match(spec.append, /## Waiting on other requests or pull requests[\s\S]*mcp__machine__blocked_on[\s\S]*Do NOT poll for it with `wake_me`/);
+  const live = async () => (await call(dispatcher().info, 'list_work', { id: 'w2' })).text;
+
+  // The bug: a worker polling every 20 minutes shows Working.
+  await h.wake_me!({ minutes: 20, note: "w2: check PR #1291 and w1's PR" });
+  assert.ok(agents.waker.pending(id));
+  assert.match(await live(), /Working/);
+  // cancel_wake takes the check-in back; a second call says there is none.
+  assert.match(String(await h.cancel_wake!({})), /^Cancelled your pending check-in \(\d\d:\d\d UTC: "w2: check PR #1291 and w1's PR"\)/);
+  assert.equal(agents.waker.pending(id), undefined);
+  assert.equal(String(await h.cancel_wake!({})), 'You had no check-in pending.');
+
+  // Bad calls say what is wrong.
+  await assert.rejects(async () => h.blocked_on!({ what: 'x' }), /name what it waits for: requests/);
+  await assert.rejects(async () => h.blocked_on!({ prs: ['#1291'], what: 'x' }), /"#1291" is not a pull request/);
+  await assert.rejects(async () => h.blocked_on!({ requests: ['w2'], what: 'x' }), /cannot be blocked on itself/);
+  await assert.rejects(async () => h.blocked_on!({ requests: ['w99'], what: 'x' }), /no request "w99"/);
+
+  // The real call, with a check-in left over: Blocked on both, the check-in cancelled.
+  await h.wake_me!({ minutes: 20, note: 'w2: still polling' });
+  const said = String(await h.blocked_on!({ requests: ['w1'], prs: ['https://github.com/Final-Factory/FinalFactory/pull/1291'], what: "w1's work and the Deck PR merged into develop" }));
+  assert.match(said, /^Recorded: w2 is Blocked on w1 finishing and PR Final-Factory\/FinalFactory#1291 merging\. Your pending check-in is cancelled\. End your turn now/);
+  assert.match(said, /Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you/);
+  assert.equal(agents.waker.pending(id), undefined, 'no polling check-in is left');
+  const w2 = store.work.get('w2')!;
+  assert.deepEqual([w2.status, w2.blocked?.by, w2.blocked?.kind, w2.alsoBlocked?.[0]?.kind], ['blocked', `worker ${id}`, 'request', 'pr']);
+  assert.match(w2.log.join('\n'), new RegExp(`worker ${id}: blocked on w1 finishing and PR Final-Factory/FinalFactory#1291 merging.*cancelled ${id}'s check-in \\(\\d\\d:\\d\\d UTC: "w2: still polling"\\)`));
+  const blocked = await live();
+  assert.match(blocked, /Blocked on w1 finishing, PR Final-Factory\/FinalFactory#1291 merging/);
+  assert.doesNotMatch(blocked, /Working/);
+  // A check-in set again (or left by an older worker) shows Blocked all the same, and blocking again from the dispatcher cancels it.
+  await h.wake_me!({ minutes: 20, note: 'w2: again' });
+  assert.match(await live(), /Blocked on w1 finishing/);
+  assert.equal((await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'block', note: 'keeping both gates' })).isError, false);
+  assert.equal(agents.waker.pending(id), undefined, "decide_work block cancelled the worker's check-in");
+  assert.match(store.work.get('w2')!.log.join('\n'), new RegExp(`dispatcher: blocked on w1 finishing and PR .*cancelled ${id}'s check-in \\(\\d\\d:\\d\\d UTC: "w2: again"\\)`));
+
+  // The PR merges: that gate goes, it stays Blocked on w1; then w1 closes: unblocked, and the dispatcher resumes the worker.
+  const watch = new BlockerWatch({ store, orchestrators: o, pr: async (ref) => ({ state: 'merged', text: `${ref} merged` }) });
+  assert.match((await watch.tick()).get('w2')!, /^clear: Final-Factory\/FinalFactory#1291 merged$/);
+  assert.deepEqual([store.work.get('w2')!.status, store.work.get('w2')!.blocked?.ref, store.work.get('w2')!.alsoBlocked], ['blocked', 'w1', undefined]);
+  assert.match(await live(), /Blocked on w1 finishing/);
+  store.work.get('w1')!.status = 'done';
+  await watch.tick();
+  assert.equal(store.work.get('w2')!.status, 'new');
+  await until('the dispatcher is told to resume the worker', () => heard(dispatcher().info.id, '[ledger] w2').some((e) => e.text.includes(`Start it now: start_agent with work_id "w2", or message_agent with work_id to its worker ${id}`)));
+  // The resume goes through, with no override: nothing is gated any more.
+  const resumed = await call(dispatcher().info, 'message_agent', { session_id: id, text: 'w1 and the PR merged: go on.', work_id: 'w2' });
+  assert.equal(resumed.isError, false, resumed.text);
+  assert.equal(store.work.get('w2')!.status, 'active');
 });

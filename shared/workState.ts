@@ -15,7 +15,7 @@
 // And a worker whose agent host never started (SessionInfo.hostFailure) is Blocked on its machine, not mid-turn.
 import type { SessionInfo, WorkItem } from './types.ts';
 import { agentState, hostFailureText } from './agentState.ts';
-import { blockerName } from './blockers.ts';
+import { gatesName, gatesOf } from './blockers.ts';
 
 export type WorkLiveState = 'working' | 'waiting' | 'queued' | 'blocked' | 'followup' | 'stalled';
 export const WORK_LIVE_STATES: readonly WorkLiveState[] = ['working', 'waiting', 'queued', 'blocked', 'followup', 'stalled'];
@@ -147,6 +147,13 @@ const ago = (iso: string | undefined, now: number) => {
   return m < 60 ? `${m} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
 };
 
+/** Blocked on a thing (w643): the gates it records, each named, with what the first waits for and who set it. */
+function blockedLive(gates: readonly NonNullable<WorkItem['blocked']>[], now: number): WorkLive {
+  const first = gates[0];
+  const more = gates.length > 1 ? `; also ${gates.slice(1).map((g) => g.what).join('; ')}` : '';
+  return { state: 'blocked', why: `${first.what}${more} (since ${ago(first.at, now)}, set by ${first.by})`, waitsOn: gates.map((g) => gatesName([g], now)) };
+}
+
 /** The live state of one request, or undefined once it is closed. */
 export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: string) => Set<string>): WorkLive | undefined {
   if (!live(w)) return undefined;
@@ -198,6 +205,12 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   const said = mine.map((s) => ({ s, p: personWaitIn(s.lastResult, w.id, people) })).find((x) => x.p);
   if (said && !(coming && coming.a.kind === 'job')) return { state: 'waiting', why: `${said.s.id}'s report says a person must act: "${said.p!.line.slice(0, 160)}"`, waitsOn: said.p!.who ? [said.p!.who] : names(w.requesters) };
 
+  // Blocked on its gates (w754): a request that waits on other requests or pull requests is Blocked, whatever check-ins its
+  // worker left behind (w750 showed "Working" for an hour while its worker polled gh every 20 minutes). Nothing a worker
+  // polls moves a gate. A job it runs meanwhile (CI, a build) is still work.
+  const gates = gatesOf(w);
+  if (w.status === 'blocked' && gates.length && !(coming && coming.a.kind === 'job')) return blockedLive(gates, f.now);
+
   if (coming) return { state: 'working', why: coming.a.state === 'stopped' ? `${coming.s.id} stopped until its ${coming.a.resumes}` : `${coming.s.id} between turns: ${coming.a.waitsOn}` };
 
   const decide = mine.find((s) => asksAPerson(s.lastResult));
@@ -209,7 +222,7 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, served?: (sessionId: str
   if (held) return { state: 'queued', why: `a message to ${held.s.id} waits for a free agent slot (${held.why})` };
 
   // Blocked on a thing (w643): the blocker it records.
-  if (w.status === 'blocked' && w.blocked) return { state: 'blocked', why: `${w.blocked.what} (since ${ago(w.blocked.at, f.now)}, set by ${w.blocked.by})`, waitsOn: [blockerName(w.blocked, f.now)] };
+  if (w.status === 'blocked' && gates.length) return blockedLive(gates, f.now);
 
   // Not decided yet: the dispatcher has it (its [work request] went out when it was filed or reopened).
   if (w.status === 'new') return { state: 'working', why: `the dispatcher has it to decide, since ${ago(w.updatedAt, f.now)}` };

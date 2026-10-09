@@ -7,7 +7,7 @@ import { WORK_LIVE_LABEL, WORK_LIVE_STATES, type WorkLive, type WorkLiveState } 
 import { WORK_OPEN, type WorkItem } from '../shared/types.ts';
 import { cleanBlock, cleanLine, sourceTag, UNTRUSTED_HEADER } from './intakeRules.ts';
 import { ledgerOrder, liveLine, names } from './work.ts';
-import { blockerName } from '../shared/blockers.ts';
+import { gatesName, gatesOf } from '../shared/blockers.ts';
 
 /**
  * The most an answer holds, in characters. Claude Code warns once an MCP result passes 10,000 tokens and saves a result
@@ -180,7 +180,7 @@ function facts(w: WorkItem): string[] {
     w.sessionIds.length ? `Workers: ${w.sessionIds.join(', ')}` : 'Workers: none yet',
     w.relatedIds?.length ? `Related: ${w.relatedIds.map((r) => cleanLine(r, 60)).join(', ')}` : '',
     w.ledgerRead ? `Grants ledger reading to its workers (set by ${w.ledgerRead.by} ${w.ledgerRead.at.slice(0, 16).replace('T', ' ')}).` : '',
-    w.status === 'blocked' && w.blocked ? `Blocked on ${cleanLine(blockerName(w.blocked), 120)}: ${cleanLine(w.blocked.what, 200)} (set by ${w.blocked.by} ${w.blocked.at.slice(0, 16).replace('T', ' ')}; it starts by itself when that clears).` : '',
+    w.status === 'blocked' && w.blocked ? `Blocked on ${cleanLine(gatesName(gatesOf(w)), 200)}: ${cleanLine(gatesOf(w).map((g) => g.what).join('; '), 300)} (set by ${w.blocked.by} ${w.blocked.at.slice(0, 16).replace('T', ' ')}; it starts by itself when ${w.alsoBlocked?.length ? 'all of them clear' : 'that clears'}).` : '',
   ].filter(Boolean);
 }
 
