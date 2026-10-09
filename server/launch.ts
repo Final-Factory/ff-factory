@@ -87,6 +87,15 @@ export const CATALOG = {
     minutes: z.number().int().min(1).max(1440).describe('How long until you are messaged again.'),
     note: z.string().describe('What to check or do when you wake: this comes back to you word for word.'),
   },
+  /** w754: cancel the worker's own pending wake_me check-in (it has one at a time). */
+  cancel_wake: {},
+  /** docs/orchestrators.md, "Waiting, Queued, Blocked" (w754): the worker says its request waits only on other requests or pull requests. */
+  blocked_on: {
+    requests: z.array(z.string().max(16)).max(6).optional().describe('Requests ("w727") that must close as done first. A request often closes later than its pull request merges: to wait for a merge, name the pull request in prs.'),
+    prs: z.array(z.string().max(200)).max(6).optional().describe('Pull requests that must MERGE first: "owner/repo#123" or the github.com link.'),
+    what: z.string().min(1).max(200).describe('What you wait for, in a line ("w727 PR #1291 and w752 fix merged into develop").'),
+    request: z.string().max(16).optional().describe('The request ("w750") that waits, when you serve several; default: the one you are on.'),
+  },
   /** docs/orchestrators.md, "Waiting, Queued, Blocked" (w691): the worker says only a person can move it on. */
   waiting_on_person: {
     who: z.string().min(1).max(120).describe('Whose action it waits on: a name ("Ben"), several separated by commas, or "a reviewer".'),

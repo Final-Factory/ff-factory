@@ -1,7 +1,7 @@
 // w643: what a Blocked request waits on, and when each kind of blocker clears, stays open, gets stuck or needs a person.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BLOCKER_STUCK_MS, blockerName, blockerProblem, blockerVerdict, type BlockerFacts } from '../shared/blockers.ts';
+import { BLOCKER_STUCK_MS, blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import type { WorkBlocker, WorkItem } from '../shared/types.ts';
 import { checksState } from './blockerWatch.ts';
 
@@ -133,4 +133,34 @@ test('w643: blocker names, as "Blocked on …" says them', () => {
   assert.equal(blockerName({ kind: 'request', ref: 'w633' }), 'w633 finishing');
   assert.equal(blockerName({ kind: 'deploy' }), 'a portal deploy');
   assert.equal(blockerName({ kind: 'time', until: '2026-10-08T06:00:00.000Z' }, NOW), '10-08 06:00 UTC');
+});
+
+test('w754: a pr blocker clears when the pull request merges, asks when it closed unmerged, and is stuck after a week; prRefOf takes a link', () => {
+  const pr = block({ kind: 'pr', ref: 'Final-Factory/FinalFactory#1291', what: 'the Deck screens PR' });
+  const state = (s: 'open' | 'merged' | 'closed') => facts([], { pr: () => ({ state: s, text: `Final-Factory/FinalFactory#1291 ${s}` }) });
+  assert.equal(blockerVerdict(pr, state('open')).state, 'open');
+  assert.deepEqual(blockerVerdict(pr, state('merged')), { state: 'clear', why: 'Final-Factory/FinalFactory#1291 merged' });
+  assert.match(blockerVerdict(pr, state('closed')).why, /closed without delivering the Deck screens PR/);
+  assert.equal(blockerVerdict(pr, state('closed')).state, 'decide');
+  assert.equal(blockerVerdict(pr, facts([])).state, 'open', 'unknown: still waiting');
+  assert.equal(blockerVerdict({ ...pr, at: ago(24 * 7) }, state('open')).state, 'stuck');
+  assert.equal(blockerName(pr), 'PR Final-Factory/FinalFactory#1291 merging');
+  assert.equal(prRefOf('https://github.com/Final-Factory/FinalFactory/pull/1291'), 'Final-Factory/FinalFactory#1291');
+  assert.equal(prRefOf('Final-Factory/FinalFactory#1291'), 'Final-Factory/FinalFactory#1291');
+  assert.equal(prRefOf('#1291'), undefined, 'no repo: not a reference');
+  assert.match(blockerProblem({ kind: 'pr', what: 'x', ref: '#1291' }, 'w750', facts([]))!, /owner\/repo#123/);
+});
+
+test('w754: a request with several gates is named by all of them; gates are the same wait by kind and reference', () => {
+  const a = block({ kind: 'request', ref: 'w752' });
+  const b = block({ kind: 'pr', ref: 'Final-Factory/FinalFactory#1291' });
+  assert.deepEqual(gatesOf({}), []);
+  assert.deepEqual(gatesOf({ blocked: a, alsoBlocked: [b] }), [a, b]);
+  assert.equal(gatesName([a, b]), 'w752 finishing and PR Final-Factory/FinalFactory#1291 merging');
+  assert.equal(gatesName([a, b, block({ kind: 'deploy' })]), 'w752 finishing, PR Final-Factory/FinalFactory#1291 merging and a portal deploy');
+  assert.equal(sameGate(a, { kind: 'request', ref: 'W752' }), true);
+  assert.equal(sameGate(a, b), false);
+  // Two requests waiting on each other through a second gate are caught too.
+  const work = [item('w750', { status: 'blocked', blocked: block({ kind: 'request', ref: 'w1' }), alsoBlocked: [block({ kind: 'request', ref: 'w752' })] }), item('w752')];
+  assert.match(blockerProblem({ kind: 'request', ref: 'w750', what: 'x' }, 'w752', facts(work))!, /wait on each other/);
 });
