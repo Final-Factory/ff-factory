@@ -34,7 +34,8 @@ import { CleanupRunner, DEFAULT_CLEANUP, appendCleanupLog, staleAtFile, biggestC
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
-import { hubEditorDirs, hubListedEditors } from './unity.ts';
+import { hubEditorDirs, hubListedEditors, realDeps as realUnityDeps } from './unity.ts';
+import { UnityReaper, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
 import { DaemonVoice, type DaemonVoiceSettings } from './voice.ts';
@@ -253,6 +254,8 @@ export class Daemon {
   readonly pool: SandboxPool;
   /** Every Unity editor on the machine against max_unity, and the queue for launches (machine/unitySlots.ts, w469). */
   readonly slots: UnitySlots;
+  /** Ends a sandbox's orphaned or hung batch build, which would hold its Unity slot for hours (machine/unityReaper.ts, w791). */
+  readonly reaper: UnityReaper;
   /** Where the `unity-slot` commands are, once written (first on agents' PATH). */
   private slotBin?: string;
   private lastSlotTick = 0;
@@ -274,7 +277,7 @@ export class Daemon {
   guard?: MachineGuard;
   private readonly guardEffects?: MachineGuardEffects;
 
-  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>) {
+  constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps) {
     this.cfg = cfg;
     this.guardEffects = guardEffects;
     this.probes = probes;
@@ -300,6 +303,21 @@ export class Daemon {
         this.send({ type: 'sandbox_event', text: `Unity slots: ${text}` });
       },
     });
+    // A test's daemon (poolDeps given) never kills real processes: its reaper sees none unless the test hands it deps.
+    const reaperHands = {
+      places: () => this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
+      log: (line: string) => log(line),
+      onEvent: (text: string) => {
+        this.send({ type: 'sandbox_event', text: `Unity batch build: ${text}` });
+      },
+      afterKill: () => this.slots.tick(),
+    };
+    this.reaper = new UnityReaper(
+      reaperDeps ??
+        (poolDeps
+          ? { ...realReaperDeps(platform, realUnityDeps(platform), reaperHands), procs: async () => [], inspect: async () => [] }
+          : realReaperDeps(platform, { ...realUnityDeps(platform), procs: () => pd.procs() }, reaperHands)),
+    );
     this.pool = new SandboxPool(
       {
         repoPath: cfg.repoPath,
@@ -572,6 +590,8 @@ export class Daemon {
     }
     this.timers.push(setInterval(() => void this.slotTick(), 5_000));
     void this.slotTick();
+    // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
+    this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
     // Each agent's Unity MCP server finds only its own place's editor (machine/unityMcp.ts).
     const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
     log(mcp.server ? `unity mcp: ${mcp.server.command} ${mcp.server.args.join(' ')} (from ${mcp.source})` : `unity mcp: none (${mcp.source}); agents here get no Unity MCP bridge`);
@@ -1380,6 +1400,13 @@ export class Daemon {
         // An older portal may still ask for the main clone's editor: the daemon manages none there (w536).
         if (!msg.sandbox) {
           this.send({ type: 'unity_result', id: msg.id, ok: false, text: MAIN_CLONE_NO_AGENTS });
+          return;
+        }
+        if (msg.action === 'clear_batch') {
+          void this.reaper.check().then(
+            (text) => this.send({ type: 'unity_result', id: msg.id, ok: true, text }),
+            (err) => this.send({ type: 'unity_result', id: msg.id, ok: false, text: `could not look for stuck batch builds: ${(err as Error).message}` }),
+          );
           return;
         }
         void this.pool.unity(msg.sandbox, msg.action, msg.force).then(

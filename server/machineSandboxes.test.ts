@@ -459,6 +459,14 @@ test('machine sandboxes: create, run agents (per-sandbox limit), drive the edito
   await until('the snapshot shows it', () => mm.requireSandbox('pc', 'sb1').unity.state !== 'stopped');
   await assert.rejects(mm.switchBranch('pc', 'feature/z', undefined, 'sb1'), /is running: stop it first/);
   await mm.unity('pc', 'stop', false, 'sb1');
+  // w791: a worker's clear_batch reaches the daemon's reaper (this daemon's process list is empty: it kills nothing real);
+  // a daemon of protocol 8 would start the editor on an action it does not know, so the portal never sends it one.
+  assert.match(await mm.unity('pc', 'clear_batch', false, 'sb1'), /No batch-mode Unity builds are running in any sandbox/);
+  const hello = (mm as unknown as { hellos: Map<string, { protocol: number }> }).hellos.get('pc')!;
+  const proto = hello.protocol;
+  hello.protocol = 8;
+  await assert.rejects(mm.unity('pc', 'clear_batch', false, 'sb1'), /speaks protocol 8 and cannot clear stuck batch builds \(needs 9\)/);
+  hello.protocol = proto;
   const sw = await mm.switchBranch('pc', 'feature/z', undefined, 'sb1');
   assert.equal(sw.to, 'feature/z');
   assert.equal(r.git(r.main, 'branch', '--show-current'), 'develop', 'the main clone stays where it was');

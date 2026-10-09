@@ -9,7 +9,8 @@
 // while it waits or holds; the daemon answers grant-<id>.json or deny-<id>.json. A request takes all its slots at once
 // or none. Waiting requests from holders (a sandbox whose editor runs, a run that already holds slots) go first, then
 // new requesters, oldest first. Process counting is the backstop: Unity started outside the gate counts all the same,
-// so nothing more is granted while the machine is over its limit. Nothing here ever kills a Unity process.
+// so nothing more is granted while the machine is over its limit. Nothing here kills a Unity process; the orphaned and hung
+// batch builds that would hold a slot for hours are ended by machine/unityReaper.ts (w791).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

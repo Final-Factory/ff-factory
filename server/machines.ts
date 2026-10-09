@@ -12,7 +12,7 @@ import { emit, type Store } from './store.ts';
 import { isMidTurn, type SessionHandle, type SessionManager } from './sessions.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
-import { ATTACHMENT_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
+import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonSandbox, type FromDaemon, type ToDaemon } from './machineProtocol.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
@@ -1958,10 +1958,16 @@ export class MachineManager {
   maxEvent?: (machineId: string, line: string) => void;
 
   /** Status, start, stop or restart the Unity editor of a machine's sandbox, on the machine (machine/unity.ts). */
-  unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart', force?: boolean, sandbox?: string) {
+  unity(machineId: string, action: 'status' | 'start' | 'stop' | 'restart' | 'clear_batch', force?: boolean, sandbox?: string) {
     const m = this.require(machineId);
     if (!sandbox) throw new Error(MAIN_CLONE_NO_AGENTS);
     if (!this.isOnline(m.id)) throw new Error(`machine ${m.id} is offline`);
+    // A daemon from before protocol 9 would start the sandbox's editor on an action it does not know.
+    const proto = this.hellos.get(m.id)?.protocol ?? 0;
+    if (action === 'clear_batch' && proto < BATCH_CLEAR_PROTOCOL) {
+      this.checkOutdated();
+      return Promise.reject(new Error(`${m.id}'s daemon speaks protocol ${proto} and cannot clear stuck batch builds (needs ${BATCH_CLEAR_PROTOCOL}): it is redeployed once no agent runs there. Ask your orchestrator to have a person end the build through the ops worker meanwhile.`));
+    }
     // Never a sandbox field to a daemon that would ignore it and act on the main clone.
     const sb = (this.requireSandboxDaemon(m.id), this.requireSandbox(m.id, sandbox).id);
     return new Promise<string>((resolve, reject) => {

@@ -25,12 +25,15 @@ import type { AttachmentRef, CleanupSummary, HostHealth, HostStats, ImageFile, I
  * 8: `relocate` (w466, docs/machines.md "Moving the portal"): a connected daemon is told the portal's new URL, keeps it
  * in its daemon.json and dials it, its agents running on; it falls back to the URL before if the new one never answers. * Also (w466, unreleased with it): `guard` in the hello, a daemon running the host guard (machine/hostGuard.ts: BEAST's
  * sandbox drive, its disks, the browser reaper), and its `host_report` and `host_health` messages.
+ * 9: `clear_batch` as a `unity` action (w791): the daemon looks for the sandboxes' orphaned or hung `-batchmode` builds that
+ * hold Unity slots and ends them. A protocol-8 daemon would take any unknown action for a start of the sandbox's editor,
+ * so the portal never sends it one.
  * Also (w615, no bump): a daemon's GPU Whisper, `voice` in the hello and `voice` status messages, which an older portal
  * ignores, and `transcribe`/`voice_warm`, which the portal sends only to a daemon that offered it.
  * Also (w656, no bump): `saveWork` in the hello and `save_work`, sent only to a daemon that offered it, answered by
  * `save_result`, which an older portal never asks for and drops.
  */
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 /**
  * The oldest daemon protocol this portal still drives (w605). A daemon is versioned by this protocol, not by the commit
@@ -65,6 +68,9 @@ export const ADOPT_PROTOCOL = 6;
 
 /** The oldest protocol that fetches attachments (docs/attachments.md). */
 export const ATTACHMENT_PROTOCOL = 7;
+
+/** The oldest protocol that ends orphaned and hung batch builds on request (`unity clear_batch`, w791). */
+export const BATCH_CLEAR_PROTOCOL = 9;
 
 /** The oldest protocol that follows the portal to a new URL without a redeploy (`relocate`, w466). */
 export const RELOCATE_PROTOCOL = 8;
@@ -134,7 +140,7 @@ export type ToDaemon =
   | { type: 'decide'; sessionId: string; requestId: string; allow: boolean; message?: string }
   | { type: 'rpc_result'; id: string; ok: boolean; text: string }
   /** The Unity editor of the machine's clone (machine/unity.ts); answered by unity_result. */
-  | { type: 'unity'; id: string; action: 'status' | 'start' | 'stop' | 'restart'; force?: boolean; sandbox?: string }
+  | { type: 'unity'; id: string; action: 'status' | 'start' | 'stop' | 'restart' | 'clear_batch'; force?: boolean; sandbox?: string }
   /** Watch this portal's host from outside (machine/outsideWatch.ts); null: this machine does not watch. Kept on the Mac. */
   | { type: 'outside_watch'; config: OutsideWatchConfig | null }
   /** The daemon's clean-up settings (server/cleanup.ts), at connect and when they change. Kept on the machine. */

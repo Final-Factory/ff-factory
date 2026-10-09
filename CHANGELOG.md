@@ -10,6 +10,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Orphaned and hung `-batchmode` builds no longer hold a sandbox's Unity slot for hours** (w791, Ben's rule that the harness learns from a
+  repeated problem). Twice on 2026-10-09 a person had to approve killing one by hand: LothDesktop pid 3856 (a nightly prepare build of
+  slot4, hung for 3.5 h on a second bee_backend, its script alive) and m5 pid 81390 (a worker's Mac build, 15 h old, parent pid 1).
+  The daemon now looks once a minute at the top-level batch Unity processes of its sandboxes (never an interactive editor, never a
+  project that is not a sandbox) and ends one whose owner is gone and that shows no log or CPU progress for 10 min (or runs 90 min), or
+  whose owner is alive but that has run an hour with no progress for 30 min. It kills the tree, removes the stale `Temp/UnityLockfile`,
+  frees the slot at once and tells the orchestrator. Workers waiting on a slot call `unity` with `action: "clear_batch"`
+  to run the check now and hear why each build stays. Protocol 9. The limits are measured against 15 healthy builds (4.5 to 36.9 min)
+  and widened by guess ([docs/unity-lifecycle.md](docs/unity-lifecycle.md), "Orphaned and hung batch builds"). Needs a portal deploy and
+  each machine's daemon at this version.
+
 - **A worker on any machine can fetch a Discord bug thread's files, with no Discord token on its machine** (w787, Ben: "we should
   have some workers that can download attachments. if not lets fix it"; "no discord token on beast, max has to live in ffbox
   for security reasons"). Bug Bot's runtime log and the `BugReport_*.zip` save were downloadable only where the `ffdiscord`

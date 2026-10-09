@@ -103,7 +103,7 @@ export const CATALOG = {
     request: z.string().max(16).optional().describe('The request ("w665") it is about, when you serve several; default: all of them.'),
   },
   unity: {
-    action: z.enum(['status', 'start', 'stop', 'restart']),
+    action: z.enum(['status', 'start', 'stop', 'restart', 'clear_batch']),
     force: z.boolean().optional().describe('stop/restart: kill the editor at once instead of asking it to quit first (a frozen editor ignores that).'),
   },
   switch_branch: {
