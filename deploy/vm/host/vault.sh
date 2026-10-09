@@ -61,7 +61,9 @@ vault_key_copy() {
 }
 
 # vault_sync: every person's tokens from this host into the VM's vault, the entries whose file is gone removed, and the
-# key's spare copy brought up to date. Returns 1 when something was skipped (each said why), 0 otherwise.
+# key's spare copy brought up to date. Returns 1 when something was skipped (each said why), 0 otherwise. The installer's
+# sync (guest.sh) and `fff-vm vault-sync` run this one function; install.sh keeps the installed copy of this file in step with
+# the checkout in every mode (install_host_scripts, lib.sh). An entry whose file exists is never removed.
 vault_sync() {
   local dir person lower name rc=0 kind file
   local -a synced=()
@@ -93,23 +95,37 @@ vault_sync() {
         file=${item#*|}
         name=${file#*|}
         file=${file%%|*}
-        [ -s "$file" ] || continue
+        [ -f "$file" ] || continue
         chmod 0600 "$file"
+        # Named before it is checked: an entry whose file exists is never removed, even when the file is not a token now (a bad paste).
+        synced+=("$name")
         if ! vault_value_ok "$kind" "$file"; then
           warn "vault: $file is not $([ "$kind" = claude ] && echo "one 'claude setup-token' token (sk-ant-oat01-...)" || echo 'one fine-grained GitHub token (github_pat_...)'); skipped (its content is not shown)"
           rc=1
           continue
         fi
-        synced+=("$name")
         vault_put "$name" "$kind" "$person" "$file" || rc=1
       done
     done
   fi
-  for name in $(vssh 'sudo fffctl vault list --names'); do
-    case "$name" in host-*) ;; *) continue ;; esac
-    [[ " ${synced[*]} " == *" $name "* ]] && continue
-    vssh "sudo fffctl vault remove $name" >/dev/null && log "vault: removed $name (its file is gone from $VAULT_PEOPLE)"
+  # Entries whose file is gone are removed. A scan that found no token file at all while the vault holds host-* entries is
+  # not trusted (a folder that moved, a script that does not know a layout: w744 removed a whole pool this way): nothing is
+  # removed then, unless `fff-vm vault-sync --prune` says so.
+  local -a held=()
+  local listed
+  listed=$(vssh 'sudo fffctl vault list --names') || listed=""
+  for name in $listed; do
+    case "$name" in host-*) held+=("$name") ;; esac
   done
+  if [ ${#held[@]} -gt 0 ] && [ ${#synced[@]} -eq 0 ] && [ "${VAULT_PRUNE:-0}" != 1 ]; then
+    warn "vault: found no token file under $VAULT_PEOPLE (claude-token, claude-tokens/<name>, github-token) but the vault holds ${held[*]}: removed none. If every person's files are really gone, run: sudo fff-vm vault-sync --prune"
+    rc=1
+  else
+    for name in "${held[@]}"; do
+      [[ " ${synced[*]} " == *" $name "* ]] && continue
+      vssh "sudo fffctl vault remove $name" >/dev/null && log "vault: removed $name (its file is gone from $VAULT_PEOPLE)"
+    done
+  fi
   vault_key_copy || rc=1
   return "$rc"
 }

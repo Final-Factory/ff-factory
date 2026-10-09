@@ -572,9 +572,7 @@ run_cmd virsh --connect qemu:///system autostart "$VM_NAME"
 
 # ---------------------------------------------------------------- 10. runtime: fff-vm, hang detection, nightly, events
 log "10/12 fff-vm, hang detection, nightly reboot and alerts"
-run_cmd install -d -m 0755 /usr/local/lib/fff-vm
-for f in lib.sh pathwatch.sh vault.sh fff-vm.conf.example; do write_file "/usr/local/lib/fff-vm/$f" 0644 <"$here/$f" >/dev/null; done
-write_file /usr/local/sbin/fff-vm 0755 <"$here/fff-vm" >/dev/null
+install_host_scripts "$here"
 [ -f "$NTFY_URL_FILE" ] || warn "no $NTFY_URL_FILE: alerts are logged only. Put the ntfy URL with FF Factory's outside-watch topic there (one line, chmod 600)"
 changed=""
 for u in fff-vm-watch.service fff-vm-nightly.service fff-vm-events.service; do
@@ -629,6 +627,13 @@ if [ "$WAIT" = 1 ] && [ "$DRY_RUN" != 1 ] && [ "$START" = 1 ]; then
 fi
 
 fi # HOST
+
+# The installed fff-vm and its libraries stay in step with this checkout in every mode (w744): --guest-only skipped them, and
+# `sudo fff-vm vault-sync` then ran an older vault.sh than the installer's own sync did.
+if [ "$HOST" = 0 ]; then
+  log "the host scripts (fff-vm, vault.sh, ...) follow this checkout"
+  install_host_scripts "$here"
+fi
 
 if [ "$GUEST" = 1 ]; then
   guest_setup "$BUNDLE"
