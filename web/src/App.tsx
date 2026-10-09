@@ -241,7 +241,7 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   // The Claude token pools (w739): a person's tokens used up or over their caps, and runs inside the dispatcher's reserve.
   // The text names no token but its last four characters; a banner returns when its text changes.
   for (const w of tokenWarnings) {
-    bars.push({ key: `token-${w.id}`, kind: w.kind === 'exhausted' ? 'error' : 'warn', lead: w.kind === 'reserve' ? 'The dispatcher\'s Claude token buffer is in use.' : w.kind === 'exhausted' ? 'A Claude token pool is used up.' : 'A Claude token pool is over its caps.', rest: w.text });
+    bars.push({ key: `token-${w.id}`, kind: w.kind === 'exhausted' ? 'error' : 'warn', lead: w.kind === 'reserve' ? 'The dispatcher\'s Claude token buffer is in use.' : w.kind === 'exhausted' ? 'All your Claude tokens are used up.' : 'All your Claude tokens are at a limit.', rest: w.text });
   }
   if (host.drain) {
     const d = host.drain;
