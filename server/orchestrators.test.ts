@@ -297,10 +297,10 @@ test("w431: a worker another person started, linked to Ben's request, takes Ben'
   assert.equal(untitled.isError, true);
   assert.match(untitled.text, /title: what the job is/);
   assert.equal(v.info.title, 'Inventory look', 'nothing sent, nothing renamed');
-  const sent = await call(dispatcher().info, 'message_agent', { session_id: v.info.id, text: 'Take w1 too.', work_id: 'w1', title: 'switch_branch refusals' });
+  // v has nothing in hand, so the dispatcher's link puts it on w1 (w740: link is the same-work mark) and names the job.
+  const sent = await call(dispatcher().info, 'decide_work', { id: 'w1', action: 'link', note: 'Same work.', session_ids: [v.info.id], title: 'switch_branch refusals' });
   assert.equal(sent.isError, false, sent.text);
   assert.equal(v.info.title, 'w1: switch_branch refusals');
-  assert.match(sent.text, /It is now "w1: switch_branch refusals"/);
   const said = (id: string) => store.readTranscript(id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text);
   // Linked by the dispatcher's work_id: Ben's orchestrator may follow up, and the worker reads which request it is about.
   const r = await call(ben, 'message_agent', { session_id: v.info.id, text: 'Push it now, GitHub works again.' });
@@ -1472,7 +1472,7 @@ test('w575: a worker is titled for each request it is handed (start, link) and k
   const { dir, store, sessions, dispatcher, chat, call } = await setupOnMachine(t);
   const ben = chat(BEN).info;
   await call(ben, 'request_work', { title: 'Install LothDesktop from scratch', brief: 'Wipe and reinstall the worker root.' });
-  await call(ben, 'request_work', { title: 'Fix the dashboard labels', brief: 'Titles follow the job.' });
+  await call(ben, 'request_work', { title: 'Fix the dashboard labels', brief: 'Titles follow the job.', related_ids: ['w1'] });
   // The dispatcher always names the job: no title, no start.
   const untitled = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Reinstall', work_id: 'w1' });
   assert.equal(untitled.isError, true);
@@ -1761,4 +1761,220 @@ test('w694: a delegated request lets its worker merge a clear bug fix or a tests
   assert.match(c, /never master or main: never push to develop directly and never force-push/);
   assert.match(c, /spends money, publishes or posts outside, changes a live setting, releases or deploys needs a person in their own words/);
   assert.match(c, /Suggested worker: sonnet, high effort/);
+});
+
+// ---------------------------------------------------------------- w740: one session per request
+
+const firstSaid = (store: Store, id: string) => (store.readTranscript(id).find((e) => e.kind === 'user') as { text: string } | undefined)?.text ?? '';
+
+test('w740: an unrelated request sent to an idle worker on another request starts a NEW session in the same sandbox, with a handover; the old one keeps its request', async (t) => {
+  const { store, sessions, o, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Fix the belt splitter', brief: 'Splitters drop items.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the splitter', title: 'Splitter fix', work_id: 'w1' });
+  const old = /Started agent (\w+)/.exec(started.text)![1];
+  await until('the first worker idle', () => sessions.get(old).info.status === 'idle');
+  const w1 = store.work.get('w1')!;
+  w1.prs = [{ repo: 'Final-Factory/FinalFactory', number: 12, state: 'open', via: 'line' }];
+  store.putWork(w1);
+  await call(ben, 'request_work', { title: 'Rewrite the tutorial text', brief: 'Nothing to do with belts.' });
+
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: old, text: 'Now do w2.', work_id: 'w2', title: 'Tutorial text' });
+  assert.equal(sent.isError, false, sent.text);
+  const fresh = /Started a NEW session (\w+)/.exec(sent.text)?.[1];
+  assert.ok(fresh && fresh !== old, sent.text);
+  assert.match(sent.text, /unrelated: nothing ties it to what this worker did/, 'the reply says which way it went and why');
+  assert.deepEqual(store.work.get('w2')!.sessionIds, [fresh], 'w2 is on the new session only');
+  assert.deepEqual(store.work.get('w1')!.sessionIds, [old], 'w1 stays on its own session');
+  assert.match(store.work.get('w2')!.log.join('\n'), /session choice: a NEW session instead of worker \w+'s; unrelated: nothing ties it/, "the request's log says it too");
+  // The same sandbox, a different conversation and process.
+  assert.equal(sessions.get(fresh).info.machineSandbox, 'alpha');
+  assert.equal(sessions.get(fresh).info.machineId, sessions.get(old).info.machineId);
+  assert.equal(sessions.get(fresh).info.title, 'w2: Tutorial text');
+  assert.equal(store.sessions.get(old)!.title, 'w1: Splitter fix', 'the old session is not retitled');
+  assert.ok(!store.readTranscript(old).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('Now do w2.')), 'nothing of w2 went into the old conversation');
+  // The first message: the dispatcher's text, the request as filed, the handover with the sandbox and the old session.
+  await until('its first message', () => !!firstSaid(store, fresh));
+  const first = firstSaid(store, fresh);
+  assert.match(first, /^Now do w2\./);
+  assert.match(first, /The request as filed \(w2/);
+  assert.match(first, /this is a NEW session for w2/);
+  assert.match(first, /Sandbox pc\/alpha: /);
+  assert.match(first, new RegExp(`last used by session ${old} "w1: Splitter fix", on w1 `));
+  assert.match(first, /`Request: w2`/);
+  // The old session still has w1 in hand: it keeps running.
+  assert.notEqual(sessions.get(old).info.status, 'stopped');
+  assert.match(sent.text, new RegExp(`${old} is left running \\(still on w1\\)`));
+  assert.equal(o.handsOf(old).map((w) => w.id).join(), 'w1');
+});
+
+test("w740: a related request stays in the session that did the earlier work: it names the request, is about its PR or branch, or the dispatcher says so", async (t) => {
+  const { store, sessions, o, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Fix the belt splitter', brief: 'Splitters drop items.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix the splitter', title: 'Splitter fix', work_id: 'w1' });
+  const old = /Started agent (\w+)/.exec(started.text)![1];
+  await until('idle', () => sessions.get(old).info.status === 'idle');
+  const w1 = store.work.get('w1')!;
+  w1.prs = [{ repo: 'Final-Factory/FinalFactory', number: 12, state: 'merged', head: 'w1-splitter-fix', via: 'line' }];
+  store.putWork(w1);
+  const workers = () => [...store.sessions.values()].filter((s) => s.kind === 'worker').length;
+  const send = (id: string, extra: Record<string, unknown> = {}) => call(dispatcher().info, 'message_agent', { session_id: old, text: `Do ${id}.`, work_id: id, title: `Job ${id}`, ...extra });
+  const said = () => store.readTranscript(old).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text);
+
+  // 1. It names w1 in related_ids: a fix for a regression the worker just shipped.
+  await call(ben, 'request_work', { title: 'Splitter regression', brief: 'The merged fix broke the merger.', related_ids: ['w1'] });
+  const r2 = await send('w2');
+  assert.equal(r2.isError, false, r2.text);
+  assert.doesNotMatch(r2.text, /NEW session/);
+  assert.match(r2.text, /Same session \(related: it names w1 "Fix the belt splitter" in related_ids\)/);
+  assert.equal(workers(), 1, 'no session started');
+  assert.deepEqual(store.work.get('w2')!.sessionIds, [old]);
+  assert.match(store.work.get('w2')!.log.join('\n'), /session choice: sent to worker \w+'s session; related: it names w1/);
+  await until('it reached the session', () => said().some((x) => x.includes('Do w2.')));
+  const got = said().find((x) => x.includes('Do w2.'))!;
+  assert.match(got, /\[session\] w2 came to this session, not a new one: related: /);
+  assert.match(got, /The request as filed \(w2/);
+  assert.doesNotMatch(got, /Handover/);
+
+  // 2. It is about the PR of w1, not naming w1.
+  await until('idle again', () => sessions.get(old).info.status === 'idle');
+  await call(ben, 'request_work', { title: 'Correct the splitter PR description', brief: 'PR #12 lacks its evidence section.' });
+  const r3 = await send('w3');
+  assert.match(r3.text, /Same session \(related: it is about PR #12, which is w1 "Fix the belt splitter"'s\)/, r3.text);
+  assert.equal(workers(), 1);
+
+  // 3. It is about the branch of w1's PR.
+  await until('idle again', () => sessions.get(old).info.status === 'idle');
+  o.personWrote(ben.id);
+  await call(ben, 'request_work', { title: 'Tidy the branch', brief: 'Rebase w1-splitter-fix onto develop.' });
+  const r4 = await send('w4');
+  assert.match(r4.text, /Same session \(related: it is about the branch w1-splitter-fix, which is w1 "Fix the belt splitter"'s\)/, r4.text);
+
+  // 4. Ambiguous: the dispatcher decides, and must say why. Overruling "unrelated" with 'same'...
+  await until('idle again', () => sessions.get(old).info.status === 'idle');
+  await call(ben, 'request_work', { title: 'Add a splitter tooltip', brief: 'Show the priority on hover.' });
+  const noWhy = await send('w5', { session: 'same' });
+  assert.equal(noWhy.isError, true);
+  assert.match(noWhy.text, /session "same" overrules the server's reading \(the server read it as unrelated: nothing ties it.*say why in session_reason/);
+  const same = await send('w5', { session: 'same', session_reason: 'the tooltip is the next step of the splitter work' });
+  assert.equal(same.isError, false, same.text);
+  assert.match(same.text, /Same session \(the dispatcher chose the same session: the tooltip is the next step of the splitter work \(the server read it as unrelated: nothing ties it/);
+  assert.equal(workers(), 1, 'the dispatcher kept it in the session');
+  assert.match(store.work.get('w5')!.log.join('\n'), /session choice: sent to worker \w+'s session; the dispatcher chose the same session: the tooltip/);
+
+  // 5. ... and overruling "related" with 'new': it starts a new session, whose handover lists the request and its PR.
+  await until('idle again', () => sessions.get(old).info.status === 'idle');
+  o.personWrote(ben.id);
+  await call(ben, 'request_work', { title: 'Splitter docs', brief: 'Write the doc page.', related_ids: ['w1'] });
+  const fresh = await send('w6', { session: 'new', session_reason: 'a docs job, big enough to want clean context' });
+  assert.equal(fresh.isError, false, fresh.text);
+  const id = /Started a NEW session (\w+)/.exec(fresh.text)![1];
+  assert.match(fresh.text, /the dispatcher chose a new session: a docs job, big enough to want clean context \(the server read it as related: it names w1/);
+  await until('its first message', () => !!firstSaid(store, id));
+  assert.match(firstSaid(store, id), /- w1 "Fix the belt splitter" \(active; PRs: #12 merged\)/);
+  assert.equal(workers(), 2);
+});
+
+test('w740: the old session is stopped once it has nothing else in hand: now when idle, at its turn end when mid-turn', async (t) => {
+  shortSlowTurns(t);
+  const { store, agents, sessions, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Check the tooltips', brief: 'Look at them.' });
+  const idle = agents.startWorker({ sandbox: 'pc/alpha', prompt: 'Hello', title: 'Idle', from: 'human', requestedBy: BEN });
+  await until('idle', () => idle.info.status === 'idle');
+  const a = await call(dispatcher().info, 'message_agent', { session_id: idle.info.id, text: 'Take w1.', work_id: 'w1', title: 'Tooltips' });
+  assert.equal(a.isError, false, a.text);
+  assert.match(a.text, new RegExp(`${idle.info.id} is stopped \\(nothing else in hand\\)`));
+  await until('the idle worker stopped', () => store.sessions.get(idle.info.id)!.status === 'stopped');
+
+  // A worker mid-turn on nothing the ledger holds is left alone, and stopped by the turn end that finds it free.
+  await call(ben, 'request_work', { title: 'Check the labels', brief: 'Look at them too.' });
+  const busy = agents.startWorker({ sandbox: 'pc/alpha', prompt: '#slow', title: 'Busy', from: 'human', requestedBy: BEN });
+  await until('running', () => busy.info.status === 'running');
+  const b = await call(dispatcher().info, 'message_agent', { session_id: busy.info.id, text: 'Take w2.', work_id: 'w2', title: 'Labels' });
+  assert.equal(b.isError, false, b.text);
+  assert.match(b.text, new RegExp(`${busy.info.id} is left running \\(mid-turn\\)`));
+  assert.equal(sessions.get(busy.info.id).info.status, 'running', 'its turn goes on');
+  await until('the busy worker stopped at its turn end', () => store.sessions.get(busy.info.id)!.status === 'stopped', 8000);
+});
+
+test('w740: a new request sent to a worker mid-turn on its own request starts a new session and leaves the busy one running', async (t) => {
+  shortSlowTurns(t);
+  const { store, sessions, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Slow job', brief: 'Takes a while.' });
+  await call(ben, 'request_work', { title: 'Other job', brief: 'Something else.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: '#slow', title: 'Slow', work_id: 'w1' });
+  const old = /Started agent (\w+)/.exec(started.text)![1];
+  await until('running', () => sessions.get(old).info.status === 'running');
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: old, text: 'Do w2.', work_id: 'w2', title: 'Other job' });
+  assert.equal(sent.isError, false, sent.text);
+  const fresh = /Started a NEW session (\w+)/.exec(sent.text)![1];
+  assert.notEqual(fresh, old);
+  assert.equal(sessions.get(old).info.status, 'running', 'mid-turn on its own request: left alone');
+  assert.equal(store.work.get('w2')!.sessionIds.join(), fresh);
+  await until('its first message', () => !!firstSaid(store, fresh));
+  assert.match(firstSaid(store, fresh), /^Do w2\./);
+  // Nothing of w2 queued behind the old turn.
+  assert.equal(store.sessions.get(old)!.queuedSend, undefined);
+});
+
+test('w740: updates to a request stay in its session: a message with the same work_id, no new session', async (t) => {
+  const { store, sessions, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Fix the belt splitter', brief: 'Splitters drop items.' });
+  const started = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix it', title: 'Splitter fix', work_id: 'w1' });
+  const id = /Started agent (\w+)/.exec(started.text)![1];
+  await until('idle', () => sessions.get(id).info.status === 'idle');
+  const before = [...store.sessions.values()].filter((s) => s.kind === 'worker').length;
+  const note = await call(dispatcher().info, 'message_agent', { session_id: id, text: 'Ben added a note: also check the merger.', work_id: 'w1' });
+  assert.equal(note.isError, false, note.text);
+  assert.doesNotMatch(note.text, /NEW session/);
+  assert.equal([...store.sessions.values()].filter((s) => s.kind === 'worker').length, before, 'no session started');
+  await until('the note reached the session', () => store.readTranscript(id).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('also check the merger')));
+  assert.deepEqual(store.work.get('w1')!.sessionIds, [id]);
+  // Not handed as a new request: no request-as-filed block, no handover.
+  const sent = store.readTranscript(id).filter((e) => e.kind === 'user').map((e) => (e as { text: string }).text).at(-1)!;
+  assert.doesNotMatch(sent, /The request as filed|Handover/);
+});
+
+test('w740: start_agent into the same sandbox for another request is a second session there, with its own handover', async (t) => {
+  const { store, sessions, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'First job', brief: 'One.' });
+  await call(ben, 'request_work', { title: 'Second job', brief: 'Two.', related_ids: ['w1'] });
+  const one = /Started agent (\w+)/.exec((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'One', title: 'First', work_id: 'w1' })).text)![1];
+  const r2 = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Two', title: 'Second', work_id: 'w2', override_duplicate: 'w2 is the regression test for w1, not a repeat of it' });
+  assert.equal(r2.isError, false, r2.text);
+  const two = /Started agent (\w+)/.exec(r2.text)![1];
+  assert.notEqual(one, two);
+  assert.equal(sessions.get(one).info.machineSandbox, 'alpha');
+  assert.equal(sessions.get(two).info.machineSandbox, 'alpha', 'the sandbox is reused when the dispatcher chooses it');
+  await until('its first message', () => !!firstSaid(store, two));
+  assert.match(firstSaid(store, two), /this is a NEW session for w2/);
+  assert.match(firstSaid(store, two), /- w1 "First job"/);
+});
+
+test('w740: decide_work link is the same-work mark: refused for an unrelated request on a worker with one in hand, allowed when it names it', async (t) => {
+  const { store, sessions, dispatcher, chat, call } = await setupOnMachine(t);
+  const ben = chat(BEN).info;
+  await call(ben, 'request_work', { title: 'Fix the belt splitter', brief: 'Splitters drop items.' });
+  await call(ben, 'request_work', { title: 'Rewrite the tutorial', brief: 'Nothing to do with belts.' });
+  await call(ben, 'request_work', { title: 'Splitter follow-up', brief: 'The direct follow-up.', related_ids: ['w1'] });
+  const id = /Started agent (\w+)/.exec((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Fix', title: 'Splitter fix', work_id: 'w1' })).text)![1];
+  const no = await call(dispatcher().info, 'decide_work', { id: 'w2', action: 'link', note: 'Already on it.', session_ids: [id], title: 'Tutorial' });
+  assert.equal(no.isError, true);
+  assert.match(no.text, /is not related to it: nothing ties it to what this worker did/);
+  assert.deepEqual(store.work.get('w2')!.sessionIds, []);
+  assert.equal(sessions.get(id).info.title, 'w1: Splitter fix', 'a refused link renames nothing');
+  const yes = await call(dispatcher().info, 'decide_work', { id: 'w3', action: 'link', note: 'Direct follow-up.', session_ids: [id], title: 'Splitter follow-up' });
+  assert.equal(yes.isError, false, yes.text);
+  assert.deepEqual(store.work.get('w3')!.sessionIds, [id]);
+  // Linked and never sent: its first message carries the request as filed.
+  await until('idle', () => sessions.get(id).info.status === 'idle');
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: id, text: 'Go on with w3.', work_id: 'w3' });
+  assert.equal(sent.isError, false, sent.text);
+  assert.doesNotMatch(sent.text, /NEW session/);
+  await until('w3 reached the same session', () => store.readTranscript(id).some((e) => e.kind === 'user' && (e as { text: string }).text.includes('The request as filed (w3')));
 });
