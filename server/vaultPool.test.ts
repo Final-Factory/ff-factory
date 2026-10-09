@@ -120,7 +120,7 @@ test('pool: one process at a time at 95% weekly, counting processes starting now
   assert.equal(s2.claude?.entry.name, 'ben-b');
   const s3 = v.forRun(run('ben', 'workers', 's3'), { claude: true, ...world(m) });
   assert.equal(s3.claude, undefined);
-  assert.match(s3.claudeHold?.why ?? '', /2 tokens: all over their caps or used up/);
+  assert.match(s3.claudeHold?.why ?? '', /^no token is free for a new job right now \(ben-a: weekly 96%, one job at a time until 99%: 3% left before it stops; the slot is taken now/);
   // Live counts from the portal do the same once the processes show.
   const live = { [fp(B1)]: 1, [fp(B2)]: 1 };
   assert.equal(v.forRun(run('ben', 'workers', 's9'), { claude: true, ...world(m, live) }).claude, undefined);
@@ -140,7 +140,7 @@ test('pool: every token over its caps holds a worker and the ops worker; the orc
     const r = v.forRun(run('ben', role), { claude: true, ...world(m) });
     assert.equal(r.claude, undefined, role);
     assert.equal(r.poolSize, 2);
-    assert.match(r.claudeHold?.why ?? '', /all over their caps or used up, the first frees up Fri 14:00Z/, role);
+    assert.match(r.claudeHold?.why ?? '', /^every token is at a limit \(ben-a: .*\): the first frees up Fri 14:00Z$/, role);
     assert.equal(r.claudeHold?.next, iso(NOW + 2 * 3_600_000));
   }
   const orch = v.forRun(run('ben', 'orchestrator'), { claude: true, ...world(m) });
@@ -151,7 +151,7 @@ test('pool: every token over its caps holds a worker and the ops worker; the orc
   m[fp(B2)] = usage(10, 100, { weeklyDays: 4 });
   const o2 = v.forRun(run('ben', 'orchestrator'), { claude: true, ...world(m) });
   assert.equal(o2.claude, undefined);
-  assert.match(o2.claudeHold?.why ?? '', /all used up/);
+  assert.match(o2.claudeHold?.why ?? '', /^every token is used up \(/);
   // lothsahn's pool is her own: ben's being held does not touch it.
   assert.equal(v.forRun(run('lothsahn'), { claude: true, ...world(m) }).claude?.token, L1);
 });
@@ -208,7 +208,7 @@ test('machineRunEnv: a worker waits (PoolHeldError) when its person pool is over
   const ben = { userId: 'ben', displayName: 'Ben' };
   assert.throws(
     () => machineRunEnv(cfgOf(), { id: 'm3' }, { role: 'workers', requestedBy: ben, sessionId: 'w1' }, ctx),
-    (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is held: 2 tokens: all over their caps or used up, the first frees up Fri 14:00Z/.test(e.message) && e.next === iso(NOW + 2 * 3_600_000) && !e.message.includes(B1.slice(13, 40)),
+    (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is held: every token is at a limit \(.*\): the first frees up Fri 14:00Z$/.test(e.message) && e.next === iso(NOW + 2 * 3_600_000) && !e.message.includes(B1.slice(13, 40)),
   );
   // Never the host token, the machine's login, nor another person's token (the dispatcher's token file is not a worker's at all).
   assert.equal(ctx.problems.length, 0, 'held is not a fallback: nothing reported as one');
@@ -291,7 +291,7 @@ test("poolRunEnv: the orchestrator stops when its pool is used up and the error 
   const used = ctxOf(v, { [fp(B1)]: usage(100, 40, { sessionHours: 2 }), [fp(B2)]: usage(10, 100, { weeklyDays: 3 }) });
   assert.throws(
     () => poolRunEnv(cfg, { role: 'orchestrator', personId: 'ben' }, fallback, used),
-    (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is used up: 2 tokens: all used up, the first frees up Fri 14:00Z/.test(e.message) && !e.message.includes(B1.slice(13, 40)) && !e.message.includes(FILE.slice(13, 40)),
+    (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is used up: every token is used up \(.*\): the first frees up Fri 14:00Z$/.test(e.message) && !e.message.includes(B1.slice(13, 40)) && !e.message.includes(FILE.slice(13, 40)),
   );
   const capped = ctxOf(v, { [fp(B1)]: usage(90, 40, { sessionHours: 2 }), [fp(B2)]: usage(85, 30, { weeklyDays: 3, sessionHours: 4 }) });
   assert.throws(() => poolRunEnv(cfg, { role: 'ops', personId: 'ben' }, fallback, capped), (e: unknown) => e instanceof PoolHeldError && /ben's Claude token pool is held/.test(e.message));

@@ -40,7 +40,7 @@ import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, reserveLines, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
-import { poolLimits, clock } from './tokenPool.ts';
+import { clock, firstFree, poolBanner, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
@@ -581,7 +581,7 @@ function appState(user: string | undefined): AppState {
     ffbox: providers.summary(),
     max: max.summary(),
     system: lastSystem,
-    host: { ...host, drain: drainer.status },
+    host: hostForUser({ ...host, drain: drainer.status }, me.userId),
     usage: usage.usage,
     accounts: accountsNow(),
     machineStats: machines.allStats(),
@@ -1544,7 +1544,20 @@ setInterval(() => {
   broadcast({ type: 'ping' });
 }, SOCKET_PING_MS);
 
+/**
+ * The host status as one person's page gets it (w747): a Claude token pool banner (`person` set) only to the pool's own
+ * person, so Ben never sees lothsahn's and lothsahn never sees Ben's; banners about the whole system (the dispatcher's
+ * reserve, no `person`) go to everyone who is logged in, as before.
+ */
+function hostForUser(h: HostStatus, user: string): HostStatus {
+  if (!h.tokenWarnings) return h;
+  return { ...h, tokenWarnings: warningsForUser(h.tokenWarnings, user) };
+}
 function broadcast(e: ServerEvent) {
+  if (e.type === 'host') {
+    for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ ...e, host: hostForUser(e.host, user) } satisfies ServerEvent));
+    return;
+  }
   const data = JSON.stringify(e);
   // A notice for some people only reaches their pages (docs/orchestrators.md: no interruptions).
   const only = e.type === 'notify' && e.users ? new Set(e.users.map((u) => u.toLowerCase())) : undefined;
@@ -1809,18 +1822,23 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
       const on = titlesOn(`token:${t.entry.fingerprint}`);
       return `${t.entry.name} …${t.entry.last4} ${t.view.state} (${t.view.why}${t.view.weeklyResetsAt ? `; weekly resets ${clock(t.view.weeklyResetsAt)}` : ''}${on.length ? `; ${on.length} running: ${on.slice(0, 3).join(', ')}${on.length > 3 ? ', …' : ''}` : ''})`;
     });
-    const states = list.map((t) => t.view.state);
-    const usedUp = states.every((x) => x === 'exhausted');
-    const noneOk = !states.includes('ok');
-    const next = list.map((t) => t.view.until).filter((x): x is string => !!x).sort()[0];
-    const verdict = usedUp
-      ? `all used up: ${person}'s workers wait${hostAccount(cfg, 'orchestrator') === 'vault' ? " and their orchestrator is stopped" : ''} until ${clock(next)}`
-      : noneOk
-        ? `all over their caps: ${person}'s workers wait until ${clock(next)}${hostAccount(cfg, 'orchestrator') === 'vault' ? '; their orchestrator uses the pool up (the token with the most room)' : ''}`
-        : 'workers and agents served';
+    const views = list.map((t) => t.view);
+    const kind = poolKind(views);
+    const next = firstFree(views);
+    const vaultOrch = hostAccount(cfg, 'orchestrator') === 'vault';
+    // The same words as the queue's reason and the banner (w747): "over its caps" only when every token is held, retired or used up.
+    const verdict =
+      kind === 'used-up'
+        ? `every token is used up: ${person}'s new work waits until ${clock(next)}${vaultOrch ? ' and their orchestrator is stopped' : ''}`
+        : kind === 'over'
+          ? `every token is at a limit: ${person}'s new work waits until ${clock(next)}${vaultOrch ? '; their orchestrator uses the pool up (the token with the most room)' : ''}`
+          : kind === 'slot-taken'
+            ? `no token is free for a new job right now (the ones that still work are busy with their one job): a new job starts when the running one finishes${next ? `, or when a limit lifts ${clock(next)}` : ''}`
+            : 'workers and agents served';
     lines.push(`Claude token pool, ${person} (${list.length} token${list.length === 1 ? '' : 's'}, soonest weekly reset first; caps ${poolLimits(cfg).sessionHold}% 5-hour / ${poolLimits(cfg).onePerWeekly}% one at a time / ${poolLimits(cfg).retireWeekly}% retired): ${each.join('; ')}. ${verdict}`);
-    if (usedUp) warnings.push({ id: `pool:${person}`, kind: 'exhausted', text: `${person}'s Claude tokens are all used up: their workers wait${hostAccount(cfg, 'orchestrator') === 'vault' ? ' and their orchestrator is stopped' : ''} until the first one resets (${clock(next)}). No override.` });
-    else if (noneOk) warnings.push({ id: `pool:${person}`, kind: 'held', text: `${person}'s Claude token pool is over its caps: their workers wait until ${clock(next)}${hostAccount(cfg, 'orchestrator') === 'vault' ? '; their orchestrator keeps running on the token with the most room until it is used up' : ''}.` });
+    const banner = poolBanner(list.map((t) => ({ name: t.entry.name, last4: t.entry.last4, view: t.view })), 'your', vaultOrch);
+    // For this person's own pages only (broadcast and appState filter on `person`): nobody else's top banner shows it.
+    if (banner) warnings.push({ id: `pool:${person}`, kind: banner.kind, person, text: banner.text });
   }
   const others = (key: string, role: 'dispatcher' | 'host-token') =>
     role === 'dispatcher' ? [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error' && !(s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher')).length : 0;
