@@ -46,7 +46,7 @@ export FAKE=$tmp FFF_CONF=$tmp/fff.conf FFF_LIB=$G FFF_TEST_NOROOT=1 FFF_PATH_PR
 rnd() { local s; s=$(head -c 96 /dev/urandom | base64 -w0 | tr -dc 'A-Za-z0-9'); printf '%s' "${s:0:$1}"; }
 tok() { printf 'sk-ant-oat01-%s' "$(rnd 44)"; }
 fresh() { rm -rf "$tmp/vault" "$tmp"/add-*.args "$tmp/argv"; mkdir -p "$tmp/vault"; : >"$tmp/argv"; }
-names() { ls "$tmp/vault" | paste -sd' ' -; }
+names() { find "$tmp/vault" -type f -printf '%f\n' | sort | paste -sd' ' -; }
 # add PERSON [NAME] with the token on stdin: output in $out, exit code in $rc
 add() { # TOKEN PERSON [NAME...]
   local t=$1
@@ -92,27 +92,32 @@ fresh
 t1=$(tok)
 add "$t1" ben a; [ "$rc" = 0 ] || fail "setup: $out"
 add "$(tok)" ben a; noleak
-[ "$rc" != 0 ] && printf '%s' "$out" | matches 'vault-ben-a exists' || fail "an existing name was not refused: rc $rc: $out"
+[ "$rc" != 0 ] || fail "an existing name was not refused: rc $rc: $out"
+printf '%s' "$out" | matches 'vault-ben-a exists' || fail "an existing name was not refused: rc $rc: $out"
 printf '%s' "$out" | matches -F 'host' || fail "the refusal does not say the host's file wins: $out"
 [ "$(cat "$tmp/vault/vault-ben-a")" = "$t1" ] || fail "an existing entry was changed"
 bad=$(tok)'!'
 add "$bad" ben b; noleak "$bad"
 [ "$rc" != 0 ] && [ "$(names)" = "vault-ben-a" ] || fail "a token with a bad character was added: $(names): $out"
 add "$(printf 'not a token at all %s' "$(rnd 20)")" ben b
-[ "$rc" != 0 ] && [ "$(names)" = "vault-ben-a" ] && printf '%s' "$out" | matches 'not one Claude token' || fail "a non-token was added or not named: $(names): $out"
+[ "$rc" != 0 ] && [ "$(names)" = "vault-ben-a" ] || fail "a non-token was added or not named: $(names): $out"
+printf '%s' "$out" | matches 'not one Claude token' || fail "a non-token was added or not named: $(names): $out"
 if printf '%s' "$out" | matches 'at all'; then fail "the bad content was printed: $out"; fi
 add "" ben b
 [ "$rc" != 0 ] && [ "$(names)" = "vault-ben-a" ] || fail "an empty token was added"
 t2=$(tok)
 add "$t2" ben 'a b'; noleak "$t2"
-[ "$rc" != 0 ] && printf '%s' "$out" | matches 'NAME is 1 to 16' || fail "a NAME with a space was not refused: $out"
+[ "$rc" != 0 ] || fail "a NAME with a space was not refused: $out"
+printf '%s' "$out" | matches 'NAME is 1 to 16' || fail "a NAME with a space was not refused: $out"
 add "$t2" 'be n'; noleak "$t2"
-[ "$rc" != 0 ] && printf '%s' "$out" | matches 'PERSON is a portal user id' || fail "a PERSON with a space was not refused: $out"
+[ "$rc" != 0 ] || fail "a PERSON with a space was not refused: $out"
+printf '%s' "$out" | matches 'PERSON is a portal user id' || fail "a PERSON with a space was not refused: $out"
 # a token typed as the NAME, or as a third word: refused, and not echoed
 add "$t2" ben "$t2"; noleak "$t2"
 [ "$rc" != 0 ] || fail "a token as the NAME was accepted"
 add "$t2" ben b "$t2"; noleak "$t2"
-[ "$rc" != 0 ] && printf '%s' "$out" | matches -F 'never an argument' || fail "a third word (a token on the command line) was not refused with that reason: $out"
+[ "$rc" != 0 ] || fail "a third word (a token on the command line) was not refused with that reason: $out"
+printf '%s' "$out" | matches -F 'never an argument' || fail "a third word (a token on the command line) was not refused with that reason: $out"
 add "$t2"; [ "$rc" != 0 ] || fail "no PERSON was accepted"
 [ "$(names)" = "vault-ben-a" ] || fail "something was added by a refused call: $(names)"
 ok "an existing name, a bad token, an empty one, a bad NAME or PERSON, and a token typed as an argument are refused; nothing added, nothing shown"

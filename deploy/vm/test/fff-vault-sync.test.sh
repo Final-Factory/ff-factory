@@ -297,14 +297,16 @@ vm_add vault-sam-7 claude sam "$s7"
 out=$(pull); secret=$out; noleak "$b2" "$s7"
 [ -f "$(people_file ben/claude-tokens/2)" ] && [ -f "$(people_file sam/claude-tokens/7)" ] || fail "nightly copy: the files are not there: $(find "$T/etc/secrets/people" -type f | sort | paste -sd' ' -): $out"
 [ "$(cat "$(people_file ben/claude-tokens/2)")" = "$b2" ] && [ "$(cat "$(people_file sam/claude-tokens/7)")" = "$s7" ] || fail "nightly copy: a file does not hold the VM's token"
-modeis "$(people_file ben/claude-tokens/2)" 600 && modeis "$(people_file sam/claude-tokens/7)" 600 || fail "nightly copy: a token file is not 0600"
+modeis "$(people_file ben/claude-tokens/2)" 600 || fail "nightly copy: ben's token file is not 0600"
+modeis "$(people_file sam/claude-tokens/7)" 600 || fail "nightly copy: sam's token file is not 0600"
 for d in "$T/etc/secrets" "$T/etc/secrets/people" "$(people_file sam)" "$(people_file sam/claude-tokens)" "$(people_file ben/claude-tokens)"; do modeis "$d" 700 || fail "nightly copy: $d is $(mode "$d"), not 0700"; done
 printf '%s' "$out" | matches -F "copied vault-ben-2 (…${b2: -4}, " || fail "nightly copy: no log line with the entry's name and last four characters: $out"
 printf '%s' "$out" | matches -F "copied vault-sam-7 (…${s7: -4}, " || fail "nightly copy: no log line for sam's: $out"
 printf '%s' "$out" | matches '1 already here' || fail "nightly copy: the summary does not count the entry the host already had: $out"
 [ "$(calls export)" = 2 ] || fail "nightly copy: $(calls export) values left the VM, not 2 (the one the host had stays)"
 out=$(pull); secret=$out; noleak "$b1" "$b2" "$s7"
-[ "$(calls export)" = 2 ] && printf '%s' "$out" | matches '0 copied, 3 already here' || fail "nightly copy: a second run copied again: $out"
+[ "$(calls export)" = 2 ] || fail "nightly copy: a second run fetched a value again"
+printf '%s' "$out" | matches '0 copied, 3 already here' || fail "nightly copy: a second run copied again: $out"
 ok "an entry added in the VM is copied to people/<id>/claude-tokens/<n> (0600 in 0700 folders), with a log of its name and last four characters, once"
 
 # ... and the sync after it keeps the entry, and so does a sync that comes before any copy
@@ -356,11 +358,9 @@ printf '%s' "$out" | matches -F "the host file holds …${h: -4}" || fail "confl
 printf '%s' "$out" | matches 'host file wins' || fail "conflict: the rule is not said: $out"
 [ "$(calls export)" = 0 ] || fail "conflict: a value left the VM although the host file wins"
 # the alert the nightly sends carries names and last four characters only
-news=$( (. "$H/lib.sh"; . "$H/vault.sh"; DRY_RUN=0; vault_pull >/dev/null 2>&1; printf '%s' "$VAULT_PULL_NEWS") )
-secret=$news; noleak "$h" "$m"
-printf '%s' "$news" | matches -F "vault-ben-2 differs between the VM (…${m: -4}) and the host file (…${h: -4})" || fail "conflict: the alert text: $news"
-# the alert the nightly sends carries names and last four characters only
-news=$( (. "$H/lib.sh"; . "$H/vault.sh"; DRY_RUN=0; vault_pull >/dev/null 2>&1; printf '%s' "$VAULT_PULL_NEWS") )
+# shellcheck source=../host/lib.sh
+# shellcheck disable=SC2030,SC2031 # a subshell on purpose: it sources the scripts and keeps nothing
+news=$( . "$H/lib.sh"; . "$H/vault.sh"; DRY_RUN=0; vault_pull >/dev/null 2>&1; printf '%s' "$VAULT_PULL_NEWS" )
 secret=$news; noleak "$h" "$m"
 printf '%s' "$news" | matches -F "vault-ben-2 differs between the VM (…${m: -4}) and the host file (…${h: -4})" || fail "conflict: the alert text: $news"
 out=$(standalone); secret=$out; noleak "$h" "$m"
@@ -396,11 +396,15 @@ vm_add vault-ben-github github ben "$gh"
 vm_add vault-sam-github github sam "$classic"
 vm_add max-discord env "" "$disc" FFDISCORD_APP_TOKEN anyone workers lothdesktop
 out=$(pull); secret=$out; noleak "$gh" "$classic" "$disc"
-[ "$(cat "$(people_file ben/github-token)")" = "$gh" ] && modeis "$(people_file ben/github-token)" 600 || fail "github: a fine-grained token did not go to people/ben/github-token"
+[ "$(cat "$(people_file ben/github-token)")" = "$gh" ] || fail "github: a fine-grained token did not go to people/ben/github-token"
+modeis "$(people_file ben/github-token)" 600 || fail "github: github-token is not 0600"
 [ ! -e "$(people_file sam/github-token)" ] || fail "github: a classic token went to github-token, which the sync refuses"
 X=$T/etc/secrets/vault-extra
 [ "$(cat "$X/vault-sam-github/value")" = "$classic" ] || fail "github: the classic token was not kept as an extra"
-[ "$(cat "$X/max-discord/value")" = "$disc" ] && modeis "$X/max-discord/value" 600 && modeis "$X/max-discord" 700 && modeis "$X" 700 || fail "extras: value or folder modes"
+[ "$(cat "$X/max-discord/value")" = "$disc" ] || fail "extras: the value is not the VM's"
+modeis "$X/max-discord/value" 600 || fail "extras: value is not 0600"
+modeis "$X/max-discord" 700 || fail "extras: the entry folder is not 0700"
+modeis "$X" 700 || fail "extras: vault-extra is not 0700"
 [ "$(cat "$X/max-discord/meta")" = "$(printf 'kind=env\nenv=FFDISCORD_APP_TOKEN\nowner=-\nshare=anyone\nroles=workers\nmachines=lothdesktop')" ] || fail "extras: meta: $(cat "$X/max-discord/meta")"
 printf '%s' "$out" | matches -F 'copied max-discord (…' || fail "extras: not logged: $out"
 # the VM's own entry changes: the copy follows it (an extra has no other editor), the old one is kept as value.prev
