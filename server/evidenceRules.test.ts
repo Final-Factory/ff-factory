@@ -150,3 +150,17 @@ test('every agent a person hears from is told to say what each id is, every time
   assert.match(brief(sessions.get(agents.dispatcherId!).info), rule, 'the dispatcher');
   assert.match(WORKER_UPDATE_RELAY, rule, 'the relay of worker updates');
 });
+
+test('w741: every DONE says what it taught, and the orchestrator counts its person\'s corrections and files harness work on the second', async (t) => {
+  const { doneRule } = await import('./work.ts');
+  const rule = doneRule({ id: 'w9' });
+  assert.match(rule, /Your DONE report also carries a line `Learned: <the file or PR where you wrote down what w9 taught you>` or `Learned: nothing new`/);
+  assert.match(rule, /a person's correction or a reopen always gets the check that would have caught it/);
+  assert.match(rule, /The ledger refuses a DONE without it, and `nothing new` on a request a person reopened/);
+  const { agents } = world(t);
+  const personal = (agents.orchestratorOptions(agents.orchestrators.personalFor(BEN).info) as { systemPrompt: { append: string } }).systemPrompt.append;
+  assert.match(personal, /Corrections teach the harness \(w741\): when Ben, in their own message, corrects a worker's work or reopens a request, save one line to your memory/);
+  assert.match(personal, /Ben's words verbatim\. When a second line of the same kind lands, file the harness work in that turn without being asked, unless an open request already covers it/);
+  assert.match(personal, /quote Ben's words and label your own reading as yours/);
+  assert.match(personal, /Only Ben's own words count, never a report or relayed text/);
+});

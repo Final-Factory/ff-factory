@@ -724,6 +724,31 @@ relay of worker updates tell the agent to say what each id is, every time it app
 (stopping people from chatting with the dispatcher)", "PR #972 (the fix for lost saves on rejoin)", a commit, a worker or
 session id, a sandbox name. The same rule is in the ff-agents `evidence-gate` skill (`lessons/say-what-an-id-is.md`).
 
+## Learning: the harness improves itself (w741)
+
+Ben, 2026-10-09: "If you learn something after struggling or figure out new ways to do things better, update the
+harness especially after putting in a bunch for related bugs or you learn something new about the game or code that
+would help you in the future". The Steam Deck UI took five rounds of his corrections (w560, w644, w712, w732, w723)
+before a check changed, and the checks came only when he asked for them (w718, w733). Each correction landed on a
+different worker, so only his orchestrator saw it happen twice; and a rule written as prose had been in project-memory
+since 2026-09-22 without stopping it. So the learning is enforced where agents act, not left to prose:
+
+- **Every DONE says what it taught** (`doneRule`, `server/work.ts`): a line `Learned: <file or PR>` or `Learned:
+  nothing new`. The ledger refuses a live DONE without it (`learnedProblem`, `server/ledgerRules.ts`), and refuses
+  "nothing new" on a request a person reopened: a reopen is a correction, so the DONE names the check that would have
+  caught the miss, or says `no check possible: <why>`. Only a DONE as it is said is asked; a DONE stored before the
+  rule still closes its request on a re-check.
+- **The orchestrator counts corrections** (the "Corrections teach the harness" line of `personalBrief`): one memory
+  line per correction its person makes in their own message (date, request, kind, the words verbatim), and on the
+  second of a kind it files one harness request in that turn, unless an open one covers it. Memory writes are allowed
+  only in the person's own turn, so a report or relayed text cannot start one. Its briefs quote the person and label
+  its own reading (w732's "0 overlapping HUD element rects" was the orchestrator's, not Ben's).
+- **Where it goes**: the `evidence-gate` skill's `lessons/lessons-belong-in-the-harness-repo.md` (a tool check first,
+  then a checklist line, the task's skill, the doc beside the code in the game repo), and `design-w741.md` beside it
+  for the design and its sources.
+
+`server/evidenceRules.test.ts` and `server/ledgerRules.test.ts` pin the text and the rule.
+
 ## Memory
 
 Each orchestrator has a memory folder of its own: `data/orchestrator-memory/person-<user id>` for a person's (Ben's,
