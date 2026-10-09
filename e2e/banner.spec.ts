@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { ALPHA, expect, go, isMobile, sandboxHash, test } from './fixtures.ts';
+import { ALPHA, appState, expect, go, isMobile, sandboxHash, test, uniq } from './fixtures.ts';
 
 const REASON = 'update (request_app_update)';
 
@@ -179,4 +179,61 @@ test('a silent path watchdog says so, and a healthy path shows nothing', async (
   await page.unrouteAll({ behavior: 'ignoreErrors' });
   await withPathHealth(page, undefined);
   await expect(page.locator('.gbar')).toHaveCount(0);
+});
+
+/** The VM's unit watchdog reported restarts (server/unitWatchdog.ts), injected into the host status; `current.events` can change between reloads. It also reads as silent, so a fixed bar shows once the status is in. */
+async function withUnitRestarts(page: Page, current: { events: object[] }) {
+  const patch = (h: object) => ({ ...h, unitWatchdog: { updatedAt: new Date().toISOString(), host: 'fff', units: [], events: current.events, silentMinutes: 40 } });
+  await page.route('**/api/state', async (route) => {
+    const res = await route.fetch();
+    const state = await res.json();
+    state.host = patch(state.host);
+    await route.fulfill({ response: res, json: state });
+  });
+  await page.routeWebSocket(/\/ws/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((m) => server.send(m));
+    server.onMessage((m) => {
+      try {
+        const ev = JSON.parse(String(m));
+        if (ev.type === 'state') ev.state.host = patch(ev.state.host);
+        else if (ev.type === 'host') ev.host = patch(ev.host);
+        ws.send(JSON.stringify(ev));
+      } catch {
+        ws.send(m);
+      }
+    });
+  });
+  await page.reload();
+}
+
+test('a closed watchdog-restart banner stays closed for that restart across reloads, and a new restart shows it again (w751)', async ({ authed: page }) => {
+  const u1 = `${uniq('a')}.socket`;
+  const u2 = `${uniq('b')}.service`;
+  const restart = (unit: string, minutesAgo: number) => ({ at: new Date(Date.now() - minutesAgo * 60_000).toISOString(), unit, action: 'restart', why: 'inactive (dead) while it should be active', attempt: 1, ok: true });
+  const first = restart(u1, 30);
+  const current = { events: [first] };
+  await withUnitRestarts(page, current);
+  const bar = page.locator('.gbar', { hasText: 'restarted a critical unit' });
+  await expect(bar).toBeVisible();
+  await expect(bar.locator('.gbar-text')).toHaveAttribute('title', new RegExp(u1));
+  await bar.getByRole('button', { name: 'Dismiss' }).click();
+  await expect(bar).toHaveCount(0);
+  // The server remembers it for this person...
+  await expect(async () => {
+    const mine = (await appState(page.request)).settings.dismissedEvents?.tester ?? [];
+    expect(mine).toContain(`${first.at}|${u1}|restart`);
+  }).toPass();
+  // ...so the same restart does not come back on a reload.
+  await page.reload();
+  // (the silent-watchdog bar rides in the same host status and cannot be closed: it shows the page has the status by now)
+  await expect(page.locator('.gbar', { hasText: 'unit watchdog has been silent for 40 minutes' })).toBeVisible();
+  await expect(bar).toHaveCount(0);
+  // A new restart (another unit, another time) shows it again, listing only the new one.
+  current.events = [first, restart(u2, 1)];
+  await page.reload();
+  await expect(bar).toBeVisible();
+  const title = (await bar.locator('.gbar-text').getAttribute('title')) ?? '';
+  expect(title).toContain(u2);
+  expect(title).not.toContain(u1);
 });

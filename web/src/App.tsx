@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { dismissedUserKey, undismissed, unitEventKey } from '../../shared/dismissals';
 import type { AppState, HostStatus } from '../../shared/types';
 import { useAttention } from './attention';
 import { Login } from './components/Login';
@@ -7,6 +8,7 @@ import { OrchestratorView } from './components/OrchestratorView';
 import { DispatcherPanel } from './components/DispatcherPanel';
 import { SessionView } from './components/SessionView';
 import { Sidebar } from './components/Sidebar';
+import { api } from './api';
 import { Icon } from './components/ui';
 import { StandingAgentModal } from './components/StandingModal';
 import { StandingPanel } from './components/StandingPanel';
@@ -149,7 +151,8 @@ function NewVersionBanner() {
 
 /**
  * The server's own trouble: running elevated (no Unity), a restart waiting for agents, the host guard's alarms.
- * Each can be dismissed; it comes back when what it says changes.
+ * Each can be dismissed; it comes back when what it says changes. The VM watchdog's restarts are remembered per person on the
+ * server (w751): a closed restart stays closed, a new one shows the bar again.
  */
 function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
@@ -160,13 +163,17 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
   const pathShown = !!path?.problems.length || path?.silentMinutes !== undefined;
   const wd = host?.unitWatchdog;
   const gaveUp = wd?.units.filter((u) => u.state === 'gave-up') ?? [];
-  const restarts = (wd?.events ?? []).filter((e) => e.action !== 'gave-up' && Date.now() - Date.parse(e.at) <= 24 * 3_600_000);
+  // The restarts this person has not closed (w751): the server keeps their closed ones, so a reload, another device and a portal
+  // restart do not bring the banner back for the same event; a new restart (another time or unit) does.
+  const closed = app.me ? app.settings.dismissedEvents?.[dismissedUserKey(app.me.userId)] : undefined;
+  const restarts = undismissed((wd?.events ?? []).filter((e) => e.action !== 'gave-up' && Date.now() - Date.parse(e.at) <= 24 * 3_600_000), closed);
   const wdShown = gaveUp.length > 0 || wd?.silentMinutes !== undefined || restarts.length > 0;
   const tokenWarnings = host?.tokenWarnings ?? [];
   if (!host || (!host.elevated && !host.drain && !drive && !disk && !host.dryRun && !pathShown && !wdShown && !tokenWarnings.length)) return null;
   const low = h?.disks.filter((d) => d.level !== 'ok').map((d) => `${d.path} ${d.freeBytes === undefined ? '?' : fmtBytes(d.freeBytes)} free`).join(', ');
   const title = (id: string) => app.sessions.find((s) => s.id === id)?.title ?? id;
-  const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string; fixed?: boolean }[] = [];
+  // `events`: the event keys closing the bar remembers for this person (on the server); other bars are forgotten on reload.
+  const bars: { key: string; kind: 'warn' | 'error'; lead: string; rest: string; fixed?: boolean; events?: string[] }[] = [];
   // Not dismissible: a dry run (FFSB_DRY_RUN=1) must never pass for the real portal.
   if (host.dryRun) bars.push({ key: 'dryrun', kind: 'error', lead: 'DRY RUN: this is a copy, not the real portal.', rest: host.dryRun, fixed: true });
   if (host.elevated) {
@@ -236,6 +243,7 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
       kind: 'warn',
       lead: `The VM watchdog restarted a critical unit ${restarts.length === 1 ? 'once' : `${restarts.length} times`} in the last 24 hours.`,
       rest: `${list}${restarts.length > 3 ? `; ${restarts.length - 3} more` : ''}.`,
+      events: restarts.map(unitEventKey),
     });
   }
   // The Claude token pools (w739): a person's tokens used up or over their caps, and runs inside the dispatcher's reserve.
@@ -253,11 +261,15 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
     });
   }
   const shown = bars.filter((b) => !dismissed.has(`${b.key}:${b.lead} ${b.rest}`));
+  const dismiss = (b: { key: string; lead: string; rest: string; events?: string[] }) => {
+    setDismissed((s) => new Set(s).add(`${b.key}:${b.lead} ${b.rest}`));
+    if (b.events?.length) api.dismissEvents(b.events).catch(() => undefined); // on failure the bar returns at the next reload, as before
+  };
   if (!shown.length) return null;
   return (
     <>
       {shown.map((b) => (
-        <Bar key={b.key} kind={b.kind} text={`${b.lead} ${b.rest}`} onDismiss={b.fixed ? undefined : () => setDismissed((s) => new Set(s).add(`${b.key}:${b.lead} ${b.rest}`))}>
+        <Bar key={b.key} kind={b.kind} text={`${b.lead} ${b.rest}`} onDismiss={b.fixed ? undefined : () => dismiss(b)}>
           <b>{b.lead}</b> {b.rest}
         </Bar>
       ))}
