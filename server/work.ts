@@ -450,6 +450,35 @@ export function settleByHand(w: WorkItem) {
   if (w.prs?.some((p) => !p.via)) w.prs = w.prs.filter((p) => p.via);
 }
 
+/**
+ * A person (or an owner for them) reopens a closed request (w731). Whatever the cleanup read as evidence of "finished" before
+ * this moment is about the work as it was then: the workers' DONEs go (a DONE refused while a PR was open, whose PR merged
+ * since, closed w712 twice while its worker was mid-fix on the reopened work) and so do the PRs linked so far (a PR
+ * created before `at` never links again, ledgerRules prsOf). The latest reopen is the one that counts. Returns the
+ * numbers of the PR links dropped, for the log.
+ */
+export function reopenWork(w: WorkItem, at: string): number[] {
+  settleByHand(w);
+  const dropped = (w.prs ?? []).map((p) => p.number);
+  w.reopenedAt = at;
+  w.done = undefined;
+  w.prs = w.prs ? [] : undefined;
+  w.followUp = undefined;
+  return dropped;
+}
+
+/** Whether something that happened at `at` (an ISO time, any offset) came after the request's latest reopen; always when it was never reopened. */
+export function afterReopen(w: Pick<WorkItem, 'reopenedAt'>, at: string | undefined): boolean {
+  if (!w.reopenedAt) return true;
+  const t = Date.parse(at ?? '');
+  return Number.isFinite(t) && t >= Date.parse(w.reopenedAt);
+}
+
+/** The DONEs its workers gave after its latest reopen (all of them when it was never reopened), by session id: the only ones that count (w731). */
+export function doneOf(w: Pick<WorkItem, 'done' | 'reopenedAt'>): NonNullable<WorkItem['done']> {
+  return Object.fromEntries(Object.entries(w.done ?? {}).filter(([, d]) => afterReopen(w, d.at)));
+}
+
 /** Notes in a request's log from before WorkItem.notes (w496): "10:02 Ben: …; note: <text>", clipped as logged. */
 const LOGGED_NOTE = /^(\d\d:\d\d) ([^:]+): (?:.*; )?note: (.+?)(?:; answers the design question .*)?$/;
 

@@ -35,6 +35,8 @@ import {
   textKeys,
   SUBJECT_KEY,
   settleByHand,
+  reopenWork,
+  doneOf,
   filingKeys,
   updateNotice,
   updateProblem,
@@ -921,8 +923,8 @@ export class Orchestrators {
       w.status = 'new';
       w.stalled = undefined;
       // A wrong automatic close, reopened by hand (w340: w50 and w128 on 2026-10-04): it no longer says it was closed.
-      settleByHand(w);
-      what.push('reopened');
+      // And what was read as "finished" before the reopen no longer counts (w731).
+      what.push(this.reopened(w));
     } else if (w.status === 'stalled' && !input.close) {
       w.status = 'new';
       w.stalled = undefined;
@@ -963,6 +965,13 @@ export class Orchestrators {
       this.gatherForDispatcher(owner, updateNotice(w, owner, `${what.join('; ')}.${hint}`));
     }
     return `${readLine ? `${readLine} ` : ''}${subjectLine ? `${subjectLine} ` : ''}${w.id} is ${w.status}: ${what.join('; ')}.`;
+  }
+
+  /** A closed request is reopened (w731): its earlier DONEs and PR links no longer count (work.ts reopenWork). Returns the log's words. */
+  private reopened(w: WorkItem): string {
+    const dropped = reopenWork(w, this.now().toISOString());
+    const prs = dropped.length ? `PR${dropped.length > 1 ? 's' : ''} ${dropped.map((n) => `#${n}`).join(', ')} and ` : '';
+    return `reopened (its earlier ${prs}DONEs no longer count: it closes again only on a DONE or a PR opened and merged after this)`;
   }
 
   /**
@@ -1009,11 +1018,12 @@ export class Orchestrators {
     this.spendUpdate(chat, by, input);
     const verb = input.reopen ? 'reopened' : input.close === 'done' ? 'closed as done' : 'cancelled';
     // Like a person's own close or reopen, it is final: no automatic-close mark survives it (w370).
-    settleByHand(w);
     if (input.reopen) {
+      this.reopened(w);
       w.status = 'new';
       w.stalled = undefined;
     } else {
+      settleByHand(w);
       w.status = input.close!;
       w.outcome = clip(note, 300);
     }
@@ -1387,7 +1397,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   private stillOn(w: WorkItem, except?: string): string[] {
     const all = [...this.store.work.values()];
     return w.sessionIds.filter((id) => {
-      if (id === except || w.done?.[id]) return false;
+      if (id === except || doneOf(w)[id]) return false;
       const s = this.store.sessions.get(id);
       if (!s || s.status === 'stopped' || s.status === 'error') return false;
       return servedBy(id, all).has(w.id);
@@ -1403,7 +1413,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     w.status = 'done';
     w.stalled = undefined;
     w.outcome = report || `done (its worker ${sid} said DONE)`;
-    const parts = Object.keys(w.done ?? {}).length > 1 ? ` (its workers ${Object.keys(w.done!).join(', ')} each said DONE)` : '';
+    const said = Object.keys(doneOf(w));
+    const parts = said.length > 1 ? ` (its workers ${said.join(', ')} each said DONE)` : '';
     this.stamp(w, `closed as done: ${how}${parts}. Its report: ${report}`);
     this.store.putWork(w);
     const audience = [...w.requesters, ...also.filter((r) => !isFor(w, r.userId))];
@@ -1430,8 +1441,9 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    */
   workerEnded(s: Pick<SessionInfo, 'id'>) {
     for (const w of [...this.store.work.values()]) {
-      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !w.done || w.done[s.id] || this.stillOn(w).length) continue;
-      const [sid, last] = Object.entries(w.done).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
+      const done = doneOf(w);
+      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id] || this.stillOn(w).length) continue;
+      const [sid, last] = Object.entries(done).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
       const problem = doneProblem(w, last.report);
       if (problem) {
         this.stamp(w, `worker ${s.id} ended; its other workers said DONE, but it stays open: ${problem}`);
@@ -1489,8 +1501,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       }
       // Its part is done, whatever else is left (w434: one worker's DONE closed w428 while another was still on it). The
       // reports' text is kept for a later re-check (recheckDone): each DONE of this worker's on it, newest last (w515).
-      const was = w.done?.[s.id]?.text;
-      w.done = { ...w.done, [s.id]: { at: this.now().toISOString(), report, text: (was ? `${was}\n\n${text}` : text).slice(-DONE_TEXT_CHARS) } };
+      const was = doneOf(w)[s.id]?.text;
+      w.done = { ...doneOf(w), [s.id]: { at: this.now().toISOString(), report, text: (was ? `${was}\n\n${text}` : text).slice(-DONE_TEXT_CHARS) } };
       const others = this.stillOn(w, s.id);
       if (others.length) {
         const who = others.map((id) => this.workerLine(id)).join(', ');
@@ -1584,11 +1596,11 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    */
   recheckDone(id: string, why: string): boolean {
     const w = this.store.work.get(id);
-    if (!w?.done || !(isOpen(w) || w.status === 'stalled') || w.question || w.flag) return false;
+    if (!w || !Object.keys(doneOf(w)).length || !(isOpen(w) || w.status === 'stalled') || w.question || w.flag) return false;
     if (this.stillOn(w).length) return false;
     const all = [...this.store.work.values()];
     if (w.sessionIds.some((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped') && servedBy(sid, all).has(w.id))) return false;
-    const [sid, last] = Object.entries(w.done).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
+    const [sid, last] = Object.entries(doneOf(w)).sort((a, b) => b[1].at.localeCompare(a[1].at))[0];
     if (doneProblem(w, last.text ?? last.report)) return false;
     this.closeOnDone(w, sid, last.report, `worker ${sid} said DONE at ${last.at.slice(11, 16)} UTC and was refused then; ${why}`);
     return true;

@@ -1426,6 +1426,12 @@ export interface WorkItem {
    * checked against again when its PRs change (w515; absent on DONEs recorded before).
    */
   done?: Record<string, { at: string; report: string; text?: string }>;
+  /**
+   * When a person (or an owner for them) last reopened it from closed (w731; absent when never). A reopen invalidates
+   * what came before it: the workers' DONEs are dropped, the earlier PRs are no longer its own (a PR created before this
+   * time never links to it), and the ledger cleanup closes it again only on a DONE, a report or a merge after this time.
+   */
+  reopenedAt?: string;
   /** Files its person attached (request_work attachments): every worker started for it gets a copy. */
   attachments?: AttachmentRef[];
   /** What it may repeat, found when it was filed; strongest first. */

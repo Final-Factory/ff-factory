@@ -23,7 +23,7 @@ import type { Orchestrators } from './orchestrators.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 import { run as runProc } from './proc.ts';
-import { isOpen, settleByHand } from './work.ts';
+import { afterReopen, doneOf, isOpen, settleByHand } from './work.ts';
 import {
   STALL_AFTER_MS,
   REPORT_QUIET_MS,
@@ -225,7 +225,7 @@ export class LedgerSweep {
         if (!live || !(isOpen(live) || live.status === 'stalled')) continue;
         if (live.approval?.state === 'pending') continue;
         // A DONE refused while a PR was open, whose PRs are all merged or closed now (w515): it closes on that DONE.
-        if (live.done && !(live.prs ?? []).some((p) => p.state === 'open') && this.d.orchestrators.recheckDone(live.id, 'its PRs have merged or closed since')) {
+        if (Object.keys(doneOf(live)).length && !(live.prs ?? []).some((p) => p.state === 'open') && this.d.orchestrators.recheckDone(live.id, 'its PRs have merged or closed since')) {
           console.log(`ledger cleanup: closed ${live.id} on its refused DONE: its PRs have merged or closed since`);
           continue;
         }
@@ -688,6 +688,8 @@ export class LedgerSweep {
     if (!workers.length || w.question || w.flag) return false;
     if ((w.prs ?? []).some((p) => p.state === 'open')) return false;
     const last = this.latest(workers);
+    // A report from before a reopen (w731) says nothing about the reopened work: the worker has to report again.
+    if (last && !afterReopen(w, last.lastActivityAt)) return false;
     const reportedSinceStall = w.status === 'stalled' && !!last && (Date.parse(last.lastActivityAt) || 0) > (Date.parse(w.stalled?.at ?? '') || Infinity);
     if (!isOpen(w) && !reportedSinceStall) return false;
     if (!last || last.status === 'error' || this.now() - this.lastActivity(w, workers) < REPORT_QUIET_MS) return false;
