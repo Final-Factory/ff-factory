@@ -354,6 +354,28 @@ export function doneProblem(w: Pick<WorkItem, 'title' | 'brief' | 'constraints' 
   return undefined;
 }
 
+/**
+ * The `Learned:` line of a DONE report (w741), its text after the colon: the file or PR where the worker wrote down
+ * what the request taught it, or "nothing new". A line of its own, markdown around it allowed.
+ */
+export function learnedIn(text: string): string | undefined {
+  const m = (text ?? '').match(/^[\s*_>`-]*Learned[*_`]*:[*_`]*[ \t]*(\S.*)$/im);
+  return m ? m[1].trim() : undefined;
+}
+
+/**
+ * Why a live DONE needs its `Learned:` line first (w741; Ben, 2026-10-09: "If you learn something after struggling or
+ * figure out new ways to do things better, update the harness"): none at all, or "nothing new" on a request a person
+ * reopened (a reopen is a correction: its DONE names the check that would have caught the miss, or why there is none).
+ * Asked only of a DONE as it is said (doneMarkers), never of one stored before this rule, so those still close.
+ */
+export function learnedProblem(w: Pick<WorkItem, 'reopenedAt'>, report: string): string | undefined {
+  const learned = learnedIn(report);
+  if (!learned) return 'say what it taught you: add a line `Learned: <the file or PR where you wrote it down>` or `Learned: nothing new` (the ff-agents evidence-gate skill, lessons/lessons-belong-in-the-harness-repo.md)';
+  if (w.reopenedAt && /^[*_`"]*nothing new\b/i.test(learned)) return 'a person reopened it: the `Learned:` line names the check that would have caught the miss (a file or PR), or says `no check possible: <why>`';
+  return undefined;
+}
+
 // ---------------------------------------------------------------- asking about a merged request (w419)
 
 /** No word about a merged request this long, and the cleanup asks its worker whether it is done (see followUpDecision). */

@@ -40,6 +40,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   the portal's account; every other key file keeps the strict rule. The VM end to end runs the deployed `readKey` as `fff`
   on the live credential after the install and after the cold restart. Needs a portal deploy.
 
+- **Every DONE says what it taught, and a second correction of a kind gets a check** (w741, Ben: "If you learn something
+  after struggling or figure out new ways to do things better, update the harness especially after putting in a bunch
+  for related bugs"). The DONE rule (`doneRule`) asks for a line `Learned: <file or PR>` or `Learned: nothing new`;
+  the ledger refuses a live DONE without one, and "nothing new" on a request a person reopened (`learnedProblem`; a
+  stored DONE from before still closes on a re-check). A person's orchestrator keeps one memory line per correction
+  (verbatim, by kind) and files the harness work on the second of a kind, and its briefs quote the person and label
+  its own reading (w732). docs/orchestrators.md "Learning". Needs a portal deploy.
+||||||| 777ffd0
+
 - **A worker's session holds one piece of work: related requests stay in it, unrelated ones get a fresh session** (w740, Lothsahn
   and Ben: "every time the dispatcher hands out a new work request to a worker, it should be in a new session … updates to an
   existing work request should go into the existing session"; then "related work stays in the session that did the earlier work").
