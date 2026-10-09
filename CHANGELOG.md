@@ -10,6 +10,19 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **An agent host the daemon lets go of is ended, tree and all, and its sandbox is never handed out while it runs** (w799, Ben:
+  "just keep going"; the harness learns from what breaks). On BEAST on 2026-10-09 the daemon dropped two agent hosts whose
+  heartbeats were 30 s late under a release build while their processes ran (daemon.log 20:01:56Z), never ended them, and could not
+  remove their folders (`EPERM`: a live process worked in each). w790's worker 38a203f0 ran on for half an hour with its claude.exe
+  and Unity MCP chain, its `publish_attachment` call never read (the daemon had stopped reading that host; the 7 MB file was not the
+  cause), while the portal gave slot1 to a new worker, and its next message failed on the same `EPERM`. Now a late heartbeat with the
+  process alive is not an end (the host is kept and answered; silent 5 min it is stopped); a host is its pid and start time; ending one
+  ends its process tree and waits before its folder goes, retrying while Windows holds it; hosts no longer work in their own folder; a
+  watch stops orphaned hosts every minute and removes gone hosts' folders after 6 h; a sandbox where an old host's tree still runs is
+  reported `lingering`, not FREE, and refuses new agents; a tool call that throws is answered, and a host gives up on an unanswered one
+  after 20 min. No protocol bump (`lingering` is optional; an older portal ignores it). Needs a portal deploy and each machine's daemon
+  at this version ([docs/machines.md](docs/machines.md), "A host's end").
+
 - **Orphaned and hung `-batchmode` builds no longer hold a sandbox's Unity slot for hours** (w791, Ben's rule that the harness learns from a
   repeated problem). Twice on 2026-10-09 a person had to approve killing one by hand: LothDesktop pid 3856 (a nightly prepare build of
   slot4, hung for 3.5 h on a second bee_backend, its script alive) and m5 pid 81390 (a worker's Mac build, 15 h old, parent pid 1).

@@ -258,6 +258,29 @@ it running, mid-turn or idle. The next daemon takes it back.
   gone has what it recorded forwarded, and its session is not live: the portal resumes it with its conversation if it was
   mid-turn (as for any agent cut off), and its next message starts a new host otherwise. A host of another host protocol
   (`HOST_PROTOCOL`) is left running and not adopted.
+- **A host's end** (w799, BEAST 2026-10-09: the daemon dropped two hosts whose heartbeats were 30 s late under a release
+  build while their processes ran on; it could not remove their folders, `EPERM` on Windows, and never ended them. One,
+  w790's worker 38a203f0 in slot1, ran half an hour more with its claude.exe and Unity MCP chain, its `publish_attachment`
+  call never read, while the portal gave slot1 to a new worker; its next message failed on the same `EPERM` and errored
+  it.) Now (`machine/hostWatch.ts`):
+  - A host is its **pid and start time** (`host.json` `startedAt` against the process's own start, within 90 s), so a
+    reused pid is never taken for it or killed.
+  - A **late heartbeat with the process alive is not an end**: the host is kept, read and answered on; silent for 5 min
+    (`HOST_WATCH.HUNG_MS`) it is stopped. Only a gone pid (or one that is another program now) ends it at once.
+  - **Ending a host** ends its whole process tree (`taskkill /T /F`; on a Mac or Linux its process group and every
+    descendant), waits until it is gone, and only then removes its folder, retrying `EPERM`/`EBUSY` with back-off (node's own
+    `rmSync` retries miss Windows' access-denied before Node 24.21). A host that closed by itself gets 10 s to exit first. A
+    host is started with the hosts folder as its working directory, not its own folder, which Windows would then refuse
+    to delete. A message sent meanwhile starts the new host once the old one is gone.
+  - **The host watch** looks every minute at every host folder the daemon does not follow: a host whose process runs
+    (pid and start time) is an orphan, and on the second look in a row it is stopped the same way, its folder removed and
+    the orchestrator told (a `sandbox_event`). The folder of a host long gone is removed 6 h after its last write (kept
+    that long for a post-mortem; the portal has the transcript).
+  - **No slot twice.** While an old host's tree is being stopped (or is still closing after the portal dropped its
+    session) its sandbox is reported with `lingering`: the portal does not count it FREE (`list_sandboxes` says why) or
+    place a released worker there, and the daemon refuses a new agent there. That session's own next message waits for it.
+  - **Tool calls always end.** A handler that throws at once is answered with its failure; a host gives up on a call
+    its daemon has not answered in 20 min (`RPC_ANSWER_MS`) and tells the agent, instead of waiting forever.
 - **Stops.** `Stop-FFDaemon` (Windows) spares the agent hosts and what they run, as it spares Unity, unless `-Agents`:
   a reinstall and a restart (`installScript`, `machine_daemon restart`) keep them, and a stop and the uninstall end them.
   On a Mac `launchctl bootout` stops only the daemon; a stop and the uninstall then `pkill` this daemon's hosts. The
@@ -266,6 +289,9 @@ it running, mid-turn or idle. The next daemon takes it back.
 - Tests: `server/agentHost.test.ts` runs a real daemon process and real hosts with the scripted fake agent, kills the
   daemon mid-turn and starts another (Linux and Windows in the checks job; CI has no macOS runner yet), and kills a host to
   see its agent resumed. `machineDeployWin.test.ts` runs the real `Stop-FFDaemon` against stand-in processes.
+  `server/hostWatch.test.ts` (w799) runs stand-in hosts (a node working in its host folder, with a child): the locked
+  folder on Windows, a late heartbeat kept and answered, an orphan stopped on the second look, a reused pid left alone;
+  `agentState.test.ts` checks the slot-reuse guard from the daemon's report to the portal's FREE.
 
 ## Windows machines
 
