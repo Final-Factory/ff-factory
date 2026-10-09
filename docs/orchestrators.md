@@ -219,6 +219,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
 | `lock` | its name ("lab.lock"); `holder`: the request holding it; `until`: when to look again | the holder closes or reports, the nightly lab posts its next results (its run let go of the lock), or `until` passes | 1 day |
 | `time` | none; `until` | `until` passes | never |
 | `ci` | the pull request, "owner/repo#123" | none of its checks is still running (it says which failed), or it merged or closed (`gh pr view`, at most every 5 minutes) | 6 hours |
+| `pr` (w754) | the pull request, "owner/repo#123" | it MERGED (`gh pr view`, at most every 5 minutes). Closed without merging: it asks its requester. For "wait for #1291 to merge"; `ci` also clears when the checks finish unmerged, and a request closes later than its PR merges | 7 days |
 
 The stuck times are judgments (`shared/blockers.ts` `BLOCKER_STUCK_MS`): a CI run takes minutes to an hour; a lock held
 a day is a run that never ended; a machine away three days is down, not asleep; a weekly usage limit resets within 7
@@ -238,8 +239,38 @@ days; a deploy is a person's call, and a week without one is worth their look.
   merge is a portal deploy or the machines' update). The cleanup records the blocker itself (`by: ledger cleanup`), and
   closes the request once what runs there contains the merge (w631); with a week and no deploy, it stalls. Any other
   step after the merge stays **Merged, follow-up pending**.
-- **Starting it, queueing it or any other decision ends the block** (`start_agent` / `message_agent` with its work_id,
-  `decide_work`): the blocker and the capacity note belong to their status only (`Orchestrators.stamp`).
+- **Starting it ends the block; a hold does not** (w754). A blocker is a **gate**, kept on the request (`WorkItem.blocked`,
+  and `alsoBlocked` for more) through a hold (`decide_work ask`: status `question`) and through a person's "go" or
+  "unblock". w750 (the Build 90 release) was blocked on w727, held by lothsahn at 07:19, and when he wrote "You can unblock
+  the release" at 07:27 the dispatcher started its worker with w727's PR still open: the hold's `ask` had dropped the gate
+  (`stamp` dropped it on any move out of `blocked`). Now a person's note that lifts a hold puts a request that still has a
+  gate back to `blocked` itself (`Orchestrators.update`, "still blocked on …"), and **`start_agent`, `message_agent` with a
+  work_id, `decide_work link` and `decide_work queue` are refused while a gate is open** (`Orchestrators.gateProblem`: the
+  reply says which gate and why; a request, time, machine or lock gate is judged on the spot, any other kind counts as open
+  until the watch clears it). What people add meanwhile is kept with the request and goes to its worker when it resumes.
+  Only a person's own words saying to start it anyway let the dispatcher pass `override_gate` (recorded in the log). A
+  start (with the override), the gates clearing, a stall or a close ends the block; queueing, the capacity note, belongs to
+  its status only (`stamp`). `decide_work block` with no blocker blocks it again on the gates it kept.
+- **Several gates** (w754; w750 waited on w727's PR and w752). `decide_work block` takes `blockers: [...]` (all of them, up
+  to 6) or one `blocker` with `add_blocker: true` to join those it has. The request starts only when ALL have cleared: the
+  watch drops each gate as it clears (`Orchestrators.gatesCleared`, "w727 cleared; still blocked on w752"), unblocks at the
+  last (`unblock`, the dispatcher is told to resume it), stalls the request when any one is stuck (naming that gate) and
+  asks the requester when any one closed without delivering (none is kept through the question). Blocked on shows all of
+  them (`gatesName`).
+- **A worker whose request waits only on other requests or PRs does not poll** (w754; w750's worker polled `gh pr view` every
+  20 to 25 minutes with `wake_me`, and a pending check-in made the ledger say Working). Three parts:
+  1. **The signal is structured**: the worker tool `blocked_on` ({requests?, prs?, what, request?}; `Agents.declareBlocked` →
+     `Orchestrators.workerBlocked`) blocks the request on those (`by: worker <id>`; `prs` are `pr` gates), cancels the
+     worker's check-in and tells it to end its turn. The dispatcher's `decide_work block` is the other way in. Nothing parses
+     a report's prose for it (the `still open:` line is read only for a person, `personWaitIn`).
+  2. **Blocked beats a check-in** (`workLive`): a blocked request with gates is Blocked whatever check-ins its worker has
+     pending; a worker mid-turn, or running a background job (CI, a build), is still Working.
+  3. **No poll is left behind**: blocking a request (`decide_work block`, `blocked_on`) cancels the pending check-in of each
+     worker that serves it alone (`Orchestrators.cancelCheckIns`, via `Agents.cancelWake`; the log says which) and the
+     worker brief says not to set one. A worker can also cancel its own with `cancel_wake`. The block clears by itself and
+     the dispatcher resumes the worker (`[ledger] … is unblocked … message_agent with work_id to its worker`).
+- **Any other decision ends the block** (`decide_work` reject, done, merge): the capacity note and the gates belong to an open
+  request only (`Orchestrators.stamp`).
 - **Workers between turns are Working** (w643's decision). A worker waiting for CI or a long run on a check-in it set,
   or on a background job it started, holds the request and comes back to it by itself: nobody else must act, no place is
   missing, and nothing outside it has to clear for it to go on, so it is neither Waiting nor Queued nor Blocked. The
@@ -291,7 +322,9 @@ days; a deploy is a person's call, and a week without one is worth their look.
 | the same | a held message: machine offline (`placeAgain.ts` "is offline"), a held brief its daemon refuses (outdated, offline, guard) | Blocked on the machine |
 | `shared/agentState.ts` `agentState` | agent between turns: job, check-in (was "Waiting") / held message | Working / Queued or Blocked |
 | `server/orchestrators.ts` `decide` | `queue` (was free text "it waits (say for what)") | Queued, capacity only, refused with room |
-| `server/orchestrators.ts` `decide` | `block` (new) | Blocked |
+| `server/orchestrators.ts` `decide` | `block` (new; w754: several gates, kept through a hold) | Blocked |
+| `shared/workState.ts` `workLive` | status `blocked` with gates, also with a check-in pending (w754) | Blocked on the gates |
+| `server/orchestrators.ts` `workerBlocked` | the worker's `blocked_on` tool (w754) | Blocked; its check-in cancelled |
 | `server/orchestrators.ts` `capacityMayHaveFreed`, `remindDispatcher` | queued requests listed for capacity; new ones to decide | Queued / Working (blocked ones are the watch's) |
 | `server/orchestrators.ts` `intakeLine` (heartbeat) | approvals and design questions | waiting on input |
 | `server/wake.ts` `describeBusy` (heartbeat) | a worker's permission request (was "WAITING FOR A PERMISSION") | WAITING ON INPUT |

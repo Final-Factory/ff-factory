@@ -4,7 +4,7 @@ import { decisionOf } from '../../../shared/decision';
 import { api } from '../api';
 import { isMine, ledgerOrder } from '../../../shared/workOrder';
 import { WORK_LIVE_LABEL, WORK_LIVE_STATES, liveCounts, workLiveAll, type WorkLive, type WorkLiveState } from '../../../shared/workState';
-import { blockerName } from '../../../shared/blockers';
+import { gatesName, gatesOf } from '../../../shared/blockers';
 import { FFBOX_LAN_LABEL, ffboxConversationHref, isFfboxConversationId } from '../../../shared/ffboxLinks';
 import { sessionRoute } from '../attention';
 import { attempt, reloadTranscript, sessionsByIds, toast } from '../store';
@@ -621,7 +621,7 @@ function WorkRow({ app, w, live, open, onToggle, now }: { app: AppState; w: Work
           )}
           {w.status === 'blocked' && w.blocked && (
             <p className="small tone-violet" data-testid={`blocked-${w.id}`}>
-              Blocked on {blockerName(w.blocked, now)}: {w.blocked.what} (set by {w.blocked.by}, {fmtRelative(w.blocked.at, now)}). It starts by itself when that clears.
+              Blocked on {gatesName(gatesOf(w), now)}: {gatesOf(w).map((g) => g.what).join('; ')} (set by {w.blocked.by}, {fmtRelative(w.blocked.at, now)}). It starts by itself when {w.alsoBlocked?.length ? 'all of them clear' : 'that clears'}.
             </p>
           )}
           {w.prs?.length ? (

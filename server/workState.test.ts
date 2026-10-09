@@ -260,3 +260,21 @@ test('w691: a worker whose agent host did not start is Blocked on its machine an
   // A declared wait on a person and a dead host: nothing can run, so Blocked on the machine says what the dispatcher must fix.
   assert.equal(one(w, [session('d', { status: 'idle', ...failed, waitingOn: { who: 'Ben', what: 'reboot', at: ago(1) } })])?.state, 'blocked');
 });
+
+test("w754: w750 as it was: a request blocked on other requests' gates is Blocked, not Working, however many check-ins its worker left; a running job or a mid-turn worker still is Working", () => {
+  const gate = (ref: string, kind: 'request' | 'pr' = 'request') => ({ kind, ref, what: kind === 'pr' ? `PR ${ref} merged` : `${ref} finishing`, at: ago(1), by: 'dispatcher' });
+  const w = item('w750', { status: 'blocked', sessionIds: ['0ab'], blocked: gate('w752'), alsoBlocked: [gate('Final-Factory/FinalFactory#1291', 'pr')] });
+  const polling = session('0ab', { status: 'idle', wakeAt: new Date(NOW + 20 * 60_000).toISOString(), wakeNote: "w750: check PR #1291 (w727) and w752's PR" });
+  const l = one(w, [polling]);
+  assert.deepEqual([l?.state, l?.waitsOn], ['blocked', ['w752 finishing', 'PR Final-Factory/FinalFactory#1291 merging']]);
+  assert.match(l!.why, /^w752 finishing; also PR Final-Factory\/FinalFactory#1291 merged \(since 1 h ago, set by dispatcher\)$/);
+  // The same request, not blocked yet (the stored status is active): the check-in is what the ledger saw, Working (the bug).
+  assert.equal(one({ ...w, status: 'active', blocked: undefined, alsoBlocked: undefined }, [polling])?.state, 'working');
+  // Stopped until its check-in, the same worker: still Blocked.
+  assert.equal(one(w, [{ ...polling, status: 'stopped' }])?.state, 'blocked');
+  // Mid-turn it works (it is answering a message); a background job it runs is work too.
+  assert.equal(one(w, [{ ...polling, status: 'running' }])?.state, 'working');
+  assert.equal(one(w, [{ ...polling, backgroundJobs: [{ type: 'bash', description: 'CI on PR #5' }] }])?.state, 'working');
+  // A person's hold beats it: a question to the requester is Waiting on input, with the gates kept underneath.
+  assert.equal(one({ ...w, status: 'question', question: { text: 'Hold?', at: ago(1) } }, [polling])?.state, 'waiting');
+});

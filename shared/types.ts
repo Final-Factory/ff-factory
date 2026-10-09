@@ -1498,8 +1498,15 @@ export interface WorkItem {
   /**
    * What it waits on (status `blocked`, w643): a thing, never a person and never capacity. It clears by itself
    * (server/blockerWatch.ts) and the dispatcher is told to start it.
+   *
+   * w754: a GATE, not a status note. It survives a hold (decide_work ask) and a person's "go": starting the work
+   * while a gate is open needs override_gate (the person's words). Only a start (with the override), the gates
+   * clearing, a stall or a close drops it. With several gates this is the first and `alsoBlocked` holds the rest; the
+   * request starts when all have cleared (shared/blockers.ts gatesOf).
    */
   blocked?: WorkBlocker;
+  /** w754: the other gates of a request that waits on several things (w750: w727's PR and w752). Absent for one. */
+  alsoBlocked?: WorkBlocker[];
   /** The computers the dispatcher said can take it when it queued it for capacity (decide_work queue `needs`, w643). */
   queuedFor?: { at: string; needs?: string[] };
   /** The cleanup's last "Is it done?" to a worker about this merged request (w419): at most one a day. */
@@ -1557,17 +1564,17 @@ export interface WorkPr {
 /**
  * What a blocked request waits on (w643; shared/blockers.ts says when each clears): another request finishing or
  * reporting, a deploy of the portal or a machine's update, a machine coming back, a Claude account's usage limit, a lock
- * (the nightly lab.lock), a time, or the CI checks of a pull request.
+ * (the nightly lab.lock), a time, the CI checks of a pull request, or (w754) a pull request merging.
  */
-export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci';
-export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci'];
+export type WorkBlockerKind = 'request' | 'deploy' | 'machine' | 'usage' | 'lock' | 'time' | 'ci' | 'pr';
+export const WORK_BLOCKER_KINDS: readonly WorkBlockerKind[] = ['request', 'deploy', 'machine', 'usage', 'lock', 'time', 'ci', 'pr'];
 
 export interface WorkBlocker {
   kind: WorkBlockerKind;
   /**
    * What it names. request: the request id ("w633"). deploy: a machine id for that machine's daemon update, absent for
    * the portal. machine: the machine id. usage: the Claude account (its email or label). lock: the lock ("lab.lock").
-   * ci: the pull request ("owner/repo#123"). time: absent.
+   * ci and pr: the pull request ("owner/repo#123"). time: absent.
    */
   ref?: string;
   /** request (and a lock some request holds): clears when that request closes as done (`done`, default) or reports. */
@@ -1579,7 +1586,7 @@ export interface WorkBlocker {
   /** What it waits for, in a few words: "w633's timing table", "the next portal deploy". */
   what: string;
   at: string;
-  /** Who set it: "dispatcher" or "ledger cleanup" (a merged request whose only step left is a deploy). */
+  /** Who set it: "dispatcher", "worker <id>" (its blocked_on tool, w754) or "ledger cleanup" (a merged request whose only step left is a deploy). */
   by: string;
   /** deploy: the commit the portal (or the machine's daemon) ran when it was set; a different one is the deploy. */
   sha?: string;
