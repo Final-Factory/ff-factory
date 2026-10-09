@@ -160,8 +160,8 @@ test('vault: systemd credential file (0440 by the ACL mask) opens, in the creden
   assert.equal(readKey(cred, { credentialsDir: creds }).length, 32);
   const v = make(() => src);
   assert.equal(v.status().key, 'loaded', v.status().why ?? '');
-  v.add({ name: 'a', kind: 'claude', value: A, share: 'anyone' });
-  assert.equal(v.forRun({ machineId: 'm3', role: 'workers' }, { claude: true }).claude?.token, A);
+  v.add({ name: 'a', kind: 'claude', value: A, owner: 'ben', share: 'owner' });
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true }).claude?.token, A);
 
   // The same mode anywhere else is refused: through config vault.keyFile, and as a bare path.
   const loose = path.join(dir, 'etc', 'loose.key');

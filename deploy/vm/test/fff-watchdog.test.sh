@@ -77,7 +77,7 @@ command -v node >/dev/null || fail "node is needed"
 node -e 'require("net").createServer().listen(process.argv[1]); setInterval(() => {}, 1e6)' "$tmp/claude.sock" &
 NODE_PID=$!
 trap 'kill $NODE_PID 2>/dev/null || true; rm -rf "$tmp"' EXIT
-for _ in $(seq 50); do [ -S "$tmp/claude.sock" ] && break; sleep 0.1; done
+for _ in $(seq 300); do [ -S "$tmp/claude.sock" ] && break; sleep 0.1; done
 [ -S "$tmp/claude.sock" ] || fail "node did not make the test socket"
 
 mkunit() { # UNIT ACTIVE UNITFILESTATE [RESULT] [SINCE]
