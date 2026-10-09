@@ -72,7 +72,7 @@ need `user:profile`. On macOS a missing file proves nothing, because the login i
 
 Machine runs (workers and standing agents on a machine) can take their Claude token from the portal's token vault
 instead: config `machines.claudeFromVault` (`true`, `false`, or per machine with `"*"`; default `false`; owner-only in
-`set_app_config`) names the machines. Each run then gets one vault token, chosen by plan headroom with the run's
+`set_app_config`, with `machine: "<id>"` for one machine alone) names the machines. Each run then gets one vault token, chosen by plan headroom with the run's
 person's own token first, as `CLAUDE_CODE_OAUTH_TOKEN` alone (`LaunchSpec.login` drops the daemon's own credentials). A
 person's own token in `userClaudeEnv` still wins for their work. With no eligible vault token the run falls back to
 what this page describes. The vault, its other secrets and the cut-over: [vault.md](vault.md).

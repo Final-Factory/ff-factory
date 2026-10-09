@@ -197,7 +197,14 @@ Each step can be undone on its own. The commands are in [Cut-over](#cut-over).
 2. **Enter the tokens:** each person's Claude and GitHub tokens on the FFBox host, then `fff-vm vault-sync` (section
    11); Max's Discord token in the VM with `fffctl vault add`.
 3. **Switch one machine at a time:** `set_app_config machines.claudeFromVault true machine: "<id>"`, m3 first, then
-   m5, LothDesktop, BEAST. Its next agent process runs on a vault token; running ones keep theirs.
+   m5, LothDesktop, BEAST. Its next agent process runs on a vault token; running ones keep theirs. `machine` is what
+   keeps the others as they are: `{ key: "machines.claudeFromVault", value: true, machine: "lothdesktop" }` writes
+   `"claudeFromVault": { "lothdesktop": true }` and nothing else changes. Without `machine` the value is the default for
+   every machine not named (`true` switches all of them). The setting is live (the server's config object), needs no
+   portal restart, and is read when each agent process starts, so a machine that is offline needs nothing pushed: its
+   next process, after it reconnects, takes the vault path (w737). If the vault cannot give a token (the key is
+   unreadable, or no entry is eligible for the run's person) the run is not refused: it falls back to the host token or
+   the machine's own login and `system_status` warns for 24 hours (`machineRunEnv`, `server/secrets.ts`).
 4. **Grant the other secrets** to that machine, then check that a worker there can `gh auth status` and push, and, on
    the posting machine, that `ffdiscord` posts.
 5. **Retire the machine's own logins** only after it has run on the vault for a while with no fallback warning:
