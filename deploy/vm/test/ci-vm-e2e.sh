@@ -50,6 +50,26 @@ wait_for() { # SECONDS DESCRIPTION CMD...
   echo "ok: $what ($(($(date +%s) - t0)) s)"
 }
 boot_id() { g cat /proc/sys/kernel/random/boot_id; }
+# vault_key_probe (w736): the portal's own view of its vault key. The deployed release's readKey, run as the portal's account
+# (fff) on the live credential file of the running fff-portal.service ($CREDENTIALS_DIRECTORY as the portal sees it), the way
+# server/index.ts does: keySource, then readKey with the credentials folder. systemd writes that file 0400 root with an ACL entry
+# for fff, which stat shows as 0440; before w736 readKey refused it ("readable by other users (mode 440)") and the vault could
+# not be used. Prints the file's mode, owner and ACL (MEASURE), then KEY-OK or the error: a message holds a path and a mode,
+# never the key.
+vault_key_probe() {
+  local js
+  js=$(base64 -w0 <<'JS'
+import { keySource, readKey } from '/srv/fff/app/current/server/vault.ts';
+const s = keySource({ dataDir: '/srv/fff/data' }, process.env);
+if (!s.file) { console.log('NO-KEY ' + s.why); process.exit(1); }
+try { const k = readKey(s.file, { credentialsDir: s.credentialsDir }); console.log('KEY-OK ' + k.length + ' bytes, credential=' + (s.credentialsDir ? 'yes' : 'no')); }
+catch (e) { console.log('KEY-ERR ' + e.message); process.exit(1); }
+JS
+)
+  g "echo $js | base64 -d | sudo tee /tmp/vault-probe.mjs >/dev/null && sudo chmod 0644 /tmp/vault-probe.mjs"
+  echo "MEASURE the portal's credential file: $(g 'sudo stat -c "mode=%a owner=%U:%G" /run/credentials/fff-portal.service/fff-vault-key; command -v getfacl >/dev/null && sudo getfacl -p /run/credentials/fff-portal.service/fff-vault-key | grep -E "^(user|group|mask|other)" | tr "\n" " "' || true)"
+  g 'sudo -u fff env CREDENTIALS_DIRECTORY=/run/credentials/fff-portal.service node /tmp/vault-probe.mjs'
+}
 # rebooted_since BOOT_ID: the guest answers with another boot id. Each look has 20 s: an ssh that is open when the VM
 # is reset can hear nothing more and wait on TCP for minutes (hang detection took 382-988 s in 6 of 61 runs, against
 # 99-120 s in the rest; w636).
@@ -229,6 +249,9 @@ echo "ok: the token is stored 0600, owned by fff, shown only as its last four ch
 [ "$(g 'sudo stat -c "%a %U" /etc/fff/vault.key')" = "600 root" ] || fail "the vault key is not 0600 root"
 if g 'sudo -u fff cat /etc/fff/vault.key' >/dev/null 2>&1; then fail "the fff user can read the vault key file"; fi
 g 'sudo test -s /run/credentials/fff-portal.service/fff-vault-key' || fail "the portal did not get the vault key as a credential"
+out=$(vault_key_probe 2>&1) || fail "the portal's account cannot use the vault key credential (w736): $out"
+echo "$out"
+printf '%s' "$out" | matches -F 'KEY-OK 32 bytes, credential=yes' || fail "the vault key probe: $out"
 out=$(g 'printf "ci-vault-secret-QRST\n" >/tmp/v && sudo fffctl vault add --name ci-env --kind env --env CI_E2E_TOKEN --share anyone --file /tmp/v; rm -f /tmp/v')
 echo "$out"
 if printf '%s' "$out" | matches 'ci-vault-secret'; then fail "fffctl vault add printed the value"; fi
@@ -601,6 +624,10 @@ wait_for 120 "fff-health restarts the stopped fff-ops.socket" g 'systemctl is-ac
 g 'sudo jq -e "[.events[] | select(.unit == \"fff-ops.socket\" and .action == \"restart\")] | length > 0" /srv/fff/data/unit-watchdog.json' >/dev/null || fail "the watchdog's file has no restart of fff-ops.socket: $(g 'sudo cat /srv/fff/data/unit-watchdog.json')"
 g 'sudo journalctl -t fff-watchdog --no-pager -n 20' | matches 'restarted fff-ops.socket' || fail "the restart is not in the journal (tag fff-watchdog)"
 g 'sudo fffctl status' | matches -F 'fff-ops.socket restart (attempt 1)' || fail "fffctl status does not show the restart"
+# The vault key opens after this cold restart too (w736): systemd made the credential afresh at this boot.
+out=$(vault_key_probe 2>&1) || fail "the vault key is not usable after the cold restart (w736): $out"
+printf '%s' "$out" | matches -F 'KEY-OK 32 bytes, credential=yes' || fail "the vault key probe after the cold restart: $out"
+echo "ok: the portal's account opens the vault key credential after the cold restart"
 # A disabled critical unit is enabled again (a restart of the VM would have left it down).
 g 'sudo systemctl disable fff-update.path'
 wait_for 120 "fff-health enables the disabled fff-update.path" g 'systemctl is-enabled fff-update.path | grep -qx enabled'

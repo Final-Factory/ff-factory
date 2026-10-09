@@ -57,8 +57,22 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
   act as default if no credentials are found by any of the former"; the data sits "at a read-only location that (if
   possible and permitted) is backed by non-swappable memory".)* The portal reads the variable once at start and removes
   it from the environment its agents inherit.
+  **The credential's mode (w736).** The portal's `fff` account is not root, so systemd writes the credential 0400,
+  root-owned, and gives `fff` read access with a POSIX ACL entry (`user:fff:r--`) on the file and on its folder
+  `/run/credentials/fff-portal.service`; where the file system has no ACLs it chowns the file to `fff` instead
+  *(sourced: systemd's `src/core/exec-credential.c`, `write_credential`: `fchmod(fd, 0400)`, then
+  `fd_add_uid_acl_permission(fd, uid, ACL_READ)`, else `fchown`)*. `stat` shows an ACL's mask in the group bits, so the
+  file read `mode 440` although no group can read it *(measured, Ubuntu 24.04, systemd 255: `setfacl -m u:nobody:r` on a
+  0400 root file gives `stat` mode 440, owner 0:0, and `getfacl` `group::---`, `mask::r--`, `other::---`)*. The old check
+  (any group or other bit refuses the key) read that as "readable by other users" and the vault could not be used
+  (`system_status`: "Token vault: 0 entries; key unreadable"). A mode set by a unit is not an option: `LoadCredential` has none.
+  So `readKey` knows the credential: when the key comes from `$CREDENTIALS_DIRECTORY` (`keySource` marks it), the file must
+  be directly in that folder (no link out), a regular file, with no *other* bits and no group or other *write* bit, owned by
+  root or the portal's own account, in a folder with no other bits and the same owners. The group bits are not read as a
+  grant there. Any other key file (config `vault.keyFile`, `/etc/fff/vault.key`) keeps the strict rule: no group or other
+  bit at all.
 - **Elsewhere** (a portal still on Windows, the e2e tests): config `vault.keyFile`. `loadConfig` refuses one inside
-  `data/`; `readKey` refuses one other users can read (Linux, macOS).
+  `data/`; `readKey` refuses one that any group or other user can read (Linux, macOS).
 - **No key, or the wrong one:** the vault still lists, but hands out nothing it cannot open. Every run falls back to
   what it had before (section 4) and `system_status` says why, naming the entries sealed with another key. Rotating an
   entry re-seals it with the current key.

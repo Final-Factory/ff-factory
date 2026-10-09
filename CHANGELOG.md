@@ -10,6 +10,16 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The portal's token vault opens its key in the VM** (w736, Lothsahn; `system_status` said "Token vault: 0 entries; key
+  unreadable (the vault key /run/credentials/fff-portal.service/fff-vault-key is readable by other users (mode 440); chmod 600
+  it)"). Cause: for a service that is not root, systemd writes a credential 0400 root-owned with an ACL entry for the service
+  user, and `stat` shows the ACL mask in the group bits, so the file reads 440; `readKey` refused any group or other bit. A
+  hand `chmod` would not survive a restart (systemd recreates the file), and `LoadCredential` has no mode setting. Fix in
+  code: for the key that comes from `$CREDENTIALS_DIRECTORY`, `readKey` accepts the group bits when the file is directly in
+  that folder, a regular file, has no other bits and no write bit for group or others, and file and folder are owned by root or
+  the portal's account; every other key file keeps the strict rule. The VM end to end runs the deployed `readKey` as `fff`
+  on the live credential after the install and after the cold restart. Needs a portal deploy.
+
 - **`fffctl credential issue` no longer exits 1 with "line 1: tmp: unbound variable" after it stored the credential** (w734, found
   installing biscuit, w693). `credential_issue` in `deploy/vm/guest/fff-ops-priv` set `trap 'rm -rf "$tmp"' EXIT` with a function-local
   `$tmp`; the single-quoted trap expanded it when the script ended, outside the function, and `set -u` failed. The trap now
