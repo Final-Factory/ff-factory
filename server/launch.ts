@@ -132,6 +132,12 @@ export const CATALOG = {
     id: z.string().max(64).describe('The FFBox report id, e.g. "20261003T101500Z-desync-3a9f01c2d4".'),
     file: z.string().max(260).optional().describe('One file inside the zip, exactly as the report lists it (e.g. "logs/Player.log"). Default: the whole zip.'),
   },
+  /** docs/ffbox.md, "Bug threads' files". On a machine the portal fetches the files from FFBox and the daemon puts them in the Inbox. */
+  fetch_discord_thread_files: {
+    thread: z.string().max(200).describe('The Discord thread: its URL, e.g. "https://discord.com/channels/530867164866150410/1558176042089447425" (a message link in it works), or its id.'),
+    file: z.string().max(260).optional().describe('One file of the thread by its name, e.g. "BugReport_20261009_185502.zip". Default: every file of the thread.'),
+    sha256: z.string().max(64).optional().describe('One file by its SHA-256 (from an earlier answer), for when the thread has two files of one name.'),
+  },
   /** docs/orchestrators.md, "Workers read the ledger" (w642). Read-only: the portal answers from the ledger (server/workRead.ts). */
   read_work: {
     id: z.string().max(16).optional().describe('One request in full, e.g. "w631": yours, one yours names, or (with a ledger-read grant) any open or stalled one.'),

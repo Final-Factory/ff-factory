@@ -220,7 +220,7 @@ export function transferOf(data: Record<string, unknown> | undefined): ReportTra
   if (!t || typeof t !== 'object' || Array.isArray(t)) return undefined;
   const r = t as Record<string, unknown>;
   if (typeof r.name !== 'string' || !/^[^\x00-\x1f\x7f/\\]{1,120}$/.test(r.name)) return undefined;
-  if (typeof r.bytes !== 'number' || !Number.isSafeInteger(r.bytes) || r.bytes < 0 || r.bytes > REPORT_LIMITS.maxBytes) return undefined;
+  if (typeof r.bytes !== 'number' || !Number.isSafeInteger(r.bytes) || r.bytes < 0 || r.bytes > REPORT_LIMITS.maxTransferBytes) return undefined;
   if (typeof r.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(r.sha256)) return undefined;
   return {
     name: r.name,
@@ -239,7 +239,7 @@ interface PendingTransfer {
 }
 
 /** Answers never kept for the "last known" fallback: a page of logs or reports, or one report, would answer another question. */
-const NOT_KEPT = new Set(['logs', 'reports', 'report']);
+const NOT_KEPT = new Set(['logs', 'reports', 'report', 'thread_files', 'thread_file']);
 
 /** FFBox's conversation id (docs/ffbox-connector-contract.md, `conversation`). */
 export const CONVERSATION_ID = /^[A-Za-z0-9._:-]{1,80}$/;

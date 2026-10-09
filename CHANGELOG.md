@@ -10,6 +10,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A worker on any machine can fetch a Discord bug thread's files, with no Discord token on its machine** (w787, Ben: "we should
+  have some workers that can download attachments. if not lets fix it"; "no discord token on beast, max has to live in ffbox
+  for security reasons"). Bug Bot's runtime log and the `BugReport_*.zip` save were downloadable only where the `ffdiscord`
+  config is, so w779's worker on the m3 had to ask for them by hand. FFBox already keeps every attachment of the channels it
+  watches, so it now answers two read-only queries, `thread_files` and `thread_file`, from its own database and blob store (it
+  never calls Discord, and only `bug_report` channels answer). The new worker tool `fetch_discord_thread_files {thread, file?,
+  sha256?}` (thread: the URL, a message link in it, or an id) puts the files in the worker's `Inbox/`, SHA-256 checked three
+  ways and against the hash FFBox listed, labelled untrusted; an orchestrator's `ffbox_activity` has `show: "thread_files"`
+  (list) and `"thread_file"` (fetch into the attachment store). Transfers may now announce up to 128 MB (a report is still
+  cut at 64 MB on FFBox). Needs a portal deploy and each machine's daemon at this version
+  ([docs/ffbox.md](docs/ffbox.md), "Bug threads' files"); the ffbox side is on its master.
+
 - **The Claude account email of a vault token on the accounts list** (w785, Lothsahn: "can we show the email address associated with the key on ffportal?").
   A `claude setup-token` token reveals no account (inference scope only; the profile and usage calls need `user:profile`; `/status` and
   `oauthAccount` stay empty under `CLAUDE_CODE_OAUTH_TOKEN`; the one owner header is an organisation id), so the email is recorded on the
