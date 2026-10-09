@@ -8,6 +8,13 @@
 #   fffctl units [--check]             the critical units: active, enabled, the watchdog's verdict and its last restarts (fffctl
 #                                      units). --check prints "down: ..." and exits 1 if one is not (w743); read only, and no
 #                                      other word: `fffctl watchdog` (run, pause, resume, reset) and the restarts stay a person's
+#   fffctl vault list [--names]        the token vault's entries (name, kind, env, last four characters, fingerprint, grants), the
+#                                      Claude pools' meters, or only the names (w745). Never a value. `vault help` prints the
+#                                      vault command's own usage. `vault init`, `export-key`, `add`, `put`, `rotate`, `grant`,
+#                                      `remove` and `new-key` change the vault or copy its key: a person's.
+#   fffctl machine-credential list     the same as `credential list`, under fffctl's own name (w745)
+#   fffctl migrate --help              migrate's usage (w745); `--key` (it trusts a new host key), `--dry-run-copy`,
+#                                      `--rollback-dry-run` and `--cut-over` change state: a person's
 #   fffctl logs [N]                    the portal's last N journal lines (default 200, at most 2000), secrets redacted
 #   fffctl machine-ssh --check         the portal's ssh to each machine, then its authorized_keys line (fff-machine-ssh
 #                                      --check, read only; machine-ssh-check is the same). Its PATH's fff-machine-ssh
@@ -104,6 +111,26 @@ case "${1:-help}" in
       *) refuse "units | units --check (the watchdog, restarts and pauses are a person's: sudo fffctl watchdog)" ;;
     esac
     ;;
+  vault)
+    # Read only (w745): the entries' metadata and the usage text. Exactly these three forms, nothing after them.
+    case "${2:-}" in
+      list)
+        if [ $# -eq 2 ]; then exec "$FFFCTL" vault list; fi
+        [ $# -eq 3 ] && [ "$3" = --names ] || refuse "vault list [--names] takes nothing more"
+        exec "$FFFCTL" vault list --names
+        ;;
+      help) [ $# -eq 2 ] || refuse "vault help takes nothing more"; exec "$FFFCTL" vault help ;;
+      *) refuse "vault list [--names] | vault help (init, export-key, add, put, rotate, grant, remove and new-key change the vault or copy its key: a person's, sudo fffctl vault ...)" ;;
+    esac
+    ;;
+  machine-credential)
+    [ $# -eq 2 ] && [ "$2" = list ] || refuse "machine-credential list (issue and revoke are a person's; credential issue ID --to TARGET is yours, with a record)"
+    exec "$FFFCTL" machine-credential list
+    ;;
+  migrate)
+    [ $# -eq 2 ] && [ "$2" = --help ] || refuse "migrate --help (the migration itself, and migrate --key, which trusts a new host key, are a person's)"
+    exec "$FFFCTL" migrate --help
+    ;;
   logs)
     n=${2:-200}
     if ! [[ $n =~ ^[0-9]{1,4}$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt 2000 ]; then refuse "logs [N]: N from 1 to 2000"; fi
@@ -146,5 +173,5 @@ case "${1:-help}" in
     echo "asked for: the portal builds origin/$FFF_BRANCH beside the running release, drains, restarts on it, verifies it and rolls back by itself. Your process ends with the old portal; FF Factory messages you when the new one is up."
     ;;
   help | -h | --help) awk 'NR > 5 && /^#$/ {exit} NR > 5' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) refuse "fffctl $1 is a person's (restarts, rollbacks, settings, the vault, migrations). You have: status, state, units [--check], logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, and update with a deploy grant" ;;
+  *) refuse "fffctl $1 is a person's (restarts, rollbacks, settings, the vault, migrations). You have: status, state, units [--check], vault list [--names] / vault help, machine-credential list, migrate --help, logs [N], machine-ssh --check / --key / --pin USER@HOST FINGERPRINT, credential list, credential issue ID --to TARGET, and update with a deploy grant" ;;
 esac

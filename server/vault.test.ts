@@ -208,7 +208,7 @@ test('vault: forRun gives the granted secrets as environment, and a Claude token
   assert.deepEqual(loth.env, { GH_TOKEN: GH, FFDISCORD_APP_TOKEN: DISCORD });
   assert.equal(loth.claude?.token, A);
   assert.deepEqual(v.forRun({ machineId: 'm3', role: 'standing' }, { claude: false }).env, {}, 'gh is for workers only');
-  assert.deepEqual(v.claudeTokens().map((x) => x.label), [`vault: a …${A.slice(-4)}`]);
+  assert.deepEqual(v.claudeTokens().map((x) => x.label), [`a …${A.slice(-4)}`]);
 });
 
 const usage = (session: number, weekly: number): PlanUsage => ({ available: true, asOf: '', models: [], session: { label: 's', percent: session }, weekly: { label: 'w', percent: weekly } });
@@ -366,19 +366,19 @@ test('vaultCli: add from a file, list, grant, machine credentials; no value on s
   for (const r of [add, ls, issued]) assert.ok(!r.stdout.includes(A.slice(13, 40)) && !r.stdout.includes(fs.readFileSync(out, 'utf8').trim().slice(7)));
 });
 
-test('the usage meters show each vault Claude token as its own account, with where it is granted', (t) => {
+test('the usage meters show each vault Claude token as its own account, named plainly and with no description', (t) => {
   const { make } = setup(t);
   const v = make();
   v.add({ name: 'ben-max', kind: 'claude', value: A, owner: 'ben', machines: ['m3'] });
   const [tok] = v.claudeTokens();
-  assert.equal(tok.where, "the token vault: workers, standing on m3, ben's own work");
+  assert.equal(tok.label, `ben-max …${A.slice(-4)}`, 'no "vault:" in front: the name is not cut off');
   const key = `token:${tok.fingerprint}`;
   const entries = new Map([[key, { kind: 'token' as const, label: tok.label, usage: usage(30, 40), direct: true }]]);
-  const accounts = buildAccounts(entries, { hostName: 'vm', machines: [{ id: 'm3', usesToken: false }], vault: [{ key, label: tok.label, where: tok.where }], sessions: [{ id: 's1', source: key, live: true }] });
+  const accounts = buildAccounts(entries, { hostName: 'vm', machines: [{ id: 'm3', usesToken: false }], vault: [{ key, label: tok.label }], sessions: [{ id: 's1', source: key, live: true }] });
   const a = accounts.find((x) => x.id === key);
   assert.ok(a, 'listed');
-  assert.equal(a.label, `vault: ben-max …${A.slice(-4)}`);
-  assert.deepEqual(a.where, [tok.where]);
+  assert.equal(a.label, `ben-max …${A.slice(-4)}`);
+  assert.deepEqual(a.where, [], 'the grant is not repeated on the account');
   assert.deepEqual(a.sessionIds, ['s1']);
   assert.equal(a.usage?.weekly?.percent, 40);
 });
@@ -486,4 +486,45 @@ test("machineRunEnv per person: each person's own Claude and GitHub tokens, neve
   // Someone with no token of their own gets nobody else's: the machine's own account, as before the vault.
   const r5 = machineRunEnv(cfg, m, { role: 'workers', requestedBy: { userId: 'mate', displayName: 'Mate' } }, ctx);
   assert.deepEqual([r5.env.CLAUDE_CODE_OAUTH_TOKEN, r5.env.GH_TOKEN], [C, undefined]);
+});
+
+test('vault rename (w748): the same entry under a new name keeps its id, value, grants and pick; a taken or bad name is refused', (t) => {
+  const { make } = setup(t);
+  const v = make();
+  const was = v.add({ name: 'host-ben-claude-1', kind: 'claude', value: A, owner: 'ben', share: 'owner', machines: ['m3'] });
+  v.add({ name: 'vault-ben-2', kind: 'claude', value: B, owner: 'ben', share: 'owner' });
+  assert.throws(() => v.rename('host-ben-claude-1', 'vault-ben-2'), /a vault entry named vault-ben-2 exists/);
+  assert.throws(() => v.rename('host-ben-claude-1', 'Vault Ben'), /lower-case/);
+  assert.throws(() => v.rename('nobody', 'vault-x'), /no vault entry named nobody/);
+  const now = v.rename('host-ben-claude-1', 'vault-ben-1');
+  assert.deepEqual([now.id, now.name, now.fingerprint, now.owner, now.machines, now.last4], [was.id, 'vault-ben-1', was.fingerprint, 'ben', ['m3'], A.slice(-4)]);
+  assert.deepEqual(v.list().map((e) => e.name).sort(), ['vault-ben-1', 'vault-ben-2']);
+  // the value still opens: a run on m3 gets it
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true }).claude?.token, A);
+  // and it survives a reload from disk
+  assert.deepEqual(make().list().map((e) => e.name).sort(), ['vault-ben-1', 'vault-ben-2']);
+});
+
+test('vaultCli put (w748): a vault-… name takes over the host-… entry holding the same token instead of adding it twice', (t) => {
+  const { dir, data, keyFile } = setup(t);
+  const cfgFile = path.join(dir, 'config.json');
+  fs.writeFileSync(cfgFile, JSON.stringify({ dataDir: data, sandboxRoot: path.join(dir, 'sb'), repo: { url: 'https://example.test/g.git', basePath: path.join(dir, 'base') }, unity: { editorPath: 'x' } }));
+  const env = { ...process.env, FFSB_CONFIG: cfgFile, FFF_VAULT_KEY_FILE: keyFile };
+  const cli = (input: string | undefined, ...a: string[]) => spawnSync(process.execPath, ['server/vaultCli.ts', ...a], { env, encoding: 'utf8', input });
+  const put = (name: string, value: string) => cli(`${value}\n`, 'put', '--name', name, '--kind', 'claude', '--owner', 'ben', '--share', 'owner', '--roles', 'workers,standing', '--machines', '*', '--stdin');
+  assert.match(put('host-ben-claude-1', A).stdout, /^added: host-ben-claude-1/);
+  const renamed = put('vault-ben-1', A);
+  assert.equal(renamed.status, 0, renamed.stderr);
+  assert.match(renamed.stdout, /^renamed: vault-ben-1 .*\(was host-ben-claude-1\)/);
+  assert.deepEqual(cli(undefined, 'list', '--names').stdout.trim().split('\n'), ['vault-ben-1']);
+  assert.match(put('vault-ben-1', A).stdout, /^unchanged: vault-ben-1/);
+  // a different token under the new name is a new entry (the old one is the sync's to remove)
+  assert.match(put('vault-ben-2', B).stdout, /^added: vault-ben-2/);
+  // the old name never takes a vault-… entry's token, and a value is in the vault once
+  assert.notEqual(put('host-ben-claude-9', A).status, 0);
+  // the explicit command
+  assert.match(cli(undefined, 'rename', 'vault-ben-2', 'vault-ben-3').stdout, /^renamed: vault-ben-3/);
+  assert.notEqual(cli(undefined, 'rename', 'vault-ben-3', 'vault-ben-1').status, 0);
+  const out = [renamed.stdout, renamed.stderr, cli(undefined, 'list').stdout].join('\n');
+  assert.ok(!out.includes(A.slice(13, 40)) && !out.includes(B.slice(13, 40)), 'no token value on any output');
 });

@@ -28,6 +28,20 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
     all on the ubuntu-26.04 host, 2026-10-06 and 2026-10-09). `dom_state` now reads virsh's whole answer;
     `deploy/vm/test/fff-vm-nightly.test.sh` case 10 makes the blank line late.
 
+- **The Claude accounts list shows only accounts in use, with shorter names, and the vault entries are renamed `vault-<person>[-<n>]`**
+  (w748, Lothsahn). An account appears only when a role or machine is set to use it or an agent runs on it now: LothDesktop's own
+  login is left out while `machines.claudeFromVault` includes it (and returns when it does not), likewise a machine on the host
+  token, the portal's stored login while no role is set to it, the host token while nothing uses it, and vault tokens while nothing
+  is on the vault (`inUse` in `buildAccounts`, `hostAccountsInUse`). A vault token's title drops "vault:" so its name is not cut
+  off, its description ("the token vault: workers, standing on every machine…") is gone (the "agents on it" list stays), and the
+  usage line says "from rate limits" instead of "from rate-limit headers". The host's sync names entries `vault-<person>`
+  (claude-token), `vault-<person>-<n>` (claude-tokens/<n>) and `vault-<person>-github` instead of `host-<person>-claude[-<n>]` and
+  `host-<person>-github`; `fffctl vault put` renames the old entry holding the same token (new `Vault.rename`, `fffctl vault rename
+  OLD NEW`), so no token is entered again and no pool loses one. A sync against a portal that cannot rename yet keeps the old
+  entries and warns. docs/vault.md 3b, docs/accounts.md. With no worker daemon on the portal's own host (the case since w510),
+  `claudeAccounts.workers` applies to nothing, so the "fff-portal login (workers)" account row, "workers here: …" in the per-agent
+  line and the "set to the fff-portal login (workers), which cannot run agents" warning are left out (`workersHere`); they return when
+  a local machine is added.
 - **A request that waits on other requests or PRs shows Blocked, not Working; its worker stops polling; a lifted hold keeps
   its gates** (w754, Lothsahn: "Why is 750 working? Shouldn't it be waiting or blocked?"). w750 (the Build 90 release) was
   blocked on w727, held, and when the hold lifted ("You can unblock the release") the dispatcher started its worker with

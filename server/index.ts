@@ -40,7 +40,7 @@ import { DispatcherChatRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, reserveLines, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostAccountsInUse, reserveLines, workersHere, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
 import { clock, firstFree, poolBanner, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
@@ -1744,21 +1744,30 @@ function accountClear(name: string): boolean | undefined {
 function accountsNow() {
   const token = hostToken(cfg);
   const toMachine = (id: string) => machineToken(cfg, usesHostClaudeEnv(cfg, store.machines.get(id) ?? id));
+  // No worker daemon on the portal's own host (the case since w510): claudeAccounts.workers applies to nothing here (w748).
+  const here = workersHere(machines.list());
+  const used = hostAccountsInUse(cfg, here);
+  const machineList = machines.list().map((m) => {
+    const t = toMachine(m.id);
+    return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token), onVault: claudeFromVault(cfg, m) };
+  });
   return buildAccounts(usage.entries, {
     hostName: os.hostname(),
     token: token ? { key: tokenKey(token), label: tokenLabel(token) } : undefined,
-    hostLoginRoles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login'),
-    roles: shownRoles(cfg),
+    hostLoginRoles: shownRoles(cfg, here).filter((r) => hostAccount(cfg, r) === 'login'),
+    roles: shownRoles(cfg, here),
     ...(() => {
       const t = tokenFileToken(cfg);
-      return t ? { tokenFile: { key: tokenKey(t), label: `token file …${t.slice(-4)}`, roles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'tokenfile') } } : {};
+      return t ? { tokenFile: { key: tokenKey(t), label: `token file …${t.slice(-4)}`, roles: shownRoles(cfg, here).filter((r) => hostAccount(cfg, r) === 'tokenfile') } } : {};
     })(),
     people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
-    vault: vault.claudeTokens().map((v) => ({ key: `token:${v.fingerprint}`, label: v.label, where: v.where })),
-    machines: machines.list().map((m) => {
-      const t = toMachine(m.id);
-      return { id: m.id, usesToken: !!t && !!token && tokenKey(t) === tokenKey(token) };
-    }),
+    vault: vault.claudeTokens().map((v) => ({ key: `token:${v.fingerprint}`, label: v.label })),
+    machines: machineList,
+    inUse: {
+      hostLogin: used.login || !token,
+      hostToken: used.token || machineList.some((m) => m.usesToken),
+      vault: used.vault || machineList.some((m) => m.onVault),
+    },
     sessions: [...store.sessions.values()].map((s) => ({ id: s.id, source: sourceOf(s, token, toMachine), live: s.status !== 'stopped' && s.status !== 'error' })),
   });
 }
@@ -1771,7 +1780,7 @@ bus.on('event', (e: ServerEvent) => {
   accountTimer ??= setTimeout(() => {
     accountTimer = undefined;
     const live = (s: { status: string }) => (s.status === 'stopped' || s.status === 'error' ? '' : '+');
-    const shape = `${[...store.sessions.values()].map((s) => s.id + live(s) + (s.account ?? '')).join()}|${machines.list().map((m) => m.id).join()}|${hostToken(cfg)?.slice(-4) ?? ''}|${JSON.stringify([cfg.claudeAccounts, cfg.machines?.useHostClaudeEnv])}`;
+    const shape = `${[...store.sessions.values()].map((s) => s.id + live(s) + (s.account ?? '')).join()}|${machines.list().map((m) => m.id).join()}|${hostToken(cfg)?.slice(-4) ?? ''}|${JSON.stringify([cfg.claudeAccounts, cfg.machines?.useHostClaudeEnv, cfg.machines?.claudeFromVault])}`;
     if (shape === accountShape) return;
     accountShape = shape;
     broadcast({ type: 'accounts', accounts: accountsNow() });

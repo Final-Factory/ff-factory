@@ -285,30 +285,30 @@ for v in "$ct" "$gt" "$ct2"; do if printf '%s' "$out" | matches -F "${v:13:24}";
 printf '%s' "$out" | matches 'not named 1-16 of a-z' || fail "a pool file with a bad name was not refused: $out"
 printf '%s' "$out" | matches 'not one fine-grained GitHub token' || fail "a classic GitHub token was not refused"
 list=$(g 'sudo fffctl vault list')
-printf '%s' "$list" | matches -F "${ct: -4}" || fail "host-ci-claude is not in the vault: $list"
-printf '%s' "$list" | matches '^host-ci-github ' || fail "host-ci-github is not in the vault: $list"
+printf '%s' "$list" | matches -F "${ct: -4}" || fail "vault-ci is not in the vault: $list"
+printf '%s' "$list" | matches '^vault-ci-github ' || fail "vault-ci-github is not in the vault: $list"
 # The pool: both Claude tokens are the person's (owner ci), and the CLI lists the pool with their state and last four characters.
-printf '%s' "$list" | matches '^host-ci-claude-second ' || fail "the second token of the pool is not in the vault: $list"
+printf '%s' "$list" | matches '^vault-ci-second ' || fail "the second token of the pool is not in the vault: $list"
 printf '%s' "$list" | matches -F "${ct2: -4}" || fail "the second token's last four characters are not listed: $list"
 printf '%s' "$list" | matches 'Claude token pools' || fail "fffctl vault list has no pool section: $list"
-printf '%s' "$list" | matches -E '^    host-ci-claude-second +…' || fail "the pool section does not list the second token: $list"
+printf '%s' "$list" | matches -E '^    vault-ci-second +…' || fail "the pool section does not list the second token: $list"
 printf '%s' "$list" | matches -E 'ok +5-hour' || fail "the pool section shows no state and meters: $list"
 if printf '%s' "$list" | matches 'bad'; then fail "the refused pool file went in"; fi
-if printf '%s' "$list" | matches '^host-ci2-'; then fail "the refused token went in"; fi
+if printf '%s' "$list" | matches '^vault-ci2'; then fail "the refused token went in"; fi
 [ "$(stat -c '%a %U' /etc/fff-vm/secrets/vault.key)" = "600 root" ] || fail "the key's spare copy is not 0600 root"
 # The file is named to sha256sum under sudo: a "<" redirect would be opened by the admin's own shell, which cannot read it.
 [ "$(sha256sum /etc/fff-vm/secrets/vault.key | cut -c1-64)" = "$(g 'sudo sha256sum /etc/fff/vault.key' | cut -c1-64)" ] || fail "the key's spare copy differs from the VM's key"
 # Captured first: the sync exits 1 (ci2's classic token is still refused), which pipefail would carry through a pipe.
 out=$(/usr/local/sbin/fff-vm vault-sync 2>&1) || true
-printf '%s' "$out" | matches 'unchanged host-ci-claude' || fail "a second sync was not a no-op: $out"
-printf '%s' "$out" | matches 'unchanged host-ci-github' || fail "a second sync was not a no-op: $out"
-printf '%s' "$out" | matches 'unchanged host-ci-claude-second' || fail "a second sync was not a no-op for the pool's second token: $out"
+printf '%s' "$out" | matches 'unchanged vault-ci' || fail "a second sync was not a no-op: $out"
+printf '%s' "$out" | matches 'unchanged vault-ci-github' || fail "a second sync was not a no-op: $out"
+printf '%s' "$out" | matches 'unchanged vault-ci-second' || fail "a second sync was not a no-op for the pool's second token: $out"
 rm -rf /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2
 # Every person is gone: a scan that finds no token file removes nothing unless --prune says so (w744).
 /usr/local/sbin/fff-vm vault-sync >/dev/null 2>&1 || true
-g 'sudo fffctl vault list --names' | matches '^host-ci-' || fail "an empty scan removed the vault's entries without --prune"
+g 'sudo fffctl vault list --names' | matches -E '^vault-ci(-|$)' || fail "an empty scan removed the vault's entries without --prune"
 /usr/local/sbin/fff-vm vault-sync --prune >/dev/null 2>&1 || true
-if g 'sudo fffctl vault list --names' | matches '^host-ci-'; then fail "a removed person's entries stayed in the vault"; fi
+if g 'sudo fffctl vault list --names' | matches -E '^vault-ci(-|$)'; then fail "a removed person's entries stayed in the vault"; fi
 echo "ok: fff-vm vault-sync: per-person tokens in, never printed, a classic GitHub token refused, removals follow, the key copied"
 # fffctl migrate (w499) in a real guest: the wrapper, node in the release, ssh as fff with the portal's key. No BEAST here,
 # so it cannot connect: it says so, prints the line that authorizes the key, and changes nothing. (The modes themselves
@@ -344,10 +344,26 @@ done
 # sudo: fff-ops-priv as root and fff-ops-ssh as fff, nothing else.
 g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl status' | matches '^portal: active' || fail "the worker's fffctl status does not work"
 g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl logs 5' >/dev/null || fail "the worker's fffctl logs does not work"
-for bad in 'sudo -n /usr/local/sbin/fffctl restart' 'sudo -n /usr/local/lib/fff/fff-ops-priv update' 'sudo -n /usr/local/lib/fff/fff-ops-priv vault list' \
+# The read-only forms of the vault and the rest (w745): the worker's fffctl lists the entries (name, last four characters,
+# fingerprint), never a value, and changes nothing.
+g 'printf "ci-ops-secret-ZYXW\n" >/tmp/v && sudo fffctl vault add --name ci-ops-env --kind env --env CI_OPS_TOKEN --share anyone --file /tmp/v; rm -f /tmp/v' >/dev/null
+wl=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl vault list 2>&1') || fail "the worker's fffctl vault list does not work: $wl"
+printf '%s' "$wl" | matches 'key: loaded' || fail "the worker's vault list: the key is not loaded: $wl"
+printf '%s' "$wl" | matches -F '…ZYXW' || fail "the worker's vault list does not show an entry's last four characters: $wl"
+if printf '%s' "$wl" | matches -F 'ci-ops-secret'; then fail "the worker's vault list printed a value"; fi
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl vault list --names' | matches -x 'ci-ops-env' || fail "the worker's vault list --names does not list ci-ops-env"
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl vault help' | matches 'vaultCli\|vault' || fail "the worker's vault help does not work"
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl machine-credential list' >/dev/null || fail "the worker's machine-credential list does not work"
+# units --check exits 1 when a unit is down: only a refusal by the wrapper ("orchestration worker") is a failure here
+if g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl units --check 2>&1 || true' | matches 'orchestration worker'; then fail "the worker's fffctl units --check was refused"; fi
+for bad in 'sudo -n /usr/local/sbin/fffctl restart' 'sudo -n /usr/local/lib/fff/fff-ops-priv update' 'sudo -n /usr/local/lib/fff/fff-ops-priv vault rotate ci-ops-env --stdin' \
+  'sudo -n /usr/local/lib/fff/fff-ops-priv vault export-key --out /tmp/ci-ops-key' 'sudo -n /usr/local/lib/fff/fff-ops-priv vault list --file /tmp/x' \
+  'sudo -n /usr/local/lib/fff/fff-ops-priv migrate --key' 'sudo -n /usr/local/lib/fff/fff-ops-priv watchdog pause' \
   'sudo -n -u fff /bin/cat /srv/fff/config/config.json' 'sudo -n -u fff /usr/local/lib/fff/fff-ops-ssh -oProxyCommand=id x' 'sudo -n apt-get install -y htop'; do
   if g "sudo -u fff-ops $bad" >/dev/null 2>&1; then fail "fff-ops may run: $bad"; fi
 done
+g 'sudo fffctl vault remove ci-ops-env' >/dev/null
+if g 'test -e /tmp/ci-ops-key'; then fail "fff-ops copied the vault key"; fi
 # A credential for a machine that does not answer ssh is not issued at all (it would only cut that machine off).
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl credential issue ci-m2 --to nosuchhost.invalid 2>&1' || true)
 printf '%s' "$out" | matches 'does not answer ssh' || fail "credential issue to an unreachable machine: $out"

@@ -111,5 +111,12 @@ Then push the commit and the tag (the script prints the command).
 - Anything that widens what agents may do (guard rules, tool groups, permissions) needs a clear
   reason in the pull request.
 
+- **A new `fffctl` command or form: allow its read-only parts to the ops worker, in the same pull request**
+  (Lothsahn, 2026-10-09, w745: "anytime a new fffctl command is provided, all read only parts of it should be allowed by
+  the orchestrator worker"). Add it to `FFFCTL_FORMS` in `server/opsWorker.ts` (allowed when it changes nothing and prints
+  no secret, otherwise `changes`) and to `deploy/vm/guest/fff-ops-priv` with its exact arguments pinned, with cases in
+  `deploy/vm/test/fff-ops.test.sh` and `server/opsWorker.test.ts`. `server/opsFffctlForms.test.ts` fails until you have.
+  How to tell the two apart: docs/ops-worker.md, "A new fffctl command".
+
 By contributing you agree that your contributions are licensed under the MIT License
 ([LICENSE](LICENSE)).

@@ -463,7 +463,7 @@ function AccountsMeters({ app }: { app: AppState }) {
               <div className="acct-head" data-testid={`account-${accountTag(a)}`}>
                 <span className="acct-label">{a.label}</span>
                 <span className="acct-agents">{live.length === 1 ? '1 agent' : `${live.length} agents`}</span>
-                <div className="acct-where">{a.where.join(' · ')}</div>
+                {a.where.length > 0 && <div className="acct-where">{a.where.join(' · ')}</div>}
               </div>
             }
           />
