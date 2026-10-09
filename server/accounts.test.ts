@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { checkAccountConfig, type Config } from './config.ts';
-import { accountSetupLines, hostAccount, hostClaudeEnv, hostClaudeEnvFor, hostLoginProblem, hostProcessEnv, hostRole, hostRoleOf, machineUsesLogin, readTokenFile, redactSecrets, tokenFileToken } from './secrets.ts';
+import { accountSetupLines, hostAccount, hostAccountsInUse, shownRoles, workersHere, hostClaudeEnv, hostClaudeEnvFor, hostLoginProblem, hostProcessEnv, hostRole, hostRoleOf, machineUsesLogin, readTokenFile, redactSecrets, tokenFileToken } from './secrets.ts';
 import { nextPerMachine, setAppConfig } from './appConfig.ts';
 import { claudeEnvFor } from './identity.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
@@ -206,10 +206,10 @@ test("accounts: system_status names each kind of agent's account", (t) => {
   const { dir } = configFile(t, {});
   login(dir, Date.now() + 3_600_000);
   const cfg = split({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST_TOKEN, CLAUDE_CONFIG_DIR: dir }, machines: { useHostClaudeEnv: { m3: false, m5: false } } });
-  const [line, ...rest] = accountSetupLines(cfg, 'BEAST', HOST_TOKEN, ['m3', 'm5', 'mini'], ['Lothsahn']);
+  const [line, ...rest] = accountSetupLines(cfg, 'BEAST', HOST_TOKEN, [{ id: 'beast', local: true }, 'm3', 'm5', 'mini'], ['Lothsahn']);
   assert.equal(
     line,
-    'Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): the orchestrator here: BEAST login; workers here: host token …9AAA; agents on m3: Mac login; agents on m5: Mac login; agents on mini: host token …9AAA; work asked for by Lothsahn: their own token',
+    'Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): the orchestrator here: BEAST login; workers here: host token …9AAA; agents on beast: host token …9AAA; agents on m3: Mac login; agents on m5: Mac login; agents on mini: host token …9AAA; work asked for by Lothsahn: their own token',
   );
   assert.deepEqual(rest, [], 'the login is usable: no warning');
   login(dir, Date.now() - 60_000);
@@ -230,7 +230,7 @@ test('accounts: claudeAccounts.dispatcher (w464): checked, set by set_app_config
   assert.doesNotMatch(accountSetupLines(cfg, 'BEAST', HOST_TOKEN, [])[0], /dispatcher/);
   assert.deepEqual(setAppConfig(file, cfg, 'claudeAccounts.dispatcher', 'token'), { before: undefined, after: 'token' });
   assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'login', dispatcher: 'token' });
-  assert.match(accountSetupLines(cfg, 'BEAST', HOST_TOKEN, [])[0], /the orchestrator here: BEAST login; the dispatcher here: host token …9AAA; workers here/);
+  assert.match(accountSetupLines(cfg, 'BEAST', HOST_TOKEN, [{ id: 'beast', local: true }])[0], /the orchestrator here: BEAST login; the dispatcher here: host token …9AAA; workers here/);
   assert.throws(() => setAppConfig(file, cfg, 'claudeAccounts.dispatcher', 'keychain'), /"login" .* or "token"/);
   setAppConfig(file, cfg, 'claudeAccounts.dispatcher', null);
   assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'login' });
@@ -350,4 +350,27 @@ test('token file: the meters show it as its own account, named by the roles on i
   assert.match(host.where[0], /the agents' token on FFVM \(workers\), lothdesktop/);
   const text = `env: CLAUDE_CODE_OAUTH_TOKEN=${FILE_TOKEN}`;
   assert.equal(redactSecrets(text), 'env: CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-[redacted …FFFF]');
+});
+
+test("accounts (w748): the workers role is named, and warned about, only while a worker daemon runs on the portal's own host", (t) => {
+  const { dir } = configFile(t, {});
+  login(dir, Date.now() - 60_000); // an expired stored login: it cannot run agents
+  const cfg = split({ claudeEnv: { CLAUDE_CODE_OAUTH_TOKEN: HOST_TOKEN, CLAUDE_CONFIG_DIR: dir }, claudeAccounts: { orchestrator: 'token', workers: 'login' } });
+  // No daemon on the portal's host (the case since w510): no "workers here", and no warning for a login nothing uses.
+  const none = accountSetupLines(cfg, 'fff-portal', HOST_TOKEN, ['m3', 'm5']);
+  assert.doesNotMatch(none[0], /workers here/);
+  assert.equal(none.length, 1, 'no WARNING about the fff-portal login (workers)');
+  assert.doesNotMatch(none.join(' | '), /fff-portal login/);
+  assert.deepEqual(shownRoles(cfg, false), ['orchestrator']);
+  assert.equal(workersHere(['m3', { id: 'm5' }]), false);
+  // A daemon added on the portal's host (add_machine local): both come back.
+  const local = [{ id: 'fff-portal', local: true }, 'm3'];
+  assert.equal(workersHere(local), true);
+  const back = accountSetupLines(cfg, 'fff-portal', HOST_TOKEN, local);
+  assert.match(back[0], /workers here: fff-portal login/);
+  assert.match(back[1], /^WARNING: set to the fff-portal login \(workers\), which cannot run agents: the stored claude\.ai login expired/);
+  assert.deepEqual(shownRoles(cfg, true), ['orchestrator', 'workers']);
+  // The accounts list: the "fff-portal login (workers)" row follows the same rule.
+  assert.deepEqual(hostAccountsInUse(cfg, false), { login: false, token: true, vault: false });
+  assert.deepEqual(hostAccountsInUse(cfg, true), { login: true, token: true, vault: false });
 });

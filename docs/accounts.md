@@ -179,6 +179,11 @@ only when something is set to use it, or an agent is running on it now:
 - **this host's stored login** is left out while no role (`claudeAccounts`) is set to `"login"` and a host token exists;
 - **the host token** is left out while no role and no machine uses it;
 - **vault tokens** are left out while no machine is on the vault and no role is set to `"vault"`.
+**The workers role is named only while a worker daemon runs on the portal's own host** (a machine added `local`, `docs/beast-machine.md`;
+`workersHere` in `server/secrets.ts`). Since w510 the portal runs no workers itself, so `claudeAccounts.workers` applies to nothing
+there: with no such daemon, `system_status` leaves "workers here: …" out of the per-agent line, drops the "WARNING: set to the
+<host> login (workers), which cannot run agents", and the accounts list drops the "<host> login (workers)" row. They return when
+a local machine is added again.
 A person's own token and the token file are always listed. A vault token is named by itself ("vault-ben-1 …abcd"), without a
 description; the line under a machine login still says where it is used ("m3 login").
 

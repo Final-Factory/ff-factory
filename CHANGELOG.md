@@ -20,7 +20,10 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   (claude-token), `vault-<person>-<n>` (claude-tokens/<n>) and `vault-<person>-github` instead of `host-<person>-claude[-<n>]` and
   `host-<person>-github`; `fffctl vault put` renames the old entry holding the same token (new `Vault.rename`, `fffctl vault rename
   OLD NEW`), so no token is entered again and no pool loses one. A sync against a portal that cannot rename yet keeps the old
-  entries and warns. docs/vault.md 3b, docs/accounts.md.
+  entries and warns. docs/vault.md 3b, docs/accounts.md. With no worker daemon on the portal's own host (the case since w510),
+  `claudeAccounts.workers` applies to nothing, so the "fff-portal login (workers)" account row, "workers here: …" in the per-agent
+  line and the "set to the fff-portal login (workers), which cannot run agents" warning are left out (`workersHere`); they return when
+  a local machine is added.
 - **`sudo fff-vm vault-sync` no longer removes the `claude-tokens/<name>` pool entries the installer just added** (w744,
   Lothsahn; his host had only `people/ben/claude-tokens/{1,2}` and `lothsahn/claude-tokens/1`: `install.sh --guest-only` printed
   "added host-ben-claude-1 …", then `fff-vm vault-sync` printed "removed host-ben-claude-1 (its file is gone …)" for all three).
