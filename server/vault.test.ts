@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { FULL_PERCENT, NIGHTLY_SENTRY, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, headroom, keySource, newKeyText, pickClaude, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
+import { NIGHTLY_SENTRY, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, keySource, newKeyText, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
 import { SECRET_ENV, addSecretValues, claudeFromVault, machineRunEnv, redactSecrets, registerSecretValues } from './secrets.ts';
 import { GITHUB_HELPER, githubCredentialEnv } from './launch.ts';
 import { buildAccounts, tokenKey } from './usage.ts';
@@ -66,14 +66,14 @@ test('vault: what each kind accepts; names and env variables are checked; duplic
   assert.match(envNameProblem('PATH') ?? '', /ends in _TOKEN/);
   assert.match(envNameProblem('GIT_ASKPASS_TOKEN') ?? '', /GIT_ variables/);
   assert.match(envNameProblem('CLAUDE_CODE_OAUTH_TOKEN') ?? '', /kind claude/);
-  assert.throws(() => v.add({ name: 'Bad Name', kind: 'claude', value: A, share: 'anyone' }), /a name is/);
+  assert.throws(() => v.add({ name: 'Bad Name', kind: 'claude', value: A, owner: 'ben', share: 'anyone' }), /a name is/);
   assert.throws(() => v.add({ name: 'x', kind: 'claude', value: A }), /needs --owner/);
   assert.throws(() => v.add({ name: 'x', kind: 'env', value: DISCORD, share: 'anyone' }), /variable name/);
-  assert.throws(() => v.add({ name: 'x', kind: 'claude', value: A, share: 'anyone', roles: ['orchestrator' as never] }), /roles are/);
-  assert.throws(() => v.add({ name: 'x', kind: 'claude', value: A, share: 'anyone', machines: ['M 3'] }), /machines are/);
-  v.add({ name: 'a', kind: 'claude', value: A, share: 'anyone' });
-  assert.throws(() => v.add({ name: 'a', kind: 'claude', value: B, share: 'anyone' }), /exists; rotate/);
-  assert.throws(() => v.add({ name: 'a2', kind: 'claude', value: A, share: 'anyone' }), /already in the vault as a/);
+  assert.throws(() => v.add({ name: 'x', kind: 'claude', value: A, owner: 'ben', share: 'anyone', roles: ['orchestrator' as never] }), /roles are/);
+  assert.throws(() => v.add({ name: 'x', kind: 'claude', value: A, owner: 'ben', share: 'anyone', machines: ['M 3'] }), /machines are/);
+  v.add({ name: 'a', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
+  assert.throws(() => v.add({ name: 'a', kind: 'claude', value: B, owner: 'ben', share: 'anyone' }), /exists; rotate/);
+  assert.throws(() => v.add({ name: 'a2', kind: 'claude', value: A, owner: 'ben', share: 'anyone' }), /already in the vault as a/);
   // No error message ever quotes a value.
   try {
     v.add({ name: 'z', kind: 'github', value: A, share: 'anyone' });
@@ -85,19 +85,21 @@ test('vault: what each kind accepts; names and env variables are checked; duplic
 test('vault: rotate, grant and remove; a rotated value is the one handed out', (t) => {
   const { make } = setup(t);
   const v = make();
-  v.add({ name: 'a', kind: 'claude', value: A, share: 'anyone' });
+  v.add({ name: 'a', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
   const r = v.rotate('a', B);
   assert.equal(r.fingerprint, fingerprintOf(B));
   assert.ok(r.rotatedAt);
-  const run = { machineId: 'm3', role: 'workers' as const };
+  const run = { machineId: 'm3', role: 'workers' as const, userId: 'ben' };
   assert.equal(v.forRun(run, { claude: true }).claude?.token, B);
   const g = v.update('a', { machines: ['M5'], roles: ['standing'] });
   assert.deepEqual(g.machines, ['m5']);
   assert.equal(v.forRun(run, { claude: true }).claude, undefined, 'no longer granted to m3 workers');
-  assert.equal(v.forRun({ machineId: 'm5', role: 'standing' }, { claude: true }).claude?.token, B);
+  assert.equal(v.forRun({ machineId: 'm5', role: 'standing', userId: 'ben' }, { claude: true }).claude?.token, B);
   v.update('a', { disabled: true });
-  assert.equal(v.forRun({ machineId: 'm5', role: 'standing' }, { claude: true }).claude, undefined, 'disabled');
-  assert.throws(() => v.update('a', { share: 'owner' }), /needs an owner/);
+  assert.equal(v.forRun({ machineId: 'm5', role: 'standing', userId: 'ben' }, { claude: true }).claude, undefined, 'disabled');
+  v.add({ name: 'shared-gh', kind: 'github', value: GH, share: 'anyone' });
+  assert.throws(() => v.update('shared-gh', { share: 'owner' }), /needs an owner/);
+  v.remove('shared-gh');
   v.remove('a');
   assert.deepEqual(v.list(), []);
   assert.throws(() => v.remove('a'), /no vault entry named a/);
@@ -122,34 +124,34 @@ test('vault: the key lives outside data/, readable by its owner only; a missing 
   assert.throws(() => readKey(path.join(dir, 'short.key')), /not 32 bytes/);
 
   const v = make();
-  v.add({ name: 'a', kind: 'claude', value: A, share: 'anyone' });
+  v.add({ name: 'a', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
   v.add({ name: 'gh', kind: 'github', value: GH, share: 'anyone' });
   const none = make(() => ({ why: 'no vault key: test' }));
   assert.equal(none.status().key, 'missing');
   assert.deepEqual(none.list().map((e) => e.name), ['a', 'gh'], 'listing needs no key');
-  const r = none.forRun({ machineId: 'm3', role: 'workers' }, { claude: true });
+  const r = none.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true });
   assert.equal(r.claude, undefined);
   assert.deepEqual(r.env, {});
   assert.match(r.problems[0], /cannot open a, gh: no vault key/);
-  assert.throws(() => none.add({ name: 'b', kind: 'claude', value: B, share: 'anyone' }), /cannot seal/);
+  assert.throws(() => none.add({ name: 'b', kind: 'claude', value: B, owner: 'ben', share: 'anyone' }), /cannot seal/);
   const other = path.join(dir, 'other.key');
   fs.writeFileSync(other, newKeyText(), { mode: 0o600 });
   fs.chmodSync(other, 0o600);
   const wrong = make(() => ({ file: other }));
   assert.equal(wrong.status().key, 'wrong');
-  assert.equal(wrong.forRun({ machineId: 'm3', role: 'workers' }, { claude: true }).claude, undefined);
+  assert.equal(wrong.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true }).claude, undefined);
 });
 
 test('vault: forRun gives the granted secrets as environment, and a Claude token only when asked', (t) => {
   const { make } = setup(t);
   const v = make();
-  v.add({ name: 'a', kind: 'claude', value: A, share: 'anyone' });
+  v.add({ name: 'a', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
   v.add({ name: 'gh', kind: 'github', value: GH, share: 'anyone', roles: ['workers'] });
   v.add({ name: 'max', kind: 'env', env: 'FFDISCORD_APP_TOKEN', value: DISCORD, share: 'anyone', machines: ['lothdesktop'] });
   const m3 = v.forRun({ machineId: 'm3', role: 'workers' }, { claude: false });
   assert.deepEqual(m3.env, { GH_TOKEN: GH });
   assert.equal(m3.claude, undefined);
-  const loth = v.forRun({ machineId: 'lothdesktop', role: 'workers' }, { claude: true });
+  const loth = v.forRun({ machineId: 'lothdesktop', role: 'workers', userId: 'ben' }, { claude: true });
   assert.deepEqual(loth.env, { GH_TOKEN: GH, FFDISCORD_APP_TOKEN: DISCORD });
   assert.equal(loth.claude?.token, A);
   assert.deepEqual(v.forRun({ machineId: 'm3', role: 'standing' }, { claude: false }).env, {}, 'gh is for workers only');
@@ -159,41 +161,33 @@ test('vault: forRun gives the granted secrets as environment, and a Claude token
 const usage = (session: number, weekly: number): PlanUsage => ({ available: true, asOf: '', models: [], session: { label: 's', percent: session }, weekly: { label: 'w', percent: weekly } });
 const meta = (name: string, over: Partial<VaultEntryMeta> = {}): VaultEntryMeta => ({ id: name, name, kind: 'claude', share: 'anyone', roles: ['workers', 'standing'], machines: ['*'], fingerprint: name, last4: 'xxxx', createdAt: '', updatedAt: '', ...over });
 
-test('pickClaude: the person own first, then room, the most headroom, the fewest live sessions; sticky while it has room', () => {
-  const run = { machineId: 'm3', role: 'workers' as const, userId: 'ben' };
-  const u: Record<string, PlanUsage> = { a: usage(10, 20), b: usage(50, 10), c: usage(96, 10), own: usage(80, 80) };
-  const of = (fp: string) => u[fp];
-  const all = [meta('a'), meta('b'), meta('c'), meta('own', { owner: 'ben', share: 'owner' }), meta('loth', { owner: 'lothsahn', share: 'owner' })];
-  assert.equal(pickClaude(all, run, of)?.name, 'own', "ben's own token first");
-  assert.equal(pickClaude(all, { ...run, userId: 'lothsahn' }, of)?.name, 'loth');
-  const shared = all.filter((e) => e.share === 'anyone');
-  assert.equal(pickClaude(shared, { ...run, userId: 'x' }, of)?.name, 'a', 'most headroom: a has 80, b 50');
-  assert.equal(headroom(u.c), 4);
-  assert.equal(pickClaude([meta('c'), meta('d')], run, of)?.name, 'd', `c is over ${FULL_PERCENT}%; d (no numbers) counts as 50`);
-  assert.equal(pickClaude([meta('c')], run, of)?.name, 'c', 'a full token still beats none');
-  u.b = usage(20, 20);
-  assert.equal(pickClaude([meta('a'), meta('b')], run, of, (fp) => (fp === 'a' ? 3 : 0))?.name, 'b', 'equal room: the fewest live sessions');
-  assert.equal(pickClaude([meta('a'), meta('b')], run, of, () => 0, 'b')?.name, 'b', 'sticky');
-  assert.equal(pickClaude([meta('a'), meta('c')], run, of, () => 0, 'c')?.name, 'a', 'sticky, unless out of room');
-  assert.equal(pickClaude([meta('a', { kind: 'github' })], run, of), undefined, 'only claude entries');
-});
 
 test('eligible: role, machine and share', () => {
   const run = { machineId: 'm5', role: 'standing' as const, userId: 'Ben' };
-  assert.equal(eligible(meta('a'), run), true);
-  assert.equal(eligible(meta('a', { roles: ['workers'] }), run), false);
-  assert.equal(eligible(meta('a', { machines: ['m3'] }), run), false);
-  assert.equal(eligible(meta('a', { machines: ['m3', 'M5'] }), run), true);
-  assert.equal(eligible(meta('a', { share: 'owner', owner: 'ben' }), run), true, 'user ids compare without case');
-  assert.equal(eligible(meta('a', { share: 'owner', owner: 'loth' }), run), false);
-  assert.equal(eligible(meta('a', { share: 'owner', owner: 'loth' }), { ...run, userId: undefined }), false);
-  assert.equal(eligible(meta('a', { disabled: true }), run), false);
+  const gh = (over: Partial<VaultEntryMeta> = {}) => meta('a', { kind: 'github', ...over });
+  assert.equal(eligible(gh(), run), true);
+  assert.equal(eligible(gh({ roles: ['workers'] }), run), false);
+  assert.equal(eligible(gh({ machines: ['m3'] }), run), false);
+  assert.equal(eligible(gh({ machines: ['m3', 'M5'] }), run), true);
+  // A Claude token serves only its owner (w739): shared and other people's tokens are in nobody's pool.
+  assert.equal(eligible(meta('a'), run), false, 'a Claude token with no owner serves nobody');
+  assert.equal(eligible(meta('a', { owner: 'ben' }), run), true);
+  assert.equal(eligible(meta('a', { owner: 'loth', share: 'anyone' }), run), false, "another person's token, shared or not");
+  assert.equal(eligible(meta('a', { owner: 'ben', roles: ['workers'] }), run), false, 'the standing role is not granted');
+  // The ops worker takes the workers' grants on no machine; a person's orchestrator takes no grant at all.
+  assert.equal(eligible(meta('a', { owner: 'ben', roles: ['workers'], machines: ['m3'] }), { ...run, role: 'ops' }), true);
+  assert.equal(eligible(meta('a', { owner: 'ben', roles: [], machines: [] }), { ...run, role: 'orchestrator' }), true);
+  assert.equal(eligible(meta('a', { owner: 'loth', roles: [], machines: [] }), { ...run, role: 'orchestrator' }), false);
+  assert.equal(eligible(gh({ share: 'owner', owner: 'ben' }), run), true, 'user ids compare without case');
+  assert.equal(eligible(gh({ share: 'owner', owner: 'loth' }), run), false);
+  assert.equal(eligible(gh({ share: 'owner', owner: 'loth' }), { ...run, userId: undefined }), false);
+  assert.equal(eligible(gh({ disabled: true }), run), false);
 });
 
 test('machineRunEnv: off by default; on, a vault token alone with the daemon credentials dropped; a person own token still wins', (t) => {
   const { make } = setup(t);
   const v = make();
-  v.add({ name: 'shared', kind: 'claude', value: A, share: 'anyone' });
+  v.add({ name: 'shared', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
   v.add({ name: 'gh', kind: 'github', value: GH, share: 'anyone' });
   const problems: string[] = [];
   const ctx: VaultContext = { vault: v, payer: () => 'ben', onProblem: (l) => problems.push(l) };
@@ -286,7 +280,7 @@ test('machine credentials: issued once as a hash, revoked by id', (t) => {
 test('vaultStatusLine: counts and the key, never a value', (t) => {
   const { make } = setup(t);
   const v = make();
-  v.add({ name: 'a', kind: 'claude', value: A, share: 'anyone' });
+  v.add({ name: 'a', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
   v.add({ name: 'gh', kind: 'github', value: GH, share: 'anyone' });
   const line = vaultStatusLine(v, ['m3']) ?? '';
   assert.match(line, /2 entries \(1 claude, 1 github\); key loaded; Claude tokens from it on m3/);
@@ -349,14 +343,14 @@ test('addSecretValues: a daemon learns the secret values of a launch spec withou
 
 test('vault: after a new key, the entries sealed with the old one are named, and rotating each makes it usable again', (t) => {
   const { dir, make } = setup(t);
-  make().add({ name: 'a', kind: 'claude', value: A, share: 'anyone' });
+  make().add({ name: 'a', kind: 'claude', value: A, owner: 'ben', share: 'anyone' });
   make().add({ name: 'gh', kind: 'github', value: GH, share: 'anyone' });
   const other = path.join(dir, 'new.key');
   fs.writeFileSync(other, newKeyText(), { mode: 0o600 });
   fs.chmodSync(other, 0o600);
   const v = make(() => ({ file: other }));
   assert.equal(v.status().key, 'wrong');
-  const r = v.forRun({ machineId: 'm3', role: 'workers' }, { claude: true });
+  const r = v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true });
   assert.equal(r.claude, undefined);
   assert.deepEqual(r.env, {});
   assert.match(r.problems.join('\n'), /gh does not open with this key \(rotate it\)/);
@@ -364,8 +358,8 @@ test('vault: after a new key, the entries sealed with the old one are named, and
   const half = v.status();
   assert.equal(half.key, 'loaded');
   assert.match(half.why ?? '', /sealed with another key, rotate: gh/);
-  assert.equal(v.forRun({ machineId: 'm3', role: 'workers' }, { claude: true }).claude?.token, B);
-  v.add({ name: 'c', kind: 'claude', value: C, share: 'anyone' });
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true }).claude?.token, B);
+  v.add({ name: 'c', kind: 'claude', value: C, owner: 'ben', share: 'anyone' });
   v.remove('gh');
   assert.equal(v.status().why, undefined, 'every entry opens again');
 });
@@ -380,7 +374,7 @@ test('vault: one value per variable, the run person own entry first, then by nam
   assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'loth' }, { claude: false }).env.GH_TOKEN, ghTok('a'), 'then by name');
   // An entry named like another's id: grants are looked up by id, never by that name.
   const owned = v.add({ name: 'x', kind: 'claude', value: A, owner: 'loth', share: 'owner' });
-  v.add({ name: owned.id, kind: 'claude', value: B, share: 'anyone', machines: ['m9'] });
+  v.add({ name: owned.id, kind: 'claude', value: B, owner: 'ben', share: 'anyone', machines: ['m9'] });
   assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'loth' }, { claude: true }).claude?.token, A);
   assert.equal(v.forRun({ machineId: 'm9', role: 'workers', userId: 'ben' }, { claude: true }).claude?.token, B);
 });

@@ -85,7 +85,7 @@ before redeploying by hand.
   deletes them. Force pushes and pushes to the game repo's master/main stay refused. The daemon's own folder
   (`~/.ff-factory`, or the machine's `app_dir`; it holds the token) is protected.
 - **Claude account.** With the token vault on for a machine (config `machines.claudeFromVault`), its runs get a vault
-  token chosen per run by plan headroom, and the other secrets granted to that machine, in the same launch spec
+  token from the run person's pool (soonest weekly reset first, within the pool's caps), and the other secrets granted to that machine, in the same launch spec
   ([vault.md](vault.md)). Otherwise: portal-run agents on a Mac (workers and standing agents) use this host's
   `claudeEnv`, so with `CLAUDE_CODE_OAUTH_TOKEN` set (`set_app_config`, write-only) they run on the same
   Claude account as the agents here, not on the Mac's own login. The portal puts it in the launch spec,

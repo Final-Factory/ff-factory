@@ -5,11 +5,16 @@
 # lothsahn, 2026-10-06: each person's Claude and GitHub tokens are kept on this host, root only, next to what the
 # installer already keeps (decision D2: root here can read the VM anyway). The VM's vault gets them from here:
 #   /etc/fff-vm/secrets/people/<user id>/claude-token    one 'claude setup-token' token (sk-ant-oat01-...)
+#   /etc/fff-vm/secrets/people/<user id>/claude-tokens/<name>
+#                                                        more of them, one token per file (w739: a person's pool; the
+#                                                        <name> is 1-16 of a-z 0-9 . _ - and starts with a letter or digit)
 #   /etc/fff-vm/secrets/people/<user id>/github-token    one fine-grained GitHub token (github_pat_...)
 #   /etc/fff-vm/secrets/vault.key                        the spare copy of the VM's vault key (kept in step with it)
 # Each value goes into the VM only over ssh's stdin, to `fffctl vault put`, and is never on a command line, in a log or in
 # the VM's daily backup (fff-backup leaves data/vault.json out; this host is where a rebuilt VM gets them back from).
-# The vault entries it makes are named host-<user>-claude and host-<user>-github; one whose file is gone is removed.
+# The vault entries it makes are named host-<user>-claude (claude-token), host-<user>-claude-<name> (each file of
+# claude-tokens/) and host-<user>-github; one whose file is gone is removed. All of a person's Claude entries are their pool:
+# the portal gives their runs those tokens only, soonest weekly reset first (docs/vault.md, section 4).
 
 VAULT_PEOPLE=$FFF_VM_ETC/secrets/people
 VAULT_KEY_COPY=$FFF_VM_ETC/secrets/vault.key
@@ -69,11 +74,27 @@ vault_sync() {
       person=$(basename "$dir")
       [[ "$person" =~ ^[A-Za-z0-9._-]{1,30}$ ]] || { warn "vault: $dir is not named for a portal user id; skipped"; rc=1; continue; }
       lower=$(tr '[:upper:]' '[:lower:]' <<<"$person")
-      for kind in claude github; do
-        file=$dir$kind-token
+      # The single files, then the pool's extra tokens (claude-tokens/<name>): "kind|file|vault entry name" per token.
+      local -a todo=()
+      for kind in claude github; do todo+=("$kind|$dir$kind-token|host-$lower-$kind"); done
+      if [ -d "${dir}claude-tokens" ]; then
+        chmod 0700 "${dir}claude-tokens"
+        for file in "${dir}claude-tokens"/*; do
+          [ -f "$file" ] || continue
+          local slot
+          slot=$(tr '[:upper:]' '[:lower:]' <<<"$(basename "$file")")
+          [[ "$slot" =~ ^[a-z0-9][a-z0-9._-]{0,15}$ ]] || { warn "vault: $file is not named 1-16 of a-z 0-9 . _ - (starting with a letter or digit); skipped"; rc=1; continue; }
+          todo+=("claude|$file|host-$lower-claude-$slot")
+        done
+      fi
+      local item
+      for item in "${todo[@]}"; do
+        kind=${item%%|*}
+        file=${item#*|}
+        name=${file#*|}
+        file=${file%%|*}
         [ -s "$file" ] || continue
         chmod 0600 "$file"
-        name=host-$lower-$kind
         if ! vault_value_ok "$kind" "$file"; then
           warn "vault: $file is not $([ "$kind" = claude ] && echo "one 'claude setup-token' token (sk-ant-oat01-...)" || echo 'one fine-grained GitHub token (github_pat_...)'); skipped (its content is not shown)"
           rc=1

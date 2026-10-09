@@ -10,6 +10,27 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Each person's runs use that person's own pool of Claude tokens, and their orchestrator and the ops worker run on it too** (w738,
+  w739, Lothsahn). A person can have several tokens in the vault (host files `people/<id>/claude-token` and
+  `claude-tokens/<name>`, loaded by `sudo fff-vm vault-sync`). The pick (`server/tokenPool.ts`): that person's tokens only (no shared
+  Claude token, no one else's), the one whose weekly window resets soonest first, the 5-hour reset as the tie-break; no new process
+  on a token at 80% of its 5-hour window, one process at a time at 95% weekly, retired at 99%, used up at 100; a session keeps its
+  token only while it passes. A worker, a standing agent and the ops worker are held with the reason and the next reset when the
+  whole pool is over its caps (no fallback to anyone else's token, the dispatcher's or the host token); a person's orchestrator
+  uses the pool up and then stops with a message. A person with no vault token keeps today's account. New:
+  `claudeAccounts.orchestrator = "vault"` (an owner's setting; the dispatcher stays on the token file; each orchestrator reads its
+  person's pool at every session start with every other credential removed, redacted everywhere); the ops worker starts a
+  fresh conversation and process for every new job and every change of caller, on that caller's pool; the pool limits are config
+  `vault.pool.*` (80 / 95 / 99, 5% a day, 20%), one set that anyone can change with `set_app_config` (checked 0-100, one at a time
+  not above retired, logged with who), read at each process start. The dispatcher's token (whatever `claudeAccounts.dispatcher`
+  names) and the host token keep a reserve of 5% of the weekly window per day left until its reset and 20% of the 5-hour window:
+  the dispatcher may always run into it; `system_status` and a dashboard warning show it. Usage numbers: a token without the
+  `user:profile` scope (every `claude setup-token` token, the dispatcher's too: HTTP 403) is read from the API's rate-limit
+  headers, as FFBox does (`scripts/claude_keys.py`); tokens near a limit are polled every 2 minutes; the SDK's rate-limit events
+  raise a meter between polls. `fffctl vault list` shows each pool; `system_status` shows each pool, its agents and the reserves; a
+  banner shows a pool used up or over its caps. Needs a portal deploy and, on the FFBox host, the new `vault.sh` (`install.sh
+  --guest-only` or `fff-vm` update).
+
 - **`set_app_config` says that `machines.claudeFromVault` takes a machine** (w737, Lothsahn: "update LothDesktop to take
   machines.claudeFromVault true"). The setting was always per machine (`appConfig.ts` `perMachine`, `nextPerMachine`;
   `machine: "lothdesktop"` writes `{ "lothdesktop": true }` and leaves BEAST, m3, m5 and biscuit off), but the tool's text

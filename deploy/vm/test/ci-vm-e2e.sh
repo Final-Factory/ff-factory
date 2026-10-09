@@ -248,17 +248,29 @@ echo "ok: the vault key is root's and loaded by the portal; values and credentia
 rnd() { local s; s=$(head -c 96 /dev/urandom | base64 -w0 | tr -dc 'A-Za-z0-9'); printf '%s' "${s:0:$1}"; }
 ct="sk-ant-oat01-$(rnd 44)"
 gt="github_pat_$(rnd 40)"
-install -d -m 0700 /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2
+ct2="sk-ant-oat01-$(rnd 44)"
+install -d -m 0700 /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2 /etc/fff-vm/secrets/people/ci/claude-tokens
 printf '%s\n' "$ct" | install -m 0600 /dev/stdin /etc/fff-vm/secrets/people/ci/claude-token
+# A second Claude token for the same person (w739: the pool), and a file the pool refuses by its name.
+printf '%s\n' "$ct2" | install -m 0600 /dev/stdin /etc/fff-vm/secrets/people/ci/claude-tokens/Second
+printf '%s\n' "sk-ant-oat01-$(rnd 44)" | install -m 0600 /dev/stdin "/etc/fff-vm/secrets/people/ci/claude-tokens/bad name!"
 printf '%s\n' "$gt" | install -m 0600 /dev/stdin /etc/fff-vm/secrets/people/ci/github-token
 printf 'ghp_%s\n' "$(rnd 36)" | install -m 0600 /dev/stdin /etc/fff-vm/secrets/people/ci2/github-token
 out=$(/usr/local/sbin/fff-vm vault-sync 2>&1) || true
 echo "$out"
-for v in "$ct" "$gt"; do if printf '%s' "$out" | matches -F "${v:13:24}"; then fail "fff-vm vault-sync printed a token"; fi; done
+for v in "$ct" "$gt" "$ct2"; do if printf '%s' "$out" | matches -F "${v:13:24}"; then fail "fff-vm vault-sync printed a token"; fi; done
+printf '%s' "$out" | matches 'not named 1-16 of a-z' || fail "a pool file with a bad name was not refused: $out"
 printf '%s' "$out" | matches 'not one fine-grained GitHub token' || fail "a classic GitHub token was not refused"
 list=$(g 'sudo fffctl vault list')
 printf '%s' "$list" | matches -F "${ct: -4}" || fail "host-ci-claude is not in the vault: $list"
 printf '%s' "$list" | matches '^host-ci-github ' || fail "host-ci-github is not in the vault: $list"
+# The pool: both Claude tokens are the person's (owner ci), and the CLI lists the pool with their state and last four characters.
+printf '%s' "$list" | matches '^host-ci-claude-second ' || fail "the second token of the pool is not in the vault: $list"
+printf '%s' "$list" | matches -F "${ct2: -4}" || fail "the second token's last four characters are not listed: $list"
+printf '%s' "$list" | matches 'Claude token pools' || fail "fffctl vault list has no pool section: $list"
+printf '%s' "$list" | matches -E '^    host-ci-claude-second +…' || fail "the pool section does not list the second token: $list"
+printf '%s' "$list" | matches -E 'ok +5-hour' || fail "the pool section shows no state and meters: $list"
+if printf '%s' "$list" | matches 'bad'; then fail "the refused pool file went in"; fi
 if printf '%s' "$list" | matches '^host-ci2-'; then fail "the refused token went in"; fi
 [ "$(stat -c '%a %U' /etc/fff-vm/secrets/vault.key)" = "600 root" ] || fail "the key's spare copy is not 0600 root"
 # The file is named to sha256sum under sudo: a "<" redirect would be opened by the admin's own shell, which cannot read it.
@@ -267,6 +279,7 @@ if printf '%s' "$list" | matches '^host-ci2-'; then fail "the refused token went
 out=$(/usr/local/sbin/fff-vm vault-sync 2>&1) || true
 printf '%s' "$out" | matches 'unchanged host-ci-claude' || fail "a second sync was not a no-op: $out"
 printf '%s' "$out" | matches 'unchanged host-ci-github' || fail "a second sync was not a no-op: $out"
+printf '%s' "$out" | matches 'unchanged host-ci-claude-second' || fail "a second sync was not a no-op for the pool's second token: $out"
 rm -rf /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2
 /usr/local/sbin/fff-vm vault-sync >/dev/null 2>&1 || true
 if g 'sudo fffctl vault list --names' | matches '^host-ci-'; then fail "a removed person's entries stayed in the vault"; fi

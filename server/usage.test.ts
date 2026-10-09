@@ -686,3 +686,71 @@ test('tracker: one poll at start, then one every usagePollMinutes; Refresh polls
   await settle();
   assert.equal(calls, 6);
 });
+
+// ---------------------------------------------------------------- w739: tokens without user:profile, near-limit polling, rate-limit events
+
+test('tracker: a token without the user:profile scope (403) is read from the rate-limit headers, and the endpoint is not asked again for hours', async () => {
+  // Every `claude setup-token` token answers the usage endpoint "403 oauth_scope_insufficient"; FFBox reads the same two windows
+  // off a /v1/messages reply (ffbox scripts/claude_keys.py, measured 2026-09-04 there).
+  const { t, calls, logs } = trackerWith(
+    async () => {
+      throw new UsageFetchError('the token may not read usage (HTTP 403: OAuth token does not meet scope requirement user:profile)', undefined, 403);
+    },
+    async () => ({ rate_limits_available: true, rate_limits: { five_hour: { utilization: 33, resets_at: '2026-09-28T04:40:00+00:00' }, seven_day: { utilization: 41, resets_at: '2026-10-02T03:00:00+00:00' } } }),
+  );
+  await t.refresh();
+  const u = t.entries.get(tokenKey(TOKEN))!.usage!;
+  assert.deepEqual([u.available, u.weekly?.percent, u.session?.percent, u.source], [true, 41, 33, 'rate-limit headers']);
+  assert.equal(u.weekly?.resetsAt, '2026-10-02T03:00:00+00:00');
+  assert.deepEqual([calls.token.length, calls.limits.length], [1, 1]);
+  assert.match(logs.find((l) => l.includes(tokenKey(TOKEN))) ?? '', /via the API's rate-limit headers \(the usage endpoint needs the user:profile scope|via the API's rate-limit headers \(the token may not read usage/);
+  await t.refresh();
+  assert.deepEqual([calls.token.length, calls.limits.length], [1, 2], 'the endpoint is not asked again; the headers are');
+  assert.ok(![...logs, JSON.stringify([...t.entries])].some((l) => l.includes(TOKEN.slice(13, 40))), 'no token in the log or the numbers');
+});
+
+test('tracker: a token near a pool limit is polled alone between the regular polls; one far from every limit is not', async () => {
+  let session = 33;
+  const { t, calls } = trackerWith(async () => ({ rate_limits_available: true, rate_limits: endpointBody(41, session, 0) }));
+  await t.refresh();
+  assert.deepEqual(t.nearTokens(), [], '33% of the 5-hour window and 41% of the week: far');
+  await t.refreshNear();
+  assert.equal(calls.token.length, 1, 'nothing near, nothing polled');
+  session = 61;
+  await t.refresh();
+  assert.deepEqual(t.nearTokens().map((x) => tokenKey(x.token)), [tokenKey(TOKEN)], '61% of the 5-hour window: near');
+  const logins = calls.login.length;
+  session = 64;
+  await t.refreshNear();
+  assert.equal(calls.token.length, 3, 'the near token alone');
+  assert.equal(calls.login.length, logins, "the host login's CLI is not run for it");
+  assert.equal(t.entries.get(tokenKey(TOKEN))!.usage!.session?.percent, 64);
+  // 90% of the week is near too.
+  session = 10;
+  const weekly = trackerWith(async () => ({ rate_limits_available: true, rate_limits: endpointBody(91, 10, 0) }));
+  await weekly.t.refresh();
+  assert.equal(weekly.t.nearTokens().length, 1);
+});
+
+test("tracker: a session's rate_limit_event raises its token's meter and never lowers it; the next poll replaces it", async () => {
+  const { t } = trackerWith(async () => ({ rate_limits_available: true, rate_limits: endpointBody(41, 33, 0) }));
+  await t.refresh();
+  const key = tokenKey(TOKEN);
+  const sess = () => t.entries.get(key)!.usage!.session!.percent;
+  const week = () => t.entries.get(key)!.usage!.weekly!.percent;
+  t.noteRateLimit(key, { rateLimitType: 'five_hour', utilization: 0.5, resetsAt: Date.parse('2026-09-28T05:00:00Z') / 1000 });
+  assert.equal(sess(), 50, 'a fraction, as the headers carry it');
+  assert.equal(t.entries.get(key)!.usage!.session!.resetsAt, '2026-09-28T05:00:00.000Z');
+  t.noteRateLimit(key, { rateLimitType: 'five_hour', utilization: 0.2 });
+  assert.equal(sess(), 50, 'never lowered between polls');
+  t.noteRateLimit(key, { rateLimitType: 'seven_day', utilization: 85 });
+  assert.equal(week(), 85, 'a value above 1 is a percent');
+  for (const bad of [{ rateLimitType: 'seven_day_opus', utilization: 0.99 }, { rateLimitType: 'five_hour' }, { rateLimitType: 'five_hour', utilization: NaN }, { utilization: 0.99 }]) t.noteRateLimit(key, bad);
+  assert.deepEqual([sess(), week()], [50, 85]);
+  t.noteRateLimit(HOST_LOGIN, { rateLimitType: 'five_hour', utilization: 0.99 });
+  t.noteRateLimit(undefined, { rateLimitType: 'five_hour', utilization: 0.99 });
+  t.noteRateLimit('token:unknown', { rateLimitType: 'five_hour', utilization: 0.99 });
+  assert.equal(t.entries.get(HOST_LOGIN)!.usage!.session?.percent, 0, "a login's meters are not touched");
+  await t.refresh();
+  assert.equal(sess(), 33, 'the poll replaces the floor');
+});

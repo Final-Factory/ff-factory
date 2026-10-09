@@ -4,6 +4,7 @@ import path from 'node:path';
 import { checkObject, readJsonDurable } from './durable.ts';
 import { withFileLock, writeJsonOwned } from './machineTokens.ts';
 import type { PlanUsage, VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus, WorkItem } from '../shared/types.ts';
+import { POOL_DEFAULTS, pickPool, judge, type PoolLimits, type PoolToken, type PoolView } from './tokenPool.ts';
 
 /**
  * The token vault (docs/vault.md, w512): the secrets worker runs need, kept by the portal, encrypted value by value with a
@@ -43,10 +44,8 @@ const GITHUB = /^(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})$/;
 const ENV_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
 const ENV_SUFFIX = /_(?:TOKEN|KEY|SECRET|PASSWORD)$/;
 const ENV_RESERVED = /^(?:CLAUDE_|ANTHROPIC_|GH_|GITHUB_|GIT_)/;
-/** A meter at this percent or more counts as out of room (section 4 of docs/vault.md). */
-export const FULL_PERCENT = 95;
-/** The headroom assumed for a token with no numbers yet. */
-const UNKNOWN_HEADROOM = 50;
+/** How long a pick counts as live before the session's process shows in the live counts (a start in progress). */
+const PENDING_MS = 20_000;
 
 export const fingerprintOf = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 12);
 const keyIdOf = (key: Buffer) => createHash('sha256').update(key).digest('hex').slice(0, 8);
@@ -159,10 +158,16 @@ function unseal(key: Buffer, e: VaultEntry): string {
 
 // ---------------------------------------------------------------- choosing a Claude token
 
-/** A run on a machine, as the vault needs it. */
+/**
+ * The kinds of run the vault serves: a worker or a standing agent on a machine, the ops worker for a person, and a
+ * person's own orchestrator on the portal. The last two take no machine grant; the orchestrator takes no role grant.
+ */
+export type RunRole = VaultRole | 'orchestrator' | 'ops';
+
+/** A run, as the vault needs it. */
 export interface VaultRun {
   machineId: string;
-  role: VaultRole;
+  role: RunRole;
   /** The person the run is for (its requester, else the system payer). */
   userId?: string;
   sessionId?: string;
@@ -170,49 +175,38 @@ export interface VaultRun {
 
 const same = (a: string | undefined, b: string | undefined) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
-/** Whether `e` may serve `run` at all (enabled, granted to its role and machine, shared or the run's person's own). */
+/**
+ * Whether `e` may serve `run` at all (enabled and granted to the run's role and machine). A Claude token serves only
+ * its owner's runs (w739: a person's pool, no shared Claude token and no one else's); every other kind is the run's
+ * person's own or shared. The ops worker takes the workers' grants; a person's orchestrator takes none: the account
+ * setting claudeAccounts.orchestrator is its consent.
+ */
 export function eligible(e: VaultEntryMeta, run: VaultRun): boolean {
   if (e.disabled) return false;
-  if (!e.roles.includes(run.role)) return false;
-  if (!e.machines.includes('*') && !e.machines.some((m) => same(m, run.machineId))) return false;
+  if (run.role !== 'orchestrator') {
+    if (!e.roles.includes(run.role === 'ops' ? 'workers' : run.role)) return false;
+    if (run.role !== 'ops' && !e.machines.includes('*') && !e.machines.some((m) => same(m, run.machineId))) return false;
+  }
+  if (e.kind === 'claude') return same(e.owner, run.userId);
   return e.share === 'anyone' || same(e.owner, run.userId);
 }
 
-/** How much room a token's account has left: 100 minus its fullest 5-hour or weekly meter, or undefined when unknown. */
-export function headroom(u: PlanUsage | undefined): number | undefined {
-  if (!u?.available) return undefined;
-  const used = [u.session?.percent, u.weekly?.percent].filter((p): p is number => typeof p === 'number');
-  return used.length ? 100 - Math.max(...used) : undefined;
+/**
+ * A run that may not start now because its person's Claude pool has no token that may serve it (every one over its caps or
+ * used up): a worker or the ops worker waits (queued with this reason), an orchestrator stops. `next` is when the first
+ * token frees up (ISO). Never holds a token's value.
+ */
+export class PoolHeldError extends Error {
+  readonly next?: string;
+  constructor(message: string, next?: string) {
+    super(message);
+    this.name = 'PoolHeldError';
+    this.next = next;
+  }
 }
 
-/**
- * The Claude entry a run gets (docs/vault.md, section 4): among the eligible ones, the run's person's own first, then
- * those with room (under FULL_PERCENT on both meters), the most headroom, the fewest live sessions, the name. `sticky`:
- * the entry the session ran on last, kept while it is eligible and has room.
- */
-export function pickClaude(
-  entries: readonly VaultEntryMeta[],
-  run: VaultRun,
-  usageOf: (fingerprint: string) => PlanUsage | undefined = () => undefined,
-  liveOn: (fingerprint: string) => number = () => 0,
-  sticky?: string,
-): VaultEntryMeta | undefined {
-  const pool = entries.filter((e) => e.kind === 'claude' && eligible(e, run));
-  const room = (e: VaultEntryMeta) => headroom(usageOf(e.fingerprint));
-  const full = (e: VaultEntryMeta) => {
-    const h = room(e);
-    return h !== undefined && h <= 100 - FULL_PERCENT;
-  };
-  const kept = sticky ? pool.find((e) => e.id === sticky) : undefined;
-  if (kept && !full(kept)) return kept;
-  const score = (e: VaultEntryMeta): [number, number, number, number] => [same(e.owner, run.userId) ? 0 : 1, full(e) ? 1 : 0, -(room(e) ?? UNKNOWN_HEADROOM), liveOn(e.fingerprint)];
-  return [...pool].sort((a, b) => {
-    const x = score(a);
-    const y = score(b);
-    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] - y[i];
-    return a.name.localeCompare(b.name);
-  })[0];
-}
+/** The limits a pick applies, read when it is made; the defaults without a context (tests). */
+export type PoolLimitsOf = () => PoolLimits;
 
 // ---------------------------------------------------------------- the store
 
@@ -231,7 +225,14 @@ export type UpdateInput = Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'role
 
 /** What a run gets from the vault: one Claude token (with its entry) and the other granted secrets, as environment. */
 export interface RunSecrets {
-  claude?: { entry: VaultEntryMeta; token: string };
+  claude?: { entry: VaultEntryMeta; token: string; how: 'normal' | 'over-cap' };
+  /**
+   * The run's person has Claude tokens in the vault and none may serve this run now (every one over its caps or used up):
+   * the run is held (a worker, the ops worker) or stopped (an orchestrator), with this reason and when the first frees up.
+   */
+  claudeHold?: { why: string; next?: string };
+  /** How many Claude tokens the run's person has (enabled, granted to the run): 0 is the transition, today's account. */
+  poolSize?: number;
   env: Record<string, string>;
   /** Entries granted to the run that could not be opened (no key, a wrong key): named, never their values. */
   problems: string[];
@@ -265,6 +266,8 @@ export class Vault {
   private mtime = -1;
   /** session id → the Claude entry it ran on last (pickClaude's sticky). */
   private readonly lastPick = new Map<string, string>();
+  /** token fingerprint → session id → when it was picked: a process not yet in the live counts (PENDING_MS). */
+  private readonly recent = new Map<string, Map<string, number>>();
 
   constructor(o: VaultOptions) {
     this.o = o;
@@ -442,11 +445,50 @@ export class Vault {
       .map(({ e, token }) => ({ token, label: `vault: ${e.name} …${e.last4}`, fingerprint: e.fingerprint, where: `the token vault: ${e.roles.join(', ')} on ${e.machines.includes('*') ? 'every machine' : e.machines.join(', ')}${e.share === 'owner' ? `, ${e.owner}'s own work` : ''}` }));
   }
 
+  /** The pick's view of one Claude entry: its meters, and the processes live on it other than `except`'s. */
+  private poolToken(e: VaultEntry, usageOf: ((fp: string) => PlanUsage | undefined) | undefined, liveOn: ((fp: string, except?: string) => number) | undefined, except: string | undefined, now: number): PoolToken {
+    const r = this.recent.get(e.fingerprint);
+    let pending = 0;
+    if (r) {
+      for (const [sid, at] of r) {
+        if (now - at > PENDING_MS) r.delete(sid);
+        else if (sid !== except) pending++;
+      }
+    }
+    // A start in progress is not in the live counts yet; whichever is more, never both (the same process).
+    return { id: e.id, name: e.name, fingerprint: e.fingerprint, owner: e.owner, usage: usageOf?.(e.fingerprint), others: Math.max(liveOn?.(e.fingerprint, except) ?? 0, pending) };
+  }
+
   /**
-   * What a run gets (docs/vault.md, section 3): with `claude`, one Claude token chosen by pickClaude; and every other
+   * Every person's Claude pool as the rules read it now (system_status, `fffctl vault list`): each enabled token with its
+   * state and how many processes run on it. The state is the worker's reading (the strictest).
+   */
+  pools(o: { usageOf?: (fp: string) => PlanUsage | undefined; liveOn?: (fp: string, except?: string) => number; limits?: PoolLimitsOf; now?: () => number }): Map<string, { entry: VaultEntryMeta; view: PoolView; live: number }[]> {
+    this.reload();
+    const limits = o.limits?.() ?? POOL_DEFAULTS;
+    const now = o.now?.() ?? Date.now();
+    const out = new Map<string, { entry: VaultEntryMeta; view: PoolView; live: number }[]>();
+    for (const e of this.data.entries) {
+      if (e.kind !== 'claude' || e.disabled || !e.owner) continue;
+      const t = this.poolToken(e, o.usageOf, o.liveOn, undefined, now);
+      const list = out.get(e.owner.toLowerCase()) ?? [];
+      list.push({ entry: this.meta(e), view: judge(t, limits), live: t.others });
+      out.set(e.owner.toLowerCase(), list);
+    }
+    return out;
+  }
+
+  /** The fingerprint of the Claude entry a session ran on last (this portal run), for attributing its stopped session. */
+  lastPickOf(sessionId: string): string | undefined {
+    const id = this.lastPick.get(sessionId);
+    return id ? this.byId(id)?.fingerprint : undefined;
+  }
+
+  /**
+   * What a run gets (docs/vault.md, section 3): with `claude`, one Claude token chosen by the pool rules (tokenPool.ts); and every other
    * entry granted to the run's role and machine, as environment. Nothing when the key is missing (the problems say so).
    */
-  forRun(run: VaultRun, o: { claude: boolean; usageOf?: (fingerprint: string) => PlanUsage | undefined; liveOn?: (fingerprint: string) => number }): RunSecrets {
+  forRun(run: VaultRun, o: { claude: boolean; usageOf?: (fingerprint: string) => PlanUsage | undefined; liveOn?: (fingerprint: string, exceptSession?: string) => number; limits?: PoolLimitsOf; now?: () => number }): RunSecrets {
     this.reload();
     const out: RunSecrets = { env: {}, problems: [] };
     const granted = this.data.entries.filter((e) => eligible(e, run));
@@ -472,31 +514,36 @@ export class Vault {
     }
     if (o.claude) {
       const sticky = run.sessionId ? this.lastPick.get(run.sessionId) : undefined;
+      const limits = o.limits?.() ?? POOL_DEFAULTS;
+      const now = o.now?.() ?? Date.now();
       const tried = new Set<string>();
+      out.poolSize = granted.filter((e) => e.kind === 'claude').length;
       // A token that does not open (sealed by another key) is skipped for the next best.
       for (;;) {
-        const pick = pickClaude(
-          granted.filter((e) => !tried.has(e.id)),
-          run,
-          o.usageOf,
-          o.liveOn,
-          sticky,
-        );
-        if (!pick) break;
-        const e = this.byId(pick.id)!;
+        const tokens = granted.filter((e) => e.kind === 'claude' && !tried.has(e.id)).map((e) => this.poolToken(e, o.usageOf, o.liveOn, run.sessionId, now));
+        if (!tokens.length) break;
+        const pick = pickPool(tokens, { orchestrator: run.role === 'orchestrator', limits, sticky });
+        if (!pick.token) {
+          out.claudeHold = pick.held;
+          break;
+        }
+        const e = this.byId(pick.token.id)!;
         const v = this.open(key, e);
         if (v) {
           if (run.sessionId) {
             this.lastPick.delete(run.sessionId);
-            this.lastPick.set(run.sessionId, pick.id);
+            this.lastPick.set(run.sessionId, e.id);
             // Oldest first: a portal that runs for months keeps the last few thousand sessions' picks only.
             if (this.lastPick.size > 5000) this.lastPick.delete(this.lastPick.keys().next().value!);
+            const r = this.recent.get(e.fingerprint) ?? new Map<string, number>();
+            r.set(run.sessionId, now);
+            this.recent.set(e.fingerprint, r);
           }
-          out.claude = { entry: this.meta(e), token: v };
+          out.claude = { entry: this.meta(e), token: v, how: pick.how ?? 'normal' };
           break;
         }
-        tried.add(pick.id);
-        out.problems.push(`vault entry ${pick.name} does not open with this key (rotate it)`);
+        tried.add(pick.token.id);
+        out.problems.push(`vault entry ${pick.token.name} does not open with this key (rotate it)`);
       }
     }
     return out;
@@ -511,7 +558,10 @@ export class Vault {
 export interface VaultContext {
   vault: Vault;
   usageOf?: (fingerprint: string) => PlanUsage | undefined;
-  liveOn?: (fingerprint: string) => number;
+  /** Live processes on a token, not counting `exceptSession`'s own. */
+  liveOn?: (fingerprint: string, exceptSession?: string) => number;
+  /** The system-wide pool limits in effect (config vault.pool), read at each pick. */
+  limits?: PoolLimitsOf;
   payer?: () => string | undefined;
   /** A run that wanted a vault Claude token and fell back, or an entry that would not open: for the log and system_status. */
   onProblem?: (line: string) => void;

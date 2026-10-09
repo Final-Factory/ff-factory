@@ -585,7 +585,11 @@ export class OpsWorker {
     if (this.job && this.job.by.userId.toLowerCase() !== person.userId.toLowerCase() && isMidTurn(h.info)) {
       throw new Error(`the orchestration worker is busy with ${this.job.by.displayName}'s job (${this.job.what}); wait for its turn to end, or ask them`);
     }
-    if (fresh) {
+    // Every new job starts a fresh conversation and a fresh process (w738): nothing, no context and no token, carries over from
+    // one job to the next, and a job from the other person's orchestrator runs on that person's own pool token. A follow-up
+    // within the job keeps both.
+    // (A turn still running for the same person, on a job that only expired, is not cut off: it is the same person's token.)
+    if (fresh || (opening && !isMidTurn(h.info))) {
       if (h.live) h.stop(true);
       delete h.info.sdkSessionId;
       this.d.store.putSession(h.info);
@@ -619,12 +623,22 @@ export class OpsWorker {
     if (!this.d.personTurn(caller.id)) throw new Error(`a portal deploy needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report); ask them`);
     const ids = this.workIdsOf(workIds);
     const at = new Date(this.now());
+    const previous = this.job;
+    const h = this.handle();
+    if (previous && previous.by.userId.toLowerCase() !== person.userId.toLowerCase() && isMidTurn(h.info)) {
+      throw new Error(`the orchestration worker is busy with ${previous.by.displayName}'s job (${previous.what}); wait for its turn to end, or ask them`);
+    }
     const grant = { by: person.userId, name: person.displayName, at: at.toISOString(), expires: new Date(at.getTime() + OPS_LIMITS.deployGrantMs).toISOString() };
     fs.writeFileSync(path.join(path.dirname(this.d.file), OPS_GRANT), `${JSON.stringify(grant)}\n`, { mode: 0o600 });
     this.deploying = { by: person, at: at.toISOString() };
     this.job = { by: person, at: at.toISOString(), what: 'deploy the portal (fffctl update)', ...(ids.length ? { workIds: ids } : {}) };
     this.save();
-    const h = this.handle();
+    // A deploy is a new job too: a fresh conversation and process, on this person's token (the restart that follows resumes it).
+    if (!isMidTurn(h.info)) {
+      if (h.live) h.stop(true);
+      delete h.info.sdkSessionId;
+    }
+    this.d.store.append(OPS_ID, { kind: 'system', text: `A new job (a deploy) from ${person.displayName}'s orchestrator: a fresh conversation.` });
     h.info.requestedBy = person;
     this.d.store.putSession(h.info);
     console.log(`ops-worker: ${person.userId} asked for a portal deploy in a turn of their own; grant until ${grant.expires}`);

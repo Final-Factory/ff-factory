@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, TOKEN_FILE_ROLES, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
+import { DEFAULT_CLEANUP, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, TOKEN_FILE_ROLES, VAULT_ROLES_ACCOUNT, VOICE_DEFAULTS, type ClaudeAccount, type Config, type HostRole, type IntakeConfig } from './config.ts';
 import { OAUTH_TOKEN, SECRET_KEYS, hostLoginProblem, maskSecret, readTokenFile } from './secrets.ts';
 import { PROVIDER_TOKEN, tokenSha256 } from './providerProtocol.ts';
 import { USER_ID } from './identity.ts';
@@ -10,6 +10,7 @@ import { refuseInDryRun } from './dryRun.ts';
 import { placeId } from './placement.ts';
 import { DEV_DEFAULTS, type DevRequestsConfig } from './devRequests.ts';
 import { STALE_OUTPUT_DEFAULTS, staleOutputSettings, type StaleOutputSettings } from './staleOutput.ts';
+import { poolLimits } from './tokenPool.ts';
 import { AUTO_COMPACT_LIMITS } from './autoCompact.ts';
 
 /**
@@ -54,6 +55,13 @@ export const SETTABLE_KEYS = [
   'machines.useHostClaudeEnv',
   // Whether a machine's runs take their Claude token from the token vault (docs/vault.md, w512; optional `machine`). The owner's only.
   'machines.claudeFromVault',
+  // The Claude token pool's limits (w739, docs/vault.md section 4): one system-wide set, anyone may change them (not owner-only).
+  // Each is a percent, 0-100; the one-at-a-time limit may not be above the retire limit.
+  'vault.pool.sessionHoldPercent',
+  'vault.pool.onePerWeeklyPercent',
+  'vault.pool.retireWeeklyPercent',
+  'vault.pool.reservePerDayPercent',
+  'vault.pool.reserveSessionPercent',
   // Who automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to.
   'systemPayer',
   // Files people attach to messages (docs/attachments.md): the largest one, and how long one nobody sends on is kept.
@@ -305,6 +313,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
         if (cfg) readTokenFile(cfg);
         return v;
       }
+      if (v === 'vault') {
+        // w738: each person's orchestrator on that person's own vault Claude token; the dispatcher stays on the token file.
+        if (!VAULT_ROLES_ACCOUNT.includes(role)) throw new Error(`${key} cannot be "vault": only ${VAULT_ROLES_ACCOUNT.join(', ')} run on a person's own vault tokens (the dispatcher stays on the token file)`);
+        return v;
+      }
       if (v !== 'login' && v !== 'token') throw new Error(`${key} is "login" (this host's stored claude.ai login) or "token" (config claudeEnv's)${TOKEN_FILE_ROLES.includes(role) ? ', or "tokenfile" (config claudeTokenFile\'s)' : ''}`);
       // Refuse a switch that would leave the role unable to start: the stored login must be there and alive.
       const problem = v === 'login' && cfg ? hostLoginProblem(cfg) : undefined;
@@ -338,6 +351,19 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     case 'usagePollMinutes': {
       const n = Number(value);
       if (!Number.isInteger(n) || n < 5 || n > 240) throw new Error('usagePollMinutes is a whole number of minutes from 5 to 240');
+      return n;
+    }
+    case 'vault.pool.sessionHoldPercent':
+    case 'vault.pool.onePerWeeklyPercent':
+    case 'vault.pool.retireWeeklyPercent':
+    case 'vault.pool.reservePerDayPercent':
+    case 'vault.pool.reserveSessionPercent': {
+      // The token pool's limits (w739): a percent, 0-100 (a number or its text); one at a time may not be above retired.
+      const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+      if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 100) throw new Error(`${key} is a percent from 0 to 100`);
+      const now = poolLimits(cfg);
+      if (key === 'vault.pool.onePerWeeklyPercent' && n > now.retireWeekly) throw new Error(`${key} (${n}) cannot be above vault.pool.retireWeeklyPercent (${now.retireWeekly}): one at a time starts before a token is retired`);
+      if (key === 'vault.pool.retireWeeklyPercent' && n < now.onePerWeekly) throw new Error(`${key} (${n}) cannot be below vault.pool.onePerWeeklyPercent (${now.onePerWeekly}): one at a time starts before a token is retired`);
       return n;
     }
     case 'attachments.maxMB': {
@@ -559,6 +585,14 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     cfg.claudeAccounts = accounts;
   } else if (key === 'machines.useHostClaudeEnv') cfg.machines = { ...cfg.machines, useHostClaudeEnv: next as boolean | Record<string, boolean> | undefined };
   else if (key === 'machines.claudeFromVault') cfg.machines = { ...cfg.machines, claudeFromVault: next as boolean | Record<string, boolean> | undefined };
+  else if (key.startsWith('vault.pool.')) {
+    // Live: the pool picks read the limits at each process start (poolLimits).
+    const pool = { ...cfg.vault?.pool } as Record<string, number | undefined>;
+    const field = key.slice('vault.pool.'.length);
+    if (v === undefined) delete pool[field];
+    else pool[field] = v as number;
+    cfg.vault = { ...cfg.vault, pool: pool as NonNullable<Config['vault']>['pool'] };
+  }
   else if (key === 'systemPayer') cfg.systemPayer = v as string | undefined;
   else if (key === 'providers.ffbox.enabled' || key === 'providers.ffbox.token' || key === 'providers.ffbox.devRequests') {
     const ffbox = { ...cfg.providers?.ffbox };

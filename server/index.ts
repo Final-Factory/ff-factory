@@ -39,7 +39,8 @@ import { DispatcherChatRefused } from './orchestrators.ts';
 import { OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, memoryRootOf } from './orchestratorMemory.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
-import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
+import { accountSetupLines, addSecretValues, claudeFromVault, hostAccount, reserveLines, hostRole, hostRoleOf, scrubTranscripts, shownRoles, tokenFileToken, usesHostClaudeEnv } from './secrets.ts';
+import { poolLimits, clock } from './tokenPool.ts';
 import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
@@ -56,7 +57,7 @@ import { DRY_RUN_BANNER, DRY_RUN_WHY, defuseConfig, dryRun } from './dryRun.ts';
 import { portalPublicKey, tailnetAddress } from './machineSsh.ts';
 import { machineSshHttp } from './machineSshHttp.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
-import type { AppState, CreateSandboxRequest, HostStatus, Machine, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
+import type { AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
@@ -1661,10 +1662,13 @@ function fileTokenEntry(): { token: string; label: string }[] {
 usage.personTokens = () => [...personTokens(), ...fileTokenEntry(), ...vault.claudeTokens()];
 /** Recent reasons a run did not get what the vault should give it (a fallback, an entry that would not open), newest last. */
 const vaultProblems: { at: string; line: string }[] = [];
+/** Live sessions whose process started on this credential key, not counting `except` (the asking session's own). */
+const liveOnKey = (key: string, except?: string) => [...store.sessions.values()].filter((s) => s.id !== except && s.account === key && s.status !== 'stopped' && s.status !== 'error').length;
 setVaultContext({
   vault,
   usageOf: (fp) => usage.entries.get(`token:${fp}`)?.usage,
-  liveOn: (fp) => [...store.sessions.values()].filter((s) => s.account === `token:${fp}` && s.status !== 'stopped' && s.status !== 'error').length,
+  liveOn: (fp, except) => liveOnKey(`token:${fp}`, except),
+  limits: () => poolLimits(cfg),
   payer: () => identity.systemPayer().userId,
   onProblem: (line) => {
     if (vaultProblems.at(-1)?.line !== line) console.warn(`vault: ${line}`);
@@ -1679,8 +1683,15 @@ setVaultContext({
 function sourceOf(s: SessionInfo, token: string | undefined, toMachine: (id: string) => string | undefined) {
   const role = hostRoleOf(cfg, s);
   const login = () => hostAccount(cfg, role) === 'login';
+  // A person's orchestrator (or the ops worker for them) on "vault" (w738) ran on the pool token it was handed last; a
+  // session with no pick (or one before a restart) on the token file it falls back to.
+  if (s.kind !== 'worker' && !s.machineId && hostAccount(cfg, role) === 'vault') {
+    const running = !!s.account && !!s.status && s.status !== 'stopped' && s.status !== 'error';
+    const fp = running ? undefined : vault.lastPickOf(s.id);
+    if (fp) return `token:${fp}`;
+  }
   // A role on the token file (w464) ran on it, whoever the session was for.
-  if (s.kind !== 'worker' && !s.machineId && hostAccount(cfg, role) === 'tokenfile') {
+  if (s.kind !== 'worker' && !s.machineId && (hostAccount(cfg, role) === 'tokenfile' || (hostAccount(cfg, role) === 'vault' && cfg.claudeTokenFile))) {
     const t = tokenFileToken(cfg);
     if (t) return sessionSource({ ...s, requestedBy: undefined }, t, toMachine, () => undefined, () => false);
   }
@@ -1744,6 +1755,8 @@ bus.on('event', (e: ServerEvent) => {
 machines.onUsage = (id, account, u) => usage.report(id, account, u);
 for (const s of sessions.sessions.values()) usage.recordCost(s.info.id, s.info.costUsd); // baselines
 sessions.events.on('result', (s: { info: { id: string; costUsd: number } }) => usage.recordCost(s.info.id, s.info.costUsd));
+// The SDK's rate_limit_event (the API's rate-limit headers on the session's own requests) raises its token's meter between polls (w739).
+sessions.events.on('rateLimit', (s: { info: { account?: string } }, info: { rateLimitType?: string; utilization?: number; resetsAt?: number }) => usage.noteRateLimit(s.info.account, info));
 /** Whose account each orchestrator runs on (docs/orchestrators.md), for system_status: a person without a token of their own is on the owner's. */
 function orchestratorAccountsLine() {
   const people = identity.list();
@@ -1773,7 +1786,7 @@ agents.usagePollChanged = () => {
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
-  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ...tokenReport().lines, ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {
@@ -1781,6 +1794,54 @@ const vaultLines = () => {
   const recent = vaultProblems.filter((p) => Date.now() - Date.parse(p.at) < 24 * 3_600_000);
   return [...(line ? [line] : []), ...(recent.length ? [`WARNING: the vault fell short ${recent.length} time(s) in 24 h; latest (${recent.at(-1)!.at}): ${recent.at(-1)!.line}`] : [])];
 };
+/**
+ * Each person's Claude token pool as the rules read it now, and the dispatcher's (and host token's) reserve (w739,
+ * docs/vault.md section 4): system_status lines and the dashboard's warnings. Only names, last four characters and numbers.
+ */
+function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarning[] } {
+  const usageOfKey = (key: string) => usage.entries.get(key)?.usage;
+  const titlesOn = (key: string) => [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error').map((s) => s.title);
+  const pools = vault.pools({ usageOf: (fp) => usageOfKey(`token:${fp}`), liveOn: (fp, except) => liveOnKey(`token:${fp}`, except), limits: () => poolLimits(cfg), now: () => now });
+  const lines: string[] = [];
+  const warnings: TokenWarning[] = [];
+  for (const [person, list] of [...pools].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const each = list.map((t) => {
+      const on = titlesOn(`token:${t.entry.fingerprint}`);
+      return `${t.entry.name} …${t.entry.last4} ${t.view.state} (${t.view.why}${t.view.weeklyResetsAt ? `; weekly resets ${clock(t.view.weeklyResetsAt)}` : ''}${on.length ? `; ${on.length} running: ${on.slice(0, 3).join(', ')}${on.length > 3 ? ', …' : ''}` : ''})`;
+    });
+    const states = list.map((t) => t.view.state);
+    const usedUp = states.every((x) => x === 'exhausted');
+    const noneOk = !states.includes('ok');
+    const next = list.map((t) => t.view.until).filter((x): x is string => !!x).sort()[0];
+    const verdict = usedUp
+      ? `all used up: ${person}'s workers wait${hostAccount(cfg, 'orchestrator') === 'vault' ? " and their orchestrator is stopped" : ''} until ${clock(next)}`
+      : noneOk
+        ? `all over their caps: ${person}'s workers wait until ${clock(next)}${hostAccount(cfg, 'orchestrator') === 'vault' ? '; their orchestrator uses the pool up (the token with the most room)' : ''}`
+        : 'workers and agents served';
+    lines.push(`Claude token pool, ${person} (${list.length} token${list.length === 1 ? '' : 's'}, soonest weekly reset first; caps ${poolLimits(cfg).sessionHold}% 5-hour / ${poolLimits(cfg).onePerWeekly}% one at a time / ${poolLimits(cfg).retireWeekly}% retired): ${each.join('; ')}. ${verdict}`);
+    if (usedUp) warnings.push({ id: `pool:${person}`, kind: 'exhausted', text: `${person}'s Claude tokens are all used up: their workers wait${hostAccount(cfg, 'orchestrator') === 'vault' ? ' and their orchestrator is stopped' : ''} until the first one resets (${clock(next)}). No override.` });
+    else if (noneOk) warnings.push({ id: `pool:${person}`, kind: 'held', text: `${person}'s Claude token pool is over its caps: their workers wait until ${clock(next)}${hostAccount(cfg, 'orchestrator') === 'vault' ? '; their orchestrator keeps running on the token with the most room until it is used up' : ''}.` });
+  }
+  const others = (key: string, role: 'dispatcher' | 'host-token') =>
+    role === 'dispatcher' ? [...store.sessions.values()].filter((s) => s.account === key && s.status !== 'stopped' && s.status !== 'error' && !(s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher')).length : 0;
+  for (const r of reserveLines(cfg, usageOfKey, others, now)) {
+    lines.push(r.line);
+    if (r.warning) warnings.push({ id: `reserve:${r.cred.key}`, kind: 'reserve', text: r.warning });
+  }
+  return { lines, warnings };
+}
+let tokenWarningsShown = '';
+/** The dashboard's token banners follow the meters and the sessions: refreshed on a timer, broadcast when they change. */
+function refreshTokenWarnings() {
+  const w = tokenReport().warnings;
+  const sig = JSON.stringify(w);
+  if (sig === tokenWarningsShown) return;
+  tokenWarningsShown = sig;
+  host.tokenWarnings = w.length ? w : undefined;
+  broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
+}
+setInterval(refreshTokenWarnings, 20_000).unref();
+setTimeout(refreshTokenWarnings, 8_000).unref();
 const outsideWatchLines = () => {
   const w = watcher();
   const c = watchConfig();

@@ -420,6 +420,71 @@ test('the one session: only an allowed orchestrator reaches it, a job needs its 
   ops.close();
 });
 
+test("every new job and every change of caller starts a fresh conversation and process, on the caller's token (w738); a follow-up keeps both", async () => {
+  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-f-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  let personTurn = true;
+  // The options factory is what picks the token at each process start (Agents.opsOptions reads info.requestedBy).
+  const starts: (string | undefined)[] = [];
+  let clock = Date.now();
+  const ops = new OpsWorker({
+    sessions,
+    store,
+    options: (info) => {
+      starts.push(info.requestedBy?.userId);
+      return {};
+    },
+    tellOrchestrator: () => {},
+    personTurn: () => personTurn,
+    file: path.join(dir, 'ops-worker.json'),
+    now: () => clock,
+  });
+  const loth = orch('lo', LOTH);
+  const ben = orch('bo', BEN);
+  const settle = () => new Promise((r) => setTimeout(r, 300));
+  // 1. Lothsahn's job: a process on lothsahn.
+  assert.match(ops.send(loth, 'job one'), /new job of Lothsahn's/);
+  await settle();
+  const h = sessions.get(OPS_ID);
+  const first = h.info.sdkSessionId;
+  assert.ok(first, 'a conversation');
+  assert.deepEqual(starts, ['lothsahn']);
+  // 2. A follow-up within the job (a harness turn of the same orchestrator): the same process, the same conversation.
+  personTurn = false;
+  assert.doesNotMatch(ops.send(loth, 'follow-up'), /new job/);
+  await settle();
+  assert.deepEqual(starts, ['lothsahn'], 'no new process');
+  assert.equal(h.info.sdkSessionId, first);
+  // 3. Ben's orchestrator, in Ben's own turn: another caller. A fresh conversation, a new process on Ben.
+  personTurn = true;
+  assert.match(ops.send(ben, "ben's job"), /new job of Ben's/);
+  await settle();
+  assert.deepEqual(starts, ['lothsahn', 'ben']);
+  assert.notEqual(h.info.sdkSessionId, first, 'nothing of the last job, context or token, carries over');
+  assert.ok(store.readTranscript(OPS_ID, 80).some((e) => e.kind === 'system' && e.text.includes("A new job from Ben's orchestrator: a fresh conversation")));
+  const second = h.info.sdkSessionId;
+  // 4. Ben's follow-up keeps it; 5. Lothsahn's next job (the job was Ben's: a change of caller again) is fresh on Lothsahn.
+  personTurn = false;
+  ops.send(ben, 'and one more thing');
+  await settle();
+  assert.deepEqual(starts, ['lothsahn', 'ben']);
+  personTurn = true;
+  assert.match(ops.send(loth, 'job two'), /new job of Lothsahn's/);
+  await settle();
+  assert.deepEqual(starts, ['lothsahn', 'ben', 'lothsahn']);
+  assert.notEqual(h.info.sdkSessionId, second);
+  // 6. The same person's next job, after theirs has gone quiet for good: still a new job, still fresh.
+  const third = h.info.sdkSessionId;
+  clock += OPS_LIMITS.jobMs + 60_000;
+  assert.match(ops.send(loth, 'job three'), /new job of Lothsahn's/);
+  await settle();
+  assert.equal(starts.length, 4, 'a process of its own');
+  assert.notEqual(h.info.sdkSessionId, third);
+  ops.close();
+});
+
 test('w631: a job sent for ledger requests: the ids are checked, the worker is told how to close them, and its turn end goes to the ledger', async () => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-w-'));
