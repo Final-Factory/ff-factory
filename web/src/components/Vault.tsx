@@ -68,6 +68,7 @@ function VaultRow({ e, people, onChange }: { e: VaultEntryMeta; people: VaultVie
   const [editing, setEditing] = useState(false);
   const [machines, setMachines] = useState(e.machines.join(', '));
   const [roles, setRoles] = useState(e.roles.join(', '));
+  const [email, setEmail] = useState(e.email ?? '');
   const [sure, setSure] = useState(false);
   const owner = people.find((p) => p.userId.toLowerCase() === e.owner?.toLowerCase())?.displayName ?? e.owner;
   return (
@@ -77,6 +78,14 @@ function VaultRow({ e, people, onChange }: { e: VaultEntryMeta; people: VaultVie
         <span className="mono dim" title="the first 12 hex characters of its SHA-256">
           {e.fingerprint}
         </span>
+        {e.kind === 'claude' && (
+          <>
+            {' '}
+            <span className="small dim" data-testid={`vault-email-${e.name}`} title="the Claude account email a person recorded for this token; the token itself does not tell">
+              {e.email ?? 'email not recorded'}
+            </span>
+          </>
+        )}
       </div>
       <div className="small dim">
         {e.share === 'owner' ? `${owner}'s own work only` : `any run${owner ? ` (${owner}'s)` : ''}`}; {e.roles.join(', ')} on {e.machines.join(', ')}
@@ -102,10 +111,11 @@ function VaultRow({ e, people, onChange }: { e: VaultEntryMeta; people: VaultVie
         <div className="field-row">
           <input className="input" aria-label="machines" placeholder="machines: m3, m5 or *" value={machines} onChange={(x) => setMachines(x.target.value)} />
           <input className="input" aria-label="roles" placeholder="roles: workers, standing" value={roles} onChange={(x) => setRoles(x.target.value)} />
+          {e.kind === 'claude' && <input className="input" type="email" aria-label="account email" placeholder="Claude account email (optional)" value={email} onChange={(x) => setEmail(x.target.value)} />}
           <button
             className="btn btn-primary"
             onClick={async () => {
-              await onChange(api.vaultUpdate(e.name, { machines: list(machines), roles: list(roles) as VaultRole[] }), `changed ${e.name}`);
+              await onChange(api.vaultUpdate(e.name, { machines: list(machines), roles: list(roles) as VaultRole[], ...(e.kind === 'claude' ? { email: email.trim() } : {}) }), `changed ${e.name}`);
               setEditing(false);
             }}
           >
@@ -140,6 +150,7 @@ function AddEntry({ view, onChange }: { view: VaultView; onChange: Act }) {
   const [share, setShare] = useState<VaultShare>('owner');
   const [roles, setRoles] = useState('workers, standing');
   const [machines, setMachines] = useState('*');
+  const [email, setEmail] = useState('');
   const [value, setValue] = useState('');
   if (!open)
     return (
@@ -178,6 +189,11 @@ function AddEntry({ view, onChange }: { view: VaultView; onChange: Act }) {
         <input className="input" aria-label="roles" placeholder="roles: workers, standing" value={roles} onChange={(x) => setRoles(x.target.value)} />
         <input className="input" aria-label="machines" placeholder="machines: m3, m5 or *" value={machines} onChange={(x) => setMachines(x.target.value)} />
       </div>
+      {kind === 'claude' && (
+        <div className="field-row">
+          <input className="input" type="email" aria-label="account email" placeholder="the Claude account's email (optional; shown on the accounts list)" value={email} onChange={(x) => setEmail(x.target.value)} />
+        </div>
+      )}
       <div className="field-row">
         <input className="input" type="password" autoComplete="off" aria-label="value" placeholder="the token (never shown again)" value={value} onChange={(x) => setValue(x.target.value)} />
         <button
@@ -185,10 +201,11 @@ function AddEntry({ view, onChange }: { view: VaultView; onChange: Act }) {
           disabled={!name.trim() || !value.trim()}
           onClick={async () => {
             await onChange(
-              api.vaultAdd({ name: name.trim(), kind, env: env.trim() || undefined, owner: owner || undefined, share, roles: list(roles) as VaultRole[], machines: list(machines), value: value.trim() }),
+              api.vaultAdd({ name: name.trim(), kind, env: env.trim() || undefined, owner: owner || undefined, email: kind === 'claude' ? email.trim() || undefined : undefined, share, roles: list(roles) as VaultRole[], machines: list(machines), value: value.trim() }),
               `added ${name.trim()}`,
             );
             setValue('');
+            setEmail('');
             setOpen(false);
           }}
         >

@@ -102,9 +102,9 @@ export const api = {
   refreshUsage: () => request<{ started: boolean; machines: number }>('POST', '/api/usage/refresh'),
   // The token vault (docs/vault.md): the owner's only. A value goes in and never comes back; answers carry metadata only.
   vault: () => request<VaultView>('GET', '/api/vault'),
-  vaultAdd: (e: Pick<VaultEntryMeta, 'name' | 'kind' | 'share' | 'roles' | 'machines'> & { env?: string; owner?: string; value: string }) => request<VaultView>('POST', '/api/vault', e),
+  vaultAdd: (e: Pick<VaultEntryMeta, 'name' | 'kind' | 'share' | 'roles' | 'machines'> & { env?: string; owner?: string; email?: string; value: string }) => request<VaultView>('POST', '/api/vault', e),
   vaultRotate: (name: string, value: string) => request<VaultView>('POST', `/api/vault/${encodeURIComponent(name)}/rotate`, { value }),
-  vaultUpdate: (name: string, patch: Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'roles' | 'machines' | 'disabled'>>) => request<VaultView>('PATCH', `/api/vault/${encodeURIComponent(name)}`, patch),
+  vaultUpdate: (name: string, patch: Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'roles' | 'machines' | 'disabled' | 'email'>>) => request<VaultView>('PATCH', `/api/vault/${encodeURIComponent(name)}`, patch),
   vaultRemove: (name: string) => request<VaultView>('DELETE', `/api/vault/${encodeURIComponent(name)}`),
   revokeMachineCredential: (id: string) => request<VaultView>('POST', `/api/machines/${encodeURIComponent(id)}/revoke-credential`),
   maxRefresh: () => request<{ ok: boolean; note?: string }>('POST', '/api/max/refresh'),
