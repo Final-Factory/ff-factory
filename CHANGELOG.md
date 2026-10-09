@@ -10,6 +10,14 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Every DONE says what it taught, and a second correction of a kind gets a check** (w741, Ben: "If you learn something
+  after struggling or figure out new ways to do things better, update the harness especially after putting in a bunch
+  for related bugs"). The DONE rule (`doneRule`) asks for a line `Learned: <file or PR>` or `Learned: nothing new`;
+  the ledger refuses a live DONE without one, and "nothing new" on a request a person reopened (`learnedProblem`; a
+  stored DONE from before still closes on a re-check). A person's orchestrator keeps one memory line per correction
+  (verbatim, by kind) and files the harness work on the second of a kind, and its briefs quote the person and label
+  its own reading (w732). docs/orchestrators.md "Learning". Needs a portal deploy.
+
 - **`set_app_config` says that `machines.claudeFromVault` takes a machine** (w737, Lothsahn: "update LothDesktop to take
   machines.claudeFromVault true"). The setting was always per machine (`appConfig.ts` `perMachine`, `nextPerMachine`;
   `machine: "lothdesktop"` writes `{ "lothdesktop": true }` and leaves BEAST, m3, m5 and biscuit off), but the tool's text

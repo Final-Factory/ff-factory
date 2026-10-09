@@ -45,7 +45,7 @@ import {
 } from './work.ts';
 import { autoApproveProblem, cleanBlock, cleanLine, identityKeys, parseMarkers, quoteUntrusted, sourceTag } from './intakeRules.ts';
 import { readDiscordConfig } from './discordConfig.ts';
-import { LIMIT_END, doneIdsIn, doneProblem, mergedMentionsIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
+import { LIMIT_END, doneIdsIn, doneProblem, learnedProblem, mergedMentionsIn, reportVerdict, stillOpenIn } from './ledgerRules.ts';
 import { asksAPerson, servedBy } from '../shared/workState.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { displayName } from '../shared/labels.ts';
@@ -1511,7 +1511,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         this.store.putWork(w);
         continue;
       }
-      const problem = doneProblem(w, text);
+      const problem = doneProblem(w, text) ?? learnedProblem(w, text);
       // The ledger's PR states are a copy, read every few minutes, and a DONE often comes seconds after its PR merged (w515:
       // #1080, #1089, #1092 and #1095 were refused as "still open"). Read the open ones live before refusing.
       if (problem && this.prsLive && (w.prs ?? []).some((p) => p.state === 'open')) {
@@ -1540,7 +1540,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
         const r = await this.prsLive!(id).catch(() => ({ unverified: before }));
         const w = this.store.work.get(id);
         if (!w || !(isOpen(w) || w.status === 'stalled')) return;
-        const problem = doneProblem(w, text, r.unverified);
+        const problem = doneProblem(w, text, r.unverified) ?? learnedProblem(w, text);
         if (problem) return this.refuseDone(w, s, problem, refused);
         this.closeOnDone(w, s.id, report, `${speaker} said DONE: ${w.id} (its PR states read live from GitHub)`, also.get(id));
       }),

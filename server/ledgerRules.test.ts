@@ -246,3 +246,16 @@ test('w631: a PR title names its request at its start or as its trailing ids onl
   const linked = prsOf(w, [pr({ number: 1196, title: 'w604/w556: warm the variants', body: 'Request: w604' }), pr({ number: 900, title: 'Desync report (w556 diagnostics)' })], { opened: [] });
   assert.deepEqual(linked.map((p) => [p.number, p.via, p.partOf]), [[1196, 'title', false]]);
 });
+
+test('w741: the Learned: line of a DONE report', async () => {
+  const { learnedIn, learnedProblem } = await import('./ledgerRules.ts');
+  assert.equal(learnedIn('Merged.\nDONE: w1\nLearned: nothing new'), 'nothing new');
+  assert.equal(learnedIn('- **Learned:** `unity-ui/ugui-pitfalls.md` (a layout rect is not what is drawn)'), '`unity-ui/ugui-pitfalls.md` (a layout rect is not what is drawn)');
+  assert.equal(learnedIn('What I learned: a lot.\nDONE: w1'), undefined, 'only a line that starts with it');
+  assert.equal(learnedIn('Learned:'), undefined, 'and says something');
+  assert.match(learnedProblem({}, 'DONE: w1')!, /add a line `Learned:/);
+  assert.equal(learnedProblem({}, 'DONE: w1\nLearned: nothing new'), undefined);
+  assert.match(learnedProblem({ reopenedAt: '2026-10-08T23:20:00Z' }, 'Learned: Nothing new.')!, /a person reopened it/);
+  assert.equal(learnedProblem({ reopenedAt: '2026-10-08T23:20:00Z' }, 'Learned: no check possible: the bug was in the Steam client'), undefined);
+  assert.equal(learnedProblem({ reopenedAt: '2026-10-08T23:20:00Z' }, 'Learned: done.md item 2 (final-factory-agents #19)'), undefined);
+});
