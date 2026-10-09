@@ -67,16 +67,20 @@ test('loadConfig (w510): keys only the portal\'s own sandbox pool read still loa
     librarySeedCopy: 'clone',
     limits: { maxUnity: 4, maxSessions: 6, maxSandboxes: 5, minFreeGB: 100, minFreeRamGB: 12 },
     unity: { editorPath: 'C:/Unity.exe', extraArgs: [], watchdog: { stallMinutes: 5 }, idleStopMinutes: 90, mcpServer: { command: 'uvx', args: ['x'] } },
-    claudeAccounts: { orchestrator: 'login', standing: 'login' },
+    // w755: the account of the workers of this host's own daemon; a value the key no longer takes loads all the same.
+    claudeAccounts: { orchestrator: 'login', standing: 'login', workers: 'tokenfile' },
+    hostGuard: { warnFreeGB: 90, compactWhenReclaimGB: 60 },
   };
   withConfig(t, old);
   const cfg = loadConfig();
-  assert.deepEqual(cfg.retiredKeys, ['hostSandboxes', 'librarySeed', 'librarySeedCopy', 'limits.maxUnity', 'limits.maxSessions', 'limits.maxSandboxes', 'limits.minFreeGB', 'unity.editorPath', 'unity.extraArgs', 'unity.watchdog', 'claudeAccounts.standing']);
+  assert.deepEqual(cfg.retiredKeys, ['hostSandboxes', 'librarySeed', 'librarySeedCopy', 'limits.maxUnity', 'limits.maxSessions', 'limits.maxSandboxes', 'limits.minFreeGB', 'unity.editorPath', 'unity.extraArgs', 'unity.watchdog', 'claudeAccounts.standing', 'claudeAccounts.workers', 'hostGuard.compactWhenReclaimGB']);
   assert.deepEqual(cfg.limits, { minFreeRamGB: 12 }, 'what is still read stays');
   assert.deepEqual(cfg.unity, { idleStopMinutes: 90, mcpServer: { command: 'uvx', args: ['x'] } });
-  assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'login' }, 'no unknown role refused at load');
+  assert.deepEqual(cfg.claudeAccounts, { orchestrator: 'login' }, 'no unknown role refused at load; workers (even "tokenfile") ignored');
+  assert.equal(cfg.hostGuard.warnFreeGB, 90, 'what is still read in hostGuard stays');
+  assert.equal('compactWhenReclaimGB' in cfg.hostGuard, false);
   assert.equal((cfg as unknown as Record<string, unknown>).librarySeed, undefined);
-  assert.match(retiredKeysLine(cfg.retiredKeys) ?? '', /^config\.json sets hostSandboxes, librarySeed, .*claudeAccounts\.standing, which nothing reads any more: the portal runs no sandboxes, editors or standing agents of its own \(w510\)/);
+  assert.match(retiredKeysLine(cfg.retiredKeys) ?? '', /^config\.json sets hostSandboxes, librarySeed, .*claudeAccounts\.standing, claudeAccounts\.workers, hostGuard\.compactWhenReclaimGB, which nothing reads any more: the portal runs no sandboxes, editors, workers or standing agents of its own \(w510\)/);
   assert.equal(retiredKeysLine([]), undefined);
   assert.deepEqual(retiredConfigKeys(withoutRetiredKeys(old)), [], 'withoutRetiredKeys leaves none');
 });

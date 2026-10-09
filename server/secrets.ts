@@ -138,15 +138,13 @@ const refLocal = (m: MachineRef) => typeof m !== 'string' && !!m.local;
 
 /**
  * Whether portal-run agents on a machine get this host's claudeEnv (config machines.useHostClaudeEnv; default
- * yes): an entry naming the machine, else, for the portal's own host (a local machine, docs/beast-machine.md), what
- * claudeAccounts.workers says (its sandboxes were this host's, so its workers keep the account they had), else the
- * value itself, or "*" for machines not named.
+ * yes): an entry naming the machine, else the value itself, or "*" for machines not named. The portal's own host as a
+ * machine (docs/beast-machine.md) is no different: until w755 it followed claudeAccounts.workers when no entry named it.
  */
-export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'> & Partial<Pick<Config, 'claudeAccounts'>>, machine: MachineRef): boolean {
+export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'>, machine: MachineRef): boolean {
   const u = cfg.machines?.useHostClaudeEnv;
   const id = refId(machine);
   if (u && typeof u === 'object' && u[id] !== undefined) return u[id];
-  if (refLocal(machine)) return hostAccount(cfg, 'workers') !== 'login';
   if (u === undefined) return true;
   if (typeof u === 'boolean') return u;
   return u['*'] ?? true;
@@ -154,13 +152,19 @@ export function usesHostClaudeEnv(cfg: Pick<Config, 'machines'> & Partial<Pick<C
 
 // ---------------------------------------------------------------- this host's agents (docs/accounts.md)
 
-/** The role config claudeAccounts knows a session of `kind` on this host by. */
-// The orchestration worker (w597) runs on the orchestrators' account: it works only for their people.
-export const hostRole = (kind: SessionKind): HostRole => (kind === 'orchestrator' || kind === 'ops' ? 'orchestrator' : 'workers');
+/**
+ * Whether a session of `kind` without a machine is one this host runs (w510: only the orchestrators, and the orchestration
+ * worker, w597, which works only for their people). Any other kind without a machine is an old portal worker's or standing
+ * agent's record, whose account the config no longer says: the host token.
+ */
+export const runsOnThisHost = (kind: SessionKind): boolean => kind === 'orchestrator' || kind === 'ops';
+
+/** The role config claudeAccounts knows a session of `kind` on this host by: the orchestrator's, for the orchestration worker too. */
+export const hostRole = (_kind: SessionKind): HostRole => 'orchestrator';
 
 /**
  * The account this host's agents of `role` run on (config claudeAccounts; default the token; the dispatcher, unset:
- * the orchestrator's). Workers never run on the token file: a "tokenfile" there (refused at config load) reads as the token.
+ * the orchestrator's). "tokenfile" is for the roles in TOKEN_FILE_ROLES (refused at config load for any other).
  */
 export function hostAccount(cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>, role: HostRole): ClaudeAccount {
   const v = cfg.claudeAccounts?.[role] ?? (role === 'dispatcher' ? cfg.claudeAccounts?.orchestrator : undefined);
@@ -197,24 +201,16 @@ const withTokenFile = <E extends Record<string, string | undefined>>(cfg: Partia
 export const dispatcherOwnAccount = (cfg: Pick<Config, 'claudeAccounts'>) => cfg.claudeAccounts?.dispatcher !== undefined;
 
 /** The roles worth naming apart: the dispatcher only when it has an account of its own (else it is the orchestrator's). */
-export const shownRoles = (cfg: Pick<Config, 'claudeAccounts'>, workersHere = true): HostRole[] => HOST_ROLES.filter((r) => (r !== 'dispatcher' || dispatcherOwnAccount(cfg)) && (r !== 'workers' || workersHere));
-
-/**
- * Whether a worker daemon runs on the portal's own host (a machine added "local", docs/beast-machine.md). Since w510 the portal
- * runs no workers itself, so `claudeAccounts.workers` means something only then; with none, the workers role is left out of
- * the account lists and warnings (`shownRoles`, w748).
- */
-export const workersHere = (machines: readonly MachineRef[]) => machines.some(refLocal);
+export const shownRoles = (cfg: Pick<Config, 'claudeAccounts'>): HostRole[] => HOST_ROLES.filter((r) => r !== 'dispatcher' || dispatcherOwnAccount(cfg));
 
 /**
  * Which of this host's own credentials its roles are set to use (w748): the stored login, the host token, or a vault pool.
  * A role on "vault" counts for the account it falls back to (the token file, else the host token) as well, since a person
  * with no tokens of their own yet still runs on it. The accounts list leaves out a credential no role is set to use.
  */
-export function hostAccountsInUse(cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>, workers = true): { login: boolean; token: boolean; vault: boolean } {
-  const roles = HOST_ROLES.filter((r) => r !== 'workers' || workers);
-  const base = roles.map((r) => baseAccount(cfg, r));
-  return { login: base.includes('login'), token: base.includes('token'), vault: roles.some((r) => hostAccount(cfg, r) === 'vault') };
+export function hostAccountsInUse(cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>): { login: boolean; token: boolean; vault: boolean } {
+  const base = HOST_ROLES.map((r) => baseAccount(cfg, r));
+  return { login: base.includes('login'), token: base.includes('token'), vault: HOST_ROLES.some((r) => hostAccount(cfg, r) === 'vault') };
 }
 
 /** The role a session on this host runs as (claudeAccounts): the dispatcher's own when it has one, else by its kind. */
@@ -274,21 +270,21 @@ export function hostLoginProblem(cfg: Pick<Config, 'claudeEnv'>, env: Record<str
  * CLAUDE_CODE_OAUTH_TOKEN, it overrides the Mac's keychain login for that agent only), or nothing (the Mac's
  * own login). It travels in the launch spec over the authenticated daemon channel and is never logged.
  */
-export function hostClaudeEnvFor(cfg: Pick<Config, 'machines' | 'claudeEnv'> & Partial<Pick<Config, 'claudeAccounts'>>, machine: MachineRef): Record<string, string> {
+export function hostClaudeEnvFor(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machine: MachineRef): Record<string, string> {
   if (usesHostClaudeEnv(cfg, machine)) return { ...cfg.claudeEnv };
-  // The portal's own host on its login: config claudeEnv without its credentials, as this host's "login" workers had
-  // it (CLAUDE_CONFIG_DIR and the like stay, so a resumed session finds its history).
+  // The portal's own host on its login (machines.useHostClaudeEnv false for it): config claudeEnv without its credentials
+  // (CLAUDE_CONFIG_DIR and the like stay, so a resumed session finds its history).
   return refLocal(machine) ? usageEnv({ ...cfg.claudeEnv }) : {};
 }
 
 /** Whether a machine's portal-run agents run on the Mac's own login: they are sent no token (hostClaudeEnvFor). */
-export const machineUsesLogin = (cfg: Pick<Config, 'machines' | 'claudeEnv'> & Partial<Pick<Config, 'claudeAccounts'>>, machine: MachineRef) => !hostClaudeEnvFor(cfg, machine).CLAUDE_CODE_OAUTH_TOKEN;
+export const machineUsesLogin = (cfg: Pick<Config, 'machines' | 'claudeEnv'>, machine: MachineRef) => !hostClaudeEnvFor(cfg, machine).CLAUDE_CODE_OAUTH_TOKEN;
 
 /** Which Claude account a machine's portal-run agents use, safe to show: "host token …abcd" or "Mac login". */
-export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'> & Partial<Pick<Config, 'claudeAccounts'>>, machine: MachineRef): string {
+export function accountSource(cfg: Pick<Config, 'machines' | 'claudeEnv'>, machine: MachineRef): string {
   const token = hostClaudeEnvFor(cfg, machine).CLAUDE_CODE_OAUTH_TOKEN;
   if (token) return `host token …${token.slice(-4)}`;
-  return refLocal(machine) ? `${os.hostname()} login (this host's stored Claude login, claudeAccounts.workers)` : "Mac login (the Mac's own Claude Code login)";
+  return refLocal(machine) ? `${os.hostname()} login (this host's stored Claude login, machines.useHostClaudeEnv false)` : "Mac login (the Mac's own Claude Code login)";
 }
 
 /**
@@ -469,7 +465,7 @@ export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts' | 'claudeEn
       : hostAccount(cfg, role) === 'login' || !hostToken
         ? `${hostName} login`
         : `host token …${hostToken.slice(-4)}`;
-  const roles = shownRoles(cfg, workersHere(machineIds));
+  const roles = shownRoles(cfg);
   const logins = roles.filter((r) => hostAccount(cfg, r) === 'login');
   const problem = logins.length ? hostLoginProblem(cfg) : undefined;
   return [

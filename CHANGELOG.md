@@ -10,6 +10,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **`claudeAccounts.workers` and `hostGuard.compactWhenReclaimGB` are retired** (w755, lothsahn: "Can we clean up the old setting
+  for the code that we removed? claudeAccounts.workers and anything else?"). Both load, are named once at startup and in
+  `system_status`, and are ignored, as `claudeAccounts.standing` already was (`RETIRED_CONFIG_KEYS`). `workers` set the account of
+  the workers of the portal's own host as a machine (a Windows portal's own daemon, as BEAST was); that machine now follows
+  `machines.useHostClaudeEnv` like every other. The roles `claudeAccounts` names are the orchestrator and the dispatcher; `workers`
+  is gone from `set_app_config`, the "workers here: …" line, the "<host> login (workers)" row, its warning and `workersHere`.
+  `compactWhenReclaimGB` had been ignored since 2026-09-24. The account each worker gets on an ordinary machine (a Mac, a PC,
+  BEAST over ssh) is unchanged, tested against the code before (`server/machineAccounts.test.ts`). `claudeAiConnectors.workers`
+  stays (it is the connectors of machine workers). docs/accounts.md, beast-machine.md, portal-on-ffbox-host.md.
 - **Unit tests on Windows no longer fail now and then on "EPERM, Permission denied" removing a test machine's folder, and
   the VM end-to-end test no longer fails on "Domain is already active"** (w759, lothsahn: "the Windows EPERM temp-folder
   failures hit different tests on each run ... A "Domain is already active" failure on #245 passed on rerun").

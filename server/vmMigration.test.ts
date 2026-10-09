@@ -83,13 +83,13 @@ test('vmMigration: BEAST\'s config with the VM\'s paths and server settings, por
   assert.equal(c.publicUrl, 'https://fff.tailedfcad.ts.net');
   // w510: no portal-only switch any more, nor any key of the portal's own sandbox pool (config RETIRED_CONFIG_KEYS).
   for (const k of ['hostSandboxes', 'librarySeed', 'librarySeedGB', 'librarySeedCopy']) assert.equal(c[k], undefined, k);
-  assert.ok(r.notes.some((n) => /left out, as nothing reads them any more \(w510\): .*claudeAccounts\.standing/.test(n)), r.notes.join('; '));
+  assert.ok(r.notes.some((n) => /left out, as nothing reads them any more \(w510\): .*claudeAccounts\.standing, claudeAccounts\.workers/.test(n)), r.notes.join('; '));
   assert.deepEqual(c.repo, { url: 'https://github.com/Final-Factory/FinalFactory.git', basePath: '/srv/fff/base' }, 'no host-sandbox seeding');
   assert.equal(c.ownerName, 'Ben', "BEAST's");
   assert.deepEqual(c.limits, { minFreeRamGB: 0 }, "the VM's own; the pool's limits are gone (w510)");
   assert.equal(c.claudeEnv?.CLAUDE_CODE_OAUTH_TOKEN, FAKE_TOKEN, "workers' token moves with it (design 5.3)");
   assert.equal(c.claudeTokenFile, '/srv/fff/secrets/claude-oauth-token');
-  assert.deepEqual(c.claudeAccounts, { workers: 'token', orchestrator: 'tokenfile', dispatcher: 'tokenfile' }, 'no standing account (w510)');
+  assert.deepEqual(c.claudeAccounts, { orchestrator: 'tokenfile', dispatcher: 'tokenfile' }, 'no standing or workers account (w510, w755)');
   assert.deepEqual(c.providers, beast.providers);
   assert.deepEqual(c.intake, beast.intake);
   assert.deepEqual(c.machines, { keepAgentsOnRestart: true, cleanup: { everyMinutes: 60 }, useHostClaudeEnv: { beast: true } }, "BEAST's workers kept on this token");
@@ -108,7 +108,7 @@ test('vmMigration: BEAST\'s workers keep their account however it was set (desig
   assert.deepEqual((run({ machines: { useHostClaudeEnv: false } }).config.machines as Record<string, unknown>).useHostClaudeEnv, { '*': false, beast: true }, 'the others keep false; BEAST as before (token)');
   assert.deepEqual((run({ machines: { useHostClaudeEnv: { beast: false, m5: true } } }).config.machines as Record<string, unknown>).useHostClaudeEnv, { beast: false, m5: true }, 'named already: left alone');
   const noToken = rewriteConfig(beastConfig(), { ...vmConfig(), claudeTokenFile: undefined }, { publicUrl: 'https://fff.x.ts.net', beastId: 'beast' });
-  assert.deepEqual(noToken.config.claudeAccounts, { workers: 'token' });
+  assert.deepEqual(noToken.config.claudeAccounts, {}, 'the retired workers key is not carried over (w755)');
   assert.ok(noToken.notes.some((n) => /no claudeTokenFile/.test(n)));
   const odd = rewriteConfig(beastConfig({ someNewKey: 'D:/x' }), vmConfig(), { publicUrl: 'https://fff.x.ts.net', beastId: 'beast' });
   assert.deepEqual(odd.windowsPaths, [{ key: 'someNewKey', value: 'D:/x' }], 'reported, for the report');

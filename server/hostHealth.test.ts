@@ -56,7 +56,7 @@ function harness(over: Partial<{ helper: (n: number) => HelperResult; driveThere
     hostDiskPaths: ['C:\\'],
     limits: { minFreeRamGB: 10 },
     unity: { idleStopMinutes: 0 },
-    hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', compactWhenReclaimGB: 0, cleanup: { everyMinutes: 60, softFreeGB: 0 } },
+    hostGuard: { pollSeconds: 30, warnFreeGB: 80, criticalFreeGB: 40, hysteresisGB: 10, remountMinFreeGB: 30, devDriveVhdx: '', cleanup: { everyMinutes: 60, softFreeGB: 0 } },
     ...over.cfg,
   } as unknown as Config;
   const deps: HostDeps = {

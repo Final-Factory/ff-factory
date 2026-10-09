@@ -61,8 +61,9 @@ Machine.local`; at most one, Windows hosts only). A local machine:
   RAM), and the Dev Drive recovery brings its editors and agents back, all inside the daemon (`machine/hostGuard.ts`).
   The portal has no gate on it any more (`MachineManager.localGate` is gone).
 - **Is attributed to the host's login.** Its sessions keep `host:login`, and its daemon's own usage report is ignored
-  (the portal polls that login already). Its workers' account is `claudeAccounts.workers`, unless
-  `machines.useHostClaudeEnv` names the machine (`server/secrets.ts usesHostClaudeEnv`).
+  (the portal polls that login already). Its workers' account is `machines.useHostClaudeEnv`'s, like any machine's
+  (`server/secrets.ts usesHostClaudeEnv`): the entry naming it, else the global value or `"*"`, else the host token. Set it to
+  `false` for it to run on the host's stored login. (`claudeAccounts.workers` set this until w755 and is retired.)
 
 **Protocol 6** (`server/machineProtocol.ts`): the `adopt` and `release` sandbox ops take an existing worktree into the
 pool, or drop it from the pool, without touching it (`SandboxPool.adopt` checks it is a direct child of the root named

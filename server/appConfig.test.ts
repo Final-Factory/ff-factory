@@ -59,12 +59,11 @@ test('set_app_config: the public commit identity', (t) => {
 // The host guard's paths are Windows paths (drive letters, a Dev Drive .vhdx): on Linux "C:/..." is not absolute.
 test('set_app_config: host guard housekeeping, with age rules kept away from anything that matters', { skip: process.platform !== 'win32' && 'Windows only' }, (t) => {
   const { file, cfg } = setup(t);
-  const full = { ...cfg, protectedPaths: ['C:/live/game'], sandboxRoot: 'F:/ffsb', standingRoot: 'F:/ffsb/_agents', dataDir: 'C:/app/data', repo: { basePath: 'C:/ffsb/_base' }, hostGuard: { devDriveVhdx: '', compactWhenReclaimGB: 0, cleanup: { ageRules: [] } } } as unknown as Config;
+  const full = { ...cfg, protectedPaths: ['C:/live/game'], sandboxRoot: 'F:/ffsb', standingRoot: 'F:/ffsb/_agents', dataDir: 'C:/app/data', repo: { basePath: 'C:/ffsb/_base' }, hostGuard: { devDriveVhdx: '', cleanup: { ageRules: [] } } } as unknown as Config;
   setAppConfig(file, full, 'hostGuard.devDriveVhdx', 'C:/ffsb-devdrive.vhdx');
   assert.throws(() => setAppConfig(file, full, 'hostGuard.compactWhenReclaimGB' as never, '60'), /not|allowed|unknown/i, 'compaction is manual only');
   setAppConfig(file, full, 'hostGuard.cleanup.ageRules', '[{"path":"C:/Users/u/AppData/LocalLow/Studio/game/DeterminismAudit","olderThanDays":14}]');
   assert.equal(full.hostGuard.devDriveVhdx, 'C:/ffsb-devdrive.vhdx');
-  assert.equal(full.hostGuard.compactWhenReclaimGB, 0);
   assert.deepEqual(full.hostGuard.cleanup.ageRules, [{ path: 'C:/Users/u/AppData/LocalLow/Studio/game/DeterminismAudit', olderThanDays: 14 }]);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).hostGuard.cleanup.ageRules[0].olderThanDays, 14);
   for (const bad of [
