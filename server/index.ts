@@ -719,6 +719,7 @@ route('POST', '/api/vault', async (req) => {
     value: typeof b.value === 'string' ? b.value.trim() : '',
     env: typeof b.env === 'string' && b.env.trim() ? b.env.trim() : undefined,
     owner: typeof b.owner === 'string' && b.owner.trim() ? b.owner.trim() : undefined,
+    email: typeof b.email === 'string' && b.email.trim() ? b.email.trim() : undefined,
     share: (b.share as VaultShare | undefined) ?? undefined,
     roles: strings(b.roles) as VaultRole[] | undefined,
     machines: strings(b.machines),
@@ -738,6 +739,7 @@ route('PATCH', '/api/vault/([a-z0-9._-]{1,40})', async (req, [name]) => {
   const b = await readJson<Record<string, unknown>>(req, 16 * 1024);
   vault.update(name, {
     ...(typeof b.owner === 'string' ? { owner: b.owner.trim() } : {}),
+    ...(typeof b.email === 'string' ? { email: b.email.trim() } : {}),
     ...(b.share !== undefined ? { share: b.share as VaultShare } : {}),
     ...(b.roles !== undefined ? { roles: (strings(b.roles) ?? []) as VaultRole[] } : {}),
     ...(b.machines !== undefined ? { machines: strings(b.machines) ?? [] } : {}),
@@ -1759,7 +1761,7 @@ function accountsNow() {
       return t ? { tokenFile: { key: tokenKey(t), label: `token file …${t.slice(-4)}`, roles: shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'tokenfile') } } : {};
     })(),
     people: personTokens().map((p) => ({ key: tokenKey(p.token), label: p.label, displayName: p.displayName })),
-    vault: vault.claudeTokens().map((v) => ({ key: `token:${v.fingerprint}`, label: v.label })),
+    vault: vault.claudeTokens().map((v) => ({ key: `token:${v.fingerprint}`, label: v.label, ...(v.email ? { email: v.email } : {}) })),
     machines: machineList,
     inUse: {
       hostLogin: used.login || !token,

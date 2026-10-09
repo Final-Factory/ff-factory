@@ -53,11 +53,13 @@
 #                                       the token vault (docs/vault.md): secrets the portal hands worker runs. A value comes
 #                                       from --file FILE or --stdin, never the command line, and is never shown back
 #                                       (fffctl vault help)
-#   fffctl vault add-claude PERSON [NAME]
+#   fffctl vault add-claude PERSON [NAME] [--email ADDRESS]
 #                                       one Claude token (sk-ant-oat01-...) into PERSON's pool as vault-<person>-<NAME>, the next
 #                                       free number when NAME is left out. The token is typed at a hidden prompt, or piped in
 #                                       on stdin; never an argument. The FFBox host copies it to its own files that night, or
-#                                       now with 'fff-vm vault-pull' there (docs/vault.md, section 12)
+#                                       now with 'fff-vm vault-pull' there (docs/vault.md, section 12). --email records the Claude
+#                                       account's address for the dashboard (a prompt asks on a terminal; Enter skips it); the
+#                                       token cannot tell it. Later: fffctl vault grant NAME --email ADDRESS (--email '' clears)
 #   fffctl vault export --manifest | NAME
 #                                       what the FFBox host's nightly copy reads over its ssh into this VM, as root: the entries
 #                                       without their values, or one value to a pipe. Not read-only: a person's, never the ops
@@ -482,8 +484,16 @@ vault_cli() {
 # 'fff-vm vault-sync' makes from people/<id>/claude-tokens/<n>. The token comes from a hidden prompt on a terminal, else from
 # stdin, never from the command line, and is never printed.
 vault_add_claude() {
-  local person=${1:-} slot=${2:-} lower name t="" names n=1 have
-  [ -n "$person" ] && [ $# -le 2 ] || die "fffctl vault add-claude PERSON [NAME]   (the token is typed at the prompt or piped in on stdin, never an argument)"
+  local person="" slot="" email="" have_email=0 lower name t="" names n=1 have
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --email) [ $# -ge 2 ] || die "--email needs an address"; email=$2; have_email=1; shift 2 ;;
+      --email=*) email=${1#--email=}; have_email=1; shift ;;
+      -*) die "unknown option $1 (fffctl vault add-claude PERSON [NAME] [--email ADDRESS])" ;;
+      *) if [ -z "$person" ]; then person=$1; elif [ -z "$slot" ]; then slot=$1; else die "too many arguments (fffctl vault add-claude PERSON [NAME] [--email ADDRESS]; the token is typed at the prompt or piped in on stdin, never an argument)"; fi; shift ;;
+    esac
+  done
+  [ -n "$person" ] || die "fffctl vault add-claude PERSON [NAME] [--email ADDRESS]   (the token is typed at the prompt or piped in on stdin, never an argument)"
   [[ "$person" =~ ^[A-Za-z0-9._-]{1,30}$ ]] || die "PERSON is a portal user id (letters, digits . _ -), not '$person'"
   lower=$(tr '[:upper:]' '[:lower:]' <<<"$person")
   names=$(vault_cli list --names)
@@ -498,6 +508,12 @@ vault_add_claude() {
   name=vault-$lower-$slot
   [ ${#name} -le 40 ] || die "$name is longer than 40 characters: a shorter PERSON or NAME"
   ! grep -qxF "$name" <<<"$names" || die "$name exists. 'sudo fffctl vault rotate $name' replaces its token; the FFBox host's file wins over it at the next sync (docs/vault.md, section 12)"
+  # The account's email is not in the token (a setup-token reveals no account): ask once on a terminal, else only what --email says.
+  if [ "$have_email" = 0 ] && [ -t 0 ]; then
+    read -r -p "Email of the Claude account this token belongs to (shown on the dashboard; Enter to skip): " email || true
+  fi
+  email=${email//[[:space:]]/}
+  [ -z "$email" ] || [[ "$email" =~ ^[^@]+@[^@]+[.][^@]+$ ]] || die "'$email' is not one address like name@example.com; nothing was added"
   if [ -t 0 ]; then
     read -rs -p "Claude token for $person (sk-ant-oat01-..., typed without echo): " t
     echo >&2
@@ -507,7 +523,7 @@ vault_add_claude() {
   t=${t//[[:space:]]/}
   [[ "$t" =~ ^sk-ant-oat01-[A-Za-z0-9_-]{40,}$ ]] || die "that is not one Claude token from 'claude setup-token' (sk-ant-oat01-... then at least 40 more characters); nothing was added (its content is not shown)"
   have=$(grep -cE "^(vault-${lower//./\.}(-.*)?|host-${lower//./\.}-claude.*)$" <<<"$names" || true)
-  printf '%s\n' "$t" | vault_cli add --name "$name" --kind claude --owner "$person" --share owner --roles workers,standing --machines '*' --stdin
+  printf '%s\n' "$t" | vault_cli add --name "$name" --kind claude --owner "$person" --share owner --roles workers,standing --machines '*' --stdin ${email:+--email "$email"}
   t=""
   [ "$have" != 0 ] || echo "note: nobody had a vault entry for '$person' before; if that is not the portal user id you meant, 'sudo fffctl vault remove $name' and add it again"
   echo "In $person's pool now (docs/vault.md, section 4). The FFBox host copies it to /etc/fff-vm/secrets/people/$person/claude-tokens/$slot tonight, or now: sudo fff-vm vault-pull (on the host)."

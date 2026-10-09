@@ -442,6 +442,24 @@ would like to update the nightly host vm restart process to copy any vault keys 
   `fff-vault-sync.test.sh` (the copy, the sync after it, the conflict rule, removal), `fff-vm-nightly.test.sh` case 11 (the
   copy comes before the drain), `ci-vm-e2e.sh` (all of it in a real guest), `server/vault.test.ts` (`export`).
 
+### 12.0 The Claude account's email on the accounts list (w785)
+
+A `claude setup-token` token cannot say whose it is, so the accounts list shows an email only when a person recorded one on the
+entry (`VaultEntryMeta.email`, not secret, never read from the token). **Sourced, not measured** (no setup-token was available to
+try; the vault's are not ours to use): the token is minted with `user:inference` alone (the CLI's `setup-token` login is
+`inferenceOnly`, see the top of `server/usage.ts`); the profile and usage endpoints need `user:profile` and answer 403 for it
+(claude-code issues 22450 and 24200); with `CLAUDE_CODE_OAUTH_TOKEN` set, `/status` and `~/.claude.json` `oauthAccount` show no email or
+organisation (issue 90298, "no way to verify which org/account a setup-token token is scoped to"); the one owner-naming reply header found (documented for API keys, never seen for a token) is
+`anthropic-organization-id`, an organisation id, not an address (Anthropic's API overview, headers). So the email
+is whatever someone types, and is shown only then (nothing is shown, never a guess, when none is recorded). Set it:
+- when adding: `sudo fffctl vault add-claude <person> [<name>] --email <address>` (on a terminal it asks, Enter skips), or Settings, Token vault,
+  Add a token, "account email";
+- afterwards, without the token: `sudo fffctl vault grant vault-ben-2 --email <address>` (`--email ''` clears), or Settings, Token vault,
+  the entry's **Grant**, "account email". `fffctl vault put --email` does the same; `put` without `--email` (the host's sync) leaves it alone.
+It is on the entry's subtext line on the dashboard and in `system_status` ("- vault-ben-2 …dAAA [ben@example.com; agents on it: …]"), before
+the other uses of the same token (docs/accounts.md). It lives in the VM's `vault.json` only, which the daily backup leaves out (section 8): a rebuilt
+VM needs it typed again.
+
 ### 12.1 Adding a Claude token in the VM
 
 ```bash

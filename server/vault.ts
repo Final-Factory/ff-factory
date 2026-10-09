@@ -61,6 +61,12 @@ export function valueProblem(kind: VaultKind, value: string): string | undefined
 }
 
 /** Why `name` cannot be a kind-env variable (docs/vault.md, section 2), or undefined. */
+/** Why `email` cannot be recorded for a Claude token, or undefined: one plain address, no spaces, at most 120 characters (w785). */
+export function emailProblem(email: string): string | undefined {
+  const e = email.trim();
+  return e.length <= 120 && /^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[^\s@<>(),;:"]+$/.test(e) ? undefined : 'email is one address like name@example.com (no spaces, at most 120 characters)';
+}
+
 export function envNameProblem(name: string | undefined): string | undefined {
   if (!name || !ENV_NAME.test(name)) return 'the variable name is upper-case letters, digits and underscores, e.g. FFDISCORD_APP_TOKEN';
   if (!ENV_SUFFIX.test(name)) return `${name}: a vault variable ends in _TOKEN, _KEY, _SECRET or _PASSWORD`;
@@ -267,12 +273,14 @@ export interface AddInput {
   value: string;
   env?: string;
   owner?: string;
+  /** kind claude only: the account's email, as a person recorded it (w785). */
+  email?: string;
   share?: VaultShare;
   roles?: VaultRole[];
   machines?: string[];
 }
 
-export type UpdateInput = Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'roles' | 'machines' | 'disabled'>>;
+export type UpdateInput = Partial<Pick<VaultEntryMeta, 'owner' | 'share' | 'roles' | 'machines' | 'disabled' | 'email'>>;
 
 /** What a run gets from the vault: one Claude token (with its entry) and the other granted secrets, as environment. */
 export interface RunSecrets {
@@ -400,6 +408,11 @@ export class Vault {
   }
 
   private checkGrant(i: UpdateInput & { kind: VaultKind }) {
+    if (i.email !== undefined && i.email !== '') {
+      if (i.kind !== 'claude') throw new Error('an email is only for a Claude token (the account it belongs to)');
+      const why = emailProblem(i.email);
+      if (why) throw new Error(why);
+    }
     if (i.share !== undefined && i.share !== 'owner' && i.share !== 'anyone') throw new Error('share is "owner" (the owner\'s own work only) or "anyone"');
     if (i.roles !== undefined && (!i.roles.length || i.roles.some((r) => !VAULT_ROLES.includes(r)))) throw new Error(`roles are one or more of ${VAULT_ROLES.join(', ')}`);
     if (i.machines !== undefined && (!i.machines.length || i.machines.some((m) => m !== '*' && !MACHINE.test(m)))) throw new Error('machines are machine ids (lower-case letters, digits, dashes) or "*" for every machine');
@@ -416,7 +429,7 @@ export class Vault {
       if (why) throw new Error(why);
     } else if (i.env) throw new Error('env is only for kind env');
     const share = i.share ?? 'owner';
-    const grant = { kind: i.kind, share, owner: i.owner, roles: i.roles ?? ['workers', 'standing'], machines: (i.machines ?? ['*']).map((m) => m.toLowerCase()) };
+    const grant = { kind: i.kind, share, owner: i.owner, ...(i.email ? { email: i.email.trim() } : {}), roles: i.roles ?? ['workers', 'standing'], machines: (i.machines ?? ['*']).map((m) => m.toLowerCase()) };
     this.checkGrant(grant);
     if (share === 'owner' && !i.owner) throw new Error('an entry for its owner\'s own work needs --owner (a portal user id), or share it with "anyone"');
     return this.change((key) => {
@@ -425,7 +438,7 @@ export class Vault {
       const dup = this.data.entries.find((e) => e.fingerprint === fp);
       if (dup) throw new Error(`that value is already in the vault as ${dup.name}`);
       const at = this.now();
-      const meta: VaultEntryMeta = { id: randomBytes(4).toString('hex'), name: i.name, kind: i.kind, ...(i.env ? { env: i.env } : {}), ...(i.owner ? { owner: i.owner } : {}), share, roles: grant.roles, machines: grant.machines, fingerprint: fp, last4: i.value.slice(-4), createdAt: at, updatedAt: at };
+      const meta: VaultEntryMeta = { id: randomBytes(4).toString('hex'), name: i.name, kind: i.kind, ...(i.env ? { env: i.env } : {}), ...(i.owner ? { owner: i.owner } : {}), ...(grant.email ? { email: grant.email } : {}), share, roles: grant.roles, machines: grant.machines, fingerprint: fp, last4: i.value.slice(-4), createdAt: at, updatedAt: at };
       this.data.entries.push({ ...meta, sealed: seal(key!, meta, i.value), keyId: keyIdOf(key!) });
       return meta;
     }, true);
@@ -452,9 +465,12 @@ export class Vault {
       this.checkGrant({ ...p, kind: e.kind });
       const next = { ...e, ...p };
       if (next.owner === '') delete next.owner;
+      if (typeof next.email === 'string') next.email = next.email.trim();
+      if (!next.email) delete next.email;
       if (next.share === 'owner' && !next.owner) throw new Error('an entry for its owner\'s own work needs an owner');
       Object.assign(e, next, { updatedAt: this.now() });
       if (!next.owner) delete e.owner;
+      if (!next.email) delete e.email;
       if (!next.disabled) delete e.disabled;
       return this.meta(e);
     }, false);
@@ -512,7 +528,7 @@ export class Vault {
   }
 
   /** The Claude tokens the usage meters poll: every enabled claude entry the key opens, labelled by name. */
-  claudeTokens(): { token: string; label: string; fingerprint: string }[] {
+  claudeTokens(): { token: string; label: string; fingerprint: string; email?: string }[] {
     this.reload();
     const { key } = this.key();
     if (!key) return [];
@@ -520,7 +536,7 @@ export class Vault {
       .filter((e) => e.kind === 'claude' && !e.disabled)
       .map((e) => ({ e, token: this.open(key, e) }))
       .filter((x): x is { e: VaultEntry; token: string } => !!x.token)
-      .map(({ e, token }) => ({ token, label: `${e.name} …${e.last4}`, fingerprint: e.fingerprint }));
+      .map(({ e, token }) => ({ token, label: `${e.name} …${e.last4}`, fingerprint: e.fingerprint, ...(e.email ? { email: e.email } : {}) }));
   }
 
   /** The pick's view of one Claude entry: its meters, and the processes live on it other than `except`'s. */

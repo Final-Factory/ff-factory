@@ -84,7 +84,7 @@ const ACCOUNTS = (agentIds: string[]): AccountUsage[] => [
 type Shape = 'machines' | 'host-only' | 'old-server';
 
 /** Serve the page a fixed world: the orchestrator only, no sandboxes, and the machines and accounts of `shape`. */
-async function fixedWorld(page: Page, shape: Shape) {
+async function fixedWorld(page: Page, shape: Shape, extra: AccountUsage[] = []) {
   await page.routeWebSocket('**/ws', (ws) => {
     const server = ws.connectToServer();
     let orchId = '';
@@ -105,7 +105,7 @@ async function fixedWorld(page: Page, shape: Shape) {
           machines: shape === 'machines' ? [machine('m5', true), machine('m3', false)] : [],
           machineStats: shape === 'machines' ? { m5: M5 } : {},
           usage: ACCOUNTS([]).at(1)!.usage,
-          accounts: shape === 'machines' ? ACCOUNTS([orchId, 'w-busy']) : ACCOUNTS([orchId, 'w-busy']).slice(0, 1),
+          accounts: shape === 'machines' ? [...ACCOUNTS([orchId, 'w-busy']), ...extra] : ACCOUNTS([orchId, 'w-busy']).slice(0, 1),
         };
         if (shape === 'old-server') {
           delete fixed.accounts;
@@ -224,4 +224,41 @@ test('meters: the server lists its accounts, with each agent on the one it runs 
   expect(s.accounts!.find((a) => a.sources.includes('host:login'))!.sessionIds).toEqual(expect.arrayContaining([s.orchestratorId]));
   expect(s.accounts!.flatMap((a) => a.sessionIds)).toContain('gallery1');
   expect(JSON.stringify(s.accounts)).not.toMatch(/sk-ant/);
+});
+
+/** A vault Claude token as the accounts list carries it (server/usage.ts buildAccounts, w777/w785): its vault name, no description. */
+const VAULT = (name: string, last4: string, weekly: number, where: string[], agentIds: string[] = []): AccountUsage => ({
+  id: `token:e2e-${name}`,
+  kind: 'token',
+  label: `${name} …${last4}`,
+  sources: [`token:e2e-${name}`],
+  where,
+  sessionIds: agentIds,
+  usage: { available: true, asOf: NOW.toISOString(), plan: 'max', source: 'rate limits', weekly: { label: 'Weekly', percent: weekly, resetsAt: at(70) }, session: { label: 'Session (5 h)', percent: 9, resetsAt: at(2) }, models: [] },
+});
+
+test('meters (w785): a vault token is one row under its vault name, the Claude account email on its subtext; none recorded shows no subtext', async ({ page }) => {
+  const foot = await fixedWorld(page, 'machines', [
+    VAULT('vault-ben-2', 'dAAA', 71, ['ben@example.com', "fff-portal's token file (the orchestrator)"], ['w-busy']),
+    VAULT('vault-lothsahn-1', 'EAAA', 95, ['lothsahn@example.com']),
+    VAULT('vault-ben-1', 'cBBB', 12, []),
+  ]);
+  await foot.locator('.sys-toggle').click();
+  await settle(page);
+  const both = foot.getByTestId('account-…dAAA');
+  await expect(both.locator('.acct-label')).toHaveText('vault-ben-2 …dAAA');
+  await expect(both).toContainText("ben@example.com · fff-portal's token file (the orchestrator)");
+  await expect(both).not.toContainText('vault:');
+  await expect(foot.getByTestId('account-…EAAA')).toContainText('lothsahn@example.com');
+  const bare = foot.getByTestId('account-…cBBB');
+  await expect(bare.locator('.acct-label')).toHaveText('vault-ben-1 …cBBB');
+  await expect(bare.locator('.acct-where')).toHaveCount(0);
+  // one row each, never the token file's name for a vault token, and the usage line says "rate limits"
+  await expect(foot.locator('.plan-meters')).toHaveCount(5);
+  await expect(foot.locator('.plan-asof').filter({ hasText: 'from rate limits' }).first()).toBeVisible();
+  if (process.env.E2E_SHOT) {
+    await page.setViewportSize({ width: 1440, height: 2200 });
+    await settle(page);
+    await foot.locator('.sys-detail').screenshot({ path: process.env.E2E_SHOT });
+  }
 });

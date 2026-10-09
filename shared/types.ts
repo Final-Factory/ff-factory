@@ -2027,6 +2027,12 @@ export interface VaultEntryMeta {
   env?: string;
   /** A portal user id: whose account or secret it is. */
   owner?: string;
+  /**
+   * kind claude: the email of the Claude account the token belongs to, as recorded by whoever added it (w785). Not a secret and
+   * not read from the token: a `claude setup-token` token reveals no account, so it is only ever what a person typed. Shown on the
+   * accounts list; absent when nobody recorded one.
+   */
+  email?: string;
   share: VaultShare;
   roles: VaultRole[];
   /** Machine ids, or ["*"] for every machine. */

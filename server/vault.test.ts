@@ -579,3 +579,65 @@ test('Vault.reveal (w749) has one caller: the root-only CLI export, never a rout
   const web = fs.readdirSync('web/src', { recursive: true }).filter((f): f is string => typeof f === 'string' && /\.tsx?$/.test(f));
   assert.ok(web.length > 0 && !web.some((f) => reveals(path.join('web/src', f))), 'the web app never reveals');
 });
+
+test('vault email (w785): recorded with the token, absent when not given, set or cleared after the token was added; never for a non-Claude entry, never invented', (t) => {
+  const { make } = setup(t);
+  const v = make();
+  // with an email at add time
+  const a = v.add({ name: 'vault-ben-1', kind: 'claude', value: A, owner: 'ben', email: ' Ben@Example.com ' });
+  assert.equal(a.email, 'Ben@Example.com', 'trimmed, kept as typed');
+  // none given: no email at all (not an empty string, not a guess)
+  const b = v.add({ name: 'vault-ben-2', kind: 'claude', value: B, owner: 'ben' });
+  assert.equal('email' in b, false);
+  assert.equal(v.claudeTokens().find((x) => x.label.startsWith('vault-ben-2'))?.email, undefined);
+  // set after the token was added: no token re-entered, same id and fingerprint
+  const set = v.update('vault-ben-2', { email: 'ben.two@example.com' });
+  assert.deepEqual([set.id, set.fingerprint, set.email], [b.id, b.fingerprint, 'ben.two@example.com']);
+  assert.equal(v.claudeTokens().find((x) => x.label.startsWith('vault-ben-2'))?.email, 'ben.two@example.com');
+  // other changes keep it; a rotation keeps it (it is the same account)
+  v.update('vault-ben-2', { machines: ['m3'] });
+  assert.equal(v.list().find((e) => e.name === 'vault-ben-2')?.email, 'ben.two@example.com');
+  // it survives a reload from disk, and the value still opens
+  assert.equal(make().list().find((e) => e.name === 'vault-ben-1')?.email, 'Ben@Example.com');
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers', userId: 'ben' }, { claude: true }).claude?.token !== undefined, true);
+  // clearing
+  assert.equal('email' in v.update('vault-ben-2', { email: '' }), false);
+  // not an address, too long, or not for this kind
+  for (const bad of ['ben', 'ben@', '@example.com', 'a b@example.com', 'a@b', `${'x'.repeat(120)}@example.com`]) assert.throws(() => v.update('vault-ben-1', { email: bad }), /email is one address/, bad);
+  v.add({ name: 'gh', kind: 'github', value: GH, share: 'anyone' });
+  assert.throws(() => v.update('gh', { email: 'ben@example.com' }), /only for a Claude token/);
+  assert.throws(() => v.add({ name: 'gh2', kind: 'github', value: `${GH}x`, share: 'anyone', email: 'ben@example.com' }), /only for a Claude token|github token/);
+  // the token never shows in what lists the entries
+  assert.ok(!JSON.stringify(v.list()).includes(A.slice(13, 40)));
+});
+
+test('vaultCli email (w785): add --email, grant --email after the fact, put never wipes it and sets it when given; list shows it, no token value', (t) => {
+  const { dir, data, keyFile } = setup(t);
+  const cfgFile = path.join(dir, 'config.json');
+  fs.writeFileSync(cfgFile, JSON.stringify({ dataDir: data, sandboxRoot: path.join(dir, 'sb'), repo: { url: 'https://example.test/g.git', basePath: path.join(dir, 'base') }, unity: { editorPath: 'x' } }));
+  const env = { ...process.env, FFSB_CONFIG: cfgFile, FFF_VAULT_KEY_FILE: keyFile };
+  const cli = (input: string | undefined, ...a: string[]) => spawnSync(process.execPath, ['server/vaultCli.ts', ...a], { env, encoding: 'utf8', input });
+  const put = (name: string, value: string, ...more: string[]) => cli(`${value}\n`, 'put', '--name', name, '--kind', 'claude', '--owner', 'ben', '--share', 'owner', '--roles', 'workers,standing', '--machines', '*', '--stdin', ...more);
+  // added with an email
+  const added = cli(`${A}\n`, 'add', '--name', 'vault-ben-1', '--kind', 'claude', '--owner', 'ben', '--email', 'ben@example.com', '--stdin');
+  assert.equal(added.status, 0, added.stderr);
+  assert.match(cli(undefined, 'list').stdout, /vault-ben-1 .*ben@example\.com/);
+  // the host's sync (put, no --email) leaves it alone, also when the token is rotated
+  assert.match(put('vault-ben-1', A).stdout, /^unchanged: vault-ben-1/);
+  assert.match(cli(undefined, 'list').stdout, /ben@example\.com/);
+  // added with none: nothing shown; set after the token was added, without re-entering it
+  assert.equal(put('vault-ben-2', B).status, 0);
+  assert.doesNotMatch(cli(undefined, 'list').stdout.split('\n').find((l) => l.startsWith('vault-ben-2')) ?? '', /@/);
+  const set = cli(undefined, 'grant', 'vault-ben-2', '--email', 'two@example.com');
+  assert.equal(set.status, 0, set.stderr);
+  assert.match(cli(undefined, 'list').stdout, /vault-ben-2 .*two@example\.com/);
+  // put with --email changes it too; a bad one is refused and changes nothing
+  assert.match(put('vault-ben-2', B, '--email', 'new@example.com').stdout, /^regranted: vault-ben-2 .*new@example\.com/);
+  assert.notEqual(cli(undefined, 'grant', 'vault-ben-2', '--email', 'nope').status, 0);
+  assert.match(cli(undefined, 'list').stdout, /new@example\.com/);
+  // cleared
+  assert.equal(cli(undefined, 'grant', 'vault-ben-2', '--email', '').status, 0);
+  assert.doesNotMatch(cli(undefined, 'list').stdout.split('\n').find((l) => l.startsWith('vault-ben-2')) ?? '', /@/);
+  const all = [added.stdout, added.stderr, set.stdout, cli(undefined, 'list').stdout].join('\n');
+  assert.ok(!all.includes(A.slice(13, 40)) && !all.includes(B.slice(13, 40)), 'no token value on any output');
+});

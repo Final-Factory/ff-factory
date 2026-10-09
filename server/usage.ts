@@ -350,8 +350,8 @@ export interface AccountContext {
   tokenFile?: { key: string; label: string; roles: HostRole[] };
   /** People's own tokens (config userClaudeEnv): key, label ("Lothsahn's token …abcd") and whose. */
   people?: { key: string; label: string; displayName: string }[];
-  /** The token vault's Claude tokens (docs/vault.md, w512): key and label ("ben-max …abcd"). Their grants are not shown (w748). */
-  vault?: { key: string; label: string }[];
+  /** The token vault's Claude tokens (docs/vault.md, w512): key, label ("ben-max …abcd") and the account email a person recorded for it, if any (w785). Their grants are not shown (w748). */
+  vault?: { key: string; label: string; email?: string }[];
   /** Every session with its source key (sessionSource); `live`: running now (for the order). */
   sessions: { id: string; source: string; live?: boolean }[];
 }
@@ -446,7 +446,12 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
     const a = out.get(id) ?? { id, kind: e.kind, label: e.kind === 'token' ? (e.label ?? 'a token') : (e.account?.email ?? where), email: e.account?.email, sources: [], where: [], sessionIds: [], usage: undefined };
     a.sources.push(key);
     if (where) a.where.push(where);
-    if (vaultKeys.has(key)) a.where.push(...alsoOn(key));
+    // A vault token's subtext, like a Mac login's "m3 login": the account email a person recorded (w785, never read from the token), then the other uses of the token.
+    if (vaultKeys.has(key)) {
+      const email = vaultByKey.get(key)?.email;
+      if (email) a.where.push(email);
+      a.where.push(...alsoOn(key));
+    }
     a.usage = newer(a.usage, e.usage);
     out.set(id, a);
   }
