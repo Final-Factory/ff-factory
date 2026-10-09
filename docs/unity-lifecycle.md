@@ -9,7 +9,7 @@ watch of its own. The dialog watchdog (modal dialogs, recovery prompts) is separ
 
 | Who | Tool | Actions |
 |---|---|---|
-| worker in a machine sandbox (a Mac, a Windows PC, BEAST) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart` of its sandbox's editor; `force: true` kills a frozen editor at once |
+| worker in a machine sandbox (a Mac, a Windows PC, BEAST) | `mcp__machine__unity` | `status`, `start`, `stop`, `restart` of its sandbox's editor; `force: true` kills a frozen editor at once; `clear_batch` ends the machine's orphaned or hung batch builds ([below](#orphaned-and-hung-batch-builds-are-ended-w791)) |
 | orchestrator | `unity` with `sandbox` (`<machine>/<name>`, or `machine` plus a bare name) | the same, and `log`; a machine alone (its main clone) is refused (w536) |
 
 A normal stop asks the editor to quit, then kills it after 30 s. A forced one
@@ -153,7 +153,7 @@ arbiter on the machine (no FF Factory daemon, or one from before w469) it runs a
 the portal; `server/hostHealth.ts` `blockReason`).
 - **The backstop.** Unity started outside the gate counts all the same. When the machine is over its limit the
   orchestrator is told once ("over its limit... Started outside the slot gate: batch FinalFactory"), and again when it is
-  back. Nothing is ever stopped or killed.
+  back. The backstop itself stops nothing; the reaper below ends a sandbox's orphaned or hung batch build.
 
 **The mailbox** (`FF_UNITY_SLOTS`, which the daemon sets for its agents; else the folder a pointer
 `~/.config/finalfactory/unity-slots.json` names, if a person wrote one (a worker-root install writes none: w513 keeps the
@@ -169,6 +169,49 @@ line), the dashboard's group header (`4/3 editors`) and `unity status` all say "
 with what waits, the RAM line and the game players. A machine with no `max_unity` (no sandbox root) is counted and never
 held up. Tests: `server/unitySlots.test.ts`, the w469 tests in `server/machineSandboxes.test.ts` and
 `server/beastMachine.test.ts`.
+
+## Orphaned and hung batch builds are ended (w791)
+
+**Why** (Ben, 2026-10-09: the harness learns from a repeated problem). Twice that day a sandbox's `-batchmode` build held a
+Unity slot for hours until a person approved killing it by hand through the ops worker, and workers may not kill Unity
+(`server/guard.ts`): LothDesktop pid 3856, a nightly prepare build of slot4 that hung for 3 h 29 min on "More than one copy
+of bee_backend running in slot4" with its script still alive (the log stopped; `.nightly-builds/<sha>-win/build-manifest.json`
+says `prepare-failed`, 209 min), and m5 pid 81390, a worker's `BuildMacMultiplayerDev`, 15 h old, parent pid 1.
+
+**What** (`machine/unityReaper.ts`, `UnityReaper`; the daemon looks once a minute and on request). Only a top-level
+`-batchmode` Unity whose `-projectPath` is one of the daemon's sandboxes is ever judged: never an interactive editor (the
+`unity` tool and the watch own those), never the main clone or a person's own checkout. Per build the reaper reads its start
+time and its tree's CPU time (CIM on Windows, `ps -o etime,time` on a Mac and Linux) and the write time of its `-logFile`
+(none when the log is stdout), and counts **progress** as the log growing or the tree using at least 2 s of CPU between
+looks (a long Burst compile is silent in the log but busy). The owner is the build's parent process: gone when its pid is
+missing from the listing (Windows keeps a dead parent's pid), when it is launchd/init/a user's systemd (pid 1), or when a
+process with that pid started after the build did (a reused pid).
+
+| The build | Ended when |
+|---|---|
+| owner gone (seen by two looks in a row) | no progress for 10 min, or running 90 min whatever it does |
+| owner alive | running 60 min and no progress for 30 min |
+| owner alive, only the log is silent | running 6 h and the log silent for 30 min (a hang that burns CPU) |
+
+Anything else is kept, and the report says why. Ending a build kills its tree (children first, with what an editor restart
+spares: game players, another project's editor, Unity Hub, node/claude), removes the sandbox's `Temp/UnityLockfile` when no Unity
+still has the project open, looks at the slots again at once (the dead owner's request is freed by the arbiter already, so
+the next waiting launch is granted), logs `unity reaper: ended batch Unity pid …` and tells the orchestrator
+(`Unity batch build: …`).
+
+**Where the numbers come from.** Measured: 15 healthy nightly Windows builds on LothDesktop (2026-10-07..09, started..finished
+in their `build-manifest.json`) took 4.5 to 36.9 min, median 8.4; the hung one ran 209 min. 60 min is 1.6x the longest healthy
+one. The stall windows (30 min, 10 min for an orphan), the 90 min and 6 h ceilings and the 2 s of CPU are guesses on top of
+that measurement, chosen wide; the owner test (parent gone) is sourced from how Windows and POSIX report a dead parent (a
+dead parent's pid stays in `ParentProcessId`; a POSIX child is re-parented to pid 1 or a user's systemd). All of them are in
+`REAP` and the table above. A daemon restart forgets what it saw, which only delays a kill (progress counts from first sight).
+
+**A worker that waits** on a slot a stuck build holds calls `mcp__machine__unity` with `action: "clear_batch"`: the same look
+at once, for the whole machine, answered with what was ended or, for every build kept, why (no limit is lowered on request).
+Daemons of protocol 9 and later (`BATCH_CLEAR_PROTOCOL`); the portal refuses it for an older one, which would take an unknown
+action for a start of the editor. Tests: `server/unityReaper.test.ts` (the two cases of 2026-10-09 end; an interactive editor,
+a non-sandbox project, an alive and progressing owner, a busy-but-silent build, a young build and a progressing orphan stay),
+and `machineSandboxes.test.ts` (the tool reaches the daemon).
 
 ## Each sandbox's Unity MCP reaches only its editor
 

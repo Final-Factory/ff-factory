@@ -26,7 +26,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w691 (no bump): `reason: 'host_start'` on `failed`, an optional field an older portal ignores; the portal reads the
 // words of an older daemon's `failed` the same way. The `waiting_on_person` tool is in the catalog a daemon offers in its
 // hello, which filters what the portal gives its workers (a daemon without it is not offered the tool).
-const DECIDED = { protocol: 8, fingerprint: '85c2e1b151c51aac' };
+// w791 (bump to 9): `clear_batch` as a `unity` action. A protocol-8 daemon would start the sandbox's editor on an action it
+// does not know, so the portal sends it only to a daemon of protocol 9 or later (BATCH_CLEAR_PROTOCOL) and refuses otherwise.
+const DECIDED = { protocol: 9, fingerprint: '4de6ece2bec4c717' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
