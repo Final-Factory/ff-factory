@@ -33,7 +33,13 @@ echo "$cmd $*" >>"$D/calls"
 st=$(cat "$D/state")
 mib() { awk -F"[<>]" '$2 ~ /^memory( |$)/ {print int($3 / 1024)}' "$1"; }
 case "$cmd" in
-  domstate) echo "$st"; echo ;;
+  domstate)
+    [ -z "${FAKE_NO_DOMAIN:-}" ] || { echo "error: failed to get domain 'fff-portal'" >&2; exit 1; }
+    # Like virsh: the state, then a blank line in a second write; FAKE_LATE_BLANK holds it back so a reader that stopped
+    # after the first line has gone (w759).
+    echo "$st"
+    [ -z "${FAKE_LATE_BLANK:-}" ] || /bin/sleep 0.3
+    echo ;;
   dominfo) printf 'Name:           fff-portal\nAutostart:      enable\n' ;;
   domuuid) cat "$D/uuid"; echo ;;
   dumpxml)
@@ -271,5 +277,14 @@ rc=0; bash "$ROOT/deploy/vm/host/fff-vm" nightly >"$T/out" 2>&1 || rc=$?
 matches -F 'fff-vm.conf changes the VM (memory 8192 -> 4096 MiB)' "$T/out" || fail "9: the pending size is not a reason"
 [ "$(size live)" = "4096 2" ] || fail "9: runs $(size live)"
 ok "if-required: a pending size is a reason for tonight's cold restart"
+
+# 10. dom_state reads virsh's whole answer (w759): "| head -n 1" left virsh to die of SIGPIPE on its blank line, and
+# pipefail made a running VM "running" and "missing"; install.sh then started it again ("Domain is already active").
+host VM_MEMORY_MB=8192 VM_VCPUS=2
+st=$(FAKE_LATE_BLANK=1 bash -c '. "$FFF_VM_LIB/lib.sh"; load_conf "$FFF_VM_CONF"; dom_state')
+[ "$st" = running ] || fail "10: a running VM read as $(printf %q "$st")"
+st=$(FAKE_NO_DOMAIN=1 bash -c '. "$FFF_VM_LIB/lib.sh"; load_conf "$FFF_VM_CONF"; dom_state')
+[ "$st" = missing ] || fail "10: no domain read as $(printf %q "$st")"
+ok "dom_state: one line, whenever virsh writes its blank line; missing when virsh finds no domain"
 
 echo "fff-vm-nightly.test.sh: $PASS passed"

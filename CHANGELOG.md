@@ -10,6 +10,24 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **Unit tests on Windows no longer fail now and then on "EPERM, Permission denied" removing a test machine's folder, and
+  the VM end-to-end test no longer fails on "Domain is already active"** (w759, lothsahn: "the Windows EPERM temp-folder
+  failures hit different tests on each run ... A "Domain is already active" failure on #245 passed on rerun").
+  - EPERM: `TestMachine.stop()` deleted the machine's folder while a `git -C <worktree> status` or `log` its daemon's
+    pool had started was still running in it (seen in all 6 failures traced on BEAST), and the daemon's stop waits for
+    none of them. The test machine's pool now starts no git once it is stopping and `stop()` waits for the git still
+    running. CI did not see it: its Node 24.21 retries Windows' access-denied in `rmSync`, which BEAST's Node 23.7 does
+    not (nodejs/node#64698). Before: every one of 7 full runs on BEAST had 1 to 3 such failures; after: none in 10.
+  - Two tests (`server/providerLedger.test.ts`, the w278 PR summary in `server/devRequests.test.ts`) wrote a sandbox's PR
+    into the portal's record, and the daemon's next report of the sandbox took it away (4 of 10 runs on BEAST). The test
+    machine's git look now reports it (`TestMachine.gitLook`).
+  - "Domain is already active": `dom_state` in `deploy/vm/host/lib.sh` read `virsh domstate | head -n 1`. virsh writes a
+    blank line after the state in a second write; when `head` had already exited, virsh died of SIGPIPE, pipefail turned
+    that into "missing", and the answer was "running" and "missing" on two lines, so the second (idempotent) host install
+    started the running VM. libvirtd logged "End of file while reading data" in that same second each time (3 failures,
+    all on the ubuntu-26.04 host, 2026-10-06 and 2026-10-09). `dom_state` now reads virsh's whole answer;
+    `deploy/vm/test/fff-vm-nightly.test.sh` case 10 makes the blank line late.
+
 - **A request that waits on other requests or PRs shows Blocked, not Working; its worker stops polling; a lifted hold keeps
   its gates** (w754, Lothsahn: "Why is 750 working? Shouldn't it be waiting or blocked?"). w750 (the Build 90 release) was
   blocked on w727, held, and when the hold lifted ("You can unblock the release") the dispatcher started its worker with

@@ -121,7 +121,15 @@ notify() {
 v() { virsh --connect qemu:///system "$@"; }
 
 dom_exists() { v dominfo "$VM_NAME" >/dev/null 2>&1; }
-dom_state() { v domstate "$VM_NAME" 2>/dev/null | head -n 1 || echo missing; }
+# dom_state: the domain's state ("running", "shut off", ...), or "missing". It reads virsh's whole answer (w759): virsh
+# prints the state, then a blank line in a second write; "| head -n 1" could exit in between, virsh died of SIGPIPE, and
+# pipefail made the answer "running" and "missing" on two lines. install.sh then started a running VM and failed on
+# "error: Domain is already active" (CI's 26.04 hosts, the second install).
+dom_state() {
+  local s
+  s=$(v domstate "$VM_NAME" 2>/dev/null) || { echo missing; return 0; }
+  printf '%s\n' "${s%%$'\n'*}"
+}
 dom_is_ours() { v dumpxml "$VM_NAME" 2>/dev/null | matches -F "$FFF_VM_MARK"; }
 net_exists() { v net-info "$NET_NAME" >/dev/null 2>&1; }
 net_is_ours() { v net-dumpxml "$NET_NAME" 2>/dev/null | matches -F "<bridge name='$NET_BRIDGE'" && v net-dumpxml "$NET_NAME" | matches -F "address='$NET_HOST_IP'"; }
