@@ -13,7 +13,8 @@ import { FFFCTL_FORMS, OPS_FFFCTL, OPS_PATHS, checkOpsShell } from './opsWorker.
 
 const read = { platform: 'linux' as const, home: OPS_PATHS.home, cwd: OPS_PATHS.scratch, fsx: { realpath: () => undefined } };
 const shell = (cmd: string) => checkOpsShell(cmd, read);
-const file = (p: string) => fs.readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
+// CRLF checkouts (Windows runners): the patterns below read LF.
+const file = (p: string) => fs.readFileSync(new URL(`../${p}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const fffctl = file('deploy/vm/guest/fffctl');
 const priv = file('deploy/vm/guest/fff-ops-priv');
 

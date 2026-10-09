@@ -145,12 +145,13 @@ if [ "$(id -u)" -ne 0 ]; then
   out=$(bash $G/fff-ops-priv status 2>&1 || true)
   printf '%s' "$out" | matches 'run through sudo' || fail "priv: runs without root: $out"
 fi
-for sub in restart rollback configure vault migrate backup claude-token gh-login prepare-shutdown; do
+# (vault and migrate have a case since w745, for their read-only forms only: the blocks below pin every other form)
+for sub in restart rollback configure backup claude-token gh-login prepare-shutdown; do
   matches -E "^  $sub\)" $G/fff-ops-priv && fail "priv: has a $sub subcommand"
 done
 matches -F 'grant=$DATA/ops-deploy.grant' $G/fff-ops-priv || fail "priv: update does not need the portal's deploy grant"
 matches -F '"$FFFCTL" update --no-wait' $G/fff-ops-priv || fail "priv: update is not the plain fffctl update"
-echo "ok: fff-ops-priv has no restart, rollback, configure, vault, migrate, backup or token subcommand, and update needs a grant"
+echo "ok: fff-ops-priv has no restart, rollback, configure, backup or token subcommand, and update needs a grant"
 
 # ---- fff-ops-priv machine-ssh and the credential's record check (w676), for real, as root (CI's lint runs as root):
 # a lib folder of fakes (lib.sh, fff-machine-ssh, fff-ops-ssh) and the portal's account taken as root.
