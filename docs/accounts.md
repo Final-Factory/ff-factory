@@ -176,7 +176,7 @@ daemon polls its own login.
 only when something is set to use it, or an agent is running on it now:
 - a **machine's own login** is left out while its machine takes vault tokens (`machines.claudeFromVault`) or the host token
   (`machines.useHostClaudeEnv`), and returns when that machine does neither;
-- **this host's stored login** is left out while no role (`claudeAccounts`) is set to `"login`" and a host token exists;
+- **this host's stored login** is left out while no role (`claudeAccounts`) is set to `"login"` and a host token exists;
 - **the host token** is left out while no role and no machine uses it;
 - **vault tokens** are left out while no machine is on the vault and no role is set to `"vault"`.
 A person's own token and the token file are always listed. A vault token is named by itself ("vault-ben-1 …abcd"), without a
