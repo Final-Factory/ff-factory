@@ -130,7 +130,7 @@ export function accountLines(accounts: AccountUsage[], sessions: Map<string, Acc
     ...accounts.map((a) => {
       const live = a.sessionIds.map((id) => sessions.get(id)).filter((s): s is AccountSession => !!s && s.status !== 'stopped' && s.status !== 'error');
       const who = live.length ? live.map(agentName).join(', ') : 'no agent right now';
-      return `- ${a.label} [${a.where.join('; ')}; agents on it: ${who}]: ${usageSummary(a.usage, now)}`;
+      return `- ${a.label} [${[...a.where, `agents on it: ${who}`].join('; ')}]: ${usageSummary(a.usage, now)}`;
     }),
   ];
 }
@@ -335,8 +335,13 @@ export interface AccountContext {
   hostName: string;
   /** The current host token's key and label, when one is set. */
   token?: { key: string; label: string };
-  /** Machines that exist; `usesToken`: their portal-run agents take the host token. */
-  machines: { id: string; usesToken: boolean }[];
+  /** Machines that exist; `usesToken`: their portal-run agents take the host token; `onVault`: their runs take a vault token (config machines.claudeFromVault). */
+  machines: { id: string; usesToken: boolean; onVault?: boolean }[];
+  /**
+   * What the config sets to use each credential (w748): an account nothing is set to use, and no agent runs on now, is not
+   * listed (a Mac's login once its machine is on the vault shows again when it leaves). Absent: every account is listed.
+   */
+  inUse?: { hostLogin: boolean; hostToken: boolean; vault: boolean };
   /** This host's roles config claudeAccounts sets to its stored login (docs/accounts.md); the others take the token. */
   hostLoginRoles?: HostRole[];
   /** The roles to name apart (secrets.ts shownRoles): the dispatcher only when it has an account of its own. Default: all but the dispatcher. */
@@ -345,8 +350,8 @@ export interface AccountContext {
   tokenFile?: { key: string; label: string; roles: HostRole[] };
   /** People's own tokens (config userClaudeEnv): key, label ("Lothsahn's token …abcd") and whose. */
   people?: { key: string; label: string; displayName: string }[];
-  /** The token vault's Claude tokens (docs/vault.md, w512): key, label ("vault: ben-max …abcd") and where they are granted. */
-  vault?: { key: string; label: string; where: string }[];
+  /** The token vault's Claude tokens (docs/vault.md, w512): key and label ("ben-max …abcd"). Their grants are not shown (w748). */
+  vault?: { key: string; label: string }[];
   /** Every session with its source key (sessionSource); `live`: running now (for the order). */
   sessions: { id: string; source: string; live?: boolean }[];
 }
@@ -377,11 +382,11 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
     sources.set(p.key, { label: p.label, ...entries.get(p.key), kind: 'token' });
     whose.set(p.key, p.displayName);
   }
-  const vaultWhere = new Map<string, string>();
+  const vaultKeys = new Set<string>();
   for (const v of ctx.vault ?? []) {
     if (sources.has(v.key)) continue; // the same token as another: one account
     sources.set(v.key, { label: v.label, ...entries.get(v.key), kind: 'token' });
-    vaultWhere.set(v.key, v.where);
+    vaultKeys.add(v.key);
   }
   for (const [key, e] of entries) {
     if (key.startsWith('login:') && key !== HOST_LOGIN && machineIds.has(key.slice(6))) sources.set(key, e);
@@ -397,15 +402,30 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
   const hostOnToken = onToken.length ? [split ? `${ctx.hostName} (${roleNames(onToken)})` : ctx.hostName] : [];
   const hostLoginWhere = `${ctx.hostName} login${ctx.token && onLogin.length ? ` (${roleNames(onLogin)})` : ''}`;
   const tokenUsers = [...hostOnToken, ...ctx.machines.filter((m) => m.usesToken).map((m) => m.id)];
+  // An account nothing is set to use and no agent runs on now is left out (w748).
+  const running = new Set(ctx.sessions.filter((x) => x.live).map((x) => x.source));
+  const unused = (key: string): boolean => {
+    const use = ctx.inUse;
+    if (!use || running.has(key)) return false;
+    if (key === HOST_LOGIN) return !use.hostLogin;
+    if (key === ctx.token?.key) return !use.hostToken;
+    if (vaultKeys.has(key)) return !use.vault;
+    if (key.startsWith('login:')) {
+      const m = ctx.machines.find((x) => x.id === key.slice(6));
+      return !!m && (!!m.onVault || m.usesToken);
+    }
+    return false;
+  };
   const out = new Map<string, AccountUsage>();
   for (const [key, e] of sources) {
+    if (unused(key)) continue;
     const email = e.kind === 'login' ? e.account?.email?.trim().toLowerCase() : undefined;
     const id = e.kind === 'token' ? key : email ? `email:${email}` : key;
     const person = whose.get(key);
     const where = person
       ? `agents working for ${person}`
-      : vaultWhere.has(key)
-        ? vaultWhere.get(key)!
+      : vaultKeys.has(key)
+        ? ''
       : ctx.tokenFile?.key === key && key !== ctx.token?.key
         ? `${ctx.hostName}'s token file (${roleNames(fileRoles)})`
       : e.kind === 'token'
@@ -413,7 +433,7 @@ export function buildAccounts(entries: ReadonlyMap<string, UsageEntry>, ctx: Acc
         : key === HOST_LOGIN ? hostLoginWhere : `${key.slice(6)} login`;
     const a = out.get(id) ?? { id, kind: e.kind, label: e.kind === 'token' ? (e.label ?? 'a token') : (e.account?.email ?? where), email: e.account?.email, sources: [], where: [], sessionIds: [], usage: undefined };
     a.sources.push(key);
-    a.where.push(where);
+    if (where) a.where.push(where);
     a.usage = newer(a.usage, e.usage);
     out.set(id, a);
   }
@@ -533,7 +553,7 @@ export async function fetchTokenUsage(token: string, fetchImpl: typeof fetch = f
 }
 
 export const MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
-export const LIMITS_SOURCE = 'rate-limit headers';
+export const LIMITS_SOURCE = 'rate limits';
 
 /**
  * A token's weekly and 5-hour utilization from the rate-limit headers the API sends with every reply
@@ -954,7 +974,7 @@ export class UsageTracker {
       const first = await endpoint();
       if ('limited' in first) {
         // The same token's rate-limit headers stand in: weekly and session, no per-model limits.
-        via = `the API's ${LIMITS_SOURCE} (${first.limited})`;
+        via = `the API's rate-limit headers (${first.limited})`;
         try {
           u = { ...parseUsage(await this.within(this.fetchTokenLimits(token), "the API's rate-limit headers"), asOf), source: LIMITS_SOURCE };
         } catch (e) {

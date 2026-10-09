@@ -285,30 +285,30 @@ for v in "$ct" "$gt" "$ct2"; do if printf '%s' "$out" | matches -F "${v:13:24}";
 printf '%s' "$out" | matches 'not named 1-16 of a-z' || fail "a pool file with a bad name was not refused: $out"
 printf '%s' "$out" | matches 'not one fine-grained GitHub token' || fail "a classic GitHub token was not refused"
 list=$(g 'sudo fffctl vault list')
-printf '%s' "$list" | matches -F "${ct: -4}" || fail "host-ci-claude is not in the vault: $list"
-printf '%s' "$list" | matches '^host-ci-github ' || fail "host-ci-github is not in the vault: $list"
+printf '%s' "$list" | matches -F "${ct: -4}" || fail "vault-ci is not in the vault: $list"
+printf '%s' "$list" | matches '^vault-ci-github ' || fail "vault-ci-github is not in the vault: $list"
 # The pool: both Claude tokens are the person's (owner ci), and the CLI lists the pool with their state and last four characters.
-printf '%s' "$list" | matches '^host-ci-claude-second ' || fail "the second token of the pool is not in the vault: $list"
+printf '%s' "$list" | matches '^vault-ci-second ' || fail "the second token of the pool is not in the vault: $list"
 printf '%s' "$list" | matches -F "${ct2: -4}" || fail "the second token's last four characters are not listed: $list"
 printf '%s' "$list" | matches 'Claude token pools' || fail "fffctl vault list has no pool section: $list"
-printf '%s' "$list" | matches -E '^    host-ci-claude-second +…' || fail "the pool section does not list the second token: $list"
+printf '%s' "$list" | matches -E '^    vault-ci-second +…' || fail "the pool section does not list the second token: $list"
 printf '%s' "$list" | matches -E 'ok +5-hour' || fail "the pool section shows no state and meters: $list"
 if printf '%s' "$list" | matches 'bad'; then fail "the refused pool file went in"; fi
-if printf '%s' "$list" | matches '^host-ci2-'; then fail "the refused token went in"; fi
+if printf '%s' "$list" | matches '^vault-ci2'; then fail "the refused token went in"; fi
 [ "$(stat -c '%a %U' /etc/fff-vm/secrets/vault.key)" = "600 root" ] || fail "the key's spare copy is not 0600 root"
 # The file is named to sha256sum under sudo: a "<" redirect would be opened by the admin's own shell, which cannot read it.
 [ "$(sha256sum /etc/fff-vm/secrets/vault.key | cut -c1-64)" = "$(g 'sudo sha256sum /etc/fff/vault.key' | cut -c1-64)" ] || fail "the key's spare copy differs from the VM's key"
 # Captured first: the sync exits 1 (ci2's classic token is still refused), which pipefail would carry through a pipe.
 out=$(/usr/local/sbin/fff-vm vault-sync 2>&1) || true
-printf '%s' "$out" | matches 'unchanged host-ci-claude' || fail "a second sync was not a no-op: $out"
-printf '%s' "$out" | matches 'unchanged host-ci-github' || fail "a second sync was not a no-op: $out"
-printf '%s' "$out" | matches 'unchanged host-ci-claude-second' || fail "a second sync was not a no-op for the pool's second token: $out"
+printf '%s' "$out" | matches 'unchanged vault-ci' || fail "a second sync was not a no-op: $out"
+printf '%s' "$out" | matches 'unchanged vault-ci-github' || fail "a second sync was not a no-op: $out"
+printf '%s' "$out" | matches 'unchanged vault-ci-second' || fail "a second sync was not a no-op for the pool's second token: $out"
 rm -rf /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2
 # Every person is gone: a scan that finds no token file removes nothing unless --prune says so (w744).
 /usr/local/sbin/fff-vm vault-sync >/dev/null 2>&1 || true
-g 'sudo fffctl vault list --names' | matches '^host-ci-' || fail "an empty scan removed the vault's entries without --prune"
+g 'sudo fffctl vault list --names' | matches -E '^vault-ci(-|$)' || fail "an empty scan removed the vault's entries without --prune"
 /usr/local/sbin/fff-vm vault-sync --prune >/dev/null 2>&1 || true
-if g 'sudo fffctl vault list --names' | matches '^host-ci-'; then fail "a removed person's entries stayed in the vault"; fi
+if g 'sudo fffctl vault list --names' | matches -E '^vault-ci(-|$)'; then fail "a removed person's entries stayed in the vault"; fi
 echo "ok: fff-vm vault-sync: per-person tokens in, never printed, a classic GitHub token refused, removals follow, the key copied"
 # fffctl migrate (w499) in a real guest: the wrapper, node in the release, ssh as fff with the portal's key. No BEAST here,
 # so it cannot connect: it says so, prints the line that authorizes the key, and changes nothing. (The modes themselves

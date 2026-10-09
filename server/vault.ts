@@ -460,6 +460,20 @@ export class Vault {
     }, false);
   }
 
+  /**
+   * The same entry under another name (w748: host-ben-claude-1 became vault-ben-1). Its id, value, grants and fingerprint
+   * stay, so the person's pool, the usage meters and the sessions' last pick carry over; only the name changes.
+   */
+  rename(from: string, to: string): VaultEntryMeta {
+    if (!NAME.test(to)) throw new Error('a name is lower-case letters, digits, ".", "_" and "-", up to 40, e.g. vault-ben-1');
+    return this.change(() => {
+      const e = this.find(from);
+      if (from !== to && this.data.entries.some((x) => x.name === to)) throw new Error(`a vault entry named ${to} exists`);
+      Object.assign(e, { name: to, updatedAt: this.now() });
+      return this.meta(e);
+    }, false);
+  }
+
   remove(name: string): VaultEntryMeta {
     return this.change(() => {
       const e = this.find(name);
@@ -485,7 +499,7 @@ export class Vault {
   }
 
   /** The Claude tokens the usage meters poll: every enabled claude entry the key opens, labelled by name. */
-  claudeTokens(): { token: string; label: string; fingerprint: string; where: string }[] {
+  claudeTokens(): { token: string; label: string; fingerprint: string }[] {
     this.reload();
     const { key } = this.key();
     if (!key) return [];
@@ -493,7 +507,7 @@ export class Vault {
       .filter((e) => e.kind === 'claude' && !e.disabled)
       .map((e) => ({ e, token: this.open(key, e) }))
       .filter((x): x is { e: VaultEntry; token: string } => !!x.token)
-      .map(({ e, token }) => ({ token, label: `vault: ${e.name} …${e.last4}`, fingerprint: e.fingerprint, where: `the token vault: ${e.roles.join(', ')} on ${e.machines.includes('*') ? 'every machine' : e.machines.join(', ')}${e.share === 'owner' ? `, ${e.owner}'s own work` : ''}` }));
+      .map(({ e, token }) => ({ token, label: `${e.name} …${e.last4}`, fingerprint: e.fingerprint }));
   }
 
   /** The pick's view of one Claude entry: its meters, and the processes live on it other than `except`'s. */

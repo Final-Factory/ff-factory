@@ -8,6 +8,9 @@
 #   - install_host_scripts (lib.sh) puts the checkout's vault.sh, lib.sh, pathwatch.sh and fff-vm where the installed fff-vm
 #     runs them, and install.sh calls it in every mode, --guest-only included (w744: it did not, and the installed older
 #     vault.sh removed the entries the installer had just added);
+#   - the entries named before w748 (host-<person>-claude[-<n>], host-<person>-github) are renamed to vault-<person>[-<n>] /
+#     vault-<person>-github by the portal's put (its meters, owner and token stay), never removed while their file exists, kept
+#     with a warning while the portal is too old to rename, and dropped when a changed file made a second entry;
 #   - no token value reaches any output.
 set -o errexit -o nounset -o pipefail
 cd "$(dirname "$0")/../../.."
@@ -38,6 +41,14 @@ case "$cmd" in
     owner=$(sed -E 's/.*--owner ([^ ]+).*/\1/' <<<"$cmd")
     new=$(sha256sum | cut -d' ' -f1)
     want="$owner|$new"
+    # the portal's rename (w748): no entry of this name, a host-… one holding this very token: it takes the new name
+    if [ ! -f "$V/$name" ] && [ "${name#vault-}" != "$name" ]; then
+      for old in "$V"/host-*; do
+        [ -f "$old" ] || continue
+        if [ "$(cut -d'|' -f2 "$old")" = "$new" ] && [ -z "${FAKE_OLD_PORTAL:-}" ]; then mv "$old" "$V/$name"; echo "renamed: $name (was $(basename "$old"))"; echo "renamed $name" >>"$FAKE/calls"; exit 0; fi
+        if [ "$(cut -d'|' -f2 "$old")" = "$new" ]; then echo "vault: that value is already in the vault as $(basename "$old")" >&2; exit 1; fi
+      done
+    fi
     if [ -f "$V/$name" ]; then
       if [ "$(cat "$V/$name")" = "$want" ]; then echo "unchanged: $name"; else echo "$want" >"$V/$name"; echo "rotated: $name"; fi
     else
@@ -94,12 +105,12 @@ fresh
 b1=$(tok); b2=$(tok); l1=$(tok)
 put ben claude-tokens/1 "$b1"; put ben claude-tokens/2 "$b2"; put lothsahn claude-tokens/1 "$l1"
 out=$(standalone); secret=$out; noleak "$b1" "$b2" "$l1"
-[ "$(names)" = "host-ben-claude-1 host-ben-claude-2 host-lothsahn-claude-1" ] || fail "pool-only: the standalone sync made: $(names): $out"
-printf '%s' "$out" | matches -F 'added host-ben-claude-1' || fail "pool-only: no 'added': $out"
+[ "$(names)" = "vault-ben-1 vault-ben-2 vault-lothsahn-1" ] || fail "pool-only: the standalone sync made: $(names): $out"
+printf '%s' "$out" | matches -F 'added vault-ben-1' || fail "pool-only: no 'added': $out"
 if printf '%s' "$out" | matches 'removed'; then fail "pool-only: the standalone sync removed something: $out"; fi
 out=$(standalone); secret=$out
-[ "$(names)" = "host-ben-claude-1 host-ben-claude-2 host-lothsahn-claude-1" ] || fail "pool-only: a second sync changed the vault: $(names)"
-printf '%s' "$out" | matches -F 'unchanged host-ben-claude-2' || fail "pool-only: a second sync was not a no-op: $out"
+[ "$(names)" = "vault-ben-1 vault-ben-2 vault-lothsahn-1" ] || fail "pool-only: a second sync changed the vault: $(names)"
+printf '%s' "$out" | matches -F 'unchanged vault-ben-2' || fail "pool-only: a second sync was not a no-op: $out"
 [ "$(calls removed)" = 0 ] || fail "pool-only: something was removed"
 # the installer's function, from a fresh vault, ends in the same vault
 set_a=$(names)
@@ -116,12 +127,12 @@ fresh
 c=$(tok); c1=$(tok)
 put ben claude-token "$c"; put ben claude-tokens/1 "$c1"; put ben claude-tokens/Second "$(tok)"
 out=$(standalone); secret=$out; noleak "$c" "$c1"
-[ "$(names)" = "host-ben-claude host-ben-claude-1 host-ben-claude-second" ] || fail "beside claude-token: $(names): $out"
-for n in host-ben-claude host-ben-claude-1 host-ben-claude-second; do
+[ "$(names)" = "vault-ben vault-ben-1 vault-ben-second" ] || fail "beside claude-token: $(names): $out"
+for n in vault-ben vault-ben-1 vault-ben-second; do
   [ "$(cut -d'|' -f1 "$FAKE/vault/$n")" = ben ] || fail "$n is not ben's"
 done
 out=$(standalone)
-[ "$(names)" = "host-ben-claude host-ben-claude-1 host-ben-claude-second" ] && [ "$(calls removed)" = 0 ] || fail "beside claude-token: a second sync changed the vault"
+[ "$(names)" = "vault-ben vault-ben-1 vault-ben-second" ] && [ "$(calls removed)" = 0 ] || fail "beside claude-token: a second sync changed the vault"
 ok "claude-tokens/<name> beside claude-token: all in as the person's, a name in upper case read as lower, none removed on the next sync"
 
 # ---------------------------------------------------------------- never remove an entry whose file exists; remove one whose file is gone
@@ -129,40 +140,94 @@ fresh
 a=$(tok); b=$(tok)
 put ben claude-token "$a"; put ben claude-tokens/2 "$b"; put sam github-token "github_pat_$(rnd 40)"
 standalone >/dev/null
-echo "x|y" >"$FAKE/vault/max-discord"            # not a host-* entry: never touched
-echo "sam|y" >"$FAKE/vault/host-gone-claude"      # a host-* entry whose file does not exist
+echo "x|y" >"$FAKE/vault/max-discord"            # not a vault-*/host-* entry: never touched
+echo "sam|y" >"$FAKE/vault/vault-gone"      # a vault-* entry whose file does not exist
 out=$(standalone); secret=$out
-[ -f "$FAKE/vault/host-gone-claude" ] && fail "an entry with no file stayed: $out"
-printf '%s' "$out" | matches -F 'removed host-gone-claude' || fail "the removal is not logged: $out"
-[ -f "$FAKE/vault/max-discord" ] || fail "an entry that is not host-* was removed"
-[ -f "$FAKE/vault/host-ben-claude-2" ] && [ -f "$FAKE/vault/host-ben-claude" ] && [ -f "$FAKE/vault/host-sam-github" ] || fail "an entry whose file exists was removed: $(names)"
+[ -f "$FAKE/vault/vault-gone" ] && fail "an entry with no file stayed: $out"
+printf '%s' "$out" | matches -F 'removed vault-gone' || fail "the removal is not logged: $out"
+[ -f "$FAKE/vault/max-discord" ] || fail "an entry that is not vault-*/host-* was removed"
+[ -f "$FAKE/vault/vault-ben-2" ] && [ -f "$FAKE/vault/vault-ben" ] && [ -f "$FAKE/vault/vault-sam-github" ] || fail "an entry whose file exists was removed: $(names)"
 # its file turns into garbage (a bad paste): the entry stays, the warning says why, the exit is 1
 printf '%s\n' 'not a token at all' >"$T/etc/secrets/people/ben/claude-tokens/2"
 out=$(standalone); secret=$out
-[ -f "$FAKE/vault/host-ben-claude-2" ] || fail "a file that is not a token now got its entry removed: $out"
+[ -f "$FAKE/vault/vault-ben-2" ] || fail "a file that is not a token now got its entry removed: $out"
 printf '%s' "$out" | matches 'is not one' || fail "no warning for the bad file: $out"
 if printf '%s' "$out" | matches 'not at all'; then fail "the bad content was printed"; fi
 # the file is deleted: now the entry goes
 rm -f "$T/etc/secrets/people/ben/claude-tokens/2"
 standalone >/dev/null
-[ -f "$FAKE/vault/host-ben-claude-2" ] && fail "an entry whose file is gone stayed"
-[ -f "$FAKE/vault/host-ben-claude" ] || fail "the other entry of the person went too"
+[ -f "$FAKE/vault/vault-ben-2" ] && fail "an entry whose file is gone stayed"
+[ -f "$FAKE/vault/vault-ben" ] || fail "the other entry of the person went too"
 ok "an entry whose file exists is never removed (a bad paste included); one whose file is gone is; others' entries are left"
 
 # ---------------------------------------------------------------- a scan that finds nothing removes nothing, unless --prune
 fresh
 put ben claude-tokens/1 "$(tok)"; put lothsahn claude-token "$(tok)"
 standalone >/dev/null
-[ "$(names)" = "host-ben-claude-1 host-lothsahn-claude" ] || fail "setup: $(names)"
+[ "$(names)" = "vault-ben-1 vault-lothsahn" ] || fail "setup: $(names)"
 rm -rf "$T/etc/secrets/people" && mkdir -p "$T/etc/secrets/people" && chmod 0700 "$T/etc/secrets/people"
 out=$(standalone); secret=$out
-[ "$(names)" = "host-ben-claude-1 host-lothsahn-claude" ] || fail "a scan that found no file removed entries: $(names): $out"
+[ "$(names)" = "vault-ben-1 vault-lothsahn" ] || fail "a scan that found no file removed entries: $(names): $out"
 printf '%s' "$out" | matches 'found no token file' || fail "no warning that nothing was removed: $out"
 printf '%s' "$out" | matches -F 'sudo fff-vm vault-sync --prune' || fail "the warning does not name --prune: $out"
 out=$(standalone --prune)
 [ -z "$(names)" ] || fail "--prune did not remove them: $(names)"
 out=$(standalone --nope); printf '%s' "$out" | matches 'unknown option --nope' || fail "an unknown option is not refused: $out"
 ok "no token file found at all: nothing removed and --prune named; --prune removes them"
+
+# ---------------------------------------------------------------- w748: the old names carry over to the new ones
+# an entry as the sync made it before w748: its owner and the hash of the token file
+old_entry() { # NAME PERSON RELATIVE-PATH
+  printf '%s|%s
+' "$2" "$(sha256sum <"$T/etc/secrets/people/$2/$3" | cut -d' ' -f1)" >"$FAKE/vault/$1"
+}
+fresh
+b1=$(tok); b2=$(tok); l1=$(tok); bs=$(tok)
+put ben claude-tokens/1 "$b1"; put ben claude-tokens/2 "$b2"; put lothsahn claude-tokens/1 "$l1"
+put ben claude-token "$bs"; put ben github-token "github_pat_$(rnd 40)"
+old_entry host-ben-claude-1 ben claude-tokens/1; old_entry host-ben-claude-2 ben claude-tokens/2; old_entry host-lothsahn-claude-1 lothsahn claude-tokens/1
+old_entry host-ben-claude ben claude-token; old_entry host-ben-github ben github-token
+before=$(cat "$FAKE"/vault/host-* | sort | paste -sd' ' -)
+out=$(standalone); secret=$out; noleak "$b1" "$b2" "$l1" "$bs"
+[ "$(names)" = "vault-ben vault-ben-1 vault-ben-2 vault-ben-github vault-lothsahn-1" ] || fail "rename: the vault holds: $(names): $out"
+[ "$(cat "$FAKE"/vault/vault-* | sort | paste -sd' ' -)" = "$before" ] || fail "rename: an entry's owner or token changed"
+printf '%s' "$out" | matches -F 'renamed vault-ben-1' || fail "rename: not logged: $out"
+[ "$(calls removed)" = 0 ] && [ "$(calls renamed)" = 5 ] || fail "rename: removed $(calls removed), renamed $(calls renamed) (five entries rename, none is removed)"
+out=$(standalone); secret=$out
+[ "$(names)" = "vault-ben vault-ben-1 vault-ben-2 vault-ben-github vault-lothsahn-1" ] && [ "$(calls removed)" = 0 ] || fail "rename: the second sync changed the vault: $(names)"
+printf '%s' "$out" | matches -F 'unchanged vault-ben-2' || fail "rename: a second sync was not a no-op: $out"
+# the installer's sync from the old names ends in the same vault
+for n in 1 2; do old_entry "host-ben-claude-$n" ben "claude-tokens/$n"; rm -f "$FAKE/vault/vault-ben-$n"; done
+out=$(installer); secret=$out
+[ "$(names)" = "vault-ben vault-ben-1 vault-ben-2 vault-ben-github vault-lothsahn-1" ] || fail "rename: the installer's sync left: $(names): $out"
+ok "host-<person>-claude[-<n>] and host-<person>-github are renamed to vault-<person>[-<n>] and vault-<person>-github, owner and token unchanged, none removed"
+
+# a portal too old to rename: the old entries stay, with a warning, and nothing is added beside them
+fresh
+b1=$(tok); put ben claude-tokens/1 "$b1"; old_entry host-ben-claude-1 ben claude-tokens/1
+out=$(FAKE_OLD_PORTAL=1 standalone); secret=$out; noleak "$b1"
+[ "$(names)" = "host-ben-claude-1" ] || fail "old portal: the vault holds: $(names): $out"
+printf '%s' "$out" | matches 'host-ben-claude-1 stays' || fail "old portal: no warning that the old entry stays: $out"
+out=$(standalone); secret=$out
+[ "$(names)" = "vault-ben-1" ] || fail "old portal: after the portal update the sync left: $(names): $out"
+ok "a portal that cannot rename yet keeps the old entries and says so; the next sync renames them"
+
+# the file changed since: the old entry holds the old token, so the new entry is made and the old one goes
+fresh
+put ben claude-tokens/1 "$(tok)"; old_entry host-ben-claude-1 ben claude-tokens/1
+put ben claude-tokens/1 "$(tok)"
+out=$(standalone); secret=$out
+[ "$(names)" = "vault-ben-1" ] || fail "changed file: the vault holds: $(names): $out"
+printf '%s' "$out" | matches -F 'removed host-ben-claude-1 (its file now feeds vault-ben-1)' || fail "changed file: the old entry's removal is not logged: $out"
+ok "an old entry left beside its new one (the file holds another token now) is removed"
+
+# two files that make one entry name: the first wins, the second is said
+fresh
+put ben github-token "github_pat_$(rnd 40)"; put ben claude-tokens/github "$(tok)"
+out=$(standalone); secret=$out
+[ "$(names)" = "vault-ben-github" ] || fail "name clash: the vault holds: $(names): $out"
+printf '%s' "$out" | matches 'would make the entry vault-ben-github' || fail "name clash: no warning: $out"
+ok "two files that would make one entry: the first wins and the other is said"
 
 # ---------------------------------------------------------------- the installed scripts follow the checkout in every mode
 # shellcheck source=../host/lib.sh

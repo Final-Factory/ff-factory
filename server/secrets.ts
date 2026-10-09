@@ -197,7 +197,25 @@ const withTokenFile = <E extends Record<string, string | undefined>>(cfg: Partia
 export const dispatcherOwnAccount = (cfg: Pick<Config, 'claudeAccounts'>) => cfg.claudeAccounts?.dispatcher !== undefined;
 
 /** The roles worth naming apart: the dispatcher only when it has an account of its own (else it is the orchestrator's). */
-export const shownRoles = (cfg: Pick<Config, 'claudeAccounts'>): HostRole[] => HOST_ROLES.filter((r) => r !== 'dispatcher' || dispatcherOwnAccount(cfg));
+export const shownRoles = (cfg: Pick<Config, 'claudeAccounts'>, workersHere = true): HostRole[] => HOST_ROLES.filter((r) => (r !== 'dispatcher' || dispatcherOwnAccount(cfg)) && (r !== 'workers' || workersHere));
+
+/**
+ * Whether a worker daemon runs on the portal's own host (a machine added "local", docs/beast-machine.md). Since w510 the portal
+ * runs no workers itself, so `claudeAccounts.workers` means something only then; with none, the workers role is left out of
+ * the account lists and warnings (`shownRoles`, w748).
+ */
+export const workersHere = (machines: readonly MachineRef[]) => machines.some(refLocal);
+
+/**
+ * Which of this host's own credentials its roles are set to use (w748): the stored login, the host token, or a vault pool.
+ * A role on "vault" counts for the account it falls back to (the token file, else the host token) as well, since a person
+ * with no tokens of their own yet still runs on it. The accounts list leaves out a credential no role is set to use.
+ */
+export function hostAccountsInUse(cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>, workers = true): { login: boolean; token: boolean; vault: boolean } {
+  const roles = HOST_ROLES.filter((r) => r !== 'workers' || workers);
+  const base = roles.map((r) => baseAccount(cfg, r));
+  return { login: base.includes('login'), token: base.includes('token'), vault: roles.some((r) => hostAccount(cfg, r) === 'vault') };
+}
 
 /** The role a session on this host runs as (claudeAccounts): the dispatcher's own when it has one, else by its kind. */
 export function hostRoleOf(cfg: Pick<Config, 'claudeAccounts'>, info: Pick<SessionInfo, 'kind'> & Partial<Pick<SessionInfo, 'orchestratorRole'>>): HostRole {
@@ -451,10 +469,11 @@ export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts' | 'claudeEn
       : hostAccount(cfg, role) === 'login' || !hostToken
         ? `${hostName} login`
         : `host token …${hostToken.slice(-4)}`;
-  const logins = shownRoles(cfg).filter((r) => hostAccount(cfg, r) === 'login');
+  const roles = shownRoles(cfg, workersHere(machineIds));
+  const logins = roles.filter((r) => hostAccount(cfg, r) === 'login');
   const problem = logins.length ? hostLoginProblem(cfg) : undefined;
   return [
-    `Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): ${shownRoles(cfg).map((r) => `${roleNames([r])} here: ${here(r)}`).join('; ')}${machineIds.length ? `; ${machineIds.map((m) => `agents on ${refId(m)}: ${accountSource(cfg, m).replace(/ \(.*\)$/, '')}`).join('; ')}` : ''}${people.length ? `; work asked for by ${people.join(', ')}: their own token` : ''}`,
+    `Claude account per agent (config claudeAccounts, machines.useHostClaudeEnv): ${roles.map((r) => `${roleNames([r])} here: ${here(r)}`).join('; ')}${machineIds.length ? `; ${machineIds.map((m) => `agents on ${refId(m)}: ${accountSource(cfg, m).replace(/ \(.*\)$/, '')}`).join('; ')}` : ''}${people.length ? `; work asked for by ${people.join(', ')}: their own token` : ''}`,
     ...(problem ? [`WARNING: set to the ${hostName} login (${roleNames(logins)}), which cannot run agents: ${problem}`] : []),
   ];
 }
