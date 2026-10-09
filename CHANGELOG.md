@@ -10,6 +10,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **machines.test.ts no longer fails now and then on a reset from the daemon** (w753, lothsahn: "Apparently
+  server/machines.test.ts is flaky. Please fix it."). The 502 test's fake portal answered each upgrade on the raw socket
+  without an error listener (an upgraded socket loses http's own), so when the daemon dropped its side after reading the
+  502 and that reached the fake portal as a reset, the "read ECONNRESET" was uncaught and failed the file. It failed 17
+  of 600 runs under load before and 0 of 600 after on Linux; it had failed 4 CI runs on 2026-10-09 (Windows and
+  Ubuntu). The fake portal now ignores that reset and destroys its sockets when the test ends.
 - **A closed "the VM watchdog restarted a critical unit" banner stays closed for that restart** (w751, Lothsahn: "make it remember
   when I close the warning at the top that a process died and doesn't reopen for the same error"). Closing it was only
   in the page's memory, so a reload, another device or a portal restart brought it back. Now the portal keeps, per person,
