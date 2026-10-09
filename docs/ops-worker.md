@@ -173,6 +173,7 @@ process of the portal: it would get the portal's account and everything that acc
 | run the worker installer on a machine | ssh, above. The installer runs on the machine, with the machine's disk and network |
 | copy files to and from the machines with scp and sftp (w612) | `/usr/bin/scp` and `/usr/bin/sftp` run as `fff-ops` (its PATH's `scp` and `sftp` add `-S fff-ops-scp-ssh`), so the local side of a copy is only what `fff-ops` may read and write: its scratch, never `/srv/fff` or the vault key. `fff-ops-scp-ssh` takes the arguments scp and sftp give their ssh, lets through only their own fixed safe settings (no `-o ProxyCommand`, `-F`, `-i`, `-J`, `-S`, port 22 only) and hands the machine alone to `fff-ops-ssh --sftp TARGET`, the machine's sftp subsystem (or, for `scp -O`, scp's own `scp -t`/`scp -f` command). The machine side is the same ssh as above: the portal's key, pinned host keys, the same network. The guard refuses scp's ssh options and the portal's files as a source or destination, with a reason |
 | read the portal's state | `fff-ops-priv` (`status`, `state`, `units [--check]`, `logs N` redacted, `machine-ssh --check`, `credential list`) and the read-only tools `list_machines`, `list_sandboxes` and `system_status` |
+| read the vault, machine credentials and the migration's usage (w745) | `fffctl vault list` (the entries: name, kind, env, last four characters, a 12-character fingerprint of the value's hash, grants and the Claude pools' meters), `fffctl vault list --names`, `fffctl vault help`, `fffctl machine-credential list` (the same as `credential list`) and `fffctl migrate --help`. `fff-ops-priv` passes exactly these forms. Never a value: `vault list` shows what `show` in `server/vaultCli.ts` shows anyone who runs it, and there is no `vault get`. Every other vault form (`init`, `export-key`, `add`, `put`, `rotate`, `grant`, `remove`, `new-key`), `machine-credential issue` and `revoke`, and every `migrate` mode stay a person's |
 | read the portal's critical units (w743) | `fffctl units` and `fffctl units --check` (its PATH's `fffctl` is `sudo -n fff-ops-priv`; the worker types no `sudo`, which its guard refuses). Both are `fffctl units` as root and read only: every critical unit's active and enabled state, the watchdog's verdict and its last restarts; `--check` prints `down: unit=state ...` and exits 1 when one is not active and enabled, else prints that every unit is and exits 0. `fff-ops-priv` passes exactly those two forms: `units --fix`, `units --check extra`, any other word and every `fffctl watchdog` form (run, pause, resume, reset) are refused with exit 2, and the unit restarts stay a person's. CI runs the allowed and refused forms against a fake `fffctl` (`deploy/vm/test/fff-ops.test.sh`) |
 | see the portal's ssh to the machines and its public key line (w676) | `fff-machine-ssh --check` and `--key` (its PATH's `fff-machine-ssh` is `sudo -n fff-ops-priv machine-ssh`): `fff-ops-priv` runs `/usr/local/lib/fff/fff-machine-ssh` as `fff` with the installed `machines.ssh`. It prints `id_ed25519.pub` and never reads the private key; CI looks for the private key in its output |
 | pin a new machine's host key (w676) | `fff-machine-ssh --pin USER@HOST FINGERPRINT`, the same way. As `fff`, it writes the key into the portal account's `~/.ssh/known_hosts` and `~/.ssh/fff-pins.ssh` (0600 `fff`, which `fff-ops` cannot read or write) and the alias into the managed block of `~/.ssh/config`, only when the key HOST shows over the tailnet now is FINGERPRINT and nothing pins HOST yet (`machines.ssh`, an earlier pin, `known_hosts` or `known_hosts2`). `fff-ops-priv` passes only `--check`, `--key` and `--pin` with exactly two words: never `--fix` or `--data` (a file of the worker's would be pinned) |
@@ -182,7 +183,7 @@ process of the portal: it would get the portal's account and everything that acc
 | It may not | Enforced by |
 |---|---|
 | read the portal's config, data, secrets or keys | Unix permissions: `/srv/fff` is 0700 `fff`, and `/etc/fff/vault.key` is root's. The guard also refuses these paths with a reason, and refuses `/proc/*/environ` |
-| restart or roll back the portal; change settings; use the vault, tokens, migrations, backups or shutdown | `fff-ops-priv` has none of those subcommands, and sudoers allows nothing else as root. The guard refuses `fffctl restart` and the like with a reason |
+| restart or roll back the portal; change settings; change the vault, tokens or migrations; backups or shutdown; pause, run or reset the watchdog | `fff-ops-priv` has none of those subcommands (it has `vault`, `machine-credential` and `migrate` only for their read-only forms, above), and sudoers allows nothing else as root. The guard refuses `fffctl restart` and the like with a reason |
 | deploy the portal on its own initiative, or on anyone's word but Lothsahn's or Ben's own | `fff-ops-priv update` runs only with the grant the portal writes into its data folder on `ops_worker deploy`, which the server allows only in the person's own turn. `fff-ops` cannot write that folder (0700 `fff`), so it cannot make a grant. The grant is good for 15 minutes and is removed before the update runs, so it works once |
 | copy the portal's secrets or keys off the VM | scp and sftp run as `fff-ops`, which cannot read `/srv/fff` (0700 `fff`) or `/etc/fff/vault.key` (root's): CI copies each of them and gets "Permission denied". `fff-ops-ssh` runs as `fff` but never sees a local path: it only carries the stream. The guard refuses those paths in an scp or sftp command (relative ones too) |
 | git, downloads, package installs, builds, interpreters | The network: the unit allows only loopback, the VM's resolvers, Anthropic's API (`160.79.104.0/23`, `2607:6bc0::/48`, [Anthropic's published inbound ranges](https://platform.claude.com/docs/en/api/ip-addresses)) and the tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). The disk: everything it can write is on a 2 GiB `noexec` file system. sudo: no `apt`. The guard refuses `git`, `curl`, `wget`, `rsync`, `apt`, `npm`, `pip`, `python`, `node` and the like, so the worker learns why at once. scp and sftp reach only what ssh reaches: the machines whose host keys are pinned, over the tailnet. They add no address to the allowlist and no nft rule: the copy is the same ssh process, as `fff`, inside the same unit |
@@ -373,6 +374,28 @@ Residual risks, and what bounds each:
 - **The network allowlist is by address.** If Anthropic's API moved off its published ranges, the worker would fail
   to start (visible, not silent), and `OPS_ALLOW_NETS` in `/etc/fff/fff.conf` would need widening, then `fffctl
   update` to rewrite the unit.
+
+## A new fffctl command
+
+**The rule** (Lothsahn, 2026-10-09, w745): "anytime a new fffctl command is provided, all read only parts of it should be allowed by the orchestrator worker". When a pull request adds an `fffctl` command or a form of one, it also allows that command's read-only parts to the worker, in the same pull request. A form is read-only when it:
+
+- writes no file (a log, a known_hosts entry, a copy of a key, a temp file the command keeps),
+- starts, stops, pauses, resets or runs no unit (`watchdog run` can restart one, so it is not read-only),
+- changes nothing in the vault or in config,
+- and prints no secret: never a token or a key, only what `fffctl vault list` shows (names, last four characters, a fingerprint).
+
+If a form could print a secret, or you are unsure, it is not read-only: leave it a person's and say why in the pull request. Pinning the arguments of a form that changes state does not make it read-only.
+
+What to change, all in the one pull request:
+
+1. `FFFCTL_FORMS` in `server/opsWorker.ts`: the command with its `allowed` (read-only) and `changes` forms. `OPS_FFFCTL` follows from it. The server's shell guard checks the command word, and for `vault`, `machine-credential` and `migrate` the form word too.
+2. `deploy/vm/guest/fff-ops-priv`: a case with the exact arguments pinned (`exec "$FFFCTL" ...`), the header comment and the refusal text. Anything not pinned there is refused with exit 2 before `fffctl` runs.
+3. Tests: allowed and refused forms in `deploy/vm/test/fff-ops.test.sh` (against a fake `fffctl`) and in `server/opsWorker.test.ts`.
+4. This file: the "It may" table.
+
+`server/opsFffctlForms.test.ts` enforces the first two: it reads `fffctl`, `server/vaultCli.ts` and `scripts/fff-migrate.ts`, and fails when a command or form exists that the table does not classify, when the table lists one that is gone, and when `fff-ops-priv` and the guard disagree. A new command that has forms of its own (a new `case` inside it) is added to the `discovered` list in that test.
+
+**How such a change ships**: it changes `fff-ops-priv` and the server's guard, not the sudoers file (one root file, `fff-ops-priv`), so a portal deploy (`fffctl update`) carries it. The host's `install.sh --guest-only` adds nothing.
 
 ## Deploying it
 

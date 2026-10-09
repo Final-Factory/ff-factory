@@ -217,4 +217,23 @@ else
   rc=0; out=$(upriv units '') || rc=$?
   [ "$rc" -eq 2 ] || fail "priv: units with an empty word was not refused (exit $rc): $out"
   echo "ok: fff-ops-priv units and units --check reach fffctl (and its exit status comes back); every other word, the watchdog included, is refused"
+  # The other read-only forms (w745): the vault's list, list --names and help, machine-credential list, migrate --help. Every
+  # other form of those commands changes the vault, a credential or the migration, or copies the key: refused, never run.
+  [ "$(upriv vault list)" = "FFFCTL [vault] [list]" ] || fail "priv: vault list: $(upriv vault list)"
+  [ "$(upriv vault list --names)" = "FFFCTL [vault] [list] [--names]" ] || fail "priv: vault list --names: $(upriv vault list --names)"
+  [ "$(upriv vault help)" = "FFFCTL [vault] [help]" ] || fail "priv: vault help: $(upriv vault help)"
+  [ "$(upriv machine-credential list)" = "FFFCTL [machine-credential] [list]" ] || fail "priv: machine-credential list: $(upriv machine-credential list)"
+  [ "$(upriv migrate --help)" = "FFFCTL [migrate] [--help]" ] || fail "priv: migrate --help: $(upriv migrate --help)"
+  for bad in 'vault' 'vault list extra' 'vault list --names extra' 'vault list --file x' 'vault list --stdin' 'vault help extra' 'vault get x' 'vault show x' 'vault status' \
+    'vault init' 'vault init --new-key' 'vault export-key --out /tmp/k' 'vault new-key /tmp/k' 'vault add --name x --kind claude --stdin' 'vault put --name x --kind claude --stdin' \
+    'vault rotate x --stdin' 'vault grant x --disable' 'vault remove x' 'vault --help' 'vault -h' 'vault LIST' \
+    'machine-credential' 'machine-credential list extra' 'machine-credential issue m5 --out /tmp/c' 'machine-credential revoke m5' \
+    'migrate' 'migrate --key' 'migrate --dry-run-copy' 'migrate --rollback-dry-run' 'migrate --cut-over' 'migrate --help --cut-over' 'migrate -h' 'migrate --cut-over --help'; do
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(upriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
+  done
+  echo "ok: fff-ops-priv passes vault list [--names], vault help, machine-credential list and migrate --help to fffctl, and refuses every other vault, machine-credential and migrate form"
 fi
