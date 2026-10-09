@@ -6,6 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import type { EventEmitter } from 'node:events';
 import type { AddressInfo } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { Store } from './store.ts';
 import { QUEUE_HOLD_MS, SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
 import { collectResume } from './restart.ts';
@@ -433,8 +434,15 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   // right away; before the fix it hung until the handshake timeout, so a restart took ~40 s to get over.
   let upgrades = 0;
   const server = http.createServer();
+  const sockets = new Set<Duplex>();
   server.on('upgrade', (_req, socket) => {
     upgrades++;
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    // The daemon drops its side as soon as it reads the 502 (req.destroy, terminate), which can reach this end as a
+    // reset. An upgraded socket has lost http's own error listener, so without this one the reset was an uncaught
+    // "read ECONNRESET" that failed the file (w753: about 1 run in 25 under load, on Ubuntu and Windows CI).
+    socket.on('error', () => undefined);
     socket.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -449,6 +457,8 @@ test('daemon: a portal answering 502 (restarting behind the proxy) is retried at
   );
   t.after(() => {
     d.shutdown();
+    // server.close() leaves upgraded sockets alone: an attempt still in flight would outlive the test.
+    for (const s of sockets) s.destroy();
     server.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   });
