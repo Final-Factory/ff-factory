@@ -10,6 +10,12 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A vault token is always listed under its vault name, even when the host token, the token file or a person's own token is the same token**
+  (w777, Lothsahn: `vault-ben-2 …dAAA` showed only as "token file …dAAA"). `buildAccounts` no longer drops the vault entry because
+  another source holds the token: it is one row, one usage, named by the vault entry, and the other uses are on its subtext line
+  ("fff-portal's token file (the orchestrator)"), as a Mac login's "m3 login" is. A host or token-file token in no vault entry keeps
+  its own row. Such a row is hidden only when none of its roles is in use.
+
 - **Claude tokens can be added from inside the VM, and the host copies what only the VM has every night** (w749, lothsahn:
   "I would also like a fffctl command that can be run in the VM that adds a key to the vault, and I would like to update
   the nightly host vm restart process to copy any vault keys that exist within the VM to the host.").
