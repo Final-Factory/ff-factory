@@ -1,7 +1,8 @@
 // The blocker watch (w643; docs/orchestrators.md, "Waiting, Queued, Blocked"). Every minute, and at once when a request
 // is blocked, it looks at each Blocked request's blocker (shared/blockers.ts blockerVerdict) and:
 //
-// - clear: unblocks it, and the dispatcher is told to start it now (Orchestrators.unblock), with no person nudging it;
+// - clear: unblocks it, and the dispatcher is told to start it now (Orchestrators.unblock), with no person nudging it. A request
+//   with several gates (w754) is unblocked only when all have cleared; the cleared ones are dropped as they clear;
 // - stuck (the blocker stalled, or did not clear in its time): stalls it with the reason (Orchestrators.blockerStuck);
 // - decide (what it waited on closed without delivering): asks its requester (Orchestrators.blockerDecide);
 // - open: leaves it, and the ledger cleanup leaves it too (stallCandidate never takes a blocked request).
@@ -12,7 +13,7 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc } from './proc.ts';
-import { blockerVerdict, CI_REF, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, gatesOf, type BlockerFacts } from '../shared/blockers.ts';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
 
 const EVERY_MS = 60_000;
@@ -21,10 +22,12 @@ const CI_EVERY_MS = 5 * 60_000;
 const BUSY: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
 
 export type CiState = { done: boolean; text: string };
+/** A pull request's state (w754): open, merged, or closed without merging, and a line saying how. */
+export type PrState = { state: 'open' | 'merged' | 'closed'; text: string };
 
 export interface BlockerWatchDeps {
   store: Store;
-  orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'flagQueuedWithRoom'>;
+  orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom'>;
   /** The commit the portal runs. */
   portalSha?: () => string | undefined;
   /** The commit a machine's daemon runs. */
@@ -37,6 +40,8 @@ export interface BlockerWatchDeps {
   nightlyAt?: () => number | undefined;
   /** A pull request's checks ("owner/repo#123"); default gh. */
   ci?: (ref: string) => Promise<CiState | undefined>;
+  /** A pull request's state ("owner/repo#123"); default gh. */
+  pr?: (ref: string) => Promise<PrState | undefined>;
   /** The computers with room for one more worker now. */
   room?: () => string[];
   now?: () => number;
@@ -47,6 +52,7 @@ export class BlockerWatch {
   private busy = false;
   private again = false;
   private readonly ciSeen = new Map<string, { at: number; state?: CiState }>();
+  private readonly prSeen = new Map<string, { at: number; state?: PrState }>();
   private readonly d: BlockerWatchDeps;
 
   constructor(d: BlockerWatchDeps) {
@@ -84,17 +90,30 @@ export class BlockerWatch {
     try {
       const blocked = [...this.d.store.work.values()].filter((w) => w.status === 'blocked' && w.blocked && w.blocked.by !== 'ledger cleanup');
       const ci = new Map<string, CiState | undefined>();
-      for (const w of blocked) if (w.blocked!.kind === 'ci' && w.blocked!.ref) ci.set(w.blocked!.ref, await this.ciOf(w.blocked!.ref));
-      const facts = this.facts(ci);
+      const pr = new Map<string, PrState | undefined>();
+      for (const w of blocked) {
+        for (const g of gatesOf(w)) {
+          if (!g.ref) continue;
+          if (g.kind === 'ci') ci.set(g.ref, await this.ciOf(g.ref));
+          else if (g.kind === 'pr') pr.set(g.ref, await this.prOf(g.ref));
+        }
+      }
+      const facts = this.facts(ci, pr);
       for (const w of blocked) {
         const live = this.d.store.work.get(w.id);
         if (!live || live.status !== 'blocked' || !live.blocked) continue;
-        const v = blockerVerdict(live.blocked, facts);
-        if (v.state === 'open') continue;
-        if (v.state === 'clear') this.d.orchestrators.unblock(live.id, v.why);
-        else if (v.state === 'stuck') this.d.orchestrators.blockerStuck(live.id, v.why);
-        else this.d.orchestrators.blockerDecide(live.id, v.why);
-        did.set(live.id, `${v.state}: ${v.why}`);
+        // Every gate (w754): the request starts only when all have cleared. One that is stuck or closed without delivering
+        // decides it at once; the cleared ones are dropped as they clear.
+        const gates = gatesOf(live).map((g) => ({ g, v: blockerVerdict(g, facts) }));
+        const bad = gates.find((x) => x.v.state === 'stuck') ?? gates.find((x) => x.v.state === 'decide');
+        const cleared = gates.filter((x) => x.v.state === 'clear');
+        if (bad?.v.state === 'stuck') this.d.orchestrators.blockerStuck(live.id, bad.v.why, bad.g);
+        else if (bad) this.d.orchestrators.blockerDecide(live.id, bad.v.why, bad.g);
+        else if (cleared.length === gates.length) this.d.orchestrators.unblock(live.id, cleared.map((x) => x.v.why).join('; '));
+        else if (cleared.length) this.d.orchestrators.gatesCleared(live.id, cleared.map((x) => x.g), cleared.map((x) => x.v.why).join('; '));
+        else continue;
+        const was = bad ?? cleared[0];
+        did.set(live.id, `${bad ? was.v.state : 'clear'}: ${(bad ? [bad] : cleared).map((x) => x.v.why).join('; ')}`);
       }
       const room = this.d.room?.();
       if (room?.length) for (const id of this.d.orchestrators.flagQueuedWithRoom(room)) did.set(id, 'flagged: queued while a computer has room');
@@ -110,7 +129,7 @@ export class BlockerWatch {
     return did;
   }
 
-  private facts(ci: ReadonlyMap<string, CiState | undefined>): BlockerFacts {
+  private facts(ci: ReadonlyMap<string, CiState | undefined>, pr: ReadonlyMap<string, PrState | undefined>): BlockerFacts {
     const store = this.d.store;
     return {
       now: this.now(),
@@ -126,7 +145,17 @@ export class BlockerWatch {
       ...(this.d.usageClear ? { usageClear: this.d.usageClear } : {}),
       nightlyAt: this.d.nightlyAt?.(),
       ci: (ref) => ci.get(ref),
+      pr: (ref) => pr.get(ref),
     };
+  }
+
+  /** A pull request's state, read at most every CI_EVERY_MS (w754). */
+  private async prOf(ref: string): Promise<PrState | undefined> {
+    const seen = this.prSeen.get(ref);
+    if (seen && this.now() - seen.at < CI_EVERY_MS) return seen.state;
+    const state = await (this.d.pr ?? ghPr)(ref).catch(() => undefined);
+    this.prSeen.set(ref, { at: this.now(), state });
+    return state;
   }
 
   /** A pull request's checks, read at most every CI_EVERY_MS. */
@@ -156,6 +185,21 @@ export function checksState(pr: { state?: string; statusCheckRollup?: GhCheck[] 
   if (running.length) return { done: false, text: `${running.length} of ${checks.length} checks on ${ref} still running` };
   const failed = checks.filter((c) => ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED'].includes((c.conclusion ?? c.state ?? '').toUpperCase()));
   return { done: true, text: failed.length ? `CI on ${ref} finished: ${failed.length} of ${checks.length} checks failed (${failed.slice(0, 3).map((c) => c.name ?? c.context).join(', ')})` : `CI on ${ref} finished: all ${checks.length} checks passed or skipped` };
+}
+
+/** What a pull request says about itself (gh pr view): open, merged, or closed without merging (w754). */
+export function prState(pr: { state?: string }, ref: string): PrState {
+  if (pr.state === 'MERGED') return { state: 'merged', text: `${ref} merged` };
+  if (pr.state === 'CLOSED') return { state: 'closed', text: `${ref} was closed without merging` };
+  return { state: 'open', text: `${ref} is still open` };
+}
+
+async function ghPr(ref: string): Promise<PrState | undefined> {
+  const m = CI_REF.exec(ref);
+  if (!m) return undefined;
+  const r = await runProc('gh', ['pr', 'view', m[2], '-R', m[1], '--json', 'state'], { timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  if (r.code !== 0) return undefined;
+  return prState(JSON.parse(r.stdout) as { state?: string }, ref);
 }
 
 async function ghChecks(ref: string): Promise<CiState | undefined> {

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gatesName, gatesOf, MAX_GATES, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
 import type { OptionsFactory, SessionHandle, SessionManager } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -55,6 +55,8 @@ import type { AttachmentRef, Machine, WorkAutoClosed, WorkBlocker, ProviderConve
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
+/** The statuses a request keeps its gates in (w754): blocked itself, a hold (question) and the dispatcher's turn after a "go" (new). */
+const GATE_STATUSES: ReadonlySet<WorkItem['status']> = new Set(['blocked', 'question', 'new']);
 /** How much of a worker's DONE reports on a request is kept for a later re-check (WorkItem.done text, w515). */
 const DONE_TEXT_CHARS = 4000;
 /** A worker is asked how a request stands at most this often (askStatus, w631). */
@@ -127,6 +129,11 @@ export interface OrchestratorsDeps {
   machineOnline?: (id: string) => boolean | undefined;
   /** The commit the portal runs (no id), or a machine's daemon (w643: a deploy blocker clears when it changes). */
   deploySha?: (machineId?: string) => string | undefined;
+  /**
+   * Cancel a worker's pending wake_me check-in (w754): a request that is Blocked on other requests needs none, and one
+   * left behind would wake the worker to poll. Returns what it was ("08:06 UTC: <note>"), or undefined when none was pending.
+   */
+  cancelWake?: (sessionId: string) => string | undefined;
   now?: () => Date;
   /** How long intake notices gather before they reach the dispatcher (tests shorten it). */
   intakeGatherMs?: number;
@@ -692,8 +699,12 @@ export class Orchestrators {
     const now = this.now();
     w.log = [...w.log, logLine(now, line)].slice(-40);
     w.updatedAt = now.toISOString();
-    // A blocker or a capacity note belongs to its status only (w643): any move out of it drops them.
-    if (w.status !== 'blocked' && w.blocked) w.blocked = undefined;
+    // A capacity note belongs to its status only (w643). Gates (w754) outlive a hold and a person's "go" (new, question):
+    // they go when the request starts (active), stalls, closes or is queued for capacity, or the unblock drops them itself.
+    if (w.blocked && !GATE_STATUSES.has(w.status)) {
+      w.blocked = undefined;
+      w.alsoBlocked = undefined;
+    }
     if (w.status !== 'queued' && w.queuedFor) w.queuedFor = undefined;
   }
 
@@ -940,6 +951,12 @@ export class Orchestrators {
       w.notes = [...(w.notes ?? []), { at: this.now().toISOString(), by: owner.displayName, text: note.slice(0, 2000) }].slice(-20);
       if (w.status === 'question') w.status = 'new';
       w.question = undefined;
+      // A hold lifted or a "go" does not lift a gate (w754, w750: w727 was still open when lothsahn said "unblock the release"):
+      // it goes back to Blocked on what it kept, and starts by itself when they clear.
+      if (w.status === 'new' && w.blocked) {
+        w.status = 'blocked';
+        what.push(`still blocked on ${gatesName(gatesOf(w), this.now().getTime())}: a lifted hold does not lift a gate, it starts by itself when they clear`);
+      }
       if (w.flag) {
         what.push(`answers the design question "${clip(w.flag.text, 120)}"`);
         w.flag = undefined;
@@ -1095,7 +1112,7 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   }
 
   /** The dispatcher decides about a request (decide_work); the requesters' orchestrators get the reply. */
-  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'> }): string {
+  decide(input: { id: string; action: Decision; note: string; into?: string; session_ids?: string[]; needs?: string[]; blocker?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>; blockers?: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[]; add_blocker?: boolean; override_gate?: string }): string {
     const w = this.requireWork(input.id);
     if (w.approval?.state === 'pending') throw new Error(`${w.id} waits for a person to approve it (intake); it is not yours to decide yet`);
     const into = input.into ? this.requireWork(input.into) : undefined;
@@ -1115,6 +1132,8 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     } else if (input.action === 'link') {
       const ids = (input.session_ids ?? []).map((x) => x.trim()).filter(Boolean);
       if (!ids.length) throw new Error('link needs session_ids: the workers already doing it');
+      const gated = this.gateProblem(w, input.override_gate);
+      if (gated) throw new Error(gated);
       for (const sid of ids) {
         const s = this.store.sessions.get(sid);
         if (!s || s.kind !== 'worker') throw new Error(`no worker "${sid}"`);
@@ -1137,6 +1156,9 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       w.question = { text: clip(note, 1000), at: this.now().toISOString() };
       what = 'a question';
     } else if (input.action === 'queue') {
+      // A gated request is not waiting for capacity (w754): queueing it would drop the gates.
+      const gated = this.gateProblem(w, input.override_gate);
+      if (gated) throw new Error(`${gated} It waits for those, not for capacity: leave it blocked.`);
       // Queued is capacity only (w643): with a computer that could take it free, it is started or blocked, not queued.
       const needs = [...new Set((input.needs ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean))];
       const room = (this.d.room?.() ?? []).filter((id) => !needs.length || needs.includes(id.toLowerCase()));
@@ -1148,25 +1170,24 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
       w.queuedFor = { at: this.now().toISOString(), ...(needs.length ? { needs } : {}) };
       what = `queued for capacity${needs.length ? ` on ${needs.join(' or ')}` : ''}`;
     } else if (input.action === 'block') {
-      const b = input.blocker;
-      if (!b) throw new Error('block needs blocker: what it waits for (kind, ref, what; until for a time). A person it waits on is ask; capacity is queue.');
       const now = this.now();
-      const problem = blockerProblem(b, w.id, { now: now.getTime(), work: (id) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) });
-      if (problem) throw new Error(problem);
-      const ref = b.kind === 'request' || b.kind === 'machine' || b.kind === 'deploy' ? b.ref?.trim().toLowerCase() : b.ref?.trim();
-      const sha = b.kind === 'deploy' ? this.d.deploySha?.(ref) : undefined;
-      w.blocked = {
-        kind: b.kind,
-        ...(ref ? { ref } : {}),
-        ...(b.on && (b.kind === 'request' || b.kind === 'lock') ? { on: b.on } : {}),
-        ...(b.holder && b.kind === 'lock' ? { holder: b.holder.trim().toLowerCase() } : {}),
-        ...(b.until ? { until: new Date(Date.parse(b.until)).toISOString() } : {}),
-        what: clip(b.what.trim(), 200),
-        at: now.toISOString(),
-        by: 'dispatcher',
-        ...(sha ? { sha } : {}),
-      };
-      what = `blocked on ${blockerName(w.blocked, now.getTime())} (${w.blocked.what}); it starts by itself when that clears`;
+      const kept = gatesOf(w);
+      const asked = input.blockers?.length ? input.blockers : input.blocker ? [input.blocker] : [];
+      if (!asked.length && !kept.length) throw new Error('block needs blocker (or blockers, for several): what it waits for (kind, ref, what; until for a time). A person it waits on is ask; capacity is queue.');
+      const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
+      for (const b of asked) {
+        const problem = blockerProblem(b, w.id, facts);
+        if (problem) throw new Error(problem);
+      }
+      const fresh = asked.map((b) => this.makeGate(b, now.toISOString(), 'dispatcher'));
+      // Without a new gate, it blocks again on the ones it kept through a hold (w754). A single blocker replaces what it
+      // waited on, unless add_blocker: then it joins the gates it has, and the request starts when all have cleared.
+      const gates = !fresh.length ? kept : input.add_blocker && !input.blockers?.length ? [...kept.filter((k) => !fresh.some((f) => sameGate(f, k))), ...fresh] : fresh.filter((g, i) => fresh.findIndex((x) => sameGate(x, g)) === i);
+      if (gates.length > MAX_GATES) throw new Error(`a request has at most ${MAX_GATES} gates; ${w.id} would have ${gates.length}`);
+      w.blocked = gates[0];
+      w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
+      const cancelled = this.cancelCheckIns(w);
+      what = `blocked on ${gatesName(gates, now.getTime())} (${gates.map((g) => g.what).join('; ')}); it starts by itself when ${gates.length > 1 ? 'all of them clear' : 'that clears'}${cancelled}`;
     } else if (input.action === 'reject') what = 'declined';
     else what = 'done';
     // The dispatcher's decision is a hand close or reopen too (w370: w339, closed by it at 02:26, reopened by the
@@ -1234,15 +1255,116 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     });
   }
 
+  /** A gate as recorded (w754): the dispatcher's blocker, or a worker's blocked_on. */
+  private makeGate(b: Omit<WorkBlocker, 'at' | 'by' | 'sha'>, at: string, by: string): WorkBlocker {
+    const ref = b.kind === 'request' || b.kind === 'machine' || b.kind === 'deploy' ? b.ref?.trim().toLowerCase() : b.ref?.trim();
+    const sha = b.kind === 'deploy' ? this.d.deploySha?.(ref) : undefined;
+    return {
+      kind: b.kind,
+      ...(ref ? { ref } : {}),
+      ...(b.on && (b.kind === 'request' || b.kind === 'lock') ? { on: b.on } : {}),
+      ...(b.holder && b.kind === 'lock' ? { holder: b.holder.trim().toLowerCase() } : {}),
+      ...(b.until ? { until: new Date(Date.parse(b.until)).toISOString() } : {}),
+      what: clip(b.what.trim(), 200),
+      at,
+      by,
+      ...(sha ? { sha } : {}),
+    };
+  }
+
+  /**
+   * A blocked request's workers need no check-ins (w754: w750's worker polled `gh pr view` every 20 minutes and the
+   * ledger called that Working): cancel the pending wake_me of each worker that serves this request alone. Returns the
+   * words for the request's log, or ''.
+   */
+  private cancelCheckIns(w: WorkItem): string {
+    if (!this.d.cancelWake) return '';
+    const items = [...this.store.work.values()];
+    const done: string[] = [];
+    for (const sid of w.sessionIds) {
+      if (!this.store.sessions.get(sid)) continue;
+      const serves = servedBy(sid, items);
+      if (serves.size !== 1 || !serves.has(w.id)) continue;
+      const was = this.d.cancelWake(sid);
+      if (was) done.push(`${sid}'s check-in (${was})`);
+    }
+    return done.length ? `; cancelled ${done.join(', ')}` : '';
+  }
+
+  /** Whether a gate may still be open: judged here only where the facts are at hand; the rest waits for the blocker watch. */
+  private gateOpen(g: WorkBlocker): boolean {
+    if (!['request', 'time', 'machine', 'lock'].includes(g.kind)) return true;
+    const f: BlockerFacts = { now: this.now().getTime(), work: (id) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
+    return blockerVerdict(g, f).state !== 'clear';
+  }
+
+  /**
+   * Why `w` may not be started or messaged now (w754), or undefined: it has a gate that is still open. A person's "go" and
+   * a lifted hold do not lift a gate (w750: the dispatcher started a worker on a released hold with w727 still open).
+   * `override` is a person's own words saying to start it anyway.
+   */
+  gateProblem(w: WorkItem, override?: string): string | undefined {
+    const open = gatesOf(w).filter((g) => this.gateOpen(g));
+    if (!open.length || override?.trim()) return undefined;
+    return `${w.id} is gated on ${gatesName(open, this.now().getTime())} (${open.map((g) => g.what).join('; ')}), which has not cleared. A hold lifted or a "go" does not lift a gate: it starts by itself when they clear, and what people add meanwhile is kept for its worker. Start it anyway only on a person's own word to do so, passing it as override_gate; otherwise leave it blocked (decide_work block with no new blocker blocks it again on these).`;
+  }
+
+  /**
+   * The blocked_on tool (w754): a worker says its request waits only on other requests or pull requests. The request is
+   * Blocked on them, its pending check-ins are cancelled, and the worker ends its turn: it is resumed by the dispatcher
+   * when they clear (unblock). No polling.
+   */
+  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; prs?: string[]; what: string }): string {
+    const items = [...this.store.work.values()];
+    const serves = [...servedBy(sessionId, items)].map((id) => this.store.work.get(id)).filter((x): x is WorkItem => !!x);
+    const named = a.request?.trim().toLowerCase();
+    const w = named ? serves.find((x) => x.id === named) : serves.length === 1 ? serves[0] : undefined;
+    if (!w) throw new Error(named ? `you are not on ${named}` : serves.length ? `you serve ${serves.map((x) => x.id).join(', ')}: pass request, the one that waits` : 'you are on no request in the ledger, so there is nothing to block');
+    if (w.status !== 'active' && w.status !== 'blocked') throw new Error(`${w.id} is ${w.status}; blocked_on is for a request you are working on`);
+    const what = (a.what ?? '').split(/ +/).join(' ').trim();
+    if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into develop');
+    const now = this.now();
+    const asked: Omit<WorkBlocker, 'at' | 'by' | 'sha'>[] = [];
+    for (const id of a.requests ?? []) asked.push({ kind: 'request', ref: id.trim(), what: `${id.trim().toLowerCase()} finishing` });
+    for (const pr of a.prs ?? []) {
+      const ref = prRefOf(pr);
+      if (!ref) throw new Error(`"${pr}" is not a pull request: give owner/repo#123 or its github.com link`);
+      asked.push({ kind: 'pr', ref, what: `PR ${ref} merged` });
+    }
+    if (!asked.length) throw new Error('name what it waits for: requests (ids) and/or prs (owner/repo#123 or a github.com link). A person is waiting_on_person; a time is wake_me');
+    asked[0] = { ...asked[0], what: clip(what, 200) };
+    const facts = { now: now.getTime(), work: (id: string) => this.store.work.get(id.toLowerCase()), ...(this.d.machineOnline ? { online: this.d.machineOnline } : {}) };
+    for (const b of asked) {
+      const problem = blockerProblem(b, w.id, facts);
+      if (problem) throw new Error(problem);
+    }
+    const gates = asked.map((b) => this.makeGate(b, now.toISOString(), `worker ${sessionId}`)).filter((g, i, all) => all.findIndex((x) => sameGate(x, g)) === i);
+    if (gates.length > MAX_GATES) throw new Error(`at most ${MAX_GATES} things at once`);
+    w.blocked = gates[0];
+    w.alsoBlocked = gates.length > 1 ? gates.slice(1) : undefined;
+    w.stalled = undefined;
+    w.status = 'blocked';
+    const cancelled = this.cancelCheckIns(w);
+    const name = gatesName(gates, now.getTime());
+    this.stamp(w, `worker ${sessionId}: blocked on ${name} (${gates[0].what}); it ends its turn and is resumed when that clears${cancelled}`);
+    this.store.putWork(w);
+    this.toPeople(w.requesters, dispatchNotice(w, `blocked on ${name} (${gates[0].what}); its worker ${sessionId} stopped polling and is resumed when that clears`));
+    return `Recorded: ${w.id} is Blocked on ${name}. ${cancelled ? 'Your pending check-in is cancelled. ' : ''}End your turn now with your report (a line "${w.id}: still open: blocked on ${name}"). Do NOT set a wake_me to poll for it: when it clears, FF Factory resumes you with a message. Anything people add meanwhile is kept for you.`;
+  }
+
   /** A worker was started, messaged or approved for a request: link it, mark the request active, tell its requesters. */
-  linkWorker(workId: string, s: Pick<SessionInfo, 'id' | 'title'>, what: string, opts: { reply?: boolean } = {}) {
+  linkWorker(workId: string, s: Pick<SessionInfo, 'id' | 'title'>, what: string, opts: { reply?: boolean; overrideGate?: string } = {}) {
     const w = this.requireWork(workId);
     const problem = startProblem(w);
     if (problem) throw new Error(problem);
+    // Gates are checked before the worker starts (gateProblem); an override is recorded here (w754).
+    const gated = gatesOf(w).length ? this.gateProblem(w, opts.overrideGate) : undefined;
+    if (gated) throw new Error(gated);
+    if (opts.overrideGate?.trim() && gatesOf(w).length) what += ` (gate overridden: "${clip(opts.overrideGate.trim(), 200)}")`;
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
     w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'sent' } };
     // Started or sent to a worker: whatever held it is over (stamp drops a blocker or a capacity note).
-    const was = w.status === 'blocked' && w.blocked ? ` (it was blocked on ${blockerName(w.blocked)})` : '';
+    const was = w.blocked ? ` (it was blocked on ${gatesName(gatesOf(w))})` : '';
     w.status = 'active';
     this.stamp(w, `dispatcher: ${what}${was}`);
     this.store.putWork(w);
@@ -2962,9 +3084,12 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
   unblock(id: string, why: string) {
     const w = this.store.work.get(id);
     if (!w || w.status !== 'blocked' || !w.blocked) return;
-    const b = w.blocked;
-    const name = blockerName(b, this.now().getTime());
+    const gates = gatesOf(w);
+    const b = { what: gates.map((g) => g.what).join('; ') };
+    const name = gatesName(gates, this.now().getTime());
     w.status = 'new';
+    w.blocked = undefined;
+    w.alsoBlocked = undefined;
     this.stamp(w, `unblocked: ${name} cleared (${why})`);
     this.store.putWork(w);
     const worker = [...w.sessionIds].reverse().find((sid) => this.store.sessions.get(sid));
@@ -2976,11 +3101,28 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
     );
   }
 
-  /** A blocked request's blocker stalled, or did not clear in time (w643): the request stalls, saying so, for its people. */
-  blockerStuck(id: string, why: string) {
+  /**
+   * Some of a blocked request's gates cleared, others have not (w754): the cleared ones go, the request stays Blocked on
+   * the rest, and its log says so. (All cleared is unblock.)
+   */
+  gatesCleared(id: string, cleared: readonly WorkBlocker[], why: string) {
     const w = this.store.work.get(id);
     if (!w || w.status !== 'blocked' || !w.blocked) return;
-    const reason = clip(`blocked on ${blockerName(w.blocked, this.now().getTime())} (${w.blocked.what}): ${why}`, 400);
+    const left = gatesOf(w).filter((g) => !cleared.some((c) => sameGate(c, g)));
+    if (!left.length || left.length === gatesOf(w).length) return;
+    const now = this.now().getTime();
+    w.blocked = left[0];
+    w.alsoBlocked = left.length > 1 ? left.slice(1) : undefined;
+    this.stamp(w, `${gatesName(cleared, now)} cleared (${why}); still blocked on ${gatesName(left, now)}`);
+    this.store.putWork(w);
+  }
+
+  /** A blocked request's blocker stalled, or did not clear in time (w643): the request stalls, saying so, for its people. */
+  blockerStuck(id: string, why: string, gate?: WorkBlocker) {
+    const w = this.store.work.get(id);
+    if (!w || w.status !== 'blocked' || !w.blocked) return;
+    const g = gate ?? w.blocked;
+    const reason = clip(`blocked on ${blockerName(g, this.now().getTime())} (${g.what}): ${why}`, 400);
     const at = this.now().toISOString();
     w.status = 'stalled';
     w.stalled = { at, kind: 'blocked', reason };
@@ -2994,11 +3136,15 @@ ${note}`, 'orchestrator', undefined, { requestedBy: asRequester(by) });
    * What a blocked request waited on closed without delivering (w643): a person must say whether it is still wanted, so
    * it waits on its requester as a question (answered by a note, like the dispatcher's).
    */
-  blockerDecide(id: string, why: string) {
+  blockerDecide(id: string, why: string, gate?: WorkBlocker) {
     const w = this.store.work.get(id);
     if (!w || w.status !== 'blocked' || !w.blocked) return;
-    const text = clip(`It was blocked on ${blockerName(w.blocked, this.now().getTime())} (${w.blocked.what}), and ${why}. Is ${w.id} still needed, and what should it wait for now?`, 1000);
+    const g = gate ?? w.blocked;
+    const text = clip(`It was blocked on ${blockerName(g, this.now().getTime())} (${g.what}), and ${why}. Is ${w.id} still needed, and what should it wait for now?`, 1000);
     w.status = 'question';
+    // A gate that died is the person's to rule on (w754): none of its gates is kept through that question.
+    w.blocked = undefined;
+    w.alsoBlocked = undefined;
     w.question = { text, at: this.now().toISOString() };
     this.stamp(w, `blocker closed without delivering: ${why}; asked ${w.requestedBy.displayName}`);
     this.store.putWork(w);

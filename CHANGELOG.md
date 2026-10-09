@@ -24,6 +24,28 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   `claudeAccounts.workers` applies to nothing, so the "fff-portal login (workers)" account row, "workers here: …" in the per-agent
   line and the "set to the fff-portal login (workers), which cannot run agents" warning are left out (`workersHere`); they return when
   a local machine is added.
+- **A request that waits on other requests or PRs shows Blocked, not Working; its worker stops polling; a lifted hold keeps
+  its gates** (w754, Lothsahn: "Why is 750 working? Shouldn't it be waiting or blocked?"). w750 (the Build 90 release) was
+  blocked on w727, held, and when the hold lifted ("You can unblock the release") the dispatcher started its worker with
+  w727's PR still open: the hold's `ask` dropped the block. Its worker then polled `gh pr view` every 20 minutes with
+  `wake_me`, and a pending check-in made the ledger show Working for an hour. Now: a block is a **gate** that survives a hold
+  and a "go" (a note lifting the hold puts the request back to Blocked; `start_agent`, `message_agent`, `decide_work link`
+  and `queue` are refused while a gate is open, unless a person's own words are passed as `override_gate`); a request can
+  wait on **several gates** (`decide_work block` with `blockers`, or `add_blocker`; it starts when all have cleared) and on a
+  **pull request merging** (the new `pr` kind); a blocked request is **Blocked whatever check-ins its worker has pending**;
+  workers get a **`blocked_on`** tool (requests and PRs it waits on: the request is blocked, its check-in cancelled, it ends
+  its turn and is resumed when they clear) and a **`cancel_wake`** tool, and blocking a request cancels its workers'
+  check-ins. The dispatcher's and the workers' briefs say so. Tests: `server/orchestrators.test.ts` (the w750 sequence),
+  `server/workState.test.ts`, `server/blockers.test.ts`. Workers on a machine get the two tools after the machine's daemon
+  updates (they are in the daemon's tool catalog).
+
+
+- **machines.test.ts no longer fails now and then on a reset from the daemon** (w753, lothsahn: "Apparently
+  server/machines.test.ts is flaky. Please fix it."). The 502 test's fake portal answered each upgrade on the raw socket
+  without an error listener (an upgraded socket loses http's own), so when the daemon dropped its side after reading the
+  502 and that reached the fake portal as a reset, the "read ECONNRESET" was uncaught and failed the file. It failed 17
+  of 600 runs under load before and 0 of 600 after on Linux; it had failed 4 CI runs on 2026-10-09 (Windows and
+  Ubuntu). The fake portal now ignores that reset and destroys its sockets when the test ends.
 - **A closed "the VM watchdog restarted a critical unit" banner stays closed for that restart** (w751, Lothsahn: "make it remember
   when I close the warning at the top that a process died and doesn't reopen for the same error"). Closing it was only
   in the page's memory, so a reload, another device or a portal restart brought it back. Now the portal keeps, per person,

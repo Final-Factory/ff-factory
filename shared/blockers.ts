@@ -13,7 +13,8 @@ const DAY = 24 * HOUR;
  * (w643): a CI run takes minutes to an hour, so 6 hours is a hung run; a lock held a day is a run that never ended; a
  * machine away three days is down, not asleep; a weekly usage limit resets within 7 days; a deploy is a person's call,
  * and a week without one is worth their look. A request blocker has none: it follows that request, which the cleanup
- * stalls by itself when nothing works on it. A time blocker clears at its time.
+ * stalls by itself when nothing works on it. A time blocker clears at its time. A pull request (w754) can wait for review
+ * for days; a week open is worth a person's look.
  */
 export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
   request: undefined,
@@ -23,6 +24,7 @@ export const BLOCKER_STUCK_MS: Record<WorkBlockerKind, number | undefined> = {
   lock: DAY,
   time: undefined,
   ci: 6 * HOUR,
+  pr: 7 * DAY,
 };
 
 /** "16:29 UTC" or "10-08 16:29 UTC". */
@@ -49,8 +51,28 @@ export function blockerName(b: Pick<WorkBlocker, 'kind' | 'ref' | 'on' | 'until'
       return utc(b.until, now);
     case 'ci':
       return `CI on ${b.ref}`;
+    case 'pr':
+      return `PR ${b.ref} merging`;
   }
 }
+
+/** Every gate of a request, first the primary `blocked` and then `alsoBlocked` (w754); empty when it has none. */
+export function gatesOf(w: Pick<WorkItem, 'blocked' | 'alsoBlocked'>): WorkBlocker[] {
+  return w.blocked ? [w.blocked, ...(w.alsoBlocked ?? [])] : [];
+}
+
+/** "w727 finishing and PR Final-Factory/FinalFactory#1291 merging": what a request with several gates waits on. */
+export function gatesName(gates: readonly WorkBlocker[], now: number = Date.now()): string {
+  const names = gates.map((g) => blockerName(g, now));
+  return names.length <= 2 ? names.join(' and ') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+}
+
+/** Whether two gates are the same wait (the later one replaces the earlier when a request is blocked again, w754). */
+export const sameGate = (a: Pick<WorkBlocker, 'kind' | 'ref' | 'holder'>, b: Pick<WorkBlocker, 'kind' | 'ref' | 'holder'>) =>
+  a.kind === b.kind && (a.ref ?? '').toLowerCase() === (b.ref ?? '').toLowerCase() && (a.holder ?? '').toLowerCase() === (b.holder ?? '').toLowerCase();
+
+/** The most gates one request may have. */
+export const MAX_GATES = 6;
 
 /** What each kind waits on and when it clears, for the tool's description and the docs. */
 export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
@@ -61,6 +83,7 @@ export const BLOCKER_KIND_HELP: Record<WorkBlockerKind, string> = {
   lock: 'a shared lock such as the nightly lab.lock (ref: its name; holder: the request holding it, if one does; until: when to look again): clears when the holder closes or reports, the nightly lab next reports, or at until',
   time: 'a time (until: ISO): clears when it passes',
   ci: 'CI or checks on a pull request (ref: "owner/repo#123"): clears when no check is still running, or the PR merged or closed',
+  pr: 'a pull request MERGING (ref: "owner/repo#123"): clears when it merges; one closed without merging asks the requester. Use it for "wait for #1291 to merge"; ci clears when the checks finish, merged or not',
 };
 
 export interface BlockerFacts {
@@ -81,6 +104,8 @@ export interface BlockerFacts {
   nightlyAt?: number;
   /** A pull request's checks: done (none still running, or it merged or closed) and a line saying how. */
   ci?: (ref: string) => { done: boolean; text: string } | undefined;
+  /** A pull request's state (w754, the pr blocker): open, merged, or closed without merging; undefined when unknown. */
+  pr?: (ref: string) => { state: 'open' | 'merged' | 'closed'; text: string } | undefined;
 }
 
 /**
@@ -155,11 +180,25 @@ export function blockerVerdict(b: WorkBlocker, f: BlockerFacts): BlockerVerdict 
       if (c?.done) return { state: 'clear', why: c.text };
       return late(c?.text ?? `CI on ${b.ref} is running`);
     }
+    case 'pr': {
+      const p = b.ref ? f.pr?.(b.ref) : undefined;
+      if (p?.state === 'merged') return { state: 'clear', why: p.text };
+      if (p?.state === 'closed') return { state: 'decide', why: `${p.text} without delivering ${b.what}` };
+      return late(p?.text ?? `PR ${b.ref} is open`);
+    }
   }
 }
 
-/** A pull request as a ci blocker names it: "owner/repo#123". */
+/** A pull request as a ci or pr blocker names it: "owner/repo#123". */
 export const CI_REF = /^([\w.-]+\/[\w.-]+)#(\d+)$/;
+
+/** "owner/repo#123" from that, or from a github.com pull request link; undefined for anything else (a bare "#123" has no repo). */
+export function prRefOf(text: string): string | undefined {
+  const t = text.trim();
+  if (CI_REF.test(t)) return t;
+  const m = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/.exec(t);
+  return m ? `${m[1]}#${m[2]}` : undefined;
+}
 
 /** Why a blocker cannot be set as given, or undefined (decide_work block). */
 export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | 'on' | 'holder' | 'what'>, self: string, f: Pick<BlockerFacts, 'now' | 'work' | 'online'>): string | undefined {
@@ -172,7 +211,7 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
     const t = follow(id, f as BlockerFacts);
     if (!t) return `no request "${id}"`;
     if (t.status === 'done' || t.status === 'rejected' || t.status === 'cancelled') return `${id} is ${t.status} already: start this one, or say what else it waits for`;
-    if (t.blocked?.kind === 'request' && t.blocked.ref?.toLowerCase() === self.toLowerCase()) return `${id} is itself blocked on ${self}: they would wait on each other`;
+    if (gatesOf(t).some((g) => g.kind === 'request' && g.ref?.toLowerCase() === self.toLowerCase())) return `${id} is itself blocked on ${self}: they would wait on each other`;
     return undefined;
   };
   switch (b.kind) {
@@ -194,6 +233,7 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
       if (until === undefined) return 'blocker.until: when it may go (ISO)';
       return until! <= f.now ? `${b.until} has passed: start it now` : undefined;
     case 'ci':
+    case 'pr':
       return b.ref && CI_REF.test(b.ref) ? undefined : 'blocker.ref: the pull request, "owner/repo#123"';
   }
 }
