@@ -140,6 +140,59 @@ test('vault: the key lives outside data/, readable by its owner only; a missing 
   assert.equal(wrong.forRun({ machineId: 'm3', role: 'workers' }, { claude: true }).claude, undefined);
 });
 
+// systemd's credential file for a service that is not root: 0400, root-owned, the service user in a POSIX ACL; stat shows the ACL's
+// mask in the group bits (0440). A hand-made file of that mode elsewhere is group-readable for real and stays refused (w736).
+test('vault: systemd credential file (0440 by the ACL mask) opens, in the credentials folder only', { skip: process.platform === 'win32' }, (t) => {
+  const { dir, data, keyFile, make } = setup(t);
+  const creds = path.join(dir, 'creds');
+  fs.mkdirSync(creds, { mode: 0o700 });
+  fs.chmodSync(creds, 0o700);
+  const cred = path.join(creds, 'fff-vault-key');
+  fs.copyFileSync(keyFile, cred);
+  fs.chmodSync(cred, 0o440);
+  const me = process.getuid?.() ?? 0;
+  // The path the portal takes: keySource marks the credential, the Vault passes that on.
+  const src = keySource({ dataDir: data }, { CREDENTIALS_DIRECTORY: creds });
+  assert.equal(src.file, cred);
+  assert.equal(src.credentialsDir, creds);
+  assert.equal(readKey(cred, { credentialsDir: creds }).length, 32);
+  const v = make(() => src);
+  assert.equal(v.status().key, 'loaded', v.status().why ?? '');
+  v.add({ name: 'a', kind: 'claude', value: A, share: 'anyone' });
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers' }, { claude: true }).claude?.token, A);
+
+  // The same mode anywhere else is refused: through config vault.keyFile, and as a bare path.
+  const loose = path.join(dir, 'etc', 'loose.key');
+  fs.copyFileSync(keyFile, loose);
+  fs.chmodSync(loose, 0o440);
+  assert.match(make(() => keySource({ dataDir: data, vault: { keyFile: loose } }, {})).status().why ?? '', /readable by other users \(mode 440\)/);
+  assert.throws(() => readKey(loose), /readable by other users/);
+  assert.throws(() => readKey(cred), /readable by other users/, 'without the credentials folder named it is the strict rule');
+  // A key file that merely sits in some other folder named as the credentials folder is not the credential.
+  assert.throws(() => readKey(loose, { credentialsDir: creds }), /not directly in the credentials folder/);
+
+  // Inside the credentials folder: other users, a write bit, a stranger as owner, an open folder, a link out are refused.
+  for (const [mode, why] of [[0o444, /other users can access it/], [0o404, /other users can access it/], [0o460, /writable by a group or others/]] as const) {
+    fs.chmodSync(cred, mode);
+    assert.throws(() => readKey(cred, { credentialsDir: creds }), why, mode.toString(8));
+  }
+  fs.chmodSync(cred, 0o440);
+  assert.throws(() => readKey(cred, { credentialsDir: creds, owners: [me + 1] }), /owned by uid/);
+  fs.chmodSync(creds, 0o755);
+  assert.throws(() => readKey(cred, { credentialsDir: creds }), /its folder is open to other users/);
+  fs.chmodSync(creds, 0o750);
+  assert.equal(readKey(cred, { credentialsDir: creds }).length, 32, 'group bits on the folder are the ACL mask too');
+  fs.chmodSync(creds, 0o700);
+  const out = path.join(creds, 'link');
+  fs.symlinkSync(loose, out);
+  assert.throws(() => readKey(out, { credentialsDir: creds }), /not directly in the credentials folder/);
+  // A wrong key in the credential is still reported as the wrong key, and its content is never in a message.
+  fs.chmodSync(cred, 0o600);
+  fs.writeFileSync(cred, 'c2hvcnQ=');
+  fs.chmodSync(cred, 0o440);
+  assert.throws(() => readKey(cred, { credentialsDir: creds }), (e: Error) => /not 32 bytes/.test(e.message) && !e.message.includes('c2hvcnQ'));
+});
+
 test('vault: forRun gives the granted secrets as environment, and a Claude token only when asked', (t) => {
   const { make } = setup(t);
   const v = make();
