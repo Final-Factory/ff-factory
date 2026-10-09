@@ -127,4 +127,10 @@ ok "an existing name, a bad token, an empty one, a bad NAME or PERSON, and a tok
 grep -q 'read -rs -p "Claude token for' "$G/fffctl" || fail "the terminal prompt must be 'read -rs' (no echo)"
 if sed -n '/^vault_add_claude()/,/^}/p' "$G/fffctl" | grep -n 'echo "\$t"\|printf .*\$t.*>&2\|set -x' >/dev/null; then fail "vault_add_claude prints the token"; fi
 ok "the terminal prompt reads without echo, and the function never prints the token"
+# `fffctl vault help` prints vaultCli.ts's usage header, now longer (the e2e's ops-worker step runs it; a bad sed range broke it)
+cp server/vaultCli.ts "$ROOT/app/current/server/vaultCli.ts"
+out=$(bash "$G/fffctl" vault help 2>&1) || fail "vault help failed: $out"
+printf '%s' "$out" | matches -F 'export --manifest' || fail "vault help does not show the export form: $out"
+printf '%s' "$out" | matches -F 'The key: ' || fail "vault help stops before the end of the header: $out"
+ok "fffctl vault help prints the whole usage header"
 echo "all fff-vault-add scenarios pass"

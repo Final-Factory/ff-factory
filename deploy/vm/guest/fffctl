@@ -544,7 +544,7 @@ cmd_vault() {
       # The FFBox host's file for a pool entry wins at the next sync (docs/vault.md, section 12): say so where it is done.
       case "${2:-}" in vault-* | host-*) echo "note: if the FFBox host has a file for ${2:-}, the host's file wins: the next 'fff-vm vault-sync' there rotates this entry back to it. Put the new token in that file to keep it (docs/vault.md, section 12)." >&2 ;; esac
       ;;
-    help | -h | --help) sed -n '2,/^// The key/p' "$CURRENT/server/vaultCli.ts" ;;
+    help | -h | --help) sed -n '2,\#^// The key#p' "$CURRENT/server/vaultCli.ts" ;;
     *) vault_cli "$@" ;;
   esac
 }
