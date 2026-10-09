@@ -199,6 +199,16 @@ export const dispatcherOwnAccount = (cfg: Pick<Config, 'claudeAccounts'>) => cfg
 /** The roles worth naming apart: the dispatcher only when it has an account of its own (else it is the orchestrator's). */
 export const shownRoles = (cfg: Pick<Config, 'claudeAccounts'>): HostRole[] => HOST_ROLES.filter((r) => r !== 'dispatcher' || dispatcherOwnAccount(cfg));
 
+/**
+ * Which of this host's own credentials its roles are set to use (w748): the stored login, the host token, or a vault pool.
+ * A role on "vault" counts for the account it falls back to (the token file, else the host token) as well, since a person
+ * with no tokens of their own yet still runs on it. The accounts list leaves out a credential no role is set to use.
+ */
+export function hostAccountsInUse(cfg: Pick<Config, 'claudeAccounts'> & Partial<Pick<Config, 'claudeTokenFile'>>): { login: boolean; token: boolean; vault: boolean } {
+  const base = HOST_ROLES.map((r) => baseAccount(cfg, r));
+  return { login: base.includes('login'), token: base.includes('token'), vault: HOST_ROLES.some((r) => hostAccount(cfg, r) === 'vault') };
+}
+
 /** The role a session on this host runs as (claudeAccounts): the dispatcher's own when it has one, else by its kind. */
 export function hostRoleOf(cfg: Pick<Config, 'claudeAccounts'>, info: Pick<SessionInfo, 'kind'> & Partial<Pick<SessionInfo, 'orchestratorRole'>>): HostRole {
   return info.kind === 'orchestrator' && info.orchestratorRole === 'dispatcher' && dispatcherOwnAccount(cfg) ? 'dispatcher' : hostRole(info.kind);

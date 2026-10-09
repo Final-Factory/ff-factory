@@ -195,7 +195,19 @@ try {
         roles: (list(o.roles) ?? ['workers', 'standing']) as VaultRole[],
         machines: list(o.machines) ?? ['*'],
       };
-      const was = vault.list().find((e) => e.name === name);
+      let was = vault.list().find((e) => e.name === name);
+      // The host's sync names its entries vault-<person>[-<n>] since w748 (host-<person>-claude[-<n>] before): the entry
+      // holding this very value under the old name is renamed, not added again (a value may be in the vault once), so the
+      // pool, its meters and its sessions carry over and nobody enters a token again.
+      let renamedFrom: string | undefined;
+      if (!was && /^vault-/.test(name)) {
+        const old = vault.list().find((e) => e.kind === kind && /^host-/.test(e.name) && e.fingerprint === fingerprintOf(value));
+        if (old) {
+          vault.rename(old.name, name);
+          renamedFrom = old.name;
+          was = vault.list().find((e) => e.name === name);
+        }
+      }
       if (!was) {
         const e = vault.add({ name, kind, value, env: o.env, ...grants });
         console.log(`added: ${show(e)}`);
@@ -207,7 +219,7 @@ try {
       const same = (a: string[], b: string[]) => a.join() === b.join();
       const regrant = (grants.owner ?? '') !== (was.owner ?? '') || grants.share !== was.share || !same(grants.roles, was.roles) || !same(grants.machines.map((m) => m.toLowerCase()), was.machines) || was.disabled;
       const e = regrant ? vault.update(name, { ...grants, owner: grants.owner ?? '', disabled: false }) : vault.list().find((x) => x.name === name)!;
-      console.log(`${rotated ? 'rotated' : regrant ? 'regranted' : 'unchanged'}: ${show(e)}`);
+      console.log(`${renamedFrom ? 'renamed' : rotated ? 'rotated' : regrant ? 'regranted' : 'unchanged'}: ${show(e)}${renamedFrom ? ` (was ${renamedFrom})` : ''}`);
       break;
     }
     case 'rotate': {
@@ -227,13 +239,18 @@ try {
       console.log(`changed: ${show(e)}`);
       break;
     }
+    case 'rename': {
+      const e = vault.rename(args[1] ?? die('rename OLD NEW'), args[2] ?? die('rename OLD NEW'));
+      console.log(`renamed: ${show(e)}`);
+      break;
+    }
     case 'remove': {
       const e = vault.remove(args[1] ?? die('remove NAME'));
       console.log(`removed ${e.name} (…${e.last4}). Revoke the token itself where it was made, too.`);
       break;
     }
     default:
-      die(`unknown command ${cmd} (list, add, rotate, grant, remove, new-key, machine-credential)`);
+      die(`unknown command ${cmd} (list, add, rotate, grant, rename, remove, new-key, machine-credential)`);
   }
 } catch (e) {
   die((e as Error).message);

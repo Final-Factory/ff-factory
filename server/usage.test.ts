@@ -495,7 +495,7 @@ test("tracker: while the endpoint rate-limits the token, the same token's rate-l
   );
   await t.refresh();
   const u = t.entries.get(tokenKey(TOKEN))!.usage!;
-  assert.deepEqual([u.available, u.weekly?.percent, u.session?.percent, u.models, u.source], [true, 42, 43, [], 'rate-limit headers']);
+  assert.deepEqual([u.available, u.weekly?.percent, u.session?.percent, u.models, u.source], [true, 42, 43, [], 'rate limits']);
   assert.deepEqual([calls.token, calls.limits], [[TOKEN], [TOKEN]]);
   assert.equal(t.usage?.weekly?.percent, 98, 'the login is untouched');
   assert.ok(
@@ -504,7 +504,7 @@ test("tracker: while the endpoint rate-limits the token, the same token's rate-l
     ),
     logs.join('\n'),
   );
-  assert.match(accountLines(tokenOnly(t), new Map(), new Date(AS_OF))[1], /^- host token …9AAA .*: Claude plan usage, as of .*, from rate-limit headers: Weekly 42% used/);
+  assert.match(accountLines(tokenOnly(t), new Map(), new Date(AS_OF))[1], /^- host token …9AAA .*: Claude plan usage, as of .*, from rate limits: Weekly 42% used/);
   fs.rmSync(dir, { recursive: true });
 });
 
@@ -700,7 +700,7 @@ test('tracker: a token without the user:profile scope (403) is read from the rat
   );
   await t.refresh();
   const u = t.entries.get(tokenKey(TOKEN))!.usage!;
-  assert.deepEqual([u.available, u.weekly?.percent, u.session?.percent, u.source], [true, 41, 33, 'rate-limit headers']);
+  assert.deepEqual([u.available, u.weekly?.percent, u.session?.percent, u.source], [true, 41, 33, 'rate limits']);
   assert.equal(u.weekly?.resetsAt, '2026-10-02T03:00:00+00:00');
   assert.deepEqual([calls.token.length, calls.limits.length], [1, 1]);
   assert.match(logs.find((l) => l.includes(tokenKey(TOKEN))) ?? '', /via the API's rate-limit headers \(the usage endpoint needs the user:profile scope|via the API's rate-limit headers \(the token may not read usage/);
@@ -753,4 +753,57 @@ test("tracker: a session's rate_limit_event raises its token's meter and never l
   assert.equal(t.entries.get(HOST_LOGIN)!.usage!.session?.percent, 0, "a login's meters are not touched");
   await t.refresh();
   assert.equal(sess(), 33, 'the poll replaces the floor');
+});
+
+test('accounts (w748): only accounts something is set to use; a Mac login leaves while its machine is on the vault and returns when it is not', () => {
+  const vaultKey = 'token:abc123abc123';
+  const entries = new Map<string, UsageEntry>([
+    [HOST_LOGIN, { kind: 'login', account: { email: 'portal@example.com' }, usage: usageOf(10) }],
+    [tokenKey(TOKEN), { kind: 'token', label: tokenLabel(TOKEN), usage: usageOf(20) }],
+    ['login:lothdesktop', { kind: 'login', account: { email: 'shamrock@example.com' }, usage: usageOf(30) }],
+    ['login:m3', { kind: 'login', account: { email: 'm3@example.com' }, usage: usageOf(40) }],
+    [vaultKey, { kind: 'token', label: 'lothsahn-1 …EAAA', usage: usageOf(95), direct: true }],
+  ]);
+  const ctx = (o: { lothVault: boolean; inUse?: { hostLogin: boolean; hostToken: boolean; vault: boolean }; sessions?: { id: string; source: string; live?: boolean }[] }) => ({
+    hostName: 'fff-portal',
+    token: { key: tokenKey(TOKEN), label: tokenLabel(TOKEN) },
+    vault: [{ key: vaultKey, label: 'lothsahn-1 …EAAA' }],
+    machines: [
+      { id: 'lothdesktop', usesToken: false, onVault: o.lothVault },
+      { id: 'm3', usesToken: false, onVault: false },
+    ],
+    inUse: o.inUse ?? { hostLogin: false, hostToken: true, vault: true },
+    sessions: o.sessions ?? [],
+  });
+  const labels = (c: ReturnType<typeof ctx>) => buildAccounts(entries, c).map((a) => a.label).sort();
+  // LothDesktop on the vault: its login is gone from the list, the portal's own login too (no role is set to it); m3's stays.
+  assert.deepEqual(labels(ctx({ lothVault: true })), ['host token …9AAA', 'lothsahn-1 …EAAA', 'm3@example.com']);
+  // Taken off the vault: it shows again, as "lothdesktop login".
+  assert.deepEqual(labels(ctx({ lothVault: false })), ['host token …9AAA', 'lothsahn-1 …EAAA', 'm3@example.com', 'shamrock@example.com']);
+  // A role set to the host login brings the portal's login back.
+  assert.ok(labels(ctx({ lothVault: true, inUse: { hostLogin: true, hostToken: true, vault: true } })).includes('portal@example.com'));
+  // Nothing set to the host token and nothing on the vault: both leave.
+  assert.deepEqual(labels(ctx({ lothVault: true, inUse: { hostLogin: false, hostToken: false, vault: false } })), ['m3@example.com']);
+  // An agent still running on a hidden account keeps it listed until it stops.
+  assert.deepEqual(
+    labels(ctx({ lothVault: true, sessions: [{ id: 'w9', source: 'login:lothdesktop', live: true }] })),
+    ['host token …9AAA', 'lothsahn-1 …EAAA', 'm3@example.com', 'shamrock@example.com'],
+  );
+  assert.deepEqual(labels(ctx({ lothVault: true, sessions: [{ id: 'w9', source: 'login:lothdesktop', live: false }] })), ['host token …9AAA', 'lothsahn-1 …EAAA', 'm3@example.com']);
+  // The machine daemon's own row for a machine on the host token goes too.
+  const viaToken = { ...ctx({ lothVault: false }), machines: [{ id: 'lothdesktop', usesToken: true, onVault: false }, { id: 'm3', usesToken: false, onVault: false }] };
+  assert.ok(!labels(viaToken).includes('shamrock@example.com'));
+  // Without `inUse` (an older caller) everything is listed as before.
+  const { inUse: _omit, ...bare } = ctx({ lothVault: true });
+  assert.ok(buildAccounts(entries, bare).some((a) => a.label === 'shamrock@example.com'));
+});
+
+test('accounts (w748): a vault token is named by itself and the status line has no description, only the agents on it', () => {
+  const key = 'token:abc123abc123';
+  const entries = new Map<string, UsageEntry>([[key, { kind: 'token', label: 'lothsahn-1 …EAAA', usage: { ...usageOf(95), source: 'rate limits' } }]]);
+  const accounts = buildAccounts(entries, { hostName: 'fff-portal', vault: [{ key, label: 'lothsahn-1 …EAAA' }], machines: [], inUse: { hostLogin: false, hostToken: false, vault: true }, sessions: [{ id: 'w1', source: key, live: true }] });
+  assert.deepEqual(accounts.map((a) => [a.label, a.where]), [['lothsahn-1 …EAAA', []]]);
+  const lines = accountLines(accounts, new Map([['w1', { id: 'w1', kind: 'worker' as const, status: 'running' as const }]]), new Date(AS_OF));
+  assert.match(lines[1], /^- lothsahn-1 …EAAA \[agents on it: w1\]: Claude plan .*usage, as of .*, from rate limits: Weekly 95% used/);
+  assert.doesNotMatch(lines.join('\n'), /vault:|the token vault|headers/);
 });

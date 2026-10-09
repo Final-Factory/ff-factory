@@ -407,14 +407,14 @@ the vault gets nobody else's: it runs as it did before the vault (the machine's 
 ```
 
 `claude-token` stays and is a pool of one. A `<name>` is 1 to 16 of `a-z 0-9 . _ -`, starting with a letter or digit
-(upper case is read as lower). Each file is an entry `host-<user>-claude-<name>`; all of a person's Claude entries are
+(upper case is read as lower). Each file is an entry `vault-<user>-<name>` (`claude-token` is `vault-<user>`); all of a person's Claude entries are
 their pool (section 4).
 
 **How the VM gets them: pushed in, not shared.** `sudo fff-vm vault-sync` (`deploy/vm/host/vault.sh`) sends each file
 over ssh's stdin to `fffctl vault put` in the VM, as the installer already sends the Claude and GitHub tokens
-(`push_secret`, `deploy/vm/host/guest.sh`). The entries are `host-<user>-claude`, `host-<user>-claude-<name>` and `host-<user>-github`, `share:
+(`push_secret`, `deploy/vm/host/guest.sh`). The entries are `vault-<user>` (claude-token), `vault-<user>-<name>` (claude-tokens/<name>) and `vault-<user>-github`, `share:
 owner`, for workers and standing agents on every machine. A second run changes nothing; a new value rotates its entry; a
-removed file removes its entry. Entries not named `host-…` (added by hand) are left alone. The installer's guest step
+removed file removes its entry. Entries not named `vault-…` or `host-…` (added by hand) are left alone; two files that would make one name (a pool file called `github` beside a `github-token`) make one entry, the other is skipped with a warning. The installer's guest step
 runs it too, so a re-run or a rebuilt VM is filled again.
 
 *Why not a read-only virtiofs share:* it needs a new device in the VM's libvirt definition and a cold restart of the
@@ -470,7 +470,7 @@ sudo fff-vm ssh 'sudo fffctl vault list'             # "key: loaded"
 sudo install -d -m 0700 /etc/fff-vm/secrets/people/<id>
 sudo bash -c 'umask 077; read -rs -p "Claude token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/claude-token'; echo
 sudo bash -c 'umask 077; read -rs -p "GitHub token: " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/github-token'; echo
-sudo fff-vm vault-sync                               # "added host-<id>-claude", "added host-<id>-github"; values never shown
+sudo fff-vm vault-sync                               # "added vault-<id>", "added vault-<id>-github"; values never shown
 ```
 
 Ben is not on the FFBox host: lothsahn runs the same commands there, and Ben types his own tokens at the hidden prompts
@@ -483,16 +483,26 @@ through a channel that is not chat (in person, or a password manager's share).
 ```bash
 sudo install -d -m 0700 /etc/fff-vm/secrets/people/<id>/claude-tokens
 sudo bash -c 'umask 077; read -rs -p "Claude token (second): " t && printf "%s\n" "$t" > /etc/fff-vm/secrets/people/<id>/claude-tokens/second'; echo
-sudo fff-vm vault-sync                               # "added host-<id>-claude-second"; values never shown
+sudo fff-vm vault-sync                               # "added vault-<id>-second"; values never shown
 sudo fff-vm ssh 'sudo fffctl vault list'             # the pool section: both tokens, their state, meters and resets
 ```
 
 From then on only the person's pool serves their runs (section 4). Someone with no token in the vault is unchanged
 until they add one.
 
-**3. Check:** `sudo fff-vm ssh 'sudo fffctl vault list'` shows `host-lothsahn-claude`, `host-lothsahn-github`,
-`host-ben-claude`, `host-ben-github`, each with its last four characters; within a minute the usage meters show
-"vault: host-<id>-claude …abcd" accounts.
+**3. Check:** `sudo fff-vm ssh 'sudo fffctl vault list'` shows `vault-lothsahn`, `vault-lothsahn-github`,
+`vault-ben`, `vault-ben-github`, each with its last four characters; within a minute the usage meters show
+"vault-<id> …abcd" accounts.
+
+**3b. The names before w748 carry over (w748).** The sync used to name the entries `host-<user>-claude`,
+`host-<user>-claude-<name>` and `host-<user>-github`; lothsahn asked for shorter names that are not cut off on the
+dashboard. Nobody enters a token again: after the portal is updated, `sudo fff-vm vault-sync` sends each file to
+`fffctl vault put` under its new name, and `put` finds the old entry holding the same token and **renames** it (`fffctl vault
+rename OLD NEW` does the same by hand): its id, token, owner, grants, meters and the sessions' last pick stay, so no pool loses a
+token in between and nothing running changes. The answer says `renamed: vault-ben-1 … (was host-ben-claude-1)`. A sync
+against a portal that cannot rename yet (it is not updated) warns `host-ben-claude-1 stays: its new name vault-ben-1 is not in
+the vault yet`, changes nothing, and the next sync after `fffctl update` renames. An old entry still there beside its new one (its
+file holds another token now) is removed. The old names are never removed while their file exists.
 
 **3a. The pool works** (after the deploy and a `vault-sync`): `sudo fff-vm ssh 'sudo fffctl vault list'` ends with a "Claude
 token pools" section, one line per token: its last four characters, its state (`ok`, `held`, `one-at-a-time`, `retired`,
@@ -513,7 +523,7 @@ Rollback: `set_app_config claudeAccounts.orchestrator "tokenfile"`.
 
 **5. Switch one machine at a time** (lothsahn, in `set_app_config` or through his orchestrator):
 `set_app_config machines.claudeFromVault true machine: "m3"`, then m5, lothdesktop and beast. A worker started there
-for lothsahn's request says "vault token host-lothsahn-claude …abcd" in its brief, and `gh auth status` there shows his
+for lothsahn's request says "vault token vault-lothsahn …abcd" in its brief, and `gh auth status` there shows his
 token; one for Ben's request shows Ben's.
 
 **6. After a few days with no fallback warning in `system_status`**, retire each machine's own logins (section 6, step

@@ -10,6 +10,17 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **The Claude accounts list shows only accounts in use, with shorter names, and the vault entries are renamed `vault-<person>[-<n>]`**
+  (w748, Lothsahn). An account appears only when a role or machine is set to use it or an agent runs on it now: LothDesktop's own
+  login is left out while `machines.claudeFromVault` includes it (and returns when it does not), likewise a machine on the host
+  token, the portal's stored login while no role is set to it, the host token while nothing uses it, and vault tokens while nothing
+  is on the vault (`inUse` in `buildAccounts`, `hostAccountsInUse`). A vault token's title drops "vault:" so its name is not cut
+  off, its description ("the token vault: workers, standing on every machine…") is gone (the "agents on it" list stays), and the
+  usage line says "from rate limits" instead of "from rate-limit headers". The host's sync names entries `vault-<person>`
+  (claude-token), `vault-<person>-<n>` (claude-tokens/<n>) and `vault-<person>-github` instead of `host-<person>-claude[-<n>]` and
+  `host-<person>-github`; `fffctl vault put` renames the old entry holding the same token (new `Vault.rename`, `fffctl vault rename
+  OLD NEW`), so no token is entered again and no pool loses one. A sync against a portal that cannot rename yet keeps the old
+  entries and warns. docs/vault.md 3b, docs/accounts.md.
 - **`sudo fff-vm vault-sync` no longer removes the `claude-tokens/<name>` pool entries the installer just added** (w744,
   Lothsahn; his host had only `people/ben/claude-tokens/{1,2}` and `lothsahn/claude-tokens/1`: `install.sh --guest-only` printed
   "added host-ben-claude-1 …", then `fff-vm vault-sync` printed "removed host-ben-claude-1 (its file is gone …)" for all three).

@@ -172,6 +172,16 @@ to the login cannot use it.
 The usage tracker polls the host token and this host's login whatever the switches say, and each Mac's
 daemon polls its own login.
 
+**Only accounts in use are listed (w748).** The usage meters and `system_status`'s "Claude accounts in use" list an account
+only when something is set to use it, or an agent is running on it now:
+- a **machine's own login** is left out while its machine takes vault tokens (`machines.claudeFromVault`) or the host token
+  (`machines.useHostClaudeEnv`), and returns when that machine does neither;
+- **this host's stored login** is left out while no role (`claudeAccounts`) is set to `"login`" and a host token exists;
+- **the host token** is left out while no role and no machine uses it;
+- **vault tokens** are left out while no machine is on the vault and no role is set to `"vault"`.
+A person's own token and the token file are always listed. A vault token is named by itself ("vault-ben-1 …abcd"), without a
+description; the line under a machine login still says where it is used ("m3 login").
+
 ## How often
 
 Every account is polled once when the portal starts (a daemon: when it connects, unless it reported in the last half
