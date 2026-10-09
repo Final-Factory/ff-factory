@@ -529,5 +529,13 @@ The ffbox repo can be changed through workers, like any repo: file it with `requ
   - for a change to a lane, one real conversation, diagnosis or build through it.
 - **If something breaks, revert with a push** (`git revert`, then push). Never force-push.
 - **Run the offline suites first**: `sh test/test.sh` (several suites need Linux).
+  A worker on a Windows or Mac machine has no Linux to run them on (`fcntl`, `os.fchmod` and symlinks fail there;
+  measured on LothDesktop, w787: 16 of the connector suite's checks fail on Windows before any change). Push the work to
+  a throwaway branch of the ffbox repo with a workflow that runs `python3 test/test_fffconnector.py` and
+  `python3 test/test_ffwatch.py` on `ubuntu-latest`, and compare with the same run on master: `test_ffwatch.py` fails 9
+  checks on a GitHub runner on master too (the runner has no `ffdiscord.py`), so a new failure is what counts. Delete the
+  branch afterwards; the workflow never goes to master. A worker's `git push origin HEAD:master` into this repo can be
+  refused by the game-repo master guard; pushing to the repo's URL (`git push https://github.com/Final-Factory/ffbox.git
+  HEAD:refs/heads/master`) is not.
 - Agents' access to the box itself is limited to its config and secrets. The orchestrators never
   push.
