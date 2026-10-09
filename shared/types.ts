@@ -1362,6 +1362,11 @@ export interface AppSettings {
   heartbeatMinutes: number | null;
   /** Each person's heartbeat, by user id: while their workers are mid-turn, their orchestrator is woken every N minutes. */
   heartbeat?: Record<string, number>;
+  /**
+   * The events each person closed a banner about, by user id (lowercase): a restart the VM watchdog made, as
+   * `shared/dismissals.ts` unitEventKey. The banner stays hidden for those events and returns for a new one (w751).
+   */
+  dismissedEvents?: Record<string, string[]>;
 }
 
 // ---- the work ledger (docs/orchestrators.md) ----

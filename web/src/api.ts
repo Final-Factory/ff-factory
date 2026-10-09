@@ -130,6 +130,8 @@ export const api = {
       `${target.sandbox ? `/api/machines/${enc(target.machine)}/sandboxes/${enc(target.sandbox)}` : `/api/machines/${enc(target.machine)}`}/switch-branch`,
       { branch, createFrom },
     ),
+  /** Close a banner about these events for the signed-in person (shared/dismissals.ts). */
+  dismissEvents: (keys: string[]) => request<AppSettings>('POST', '/api/dismiss', { keys }),
   setSettings: (patch: Partial<AppSettings>) => request<AppSettings>('POST', '/api/settings', patch),
   search: (q: { q: string; sandbox?: string; machine?: string; agent?: string; since?: string; until?: string }) =>
     request<{ hits: SearchHit[]; scanned: number; ms: number }>('GET', `/api/search?${new URLSearchParams(Object.entries(q).filter(([, v]) => v) as [string, string][])}`),
