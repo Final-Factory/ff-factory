@@ -8,6 +8,7 @@
 // is clamped, unknown fields are ignored, and a missing or half-written file shows nothing.
 
 import type { UnitWatchdog, UnitWatchdogEvent, UnitWatchdogUnit } from '../shared/types.ts';
+import { unitEventKey } from '../shared/dismissals.ts';
 import { filePathHealth } from './pathHealth.ts';
 
 /** The file's name in the portal's data folder; FFF_UNIT_WATCHDOG_FILE overrides the whole path (server/index.ts). */
@@ -94,7 +95,8 @@ export function recentRestarts(events: UnitWatchdogEvent[], now: number): UnitWa
 /** "2026-10-08T15:33:02Z" as "2026-10-08 15:33Z", for text a person reads in a chat. */
 const when = (iso: string): string => iso.replace('T', ' ').replace(/:\d\d(\.\d+)?Z$/, 'Z');
 
-const eventKey = (e: UnitWatchdogEvent): string => `${e.at}|${e.unit}|${e.action}`;
+/** An event's identity; the banner's per-person dismissals use the same key (shared/dismissals.ts, w751). */
+const eventKey = unitEventKey;
 
 export function describeEvent(e: UnitWatchdogEvent): string {
   const what = e.action === 'enable' ? 'enabled' : e.action === 'gave-up' ? 'gave up on' : 'restarted';

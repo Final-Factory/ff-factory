@@ -33,6 +33,7 @@ import { AttachmentError, AttachmentStore, downloadDisposition, machineAttachmen
 import { REVIEW_DEFAULTS, ReviewStore, reviewHttp } from './review.ts';
 import { HostHealthMonitor } from './hostHealth.ts';
 import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealth.ts';
+import { withDismissed } from '../shared/dismissals.ts';
 import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './unitWatchdog.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused } from './orchestrators.ts';
@@ -1167,6 +1168,17 @@ route('POST', '/api/settings', async (req) => {
   const m = b.heartbeatMinutes;
   if (m !== undefined && m !== null && (!Number.isInteger(m) || m < 5 || m > 240)) throw new HttpError(400, 'heartbeatMinutes: 5 to 240, or null for off');
   if (m !== undefined) agents.setHeartbeat(requesterOf(req).userId, m);
+  return store.settings;
+});
+
+/**
+ * The signed-in person closed a banner about these events (w751): remembered for them alone, until the events are gone;
+ * a new event shows the banner again. Body: { keys: string[] } (shared/dismissals.ts unitEventKey).
+ */
+route('POST', '/api/dismiss', async (req) => {
+  const b = await readJson<{ keys?: unknown }>(req);
+  if (!Array.isArray(b.keys) || b.keys.length > 100 || b.keys.some((k) => typeof k !== 'string' || !k || k.length > 400)) throw new HttpError(400, 'keys: a list of up to 100 event keys (strings)');
+  store.putSettings({ dismissedEvents: withDismissed(store.settings.dismissedEvents, requesterOf(req).userId, b.keys as string[]) });
   return store.settings;
 });
 

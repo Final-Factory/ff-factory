@@ -24,6 +24,15 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   `claudeAccounts.workers` applies to nothing, so the "fff-portal login (workers)" account row, "workers here: …" in the per-agent
   line and the "set to the fff-portal login (workers), which cannot run agents" warning are left out (`workersHere`); they return when
   a local machine is added.
+- **A closed "the VM watchdog restarted a critical unit" banner stays closed for that restart** (w751, Lothsahn: "make it remember
+  when I close the warning at the top that a process died and doesn't reopen for the same error"). Closing it was only
+  in the page's memory, so a reload, another device or a portal restart brought it back. Now the portal keeps, per person,
+  the restarts they closed (`dismissedEvents` in the settings, `POST /api/dismiss`, keyed on the watchdog event: time, unit
+  and action, `unitEventKey` in `shared/dismissals.ts`). A restart at another time or of another unit shows the banner
+  again, listing only the new ones; Ben closing it does not hide it for Lothsahn. The host-side "VM units" alert from
+  `fff-vm watch` is a standing condition (a unit down and not brought back), not a restart event: it has no close button,
+  clears itself when the check passes and re-alerts at most hourly while it fails; unchanged.
+
 - **`sudo fff-vm vault-sync` no longer removes the `claude-tokens/<name>` pool entries the installer just added** (w744,
   Lothsahn; his host had only `people/ben/claude-tokens/{1,2}` and `lothsahn/claude-tokens/1`: `install.sh --guest-only` printed
   "added host-ben-claude-1 …", then `fff-vm vault-sync` printed "removed host-ben-claude-1 (its file is gone …)" for all three).
