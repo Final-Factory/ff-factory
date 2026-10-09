@@ -392,6 +392,9 @@ What to change, all in the one pull request:
 2. `deploy/vm/guest/fff-ops-priv`: a case with the exact arguments pinned (`exec "$FFFCTL" ...`), the header comment and the refusal text. Anything not pinned there is refused with exit 2 before `fffctl` runs.
 3. Tests: allowed and refused forms in `deploy/vm/test/fff-ops.test.sh` (against a fake `fffctl`) and in `server/opsWorker.test.ts`.
 4. This file: the "It may" table.
+5. The two places that assert what the worker may not do, in case they list your form as refused: the `for sub in ...` loop near the top of the `fff-ops-priv` block in `deploy/vm/test/fff-ops.test.sh` (no subcommand of that name) and the `for bad in ...` list in `deploy/vm/test/ci-vm-e2e.sh` (run in the nested VM, about 15 minutes: the one check that runs the real `sudo` rules, and the only one not run on a laptop). w745 found both only after CI failed on them.
+
+Tests that read these scripts read LF: Windows runners check out CRLF, so strip `\r` when you read them (as `server/opsFffctlForms.test.ts` does).
 
 `server/opsFffctlForms.test.ts` enforces the first two: it reads `fffctl`, `server/vaultCli.ts` and `scripts/fff-migrate.ts`, and fails when a command or form exists that the table does not classify, when the table lists one that is gone, and when `fff-ops-priv` and the guard disagree. A new command that has forms of its own (a new `case` inside it) is added to the `discovered` list in that test.
 
