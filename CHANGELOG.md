@@ -10,6 +10,18 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A worker on any machine can fetch a Discord bug thread's files, with no Discord token on its machine** (w787, Ben: "we should
+  have some workers that can download attachments. if not lets fix it"; "no discord token on beast, max has to live in ffbox
+  for security reasons"). Bug Bot's runtime log and the `BugReport_*.zip` save were downloadable only where the `ffdiscord`
+  config is, so w779's worker on the m3 had to ask for them by hand. FFBox already keeps every attachment of the channels it
+  watches, so it now answers two read-only queries, `thread_files` and `thread_file`, from its own database and blob store (it
+  never calls Discord, and only `bug_report` channels answer). The new worker tool `fetch_discord_thread_files {thread, file?,
+  sha256?}` (thread: the URL, a message link in it, or an id) puts the files in the worker's `Inbox/`, SHA-256 checked three
+  ways and against the hash FFBox listed, labelled untrusted; an orchestrator's `ffbox_activity` has `show: "thread_files"`
+  (list) and `"thread_file"` (fetch into the attachment store). Transfers may now announce up to 128 MB (a report is still
+  cut at 64 MB on FFBox). Needs a portal deploy and each machine's daemon at this version
+  ([docs/ffbox.md](docs/ffbox.md), "Bug threads' files"); the ffbox side is on its master.
+
 - **A vault token is always listed under its vault name, even when the host token, the token file or a person's own token is the same token**
   (w777, Lothsahn: `vault-ben-2 …dAAA` showed only as "token file …dAAA"). `buildAccounts` no longer drops the vault entry because
   another source holds the token: it is one row, one usage, named by the vault entry, and the other uses are on its subtext line

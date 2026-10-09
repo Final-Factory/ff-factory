@@ -228,7 +228,7 @@ export type ToConnector =
  * The queries the ffbox_activity tool offers. Not a gate: any name matching QUERY_NAME may be sent, and FFBox answers
  * error unsupported for one it does not know.
  */
-export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation', 'logs', 'reports', 'report'] as const;
+export const PROVIDER_QUERIES = ['config', 'board_log', 'status', 'conversation', 'logs', 'reports', 'report', 'thread_files', 'thread_file'] as const;
 export const QUERY_NAME = /^[a-z_]{1,32}$/;
 export type ProviderQuery = (typeof PROVIDER_QUERIES)[number];
 
@@ -241,7 +241,7 @@ export const QUERY_LIMITS = {
   inFlight: 8,
   /** conversation and logs are answered on FFBox's next pass (about 5 s; logs reads the journal for up to 6 s), and the
    * connector gives up at 12 s. */
-  timeoutMsByQuery: { conversation: 15_000, logs: 15_000, reports: 15_000, report: 15_000 } as Record<string, number>,
+  timeoutMsByQuery: { conversation: 15_000, logs: 15_000, reports: 15_000, report: 15_000, thread_files: 15_000, thread_file: 15_000 } as Record<string, number>,
   /** Conversations whose last answer is kept for the fallback. */
   keptConversations: 20,
 } as const;
@@ -284,6 +284,8 @@ export const REPORT_LIMITS = {
   maxChunkBytes: 45_000,
   /** What one report may hand over (FFBox's fff_feed.REPORT_MAX_BYTES; ffintake takes 50 MB). */
   maxBytes: 64 * 1024 * 1024,
+  /** What any transfer may announce, a Discord thread's file included (FFBox's fff_feed.THREAD_FILE_MAX_BYTES, w787). */
+  maxTransferBytes: 128 * 1024 * 1024,
   /** A transfer that hears nothing for this long fails. */
   idleMs: 60_000,
 } as const;
