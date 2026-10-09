@@ -142,7 +142,8 @@ Claude token pools (5-hour >= ${lim.sessionHold}%: held; weekly >= ${lim.onePerW
     console.log(`  ${person}`);
     for (const t of list.sort((a, b) => (a.view.weeklyResetsAt ?? '9').localeCompare(b.view.weeklyResetsAt ?? '9'))) {
       const v = t.view;
-      console.log(`    ${t.entry.name.padEnd(24)} …${t.entry.last4}  ${v.state.padEnd(13)} 5-hour ${v.known ? Math.round(v.session) + '%' : '?'}${v.sessionResetsAt ? ` (resets ${clock(v.sessionResetsAt)})` : ''}, weekly ${v.known ? Math.round(v.weekly) + '%' : '?'}${v.weeklyResetsAt ? ` (resets ${clock(v.weeklyResetsAt)})` : ''}; ${t.live} agent${t.live === 1 ? '' : 's'} running`);
+      console.log(`    ${t.entry.name.padEnd(24)} …${t.entry.last4}  ${v.state.padEnd(13)} 5-hour ${v.known ? Math.round(v.session) + '%' : '?'}${v.sessionResetsAt ? ` (resets ${clock(v.sessionResetsAt)})` : ''}, weekly ${v.known ? Math.round(v.weekly) + '%' : '?'}${v.weeklyResetsAt ? ` (resets ${clock(v.weeklyResetsAt)})` : ''}; ${t.live} agent${t.live === 1 ? '' : 's'} running${v.state === 'ok' && !v.why.includes('one job') ? '' : `
+${' '.repeat(8)}${v.why}`}`);
     }
   }
 }
