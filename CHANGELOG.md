@@ -10,6 +10,27 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
 
 ## [Unreleased]
 
+- **A closed "the VM watchdog restarted a critical unit" banner stays closed for that restart** (w751, Lothsahn: "make it remember
+  when I close the warning at the top that a process died and doesn't reopen for the same error"). Closing it was only
+  in the page's memory, so a reload, another device or a portal restart brought it back. Now the portal keeps, per person,
+  the restarts they closed (`dismissedEvents` in the settings, `POST /api/dismiss`, keyed on the watchdog event: time, unit
+  and action, `unitEventKey` in `shared/dismissals.ts`). A restart at another time or of another unit shows the banner
+  again, listing only the new ones; Ben closing it does not hide it for Lothsahn. The host-side "VM units" alert from
+  `fff-vm watch` is a standing condition (a unit down and not brought back), not a restart event: it has no close button,
+  clears itself when the check passes and re-alerts at most hourly while it fails; unchanged.
+
+- **`sudo fff-vm vault-sync` no longer removes the `claude-tokens/<name>` pool entries the installer just added** (w744,
+  Lothsahn; his host had only `people/ben/claude-tokens/{1,2}` and `lothsahn/claude-tokens/1`: `install.sh --guest-only` printed
+  "added host-ben-claude-1 …", then `fff-vm vault-sync` printed "removed host-ben-claude-1 (its file is gone …)" for all three).
+  Cause: `--guest-only` skips the host part of the installer, which is the step that copies `vault.sh` to
+  `/usr/local/lib/fff-vm`, so the installer's own sync ran the new `vault.sh` from the checkout while `fff-vm vault-sync` ran the
+  installed one from before the pool (#241), which only looks for `claude-token` and `github-token` and read every pool entry
+  as one whose file was gone. Fixed: every mode of `install.sh` copies `fff-vm`, `lib.sh`, `pathwatch.sh`, `vault.sh` and
+  `fff-vm.conf.example` (`install_host_scripts`); a sync names an entry as kept as soon as its file exists, even when the file
+  is not a token now; and a scan that finds no token file at all removes nothing unless `fff-vm vault-sync --prune`. New test
+  `deploy/vm/test/fff-vault-sync.test.sh` (a person with only `claude-tokens/`, the standalone path, the installer's path,
+  nothing removed whose file exists, the scripts follow the checkout). docs/vault.md: `bash -c`, not `sh -c`, for the hidden
+  token prompt (dash's `read` has no `-s`).
 - **The "over its caps" banner shows only to its own person, and only when none of their tokens can take new work** (w747,
   Lothsahn: his single token at 95% weekly, still good for 4% more, was reported "over cap"; Ben saw it too). A pool banner
   carries `person` and the server sends each page only its own (`hostForUser` in `server/index.ts`, `warningsForUser`);

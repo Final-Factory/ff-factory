@@ -304,7 +304,10 @@ printf '%s' "$out" | matches 'unchanged host-ci-claude' || fail "a second sync w
 printf '%s' "$out" | matches 'unchanged host-ci-github' || fail "a second sync was not a no-op: $out"
 printf '%s' "$out" | matches 'unchanged host-ci-claude-second' || fail "a second sync was not a no-op for the pool's second token: $out"
 rm -rf /etc/fff-vm/secrets/people/ci /etc/fff-vm/secrets/people/ci2
+# Every person is gone: a scan that finds no token file removes nothing unless --prune says so (w744).
 /usr/local/sbin/fff-vm vault-sync >/dev/null 2>&1 || true
+g 'sudo fffctl vault list --names' | matches '^host-ci-' || fail "an empty scan removed the vault's entries without --prune"
+/usr/local/sbin/fff-vm vault-sync --prune >/dev/null 2>&1 || true
 if g 'sudo fffctl vault list --names' | matches '^host-ci-'; then fail "a removed person's entries stayed in the vault"; fi
 echo "ok: fff-vm vault-sync: per-person tokens in, never printed, a classic GitHub token refused, removals follow, the key copied"
 # fffctl migrate (w499) in a real guest: the wrapper, node in the release, ssh as fff with the portal's key. No BEAST here,

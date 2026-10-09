@@ -56,6 +56,24 @@ write_file() {
   echo changed
 }
 
+# install_host_scripts SRC [LIBDIR [SBINDIR]]: the scripts the installed fff-vm runs from, copied from the checkout SRC (the
+# folder of install.sh): lib.sh, pathwatch.sh, vault.sh and fff-vm.conf.example into LIBDIR (default /usr/local/lib/fff-vm),
+# and fff-vm itself into SBINDIR (default /usr/local/sbin). install.sh calls it in every mode, --guest-only included: the
+# installer's own vault sync runs vault.sh from the checkout, and `sudo fff-vm vault-sync` runs the installed copy, so a copy
+# left behind by --guest-only read the pool files (people/<id>/claude-tokens/) as gone and removed their entries (w744,
+# after w739). The files belong to HOST_SCRIPTS_OWNER (default root:root; the tests set their own). Prints the names it
+# changed, one line.
+install_host_scripts() {
+  local src=$1 lib=${2:-/usr/local/lib/fff-vm} sbin=${3:-/usr/local/sbin} owner=${HOST_SCRIPTS_OWNER:-root:root} f changed=""
+  run_cmd install -d -m 0755 "$lib" "$sbin"
+  for f in lib.sh pathwatch.sh vault.sh fff-vm.conf.example; do
+    [ -z "$(write_file "$lib/$f" 0644 "$owner" <"$src/$f")" ] || changed+=" $f"
+  done
+  [ -z "$(write_file "$sbin/fff-vm" 0755 "$owner" <"$src/fff-vm")" ] || changed+=" fff-vm"
+  [ -z "$changed" ] || log "host scripts updated:$changed (in $lib and $sbin)"
+  return 0
+}
+
 # load_conf FILE: the operator's settings over the defaults in fff-vm.conf.example.
 load_conf() {
   local file=$1 here
