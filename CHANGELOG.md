@@ -28,6 +28,20 @@ Add your change under **[Unreleased]** in the same pull request. `npm run releas
   Needs a portal deploy; a machine's daemon sends tokens and context readings only once it is updated (until then its turns are
   dollars only, labelled estimated).
 
+- **Test only: CONTRIBUTING's rule for e2e tests that share the orchestrator chat (w866), and the stray `node_modules` symlink leaves the repo.** A symlink to a Mac path had been committed at the root (c0df96e); merging main replaced a local `node_modules` folder with it. No portal deploy.
+
+- **Reply to a message and react with an emoji in your orchestrator chat** (w866, Ben: "we should be able to reply to a
+  message and include it in the intput as context. also let us give emoji reactions to messages and used as
+  responses"). Every message of your own chat (the orchestrator's answers, your own, and the relayed `[worker update]`,
+  `[dispatch]` and `[person message]` lines) has Reply and React: on hover, or after a tap on a touch screen. A reply shows
+  the message it answers above it (press it to go there) and reaches the orchestrator as your words, then the quoted
+  message under a mark that says it is not your words. A reaction shows as a chip on the message and reaches the
+  orchestrator as a short response with the message quoted: 👍 or ✅ is a yes, 👎 or ❌ a no, ❓ asks it to explain, 👀 is
+  seen. **A reaction is not your own turn:** it cannot approve, decline, delete, change a setting or deploy (a call it
+  tries is held and offered back with your next typed message); a reply, which you type, can. Sending a message now also
+  scrolls the chat to it. `shared/replies.ts`, `Orchestrators.quoteOf` and `react`, `POST /api/sessions/<id>/react`;
+  docs/orchestrators.md, "Replies and reactions". Needs a portal deploy.
+
 - **Per-person GitHub tokens from the vault** (w868, lothsahn: "I'd like the right token to get used based on whether a
   request is Ben or lothsahn. Let's setup the framework for that similar to Claude tokens"). The vault's `vault-<person>-github`
   entries are used where the new owner-only `machines.githubFromVault` is on (per machine; `"portal"` for the portal's own
